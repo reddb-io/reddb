@@ -35,7 +35,7 @@ concurrency:
 jobs:
   plan:
     name: Plan release
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     outputs:
       should_skip: ${{ steps.plan.outputs.should_skip }}
       release_channel: ${{ steps.plan.outputs.release_channel }}
@@ -119,7 +119,7 @@ jobs:
         include:
           - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,      asset_name: linux-x86_64,        cross: false }
           - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu,     asset_name: linux-aarch64,       cross: true  }
-          - { os: ubuntu-latest,  target: armv7-unknown-linux-gnueabihf, asset_name: linux-armv7,         cross: true  }
+          - { os: ubuntu-latest,  target: blacksmith-4vcpu-ubuntu-2404-arm, asset_name: linux-armv7,         cross: true  }
           - { os: ubuntu-latest,  target: aarch64-unknown-linux-musl,    asset_name: linux-aarch64-static, cross: true }
           - { os: macos-14,       target: aarch64-apple-darwin,          asset_name: macos-aarch64,       cross: false }
           - { os: windows-latest, target: x86_64-pc-windows-msvc,       asset_name: windows-x86_64,      cross: false }
@@ -236,7 +236,7 @@ jobs:
     # PLAN.md B2 — gate release on measured static binary and image size.
     name: Artifact Size Gate
     needs: [plan]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     if: needs.plan.outputs.should_skip != 'true'
     steps:
       - uses: actions/checkout@v4
@@ -260,7 +260,7 @@ jobs:
   publish-github:
     name: GitHub Release
     needs: [plan, build, artifact-sizes]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: write
     if: needs.plan.outputs.should_skip != 'true'
@@ -310,7 +310,7 @@ jobs:
   publish-npm:
     name: Publish CLI npm package
     needs: [plan, publish-github]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     if: needs.plan.outputs.should_skip != 'true'
     steps:
       - uses: actions/checkout@v4
@@ -335,7 +335,7 @@ jobs:
   publish-cargo:
     name: Publish to crates.io
     needs: [plan, publish-github]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     if: |
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
@@ -369,7 +369,7 @@ jobs:
   publish-rust-client:
     name: Publish reddb-client to crates.io
     needs: [plan, publish-cargo]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     if: |
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
@@ -425,7 +425,7 @@ jobs:
   publish-js-driver:
     name: Publish reddb JS driver (npm)
     needs: [plan, publish-github]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     if: needs.plan.outputs.should_skip != 'true'
     steps:
       - uses: actions/checkout@v4
@@ -455,7 +455,7 @@ jobs:
   publish-docker:
     name: Docker image (GHCR + Docker Hub)
     needs: [plan, build]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
       packages: write
@@ -517,7 +517,7 @@ jobs:
     # Pushed to GHCR only; the thin client doesn't need Docker Hub mirroring.
     name: Docker image — red_client (GHCR)
     needs: [plan, build]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
       packages: write
@@ -592,7 +592,7 @@ jobs:
       matrix:
         include:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu,  manylinux: '2014' }
-          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, manylinux: '2014' }
+          - { os: ubuntu-latest, target: blacksmith-4vcpu-ubuntu-2404-arm, manylinux: '2014' }
           - { os: macos-14,      target: aarch64-apple-darwin,      manylinux: 'auto' }
           - { os: macos-13,      target: x86_64-apple-darwin,       manylinux: 'auto' }
           - { os: windows-latest,target: x86_64-pc-windows-msvc,    manylinux: 'auto' }
@@ -624,7 +624,7 @@ jobs:
     name: Upload wheels to PyPI
     needs: [plan, publish-python-wheels]
     if: false  # TODO: enable after creating PYPI_API_TOKEN secret
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/download-artifact@v4
         with:
