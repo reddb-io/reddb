@@ -4,4 +4,4 @@ expression: "fmt_parse_error(\"CREATE MIGRATION m1 DEPENDS ON a, AS CREATE TABLE
 ---
 input: "CREATE MIGRATION m1 DEPENDS ON a, AS CREATE TABLE t (id INTEGER)"
 kind:  Syntax
-error: Parse error at 1:29: Unexpected token: ON (expected: identifier)
+error: Parse error at 1:35: Unexpected token: AS (expected: identifier)

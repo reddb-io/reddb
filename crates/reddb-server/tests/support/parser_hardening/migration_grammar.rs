@@ -93,26 +93,27 @@ pub fn migration_body_stmt() -> impl Strategy<Value = String> {
     ]
 }
 
-/// `CREATE MIGRATION name [BATCH n ROWS] [NO ROLLBACK] AS body`.
+/// `CREATE MIGRATION name [DEPENDS ON dep1, dep2, ...] [BATCH n ROWS]
+/// [NO ROLLBACK] AS body`.
 ///
-/// Note: the `DEPENDS ON ...` clause and `FOR TENANT ...` apply
-/// suffix are intentionally *not* generated here. Both clauses use
-/// reserved tokens (`Token::On`, `Token::For`) that the migration
-/// parser tries to consume via `consume_ident_ci`, which only
-/// matches `Token::Ident`. Those broken edges are pinned via the
-/// snapshot suite + adversarial corpus instead — extending the
-/// happy-path generator there would produce inputs that the parser
-/// rejects today, and the property suite would flag every shrink
-/// as a "did not parse" regression.
+/// All optional clauses are generated. `DEPENDS ON` uses `Token::On`,
+/// which #92 fixed by switching the parser from
+/// `consume_ident_ci("ON")` (which matches `Token::Ident` only) to
+/// `expect(Token::On)`. Exercising the clause here pins the fix
+/// against future regressions.
 pub fn create_migration_stmt() -> impl Strategy<Value = String> {
     (
         ident(),
+        proptest::option::of(proptest::collection::vec(ident(), 1..3)),
         proptest::option::of(1u64..1000),
         any::<bool>(),
         migration_body_stmt(),
     )
-        .prop_map(|(name, batch, no_rb, body)| {
+        .prop_map(|(name, deps, batch, no_rb, body)| {
             let mut s = format!("CREATE MIGRATION {}", name);
+            if let Some(d) = deps {
+                s.push_str(&format!(" DEPENDS ON {}", d.join(", ")));
+            }
             if let Some(b) = batch {
                 s.push_str(&format!(" BATCH {} ROWS", b));
             }
@@ -125,12 +126,24 @@ pub fn create_migration_stmt() -> impl Strategy<Value = String> {
         })
 }
 
-/// `APPLY MIGRATION (name | *)`. The `FOR TENANT ...` suffix is
-/// not generated — `Token::For` is reserved and the migration
-/// parser's `consume_ident_ci("FOR")` never matches it. Pinned via
-/// snapshot suite + adversarial corpus.
+/// `APPLY MIGRATION (name | *) [FOR TENANT id]`.
+///
+/// The `FOR TENANT ...` suffix is generated. `Token::For` is a
+/// reserved keyword; #92 fixed the parser from
+/// `consume_ident_ci("FOR")` (which never matched) to
+/// `consume(&Token::For)`, so the suffix now parses as documented.
 pub fn apply_migration_stmt() -> impl Strategy<Value = String> {
-    prop_oneof![ident(), Just("*".to_string())].prop_map(|target| format!("APPLY MIGRATION {}", target))
+    (
+        prop_oneof![ident(), Just("*".to_string())],
+        proptest::option::of(ident()),
+    )
+        .prop_map(|(target, tenant)| {
+            let mut s = format!("APPLY MIGRATION {}", target);
+            if let Some(t) = tenant {
+                s.push_str(&format!(" FOR TENANT {}", t));
+            }
+            s
+        })
 }
 
 /// `ROLLBACK MIGRATION name`.

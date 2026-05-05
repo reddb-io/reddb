@@ -139,3 +139,76 @@ proptest! {
         prop_assert!(r.is_err(), "oversized migration body must error");
     }
 }
+
+// ---- happy-path regression tests for issue #92 ------------------
+//
+// `DEPENDS ON`, `FOR TENANT`, and the `MIGRATION` keyword in
+// `APPLY MIGRATION` were each broken by `consume_ident_ci` calls
+// against reserved-keyword tokens (or by silent-on-miss semantics).
+// These tests pin the post-fix behaviour: the formerly-broken shapes
+// now parse, and `APPLY <name>` without `MIGRATION` errors instead of
+// silently succeeding.
+
+use reddb_server::storage::query::ast::{ApplyMigrationTarget, QueryExpr};
+
+fn parse_query(input: &str) -> QueryExpr {
+    parser::parse(input)
+        .unwrap_or_else(|e| panic!("expected ok for {input:?}, got error: {e}"))
+        .query
+}
+
+#[test]
+fn create_migration_with_single_dependency_parses() {
+    let q = parse_query("CREATE MIGRATION m1 DEPENDS ON m0 AS CREATE TABLE t (id INTEGER)");
+    match q {
+        QueryExpr::CreateMigration(cm) => {
+            assert_eq!(cm.name, "m1");
+            assert_eq!(cm.depends_on, vec!["m0".to_string()]);
+        }
+        other => panic!("expected CreateMigration, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_migration_with_multiple_dependencies_parses() {
+    let q =
+        parse_query("CREATE MIGRATION m1 DEPENDS ON m0, m_alpha AS CREATE TABLE t (id INTEGER)");
+    match q {
+        QueryExpr::CreateMigration(cm) => {
+            assert_eq!(cm.name, "m1");
+            assert_eq!(
+                cm.depends_on,
+                vec!["m0".to_string(), "m_alpha".to_string()]
+            );
+        }
+        other => panic!("expected CreateMigration, got {other:?}"),
+    }
+}
+
+#[test]
+fn apply_migration_for_tenant_parses_with_tenant_scope() {
+    let q = parse_query("APPLY MIGRATION m1 FOR TENANT 't1'");
+    match q {
+        QueryExpr::ApplyMigration(am) => {
+            assert!(matches!(am.target, ApplyMigrationTarget::Named(ref n) if n == "m1"));
+            assert_eq!(am.for_tenant.as_deref(), Some("t1"));
+        }
+        other => panic!("expected ApplyMigration, got {other:?}"),
+    }
+}
+
+#[test]
+fn apply_without_migration_keyword_returns_parse_error() {
+    let result = parser::parse("APPLY m1");
+    let err = result.expect_err("APPLY <name> without MIGRATION must error");
+    assert!(
+        matches!(err.kind, parser::ParseErrorKind::Syntax),
+        "expected Syntax error, got {:?}",
+        err.kind
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("MIGRATION"),
+        "error should mention the missing MIGRATION keyword, got: {msg}"
+    );
+}
