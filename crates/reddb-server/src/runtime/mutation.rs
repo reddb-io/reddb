@@ -101,20 +101,19 @@ impl<'rt> MutationEngine<'rt> {
         // MVCC xmin stamping (#30).
         //
         // Inside a BEGIN-wrapped transaction the writer reuses its
-        // tx xid; outside (autocommit) we allocate a fresh xid from
-        // the coordinator's allocator and commit it immediately —
-        // future snapshots see the xid as committed before the row
-        // even lands, which is correct: there's no row to find until
-        // `insert_auto` returns. xmin=0 is no longer emitted for
-        // freshly-written rows.
+        // tx xid; outside (autocommit) we draw a "born committed" xid
+        // from the snapshot manager's pool. Pool xids skip the
+        // active-set insert/remove pair entirely — a pool refill costs
+        // one `fetch_add(BATCH)` per `AUTOCOMMIT_POOL_BATCH` writes
+        // instead of two `state.write()` lock acquisitions per write.
+        // Visibility is identical: the legacy `begin()/commit()` pair
+        // also leaves the xid out of `active` and `aborted` by the
+        // time `insert_auto` runs, so concurrent readers see the same
+        // row state either way (see `SnapshotManager::allocate_committed_xid`).
+        // xmin=0 is no longer emitted for freshly-written rows.
         let writer_xid = match self.runtime.current_xid() {
             Some(xid) => xid,
-            None => {
-                let mgr = self.runtime.snapshot_manager();
-                let xid = mgr.begin();
-                mgr.commit(xid);
-                xid
-            }
+            None => self.runtime.snapshot_manager().allocate_committed_xid(),
         };
         entity.set_xmin(writer_xid);
 
@@ -192,17 +191,13 @@ impl<'rt> MutationEngine<'rt> {
 
         // Resolve the writer xid once — every entity in this batch
         // shares it. Inside a tx we reuse the active xid; in
-        // autocommit we allocate a fresh xid + commit it before the
-        // batch starts so all rows land with a single coherent xmin
-        // (#30 single-statement single-xid invariant).
+        // autocommit we draw a pool-backed pre-committed xid so every
+        // row in the batch lands with a single coherent xmin (#30
+        // single-statement single-xid invariant). Pool semantics match
+        // the previous `begin()/commit()` pair — see `append_one`.
         let current_xid = match self.runtime.current_xid() {
             Some(xid) => xid,
-            None => {
-                let mgr = self.runtime.snapshot_manager();
-                let xid = mgr.begin();
-                mgr.commit(xid);
-                xid
-            }
+            None => self.runtime.snapshot_manager().allocate_committed_xid(),
         };
 
         // If this collection has no context index enabled AND no row
