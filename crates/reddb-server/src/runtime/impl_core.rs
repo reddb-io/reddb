@@ -3675,9 +3675,13 @@ impl RedDBRuntime {
         }
 
         // ── Result cache: return cached result if still fresh (30s TTL) ──
-        if frame.can_read_result_cache() {
+        // Safety check goes through `ReadFrame::should_cache_result()` so
+        // the volatile-builtin / active-tx-with-uncommitted-writes
+        // decision is not re-derived from globals here.
+        let frame_iface: &dyn super::statement_frame::ReadFrame = &frame;
+        if frame_iface.should_cache_result() {
             let cache = self.inner.result_cache.read();
-            if let Some(entry) = cache.0.get(frame.cache_key()) {
+            if let Some(entry) = cache.0.get(frame_iface.cache_key()) {
                 if entry.cached_at.elapsed().as_secs() < 30 {
                     return Ok(entry.result.clone());
                 }
@@ -4980,14 +4984,19 @@ impl RedDBRuntime {
         // zero while the clone cost (100 records × ~16 fields each) is high.
         // Aggregations (1 row) and point lookups (1 row) still benefit.
         if let Ok(ref result) = query_result {
-            if frame.should_write_result_cache(result) {
+            // Cache-safety gate goes through the `ReadFrame` Interface
+            // (volatile builtin / active-tx-with-writes); payload-shape
+            // gates (statement type, pre-serialized JSON, row count)
+            // are write-side heuristics handled by
+            // `should_write_result_cache`.
+            if frame_iface.should_cache_result() && frame.should_write_result_cache(result) {
                 let mut cache = self.inner.result_cache.write();
                 let (ref mut map, ref mut order) = *cache;
-                if !map.contains_key(frame.cache_key()) {
-                    order.push_back(frame.cache_key().to_string());
+                if !map.contains_key(frame_iface.cache_key()) {
+                    order.push_back(frame_iface.cache_key().to_string());
                 }
                 map.insert(
-                    frame.cache_key().to_string(),
+                    frame_iface.cache_key().to_string(),
                     RuntimeResultCacheEntry {
                         result: result.clone(),
                         cached_at: std::time::Instant::now(),
