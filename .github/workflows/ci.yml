@@ -317,6 +317,48 @@ jobs:
       - name: Unit tests
         run: cargo test --locked --lib
 
+  fuzz-parsers:
+    # Issue #87 — short-window cargo-fuzz run on every PR.
+    # Catches panics introduced by grammar changes; the long-window
+    # nightly run lives in a separate scheduled workflow.
+    name: Fuzz Parsers
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '28.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: rui314/setup-mold@v1
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-fuzz-nightly
+          cache-on-failure: "true"
+          workspaces: |
+            . -> target
+            fuzz -> fuzz/target
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Build fuzz target
+        run: cargo fuzz build sql_parser
+      - name: Run sql_parser fuzz target (5 min)
+        run: cargo fuzz run sql_parser -- -max_total_time=300
+      - name: Upload fuzz crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: |
+            fuzz/artifacts/
+            fuzz/corpus/
+          retention-days: 14
+
   package:
     name: cargo publish dry-run
     runs-on: blacksmith-4vcpu-ubuntu-2404
