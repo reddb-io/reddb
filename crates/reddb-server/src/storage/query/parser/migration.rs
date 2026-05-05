@@ -70,8 +70,17 @@ impl<'a> Parser<'a> {
 
     /// Parse: APPLY MIGRATION name | APPLY MIGRATION * [FOR TENANT id]
     pub fn parse_apply_migration(&mut self) -> Result<QueryExpr, ParseError> {
-        // APPLY has already been consumed
-        self.consume_ident_ci("MIGRATION")?;
+        // APPLY has already been consumed. The `MIGRATION` keyword is
+        // mandatory — `consume_ident_ci` returns `Ok(false)` on a
+        // miss, which previously let `APPLY m1` silently succeed by
+        // treating `m1` as the migration name. Require it strictly.
+        if !self.consume_ident_ci("MIGRATION")? {
+            return Err(ParseError::expected(
+                vec!["MIGRATION"],
+                self.peek(),
+                self.position(),
+            ));
+        }
 
         let target = if self.consume(&Token::Star)? {
             ApplyMigrationTarget::All
