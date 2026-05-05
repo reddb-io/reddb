@@ -3361,3 +3361,90 @@ fn cte_recursive_marker_propagates() {
     assert!(with.has_recursive);
     assert!(with.ctes[0].recursive);
 }
+
+// --- Issue #87: hardening / DoS-limit tests --------------------
+
+#[test]
+fn dos_limit_input_too_large_is_structured() {
+    use super::limits::ParserLimits;
+    let limits = ParserLimits {
+        max_input_bytes: 16,
+        ..ParserLimits::default()
+    };
+    // The input is well over 16 bytes — must refuse before tokenizing.
+    let err = super::Parser::with_limits("SELECT * FROM users WHERE x = 1", limits)
+        .err()
+        .expect("oversized input must error");
+    assert!(matches!(
+        err.kind,
+        super::ParseErrorKind::InputTooLarge {
+            limit_name: "max_input_bytes",
+            value: 16,
+        }
+    ));
+}
+
+#[test]
+fn dos_limit_identifier_too_long_is_structured() {
+    use super::limits::ParserLimits;
+    let limits = ParserLimits {
+        max_identifier_chars: 8,
+        ..ParserLimits::default()
+    };
+    // `userstable_long_identifier_name` is well over 8 chars; SELECT/FROM
+    // are 6 and 4 chars respectively, both ≤ 8.
+    let err = super::Parser::with_limits(
+        "SELECT * FROM userstable_long_identifier_name",
+        limits,
+    )
+    .and_then(|mut p| p.parse())
+    .err()
+    .expect("oversized ident must error");
+    assert!(
+        matches!(
+            err.kind,
+            super::ParseErrorKind::IdentifierTooLong {
+                limit_name: "max_identifier_chars",
+                ..
+            }
+        ),
+        "kind: {:?}",
+        err.kind
+    );
+}
+
+#[test]
+fn dos_limit_recursion_depth_is_structured() {
+    use super::limits::ParserLimits;
+    let limits = ParserLimits {
+        max_depth: 8,
+        ..ParserLimits::default()
+    };
+    // 50 nested parens = recursion depth 50, well past the cap of 8.
+    let nested = format!("SELECT {}1{} FROM t", "(".repeat(50), ")".repeat(50));
+    let mut parser = super::Parser::with_limits(&nested, limits).expect("ctor ok");
+    let err = parser.parse().err().expect("deep nesting must error");
+    assert!(matches!(
+        err.kind,
+        super::ParseErrorKind::DepthLimit {
+            limit_name: "max_depth",
+            value: 8,
+        }
+    ));
+}
+
+#[test]
+fn dos_limit_no_panic_on_pathological_input() {
+    // Adversarial inputs return Err but never panic / OOM.
+    let mut adversarial = "(".repeat(2_000);
+    adversarial.push_str("SELECT 1");
+    adversarial.push_str(&")".repeat(2_000));
+    let _ = super::parse(&adversarial); // must return Err, not panic.
+
+    let big = "x".repeat(10_000); // exceeds default 256 ident cap
+    let _ = super::parse(&format!("SELECT {} FROM t", big));
+
+    let huge = "a".repeat(2 * 1024 * 1024); // 2 MiB, exceeds 1 MiB cap
+    let err = super::parse(&huge).err().expect("must reject");
+    assert!(matches!(err.kind, super::ParseErrorKind::InputTooLarge { .. }));
+}

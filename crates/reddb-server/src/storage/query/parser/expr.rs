@@ -116,8 +116,17 @@ impl<'a> Parser<'a> {
     /// Pratt climb: parse a unary atom then consume any infix operators
     /// whose precedence meets or exceeds `min_prec`.
     fn parse_expr_prec(&mut self, min_prec: u8) -> Result<Expr, ParseError> {
-        let left = self.parse_expr_unary()?;
-        self.parse_expr_suffix(left, min_prec)
+        // Depth guard: every recursive descent point in the expr
+        // grammar bottoms out here, so checking once is enough to
+        // catch deeply nested literals like `((((((1))))))` and
+        // boolean chains like `NOT NOT NOT NOT … x`.
+        self.enter_depth()?;
+        let result = (|| {
+            let left = self.parse_expr_unary()?;
+            self.parse_expr_suffix(left, min_prec)
+        })();
+        self.exit_depth();
+        result
     }
 
     fn parse_expr_suffix(&mut self, mut left: Expr, min_prec: u8) -> Result<Expr, ParseError> {

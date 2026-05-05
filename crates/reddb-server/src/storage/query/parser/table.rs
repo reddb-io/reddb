@@ -108,6 +108,17 @@ use super::Parser;
 impl<'a> Parser<'a> {
     /// Parse SELECT ... FROM ... query
     pub fn parse_select_query(&mut self) -> Result<QueryExpr, ParseError> {
+        // Recursion guard: nested subqueries (UNION, derived tables,
+        // EXISTS) re-enter through this point, so depth here bounds
+        // the SELECT-shaped recursion in addition to the expr Pratt
+        // climb guarded in `parse_expr_prec`.
+        self.enter_depth()?;
+        let result = self.parse_select_query_inner();
+        self.exit_depth();
+        result
+    }
+
+    fn parse_select_query_inner(&mut self) -> Result<QueryExpr, ParseError> {
         self.expect(Token::Select)?;
 
         // Parse column list
