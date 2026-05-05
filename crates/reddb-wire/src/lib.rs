@@ -12,5 +12,7 @@
 pub mod conn_string;
 pub mod redwire;
 
-pub use conn_string::{parse, ConnectionTarget, ParseError, ParseErrorKind};
+pub use conn_string::{
+    parse, parse_with_limits, ConnStringLimits, ConnectionTarget, ParseError, ParseErrorKind,
+};
 pub use redwire::{BuildError, FrameBuilder};
