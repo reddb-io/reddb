@@ -6,6 +6,24 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
+/// Adaptive group-commit window applied when the configured
+/// `GroupCommitOptions::window_ms` is 0 (the historical default).
+///
+/// Sub-millisecond so individual single-writer commits don't see a
+/// visible latency penalty (a 200 µs floor sits below typical NVMe
+/// fsync latency of 50–150 µs by ~one fsync), while still giving a
+/// pipelined writer a chance to drop a second statement into the
+/// same drain cycle. A lone synchronous `insert_one` still pays one
+/// fsync per row in the worst case, but two back-to-back inserts on
+/// the same connection now coalesce into one drain. See P1 in
+/// `docs/perf/insert_sequential-2026-05-05.md`.
+///
+/// Override via `REDDB_GROUP_COMMIT_WINDOW_US` (microseconds). Set
+/// to `0` to disable the floor entirely (legacy behaviour). Set
+/// `REDDB_GROUP_COMMIT_WINDOW_MS` to any non-zero value to bypass
+/// this floor — explicit ms config wins.
+const DEFAULT_ADAPTIVE_WINDOW_US: u64 = 200;
+
 /// Shorthand — `Arc<parking_lot::Mutex<WalWriter>>` avoids poisoning
 /// (one writer panicking mid-append used to taint every subsequent
 /// lock acquisition) and shaves a few syscalls off the fast path.
@@ -298,6 +316,12 @@ pub(crate) struct StoreCommitCoordinator {
     /// to preserve the one-fsync-per-commit semantic.
     queue: Arc<WalAppendQueue>,
     state: Arc<(CommitStateMutex, CommitStateCondvar)>,
+    /// Number of `wal.sync()` calls issued by the group-commit
+    /// drain loop. Used by tests to observe coalescing — a burst
+    /// of N concurrent commits should bump this by far less than N
+    /// when the adaptive window is doing its job. Strict-mode
+    /// commits go through `force_sync` which also bumps this.
+    fsync_count: Arc<AtomicU64>,
 }
 
 impl StoreCommitCoordinator {
@@ -323,6 +347,7 @@ impl StoreCommitCoordinator {
             CommitStateMutex::new(CommitState::new(initial_durable_lsn)),
             CommitStateCondvar::new(),
         ));
+        let fsync_count = Arc::new(AtomicU64::new(0));
 
         if matches!(
             mode,
@@ -331,13 +356,22 @@ impl StoreCommitCoordinator {
             let wal_bg = Arc::clone(&wal);
             let queue_bg = Arc::clone(&queue);
             let state_bg = Arc::clone(&state);
-            // window_ms == 0 is a valid configuration meaning "no wait" —
-            // flush on every wakeup. Under single-writer workloads the
-            // batching window adds pure latency (no one to batch with)
-            // while capping individual insert throughput at ~1000 ops/s
-            // for window_ms=1. Concurrent writers still batch naturally
-            // via the SegQueue drain in the coordinator below.
-            let window = Duration::from_millis(config.window_ms);
+            let fsync_bg = Arc::clone(&fsync_count);
+            // P1: adaptive group-commit window. Historical default is
+            // `window_ms = 0` ("no wait"), which under single-writer
+            // OLTP means one fsync per autocommit row — the throughput
+            // floor. When window_ms is 0 we fall back to a small
+            // microsecond floor (`DEFAULT_ADAPTIVE_WINDOW_US`, override
+            // via `REDDB_GROUP_COMMIT_WINDOW_US`) so a pipelined writer
+            // can drop a second statement into the same drain cycle.
+            // Explicit non-zero `window_ms` config takes precedence.
+            //
+            // The loop already short-circuits on
+            // `pending_statements >= max_statements` /
+            // `pending_wal_bytes >= max_wal_bytes`, so the window only
+            // delays the leader when the queue is otherwise empty —
+            // exactly the case we want to coalesce.
+            let window = Self::resolve_window(&config);
             let max_statements = config.max_statements.max(1);
             let max_wal_bytes = config.max_wal_bytes.max(1);
             std::thread::spawn(move || {
@@ -345,6 +379,7 @@ impl StoreCommitCoordinator {
                     wal_bg,
                     queue_bg,
                     state_bg,
+                    fsync_bg,
                     window,
                     max_statements,
                     max_wal_bytes,
@@ -359,7 +394,36 @@ impl StoreCommitCoordinator {
             wal,
             queue,
             state,
+            fsync_count,
         })
+    }
+
+    /// Resolve the effective group-commit window from the configured
+    /// options + the `REDDB_GROUP_COMMIT_WINDOW_US` env override.
+    ///
+    /// Precedence (highest first):
+    ///   1. `REDDB_GROUP_COMMIT_WINDOW_US=N` — N µs (0 disables).
+    ///   2. `config.window_ms != 0` — explicit ms config wins.
+    ///   3. `DEFAULT_ADAPTIVE_WINDOW_US` — adaptive floor for the
+    ///      historical zero-default. Set the env var to 0 to opt out.
+    fn resolve_window(config: &crate::api::GroupCommitOptions) -> Duration {
+        if let Ok(raw) = std::env::var("REDDB_GROUP_COMMIT_WINDOW_US") {
+            if let Ok(parsed) = raw.parse::<u64>() {
+                return Duration::from_micros(parsed);
+            }
+        }
+        if config.window_ms != 0 {
+            return Duration::from_millis(config.window_ms);
+        }
+        Duration::from_micros(DEFAULT_ADAPTIVE_WINDOW_US)
+    }
+
+    /// Total `wal.sync()` calls issued since this coordinator opened.
+    /// Public for tests that want to observe fsync coalescing under
+    /// concurrent autocommits.
+    #[cfg(test)]
+    pub(crate) fn fsync_count(&self) -> u64 {
+        self.fsync_count.load(Ordering::Relaxed)
     }
 
     pub(crate) fn append_actions(&self, actions: &[StoreWalAction]) -> io::Result<()> {
@@ -422,6 +486,7 @@ impl StoreCommitCoordinator {
         {
             let mut wal = self.wal.lock();
             wal.sync()?;
+            self.fsync_count.fetch_add(1, Ordering::Relaxed);
             let durable = wal.durable_lsn();
             drop(wal);
             let (state_lock, cond) = &*self.state;
@@ -555,6 +620,7 @@ impl StoreCommitCoordinator {
         wal: Arc<WalMutex>,
         queue: Arc<WalAppendQueue>,
         state: Arc<(CommitStateMutex, CommitStateCondvar)>,
+        fsync_count: Arc<AtomicU64>,
         window: Duration,
         max_statements: usize,
         max_wal_bytes: u64,
@@ -621,7 +687,14 @@ impl StoreCommitCoordinator {
                 }
                 match write_err {
                     Some(e) => Err(e),
-                    None => wal.sync().map(|_| wal.durable_lsn()),
+                    None => wal.sync().map(|_| {
+                        // Count the fsync exactly once per drain
+                        // cycle so tests can compare it against the
+                        // number of `append_actions` callers that
+                        // entered the queue.
+                        fsync_count.fetch_add(1, Ordering::Relaxed);
+                        wal.durable_lsn()
+                    }),
                 }
             };
 
