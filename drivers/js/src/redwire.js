@@ -3,7 +3,7 @@
  *
  * Speaks the binary TCP protocol from
  * `docs/adr/0001-redwire-tcp-protocol.md` directly — no spawn, no
- * HTTP. Mirrors `drivers/rust/src/redwire/` so the wire shape
+ * HTTP. Mirrors `crates/reddb-client/src/redwire/` so the wire shape
  * stays in lockstep across drivers.
  *
  * Public surface:

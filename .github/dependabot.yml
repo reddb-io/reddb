@@ -21,11 +21,9 @@ updates:
         patterns: ["aes-gcm", "hmac", "sha2", "argon2"]
 
   # Drivers — independent ecosystems. Keep open-PR ceiling low because
-  # version bumps cascade through publish workflows.
-  - package-ecosystem: cargo
-    directory: /drivers/rust
-    schedule: { interval: weekly }
-    open-pull-requests-limit: 2
+  # version bumps cascade through publish workflows. The Rust client
+  # is now part of the workspace at `crates/reddb-client/` and shares
+  # the engine's `directory: /` cargo entry above.
   - package-ecosystem: cargo
     directory: /drivers/python
     schedule: { interval: weekly }

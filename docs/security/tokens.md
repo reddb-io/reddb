@@ -115,7 +115,7 @@ flow without forcing TLS — the password never crosses the wire and a
 replay can't steal future sessions.
 
 Server-side primitives: `src/auth/scram.rs`. Client-side primitives:
-`drivers/rust/src/redwire/scram.rs`. The `ScramServer` / `ScramClient`
+`crates/reddb-client/src/redwire/scram.rs`. The `ScramServer` / `ScramClient`
 state machines pair with the user-vault entry stored as
 `SCRAM-SHA-256$<iterations>:<salt-b64>:<stored-key-b64>:<server-key-b64>`.
 
