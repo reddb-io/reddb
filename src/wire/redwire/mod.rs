@@ -26,15 +26,7 @@ pub use listener::{
     start_redwire_listener, start_redwire_listener_on, start_redwire_tls_listener, RedWireConfig,
 };
 
-/// Discriminator byte every RedWire client sends as the very first
-/// byte off the wire. The service-router detector keys off this
-/// (and so does the standalone listener path).
-pub const REDWIRE_MAGIC: u8 = 0xFE;
-
-/// Highest minor version the server supports. Wire-bumped as we
-/// add features that change the handshake; data-plane additions
-/// flow through `Hello.features` instead.
-pub const MAX_KNOWN_MINOR_VERSION: u8 = 0x01;
-
-/// Default port for the RedWire listener.
-pub const DEFAULT_REDWIRE_PORT: u16 = 5050;
+// Constants live in the shared `reddb-wire` crate; re-exported here
+// so existing `crate::wire::redwire::REDWIRE_MAGIC` paths continue
+// to resolve.
+pub use reddb_wire::redwire::{DEFAULT_REDWIRE_PORT, MAX_KNOWN_MINOR_VERSION, REDWIRE_MAGIC};

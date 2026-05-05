@@ -1448,6 +1448,7 @@ name = "reddb-wire"
 version = "0.2.9"
 dependencies = [
  "url",
+ "zstd",
 ]
 
 [[package]]

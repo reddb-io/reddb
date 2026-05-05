@@ -14,3 +14,4 @@ categories = ["database", "network-programming"]
 
 [dependencies]
 url = "2"
+zstd = { version = "0.13", default-features = false }
