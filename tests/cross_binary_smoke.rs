@@ -11,7 +11,25 @@ use std::io::{ErrorKind, Read};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
+
+// `pick_port()` returns a port that is briefly free, but the OS may
+// hand the same port to a sibling test thread (or another process)
+// before the spawned `red` child has bind()'d to it. On fast runners
+// where multiple smoke tests boot servers concurrently, that
+// TOCTOU race makes `red_client` see "Connection refused" / "transport
+// error" against a port owned by a different test's listener (or no
+// listener at all). Serialise the boot-and-handshake critical section
+// across the tests in this file so each pick/spawn/wait cycle runs to
+// completion before the next one starts.
+static BOOT_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_boot() -> MutexGuard<'static, ()> {
+    // A panicking sibling test poisons the mutex; recover the guard
+    // so the remaining tests still run and surface their own outcome.
+    BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 fn red_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_red"))
@@ -195,6 +213,7 @@ fn red_client_round_trips_against_red_over_grpc() {
     let Some(red_client) = skip_if_no_red_client() else {
         return;
     };
+    let _guard = lock_boot();
     let port = pick_port();
     let mut server = match boot_red_grpc(port) {
         Ok(h) => h,
@@ -237,6 +256,7 @@ fn red_client_round_trips_against_red_over_redwire() {
     let Some(red_client) = skip_if_no_red_client() else {
         return;
     };
+    let _guard = lock_boot();
     let port = pick_port();
     let mut server = match boot_red_wire(port) {
         Ok(h) => h,
@@ -276,6 +296,7 @@ fn red_client_round_trips_against_red_over_http() {
     let Some(red_client) = skip_if_no_red_client() else {
         return;
     };
+    let _guard = lock_boot();
     let port = pick_port();
     let mut server = match boot_red_http(port) {
         Ok(h) => h,
@@ -350,6 +371,7 @@ fn red_client_red_scheme_routes_to_default_port() {
     }
     drop(probe);
 
+    let _guard = lock_boot();
     let mut server = match boot_red_wire(port) {
         Ok(h) => h,
         Err(e) => panic!("could not start `red server` (wire): {e}"),

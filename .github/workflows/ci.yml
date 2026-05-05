@@ -13,7 +13,7 @@ env:
 jobs:
   quality:
     name: Quality (fmt, check, clippy)
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -44,7 +44,7 @@ jobs:
     # PLAN.md B5 — compile every supported feature combination that
     # operators may select for release artifacts.
     name: Feature Matrix (${{ matrix.features.label }})
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -86,7 +86,7 @@ jobs:
 
   tests:
     name: Test Suite
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -127,7 +127,7 @@ jobs:
     # time. `cargo package` with verify rebuilds the engine from the
     # tarball, so this also exercises the include manifest end-to-end.
     name: Publish Dry-Run (crates.io)
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -160,7 +160,7 @@ jobs:
 
   containers:
     name: Container Stack
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -200,7 +200,7 @@ jobs:
     # Runs the 8 chaos tests + 3 backup/restore drills shipped in
     # tests/chaos_*.rs and tests/drill_*.rs. Failure is a release blocker.
     name: Chaos & Drill Suite
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
     needs: tests
     env:
@@ -229,7 +229,7 @@ jobs:
     # backend (MinIO) so the LocalBackend coverage doesn't mask
     # backend-specific failure modes.
     name: Chaos Suite (MinIO S3 backend)
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
     needs: tests
     services:
@@ -275,7 +275,7 @@ jobs:
     # test suite on Windows. Excludes Linux-only integration tests
     # (systemd install, mmap, Unix sockets) via cfg gates in the source.
     name: Windows (build + unit tests)
-    runs-on: windows-latest
+    runs-on: blacksmith-8vcpu-windows-2025
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -299,7 +299,7 @@ jobs:
     # Mirror of the Windows job for Darwin; keeps the cross-platform
     # story complete. Same scope — library build + unit tests.
     name: macOS (build + unit tests)
-    runs-on: macos-latest
+    runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -319,7 +319,7 @@ jobs:
 
   package:
     name: cargo publish dry-run
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4

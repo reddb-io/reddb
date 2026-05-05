@@ -16,7 +16,7 @@ env:
 jobs:
   drill:
     name: Backup/Restore Drills
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     env:
       SCCACHE_GHA_ENABLED: "true"
