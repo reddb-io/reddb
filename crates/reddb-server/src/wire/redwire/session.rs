@@ -24,7 +24,7 @@ use super::auth::{
 };
 use super::codec::{decode_frame, encode_frame};
 use super::frame::{Frame, MessageKind, FRAME_HEADER_SIZE};
-use super::{MAX_KNOWN_MINOR_VERSION, REDWIRE_MAGIC};
+use super::{FrameBuilder, MAX_KNOWN_MINOR_VERSION, REDWIRE_MAGIC};
 
 #[derive(Debug)]
 struct AuthedSession {
@@ -205,11 +205,12 @@ where
                 stream.write_all(&encode_frame(&response)).await?;
             }
             other => {
-                let err = encode_frame(&Frame::new(
-                    MessageKind::Error,
-                    frame.correlation_id,
-                    format!("redwire: cannot dispatch {other:?} yet").into_bytes(),
-                ));
+                let err_frame = FrameBuilder::reply_to(frame.correlation_id)
+                    .kind(MessageKind::Error)
+                    .payload(format!("redwire: cannot dispatch {other:?} yet").into_bytes())
+                    .build()
+                    .map_err(|e| io::Error::other(format!("build Error frame: {e}")))?;
+                let err = encode_frame(&err_frame);
                 stream.write_all(&err).await?;
             }
         }
@@ -294,11 +295,12 @@ where
 
     // Step 3: HelloAck.
     let server_features = 0u32;
-    let ack = encode_frame(&Frame::new(
-        MessageKind::HelloAck,
-        hello.correlation_id,
-        build_hello_ack(chosen_version, chosen, server_features),
-    ));
+    let ack_frame = FrameBuilder::reply_to(hello.correlation_id)
+        .kind(MessageKind::HelloAck)
+        .payload(build_hello_ack(chosen_version, chosen, server_features))
+        .build()
+        .map_err(|e| io::Error::other(format!("build HelloAck: {e}")))?;
+    let ack = encode_frame(&ack_frame);
     stream.write_all(&ack).await?;
 
     // SCRAM is a 3-RTT challenge/response exchange. Branch off to
@@ -388,11 +390,12 @@ where
             role,
             session_id,
         } => {
-            let ok = encode_frame(&Frame::new(
-                MessageKind::AuthOk,
-                resp.correlation_id,
-                build_auth_ok(&session_id, &username, role, server_features),
-            ));
+            let ok_frame = FrameBuilder::reply_to(resp.correlation_id)
+                .kind(MessageKind::AuthOk)
+                .payload(build_auth_ok(&session_id, &username, role, server_features))
+                .build()
+                .map_err(|e| io::Error::other(format!("build AuthOk: {e}")))?;
+            let ok = encode_frame(&ok_frame);
             stream.write_all(&ok).await?;
             Ok(Some(AuthedSession {
                 username,
@@ -626,7 +629,11 @@ fn run_query(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
                 JsonValue::Number(result.affected_rows as f64),
             );
             let payload = serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default();
-            Frame::new(MessageKind::Result, frame.correlation_id, payload)
+            FrameBuilder::reply_to(frame.correlation_id)
+                .kind(MessageKind::Result)
+                .payload(payload)
+                .build()
+                .unwrap_or_else(|e| error_frame(frame.correlation_id, &e.to_string()))
         }
         Err(err) => error_frame(frame.correlation_id, &err.to_string()),
     }
@@ -703,7 +710,15 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
 }
 
 fn error_frame(correlation_id: u64, msg: &str) -> Frame {
-    Frame::new(MessageKind::Error, correlation_id, msg.as_bytes().to_vec())
+    // Error frames are guaranteed to fit (UTF-8 message bodies are
+    // far smaller than MAX_FRAME_SIZE), so unwrapping the builder
+    // here is sound — failure would mean the codebase generated a
+    // 16 MiB error string, at which point we have a bigger problem.
+    FrameBuilder::reply_to(correlation_id)
+        .kind(MessageKind::Error)
+        .payload(msg.as_bytes().to_vec())
+        .build()
+        .expect("error frame fits in MAX_FRAME_SIZE")
 }
 
 /// Adapt a binary-fast-path handler response into a RedWire frame.
