@@ -30,6 +30,7 @@
 use std::env;
 use std::process::ExitCode;
 
+use reddb_client_internal::http::{query_one_shot as http_query_one_shot, Auth as HttpAuth};
 use reddb_client_internal::redwire::{Auth as RedWireAuth, RedWireClient, RedWireError};
 use reddb_client_internal::{repl::run_repl, RedDBClient};
 use reddb_wire::{parse, ConnectionTarget, ParseErrorKind};
@@ -61,13 +62,6 @@ async fn main() -> ExitCode {
             );
             return ExitCode::from(EXIT_EMBEDDED_REJECTED);
         }
-        Err(EndpointError::HttpUnsupported) => {
-            eprintln!(
-                "red_client: HTTP/HTTPS transport is not yet wired through red_client.\n\
-                 Use a `red://` / `reds://` / `grpc://` / `grpcs://` URL, or the full `red` CLI."
-            );
-            return ExitCode::from(EXIT_TRANSPORT_UNSUPPORTED);
-        }
         Err(EndpointError::PgUnsupported) => {
             eprintln!(
                 "red_client: PostgreSQL wire (?proto=pg) is server-side only.\n\
@@ -92,6 +86,42 @@ async fn main() -> ExitCode {
         ResolvedTarget::Grpc(endpoint) => run_grpc(endpoint, parsed).await,
         ResolvedTarget::RedWire { host, port, tls } => {
             run_redwire(host, port, tls, parsed).await
+        }
+        ResolvedTarget::Http(base_url) => run_http(base_url, parsed).await,
+    }
+}
+
+async fn run_http(base_url: String, parsed: ParsedArgs) -> ExitCode {
+    let auth = match parsed.token.clone() {
+        Some(t) => HttpAuth::Bearer(t),
+        None => HttpAuth::Anonymous,
+    };
+    match parsed.command {
+        Some(Command::OneShot(sql)) => {
+            let result = tokio::task::spawn_blocking(move || {
+                http_query_one_shot(&base_url, &sql, &auth)
+            })
+            .await;
+            match result {
+                Ok(Ok(body)) => {
+                    println!("{body}");
+                    ExitCode::SUCCESS
+                }
+                Ok(Err(e)) => {
+                    eprintln!("red_client: {e}");
+                    ExitCode::from(EXIT_RPC_ERROR)
+                }
+                Err(e) => {
+                    eprintln!("red_client: blocking task failed: {e}");
+                    ExitCode::from(EXIT_RPC_ERROR)
+                }
+            }
+        }
+        Some(Command::Repl) | None => {
+            eprintln!(
+                "red_client: REPL over HTTP is not yet wired; pass `-c \"<SQL>\"` for now."
+            );
+            ExitCode::from(EXIT_TRANSPORT_UNSUPPORTED)
         }
     }
 }
@@ -226,7 +256,6 @@ fn parse_argv(args: &[String]) -> Result<ParsedArgs, String> {
 #[derive(Debug)]
 enum EndpointError {
     Embedded,
-    HttpUnsupported,
     PgUnsupported,
     ClusterUnsupported,
     ParseFailed(String),
@@ -236,6 +265,7 @@ enum EndpointError {
 enum ResolvedTarget {
     Grpc(String),
     RedWire { host: String, port: u16, tls: bool },
+    Http(String),
 }
 
 fn resolve_target(uri: &str) -> Result<ResolvedTarget, EndpointError> {
@@ -252,7 +282,7 @@ fn resolve_target(uri: &str) -> Result<ResolvedTarget, EndpointError> {
     })?;
     match target {
         ConnectionTarget::Memory | ConnectionTarget::File { .. } => Err(EndpointError::Embedded),
-        ConnectionTarget::Http { .. } => Err(EndpointError::HttpUnsupported),
+        ConnectionTarget::Http { base_url } => Ok(ResolvedTarget::Http(base_url)),
         ConnectionTarget::GrpcCluster { .. } => Err(EndpointError::ClusterUnsupported),
         ConnectionTarget::Grpc { endpoint } => Ok(ResolvedTarget::Grpc(endpoint)),
         ConnectionTarget::RedWire { host, port, tls } => {
