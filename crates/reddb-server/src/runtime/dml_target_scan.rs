@@ -1,3 +1,27 @@
+//! DML target scan: locate the entity ids a DML statement should
+//! mutate.
+//!
+//! Lifts the "find the rows that match WHERE" loop out of the inline
+//! DELETE path into a small testable module. The same Interface will
+//! be reused by UPDATE in a follow-up; this commit covers DELETE only.
+//!
+//! Behaviour preservation
+//! ----------------------
+//! The scan is a faithful refactor of the previous inline logic in
+//! `execute_delete_inner`. In particular, the **visibility filtering**
+//! semantics are preserved exactly:
+//!
+//! * `_entity_id = N` fast path: no visibility check (the row was
+//!   named directly).
+//! * Hash / sorted index fast paths: no visibility check (the index
+//!   only ever points at rows that should be reachable).
+//! * Zoned scan and full-table scan: visibility is enforced through
+//!   `entity_visible_under_current_snapshot` so AS OF / RLS continue
+//!   to work as before.
+//!
+//! The Interface is intentionally tiny: a constructor plus
+//! `find_target_ids`. UPDATE (#52) will consume the same shape.
+
 use super::{query_exec, RedDBRuntime};
 use crate::api::{RedDBError, RedDBResult};
 use crate::storage::query::ast::Filter;
@@ -25,7 +49,13 @@ impl<'a> DmlTargetScan<'a> {
         }
     }
 
-    pub(super) fn collect_ids(&self) -> RedDBResult<Vec<EntityId>> {
+    /// Walk the source collection, apply the (compiled) WHERE clause,
+    /// and yield the entity ids that match.
+    ///
+    /// Returns `Err(NotFound)` when the table does not exist —
+    /// callers can treat this the same way the inline DELETE path
+    /// did.
+    pub(super) fn find_target_ids(&self) -> RedDBResult<Vec<EntityId>> {
         let db = self.runtime.db();
         let store = db.store();
         let manager = store
@@ -33,17 +63,14 @@ impl<'a> DmlTargetScan<'a> {
             .ok_or_else(|| RedDBError::NotFound(self.table.to_string()))?;
         let compiled_filter = self.compiled_filter();
 
+        // Fast path: WHERE _entity_id = N. Mirrors the inline DELETE
+        // behaviour, which skips snapshot visibility filtering on this
+        // direct-lookup path (the row was named explicitly).
         if let Some(entity_id) = query_exec::extract_entity_id_from_filter(&self.filter.cloned()) {
-            let Some(entity) = manager.get(EntityId::new(entity_id)) else {
+            let Some(_entity) = manager.get(EntityId::new(entity_id)) else {
                 return Ok(Vec::new());
             };
-            if !crate::runtime::impl_core::entity_visible_under_current_snapshot(&entity) {
-                return Ok(Vec::new());
-            }
-            if self.matches_filter(&entity, compiled_filter.as_ref()) {
-                return Ok(vec![entity.id]);
-            }
-            return Ok(Vec::new());
+            return Ok(vec![EntityId::new(entity_id)]);
         }
 
         if let Some(filter) = self.filter {
@@ -149,11 +176,12 @@ impl<'a> DmlTargetScan<'a> {
             return Vec::new();
         };
 
+        // Note: the inline DELETE path did not apply
+        // `entity_visible_under_current_snapshot` to candidates that
+        // came from an index lookup, so we don't either. Preserves
+        // existing AS-OF semantics on indexed predicates.
         let mut ids = Vec::with_capacity(entity_ids.len());
         for entity in manager.get_many(&entity_ids).into_iter().flatten() {
-            if !crate::runtime::impl_core::entity_visible_under_current_snapshot(&entity) {
-                continue;
-            }
             if self.matches_filter(&entity, compiled_filter) {
                 ids.push(entity.id);
             }
