@@ -1,0 +1,7 @@
+---
+source: crates/reddb-wire/tests/parser_snapshots.rs
+expression: "fmt_parse_error(\"grpc://a,\")"
+---
+input: "grpc://a,"
+kind:  InvalidUri
+error: INVALID_URI: grpc cluster URI has an empty host entry

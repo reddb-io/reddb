@@ -1,0 +1,6 @@
+---
+source: crates/reddb-wire/tests/parser_snapshots.rs
+expression: formatted
+---
+kind:  LimitExceeded
+error: LIMIT_EXCEEDED: max_uri_bytes exceeded: limit=16 actual=30

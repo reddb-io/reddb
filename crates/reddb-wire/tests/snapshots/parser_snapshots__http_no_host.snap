@@ -1,0 +1,7 @@
+---
+source: crates/reddb-wire/tests/parser_snapshots.rs
+expression: "fmt_parse_error(\"http://\")"
+---
+input: "http://"
+kind:  InvalidUri
+error: INVALID_URI: empty host: http://

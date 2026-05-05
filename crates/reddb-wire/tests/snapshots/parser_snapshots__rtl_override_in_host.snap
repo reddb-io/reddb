@@ -1,0 +1,7 @@
+---
+source: crates/reddb-wire/tests/parser_snapshots.rs
+expression: "fmt_parse_error(\"red://h\\u{202e}ost:5050\")"
+---
+UNEXPECTED OK
+input: "red://h\u{202e}ost:5050"
+parsed: RedWire { host: "h%E2%80%AEost", port: 5050, tls: false }
