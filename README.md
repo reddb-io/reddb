@@ -580,6 +580,15 @@ and [`docs/security/vault.md`](./docs/security/vault.md).
 
 ---
 
+## Workspace layout
+
+RedDB ships as a Cargo workspace. The `reddb` crate is the
+umbrella that hosts the `red` binary; the engine, thin client,
+gRPC stubs, and wire vocabulary live in sibling crates. See the
+[workspace migration guide](./docs/migration/workspace-split.md)
+for what moved where and which crate to pick when depending on
+RedDB from another Rust project.
+
 ## Links
 
 - [Documentation](https://reddb-io.github.io/reddb)
@@ -587,6 +596,7 @@ and [`docs/security/vault.md`](./docs/security/vault.md).
 - [npm driver package](https://www.npmjs.com/package/reddb)
 - [npm package](https://www.npmjs.com/package/reddb-cli)
 - [Releases](https://github.com/reddb-io/reddb/releases)
+- [Workspace migration guide](./docs/migration/workspace-split.md)
 
 ---
 
