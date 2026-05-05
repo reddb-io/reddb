@@ -166,10 +166,19 @@ impl Pager {
         // Create header page. Page ids 1 and 2 are reserved so fixed
         // metadata/vault pages cannot be handed out to normal B-tree
         // allocation before those subsystems are initialized.
-        let header_page = Page::new_header_page(3);
+        let initial_page_count = 3;
+        let header_page = Page::new_header_page(initial_page_count);
+        self.header_write()?.page_count = initial_page_count;
 
-        // Write header page
+        // Write header and reserved pages so any scan over 0..page_count
+        // can read every allocated page in a brand-new database.
         self.write_page_raw(0, &header_page)?;
+        let mut metadata_page = Page::new(PageType::Header, 1);
+        metadata_page.update_checksum();
+        self.write_page_raw(1, &metadata_page)?;
+        let mut vault_page = Page::new(PageType::Vault, 2);
+        vault_page.update_checksum();
+        self.write_page_raw(2, &vault_page)?;
 
         // Sync to disk
         self.sync()?;
