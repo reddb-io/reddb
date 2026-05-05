@@ -32,6 +32,10 @@ pub enum ParseErrorKind {
     InvalidUri,
     /// The scheme is not in the documented vocabulary.
     UnsupportedScheme,
+    /// A DoS guardrail in [`ConnStringLimits`] was tripped.
+    /// `message` carries the limit name + the offending value so
+    /// downstream wrappers can surface the structured detail.
+    LimitExceeded,
 }
 
 impl ParseErrorKind {
@@ -40,6 +44,7 @@ impl ParseErrorKind {
             ParseErrorKind::Empty => "EMPTY",
             ParseErrorKind::InvalidUri => "INVALID_URI",
             ParseErrorKind::UnsupportedScheme => "UNSUPPORTED_SCHEME",
+            ParseErrorKind::LimitExceeded => "LIMIT_EXCEEDED",
         }
     }
 }
@@ -72,6 +77,33 @@ impl std::error::Error for ParseError {}
 /// (the connector, server-side dispatch) can stay consistent.
 pub const DEFAULT_PORT_RED: u16 = 5050;
 pub const DEFAULT_PORT_GRPC: u16 = 5055;
+
+/// DoS guardrails applied by [`parse`] before any URI work happens.
+///
+/// The connection-string parser is the only entry point an attacker
+/// can reach BEFORE auth, so every limit here is enforced eagerly
+/// and surfaces as a structured [`ParseErrorKind::LimitExceeded`]
+/// error rather than a panic, hang, or unbounded allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnStringLimits {
+    /// Maximum length of the input URI in bytes. Default `8 KiB`.
+    pub max_uri_bytes: usize,
+    /// Maximum number of `key=value` query parameters. Default `32`.
+    pub max_query_params: usize,
+    /// Maximum number of comma-separated cluster hosts allowed in a
+    /// `red://`/`reds://`/`grpc://` cluster URI. Default `64`.
+    pub max_cluster_hosts: usize,
+}
+
+impl Default for ConnStringLimits {
+    fn default() -> Self {
+        Self {
+            max_uri_bytes: 8 * 1024,
+            max_query_params: 32,
+            max_cluster_hosts: 64,
+        }
+    }
+}
 
 /// Normalised target produced by [`parse`].
 ///
@@ -109,17 +141,52 @@ pub enum ConnectionTarget {
     },
 }
 
-/// Parse a connection URI into a [`ConnectionTarget`].
+/// Parse a connection URI into a [`ConnectionTarget`] under the
+/// default DoS limits.
 ///
 /// Pure function, no side effects. Behaviour matches
-/// `drivers/rust/src/connect.rs::parse` 1:1.
+/// `drivers/rust/src/connect.rs::parse` 1:1 with two additions:
+///   - Mixed-case schemes (e.g. `Red://`, `REDS://`) are normalised
+///     to lowercase before dispatch.
+///   - Inputs exceeding [`ConnStringLimits`] return a structured
+///     [`ParseErrorKind::LimitExceeded`] error instead of being
+///     processed.
 pub fn parse(uri: &str) -> Result<ConnectionTarget, ParseError> {
+    parse_with_limits(uri, ConnStringLimits::default())
+}
+
+/// Same as [`parse`] but with caller-supplied DoS guardrails.
+/// Useful for tests that need tighter limits or for callers (a
+/// future admin tool, an offline validator) that need to relax the
+/// defaults.
+pub fn parse_with_limits(
+    uri: &str,
+    limits: ConnStringLimits,
+) -> Result<ConnectionTarget, ParseError> {
     if uri.is_empty() {
         return Err(ParseError::new(
             ParseErrorKind::Empty,
             "empty connection string",
         ));
     }
+
+    if uri.len() > limits.max_uri_bytes {
+        return Err(ParseError::new(
+            ParseErrorKind::LimitExceeded,
+            format!(
+                "max_uri_bytes exceeded: limit={} actual={}",
+                limits.max_uri_bytes,
+                uri.len(),
+            ),
+        ));
+    }
+
+    // Lowercase the scheme so `Red://Host`, `REDS://Host`, etc.
+    // dispatch identically to the canonical lowercase forms. The
+    // host and path retain original casing — host is downcased by
+    // `url::Url` for IDN per spec, path stays verbatim.
+    let normalised = normalise_scheme(uri);
+    let uri = normalised.as_str();
 
     if uri == "memory://" || uri == "memory:" {
         return Ok(ConnectionTarget::Memory);
@@ -137,12 +204,14 @@ pub fn parse(uri: &str) -> Result<ConnectionTarget, ParseError> {
         });
     }
 
-    if let Some(cluster) = try_parse_grpc_cluster(uri)? {
+    if let Some(cluster) = try_parse_grpc_cluster(uri, &limits)? {
         return Ok(cluster);
     }
 
     let parsed = Url::parse(uri)
         .map_err(|e| ParseError::new(ParseErrorKind::InvalidUri, format!("{e}: {uri}")))?;
+
+    enforce_query_param_limit(&parsed, &limits)?;
 
     match parsed.scheme() {
         "red" | "reds" => {
@@ -187,10 +256,64 @@ pub fn parse(uri: &str) -> Result<ConnectionTarget, ParseError> {
     }
 }
 
+/// Lowercase only the scheme portion (everything before the first
+/// `:`), leaving host/path/query untouched. Returns the original
+/// string when no scheme separator is present so the downstream
+/// `Url::parse` path produces the canonical "missing scheme" error
+/// instead of being masked here.
+fn normalise_scheme(uri: &str) -> String {
+    match uri.find(':') {
+        Some(i) => {
+            let scheme = &uri[..i];
+            // Only ASCII alphanumerics + `+ . -` are valid scheme
+            // bytes per RFC 3986. If the prefix violates that we
+            // leave it alone so `Url::parse` can produce the
+            // structured error.
+            if scheme.is_empty()
+                || !scheme.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || b == b'+' || b == b'.' || b == b'-'
+                })
+            {
+                return uri.to_string();
+            }
+            let mut out = String::with_capacity(uri.len());
+            out.push_str(&scheme.to_ascii_lowercase());
+            out.push_str(&uri[i..]);
+            out
+        }
+        None => uri.to_string(),
+    }
+}
+
+fn enforce_query_param_limit(url: &Url, limits: &ConnStringLimits) -> Result<(), ParseError> {
+    let Some(q) = url.query() else {
+        return Ok(());
+    };
+    if q.is_empty() {
+        return Ok(());
+    }
+    let count = q.split('&').count();
+    if count > limits.max_query_params {
+        return Err(ParseError::new(
+            ParseErrorKind::LimitExceeded,
+            format!(
+                "max_query_params exceeded: limit={} actual={}",
+                limits.max_query_params, count,
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Try to parse a multi-host gRPC URI. `Ok(None)` means "this is a
 /// single-host URI — fall through to the standard parser".
-fn try_parse_grpc_cluster(uri: &str) -> Result<Option<ConnectionTarget>, ParseError> {
+fn try_parse_grpc_cluster(
+    uri: &str,
+    limits: &ConnStringLimits,
+) -> Result<Option<ConnectionTarget>, ParseError> {
     let (rest, default_port) = if let Some(r) = uri.strip_prefix("grpc://") {
+        (r, DEFAULT_PORT_GRPC)
+    } else if let Some(r) = uri.strip_prefix("grpcs://") {
         (r, DEFAULT_PORT_GRPC)
     } else if let Some(r) = uri
         .strip_prefix("red://")
@@ -210,7 +333,18 @@ fn try_parse_grpc_cluster(uri: &str) -> Result<Option<ConnectionTarget>, ParseEr
         return Ok(None);
     }
 
-    let mut endpoints: Vec<String> = Vec::new();
+    let raw_count = host_part.split(',').count();
+    if raw_count > limits.max_cluster_hosts {
+        return Err(ParseError::new(
+            ParseErrorKind::LimitExceeded,
+            format!(
+                "max_cluster_hosts exceeded: limit={} actual={}",
+                limits.max_cluster_hosts, raw_count,
+            ),
+        ));
+    }
+
+    let mut endpoints: Vec<String> = Vec::with_capacity(raw_count);
     for raw in host_part.split(',') {
         let raw = raw.trim();
         if raw.is_empty() {
@@ -219,25 +353,66 @@ fn try_parse_grpc_cluster(uri: &str) -> Result<Option<ConnectionTarget>, ParseEr
                 "grpc cluster URI has an empty host entry",
             ));
         }
-        let (host, port) = match raw.rsplit_once(':') {
-            Some((h, p)) => {
-                let port: u16 = p.parse().map_err(|_| {
+        // Bracketed IPv6 literal: `[::1]:5050` or `[::1]`.
+        let (host, port) = if let Some(after_bracket) = raw.strip_prefix('[') {
+            let end = after_bracket.find(']').ok_or_else(|| {
+                ParseError::new(
+                    ParseErrorKind::InvalidUri,
+                    format!("unterminated IPv6 bracket in cluster URI: {raw}"),
+                )
+            })?;
+            let host = &after_bracket[..end];
+            let tail = &after_bracket[end + 1..];
+            let port = if tail.is_empty() {
+                default_port
+            } else if let Some(p) = tail.strip_prefix(':') {
+                p.parse::<u16>().map_err(|_| {
                     ParseError::new(
                         ParseErrorKind::InvalidUri,
                         format!("invalid port in cluster URI: {raw}"),
                     )
-                })?;
-                (h, port)
+                })?
+            } else {
+                return Err(ParseError::new(
+                    ParseErrorKind::InvalidUri,
+                    format!("trailing junk after IPv6 bracket in cluster URI: {raw}"),
+                ));
+            };
+            (format!("[{host}]"), port)
+        } else {
+            match raw.rsplit_once(':') {
+                Some((h, p)) => {
+                    let port: u16 = p.parse().map_err(|_| {
+                        ParseError::new(
+                            ParseErrorKind::InvalidUri,
+                            format!("invalid port in cluster URI: {raw}"),
+                        )
+                    })?;
+                    (h.to_string(), port)
+                }
+                None => (raw.to_string(), default_port),
             }
-            None => (raw, default_port),
         };
-        if host.is_empty() {
+        if host.is_empty() || host == "[]" {
             return Err(ParseError::new(
                 ParseErrorKind::InvalidUri,
                 "grpc cluster URI has an empty host entry",
             ));
         }
         endpoints.push(format!("http://{host}:{port}"));
+    }
+
+    if let Some(q) = query_part {
+        let qcount = if q.is_empty() { 0 } else { q.split('&').count() };
+        if qcount > limits.max_query_params {
+            return Err(ParseError::new(
+                ParseErrorKind::LimitExceeded,
+                format!(
+                    "max_query_params exceeded: limit={} actual={}",
+                    limits.max_query_params, qcount,
+                ),
+            ));
+        }
     }
 
     let force_primary = query_part
