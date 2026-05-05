@@ -349,10 +349,17 @@ jobs:
         run: |
           cargo fuzz build sql_parser
           cargo fuzz build migration_parser
+          cargo fuzz build conn_string_parser
       - name: Run sql_parser fuzz target (5 min)
         run: cargo fuzz run sql_parser -- -max_total_time=300
       - name: Run migration_parser fuzz target (5 min)
         run: cargo fuzz run migration_parser -- -max_total_time=300
+      - name: Run conn_string_parser fuzz target (5 min)
+        # Issue #90 — pre-auth parser, panic-resistance is the only
+        # invariant; conn-string sees attacker-controlled bytes
+        # before any handshake completes, so we bake it into the
+        # same per-PR window as the SQL fuzzer.
+        run: cargo fuzz run conn_string_parser -- -max_total_time=300
       - name: Upload fuzz crash artifacts
         if: failure()
         uses: actions/upload-artifact@v4
