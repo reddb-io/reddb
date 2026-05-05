@@ -41,9 +41,12 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 
-pub mod proto {
-    tonic::include_proto!("reddb.v1");
-}
+// gRPC protobuf types and tonic stubs live in the standalone
+// `reddb-grpc-proto` crate so `reddb-server` and `reddb-client`
+// can both consume them without a dependency cycle. We expose
+// them under the legacy `proto` module path so existing
+// `crate::grpc::proto::…` imports keep resolving.
+pub use reddb_grpc_proto as proto;
 
 use proto::red_db_server::{RedDb, RedDbServer};
 use proto::{

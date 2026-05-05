@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/reddb-wire"]
+members = ["crates/reddb-grpc-proto", "crates/reddb-wire"]
 resolver = "2"
 
 [package]
@@ -31,6 +31,7 @@ path = "src/bin/red.rs"
 
 [dependencies]
 reddb-wire = { version = "0.2", path = "crates/reddb-wire" }
+reddb-grpc-proto = { version = "0.2", path = "crates/reddb-grpc-proto" }
 aes-gcm = "0.10"
 hmac = "0.13"
 itoa = "1"
@@ -85,9 +86,8 @@ trybuild = "1"
 jsonwebtoken = "9"
 serde_json = "1"
 
-[build-dependencies]
-tonic-build = "0.14"
-tonic-prost-build = "0.14"
+# build-dependencies removed: gRPC proto compilation moved to
+# crates/reddb-grpc-proto, which carries its own tonic-{build,prost-build}.
 
 # ---------------------------------------------------------------------
 # Build profile tuning — trades runtime perf for build wall time
