@@ -1,4 +1,4 @@
-.PHONY: help build build-fast release warm test test-fast test-persistent drill-nightly clean run run-grpc install fmt lint check check-driver-rust check-driver-python timings cold-start-bench binary-size image-size artifact-size link unlink dev which patch minor major release-push package-check docs publish publish-dry-run env-up env-down env-logs test-env test-env-shell test-env-rust
+.PHONY: help build build-fast release warm test test-fast test-persistent drill-nightly clean run run-grpc install fmt lint check check-driver-rust check-driver-python timings cold-start-bench binary-size image-size artifact-size link unlink dev which patch minor major release-push package-check docs publish publish-dry-run env-up env-down env-logs test-env test-env-shell test-env-rust perf-bench
 
 # Paths
 LOCAL_BIN := $(HOME)/.local/bin
@@ -35,6 +35,7 @@ help:
 	@echo "  make cold-start-bench - Measure cold-start P50/P95/P99 baselines"
 	@echo "  make binary-size   - Measure release-static binary size"
 	@echo "  make image-size    - Measure Docker image size"
+	@echo "  make perf-bench    - Capture an insert_sequential flamegraph (requires relaxed kernel knobs; see docs/perf/perf-knobs.md)"
 	@echo ""
 	@echo "Release:"
 	@echo "  make patch         - Release bump + commit/tag (patch)"
@@ -200,3 +201,73 @@ package-check:
 	@cargo package --allow-dirty
 	@echo "==> cargo package (rust client, no verify)"
 	@cargo package -p reddb-client --allow-dirty --no-verify
+
+# Capture a CPU flamegraph of `red` while the bench-runner drives
+# `insert_sequential`. Implements P5 from
+# docs/perf/insert_sequential-2026-05-05.md. See
+# docs/perf/perf-knobs.md for the host requirements
+# (kernel.perf_event_paranoid <= 1, kernel.yama.ptrace_scope = 0)
+# and how to relax them.
+#
+# Bench load comes from the sibling repo at
+# /home/cyber/Work/reddb.io/rdb-benchmark — assumed cloned there.
+# If the bench finishes before the 30 s perf-record window closes,
+# re-run the bench loop in another terminal until perf record exits.
+#
+# Output: target/perf/insert_sequential.svg (+ perf.data alongside).
+PERF_OUT_DIR := target/perf
+PERF_RED_BIN := target/release/red
+PERF_DB_PATH := /tmp/reddb-perf-bench.rdb
+PERF_BIND := 127.0.0.1:5050
+PERF_DURATION := 30
+RDB_BENCHMARK_DIR := /home/cyber/Work/reddb.io/rdb-benchmark
+
+perf-bench:
+	@set -e; \
+	if ! command -v perf >/dev/null 2>&1; then \
+		echo "ERROR: 'perf' is not installed."; \
+		echo "  Install with: sudo apt install linux-tools-common linux-tools-$$(uname -r)"; \
+		exit 1; \
+	fi; \
+	paranoid=$$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo 4); \
+	if [ "$$paranoid" -gt 1 ]; then \
+		echo "ERROR: kernel.perf_event_paranoid is $$paranoid — must be <= 1 for unprivileged perf record."; \
+		echo "  Fix (until reboot): sudo sysctl kernel.perf_event_paranoid=1 kernel.yama.ptrace_scope=0"; \
+		echo "  See docs/perf/perf-knobs.md for the security trade-off and a permanent fix."; \
+		exit 1; \
+	fi; \
+	ptrace=$$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo 1); \
+	if [ "$$ptrace" -gt 0 ]; then \
+		echo "ERROR: kernel.yama.ptrace_scope is $$ptrace — must be 0 to attach perf to a sibling-shell process."; \
+		echo "  Fix (until reboot): sudo sysctl kernel.yama.ptrace_scope=0"; \
+		echo "  See docs/perf/perf-knobs.md for the security trade-off."; \
+		exit 1; \
+	fi; \
+	if ! command -v inferno-flamegraph >/dev/null 2>&1; then \
+		echo "ERROR: 'inferno-flamegraph' is not installed."; \
+		echo "  Install with: cargo install inferno"; \
+		exit 1; \
+	fi; \
+	echo "==> building red with frame pointers"; \
+	RUSTFLAGS="-Cforce-frame-pointers=yes" cargo build --release --bin red; \
+	mkdir -p $(PERF_OUT_DIR); \
+	rm -f $(PERF_DB_PATH); \
+	echo "==> starting red on $(PERF_BIND) (db=$(PERF_DB_PATH))"; \
+	$(PERF_RED_BIN) server --wire-bind $(PERF_BIND) --path $(PERF_DB_PATH) > $(PERF_OUT_DIR)/red.log 2>&1 & \
+	RED_PID=$$!; \
+	trap "kill $$RED_PID 2>/dev/null || true; wait $$RED_PID 2>/dev/null || true" EXIT INT TERM; \
+	sleep 2; \
+	if ! kill -0 $$RED_PID 2>/dev/null; then \
+		echo "ERROR: red failed to start; see $(PERF_OUT_DIR)/red.log"; \
+		exit 1; \
+	fi; \
+	echo "==> recording perf for $(PERF_DURATION) s against pid $$RED_PID"; \
+	echo "    (drive load from $(RDB_BENCHMARK_DIR) — see comments in Makefile)"; \
+	perf record -F 99 -g -p $$RED_PID -o $(PERF_OUT_DIR)/perf.data -- sleep $(PERF_DURATION); \
+	echo "==> rendering flamegraph to $(PERF_OUT_DIR)/insert_sequential.svg"; \
+	perf script -i $(PERF_OUT_DIR)/perf.data | inferno-flamegraph > $(PERF_OUT_DIR)/insert_sequential.svg; \
+	echo "==> stopping red (pid $$RED_PID)"; \
+	kill $$RED_PID 2>/dev/null || true; \
+	wait $$RED_PID 2>/dev/null || true; \
+	trap - EXIT INT TERM; \
+	echo "OK: $(PERF_OUT_DIR)/insert_sequential.svg"
