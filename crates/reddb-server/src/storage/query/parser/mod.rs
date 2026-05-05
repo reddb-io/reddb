@@ -59,6 +59,8 @@ mod vector;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod json_literal_table;
 
 pub use error::ParseError;
 
