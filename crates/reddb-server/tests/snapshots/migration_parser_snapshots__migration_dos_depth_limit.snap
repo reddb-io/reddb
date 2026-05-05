@@ -1,0 +1,5 @@
+---
+source: crates/reddb-server/tests/migration_parser_snapshots.rs
+expression: formatted
+---
+UNEXPECTED OK
