@@ -51,6 +51,29 @@ const targets = [
     file: path.join(root, 'Cargo.toml'),
     type: 'cargo-toml',
   },
+  // Workspace members introduced by PRD #54. They publish (or stay
+  // pinned at) the same version as the umbrella reddb crate so the
+  // release workflow doesn't have to special-case them.
+  {
+    label: 'crates/reddb-wire/Cargo.toml',
+    file: path.join(root, 'crates', 'reddb-wire', 'Cargo.toml'),
+    type: 'cargo-toml',
+  },
+  {
+    label: 'crates/reddb-grpc-proto/Cargo.toml',
+    file: path.join(root, 'crates', 'reddb-grpc-proto', 'Cargo.toml'),
+    type: 'cargo-toml',
+  },
+  {
+    label: 'crates/reddb-server/Cargo.toml',
+    file: path.join(root, 'crates', 'reddb-server', 'Cargo.toml'),
+    type: 'cargo-toml',
+  },
+  {
+    label: 'crates/reddb-client/Cargo.toml',
+    file: path.join(root, 'crates', 'reddb-client', 'Cargo.toml'),
+    type: 'cargo-toml',
+  },
   {
     label: 'drivers/rust/Cargo.toml',
     file: path.join(root, 'drivers', 'rust', 'Cargo.toml'),
@@ -125,6 +148,10 @@ const stageList = [
   'package.json',
   'Cargo.toml',
   'Cargo.lock',
+  'crates/reddb-wire/Cargo.toml',
+  'crates/reddb-grpc-proto/Cargo.toml',
+  'crates/reddb-server/Cargo.toml',
+  'crates/reddb-client/Cargo.toml',
   'drivers/rust/Cargo.toml',
   'drivers/rust/Cargo.lock',
   'drivers/js/package.json',
