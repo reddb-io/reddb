@@ -19,8 +19,8 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, clippy
       - uses: arduino/setup-protoc@v3
@@ -28,7 +28,7 @@ jobs:
           version: '28.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: rui314/setup-mold@v1
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ubuntu-rust-1.91.0
@@ -66,14 +66,14 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: arduino/setup-protoc@v3
         with:
           version: '28.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: rui314/setup-mold@v1
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ubuntu-features-rust-1.91.0-${{ matrix.features.label }}
@@ -92,14 +92,14 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: arduino/setup-protoc@v3
         with:
           version: '28.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: rui314/setup-mold@v1
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ubuntu-rust-1.91.0
@@ -133,14 +133,14 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: arduino/setup-protoc@v3
         with:
           version: '28.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: rui314/setup-mold@v1
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ubuntu-publish-dryrun-rust-1.91.0
@@ -163,7 +163,7 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build and start primary + replica
         run: docker compose --project-directory . -f testdata/compose/replica.yml up -d --build
       - name: Wait for HTTP health endpoints
@@ -207,14 +207,14 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: arduino/setup-protoc@v3
         with:
           version: '28.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: rui314/setup-mold@v1
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ubuntu-rust-1.91.0
@@ -253,8 +253,8 @@ jobs:
       RED_S3_ACCESS_KEY: minioadmin
       RED_S3_SECRET_KEY: minioadmin
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: arduino/setup-protoc@v3
         with:
           version: '28.x'
@@ -278,8 +278,8 @@ jobs:
     runs-on: blacksmith-8vcpu-windows-2025
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: arduino/setup-protoc@v3
         with:
           version: '28.x'
@@ -302,8 +302,8 @@ jobs:
     runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: arduino/setup-protoc@v3
         with:
           version: '28.x'
@@ -328,14 +328,14 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
       - uses: arduino/setup-protoc@v3
         with:
           version: '28.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: rui314/setup-mold@v1
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ubuntu-fuzz-nightly
@@ -362,7 +362,7 @@ jobs:
         run: cargo fuzz run conn_string_parser -- -max_total_time=300
       - name: Upload fuzz crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-crashes
           path: |
@@ -375,8 +375,8 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: arduino/setup-protoc@v3
         with:
           version: '28.x'

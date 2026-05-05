@@ -22,14 +22,14 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: arduino/setup-protoc@v3
         with:
           version: '28.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: rui314/setup-mold@v1
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ubuntu-drill-rust-1.91.0
@@ -39,13 +39,13 @@ jobs:
         run: make drill-nightly
       - name: Upload drill history
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: drill-history
           path: docs/release/drill-history.md
       - name: Open issue on drill failure
         if: failure()
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const title = `Nightly DR drill failed: ${new Date().toISOString().slice(0, 10)}`;
