@@ -44,6 +44,7 @@
 use crate::storage::query::ast::{BinOp, CompareOp, Expr, FieldRef, UnaryOp};
 use crate::storage::query::unified::UnifiedRecord;
 use crate::storage::schema::cast_catalog::{find_cast, CastContext, CastEntry};
+use crate::storage::schema::coercion_spine;
 use crate::storage::schema::function_catalog::{self, FunctionEntry};
 use crate::storage::schema::operator_catalog::{self, OperatorEntry, OperatorKind};
 use crate::storage::schema::types::DataType;
@@ -312,14 +313,23 @@ fn compile_expr(expr: &Expr, scope: &dyn Scope) -> Result<CompiledScalar, Compil
             let r = compile_expr(rhs, scope)?;
             let lty = l.data_type();
             let rty = r.data_type();
-            let symbol = binop_symbol(*op);
-            let entry =
-                operator_catalog::resolve(symbol, OperatorKind::Infix, lty, rty);
+            // Route the binop overload pick through the coercion
+            // spine (issue #82): a single Module owns "given (op,
+            // lhs, rhs), which overload applies and what implicit
+            // casts must we insert". The spine first tries an exact
+            // match (preserving legacy behaviour for queries the
+            // catalog already covers), then falls back to a
+            // coercion-aware widening pick. We discard the
+            // OperandCoercions slot today because the runtime eval
+            // path still uses dynamic numeric coercion in `arith()`
+            // — a future commit can synthesize explicit Cast nodes
+            // here once every consumer respects them.
+            let entry = coercion_spine::resolve_binop(*op, lty, rty).map(|(e, _)| e);
             // For comparisons / arith we still want a static return
-            // type even when the catalog has no exact-match overload
-            // — the legacy numeric coercion path handles cross-type
-            // arithmetic that the catalog doesn't enumerate. We use
-            // the operator family to assign a default return type.
+            // type even when the spine has no overload — the legacy
+            // numeric coercion path handles cross-type arithmetic
+            // that neither catalog enumerates. We use the operator
+            // family to assign a default return type.
             let ty = match entry {
                 Some(e) => e.return_type,
                 None => default_binop_result_type(*op, lty, rty),
