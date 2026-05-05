@@ -109,6 +109,8 @@ jobs:
             . -> target/persistent-tests
       - name: Build red_client (cross-binary smoke prereq)
         run: cargo build --locked --bin red_client -p reddb-client-internal
+      - name: red_client size budget
+        run: ./scripts/check-red-client-size.sh
       - name: Run default test layer
         run: cargo test --locked --verbose
       - name: Run persistent multimodel layer
