@@ -7,9 +7,11 @@
 //! session loop, listener accept) stays in `reddb` and depends on
 //! these types.
 
+pub mod builder;
 pub mod codec;
 pub mod frame;
 
+pub use builder::{BuildError, FrameBuilder};
 pub use codec::{decode_frame, encode_frame, FrameError};
 pub use frame::{Flags, Frame, MessageKind, FRAME_HEADER_SIZE, MAX_FRAME_SIZE};
 
