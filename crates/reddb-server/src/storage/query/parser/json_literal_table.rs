@@ -511,9 +511,13 @@ fn dos_payload_size_exceeded() {
     let sql = format!("INSERT INTO t (body) VALUES ({})", raw);
     let r = parse(&sql);
     let err = r.expect_err("expected size-limit error");
+    let msg = err.to_string();
+    // Either limit can fire first depending on which is tighter:
+    // the JSON sub-mode's JSON_LITERAL_MAX_BYTES (16 MiB) or the
+    // outer parser's max_input_bytes (1 MiB by default per #87).
     assert!(
-        err.to_string().contains("JSON_LITERAL_MAX_BYTES"),
-        "expected size error, got: {}",
+        msg.contains("JSON_LITERAL_MAX_BYTES") || msg.contains("InputTooLarge") || msg.contains("max_input_bytes"),
+        "expected size-limit error, got: {}",
         err
     );
 }
