@@ -1212,6 +1212,14 @@ fn dispatch_ca_function(db: &RedDB, name: &str, args: &[Value]) -> Option<Value>
     }
 }
 
+/// Crate-local shim that exposes `dispatch_builtin_function` to the
+/// scalar evaluator without making the dispatcher itself part of the
+/// runtime API. Once the evaluator owns the dispatch table this shim
+/// disappears.
+pub(super) fn scalar_dispatch_builtin(name: &str, args: &[Value]) -> Option<Value> {
+    dispatch_builtin_function(name, args)
+}
+
 fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
     match name {
         "UPPER" => match args.first()? {
