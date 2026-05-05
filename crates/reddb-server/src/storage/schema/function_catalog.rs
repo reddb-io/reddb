@@ -42,7 +42,6 @@
 //! - Operator functions backing `+`, `-`, `*` — those go in
 //!   `pg_operator` equivalent which we haven't built yet.
 
-use super::cast_catalog::can_implicit_cast;
 use super::types::DataType;
 
 /// Function classification — affects resolver behavior and
@@ -803,88 +802,17 @@ pub fn lookup(name: &str) -> Vec<&'static FunctionEntry> {
 
 /// Resolve a function call to the best-matching overload. Returns
 /// `None` when no overload matches the call-site argument types
-/// (after implicit coercion via the cast catalog). The match
-/// algorithm is a tiny version of PG `func_select_candidate`:
+/// (after implicit coercion).
 ///
-/// 1. Filter overloads by name (case-insensitive).
-/// 2. Filter by arity (variadic entries skip this check).
-/// 3. Discard overloads with any incompatible argument position.
-///    Exact matches win over implicit-cast matches.
-/// 4. Tie-break by preferring the overload whose return type is
-///    the preferred member of its category (Float over Integer,
-///    Text over Blob, etc.).
+/// **As of issue #82, this function delegates to
+/// `coercion_spine::resolve_function`**. The spine owns the
+/// coercion-aware overload-picking rule that used to live inline
+/// here; the catalog itself is now a pure registry of `pg_proc`-style
+/// rows. Callers that need the per-argument implicit-cast list
+/// (which the runtime evaluator must apply before dispatch) should
+/// call `coercion_spine::resolve_function` directly — this wrapper
+/// only returns the entry to preserve the existing call-site
+/// signature.
 pub fn resolve(name: &str, arg_types: &[DataType]) -> Option<&'static FunctionEntry> {
-    let candidates = lookup(name);
-    if candidates.is_empty() {
-        return None;
-    }
-
-    // Score each candidate.
-    let mut best: Option<(usize, &'static FunctionEntry)> = None;
-    for entry in candidates {
-        // Arity check (skip for variadic).
-        if !entry.variadic && entry.arg_types.len() != arg_types.len() {
-            continue;
-        }
-        if entry.variadic && arg_types.is_empty() {
-            // Variadic with zero args is degenerate — skip.
-            continue;
-        }
-
-        let compatible = if entry.variadic {
-            if entry.name.eq_ignore_ascii_case("CONCAT")
-                || entry.name.eq_ignore_ascii_case("CONCAT_WS")
-            {
-                true
-            } else {
-                let target = entry.arg_types[0];
-                arg_types
-                    .iter()
-                    .all(|arg| *arg == target || can_implicit_cast(*arg, target))
-            }
-        } else {
-            entry
-                .arg_types
-                .iter()
-                .zip(arg_types.iter())
-                .all(|(target, arg)| *target == *arg || can_implicit_cast(*arg, *target))
-        };
-
-        if !compatible {
-            continue;
-        }
-
-        let score = if entry.variadic {
-            let target = entry.arg_types[0];
-            if entry.name.eq_ignore_ascii_case("CONCAT")
-                || entry.name.eq_ignore_ascii_case("CONCAT_WS")
-            {
-                arg_types.len()
-            } else {
-                arg_types.iter().filter(|t| **t == target).count()
-            }
-        } else {
-            entry
-                .arg_types
-                .iter()
-                .zip(arg_types.iter())
-                .filter(|(target, arg)| *target == *arg)
-                .count()
-        };
-
-        match best {
-            None => best = Some((score, entry)),
-            Some((best_score, best_entry)) => {
-                if score > best_score
-                    || (score == best_score
-                        && entry.return_type.is_preferred()
-                        && !best_entry.return_type.is_preferred())
-                {
-                    best = Some((score, entry));
-                }
-            }
-        }
-    }
-
-    best.map(|(_, entry)| entry)
+    super::coercion_spine::resolve_function(name, arg_types).map(|(entry, _)| entry)
 }
