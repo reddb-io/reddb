@@ -1,9 +1,9 @@
 [package]
-name = "reddb-client-internal"
+name = "reddb-client"
 version = "0.2.9"
 edition = "2021"
 authors = ["RedDB.io <hello@reddb.io>"]
-description = "Internal RedDB client (gRPC connector + REPL) used by the `red` and (later) `red_client` binaries. Not the published driver — that crate lives in drivers/rust."
+description = "Internal RedDB client (gRPC connector + REPL) used by the `red` and `red_client` binaries. Will subsume the published driver from drivers/rust in a follow-up commit."
 license = "AGPL-3.0-only"
 homepage = "https://github.com/reddb-io/reddb"
 repository = "https://github.com/reddb-io/reddb"

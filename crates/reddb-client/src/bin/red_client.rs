@@ -30,9 +30,9 @@
 use std::env;
 use std::process::ExitCode;
 
-use reddb_client_internal::http::{query_one_shot as http_query_one_shot, Auth as HttpAuth};
-use reddb_client_internal::redwire::{Auth as RedWireAuth, RedWireClient, RedWireError};
-use reddb_client_internal::{repl::run_repl, RedDBClient};
+use reddb_client::http::{query_one_shot as http_query_one_shot, Auth as HttpAuth};
+use reddb_client::redwire::{Auth as RedWireAuth, RedWireClient, RedWireError};
+use reddb_client::{repl::run_repl, RedDBClient};
 use reddb_wire::{parse, ConnectionTarget, ParseErrorKind};
 
 const EXIT_USAGE: u8 = 1;
