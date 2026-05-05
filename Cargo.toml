@@ -1,5 +1,9 @@
 [workspace]
-members = ["crates/reddb-grpc-proto", "crates/reddb-wire"]
+members = [
+    "crates/reddb-client",
+    "crates/reddb-grpc-proto",
+    "crates/reddb-wire",
+]
 resolver = "2"
 
 [package]
@@ -32,6 +36,7 @@ path = "src/bin/red.rs"
 [dependencies]
 reddb-wire = { version = "0.2", path = "crates/reddb-wire" }
 reddb-grpc-proto = { version = "0.2", path = "crates/reddb-grpc-proto" }
+reddb-client-internal = { version = "0.2", path = "crates/reddb-client" }
 aes-gcm = "0.10"
 hmac = "0.13"
 itoa = "1"

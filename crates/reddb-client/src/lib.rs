@@ -1,12 +1,15 @@
-//! RedDB gRPC Client
+//! RedDB gRPC client used by the `red` and (later) `red_client`
+//! binaries.
 //!
-//! Connects to a remote RedDB server and provides an interactive REPL
-//! or one-shot command execution.
+//! Connects to a remote RedDB server and provides an interactive
+//! REPL or one-shot command execution. The crate is internal to
+//! the workspace (`publish = false`) and is distinct from the
+//! standalone language driver published from `drivers/rust`.
 
 pub mod repl;
 
-use crate::grpc::proto::red_db_client::RedDbClient;
-use crate::grpc::proto::*;
+use reddb_grpc_proto::red_db_client::RedDbClient;
+use reddb_grpc_proto::*;
 use tonic::transport::Channel;
 use tonic::Request;
 

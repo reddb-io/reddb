@@ -17,7 +17,14 @@ pub mod application;
 pub mod auth;
 pub mod catalog;
 pub mod cli;
-pub mod client;
+/// Re-export of the internal `reddb-client-internal` crate.
+///
+/// The gRPC client + REPL used by the `red` and (later) `red_client`
+/// binaries lives in `crates/reddb-client/`. Exposed here under the
+/// legacy `reddb::client::…` path so existing call sites in
+/// `src/bin/red.rs`, `src/rpc_stdio.rs`, and the integration tests
+/// keep compiling unchanged.
+pub use reddb_client_internal as client;
 pub mod config;
 pub mod crypto;
 pub mod ec;

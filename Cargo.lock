@@ -1420,6 +1420,7 @@ dependencies = [
  "prost",
  "rayon",
  "rcgen",
+ "reddb-client-internal",
  "reddb-grpc-proto",
  "reddb-wire",
  "regex",
@@ -1440,6 +1441,15 @@ dependencies = [
  "trybuild",
  "ureq",
  "zstd",
+]
+
+[[package]]
+name = "reddb-client-internal"
+version = "0.2.9"
+dependencies = [
+ "reddb-grpc-proto",
+ "reddb-wire",
+ "tonic",
 ]
 
 [[package]]
