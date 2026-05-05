@@ -22,7 +22,12 @@ impl<'a> Parser<'a> {
         // Parse optional clauses in any order before the body
         loop {
             if self.consume_ident_ci("DEPENDS")? {
-                self.consume_ident_ci("ON")?;
+                // `ON` is lexed as `Token::On` (reserved keyword), not as
+                // an identifier — `consume_ident_ci("ON")` would silently
+                // miss it and the next `expect_ident()` would surface
+                // "expected identifier, got ON". Require the typed
+                // keyword so the dependency list actually parses.
+                self.expect(Token::On)?;
                 loop {
                     depends_on.push(self.expect_ident()?);
                     if !self.consume(&Token::Comma)? {
