@@ -417,6 +417,51 @@ mod tests {
         reset_thread_locals();
     }
 
+    /// A SELECT that calls a volatile builtin (here:
+    /// `pg_advisory_unlock`, the volatile token the runtime currently
+    /// recognises in `query_has_volatile_builtin`) must NOT populate
+    /// the result cache. Any caller hitting the cache after this would
+    /// see a stale answer for an inherently-volatile query, so the
+    /// SELECT path gates writes through `frame.should_cache_result()`.
+    ///
+    /// Deletion test: removing `ReadFrame::should_cache_result`, or
+    /// reverting the SELECT path to skip its safety gate, would let
+    /// the result cache silently absorb this statement and break the
+    /// assertion below.
+    #[test]
+    fn volatile_select_does_not_populate_result_cache() {
+        reset_thread_locals();
+        let rt = fresh_runtime();
+
+        // Frame-level invariant: the volatile-builtin signal collapses
+        // `should_cache_result` to false even for an autocommit /
+        // out-of-tx connection.
+        let frame =
+            StatementExecutionFrame::build(&rt, "SELECT pg_advisory_unlock(1)").expect("frame");
+        let f: &dyn ReadFrame = &frame;
+        assert!(
+            !f.should_cache_result(),
+            "volatile builtin must disable result-cache safety"
+        );
+
+        // End-to-end: drive the volatile SELECT through `execute_query`
+        // and confirm no entry was stamped under its cache key. Other
+        // entries from prior tests sharing the binary may exist, so we
+        // assert specifically on this query's key.
+        let _ = rt
+            .execute_query("SELECT pg_advisory_unlock(1)")
+            .expect("volatile SELECT executes");
+        let cache = rt.inner.result_cache.read();
+        let key = result_cache_key("SELECT pg_advisory_unlock(1)");
+        assert!(
+            !cache.0.contains_key(&key),
+            "volatile SELECT must not populate result cache, found key {key:?} in {:?}",
+            cache.0.keys().collect::<Vec<_>>()
+        );
+
+        reset_thread_locals();
+    }
+
     #[test]
     fn as_of_on_red_collection_records_floor() {
         reset_thread_locals();
