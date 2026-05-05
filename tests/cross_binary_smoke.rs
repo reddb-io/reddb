@@ -124,6 +124,32 @@ fn boot_red_grpc(port: u16) -> Result<ServerHandle, String> {
     Ok(ServerHandle { child })
 }
 
+fn boot_red_wire(port: u16) -> Result<ServerHandle, String> {
+    let path = scratch_path("wire");
+    let bind = format!("127.0.0.1:{port}");
+    // The server boots a default-port gRPC listener even when only
+    // --wire-bind is requested. Pin it to a free port so parallel
+    // smoke tests don't collide on 5055.
+    let grpc_port = pick_port();
+    let grpc_bind = format!("127.0.0.1:{grpc_port}");
+    let mut cmd = Command::new(red_binary());
+    cmd.args([
+        "server",
+        "--wire-bind",
+        &bind,
+        "--grpc-bind",
+        &grpc_bind,
+        "--path",
+        path.to_str().unwrap(),
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("spawn red server: {e}"))?;
+    Ok(ServerHandle { child })
+}
+
 /// Skip helper: emit a message and return early when red_client
 /// hasn't been built yet (workspace test runs without
 /// `--bin red_client` won't build it).
@@ -183,13 +209,76 @@ fn red_client_round_trips_against_red_over_grpc() {
 }
 
 #[test]
+fn red_client_round_trips_against_red_over_redwire() {
+    let Some(red_client) = skip_if_no_red_client() else {
+        return;
+    };
+    let port = pick_port();
+    let mut server = match boot_red_wire(port) {
+        Ok(h) => h,
+        Err(e) => panic!("could not start `red server` (wire): {e}"),
+    };
+
+    if !wait_for_listener("127.0.0.1", port, Duration::from_secs(15)) {
+        let (out, err) = drain_output(&mut server.child);
+        panic!(
+            "`red server --wire-bind` did not listen on {port} within 15s\nstdout:\n{out}\nstderr:\n{err}"
+        );
+    }
+
+    let uri = format!("red://127.0.0.1:{port}");
+    let out = Command::new(&red_client)
+        .args([&uri, "-c", "SELECT 1"])
+        .output()
+        .expect("spawn red_client");
+    let code = out.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    server.kill();
+
+    assert_eq!(
+        code, 0,
+        "red_client over RedWire should exit 0; got {code}\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        !stdout.trim().is_empty(),
+        "red_client should print a result; stdout empty.\nstderr: {stderr}"
+    );
+}
+
+#[test]
+fn red_client_reds_scheme_returns_tls_not_implemented() {
+    // `reds://` is parsed correctly but the connector does not yet
+    // wire TLS — surface the documented "not yet implemented" exit
+    // code (5) instead of crashing or hanging on a TCP connect.
+    let Some(red_client) = skip_if_no_red_client() else {
+        return;
+    };
+    let out = Command::new(&red_client)
+        .args(["reds://127.0.0.1:1", "-c", "SELECT 1"])
+        .output()
+        .expect("spawn red_client");
+    let code = out.status.code().unwrap_or(-1);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        code, 5,
+        "reds:// should hit transport-not-implemented (5); got {code}\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("TLS") || stderr.contains("reds"),
+        "stderr should mention TLS / reds; got: {stderr}"
+    );
+}
+
+#[test]
 fn red_client_red_scheme_routes_to_default_port() {
     let Some(red_client) = skip_if_no_red_client() else {
         return;
     };
     // `red://host` (no explicit port) must inherit DEFAULT_PORT_RED
-    // (5050). Boot the server on 5050 and confirm. Skipped when
-    // 5050 is already taken on this host.
+    // (5050). Boot a RedWire listener on 5050 and confirm.
+    // Skipped when 5050 is already taken on this host.
     let port = 5050u16;
     let probe = std::net::TcpListener::bind(("127.0.0.1", port));
     if probe.is_err() {
@@ -198,9 +287,9 @@ fn red_client_red_scheme_routes_to_default_port() {
     }
     drop(probe);
 
-    let mut server = match boot_red_grpc(port) {
+    let mut server = match boot_red_wire(port) {
         Ok(h) => h,
-        Err(e) => panic!("could not start `red server`: {e}"),
+        Err(e) => panic!("could not start `red server` (wire): {e}"),
     };
 
     if !wait_for_listener("127.0.0.1", port, Duration::from_secs(15)) {

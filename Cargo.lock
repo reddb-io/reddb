@@ -1429,6 +1429,7 @@ version = "0.2.9"
 dependencies = [
  "reddb-grpc-proto",
  "reddb-wire",
+ "serde_json",
  "tokio",
  "tonic",
 ]

@@ -6,6 +6,7 @@
 //! the workspace (`publish = false`) and is distinct from the
 //! standalone language driver published from `drivers/rust`.
 
+pub mod redwire;
 pub mod repl;
 
 use reddb_grpc_proto::red_db_client::RedDbClient;

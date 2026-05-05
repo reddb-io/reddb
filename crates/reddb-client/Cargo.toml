@@ -16,7 +16,12 @@ tonic = { version = "0.14", default-features = false, features = ["channel", "co
 # `red_client` binary spins up a current-thread tokio runtime via
 # `#[tokio::main]`. Library callers (the `red` bin) bring their
 # own runtime, so the macro feature is only needed for the bin.
-tokio = { version = "1", default-features = false, features = ["rt", "macros"] }
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "net", "io-util"] }
+# RedWire handshake payloads are JSON-encoded today (per ADR 0001),
+# so the connector serialises Hello/AuthResponse and parses HelloAck
+# /AuthOk via serde_json. Pulled into the lib because both the
+# library RedWireClient and the bin route through it.
+serde_json = "1"
 
 [[bin]]
 name = "red_client"

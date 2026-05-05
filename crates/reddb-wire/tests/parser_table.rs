@@ -44,22 +44,28 @@ fn ok_cases() -> Vec<OkCase> {
         OkCase {
             name: "red:// default port 5050",
             input: "red://primary.svc",
-            expect: ConnectionTarget::Grpc {
-                endpoint: "http://primary.svc:5050".into(),
+            expect: ConnectionTarget::RedWire {
+                host: "primary.svc".into(),
+                port: 5050,
+                tls: false,
             },
         },
         OkCase {
-            name: "reds:// default port 5050",
+            name: "reds:// default port 5050 with TLS flag",
             input: "reds://host.example",
-            expect: ConnectionTarget::Grpc {
-                endpoint: "http://host.example:5050".into(),
+            expect: ConnectionTarget::RedWire {
+                host: "host.example".into(),
+                port: 5050,
+                tls: true,
             },
         },
         OkCase {
             name: "red:// explicit port",
             input: "red://h:6000",
-            expect: ConnectionTarget::Grpc {
-                endpoint: "http://h:6000".into(),
+            expect: ConnectionTarget::RedWire {
+                host: "h".into(),
+                port: 6000,
+                tls: false,
             },
         },
         OkCase {
