@@ -15,3 +15,10 @@ categories = ["database", "network-programming"]
 [dependencies]
 url = "2"
 zstd = { version = "0.13", default-features = false }
+
+# Issue #90: parser-hardening test suite mirrors the SQL parser
+# coverage (#87). Property tests via proptest, pinned error-message
+# snapshots via insta.
+[dev-dependencies]
+proptest = "1"
+insta = "1"
