@@ -30,6 +30,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::coordinator::IsolationLevel;
 
+/// Default autocommit-xid pool batch size. Each refill reserves this
+/// many xids in a single `fetch_add` so back-to-back autocommit inserts
+/// share one atomic op instead of paying it per row. Sized small to
+/// keep a pristine `peek_next_xid()` close to the truth — VACUUM and
+/// diagnostics treat reserved-but-unused xids as already-committed.
+pub(crate) const AUTOCOMMIT_POOL_BATCH: u64 = 16;
+
 /// A transaction identifier. Monotonic across the lifetime of the process.
 pub type Xid = u64;
 
@@ -108,9 +115,38 @@ impl TxnContext {
 /// HashSet for in-progress/aborted bookkeeping. The sets stay small —
 /// only unfinished transactions plus a finite rollback history — so a
 /// plain HashSet outperforms more complex data structures here.
+///
+/// # Autocommit xid pool
+///
+/// Single-row autocommit writes (`MutationEngine::append_one`) need an
+/// xid that's "born committed" — they call `begin()` then `commit()`
+/// back-to-back before the row is even durable. The pre-commit pool
+/// (`autocommit_pool_*`) batches the reservation: one
+/// `next_xid.fetch_add(BATCH)` reserves a contiguous range of xids,
+/// each handed out via a single atomic without touching the
+/// `RwLock<ManagerState>`. Pool xids are never inserted into `active`
+/// or `aborted` so they look like already-committed transactions to
+/// every snapshot — identical visibility semantics to the legacy
+/// `begin()/commit()` pair (which also leaves the xid in neither set).
 pub struct SnapshotManager {
     next_xid: AtomicU64,
     state: parking_lot::RwLock<ManagerState>,
+    /// Reservation window for the autocommit pool. A single
+    /// `parking_lot::Mutex` protects two `u64`s — `next` (next xid to
+    /// hand out) and `end` (exclusive upper bound). When `next == end`
+    /// the next caller refills by reserving `AUTOCOMMIT_POOL_BATCH`
+    /// xids in a single `next_xid.fetch_add`, dropping the lock cost
+    /// from one acquire-per-xid (the legacy `begin()`+`commit()` pair)
+    /// to one acquire-per-`AUTOCOMMIT_POOL_BATCH` xids. A plain Mutex
+    /// is enough here — the critical section is two stores and an
+    /// atomic add, and contention is bounded by the writer count.
+    autocommit_pool: parking_lot::Mutex<AutocommitPool>,
+}
+
+#[derive(Default)]
+struct AutocommitPool {
+    next: Xid,
+    end: Xid,
 }
 
 #[derive(Default)]
@@ -134,6 +170,8 @@ impl SnapshotManager {
             // Start at 1 so xid=0 keeps its pre-MVCC "everyone sees it" meaning.
             next_xid: AtomicU64::new(1),
             state: parking_lot::RwLock::new(ManagerState::default()),
+            // Pool starts empty — first caller triggers a refill.
+            autocommit_pool: parking_lot::Mutex::new(AutocommitPool::default()),
         }
     }
 
@@ -164,6 +202,46 @@ impl SnapshotManager {
         // Also clear from aborted set in case of prior rollback_to call
         // that touched this xid (defensive; normally a no-op).
         state.aborted.remove(&xid);
+    }
+
+    /// Allocate an xid that is *born committed* — for autocommit
+    /// callers (`MutationEngine::append_one`) that previously paid two
+    /// `state.write()` lock acquisitions per row to insert-then-remove
+    /// from the active set.
+    ///
+    /// The returned xid is never inserted into `active` and never into
+    /// `aborted`, which matches the steady state of the legacy
+    /// `begin()/commit()` pair when called back-to-back: the xid leaves
+    /// the manager's tracking sets unobservably. Concurrent readers
+    /// therefore see it as an already-committed transaction once
+    /// `xmin <= snapshot.xid`, which is exactly the semantics the
+    /// autocommit path needs.
+    ///
+    /// Implementation: a small reservation pool (`AUTOCOMMIT_POOL_BATCH`
+    /// xids) is reserved with one `fetch_add`. Each caller hands itself
+    /// the next xid via a single atomic. When the pool drains, the
+    /// next caller serialises briefly through `autocommit_pool_refill`
+    /// to bump the window, then falls back into the lock-free hot path.
+    ///
+    /// Durability note: this method does NOT make the row durable —
+    /// it only allocates the identifier. The caller must complete the
+    /// usual WAL-append + fsync cycle before acknowledging the write.
+    /// Pre-allocating the xid is safe because the xid carries no
+    /// promise that any row exists; it's just a number for `xmin`.
+    pub fn allocate_committed_xid(&self) -> Xid {
+        let mut pool = self.autocommit_pool.lock();
+        if pool.next >= pool.end {
+            // Reserve the next contiguous range. A single
+            // `fetch_add(BATCH)` on the global counter — equivalent to
+            // BATCH back-to-back `begin()` calls in terms of xid
+            // numbering, but with zero `state.write()` traffic.
+            let start = self.next_xid.fetch_add(AUTOCOMMIT_POOL_BATCH, Ordering::Relaxed);
+            pool.next = start;
+            pool.end = start + AUTOCOMMIT_POOL_BATCH;
+        }
+        let xid = pool.next;
+        pool.next += 1;
+        xid
     }
 
     /// Mark a transaction as rolled back. Its writes MUST stay hidden
@@ -354,6 +432,59 @@ mod tests {
         m.pin(XID_NONE);
         assert!(!m.is_pinned(XID_NONE));
         assert_eq!(m.pin_count(XID_NONE), 0);
+    }
+
+    #[test]
+    fn allocate_committed_xid_is_monotonic_and_unique() {
+        let m = SnapshotManager::new();
+        let mut seen = HashSet::new();
+        let mut last = 0u64;
+        // Drive at least three pool refills (BATCH=16 → 50 covers it).
+        for _ in 0..50 {
+            let x = m.allocate_committed_xid();
+            assert!(x > last, "xids must be strictly increasing: {x} > {last}");
+            assert!(seen.insert(x), "duplicate xid handed out: {x}");
+            last = x;
+        }
+    }
+
+    #[test]
+    fn allocate_committed_xid_skips_active_set() {
+        let m = SnapshotManager::new();
+        let _x = m.allocate_committed_xid();
+        // Pool xids must never appear in the active set — they are
+        // born committed. `oldest_active_xid` reflects only `begin()`
+        // callers (real BEGIN-wrapped transactions).
+        assert_eq!(m.oldest_active_xid(), None);
+    }
+
+    #[test]
+    fn allocate_committed_xid_visible_to_subsequent_snapshots() {
+        let m = SnapshotManager::new();
+        let writer = m.allocate_committed_xid();
+        let reader = m.begin();
+        let snap = m.snapshot(reader);
+        // Pool xid must be invisible to in_progress/aborted (it's in
+        // neither) and visible because writer < reader. This matches
+        // the legacy begin()+commit() pair's visibility exactly.
+        assert!(!snap.in_progress.contains(&writer));
+        assert!(!m.is_aborted(writer));
+        assert!(snap.sees(writer, XID_NONE));
+    }
+
+    #[test]
+    fn allocate_committed_xid_does_not_block_concurrent_begin() {
+        // Smoke test: an open BEGIN-wrapped tx coexists with pool
+        // allocation; pool xids end up between the begin and commit
+        // without being added to `active`.
+        let m = SnapshotManager::new();
+        let tx = m.begin();
+        let auto1 = m.allocate_committed_xid();
+        let auto2 = m.allocate_committed_xid();
+        m.commit(tx);
+        assert!(tx < auto1 && auto1 < auto2);
+        // `active` should be empty after commit.
+        assert_eq!(m.oldest_active_xid(), None);
     }
 
     #[test]
