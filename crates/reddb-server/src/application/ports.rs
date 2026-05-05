@@ -141,6 +141,21 @@ pub trait RuntimeEntityPort {
         column_names: std::sync::Arc<Vec<String>>,
         rows: Vec<Vec<crate::storage::schema::Value>>,
     ) -> RedDBResult<usize>;
+    /// Columnar bulk insert with full contract validation — wire
+    /// handler shape (one `Arc<Vec<String>>` schema shared across
+    /// every row, `Vec<Vec<Value>>` row payload). Equivalent to
+    /// `create_rows_batch` semantically but skips the per-row
+    /// `(String, Value)` tuple materialisation in the wire decoder.
+    /// When the collection has no contract (or no declared columns)
+    /// fast-paths to `create_rows_batch_prevalidated_columnar`;
+    /// otherwise falls back to the tuple path so contract
+    /// normalisation can run.
+    fn create_rows_batch_columnar(
+        &self,
+        collection: String,
+        column_names: std::sync::Arc<Vec<String>>,
+        rows: Vec<Vec<crate::storage::schema::Value>>,
+    ) -> RedDBResult<usize>;
     fn create_node(&self, input: CreateNodeInput) -> RedDBResult<CreateEntityOutput>;
     fn create_edge(&self, input: CreateEdgeInput) -> RedDBResult<CreateEntityOutput>;
     fn create_vector(&self, input: CreateVectorInput) -> RedDBResult<CreateEntityOutput>;
