@@ -3,29 +3,99 @@ name = "reddb-client"
 version = "0.2.9"
 edition = "2021"
 authors = ["RedDB.io <hello@reddb.io>"]
-description = "Internal RedDB client (gRPC connector + REPL) used by the `red` and `red_client` binaries. Will subsume the published driver from drivers/rust in a follow-up commit."
+description = "Official Rust client for RedDB — embedded engine, gRPC, HTTP, and RedWire transports behind one connection-string API. Also hosts the workspace-internal connector + REPL used by the `red` and `red_client` binaries."
 license = "AGPL-3.0-only"
 homepage = "https://github.com/reddb-io/reddb"
 repository = "https://github.com/reddb-io/reddb"
+documentation = "https://docs.rs/reddb-client"
+readme = "README.md"
+keywords = ["reddb", "database", "client", "embedded"]
+categories = ["database", "api-bindings"]
 publish = false
 
+[features]
+# `embedded` pulls the entire RedDB engine in-process (fastest path).
+# `grpc` pulls the same engine but only uses its tonic client type.
+# A standalone thin client that does not compile the engine is
+# tracked in PLAN_DRIVERS.md.
+default = ["embedded"]
+
+embedded = ["dep:reddb-server"]
+grpc = []
+# RedWire native TCP client. No engine dep — speaks the wire
+# protocol directly. See ADR 0001.
+redwire = ["dep:zstd", "dep:sha2"]
+# HTTP / HTTPS transport using reqwest. Parity with the JS
+# driver's HttpRpcClient — talks REST endpoints directly.
+http = ["dep:reqwest"]
+# RedWire over TLS / mTLS. Reuses the redwire handshake; flips
+# the transport to tokio-rustls.
+redwire-tls = [
+    "redwire",
+    "dep:tokio-rustls",
+    "dep:rustls",
+    "dep:rustls-pemfile",
+]
+
 [dependencies]
+# Always-on workspace deps. The connector + bin paths only need
+# tonic, ureq, and serde_json — no engine, no reqwest, no
+# rustls. Optional features layer the heavier transports on top.
 reddb-grpc-proto = { version = "0.2", path = "../reddb-grpc-proto" }
 reddb-wire = { version = "0.2", path = "../reddb-wire" }
+# The gRPC connector type lives in its own crate to break the
+# would-be circular path dependency between this crate (with
+# `embedded`) and `reddb-server`.
+reddb-client-connector = { version = "0.2", path = "../reddb-client-connector" }
 tonic = { version = "0.14", default-features = false, features = ["channel", "codegen"] }
 # `red_client` binary spins up a current-thread tokio runtime via
 # `#[tokio::main]`. Library callers (the `red` bin) bring their
 # own runtime, so the macro feature is only needed for the bin.
-tokio = { version = "1", default-features = false, features = ["rt", "macros", "net", "io-util"] }
-# RedWire handshake payloads are JSON-encoded today (per ADR 0001),
-# so the connector serialises Hello/AuthResponse and parses HelloAck
-# /AuthOk via serde_json. Pulled into the lib because both the
-# library RedWireClient and the bin route through it.
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "net", "io-util"] }
+# RedWire handshake payloads + HTTP request/response shapes are
+# JSON-encoded.
 serde_json = "1"
-# Lightweight sync HTTP client for the http:// / https:// transport.
-# `default-features = false` skips the platform native TLS in favour
-# of rustls, matching the rest of the workspace's TLS stack.
+# Lightweight sync HTTP client for the `red_client` bin's
+# http(s) transport. Skips the platform native TLS in favour of
+# rustls, matching the rest of the workspace's TLS stack.
 ureq = { version = "3.3", default-features = false, features = ["rustls"] }
+# Connection-string parsing reuses `url` indirectly through
+# `reddb-wire`; the published `Reddb` API doesn't need it
+# directly.
+
+# Engine — only compiled in when the `embedded` feature is on.
+# Depends on `reddb-server` (not the `reddb` umbrella) to avoid a
+# circular dependency: the umbrella `reddb` depends on this
+# crate, so we skip a level and reach into the workspace
+# directly.
+reddb-server = { version = "0.2", path = "../reddb-server", optional = true }
+
+# Per-frame compression (Flags::COMPRESSED). Pulled in only by
+# the `redwire` feature so embedded-only callers don't pay it.
+zstd = { version = "0.13", default-features = false, optional = true }
+
+# SHA-256 for SCRAM client primitives (Phase 3a/3c). Pulled in
+# only by the `redwire` feature.
+sha2 = { version = "0.11", optional = true }
+
+# TLS / mTLS for the RedWire client. Pulled in only by the
+# `redwire-tls` feature.
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "ring"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
+rustls-pemfile = { version = "2", optional = true }
+
+# HTTP / HTTPS transport for the published `Reddb::Http` variant.
+# Pulled in only by the `http` feature. `default-features = false`
+# skips OpenSSL; we use rustls.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# OAuth-JWT smoke (`tests/redwire_oauth_smoke.rs`). Mints + decodes
+# RS256 tokens against an in-process JWKS server. Pulled only when
+# building tests.
+jsonwebtoken = "9"
+serde_json = "1"
 
 [[bin]]
 name = "red_client"

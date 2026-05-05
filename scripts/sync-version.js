@@ -20,8 +20,7 @@
  * Files updated:
  *   - Cargo.toml                      (engine crate)
  *   - Cargo.lock                      (regenerated)
- *   - drivers/rust/Cargo.toml         (reddb-client)
- *   - drivers/rust/Cargo.lock         (regenerated)
+ *   - crates/reddb-client-connector/Cargo.toml (workspace internal)
  *   - drivers/js/package.json         (reddb npm)
  *   - drivers/python/Cargo.toml       (reddb-python internal name)
  *   - drivers/python/Cargo.lock       (regenerated)
@@ -75,8 +74,8 @@ const targets = [
     type: 'cargo-toml',
   },
   {
-    label: 'drivers/rust/Cargo.toml',
-    file: path.join(root, 'drivers', 'rust', 'Cargo.toml'),
+    label: 'crates/reddb-client-connector/Cargo.toml',
+    file: path.join(root, 'crates', 'reddb-client-connector', 'Cargo.toml'),
     type: 'cargo-toml',
   },
   {
@@ -126,7 +125,6 @@ if (failed > 0) {
 // the authoritative verify.
 const lockManifests = [
   path.join(root, 'Cargo.toml'),
-  path.join(root, 'drivers', 'rust', 'Cargo.toml'),
   path.join(root, 'drivers', 'python', 'Cargo.toml'),
 ]
 
@@ -152,8 +150,7 @@ const stageList = [
   'crates/reddb-grpc-proto/Cargo.toml',
   'crates/reddb-server/Cargo.toml',
   'crates/reddb-client/Cargo.toml',
-  'drivers/rust/Cargo.toml',
-  'drivers/rust/Cargo.lock',
+  'crates/reddb-client-connector/Cargo.toml',
   'drivers/js/package.json',
   'drivers/python/Cargo.toml',
   'drivers/python/Cargo.lock',

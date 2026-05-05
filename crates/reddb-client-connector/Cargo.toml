@@ -1,0 +1,14 @@
+[package]
+name = "reddb-client-connector"
+version = "0.2.9"
+edition = "2021"
+authors = ["RedDB.io <hello@reddb.io>"]
+description = "Workspace-internal gRPC connector used by `reddb-server` (rpc_stdio) and `reddb-client`. Splitting it out of `reddb-client` breaks the otherwise-circular path dependency between `reddb-client[embedded]` (which pulls `reddb-server`) and `reddb-server` (which needs the connector)."
+license = "AGPL-3.0-only"
+homepage = "https://github.com/reddb-io/reddb"
+repository = "https://github.com/reddb-io/reddb"
+publish = false
+
+[dependencies]
+reddb-grpc-proto = { version = "0.2", path = "../reddb-grpc-proto" }
+tonic = { version = "0.14", default-features = false, features = ["channel", "codegen"] }
