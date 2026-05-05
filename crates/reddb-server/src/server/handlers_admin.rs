@@ -1167,7 +1167,7 @@ impl RedDBServer {
     /// matching its own surface, even if the deploy target lacks
     /// access to the source repo.
     pub(crate) fn handle_admin_openapi(&self) -> HttpResponse {
-        const SPEC: &str = include_str!("../../docs/spec/admin-api.openapi.yaml");
+        const SPEC: &str = include_str!("../../../../docs/spec/admin-api.openapi.yaml");
         HttpResponse {
             status: 200,
             content_type: "application/yaml",
