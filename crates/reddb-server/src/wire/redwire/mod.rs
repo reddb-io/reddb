@@ -30,3 +30,8 @@ pub use listener::{
 // so existing `crate::wire::redwire::REDWIRE_MAGIC` paths continue
 // to resolve.
 pub use reddb_wire::redwire::{DEFAULT_REDWIRE_PORT, MAX_KNOWN_MINOR_VERSION, REDWIRE_MAGIC};
+
+// FrameBuilder owns server-side frame-construction discipline (see
+// `crates/reddb-wire/src/redwire/builder.rs`). Re-exported here so
+// dispatch sites can `use crate::wire::redwire::FrameBuilder`.
+pub use reddb_wire::redwire::{BuildError, FrameBuilder};
