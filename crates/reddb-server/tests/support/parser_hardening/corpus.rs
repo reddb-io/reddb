@@ -50,3 +50,65 @@ pub fn adversarial_inputs() -> Vec<(&'static str, String)> {
         ),
     ]
 }
+
+/// Adversarial inputs that target the migration DSL surface (issue
+/// #88). These exercise the `parse_create_migration_body`,
+/// `parse_apply_migration`, `parse_rollback_migration_after_keyword`,
+/// and `parse_explain_migration_after_keyword` entry points.
+pub fn migration_adversarial_inputs() -> Vec<(&'static str, String)> {
+    vec![
+        ("migration_eof_after_create", "CREATE MIGRATION".to_string()),
+        (
+            "migration_eof_after_name",
+            "CREATE MIGRATION m1".to_string(),
+        ),
+        (
+            "migration_eof_after_depends",
+            "CREATE MIGRATION m1 DEPENDS ON".to_string(),
+        ),
+        (
+            "migration_dangling_depends_comma",
+            "CREATE MIGRATION m1 DEPENDS ON a, AS CREATE TABLE t (id INTEGER)".to_string(),
+        ),
+        (
+            "migration_apply_eof",
+            "APPLY MIGRATION".to_string(),
+        ),
+        (
+            "migration_rollback_eof",
+            "ROLLBACK MIGRATION".to_string(),
+        ),
+        (
+            "migration_explain_eof",
+            "EXPLAIN MIGRATION".to_string(),
+        ),
+        (
+            "migration_apply_for_no_tenant",
+            "APPLY MIGRATION m1 FOR".to_string(),
+        ),
+        (
+            "migration_long_name",
+            format!("CREATE MIGRATION {} AS CREATE TABLE t (id INTEGER)", "m".repeat(10_000)),
+        ),
+        (
+            "migration_deep_paren_body",
+            format!(
+                "CREATE MIGRATION m1 AS SELECT {}1{} FROM t",
+                "(".repeat(500),
+                ")".repeat(500),
+            ),
+        ),
+        (
+            "migration_oversized_body",
+            format!("CREATE MIGRATION m1 AS {}", "a".repeat(2 * 1024 * 1024)),
+        ),
+        (
+            "migration_nul_byte",
+            "CREATE MIGRATION m1 AS CREATE TABLE t (id INTEGER)\0".to_string(),
+        ),
+        (
+            "migration_garbage",
+            "CREATE MIGRATION @#$%".to_string(),
+        ),
+    ]
+}

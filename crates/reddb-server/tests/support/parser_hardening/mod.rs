@@ -13,6 +13,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use reddb_server::storage::query::parser::ParserLimits;
 
 pub mod corpus;
+pub mod migration_grammar;
 pub mod sql_grammar;
 
 /// Parser-agnostic interface every consumer of the harness
