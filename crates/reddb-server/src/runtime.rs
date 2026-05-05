@@ -834,6 +834,7 @@ pub(crate) mod query_exec;
 pub mod quota_bucket;
 mod record_search;
 pub mod resource_limits;
+pub(crate) mod scalar_evaluator;
 pub mod schema_diff;
 pub mod snapshot_reuse;
 mod statement_frame;
