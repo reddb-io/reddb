@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/parser_snapshots.rs
+expression: "fmt_parse_error(\"SELECT a AS WHERE FROM t\")"
+---
+input: "SELECT a AS WHERE FROM t"
+kind:  Syntax
+error: Parse error at 1:13: Unexpected token: WHERE (expected: identifier)

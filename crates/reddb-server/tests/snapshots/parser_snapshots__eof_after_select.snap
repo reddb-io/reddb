@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/parser_snapshots.rs
+expression: "fmt_parse_error(\"SELECT\")"
+---
+input: "SELECT"
+kind:  Syntax
+error: Parse error at 1:7: Unexpected token: EOF (expected: identifier or field name)

@@ -1,0 +1,6 @@
+---
+source: crates/reddb-server/tests/parser_snapshots.rs
+expression: "fmt_parse_error(\"INSERT INTO t (a, b) VALUES (1)\")"
+---
+UNEXPECTED OK
+input: "INSERT INTO t (a, b) VALUES (1)"

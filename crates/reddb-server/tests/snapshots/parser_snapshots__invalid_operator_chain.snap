@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/parser_snapshots.rs
+expression: "fmt_parse_error(\"SELECT * FROM t WHERE x === 1\")"
+---
+input: "SELECT * FROM t WHERE x === 1"
+kind:  Syntax
+error: Parse error at 1:26: Unexpected token: = (expected: string, number, true, false, null, [, {)

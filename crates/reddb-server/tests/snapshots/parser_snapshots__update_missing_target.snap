@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/parser_snapshots.rs
+expression: "fmt_parse_error(\"UPDATE SET a = 1\")"
+---
+input: "UPDATE SET a = 1"
+kind:  Syntax
+error: Parse error at 1:8: Unexpected token: SET (expected: identifier)
