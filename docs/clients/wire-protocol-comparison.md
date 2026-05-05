@@ -61,7 +61,7 @@ S → C  AuthOk { session_id, server_caps_final }
 challenge-response (1 RTT). RedWire's `Hello` carries the auth
 methods inline so caller doesn't need a probe round-trip like
 Mongo's `hello`. SCRAM primitives live in `src/auth/scram.rs`
-(server) and `drivers/rust/src/redwire/scram.rs` (client); the
+(server) and `crates/reddb-client/src/redwire/scram.rs` (client); the
 JWT validator path is shared with the HTTP and gRPC surfaces
 through `AuthConfig.oauth`.
 

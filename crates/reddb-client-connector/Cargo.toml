@@ -7,7 +7,15 @@ description = "Workspace-internal gRPC connector used by `reddb-server` (rpc_std
 license = "AGPL-3.0-only"
 homepage = "https://github.com/reddb-io/reddb"
 repository = "https://github.com/reddb-io/reddb"
-publish = false
+documentation = "https://docs.rs/reddb-client-connector"
+readme = "README.md"
+keywords = ["reddb", "database", "client", "grpc"]
+categories = ["database", "api-bindings"]
+include = [
+    "/src/**/*.rs",
+    "/README.md",
+    "/Cargo.toml",
+]
 
 [dependencies]
 reddb-grpc-proto = { version = "0.2", path = "../reddb-grpc-proto" }

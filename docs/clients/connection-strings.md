@@ -208,7 +208,7 @@ OAuth/JWT validates via the server's pluggable `JwtVerifier`.
 | Driver | Transports landed | Auth methods |
 |--------|--------------------|--------------|
 | `reddb` (JS / TS) — `drivers/js` | embedded, HTTP, HTTPS, RedWire (TCP / TLS / mTLS), PG wire | bearer, login, mTLS, OAuth/JWT, SCRAM (via RedWire) |
-| `reddb` (Rust) — `drivers/rust` | embedded, HTTP, HTTPS, RedWire (TCP / TLS / mTLS), PG wire | bearer, login, mTLS, OAuth/JWT, SCRAM (via RedWire) |
+| `reddb-client` (Rust) — `crates/reddb-client` | embedded, HTTP, HTTPS, RedWire (TCP / TLS / mTLS), PG wire | bearer, login, mTLS, OAuth/JWT, SCRAM (via RedWire) |
 | `reddb` (Python) — `drivers/python` | embedded (PyO3), HTTP | bearer, login |
 
 The JS and Rust drivers share the **6-transport matrix** (embedded,

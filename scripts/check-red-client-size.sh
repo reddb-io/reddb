@@ -28,7 +28,7 @@ if [[ -z "$budget" ]]; then
   exit 1
 fi
 
-cargo build --locked --release --bin "$BIN_NAME" -p reddb-client-internal
+cargo build --locked --release --bin "$BIN_NAME" -p reddb-client --no-default-features
 
 # Resolve target dir: respect CARGO_TARGET_DIR if set, otherwise
 # the workspace default.
