@@ -1,8 +1,5 @@
 fn main() {
-    println!("cargo:rerun-if-changed=proto/reddb.proto");
-    tonic_prost_build::configure()
-        .build_server(true)
-        .build_client(true)
-        .compile_protos(&["proto/reddb.proto"], &["proto"])
-        .expect("failed to compile reddb gRPC protobufs");
+    // gRPC proto compilation moved to crates/reddb-grpc-proto/build.rs.
+    // This file is intentionally empty for now; future build-time
+    // codegen for the umbrella crate would land here.
 }

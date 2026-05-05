@@ -1420,6 +1420,7 @@ dependencies = [
  "prost",
  "rayon",
  "rcgen",
+ "reddb-grpc-proto",
  "reddb-wire",
  "regex",
  "roaring",
@@ -1432,15 +1433,24 @@ dependencies = [
  "tokio-rustls",
  "tokio-stream",
  "tonic",
- "tonic-build",
  "tonic-prost",
- "tonic-prost-build",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
  "trybuild",
  "ureq",
  "zstd",
+]
+
+[[package]]
+name = "reddb-grpc-proto"
+version = "0.2.9"
+dependencies = [
+ "prost",
+ "tonic",
+ "tonic-build",
+ "tonic-prost",
+ "tonic-prost-build",
 ]
 
 [[package]]

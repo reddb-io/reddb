@@ -1,0 +1,22 @@
+[package]
+name = "reddb-grpc-proto"
+version = "0.2.9"
+edition = "2021"
+authors = ["RedDB.io <hello@reddb.io>"]
+description = "Generated gRPC protobuf types and tonic client/server stubs for RedDB. Shared across reddb-server, reddb-client, and language drivers."
+license = "AGPL-3.0-only"
+homepage = "https://github.com/reddb-io/reddb"
+repository = "https://github.com/reddb-io/reddb"
+documentation = "https://docs.rs/reddb-grpc-proto"
+readme = "README.md"
+keywords = ["reddb", "grpc", "protobuf", "tonic"]
+categories = ["database", "network-programming"]
+
+[dependencies]
+tonic = { version = "0.14", default-features = false, features = ["codegen", "router", "server", "channel"] }
+tonic-prost = "0.14"
+prost = "0.14"
+
+[build-dependencies]
+tonic-build = "0.14"
+tonic-prost-build = "0.14"
