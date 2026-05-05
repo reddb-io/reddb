@@ -5,6 +5,12 @@ Status: **static analysis (live profile blocked)**.
 Tracking issue: #76 — *"insert_sequential mini-duel fails 20% margin
 versus PostgreSQL and MongoDB"*.
 
+> **Reproducing the live profile.** P5 below is now wired up as
+> `make perf-bench` (writes `target/perf/insert_sequential.svg`).
+> The host kernel knobs that blocked this slice are documented in
+> [`perf-knobs.md`](perf-knobs.md) — relax them per that doc, then
+> run `make perf-bench`.
+
 ## TL;DR
 
 - The 20%-slower-than-PostgreSQL claim in #76 came from a 1-row
@@ -347,16 +353,17 @@ Each is bounded so a single PR can land it without sprawling.
 - **Problem.** This document is static analysis. Some of the items
   above may turn out to be ≤2% of CPU once a flamegraph lands; the
   ranking is best-effort.
-- **Suspected fix.** File a tracking issue for the host-side perf
-  knobs the bench infra needs: `kernel.perf_event_paranoid=1`,
-  `kernel.yama.ptrace_scope=0`, frame-pointer release build, and a
-  Make target like `make perf-bench` that
-  (a) builds `red` with `-Cforce-frame-pointers=yes`,
-  (b) brings up the `reddb` compose service,
-  (c) attaches `perf record -F 99 -g -p $(docker inspect -f
-  '{{.State.Pid}}' …)` for 30 s while the bench runs,
-  (d) writes `perf.data` + `perf report --stdio` into
-  `docs/perf/insert_sequential-<date>.md`.
+- **Tooling (landed).** [`make perf-bench`](../../Makefile) builds
+  `red` with `-Cforce-frame-pointers=yes`, starts it on
+  `127.0.0.1:5050`, attaches `perf record -F 99 -g` for 30 s, and
+  renders `target/perf/insert_sequential.svg` via
+  `inferno-flamegraph`. Host requirements
+  (`kernel.perf_event_paranoid <= 1`,
+  `kernel.yama.ptrace_scope = 0`) are documented in
+  [`perf-knobs.md`](perf-knobs.md); the target itself fails loudly
+  with the exact `sysctl` invocation when they're not met. Drive
+  load from the bench at
+  `/home/cyber/Work/reddb.io/rdb-benchmark` during the 30 s window.
 - **Acceptance.** A re-run of this profile lists actual CPU
   percentages for the top 20 frames and updates the punch-list
   ranking accordingly.
