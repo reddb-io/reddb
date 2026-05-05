@@ -1045,12 +1045,13 @@ fn edge_passes_rls(
 /// `Some(mutated_table)` with policy filters folded in otherwise.
 fn inject_rls_filters(
     runtime: &RedDBRuntime,
+    frame: &dyn super::statement_frame::ReadFrame,
     mut table: crate::storage::query::ast::TableQuery,
 ) -> Option<crate::storage::query::ast::TableQuery> {
     use crate::storage::query::ast::{Filter, PolicyAction};
 
     // `None` role falls through to policies with no `TO role` clause.
-    let role = current_auth_identity().map(|(_, role)| role);
+    let role = frame.identity().map(|(_, role)| role);
     let role_str = role.map(|r| r.as_str().to_string());
     let policies =
         runtime.matching_rls_policies(&table.table, role_str.as_deref(), PolicyAction::Select);
@@ -1086,15 +1087,16 @@ fn inject_rls_filters(
 /// the caller — the join short-circuits to an empty result.
 fn inject_rls_into_join(
     runtime: &RedDBRuntime,
+    frame: &dyn super::statement_frame::ReadFrame,
     mut join: crate::storage::query::ast::JoinQuery,
 ) -> Option<crate::storage::query::ast::JoinQuery> {
     use crate::storage::query::ast::Filter;
 
     let mut policy_filters: Vec<Filter> = Vec::new();
-    if !collect_join_side_policy(runtime, join.left.as_ref(), &mut policy_filters) {
+    if !collect_join_side_policy(runtime, frame, join.left.as_ref(), &mut policy_filters) {
         return None;
     }
-    if !collect_join_side_policy(runtime, join.right.as_ref(), &mut policy_filters) {
+    if !collect_join_side_policy(runtime, frame, join.right.as_ref(), &mut policy_filters) {
         return None;
     }
 
@@ -1121,6 +1123,7 @@ fn inject_rls_into_join(
 /// but no policy admits the caller — the join must short-circuit.
 fn collect_join_side_policy(
     runtime: &RedDBRuntime,
+    frame: &dyn super::statement_frame::ReadFrame,
     expr: &crate::storage::query::ast::QueryExpr,
     out: &mut Vec<crate::storage::query::ast::Filter>,
 ) -> bool {
@@ -1130,7 +1133,7 @@ fn collect_join_side_policy(
             if !runtime.inner.rls_enabled_tables.read().contains(&t.table) {
                 return true;
             }
-            let role = current_auth_identity().map(|(_, role)| role);
+            let role = frame.identity().map(|(_, role)| role);
             let role_str = role.map(|r| r.as_str().to_string());
             let policies =
                 runtime.matching_rls_policies(&t.table, role_str.as_deref(), PolicyAction::Select);
@@ -1145,8 +1148,8 @@ fn collect_join_side_policy(
             true
         }
         QueryExpr::Join(inner) => {
-            collect_join_side_policy(runtime, inner.left.as_ref(), out)
-                && collect_join_side_policy(runtime, inner.right.as_ref(), out)
+            collect_join_side_policy(runtime, frame, inner.left.as_ref(), out)
+                && collect_join_side_policy(runtime, frame, inner.right.as_ref(), out)
         }
         _ => true,
     }
@@ -3881,7 +3884,7 @@ impl RedDBRuntime {
                 // synthesising a contradiction filter.
                 let table_with_rls = if self.inner.rls_enabled_tables.read().contains(&table.table)
                 {
-                    match inject_rls_filters(self, table) {
+                    match inject_rls_filters(self, &frame as &dyn super::statement_frame::ReadFrame, table) {
                         Some(t) => t,
                         None => {
                             let empty = crate::storage::query::unified::UnifiedResult::empty();
@@ -3922,7 +3925,7 @@ impl RedDBRuntime {
                 // When any leaf has RLS enabled and zero matching policy,
                 // short-circuit to an empty join result instead of
                 // emitting a contradiction filter.
-                let join_with_rls = match inject_rls_into_join(self, join) {
+                let join_with_rls = match inject_rls_into_join(self, &frame as &dyn super::statement_frame::ReadFrame, join) {
                     Some(j) => j,
                     None => {
                         return Ok(RuntimeQueryResult {
