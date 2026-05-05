@@ -254,7 +254,12 @@ impl<'a> Parser<'a> {
 
         // JSON object `{…}` and array `[…]` literals — delegate to the DML literal parser
         // which already handles the full JSON value grammar including nested objects.
-        if matches!(self.peek(), Token::LBrace | Token::LBracket) {
+        // `JsonLiteral` is the strict-JSON variant emitted by the lexer's sub-mode
+        // when `{` is followed by `"`; both shapes route through `parse_literal_value`.
+        if matches!(
+            self.peek(),
+            Token::LBrace | Token::LBracket | Token::JsonLiteral(_)
+        ) {
             let value = self
                 .parse_literal_value()
                 .map_err(|e| ParseError::new(e.message, self.position()))?;
