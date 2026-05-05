@@ -9,8 +9,49 @@ use super::impl_core::{
 };
 use super::{RedDBRuntime, RuntimeQueryResult};
 use crate::api::{RedDBError, RedDBResult};
+use crate::auth::Role;
 use crate::storage::query::ast::QueryExpr;
 use crate::storage::transaction::snapshot::{Snapshot, Xid};
+
+/// Small, stable Interface that *represents* a read statement's
+/// execution context. Every read caller that needs to know "under
+/// what scope / identity / snapshot am I running, and is there an
+/// AS OF floor in effect?" consults this trait — never the
+/// underlying thread-locals or runtime fields directly.
+///
+/// The deletion test: removing this trait would force the four
+/// concerns it exposes back into ad-hoc lookups at every read
+/// callsite (`current_tenant()`, `current_auth_identity()`,
+/// `capture_current_snapshot()`, AS OF re-parsing). The trait
+/// concentrates them in one place so future changes (per-statement
+/// logging, audit, scope policy) have a single seam to extend.
+pub(crate) trait ReadFrame {
+    /// Effective tenant scope for the statement after WITHIN /
+    /// SET LOCAL TENANT / SET TENANT resolution. `None` means
+    /// "no tenant bound" (RLS deny-default applies).
+    fn effective_scope(&self) -> Option<&str>;
+
+    /// Authenticated identity observed at frame-build time, if any.
+    /// Returns `(username, role)` so callers can render audit lines
+    /// or feed RLS policy lookups without re-reading thread-locals.
+    fn identity(&self) -> Option<(&str, Role)>;
+
+    /// MVCC snapshot the statement reads against. For autocommit
+    /// this is a fresh snapshot; inside an active transaction it
+    /// is the txn's snapshot; under AS OF it is the resolved
+    /// historical xid.
+    fn snapshot(&self) -> &Snapshot;
+
+    /// AS OF xid floor when AS OF was applied for this statement,
+    /// `None` for live reads. Useful for downstream callers that
+    /// want to gate behaviour on historical-read mode without
+    /// re-parsing the query.
+    fn as_of_floor(&self) -> Option<Xid>;
+
+    /// Stable result-cache key for the statement (already mixes
+    /// effective tenant + identity).
+    fn cache_key(&self) -> &str;
+}
 
 pub(super) struct StatementExecutionFrame {
     tx_local_tenant: Option<Option<String>>,
@@ -19,6 +60,17 @@ pub(super) struct StatementExecutionFrame {
     cache_key: String,
     is_volatile_query: bool,
     cache_safe: bool,
+    /// Effective tenant captured at frame-build time after WITHIN /
+    /// SET LOCAL TENANT / SET TENANT resolution. Stored on the frame
+    /// so the `ReadFrame` Interface can return a borrow without
+    /// re-touching the thread-local stack.
+    effective_scope: Option<String>,
+    /// Auth identity captured at frame-build time. `None` for
+    /// embedded / anonymous callers.
+    identity: Option<(String, Role)>,
+    /// `Some(xid)` when AS OF resolved to a historical xid; `None`
+    /// for live reads.
+    as_of_floor: Option<Xid>,
 }
 
 pub(super) struct StatementFrameGuards {
@@ -33,10 +85,16 @@ impl StatementExecutionFrame {
         let conn_id = current_connection_id();
         let tx_local_tenant = runtime.inner.tx_local_tenants.read().get(&conn_id).cloned();
         let own_xids = runtime.own_transaction_xids(conn_id);
-        let snapshot = runtime.statement_snapshot(query)?;
+        let (snapshot, as_of_floor) = runtime.statement_snapshot(query)?;
         let cache_key = result_cache_key(query);
         let is_volatile_query = query_has_volatile_builtin(query);
         let cache_safe = runtime.result_cache_safe(conn_id);
+        // Capture identity + effective scope under the same
+        // thread-local view that the cache key was built from, so
+        // the Interface and the cache key agree on what "this
+        // statement" means.
+        let effective_scope = current_tenant();
+        let identity = current_auth_identity();
 
         Ok(Self {
             tx_local_tenant,
@@ -45,6 +103,9 @@ impl StatementExecutionFrame {
             cache_key,
             is_volatile_query,
             cache_safe,
+            effective_scope,
+            identity,
+            as_of_floor,
         })
     }
 
@@ -110,6 +171,28 @@ impl StatementExecutionFrame {
     }
 }
 
+impl ReadFrame for StatementExecutionFrame {
+    fn effective_scope(&self) -> Option<&str> {
+        self.effective_scope.as_deref()
+    }
+
+    fn identity(&self) -> Option<(&str, Role)> {
+        self.identity.as_ref().map(|(u, r)| (u.as_str(), *r))
+    }
+
+    fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
+    }
+
+    fn as_of_floor(&self) -> Option<Xid> {
+        self.as_of_floor
+    }
+
+    fn cache_key(&self) -> &str {
+        &self.cache_key
+    }
+}
+
 impl RedDBRuntime {
     fn own_transaction_xids(&self, conn_id: u64) -> HashSet<Xid> {
         let mut set = HashSet::new();
@@ -122,7 +205,13 @@ impl RedDBRuntime {
         set
     }
 
-    fn statement_snapshot(&self, query: &str) -> RedDBResult<Snapshot> {
+    /// Resolve the snapshot for the current statement, returning
+    /// the snapshot itself and (when AS OF is in effect) the
+    /// resolved xid floor. The floor is the same xid carried inside
+    /// `Snapshot.xid` for AS OF reads — exposing it separately lets
+    /// the `ReadFrame` Interface tell "live read" from "historical
+    /// read" without inferring from `in_progress.is_empty()`.
+    fn statement_snapshot(&self, query: &str) -> RedDBResult<(Snapshot, Option<Xid>)> {
         match peek_top_level_as_of_with_table(query) {
             Some((spec, Some(table))) => {
                 if !table.starts_with("red_") && !self.vcs_is_versioned(&table)? {
@@ -133,19 +222,25 @@ impl RedDBRuntime {
                     )));
                 }
                 let xid = self.vcs_resolve_as_of(spec)?;
-                Ok(Snapshot {
-                    xid,
-                    in_progress: HashSet::new(),
-                })
+                Ok((
+                    Snapshot {
+                        xid,
+                        in_progress: HashSet::new(),
+                    },
+                    Some(xid),
+                ))
             }
             Some((spec, None)) => {
                 let xid = self.vcs_resolve_as_of(spec)?;
-                Ok(Snapshot {
-                    xid,
-                    in_progress: HashSet::new(),
-                })
+                Ok((
+                    Snapshot {
+                        xid,
+                        in_progress: HashSet::new(),
+                    },
+                    Some(xid),
+                ))
             }
-            None => Ok(self.current_snapshot()),
+            None => Ok((self.current_snapshot(), None)),
         }
     }
 
@@ -165,5 +260,117 @@ fn result_cache_key(query: &str) -> String {
         query.to_string()
     } else {
         format!("{query}\u{001e}{tenant}\u{001e}{auth}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::impl_core::{
+        clear_current_auth_identity, clear_current_tenant, set_current_auth_identity,
+        set_current_tenant,
+    };
+    use crate::api::RedDBOptions;
+    use crate::runtime::RedDBRuntime;
+
+    fn fresh_runtime() -> RedDBRuntime {
+        RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime")
+    }
+
+    /// Ensure thread-local state from a prior test can't leak into
+    /// the next one — tests in the same binary share the thread.
+    fn reset_thread_locals() {
+        clear_current_tenant();
+        clear_current_auth_identity();
+    }
+
+    #[test]
+    fn autocommit_select_takes_live_snapshot() {
+        reset_thread_locals();
+        let rt = fresh_runtime();
+        let frame =
+            StatementExecutionFrame::build(&rt, "SELECT 1").expect("frame builds for SELECT 1");
+
+        // Live reads: no AS OF floor, snapshot bounded by the
+        // manager's `peek_next_xid` so committed tuples are visible.
+        let f: &dyn ReadFrame = &frame;
+        assert!(f.as_of_floor().is_none(), "live read has no AS OF floor");
+        assert!(
+            f.snapshot().xid >= 1,
+            "autocommit snapshot xid is bounded by peek_next_xid"
+        );
+    }
+
+    #[test]
+    fn frame_captures_identity_and_scope() {
+        reset_thread_locals();
+        set_current_tenant("acme".to_string());
+        set_current_auth_identity("alice".to_string(), Role::Write);
+
+        let rt = fresh_runtime();
+        let frame = StatementExecutionFrame::build(&rt, "SELECT 1").expect("frame builds");
+        let f: &dyn ReadFrame = &frame;
+
+        assert_eq!(f.effective_scope(), Some("acme"));
+        let id = f.identity().expect("identity captured");
+        assert_eq!(id.0, "alice");
+        assert!(matches!(id.1, Role::Write));
+
+        // Cache key mixes scope + identity so two callers under
+        // different tenants never share a cache slot.
+        assert!(
+            f.cache_key().contains("acme") && f.cache_key().contains("alice"),
+            "cache key folds in scope + identity, got {:?}",
+            f.cache_key()
+        );
+
+        reset_thread_locals();
+    }
+
+    #[test]
+    fn as_of_rejects_non_versioned_user_collection() {
+        reset_thread_locals();
+        let rt = fresh_runtime();
+
+        // `not_versioned` is a plain user collection — the frame
+        // builder must reject AS OF until the caller opts in via
+        // `vcs.set_versioned`.
+        let err = StatementExecutionFrame::build(
+            &rt,
+            "SELECT * FROM not_versioned AS OF COMMIT 'deadbeef'",
+        )
+        .expect_err("AS OF on non-versioned user collection rejected");
+
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("AS OF requires a versioned collection"),
+            "expected AS OF rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn as_of_on_red_collection_records_floor() {
+        reset_thread_locals();
+        let rt = fresh_runtime();
+
+        // `red_*` collections always allow AS OF. The frame should
+        // resolve to a concrete xid and surface it via the Interface.
+        let frame = StatementExecutionFrame::build(
+            &rt,
+            "SELECT * FROM red_commits AS OF SNAPSHOT 1",
+        )
+        .expect("AS OF SNAPSHOT 1 on red_commits resolves");
+
+        let f: &dyn ReadFrame = &frame;
+        assert_eq!(
+            f.as_of_floor(),
+            Some(1),
+            "AS OF SNAPSHOT 1 records xid=1 as the floor"
+        );
+        assert_eq!(f.snapshot().xid, 1);
+        assert!(
+            f.snapshot().in_progress.is_empty(),
+            "historical reads have no in-progress set"
+        );
     }
 }
