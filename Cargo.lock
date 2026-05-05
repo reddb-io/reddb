@@ -563,8 +563,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "wasi",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -993,6 +995,21 @@ dependencies = [
  "futures-util",
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "jsonwebtoken"
+version = "9.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
+dependencies = [
+ "base64",
+ "js-sys",
+ "pem",
+ "ring",
+ "serde",
+ "serde_json",
+ "simple_asn1",
 ]
 
 [[package]]
@@ -1571,7 +1588,7 @@ dependencies = [
 name = "reddb"
 version = "0.2.9"
 dependencies = [
- "jsonwebtoken",
+ "jsonwebtoken 10.3.0",
  "rcgen",
  "reddb-client",
  "reddb-grpc-proto",
@@ -1589,7 +1606,7 @@ dependencies = [
 name = "reddb-client"
 version = "0.2.9"
 dependencies = [
- "jsonwebtoken",
+ "jsonwebtoken 9.3.1",
  "reddb-client-connector",
  "reddb-grpc-proto",
  "reddb-server",
@@ -1634,7 +1651,7 @@ dependencies = [
  "hex",
  "hmac",
  "itoa",
- "jsonwebtoken",
+ "jsonwebtoken 9.3.1",
  "lz4_flex",
  "parking_lot",
  "prost",
@@ -1988,7 +2005,7 @@ version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 dependencies = [
- "rand_core",
+ "rand_core 0.6.4",
 ]
 
 [[package]]
