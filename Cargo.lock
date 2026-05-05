@@ -1409,6 +1409,44 @@ dependencies = [
 name = "reddb"
 version = "0.2.9"
 dependencies = [
+ "jsonwebtoken",
+ "rcgen",
+ "reddb-client-internal",
+ "reddb-grpc-proto",
+ "reddb-server",
+ "reddb-wire",
+ "rustls",
+ "serde_json",
+ "tokio",
+ "tonic",
+ "trybuild",
+ "ureq",
+]
+
+[[package]]
+name = "reddb-client-internal"
+version = "0.2.9"
+dependencies = [
+ "reddb-grpc-proto",
+ "reddb-wire",
+ "tonic",
+]
+
+[[package]]
+name = "reddb-grpc-proto"
+version = "0.2.9"
+dependencies = [
+ "prost",
+ "tonic",
+ "tonic-build",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
+name = "reddb-server"
+version = "0.2.9"
+dependencies = [
  "aes-gcm",
  "fs2",
  "hex",
@@ -1441,26 +1479,6 @@ dependencies = [
  "trybuild",
  "ureq",
  "zstd",
-]
-
-[[package]]
-name = "reddb-client-internal"
-version = "0.2.9"
-dependencies = [
- "reddb-grpc-proto",
- "reddb-wire",
- "tonic",
-]
-
-[[package]]
-name = "reddb-grpc-proto"
-version = "0.2.9"
-dependencies = [
- "prost",
- "tonic",
- "tonic-build",
- "tonic-prost",
- "tonic-prost-build",
 ]
 
 [[package]]

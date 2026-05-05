@@ -20,7 +20,7 @@ use std::panic::AssertUnwindSafe;
 
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::client::RedDBClient;
+use reddb_client_internal::RedDBClient;
 use crate::json::{self as json, Value};
 use crate::runtime::{RedDBRuntime, RuntimeQueryResult};
 use crate::storage::query::unified::UnifiedRecord;

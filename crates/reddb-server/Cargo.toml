@@ -1,0 +1,71 @@
+[package]
+name = "reddb-server"
+version = "0.2.9"
+edition = "2021"
+authors = ["RedDB.io <hello@reddb.io>"]
+description = "RedDB server-side engine: storage, runtime, replication, MCP, AI, and the gRPC/HTTP/RedWire/PG-wire dispatchers. Re-exported by the umbrella `reddb` crate."
+license = "AGPL-3.0-only"
+homepage = "https://github.com/reddb-io/reddb"
+repository = "https://github.com/reddb-io/reddb"
+documentation = "https://docs.rs/reddb-server"
+readme = "README.md"
+keywords = ["database", "vector-search", "graph", "document-store", "rust"]
+categories = ["database-implementations", "data-structures"]
+
+[dependencies]
+reddb-wire = { version = "0.2", path = "../reddb-wire" }
+reddb-grpc-proto = { version = "0.2", path = "../reddb-grpc-proto" }
+# rpc_stdio's Remote backend wraps the same gRPC client that the
+# `red` binary uses for the `red rpc` subcommand. Single-direction
+# dep — the client crate does not depend on the server.
+reddb-client-internal = { version = "0.2", path = "../reddb-client" }
+aes-gcm = "0.10"
+hmac = "0.13"
+itoa = "1"
+zstd = { version = "0.13", default-features = false }
+lz4_flex = { version = "0.13", default-features = false, features = ["std"] }
+sha2 = "0.11"
+hex = "0.4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = { version = "0.14", features = ["transport", "gzip", "zstd", "tls-ring"] }
+tonic-prost = "0.14"
+prost = "0.14"
+ureq = { version = "3.3", default-features = false, features = ["rustls"] }
+roaring = "0.11"
+parking_lot = "0.12"
+rayon = "1.12"
+rstar = "0.12"
+regex = "1"
+fs2 = "0.4"
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "logging", "ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
+rcgen = "0.14"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+    "env-filter",
+    "fmt",
+    "json",
+    "ansi",
+    "registry",
+] }
+tracing-appender = "0.2"
+
+[features]
+default = []
+backend-s3 = []
+backend-turso = []
+backend-d1 = []
+# OpenTelemetry tracing. Opt-in (`--features otel`) so the OTLP
+# dependency tree doesn't bloat the default build.
+otel = []
+
+[dev-dependencies]
+# Used by `tests/compile_fail.rs` to assert that misuse of
+# `LeaseStore::new` (passing a non-CAS backend) fails to compile.
+trybuild = "1"
+# OAuth-JWT end-to-end smoke. `jsonwebtoken` mints + decodes RS256
+# tokens; `serde_json` shapes the JWKS responses. Both are dev-only.
+jsonwebtoken = "9"
+serde_json = "1"

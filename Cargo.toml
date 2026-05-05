@@ -2,6 +2,7 @@
 members = [
     "crates/reddb-client",
     "crates/reddb-grpc-proto",
+    "crates/reddb-server",
     "crates/reddb-wire",
 ]
 resolver = "2"
@@ -11,7 +12,7 @@ name = "reddb"
 version = "0.2.9"
 edition = "2021"
 authors = ["RedDB.io <hello@reddb.io>"]
-description = "Unified multi-model database: tables, documents, graphs, vectors, and key-value in one engine"
+description = "Unified multi-model database: tables, documents, graphs, vectors, and key-value in one engine. Umbrella crate that hosts the `red` binary and re-exports the workspace."
 license = "AGPL-3.0-only"
 homepage = "https://github.com/reddb-io/reddb"
 repository = "https://github.com/reddb-io/reddb"
@@ -21,8 +22,6 @@ keywords = ["database", "vector-search", "graph", "document-store", "rust"]
 categories = ["database-implementations", "data-structures"]
 include = [
     "/src/**/*.rs",
-    "/proto/**/*.proto",
-    "/docs/spec/admin-api.openapi.yaml",
     "/build.rs",
     "/README.md",
     "/Cargo.toml",
@@ -37,50 +36,19 @@ path = "src/bin/red.rs"
 reddb-wire = { version = "0.2", path = "crates/reddb-wire" }
 reddb-grpc-proto = { version = "0.2", path = "crates/reddb-grpc-proto" }
 reddb-client-internal = { version = "0.2", path = "crates/reddb-client" }
-aes-gcm = "0.10"
-hmac = "0.13"
-itoa = "1"
-zstd = { version = "0.13", default-features = false }
-lz4_flex = { version = "0.13", default-features = false, features = ["std"] }
-sha2 = "0.11"
-hex = "0.4"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
-tokio-stream = { version = "0.1", features = ["net"] }
-tonic = { version = "0.14", features = ["transport", "gzip", "zstd", "tls-ring"] }
-tonic-prost = "0.14"
-prost = "0.14"
-ureq = { version = "3.3", default-features = false, features = ["rustls"] }
-roaring = "0.11"
-parking_lot = "0.12"
-rayon = "1.12"
-rstar = "0.12"
-regex = "1"
-fs2 = "0.4"
-tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "logging", "ring"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-rustls-pemfile = "2"
-rcgen = "0.14"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = [
-    "env-filter",
-    "fmt",
-    "json",
-    "ansi",
-    "registry",
-] }
-tracing-appender = "0.2"
+reddb-server = { version = "0.2", path = "crates/reddb-server" }
+# `red` bin spins up its own multi-thread tokio runtime (server
+# subcommand needs explicit Builder configuration with custom
+# stack size). All other reddb modules pull tokio transitively
+# via reddb-server, so this is for the bin only.
+tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [features]
 default = []
-backend-s3 = []
-backend-turso = []
-backend-d1 = []
-# PLAN.md Phase 5.3 — OpenTelemetry tracing. Opt-in (`--features otel`)
-# so the OTLP dependency tree doesn't bloat the default build. The
-# feature gate compiles the scaffolding in src/telemetry/otel.rs
-# but the OTLP client integration lands when the operator confirms
-# their collector and the dep tree review passes.
-otel = []
+backend-s3 = ["reddb-server/backend-s3"]
+backend-turso = ["reddb-server/backend-turso"]
+backend-d1 = ["reddb-server/backend-d1"]
+otel = ["reddb-server/otel"]
 
 [dev-dependencies]
 # Used by `tests/compile_fail.rs` to assert that misuse of
@@ -90,9 +58,18 @@ trybuild = "1"
 # tokens; `serde_json` shapes the JWKS responses. Both are dev-only.
 jsonwebtoken = "9"
 serde_json = "1"
-
-# build-dependencies removed: gRPC proto compilation moved to
-# crates/reddb-grpc-proto, which carries its own tonic-{build,prost-build}.
+# HTTP smoke tests (REST endpoints) and AI-live comment-clustering
+# integration probes use ureq directly.
+ureq = { version = "3.3", default-features = false, features = ["rustls"] }
+# Tonic + RedWire integration tests reach the wire under TLS.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# Several integration tests (e2e_isolation_levels, integration_*)
+# spin up an async runtime via the macro form.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# tonic for gRPC-side smoke tests.
+tonic = { version = "0.14", features = ["transport"] }
+# Self-signed certificate generator for TLS smoke tests.
+rcgen = "0.14"
 
 # ---------------------------------------------------------------------
 # Build profile tuning — trades runtime perf for build wall time
@@ -121,48 +98,17 @@ codegen-units = 256
 panic = "abort"
 
 # Fast-build variant of release. Trades ~5-10% runtime perf for
-# ~3× faster cold build of the `red` binary. Use for local smoke
-# tests and CI artifacts where release speed matters more than
-# microbenchmark numbers:
-#
-#     cargo build --profile release-fast --bin red
-#
-# Shipping binaries should still use `--release` (default profile).
+# ~3× faster cold build of the `red` binary.
 [profile.release-fast]
 inherits = "release"
-# opt-level = 1 skips the expensive LLVM passes (inlining,
-# vectorisation, loop opts) while keeping basic register alloc and
-# dead-code elim. reddb lib compile drops from 6 min → ~2 min in
-# this profile. Runtime ~2-3× slower than release, but smoke
-# tests still finish in seconds.
 opt-level = 1
-# 256 codegen units lets LLVM parallelise across all cores. Default
-# release is 16.
 codegen-units = 256
-# LTO is already off in default release. Restate for clarity.
 lto = false
-# Strip symbols — cuts link time and shrinks the binary ~40%.
 strip = "symbols"
-# Debug info generation dominates a surprising slice of bin link
-# time. 0 = no debuginfo.
 debug = 0
-# Keep incremental on for warm rebuilds. Release has it off by
-# default because incremental hurts runtime perf slightly; in
-# release-fast we already traded runtime for build time.
 incremental = true
 
-# PLAN.md Phase 7.2 — static-binary-friendly profile for the
-# distributed v1.0 release builds. Aggressive size optimisation
-# (`opt-level = "z"`), full LTO, single codegen unit, strip
-# everything. Build with:
-#
-#   cargo build --profile release-static --bin red \
-#     --target x86_64-unknown-linux-musl
-#
-# CI uses an Alpine container + musl toolchain so the resulting
-# binary has zero glibc dependency and runs on every Linux distro
-# (`scratch`-based containers, busybox, etc.). Target binary size
-# < 30 MB after strip, < 12 MB after `upx --best`.
+# Static-binary-friendly profile for distributed v1.0 release builds.
 [profile.release-static]
 inherits = "release"
 opt-level = "z"
