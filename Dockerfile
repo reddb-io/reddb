@@ -7,7 +7,7 @@
 # Stage 2: Debian-slim runtime with tini, non-root user, secret-file shim
 # ============================================================================
 
-FROM rust:1.91-slim-bookworm AS builder
+FROM rust:1.95-slim-bookworm AS builder
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG REDDB_CARGO_FEATURES=""
