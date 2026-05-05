@@ -28,11 +28,20 @@ pub enum ParseErrorKind {
     /// Generic syntax / semantic error.
     Syntax,
     /// Recursion-depth limit exceeded during parsing.
-    DepthLimit { limit_name: &'static str, value: usize },
+    DepthLimit {
+        limit_name: &'static str,
+        value: usize,
+    },
     /// Input larger than the configured byte cap.
-    InputTooLarge { limit_name: &'static str, value: usize },
+    InputTooLarge {
+        limit_name: &'static str,
+        value: usize,
+    },
     /// Identifier longer than the configured character cap.
-    IdentifierTooLong { limit_name: &'static str, value: usize },
+    IdentifierTooLong {
+        limit_name: &'static str,
+        value: usize,
+    },
 }
 
 impl ParseError {
@@ -85,11 +94,7 @@ impl ParseError {
     }
 
     /// Identifier exceeded the configured character cap.
-    pub fn identifier_too_long(
-        limit_name: &'static str,
-        value: usize,
-        position: Position,
-    ) -> Self {
+    pub fn identifier_too_long(limit_name: &'static str, value: usize, position: Position) -> Self {
         Self {
             message: format!(
                 "identifier exceeds maximum length ({} = {} chars)",

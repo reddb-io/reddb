@@ -24,10 +24,7 @@ use reddb_server::storage::query::parser::{self, ParseError};
 fn fmt_parse_error(input: &str) -> String {
     match parser::parse(input) {
         Ok(_) => format!("UNEXPECTED OK\ninput: {:?}\n", input),
-        Err(e) => format!(
-            "input: {:?}\nkind:  {:?}\nerror: {}\n",
-            input, e.kind, e
-        ),
+        Err(e) => format!("input: {:?}\nkind:  {:?}\nerror: {}\n", input, e.kind, e),
     }
 }
 
@@ -45,7 +42,10 @@ macro_rules! snap {
 // Use the test that exists to make rust-analyzer / linter happy.
 #[allow(dead_code)]
 fn _unused_warn_silencer() {
-    let _ = ParseError::new("", reddb_server::storage::query::lexer::Position::new(1, 1, 0));
+    let _ = ParseError::new(
+        "",
+        reddb_server::storage::query::lexer::Position::new(1, 1, 0),
+    );
 }
 
 // ----- 30+ pinned error scenarios --------------------------------
@@ -61,8 +61,14 @@ snap!(unbalanced_rparen, "SELECT 1)) FROM t");
 snap!(unbalanced_brackets, "SELECT a[1 FROM t");
 
 snap!(dangling_comma_select, "SELECT a, b, FROM t");
-snap!(dangling_comma_insert_cols, "INSERT INTO t (a, b,) VALUES (1, 2)");
-snap!(dangling_comma_insert_values, "INSERT INTO t (a, b) VALUES (1, 2,)");
+snap!(
+    dangling_comma_insert_cols,
+    "INSERT INTO t (a, b,) VALUES (1, 2)"
+);
+snap!(
+    dangling_comma_insert_values,
+    "INSERT INTO t (a, b) VALUES (1, 2,)"
+);
 snap!(dangling_comma_orderby, "SELECT * FROM t ORDER BY a,");
 
 snap!(missing_from_keyword, "SELECT a, b WHERE x = 1");
@@ -116,11 +122,8 @@ fn dos_identifier_too_long_message_is_pinned() {
         max_identifier_chars: 8,
         ..parser::ParserLimits::default()
     };
-    let result = parser::Parser::with_limits(
-        "SELECT * FROM userstable_long_ident",
-        limits,
-    )
-    .and_then(|mut p| p.parse());
+    let result = parser::Parser::with_limits("SELECT * FROM userstable_long_ident", limits)
+        .and_then(|mut p| p.parse());
     let formatted = match result {
         Ok(_) => "UNEXPECTED OK".to_string(),
         Err(e) => format!("kind:  {:?}\nerror: {}\n", e.kind, e),
@@ -134,11 +137,7 @@ fn dos_depth_limit_message_is_pinned() {
         max_depth: 4,
         ..parser::ParserLimits::default()
     };
-    let mut p = parser::Parser::with_limits(
-        "SELECT (((((1))))) FROM t",
-        limits,
-    )
-    .expect("ctor ok");
+    let mut p = parser::Parser::with_limits("SELECT (((((1))))) FROM t", limits).expect("ctor ok");
     let formatted = match p.parse() {
         Ok(_) => "UNEXPECTED OK".to_string(),
         Err(e) => format!("kind:  {:?}\nerror: {}\n", e.kind, e),
