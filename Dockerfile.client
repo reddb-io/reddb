@@ -1,0 +1,64 @@
+# syntax=docker/dockerfile:1
+
+# ============================================================================
+# RedDB thin client (red_client) — minimal container image
+# ============================================================================
+# Stage 1: Build a stripped release `red_client` binary from the workspace.
+# Stage 2: gcr.io/distroless/static — ~2 MB base, ships ca-certificates so
+#          https:// transports work out of the box. No shell, no package
+#          manager, no engine.
+#
+# Image goal: < 10 MB. red_client itself strips to ~4.5 MB.
+# Pair image: see Dockerfile for the full server (`red`).
+# ADR: docs/adr/0004-red-client-container-image.md
+# ============================================================================
+
+FROM messense/rust-musl-cross:x86_64-musl AS builder
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG TARGET=x86_64-unknown-linux-musl
+ENV CARGO_PROFILE_RELEASE_STRIP=symbols
+
+# rust-musl-cross ships with the Rust toolchain + a fully-static musl
+# cross-compiler, so the resulting binary lands cleanly on
+# distroless/static (no glibc, no libgcc_s, no musl loader). We still
+# need protoc for reddb-grpc-proto's build.rs.
+# rust-musl-cross ships Debian 10/Ubuntu base with an older protoc that
+# rejects proto3 optional. Pull a recent protoc release that matches the
+# one used in CI (.github/workflows/release.yml).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl unzip ca-certificates \
+    && curl -sSL https://github.com/protocolbuffers/protobuf/releases/download/v28.3/protoc-28.3-linux-x86_64.zip -o /tmp/protoc.zip \
+    && unzip -o /tmp/protoc.zip -d /usr/local >/dev/null \
+    && rm /tmp/protoc.zip \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Workspace manifests + the workspace crates. Proto schemas live in
+# crates/reddb-grpc-proto/proto/ — pulled in by `crates/`.
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY crates/ crates/
+
+# The umbrella `reddb` crate (root Cargo.toml) declares src/lib.rs and
+# src/bin/red.rs. We don't compile the engine, but cargo still parses
+# the umbrella manifest to resolve the workspace, so we need stub
+# sources to make it valid.
+RUN mkdir -p src/bin \
+    && echo 'fn main() {}' > src/bin/red.rs \
+    && echo '' > src/lib.rs
+
+# rust-musl-cross pins its own toolchain; the workspace's
+# rust-toolchain.toml would force a download we don't need.
+RUN rm -f rust-toolchain.toml
+
+RUN cargo build --release --locked --target ${TARGET} \
+        --bin red_client -p reddb-client-internal \
+    && strip target/${TARGET}/release/red_client \
+    && cp target/${TARGET}/release/red_client /red_client
+
+FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+
+COPY --from=builder /red_client /red_client
+
+ENTRYPOINT ["/red_client"]
