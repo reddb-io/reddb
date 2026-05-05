@@ -105,7 +105,160 @@ pub enum MessageKind {
     GraphTraverse = 0x27,
 }
 
+/// Coarse routing class for a `MessageKind`.
+///
+/// The numeric ranges in the wire spec (0x01..0x0F data plane,
+/// 0x10..0x1F handshake/lifecycle, 0x20..0x3F control plane) are
+/// turned into a typed catalog so dispatch sites can interrogate
+/// a kind's role without re-implementing the comment-grouped match
+/// arms. `Streamed` is split out from `DataPlane` for kinds that
+/// describe an in-flight stream envelope rather than a request/reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageClass {
+    DataPlane,
+    Handshake,
+    ControlPlane,
+    Streamed,
+}
+
+/// Who is allowed to put this kind on the wire.
+///
+/// The handshake and lifecycle frames split cleanly between the two
+/// peers (Hello is client→server, HelloAck is server→client, etc.);
+/// the data-plane request/reply pairs follow the same split. `Both`
+/// is reserved for symmetric frames such as `Bye` (either side may
+/// initiate the disconnect).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageDirection {
+    ClientToServer,
+    ServerToClient,
+    Both,
+}
+
 impl MessageKind {
+    /// Routing class derived from the comment-grouped wire ranges.
+    pub fn class(&self) -> MessageClass {
+        match self {
+            // 0x01..0x0F — data plane request/reply pairs. The
+            // BulkStream* family is in this range for backward
+            // compatibility but is reclassified as `Streamed` so
+            // dispatch can treat it as a long-running envelope.
+            Self::Query
+            | Self::Result
+            | Self::Error
+            | Self::BulkInsert
+            | Self::BulkOk
+            | Self::BulkInsertBinary
+            | Self::QueryBinary
+            | Self::BulkInsertPrevalidated
+            | Self::Prepare
+            | Self::PreparedOk
+            | Self::ExecutePrepared
+            | Self::Get
+            | Self::Delete
+            | Self::DeleteOk
+            | Self::VectorSearch
+            | Self::GraphTraverse => MessageClass::DataPlane,
+
+            // BulkStream* + RowDescription/StreamEnd describe an
+            // in-flight stream rather than a single round trip.
+            Self::BulkStreamStart
+            | Self::BulkStreamRows
+            | Self::BulkStreamCommit
+            | Self::BulkStreamAck
+            | Self::RowDescription
+            | Self::StreamEnd => MessageClass::Streamed,
+
+            // 0x10..0x1F — handshake / lifecycle.
+            Self::Hello
+            | Self::HelloAck
+            | Self::AuthRequest
+            | Self::AuthResponse
+            | Self::AuthOk
+            | Self::AuthFail
+            | Self::Bye
+            | Self::Ping
+            | Self::Pong => MessageClass::Handshake,
+
+            // 0x20..0x3F — control plane.
+            Self::Cancel | Self::Compress | Self::SetSession | Self::Notice => {
+                MessageClass::ControlPlane
+            }
+        }
+    }
+
+    /// Bitset of `Flags` values this kind may legitimately carry.
+    ///
+    /// Pinned conservatively: `MORE_FRAMES` is universal (any frame
+    /// may be split), but `COMPRESSED` is whitelisted only on kinds
+    /// whose payloads are big enough to benefit from compression.
+    /// Handshake/lifecycle payloads (Hello, AuthRequest, Ping, …)
+    /// are tiny and stay uncompressed today; future contributors
+    /// who want to flip that decision must update both the matrix
+    /// and the unit tests that pin it.
+    pub fn allowed_flags(&self) -> Flags {
+        match self {
+            // Handshake / lifecycle — tiny payloads, never
+            // compressed today.
+            Self::Hello
+            | Self::HelloAck
+            | Self::AuthRequest
+            | Self::AuthResponse
+            | Self::AuthOk
+            | Self::AuthFail
+            | Self::Bye
+            | Self::Ping
+            | Self::Pong => Flags::MORE_FRAMES,
+
+            // Everything else may carry both documented flags.
+            _ => Flags::COMPRESSED.insert(Flags::MORE_FRAMES),
+        }
+    }
+
+    /// Which peer is allowed to originate this kind.
+    pub fn direction(&self) -> MessageDirection {
+        match self {
+            // Client-originated requests.
+            Self::Hello
+            | Self::AuthResponse
+            | Self::Query
+            | Self::QueryBinary
+            | Self::BulkInsert
+            | Self::BulkInsertBinary
+            | Self::BulkInsertPrevalidated
+            | Self::BulkStreamStart
+            | Self::BulkStreamRows
+            | Self::BulkStreamCommit
+            | Self::Prepare
+            | Self::ExecutePrepared
+            | Self::Get
+            | Self::Delete
+            | Self::Cancel
+            | Self::Compress
+            | Self::SetSession
+            | Self::VectorSearch
+            | Self::GraphTraverse => MessageDirection::ClientToServer,
+
+            // Server-originated replies / push frames.
+            Self::HelloAck
+            | Self::AuthRequest
+            | Self::AuthOk
+            | Self::AuthFail
+            | Self::Result
+            | Self::Error
+            | Self::BulkOk
+            | Self::BulkStreamAck
+            | Self::PreparedOk
+            | Self::DeleteOk
+            | Self::Notice
+            | Self::RowDescription
+            | Self::StreamEnd => MessageDirection::ServerToClient,
+
+            // Symmetric — either peer may initiate.
+            Self::Bye | Self::Ping | Self::Pong => MessageDirection::Both,
+        }
+    }
+
     pub fn from_u8(byte: u8) -> Option<Self> {
         match byte {
             0x01 => Some(Self::Query),
@@ -180,5 +333,201 @@ impl std::ops::BitOr for Flags {
     type Output = Self;
     fn bitor(self, rhs: Self) -> Self {
         self.insert(rhs)
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+
+    /// Every kind known to the wire spec — kept in sync with the
+    /// `from_u8` table. New entries must be added here so the
+    /// matrix tests below cover them.
+    const ALL_KINDS: &[MessageKind] = &[
+        MessageKind::Query,
+        MessageKind::Result,
+        MessageKind::Error,
+        MessageKind::BulkInsert,
+        MessageKind::BulkOk,
+        MessageKind::BulkInsertBinary,
+        MessageKind::QueryBinary,
+        MessageKind::BulkInsertPrevalidated,
+        MessageKind::BulkStreamStart,
+        MessageKind::BulkStreamRows,
+        MessageKind::BulkStreamCommit,
+        MessageKind::BulkStreamAck,
+        MessageKind::Prepare,
+        MessageKind::PreparedOk,
+        MessageKind::ExecutePrepared,
+        MessageKind::Hello,
+        MessageKind::HelloAck,
+        MessageKind::AuthRequest,
+        MessageKind::AuthResponse,
+        MessageKind::AuthOk,
+        MessageKind::AuthFail,
+        MessageKind::Bye,
+        MessageKind::Ping,
+        MessageKind::Pong,
+        MessageKind::Get,
+        MessageKind::Delete,
+        MessageKind::DeleteOk,
+        MessageKind::Cancel,
+        MessageKind::Compress,
+        MessageKind::SetSession,
+        MessageKind::Notice,
+        MessageKind::RowDescription,
+        MessageKind::StreamEnd,
+        MessageKind::VectorSearch,
+        MessageKind::GraphTraverse,
+    ];
+
+    #[test]
+    fn class_matrix_is_pinned() {
+        // Handshake / lifecycle (0x10..0x1F minus Get/Delete/DeleteOk
+        // which are data plane despite the historic numbering).
+        assert_eq!(MessageKind::Hello.class(), MessageClass::Handshake);
+        assert_eq!(MessageKind::HelloAck.class(), MessageClass::Handshake);
+        assert_eq!(MessageKind::AuthRequest.class(), MessageClass::Handshake);
+        assert_eq!(MessageKind::AuthResponse.class(), MessageClass::Handshake);
+        assert_eq!(MessageKind::AuthOk.class(), MessageClass::Handshake);
+        assert_eq!(MessageKind::AuthFail.class(), MessageClass::Handshake);
+        assert_eq!(MessageKind::Bye.class(), MessageClass::Handshake);
+        assert_eq!(MessageKind::Ping.class(), MessageClass::Handshake);
+        assert_eq!(MessageKind::Pong.class(), MessageClass::Handshake);
+
+        // Data plane.
+        assert_eq!(MessageKind::Query.class(), MessageClass::DataPlane);
+        assert_eq!(MessageKind::Result.class(), MessageClass::DataPlane);
+        assert_eq!(MessageKind::BulkInsert.class(), MessageClass::DataPlane);
+        assert_eq!(MessageKind::Get.class(), MessageClass::DataPlane);
+        assert_eq!(MessageKind::Delete.class(), MessageClass::DataPlane);
+        assert_eq!(MessageKind::DeleteOk.class(), MessageClass::DataPlane);
+        assert_eq!(MessageKind::VectorSearch.class(), MessageClass::DataPlane);
+        assert_eq!(MessageKind::GraphTraverse.class(), MessageClass::DataPlane);
+
+        // Streamed envelopes.
+        assert_eq!(MessageKind::BulkStreamStart.class(), MessageClass::Streamed);
+        assert_eq!(MessageKind::BulkStreamRows.class(), MessageClass::Streamed);
+        assert_eq!(MessageKind::BulkStreamCommit.class(), MessageClass::Streamed);
+        assert_eq!(MessageKind::BulkStreamAck.class(), MessageClass::Streamed);
+        assert_eq!(MessageKind::RowDescription.class(), MessageClass::Streamed);
+        assert_eq!(MessageKind::StreamEnd.class(), MessageClass::Streamed);
+
+        // Control plane.
+        assert_eq!(MessageKind::Cancel.class(), MessageClass::ControlPlane);
+        assert_eq!(MessageKind::Compress.class(), MessageClass::ControlPlane);
+        assert_eq!(MessageKind::SetSession.class(), MessageClass::ControlPlane);
+        assert_eq!(MessageKind::Notice.class(), MessageClass::ControlPlane);
+
+        // Coverage check — every catalogued kind has a class.
+        for k in ALL_KINDS {
+            let _ = k.class();
+        }
+    }
+
+    #[test]
+    fn allowed_flags_matrix_is_pinned() {
+        // Handshake / lifecycle: MORE_FRAMES only — no COMPRESSED on
+        // tiny control-frame payloads. Flipping this requires updating
+        // the matrix below in lockstep.
+        let handshake = [
+            MessageKind::Hello,
+            MessageKind::HelloAck,
+            MessageKind::AuthRequest,
+            MessageKind::AuthResponse,
+            MessageKind::AuthOk,
+            MessageKind::AuthFail,
+            MessageKind::Bye,
+            MessageKind::Ping,
+            MessageKind::Pong,
+        ];
+        for k in handshake {
+            let f = k.allowed_flags();
+            assert!(
+                f.contains(Flags::MORE_FRAMES),
+                "{k:?} must allow MORE_FRAMES"
+            );
+            assert!(
+                !f.contains(Flags::COMPRESSED),
+                "{k:?} must NOT allow COMPRESSED today"
+            );
+        }
+
+        // Everything else: both documented flags allowed.
+        for k in ALL_KINDS {
+            if handshake.contains(k) {
+                continue;
+            }
+            let f = k.allowed_flags();
+            assert!(
+                f.contains(Flags::MORE_FRAMES),
+                "{k:?} must allow MORE_FRAMES"
+            );
+            assert!(f.contains(Flags::COMPRESSED), "{k:?} must allow COMPRESSED");
+        }
+    }
+
+    #[test]
+    fn direction_matrix_is_pinned() {
+        // Client → Server.
+        for k in [
+            MessageKind::Hello,
+            MessageKind::AuthResponse,
+            MessageKind::Query,
+            MessageKind::QueryBinary,
+            MessageKind::BulkInsert,
+            MessageKind::BulkInsertBinary,
+            MessageKind::BulkInsertPrevalidated,
+            MessageKind::BulkStreamStart,
+            MessageKind::BulkStreamRows,
+            MessageKind::BulkStreamCommit,
+            MessageKind::Prepare,
+            MessageKind::ExecutePrepared,
+            MessageKind::Get,
+            MessageKind::Delete,
+            MessageKind::Cancel,
+            MessageKind::Compress,
+            MessageKind::SetSession,
+            MessageKind::VectorSearch,
+            MessageKind::GraphTraverse,
+        ] {
+            assert_eq!(
+                k.direction(),
+                MessageDirection::ClientToServer,
+                "{k:?} should be client-originated"
+            );
+        }
+
+        // Server → Client.
+        for k in [
+            MessageKind::HelloAck,
+            MessageKind::AuthRequest,
+            MessageKind::AuthOk,
+            MessageKind::AuthFail,
+            MessageKind::Result,
+            MessageKind::Error,
+            MessageKind::BulkOk,
+            MessageKind::BulkStreamAck,
+            MessageKind::PreparedOk,
+            MessageKind::DeleteOk,
+            MessageKind::Notice,
+            MessageKind::RowDescription,
+            MessageKind::StreamEnd,
+        ] {
+            assert_eq!(
+                k.direction(),
+                MessageDirection::ServerToClient,
+                "{k:?} should be server-originated"
+            );
+        }
+
+        // Symmetric.
+        for k in [MessageKind::Bye, MessageKind::Ping, MessageKind::Pong] {
+            assert_eq!(
+                k.direction(),
+                MessageDirection::Both,
+                "{k:?} should be symmetric"
+            );
+        }
     }
 }
