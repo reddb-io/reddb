@@ -263,7 +263,7 @@ fn map_query_result(qr: &reddb_server::runtime::RuntimeQueryResult) -> QueryResu
         .records
         .first()
         .map(|r| {
-            let mut keys: Vec<String> = r.values.keys().map(|k| k.to_string()).collect();
+            let mut keys: Vec<String> = r.column_names().iter().map(|k| k.to_string()).collect();
             keys.sort();
             keys
         })
@@ -285,8 +285,10 @@ fn map_query_result(qr: &reddb_server::runtime::RuntimeQueryResult) -> QueryResu
 }
 
 fn record_to_pairs(record: &UnifiedRecord) -> Vec<(String, ValueOut)> {
-    let mut entries: Vec<(&str, &SchemaValue)> =
-        record.values.iter().map(|(k, v)| (k.as_ref(), v)).collect();
+    let mut entries: Vec<(&str, &SchemaValue)> = record
+        .iter_fields()
+        .map(|(k, v)| (k.as_ref(), v))
+        .collect();
     entries.sort_by(|a, b| a.0.cmp(b.0));
     entries
         .into_iter()

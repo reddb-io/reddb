@@ -1207,7 +1207,7 @@ fn apply_foreign_table_filters(
     let columns: Vec<String> = if projections.is_empty() {
         filtered
             .first()
-            .map(|r| r.values.keys().map(|k| k.to_string()).collect())
+            .map(|r| r.column_names().iter().map(|k| k.to_string()).collect())
             .unwrap_or_default()
     } else {
         projections
@@ -2313,7 +2313,7 @@ impl RedDBRuntime {
             return;
         };
         for record in result.result.records.iter_mut() {
-            for value in record.values.values_mut() {
+            for value in record.values_mut() {
                 if let Value::Secret(ref bytes) = value {
                     if let Some(plain) =
                         super::impl_dml::decrypt_secret_payload(&key, bytes.as_slice())
@@ -6105,13 +6105,11 @@ impl RedDBRuntime {
         for name in &explain.cte_materializations {
             use std::sync::Arc;
             let mut rec = crate::storage::query::unified::UnifiedRecord::default();
-            rec.values
-                .insert(Arc::from("op"), Value::text("CteScan".to_string()));
-            rec.values
-                .insert(Arc::from("source"), Value::text(name.clone()));
-            rec.values.insert(Arc::from("est_rows"), Value::Float(0.0));
-            rec.values.insert(Arc::from("est_cost"), Value::Float(0.0));
-            rec.values.insert(Arc::from("depth"), Value::Integer(0));
+            rec.set_arc(Arc::from("op"), Value::text("CteScan".to_string()));
+            rec.set_arc(Arc::from("source"), Value::text(name.clone()));
+            rec.set_arc(Arc::from("est_rows"), Value::Float(0.0));
+            rec.set_arc(Arc::from("est_cost"), Value::Float(0.0));
+            rec.set_arc(Arc::from("depth"), Value::Integer(0));
             records.push(rec);
         }
 
@@ -6900,21 +6898,19 @@ impl RedDBRuntime {
         let mut records = Vec::with_capacity(pols.len());
         for p in pols.iter() {
             let mut rec = UnifiedRecord::default();
-            rec.values
-                .insert(Arc::from("id"), SchemaValue::text(p.id.clone()));
-            rec.values.insert(
+            rec.set_arc(Arc::from("id"), SchemaValue::text(p.id.clone()));
+            rec.set_arc(
                 Arc::from("statements"),
                 SchemaValue::Integer(p.statements.len() as i64),
             );
-            rec.values.insert(
+            rec.set_arc(
                 Arc::from("tenant"),
                 p.tenant
                     .as_deref()
                     .map(|t| SchemaValue::text(t.to_string()))
                     .unwrap_or(SchemaValue::Null),
             );
-            rec.values
-                .insert(Arc::from("json"), SchemaValue::text(p.to_json_string()));
+            rec.set_arc(Arc::from("json"), SchemaValue::text(p.to_json_string()));
             records.push(rec);
         }
         let mut result = crate::storage::query::unified::UnifiedResult::empty();
@@ -6961,31 +6957,30 @@ impl RedDBRuntime {
                     // (the simulator handles fine-grained matching).
                 }
                 let mut rec = UnifiedRecord::default();
-                rec.values
-                    .insert(Arc::from("policy_id"), SchemaValue::text(p.id.clone()));
-                rec.values.insert(
+                rec.set_arc(Arc::from("policy_id"), SchemaValue::text(p.id.clone()));
+                rec.set_arc(
                     Arc::from("statement_index"),
                     SchemaValue::Integer(idx as i64),
                 );
-                rec.values.insert(
+                rec.set_arc(
                     Arc::from("sid"),
                     st.sid
                         .as_deref()
                         .map(|s| SchemaValue::text(s.to_string()))
                         .unwrap_or(SchemaValue::Null),
                 );
-                rec.values.insert(
+                rec.set_arc(
                     Arc::from("effect"),
                     SchemaValue::text(match st.effect {
                         crate::auth::policies::Effect::Allow => "allow",
                         crate::auth::policies::Effect::Deny => "deny",
                     }),
                 );
-                rec.values.insert(
+                rec.set_arc(
                     Arc::from("actions"),
                     SchemaValue::Integer(st.actions.len() as i64),
                 );
-                rec.values.insert(
+                rec.set_arc(
                     Arc::from("resources"),
                     SchemaValue::Integer(st.resources.len() as i64),
                 );
@@ -7051,23 +7046,21 @@ impl RedDBRuntime {
         );
 
         let mut rec = UnifiedRecord::default();
-        rec.values
-            .insert(Arc::from("decision"), SchemaValue::text(decision_str));
-        rec.values.insert(
+        rec.set_arc(Arc::from("decision"), SchemaValue::text(decision_str));
+        rec.set_arc(
             Arc::from("matched_policy_id"),
             matched_pid
                 .map(SchemaValue::text)
                 .unwrap_or(SchemaValue::Null),
         );
-        rec.values.insert(
+        rec.set_arc(
             Arc::from("matched_sid"),
             matched_sid
                 .map(SchemaValue::text)
                 .unwrap_or(SchemaValue::Null),
         );
-        rec.values
-            .insert(Arc::from("reason"), SchemaValue::text(outcome.reason));
-        rec.values.insert(
+        rec.set_arc(Arc::from("reason"), SchemaValue::text(outcome.reason));
+        rec.set_arc(
             Arc::from("trail_len"),
             SchemaValue::Integer(outcome.trail.len() as i64),
         );
@@ -7314,18 +7307,14 @@ fn walk_plan_node(
 ) {
     use std::sync::Arc;
     let mut rec = crate::storage::query::unified::UnifiedRecord::default();
-    rec.values
-        .insert(Arc::from("op"), Value::text(node.operator.clone()));
-    rec.values.insert(
+    rec.set_arc(Arc::from("op"), Value::text(node.operator.clone()));
+    rec.set_arc(
         Arc::from("source"),
         node.source.clone().map(Value::text).unwrap_or(Value::Null),
     );
-    rec.values
-        .insert(Arc::from("est_rows"), Value::Float(node.estimated_rows));
-    rec.values
-        .insert(Arc::from("est_cost"), Value::Float(node.operator_cost));
-    rec.values
-        .insert(Arc::from("depth"), Value::Integer(depth as i64));
+    rec.set_arc(Arc::from("est_rows"), Value::Float(node.estimated_rows));
+    rec.set_arc(Arc::from("est_cost"), Value::Float(node.operator_cost));
+    rec.set_arc(Arc::from("depth"), Value::Integer(depth as i64));
     out.push(rec);
     for child in &node.children {
         walk_plan_node(child, depth + 1, out);

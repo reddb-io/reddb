@@ -132,7 +132,7 @@ fn test_row_patch_set() {
     assert_eq!(result.result.records.len(), 1, "should have exactly 1 row");
 
     let record = &result.result.records[0];
-    let role_val = record.values.get("role");
+    let role_val = record.get("role");
     assert!(role_val.is_some(), "record should have 'role' field");
     match role_val.unwrap() {
         Value::Text(s) => assert_eq!(
@@ -192,7 +192,7 @@ fn test_row_patch_unset() {
     let record = &result.result.records[0];
 
     // phone should be absent or null
-    let phone_val = record.values.get("phone");
+    let phone_val = record.get("phone");
     assert!(
         phone_val.is_none() || matches!(phone_val, Some(Value::Null)),
         "phone should be unset, got {:?}",
@@ -201,11 +201,11 @@ fn test_row_patch_unset() {
 
     // name and email should still exist
     assert!(
-        record.values.contains_key("name"),
+        record.contains_column("name"),
         "name should still exist"
     );
     assert!(
-        record.values.contains_key("email"),
+        record.contains_column("email"),
         "email should still exist"
     );
 }
@@ -252,7 +252,7 @@ fn test_select_by_entity_id_sees_latest_updated_row_image() {
         1,
         "should return one updated row"
     );
-    match result.result.records[0].values.get("role") {
+    match result.result.records[0].get("role") {
         Some(Value::Text(value)) => assert_eq!(value.as_ref(), "architect"),
         other => panic!("expected updated role, got {:?}", other),
     }
@@ -900,7 +900,7 @@ fn test_select_with_filter() {
     );
 
     for record in &result.result.records {
-        let dept = record.values.get("dept");
+        let dept = record.get("dept");
         match dept {
             Some(Value::Text(s)) => assert_eq!(s.as_ref(), "engineering"),
             other => panic!("expected dept='engineering', got {:?}", other),
@@ -946,7 +946,7 @@ fn test_select_with_order_by() {
         .result
         .records
         .iter()
-        .filter_map(|r| match r.values.get("age") {
+        .filter_map(|r| match r.get("age") {
             Some(Value::Integer(n)) => Some(*n),
             Some(Value::Float(f)) => Some(*f as i64),
             _ => None,
@@ -1084,7 +1084,7 @@ fn test_scalar_length_without_from_returns_single_row() {
         .expect("scalar SELECT without FROM should succeed");
 
     assert_eq!(result.result.records.len(), 1);
-    match result.result.records[0].values.get("chars") {
+    match result.result.records[0].get("chars") {
         Some(Value::Integer(value)) => assert_eq!(*value, 4),
         Some(Value::UnsignedInteger(value)) => assert_eq!(*value, 4),
         other => panic!("expected chars=4, got {other:?}"),
@@ -2021,7 +2021,7 @@ fn test_password_hash_and_verify() {
         })
         .expect("raw SELECT of password should succeed");
     let row = raw.result.records.first().expect("at least one row");
-    if let Some(pw_value) = row.values.get("pw") {
+    if let Some(pw_value) = row.get("pw") {
         // The value must be wrapped in Value::Password (not raw Text
         // that would leak the hash or plaintext through formatters).
         match pw_value {
@@ -2054,7 +2054,7 @@ fn test_password_hash_and_verify() {
         })
         .expect("VERIFY_PASSWORD old candidate after update should succeed");
     assert_eq!(
-        old_after_update.result.records[0].values.get("ok"),
+        old_after_update.result.records[0].get("ok"),
         Some(&Value::Boolean(false)),
         "old password must stop matching after UPDATE"
     );
@@ -2065,7 +2065,7 @@ fn test_password_hash_and_verify() {
         })
         .expect("VERIFY_PASSWORD new candidate after update should succeed");
     assert_eq!(
-        new_after_update.result.records[0].values.get("ok"),
+        new_after_update.result.records[0].get("ok"),
         Some(&Value::Boolean(true)),
         "new password must match after UPDATE"
     );
@@ -2075,7 +2075,7 @@ fn test_password_hash_and_verify() {
             query: "SELECT pw FROM accounts".into(),
         })
         .expect("raw SELECT of updated password should succeed");
-    match raw_after_update.result.records[0].values.get("pw") {
+    match raw_after_update.result.records[0].get("pw") {
         Some(Value::Password(h)) => {
             assert!(h.starts_with("argon2id$"));
             assert!(!h.contains("NewP@ss456"));
@@ -2121,7 +2121,7 @@ fn test_secret_encrypt_and_decrypt() {
         })
         .expect("SELECT should succeed");
     let row = decrypted.result.records.first().expect("at least one row");
-    let tok_val = row.values.get("token").expect("token column present");
+    let tok_val = row.get("token").expect("token column present");
     assert_eq!(
         tok_val,
         &Value::text("sk_live_abc".to_string()),
@@ -2142,7 +2142,7 @@ fn test_secret_encrypt_and_decrypt() {
         })
         .expect("SELECT with auto_decrypt=false should succeed");
     let row = masked.result.records.first().expect("at least one row");
-    let tok_val = row.values.get("token").expect("token column present");
+    let tok_val = row.get("token").expect("token column present");
     match tok_val {
         Value::Secret(bytes) => {
             assert!(
@@ -2171,7 +2171,7 @@ fn test_secret_encrypt_and_decrypt() {
         })
         .expect("SELECT updated secret should succeed");
     assert_eq!(
-        updated_decrypted.result.records[0].values.get("token"),
+        updated_decrypted.result.records[0].get("token"),
         Some(&Value::text("sk_live_updated".to_string())),
         "updated secret should decrypt to the new plaintext"
     );
@@ -2186,7 +2186,7 @@ fn test_secret_encrypt_and_decrypt() {
             query: "SELECT name, token FROM creds".into(),
         })
         .expect("SELECT updated secret with auto_decrypt=false should succeed");
-    match updated_masked.result.records[0].values.get("token") {
+    match updated_masked.result.records[0].get("token") {
         Some(Value::Secret(bytes)) => {
             assert!(
                 !String::from_utf8_lossy(bytes).contains("sk_live_updated"),
@@ -2979,7 +2979,7 @@ fn test_select_config_function_accepts_bare_path_and_default() {
         .expect("scalar CONFIG() select should succeed");
 
     assert_eq!(configured.result.records.len(), 1);
-    match configured.result.records[0].values.get("provider") {
+    match configured.result.records[0].get("provider") {
         Some(Value::Text(value)) => assert_eq!(value.as_ref(), "groq"),
         other => panic!("expected configured provider text, got {:?}", other),
     }
@@ -2991,7 +2991,7 @@ fn test_select_config_function_accepts_bare_path_and_default() {
         .expect("CONFIG() fallback select should succeed");
 
     assert_eq!(fallback.result.records.len(), 1);
-    match fallback.result.records[0].values.get("provider") {
+    match fallback.result.records[0].get("provider") {
         Some(Value::Text(value)) => assert_eq!(value.as_ref(), "openai"),
         other => panic!("expected fallback provider text, got {:?}", other),
     }
@@ -3038,7 +3038,7 @@ fn test_kv_function_filters_rows_and_uses_bare_default() {
         .result
         .records
         .iter()
-        .map(|record| match record.values.get("name") {
+        .map(|record| match record.get("name") {
             Some(Value::Text(value)) => value.to_string(),
             other => panic!("expected name text, got {:?}", other),
         })
@@ -3055,7 +3055,7 @@ fn test_kv_function_filters_rows_and_uses_bare_default() {
         .result
         .records
         .iter()
-        .map(|record| match record.values.get("name") {
+        .map(|record| match record.get("name") {
             Some(Value::Text(value)) => value.to_string(),
             other => panic!("expected name text, got {:?}", other),
         })
@@ -3117,11 +3117,11 @@ fn test_update_accepts_config_assignment_and_kv_filter() {
         .records
         .iter()
         .map(|record| {
-            let name = match record.values.get("name") {
+            let name = match record.get("name") {
                 Some(Value::Text(value)) => value.to_string(),
                 other => panic!("expected name text, got {:?}", other),
             };
-            let tier = match record.values.get("tier") {
+            let tier = match record.get("tier") {
                 Some(Value::Text(value)) => value.to_string(),
                 other => panic!("expected tier text, got {:?}", other),
             };

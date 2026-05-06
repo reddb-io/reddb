@@ -28,7 +28,7 @@ fn register_then_list_surfaces_aggregate() {
             query: "SELECT CA_LIST() AS names".into(),
         })
         .expect("list ok");
-    let names = r.result.records[0].values.get("names").expect("names");
+    let names = r.result.records[0].get("names").expect("names");
     match names {
         Value::Array(items) => {
             assert_eq!(items.len(), 1);
@@ -52,7 +52,7 @@ fn state_returns_initial_watermark() {
             query: "SELECT CA_STATE('ca1') AS st".into(),
         })
         .expect("state ok");
-    let st = r.result.records[0].values.get("st").expect("st");
+    let st = r.result.records[0].get("st").expect("st");
     match st {
         Value::Text(s) => {
             assert!(
@@ -81,7 +81,7 @@ fn drop_removes_aggregate_from_list() {
             query: "SELECT CA_LIST() AS names".into(),
         })
         .expect("list ok");
-    let names = r.result.records[0].values.get("names").expect("names");
+    let names = r.result.records[0].get("names").expect("names");
     match names {
         Value::Array(items) => assert!(items.is_empty()),
         other => panic!("expected empty array, got {other:?}"),
@@ -140,7 +140,7 @@ fn refresh_absorbs_rows_and_query_returns_aggregate() {
             query: "SELECT CA_QUERY('avg_load', 0, 'avg_load') AS v".into(),
         })
         .expect("query ok");
-    let v = r.result.records[0].values.get("v").expect("v");
+    let v = r.result.records[0].get("v").expect("v");
     match v {
         Value::Float(f) => assert!((*f - 15.0).abs() < 0.01, "expected ~15.0, got {f}"),
         other => panic!("expected Float, got {other:?}"),
@@ -156,6 +156,6 @@ fn state_returns_null_for_unknown() {
             query: "SELECT CA_STATE('no_such_aggregate') AS st".into(),
         })
         .expect("state ok");
-    let st = r.result.records[0].values.get("st").expect("st");
+    let st = r.result.records[0].get("st").expect("st");
     assert!(matches!(st, Value::Null), "expected Null, got {st:?}");
 }

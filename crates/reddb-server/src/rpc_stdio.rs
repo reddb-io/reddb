@@ -1085,8 +1085,7 @@ pub(crate) fn insert_result_to_json(qr: &RuntimeQueryResult) -> Value {
     // First row of the result, if any, contains the inserted entity id.
     if let Some(first) = qr.result.records.first() {
         if let Some(id_val) = first
-            .values
-            .iter()
+            .iter_fields()
             .find(|(k, _)| {
                 let s: &str = k;
                 s == "_entity_id"

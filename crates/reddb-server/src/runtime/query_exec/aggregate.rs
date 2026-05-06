@@ -3323,7 +3323,7 @@ mod parallel_group_by_tests {
             .records
             .iter()
             .filter_map(|rec| {
-                for (k, v) in rec.values.iter() {
+                for (k, v) in rec.iter_fields() {
                     if k.as_ref() == "city" {
                         continue;
                     }

@@ -75,7 +75,7 @@ fn ml_classify_returns_predicted_class_from_sql() {
             query: "SELECT ML_CLASSIFY('xor_toy', [3.0, 0.1]) AS cls".into(),
         })
         .expect("ML_CLASSIFY should run");
-    let cls = r.result.records[0].values.get("cls").expect("cls present");
+    let cls = r.result.records[0].get("cls").expect("cls present");
     assert!(
         matches!(cls, Value::Integer(0)),
         "expected class 0, got {cls:?}"
@@ -87,7 +87,7 @@ fn ml_classify_returns_predicted_class_from_sql() {
             query: "SELECT ML_CLASSIFY('xor_toy', [0.1, 3.0]) AS cls".into(),
         })
         .expect("ML_CLASSIFY should run");
-    let cls = r.result.records[0].values.get("cls").expect("cls present");
+    let cls = r.result.records[0].get("cls").expect("cls present");
     assert!(
         matches!(cls, Value::Integer(1)),
         "expected class 1, got {cls:?}"
@@ -105,9 +105,7 @@ fn ml_predict_proba_returns_normalised_probabilities() {
             query: "SELECT ML_PREDICT_PROBA('xor_toy2', [3.0, 0.1]) AS probs".into(),
         })
         .expect("ML_PREDICT_PROBA should run");
-    let probs = r.result.records[0]
-        .values
-        .get("probs")
+    let probs = r.result.records[0].get("probs")
         .expect("probs present");
     let arr = match probs {
         Value::Array(v) => v,
@@ -139,7 +137,7 @@ fn ml_classify_unknown_model_returns_null() {
             query: "SELECT ML_CLASSIFY('does_not_exist', [1.0, 2.0]) AS cls".into(),
         })
         .expect("call should not error — NULL on missing model");
-    let cls = r.result.records[0].values.get("cls").expect("cls present");
+    let cls = r.result.records[0].get("cls").expect("cls present");
     assert!(matches!(cls, Value::Null), "expected Null, got {cls:?}");
 }
 
@@ -162,9 +160,7 @@ fn semantic_cache_roundtrip_via_sql() {
             query: "SELECT SEMANTIC_CACHE_GET('qa', [0.1, 0.2, 0.3, 0.4]) AS cached".into(),
         })
         .expect("cache get ok");
-    let cached = r.result.records[0]
-        .values
-        .get("cached")
+    let cached = r.result.records[0].get("cached")
         .expect("cached present");
     assert!(
         matches!(cached, Value::Text(s) if s.as_ref() == "AI-first multi-model db"),
@@ -185,7 +181,7 @@ fn embed_returns_null_without_provider_config() {
             query: "SELECT EMBED('hello world', 'openai') AS emb".into(),
         })
         .expect("call should not error");
-    let emb = r.result.records[0].values.get("emb").expect("emb present");
+    let emb = r.result.records[0].get("emb").expect("emb present");
     // Either Null (no API key) or a Vector if REDDB_OPENAI_API_KEY is
     // set in the environment. Both are acceptable; we only assert we
     // didn't get a transport-layer panic or a stringified placeholder.
@@ -231,7 +227,7 @@ fn model_register_then_classify_roundtrip() {
     let r = q
         .execute(ExecuteQueryInput { query: sql })
         .expect("register ok");
-    let v = r.result.records[0].values.get("v").expect("v");
+    let v = r.result.records[0].get("v").expect("v");
     assert!(
         matches!(v, Value::Integer(n) if *n >= 1),
         "expected version id >= 1, got {v:?}"
@@ -243,7 +239,7 @@ fn model_register_then_classify_roundtrip() {
             query: "SELECT ML_CLASSIFY('sql_reg_model', [0.1, 3.0]) AS cls".into(),
         })
         .expect("classify ok");
-    let cls = r.result.records[0].values.get("cls").expect("cls");
+    let cls = r.result.records[0].get("cls").expect("cls");
     assert!(
         matches!(cls, Value::Integer(1)),
         "expected class 1, got {cls:?}"
@@ -266,7 +262,7 @@ fn model_drop_archives_versions() {
             query: "SELECT ML_CLASSIFY('drop_me', [1.0, 2.0]) AS cls".into(),
         })
         .expect("ok");
-    let cls = r.result.records[0].values.get("cls").expect("cls");
+    let cls = r.result.records[0].get("cls").expect("cls");
     assert!(matches!(cls, Value::Null), "expected Null, got {cls:?}");
 }
 
@@ -279,9 +275,7 @@ fn semantic_cache_miss_returns_null() {
             query: "SELECT SEMANTIC_CACHE_GET('qa', [0.99, 0.0, 0.0, 0.0]) AS cached".into(),
         })
         .expect("cache get ok");
-    let cached = r.result.records[0]
-        .values
-        .get("cached")
+    let cached = r.result.records[0].get("cached")
         .expect("cached present");
     assert!(
         matches!(cached, Value::Null),

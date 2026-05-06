@@ -337,7 +337,7 @@ pub(crate) fn resolve_runtime_join_field(
 ) -> Option<Value> {
     match field {
         FieldRef::TableColumn { table, column } if !table.is_empty() => {
-            if let Some(value) = record.values.get(format!("{table}.{column}").as_str()) {
+            if let Some(value) = record.get(format!("{table}.{column}").as_str()) {
                 return Some(value.clone());
             }
 
@@ -350,7 +350,6 @@ pub(crate) fn resolve_runtime_join_field(
             }
 
             record
-                .values
                 .get(column.as_str())
                 .cloned()
                 .or_else(|| resolve_runtime_document_path(record, column))
@@ -399,10 +398,9 @@ pub(crate) fn project_runtime_join_record_with_db(
 
     if select_all {
         for key in visible_value_keys(source) {
-            if let Some(value) = source.values.get(key.as_str()) {
-                record
-                    .values
-                    .insert(std::sync::Arc::from(key), value.clone());
+            if let Some(value) = source.get(key.as_str()) {
+                let cloned = value.clone();
+                record.set_arc(std::sync::Arc::from(key), cloned);
             }
         }
     }
@@ -415,7 +413,6 @@ pub(crate) fn project_runtime_join_record_with_db(
         let label = projection_name(projection);
         let value = match projection {
             Projection::Column(column) | Projection::Alias(column, _) => source
-                .values
                 .get(column.as_str())
                 .cloned()
                 .or_else(|| resolve_runtime_document_path(source, column)),
@@ -444,9 +441,7 @@ pub(crate) fn project_runtime_join_record_with_db(
             Projection::All => None,
         };
 
-        record
-            .values
-            .insert(std::sync::Arc::from(label), value.unwrap_or(Value::Null));
+        record.set_arc(std::sync::Arc::from(label), value.unwrap_or(Value::Null));
     }
 
     record

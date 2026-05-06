@@ -158,7 +158,6 @@ pub(super) fn execute_runtime_table_query(
 
 pub(super) fn runtime_record_has_document_capability(record: &UnifiedRecord) -> bool {
     record
-        .values
         .get("red_capabilities")
         .and_then(|value| match value {
             crate::storage::schema::Value::Text(value) => Some(value),
@@ -262,7 +261,7 @@ pub(super) fn runtime_record_rank_score(record: &UnifiedRecord) -> f64 {
         "text_relevance",
     ]
     .into_iter()
-    .find_map(|field| record.values.get(field).and_then(runtime_value_number))
+    .find_map(|field| record.get(field).and_then(runtime_value_number))
     .unwrap_or(0.0)
 }
 

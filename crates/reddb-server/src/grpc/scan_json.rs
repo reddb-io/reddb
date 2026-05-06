@@ -104,7 +104,7 @@ pub(crate) fn unified_result_json_string_with_records(
         }
         buf.push('{');
         let mut first = true;
-        for (key, value) in &record.values {
+        for (key, value) in record.iter_fields() {
             if !first {
                 buf.push(',');
             }

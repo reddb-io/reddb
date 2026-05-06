@@ -559,7 +559,7 @@ mod tests {
 
         let (result, _) = executor.execute_with_explanation("how many hosts").unwrap();
         assert_eq!(result.records.len(), 1);
-        let count = result.records[0].values.get("count");
+        let count = result.records[0].get("count");
         assert!(count.is_some());
     }
 

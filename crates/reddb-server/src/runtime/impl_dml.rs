@@ -1110,8 +1110,7 @@ impl RedDBRuntime {
                 .records
                 .iter()
                 .map(|rec| {
-                    rec.values
-                        .iter()
+                    rec.iter_fields()
                         .map(|(k, v)| (k.as_ref().to_string(), v.clone()))
                         .collect()
                 })
@@ -1384,7 +1383,7 @@ fn build_returning_result(
         // Only keep projected columns on the record.
         for col in &columns {
             if let Some(v) = values.get(col.as_str()) {
-                rec.values.insert(Arc::from(col.as_str()), v.clone());
+                rec.set_arc(Arc::from(col.as_str()), v.clone());
             }
         }
         records.push(rec);

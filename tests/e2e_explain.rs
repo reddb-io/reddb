@@ -50,17 +50,17 @@ fn explain_select_returns_plan_tree_rows() {
 
     // Root node: depth=0, op populated.
     let root = &result.result.records[0];
-    match root.values.get("depth") {
+    match root.get("depth") {
         Some(Value::Integer(0)) => {}
         other => panic!("root depth must be 0, got {other:?}"),
     }
-    match root.values.get("op") {
+    match root.get("op") {
         Some(Value::Text(op)) => assert!(!op.is_empty(), "root op must be non-empty"),
         other => panic!("root op must be Text, got {other:?}"),
     }
     // est_rows/est_cost are floats.
-    assert!(matches!(root.values.get("est_rows"), Some(Value::Float(_))));
-    assert!(matches!(root.values.get("est_cost"), Some(Value::Float(_))));
+    assert!(matches!(root.get("est_rows"), Some(Value::Float(_))));
+    assert!(matches!(root.get("est_cost"), Some(Value::Float(_))));
 }
 
 #[test]
@@ -139,7 +139,7 @@ fn explain_indexed_select_mentions_index_or_scan_op() {
 
     // At least one node references the target table in `source`.
     let has_user_source = result.result.records.iter().any(
-        |rec| matches!(rec.values.get("source"), Some(Value::Text(s)) if s.as_ref() == "users"),
+        |rec| matches!(rec.get("source"), Some(Value::Text(s)) if s.as_ref() == "users"),
     );
     assert!(
         has_user_source,
