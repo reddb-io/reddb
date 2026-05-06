@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/timeseries_parser_snapshots.rs
+expression: "fmt_parse_error(\"CREATE HYPERTABLE metrics CHUNK_INTERVAL '1d'\")"
+---
+input: "CREATE HYPERTABLE metrics CHUNK_INTERVAL '1d'"
+kind:  Syntax
+error: Parse error at 1:46: CREATE HYPERTABLE requires TIME_COLUMN <ident>

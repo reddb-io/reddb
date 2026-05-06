@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/timeseries_parser_snapshots.rs
+expression: "fmt_parse_error(\"CREATE TIMESERIES m1 DOWNSAMPLE 1h:5m:avg,\")"
+---
+input: "CREATE TIMESERIES m1 DOWNSAMPLE 1h:5m:avg,"
+kind:  Syntax
+error: Parse error at 1:43: expected duration literal for downsample policy, got EOF
