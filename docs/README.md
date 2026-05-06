@@ -252,11 +252,11 @@ npx reddb-cli@latest server --path ./data/reddb.rdb --http-bind 127.0.0.1:8080
 ### JavaScript / TypeScript driver
 
 ```bash
-pnpm add reddb
+pnpm add @reddb-io/sdk
 ```
 
 ```ts
-import { connect } from 'reddb'
+import { connect } from '@reddb-io/sdk'
 
 const db = await connect('memory://')
 const result = await db.query('SELECT * FROM hosts')

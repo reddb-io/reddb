@@ -25,7 +25,7 @@ the URL or via the `options.tls` object.
 ### Embedded (in-memory or file)
 
 ```js
-import { connect } from 'reddb'
+import { connect } from '@reddb-io/sdk'
 const a = await connect('red://')                      // memory, ephemeral
 const b = await connect('red://:memory:')              // SQLite-style alias
 const c = await connect('red:///var/lib/db.rdb')       // persistent
