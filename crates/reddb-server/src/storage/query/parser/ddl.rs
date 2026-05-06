@@ -582,7 +582,10 @@ impl<'a> Parser<'a> {
         let option_name = self.expect_ident_or_keyword()?;
         if !option_name.eq_ignore_ascii_case("ttl") {
             return Err(ParseError::new(
-                format!("unsupported CREATE TABLE option '{option_name}', expected TTL"),
+                // F-05: `option_name` is caller-controlled identifier text.
+                // Render via `{:?}` so embedded CR/LF/NUL/quotes are escaped
+                // before the message reaches downstream serialization sinks.
+                format!("unsupported CREATE TABLE option {option_name:?}, expected TTL"),
                 self.position(),
             ));
         }
@@ -605,7 +608,10 @@ impl<'a> Parser<'a> {
             "d" | "day" | "days" => 86_400_000.0,
             other => {
                 return Err(ParseError::new(
-                    format!("unsupported TTL unit '{other}'"),
+                    // F-05: render `other` via `{:?}` so caller-controlled
+                    // bytes (CR / LF / NUL / quotes) are escaped before
+                    // reaching downstream serialization sinks.
+                    format!("unsupported TTL unit {other:?}"),
                     self.position(),
                 ))
             }

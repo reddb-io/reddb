@@ -591,7 +591,12 @@ impl<'a> Parser<'a> {
             }
             other => {
                 return Err(ParseError::new(
-                    format!("expected number, got {}", other),
+                    // F-05: `other` is a `Token` whose Display arms emit raw
+                    // user bytes for `Ident` / `String` / `JsonLiteral`.
+                    // Render via `{:?}` so CR/LF/NUL/quotes are escaped
+                    // before the message reaches downstream serialization
+                    // sinks.
+                    format!("expected number, got {:?}", other),
                     self.position(),
                 ));
             }

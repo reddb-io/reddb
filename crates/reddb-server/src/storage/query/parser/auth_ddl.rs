@@ -363,7 +363,11 @@ impl<'a> Parser<'a> {
             let raw = self.parse_string()?;
             let (kind, name) = raw.split_once(':').ok_or_else(|| {
                 ParseError::new(
-                    format!("resource must be `kind:name`, got `{raw}`"),
+                    // F-05: `raw` is caller-controlled string-literal bytes.
+                    // Render via `{:?}` so CR/LF/NUL/quotes are escaped
+                    // before the message reaches the downstream JSON /
+                    // audit / log / gRPC sinks.
+                    format!("resource must be `kind:name`, got {raw:?}"),
                     self.position(),
                 )
             })?;

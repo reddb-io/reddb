@@ -63,7 +63,7 @@ mod tests;
 #[cfg(test)]
 mod json_literal_table;
 
-pub use error::{ParseError, ParseErrorKind};
+pub use error::{ParseError, ParseErrorKind, SafeTokenDisplay};
 pub use limits::ParserLimits;
 
 use super::ast::{QueryExpr, QueryWithCte};
@@ -291,7 +291,14 @@ impl<'a> Parser<'a> {
         // Expect end of input
         if !self.check(&Token::Eof) {
             return Err(ParseError::new(
-                format!("Unexpected token after query: {}", self.current.token),
+                // F-05: route the offending token through `SafeTokenDisplay`
+                // so the user-controlled `Ident` / `String` / `JsonLiteral`
+                // payloads are escaped before the message lands in the
+                // downstream JSON / audit / log / gRPC sinks.
+                format!(
+                    "Unexpected token after query: {}",
+                    error::SafeTokenDisplay(&self.current.token)
+                ),
                 self.position(),
             ));
         }

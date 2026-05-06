@@ -410,7 +410,10 @@ impl<'a> Parser<'a> {
             let end = self.position();
             let Some(target) = DataType::from_sql_name(&type_name) else {
                 return Err(ParseError::new(
-                    format!("unknown type name `{type_name}` in CAST"),
+                    // F-05: `type_name` is caller-controlled identifier text.
+                    // Render via `{:?}` so embedded CR/LF/NUL/quotes are
+                    // escaped before reaching downstream serialization sinks.
+                    format!("unknown type name {type_name:?} in CAST"),
                     self.position(),
                 ));
             };

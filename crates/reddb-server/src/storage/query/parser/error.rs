@@ -1,6 +1,6 @@
 //! Parser error types
 
-use std::fmt;
+use std::fmt::{self, Write};
 
 use super::super::lexer::{LexerError, LexerLimitHit, Position, Token};
 
@@ -69,9 +69,18 @@ impl ParseError {
     }
 
     /// Create error with expected tokens
+    ///
+    /// `found` is rendered through [`SafeTokenDisplay`] so caller-controlled
+    /// bytes inside `Token::Ident` / `Token::String` / `Token::JsonLiteral` /
+    /// `Token::Float` / `Token::Integer` payloads are escaped via Rust's
+    /// `escape_debug` rules (CR / LF / NUL / quote bytes become `\n`,
+    /// `\r`, `\0`, `\"`, …). Static keyword and punctuation arms keep their
+    /// existing UPPER-CASE rendering so error messages and snapshot tests
+    /// stay readable. This prevents F-05 smuggling through the downstream
+    /// JSON / audit / log / gRPC sinks that embed `ParseError::message`.
     pub fn expected(expected: Vec<&str>, found: &Token, position: Position) -> Self {
         Self {
-            message: format!("Unexpected token: {}", found),
+            message: format!("Unexpected token: {}", SafeTokenDisplay(found)),
             position,
             expected: expected.into_iter().map(|s| s.to_string()).collect(),
             kind: ParseErrorKind::Syntax,
@@ -147,6 +156,61 @@ impl fmt::Display for ParseError {
 }
 
 impl std::error::Error for ParseError {}
+
+/// `Display` adapter that emits a `Token` while escaping the
+/// caller-controlled byte payload of `Ident` / `String` / `JsonLiteral` /
+/// `Integer` / `Float` arms.
+///
+/// F-05 (serialization-boundary audit, 2026-05-06): SQL parser error
+/// messages flow into JSON HTTP bodies, JSONL audit rows, gRPC
+/// `Status::message`, PG3 `ErrorResponse`, and `tracing::warn!` log
+/// lines. The default `Token` Display arms emit raw user bytes for
+/// `Token::Ident("foo\nbar")` etc., which lets a tenant smuggle CR /
+/// LF / NUL / quote bytes through every downstream sink at once.
+///
+/// This adapter renders user-controlled arms via `escape_debug` (the
+/// same rules `{:?}` applies to a `&str`) and leaves keyword /
+/// punctuation arms untouched so existing snapshot tests and operator
+/// log readability are preserved.
+pub struct SafeTokenDisplay<'a>(pub &'a Token);
+
+impl fmt::Display for SafeTokenDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            // User-controlled byte payloads. Render via `escape_debug`
+            // so embedded CR / LF / NUL / quote bytes do not reach
+            // downstream serialization sinks unescaped.
+            Token::Ident(s) => write_escaped(f, s),
+            Token::String(s) => {
+                f.write_str("'")?;
+                write_escaped(f, s)?;
+                f.write_str("'")
+            }
+            Token::JsonLiteral(s) => write_escaped(f, s),
+            // Numeric tokens come straight from the lexer; their
+            // canonical Display form is bounded ASCII, but the lexer
+            // builds them via `to_string` so they cannot carry control
+            // bytes. Pass through Display.
+            Token::Integer(_) | Token::Float(_) => fmt::Display::fmt(self.0, f),
+            // Static keyword / punctuation arms — fall back to the
+            // existing Display output verbatim.
+            other => fmt::Display::fmt(other, f),
+        }
+    }
+}
+
+fn write_escaped(f: &mut fmt::Formatter<'_>, s: &str) -> fmt::Result {
+    for ch in s.chars() {
+        // `escape_debug` matches Rust's Debug rules: ASCII control
+        // bytes become `\n`, `\r`, `\0`, `\t`, …; non-ASCII printable
+        // characters pass through; backslash and double-quote are
+        // escaped.
+        for esc in ch.escape_debug() {
+            f.write_char(esc)?;
+        }
+    }
+    Ok(())
+}
 
 impl From<LexerError> for ParseError {
     fn from(e: LexerError) -> Self {
