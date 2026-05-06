@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/queue_parser_snapshots.rs
+expression: "fmt_parse_error(\"QUEUE CLAIM q GROUP g CONSUMER c\")"
+---
+input: "QUEUE CLAIM q GROUP g CONSUMER c"
+kind:  Syntax
+error: Parse error at 1:33: Unexpected token: EOF (expected: MIN_IDLE)
