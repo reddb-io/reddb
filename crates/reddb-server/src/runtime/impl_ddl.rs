@@ -169,6 +169,12 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         self.clear_table_planner_stats(&query.name);
         self.invalidate_result_cache();
+        // Issue #119: a dropped collection vanishes from every
+        // (tenant, role)'s visible-collections set. Auth is optional in
+        // embedded mode so guard the call.
+        if let Some(store) = self.inner.auth_store.read().clone() {
+            store.invalidate_visible_collections_cache();
+        }
         self.inner
             .db
             .persist_metadata()
