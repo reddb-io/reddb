@@ -23,6 +23,7 @@
  *   - Cargo.lock                      (regenerated)
  *   - crates/reddb-client-connector/Cargo.toml (workspace internal)
  *   - drivers/js/package.json         (@reddb-io/sdk npm)
+ *   - drivers/js-client/package.json  (@reddb-io/client npm — optional, Lane T #136)
  *   - drivers/python/Cargo.toml       (reddb-python internal name)
  *   - drivers/python/Cargo.lock       (regenerated)
  *   - drivers/python/pyproject.toml   (reddb PyPI)
@@ -90,6 +91,16 @@ const targets = [
     type: 'package-json',
   },
   {
+    // Lane T (#136) introduces drivers/js-client/. Until that lane
+    // merges, the file may not exist on this branch — `optional: true`
+    // makes the sync step a no-op skip instead of failing the version
+    // bump.
+    label: 'drivers/js-client/package.json',
+    file: path.join(root, 'drivers', 'js-client', 'package.json'),
+    type: 'package-json',
+    optional: true,
+  },
+  {
     label: 'drivers/python/Cargo.toml',
     file: path.join(root, 'drivers', 'python', 'Cargo.toml'),
     type: 'cargo-toml',
@@ -101,13 +112,18 @@ const targets = [
   },
 ]
 
+const SKIPPED = Symbol('skipped')
 const changes = []
 let failed = 0
 
 for (const t of targets) {
   try {
     const before = apply(t)
-    changes.push({ label: t.label, before, after: version })
+    if (before === SKIPPED) {
+      changes.push({ label: t.label, before: '(missing)', after: '(skipped)', skipped: true })
+    } else {
+      changes.push({ label: t.label, before, after: version })
+    }
   } catch (err) {
     failed++
     console.error(`  FAIL ${t.label}: ${err.message}`)
@@ -116,7 +132,7 @@ for (const t of targets) {
 
 console.log(`synced version: → ${version}`)
 for (const c of changes) {
-  const arrow = c.before === version ? '=' : '→'
+  const arrow = c.skipped ? '·' : c.before === version ? '=' : '→'
   console.log(`  ${c.label.padEnd(32)} ${c.before} ${arrow} ${c.after}`)
 }
 
@@ -158,6 +174,9 @@ const stageList = [
   'crates/reddb-client/Cargo.toml',
   'crates/reddb-client-connector/Cargo.toml',
   'drivers/js/package.json',
+  // drivers/js-client/package.json comes from Lane T (#136); the
+  // .filter() below drops it from the stage list when absent.
+  'drivers/js-client/package.json',
   'drivers/python/Cargo.toml',
   'drivers/python/Cargo.lock',
   'drivers/python/pyproject.toml',
@@ -180,6 +199,9 @@ console.log(`  staged ${stageList.length} files for the version commit`)
 
 function apply(target) {
   if (!fs.existsSync(target.file)) {
+    if (target.optional) {
+      return SKIPPED
+    }
     throw new Error(`missing file`)
   }
   const original = fs.readFileSync(target.file, 'utf8')
