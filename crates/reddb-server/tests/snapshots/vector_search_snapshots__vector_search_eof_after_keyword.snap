@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/vector_search_snapshots.rs
+expression: "fmt_parse_error(\"VECTOR SEARCH\")"
+---
+input: "VECTOR SEARCH"
+kind:  Syntax
+error: Parse error at 1:14: Unexpected token: EOF (expected: identifier)

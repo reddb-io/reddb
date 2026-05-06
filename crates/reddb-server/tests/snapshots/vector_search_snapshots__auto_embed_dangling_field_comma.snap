@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/vector_search_snapshots.rs
+expression: "fmt_parse_error(\"INSERT INTO t (a, b) VALUES ('x', 'y') WITH AUTO EMBED (a, b,)\")"
+---
+input: "INSERT INTO t (a, b) VALUES ('x', 'y') WITH AUTO EMBED (a, b,)"
+kind:  Syntax
+error: Parse error at 1:62: Unexpected token: ) (expected: identifier)

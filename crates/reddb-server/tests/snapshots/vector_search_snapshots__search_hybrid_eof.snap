@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/vector_search_snapshots.rs
+expression: "fmt_parse_error(\"SEARCH HYBRID\")"
+---
+input: "SEARCH HYBRID"
+kind:  Syntax
+error: Parse error at 1:14: SEARCH HYBRID requires at least SIMILAR or TEXT

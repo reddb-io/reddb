@@ -638,3 +638,121 @@ pub fn timeseries_adversarial_inputs() -> Vec<(&'static str, String)> {
     ]
 }
 
+pub fn vector_search_adversarial_inputs() -> Vec<(&'static str, String)> {
+    vec![
+        // ---- malformed vector literals -------------------------
+        ("vector_eof_after_lbracket", "SEARCH SIMILAR [".to_string()),
+        (
+            "vector_unterminated_literal",
+            "SEARCH SIMILAR [0.1, 0.2 COLLECTION c".to_string(),
+        ),
+        (
+            "vector_dangling_comma",
+            "SEARCH SIMILAR [0.1, 0.2,] COLLECTION c".to_string(),
+        ),
+        (
+            "vector_empty_literal",
+            "VECTOR SEARCH e SIMILAR TO [] LIMIT 5".to_string(),
+        ),
+        (
+            "vector_garbage_in_literal",
+            "SEARCH SIMILAR [0.1, @#$, 0.3] COLLECTION c".to_string(),
+        ),
+        // ---- gigantic dims -------------------------------------
+        (
+            "vector_huge_dim_4096",
+            {
+                let dims: Vec<String> = (0..4096).map(|i| format!("{:.4}", i as f32 / 4096.0)).collect();
+                format!("SEARCH SIMILAR [{}] COLLECTION big LIMIT 5", dims.join(", "))
+            },
+        ),
+        (
+            "vector_silly_dim_50000_under_limit",
+            // Stays under the 1 MiB max_input_bytes default by
+            // virtue of short floats. Targets the vector-literal
+            // comma-loop without tripping the size guard.
+            {
+                let dims: Vec<String> = (0..50_000).map(|_| "0.1".to_string()).collect();
+                format!("SEARCH SIMILAR [{}] COLLECTION big", dims.join(","))
+            },
+        ),
+        // ---- NaN / Infinity floats -----------------------------
+        // The lexer accepts these as identifiers (NaN / Infinity
+        // are not numeric tokens), so the parser bails inside
+        // `parse_float`. Pin the no-panic invariant.
+        (
+            "vector_nan_in_literal",
+            "SEARCH SIMILAR [0.1, NaN, 0.3] COLLECTION c".to_string(),
+        ),
+        (
+            "vector_inf_in_literal",
+            "SEARCH SIMILAR [0.1, Infinity, 0.3] COLLECTION c".to_string(),
+        ),
+        (
+            "vector_neg_inf_in_literal",
+            "SEARCH SIMILAR [-Infinity, 0.0] COLLECTION c".to_string(),
+        ),
+        (
+            "vector_huge_float",
+            "SEARCH SIMILAR [1e308, -1e308] COLLECTION c".to_string(),
+        ),
+        (
+            "vector_too_huge_float",
+            "SEARCH SIMILAR [1e500] COLLECTION c".to_string(),
+        ),
+        // ---- structural breakage -------------------------------
+        ("similar_eof", "SEARCH SIMILAR".to_string()),
+        ("similar_no_collection", "SEARCH SIMILAR [0.1, 0.2]".to_string()),
+        (
+            "similar_no_collection_name",
+            "SEARCH SIMILAR [0.1] COLLECTION".to_string(),
+        ),
+        (
+            "similar_text_no_string",
+            "SEARCH SIMILAR TEXT COLLECTION c".to_string(),
+        ),
+        (
+            "similar_unterminated_text",
+            "SEARCH SIMILAR TEXT 'unterminated COLLECTION c".to_string(),
+        ),
+        // ---- AUTO EMBED malformed shapes -----------------------
+        (
+            "auto_embed_eof_after_keyword",
+            "INSERT INTO t (a) VALUES ('x') WITH AUTO EMBED".to_string(),
+        ),
+        (
+            "auto_embed_empty_field_list",
+            "INSERT INTO t (a) VALUES ('x') WITH AUTO EMBED ()".to_string(),
+        ),
+        (
+            "auto_embed_dangling_comma",
+            "INSERT INTO t (a, b) VALUES ('x', 'y') WITH AUTO EMBED (a, b,)".to_string(),
+        ),
+        (
+            "auto_embed_using_no_provider",
+            "INSERT INTO t (a) VALUES ('x') WITH AUTO EMBED (a) USING".to_string(),
+        ),
+        (
+            "auto_embed_model_no_string",
+            "INSERT INTO t (a) VALUES ('x') WITH AUTO EMBED (a) USING openai MODEL".to_string(),
+        ),
+        // ---- HYBRID FROM malformed -----------------------------
+        (
+            "hybrid_no_fusion",
+            "HYBRID FROM hosts VECTOR SEARCH e SIMILAR TO [0.1] LIMIT 10".to_string(),
+        ),
+        (
+            "hybrid_no_vector_search",
+            "HYBRID FROM hosts FUSION RERANK".to_string(),
+        ),
+        (
+            "hybrid_unknown_fusion",
+            "HYBRID FROM hosts VECTOR SEARCH e SIMILAR TO [0.1] FUSION GLORP LIMIT 10".to_string(),
+        ),
+        (
+            "hybrid_search_neither_set",
+            "SEARCH HYBRID COLLECTION c LIMIT 10".to_string(),
+        ),
+    ]
+}
+
