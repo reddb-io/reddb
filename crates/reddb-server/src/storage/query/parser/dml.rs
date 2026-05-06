@@ -191,7 +191,11 @@ impl<'a> Parser<'a> {
                     }
                 }
                 self.expect(Token::RParen)?;
-                let provider = if self.consume_ident_ci("USING")? {
+                // `USING` is a reserved keyword (`Token::Using`), so
+                // `consume_ident_ci` would never match. Use the typed
+                // consumer instead. See bug #108 (mirrors the #92 fix
+                // for migration `DEPENDS ON`).
+                let provider = if self.consume(&Token::Using)? {
                     self.expect_ident()?
                 } else {
                     "openai".to_string()
@@ -399,7 +403,7 @@ impl<'a> Parser<'a> {
 
         // Parse optional clauses in any order
         for _ in 0..5 {
-            if self.consume_ident_ci("USING")? {
+            if self.consume(&Token::Using)? {
                 provider = Some(self.expect_ident()?);
             } else if self.consume_ident_ci("MODEL")? {
                 model = Some(self.parse_string()?);
