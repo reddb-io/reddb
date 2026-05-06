@@ -756,3 +756,147 @@ pub fn vector_search_adversarial_inputs() -> Vec<(&'static str, String)> {
     ]
 }
 
+/// Adversarial inputs that target the subquery surface (issue #106).
+///
+/// These exercise the WHERE-IN / WHERE-EXISTS / scalar-subquery /
+/// FROM-aliased / correlated-reference paths and the SELECT-recursion
+/// depth guard (issue #91 counterpart).
+///
+/// Phase A: most of these inputs *error* on main today — the
+/// parser's `Subquery` AST variant ships in Fase 2 Week 3
+/// (`ast.rs` L216). The harness only guarantees no panics.
+pub fn subquery_adversarial_inputs() -> Vec<(&'static str, String)> {
+    vec![
+        // ----- WHERE x IN (SELECT …) ----------------------------
+        (
+            "subq_in_eof_after_lparen",
+            "SELECT * FROM t WHERE id IN (".to_string(),
+        ),
+        (
+            "subq_in_select_eof_in_inner",
+            "SELECT * FROM t WHERE id IN (SELECT".to_string(),
+        ),
+        (
+            "subq_in_unbalanced_paren",
+            "SELECT * FROM t WHERE id IN (SELECT id FROM u".to_string(),
+        ),
+        (
+            "subq_in_dangling_comma_inner",
+            "SELECT * FROM t WHERE id IN (SELECT id, FROM u)".to_string(),
+        ),
+        (
+            "subq_not_in_subquery",
+            "SELECT * FROM t WHERE id NOT IN (SELECT id FROM u)".to_string(),
+        ),
+        // ----- WHERE EXISTS (SELECT …) --------------------------
+        (
+            "subq_exists_eof_after_keyword",
+            "SELECT * FROM t WHERE EXISTS".to_string(),
+        ),
+        (
+            "subq_exists_no_paren",
+            "SELECT * FROM t WHERE EXISTS SELECT id FROM u".to_string(),
+        ),
+        (
+            "subq_exists_inner_garbage",
+            "SELECT * FROM t WHERE EXISTS (@#$%)".to_string(),
+        ),
+        (
+            "subq_not_exists_subquery",
+            "SELECT * FROM t WHERE NOT EXISTS (SELECT id FROM u)".to_string(),
+        ),
+        // ----- scalar `= (SELECT …)` ----------------------------
+        (
+            "subq_scalar_eq_eof",
+            "SELECT * FROM t WHERE x = (SELECT".to_string(),
+        ),
+        (
+            "subq_scalar_eq_unterminated",
+            "SELECT * FROM t WHERE x = (SELECT y FROM u".to_string(),
+        ),
+        (
+            "subq_scalar_lt_subquery",
+            "SELECT * FROM t WHERE x < (SELECT MAX(y) FROM u)".to_string(),
+        ),
+        // ----- FROM (SELECT …) AS sub ---------------------------
+        (
+            "subq_from_eof_after_lparen",
+            "SELECT * FROM (".to_string(),
+        ),
+        (
+            "subq_from_inner_not_select",
+            "SELECT * FROM (DELETE FROM t) AS x".to_string(),
+        ),
+        (
+            "subq_from_no_alias",
+            "SELECT * FROM (SELECT id FROM t)".to_string(),
+        ),
+        (
+            "subq_from_alias_no_as",
+            "SELECT * FROM (SELECT id FROM t) sub".to_string(),
+        ),
+        (
+            "subq_from_unterminated",
+            "SELECT * FROM (SELECT id FROM t AS sub".to_string(),
+        ),
+        (
+            "subq_from_double_subquery",
+            "SELECT * FROM ((SELECT id FROM t) AS inner_q) AS outer_q".to_string(),
+        ),
+        // ----- correlated outer/inner refs ----------------------
+        (
+            "subq_correlated_outer_dot_col",
+            "SELECT * FROM users u WHERE u.id IN (SELECT user_id FROM orders o WHERE o.user_id = u.id)".to_string(),
+        ),
+        (
+            "subq_correlated_dangling_dot",
+            "SELECT * FROM users u WHERE u.id IN (SELECT user_id FROM orders o WHERE o. = u.id)".to_string(),
+        ),
+        // ----- depth-guard pins (issue #91 SELECT-recursion) ---
+        (
+            "subq_deeply_nested_select_50",
+            {
+                let mut s = String::new();
+                for _ in 0..50 {
+                    s.push_str("(SELECT x FROM t WHERE x = ");
+                }
+                s.push('1');
+                for _ in 0..50 {
+                    s.push(')');
+                }
+                format!("SELECT * FROM t WHERE x = {}", s)
+            },
+        ),
+        (
+            "subq_deeply_nested_in_50",
+            {
+                let mut s = String::new();
+                for _ in 0..50 {
+                    s.push_str("SELECT x FROM t WHERE x IN (");
+                }
+                s.push_str("SELECT x FROM t");
+                for _ in 0..50 {
+                    s.push(')');
+                }
+                s
+            },
+        ),
+        // ----- bytes-level adversarial --------------------------
+        (
+            "subq_in_oversized_inner",
+            format!(
+                "SELECT * FROM t WHERE id IN (SELECT {} FROM u)",
+                "x".repeat(10_000),
+            ),
+        ),
+        (
+            "subq_nul_byte_inside_inner",
+            "SELECT * FROM t WHERE id IN (SELECT id FROM u\0)".to_string(),
+        ),
+        (
+            "subq_garbage_after_in",
+            "SELECT * FROM t WHERE id IN @#$%".to_string(),
+        ),
+    ]
+}
+
