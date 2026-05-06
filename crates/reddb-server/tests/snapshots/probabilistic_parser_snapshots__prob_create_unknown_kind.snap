@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/probabilistic_parser_snapshots.rs
+expression: "fmt_parse_error(\"CREATE BLOOM b1\")"
+---
+input: "CREATE BLOOM b1"
+kind:  Syntax
+error: Parse error at 1:1: Unexpected token: BLOOM (expected: TABLE, INDEX, UNIQUE, TIMESERIES, QUEUE, TREE, HLL, SKETCH, FILTER, SCHEMA, SEQUENCE, MIGRATION)

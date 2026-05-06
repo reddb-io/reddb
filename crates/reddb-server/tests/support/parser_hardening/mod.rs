@@ -110,3 +110,6 @@ pub mod queue_grammar;
 pub mod timeseries_grammar;
 
 pub mod vector_search_grammar;
+
+pub mod probabilistic_grammar;
+pub mod subquery_grammar;

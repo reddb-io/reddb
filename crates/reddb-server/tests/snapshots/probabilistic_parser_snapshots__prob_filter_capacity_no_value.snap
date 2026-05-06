@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/probabilistic_parser_snapshots.rs
+expression: "fmt_parse_error(\"CREATE FILTER f1 CAPACITY\")"
+---
+input: "CREATE FILTER f1 CAPACITY"
+kind:  Syntax
+error: Parse error at 1:26: Unexpected token: EOF (expected: integer)

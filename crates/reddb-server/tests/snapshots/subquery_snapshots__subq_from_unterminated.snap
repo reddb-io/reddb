@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/subquery_snapshots.rs
+expression: "fmt_parse_error(\"SELECT * FROM (SELECT id FROM t AS sub\")"
+---
+input: "SELECT * FROM (SELECT id FROM t AS sub"
+kind:  Syntax
+error: Parse error at 1:15: Unexpected token: ( (expected: identifier)

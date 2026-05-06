@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/probabilistic_parser_snapshots.rs
+expression: "fmt_parse_error(\"CREATE FILTER f1 CAPACITY many\")"
+---
+input: "CREATE FILTER f1 CAPACITY many"
+kind:  Syntax
+error: Parse error at 1:27: Unexpected token: many (expected: integer)

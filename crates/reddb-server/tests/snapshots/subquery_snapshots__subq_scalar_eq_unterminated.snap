@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/subquery_snapshots.rs
+expression: "fmt_parse_error(\"SELECT * FROM t WHERE x = (SELECT\")"
+---
+input: "SELECT * FROM t WHERE x = (SELECT"
+kind:  Syntax
+error: Parse error at 1:34: Unexpected token: EOF (expected: ))

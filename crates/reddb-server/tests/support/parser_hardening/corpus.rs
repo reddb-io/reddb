@@ -756,3 +756,325 @@ pub fn vector_search_adversarial_inputs() -> Vec<(&'static str, String)> {
     ]
 }
 
+pub fn probabilistic_adversarial_inputs() -> Vec<(&'static str, String)> {
+    vec![
+        // ----- CREATE envelope: missing names / EOF --------------
+        ("prob_create_eof_after_keyword", "CREATE".to_string()),
+        ("prob_create_hll_no_name", "CREATE HLL".to_string()),
+        ("prob_create_sketch_no_name", "CREATE SKETCH".to_string()),
+        ("prob_create_filter_no_name", "CREATE FILTER".to_string()),
+        (
+            "prob_create_unknown_kind",
+            "CREATE BLOOM b1".to_string(),
+        ),
+        (
+            "prob_create_hll_dangling_if",
+            "CREATE HLL IF NOT EXISTS".to_string(),
+        ),
+        // ----- CREATE FILTER capacity edge cases -----------------
+        (
+            "prob_filter_capacity_no_value",
+            "CREATE FILTER f1 CAPACITY".to_string(),
+        ),
+        (
+            "prob_filter_capacity_negative",
+            // Lexer emits Minus, then Integer; parse_integer errors.
+            "CREATE FILTER f1 CAPACITY -1".to_string(),
+        ),
+        (
+            "prob_filter_capacity_zero",
+            "CREATE FILTER f1 CAPACITY 0".to_string(),
+        ),
+        (
+            "prob_filter_capacity_non_numeric",
+            "CREATE FILTER f1 CAPACITY many".to_string(),
+        ),
+        (
+            "prob_filter_capacity_overflow",
+            "CREATE FILTER f1 CAPACITY 99999999999999999999".to_string(),
+        ),
+        // ----- CREATE SKETCH width / depth edge cases ------------
+        (
+            "prob_sketch_width_no_value",
+            "CREATE SKETCH s1 WIDTH".to_string(),
+        ),
+        (
+            "prob_sketch_width_negative",
+            "CREATE SKETCH s1 WIDTH -1".to_string(),
+        ),
+        (
+            "prob_sketch_width_zero",
+            "CREATE SKETCH s1 WIDTH 0".to_string(),
+        ),
+        (
+            "prob_sketch_depth_no_value",
+            "CREATE SKETCH s1 DEPTH".to_string(),
+        ),
+        (
+            "prob_sketch_depth_negative",
+            "CREATE SKETCH s1 DEPTH -1".to_string(),
+        ),
+        (
+            "prob_sketch_depth_zero",
+            // `Token::Depth` lexes as a keyword; the modifier loop
+            // never matches, so `DEPTH 0` ends up as trailing
+            // tokens and the top-level dispatcher errors.
+            "CREATE SKETCH s1 DEPTH 0".to_string(),
+        ),
+        (
+            "prob_sketch_width_then_depth",
+            "CREATE SKETCH s1 WIDTH 100 DEPTH 5".to_string(),
+        ),
+        // ----- HLL operational surface ---------------------------
+        ("prob_hll_eof_after_keyword", "HLL".to_string()),
+        (
+            "prob_hll_unknown_subcmd",
+            "HLL FROBNICATE x".to_string(),
+        ),
+        ("prob_hll_add_no_name", "HLL ADD".to_string()),
+        (
+            "prob_hll_add_no_payload",
+            "HLL ADD visitors".to_string(),
+        ),
+        (
+            "prob_hll_add_unterminated_string",
+            "HLL ADD visitors 'open".to_string(),
+        ),
+        (
+            "prob_hll_count_no_name",
+            "HLL COUNT".to_string(),
+        ),
+        (
+            "prob_hll_merge_no_dest",
+            "HLL MERGE".to_string(),
+        ),
+        // ----- SKETCH operational surface ------------------------
+        ("prob_sketch_eof_after_keyword", "SKETCH".to_string()),
+        ("prob_sketch_add_no_name", "SKETCH ADD".to_string()),
+        (
+            "prob_sketch_add_no_element",
+            "SKETCH ADD events".to_string(),
+        ),
+        (
+            "prob_sketch_add_unquoted_element",
+            // ADD requires a string literal at the element slot.
+            "SKETCH ADD events bareword".to_string(),
+        ),
+        (
+            "prob_sketch_add_negative_count",
+            "SKETCH ADD events 'click' -1".to_string(),
+        ),
+        (
+            "prob_sketch_count_no_element",
+            "SKETCH COUNT events".to_string(),
+        ),
+        // ----- FILTER operational surface ------------------------
+        ("prob_filter_eof_after_keyword", "FILTER".to_string()),
+        ("prob_filter_add_no_name", "FILTER ADD".to_string()),
+        (
+            "prob_filter_add_no_element",
+            "FILTER ADD seen".to_string(),
+        ),
+        (
+            "prob_filter_check_no_element",
+            "FILTER CHECK seen".to_string(),
+        ),
+        (
+            "prob_filter_delete_no_element",
+            "FILTER DELETE seen".to_string(),
+        ),
+        (
+            "prob_filter_count_no_name",
+            "FILTER COUNT".to_string(),
+        ),
+        (
+            "prob_filter_check_unquoted_element",
+            "FILTER CHECK seen bareword".to_string(),
+        ),
+        // ----- DROP envelope -------------------------------------
+        ("prob_drop_eof", "DROP".to_string()),
+        (
+            "prob_drop_unknown_kind",
+            "DROP BLOOM b1".to_string(),
+        ),
+        (
+            "prob_drop_hll_dangling_if",
+            "DROP HLL IF EXISTS".to_string(),
+        ),
+        // ----- DoS / bytes-level shapes --------------------------
+        (
+            "prob_long_hll_name",
+            format!("CREATE HLL {}", "h".repeat(10_000)),
+        ),
+        (
+            "prob_filter_capacity_oversized",
+            format!("CREATE FILTER f1 CAPACITY 1{}", "0".repeat(10_000)),
+        ),
+        (
+            "prob_hll_add_oversized_payload",
+            format!("HLL ADD visitors '{}'", "x".repeat(2 * 1024 * 1024)),
+        ),
+        (
+            "prob_hll_add_many_elements",
+            // 5_000 single-char string literals — exercises the
+            // `HllAdd` accumulator loop without tripping the input
+            // size guard.
+            {
+                let els: Vec<String> = (0..5_000).map(|_| "'x'".to_string()).collect();
+                format!("HLL ADD visitors {}", els.join(" "))
+            },
+        ),
+        (
+            "prob_nul_byte_after_create",
+            "CREATE HLL h1\0".to_string(),
+        ),
+        (
+            "prob_garbage_after_filter_kw",
+            "FILTER @#$%".to_string(),
+        ),
+        (
+            "prob_unicode_in_element",
+            "FILTER ADD seen '雪 ❄ ε≈μ'".to_string(),
+        ),
+        (
+            "prob_zero_width_in_element",
+            "HLL ADD visitors '\u{200b}\u{feff}user'".to_string(),
+        ),
+    ]
+}
+
+pub fn subquery_adversarial_inputs() -> Vec<(&'static str, String)> {
+    vec![
+        // ----- WHERE x IN (SELECT …) ----------------------------
+        (
+            "subq_in_eof_after_lparen",
+            "SELECT * FROM t WHERE id IN (".to_string(),
+        ),
+        (
+            "subq_in_select_eof_in_inner",
+            "SELECT * FROM t WHERE id IN (SELECT".to_string(),
+        ),
+        (
+            "subq_in_unbalanced_paren",
+            "SELECT * FROM t WHERE id IN (SELECT id FROM u".to_string(),
+        ),
+        (
+            "subq_in_dangling_comma_inner",
+            "SELECT * FROM t WHERE id IN (SELECT id, FROM u)".to_string(),
+        ),
+        (
+            "subq_not_in_subquery",
+            "SELECT * FROM t WHERE id NOT IN (SELECT id FROM u)".to_string(),
+        ),
+        // ----- WHERE EXISTS (SELECT …) --------------------------
+        (
+            "subq_exists_eof_after_keyword",
+            "SELECT * FROM t WHERE EXISTS".to_string(),
+        ),
+        (
+            "subq_exists_no_paren",
+            "SELECT * FROM t WHERE EXISTS SELECT id FROM u".to_string(),
+        ),
+        (
+            "subq_exists_inner_garbage",
+            "SELECT * FROM t WHERE EXISTS (@#$%)".to_string(),
+        ),
+        (
+            "subq_not_exists_subquery",
+            "SELECT * FROM t WHERE NOT EXISTS (SELECT id FROM u)".to_string(),
+        ),
+        // ----- scalar `= (SELECT …)` ----------------------------
+        (
+            "subq_scalar_eq_eof",
+            "SELECT * FROM t WHERE x = (SELECT".to_string(),
+        ),
+        (
+            "subq_scalar_eq_unterminated",
+            "SELECT * FROM t WHERE x = (SELECT y FROM u".to_string(),
+        ),
+        (
+            "subq_scalar_lt_subquery",
+            "SELECT * FROM t WHERE x < (SELECT MAX(y) FROM u)".to_string(),
+        ),
+        // ----- FROM (SELECT …) AS sub ---------------------------
+        (
+            "subq_from_eof_after_lparen",
+            "SELECT * FROM (".to_string(),
+        ),
+        (
+            "subq_from_inner_not_select",
+            "SELECT * FROM (DELETE FROM t) AS x".to_string(),
+        ),
+        (
+            "subq_from_no_alias",
+            "SELECT * FROM (SELECT id FROM t)".to_string(),
+        ),
+        (
+            "subq_from_alias_no_as",
+            "SELECT * FROM (SELECT id FROM t) sub".to_string(),
+        ),
+        (
+            "subq_from_unterminated",
+            "SELECT * FROM (SELECT id FROM t AS sub".to_string(),
+        ),
+        (
+            "subq_from_double_subquery",
+            "SELECT * FROM ((SELECT id FROM t) AS inner_q) AS outer_q".to_string(),
+        ),
+        // ----- correlated outer/inner refs ----------------------
+        (
+            "subq_correlated_outer_dot_col",
+            "SELECT * FROM users u WHERE u.id IN (SELECT user_id FROM orders o WHERE o.user_id = u.id)".to_string(),
+        ),
+        (
+            "subq_correlated_dangling_dot",
+            "SELECT * FROM users u WHERE u.id IN (SELECT user_id FROM orders o WHERE o. = u.id)".to_string(),
+        ),
+        // ----- depth-guard pins (issue #91 SELECT-recursion) ---
+        (
+            "subq_deeply_nested_select_50",
+            {
+                let mut s = String::new();
+                for _ in 0..50 {
+                    s.push_str("(SELECT x FROM t WHERE x = ");
+                }
+                s.push('1');
+                for _ in 0..50 {
+                    s.push(')');
+                }
+                format!("SELECT * FROM t WHERE x = {}", s)
+            },
+        ),
+        (
+            "subq_deeply_nested_in_50",
+            {
+                let mut s = String::new();
+                for _ in 0..50 {
+                    s.push_str("SELECT x FROM t WHERE x IN (");
+                }
+                s.push_str("SELECT x FROM t");
+                for _ in 0..50 {
+                    s.push(')');
+                }
+                s
+            },
+        ),
+        // ----- bytes-level adversarial --------------------------
+        (
+            "subq_in_oversized_inner",
+            format!(
+                "SELECT * FROM t WHERE id IN (SELECT {} FROM u)",
+                "x".repeat(10_000),
+            ),
+        ),
+        (
+            "subq_nul_byte_inside_inner",
+            "SELECT * FROM t WHERE id IN (SELECT id FROM u\0)".to_string(),
+        ),
+        (
+            "subq_garbage_after_in",
+            "SELECT * FROM t WHERE id IN @#$%".to_string(),
+        ),
+    ]
+}
+

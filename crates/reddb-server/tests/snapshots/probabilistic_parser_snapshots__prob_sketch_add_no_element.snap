@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/probabilistic_parser_snapshots.rs
+expression: "fmt_parse_error(\"SKETCH ADD events\")"
+---
+input: "SKETCH ADD events"
+kind:  Syntax
+error: Parse error at 1:18: Unexpected token: EOF (expected: string)

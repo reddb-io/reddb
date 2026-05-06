@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/subquery_snapshots.rs
+expression: "fmt_parse_error(\"SELECT * FROM t WHERE id NOT IN (SELECT id FROM u)\")"
+---
+input: "SELECT * FROM t WHERE id NOT IN (SELECT id FROM u)"
+kind:  Syntax
+error: Parse error at 1:26: Unexpected token: NOT (expected: =, <>, <, <=, >, >=)
