@@ -1130,8 +1130,11 @@ impl RedDBRuntime {
             AiProvider, AnthropicPromptRequest, OpenAiPromptRequest,
         };
 
-        // Step 1: Search context to find relevant entities
-        let context_result = self.search_context(SearchContextInput {
+        // Step 1: Search context to find relevant entities. Issue #119:
+        // ASK is the canonical leak path (search results feed the LLM
+        // verbatim) — route through AuthorizedSearch so the candidate
+        // set stays inside `EffectiveScope.visible_collections`.
+        let ctx_input = SearchContextInput {
             query: ask.question.clone(),
             field: None,
             vector: None,
@@ -1145,7 +1148,17 @@ impl RedDBRuntime {
             reindex: None,
             limit: ask.limit,
             min_score: None,
-        })?;
+        };
+        let scope = self.ai_scope();
+        let context_result = if super::statement_frame::ReadFrame::visible_collections(&scope)
+            .is_some()
+        {
+            crate::runtime::authorized_search::AuthorizedSearch::execute_context(
+                self, &scope, ctx_input,
+            )?
+        } else {
+            self.search_context(ctx_input)?
+        };
 
         // Step 2: Build rich context with schema + search results
         let context_json =

@@ -347,8 +347,25 @@ impl RedDBRuntime {
                 } else {
                     vector.clone()
                 };
-                let results =
-                    self.search_similar(collection, &search_vector, *limit, *min_score)?;
+                // Issue #119: route through AuthorizedSearch so the
+                // candidate set is gated by `EffectiveScope.visible_collections`
+                // before any similarity score is computed.
+                let scope = self.ai_scope();
+                let results = if super::statement_frame::ReadFrame::visible_collections(&scope)
+                    .is_some()
+                {
+                    crate::runtime::authorized_search::AuthorizedSearch::execute_similar(
+                        self,
+                        &scope,
+                        collection,
+                        &search_vector,
+                        *limit,
+                        *min_score,
+                    )?
+                } else {
+                    // Embedded / no-auth caller: keep legacy behaviour.
+                    self.search_similar(collection, &search_vector, *limit, *min_score)?
+                };
                 let mut result =
                     UnifiedResult::with_columns(vec!["entity_id".into(), "score".into()]);
                 for sr in &results {
@@ -374,15 +391,33 @@ impl RedDBRuntime {
                 fuzzy,
             } => {
                 let collections = collection.as_ref().map(|c| vec![c.clone()]);
-                let res = self.search_text(
-                    query.clone(),
-                    collections,
-                    None,
-                    None,
-                    None,
-                    Some(*limit),
-                    *fuzzy,
-                )?;
+                // Issue #119: gate the candidate set by visible_collections.
+                let scope = self.ai_scope();
+                let res = if super::statement_frame::ReadFrame::visible_collections(&scope)
+                    .is_some()
+                {
+                    crate::runtime::authorized_search::AuthorizedSearch::execute_text(
+                        self,
+                        &scope,
+                        query.clone(),
+                        collections,
+                        None,
+                        None,
+                        None,
+                        Some(*limit),
+                        *fuzzy,
+                    )?
+                } else {
+                    self.search_text(
+                        query.clone(),
+                        collections,
+                        None,
+                        None,
+                        None,
+                        Some(*limit),
+                        *fuzzy,
+                    )?
+                };
                 let mut result =
                     UnifiedResult::with_columns(vec!["entity_id".into(), "score".into()]);
                 for item in &res.matches {
@@ -507,7 +542,10 @@ impl RedDBRuntime {
                 depth,
             } => {
                 use crate::application::SearchContextInput;
-                let res = self.search_context(SearchContextInput {
+                // Issue #119: route through AuthorizedSearch so the
+                // candidate set + every expansion bucket is bounded by
+                // `EffectiveScope.visible_collections`.
+                let input = SearchContextInput {
                     query: query.clone(),
                     field: field.clone(),
                     vector: None,
@@ -521,7 +559,17 @@ impl RedDBRuntime {
                     reindex: None,
                     limit: Some(*limit),
                     min_score: None,
-                })?;
+                };
+                let scope = self.ai_scope();
+                let res = if super::statement_frame::ReadFrame::visible_collections(&scope)
+                    .is_some()
+                {
+                    crate::runtime::authorized_search::AuthorizedSearch::execute_context(
+                        self, &scope, input,
+                    )?
+                } else {
+                    self.search_context(input)?
+                };
                 let mut result = UnifiedResult::with_columns(vec![
                     "entity_id".into(),
                     "collection".into(),
