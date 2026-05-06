@@ -108,9 +108,21 @@ impl AuthCache {
         if entry.inserted_at.elapsed() >= self.ttl {
             // TTL'd out — count as miss so the runtime rebuilds.
             self.misses.fetch_add(1, Ordering::Relaxed);
+            tracing::trace!(
+                target: "auth_cache",
+                tenant = ?key.tenant,
+                role = ?key.role,
+                "scope_cache miss (TTL expired)"
+            );
             return None;
         }
         self.hits.fetch_add(1, Ordering::Relaxed);
+        tracing::trace!(
+            target: "auth_cache",
+            tenant = ?key.tenant,
+            role = ?key.role,
+            "scope_cache hit"
+        );
         Some(entry.collections.clone())
     }
 
@@ -119,6 +131,13 @@ impl AuthCache {
     /// freshly-computed set so the next caller hits the cache.
     pub fn insert(&self, key: ScopeKey, collections: HashSet<String>) {
         self.misses.fetch_add(1, Ordering::Relaxed);
+        tracing::trace!(
+            target: "auth_cache",
+            tenant = ?key.tenant,
+            role = ?key.role,
+            n = collections.len(),
+            "scope_cache miss → insert"
+        );
         if let Ok(mut guard) = self.entries.write() {
             guard.insert(
                 key,
@@ -138,6 +157,7 @@ impl AuthCache {
             guard.clear();
         }
         self.invalidations.fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(target: "auth_cache", "scope_cache invalidate_all");
     }
 
     /// Invalidate every entry whose tenant matches `tenant`. Used by
@@ -147,6 +167,7 @@ impl AuthCache {
             guard.retain(|k, _| k.tenant.as_deref() != tenant);
         }
         self.invalidations.fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(target: "auth_cache", tenant = ?tenant, "scope_cache invalidate_tenant");
     }
 
     pub fn stats(&self) -> AuthCacheStats {
