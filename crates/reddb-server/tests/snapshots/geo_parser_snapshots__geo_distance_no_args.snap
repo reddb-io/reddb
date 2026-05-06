@@ -1,0 +1,6 @@
+---
+source: crates/reddb-server/tests/geo_parser_snapshots.rs
+expression: "fmt_parse_error(\"SELECT GEO_DISTANCE() FROM t\")"
+---
+UNEXPECTED OK
+input: "SELECT GEO_DISTANCE() FROM t"
