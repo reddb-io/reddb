@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/timeseries_parser_snapshots.rs
+expression: "fmt_parse_error(\"CREATE TIMESERIES m1 RETENTION 1 min\")"
+---
+input: "CREATE TIMESERIES m1 RETENTION 1 min"
+kind:  Syntax
+error: Parse error at 1:34: Unexpected token after query: MIN

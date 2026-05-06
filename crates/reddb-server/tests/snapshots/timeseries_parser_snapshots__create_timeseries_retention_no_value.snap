@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/timeseries_parser_snapshots.rs
+expression: "fmt_parse_error(\"CREATE TIMESERIES m1 RETENTION\")"
+---
+input: "CREATE TIMESERIES m1 RETENTION"
+kind:  Syntax
+error: Parse error at 1:31: Unexpected token: EOF (expected: number)

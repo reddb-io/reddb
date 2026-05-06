@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/timeseries_parser_snapshots.rs
+expression: "fmt_parse_error(\"DROP TIMESERIES\")"
+---
+input: "DROP TIMESERIES"
+kind:  Syntax
+error: Parse error at 1:16: Unexpected token: EOF (expected: identifier)
