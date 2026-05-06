@@ -1,0 +1,8 @@
+---
+source: crates/reddb-server/tests/graph_dsl_snapshots.rs
+assertion_line: 56
+expression: "fmt_parse_error(\"MATCH\")"
+---
+input: "MATCH"
+kind:  Syntax
+error: Parse error at 1:6: Unexpected token: EOF (expected: ()

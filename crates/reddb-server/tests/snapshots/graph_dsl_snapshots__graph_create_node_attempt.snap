@@ -1,0 +1,8 @@
+---
+source: crates/reddb-server/tests/graph_dsl_snapshots.rs
+assertion_line: 103
+expression: "fmt_parse_error(\"CREATE NODE (a:person {name: 'alice'})\")"
+---
+input: "CREATE NODE (a:person {name: 'alice'})"
+kind:  Syntax
+error: Parse error at 1:1: Unexpected token: NODE (expected: TABLE, INDEX, UNIQUE, TIMESERIES, QUEUE, TREE, HLL, SKETCH, FILTER, SCHEMA, SEQUENCE, MIGRATION)

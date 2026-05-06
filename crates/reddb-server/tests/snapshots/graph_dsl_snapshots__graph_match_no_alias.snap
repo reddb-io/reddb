@@ -1,0 +1,8 @@
+---
+source: crates/reddb-server/tests/graph_dsl_snapshots.rs
+assertion_line: 70
+expression: "fmt_parse_error(\"MATCH (:person) RETURN a\")"
+---
+input: "MATCH (:person) RETURN a"
+kind:  Syntax
+error: Parse error at 1:8: Unexpected token: : (expected: identifier)
