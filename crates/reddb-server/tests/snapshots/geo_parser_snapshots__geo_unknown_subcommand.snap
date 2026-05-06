@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/geo_parser_snapshots.rs
+expression: "fmt_parse_error(\"SEARCH SPATIAL POLYGON 0.0 0.0 COLLECTION c COLUMN col\")"
+---
+input: "SEARCH SPATIAL POLYGON 0.0 0.0 COLLECTION c COLUMN col"
+kind:  Syntax
+error: Parse error at 1:16: Unexpected token: POLYGON (expected: RADIUS, BBOX, NEAREST)

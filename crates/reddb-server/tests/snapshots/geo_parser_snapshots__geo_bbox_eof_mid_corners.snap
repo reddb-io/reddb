@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/geo_parser_snapshots.rs
+expression: "fmt_parse_error(\"SEARCH SPATIAL BBOX 0.0 0.0\")"
+---
+input: "SEARCH SPATIAL BBOX 0.0 0.0"
+kind:  Syntax
+error: Parse error at 1:28: Unexpected token: EOF (expected: number)
