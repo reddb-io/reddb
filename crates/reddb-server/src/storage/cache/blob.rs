@@ -27,6 +27,14 @@ pub const METRIC_CACHE_VERSION_MISMATCH_TOTAL: &str = "cache_version_mismatch_to
 pub const METRIC_CACHE_BLOB_L2_BYTES_IN_USE: &str = "reddb_cache_blob_l2_bytes_in_use";
 pub const METRIC_CACHE_BLOB_L2_FULL_REJECTIONS_TOTAL: &str =
     "reddb_cache_blob_l2_full_rejections_total";
+pub const METRIC_CACHE_BLOB_SYNOPSIS_METADATA_READS_TOTAL: &str =
+    "cache_blob_synopsis_metadata_reads_total";
+pub const METRIC_CACHE_BLOB_SYNOPSIS_BYTES: &str = "cache_blob_synopsis_bytes";
+
+/// Default per-namespace Bloom synopsis sizing target. The filter is sized
+/// for ~10K entries at ~1% false-positive rate.
+pub const DEFAULT_BLOB_SYNOPSIS_CAPACITY: usize = 10_000;
+pub const DEFAULT_BLOB_SYNOPSIS_FPR: f64 = 0.01;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlobCacheConfig {
@@ -479,6 +487,12 @@ pub struct BlobCacheStats {
     l2_full_rejections: u64,
     l2_metadata_reads: u64,
     l2_negative_skips: u64,
+    /// Times the per-namespace Bloom synopsis answered `MaybePresent` but the
+    /// authoritative L2 metadata B+ tree said `Absent` (the false-positive
+    /// cost of the probabilistic synopsis).
+    synopsis_metadata_reads: u64,
+    /// Total bytes used by all per-namespace Bloom synopsis filters.
+    synopsis_bytes: u64,
     namespaces: usize,
     max_namespaces: usize,
 }
@@ -551,6 +565,20 @@ impl BlobCacheStats {
 
     pub fn l2_negative_skips(&self) -> u64 {
         self.l2_negative_skips
+    }
+
+    /// Times the Bloom synopsis answered `MaybePresent` but the authoritative
+    /// L2 metadata B+ tree said `Absent`. This is the cost of the
+    /// probabilistic synopsis: a counter for the false-positive rate in
+    /// production. Negative answers from the filter never trigger a metadata
+    /// read (see [`l2_negative_skips`](Self::l2_negative_skips)).
+    pub fn synopsis_metadata_reads(&self) -> u64 {
+        self.synopsis_metadata_reads
+    }
+
+    /// Total bytes used by all per-namespace Bloom synopsis filters.
+    pub fn synopsis_bytes(&self) -> u64 {
+        self.synopsis_bytes
     }
 
     pub fn namespaces(&self) -> usize {
@@ -971,15 +999,136 @@ fn read_l2_string(bytes: &mut &[u8]) -> Result<String, CacheError> {
     Ok(value)
 }
 
+/// Tiny in-tree Bloom filter for the L2 membership synopsis (#146).
+///
+/// # Sizing
+///
+/// For a target capacity `n` and false-positive rate `p`, the optimal
+/// parameters are:
+///
+/// - bit array size `m = -n * ln(p) / ln(2)^2`
+/// - hash count `k = (m / n) * ln(2)`
+///
+/// At the cache defaults (`n = 10_000`, `p = 0.01`) this yields
+/// `m ≈ 95_851 bits ≈ 12 KB` and `k = 7`. With
+/// [`DEFAULT_BLOB_MAX_NAMESPACES`] = 256 the worst-case synopsis state is
+/// ~3 MB — acceptable next to a 256 MB L1 budget.
+///
+/// # Contract
+///
+/// - `contains(key)` returning `false` ALWAYS means absent (no
+///   false-negatives).
+/// - `contains(key)` returning `true` means MaybePresent — callers MUST verify
+///   against the authoritative L2 metadata B+ tree.
+/// - Bits cannot be cleared without losing the no-false-negatives guarantee,
+///   so deletes / expirations leave stale bits behind. Stale bits cause extra
+///   L2 metadata verifications, never spurious `Present` answers. A periodic
+///   full rebuild from the metadata B+ tree (currently startup-only) reclaims
+///   that space.
+mod synopsis_filter {
+    use std::hash::{Hash, Hasher};
+
+    /// Per-namespace Bloom filter. Hashing uses double-hashing
+    /// (`h_i(x) = h1(x) + i * h2(x)`) over two `DefaultHasher` seeds to avoid
+    /// pulling in any new dependency. The filter is never persisted; it is
+    /// rebuilt from the L2 metadata B+ tree at startup, so the per-process
+    /// `RandomState` of `DefaultHasher` is irrelevant to correctness.
+    #[derive(Debug)]
+    pub(super) struct BloomFilter {
+        bits: Vec<u64>,
+        bit_count: usize,
+        hash_count: u32,
+    }
+
+    impl BloomFilter {
+        /// Sized for `capacity` insertions at `target_fpr` false-positive
+        /// rate. `capacity` is clamped to ≥ 1 and `target_fpr` is clamped to
+        /// `(0.0, 1.0)` to avoid undefined math at the edges.
+        pub(super) fn with_capacity(capacity: usize, target_fpr: f64) -> Self {
+            let n = capacity.max(1) as f64;
+            let p = target_fpr.clamp(f64::MIN_POSITIVE, 0.999_999);
+            // m = -n * ln(p) / ln(2)^2
+            let ln2 = std::f64::consts::LN_2;
+            let m_bits = (-(n * p.ln()) / (ln2 * ln2)).ceil() as usize;
+            let bit_count = m_bits.max(64);
+            // k = (m / n) * ln(2)
+            let k = ((bit_count as f64 / n) * ln2).round() as u32;
+            let hash_count = k.max(1);
+            let words = bit_count.div_ceil(64);
+            Self {
+                bits: vec![0u64; words],
+                bit_count,
+                hash_count,
+            }
+        }
+
+        pub(super) fn insert(&mut self, key: &str) {
+            let (h1, h2) = double_hash(key);
+            for i in 0..self.hash_count {
+                let bit = (h1.wrapping_add((i as u64).wrapping_mul(h2))
+                    % self.bit_count as u64) as usize;
+                self.bits[bit / 64] |= 1u64 << (bit % 64);
+            }
+        }
+
+        pub(super) fn contains(&self, key: &str) -> bool {
+            let (h1, h2) = double_hash(key);
+            for i in 0..self.hash_count {
+                let bit = (h1.wrapping_add((i as u64).wrapping_mul(h2))
+                    % self.bit_count as u64) as usize;
+                if self.bits[bit / 64] & (1u64 << (bit % 64)) == 0 {
+                    return false;
+                }
+            }
+            true
+        }
+
+        /// Bytes consumed by the bit array (the heap allocation).
+        pub(super) fn bytes(&self) -> u64 {
+            (self.bits.len() * std::mem::size_of::<u64>()) as u64
+        }
+
+        #[cfg(test)]
+        pub(super) fn bit_count(&self) -> usize {
+            self.bit_count
+        }
+
+        #[cfg(test)]
+        pub(super) fn hash_count(&self) -> u32 {
+            self.hash_count
+        }
+    }
+
+    /// Two independent 64-bit hashes via two seeded `DefaultHasher`s. Only
+    /// used to derive `k` Bloom positions via double-hashing; correctness
+    /// does not depend on the choice of hasher (only `contains` after
+    /// `insert` returning `true` matters, which holds for any total hash).
+    fn double_hash(key: &str) -> (u64, u64) {
+        let mut h1 = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut h1);
+        let mut h2 = std::collections::hash_map::DefaultHasher::new();
+        // Domain-separate the second hash so it is independent of `h1`
+        // even though both seeds derive from the same `RandomState`.
+        0xa5a5_a5a5_a5a5_a5a5u64.hash(&mut h2);
+        key.hash(&mut h2);
+        let v2 = h2.finish();
+        // Ensure the increment is non-zero so all `k` probes are distinct.
+        (h1.finish(), v2 | 1)
+    }
+}
+
+use synopsis_filter::BloomFilter;
+
 struct BlobCacheL2 {
     pager: Arc<crate::storage::engine::Pager>,
     metadata: RwLock<crate::storage::engine::BTree>,
-    synopsis: RwLock<HashMap<String, HashSet<String>>>,
+    synopsis: RwLock<HashMap<String, BloomFilter>>,
     control: RwLock<L2Control>,
     control_path: PathBuf,
     bytes_in_use: AtomicU64,
     metadata_reads: AtomicU64,
     negative_skips: AtomicU64,
+    synopsis_metadata_reads: AtomicU64,
     bytes_max: u64,
     #[cfg(test)]
     fault_after_blob_write: std::sync::atomic::AtomicBool,
@@ -1011,6 +1160,7 @@ impl BlobCacheL2 {
             control_path,
             metadata_reads: AtomicU64::new(0),
             negative_skips: AtomicU64::new(0),
+            synopsis_metadata_reads: AtomicU64::new(0),
             bytes_max,
             #[cfg(test)]
             fault_after_blob_write: std::sync::atomic::AtomicBool::new(false),
@@ -1024,13 +1174,24 @@ impl BlobCacheL2 {
         }
         let encoded_key = encode_l2_key(&key.namespace, &key.key);
         self.metadata_reads.fetch_add(1, Ordering::Relaxed);
-        let record = self
+        let record = match self
             .metadata
             .read()
             .get(&encoded_key)
             .ok()
             .flatten()
-            .and_then(|bytes| L2Record::decode(&bytes).ok())?;
+            .and_then(|bytes| L2Record::decode(&bytes).ok())
+        {
+            Some(record) => record,
+            None => {
+                // Bloom synopsis said MaybePresent but the authoritative
+                // metadata B+ tree disagrees: a false positive (or stale
+                // bit). Count it for FPR observability.
+                self.synopsis_metadata_reads
+                    .fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+        };
         if record.namespace_generation != generation || record.is_expired_at(now_ms) {
             let _ = self.delete_key(key);
             return None;
@@ -1225,19 +1386,36 @@ impl BlobCacheL2 {
         self.negative_skips.load(Ordering::Relaxed)
     }
 
+    fn stats_synopsis_metadata_reads(&self) -> u64 {
+        self.synopsis_metadata_reads.load(Ordering::Relaxed)
+    }
+
+    fn stats_synopsis_bytes(&self) -> u64 {
+        self.synopsis
+            .read()
+            .values()
+            .map(|filter| filter.bytes())
+            .sum()
+    }
+
     fn synopsis_may_contain(&self, namespace: &str, key: &str) -> bool {
         self.synopsis
             .read()
             .get(namespace)
-            .is_some_and(|keys| keys.contains(key))
+            .is_some_and(|filter| filter.contains(key))
     }
 
     fn add_synopsis_key(&self, namespace: &str, key: &str) {
         self.synopsis
             .write()
             .entry(namespace.to_string())
-            .or_default()
-            .insert(key.to_string());
+            .or_insert_with(|| {
+                BloomFilter::with_capacity(
+                    DEFAULT_BLOB_SYNOPSIS_CAPACITY,
+                    DEFAULT_BLOB_SYNOPSIS_FPR,
+                )
+            })
+            .insert(key);
     }
 
     #[cfg(test)]
@@ -1339,8 +1517,8 @@ fn encode_l2_key(namespace: &str, key: &str) -> Vec<u8> {
 
 fn rebuild_l2_synopsis(
     metadata: &crate::storage::engine::BTree,
-) -> HashMap<String, HashSet<String>> {
-    let mut synopsis: HashMap<String, HashSet<String>> = HashMap::new();
+) -> HashMap<String, BloomFilter> {
+    let mut synopsis: HashMap<String, BloomFilter> = HashMap::new();
     let Ok(mut cursor) = metadata.cursor_first() else {
         return synopsis;
     };
@@ -1348,8 +1526,13 @@ fn rebuild_l2_synopsis(
         if let Ok(record) = L2Record::decode(&value) {
             synopsis
                 .entry(record.namespace)
-                .or_default()
-                .insert(record.key);
+                .or_insert_with(|| {
+                    BloomFilter::with_capacity(
+                        DEFAULT_BLOB_SYNOPSIS_CAPACITY,
+                        DEFAULT_BLOB_SYNOPSIS_FPR,
+                    )
+                })
+                .insert(&record.key);
         }
     }
     synopsis
@@ -1558,11 +1741,21 @@ impl BlobCache {
 
     /// Probe whether `(namespace, key)` is cached.
     ///
-    /// Returns a three-valued [`CachePresence`]: `Present` when an entry is
-    /// resident (L1 or rehydrated from L2), `Absent` when the cache can
-    /// authoritatively rule the key out, and `MaybePresent` when only a
-    /// probabilistic synopsis can answer (reserved for #146; never returned
-    /// today).
+    /// Returns a three-valued [`CachePresence`]:
+    ///
+    /// - `Present` when an L1-resident entry is held for the key.
+    /// - `Absent` when the cache can authoritatively rule the key out: either
+    ///   no L2 is configured, or the per-namespace Bloom synopsis
+    ///   (no-false-negatives) says the key was never inserted into L2.
+    /// - `MaybePresent` when L1 missed but the Bloom synopsis cannot rule the
+    ///   key out. Callers that need an exact answer must follow up with
+    ///   [`get`](Self::get), which performs the authoritative metadata read
+    ///   and either rehydrates a hit or surfaces a genuine miss.
+    ///
+    /// `exists` deliberately does NOT touch the L2 metadata B+ tree on a
+    /// `MaybePresent` answer — that is the whole reason the synopsis exists
+    /// (#146). The probabilistic answer is the cheap fast path; pay the
+    /// metadata-read cost only when you actually need the bytes.
     pub fn exists(&self, namespace: &str, key: &str) -> CachePresence {
         self.exists_at(namespace, key, unix_now_ms())
     }
@@ -1595,15 +1788,21 @@ impl BlobCache {
             }
             Lookup::Miss => {
                 drop(shard);
-                if self
-                    .rehydrate_l2_entry(&cache_key, now_ms, namespace_generation, shard_idx)
-                    .is_some()
-                {
+                let Some(l2) = self.l2.as_ref() else {
+                    self.stats.misses.fetch_add(1, Ordering::Relaxed);
+                    return CachePresence::Absent;
+                };
+                if l2.synopsis_may_contain(namespace, key) {
+                    // Filter says maybe — the cheap fast path defers the
+                    // authoritative read to `get`. Count as a hit prospect.
                     self.stats.hits.fetch_add(1, Ordering::Relaxed);
-                    return CachePresence::Present;
+                    CachePresence::MaybePresent
+                } else {
+                    // Filter says no — definitively absent (no
+                    // false-negatives).
+                    self.stats.misses.fetch_add(1, Ordering::Relaxed);
+                    CachePresence::Absent
                 }
-                self.stats.misses.fetch_add(1, Ordering::Relaxed);
-                CachePresence::Absent
             }
             Lookup::Hit(_) => unreachable!("exists cannot return a hit payload"),
         }
@@ -1746,6 +1945,11 @@ impl BlobCache {
             l2_full_rejections: self.stats.l2_full_rejections.load(Ordering::Relaxed),
             l2_metadata_reads: self.l2.as_ref().map_or(0, |l2| l2.stats_metadata_reads()),
             l2_negative_skips: self.l2.as_ref().map_or(0, |l2| l2.stats_negative_skips()),
+            synopsis_metadata_reads: self
+                .l2
+                .as_ref()
+                .map_or(0, |l2| l2.stats_synopsis_metadata_reads()),
+            synopsis_bytes: self.l2.as_ref().map_or(0, |l2| l2.stats_synopsis_bytes()),
             namespaces: self.namespaces.read().len(),
             max_namespaces: self.config.max_namespaces,
         }
@@ -2832,9 +3036,18 @@ mod tests {
             .unwrap();
         assert_eq!(cache.invalidate_key("n", "deleted"), 1);
 
-        assert_eq!(cache.exists("n", "deleted"), CachePresence::Absent);
+        // Bloom filter cannot clear bits, so the key still hashes positive
+        // — but `exists` must surface that ambiguity as `MaybePresent`, not a
+        // false `Present`. The authoritative `get` then returns None and
+        // bumps the synopsis-false-positive counter.
+        assert_eq!(
+            cache.exists("n", "deleted"),
+            CachePresence::MaybePresent
+        );
+        assert!(cache.get("n", "deleted").is_none());
         let stats = cache.stats();
         assert_eq!(stats.l2_metadata_reads, 1);
+        assert_eq!(stats.synopsis_metadata_reads, 1);
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("blob-cache.ctl"));
@@ -2858,7 +3071,14 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(cache.exists_at("n", "expired", 1_010), CachePresence::Absent);
+        // Filter still says maybe (bits cannot be cleared), so `exists`
+        // returns MaybePresent. The authoritative `get` walks the metadata,
+        // observes the expiry, and returns None.
+        assert_eq!(
+            cache.exists_at("n", "expired", 1_010),
+            CachePresence::MaybePresent
+        );
+        assert!(cache.get_at("n", "expired", 1_010).is_none());
         let stats = cache.stats();
         assert_eq!(stats.l2_metadata_reads, 1);
         assert_eq!(stats.l2_bytes_in_use, 0);
@@ -2909,8 +3129,20 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(cache.invalidate_key("n", &key), 1);
-            assert_eq!(cache.exists("n", &key), CachePresence::Absent);
+            // After delete the Bloom filter still has stale bits — exists
+            // can answer MaybePresent or Absent depending on whether the
+            // hash collides with a still-live key. The strict invariant is
+            // that `get` (the authoritative path) NEVER returns Some for a
+            // deleted key.
+            assert!(matches!(
+                cache.exists("n", &key),
+                CachePresence::MaybePresent | CachePresence::Absent
+            ));
+            assert!(cache.get("n", &key).is_none());
         }
+        // Each `get` of a deleted key with positive Bloom bits walks the
+        // metadata and finds nothing; that's the false-positive cost. Filter
+        // sizing (10K capacity / 1% FPR) means most lookups hit fast.
         assert_eq!(cache.stats().l2_metadata_reads, 1_000);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("blob-cache.ctl"));
@@ -2935,6 +3167,11 @@ mod tests {
             METRIC_CACHE_BLOB_L2_FULL_REJECTIONS_TOTAL,
             "reddb_cache_blob_l2_full_rejections_total"
         );
+        assert_eq!(
+            METRIC_CACHE_BLOB_SYNOPSIS_METADATA_READS_TOTAL,
+            "cache_blob_synopsis_metadata_reads_total"
+        );
+        assert_eq!(METRIC_CACHE_BLOB_SYNOPSIS_BYTES, "cache_blob_synopsis_bytes");
     }
 
     // -- API review #151 follow-ups -----------------------------------------
@@ -2943,10 +3180,10 @@ mod tests {
     fn cache_presence_from_bool_round_trips_present_and_absent() {
         assert_eq!(CachePresence::from(true), CachePresence::Present);
         assert_eq!(CachePresence::from(false), CachePresence::Absent);
-        // Today the implementation never emits MaybePresent — that variant
-        // is reserved for the Bloom synopsis (#146). The variant must still
-        // exist in the type so downstream callers can match on it without a
-        // future breaking change.
+        // The `MaybePresent` variant is emitted by the L2 Bloom synopsis
+        // (#146); the `From<bool>` adapter still maps the binary case
+        // exactly so callers that have a definitive answer can lift it
+        // without going through the synopsis.
         let _ = CachePresence::MaybePresent;
     }
 
@@ -3090,6 +3327,11 @@ mod tests {
         assert_eq!(stats.l2_full_rejections(), stats.l2_full_rejections);
         assert_eq!(stats.l2_metadata_reads(), stats.l2_metadata_reads);
         assert_eq!(stats.l2_negative_skips(), stats.l2_negative_skips);
+        assert_eq!(
+            stats.synopsis_metadata_reads(),
+            stats.synopsis_metadata_reads
+        );
+        assert_eq!(stats.synopsis_bytes(), stats.synopsis_bytes);
         assert_eq!(stats.namespaces(), stats.namespaces);
         assert_eq!(stats.max_namespaces(), stats.max_namespaces);
     }
@@ -3150,5 +3392,290 @@ mod tests {
         };
         let observed = worker.join().expect("worker thread");
         assert_eq!(observed.as_deref(), Some(b"v".as_slice()));
+    }
+
+    // -- #146 Bloom synopsis ------------------------------------------------
+
+    /// Tiny shared helper for the Bloom-filter property tests below.
+    fn fpr_for(filter: &super::synopsis_filter::BloomFilter, negatives: &[String]) -> f64 {
+        let positives = negatives
+            .iter()
+            .filter(|key| filter.contains(key))
+            .count() as f64;
+        positives / negatives.len().max(1) as f64
+    }
+
+    #[test]
+    fn bloom_synopsis_filter_no_false_negatives_and_fpr_within_target() {
+        // Insert N keys, assert all are reported as `contains == true`
+        // (no false-negatives). Then probe a 10*N disjoint negative set and
+        // check the empirical FPR is within ±2% of the configured target.
+        use super::synopsis_filter::BloomFilter;
+        let n = DEFAULT_BLOB_SYNOPSIS_CAPACITY;
+        let p = DEFAULT_BLOB_SYNOPSIS_FPR;
+        let mut filter = BloomFilter::with_capacity(n, p);
+
+        let inserted: Vec<String> = (0..n).map(|i| format!("present-{i}")).collect();
+        for key in &inserted {
+            filter.insert(key);
+        }
+        for key in &inserted {
+            assert!(
+                filter.contains(key),
+                "Bloom filter must never report false-negatives ({key} missing)"
+            );
+        }
+
+        let negatives: Vec<String> = (0..n * 10).map(|i| format!("absent-{i}")).collect();
+        let observed_fpr = fpr_for(&filter, &negatives);
+        let tolerance = 0.02;
+        assert!(
+            (observed_fpr - p).abs() <= tolerance,
+            "observed FPR {observed_fpr:.4} not within ±{tolerance} of target {p}"
+        );
+    }
+
+    #[test]
+    fn bloom_synopsis_filter_default_sizing_is_about_twelve_kilobytes() {
+        // Documented in the module comment: at the cache defaults the per-
+        // namespace filter is ~12 KB. Lock that in so an accidental sizing
+        // change shows up in review.
+        use super::synopsis_filter::BloomFilter;
+        let filter =
+            BloomFilter::with_capacity(DEFAULT_BLOB_SYNOPSIS_CAPACITY, DEFAULT_BLOB_SYNOPSIS_FPR);
+        // 95_851 bits round up to 1499 * 64 = 95_936 bits = 11_992 bytes.
+        assert!(filter.bit_count() >= 95_000 && filter.bit_count() <= 100_000);
+        assert!(filter.bytes() >= 11_500 && filter.bytes() <= 12_500);
+        assert_eq!(filter.hash_count(), 7);
+    }
+
+    #[test]
+    fn l2_synopsis_get_after_invalidate_returns_none_via_metadata_check() {
+        // Stale-bits-after-delete: insert key, invalidate, `get` must still
+        // return None because the authoritative metadata read says so.
+        let path = l2_path("synopsis-bloom-delete");
+        let cache = l2_cache(&path);
+        cache
+            .put(
+                "n",
+                "deleted",
+                BlobCachePut::new(b"gone".to_vec())
+                    .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
+            )
+            .unwrap();
+        assert_eq!(cache.invalidate_key("n", "deleted"), 1);
+        assert!(cache.get("n", "deleted").is_none());
+        assert_eq!(cache.stats().synopsis_metadata_reads(), 1);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("blob-cache.ctl"));
+        let _ = std::fs::remove_file(path.with_extension("dwb"));
+    }
+
+    #[test]
+    fn l2_synopsis_get_after_expiry_returns_none_via_metadata_check() {
+        // Stale-bits-after-expiry: TTL elapses, `get` must return None even
+        // though the Bloom bits still hash positive.
+        let path = l2_path("synopsis-bloom-expiry");
+        let cache = l2_cache(&path);
+        cache
+            .put_at(
+                "n",
+                "expired",
+                BlobCachePut::new(b"old".to_vec()).with_policy(
+                    BlobCachePolicy::default()
+                        .ttl_ms(10)
+                        .l1_admission(L1Admission::Never),
+                ),
+                1_000,
+            )
+            .unwrap();
+        assert!(cache.get_at("n", "expired", 1_010).is_none());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("blob-cache.ctl"));
+        let _ = std::fs::remove_file(path.with_extension("dwb"));
+    }
+
+    #[test]
+    fn l2_synopsis_rebuilds_filter_with_same_hit_rate_after_reopen() {
+        // Startup rebuild: write a non-trivial corpus, close, reopen, and
+        // assert the rebuilt filter produces the same negative-skip behaviour
+        // as the in-memory one would have.
+        let path = l2_path("synopsis-bloom-rebuild");
+        let live: Vec<String> = (0..512).map(|i| format!("live-{i}")).collect();
+        {
+            let cache = l2_cache(&path);
+            for key in &live {
+                cache
+                    .put(
+                        "n",
+                        key,
+                        BlobCachePut::new(b"x".to_vec()).with_policy(
+                            BlobCachePolicy::default().l1_admission(L1Admission::Never),
+                        ),
+                    )
+                    .unwrap();
+            }
+        }
+        let cache = l2_cache(&path);
+        // All live keys must still be reported MaybePresent (no false-
+        // negatives survived the rebuild).
+        for key in &live {
+            assert!(matches!(
+                cache.exists("n", key),
+                CachePresence::Present | CachePresence::MaybePresent
+            ));
+        }
+        // Negative probes hit the rebuilt Bloom path; almost all of them
+        // should be Absent. We tolerate the same FPR window as the
+        // dedicated filter test (within 2% of target).
+        let negatives: Vec<String> = (0..5_000).map(|i| format!("never-{i}")).collect();
+        let mut maybe_or_present = 0usize;
+        for key in &negatives {
+            if !matches!(cache.exists("n", key), CachePresence::Absent) {
+                maybe_or_present += 1;
+            }
+        }
+        let observed_fpr = maybe_or_present as f64 / negatives.len() as f64;
+        // Filter is well under capacity (512 of 10K), so empirical FPR is
+        // far below the 1% target; just assert it stays inside the
+        // documented ±2% envelope.
+        assert!(
+            observed_fpr <= DEFAULT_BLOB_SYNOPSIS_FPR + 0.02,
+            "rebuilt filter FPR {observed_fpr:.4} exceeded target+tolerance"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("blob-cache.ctl"));
+        let _ = std::fs::remove_file(path.with_extension("dwb"));
+    }
+
+    #[test]
+    fn l2_synopsis_present_answer_is_never_a_false_hit_under_random_workload() {
+        // Negative-only property test: drive a random workload and assert
+        // every `Present` answer is backed by an authoritative metadata hit.
+        let path = l2_path("synopsis-bloom-property");
+        let cache = l2_cache(&path);
+        // Lightweight deterministic LCG so the test does not pull in `rand`.
+        let mut state: u64 = 0xc001_d00d_dead_beef;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            state
+        };
+
+        for _ in 0..1_000 {
+            let key = format!("k{}", next() % 200);
+            match next() % 3 {
+                0 => {
+                    let _ = cache.put(
+                        "n",
+                        &key,
+                        BlobCachePut::new(b"v".to_vec())
+                            .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
+                    );
+                }
+                1 => {
+                    let _ = cache.invalidate_key("n", &key);
+                }
+                _ => {
+                    if cache.exists("n", &key) == CachePresence::Present {
+                        // Any `Present` answer must round-trip via `get`.
+                        // A false hit would surface as `None` here.
+                        assert!(
+                            cache.get("n", &key).is_some(),
+                            "exists reported Present for {key} but get returned None"
+                        );
+                    }
+                }
+            }
+        }
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("blob-cache.ctl"));
+        let _ = std::fs::remove_file(path.with_extension("dwb"));
+    }
+
+    #[test]
+    fn l2_synopsis_metadata_reads_counter_increments_on_filter_false_positive() {
+        // Inject a bit (no L2 record), then `get` — the metadata read finds
+        // nothing, which must bump `synopsis_metadata_reads_total`.
+        let path = l2_path("synopsis-bloom-stats");
+        let cache = l2_cache(&path);
+        cache.inject_l2_synopsis_maybe_present("n", "phantom");
+
+        assert!(cache.get("n", "phantom").is_none());
+        let stats = cache.stats();
+        assert_eq!(stats.synopsis_metadata_reads(), 1);
+        assert!(stats.synopsis_bytes() > 0);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("blob-cache.ctl"));
+        let _ = std::fs::remove_file(path.with_extension("dwb"));
+    }
+
+    #[test]
+    fn l2_synopsis_concurrent_readers_never_block_each_other() {
+        // 8 reader threads call `exists` while 1 writer thread inserts. The
+        // synopsis is RwLock-read-heavy, so readers should never deadlock or
+        // see torn state. The strict invariant: every reader makes forward
+        // progress and observes a legal `CachePresence` answer.
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc as StdArc;
+        use std::thread;
+        let path = l2_path("synopsis-bloom-concurrent");
+        let cache = StdArc::new(l2_cache(&path));
+        let stop = StdArc::new(AtomicBool::new(false));
+
+        let writer = {
+            let cache = StdArc::clone(&cache);
+            let stop = StdArc::clone(&stop);
+            thread::spawn(move || {
+                let mut i = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    let key = format!("w{}", i % 256);
+                    let _ = cache.put(
+                        "n",
+                        &key,
+                        BlobCachePut::new(b"x".to_vec())
+                            .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
+                    );
+                    i += 1;
+                }
+            })
+        };
+
+        let readers: Vec<_> = (0..8)
+            .map(|tid| {
+                let cache = StdArc::clone(&cache);
+                thread::spawn(move || {
+                    let mut probes = 0u64;
+                    for i in 0..2_000 {
+                        let key = format!("w{}", (i + tid) % 256);
+                        let answer = cache.exists("n", &key);
+                        // Any of the three legal answers is fine; the test
+                        // is that we did not deadlock and got a value.
+                        let _ = matches!(
+                            answer,
+                            CachePresence::Present
+                                | CachePresence::Absent
+                                | CachePresence::MaybePresent
+                        );
+                        probes += 1;
+                    }
+                    probes
+                })
+            })
+            .collect();
+
+        for r in readers {
+            assert_eq!(r.join().unwrap(), 2_000);
+        }
+        stop.store(true, Ordering::Relaxed);
+        writer.join().unwrap();
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("blob-cache.ctl"));
+        let _ = std::fs::remove_file(path.with_extension("dwb"));
     }
 }
