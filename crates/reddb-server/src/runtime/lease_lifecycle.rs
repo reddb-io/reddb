@@ -21,9 +21,10 @@
 use std::sync::{Arc, Mutex};
 
 use crate::api::{RedDBError, RedDBResult};
-use crate::json::Value as JsonValue;
 use crate::replication::lease::{LeaseError, LeaseStore, WriterLease};
-use crate::runtime::audit_log::{AuditAuthSource, AuditEvent, AuditLogger, Outcome};
+use crate::runtime::audit_log::{
+    AuditAuthSource, AuditEvent, AuditFieldEscaper, AuditLogger, Outcome,
+};
 use crate::runtime::write_gate::{LeaseGateState, WriteGate};
 
 /// Callback the lifecycle uses to ask the surrounding runtime to
@@ -96,33 +97,26 @@ impl LeaseLifecycle {
             Ok(lease) => {
                 *self.current.lock().expect("poisoned lease mutex") = Some(lease.clone());
                 self.write_gate.set_lease_state(LeaseGateState::Held);
-                let mut details = crate::json::Map::new();
-                details.insert(
-                    "generation".to_string(),
-                    JsonValue::Number(lease.generation as f64),
-                );
-                details.insert("ttl_ms".to_string(), JsonValue::Number(self.ttl_ms as f64));
                 self.audit_log.record_event(
                     AuditEvent::builder("lease/acquire")
                         .principal(self.holder_id.clone())
                         .source(AuditAuthSource::System)
                         .resource(self.database_key.clone())
                         .outcome(Outcome::Success)
-                        .detail(JsonValue::Object(details))
+                        .field(AuditFieldEscaper::field("generation", lease.generation as i64))
+                        .field(AuditFieldEscaper::field("ttl_ms", self.ttl_ms))
                         .build(),
                 );
                 Ok(())
             }
             Err(err) => {
-                let mut detail = crate::json::Map::new();
-                detail.insert("error".to_string(), JsonValue::String(format!("{err}")));
                 self.audit_log.record_event(
                     AuditEvent::builder("lease/acquire")
                         .principal(self.holder_id.clone())
                         .source(AuditAuthSource::System)
                         .resource(self.database_key.clone())
                         .outcome(Outcome::Error)
-                        .detail(JsonValue::Object(detail))
+                        .field(AuditFieldEscaper::field("error", err.to_string()))
                         .build(),
                 );
                 Err(RedDBError::Internal(format!("acquire writer lease: {err}")))
@@ -187,15 +181,13 @@ impl LeaseLifecycle {
                 Ok(())
             }
             Err(err) => {
-                let mut detail = crate::json::Map::new();
-                detail.insert("error".to_string(), JsonValue::String(format!("{err}")));
                 self.audit_log.record_event(
                     AuditEvent::builder("lease/release")
                         .principal(self.holder_id.clone())
                         .source(AuditAuthSource::System)
                         .resource(self.database_key.clone())
                         .outcome(Outcome::Error)
-                        .detail(JsonValue::Object(detail))
+                        .field(AuditFieldEscaper::field("error", err.to_string()))
                         .build(),
                 );
                 tracing::warn!(
@@ -218,15 +210,13 @@ impl LeaseLifecycle {
         );
         *self.current.lock().expect("poisoned lease mutex") = None;
         self.write_gate.set_lease_state(LeaseGateState::NotHeld);
-        let mut detail = crate::json::Map::new();
-        detail.insert("error".to_string(), JsonValue::String(format!("{err}")));
         self.audit_log.record_event(
             AuditEvent::builder("lease/lost")
                 .principal(self.holder_id.clone())
                 .source(AuditAuthSource::System)
                 .resource(self.database_key.clone())
                 .outcome(Outcome::Error)
-                .detail(JsonValue::Object(detail))
+                .field(AuditFieldEscaper::field("error", err.to_string()))
                 .build(),
         );
         (self.mark_draining)();
@@ -249,37 +239,27 @@ pub fn admin_promote_lease(
 ) -> Result<WriterLease, LeaseError> {
     match store.try_acquire(database_key, holder_id, ttl_ms) {
         Ok(lease) => {
-            let mut details = crate::json::Map::new();
-            details.insert(
-                "holder_id".to_string(),
-                JsonValue::String(lease.holder_id.clone()),
-            );
-            details.insert(
-                "generation".to_string(),
-                JsonValue::Number(lease.generation as f64),
-            );
-            details.insert("ttl_ms".to_string(), JsonValue::Number(ttl_ms as f64));
             audit_log.record_event(
                 AuditEvent::builder("admin/failover/promote")
                     .principal(lease.holder_id.clone())
                     .source(AuditAuthSource::System)
                     .resource(database_key.to_string())
                     .outcome(Outcome::Success)
-                    .detail(JsonValue::Object(details))
+                    .field(AuditFieldEscaper::field("holder_id", lease.holder_id.clone()))
+                    .field(AuditFieldEscaper::field("generation", lease.generation as i64))
+                    .field(AuditFieldEscaper::field("ttl_ms", ttl_ms))
                     .build(),
             );
             Ok(lease)
         }
         Err(err) => {
-            let mut detail = crate::json::Map::new();
-            detail.insert("error".to_string(), JsonValue::String(format!("{err}")));
             audit_log.record_event(
                 AuditEvent::builder("admin/failover/promote")
                     .principal(holder_id.to_string())
                     .source(AuditAuthSource::System)
                     .resource(database_key.to_string())
                     .outcome(Outcome::Error)
-                    .detail(JsonValue::Object(detail))
+                    .field(AuditFieldEscaper::field("error", err.to_string()))
                     .build(),
             );
             Err(err)
