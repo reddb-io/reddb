@@ -1037,6 +1037,37 @@ mod tests {
         }
     }
 
+    /// Decoder must reject a type byte it does not recognise rather
+    /// than silently returning a default. Guards against on-disk
+    /// corruption being interpreted as a valid value.
+    #[test]
+    fn rejects_unknown_type_tag() {
+        // 0xFF is outside the registered DataType range.
+        let buf = [0xFFu8];
+        let err = decode(&buf).expect_err("unknown tag must error");
+        assert!(matches!(err, ValueError::InvalidType(0xFF)));
+    }
+
+    /// A buffer truncated mid-payload must surface as
+    /// `TruncatedData`, not panic on a slice index. Covers the
+    /// fixed-width and length-prefixed code paths.
+    #[test]
+    fn rejects_truncated_buffer() {
+        // Empty buffer.
+        assert!(matches!(decode(&[]), Err(ValueError::EmptyData)));
+
+        // Integer tag (0x01) needs 8 payload bytes; supply 3.
+        let mut buf = vec![DataType::Integer.to_byte()];
+        buf.extend_from_slice(&[0x01, 0x02, 0x03]);
+        assert!(matches!(decode(&buf), Err(ValueError::TruncatedData)));
+
+        // Text tag (0x04) with varint len=5 but only 2 payload bytes.
+        let mut buf = vec![DataType::Text.to_byte()];
+        write_varint(&mut buf, 5);
+        buf.extend_from_slice(b"ab");
+        assert!(matches!(decode(&buf), Err(ValueError::TruncatedData)));
+    }
+
     /// Round-trip: encode then decode must recover the original
     /// value, byte for byte.
     #[test]

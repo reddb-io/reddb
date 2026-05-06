@@ -1,61 +1,10 @@
+use crate::storage::schema::value_codec::type_tag as registry_type_tag;
 use crate::storage::schema::Value;
 use std::cmp::Ordering;
 
+#[inline]
 fn value_type_tag(v: &Value) -> u8 {
-    match v {
-        Value::Null => 0,
-        Value::Boolean(_) => 1,
-        Value::Integer(_) => 2,
-        Value::UnsignedInteger(_) => 3,
-        Value::Float(_) => 4,
-        Value::Text(_) => 5,
-        Value::Blob(_) => 6,
-        Value::Timestamp(_) => 7,
-        Value::Duration(_) => 8,
-        Value::IpAddr(_) => 9,
-        Value::MacAddr(_) => 10,
-        Value::Vector(_) => 11,
-        Value::Json(_) => 12,
-        Value::Uuid(_) => 13,
-        Value::NodeRef(_) => 14,
-        Value::EdgeRef(_) => 15,
-        Value::VectorRef(_, _) => 16,
-        Value::RowRef(_, _) => 17,
-        Value::Color(_) => 18,
-        Value::Email(_) => 19,
-        Value::Url(_) => 20,
-        Value::Phone(_) => 21,
-        Value::Semver(_) => 22,
-        Value::Cidr(_, _) => 23,
-        Value::Date(_) => 24,
-        Value::Time(_) => 25,
-        Value::Decimal(_) => 26,
-        Value::EnumValue(_) => 27,
-        Value::Array(_) => 28,
-        Value::TimestampMs(_) => 29,
-        Value::Ipv4(_) => 30,
-        Value::Ipv6(_) => 31,
-        Value::Subnet(_, _) => 32,
-        Value::Port(_) => 33,
-        Value::Latitude(_) => 34,
-        Value::Longitude(_) => 35,
-        Value::GeoPoint(_, _) => 36,
-        Value::Country2(_) => 37,
-        Value::Country3(_) => 38,
-        Value::Lang2(_) => 39,
-        Value::Lang5(_) => 40,
-        Value::Currency(_) => 41,
-        Value::ColorAlpha(_) => 42,
-        Value::BigInt(_) => 43,
-        Value::KeyRef(_, _) => 44,
-        Value::DocRef(_, _) => 45,
-        Value::TableRef(_) => 46,
-        Value::PageRef(_) => 47,
-        Value::Secret(_) => 48,
-        Value::Password(_) => 49,
-        Value::AssetCode(_) => 50,
-        Value::Money { .. } => 51,
-    }
+    registry_type_tag(v)
 }
 
 pub(crate) fn partial_compare_values(a: &Value, b: &Value) -> Option<Ordering> {
@@ -82,4 +31,49 @@ pub(crate) fn partial_compare_values(a: &Value, b: &Value) -> Option<Ordering> {
 
 pub(crate) fn total_compare_values(a: &Value, b: &Value) -> Ordering {
     partial_compare_values(a, b).unwrap_or_else(|| value_type_tag(a).cmp(&value_type_tag(b)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::schema::value_codec;
+
+    /// Cross-type ordering must consult the registry's tag space, not a
+    /// local copy. If a new `Value` variant is added without registering
+    /// a tag, the registry returns the same byte as `DataType::to_byte`
+    /// and this test still passes — but a parallel hand-rolled table
+    /// (deleted in this slice) would have drifted.
+    #[test]
+    fn type_tag_delegates_to_registry() {
+        let samples: &[Value] = &[
+            Value::Null,
+            Value::Boolean(false),
+            Value::Integer(0),
+            Value::UnsignedInteger(0),
+            Value::Float(0.0),
+            Value::text(""),
+            Value::Blob(Vec::new()),
+            Value::Timestamp(0),
+            Value::Duration(0),
+            Value::Uuid([0; 16]),
+        ];
+        for v in samples {
+            assert_eq!(value_type_tag(v), value_codec::type_tag(v));
+        }
+    }
+
+    /// Cross-type orderings between disjoint variants stay total: any
+    /// two distinct variants must produce a non-Equal ordering through
+    /// the registry-derived tag fallback.
+    #[test]
+    fn cross_type_total_compare_is_total() {
+        let pairs: &[(Value, Value)] = &[
+            (Value::Boolean(true), Value::text("x")),
+            (Value::Integer(1), Value::Boolean(true)),
+            (Value::Null, Value::Boolean(false)),
+        ];
+        for (a, b) in pairs {
+            assert_ne!(total_compare_values(a, b), Ordering::Equal);
+        }
+    }
 }
