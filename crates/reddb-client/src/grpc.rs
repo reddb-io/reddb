@@ -13,10 +13,13 @@
 //! does not spin up its own runtime.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::RwLock;
+use std::time::Instant;
 
 use crate::connector::RedDBClient;
 
 use crate::error::{ClientError, ErrorCode, Result};
+use crate::router::{ClusterMembership, HealthAwareRouter, Outcome};
 use crate::types::{InsertResult, JsonValue, QueryResult, ValueOut};
 
 /// Default per-endpoint pool size when callers don't specify one.
@@ -37,10 +40,20 @@ pub struct GrpcClient {
     /// Round-robin counter for replica selection. Wraps cleanly
     /// (`Relaxed` is fine — exact ordering doesn't matter; spreading
     /// load across replicas does).
+    ///
+    /// Retained as a fallback for the all-equal-weight cold-start
+    /// path; the primary selection logic now lives in
+    /// [`crate::router::HealthAwareRouter`].
+    #[allow(dead_code)]
     next_replica: AtomicUsize,
     /// `?route=primary` opt-out. When true, every operation hits the
     /// primary regardless of method type.
     force_primary: bool,
+    /// Health-aware routing state (issue #171). Replaces the dumb
+    /// modulo round-robin with EWMA-RTT + circuit breaker per
+    /// endpoint. Behind an `RwLock` so [`update_membership`] can
+    /// swap the membership snapshot without poisoning hot reads.
+    router: RwLock<HealthAwareRouter>,
 }
 
 /// One remote endpoint plus a fixed pool of `RedDBClient` clones.
@@ -113,11 +126,14 @@ impl GrpcClient {
     /// without the legacy `Mutex` serialization.
     pub async fn connect_with_pool_size(endpoint: String, pool_size: usize) -> Result<Self> {
         let primary = Endpoint::connect(endpoint, pool_size).await?;
+        let membership = ClusterMembership::new(primary.url.clone(), Vec::new());
+        let router = RwLock::new(HealthAwareRouter::with_force_primary(membership, true));
         Ok(Self {
             primary,
             replicas: Vec::new(),
             next_replica: AtomicUsize::new(0),
             force_primary: true,
+            router,
         })
     }
 
@@ -147,11 +163,20 @@ impl GrpcClient {
         for url in replicas {
             replica_eps.push(Endpoint::connect(url, pool_size).await?);
         }
+        let membership = ClusterMembership::new(
+            primary_ep.url.clone(),
+            replica_eps.iter().map(|e| e.url.clone()).collect(),
+        );
+        let router = RwLock::new(HealthAwareRouter::with_force_primary(
+            membership,
+            force_primary,
+        ));
         Ok(Self {
             primary: primary_ep,
             replicas: replica_eps,
             next_replica: AtomicUsize::new(0),
             force_primary,
+            router,
         })
     }
 
@@ -165,24 +190,58 @@ impl GrpcClient {
         self.replicas.iter().map(|e| e.url.as_str()).collect()
     }
 
-    /// Pick the endpoint to dispatch a read against. Round-robins over
-    /// replicas; falls back to the primary when no replicas are
-    /// configured or `force_primary` is set.
-    fn read_endpoint(&self) -> &Endpoint {
-        if self.force_primary || self.replicas.is_empty() {
-            return &self.primary;
-        }
-        let idx = self.next_replica.fetch_add(1, Ordering::Relaxed) % self.replicas.len();
-        &self.replicas[idx]
+    /// Pick the endpoint to dispatch a read against. Delegates to
+    /// [`HealthAwareRouter`] (issue #171): inverse-RTT weighted
+    /// across healthy replicas, fallback to primary when all are
+    /// unhealthy or `force_primary` is set. Returns the endpoint
+    /// reference plus the index the router used so the caller can
+    /// `observe(...)` the outcome.
+    fn read_endpoint(&self) -> (&Endpoint, usize) {
+        let idx = self.router.read().unwrap().pick_read_index();
+        let ep = if idx == 0 {
+            &self.primary
+        } else {
+            // Index `i` (1-based) maps onto replica `i-1`. Guard
+            // against a stale router pointing past the current
+            // pool — fall back to primary.
+            self.replicas.get(idx - 1).unwrap_or(&self.primary)
+        };
+        (ep, idx)
+    }
+
+    /// Refresh routing state from a new cluster membership. Called
+    /// by Lane P's TopologyConsumer when it observes a topology
+    /// delta.
+    pub fn update_membership(&self, new_membership: ClusterMembership) {
+        self.router.write().unwrap().update_membership(new_membership);
+    }
+
+    /// Record an observation against an endpoint by index. Exposed
+    /// for Lane P's probe loop and integration tests.
+    pub(crate) fn observe(&self, idx: usize, outcome: Outcome) {
+        self.router.read().unwrap().observe_index(idx, outcome);
     }
 
     pub async fn query(&self, sql: &str) -> Result<QueryResult> {
-        let ep = self.read_endpoint();
+        let (ep, idx) = self.read_endpoint();
         let mut client = ep.pick();
-        let reply = client
-            .query_reply(sql)
-            .await
-            .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
+        let started = Instant::now();
+        let reply = match client.query_reply(sql).await {
+            Ok(r) => {
+                self.observe(idx, Outcome::Rtt(started.elapsed()));
+                r
+            }
+            Err(e) => {
+                // Treat any RPC error as a wire-level failure for
+                // the circuit breaker. Tonic does not expose a
+                // dedicated timeout variant we can match on without
+                // pulling more deps; the breaker's K=3 threshold
+                // tolerates the occasional false positive (a
+                // QueryError that happens to be application-level).
+                self.observe(idx, Outcome::Timeout);
+                return Err(ClientError::new(ErrorCode::QueryError, e.to_string()));
+            }
+        };
         parse_query_json(&reply.result_json)
     }
 

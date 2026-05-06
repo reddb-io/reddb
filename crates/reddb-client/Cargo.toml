@@ -105,6 +105,10 @@ tonic = { version = "0.14", default-features = false, features = ["channel", "co
 reddb-grpc-proto = { version = "0.2", path = "../reddb-grpc-proto" }
 tokio-stream = { version = "0.1", features = ["net"] }
 async-trait = "0.1"
+# Proptest exercises HealthAwareRouter (issue #171): random RTT
+# distributions + injected timeouts, asserts circuit-breaker
+# convergence and inverse-RTT weighted distribution.
+proptest = "1"
 
 [[bin]]
 name = "red_client"
