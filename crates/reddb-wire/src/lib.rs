@@ -11,8 +11,13 @@
 
 pub mod conn_string;
 pub mod redwire;
+pub mod topology;
 
 pub use conn_string::{
     parse, parse_with_limits, ConnStringLimits, ConnectionTarget, ParseError, ParseErrorKind,
 };
 pub use redwire::{BuildError, FrameBuilder};
+pub use topology::{
+    decode_topology, encode_topology, Endpoint, ReplicaInfo, Topology, TopologyError,
+    MAX_KNOWN_TOPOLOGY_VERSION, TOPOLOGY_HEADER_SIZE, TOPOLOGY_WIRE_VERSION_V1,
+};
