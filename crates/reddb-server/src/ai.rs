@@ -1363,7 +1363,7 @@ fn grpc_collect_inputs_from_source_query(
                     )
                 })?;
             for rec in &result.result.records {
-                for (key, value) in rec.values.iter() {
+                for (key, value) in rec.iter_fields() {
                     if key.as_ref() == field {
                         if let crate::storage::schema::Value::Text(text) = value {
                             let trimmed = text.trim();
@@ -1377,7 +1377,7 @@ fn grpc_collect_inputs_from_source_query(
         }
         "result" => {
             for rec in &result.result.records {
-                for (_, value) in rec.values.iter() {
+                for (_, value) in rec.iter_fields() {
                     if let crate::storage::schema::Value::Text(text) = value {
                         let trimmed = text.trim();
                         if !trimmed.is_empty() {

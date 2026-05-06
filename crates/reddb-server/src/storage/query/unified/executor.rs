@@ -803,7 +803,7 @@ impl UnifiedExecutor {
     /// Get a value for join condition
     fn get_join_value(&self, field: &FieldRef, record: &UnifiedRecord) -> Option<Value> {
         match field {
-            FieldRef::TableColumn { column, .. } => record.values.get(column.as_str()).cloned(),
+            FieldRef::TableColumn { column, .. } => record.get(column.as_str()).cloned(),
             FieldRef::NodeId { alias } => record
                 .nodes
                 .get(alias)
@@ -922,7 +922,9 @@ impl UnifiedExecutor {
                     let mut merged = left.clone();
                     merged.nodes.extend(right.nodes.clone());
                     merged.edges.extend(right.edges.clone());
-                    merged.values.extend(right.values.clone());
+                    for (k, v) in right.iter_fields() {
+                        merged.set_arc(k.clone(), v.clone());
+                    }
                     result.push(merged);
                 }
             }

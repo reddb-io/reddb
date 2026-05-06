@@ -2237,7 +2237,7 @@ async fn ask(
     let mut object = crate::json::Map::new();
     // Extract answer from first record
     if let Some(record) = result.result.records.first() {
-        if let Some(crate::storage::schema::Value::Text(answer)) = record.values.get("answer") {
+        if let Some(crate::storage::schema::Value::Text(answer)) = record.get("answer") {
             object.insert("ok".to_string(), crate::json::Value::Bool(true));
             object.insert("answer".to_string(), crate::json::Value::String(answer.to_string()));
         }

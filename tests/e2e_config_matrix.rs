@@ -19,7 +19,7 @@ fn show_value(rt: &RedDBRuntime, key: &str) -> Option<String> {
     // value representation depends on the underlying Value type, so
     // the helper returns a string rendering — tests assert by
     // `.contains(...)`.
-    record.values.get("value").map(|v| format!("{v:?}"))
+    record.get("value").map(|v| format!("{v:?}"))
 }
 
 #[test]

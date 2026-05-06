@@ -38,7 +38,7 @@ fn show_chunks_lists_every_allocated_chunk() {
             query: "SELECT HYPERTABLE_SHOW_CHUNKS('metrics') AS chunks".into(),
         })
         .expect("show ok");
-    let chunks = r.result.records[0].values.get("chunks").expect("chunks");
+    let chunks = r.result.records[0].get("chunks").expect("chunks");
     match chunks {
         Value::Array(v) => assert_eq!(v.len(), 3),
         other => panic!("expected Array, got {other:?}"),
@@ -70,7 +70,7 @@ fn drop_chunks_before_cutoff_removes_stale() {
             query: format!("SELECT HYPERTABLE_DROP_CHUNKS_BEFORE('metrics', {HOUR_NS}) AS n"),
         })
         .expect("drop ok");
-    let n = r.result.records[0].values.get("n").expect("n");
+    let n = r.result.records[0].get("n").expect("n");
     assert!(
         matches!(n, Value::Integer(n) if *n >= 1),
         "expected at least 1 dropped, got {n:?}"
@@ -102,7 +102,7 @@ fn sweep_expired_respects_ttl() {
             query: format!("SELECT HYPERTABLE_SWEEP_EXPIRED('metrics', {now_ns}) AS n"),
         })
         .expect("sweep ok");
-    let n = r.result.records[0].values.get("n").expect("n");
+    let n = r.result.records[0].get("n").expect("n");
     assert!(
         matches!(n, Value::Integer(1)),
         "expected 1 sweep, got {n:?}"
@@ -137,7 +137,7 @@ fn sweep_all_expired_crosses_every_hypertable() {
             query: format!("SELECT HYPERTABLE_SWEEP_ALL_EXPIRED({now_ns}) AS n"),
         })
         .expect("sweep_all ok");
-    let n = r.result.records[0].values.get("n").expect("n");
+    let n = r.result.records[0].get("n").expect("n");
     assert!(
         matches!(n, Value::Integer(n) if *n == 2),
         "expected 2 chunks swept across both tables, got {n:?}"
@@ -203,7 +203,7 @@ fn chunks_expiring_within_horizon_previews_without_drop() {
             ),
         })
         .expect("ok");
-    let c = r.result.records[0].values.get("c").expect("c");
+    let c = r.result.records[0].get("c").expect("c");
     match c {
         Value::Array(v) => assert_eq!(v.len(), 1, "one expiring chunk, got {v:?}"),
         other => panic!("expected Array, got {other:?}"),
@@ -235,6 +235,6 @@ fn sweep_without_ttl_is_noop() {
             ),
         })
         .expect("sweep ok");
-    let n = r.result.records[0].values.get("n").expect("n");
+    let n = r.result.records[0].get("n").expect("n");
     assert!(matches!(n, Value::Integer(0)), "expected 0, got {n:?}");
 }

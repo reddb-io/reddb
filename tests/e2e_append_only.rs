@@ -140,7 +140,7 @@ fn alter_table_set_append_only_flips_on() {
             query: "SELECT v FROM flips WHERE id = 1".into(),
         })
         .unwrap();
-    let v = sel.result.records[0].values.get("v").unwrap().to_string();
+    let v = sel.result.records[0].get("v").unwrap().to_string();
     assert!(v.contains('b'), "v expected 'b', got {v}");
 }
 
@@ -161,7 +161,7 @@ fn alter_table_unset_append_only_re_enables_mutations() {
             query: "SELECT v FROM switch WHERE id = 1".into(),
         })
         .unwrap();
-    let v = sel.result.records[0].values.get("v").unwrap().to_string();
+    let v = sel.result.records[0].get("v").unwrap().to_string();
     assert!(v.contains('y'), "v expected 'y', got {v}");
 }
 

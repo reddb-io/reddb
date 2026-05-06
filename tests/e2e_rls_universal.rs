@@ -47,7 +47,7 @@ fn policy_on_messages_of_queue_gates_consumers() {
         .result
         .records
         .first()
-        .and_then(|r| r.values.get("len"))
+        .and_then(|r| r.get("len"))
         .cloned();
     assert_eq!(
         len_value,
@@ -64,7 +64,7 @@ fn policy_on_messages_of_queue_gates_consumers() {
         .result
         .records
         .first()
-        .and_then(|r| r.values.get("len"))
+        .and_then(|r| r.get("len"))
         .cloned();
     assert_eq!(
         len_value,
@@ -81,7 +81,7 @@ fn policy_on_messages_of_queue_gates_consumers() {
         .result
         .records
         .first()
-        .and_then(|r| r.values.get("len"))
+        .and_then(|r| r.get("len"))
         .cloned();
     assert_eq!(
         len_value,
