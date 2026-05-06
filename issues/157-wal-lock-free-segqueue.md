@@ -1,4 +1,4 @@
-# perf(wal): lock-free append via SegQueue + leader-flush (Roadmap #2) [AFK]
+# perf(wal): lock-free append via SegQueue + leader-flush (Roadmap #2) [HITL] (in flight via worktree agent)
 
 GitHub: reddb-io/reddb#157
 Parent: #152

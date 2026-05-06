@@ -1,4 +1,4 @@
-# perf(storage): UnifiedRecord schema-shared layout (Roadmap #1) [AFK]
+# perf(storage): UnifiedRecord schema-shared layout (Roadmap #1) [HITL] (in flight via worktree agent)
 
 GitHub: reddb-io/reddb#156
 Parent: #152
