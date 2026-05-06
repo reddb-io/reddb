@@ -1,4 +1,4 @@
-# Bench: stale-binary preflight hardening + auto-rebuild [AFK]
+# Bench: stale-binary preflight hardening + auto-rebuild [HITL] (rdb-benchmark repo, not for ralph in reddb dir)
 
 GitHub: reddb-io/reddb#155
 Parent: #152
