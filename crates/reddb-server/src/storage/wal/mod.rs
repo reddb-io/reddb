@@ -8,6 +8,7 @@
 //! - **Records:** Sequence of variable-length records.
 //! - **Checksum:** Each record ends with a CRC32 checksum.
 
+pub mod append_coordinator;
 pub mod archiver;
 pub mod checkpoint;
 pub mod checkpointer_task;
@@ -19,6 +20,7 @@ pub mod rmgr;
 pub mod transaction;
 pub mod writer;
 
+pub use append_coordinator::WalAppendCoordinator;
 pub use archiver::{
     archive_change_records, archive_snapshot, load_archived_change_records, load_backup_head,
     load_snapshot_manifest, load_unified_manifest, load_wal_segment_manifest, publish_backup_head,
