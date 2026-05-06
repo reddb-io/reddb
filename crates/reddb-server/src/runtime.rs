@@ -176,6 +176,7 @@ pub struct RuntimeStats {
     pub started_at_unix_ms: u128,
     pub store: StoreStats,
     pub system: SystemInfo,
+    pub result_blob_cache: crate::storage::cache::BlobCacheStats,
 }
 
 #[derive(Debug, Clone)]
@@ -610,6 +611,8 @@ struct RuntimeResultCacheEntry {
     scopes: HashSet<String>,
 }
 
+pub const METRIC_CACHE_SHADOW_DIVERGENCE_TOTAL: &str = "cache_shadow_divergence_total";
+
 struct RuntimeInner {
     db: Arc<RedDB>,
     layout: PhysicalLayout,
@@ -626,6 +629,12 @@ struct RuntimeInner {
         HashMap<String, RuntimeResultCacheEntry>,
         std::collections::VecDeque<String>,
     )>,
+    result_blob_cache: crate::storage::cache::BlobCache,
+    result_blob_entries: parking_lot::RwLock<(
+        HashMap<String, RuntimeResultCacheEntry>,
+        std::collections::VecDeque<String>,
+    )>,
+    result_cache_shadow_divergences: std::sync::atomic::AtomicU64,
     /// Process-local queue message locks used to emulate `SKIP LOCKED`-style
     /// claim semantics for concurrent queue consumers inside this runtime.
     queue_message_locks: parking_lot::RwLock<HashMap<String, Arc<parking_lot::Mutex<()>>>>,
@@ -803,8 +812,10 @@ pub struct RuntimeConnection {
     inner: Arc<RuntimeInner>,
 }
 
+pub mod ask_pipeline;
 pub mod audit_log;
 pub mod audit_query;
+pub mod authorized_search;
 mod collection_contract;
 pub mod config_matrix;
 pub mod config_overlay;
@@ -844,8 +855,6 @@ pub mod schema_diff;
 pub mod schema_vocabulary;
 pub mod snapshot_reuse;
 mod statement_frame;
-pub mod authorized_search;
-pub mod ask_pipeline;
 pub mod within_clause;
 pub mod write_gate;
 

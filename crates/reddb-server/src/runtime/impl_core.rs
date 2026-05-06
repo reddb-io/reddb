@@ -1240,6 +1240,44 @@ fn query_expr_result_cache_scopes(expr: &QueryExpr) -> HashSet<String> {
     scopes
 }
 
+const RESULT_CACHE_BACKEND_KEY: &str = "runtime.result_cache.backend";
+const RESULT_CACHE_DEFAULT_BACKEND: &str = "legacy";
+const RESULT_CACHE_BLOB_NAMESPACE: &str = "runtime.result_cache";
+const RESULT_CACHE_TTL_SECS: u64 = 30;
+const RESULT_CACHE_MAX_ENTRIES: usize = 1000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeResultCacheBackend {
+    Legacy,
+    BlobCache,
+    Shadow,
+}
+
+fn trim_result_cache(
+    map: &mut HashMap<String, RuntimeResultCacheEntry>,
+    order: &mut std::collections::VecDeque<String>,
+) {
+    while map.len() > RESULT_CACHE_MAX_ENTRIES {
+        if let Some(oldest) = order.pop_front() {
+            map.remove(&oldest);
+        } else {
+            break;
+        }
+    }
+}
+
+fn result_cache_fingerprint(result: &RuntimeQueryResult) -> String {
+    format!(
+        "{:?}|{}|{}|{}|{}|{:?}",
+        result.result,
+        result.query,
+        result.statement,
+        result.engine,
+        result.affected_rows,
+        result.statement_type
+    )
+}
+
 /// Heuristic: does the raw SQL reference a built-in whose output
 /// varies by connection, clock, or randomness? Such queries must
 /// skip the 30s result cache — see the call site for rationale.
@@ -1553,6 +1591,12 @@ impl RedDBRuntime {
                     HashMap::new(),
                     std::collections::VecDeque::new(),
                 )),
+                result_blob_cache: crate::storage::cache::BlobCache::with_defaults(),
+                result_blob_entries: parking_lot::RwLock::new((
+                    HashMap::new(),
+                    std::collections::VecDeque::new(),
+                )),
+                result_cache_shadow_divergences: std::sync::atomic::AtomicU64::new(0),
                 queue_message_locks: parking_lot::RwLock::new(HashMap::new()),
                 planner_dirty_tables: parking_lot::RwLock::new(HashSet::new()),
                 ec_registry: Arc::new(crate::ec::config::EcRegistry::new()),
@@ -2068,11 +2112,7 @@ impl RedDBRuntime {
         &self,
         token: &str,
     ) -> Vec<crate::runtime::schema_vocabulary::VocabHit> {
-        self.inner
-            .schema_vocabulary
-            .read()
-            .lookup(token)
-            .to_vec()
+        self.inner.schema_vocabulary.read().lookup(token).to_vec()
     }
 
     /// Inject an AuthStore into the runtime. Called by server boot
@@ -3560,6 +3600,7 @@ impl RedDBRuntime {
             started_at_unix_ms: self.inner.started_at_unix_ms,
             store: self.inner.db.stats(),
             system: SystemInfo::collect(),
+            result_blob_cache: self.inner.result_blob_cache.stats(),
         }
     }
 
@@ -3709,11 +3750,8 @@ impl RedDBRuntime {
         // decision is not re-derived from globals here.
         let frame_iface: &dyn super::statement_frame::ReadFrame = &frame;
         if frame_iface.should_cache_result() {
-            let cache = self.inner.result_cache.read();
-            if let Some(entry) = cache.0.get(frame_iface.cache_key()) {
-                if entry.cached_at.elapsed().as_secs() < 30 {
-                    return Ok(entry.result.clone());
-                }
+            if let Some(result) = self.get_result_cache_entry(frame_iface.cache_key()) {
+                return Ok(result);
             }
         }
 
@@ -3917,7 +3955,11 @@ impl RedDBRuntime {
                 // synthesising a contradiction filter.
                 let table_with_rls = if self.inner.rls_enabled_tables.read().contains(&table.table)
                 {
-                    match inject_rls_filters(self, &frame as &dyn super::statement_frame::ReadFrame, table) {
+                    match inject_rls_filters(
+                        self,
+                        &frame as &dyn super::statement_frame::ReadFrame,
+                        table,
+                    ) {
                         Some(t) => t,
                         None => {
                             let empty = crate::storage::query::unified::UnifiedResult::empty();
@@ -3958,7 +4000,11 @@ impl RedDBRuntime {
                 // When any leaf has RLS enabled and zero matching policy,
                 // short-circuit to an empty join result instead of
                 // emitting a contradiction filter.
-                let join_with_rls = match inject_rls_into_join(self, &frame as &dyn super::statement_frame::ReadFrame, join) {
+                let join_with_rls = match inject_rls_into_join(
+                    self,
+                    &frame as &dyn super::statement_frame::ReadFrame,
+                    join,
+                ) {
                     Some(j) => j,
                     None => {
                         return Ok(RuntimeQueryResult {
@@ -5036,26 +5082,14 @@ impl RedDBRuntime {
             // are write-side heuristics handled by
             // `should_write_result_cache`.
             if frame_iface.should_cache_result() && frame.should_write_result_cache(result) {
-                let mut cache = self.inner.result_cache.write();
-                let (ref mut map, ref mut order) = *cache;
-                if !map.contains_key(frame_iface.cache_key()) {
-                    order.push_back(frame_iface.cache_key().to_string());
-                }
-                map.insert(
-                    frame_iface.cache_key().to_string(),
+                self.put_result_cache_entry(
+                    frame_iface.cache_key(),
                     RuntimeResultCacheEntry {
                         result: result.clone(),
                         cached_at: std::time::Instant::now(),
                         scopes: result_cache_scopes,
                     },
                 );
-                while map.len() > 1000 {
-                    if let Some(oldest) = order.pop_front() {
-                        map.remove(&oldest);
-                    } else {
-                        break;
-                    }
-                }
             }
         }
 
@@ -5328,35 +5362,164 @@ impl RedDBRuntime {
         }))
     }
 
+    fn result_cache_backend(&self) -> RuntimeResultCacheBackend {
+        match self
+            .config_string(RESULT_CACHE_BACKEND_KEY, RESULT_CACHE_DEFAULT_BACKEND)
+            .as_str()
+        {
+            "blob_cache" => RuntimeResultCacheBackend::BlobCache,
+            "shadow" => RuntimeResultCacheBackend::Shadow,
+            _ => RuntimeResultCacheBackend::Legacy,
+        }
+    }
+
+    fn get_result_cache_entry(&self, key: &str) -> Option<RuntimeQueryResult> {
+        match self.result_cache_backend() {
+            RuntimeResultCacheBackend::Legacy => self.get_legacy_result_cache_entry(key),
+            RuntimeResultCacheBackend::BlobCache => self.get_blob_result_cache_entry(key),
+            RuntimeResultCacheBackend::Shadow => {
+                let legacy = self.get_legacy_result_cache_entry(key);
+                let blob = self.get_blob_result_cache_entry(key);
+                if let (Some(ref legacy), Some(ref blob)) = (&legacy, &blob) {
+                    if result_cache_fingerprint(legacy) != result_cache_fingerprint(blob) {
+                        self.inner
+                            .result_cache_shadow_divergences
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tracing::warn!(
+                            key,
+                            metric = crate::runtime::METRIC_CACHE_SHADOW_DIVERGENCE_TOTAL,
+                            "result cache shadow backend diverged from legacy"
+                        );
+                    }
+                }
+                legacy
+            }
+        }
+    }
+
+    fn get_legacy_result_cache_entry(&self, key: &str) -> Option<RuntimeQueryResult> {
+        let cache = self.inner.result_cache.read();
+        cache.0.get(key).and_then(|entry| {
+            if entry.cached_at.elapsed().as_secs() < RESULT_CACHE_TTL_SECS {
+                Some(entry.result.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn get_blob_result_cache_entry(&self, key: &str) -> Option<RuntimeQueryResult> {
+        self.inner
+            .result_blob_cache
+            .get(RESULT_CACHE_BLOB_NAMESPACE, key)?;
+        let cache = self.inner.result_blob_entries.read();
+        cache.0.get(key).map(|entry| entry.result.clone())
+    }
+
+    fn put_result_cache_entry(&self, key: &str, entry: RuntimeResultCacheEntry) {
+        match self.result_cache_backend() {
+            RuntimeResultCacheBackend::Legacy => self.put_legacy_result_cache_entry(key, entry),
+            RuntimeResultCacheBackend::BlobCache => self.put_blob_result_cache_entry(key, entry),
+            RuntimeResultCacheBackend::Shadow => {
+                self.put_legacy_result_cache_entry(key, entry.clone());
+                self.put_blob_result_cache_entry(key, entry);
+            }
+        }
+    }
+
+    fn put_legacy_result_cache_entry(&self, key: &str, entry: RuntimeResultCacheEntry) {
+        let mut cache = self.inner.result_cache.write();
+        let (ref mut map, ref mut order) = *cache;
+        if !map.contains_key(key) {
+            order.push_back(key.to_string());
+        }
+        map.insert(key.to_string(), entry);
+        trim_result_cache(map, order);
+    }
+
+    fn put_blob_result_cache_entry(&self, key: &str, entry: RuntimeResultCacheEntry) {
+        let policy = crate::storage::cache::BlobCachePolicy::default()
+            .ttl_ms(RESULT_CACHE_TTL_SECS * 1000)
+            .priority(200);
+        let dependencies = entry.scopes.iter().cloned().collect::<Vec<_>>();
+        let put = crate::storage::cache::BlobCachePut::new(
+            result_cache_fingerprint(&entry.result).into_bytes(),
+        )
+        .with_dependencies(dependencies)
+        .with_policy(policy);
+        if self
+            .inner
+            .result_blob_cache
+            .put(RESULT_CACHE_BLOB_NAMESPACE, key, put)
+            .is_err()
+        {
+            return;
+        }
+
+        let mut cache = self.inner.result_blob_entries.write();
+        let (ref mut map, ref mut order) = *cache;
+        if !map.contains_key(key) {
+            order.push_back(key.to_string());
+        }
+        map.insert(key.to_string(), entry);
+        trim_result_cache(map, order);
+    }
+
+    pub fn result_cache_shadow_divergences(&self) -> u64 {
+        self.inner
+            .result_cache_shadow_divergences
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Invalidate the result cache (call after any write operation).
     /// Full clear — use for DDL (DROP TABLE, schema changes) or when table is unknown.
     pub fn invalidate_result_cache(&self) {
         let mut cache = self.inner.result_cache.write();
         cache.0.clear();
         cache.1.clear();
+        let mut blob_entries = self.inner.result_blob_entries.write();
+        blob_entries.0.clear();
+        blob_entries.1.clear();
+        self.inner
+            .result_blob_cache
+            .invalidate_namespace(RESULT_CACHE_BLOB_NAMESPACE);
     }
 
     /// Invalidate only result cache entries that declared a dependency on `table`.
     /// Cheaper than a full clear: unrelated tables keep their cached results.
     pub(crate) fn invalidate_result_cache_for_table(&self, table: &str) {
-        // Hot-path probe: with a read lock, see if any cache entry
-        // even references this table. The bench's `bulk_update`
-        // pattern fires N independent UPDATE statements; each used
-        // to grab the result-cache write lock unconditionally,
-        // serialising the writers on this single mutex even though
-        // the cache is empty (no SELECT cached against the table).
-        // Read lock first → if no match, skip the write entirely.
-        {
+        // Hot-path probe both backends before taking write locks. The blob
+        // backend is node-local, same as the legacy result cache.
+        let legacy_has_match = {
             let cache = self.inner.result_cache.read();
             let (ref map, _) = *cache;
-            if map.is_empty() || !map.values().any(|entry| entry.scopes.contains(table)) {
-                return;
-            }
+            !map.is_empty() && map.values().any(|entry| entry.scopes.contains(table))
+        };
+        let blob_has_match = {
+            let cache = self.inner.result_blob_entries.read();
+            let (ref map, _) = *cache;
+            !map.is_empty() && map.values().any(|entry| entry.scopes.contains(table))
+        };
+        if !legacy_has_match && !blob_has_match {
+            return;
         }
-        let mut cache = self.inner.result_cache.write();
-        let (ref mut map, ref mut order) = *cache;
-        map.retain(|_, entry| !entry.scopes.contains(table));
-        order.retain(|key| map.contains_key(key));
+
+        if legacy_has_match {
+            let mut cache = self.inner.result_cache.write();
+            let (ref mut map, ref mut order) = *cache;
+            map.retain(|_, entry| !entry.scopes.contains(table));
+            order.retain(|key| map.contains_key(key));
+        }
+
+        if blob_has_match {
+            let mut blob_entries = self.inner.result_blob_entries.write();
+            let (ref mut blob_map, ref mut blob_order) = *blob_entries;
+            blob_map.retain(|_, entry| !entry.scopes.contains(table));
+            blob_order.retain(|key| blob_map.contains_key(key));
+            self.inner
+                .result_blob_cache
+                .invalidate_dependency(RESULT_CACHE_BLOB_NAMESPACE, table);
+        }
     }
 
     pub(crate) fn invalidate_plan_cache(&self) {

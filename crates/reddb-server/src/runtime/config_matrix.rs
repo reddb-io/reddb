@@ -14,7 +14,7 @@
 //! It intentionally does **not** cover the pre-existing `red.*`
 //! trees (ai, server, storage, search, etc.) — those have their own
 //! lifecycle in `impl_core`. Keys here live under the new
-//! `durability.*`, `concurrency.*`, `storage.*` namespaces.
+//! `cache.*`, `durability.*`, `concurrency.*`, `storage.*` namespaces.
 
 use crate::serde_json::Value as JsonValue;
 use crate::storage::UnifiedStore;
@@ -51,11 +51,33 @@ pub enum Tier {
 
 /// The full matrix. Keep sorted by namespace for readability.
 pub const MATRIX: &[ConfigDefault] = &[
+    // cache.blob.*
+    ConfigDefault {
+        key: "cache.blob.l1_bytes_max",
+        tier: Tier::Critical,
+        default: || num(crate::storage::cache::DEFAULT_BLOB_L1_BYTES_MAX as f64),
+    },
+    ConfigDefault {
+        key: "cache.blob.l2_bytes_max",
+        tier: Tier::Critical,
+        default: || num(crate::storage::cache::DEFAULT_BLOB_L2_BYTES_MAX as f64),
+    },
+    ConfigDefault {
+        key: "cache.blob.max_namespaces",
+        tier: Tier::Critical,
+        default: || num(crate::storage::cache::DEFAULT_BLOB_MAX_NAMESPACES as f64),
+    },
     // durability.*
     ConfigDefault {
         key: "durability.mode",
         tier: Tier::Critical,
         default: || text("sync"),
+    },
+    // runtime.result_cache.*
+    ConfigDefault {
+        key: "runtime.result_cache.backend",
+        tier: Tier::Critical,
+        default: || text("legacy"),
     },
     // concurrency.*
     ConfigDefault {
@@ -203,7 +225,11 @@ mod tests {
         // This list is a tripwire — if someone drops one of these
         // from Tier A without updating callers, the test catches it.
         let required_critical = [
+            "cache.blob.l1_bytes_max",
+            "cache.blob.l2_bytes_max",
+            "cache.blob.max_namespaces",
             "durability.mode",
+            "runtime.result_cache.backend",
             "concurrency.locking.enabled",
             "storage.wal.max_interval_ms",
             "storage.bgwriter.delay_ms",

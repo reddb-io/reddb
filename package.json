@@ -8,7 +8,7 @@
   },
   "files": [
     "drivers/js/src/",
-    "drivers/js/postinstall.js",
+    "drivers/js/cli-postinstall.js",
     "drivers/js/package.json"
   ],
   "engines": {
@@ -16,9 +16,13 @@
   },
   "packageManager": "pnpm@9.15.0",
   "scripts": {
-    "postinstall": "node drivers/js/postinstall.js",
+    "postinstall": "node drivers/js/cli-postinstall.js",
     "test": "node drivers/js/test/smoke.test.mjs",
     "version": "node scripts/sync-version.js"
+  },
+  "dependencies": {
+    "@reddb-io/internal-asset-fetcher": "workspace:*",
+    "@reddb-io/internal-version-compare": "workspace:*"
   },
   "keywords": [
     "database",

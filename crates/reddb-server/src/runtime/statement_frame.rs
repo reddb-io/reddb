@@ -173,7 +173,10 @@ fn statement_kind(query: &str) -> &'static str {
     // Skip a leading line / block comment so the classifier doesn't
     // misread `/* ... */ SELECT ...` as an unknown statement.
     let trimmed = if let Some(rest) = trimmed.strip_prefix("--") {
-        rest.split_once('\n').map(|(_, r)| r).unwrap_or("").trim_start()
+        rest.split_once('\n')
+            .map(|(_, r)| r)
+            .unwrap_or("")
+            .trim_start()
     } else {
         trimmed
     };
@@ -290,10 +293,8 @@ impl StatementExecutionFrame {
         // store is wired *and* an identity was captured — embedded
         // anonymous callers fall back to `None`, and AI search call
         // sites refuse on `None`.
-        let visible_collections = match (
-            runtime.inner.auth_store.read().clone(),
-            identity.as_ref(),
-        ) {
+        let visible_collections = match (runtime.inner.auth_store.read().clone(), identity.as_ref())
+        {
             (Some(store), Some((principal, role))) => {
                 let collections = runtime.inner.db.store().list_collections();
                 Some(store.visible_collections_for_scope(
@@ -681,11 +682,11 @@ fn result_cache_key(query: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::RedDBOptions;
     use crate::runtime::impl_core::{
         clear_current_auth_identity, clear_current_tenant, set_current_auth_identity,
         set_current_tenant,
     };
-    use crate::api::RedDBOptions;
     use crate::runtime::RedDBRuntime;
 
     fn fresh_runtime() -> RedDBRuntime {
@@ -854,17 +855,88 @@ mod tests {
     }
 
     #[test]
+    fn blob_cache_backend_populates_blob_path_without_legacy_write() {
+        reset_thread_locals();
+        let rt = fresh_runtime();
+        rt.inner
+            .db
+            .store()
+            .set_config_tree("runtime.result_cache.backend", &crate::json!("blob_cache"));
+
+        let result = rt.execute_query("SELECT 1").expect("SELECT 1 executes");
+        assert_eq!(result.statement_type, "select");
+
+        let key = result_cache_key("SELECT 1");
+        assert!(
+            rt.inner
+                .result_blob_cache
+                .get("runtime.result_cache", &key)
+                .is_some(),
+            "blob backend should stamp the Blob Cache path"
+        );
+        assert!(rt.inner.result_blob_entries.read().0.contains_key(&key));
+        assert!(
+            !rt.inner.result_cache.read().0.contains_key(&key),
+            "blob backend should not write the legacy map"
+        );
+    }
+
+    #[test]
+    fn blob_cache_backend_keeps_volatile_select_out_of_blob_path() {
+        reset_thread_locals();
+        let rt = fresh_runtime();
+        rt.inner
+            .db
+            .store()
+            .set_config_tree("runtime.result_cache.backend", &crate::json!("blob_cache"));
+
+        let _ = rt
+            .execute_query("SELECT pg_advisory_unlock(1)")
+            .expect("volatile SELECT executes");
+        let key = result_cache_key("SELECT pg_advisory_unlock(1)");
+        assert!(
+            rt.inner
+                .result_blob_cache
+                .get("runtime.result_cache", &key)
+                .is_none(),
+            "volatile SELECT must not populate blob result cache"
+        );
+        assert!(!rt.inner.result_blob_entries.read().0.contains_key(&key));
+    }
+
+    #[test]
+    fn shadow_backend_dual_writes_and_reports_no_divergence_on_equal_results() {
+        reset_thread_locals();
+        let rt = fresh_runtime();
+        rt.inner
+            .db
+            .store()
+            .set_config_tree("runtime.result_cache.backend", &crate::json!("shadow"));
+
+        let first = rt.execute_query("SELECT 1").expect("first SELECT");
+        let second = rt.execute_query("SELECT 1").expect("cached SELECT");
+        assert_eq!(first.result.len(), second.result.len());
+
+        let key = result_cache_key("SELECT 1");
+        assert!(rt.inner.result_cache.read().0.contains_key(&key));
+        assert!(rt.inner.result_blob_entries.read().0.contains_key(&key));
+        assert_eq!(rt.result_cache_shadow_divergences(), 0);
+        assert_eq!(
+            crate::runtime::METRIC_CACHE_SHADOW_DIVERGENCE_TOTAL,
+            "cache_shadow_divergence_total"
+        );
+    }
+
+    #[test]
     fn as_of_on_red_collection_records_floor() {
         reset_thread_locals();
         let rt = fresh_runtime();
 
         // `red_*` collections always allow AS OF. The frame should
         // resolve to a concrete xid and surface it via the Interface.
-        let frame = StatementExecutionFrame::build(
-            &rt,
-            "SELECT * FROM red_commits AS OF SNAPSHOT 1",
-        )
-        .expect("AS OF SNAPSHOT 1 on red_commits resolves");
+        let frame =
+            StatementExecutionFrame::build(&rt, "SELECT * FROM red_commits AS OF SNAPSHOT 1")
+                .expect("AS OF SNAPSHOT 1 on red_commits resolves");
 
         let f: &dyn ReadFrame = &frame;
         assert_eq!(
@@ -920,11 +992,7 @@ mod tests {
             let frame = StatementExecutionFrame::build(&rt, q)
                 .unwrap_or_else(|e| panic!("frame builds for {q:?}: {e}"));
             let f: &dyn ReadFrame = &frame;
-            assert_eq!(
-                f.required_privilege(),
-                want_priv,
-                "privilege for {q:?}"
-            );
+            assert_eq!(f.required_privilege(), want_priv, "privilege for {q:?}");
             assert_eq!(f.lock_intent(), want_lock, "lock intent for {q:?}");
         }
     }
@@ -956,9 +1024,8 @@ mod tests {
         // needing an auth_store wired up. Driving end-to-end via
         // `execute_query` would also reject (no table `t`), but for
         // a different reason — we want to pin the privilege seam.
-        let frame =
-            StatementExecutionFrame::build(&rt, "INSERT INTO t (id) VALUES (1)")
-                .expect("frame builds for INSERT");
+        let frame = StatementExecutionFrame::build(&rt, "INSERT INTO t (id) VALUES (1)")
+            .expect("frame builds for INSERT");
         let f: &dyn ReadFrame = &frame;
         assert_eq!(
             f.required_privilege(),
@@ -1004,8 +1071,7 @@ mod tests {
         reset_thread_locals();
         let rt = fresh_runtime();
 
-        let frame =
-            StatementExecutionFrame::build(&rt, "BEGIN").expect("frame builds for BEGIN");
+        let frame = StatementExecutionFrame::build(&rt, "BEGIN").expect("frame builds for BEGIN");
         let f: &dyn ReadFrame = &frame;
         assert_eq!(f.lock_intent(), LockIntent::None);
 
