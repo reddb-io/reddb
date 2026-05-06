@@ -1,0 +1,6 @@
+---
+source: crates/reddb-server/tests/geo_parser_snapshots.rs
+expression: "fmt_parse_error(\"SEARCH SPATIAL RADIUS 0.0 0.0 10.0 COLLECTION sites location\")"
+---
+UNEXPECTED OK
+input: "SEARCH SPATIAL RADIUS 0.0 0.0 10.0 COLLECTION sites location"

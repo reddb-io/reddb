@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/geo_parser_snapshots.rs
+expression: "fmt_parse_error(\"SEARCH SPATIAL RADIUS 48.8566 2.3522\")"
+---
+input: "SEARCH SPATIAL RADIUS 48.8566 2.3522"
+kind:  Syntax
+error: Parse error at 1:37: Unexpected token: EOF (expected: number)
