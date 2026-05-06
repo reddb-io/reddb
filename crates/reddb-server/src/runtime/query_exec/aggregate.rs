@@ -76,6 +76,21 @@ pub(crate) fn execute_aggregate_query(
 ) -> RedDBResult<UnifiedResult> {
     validate_aggregate_projection_shape(query)?;
 
+    // ── Push-down GROUP BY planner — issue #161 ───────────────────────
+    // The new `AggregateQueryPlanner` deep module accumulates per-group
+    // state directly in the scan loop, materialising one row per group
+    // instead of one per scanned input. Eligible: single-column GROUP
+    // BY by simple column ref, aggregates limited to COUNT(*) /
+    // COUNT(col) / SUM / AVG / MIN / MAX over simple column refs.
+    // Unsupported shapes return None and fall through to the legacy
+    // path below — this is a strict subset, so behaviour is identical
+    // for queries it accepts.
+    if let Some(result) =
+        super::aggregate_pushdown_dispatch::try_execute_pushdown_aggregate(db, query)?
+    {
+        return Ok(result);
+    }
+
     // Fast path — SELECT <col>, COUNT/SUM/AVG(...) FROM t GROUP BY <col>
     // parallelised across segments via rayon. This is the mini-duel
     // aggregate_group shape and avoids the generic Vec<GroupKeyPart> +
