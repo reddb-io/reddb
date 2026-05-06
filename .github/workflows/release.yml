@@ -282,7 +282,7 @@ jobs:
 
             **npm / pnpm:**
             ```bash
-            pnpm add reddb-cli    # CLI launcher (`red` binary wrapper)
+            pnpm add @reddb-io/cli    # CLI launcher (`red` binary wrapper)
             pnpm add reddb        # Node/TS driver package (native protocol + spawn)
             ```
 
