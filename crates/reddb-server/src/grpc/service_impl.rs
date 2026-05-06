@@ -865,19 +865,24 @@ async fn roots(&self, request: Request<Empty>) -> Result<Response<PayloadReply>,
 async fn snapshots(&self, request: Request<Empty>) -> Result<Response<PayloadReply>, Status> {
     self.authorize_read(request.metadata())?;
     let snapshots = self.native_use_cases().snapshots().map_err(to_status)?;
-    Ok(Response::new(PayloadReply {
-        ok: true,
-        payload: format!("{snapshots:?}"),
-    }))
+    // Round-trip through the JSON guard rather than emit raw
+    // `Debug` text — the inner snapshot struct can carry user-
+    // supplied collection / path strings. ADR 0010 §3 / #178.
+    let payload = format!("{snapshots:?}");
+    Ok(Response::new(json_payload_reply(
+        crate::json_field::SerializedJsonField::tainted(&payload),
+    )))
 }
 
 async fn exports(&self, request: Request<Empty>) -> Result<Response<PayloadReply>, Status> {
     self.authorize_read(request.metadata())?;
     let exports = self.native_use_cases().exports().map_err(to_status)?;
-    Ok(Response::new(PayloadReply {
-        ok: true,
-        payload: format!("{exports:?}"),
-    }))
+    // See `snapshots` above — `exports` Debug text can carry user
+    // path fragments. ADR 0010 §3 / #178.
+    let payload = format!("{exports:?}");
+    Ok(Response::new(json_payload_reply(
+        crate::json_field::SerializedJsonField::tainted(&payload),
+    )))
 }
 
 async fn indexes(

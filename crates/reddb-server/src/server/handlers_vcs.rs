@@ -620,11 +620,15 @@ pub(crate) fn handle_merge_show(_runtime: &RedDBRuntime, msid: &str) -> HttpResp
     // For now merge state is surfaced only via the conflict list —
     // a full "get merge state row" method can be added in a follow-up
     // as the runtime exposes it.
+    // `msid` comes from the request path — caller-controlled. Route
+    // both the bare echo and the URL-composed form through the
+    // JSON-boundary guard. ADR 0010 §3 / #178.
     let mut map = Map::new();
-    map.insert("id".to_string(), JsonValue::String(msid.to_string()));
+    map.insert("id".to_string(), crate::json_field::SerializedJsonField::tainted(msid));
+    let conflicts_url = format!("/repo/merges/{msid}/conflicts");
     map.insert(
         "conflicts_url".to_string(),
-        JsonValue::String(format!("/repo/merges/{msid}/conflicts")),
+        crate::json_field::SerializedJsonField::tainted(&conflicts_url),
     );
     json_response(200, ok(JsonValue::Object(map)))
 }
