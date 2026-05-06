@@ -1974,7 +1974,7 @@ dependencies = [
 
 [[package]]
 name = "reddb"
-version = "0.2.9"
+version = "1.0.0"
 dependencies = [
  "jsonwebtoken",
  "rcgen",
@@ -1992,7 +1992,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-client"
-version = "0.2.9"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "jsonwebtoken",
@@ -2016,7 +2016,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-client-connector"
-version = "0.2.9"
+version = "1.0.0"
 dependencies = [
  "reddb-grpc-proto",
  "tonic",
@@ -2024,7 +2024,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-grpc-proto"
-version = "0.2.9"
+version = "1.0.0"
 dependencies = [
  "prost",
  "reddb-wire",
@@ -2036,7 +2036,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-server"
-version = "0.2.9"
+version = "1.0.0"
 dependencies = [
  "aes-gcm",
  "crossbeam-queue",
@@ -2077,7 +2077,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-wire"
-version = "0.2.9"
+version = "1.0.0"
 dependencies = [
  "insta",
  "proptest",
