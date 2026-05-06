@@ -10,7 +10,7 @@ resolver = "2"
 
 [package]
 name = "reddb"
-version = "0.2.9"
+version = "1.0.0"
 edition = "2021"
 authors = ["RedDB.io <hello@reddb.io>"]
 description = "Unified multi-model database: tables, documents, graphs, vectors, and key-value in one engine. Umbrella crate that hosts the `red` binary and re-exports the workspace."
@@ -34,10 +34,10 @@ name = "red"
 path = "src/bin/red.rs"
 
 [dependencies]
-reddb-wire = { version = "0.2", path = "crates/reddb-wire" }
-reddb-grpc-proto = { version = "0.2", path = "crates/reddb-grpc-proto" }
-reddb-client = { version = "0.2", path = "crates/reddb-client" }
-reddb-server = { version = "0.2", path = "crates/reddb-server" }
+reddb-wire = { version = "1.0", path = "crates/reddb-wire" }
+reddb-grpc-proto = { version = "1.0", path = "crates/reddb-grpc-proto" }
+reddb-client = { version = "1.0", path = "crates/reddb-client" }
+reddb-server = { version = "1.0", path = "crates/reddb-server" }
 # `red` bin spins up its own multi-thread tokio runtime (server
 # subcommand needs explicit Builder configuration with custom
 # stack size). All other reddb modules pull tokio transitively
@@ -57,7 +57,7 @@ otel = ["reddb-server/otel"]
 # integration smoke). The crate-root dep keeps `default-features
 # = false`; the dev-only entry layers in the published features
 # the tests need.
-reddb-client = { version = "0.2", path = "crates/reddb-client", features = ["embedded", "redwire"] }
+reddb-client = { version = "1.0", path = "crates/reddb-client", features = ["embedded", "redwire"] }
 # Used by `tests/compile_fail.rs` to assert that misuse of
 # `LeaseStore::new` (passing a non-CAS backend) fails to compile.
 trybuild = "1"

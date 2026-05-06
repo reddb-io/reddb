@@ -1,6 +1,6 @@
 [package]
 name = "reddb-python"
-version = "0.2.9"
+version = "1.0.0"
 edition = "2021"
 description = "Native Python driver for RedDB (compiled Rust via pyo3)"
 license = "MIT"
@@ -31,7 +31,7 @@ rustls-pemfile = "2"
 webpki-roots = "0.26"
 
 # Engine — only compiled in when the `embedded` feature is on.
-reddb = { version = "0.1", path = "../..", optional = true }
+reddb = { version = "1.0", path = "../..", optional = true }
 
 [build-dependencies]
 tonic-build = "0.12"
