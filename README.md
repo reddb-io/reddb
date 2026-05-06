@@ -479,7 +479,7 @@ ceremony.
 | Language          | Package          | Install                        | Backends                            |
 |-------------------|------------------|--------------------------------|-------------------------------------|
 | Rust              | `reddb-client`   | `cargo add reddb-client`       | embedded ✅ · gRPC ✅ · HTTP ✅      |
-| Node / Bun / Deno | `reddb` (npm)    | `pnpm add reddb`               | stdio subprocess ✅                 |
+| Node / Bun / Deno | `@reddb-io/sdk` (npm) | `pnpm add @reddb-io/sdk`  | stdio subprocess ✅                 |
 | Python            | `reddb` (PyPI)   | `pip install reddb` *(soon)*   | embedded ✅ · gRPC ✅ · wire ✅      |
 
 All drivers accept the same URIs:
@@ -501,7 +501,7 @@ let rows = db.query("SELECT * FROM users").await?;
 
 ```js
 // Node, Bun, Deno
-import { connect } from 'reddb'
+import { connect } from '@reddb-io/sdk'
 const db = await connect('memory://')
 await db.insert('users', { name: 'Alice' })
 const rows = await db.query('SELECT * FROM users')
@@ -519,14 +519,14 @@ Driver docs live in `crates/reddb-client/README.md`, `drivers/js/README.md`, and
 `drivers/python/README.md`. The full protocol spec and roadmap are in
 [`PLAN_DRIVERS.md`](./PLAN_DRIVERS.md).
 
-For JavaScript and TypeScript, use the `reddb` package in application code:
+For JavaScript and TypeScript, use the `@reddb-io/sdk` package in application code:
 
 ```bash
-pnpm add reddb
+pnpm add @reddb-io/sdk
 ```
 
 ```ts
-import { connect } from 'reddb'
+import { connect } from '@reddb-io/sdk'
 
 const db = await connect('memory://')
 const result = await db.query('SELECT * FROM users')
