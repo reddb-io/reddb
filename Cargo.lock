@@ -2026,6 +2026,7 @@ name = "reddb-grpc-proto"
 version = "0.2.9"
 dependencies = [
  "prost",
+ "reddb-wire",
  "tonic",
  "tonic-build",
  "tonic-prost",
