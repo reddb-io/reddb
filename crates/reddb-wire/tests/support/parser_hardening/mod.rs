@@ -23,6 +23,7 @@ use reddb_wire::ConnStringLimits;
 
 pub mod conn_grammar;
 pub mod corpus;
+pub mod secret_fixture_gen;
 pub mod secret_redactor;
 
 /// Parser-agnostic interface every consumer of the harness
