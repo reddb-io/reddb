@@ -129,6 +129,16 @@ impl RedDBRuntime {
             .persist_metadata()
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         self.note_table_write(&query.collection);
+        // Issue #120 — surface the tree name in the schema-vocabulary,
+        // scoped to its parent collection. Trees behave like an
+        // index in the lookup model.
+        self.schema_vocabulary_apply(
+            crate::runtime::schema_vocabulary::DdlEvent::CreateIndex {
+                collection: query.collection.clone(),
+                index: query.name.clone(),
+                columns: Vec::new(),
+            },
+        );
 
         Ok(RuntimeQueryResult::ok_records(
             raw_query.to_string(),
@@ -201,6 +211,13 @@ impl RedDBRuntime {
             .persist_metadata()
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         self.note_table_write(&query.collection);
+        // Issue #120 — invalidate the schema-vocabulary tree entry.
+        self.schema_vocabulary_apply(
+            crate::runtime::schema_vocabulary::DdlEvent::DropIndex {
+                collection: query.collection.clone(),
+                index: query.name.clone(),
+            },
+        );
 
         Ok(RuntimeQueryResult::ok_message(
             raw_query.to_string(),

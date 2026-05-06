@@ -127,6 +127,22 @@ impl RedDBRuntime {
             .db
             .persist_metadata()
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        // Issue #120 — feed the queue into the schema-vocabulary so
+        // AskPipeline (#121) can resolve queue references. Queues
+        // have an opaque payload column, so we expose `payload` and
+        // (when configured) the DLQ partner as type-tag context.
+        let mut type_tags = Vec::new();
+        if let Some(dlq) = &query.dlq {
+            type_tags.push(format!("dlq:{}", dlq));
+        }
+        self.schema_vocabulary_apply(
+            crate::runtime::schema_vocabulary::DdlEvent::CreateCollection {
+                collection: query.name.clone(),
+                columns: vec!["payload".to_string()],
+                type_tags,
+                description: None,
+            },
+        );
 
         let mut msg = format!("queue '{}' created", query.name);
         if query.priority {
@@ -187,6 +203,12 @@ impl RedDBRuntime {
             .db
             .persist_metadata()
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        // Issue #120 — invalidate the schema-vocabulary entry.
+        self.schema_vocabulary_apply(
+            crate::runtime::schema_vocabulary::DdlEvent::DropCollection {
+                collection: query.name.clone(),
+            },
+        );
 
         Ok(RuntimeQueryResult::ok_message(
             raw_query.to_string(),
