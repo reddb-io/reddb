@@ -321,6 +321,37 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parse a strictly-positive integer literal (`> 0`).
+    ///
+    /// Surfaces a `ValueOutOfRange` error for `field` when the literal
+    /// is `0`, negative, or starts with a unary `-` (which the bare
+    /// `parse_integer` rejects with a confusing "expected: integer"
+    /// message). Used by modifier slots like `MAX_SIZE`, `CAPACITY`,
+    /// `WIDTH`, `DEPTH`, `K` where zero or negative values are
+    /// semantically meaningless.
+    pub fn parse_positive_integer(&mut self, field: &'static str) -> Result<i64, ParseError> {
+        let pos = self.position();
+        // Detect the unary-minus path up-front so we surface a
+        // clearer "must be positive" message instead of the generic
+        // "expected: integer".
+        if matches!(self.current.token, Token::Minus | Token::Dash) {
+            return Err(ParseError::value_out_of_range(
+                field,
+                "must be a positive integer",
+                pos,
+            ));
+        }
+        let raw = self.parse_integer()?;
+        if raw <= 0 {
+            return Err(ParseError::value_out_of_range(
+                field,
+                "must be a positive integer",
+                pos,
+            ));
+        }
+        Ok(raw)
+    }
+
     /// Parse float literal. Accepts an optional leading unary `-`
     /// followed by a `Float` or `Integer` token so positions like
     /// vector literals (`[-0.1, …]`), `THRESHOLD -0.5`, `MIN_SCORE

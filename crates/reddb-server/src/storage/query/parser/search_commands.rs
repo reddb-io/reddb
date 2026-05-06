@@ -317,9 +317,33 @@ impl<'a> Parser<'a> {
         match self.peek().clone() {
             Token::Ident(ref name) if name.eq_ignore_ascii_case("RADIUS") => {
                 self.advance()?; // consume RADIUS
+                let lat_pos = self.position();
                 let center_lat = self.parse_float()?;
+                if !(-90.0..=90.0).contains(&center_lat) {
+                    return Err(ParseError::value_out_of_range(
+                        "lat",
+                        "must be in -90.0..=90.0",
+                        lat_pos,
+                    ));
+                }
+                let lon_pos = self.position();
                 let center_lon = self.parse_float()?;
+                if !(-180.0..=180.0).contains(&center_lon) {
+                    return Err(ParseError::value_out_of_range(
+                        "lon",
+                        "must be in -180.0..=180.0",
+                        lon_pos,
+                    ));
+                }
+                let r_pos = self.position();
                 let radius_km = self.parse_float()?;
+                if !(radius_km > 0.0) {
+                    return Err(ParseError::value_out_of_range(
+                        "radius",
+                        "must be a positive number",
+                        r_pos,
+                    ));
+                }
 
                 self.expect(Token::Collection)?;
                 let collection = self.expect_ident()?;
@@ -344,10 +368,42 @@ impl<'a> Parser<'a> {
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("BBOX") => {
                 self.advance()?; // consume BBOX
+                let p = self.position();
                 let min_lat = self.parse_float()?;
+                if !(-90.0..=90.0).contains(&min_lat) {
+                    return Err(ParseError::value_out_of_range(
+                        "lat",
+                        "must be in -90.0..=90.0",
+                        p,
+                    ));
+                }
+                let p = self.position();
                 let min_lon = self.parse_float()?;
+                if !(-180.0..=180.0).contains(&min_lon) {
+                    return Err(ParseError::value_out_of_range(
+                        "lon",
+                        "must be in -180.0..=180.0",
+                        p,
+                    ));
+                }
+                let p = self.position();
                 let max_lat = self.parse_float()?;
+                if !(-90.0..=90.0).contains(&max_lat) {
+                    return Err(ParseError::value_out_of_range(
+                        "lat",
+                        "must be in -90.0..=90.0",
+                        p,
+                    ));
+                }
+                let p = self.position();
                 let max_lon = self.parse_float()?;
+                if !(-180.0..=180.0).contains(&max_lon) {
+                    return Err(ParseError::value_out_of_range(
+                        "lon",
+                        "must be in -180.0..=180.0",
+                        p,
+                    ));
+                }
 
                 self.expect(Token::Collection)?;
                 let collection = self.expect_ident()?;
@@ -373,11 +429,27 @@ impl<'a> Parser<'a> {
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("NEAREST") => {
                 self.advance()?; // consume NEAREST
+                let lat_pos = self.position();
                 let lat = self.parse_float()?;
+                if !(-90.0..=90.0).contains(&lat) {
+                    return Err(ParseError::value_out_of_range(
+                        "lat",
+                        "must be in -90.0..=90.0",
+                        lat_pos,
+                    ));
+                }
+                let lon_pos = self.position();
                 let lon = self.parse_float()?;
+                if !(-180.0..=180.0).contains(&lon) {
+                    return Err(ParseError::value_out_of_range(
+                        "lon",
+                        "must be in -180.0..=180.0",
+                        lon_pos,
+                    ));
+                }
 
                 self.expect(Token::K)?;
-                let k = self.parse_integer()? as usize;
+                let k = self.parse_positive_integer("K")? as usize;
 
                 self.expect(Token::Collection)?;
                 let collection = self.expect_ident()?;

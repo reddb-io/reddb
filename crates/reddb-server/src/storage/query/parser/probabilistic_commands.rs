@@ -187,14 +187,20 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 let if_not_exists = self.match_if_not_exists()?;
                 let name = self.expect_ident()?;
-                // Optional WIDTH and DEPTH
+                // Optional WIDTH and DEPTH. `DEPTH` lexes as the
+                // reserved `Token::Depth` keyword (used by graph
+                // traversal modifiers), so `consume_ident_ci("DEPTH")`
+                // would never match — fall through to the typed
+                // consumer for that arm.
                 let mut width = 1000usize;
                 let mut depth = 5usize;
                 for _ in 0..2 {
                     if self.consume_ident_ci("WIDTH")? {
-                        width = self.parse_integer()? as usize;
-                    } else if self.consume_ident_ci("DEPTH")? {
-                        depth = self.parse_integer()? as usize;
+                        width = self.parse_positive_integer("WIDTH")? as usize;
+                    } else if self.consume(&Token::Depth)? {
+                        depth = self.parse_positive_integer("DEPTH")? as usize;
+                    } else {
+                        break;
                     }
                 }
                 Ok(QueryExpr::ProbabilisticCommand(
@@ -211,7 +217,7 @@ impl<'a> Parser<'a> {
                 let if_not_exists = self.match_if_not_exists()?;
                 let name = self.expect_ident()?;
                 let capacity = if self.consume_ident_ci("CAPACITY")? {
-                    self.parse_integer()? as usize
+                    self.parse_positive_integer("CAPACITY")? as usize
                 } else {
                     100_000
                 };
