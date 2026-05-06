@@ -28,6 +28,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use super::context_index::ContextIndex;
+use super::entity_cache::EntityCache;
 use super::entity::{
     CrossRef, EdgeData, EmbeddingSlot, EntityData, EntityId, EntityKind, GraphEdgeKind,
     GraphNodeKind, NodeData, RefType, RowData, TimeSeriesPointKind, UnifiedEntity, VectorData,
@@ -450,8 +451,10 @@ pub struct UnifiedStore {
     btree_indices: RwLock<HashMap<String, Arc<BTree>>>,
     /// Cross-structure context index for unified search
     context_index: ContextIndex,
-    /// Hot entity cache — LRU for frequently accessed entities by ID
-    entity_cache: RwLock<HashMap<u64, (String, UnifiedEntity)>>,
+    /// Hot entity cache — sharded bounded LRU for `get_any` lookups.
+    /// See `entity_cache.rs` for the rationale; this replaced a single
+    /// `RwLock<HashMap>` that serialised every `delete_batch` invalidation.
+    entity_cache: EntityCache,
     /// Graph node label index: (collection, label) → Vec<EntityId>.
     /// O(1) lookup for MATCH (n:Label) graph patterns — avoids full collection scan.
     graph_label_index: RwLock<HashMap<(String, String), Vec<EntityId>>>,

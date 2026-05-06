@@ -814,9 +814,8 @@ impl UnifiedStore {
         }
         self.btree_indices.write().remove(name);
         self.entity_cache
-            .write()
             .retain(|entity_id, (collection, _)| {
-                collection != name && !entity_ids.iter().any(|id| id.raw() == *entity_id)
+                collection != name && !entity_ids.iter().any(|id| id.raw() == entity_id)
             });
         self.remove_from_graph_label_index_batch(name, &entity_ids);
         self.mark_paged_registry_dirty();
@@ -884,7 +883,7 @@ impl UnifiedStore {
     }
 
     fn apply_replayed_delete(&self, collection: &str, id: EntityId) -> Result<(), StoreError> {
-        self.entity_cache.write().remove(&id.raw());
+        self.entity_cache.remove(id.raw());
         if let Some(manager) = self.get_collection(collection) {
             let deleted = manager.delete(id)?;
             if !deleted {

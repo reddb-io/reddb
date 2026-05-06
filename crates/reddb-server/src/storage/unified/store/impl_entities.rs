@@ -353,9 +353,8 @@ impl UnifiedStore {
         self.btree_indices.write().remove(name);
 
         self.entity_cache
-            .write()
             .retain(|entity_id, (collection, _)| {
-                collection != name && !entity_ids.iter().any(|id| id.raw() == *entity_id)
+                collection != name && !entity_ids.iter().any(|id| id.raw() == entity_id)
             });
 
         self.cross_refs.write().retain(|source_id, refs| {
@@ -849,41 +848,47 @@ impl UnifiedStore {
 
     /// Get an entity from any collection
     pub fn get_any(&self, id: EntityId) -> Option<(String, UnifiedEntity)> {
-        // Check entity cache first
-        {
-            let cache = self.entity_cache.read();
-            if let Some(cached) = cache.get(&id.raw()) {
-                return Some(cached.clone());
-            }
+        // Sharded LRU probe: hits / misses are counted by `EntityCache::get`,
+        // so external observers can read `entity_cache_hit_rate()` without
+        // any extra wiring on the call site.
+        if let Some(cached) = self.entity_cache.get(id.raw()) {
+            return Some(cached);
         }
 
-        // Full collection scan
+        // Cache miss — fall back to the full collection scan, then memoise.
         let collections = self.collections.read();
         for (name, manager) in collections.iter() {
             if let Some(entity) = manager.get(id) {
                 let result = (name.clone(), entity);
-                // Cache the result — drop read guard first to avoid deadlock
+                // Drop the collections read guard before taking any cache
+                // lock — the cache shards are independent, but releasing
+                // here keeps `collections` contention low.
                 drop(collections);
-                {
-                    let mut cache = self.entity_cache.write();
-                    cache.insert(id.raw(), result.clone());
-                    // Evict if too large
-                    if cache.len() > 10_000 {
-                        if let Some(&oldest_key) = cache.keys().next() {
-                            cache.remove(&oldest_key);
-                        }
-                    }
-                }
+                self.entity_cache.insert(id.raw(), result.clone());
                 return Some(result);
             }
         }
         None
     }
 
+    /// Hit rate of the store's entity cache (`get_any` lookups).
+    ///
+    /// Returns `None` until the cache has served at least one lookup.
+    /// Exposed for observability — e.g. dashboards distinguishing graph
+    /// workloads (high hit rate) from OLTP DML (≈ 0 % hit rate).
+    pub fn entity_cache_hit_rate(&self) -> Option<f64> {
+        self.entity_cache.hit_rate()
+    }
+
+    /// Snapshot of cache hit / miss / eviction counters and current size.
+    pub fn entity_cache_stats(&self) -> super::super::entity_cache::EntityCacheStats {
+        self.entity_cache.stats()
+    }
+
     /// Delete an entity
     pub fn delete(&self, collection: &str, id: EntityId) -> Result<bool, StoreError> {
-        // Invalidate entity cache
-        self.entity_cache.write().remove(&id.raw());
+        // Invalidate entity cache (read-lock probe; no write lock when cold).
+        self.entity_cache.remove(id.raw());
         let manager = self
             .get_collection(collection)
             .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
@@ -931,12 +936,12 @@ impl UnifiedStore {
             return Ok(Vec::new());
         }
 
-        {
-            let mut cache = self.entity_cache.write();
-            for id in ids {
-                cache.remove(&id.raw());
-            }
-        }
+        // Sharded invalidation. The bounded LRU's shard write lock is
+        // only acquired when the shard actually carries one of these ids,
+        // so the bench-typical zero-hit `delete_sequential` workload never
+        // takes a write lock here at all.
+        self.entity_cache
+            .remove_many(ids.iter().map(|id| id.raw()));
 
         let manager = self
             .get_collection(collection)
