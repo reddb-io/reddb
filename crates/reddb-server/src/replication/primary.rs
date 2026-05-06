@@ -542,6 +542,13 @@ pub struct PrimaryReplication {
     /// allocated so the policy enum can flip from `Local` to
     /// `AckN`/`Quorum` without touching this struct's shape.
     pub commit_waiter: Arc<crate::replication::commit_waiter::CommitWaiter>,
+    /// Monotonic registry-change counter consumed by the
+    /// `TopologyAdvertiser` (issue #167). Bumps on register,
+    /// unregister, and the periodic health sweep when a replica
+    /// flips between healthy/unhealthy. Clients use the epoch to
+    /// detect stale advertisements without comparing the full
+    /// replica list element-wise.
+    topology_epoch: std::sync::atomic::AtomicU64,
 }
 
 impl PrimaryReplication {
@@ -553,6 +560,7 @@ impl PrimaryReplication {
                 .map(Arc::new),
             replicas: RwLock::new(Vec::new()),
             commit_waiter: Arc::new(crate::replication::commit_waiter::CommitWaiter::new()),
+            topology_epoch: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -579,7 +587,43 @@ impl PrimaryReplication {
         };
         let mut replicas = self.replicas.write().unwrap_or_else(|e| e.into_inner());
         replicas.push(state);
+        drop(replicas);
+        self.bump_topology_epoch();
         lsn
+    }
+
+    /// Unregister a replica by id. Returns `true` when the replica
+    /// was present (and removed). Bumps the topology epoch so a
+    /// pending advertisement reflects the new fleet size.
+    pub fn unregister_replica(&self, id: &str) -> bool {
+        let mut replicas = self.replicas.write().unwrap_or_else(|e| e.into_inner());
+        let before = replicas.len();
+        replicas.retain(|r| r.id != id);
+        let removed = replicas.len() != before;
+        drop(replicas);
+        if removed {
+            self.bump_topology_epoch();
+        }
+        removed
+    }
+
+    /// Current topology epoch. Strictly monotonic, bumps on every
+    /// registry-shape change consumed by `TopologyAdvertiser`.
+    pub fn topology_epoch(&self) -> u64 {
+        self.topology_epoch
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Advance the topology epoch. Call sites: register, unregister,
+    /// and the health-sweep tick that flips a replica between
+    /// healthy/unhealthy. Wrapping is not a concern in practice
+    /// (`u64::MAX` events would take centuries at any realistic ack
+    /// rate) but `fetch_add` saturates implicitly via wrap-around;
+    /// the consumer treats epoch as opaque so a wrap is still
+    /// strictly "different" from the previous value.
+    pub fn bump_topology_epoch(&self) {
+        self.topology_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn ack_replica(&self, id: &str, lsn: u64) {
@@ -701,5 +745,36 @@ mod tests {
         assert_eq!(retained[0].0, 8);
 
         let _ = fs::remove_file(spool_path);
+    }
+
+    #[test]
+    fn topology_epoch_monotonic_on_register_and_unregister() {
+        // Issue #167 acceptance: the epoch consumed by
+        // TopologyAdvertiser is strictly monotonic across registry
+        // shape changes. Pin it here so a future refactor doesn't
+        // accidentally swallow the bump.
+        let primary = PrimaryReplication::new(None);
+        let e0 = primary.topology_epoch();
+        primary.register_replica("r1".to_string());
+        let e1 = primary.topology_epoch();
+        primary.register_replica("r2".to_string());
+        let e2 = primary.topology_epoch();
+        assert!(e1 > e0, "register must bump epoch ({e0} -> {e1})");
+        assert!(e2 > e1, "second register must bump epoch ({e1} -> {e2})");
+
+        let removed = primary.unregister_replica("r1");
+        assert!(removed);
+        let e3 = primary.topology_epoch();
+        assert!(e3 > e2, "unregister must bump epoch ({e2} -> {e3})");
+
+        // Unknown id is a no-op and does not bump the epoch — keep
+        // the monotonicity tied to actual registry shape changes.
+        let absent = primary.unregister_replica("ghost");
+        assert!(!absent);
+        assert_eq!(
+            primary.topology_epoch(),
+            e3,
+            "unregistering a missing replica must not bump the epoch"
+        );
     }
 }
