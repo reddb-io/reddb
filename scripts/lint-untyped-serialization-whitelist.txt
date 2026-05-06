@@ -1,0 +1,80 @@
+# lint-untyped-serialization-whitelist.txt
+#
+# Per-line whitelist for `scripts/lint-no-untyped-serialization.sh`.
+# Every entry is a known-debt site, NOT a sanctioned exception. The
+# slice that retrofits the call site removes the entry.
+#
+# Format (one per line):
+#   path/suffix.rs                — every hit in this file is allowed.
+#   path/suffix.rs:<ERE>          — only hits whose body matches the
+#                                   extended regex are allowed.
+#
+# Trailing `#` comments are stripped. Each entry MUST carry an inline
+# `# … (issue #NNN)` comment explaining the deferral.
+#
+# See ADR 0010 (`docs/adr/0010-serialization-boundary-discipline.md`)
+# for the boundary discipline this lint enforces.
+
+# ---------------------------------------------------------------------
+# A. user-WIP territory.
+#
+# `crates/reddb-server/src/server/handlers_admin.rs` is the admin
+# router; the user is iterating on the surface and the lint should
+# stay quiet here until they sign off. Tracking: PRD #173 (parent of
+# the boundary-discipline rollout).
+# ---------------------------------------------------------------------
+crates/reddb-server/src/server/handlers_admin.rs   # user WIP — see PRD #173
+
+# ---------------------------------------------------------------------
+# B. Lane AC residue — JsonValue::to_json_string is deprecated for
+# new boundary emission, but keeps internal recursion through itself
+# for the legacy MCP JSON-RPC and policy-store call sites pending the
+# follow-up retirement slice. The internal recursive write is
+# explicitly opted into via `#[allow(deprecated)]` and the legacy
+# entry point is `Display`. (issue #177)
+# ---------------------------------------------------------------------
+crates/reddb-server/src/utils/json.rs:to_json_string
+
+# ---------------------------------------------------------------------
+# C. Lane AD residue — outbound HTTP `Authorization` header on the
+# client/AI surfaces. These build a `Bearer <token>` value with
+# format!()/HeaderValue::from_str on the *client* side of an outbound
+# request, not the producing side of an inbound response — the
+# Babeld-class smuggling vector goes the other way. Until we extend
+# `HeaderEscapeGuard` to also wrap outbound construction, the call
+# sites are flagged here so the boundary discipline still gets
+# tracked. (issue #179, follow-up #176)
+# ---------------------------------------------------------------------
+crates/reddb-server/src/ai.rs:\.header\("Authorization"
+crates/reddb-client/src/connector/http.rs:\.header\("authorization"
+crates/reddb-client/src/http.rs:HeaderValue::from_str
+
+# ---------------------------------------------------------------------
+# D. Lane AD residue — `Tainted<T>::expose_secret` allowlist.
+# The exit gate is named loudly so it surfaces in review; the test
+# suite asserts the gate name and the round-trip semantics around it.
+# These call sites are the assertion + adversarial-test helpers, not
+# production paths. (issue #179)
+# ---------------------------------------------------------------------
+crates/reddb-wire/tests/sanitizer_adversarial.rs:expose_secret
+
+# ---------------------------------------------------------------------
+# E. Lane AD residue — remaining ~26-130 `tracing::*!(%user_input)`
+# sites flagged in the F-04 first-pass triage list. These do NOT use
+# `format!()`/`write!()` (the lint rule that catches them is the
+# strict `format!`-in-log shape, which already excludes them) — but
+# the migration to `Tainted::escape_for(Boundary::LogField)` is
+# tracked under issue #179 and will land slice-by-slice. No
+# whitelist entry is needed for the *current* lint, because the
+# current rule is conservative; once the lint graduates to flag
+# `%user_input` directly, the whitelist will grow. The list below
+# names the file batches so reviewers can grep when graduating:
+#
+#   crates/reddb-server/src/server/handlers_admin.rs    (covered above)
+#   crates/reddb-server/src/server/handlers_*.rs
+#   crates/reddb-server/src/runtime/*.rs
+#   crates/reddb-server/src/auth/*.rs
+#   crates/reddb-wire/src/conn_string.rs
+#
+# See `tests/lint-fixtures/violations.rs.fixture` for the canonical
+# violation shapes the lint *does* catch today.

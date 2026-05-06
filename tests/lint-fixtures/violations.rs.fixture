@@ -1,0 +1,66 @@
+// tests/lint-fixtures/violations.rs.fixture
+//
+// One violation per category for `scripts/lint-no-untyped-serialization.sh`.
+// This file is NOT compiled — `.rs.fixture` keeps it outside the cargo
+// workspace target tree. The lint script is exercised against this file
+// in CI (`bash scripts/lint-no-untyped-serialization.sh
+// tests/lint-fixtures/violations.rs.fixture` should exit 1 and name
+// every category).
+//
+// If you add a new category to the lint, add a violation here. If you
+// remove a category, delete its sample. Each violation is annotated
+// with the category tag the lint emits for it; CI asserts every tag is
+// present in the output.
+
+#![allow(dead_code, unused)]
+
+use http::HeaderValue;
+
+fn category_tracing_format(user: &str) {
+    // [tracing+format] format!() inside a tracing log macro
+    tracing::info!("login from {}", format!("user={user}"));
+
+    // [tracing+format] write!() inside a tracing log macro (multi-line)
+    tracing::warn!(
+        target: "reddb::lint::fixture",
+        "rejected request: {}",
+        format!("reason={user}")
+    );
+}
+
+fn category_header_format(resp: ResponseBuilder, user: &str) {
+    // [header+format] format!() argument to .header()
+    let _ = resp.header("X-User", format!("user={user}"));
+}
+
+fn category_audit_format(audit_log: &AuditLog, user: &str) {
+    // [audit+format] format!()-built field handed to audit emitter
+    audit_log.record(format!("login_attempt user={user}"));
+}
+
+fn category_json_format(user: &str) {
+    // [json+format] format!() splice inside a json! literal
+    let _v = serde_json::json!({ "actor": format!("u={user}") });
+}
+
+fn category_tainted_unwrap(t: reddb_wire::sanitizer::Tainted<String>) {
+    // [tainted-unwrap] direct .0 projection of a Tainted<T>
+    let _raw = Tainted::0;
+    // [tainted-unwrap] expose_secret outside its allowlist
+    let _peek = t.expose_secret();
+}
+
+fn category_header_from_str(user: &str) {
+    // [header-from-str] HeaderValue::from_str() outside header_escape_guard
+    let _ = HeaderValue::from_str(user).unwrap();
+}
+
+// Stub types so the file at least parses if anyone copies it elsewhere.
+struct ResponseBuilder;
+impl ResponseBuilder {
+    fn header(self, _k: &str, _v: String) -> Self { self }
+}
+struct AuditLog;
+impl AuditLog {
+    fn record(&self, _s: String) {}
+}
