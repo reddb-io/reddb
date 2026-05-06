@@ -136,7 +136,7 @@ jobs:
           echo "Cargo.toml: $(grep '^version' Cargo.toml)"
           echo "package.json: $(grep '\"version\"' package.json)"
 
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           targets: ${{ matrix.target }}
       - uses: arduino/setup-protoc@v3
