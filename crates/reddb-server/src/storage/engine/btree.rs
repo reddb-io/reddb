@@ -1183,6 +1183,125 @@ mod tests {
         cleanup(&path);
     }
 
+    /// Property test for `BTree::upsert_batch_sorted` (#159).
+    ///
+    /// Generates random batches of (key, value) updates and applies them to
+    /// two independently-built trees: the baseline uses the existing
+    /// loop-of-`upsert` path, and the candidate uses `upsert_batch_sorted`
+    /// after the caller-side sort.  Both trees must end up with identical
+    /// key→value contents (verified via per-key `get` and a full cursor
+    /// scan), proving the new path is observationally equivalent for
+    /// arbitrary batches up to 200 entries.
+    mod prop_upsert_batch_sorted {
+        use super::*;
+        use proptest::prelude::*;
+        use std::collections::BTreeMap;
+
+        /// Build a tree pre-populated with `seed` and return the path so
+        /// the caller can clean it up.
+        fn populate_tree(seed: &[(Vec<u8>, Vec<u8>)]) -> (BTree, PathBuf, Arc<Pager>) {
+            let path = temp_db_path();
+            cleanup(&path);
+            let pager = Arc::new(Pager::open_default(&path).unwrap());
+            let tree = BTree::new(Arc::clone(&pager));
+            for (k, v) in seed {
+                tree.upsert(k, v).unwrap();
+            }
+            (tree, path, pager)
+        }
+
+        fn key_strategy() -> impl Strategy<Value = Vec<u8>> {
+            // Short keys keep many entries per leaf so a single batch
+            // hits multiple keys in the same leaf — the path the new
+            // method optimises.  1..=4 bytes from a small alphabet.
+            prop::collection::vec(0u8..16u8, 1..=4)
+        }
+
+        fn value_strategy() -> impl Strategy<Value = Vec<u8>> {
+            // Tiny values — same-or-shrink fits the in-place overwrite
+            // fast path; growing values fall back to the generic
+            // single-key `upsert`, exercising both branches.
+            prop::collection::vec(0u8..255u8, 0..=8)
+        }
+
+        fn pair_strategy() -> impl Strategy<Value = (Vec<u8>, Vec<u8>)> {
+            (key_strategy(), value_strategy())
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig {
+                cases: 64,
+                .. ProptestConfig::default()
+            })]
+
+            #[test]
+            fn batch_upsert_matches_loop_upsert(
+                seed in prop::collection::vec(pair_strategy(), 0..50),
+                batch in prop::collection::vec(pair_strategy(), 1..200),
+            ) {
+                // Dedup the seed by key (last write wins) so both trees
+                // start from the same well-defined state.
+                let mut seed_map: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+                for (k, v) in seed {
+                    seed_map.insert(k, v);
+                }
+                let seed: Vec<(Vec<u8>, Vec<u8>)> = seed_map.into_iter().collect();
+
+                // Baseline: loop-of-upsert.
+                let (baseline, baseline_path, _baseline_pager) = populate_tree(&seed);
+                for (k, v) in &batch {
+                    baseline.upsert(k, v).unwrap();
+                }
+
+                // Candidate: upsert_batch_sorted after caller-side sort
+                // (matches the contract documented on the method).
+                let (candidate, candidate_path, _candidate_pager) = populate_tree(&seed);
+                let mut sorted = batch.clone();
+                sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                candidate.upsert_batch_sorted(&sorted).unwrap();
+
+                // Compute the expected end state from BTreeMap (last
+                // write wins), independent of insertion order.
+                let mut expected: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+                for (k, v) in &seed {
+                    expected.insert(k.clone(), v.clone());
+                }
+                for (k, v) in &batch {
+                    expected.insert(k.clone(), v.clone());
+                }
+
+                // Per-key get matches expected on both trees.
+                for (k, v) in &expected {
+                    let baseline_got = baseline.get(k).unwrap();
+                    let candidate_got = candidate.get(k).unwrap();
+                    prop_assert_eq!(baseline_got.as_ref(), Some(v));
+                    prop_assert_eq!(candidate_got.as_ref(), Some(v));
+                }
+
+                // Full cursor scan yields identical sorted contents.
+                let collect = |t: &BTree| -> Vec<(Vec<u8>, Vec<u8>)> {
+                    let mut out = Vec::new();
+                    let mut cur = t.cursor_first().unwrap();
+                    while let Some(entry) = cur.next().unwrap() {
+                        out.push(entry);
+                    }
+                    out
+                };
+                let baseline_contents = collect(&baseline);
+                let candidate_contents = collect(&candidate);
+                prop_assert_eq!(&baseline_contents, &candidate_contents);
+
+                // And both equal the BTreeMap-derived expectation.
+                let expected_contents: Vec<(Vec<u8>, Vec<u8>)> =
+                    expected.into_iter().collect();
+                prop_assert_eq!(&candidate_contents, &expected_contents);
+
+                cleanup(&baseline_path);
+                cleanup(&candidate_path);
+            }
+        }
+    }
+
     #[test]
     fn test_btree_sorted_iteration() {
         let path = temp_db_path();
