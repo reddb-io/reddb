@@ -60,27 +60,22 @@ pub fn model_name() -> impl Strategy<Value = String> {
     "m_[a-z0-9]{1,10}".prop_map(|s| s)
 }
 
-/// A finite, **non-negative** f32 rendered as a decimal. We
-/// generate from a positive bounded range so the textual
-/// representation always parses as a `Float`/`Integer` token.
-///
-/// FIXME: bug — fix in #107. `Parser::parse_float` doesn't accept a
-/// unary `-` prefix, so a generated negative literal fails inside
-/// vector literals / `THRESHOLD` / `MIN_SCORE` / `RERANK(w)` /
-/// `UNION(sw, vw)`. Once #107 lands, widen this strategy to
-/// `(-1000.0..1000.0)` and drop the FIXME.
+/// A finite f32 rendered as a decimal, covering both positive and
+/// negative values now that `Parser::parse_float` accepts a leading
+/// unary `-` prefix (#107). The full `[-1000.0, 1000.0]` range
+/// exercises the minus-prefix path inside vector literals,
+/// `THRESHOLD`, `MIN_SCORE`, `RERANK(w)`, and `UNION(sw, vw)`.
 ///
 /// Adversarial NaN / Infinity / oversized literals live in the
 /// corpus and the snapshot suite — *not* here, where every emitted
 /// string must parse cleanly.
 pub fn finite_float_lit() -> impl Strategy<Value = String> {
-    (0.0_f32..1000.0_f32).prop_map(|f| {
+    (-1000.0_f32..1000.0_f32).prop_map(|f| {
         // Force a decimal point so the lexer always picks the
         // `Token::Float` branch (some integers would otherwise
         // tokenise as `Token::Integer`, which the vector-literal
         // parser also accepts via `parse_float`).
-        let s = format!("{:.4}", f);
-        s
+        format!("{:.4}", f)
     })
 }
 

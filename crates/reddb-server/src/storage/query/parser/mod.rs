@@ -327,7 +327,7 @@ impl<'a> Parser<'a> {
     /// -0.1`, `RERANK(-0.3)`, `UNION(0.7, -0.3)`, and geo coordinates
     /// (`LATITUDE -33.86`) parse correctly. See bug #107.
     pub fn parse_float(&mut self) -> Result<f64, ParseError> {
-        let negate = if matches!(self.current.token, Token::Minus) {
+        let negate = if matches!(self.current.token, Token::Minus | Token::Dash) {
             self.advance()?;
             true
         } else {

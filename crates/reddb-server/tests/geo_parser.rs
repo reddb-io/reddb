@@ -315,23 +315,18 @@ fn happy_nearest_at_origin_parses() {
 // lands, dropping the `#[ignore]` flips the test into a regression
 // guard.
 
-/// FIXME(#104-followup-1): `parse_float` does not accept a unary
-/// minus, so latitudes / longitudes / radii in the southern or
-/// western hemisphere fail to parse with a confusing
-/// "expected number" error. Real-world geo applications routinely
-/// query Sydney (-33.86, 151.21) or Buenos Aires (-34.60, -58.38).
-///
-/// Expected once fixed: this input parses successfully and produces
-/// `SpatialNearest { lat: -33.86…, lon: 151.21…, k: 5, … }`.
+/// Regression guard for #107: `parse_float` accepts a unary `-`,
+/// so southern / western hemisphere coordinates parse cleanly.
+/// Real-world geo applications routinely query Sydney
+/// (-33.86, 151.21) or Buenos Aires (-34.60, -58.38).
 #[test]
-#[ignore = "FIXME #104-followup-1: parse_float rejects leading unary minus"]
-fn fixme_negative_latitude_not_parsed_today() {
+fn negative_latitude_parses() {
     let r = parser::parse(
         "SEARCH SPATIAL NEAREST -33.8688 151.2093 K 5 COLLECTION sites COLUMN location",
     );
     assert!(
         r.is_ok(),
-        "negative lat should parse once unary-minus is wired into the SPATIAL float position"
+        "negative lat should parse with unary-minus wired into the SPATIAL float position"
     );
 }
 
