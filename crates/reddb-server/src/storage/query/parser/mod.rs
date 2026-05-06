@@ -321,21 +321,38 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse float literal
+    /// Parse float literal. Accepts an optional leading unary `-`
+    /// followed by a `Float` or `Integer` token so positions like
+    /// vector literals (`[-0.1, …]`), `THRESHOLD -0.5`, `MIN_SCORE
+    /// -0.1`, `RERANK(-0.3)`, `UNION(0.7, -0.3)`, and geo coordinates
+    /// (`LATITUDE -33.86`) parse correctly. See bug #107.
     pub fn parse_float(&mut self) -> Result<f64, ParseError> {
-        match &self.current.token {
+        let negate = if matches!(self.current.token, Token::Minus) {
+            self.advance()?;
+            true
+        } else {
+            false
+        };
+        let value = match &self.current.token {
             Token::Float(n) => {
                 let n = *n;
                 self.advance()?;
-                Ok(n)
+                n
             }
             Token::Integer(n) => {
                 let n = *n as f64;
                 self.advance()?;
-                Ok(n)
+                n
             }
-            other => Err(ParseError::expected(vec!["number"], other, self.position())),
-        }
+            other => {
+                return Err(ParseError::expected(
+                    vec!["number"],
+                    other,
+                    self.position(),
+                ));
+            }
+        };
+        Ok(if negate { -value } else { value })
     }
 
     /// Parse a string literal
