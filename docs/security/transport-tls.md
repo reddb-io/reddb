@@ -462,7 +462,6 @@ distinguish federated identities from local credentials at a glance.
 |----------------------------|-------------|------|-----------|-------------|--------------------------------------------------------------------------------|
 | `crates/reddb-client`      | yes         | yes  | yes       | yes         | tokio-rustls; full ALPN support                                                |
 | `drivers/js` (Node, Bun)   | yes         | yes  | yes       | yes         | Native `node:tls`; ALPN fully supported                                        |
-| `drivers/node`             | yes         | yes  | yes       | yes         | Same engine as `drivers/js`                                                    |
 | `drivers/bun`              | yes         | yes  | yes       | yes         | Same engine as `drivers/js`                                                    |
 | `drivers/python-asyncio`   | yes         | yes  | yes       | yes         | `asyncio + ssl`                                                                |
 | `drivers/python` (PyO3)    | yes         | yes  | yes       | yes         | TLS via embedded engine bridge                                                 |
