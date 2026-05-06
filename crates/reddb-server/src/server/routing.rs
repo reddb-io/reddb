@@ -40,6 +40,7 @@ impl RedDBServer {
                             "{{\"error\":\"rate limited\",\"retry_after_secs\":{retry}}}"
                         )
                         .into_bytes(),
+                        extra_headers: Vec::new(),
                     };
                 }
                 crate::runtime::quota_bucket::QuotaOutcome::Granted
