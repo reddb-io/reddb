@@ -1,15 +1,28 @@
 /**
- * Locate the `red` binary on disk.
+ * Locate the `red` binary for SDK / CLI use.
  *
- * Resolution order:
- *   1. REDDB_BINARY_PATH env var (escape hatch).
- *   2. node_modules/reddb/bin/red (where postinstall.js downloads it).
- *   3. fallback: just `red` and let the OS resolve via PATH.
+ * SDK lookup (`resolveSdkBinary`):
+ *   1. `REDDB_BIN` env var (the canonical override per ADR 0006).
+ *   2. `REDDB_BINARY_PATH` env var (legacy alias, deprecation window).
+ *   3. `<package>/bin/red[.exe]` — where postinstall.js dropped it.
+ *   4. Otherwise throw an actionable error.
+ *
+ *   PATH is **never** consulted. The wire-format coupling between the
+ *   SDK and the embedded engine is too tight to silently bind to
+ *   whatever `red` happens to be on PATH (see ADR 0006).
+ *
+ * CLI lookup (`resolveCliBinary`):
+ *   1. `REDDB_BIN` env var.
+ *   2. `<package>/bin/red[.exe]`.
+ *   3. PATH-resolved bare `red[.exe]` — appropriate for the CLI which
+ *      *targets* PATH.
  */
 
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve, join } from 'node:path'
+
+import { resolveBin } from '@reddb-io/internal-bin-resolver'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PACKAGE_ROOT = resolve(HERE, '..')
@@ -18,14 +31,27 @@ function defaultBinaryName() {
   if (typeof process !== 'undefined' && process.platform === 'win32') {
     return 'red.exe'
   }
-  // Bun/Deno also expose process.platform; this branch covers all three.
   return 'red'
 }
 
-/** Returns the absolute path to the `red` binary, or `'red'` as a fallback. */
-export function resolveBinaryPath() {
-  if (typeof process !== 'undefined' && process.env && process.env.REDDB_BINARY_PATH) {
-    return process.env.REDDB_BINARY_PATH
+/** SDK runtime lookup. Throws actionable error when binary cannot be located. */
+export function resolveSdkBinary() {
+  const legacy = process.env?.REDDB_BINARY_PATH
+  if (typeof legacy === 'string' && legacy !== '' && !process.env?.REDDB_BIN) {
+    return legacy
+  }
+  return resolveBin({
+    name: defaultBinaryName(),
+    packageRoot: PACKAGE_ROOT,
+    envVar: 'REDDB_BIN',
+  })
+}
+
+/** CLI runtime lookup. Allowed to fall back to PATH per ADR 0006. */
+export function resolveCliBinary() {
+  const override = process.env?.REDDB_BIN
+  if (typeof override === 'string' && override !== '') {
+    return override
   }
   const local = join(PACKAGE_ROOT, 'bin', defaultBinaryName())
   if (existsSync(local)) {
