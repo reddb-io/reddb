@@ -470,6 +470,45 @@ jobs:
           # the GitHub Release that `publish-github` just created.
           npm publish --tag "${TAG}" --access public
 
+  publish-js-client:
+    name: Publish @reddb-io/client (npm)
+    needs: [plan, publish-github]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: needs.plan.outputs.should_skip != 'true'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Sync version
+        working-directory: drivers/js-client
+        run: |
+          node -e "
+            const pkg = require('./package.json');
+            pkg.version = '${{ needs.plan.outputs.package_version }}';
+            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          cat package.json | grep '"version"'
+      - name: Verify pack
+        # Preflight per #128 retro: `npm pack --dry-run` fails fast on
+        # regressions like the `reddb` 404 root cause (unscoped name
+        # squatted on the registry). Catches missing files, bad paths,
+        # or postinstall script issues before we hit the publish step.
+        working-directory: drivers/js-client
+        run: npm pack --dry-run
+      - name: Publish
+        working-directory: drivers/js-client
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          TAG=$([[ "${{ needs.plan.outputs.release_channel }}" == "next" ]] && echo "next" || echo "latest")
+          # `--access public` is mandatory for first-publish of a scoped
+          # package — npm defaults scoped packages to private and rejects
+          # the publish with a 402/404 otherwise. See publish-js-driver
+          # for the full retro from #128.
+          npm publish --tag "${TAG}" --access public
+
   publish-docker:
     name: Docker image (GHCR + Docker Hub)
     needs: [plan, build]
