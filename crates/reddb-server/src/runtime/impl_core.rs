@@ -5518,7 +5518,7 @@ impl RedDBRuntime {
             blob_order.retain(|key| blob_map.contains_key(key));
             self.inner
                 .result_blob_cache
-                .invalidate_dependency(RESULT_CACHE_BLOB_NAMESPACE, table);
+                .invalidate_dependencies(RESULT_CACHE_BLOB_NAMESPACE, &[table]);
         }
     }
 

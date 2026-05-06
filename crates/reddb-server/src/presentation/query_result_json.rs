@@ -171,35 +171,35 @@ pub(crate) fn runtime_stats_json(stats: &RuntimeStats) -> JsonValue {
 
     let blob = stats.result_blob_cache;
     let mut result_blob_cache = Map::new();
-    result_blob_cache.insert("hits".to_string(), JsonValue::Number(blob.hits as f64));
-    result_blob_cache.insert("misses".to_string(), JsonValue::Number(blob.misses as f64));
+    result_blob_cache.insert("hits".to_string(), JsonValue::Number(blob.hits() as f64));
+    result_blob_cache.insert("misses".to_string(), JsonValue::Number(blob.misses() as f64));
     result_blob_cache.insert(
         "expirations".to_string(),
-        JsonValue::Number(blob.expirations as f64),
+        JsonValue::Number(blob.expirations() as f64),
     );
     result_blob_cache.insert(
         "evictions".to_string(),
-        JsonValue::Number(blob.evictions as f64),
+        JsonValue::Number(blob.evictions() as f64),
     );
     result_blob_cache.insert(
         "invalidations".to_string(),
-        JsonValue::Number(blob.invalidations as f64),
+        JsonValue::Number(blob.invalidations() as f64),
     );
     result_blob_cache.insert(
         "entries".to_string(),
-        JsonValue::Number(blob.entries as f64),
+        JsonValue::Number(blob.entries() as f64),
     );
     result_blob_cache.insert(
         "memory_bytes".to_string(),
-        JsonValue::Number(blob.bytes_in_use as f64),
+        JsonValue::Number(blob.bytes_in_use() as f64),
     );
     result_blob_cache.insert(
         "l2_memory_bytes".to_string(),
-        JsonValue::Number(blob.l2_bytes_in_use as f64),
+        JsonValue::Number(blob.l2_bytes_in_use() as f64),
     );
     result_blob_cache.insert(
         "l2_full_rejections".to_string(),
-        JsonValue::Number(blob.l2_full_rejections as f64),
+        JsonValue::Number(blob.l2_full_rejections() as f64),
     );
     object.insert(
         "result_blob_cache".to_string(),

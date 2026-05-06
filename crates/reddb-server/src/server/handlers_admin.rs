@@ -718,7 +718,7 @@ impl RedDBServer {
         let _ = writeln!(
             body,
             "reddb_cache_blob_get_total{{namespace=\"{}\",result=\"hit_l1\"}} {}",
-            blob_ns, result_blob_stats.hits
+            blob_ns, result_blob_stats.hits()
         );
         let _ = writeln!(
             body,
@@ -728,7 +728,7 @@ impl RedDBServer {
         let _ = writeln!(
             body,
             "reddb_cache_blob_get_total{{namespace=\"{}\",result=\"miss\"}} {}",
-            blob_ns, result_blob_stats.misses
+            blob_ns, result_blob_stats.misses()
         );
         let _ = writeln!(
             body,
@@ -738,12 +738,12 @@ impl RedDBServer {
         let _ = writeln!(
             body,
             "reddb_cache_blob_put_total{{namespace=\"{}\",outcome=\"ok\"}} {}",
-            blob_ns, result_blob_stats.insertions
+            blob_ns, result_blob_stats.insertions()
         );
         let _ = writeln!(
             body,
             "reddb_cache_blob_put_total{{namespace=\"{}\",outcome=\"version_mismatch\"}} {}",
-            blob_ns, result_blob_stats.version_mismatches
+            blob_ns, result_blob_stats.version_mismatches()
         );
         let _ = writeln!(
             body,
@@ -764,8 +764,8 @@ impl RedDBServer {
             ("key", 0),
             ("prefix", 0),
             ("tag", 0),
-            ("dependency", result_blob_stats.invalidations),
-            ("namespace", result_blob_stats.namespace_flushes),
+            ("dependency", result_blob_stats.invalidations()),
+            ("namespace", result_blob_stats.namespace_flushes()),
         ] {
             let _ = writeln!(
                 body,
@@ -779,8 +779,8 @@ impl RedDBServer {
         );
         let _ = writeln!(body, "# TYPE reddb_cache_blob_evict_total counter");
         for (reason, count) in [
-            ("capacity", result_blob_stats.evictions),
-            ("expiry", result_blob_stats.expirations),
+            ("capacity", result_blob_stats.evictions()),
+            ("expiry", result_blob_stats.expirations()),
             ("policy", 0),
         ] {
             let _ = writeln!(
@@ -797,7 +797,7 @@ impl RedDBServer {
         let _ = writeln!(
             body,
             "reddb_cache_blob_l1_bytes_in_use{{namespace=\"{}\"}} {}",
-            blob_ns, result_blob_stats.bytes_in_use
+            blob_ns, result_blob_stats.bytes_in_use()
         );
         let _ = writeln!(
             body,
@@ -807,7 +807,7 @@ impl RedDBServer {
         let _ = writeln!(
             body,
             "reddb_cache_blob_l1_entries{{namespace=\"{}\"}} {}",
-            blob_ns, result_blob_stats.entries
+            blob_ns, result_blob_stats.entries()
         );
         let _ = writeln!(
             body,
@@ -817,7 +817,7 @@ impl RedDBServer {
         let _ = writeln!(
             body,
             "reddb_cache_blob_l2_bytes_in_use{{namespace=\"{}\"}} {}",
-            blob_ns, result_blob_stats.l2_bytes_in_use
+            blob_ns, result_blob_stats.l2_bytes_in_use()
         );
         let _ = writeln!(
             body,
@@ -830,7 +830,7 @@ impl RedDBServer {
         let _ = writeln!(
             body,
             "reddb_cache_blob_l2_full_rejections_total{{namespace=\"{}\"}} {}",
-            blob_ns, result_blob_stats.l2_full_rejections
+            blob_ns, result_blob_stats.l2_full_rejections()
         );
         let _ = writeln!(
             body,
@@ -843,7 +843,7 @@ impl RedDBServer {
         let _ = writeln!(
             body,
             "reddb_cache_blob_version_mismatch_total{{namespace=\"{}\"}} {}",
-            blob_ns, result_blob_stats.version_mismatches
+            blob_ns, result_blob_stats.version_mismatches()
         );
 
         let _ = writeln!(
