@@ -1,6 +1,6 @@
 [package]
 name = "reddb-server"
-version = "0.2.9"
+version = "1.0.0"
 edition = "2021"
 authors = ["RedDB.io <hello@reddb.io>"]
 description = "RedDB server-side engine: storage, runtime, replication, MCP, AI, and the gRPC/HTTP/RedWire/PG-wire dispatchers. Re-exported by the umbrella `reddb` crate."
@@ -13,12 +13,12 @@ keywords = ["database", "vector-search", "graph", "document-store", "rust"]
 categories = ["database-implementations", "data-structures"]
 
 [dependencies]
-reddb-wire = { version = "0.2", path = "../reddb-wire" }
-reddb-grpc-proto = { version = "0.2", path = "../reddb-grpc-proto" }
+reddb-wire = { version = "1.0", path = "../reddb-wire" }
+reddb-grpc-proto = { version = "1.0", path = "../reddb-grpc-proto" }
 # rpc_stdio's Remote backend wraps the same gRPC client that the
 # `red` binary uses for the `red rpc` subcommand. Single-direction
 # dep — the client crate does not depend on the server.
-reddb-client-connector = { version = "0.2", path = "../reddb-client-connector" }
+reddb-client-connector = { version = "1.0", path = "../reddb-client-connector" }
 aes-gcm = "0.10"
 hmac = "0.13"
 itoa = "1"
