@@ -786,6 +786,11 @@ struct RuntimeInner {
     /// PLAN.md Phase 4.4 — per-caller QPS quotas. Disabled (no-op)
     /// when `RED_MAX_QPS_PER_CALLER` is unset.
     quota_bucket: crate::runtime::quota_bucket::QuotaBucket,
+    /// Issue #120 — token → schema entity reverse index, kept current
+    /// incrementally on DDL events. Consumed by AskPipeline (issue
+    /// #121) Stage 2 to narrow vector-search candidates before any
+    /// embedding compute. Mutated only from DDL execution paths.
+    schema_vocabulary: parking_lot::RwLock<crate::runtime::schema_vocabulary::SchemaVocabulary>,
 }
 
 #[derive(Clone)]
@@ -836,6 +841,7 @@ mod record_search;
 pub mod resource_limits;
 pub(crate) mod scalar_evaluator;
 pub mod schema_diff;
+pub mod schema_vocabulary;
 pub mod snapshot_reuse;
 mod statement_frame;
 pub mod within_clause;
