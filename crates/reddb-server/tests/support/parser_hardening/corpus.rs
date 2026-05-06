@@ -243,3 +243,290 @@ pub fn geo_adversarial_inputs() -> Vec<(&'static str, String)> {
         ),
     ]
 }
+pub fn graph_dsl_adversarial_inputs() -> Vec<(&'static str, String)> {
+    vec![
+        ("graph_match_eof", "MATCH".to_string()),
+        ("graph_match_open_paren_eof", "MATCH (".to_string()),
+        ("graph_match_open_alias_eof", "MATCH (a".to_string()),
+        ("graph_match_no_return", "MATCH (a)-[r]->(b)".to_string()),
+        (
+            "graph_match_unbalanced_bracket",
+            "MATCH (a)-[r:KNOWS->(b) RETURN a".to_string(),
+        ),
+        (
+            "graph_match_unbalanced_brace",
+            "MATCH (a {name: 'x') RETURN a".to_string(),
+        ),
+        (
+            "graph_match_dangling_props_comma",
+            "MATCH (a:person {name: 'x',}) RETURN a".to_string(),
+        ),
+        (
+            "graph_match_dangling_return_comma",
+            "MATCH (a)-[r]->(b) RETURN a,".to_string(),
+        ),
+        (
+            "graph_match_bad_var_length",
+            "MATCH (a)-[r*1..]->(b) RETURN a".to_string(),
+        ),
+        (
+            "graph_match_var_length_no_max",
+            "MATCH (a)-[r*..3]->(b) RETURN a".to_string(),
+        ),
+        (
+            "graph_match_deep_chain",
+            // 200 hops of `(x)-[]->` to stress the depth tracker.
+            format!(
+                "MATCH (a){} RETURN a",
+                "-[]->(x)".repeat(200),
+            ),
+        ),
+        (
+            "graph_match_long_alias",
+            format!("MATCH ({}) RETURN a", "a".repeat(10_000)),
+        ),
+        (
+            "graph_match_oversized",
+            format!("MATCH (a) RETURN a {}", " ".repeat(2 * 1024 * 1024)),
+        ),
+        (
+            "graph_match_nul_byte",
+            "MATCH (a)-[r]->(b) RETURN a\0".to_string(),
+        ),
+        ("graph_match_garbage", "MATCH @#$%".to_string()),
+        // PATH FROM ... TO ... surface
+        ("graph_path_eof", "PATH".to_string()),
+        ("graph_path_no_to", "PATH FROM host('x')".to_string()),
+        ("graph_path_garbage_via", "PATH FROM host('a') TO host('b') VIA @#$%".to_string()),
+        // GRAPH command surface
+        ("graph_cmd_eof", "GRAPH".to_string()),
+        ("graph_cmd_unknown_subcmd", "GRAPH NONESUCH".to_string()),
+        ("graph_neighborhood_no_src", "GRAPH NEIGHBORHOOD".to_string()),
+        (
+            "graph_shortest_path_no_to",
+            "GRAPH SHORTEST_PATH 'a'".to_string(),
+        ),
+        (
+            "graph_traverse_garbage_strategy",
+            "GRAPH TRAVERSE 'a' STRATEGY".to_string(),
+        ),
+        // Phase A: CREATE NODE / CREATE EDGE shapes do not exist in
+        // the SQL grammar (they ship as API calls). The parser must
+        // surface a Syntax error rather than panicking.
+        (
+            "graph_create_node_attempt",
+            "CREATE NODE (a:person {name: 'x'})".to_string(),
+        ),
+        (
+            "graph_create_edge_attempt",
+            "CREATE EDGE (a)-[:KNOWS]->(b)".to_string(),
+        ),
+    ]
+}
+
+pub fn queue_adversarial_inputs() -> Vec<(&'static str, String)> {
+    vec![
+        // CREATE QUEUE — invalid MAX_SIZE values.
+        ("queue_create_eof_after_keyword", "CREATE QUEUE".to_string()),
+        ("queue_create_missing_name", "CREATE QUEUE MAX_SIZE 100".to_string()),
+        (
+            "queue_create_max_size_negative",
+            "CREATE QUEUE q MAX_SIZE -1".to_string(),
+        ),
+        (
+            "queue_create_max_size_zero",
+            "CREATE QUEUE q MAX_SIZE 0".to_string(),
+        ),
+        (
+            "queue_create_max_size_non_numeric",
+            "CREATE QUEUE q MAX_SIZE forever".to_string(),
+        ),
+        (
+            "queue_create_max_size_eof",
+            "CREATE QUEUE q MAX_SIZE".to_string(),
+        ),
+        (
+            "queue_create_max_size_overflow",
+            "CREATE QUEUE q MAX_SIZE 99999999999999999999".to_string(),
+        ),
+        (
+            "queue_create_dangling_with",
+            "CREATE QUEUE q WITH".to_string(),
+        ),
+        (
+            "queue_create_with_ttl_no_value",
+            "CREATE QUEUE q WITH TTL".to_string(),
+        ),
+        (
+            "queue_create_with_dlq_no_name",
+            "CREATE QUEUE q WITH DLQ".to_string(),
+        ),
+        // PUSH — malformed and oversized payloads.
+        ("queue_push_eof", "QUEUE PUSH".to_string()),
+        ("queue_push_missing_payload", "QUEUE PUSH q".to_string()),
+        (
+            "queue_push_unterminated_string",
+            "QUEUE PUSH q 'no closing".to_string(),
+        ),
+        (
+            "queue_push_unbalanced_json",
+            "QUEUE PUSH q {job: 'hello'".to_string(),
+        ),
+        (
+            "queue_push_oversized_string_payload",
+            format!("QUEUE PUSH q '{}'", "x".repeat(2 * 1024 * 1024)),
+        ),
+        (
+            "queue_push_oversized_input",
+            "QUEUE PUSH q ".to_string() + &"x".repeat(2 * 1024 * 1024),
+        ),
+        (
+            "queue_push_priority_no_value",
+            "QUEUE PUSH q 'x' PRIORITY".to_string(),
+        ),
+        // POP / aliases.
+        ("queue_pop_eof", "QUEUE POP".to_string()),
+        (
+            "queue_pop_count_no_value",
+            "QUEUE POP q COUNT".to_string(),
+        ),
+        // Consumer group syntax.
+        ("queue_group_create_eof", "QUEUE GROUP CREATE".to_string()),
+        (
+            "queue_group_create_missing_group",
+            "QUEUE GROUP CREATE q".to_string(),
+        ),
+        (
+            "queue_read_missing_group_keyword",
+            "QUEUE READ q workers".to_string(),
+        ),
+        (
+            "queue_read_missing_consumer_name",
+            "QUEUE READ q GROUP g CONSUMER".to_string(),
+        ),
+        (
+            "queue_claim_missing_min_idle",
+            "QUEUE CLAIM q GROUP g CONSUMER c".to_string(),
+        ),
+        (
+            "queue_claim_min_idle_non_numeric",
+            "QUEUE CLAIM q GROUP g CONSUMER c MIN_IDLE forever".to_string(),
+        ),
+        (
+            "queue_ack_missing_message_id",
+            "QUEUE ACK q GROUP g".to_string(),
+        ),
+        (
+            "queue_unknown_subcommand",
+            "QUEUE FROBNICATE q".to_string(),
+        ),
+        // Bytes-level adversarial inputs.
+        (
+            "queue_garbage_after_keyword",
+            "QUEUE @#$%".to_string(),
+        ),
+        (
+            "queue_nul_byte",
+            "CREATE QUEUE q\0".to_string(),
+        ),
+        (
+            "queue_long_name",
+            format!("CREATE QUEUE {}", "q".repeat(10_000)),
+        ),
+    ]
+}
+
+pub fn ask_adversarial_inputs() -> Vec<(&'static str, String)> {
+    vec![
+        ("ask_eof_after_keyword", "ASK".to_string()),
+        ("ask_eof_after_question", "ASK 'why?'".to_string()),
+        ("ask_missing_question", "ASK USING openai".to_string()),
+        (
+            "ask_unterminated_string",
+            "ASK 'open question without closing quote".to_string(),
+        ),
+        (
+            "ask_using_no_provider",
+            "ASK 'q' USING".to_string(),
+        ),
+        (
+            "ask_model_no_string",
+            "ASK 'q' MODEL".to_string(),
+        ),
+        (
+            "ask_model_unquoted_ident",
+            // MODEL slot expects a string literal, not a bare ident.
+            "ASK 'q' MODEL gpt4".to_string(),
+        ),
+        (
+            "ask_depth_no_int",
+            "ASK 'q' DEPTH".to_string(),
+        ),
+        (
+            "ask_depth_negative",
+            "ASK 'q' DEPTH -1".to_string(),
+        ),
+        (
+            "ask_limit_garbage",
+            "ASK 'q' LIMIT @#$%".to_string(),
+        ),
+        (
+            "ask_collection_no_ident",
+            "ASK 'q' COLLECTION".to_string(),
+        ),
+        (
+            "ask_more_than_five_clauses",
+            // Parser caps the optional-clause loop at 5 iterations;
+            // a 6th repeat must round-trip without panic (it parses
+            // partially and the trailing tokens become a follow-on
+            // statement which the top-level loop rejects).
+            "ASK 'q' USING a MODEL 'm' DEPTH 1 LIMIT 2 COLLECTION c USING b".to_string(),
+        ),
+        (
+            "ask_oversized_question",
+            format!("ASK '{}'", "x".repeat(100_000)),
+        ),
+        (
+            "ask_unicode_question",
+            "ASK '雪花飘落 ❄ ε≈μ' USING openai".to_string(),
+        ),
+        (
+            "ask_zero_width_unicode",
+            "ASK '\u{200b}\u{feff}q' USING openai".to_string(),
+        ),
+        (
+            "ask_nul_byte_in_question",
+            "ASK 'q\0nul' USING openai".to_string(),
+        ),
+        (
+            "ask_garbage_payload",
+            "ASK @#$%".to_string(),
+        ),
+        // SEARCH CONTEXT adversarial shapes
+        (
+            "search_context_eof",
+            "SEARCH CONTEXT".to_string(),
+        ),
+        (
+            "search_context_missing_string",
+            "SEARCH CONTEXT FIELD x".to_string(),
+        ),
+        (
+            "search_context_unterminated_string",
+            "SEARCH CONTEXT 'open".to_string(),
+        ),
+        (
+            "search_context_field_no_ident",
+            "SEARCH CONTEXT 'q' FIELD".to_string(),
+        ),
+        (
+            "search_context_collection_no_ident",
+            "SEARCH CONTEXT 'q' COLLECTION".to_string(),
+        ),
+        (
+            "search_context_oversized_query",
+            format!("SEARCH CONTEXT '{}'", "x".repeat(100_000)),
+        ),
+    ]
+}
+

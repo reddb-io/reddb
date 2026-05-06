@@ -1,0 +1,8 @@
+---
+source: crates/reddb-server/tests/graph_dsl_snapshots.rs
+assertion_line: 90
+expression: "fmt_parse_error(\"GRAPH\")"
+---
+input: "GRAPH"
+kind:  Syntax
+error: Parse error at 1:6: Unexpected token: EOF (expected: NEIGHBORHOOD, SHORTEST_PATH, TRAVERSE, CENTRALITY, COMMUNITY, COMPONENTS, CYCLES, CLUSTERING, TOPOLOGICAL_SORT, PROPERTIES)
