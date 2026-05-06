@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/probabilistic_parser_snapshots.rs
+expression: "fmt_parse_error(\"SKETCH ADD events bareword\")"
+---
+input: "SKETCH ADD events bareword"
+kind:  Syntax
+error: Parse error at 1:19: Unexpected token: bareword (expected: string)
