@@ -112,3 +112,107 @@ pub fn migration_adversarial_inputs() -> Vec<(&'static str, String)> {
         ),
     ]
 }
+
+/// Adversarial inputs that target the ASK / AI extension surface
+/// (issue #101). Exercise `parse_ask_query` and `parse_search_context`
+/// on malformed shapes that historically cause parser-loop bugs:
+/// missing closing quotes, oversized questions, stray unicode, repeats
+/// of the same optional clause, etc.
+///
+/// Provider / model identifiers in error paths are routed through the
+/// shared snapshot redactor when consumed by snapshot tests — none of
+/// these fixtures contain a literal secret, but the redaction guard is
+/// still installed at every call site as defense in depth (#98).
+pub fn ask_adversarial_inputs() -> Vec<(&'static str, String)> {
+    vec![
+        ("ask_eof_after_keyword", "ASK".to_string()),
+        ("ask_eof_after_question", "ASK 'why?'".to_string()),
+        ("ask_missing_question", "ASK USING openai".to_string()),
+        (
+            "ask_unterminated_string",
+            "ASK 'open question without closing quote".to_string(),
+        ),
+        (
+            "ask_using_no_provider",
+            "ASK 'q' USING".to_string(),
+        ),
+        (
+            "ask_model_no_string",
+            "ASK 'q' MODEL".to_string(),
+        ),
+        (
+            "ask_model_unquoted_ident",
+            // MODEL slot expects a string literal, not a bare ident.
+            "ASK 'q' MODEL gpt4".to_string(),
+        ),
+        (
+            "ask_depth_no_int",
+            "ASK 'q' DEPTH".to_string(),
+        ),
+        (
+            "ask_depth_negative",
+            "ASK 'q' DEPTH -1".to_string(),
+        ),
+        (
+            "ask_limit_garbage",
+            "ASK 'q' LIMIT @#$%".to_string(),
+        ),
+        (
+            "ask_collection_no_ident",
+            "ASK 'q' COLLECTION".to_string(),
+        ),
+        (
+            "ask_more_than_five_clauses",
+            // Parser caps the optional-clause loop at 5 iterations;
+            // a 6th repeat must round-trip without panic (it parses
+            // partially and the trailing tokens become a follow-on
+            // statement which the top-level loop rejects).
+            "ASK 'q' USING a MODEL 'm' DEPTH 1 LIMIT 2 COLLECTION c USING b".to_string(),
+        ),
+        (
+            "ask_oversized_question",
+            format!("ASK '{}'", "x".repeat(100_000)),
+        ),
+        (
+            "ask_unicode_question",
+            "ASK '雪花飘落 ❄ ε≈μ' USING openai".to_string(),
+        ),
+        (
+            "ask_zero_width_unicode",
+            "ASK '\u{200b}\u{feff}q' USING openai".to_string(),
+        ),
+        (
+            "ask_nul_byte_in_question",
+            "ASK 'q\0nul' USING openai".to_string(),
+        ),
+        (
+            "ask_garbage_payload",
+            "ASK @#$%".to_string(),
+        ),
+        // SEARCH CONTEXT adversarial shapes
+        (
+            "search_context_eof",
+            "SEARCH CONTEXT".to_string(),
+        ),
+        (
+            "search_context_missing_string",
+            "SEARCH CONTEXT FIELD x".to_string(),
+        ),
+        (
+            "search_context_unterminated_string",
+            "SEARCH CONTEXT 'open".to_string(),
+        ),
+        (
+            "search_context_field_no_ident",
+            "SEARCH CONTEXT 'q' FIELD".to_string(),
+        ),
+        (
+            "search_context_collection_no_ident",
+            "SEARCH CONTEXT 'q' COLLECTION".to_string(),
+        ),
+        (
+            "search_context_oversized_query",
+            format!("SEARCH CONTEXT '{}'", "x".repeat(100_000)),
+        ),
+    ]
+}

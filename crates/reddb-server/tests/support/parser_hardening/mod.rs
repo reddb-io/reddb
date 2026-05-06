@@ -12,6 +12,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use reddb_server::storage::query::parser::ParserLimits;
 
+pub mod ask_grammar;
 pub mod corpus;
 pub mod migration_grammar;
 pub mod secret_redactor;
