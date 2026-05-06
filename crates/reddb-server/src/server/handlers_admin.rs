@@ -918,6 +918,7 @@ impl RedDBServer {
             status: 200,
             content_type: "text/plain; version=0.0.4",
             body: body.into_bytes(),
+            extra_headers: Vec::new(),
         }
     }
 
@@ -1314,6 +1315,7 @@ impl RedDBServer {
             status: 200,
             content_type: "application/yaml",
             body: SPEC.as_bytes().to_vec(),
+            extra_headers: Vec::new(),
         }
     }
 
@@ -1410,6 +1412,7 @@ impl RedDBServer {
                 status: 200,
                 content_type: "application/x-ndjson",
                 body: body.into_bytes(),
+                extra_headers: Vec::new(),
             };
         }
 
@@ -1567,6 +1570,7 @@ impl RedDBServer {
             status: 200,
             content_type: "application/json",
             body: body.into_bytes(),
+            extra_headers: Vec::new(),
         }
     }
 
@@ -1615,6 +1619,7 @@ impl RedDBServer {
                     status: 204,
                     content_type: "application/json",
                     body: Vec::new(),
+                    extra_headers: Vec::new(),
                 }
             }
             Err(e) => json_error(404, e.to_string()),
@@ -1668,6 +1673,7 @@ impl RedDBServer {
                     status: 204,
                     content_type: "application/json",
                     body: Vec::new(),
+                    extra_headers: Vec::new(),
                 }
             }
             Err(e) => json_error(400, e.to_string()),
@@ -1710,6 +1716,7 @@ impl RedDBServer {
                     status: 204,
                     content_type: "application/json",
                     body: Vec::new(),
+                    extra_headers: Vec::new(),
                 }
             }
             Err(e) => json_error(400, e.to_string()),
@@ -1760,6 +1767,7 @@ impl RedDBServer {
                     status: 204,
                     content_type: "application/json",
                     body: Vec::new(),
+                    extra_headers: Vec::new(),
                 }
             }
             Err(e) => json_error(400, e.to_string()),
