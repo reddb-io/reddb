@@ -9,8 +9,8 @@ Use this package for application code. If you just want to launch the CLI from
 npm, use:
 
 ```bash
-npx reddb-cli@latest version
-npx reddb-cli@latest server --http-bind 127.0.0.1:8080 --path ./data.rdb
+npx @reddb-io/cli@latest version
+npx @reddb-io/cli@latest server --http-bind 127.0.0.1:8080 --path ./data.rdb
 ```
 
 ## Install
