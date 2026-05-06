@@ -18,6 +18,29 @@ SQL parser is the first consumer; subsequent slices (#88, #89,
   long identifiers, oversized inputs) used by both property tests
   and fuzz seeds. `migration_adversarial_inputs()` covers the
   migration DSL surface (#88).
+- `secret_redactor.rs` — shared `insta` filter set that masks
+  secret-shaped substrings (bearer headers, JWTs, conn-string
+  credential params, `sk_/rs_/reddb_` API keys) before insta
+  diffs the snapshot (#98). Every parser snapshot test in this
+  crate must opt in via `install_redactions()`.
+
+## Snapshot secret redaction (#98)
+
+Bad inputs may contain secret-shaped substrings. To prevent a real
+credential from being pinned into a `*.snap` file, every parser
+snapshot test must install the shared redactor before calling
+`insta::assert_snapshot!`:
+
+```rust
+use super::secret_redactor;
+
+let _guard = secret_redactor::install_redactions();
+insta::assert_snapshot!(name, formatted);
+```
+
+The lint `tests/snapshot_redaction_lint.rs` re-greps every
+committed `*.snap` file with the same patterns and fails CI on a
+single unmasked match.
 
 ## How a new parser consumes the harness
 
