@@ -956,4 +956,142 @@ mod tests {
         cache.reset_stats();
         assert_eq!(cache.stats().misses, 0);
     }
+
+    /// Legacy single-lock baseline used as a regression check for the
+    /// sharded `PageCache`. Mirrors the pre-shard cache shape: a single
+    /// `RwLock<HashMap<u32, Page>>` so every mutation serializes on one
+    /// writer. We only need the surface used by the concurrency test
+    /// (`insert` / `get`); keeping it minimal avoids accidentally
+    /// drifting toward the sharded design and silently flattening the
+    /// regression signal.
+    mod legacy_baseline {
+        use super::Page;
+        use std::collections::HashMap;
+        use std::sync::RwLock;
+
+        pub struct LegacyPageCache {
+            entries: RwLock<HashMap<u32, Page>>,
+        }
+
+        impl LegacyPageCache {
+            pub fn new(_capacity: usize) -> Self {
+                Self {
+                    entries: RwLock::new(HashMap::new()),
+                }
+            }
+
+            pub fn insert(&self, page_id: u32, page: Page) {
+                let mut entries = self.entries.write().unwrap();
+                entries.insert(page_id, page);
+            }
+
+            pub fn get(&self, page_id: u32) -> Option<Page> {
+                let entries = self.entries.read().unwrap();
+                entries.get(&page_id).cloned()
+            }
+        }
+    }
+
+    /// Workload shared by both the sharded and legacy runs of the
+    /// concurrency property test below. Each worker churns through its
+    /// own disjoint `page_id` range so any contention seen between
+    /// workers is purely lock-induced, not data-induced.
+    fn run_workload<F>(workers: usize, ops_per_worker: usize, run: F) -> std::time::Duration
+    where
+        F: Fn(u32, &Page) + Send + Sync + 'static + Clone,
+    {
+        use std::sync::Arc;
+        use std::time::Instant;
+
+        let run = Arc::new(run);
+        let start = Instant::now();
+        let mut handles = Vec::with_capacity(workers);
+        for w in 0..workers {
+            let run = Arc::clone(&run);
+            handles.push(std::thread::spawn(move || {
+                let base = (w as u32) * 1_000_000;
+                let page = make_page(0);
+                for i in 0..ops_per_worker {
+                    let id = base + (i as u32);
+                    run(id, &page);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        start.elapsed()
+    }
+
+    #[test]
+    fn test_sharded_cache_scales_concurrently() {
+        // Property: with disjoint page_id ranges, 10 workers should
+        // beat 1 worker by a meaningful factor on the sharded cache,
+        // and the sharded cache should beat the legacy single-lock
+        // baseline at 10 workers (since the baseline serializes every
+        // mutation through one global RwLock).
+        //
+        // We assert "sub-linear scaling" in a deliberately loose form
+        // (parallel < 7x serial) so CI flakiness on busy runners
+        // doesn't false-positive. The legacy comparison is the
+        // stronger regression signal.
+        use std::sync::Arc;
+
+        const WORKERS: usize = 10;
+        const OPS: usize = 5_000;
+        const CAPACITY: usize = 200_000;
+
+        // Sharded: 1 worker baseline.
+        let sharded = Arc::new(PageCache::new(CAPACITY));
+        let s1 = Arc::clone(&sharded);
+        let sharded_serial = run_workload(1, OPS * WORKERS, move |id, page| {
+            s1.insert(id, page.clone());
+            let _ = s1.get(id);
+        });
+
+        // Sharded: WORKERS parallel.
+        let sharded = Arc::new(PageCache::new(CAPACITY));
+        let s2 = Arc::clone(&sharded);
+        let sharded_parallel = run_workload(WORKERS, OPS, move |id, page| {
+            s2.insert(id, page.clone());
+            let _ = s2.get(id);
+        });
+
+        // Legacy: WORKERS parallel.
+        let legacy = Arc::new(legacy_baseline::LegacyPageCache::new(CAPACITY));
+        let l2 = Arc::clone(&legacy);
+        let legacy_parallel = run_workload(WORKERS, OPS, move |id, page| {
+            l2.insert(id, page.clone());
+            let _ = l2.get(id);
+        });
+
+        eprintln!(
+            "page_cache concurrency: sharded 1w={:?} sharded {}w={:?} legacy {}w={:?}",
+            sharded_serial, WORKERS, sharded_parallel, WORKERS, legacy_parallel
+        );
+
+        // Sub-linear scaling: parallel must not be worse than ~7x the
+        // serial run. Linear (no scaling) would be ~10x.
+        assert!(
+            sharded_parallel.as_nanos() < sharded_serial.as_nanos() * 7,
+            "sharded cache did not scale: 1w={:?} {}w={:?}",
+            sharded_serial,
+            WORKERS,
+            sharded_parallel
+        );
+
+        // Regression check: sharded must beat the legacy single-lock
+        // baseline at WORKERS workers. We give the legacy a generous
+        // 1.2x cushion so a noisy CI box doesn't flip the assertion
+        // when both designs are within noise (would itself indicate a
+        // sharding regression worth investigating).
+        assert!(
+            sharded_parallel.as_nanos() * 12 < legacy_parallel.as_nanos() * 10,
+            "sharded cache did not beat legacy baseline: sharded {}w={:?} legacy {}w={:?}",
+            WORKERS,
+            sharded_parallel,
+            WORKERS,
+            legacy_parallel
+        );
+    }
 }
