@@ -209,3 +209,125 @@ fn bulk_insert_empty_is_noop() {
     drop(db);
     cleanup_db(&path);
 }
+
+/// Pins #111: `EmbeddedClient::insert` routes through the same
+/// `create_rows_batch_columnar` port as `bulk_insert`, so a single
+/// `insert` call must produce exactly one WAL append — same byte
+/// growth as a 1-row `bulk_insert`. If anyone re-introduces the
+/// `build_insert_sql` + `execute_query` round-trip, the SQL parser
+/// path adds extra WAL framing (transaction-wrapped statement
+/// records) and this size delta diverges.
+#[test]
+fn insert_emits_one_wal_record_per_call() {
+    // Run 1: a single `insert` of one row.
+    let insert_path = unique_db_path("insert-one");
+    let insert_size = {
+        let db = EmbeddedClient::open(insert_path.clone()).expect("open insert db");
+        let res = db
+            .insert(
+                "users",
+                &JsonValue::object([
+                    ("name", JsonValue::string("solo".to_string())),
+                    ("age", JsonValue::number(42.0)),
+                ]),
+            )
+            .expect("single insert");
+        assert_eq!(res.affected, 1, "insert returned wrong affected count");
+        let after = wal_size(&insert_path);
+        drop(db);
+        after
+    };
+
+    // Run 2: a 1-row `bulk_insert` of the same payload — known to
+    // route through `create_rows_batch_columnar` post-#110. The two
+    // runs must produce the same WAL byte count, since they're
+    // hitting the same port with the same row.
+    let bulk_path = unique_db_path("bulk-one");
+    let bulk_size = {
+        let db = EmbeddedClient::open(bulk_path.clone()).expect("open bulk db");
+        let inserted = db
+            .bulk_insert(
+                "users",
+                &[JsonValue::object([
+                    ("name", JsonValue::string("solo".to_string())),
+                    ("age", JsonValue::number(42.0)),
+                ])],
+            )
+            .expect("bulk insert one");
+        assert_eq!(inserted, 1);
+        let after = wal_size(&bulk_path);
+        drop(db);
+        after
+    };
+
+    // Run 3: same payload via `query("INSERT ...")` — the old SQL
+    // round-trip path. This is the size we expect the new `insert`
+    // to *beat* (or at least match the bulk path on, decisively
+    // below the SQL path).
+    let sql_path = unique_db_path("insert-sql");
+    let sql_size = {
+        let db = EmbeddedClient::open(sql_path.clone()).expect("open sql db");
+        db.query("INSERT INTO users (name, age) VALUES ('solo', 42)")
+            .expect("sql insert");
+        let after = wal_size(&sql_path);
+        drop(db);
+        after
+    };
+
+    cleanup_db(&insert_path);
+    cleanup_db(&bulk_path);
+    cleanup_db(&sql_path);
+
+    eprintln!(
+        "WAL size for 1 row: insert={insert_size} bytes, bulk_insert(1)={bulk_size} bytes, query(SQL)={sql_size} bytes"
+    );
+
+    // Header-only WAL is 8 bytes; both fast paths must have written
+    // payload past that.
+    assert!(
+        insert_size > 8,
+        "insert WAL only contains the header — no append happened (size={insert_size})"
+    );
+
+    // Direct columnar port shares the same WAL framing as the
+    // 1-row bulk path. Equal sizes pin that `insert` no longer
+    // routes through `execute_query`.
+    assert_eq!(
+        insert_size, bulk_size,
+        "insert WAL ({insert_size}) should match 1-row bulk_insert WAL ({bulk_size}) — insert likely regressed back to the SQL round-trip"
+    );
+
+    // And the SQL round-trip path must be strictly larger (it
+    // wraps the same row in extra parser/transaction framing).
+    // If `insert_size >= sql_size`, then `insert` itself is going
+    // through the SQL path.
+    assert!(
+        insert_size < sql_size,
+        "expected insert WAL ({insert_size}) to be smaller than SQL-roundtrip WAL ({sql_size}) — insert appears to still be on the execute_query path"
+    );
+}
+
+#[test]
+fn insert_round_trip() {
+    let path = unique_db_path("insert-round-trip");
+    let db = EmbeddedClient::open(path.clone()).expect("open db");
+
+    let res = db
+        .insert(
+            "items",
+            &JsonValue::object([
+                ("sku", JsonValue::string("X9".to_string())),
+                ("qty", JsonValue::number(13.0)),
+            ]),
+        )
+        .expect("single insert");
+    assert_eq!(res.affected, 1);
+
+    let result = db
+        .query("SELECT sku, qty FROM items")
+        .expect("select after insert");
+    assert_eq!(result.rows.len(), 1, "expected 1 row back from select");
+
+    drop(db);
+    cleanup_db(&path);
+}
