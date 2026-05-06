@@ -1,4 +1,4 @@
-# Bench: lock benchmark methodology to one canonical config schema [HITL] (in flight via worktree agent)
+# Bench: lock benchmark methodology to one canonical config schema [AFK]
 
 GitHub: reddb-io/reddb#154
 Parent: #152
