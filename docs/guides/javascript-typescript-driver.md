@@ -9,6 +9,15 @@ npx @reddb-io/cli@latest version
 npx @reddb-io/cli@latest server --http-bind 127.0.0.1:8080 --path ./data.rdb
 ```
 
+> **Performance check before you commit.** RedDB's measured wins (and
+> the gaps where it still loses) are catalogued in
+> [`docs/perf/wins.md`](../perf/wins.md) and
+> [`docs/perf/when-not-reddb.md`](../perf/when-not-reddb.md). If your
+> hot path is bulk typed ingest or compact-write throughput, you are
+> on the right track. If it is highly concurrent OLTP, large `UPDATE`s,
+> `GROUP BY` aggregates, or filtered `SELECT`s on secondary indices,
+> read `when-not-reddb.md` first — those are in-flight.
+
 ## 1. Install the driver
 
 ```bash
