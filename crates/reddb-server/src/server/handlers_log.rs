@@ -110,20 +110,34 @@ fn json_to_value(v: &JsonValue) -> Value {
 }
 
 fn value_to_json(v: &Value) -> JsonValue {
+    use crate::json_field::SerializedJsonField;
     match v {
         Value::Null => JsonValue::Null,
         Value::Boolean(b) => JsonValue::Bool(*b),
         Value::Integer(n) => JsonValue::Number(*n as f64),
         Value::UnsignedInteger(n) => JsonValue::Number(*n as f64),
         Value::Float(f) => JsonValue::Number(*f),
-        Value::Text(s) => JsonValue::String(s.to_string()),
-        _ => JsonValue::String(format!("{:?}", v)),
+        Value::Text(s) => SerializedJsonField::tainted(s),
+        // Fallback path: a non-canonical Value type debug-formatted
+        // into a string. Round-trip through the JSON guard so any
+        // delimiters in the Debug output cannot terminate the field
+        // early. ADR 0010 §3 / #178.
+        other => {
+            let text = format!("{:?}", other);
+            SerializedJsonField::tainted(&text)
+        }
     }
 }
 
 fn err(msg: &str) -> JsonValue {
     let mut obj = Map::<String, JsonValue>::new();
     obj.insert("ok".to_string(), JsonValue::Bool(false));
-    obj.insert("error".to_string(), JsonValue::String(msg.to_string()));
+    // `msg` reaches us from request validation paths that may
+    // include user-supplied field names. Route through the
+    // JSON-boundary guard. ADR 0010 §3 / #178.
+    obj.insert(
+        "error".to_string(),
+        crate::json_field::SerializedJsonField::tainted(msg),
+    );
     JsonValue::Object(obj)
 }

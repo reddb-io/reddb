@@ -167,14 +167,35 @@ impl HttpResponse {
 pub(crate) fn json_ok(message: impl Into<String>) -> HttpResponse {
     let mut object = Map::new();
     object.insert("ok".to_string(), JsonValue::Bool(true));
-    object.insert("message".to_string(), JsonValue::String(message.into()));
+    // `message` is caller-influenced in many call sites (it surfaces
+    // request-derived strings back to the client). Route through the
+    // JSON-boundary guard so the field round-trips through the
+    // canonical encoder rather than being string-concatenated. See
+    // ADR 0010 §3 / issue #178.
+    let message = message.into();
+    object.insert(
+        "message".to_string(),
+        crate::json_field::SerializedJsonField::tainted(&message),
+    );
     json_response(200, JsonValue::Object(object))
 }
 
 pub(crate) fn json_error(status: u16, message: impl Into<String>) -> HttpResponse {
     let mut object = Map::new();
     object.insert("ok".to_string(), JsonValue::Bool(false));
-    object.insert("error".to_string(), JsonValue::String(message.into()));
+    // `message` is caller-influenced in nearly every call site —
+    // notably SQL parser errors (F-05) interpolate user fragments via
+    // bare `format!` upstream, and the resulting `Display` string
+    // reaches us here. Route through the JSON-boundary guard so the
+    // field round-trips and any embedded `"`, control bytes, or
+    // CRLF cannot terminate the field early. See ADR 0010 §3,
+    // F-05 in `docs/security/serialization-boundary-audit-2026-05-06.md`,
+    // and issue #178.
+    let message = message.into();
+    object.insert(
+        "error".to_string(),
+        crate::json_field::SerializedJsonField::tainted(&message),
+    );
     json_response(status, JsonValue::Object(object))
 }
 
