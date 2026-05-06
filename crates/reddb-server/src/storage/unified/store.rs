@@ -472,6 +472,11 @@ pub struct UnifiedStore {
     paged_registry_dirty: AtomicBool,
     /// Logical store WAL / grouped durability coordinator for paged mode.
     commit: Option<Arc<StoreCommitCoordinator>>,
+    /// Counts how often `unindex_cross_refs_batch` took the read-only fast
+    /// path (no inbound refs, no outbound refs for any deleted id) and so
+    /// avoided acquiring the `cross_refs` / `reverse_refs` write locks.
+    /// Used by tests to pin the early-exit; cheap relaxed counter otherwise.
+    unindex_cross_refs_fast_path: AtomicU64,
 }
 
 mod builder;
