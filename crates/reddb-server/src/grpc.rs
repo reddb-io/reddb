@@ -55,7 +55,7 @@ use proto::{
     ExportRequest, GraphProjectionUpsertRequest, HealthReply, IndexNameRequest, IndexToggleRequest,
     JsonBulkCreateRequest, JsonCreateRequest, JsonPayloadRequest, ManifestRequest, OperationReply,
     PayloadReply, PrepareQueryReply, PrepareQueryRequest, QueryReply, QueryRequest, ScanEntity,
-    ScanReply, ScanRequest, StatsReply, UpdateEntityRequest,
+    ScanReply, ScanRequest, StatsReply, TopologyReply, TopologyRequest, UpdateEntityRequest,
 };
 
 mod control_support;

@@ -16,6 +16,12 @@ categories = ["database", "network-programming"]
 tonic = { version = "0.14", default-features = false, features = ["codegen", "router", "server", "channel"] }
 tonic-prost = "0.14"
 prost = "0.14"
+# Issue #166: re-export the canonical Topology Rust type from
+# reddb-wire so gRPC consumers (reddb-server, reddb-client) reach
+# for one place to grab the shared schema rather than hand-rolling
+# their own. The transport carries the version-tagged byte string;
+# the type itself lives in reddb-wire::topology.
+reddb-wire = { path = "../reddb-wire", version = "0.2.9" }
 
 [build-dependencies]
 tonic-build = "0.14"
