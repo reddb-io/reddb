@@ -845,6 +845,7 @@ pub mod schema_vocabulary;
 pub mod snapshot_reuse;
 mod statement_frame;
 pub mod authorized_search;
+pub mod ask_pipeline;
 pub mod within_clause;
 pub mod write_gate;
 
