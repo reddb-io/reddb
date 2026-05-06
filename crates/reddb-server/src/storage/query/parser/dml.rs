@@ -143,7 +143,10 @@ impl<'a> Parser<'a> {
             "d" | "day" | "days" => 86_400_000.0,
             other => {
                 return Err(ParseError::new(
-                    format!("unsupported TTL unit '{other}'"),
+                    // F-05: render `other` via `{:?}` so caller-controlled
+                    // bytes (CR / LF / NUL / quotes) are escaped before
+                    // landing in the JSON/audit/log/gRPC error sinks.
+                    format!("unsupported TTL unit {other:?}"),
                     self.position(),
                 ))
             }
@@ -250,7 +253,10 @@ impl<'a> Parser<'a> {
             }
             // Basic date parsing — delegate to chrono if available, or simple heuristic
             return Err(ParseError::new(
-                format!("EXPIRES AT requires a unix timestamp in milliseconds, got '{trimmed}'"),
+                // F-05: `trimmed` is caller-controlled string-literal bytes.
+                // Render via `{:?}` so CR/LF/NUL/quotes are escaped before
+                // the message reaches the JSON / audit / log / gRPC sinks.
+                format!("EXPIRES AT requires a unix timestamp in milliseconds, got {trimmed:?}"),
                 self.position(),
             ));
         }
@@ -513,7 +519,12 @@ impl<'a> Parser<'a> {
                 let json_value =
                     crate::utils::json::parse_json(&raw).map_err(|err| {
                         ParseError::new(
-                            format!("invalid JSON object literal: {err}"),
+                            // F-05: render the underlying parse-error string
+                            // via `{:?}` so any user fragment serde echoed
+                            // back (unexpected character, key text, …) is
+                            // Debug-escaped before reaching the downstream
+                            // JSON / audit / log / gRPC sinks.
+                            format!("invalid JSON object literal: {:?}", err.to_string()),
                             self.position(),
                         )
                     })?;
@@ -523,7 +534,10 @@ impl<'a> Parser<'a> {
                 let canonical = crate::serde_json::Value::from(json_value);
                 let bytes = crate::json::to_vec(&canonical).map_err(|err| {
                     ParseError::new(
-                        format!("failed to encode JSON literal: {err}"),
+                        // F-05: escape the encoder error via `{:?}` so any
+                        // user fragment it carries cannot smuggle control
+                        // bytes through downstream serialization sinks.
+                        format!("failed to encode JSON literal: {:?}", err.to_string()),
                         self.position(),
                     )
                 })?;

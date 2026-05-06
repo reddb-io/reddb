@@ -164,7 +164,11 @@ impl<'a> Parser<'a> {
                         Ok(FusionStrategy::Rerank { weight })
                     }
                     _ => Err(ParseError::new(
-                        format!("Unknown fusion strategy: {}. Valid: RERANK, RRF, FILTER_THEN_SEARCH, SEARCH_THEN_FILTER, INTERSECTION, UNION", name_clone),
+                        // F-05: `name_clone` is caller-controlled identifier
+                        // bytes. Render via `{:?}` so CR/LF/NUL/quotes are
+                        // escaped before the message reaches the downstream
+                        // JSON / audit / log / gRPC sinks.
+                        format!("Unknown fusion strategy: {name_clone:?}. Valid: RERANK, RRF, FILTER_THEN_SEARCH, SEARCH_THEN_FILTER, INTERSECTION, UNION"),
                         self.position(),
                     )),
                 }

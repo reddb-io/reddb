@@ -116,7 +116,11 @@ impl<'a> Parser<'a> {
             crate::storage::schema::Value::Text(s) => {
                 crate::storage::timeseries::retention::parse_duration_ns(&s).ok_or_else(|| {
                     ParseError::new(
-                        format!("{clause} duration '{s}' is not a valid duration literal"),
+                        // F-05: `s` is caller-controlled string-literal bytes.
+                        // Render via `{:?}` so CR/LF/NUL/quotes are escaped
+                        // before reaching downstream serialization sinks.
+                        // `clause` is a static internal label and stays bare.
+                        format!("{clause} duration {s:?} is not a valid duration literal"),
                         pos,
                     )
                 })
@@ -156,7 +160,11 @@ impl<'a> Parser<'a> {
                     "d" | "day" | "days" => 86_400_000.0,
                     other => {
                         return Err(ParseError::new(
-                            format!("unknown duration unit '{}', expected s/m/h/d", other),
+                            // F-05: `other` is caller-controlled identifier
+                            // text. Render via `{:?}` so embedded CR/LF/NUL/
+                            // quotes are escaped before the message reaches
+                            // downstream serialization sinks.
+                            format!("unknown duration unit {other:?}, expected s/m/h/d"),
                             self.position(),
                         ));
                     }

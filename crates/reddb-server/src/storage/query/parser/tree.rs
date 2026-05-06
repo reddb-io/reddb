@@ -197,7 +197,11 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 parse_tree_entity_id_text(&value).ok_or_else(|| {
                     ParseError::new(
-                        format!("invalid tree entity id '{}'", value),
+                        // F-05: `value` is caller-controlled string-literal
+                        // bytes. Render via `{:?}` so embedded CR/LF/NUL/
+                        // quotes are escaped before the message reaches the
+                        // downstream JSON / audit / log / gRPC sinks.
+                        format!("invalid tree entity id {value:?}"),
                         self.position(),
                     )
                 })
@@ -252,7 +256,10 @@ impl<'a> Parser<'a> {
         };
         let decoded = crate::json::from_slice::<JsonValue>(&bytes).map_err(|err| {
             ParseError::new(
-                format!("failed to decode object literal: {err}"),
+                // F-05: serde's parse error string can echo a user fragment.
+                // Render via `{:?}` so embedded control bytes / quotes are
+                // escaped before the message reaches downstream sinks.
+                format!("failed to decode object literal: {:?}", err.to_string()),
                 self.position(),
             )
         })?;
@@ -293,7 +300,9 @@ fn tree_json_value_to_storage_value(value: &JsonValue) -> Result<Value, ParseErr
         JsonValue::Array(_) | JsonValue::Object(_) => {
             Value::Json(crate::json::to_vec(value).map_err(|err| {
                 ParseError::new(
-                    format!("failed to encode nested JSON value: {err}"),
+                    // F-05: defensively escape encoder error in case it
+                    // echoes a user fragment.
+                    format!("failed to encode nested JSON value: {:?}", err.to_string()),
                     crate::storage::query::lexer::Position::default(),
                 )
             })?)

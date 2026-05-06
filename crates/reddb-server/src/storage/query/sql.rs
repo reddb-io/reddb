@@ -11,7 +11,7 @@ use crate::storage::query::ast::{
     RollbackMigrationQuery, SearchCommand, TableQuery, TreeCommand, TxnControl, UpdateQuery,
     VectorQuery,
 };
-use crate::storage::query::parser::{ParseError, Parser};
+use crate::storage::query::parser::{ParseError, Parser, SafeTokenDisplay};
 use crate::storage::query::Token;
 use crate::storage::schema::Value;
 
@@ -319,7 +319,11 @@ pub fn parse_frontend(input: &str) -> Result<FrontendStatement, ParseError> {
     let statement = parser.parse_frontend_statement()?;
     if !parser.check(&Token::Eof) {
         return Err(ParseError::new(
-            format!("Unexpected token after query: {}", parser.current.token),
+            // F-05: `Token::Ident` / `Token::String` / `Token::JsonLiteral`
+            // Display arms emit raw user bytes. Render via `{:?}` so
+            // embedded CR/LF/NUL/quotes are escaped before the message
+            // reaches downstream JSON / audit / log / gRPC sinks.
+            format!("Unexpected token after query: {:?}", parser.current.token),
             parser.position(),
         ));
     }

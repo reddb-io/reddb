@@ -2,7 +2,7 @@
 
 use super::super::ast::{CteDefinition, QueryExpr, QueryWithCte, WithClause};
 use super::super::lexer::Token;
-use super::error::ParseError;
+use super::error::{ParseError, SafeTokenDisplay};
 use super::Parser;
 
 impl<'a> Parser<'a> {
@@ -16,7 +16,14 @@ impl<'a> Parser<'a> {
             // Expect end of input
             if !self.check(&Token::Eof) {
                 return Err(ParseError::new(
-                    format!("Unexpected token after query: {}", self.current.token),
+                    // F-05: route the offending token through
+                    // `SafeTokenDisplay` so user-controlled `Ident` /
+                    // `String` / `JsonLiteral` payloads are escaped before
+                    // the message reaches downstream serialization sinks.
+                    format!(
+                        "Unexpected token after query: {}",
+                        SafeTokenDisplay(&self.current.token)
+                    ),
                     self.position(),
                 ));
             }
@@ -28,7 +35,11 @@ impl<'a> Parser<'a> {
             // Expect end of input
             if !self.check(&Token::Eof) {
                 return Err(ParseError::new(
-                    format!("Unexpected token after query: {}", self.current.token),
+                    // F-05: same rationale as the CTE arm above.
+                    format!(
+                        "Unexpected token after query: {}",
+                        SafeTokenDisplay(&self.current.token)
+                    ),
                     self.position(),
                 ));
             }
