@@ -59,6 +59,9 @@ pub mod embedded;
 #[cfg(feature = "grpc")]
 pub mod grpc;
 
+#[cfg(feature = "grpc")]
+pub mod router;
+
 #[cfg(feature = "redwire")]
 pub mod redwire;
 
