@@ -72,8 +72,11 @@ impl<'a> Parser<'a> {
             0.0
         };
 
-        // Optional USING provider
-        let provider = if self.consume_search_ident("USING")? {
+        // Optional USING provider. `USING` is a reserved keyword
+        // (`Token::Using`), so `consume_search_ident` (which only
+        // matches `Token::Ident`) would never fire. Use the typed
+        // consumer. See bug #108.
+        let provider = if self.consume(&Token::Using)? {
             Some(self.expect_ident()?)
         } else {
             None
