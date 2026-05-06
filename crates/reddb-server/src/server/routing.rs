@@ -1436,21 +1436,25 @@ pub(crate) fn resolve_bearer_role(
         if let Some(validator) = runtime.oauth_validator() {
             match crate::wire::redwire::auth::validate_oauth_jwt(&validator, token) {
                 Ok((username, role)) => {
+                    // F-04: `username` is a JWT-claim string in the
+                    // federated case, attacker-influenceable. Strip
+                    // CR/LF/control bytes through the LogField escaper.
                     tracing::info!(
                         target: "reddb::http_auth",
                         method = "oauth_jwt",
-                        user = %username,
+                        user = %reddb_wire::audit_safe_log_field(&username),
                         token_sha256 = %token_fp,
                         "JWT accepted"
                     );
                     return BearerOutcome::Valid(role);
                 }
                 Err(reason) => {
+                    // F-04: `reason` quotes parts of the token; sanitize.
                     tracing::warn!(
                         target: "reddb::http_auth",
                         method = "oauth_jwt",
                         token_sha256 = %token_fp,
-                        reason = %reason,
+                        reason = %reddb_wire::audit_safe_log_field(&reason),
                         "JWT rejected"
                     );
                     return BearerOutcome::Invalid;

@@ -1861,8 +1861,11 @@ impl RedDBRuntime {
                         )
                         .map_err(crate::RedDBError::Internal)?;
                 } else {
+                    // F-04: `applied.collection` is tenant-supplied;
+                    // strip CR/LF/control bytes via the LogField
+                    // escaper (ADR 0010).
                     tracing::debug!(
-                        collection = %applied.collection,
+                        collection = %reddb_wire::audit_safe_log_field(&applied.collection),
                         "hot_update fast-path: skipped index_entity_update"
                     );
                 }
