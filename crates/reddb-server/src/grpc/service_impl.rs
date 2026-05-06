@@ -2378,6 +2378,23 @@ async fn checkpoint(&self, _request: Request<Empty>) -> Result<Response<Operatio
     }))
 }
 
+async fn topology(
+    &self,
+    _request: Request<TopologyRequest>,
+) -> Result<Response<TopologyReply>, Status> {
+    // Wire surface only (#166). The TopologyAdvertiser landing in
+    // #167 will fill the body — this stub keeps the generated trait
+    // satisfied so the workspace compiles. Returning Unimplemented
+    // (rather than an empty payload) keeps the contract honest:
+    // a client probing the new RPC against a server that has not
+    // yet picked up the advertiser sees a status code it can fall
+    // back on, instead of an empty success that looks like "no
+    // replicas". See ADR 0008 §4 on the schema-evolution rule.
+    Err(Status::unimplemented(
+        "Topology RPC not yet wired (issue #167 TopologyAdvertiser)",
+    ))
+}
+
 async fn replication_status(
     &self,
     request: Request<Empty>,

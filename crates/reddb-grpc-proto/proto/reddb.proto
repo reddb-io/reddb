@@ -120,6 +120,13 @@ service RedDb {
   rpc DeleteEntity(DeleteEntityRequest) returns (OperationReply);
   rpc Checkpoint(Empty) returns (OperationReply);
 
+  // Cluster topology (issue #166, ADR 0008). Carries the canonical
+  // version-tagged Topology bytes produced by the shared encoder in
+  // `reddb_wire::topology` — same bytes the RedWire HelloAck embeds
+  // base64-wrapped. Distinct from the human-readable
+  // ReplicationStatus observability endpoint below.
+  rpc Topology(TopologyRequest) returns (TopologyReply);
+
   // Replication
   rpc ReplicationStatus(Empty) returns (PayloadReply);
   rpc PullWalRecords(JsonPayloadRequest) returns (PayloadReply);
@@ -341,4 +348,16 @@ message BulkInsertReply {
   bool ok = 1;
   uint64 count = 2;
   uint64 first_id = 3;
+}
+
+// Topology RPC (#166). The canonical, version-tagged byte string is
+// produced by the shared encoder in `reddb_wire::topology` and
+// carried verbatim in `topology_bytes`. Schema evolution rule: new
+// optional fields are added inside the version-tagged body, NOT as
+// new protobuf fields, so the wire shape stays identical to the
+// HelloAck-embedded form. See ADR 0008 §4.
+message TopologyRequest {}
+
+message TopologyReply {
+  bytes topology_bytes = 1;
 }
