@@ -653,8 +653,11 @@ impl UnifiedStore {
             let original_len = records.len();
             records.retain(|(_, value)| {
                 if value.len() > max_value_size {
+                    // F-04: `name` is a tenant-supplied collection name.
+                    // Route through LogField escaper to neutralise
+                    // CR/LF/control-byte injection (ADR 0010).
                     tracing::warn!(
-                        collection = %name,
+                        collection = %reddb_wire::audit_safe_log_field(name),
                         bytes = value.len(),
                         max = max_value_size,
                         "skipping oversized row during B-tree bulk rebuild"
@@ -666,10 +669,14 @@ impl UnifiedStore {
             });
             let dropped = original_len - records.len();
             if dropped > 0 {
+                // F-04: tenant-supplied `name` interpolated into the
+                // structured `collection` field AND the message
+                // string. Sanitize both via the LogField escaper.
+                let safe_name = format!("{}", reddb_wire::audit_safe_log_field(name));
                 tracing::warn!(
-                    collection = %name,
+                    collection = %safe_name,
                     dropped,
-                    "dropped {dropped} oversized row(s) from '{name}' on rebuild — \
+                    "dropped {dropped} oversized row(s) from '{safe_name}' on rebuild — \
                      the rows remain readable via the in-memory entity store but \
                      are absent from the on-disk B-tree until they are rewritten"
                 );
