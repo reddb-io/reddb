@@ -275,6 +275,35 @@ Five concrete follow-up items the main agent can decide to file.
   ~330 to ≥1500. No regression on `insert_sequential` reddb_wire at
   any N (the index maintenance is small relative to the WAL fsync
   floor; should be ≤5 %).
+- **Status (2026-05-04, #112 implementation).** Landed as a hook in
+  `MutationEngine::{append_one, append_batch}` (`crates/reddb-server/
+  src/runtime/mutation.rs::maybe_auto_index_id`). On the first insert
+  carrying a column named `id` (case-sensitive, conservative), the
+  hook registers a HASH index named `idx_id` on the collection via
+  `IndexStore::create_index` + `register`. The standard per-row
+  `index_entity_insert{,_batch}` pass that follows populates it.
+
+  Path-level expectation against the static read in this doc:
+  - `DmlTargetScan::find_target_ids` (`dml_target_scan.rs:77-80`) now
+    has `try_hash_eq_lookup` succeed for `WHERE id = N` because
+    `find_index_for_column("bench_users", "id")` returns
+    `Some(idx_id, Hash, ["id"])`. The growing-segment scan is skipped.
+  - The per-delete cost line "**Full segment scan** in
+    `for_each_entity_zoned` for every `WHERE id = N`" — the dominant
+    O(N²/2) term identified above — collapses to an O(1) HashMap
+    probe. Big-O total drops from O(N²/2) to O(N) on the scan term.
+  - WAL fsync (P3 / #76 P1) and per-row registry write locks (P4) are
+    untouched; they remain the new floor at ~330 ops/s × (10000 ÷
+    50M predicate evaluations saved) ≈ ≥1500 ops/s expected, matching
+    the original Acceptance target. Confirming with a live mini-duel
+    requires the bench-runner + PG/Mongo containers; deferred to the
+    next round when knobs in `perf-knobs.md` are loosened.
+
+  Opt-out: `RedDBOptions::with_auto_index_id(false)` →
+  `UnifiedStoreConfig::auto_index_id = false`. Defaults to `true`.
+  Lifecycle: `execute_drop_table` already iterates `list_indices` and
+  drops every entry, so the implicit index is reaped with the
+  collection (no special-case needed).
 
 ### P2 — Add `post_seed` to `delete_sequential` (bench-side stop-gap)
 
