@@ -4,4 +4,4 @@ expression: "fmt_parse_error(\"INSERT INTO t (a) VALUES ('x') WITH AUTO EMBED (a
 ---
 input: "INSERT INTO t (a) VALUES ('x') WITH AUTO EMBED (a) USING openai MODEL"
 kind:  Syntax
-error: Parse error at 1:52: Unexpected token after query: USING
+error: Parse error at 1:70: Unexpected token: EOF (expected: string)
