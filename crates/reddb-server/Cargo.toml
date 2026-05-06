@@ -70,6 +70,11 @@ trybuild = "1"
 jsonwebtoken = "9"
 serde_json = "1"
 # Parser hardening harness (issue #87): property tests via proptest,
-# pinned error-message snapshots via insta.
+# pinned error-message snapshots via insta. The `filters` feature
+# (issue #98) lets the shared secret redactor mask secret-shaped
+# strings before insta diffs the snapshot. `regex` is reused by the
+# secret-redactor unit tests + the snapshot-redaction lint (#98) to
+# scan committed `*.snap` files for unmasked secret-shaped strings.
 proptest = "1"
-insta = "1"
+insta = { version = "1", features = ["filters"] }
+regex = "1"

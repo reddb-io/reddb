@@ -18,7 +18,11 @@ zstd = { version = "0.13", default-features = false }
 
 # Issue #90: parser-hardening test suite mirrors the SQL parser
 # coverage (#87). Property tests via proptest, pinned error-message
-# snapshots via insta.
+# snapshots via insta. The `filters` feature (issue #98) lets the
+# shared secret redactor mask secret-shaped strings before insta
+# diffs the snapshot. `regex` powers the redactor unit tests + the
+# wire-side snapshot-redaction lint (#98).
 [dev-dependencies]
 proptest = "1"
-insta = "1"
+insta = { version = "1", features = ["filters"] }
+regex = "1"
