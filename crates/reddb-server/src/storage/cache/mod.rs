@@ -34,6 +34,7 @@ pub mod ring;
 pub mod sieve;
 pub mod spill;
 pub mod strategy;
+pub mod sweeper;
 
 pub use aggregates::{AggCacheStats, AggValue, AggregationCache, CardinalityEstimate, NumericAgg};
 pub use blob::{
