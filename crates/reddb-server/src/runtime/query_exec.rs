@@ -6,6 +6,8 @@ use crate::storage::query::sql_lowering::{
 };
 
 mod aggregate;
+mod aggregate_planner;
+mod aggregate_pushdown_dispatch;
 mod filter_compiled;
 mod helpers;
 mod hybrid;
