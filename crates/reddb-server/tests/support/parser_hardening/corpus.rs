@@ -756,3 +756,204 @@ pub fn vector_search_adversarial_inputs() -> Vec<(&'static str, String)> {
     ]
 }
 
+/// Adversarial inputs that target the probabilistic data-structure
+/// surface (issue #105): HLL, Count-Min Sketch, Cuckoo Filter.
+///
+/// Exercises CREATE / DROP envelopes, ADD / CHECK / DELETE / COUNT
+/// operational paths, and the `WIDTH` / `DEPTH` / `CAPACITY`
+/// modifiers. Several entries pin parser quirks that look like bugs
+/// but do not panic:
+///   * The lexer recognises `DEPTH` as `Token::Depth`, so any
+///     `CREATE SKETCH ... DEPTH n` shape fails the top-level
+///     trailing-tokens check rather than being consumed by the
+///     modifier loop. See FIXME pin #105-followup-1.
+///   * Negative integers after `CAPACITY` / `WIDTH` / `MAX_SIZE`
+///     surface as a Minus token followed by an integer, so the
+///     `parse_integer` call errors before semantic validation.
+pub fn probabilistic_adversarial_inputs() -> Vec<(&'static str, String)> {
+    vec![
+        // ----- CREATE envelope: missing names / EOF --------------
+        ("prob_create_eof_after_keyword", "CREATE".to_string()),
+        ("prob_create_hll_no_name", "CREATE HLL".to_string()),
+        ("prob_create_sketch_no_name", "CREATE SKETCH".to_string()),
+        ("prob_create_filter_no_name", "CREATE FILTER".to_string()),
+        (
+            "prob_create_unknown_kind",
+            "CREATE BLOOM b1".to_string(),
+        ),
+        (
+            "prob_create_hll_dangling_if",
+            "CREATE HLL IF NOT EXISTS".to_string(),
+        ),
+        // ----- CREATE FILTER capacity edge cases -----------------
+        (
+            "prob_filter_capacity_no_value",
+            "CREATE FILTER f1 CAPACITY".to_string(),
+        ),
+        (
+            "prob_filter_capacity_negative",
+            // Lexer emits Minus, then Integer; parse_integer errors.
+            "CREATE FILTER f1 CAPACITY -1".to_string(),
+        ),
+        (
+            "prob_filter_capacity_zero",
+            "CREATE FILTER f1 CAPACITY 0".to_string(),
+        ),
+        (
+            "prob_filter_capacity_non_numeric",
+            "CREATE FILTER f1 CAPACITY many".to_string(),
+        ),
+        (
+            "prob_filter_capacity_overflow",
+            "CREATE FILTER f1 CAPACITY 99999999999999999999".to_string(),
+        ),
+        // ----- CREATE SKETCH width / depth edge cases ------------
+        (
+            "prob_sketch_width_no_value",
+            "CREATE SKETCH s1 WIDTH".to_string(),
+        ),
+        (
+            "prob_sketch_width_negative",
+            "CREATE SKETCH s1 WIDTH -1".to_string(),
+        ),
+        (
+            "prob_sketch_width_zero",
+            "CREATE SKETCH s1 WIDTH 0".to_string(),
+        ),
+        (
+            "prob_sketch_depth_no_value",
+            "CREATE SKETCH s1 DEPTH".to_string(),
+        ),
+        (
+            "prob_sketch_depth_negative",
+            "CREATE SKETCH s1 DEPTH -1".to_string(),
+        ),
+        (
+            "prob_sketch_depth_zero",
+            // `Token::Depth` lexes as a keyword; the modifier loop
+            // never matches, so `DEPTH 0` ends up as trailing
+            // tokens and the top-level dispatcher errors.
+            "CREATE SKETCH s1 DEPTH 0".to_string(),
+        ),
+        (
+            "prob_sketch_width_then_depth",
+            "CREATE SKETCH s1 WIDTH 100 DEPTH 5".to_string(),
+        ),
+        // ----- HLL operational surface ---------------------------
+        ("prob_hll_eof_after_keyword", "HLL".to_string()),
+        (
+            "prob_hll_unknown_subcmd",
+            "HLL FROBNICATE x".to_string(),
+        ),
+        ("prob_hll_add_no_name", "HLL ADD".to_string()),
+        (
+            "prob_hll_add_no_payload",
+            "HLL ADD visitors".to_string(),
+        ),
+        (
+            "prob_hll_add_unterminated_string",
+            "HLL ADD visitors 'open".to_string(),
+        ),
+        (
+            "prob_hll_count_no_name",
+            "HLL COUNT".to_string(),
+        ),
+        (
+            "prob_hll_merge_no_dest",
+            "HLL MERGE".to_string(),
+        ),
+        // ----- SKETCH operational surface ------------------------
+        ("prob_sketch_eof_after_keyword", "SKETCH".to_string()),
+        ("prob_sketch_add_no_name", "SKETCH ADD".to_string()),
+        (
+            "prob_sketch_add_no_element",
+            "SKETCH ADD events".to_string(),
+        ),
+        (
+            "prob_sketch_add_unquoted_element",
+            // ADD requires a string literal at the element slot.
+            "SKETCH ADD events bareword".to_string(),
+        ),
+        (
+            "prob_sketch_add_negative_count",
+            "SKETCH ADD events 'click' -1".to_string(),
+        ),
+        (
+            "prob_sketch_count_no_element",
+            "SKETCH COUNT events".to_string(),
+        ),
+        // ----- FILTER operational surface ------------------------
+        ("prob_filter_eof_after_keyword", "FILTER".to_string()),
+        ("prob_filter_add_no_name", "FILTER ADD".to_string()),
+        (
+            "prob_filter_add_no_element",
+            "FILTER ADD seen".to_string(),
+        ),
+        (
+            "prob_filter_check_no_element",
+            "FILTER CHECK seen".to_string(),
+        ),
+        (
+            "prob_filter_delete_no_element",
+            "FILTER DELETE seen".to_string(),
+        ),
+        (
+            "prob_filter_count_no_name",
+            "FILTER COUNT".to_string(),
+        ),
+        (
+            "prob_filter_check_unquoted_element",
+            "FILTER CHECK seen bareword".to_string(),
+        ),
+        // ----- DROP envelope -------------------------------------
+        ("prob_drop_eof", "DROP".to_string()),
+        (
+            "prob_drop_unknown_kind",
+            "DROP BLOOM b1".to_string(),
+        ),
+        (
+            "prob_drop_hll_dangling_if",
+            "DROP HLL IF EXISTS".to_string(),
+        ),
+        // ----- DoS / bytes-level shapes --------------------------
+        (
+            "prob_long_hll_name",
+            format!("CREATE HLL {}", "h".repeat(10_000)),
+        ),
+        (
+            "prob_filter_capacity_oversized",
+            format!("CREATE FILTER f1 CAPACITY 1{}", "0".repeat(10_000)),
+        ),
+        (
+            "prob_hll_add_oversized_payload",
+            format!("HLL ADD visitors '{}'", "x".repeat(2 * 1024 * 1024)),
+        ),
+        (
+            "prob_hll_add_many_elements",
+            // 5_000 single-char string literals — exercises the
+            // `HllAdd` accumulator loop without tripping the input
+            // size guard.
+            {
+                let els: Vec<String> = (0..5_000).map(|_| "'x'".to_string()).collect();
+                format!("HLL ADD visitors {}", els.join(" "))
+            },
+        ),
+        (
+            "prob_nul_byte_after_create",
+            "CREATE HLL h1\0".to_string(),
+        ),
+        (
+            "prob_garbage_after_filter_kw",
+            "FILTER @#$%".to_string(),
+        ),
+        (
+            "prob_unicode_in_element",
+            "FILTER ADD seen '雪 ❄ ε≈μ'".to_string(),
+        ),
+        (
+            "prob_zero_width_in_element",
+            "HLL ADD visitors '\u{200b}\u{feff}user'".to_string(),
+        ),
+    ]
+}
+
