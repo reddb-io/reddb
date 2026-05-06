@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/schema_vocabulary_snapshots.rs
+expression: "fmt_hits(\"passports\", &hits)"
+---
+token: "passports"
+hit_count: 1
+- collection: passports | column: None | type_tag: None

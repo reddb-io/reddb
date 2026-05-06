@@ -1,0 +1,6 @@
+---
+source: crates/reddb-server/tests/schema_vocabulary_snapshots.rs
+expression: "fmt_hits(\"passport\", &hits)"
+---
+token: "passport"
+hit_count: 0
