@@ -1,0 +1,9 @@
+---
+source: crates/reddb-server/tests/schema_vocabulary_snapshots.rs
+expression: "fmt_hits(\"id\", &hits)"
+---
+token: "id"
+hit_count: 3
+- collection: events | column: Some("id") | type_tag: None
+- collection: passports | column: Some("id") | type_tag: None
+- collection: users | column: Some("id") | type_tag: None
