@@ -100,18 +100,17 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: rui314/setup-mold@v1
       - uses: mozilla-actions/sccache-action@v0.0.10
-      # Sticky Disk for the cargo target dir — much larger working set
-      # than the 25GB cache cap, and 3s mount vs ~15s on Blacksmith's
-      # colocated cache (per docs). Persistent multimodel layer uses a
-      # separate target dir, also stickied to keep it warm across runs.
+      # Sticky Disk for the cargo target dir — 3s mount vs ~15s on
+      # Blacksmith's colocated cache (per docs).
+      #
+      # ONLY the regular target/ is stickied. target/persistent-tests
+      # holds runtime RDB data files for integration tests that assert
+      # on a clean bootstrap — preserving it across runs caused
+      # persistent_native_metadata_and_catalog_stay_consistent to fail.
       - uses: useblacksmith/stickydisk@v1
         with:
           key: ${{ github.repository }}-cargo-target
           path: target
-      - uses: useblacksmith/stickydisk@v1
-        with:
-          key: ${{ github.repository }}-cargo-target-persistent
-          path: target/persistent-tests
       # Cargo registry + git index stay on Swatinem (small, fits the
       # standard cache and benefits from compression).
       - uses: Swatinem/rust-cache@v2
