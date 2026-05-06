@@ -162,7 +162,7 @@ db.insert_many("access_log", [
 Node / Bun:
 
 ```js
-import { Client } from "@reddb/client";
+import { Client } from "reddb";
 const db = new Client("localhost:50051");
 await db.insertMany("access_log", batch);
 ```
