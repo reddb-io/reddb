@@ -1,0 +1,8 @@
+---
+source: crates/reddb-server/tests/schema_vocabulary_snapshots.rs
+expression: "fmt_hits(\"email\", &hits)"
+---
+token: "email"
+hit_count: 2
+- collection: users | column: Some("email") | type_tag: None
+- collection: users | column: Some("email") | type_tag: Some("index:idx_users_email")
