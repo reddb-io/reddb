@@ -1,4 +1,4 @@
-# perf(btree): batch upsert by leaf for sorted keys (Roadmap #4) [HITL] (in flight via worktree agent)
+# perf(btree): batch upsert by leaf for sorted keys (Roadmap #4) [AFK]
 
 GitHub: reddb-io/reddb#159
 Parent: #152
