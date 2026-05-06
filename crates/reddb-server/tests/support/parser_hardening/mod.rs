@@ -108,3 +108,5 @@ pub mod graph_dsl_grammar;
 pub mod queue_grammar;
 
 pub mod timeseries_grammar;
+
+pub mod vector_search_grammar;

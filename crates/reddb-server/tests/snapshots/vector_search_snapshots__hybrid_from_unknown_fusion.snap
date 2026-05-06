@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/vector_search_snapshots.rs
+expression: "fmt_parse_error(\"HYBRID FROM hosts VECTOR SEARCH e SIMILAR TO [0.1] FUSION GLORP LIMIT 10\")"
+---
+input: "HYBRID FROM hosts VECTOR SEARCH e SIMILAR TO [0.1] FUSION GLORP LIMIT 10"
+kind:  Syntax
+error: Parse error at 1:65: Unknown fusion strategy: GLORP. Valid: RERANK, RRF, FILTER_THEN_SEARCH, SEARCH_THEN_FILTER, INTERSECTION, UNION

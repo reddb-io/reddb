@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/vector_search_snapshots.rs
+expression: "fmt_parse_error(\"VECTOR SEARCH e [0.1, 0.2]\")"
+---
+input: "VECTOR SEARCH e [0.1, 0.2]"
+kind:  Syntax
+error: Parse error at 1:17: Unexpected token: [ (expected: SIMILAR)
