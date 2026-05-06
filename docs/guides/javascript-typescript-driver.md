@@ -1,13 +1,31 @@
 # JavaScript and TypeScript Driver
 
-Use the `@reddb-io/sdk` package for application code in Node, Bun, and Deno.
+RedDB ships three npm packages under the `@reddb-io/` scope. Pick the one
+that matches how your code talks to RedDB — they are not interchangeable
+and each has a distinct binary-acquisition contract (see
+[ADR 0007](../adr/0007-npm-package-matrix.md) for the rationale).
 
-Use `@reddb-io/cli` only when you want to launch the real `red` binary from npm:
+## Package matrix
 
-```bash
-npx @reddb-io/cli@latest version
-npx @reddb-io/cli@latest server --http-bind 127.0.0.1:8080 --path ./data.rdb
-```
+### Decision tree
+
+- **Using as a CLI / launching a local server from npm** →
+  [`@reddb-io/cli`](#reddb-iocli). Operator and CI scenario; puts `red`
+  on global `PATH`.
+- **App code that needs the full SDK including embedded mode** →
+  [`@reddb-io/sdk`](#reddb-iosdk). Embedded engine (`memory://`,
+  `file:///...`), gRPC, and HTTP transports in one package.
+- **Serverless / edge / CI / remote-only client** →
+  [`@reddb-io/client`](#reddb-ioclient). Thin client that only speaks to
+  a remote RedDB; embedded URIs are rejected.
+
+### Comparison
+
+| Package              | What it ships                                                          | Install size budget | Transports supported                          | Embedded mode | Env override        |
+| -------------------- | ---------------------------------------------------------------------- | ------------------- | --------------------------------------------- | ------------- | ------------------- |
+| `@reddb-io/cli`      | CLI launcher; downloads full `red` binary on postinstall to global `PATH` | ≤ 12 MB compressed  | n/a (CLI subcommands wrap the server binary)  | n/a           | `REDDB_BIN`         |
+| `@reddb-io/sdk`      | Full JS SDK; downloads full `red` binary into `node_modules` on postinstall | ≤ 12 MB compressed  | embedded (stdio JSON-RPC), gRPC, HTTP         | yes           | `REDDB_BIN`         |
+| `@reddb-io/client`   | Thin remote-only JS driver; downloads `red_client` thin binary on postinstall | ≤ 5 MB compressed   | gRPC, HTTP (remote endpoints only)            | no — rejects `memory://` and `file:///...` | `REDDB_CLIENT_BIN`  |
 
 > **Performance check before you commit.** RedDB's measured wins (and
 > the gaps where it still loses) are catalogued in
@@ -18,7 +36,11 @@ npx @reddb-io/cli@latest server --http-bind 127.0.0.1:8080 --path ./data.rdb
 > `GROUP BY` aggregates, or filtered `SELECT`s on secondary indices,
 > read `when-not-reddb.md` first — those are in-flight.
 
-## 1. Install the driver
+## 1. Install
+
+### `@reddb-io/sdk`
+
+The default for application code in Node, Bun, and Deno.
 
 ```bash
 pnpm add @reddb-io/sdk
@@ -38,7 +60,44 @@ import { connect } from 'npm:@reddb-io/sdk'
 ```
 
 The package downloads the matching `red` binary during `postinstall`. If your
-environment blocks install scripts, set `REDDB_BINARY_PATH=/path/to/red`.
+environment blocks install scripts, set `REDDB_BIN=/path/to/red` (the legacy
+name `REDDB_BINARY_PATH` is still honoured during the deprecation window).
+
+### `@reddb-io/cli`
+
+Launch the real `red` binary from npm without a separate install step:
+
+```bash
+npx @reddb-io/cli@latest version
+npx @reddb-io/cli@latest server --http-bind 127.0.0.1:8080 --path ./data.rdb
+```
+
+Or install globally so `reddb-cli` is on `PATH`:
+
+```bash
+pnpm add -g @reddb-io/cli
+```
+
+The CLI postinstall consults the `red` already on `PATH` and decides
+between `install`, `upgrade`, and `skip`. Set `REDDB_SKIP_POSTINSTALL=1`
+to short-circuit the network round-trip in CI cache-warming or air-gapped
+installs.
+
+### `@reddb-io/client`
+
+Pick this when your runtime only talks to a *remote* RedDB and bundling
+the full server binary is wasteful (Lambda layers, Cloudflare Workers,
+edge containers, CI smoke tests):
+
+```bash
+pnpm add @reddb-io/client
+```
+
+Only `grpc://...` and `http://...` URIs are accepted. Embedded URIs
+(`memory://`, `file:///...`) throw at `connect()` time — by design, the
+thin `red_client` binary cannot host an engine. Override the binary
+location with `REDDB_CLIENT_BIN=/path/to/red_client` when postinstall
+is blocked.
 
 ## 2. Connect
 
