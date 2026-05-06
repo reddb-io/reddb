@@ -62,9 +62,9 @@ const BEARER_PATTERN: &str = r"(?i)Bearer\s+[A-Za-z0-9._\-+/=]+";
 const PARAM_PATTERN: &str = r"(?i)(?P<sep>[?&])(?P<name>token|cert|key|ca)=[^&#\s]+";
 
 /// Generic API-key shapes: `sk_/rs_/reddb_` followed by 16+ base62
-/// or `_` chars. Catches OpenAI-style (`sk_live_AbCdEf…`) + RedDB-
-/// issued keys without false-positives on short identifiers. The
-/// `_` inside the body covers OpenAI's `sk_live_<body>` shape.
+/// or `_` chars. Catches OpenAI-style livemode keys plus RedDB-
+/// issued tokens without false-positives on short identifiers. The
+/// `_` inside the body covers the multi-segment provider shape.
 const API_KEY_PATTERN: &str = r"(?:sk|rs|reddb)_[A-Za-z0-9_]{16,}";
 
 /// Build an `insta::Settings` pre-loaded with the four redaction
@@ -199,18 +199,21 @@ mod tests {
     //! these tests double as a regression net for the lint.
 
     use super::*;
+    use crate::support::parser_hardening::secret_fixture_gen as gen;
 
     #[test]
     fn bearer_in_url_is_masked() {
-        let input = "GET /v1/keys with Authorization: Bearer abc123XYZ.tok-_=";
-        let redacted = redact(input);
+        let bearer = gen::bearer_header(0x1001);
+        let input = format!("GET /v1/keys with Authorization: {}", bearer);
+        let redacted = redact(&input);
+        let body = bearer.split_whitespace().nth(1).expect("bearer body");
         assert!(
             redacted.contains(BEARER_PLACEHOLDER),
             "expected bearer placeholder in: {}",
             redacted
         );
         assert!(
-            !redacted.contains("abc123XYZ"),
+            !redacted.contains(body),
             "raw token leaked through: {}",
             redacted
         );
@@ -219,16 +222,17 @@ mod tests {
 
     #[test]
     fn jwt_in_error_message_is_masked() {
-        let input =
-            "parse error: token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4f";
-        let redacted = redact(input);
+        let jwt = gen::jwt(0x1002);
+        let input = format!("parse error: token={}", jwt);
+        let redacted = redact(&input);
+        let header = jwt.split('.').next().expect("jwt header");
         assert!(
             redacted.contains(JWT_PLACEHOLDER),
             "expected jwt placeholder in: {}",
             redacted
         );
         assert!(
-            !redacted.contains("eyJhbGciOiJIUzI1NiJ9"),
+            !redacted.contains(header),
             "jwt header leaked: {}",
             redacted
         );
@@ -258,15 +262,13 @@ mod tests {
 
     #[test]
     fn sk_style_api_key_is_masked() {
-        // Build token strings at runtime so this source file never
-        // ships a literal token-shaped substring that GitHub Secret
-        // Scanning would block on push (the policy this test
-        // enforces is the same the policy this test must obey).
-        let synth = |prefix: &str, body: &str| format!("{}_{}", prefix, body);
+        // Inputs assembled at runtime via `secret_fixture_gen`. No
+        // literal in this file matches the redactor's regexes — the
+        // policy this test enforces is the policy this test obeys.
 
-        let body = "AbCdEfGhIjKlMnOpQrStUv0123";
-
-        let input_sk = format!("Auth header carried {}_live_{}", "sk", body);
+        let sk_token = gen::api_key_token(&["sk", "live"], 24, 0x2001);
+        let sk_body = sk_token.rsplit('_').next().expect("body");
+        let input_sk = format!("Auth header carried {}", sk_token);
         let red_sk = redact(&input_sk);
         assert!(
             red_sk.contains(TOKEN_PLACEHOLDER),
@@ -274,13 +276,13 @@ mod tests {
             red_sk
         );
         assert!(
-            !red_sk.contains(body),
+            !red_sk.contains(sk_body),
             "sk_ body leaked: {}",
             red_sk
         );
 
-        // RedDB-issued rs_ prefix.
-        let input_rs = format!("issued {} for tenant", synth("rs", "abcdef0123456789ABCDEF"));
+        let rs_token = gen::api_key_token(&["rs"], 22, 0x2002);
+        let input_rs = format!("issued {} for tenant", rs_token);
         let red_rs = redact(&input_rs);
         assert!(
             red_rs.contains(TOKEN_PLACEHOLDER),
@@ -288,8 +290,8 @@ mod tests {
             red_rs
         );
 
-        // RedDB-issued reddb_ prefix.
-        let input_reddb = format!("key {}", synth("reddb", "0123456789abcdef0123"));
+        let reddb_token = gen::api_key_token(&["reddb"], 20, 0x2003);
+        let input_reddb = format!("key {}", reddb_token);
         let red_reddb = redact(&input_reddb);
         assert!(
             red_reddb.contains(TOKEN_PLACEHOLDER),

@@ -15,6 +15,7 @@ use reddb_server::storage::query::parser::ParserLimits;
 pub mod corpus;
 pub mod geo_grammar;
 pub mod migration_grammar;
+pub mod secret_fixture_gen;
 pub mod secret_redactor;
 pub mod sql_grammar;
 

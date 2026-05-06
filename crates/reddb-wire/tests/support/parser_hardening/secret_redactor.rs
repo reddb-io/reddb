@@ -144,27 +144,27 @@ mod tests {
     //! recognisable failure.
 
     use super::*;
+    use crate::support::parser_hardening::secret_fixture_gen as gen;
 
     #[test]
     fn bearer_in_url_is_masked() {
-        let input = "GET /v1/keys with Authorization: Bearer abc123XYZ.tok-_=";
-        let redacted = redact(input);
+        let bearer = gen::bearer_header(0x1001);
+        let input = format!("GET /v1/keys with Authorization: {}", bearer);
+        let redacted = redact(&input);
+        let body = bearer.split_whitespace().nth(1).expect("bearer body");
         assert!(redacted.contains(BEARER_PLACEHOLDER), "got: {}", redacted);
-        assert!(!redacted.contains("abc123XYZ"), "leaked: {}", redacted);
+        assert!(!redacted.contains(body), "leaked: {}", redacted);
         assert!(find_unmasked_secrets(&redacted).is_empty());
     }
 
     #[test]
     fn jwt_in_error_message_is_masked() {
-        let input =
-            "parse error: token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4f";
-        let redacted = redact(input);
+        let jwt = gen::jwt(0x1002);
+        let input = format!("parse error: token={}", jwt);
+        let redacted = redact(&input);
+        let header = jwt.split('.').next().expect("jwt header");
         assert!(redacted.contains(JWT_PLACEHOLDER), "got: {}", redacted);
-        assert!(
-            !redacted.contains("eyJhbGciOiJIUzI1NiJ9"),
-            "leaked: {}",
-            redacted
-        );
+        assert!(!redacted.contains(header), "leaked: {}", redacted);
         assert!(find_unmasked_secrets(&redacted).is_empty());
     }
 
@@ -187,26 +187,19 @@ mod tests {
 
     #[test]
     fn sk_style_api_key_is_masked() {
-        // Build token strings at runtime so this source file never
-        // ships a literal token-shaped substring that GitHub Secret
-        // Scanning would block on push.
-        let synth = |prefix: &str, body: &str| format!("{}_{}", prefix, body);
-
-        let body = "AbCdEfGhIjKlMnOpQrStUv0123";
-        let input_sk = format!("Auth header carried {}_live_{}", "sk", body);
+        let sk_token = gen::api_key_token(&["sk", "live"], 24, 0x2001);
+        let sk_body = sk_token.rsplit('_').next().expect("body");
+        let input_sk = format!("Auth header carried {}", sk_token);
         let red_sk = redact(&input_sk);
         assert!(
             red_sk.contains(TOKEN_PLACEHOLDER),
             "sk_ not masked: {}",
             red_sk
         );
-        assert!(
-            !red_sk.contains(body),
-            "leaked: {}",
-            red_sk
-        );
+        assert!(!red_sk.contains(sk_body), "leaked: {}", red_sk);
 
-        let input_rs = format!("issued {} for tenant", synth("rs", "abcdef0123456789ABCDEF"));
+        let rs_token = gen::api_key_token(&["rs"], 22, 0x2002);
+        let input_rs = format!("issued {} for tenant", rs_token);
         let red_rs = redact(&input_rs);
         assert!(
             red_rs.contains(TOKEN_PLACEHOLDER),
@@ -214,7 +207,8 @@ mod tests {
             red_rs
         );
 
-        let input_reddb = format!("key {}", synth("reddb", "0123456789abcdef0123"));
+        let reddb_token = gen::api_key_token(&["reddb"], 20, 0x2003);
+        let input_reddb = format!("key {}", reddb_token);
         let red_reddb = redact(&input_reddb);
         assert!(
             red_reddb.contains(TOKEN_PLACEHOLDER),
