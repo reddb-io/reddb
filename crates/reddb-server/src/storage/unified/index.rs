@@ -628,6 +628,8 @@ struct HnswIndexInfo {
 }
 
 mod manager_impl;
+pub mod incremental;
+pub use incremental::{IncrementalIndexMaintainer, IndexDeltaOp, SecondaryIndexHandle};
 impl Default for IntegratedIndexManager {
     fn default() -> Self {
         Self::new()
