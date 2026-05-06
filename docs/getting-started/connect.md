@@ -136,19 +136,19 @@ You can run the same flows through the npm package.
 Start HTTP:
 
 ```bash
-npx reddb-cli@latest server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
+npx @reddb-io/cli@latest server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
 ```
 
 Start gRPC:
 
 ```bash
-npx reddb-cli@latest server --grpc --path ./data/reddb.rdb --bind 127.0.0.1:50051
+npx @reddb-io/cli@latest server --grpc --path ./data/reddb.rdb --bind 127.0.0.1:50051
 ```
 
 Open the REPL through the wrapper:
 
 ```bash
-npx reddb-cli@latest connect 127.0.0.1:50051
+npx @reddb-io/cli@latest connect 127.0.0.1:50051
 ```
 
 ## Connect Through the Local `red` Binary

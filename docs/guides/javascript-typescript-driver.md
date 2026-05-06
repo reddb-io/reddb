@@ -2,11 +2,11 @@
 
 Use the `reddb` package for application code in Node, Bun, and Deno.
 
-Use `reddb-cli` only when you want to launch the real `red` binary from npm:
+Use `@reddb-io/cli` only when you want to launch the real `red` binary from npm:
 
 ```bash
-npx reddb-cli@latest version
-npx reddb-cli@latest server --http-bind 127.0.0.1:8080 --path ./data.rdb
+npx @reddb-io/cli@latest version
+npx @reddb-io/cli@latest server --http-bind 127.0.0.1:8080 --path ./data.rdb
 ```
 
 ## 1. Install the driver
@@ -111,7 +111,7 @@ const db = await connect('memory://', {
 Use this rule:
 
 - application code: `reddb`
-- npm-launched CLI: `reddb-cli`
+- npm-launched CLI: `@reddb-io/cli`
 
 Examples:
 
@@ -124,5 +124,5 @@ import { connect } from 'reddb'
 ```
 
 ```bash
-npx reddb-cli@latest server --http-bind 127.0.0.1:8080 --path ./data.rdb
+npx @reddb-io/cli@latest server --http-bind 127.0.0.1:8080 --path ./data.rdb
 ```

@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/reddb-io/reddb/releases"><img src="https://img.shields.io/github/v/release/reddb-io/reddb?style=flat-square" alt="Release"></a>
   <a href="https://www.gnu.org/licenses/agpl-3.0"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="License"></a>
-  <a href="https://www.npmjs.com/package/reddb-cli"><img src="https://img.shields.io/npm/v/reddb-cli?style=flat-square&label=npm" alt="npm"></a>
+  <a href="https://www.npmjs.com/package/@reddb-io/cli"><img src="https://img.shields.io/npm/v/@reddb-io/cli?style=flat-square&label=npm" alt="npm"></a>
 </p>
 
 > [!IMPORTANT]
@@ -533,11 +533,11 @@ const result = await db.query('SELECT * FROM users')
 await db.close()
 ```
 
-Use `reddb-cli` only when you want to launch the real `red` binary from npm:
+Use `@reddb-io/cli` only when you want to launch the real `red` binary from npm:
 
 ```bash
-npx reddb-cli@latest version
-npx reddb-cli@latest server --wire-bind 127.0.0.1:5050 --http-bind 127.0.0.1:8080 --path ./data.rdb
+npx @reddb-io/cli@latest version
+npx @reddb-io/cli@latest server --wire-bind 127.0.0.1:5050 --http-bind 127.0.0.1:8080 --path ./data.rdb
 ```
 
 ---
@@ -565,7 +565,7 @@ curl -X POST http://127.0.0.1:8080/query \
 Or via npm CLI launcher:
 
 ```bash
-npx reddb-cli@latest server --wire-bind 127.0.0.1:5050 --http-bind 127.0.0.1:8080
+npx @reddb-io/cli@latest server --wire-bind 127.0.0.1:5050 --http-bind 127.0.0.1:8080
 ```
 
 Or via Docker:
@@ -600,7 +600,7 @@ RedDB from another Rust project.
 - [Documentation](https://reddb-io.github.io/reddb)
 - [GitHub](https://github.com/reddb-io/reddb)
 - [npm driver package](https://www.npmjs.com/package/reddb)
-- [npm package](https://www.npmjs.com/package/reddb-cli)
+- [npm CLI launcher](https://www.npmjs.com/package/@reddb-io/cli)
 - [Releases](https://github.com/reddb-io/reddb/releases)
 - [Workspace migration guide](./docs/migration/workspace-split.md)
 
