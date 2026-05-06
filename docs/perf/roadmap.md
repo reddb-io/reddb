@@ -1,27 +1,61 @@
 # RedDB Performance Roadmap
 
-Status: 2026-04-19 — mini-duel baseline via `reddb_wire` (consistent transport).
+Status: 2026-05-06 — canonical methodology is `make duel-official` per
+issue #154 (`BenchConfigSchema`, `OFFICIAL_PROFILE=standard`,
+`OFFICIAL_RUNS=10`, `ITEMS=50000`). The earlier mini-duel target
+remains the dev variant; published numbers must come from
+`duel-official`.
+
+> **Where we win, where we lose.** Reproducible scenario-by-scenario
+> positioning lives in [`wins.md`](wins.md) (the two productized wins:
+> `typed_insert` ~16× over PG, `disk_usage` ~1.5× over Mongo) and
+> [`when-not-reddb.md`](when-not-reddb.md) (the catalogued gaps with
+> closure-issue links). This roadmap explains the engineering work
+> behind both pages.
+
+## Posture (ADR 0009)
+
+PRD #152 ships against the **scenario-specific** posture chosen in
+[ADR 0009](../adr/0009-performance-gate-scope.md): RedDB defends the
+unified-engine wins (`typed_insert`, `disk_usage`, cross-model
+queries) and narrows — not necessarily inverts — the gap scenarios
+where storage-engine specialisation dominates (`concurrent`,
+`bulk_update`, `aggregate_group`, `update_random`). Universal-20%
+across the grid was rejected because the architectural commitments
+required to defend it (sharded log, columnar push-down planner, MVCC
+redesign) are each a multi-quarter PRD. The slices below are sized
+to the chosen posture.
 
 ## Methodology
 
-All benchmarks run via `make mini-duel` in `reddb-benchmark`, which maps
-`--database duel` to `reddb_wire + postgresql`. One transport, apples to
-apples. Any result discussed in this document must come from a run made
-under this setup — no cherry-picking transports per scenario.
+All benchmarks run via `make duel-official` in `rdb-benchmark`
+(canonical) or `make mini-duel` (dev variant of the same schema).
+One transport, apples to apples. Any result discussed in this
+document or in `wins.md` / `when-not-reddb.md` must come from a run
+made under this setup — no cherry-picking transports per scenario.
+The methodology lock and the stale-binary preflight guards are
+themselves tracked as roadmap slices (see #154 and #155 below).
 
-## Known server-side bottlenecks
+## Server-side bottlenecks (PRD #152)
 
 Listed by scope and return-on-investment. Each is a dedicated PR.
+The original four-bottleneck list is preserved in place and
+annotated with shipped status.
 
-### 1. UnifiedRecord layout (scan hot paths)
+### 1. UnifiedRecord layout (scan hot paths) — ✅ SHIPPED (#156)
 
-**Problem.** `UnifiedRecord` stores fields in
-`HashMap<String, Value>`. Every scan row materialisation allocates a
-fresh HashMap plus `N` owned String keys. Flamegraphs show
-`HashMap::insert` + `UnifiedRecord::set` at **~60 % of CPU** on
-`select_range`, `select_filtered`, `mixed_workload_indexed`.
+Outcome: schema-shared layout landed on `main`; +6 proptests, full
+2886-test lib suite green. Closes the per-row `HashMap` allocation
+that flamegraphs blamed for ~60% of CPU on `select_range`,
+`select_filtered`, and `mixed_workload_indexed`. Re-bench against
+the canonical lock will refresh the gap rows in
+`when-not-reddb.md`.
 
-**Fix.** Replace per-record HashMap with a schema-shared layout:
+**Original problem.** `UnifiedRecord` stored fields in
+`HashMap<String, Value>`. Every scan row materialisation allocated
+a fresh HashMap plus `N` owned String keys.
+
+**Fix as shipped.** Schema-shared layout:
 
 ```rust
 pub struct UnifiedRecord {
@@ -31,96 +65,132 @@ pub struct UnifiedRecord {
 }
 ```
 
-- `Arc::clone` per record instead of N heap allocations.
-- `values` access via `schema.binary_search(col).map(|i| &values[i])`
-  is O(log N) with cache-friendly Vec.
-- Overflow HashMap only materialises for schemaless inserts.
+`Arc::clone` per record instead of N heap allocations; values
+access via binary search over the shared schema; overflow HashMap
+only materialises for schemaless inserts.
 
-**Blast radius.** 746 call sites reference `UnifiedRecord` or its
-`values` field. Mostly mechanical (grep replace `.values.insert(k, v)`
-→ `.set_owned(k, v)`), but every caller needs review for read
-semantics.
+### 2. WAL append lock-free path (concurrent writes) — ✅ SHIPPED (#157)
 
-**Estimated effort.** 2-3 dias dedicados + regression tests.
+Outcome: `Mutex<WalWriter>` replaced by a lock-free SegQueue +
+single-leader flush coordinator. 6 new coordinator tests plus the
+full WAL suite green on `main`. The `concurrent` gap (~49× behind
+Mongo at the lock window) is the headline target; re-bench tracked
+in `when-not-reddb.md` Gap 1.
 
-**Estimated win.** 2-3× on scan-heavy scenarios:
-- `select_range` 6.8× → 2-3× gap
-- `select_filtered` 3.7× → 1.5-2× gap
-- `mixed_workload_indexed` 4.2× → 1.8-2× gap
-- `select_complex` currently 1.15× paridade, minor upside
+**Original problem.** Every commit took `Mutex<WalWriter>` across
+`Begin + PageWrite×N + Commit`. Under 16-way concurrent workers,
+inserts serialised on this mutex *and* on the state-condvar
+notify_all thundering herd.
 
-### 2. WAL append lock-free path (concurrent writes)
+**Fix as shipped.** `crossbeam::queue::SegQueue<(u64 seq, Vec<u8>)>`
+for pending encoded records; writers CAS a sequence from atomic
+`next_seq` and push bytes; a single leader drains in LSN order,
+fsyncs, publishes `durable_lsn` via atomic; waiters atomic-load
+and park, leader `unpark_all` after publish. Commit-coordinator
+state moved to `parking_lot` primitives.
 
-**Problem.** Every commit takes `Mutex<WalWriter>` across `Begin +
-PageWrite×N + Commit` append. Under 16-way concurrent workers
-inserts serialise on this mutex *and* then on the state-condvar
-wait loop (notify_all thundering herd).
+### 3. Pager cache striped locks — ✅ SHIPPED (#158)
 
-Prior attempts that moved encode-out-of-lock *regressed* because 16
-threads then converge on the mutex in a burst, causing park
-convoys. The real fix is lock-free append.
+Outcome: cache sharded into N buckets each with its own RwLock,
+`page_id % N` routing. Measured **5.6× speedup vs single-lock at
+10 workers**. Internal refactor only, no API surface change.
+SIEVE eviction reviewed across shards.
 
-**Fix.** Replace `Mutex<WalWriter>` with a lock-free append ring:
-- `crossbeam::queue::SegQueue<(u64 seq, Vec<u8>)>` for pending
-  encoded records.
-- Writer CAS-es a sequence from atomic `next_seq`, pushes bytes.
-- A single leader (whichever thread calls `drive_flush` first)
-  takes the WAL file lock, drains the queue in LSN order, writes
-  to BufWriter, fsyncs, publishes `durable_lsn` via atomic.
-- Waiters atomic-load `durable_lsn` and park with a timeout; the
-  leader `unpark_all()` after publish.
+### 4. BTree batch upsert by leaf — ✅ SHIPPED (#159)
 
-Separately: convert `commit.rs` state Mutex + Condvar to
-`parking_lot` primitives (non-poisoning, much lighter park path).
+Outcome: `BTree::upsert_batch_sorted` helper + one caller change
+in `persist_entities_to_pager`. Sorts keys within a single entity
+batch, walks each leaf once, applies all updates for that leaf in
+one page write. Proptest covers 1..200 entries. Targets the
+~30× `bulk_update` gap in `when-not-reddb.md` Gap 2.
 
-**Blast radius.** WAL writer API surface + commit coordinator
-rewrite. Recovery path must still be able to read the new
-format (unchanged on-disk layout, only in-memory buffering
-changes).
+## In-flight slices (PRD #152)
 
-**Estimated effort.** 3-5 dias + fuzz + crash tests.
+These close the remaining `when-not-reddb.md` gaps that the four
+shipped slices above did not eliminate.
 
-**Estimated win.** 3-5× on concurrent-bound scenarios:
-- `concurrent` 9.5× → 2-3× gap (via wire, server-side ceiling)
-- `insert_sequential` 1.2× → 1.0× paridade
-- `bulk_update` — already at paridade via in-place upsert, minor
+### IncrementalIndexMaintainer — in flight (#160)
 
-### 3. Pager cache striped locks
+Closes `BASELINE` Finding #4 and the secondary half of
+`when-not-reddb.md` Gap 4 (`select_filtered`). Maintains secondary
+indices on every write so the planner can use them, instead of
+falling back to a full-table scan. Restarted on a fresh `main`
+base after the #156–#159 cluster landed.
 
-**Problem.** `PageCache::insert` takes a single `RwLock<entries>`
-write lock per page mutation. Under heavy concurrent write
-workloads, all workers contend on it even for disjoint pages.
+### AggregateQueryPlanner — in flight (#161)
 
-**Fix.** Shard the cache into N buckets (8 or 16), each with its
-own RwLock. `insert(page_id)` picks bucket via
-`page_id % N`. Readers for different pages never collide.
+Closes the ~12× `aggregate_group` gap (`when-not-reddb.md` Gap 3).
+Replaces the per-row HashMap rehydration with a columnar group-by
+over the underlying page representation.
 
-**Blast radius.** `page_cache.rs` internal refactor. No API
-changes visible to callers.
+## Methodology and productization slices (PRD #152)
 
-**Estimated effort.** 1 dia + correctness review (SIEVE eviction
-semantics across shards).
+These are non-engine slices that PRD #152 also delivered. They are
+listed here so the roadmap traces every PRD line item.
 
-**Estimated win.** 1.3-1.5× on write-heavy scenarios. Compounds
-with #2.
+- **#154 — bench methodology lock-in.** ✅ SHIPPED in
+  `rdb-benchmark`. Canonical = `make duel-official`. Every number
+  in `wins.md` / `when-not-reddb.md` cites a session id from this
+  configuration.
+- **#155 — stale-binary preflight + autorebuild.** ✅ SHIPPED in
+  `rdb-benchmark`. Prevents the entire class of regressions that
+  came from running an outdated binary against an updated schema.
+- **#163 — productize wins.** ✅ SHIPPED. `docs/perf/wins.md`
+  lifts the two reproducible wins out of `BASELINE.md`;
+  `docs/perf/when-not-reddb.md` is the honest counterpart with
+  closure-issue links.
+- **#153 — ADR 0009 posture.** ✅ SHIPPED. Scenario-specific
+  posture recorded; see "Posture" section above.
+- **#162 — close #124 not-a-regression.** ✅ SHIPPED inline.
 
-### 4. BTree batch upsert by leaf
+## Topology discovery (PRD #164)
 
-**Problem.** `persist_entities_to_pager` calls `btree.upsert()` in
-a loop for each mutated entity. For `bulk_update` of 50 rows,
-that's 50 separate btree walks to maybe 10 distinct leaves. Each
-walk is O(log n) + page read + page write.
+Server-advertised topology so clients learn the primary endpoint
+and the replica fleet from whichever node they hit first, instead
+of enumerating the cluster in their seed config. Throughput
+motivation is replica-aware read routing. Security model is
+recorded in [ADR 0008](../adr/0008-topology-advertisement-security.md).
 
-**Fix.** Sort keys within a single entity batch, walk to each leaf
-once, apply all updates for that leaf in one page write, move to
-the next leaf.
+### Slice DAG
 
-**Blast radius.** Additive — new `BTree::upsert_batch_sorted`
-helper, one caller change in `persist_entities_to_pager`.
+```
+#165 ADR 0008 (security model)        ── ✅ SHIPPED
+        │
+#166 wire payload spec                 ── ✅ SHIPPED
+   (canonical Topology in
+    crates/reddb-wire/src/topology.rs)
+        │
+        ├── #167 TopologyAdvertiser       ── in flight
+        │       (server-side)
+        │
+        ├── #168 TopologyConsumer         ── in flight
+        │       (client-side)
+        │
+        ├── #170 PerEndpointPool          ── ✅ SHIPPED
+        │       (5.4× faster than
+        │        legacy mutex pool)
+        │
+        ├── #171 HealthAwareRouter        ── in flight
+        │
+        └── #172 E2E integration test     ── pending
+                (blocked on #167+#168+#171)
+```
 
-**Estimated effort.** 1-2 dias.
+### State
 
-**Estimated win.** 1.5-2× on bulk UPDATE paths. Complements #1.
+- **#165 ADR 0008.** ✅ SHIPPED. Capability gate
+  `cluster:topology:read`, default-on for authenticated principals,
+  default-off for anonymous. Seed URI is a hint; advertised
+  topology is authoritative on disagreement.
+- **#166 wire payload spec.** ✅ SHIPPED. Canonical `Topology` type
+  lives in `crates/reddb-wire/src/topology.rs`.
+- **#170 PerEndpointPool.** ✅ SHIPPED. 5.4× faster than the legacy
+  mutex pool under contended dispatch.
+- **#167 TopologyAdvertiser** (server-side) — in flight.
+- **#168 TopologyConsumer** (client-side) — in flight.
+- **#171 HealthAwareRouter** — in flight.
+- **#172 E2E integration test** — pending; blocked by
+  #167 + #168 + #171.
 
 ## Deferred / out of scope
 
@@ -130,30 +200,31 @@ helper, one caller change in `persist_entities_to_pager`.
   the noise. Real fix = switch tonic to sync handlers, which is a
   tonic-wide change, not a RedDB one.
 
-- **select_complex already at paridade** (1.15×). No action.
+- **`select_complex` already at paridade** (1.15×). No action.
 
-- **Correctness audit of scan paths after UnifiedRecord refactor**
-  — baked into #1 acceptance criteria.
+- **Universal-20% architectural rework** — sharded log structure,
+  columnar push-down planner, MVCC redesign. Each is a
+  multi-quarter PRD on its own; ADR 0009 records the explicit
+  decision not to schedule them under PRD #152.
 
 ## Execution order
 
-Hard dependencies: none between #1/#2/#3/#4. Pick by ROI.
+The original ROI ordering (#1 → #2 → #4 → #3) shipped end-to-end.
+Remaining order is determined by gap rather than dependency:
 
-1. **#1 UnifiedRecord** — biggest aggregate win, touches 4 scan
-   scenarios. Do this first.
-2. **#2 WAL lock-free** — closes the concurrent gap. Independent
-   of #1. Second.
-3. **#4 BTree batch upsert** — small focused PR, compounds with
-   #2. Third.
-4. **#3 Pager cache striped** — nice-to-have, smaller impact in
-   isolation, but compounds with #2+#4. Last.
-
-Total realistic effort: **2 weeks of focused work** to close most
-remaining gaps.
+1. **#160 IncrementalIndexMaintainer** — unblocks the planner half
+   of `select_filtered` once #156's UnifiedRecord work is bench-
+   confirmed.
+2. **#161 AggregateQueryPlanner** — independent of #160. Pick up
+   in parallel.
+3. **PRD #164 client-side cluster** (#167 / #168 / #171 → #172) —
+   independent of #160 / #161; closes the replica-aware routing
+   throughput story.
 
 ## Non-goals
 
-- Hitting PG parity on every scenario (we're a different database).
+- Hitting PG parity on every scenario (we're a different database;
+  ADR 0009 makes the posture explicit).
 - Maintaining durability guarantees weaker than PG's
   `synchronous_commit=off` — async mode is the floor.
 - Adding feature flags for each optimisation; land them
