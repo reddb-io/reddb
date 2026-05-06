@@ -215,6 +215,24 @@ impl MessageKind {
         }
     }
 
+    /// `true` when this kind belongs to the handshake/lifecycle group
+    /// (Hello, AuthRequest, AuthOk, …, Bye, Ping, Pong). Equivalent to
+    /// `class() == MessageClass::Handshake` and exists so dispatch sites
+    /// can read the predicate without importing `MessageClass`.
+    pub fn is_handshake(&self) -> bool {
+        matches!(self.class(), MessageClass::Handshake)
+    }
+
+    /// `true` when every flag bit in `flags` is in `allowed_flags()`.
+    /// The catalog is the single source of truth for which flag bits a
+    /// kind may carry; both the codec (decode side) and the builder
+    /// (encode side) consult this so a misframed frame fails at the
+    /// boundary rather than reaching the dispatch arms.
+    pub fn permits_flags(&self, flags: Flags) -> bool {
+        let allowed = self.allowed_flags().bits();
+        (flags.bits() & !allowed) == 0
+    }
+
     /// Which peer is allowed to originate this kind.
     pub fn direction(&self) -> MessageDirection {
         match self {
@@ -465,6 +483,51 @@ mod catalog_tests {
             );
             assert!(f.contains(Flags::COMPRESSED), "{k:?} must allow COMPRESSED");
         }
+    }
+
+    #[test]
+    fn every_kind_has_unique_byte_value() {
+        // The byte value is the wire spec — two kinds sharing a value
+        // would silently corrupt dispatch. The catalog must reject it.
+        let mut seen = std::collections::HashSet::new();
+        for k in ALL_KINDS {
+            let byte = *k as u8;
+            assert!(
+                seen.insert(byte),
+                "byte 0x{byte:02x} reused by {k:?}; catalog has a duplicate"
+            );
+        }
+    }
+
+    #[test]
+    fn from_u8_round_trips_for_every_kind() {
+        for k in ALL_KINDS {
+            let byte = *k as u8;
+            let decoded = MessageKind::from_u8(byte).unwrap_or_else(|| {
+                panic!("from_u8 returned None for catalog entry {k:?} (0x{byte:02x})")
+            });
+            assert_eq!(
+                decoded, *k,
+                "from_u8(0x{byte:02x}) must round-trip back to {k:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn permits_flags_matches_allowed_flags() {
+        // Handshake kinds reject COMPRESSED, accept MORE_FRAMES.
+        assert!(MessageKind::Ping.permits_flags(Flags::MORE_FRAMES));
+        assert!(MessageKind::Ping.permits_flags(Flags::empty()));
+        assert!(!MessageKind::Ping.permits_flags(Flags::COMPRESSED));
+        assert!(!MessageKind::Ping.permits_flags(Flags::COMPRESSED | Flags::MORE_FRAMES));
+
+        // Streamed kinds accept both documented bits — the
+        // MORE_FRAMES invariant for in-flight stream envelopes is
+        // declared here through `allowed_flags`.
+        assert!(MessageKind::BulkStreamRows.permits_flags(Flags::MORE_FRAMES));
+        assert!(MessageKind::BulkStreamRows.permits_flags(Flags::COMPRESSED));
+        assert!(MessageKind::RowDescription.permits_flags(Flags::MORE_FRAMES));
+        assert!(MessageKind::StreamEnd.permits_flags(Flags::MORE_FRAMES));
     }
 
     #[test]
