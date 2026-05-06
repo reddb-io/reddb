@@ -390,6 +390,7 @@ impl RedDBServer {
             .and_then(|p| std::fs::metadata(p).ok())
             .map(|m| m.len())
             .unwrap_or(0);
+        let result_blob_stats = self.runtime.stats().result_blob_cache;
 
         let mut body = String::with_capacity(1024);
         let _ = writeln!(
@@ -702,6 +703,147 @@ impl RedDBServer {
             body,
             "reddb_primary_commit_policy{{policy=\"{}\"}} 1",
             policy.label()
+        );
+
+        // Blob Cache observability for the SQL result-cache adapter.
+        // Per-namespace label cardinality is acceptable while the MVP namespace
+        // cap stays near 256; raising that cap should move per-namespace detail
+        // to an on-demand admin query and keep scrape metrics rolled up.
+        let blob_ns = "runtime.result_cache";
+        let _ = writeln!(
+            body,
+            "# HELP reddb_cache_blob_get_total Blob Cache get outcomes by namespace."
+        );
+        let _ = writeln!(body, "# TYPE reddb_cache_blob_get_total counter");
+        let _ = writeln!(
+            body,
+            "reddb_cache_blob_get_total{{namespace=\"{}\",result=\"hit_l1\"}} {}",
+            blob_ns, result_blob_stats.hits
+        );
+        let _ = writeln!(
+            body,
+            "reddb_cache_blob_get_total{{namespace=\"{}\",result=\"hit_l2\"}} 0",
+            blob_ns
+        );
+        let _ = writeln!(
+            body,
+            "reddb_cache_blob_get_total{{namespace=\"{}\",result=\"miss\"}} {}",
+            blob_ns, result_blob_stats.misses
+        );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_cache_blob_put_total Blob Cache put outcomes by namespace."
+        );
+        let _ = writeln!(body, "# TYPE reddb_cache_blob_put_total counter");
+        let _ = writeln!(
+            body,
+            "reddb_cache_blob_put_total{{namespace=\"{}\",outcome=\"ok\"}} {}",
+            blob_ns, result_blob_stats.insertions
+        );
+        let _ = writeln!(
+            body,
+            "reddb_cache_blob_put_total{{namespace=\"{}\",outcome=\"version_mismatch\"}} {}",
+            blob_ns, result_blob_stats.version_mismatches
+        );
+        let _ = writeln!(
+            body,
+            "reddb_cache_blob_put_total{{namespace=\"{}\",outcome=\"too_large\"}} 0",
+            blob_ns
+        );
+        let _ = writeln!(
+            body,
+            "reddb_cache_blob_put_total{{namespace=\"{}\",outcome=\"metadata_too_large\"}} 0",
+            blob_ns
+        );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_cache_blob_invalidate_total Blob Cache invalidations by namespace and kind."
+        );
+        let _ = writeln!(body, "# TYPE reddb_cache_blob_invalidate_total counter");
+        for (kind, count) in [
+            ("key", 0),
+            ("prefix", 0),
+            ("tag", 0),
+            ("dependency", result_blob_stats.invalidations),
+            ("namespace", result_blob_stats.namespace_flushes),
+        ] {
+            let _ = writeln!(
+                body,
+                "reddb_cache_blob_invalidate_total{{namespace=\"{}\",kind=\"{}\"}} {}",
+                blob_ns, kind, count
+            );
+        }
+        let _ = writeln!(
+            body,
+            "# HELP reddb_cache_blob_evict_total Blob Cache evictions by namespace and reason."
+        );
+        let _ = writeln!(body, "# TYPE reddb_cache_blob_evict_total counter");
+        for (reason, count) in [
+            ("capacity", result_blob_stats.evictions),
+            ("expiry", result_blob_stats.expirations),
+            ("policy", 0),
+        ] {
+            let _ = writeln!(
+                body,
+                "reddb_cache_blob_evict_total{{namespace=\"{}\",reason=\"{}\"}} {}",
+                blob_ns, reason, count
+            );
+        }
+        let _ = writeln!(
+            body,
+            "# HELP reddb_cache_blob_l1_bytes_in_use L1 bytes currently used by Blob Cache namespace."
+        );
+        let _ = writeln!(body, "# TYPE reddb_cache_blob_l1_bytes_in_use gauge");
+        let _ = writeln!(
+            body,
+            "reddb_cache_blob_l1_bytes_in_use{{namespace=\"{}\"}} {}",
+            blob_ns, result_blob_stats.bytes_in_use
+        );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_cache_blob_l1_entries L1 entries currently held by Blob Cache namespace."
+        );
+        let _ = writeln!(body, "# TYPE reddb_cache_blob_l1_entries gauge");
+        let _ = writeln!(
+            body,
+            "reddb_cache_blob_l1_entries{{namespace=\"{}\"}} {}",
+            blob_ns, result_blob_stats.entries
+        );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_cache_blob_l2_bytes_in_use L2 bytes currently used by Blob Cache namespace."
+        );
+        let _ = writeln!(body, "# TYPE reddb_cache_blob_l2_bytes_in_use gauge");
+        let _ = writeln!(
+            body,
+            "reddb_cache_blob_l2_bytes_in_use{{namespace=\"{}\"}} {}",
+            blob_ns, result_blob_stats.l2_bytes_in_use
+        );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_cache_blob_l2_full_rejections_total Blob Cache puts rejected because L2 is full."
+        );
+        let _ = writeln!(
+            body,
+            "# TYPE reddb_cache_blob_l2_full_rejections_total counter"
+        );
+        let _ = writeln!(
+            body,
+            "reddb_cache_blob_l2_full_rejections_total{{namespace=\"{}\"}} {}",
+            blob_ns, result_blob_stats.l2_full_rejections
+        );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_cache_blob_version_mismatch_total Blob Cache CAS version mismatches by namespace."
+        );
+        let _ = writeln!(
+            body,
+            "# TYPE reddb_cache_blob_version_mismatch_total counter"
+        );
+        let _ = writeln!(
+            body,
+            "reddb_cache_blob_version_mismatch_total{{namespace=\"{}\"}} {}",
+            blob_ns, result_blob_stats.version_mismatches
         );
 
         let _ = writeln!(
@@ -1801,4 +1943,50 @@ fn decode_user_arg(raw: &str) -> crate::auth::UserId {
         return crate::auth::UserId::scoped(tenant.to_string(), name.to_string());
     }
     crate::auth::UserId::platform(raw.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metrics_expose_result_blob_cache_label_set() {
+        let runtime =
+            crate::runtime::RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory())
+                .expect("runtime");
+        runtime
+            .db()
+            .store()
+            .set_config_tree("runtime.result_cache.backend", &crate::json!("blob_cache"));
+
+        runtime.execute_query("SELECT 1").expect("populate miss");
+        runtime.execute_query("SELECT 1").expect("blob hit");
+        runtime.invalidate_result_cache();
+
+        let server = RedDBServer::new(runtime);
+        let response = server.handle_metrics();
+        let body = String::from_utf8(response.body).expect("utf8 metrics");
+
+        for needle in [
+            "reddb_cache_blob_get_total{namespace=\"runtime.result_cache\",result=\"hit_l1\"}",
+            "reddb_cache_blob_get_total{namespace=\"runtime.result_cache\",result=\"hit_l2\"}",
+            "reddb_cache_blob_get_total{namespace=\"runtime.result_cache\",result=\"miss\"}",
+            "reddb_cache_blob_put_total{namespace=\"runtime.result_cache\",outcome=\"ok\"}",
+            "reddb_cache_blob_put_total{namespace=\"runtime.result_cache\",outcome=\"version_mismatch\"}",
+            "reddb_cache_blob_put_total{namespace=\"runtime.result_cache\",outcome=\"too_large\"}",
+            "reddb_cache_blob_put_total{namespace=\"runtime.result_cache\",outcome=\"metadata_too_large\"}",
+            "reddb_cache_blob_invalidate_total{namespace=\"runtime.result_cache\",kind=\"dependency\"}",
+            "reddb_cache_blob_invalidate_total{namespace=\"runtime.result_cache\",kind=\"namespace\"}",
+            "reddb_cache_blob_evict_total{namespace=\"runtime.result_cache\",reason=\"capacity\"}",
+            "reddb_cache_blob_evict_total{namespace=\"runtime.result_cache\",reason=\"expiry\"}",
+            "reddb_cache_blob_evict_total{namespace=\"runtime.result_cache\",reason=\"policy\"}",
+            "reddb_cache_blob_l1_bytes_in_use{namespace=\"runtime.result_cache\"}",
+            "reddb_cache_blob_l1_entries{namespace=\"runtime.result_cache\"}",
+            "reddb_cache_blob_l2_bytes_in_use{namespace=\"runtime.result_cache\"}",
+            "reddb_cache_blob_l2_full_rejections_total{namespace=\"runtime.result_cache\"}",
+            "reddb_cache_blob_version_mismatch_total{namespace=\"runtime.result_cache\"}",
+        ] {
+            assert!(body.contains(needle), "missing metric line for {needle}");
+        }
+    }
 }

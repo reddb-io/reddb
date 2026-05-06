@@ -1,0 +1,21 @@
+{
+  "name": "@reddb-io/internal-version-compare",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Workspace-only deep module: compare a package version against an installed `red --version`, return install/upgrade/skip verdict for the CLI postinstall.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src/"
+  ],
+  "scripts": {
+    "test": "node test/compare.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

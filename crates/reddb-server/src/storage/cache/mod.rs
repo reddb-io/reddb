@@ -5,6 +5,7 @@
 //! # Components
 //!
 //! - **sieve**: SIEVE page cache for database pages (O(1) operations)
+//! - **blob**: Byte-oriented L1 cache for exact-key cached blobs
 //! - **result**: Query result cache with dependency-based invalidation
 //! - **aggregates**: Precomputed aggregations (COUNT, SUM, AVG, etc.)
 //! - **spill**: Graph spill-to-disk for memory-limited environments
@@ -27,6 +28,7 @@
 
 pub mod aggregates;
 pub mod bgwriter;
+pub mod blob;
 pub mod result;
 pub mod ring;
 pub mod sieve;
@@ -34,6 +36,13 @@ pub mod spill;
 pub mod strategy;
 
 pub use aggregates::{AggCacheStats, AggValue, AggregationCache, CardinalityEstimate, NumericAgg};
+pub use blob::{
+    BlobCache, BlobCacheConfig, BlobCacheHit, BlobCachePolicy, BlobCachePut, BlobCacheStats,
+    CacheError, L1Admission, DEFAULT_BLOB_L1_BYTES_MAX, DEFAULT_BLOB_L2_BYTES_MAX,
+    DEFAULT_BLOB_MAX_NAMESPACES, METRIC_CACHE_BLOB_L1_BYTES_IN_USE,
+    METRIC_CACHE_BLOB_L2_BYTES_IN_USE, METRIC_CACHE_BLOB_L2_FULL_REJECTIONS_TOTAL,
+    METRIC_CACHE_VERSION_MISMATCH_TOTAL,
+};
 pub use result::{
     CacheKey, CachePolicy, MaterializedViewCache, MaterializedViewDef, RefreshPolicy, ResultCache,
     ResultCacheStats,
