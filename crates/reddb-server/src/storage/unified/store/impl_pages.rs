@@ -149,6 +149,7 @@ impl UnifiedStore {
             graph_label_index: RwLock::new(HashMap::new()),
             paged_registry_dirty: AtomicBool::new(false),
             commit: None,
+            unindex_cross_refs_fast_path: AtomicU64::new(0),
         }
     }
 
@@ -220,6 +221,7 @@ impl UnifiedStore {
             graph_label_index: RwLock::new(HashMap::new()),
             paged_registry_dirty: AtomicBool::new(false),
             commit,
+            unindex_cross_refs_fast_path: AtomicU64::new(0),
         };
 
         // Load existing data from pages if database exists
