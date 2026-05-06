@@ -42,6 +42,19 @@ pub enum ParseErrorKind {
         limit_name: &'static str,
         value: usize,
     },
+    /// A literal value (integer / float) parsed cleanly but lies
+    /// outside the semantic range expected for its slot — e.g.
+    /// `MAX_SIZE 0`, `lat = 91.0`, `K = 0`, or a negative integer
+    /// where a positive one is required. The structured payload lets
+    /// the snapshot/property harness distinguish these from generic
+    /// syntax errors without string matching.
+    ValueOutOfRange {
+        /// Stable slot name, e.g. `"MAX_SIZE"`, `"lat"`, `"radius"`.
+        field: &'static str,
+        /// Free-text constraint, e.g. `"must be > 0"`,
+        /// `"must be in -90.0..=90.0"`.
+        constraint: &'static str,
+    },
 }
 
 impl ParseError {
@@ -103,6 +116,22 @@ impl ParseError {
             position,
             expected: Vec::new(),
             kind: ParseErrorKind::IdentifierTooLong { limit_name, value },
+        }
+    }
+
+    /// A literal value lies outside the allowed range for its slot.
+    /// The free-text `constraint` is included verbatim in the message
+    /// so callers can render a single line without re-formatting.
+    pub fn value_out_of_range(
+        field: &'static str,
+        constraint: &'static str,
+        position: Position,
+    ) -> Self {
+        Self {
+            message: format!("{} {}", field, constraint),
+            position,
+            expected: Vec::new(),
+            kind: ParseErrorKind::ValueOutOfRange { field, constraint },
         }
     }
 }

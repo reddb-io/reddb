@@ -140,6 +140,12 @@ impl<'a> Parser<'a> {
 
     /// Parse a duration unit and return the multiplier in milliseconds
     fn parse_duration_unit(&mut self) -> Result<f64, ParseError> {
+        // Aggregate-function keywords (`MIN`, `MAX`, `AVG`) lex as
+        // dedicated tokens, not `Token::Ident`, so they need their
+        // own arms. `MIN` is the minute alias; `MAX` and `AVG` have
+        // no canonical duration meaning today but were silently
+        // falling through to the seconds default — surface a clear
+        // error instead.
         match self.peek().clone() {
             Token::Ident(ref unit) => {
                 let mult = match unit.to_ascii_lowercase().as_str() {
@@ -157,6 +163,24 @@ impl<'a> Parser<'a> {
                 };
                 self.advance()?;
                 Ok(mult)
+            }
+            Token::Min => {
+                // `MIN` keyword used as the minute alias.
+                self.advance()?;
+                Ok(60_000.0)
+            }
+            Token::Max | Token::Avg => {
+                // These keywords have no duration semantics; reject
+                // explicitly so a stray aggregate keyword does not
+                // silently default to seconds.
+                let kw = self.peek().clone();
+                Err(ParseError::new(
+                    format!(
+                        "unknown duration unit '{}', expected s/m/h/d",
+                        kw
+                    ),
+                    self.position(),
+                ))
             }
             _ => Ok(1_000.0), // default: seconds
         }
