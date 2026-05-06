@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/queue_parser_snapshots.rs
+expression: "fmt_parse_error(\"QUEUE POP q COUNT\")"
+---
+input: "QUEUE POP q COUNT"
+kind:  Syntax
+error: Parse error at 1:18: Unexpected token: EOF (expected: integer)

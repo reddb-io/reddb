@@ -1,0 +1,8 @@
+---
+source: crates/reddb-server/tests/graph_dsl_snapshots.rs
+assertion_line: 93
+expression: "fmt_parse_error(\"GRAPH SHORTEST_PATH 'a'\")"
+---
+input: "GRAPH SHORTEST_PATH 'a'"
+kind:  Syntax
+error: Parse error at 1:24: Unexpected token: EOF (expected: TO)

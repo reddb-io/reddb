@@ -1,0 +1,8 @@
+---
+source: crates/reddb-server/tests/graph_dsl_snapshots.rs
+assertion_line: 81
+expression: "fmt_parse_error(\"PATH\")"
+---
+input: "PATH"
+kind:  Syntax
+error: Parse error at 1:5: Unexpected token: EOF (expected: FROM)

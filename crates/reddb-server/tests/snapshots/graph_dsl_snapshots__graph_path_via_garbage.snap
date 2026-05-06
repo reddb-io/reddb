@@ -1,0 +1,8 @@
+---
+source: crates/reddb-server/tests/graph_dsl_snapshots.rs
+assertion_line: 83
+expression: "fmt_parse_error(\"PATH FROM host('a') TO host('b') VIA @#$%\")"
+---
+input: "PATH FROM host('a') TO host('b') VIA @#$%"
+kind:  Syntax
+error: Parse error at 1:38: Unexpected character: '@'

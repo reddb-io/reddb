@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/ask_snapshots.rs
+expression: "fmt_parse_error(\"ASK 'q' DEPTH -1\")"
+---
+input: "ASK 'q' DEPTH -1"
+kind:  Syntax
+error: Parse error at 1:15: Unexpected token: - (expected: integer)

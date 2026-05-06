@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/queue_parser_snapshots.rs
+expression: "fmt_parse_error(\"CREATE QUEUE q MAX_SIZE forever\")"
+---
+input: "CREATE QUEUE q MAX_SIZE forever"
+kind:  Syntax
+error: Parse error at 1:25: Unexpected token: forever (expected: integer)

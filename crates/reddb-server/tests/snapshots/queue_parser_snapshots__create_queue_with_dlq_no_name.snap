@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/queue_parser_snapshots.rs
+expression: "fmt_parse_error(\"CREATE QUEUE q WITH DLQ\")"
+---
+input: "CREATE QUEUE q WITH DLQ"
+kind:  Syntax
+error: Parse error at 1:24: Unexpected token: EOF (expected: identifier)
