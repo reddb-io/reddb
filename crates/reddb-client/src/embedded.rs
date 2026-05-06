@@ -56,6 +56,12 @@ impl EmbeddedClient {
         Ok(map_query_result(&qr))
     }
 
+    /// Single-row insert. Routes through the same
+    /// `runtime.create_rows_batch_columnar` port that
+    /// [`Self::bulk_insert`] uses (#110), passing a one-row batch.
+    /// Skips `build_insert_sql` + `execute_query`, so this hot
+    /// autocommit path pays zero SQL build / lex / parse / plan cost
+    /// when the collection carries no contract.
     pub fn insert(&self, collection: &str, payload: &JsonValue) -> Result<InsertResult> {
         let object = payload.as_object().ok_or_else(|| {
             ClientError::new(
@@ -63,13 +69,19 @@ impl EmbeddedClient {
                 "insert payload must be a JSON object".to_string(),
             )
         })?;
-        let sql = build_insert_sql(collection, object);
-        let qr = self
+        let column_names: Vec<String> = object.iter().map(|(k, _)| k.clone()).collect();
+        let row: Vec<SchemaValue> =
+            object.iter().map(|(_, v)| json_value_to_schema_value(v)).collect();
+        let count = self
             .runtime
-            .execute_query(&sql)
+            .create_rows_batch_columnar(
+                collection.to_string(),
+                Arc::new(column_names),
+                vec![row],
+            )
             .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
         Ok(InsertResult {
-            affected: qr.affected_rows,
+            affected: count as u64,
             id: None,
         })
     }
