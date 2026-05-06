@@ -29,11 +29,16 @@ pub mod primary;
 pub mod quorum;
 pub mod replica;
 pub mod scheduler;
+pub mod topology_advertiser;
 
 pub use commit_policy::CommitPolicy;
 pub use commit_waiter::{AwaitOutcome, CommitWaiter};
 pub use lease::{LeaseError, LeaseStore, WriterLease};
 pub use quorum::{QuorumConfig, QuorumCoordinator, QuorumError};
+pub use topology_advertiser::{
+    LagConfig, TopologyAdvertiser, TopologyAuthGate, DEFAULT_REPLICA_TIMEOUT_MS,
+    TOPOLOGY_READ_CAPABILITY,
+};
 
 /// Role of this RedDB instance in a replication cluster.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
