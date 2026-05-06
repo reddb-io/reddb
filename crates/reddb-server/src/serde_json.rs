@@ -179,12 +179,108 @@ impl Value {
 }
 
 fn escape_string(input: &str) -> String {
-    input
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
+    // RFC 8259 §7: all control bytes (U+0000..U+001F), `"`, and `\` MUST be escaped.
+    // Previous version silently dropped control bytes other than \n \r \t — see
+    // F-01 in docs/security/serialization-boundary-audit-2026-05-06.md and
+    // ADR 0010 (serialization-boundary discipline).
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0C}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn encode(s: &str) -> String {
+        Value::String(s.to_string()).to_string_compact()
+    }
+
+    /// Every byte 0x00..0x20 must produce a valid JSON string that round-trips
+    /// through a real JSON parser preserving the original byte.
+    #[test]
+    fn escape_string_handles_every_control_byte() {
+        for byte in 0x00u8..0x20 {
+            let original: String = std::char::from_u32(byte as u32).unwrap().to_string();
+            let encoded = encode(&original);
+            // Must parse back to the exact same byte (NOT silently dropped).
+            let parsed: String = from_str(&encoded).unwrap_or_else(|err| {
+                panic!("byte 0x{byte:02x} encoded as {encoded:?} failed to parse: {err}")
+            });
+            assert_eq!(
+                parsed, original,
+                "byte 0x{byte:02x} did not round-trip (encoded={encoded:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn escape_string_handles_standard_escapes() {
+        assert_eq!(encode("\""), "\"\\\"\"");
+        assert_eq!(encode("\\"), "\"\\\\\"");
+        assert_eq!(encode("\n"), "\"\\n\"");
+        assert_eq!(encode("\r"), "\"\\r\"");
+        assert_eq!(encode("\t"), "\"\\t\"");
+        assert_eq!(encode("\u{08}"), "\"\\b\"");
+        assert_eq!(encode("\u{0C}"), "\"\\f\"");
+    }
+
+    #[test]
+    fn escape_string_handles_mixed_payload() {
+        let input = "name=\"x\"\n\\path\t\x01end";
+        let encoded = encode(input);
+        let parsed: String = from_str(&encoded).expect("mixed payload must parse");
+        assert_eq!(parsed, input);
+    }
+
+    /// Regression test for F-01: the "self-disagreeing audit log" exploit.
+    /// An attacker writes audit data containing \x01. The old encoder
+    /// silently dropped \x01, so a downstream auditor that re-parses the
+    /// JSONL would see a different record than what was emitted. The fix
+    /// must encode \x01 as  so it survives the round trip.
+    #[test]
+    fn audit_log_preserves_low_control_bytes() {
+        let payload = "collection\x01name\x07with\x1fbells";
+        let encoded = encode(payload);
+
+        // Encoded form must contain explicit \u escapes — NOT raw control bytes,
+        // NOT silent drops.
+        assert!(
+            encoded.contains("\\u0001"),
+            "expected \\u0001 escape in {encoded:?}"
+        );
+        assert!(
+            encoded.contains("\\u0007"),
+            "expected \\u0007 escape in {encoded:?}"
+        );
+        assert!(
+            encoded.contains("\\u001f"),
+            "expected \\u001f escape in {encoded:?}"
+        );
+        assert!(
+            !encoded.contains('\x01'),
+            "raw \\x01 must not appear in encoded output"
+        );
+
+        // Round trip through the in-house parser must reproduce the original bytes.
+        let parsed: String = from_str(&encoded).expect("audit payload must parse");
+        assert_eq!(parsed, payload);
+    }
 }
 
 impl From<JsonValue> for Value {
