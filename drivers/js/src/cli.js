@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process'
-import { resolveBinaryPath } from './binary.js'
+import { resolveCliBinary } from './binary.js'
 
-const binary = resolveBinaryPath()
+const binary = resolveCliBinary()
 const args = process.argv.slice(2)
 
 const child = spawn(binary, args, {

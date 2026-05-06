@@ -37,7 +37,7 @@
  */
 
 import { spawnRed } from './spawn.js'
-import { resolveBinaryPath } from './binary.js'
+import { resolveSdkBinary } from './binary.js'
 import { RpcClient, RedDBError } from './protocol.js'
 import { HttpRpcClient } from './http.js'
 import { connectRedwire } from './redwire.js'
@@ -73,7 +73,7 @@ export async function connect(uri, options = {}) {
       )
     }
     const args = embeddedArgs(parsed)
-    const binary = options.binary ?? resolveBinaryPath()
+    const binary = options.binary ?? resolveSdkBinary()
     const child = await spawnRed(binary, args)
     const client = new RpcClient(child)
     await client.call('version', {})
@@ -123,7 +123,7 @@ export async function connect(uri, options = {}) {
     const protoOverride = parsed.params?.get?.('proto') ?? ''
     if (protoOverride === 'spawn-grpc') {
       const args = grpcArgs(parsed, token)
-      const binary = options.binary ?? resolveBinaryPath()
+      const binary = options.binary ?? resolveSdkBinary()
       const child = await spawnRed(binary, args)
       const legacy = new RpcClient(child)
       await legacy.call('version', {})
