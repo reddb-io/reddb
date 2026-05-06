@@ -41,13 +41,9 @@
 //! in `corpus::probabilistic_adversarial_inputs()` and the
 //! `arbitrary_suffix` strategy below.
 //!
-//! Caveat — `DEPTH` is a reserved lexer token (`Token::Depth`), not
-//! a plain identifier. The parser's `consume_ident_ci("DEPTH")` only
-//! matches `Token::Ident`, so any sketch shape that includes `DEPTH`
-//! today fails to parse at the top-level "trailing-tokens" check.
-//! The valid-shape SKETCH strategy therefore emits `WIDTH` only and
-//! the `DEPTH` regression is captured by a FIXME pin in
-//! `tests/probabilistic_parser.rs`.
+//! Note — `DEPTH` lexes as the reserved `Token::Depth`. The parser
+//! now consumes it via a typed-keyword arm (issue #115), so the
+//! valid-shape SKETCH strategy emits both `WIDTH` and `DEPTH`.
 
 use proptest::prelude::*;
 
@@ -85,11 +81,6 @@ pub fn opt_if_exists() -> impl Strategy<Value = &'static str> {
 /// Pinned as the entry-point strategy: every other strategy assumes
 /// the structure has been declared and the most common regression
 /// is a tweak to the CREATE/DROP envelope.
-///
-/// The SKETCH variant intentionally never emits a `DEPTH` clause
-/// because `Token::Depth` lexes as a reserved keyword; see the
-/// FIXME pin `fixme_sketch_depth_clause_breaks_top_level_eof` in
-/// `tests/probabilistic_parser.rs`.
 pub fn create_drop_stmt() -> impl Strategy<Value = String> {
     prop_oneof![
         // CREATE HLL
@@ -101,6 +92,14 @@ pub fn create_drop_stmt() -> impl Strategy<Value = String> {
         // CREATE SKETCH name WIDTH w
         (opt_if_not_exists(), ident(), 1u32..=10_000u32)
             .prop_map(|(ine, n, w)| format!("CREATE SKETCH{} {} WIDTH {}", ine, n, w)),
+        // CREATE SKETCH name DEPTH d
+        (opt_if_not_exists(), ident(), 1u32..=128u32)
+            .prop_map(|(ine, n, d)| format!("CREATE SKETCH{} {} DEPTH {}", ine, n, d)),
+        // CREATE SKETCH name WIDTH w DEPTH d
+        (opt_if_not_exists(), ident(), 1u32..=10_000u32, 1u32..=128u32)
+            .prop_map(|(ine, n, w, d)| {
+                format!("CREATE SKETCH{} {} WIDTH {} DEPTH {}", ine, n, w, d)
+            }),
         // CREATE FILTER (bare)
         (opt_if_not_exists(), ident())
             .prop_map(|(ine, n)| format!("CREATE FILTER{} {}", ine, n)),
@@ -189,11 +188,10 @@ pub fn filter_op_stmt() -> impl Strategy<Value = String> {
 // ---------------------------------------------------------------
 
 /// Modifier-focused strategy: pinpoints the `CAPACITY` token after
-/// `CREATE FILTER` and the `WIDTH` token after `CREATE SKETCH`. A
-/// regression that breaks the modifier shrinks straight to the
-/// modifier keyword rather than a fuzzy whole-statement diff.
-///
-/// `DEPTH` is intentionally absent; see module-level note.
+/// `CREATE FILTER` and the `WIDTH` / `DEPTH` modifiers after
+/// `CREATE SKETCH`. A regression that breaks the modifier shrinks
+/// straight to the modifier keyword rather than a fuzzy whole-
+/// statement diff.
 pub fn modifier_stmt() -> impl Strategy<Value = String> {
     prop_oneof![
         // CREATE FILTER name CAPACITY c
@@ -208,6 +206,12 @@ pub fn modifier_stmt() -> impl Strategy<Value = String> {
         // CREATE SKETCH IF NOT EXISTS name WIDTH w
         (ident(), 1u32..=10_000u32)
             .prop_map(|(n, w)| format!("CREATE SKETCH IF NOT EXISTS {} WIDTH {}", n, w)),
+        // CREATE SKETCH name DEPTH d
+        (ident(), 1u32..=128u32)
+            .prop_map(|(n, d)| format!("CREATE SKETCH {} DEPTH {}", n, d)),
+        // CREATE SKETCH name WIDTH w DEPTH d
+        (ident(), 1u32..=10_000u32, 1u32..=128u32)
+            .prop_map(|(n, w, d)| format!("CREATE SKETCH {} WIDTH {} DEPTH {}", n, w, d)),
     ]
 }
 

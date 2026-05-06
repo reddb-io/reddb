@@ -3,5 +3,5 @@ source: crates/reddb-server/tests/probabilistic_parser_snapshots.rs
 expression: "fmt_parse_error(\"CREATE FILTER f1 CAPACITY -1\")"
 ---
 input: "CREATE FILTER f1 CAPACITY -1"
-kind:  Syntax
-error: Parse error at 1:27: Unexpected token: - (expected: integer)
+kind:  ValueOutOfRange { field: "CAPACITY", constraint: "must be a positive integer" }
+error: Parse error at 1:27: CAPACITY must be a positive integer

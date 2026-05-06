@@ -10,12 +10,11 @@
 //! max_identifier_chars) cascade automatically — this file pins the
 //! contract.
 //!
-//! Phase A note (per AFK plan): no source modifications. Behaviours
-//! that the parser does not yet implement (e.g. accepting `DEPTH n`
-//! after `CREATE SKETCH`, accepting unary-minus integers, rejecting
-//! zero capacity) are pinned via `#[ignore]`-marked FIXME tests so
-//! the regression appears as soon as the parser starts enforcing
-//! them.
+//! Phase B follow-up (issue #115): the FIXME pins below were flipped
+//! into regression guards once the parser landed `Token::Depth`
+//! handling, `ValueOutOfRange` for zero-valued modifiers, and a
+//! clearer "must be a positive integer" message via
+//! `parse_positive_integer`.
 
 mod support {
     pub mod parser_hardening;
@@ -253,8 +252,7 @@ fn happy_create_sketch_with_width_parses() {
         }) => {
             assert_eq!(name, "events");
             assert_eq!(width, 5000);
-            // DEPTH is not parsed (see FIXME pin); width-only path
-            // keeps the default depth.
+            // DEPTH defaults to 5 when the modifier is omitted.
             assert_eq!(depth, 5, "default depth pinned at 5");
             assert!(!if_not_exists);
         }
@@ -365,78 +363,60 @@ fn happy_filter_count_and_drop_filter_if_exists() {
     }
 }
 
-// ---- FIXME pins -------------------------------------------------
+// ---- regression guards (originally FIXME pins) ------------------
 //
-// These tests document parser behaviours that we believe are bugs,
-// but Phase A is tests-only — no source mods. Each test is marked
-// `#[ignore]` with a follow-up issue link. When the upstream fix
-// lands, dropping the `#[ignore]` flips the test into a regression
-// guard.
+// Phase B / issue #115 landed the parser fixes; the tests below were
+// flipped from `#[ignore]` FIXME pins into live guards.
 
-/// FIXME(#105-followup-1): the lexer recognises `DEPTH` as a
-/// reserved keyword (`Token::Depth`), but `parse_create_probabilistic`
-/// looks for it via `consume_ident_ci("DEPTH")` which only matches
-/// `Token::Ident`. As a result, any `CREATE SKETCH name DEPTH n`
-/// shape fails the top-level "trailing tokens after query" check.
-///
-/// Expected once fixed: this input parses successfully and produces
-/// `CreateSketch { width: 1000, depth: 5, .. }` (default WIDTH +
-/// the user-supplied DEPTH=5).
+/// Regression guard for #105-followup-1: `Token::Depth` shadowed the
+/// `DEPTH` modifier and `consume_ident_ci("DEPTH")` never matched.
+/// The fix wires a typed `consume(&Token::Depth)` arm so
+/// `CREATE SKETCH name DEPTH n` parses cleanly.
 #[test]
-#[ignore = "FIXME #105-followup-1: Token::Depth shadows the DEPTH modifier in CREATE SKETCH"]
-fn fixme_sketch_depth_clause_breaks_top_level_eof() {
-    let r = parser::parse("CREATE SKETCH events DEPTH 5");
-    assert!(
-        r.is_ok(),
-        "DEPTH should be accepted as a sketch modifier; got: {r:?}"
-    );
+fn sketch_depth_clause_parses() {
+    let parsed = parser::parse("CREATE SKETCH events DEPTH 5")
+        .expect("DEPTH should be accepted as a sketch modifier");
+    match parsed.query {
+        reddb_server::storage::query::ast::QueryExpr::ProbabilisticCommand(
+            ProbabilisticCommand::CreateSketch { width, depth, .. },
+        ) => {
+            assert_eq!(width, 1000, "default WIDTH stays at 1000");
+            assert_eq!(depth, 5, "user-supplied DEPTH lands at 5");
+        }
+        other => panic!("expected CreateSketch, got {other:?}"),
+    }
 }
 
-/// FIXME(#105-followup-2): `CAPACITY 0` is degenerate (a Cuckoo
-/// Filter with zero buckets cannot store anything), but the parser
-/// accepts it. A `Sema`-kind error at parse time is cheaper than
-/// the runtime allocation failure that follows.
-///
-/// Expected once fixed: this input returns `Err`.
+/// Regression guard for #105-followup-2: `CAPACITY 0` is degenerate
+/// (a Cuckoo Filter with zero buckets cannot store anything). The
+/// parser now rejects it with a `ValueOutOfRange` error.
 #[test]
-#[ignore = "FIXME #105-followup-2: parser accepts CAPACITY 0 for CREATE FILTER"]
-fn fixme_filter_capacity_zero_accepted_today() {
+fn filter_capacity_zero_rejected() {
     let r = parser::parse("CREATE FILTER seen CAPACITY 0");
     assert!(r.is_err(), "CAPACITY=0 should be rejected as degenerate");
 }
 
-/// FIXME(#105-followup-3): `WIDTH 0` is degenerate (a Count-Min
-/// Sketch with zero columns has no counters), but the parser accepts
-/// it for the same reason as `CAPACITY 0`.
-///
-/// Expected once fixed: this input returns `Err`.
+/// Regression guard for #105-followup-3: `WIDTH 0` is degenerate.
+/// Same `ValueOutOfRange` shape as `CAPACITY 0`.
 #[test]
-#[ignore = "FIXME #105-followup-3: parser accepts WIDTH 0 for CREATE SKETCH"]
-fn fixme_sketch_width_zero_accepted_today() {
+fn sketch_width_zero_rejected() {
     let r = parser::parse("CREATE SKETCH events WIDTH 0");
     assert!(r.is_err(), "WIDTH=0 should be rejected as degenerate");
 }
 
-/// FIXME(#105-followup-4): `parse_integer` does not accept a leading
-/// unary minus, so `CAPACITY -1` / `WIDTH -1` / `SKETCH ADD x 'e' -1`
-/// all fail with a confusing "expected integer" error rather than a
-/// clear "value must be positive". Mirrors the geo `radius_negative`
-/// FIXME pin (#104-followup-1).
-///
-/// Expected once fixed: this input returns `Err` with a kind that
-/// names the negative integer.
+/// Regression guard for #105-followup-4: negative integer modifiers
+/// now surface a clearer "must be a positive integer" message via
+/// the typed `parse_positive_integer` helper.
 #[test]
-#[ignore = "FIXME #105-followup-4: negative integer modifiers surface as expected-integer errors"]
-fn fixme_filter_capacity_negative_surfaces_unary_minus_error() {
+fn filter_capacity_negative_surfaces_positive_integer_error() {
     let r = parser::parse("CREATE FILTER seen CAPACITY -1");
-    // Today: error is `Unexpected token: Minus (expected: integer)`.
-    // Once fixed: error should reference the negative-value semantics.
-    if let Err(e) = r {
-        assert!(
-            !format!("{e}").to_lowercase().contains("must be positive"),
-            "if this assertion fails, CAPACITY -1 now produces a semantic error — flip the FIXME"
-        );
-    } else {
-        panic!("CAPACITY -1 should not parse successfully");
+    match r {
+        Err(e) => {
+            assert!(
+                format!("{e}").to_lowercase().contains("must be a positive integer"),
+                "expected 'must be a positive integer' message, got: {e}"
+            );
+        }
+        Ok(_) => panic!("CAPACITY -1 should not parse successfully"),
     }
 }

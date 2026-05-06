@@ -34,10 +34,12 @@ pub fn ident() -> impl Strategy<Value = String> {
 /// values are emitted with a leading unary `-`, exercising the
 /// `parse_float` minus-prefix path (#107).
 ///
-/// We still want fractional jitter so the generator emits a small
-/// integer + fractional component formatted via `f64::to_string`.
+/// The integer portion is restricted to `[0, 89]` so the fractional
+/// jitter (`0..1_000_000`) cannot push the literal out of range; the
+/// edge values `±90.0` are exercised by hand-rolled happy-path tests
+/// so the strategy does not need to emit them itself.
 pub fn lat_lit() -> impl Strategy<Value = String> {
-    (any::<bool>(), 0u32..=90, 0u32..1_000_000u32).prop_map(|(neg, deg, frac)| {
+    (any::<bool>(), 0u32..=89, 0u32..1_000_000u32).prop_map(|(neg, deg, frac)| {
         let sign = if neg { "-" } else { "" };
         format!("{}{}.{:06}", sign, deg, frac)
     })
@@ -45,9 +47,11 @@ pub fn lat_lit() -> impl Strategy<Value = String> {
 
 /// Longitude literal in the closed interval `[-180, 180]`. Like
 /// `lat_lit`, the generator emits an optional leading unary `-` so
-/// the western hemisphere is covered by the proptest sweep.
+/// the western hemisphere is covered by the proptest sweep. The
+/// integer portion is restricted to `[0, 179]` so the fractional
+/// jitter cannot push the literal out of range.
 pub fn lon_lit() -> impl Strategy<Value = String> {
-    (any::<bool>(), 0u32..=180, 0u32..1_000_000u32).prop_map(|(neg, deg, frac)| {
+    (any::<bool>(), 0u32..=179, 0u32..1_000_000u32).prop_map(|(neg, deg, frac)| {
         let sign = if neg { "-" } else { "" };
         format!("{}{}.{:06}", sign, deg, frac)
     })
