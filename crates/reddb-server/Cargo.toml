@@ -34,6 +34,13 @@ prost = "0.14"
 ureq = { version = "3.3", default-features = false, features = ["rustls"] }
 roaring = "0.11"
 parking_lot = "0.12"
+# crossbeam-queue::SegQueue powers the lock-free WAL append path
+# (Roadmap #2 / issue #157). Writers atomically reserve an LSN via
+# next_lsn.fetch_add and push their encoded bytes onto the queue —
+# no mutex held across the encode-and-push step. The leader drain
+# loop pops, sorts by LSN, and writes contiguous prefixes to the
+# BufWriter under the WAL file mutex. Preserves on-disk format.
+crossbeam-queue = "0.3"
 rayon = "1.12"
 rstar = "0.12"
 regex = "1"
