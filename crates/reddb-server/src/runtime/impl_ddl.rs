@@ -60,6 +60,21 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         self.refresh_table_planner_stats(&query.name);
         self.invalidate_result_cache();
+        // Issue #120 — feed the create into the schema-vocabulary
+        // reverse index so AskPipeline (#121) sees this collection.
+        let columns: Vec<String> = query
+            .columns
+            .iter()
+            .map(|col| col.name.clone())
+            .collect();
+        self.schema_vocabulary_apply(
+            crate::runtime::schema_vocabulary::DdlEvent::CreateCollection {
+                collection: query.name.clone(),
+                columns,
+                type_tags: Vec::new(),
+                description: None,
+            },
+        );
         // Partition metadata (Phase 2.2 PG parity).
         //
         // When the CREATE TABLE carries a `PARTITION BY RANGE|LIST|HASH (col)`
@@ -173,6 +188,16 @@ impl RedDBRuntime {
             .db
             .persist_metadata()
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        // Issue #120 — drop both the collection entries *and* every
+        // index entry that was scoped to this collection.  Dropping the
+        // collection wipes columns + collection-name + type-tags +
+        // index hits in one pass via `purge_collection_entries`, so
+        // the explicit `DropIndex` calls would be redundant.
+        self.schema_vocabulary_apply(
+            crate::runtime::schema_vocabulary::DdlEvent::DropCollection {
+                collection: query.name.clone(),
+            },
+        );
 
         Ok(RuntimeQueryResult::ok_message(
             raw_query.to_string(),
@@ -325,6 +350,30 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         self.clear_table_planner_stats(&query.name);
         self.invalidate_result_cache();
+        // Issue #120 — refresh the schema-vocabulary entries from the
+        // post-ALTER contract. Drop+recreate inside the index keeps
+        // the invalidation guarantee complete (no stale columns from
+        // before an ALTER ... DROP COLUMN).
+        let post_alter_columns: Vec<String> = self
+            .inner
+            .db
+            .collection_contract(&query.name)
+            .map(|contract| {
+                contract
+                    .declared_columns
+                    .iter()
+                    .map(|col| col.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.schema_vocabulary_apply(
+            crate::runtime::schema_vocabulary::DdlEvent::AlterCollection {
+                collection: query.name.clone(),
+                columns: post_alter_columns,
+                type_tags: Vec::new(),
+                description: None,
+            },
+        );
 
         let message = if messages.is_empty() {
             format!("table '{}' altered (no operations)", query.name)
@@ -494,6 +543,16 @@ impl RedDBRuntime {
                 method: method_kind,
                 unique: query.unique,
             });
+        // Issue #120 — surface the index name + indexed columns in
+        // the schema-vocabulary so AskPipeline (#121) can resolve
+        // "the email index" back to its collection.
+        self.schema_vocabulary_apply(
+            crate::runtime::schema_vocabulary::DdlEvent::CreateIndex {
+                collection: query.table.clone(),
+                index: query.name.clone(),
+                columns: query.columns.clone(),
+            },
+        );
 
         let method_str = format!("{}", query.method);
         let unique_str = if query.unique { "unique " } else { "" };
@@ -538,6 +597,13 @@ impl RedDBRuntime {
         // Remove from IndexStore
         self.inner.index_store.drop_index(&query.name, &query.table);
         self.invalidate_plan_cache();
+        // Issue #120 — keep the schema-vocabulary index entry in sync.
+        self.schema_vocabulary_apply(
+            crate::runtime::schema_vocabulary::DdlEvent::DropIndex {
+                collection: query.table.clone(),
+                index: query.name.clone(),
+            },
+        );
 
         Ok(RuntimeQueryResult::ok_message(
             raw_query.to_string(),

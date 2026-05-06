@@ -1618,6 +1618,9 @@ impl RedDBRuntime {
                 lease_lifecycle: std::sync::OnceLock::new(),
                 replica_apply_metrics: crate::replication::logical::ReplicaApplyMetrics::default(),
                 quota_bucket: crate::runtime::quota_bucket::QuotaBucket::from_env(),
+                schema_vocabulary: parking_lot::RwLock::new(
+                    crate::runtime::schema_vocabulary::SchemaVocabulary::new(),
+                ),
             }),
         };
 
@@ -2044,6 +2047,32 @@ impl RedDBRuntime {
     /// maintenance hook after `store.bulk_insert` returns.
     pub fn index_store_ref(&self) -> &super::index_store::IndexStore {
         &self.inner.index_store
+    }
+
+    /// Apply a DDL event to the schema-vocabulary reverse index
+    /// (issue #120). Called by DDL execution paths after the catalog
+    /// mutation has succeeded so the index never holds entries for
+    /// half-applied DDL.
+    pub(crate) fn schema_vocabulary_apply(
+        &self,
+        event: crate::runtime::schema_vocabulary::DdlEvent,
+    ) {
+        self.inner.schema_vocabulary.write().on_ddl(event);
+    }
+
+    /// Lookup `token` in the schema-vocabulary reverse index. Returns
+    /// an owned `Vec<VocabHit>` because the underlying read lock
+    /// cannot be borrowed across the call boundary; the slice from
+    /// `SchemaVocabulary::lookup` is cloned per hit.
+    pub fn schema_vocabulary_lookup(
+        &self,
+        token: &str,
+    ) -> Vec<crate::runtime::schema_vocabulary::VocabHit> {
+        self.inner
+            .schema_vocabulary
+            .read()
+            .lookup(token)
+            .to_vec()
     }
 
     /// Inject an AuthStore into the runtime. Called by server boot
@@ -4678,6 +4707,15 @@ impl RedDBRuntime {
                     .write()
                     .insert(key, Arc::new(q.clone()));
                 self.invalidate_plan_cache();
+                // Issue #120 — surface policy names in the
+                // schema-vocabulary so AskPipeline (#121) can resolve
+                // a policy reference back to its table.
+                self.schema_vocabulary_apply(
+                    crate::runtime::schema_vocabulary::DdlEvent::CreatePolicy {
+                        collection: q.table.clone(),
+                        policy: q.name.clone(),
+                    },
+                );
                 Ok(RuntimeQueryResult::ok_message(
                     query.to_string(),
                     &format!("policy {} on {} created", q.name, q.table),
@@ -4698,6 +4736,14 @@ impl RedDBRuntime {
                     )));
                 }
                 self.invalidate_plan_cache();
+                // Issue #120 — keep the schema-vocabulary policy
+                // entry in sync.
+                self.schema_vocabulary_apply(
+                    crate::runtime::schema_vocabulary::DdlEvent::DropPolicy {
+                        collection: q.table.clone(),
+                        policy: q.name.clone(),
+                    },
+                );
                 Ok(RuntimeQueryResult::ok_message(
                     query.to_string(),
                     &format!("policy {} on {} dropped", q.name, q.table),
