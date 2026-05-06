@@ -24,11 +24,16 @@ impl GrpcRuntime {
                 if let Some(validator) = self.oauth_validator() {
                     match crate::wire::redwire::auth::validate_oauth_jwt(&validator, token_str) {
                         Ok((username, role)) => {
+                            // F-04: `username` is JWT-claim controlled
+                            // (federated case), `role` is a stable enum
+                            // string. Strip CR/LF/control bytes from
+                            // username so a forged claim cannot smuggle
+                            // a second log line. See ADR 0010.
                             tracing::info!(
                                 target: "reddb::security",
                                 transport = "grpc",
                                 token_sha256_prefix = %log_prefix,
-                                username = %username,
+                                username = %reddb_wire::audit_safe_log_field(&username),
                                 role = %role.as_str(),
                                 "gRPC OAuth JWT accepted"
                             );
@@ -49,11 +54,15 @@ impl GrpcRuntime {
                             // validation = hard reject. Falling back to
                             // AuthStore would let an attacker forge a JWT
                             // and ride a session-id collision.
+                            // F-04: `reason` may quote the token-shape
+                            // it rejected; route through the LogField
+                            // escaper so a hostile token cannot ride
+                            // CR/LF into the log shipper.
                             tracing::warn!(
                                 target: "reddb::security",
                                 transport = "grpc",
                                 token_sha256_prefix = %log_prefix,
-                                reason = %reason,
+                                reason = %reddb_wire::audit_safe_log_field(&reason),
                                 "gRPC OAuth JWT rejected"
                             );
                             return AuthResult::Denied(format!("oauth jwt: {reason}"));
