@@ -237,3 +237,90 @@ fn reported_scenario_does_not_parse() {
         );
     }
 }
+
+/// F8 — full-cycle proof for the reporter's restated scenario
+/// (`SET CONFIG …` instead of `PUT`):
+///
+///   SET CONFIG my.attack = '1=1 OR 1=1'
+///   SELECT 1 WHERE 'normal_id' = $config.my.attack
+///
+/// At parse time we pin two AST invariants together. Combined they
+/// rule out any SQL-injection path through stored config values:
+///
+///   (a) `SET CONFIG <path> = <rhs>` accepts ONLY a typed literal
+///       on the RHS. The attacker cannot bury an expression there,
+///       so the stored payload is always opaque bytes / typed atom.
+///
+///   (b) `$config.my.attack` desugars to `Expr::FunctionCall { name:
+///       "CONFIG", args: [Literal(Value::Text("my.attack"))] }` —
+///       the *path* is the literal, never the value. At runtime
+///       `current_config_value("my.attack")` returns
+///       `Value::Text("1=1 OR 1=1")` and `apply_binop(Eq, Text, Text)`
+///       compares bytewise. There is no path that feeds the stored
+///       string back through the SQL parser.
+///
+/// Removing either invariant — letting SET CONFIG accept
+/// expressions, OR letting `$config.x` be substituted textually
+/// before parsing — would break this test loudly.
+#[test]
+fn set_config_attacker_value_does_not_alter_predicate_at_parse() {
+    // (a) SET CONFIG RHS rejects expressions; only typed literals
+    // survive parser::parse. We try a benign-looking attacker
+    // payload and assert it parses (typed string literal); we then
+    // try an expression in the same slot and assert it errors.
+    parser::parse("SET CONFIG my.attack = '1=1 OR 1=1'")
+        .expect("attacker-controlled string literal value must parse cleanly");
+    parser::parse("SET CONFIG my.attack = ('1=1' OR '1=1')")
+        .expect_err("expression on RHS of SET CONFIG must be rejected");
+    parser::parse("SET CONFIG my.attack = $config.elsewhere")
+        .expect_err("$-reference on RHS of SET CONFIG must be rejected");
+
+    // (b) The reading-side predicate uses `$config.my.attack` as one
+    // operand of `=`. We assert the AST shape: comparison whose RHS
+    // is a function-call expression over a Value::Text path, NOT a
+    // Value::Text expression of the *content*.
+    let parsed = parser::parse(
+        "SELECT 1 FROM users WHERE 'normal_id' = $config.my.attack",
+    )
+    .expect("$config substitution in WHERE must parse");
+
+    let where_filter = match parsed.query {
+        QueryExpr::Table(table) => table
+            .filter
+            .clone()
+            .expect("WHERE clause must be present in the AST"),
+        ref other => panic!("expected Table query, got {other:?}"),
+    };
+
+    // Walk into the comparison and confirm the substitution lands as
+    // a function-call over a typed path literal.
+    let rhs_expr = match where_filter {
+        Filter::CompareExpr { rhs, .. } => rhs,
+        other => panic!("expected Filter::CompareExpr, got {other:?}"),
+    };
+
+    match rhs_expr {
+        Expr::FunctionCall { name, args, .. } => {
+            assert!(
+                name.eq_ignore_ascii_case("__CONFIG_REF") || name.eq_ignore_ascii_case("CONFIG"),
+                "$config.* must desugar to a CONFIG/__CONFIG_REF function call, got {name:?}"
+            );
+            assert_eq!(args.len(), 1, "exactly one path arg");
+            match &args[0] {
+                Expr::Literal { value, .. } => {
+                    let text = match value {
+                        Value::Text(s) => s.to_string(),
+                        other => panic!("path arg must be Value::Text, got {other:?}"),
+                    };
+                    assert_eq!(text, "my.attack", "argument must be the typed path literal");
+                }
+                other => panic!("config path arg must be Literal(Text), got {other:?}"),
+            }
+        }
+        other => panic!(
+            "$config.* must produce Expr::FunctionCall, got {other:?} \
+             (a non-FunctionCall arm here would mean the substitution \
+             leaks the stored value into the AST shape — SQL injection)",
+        ),
+    }
+}
