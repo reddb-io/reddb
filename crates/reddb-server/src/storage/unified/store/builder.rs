@@ -144,6 +144,85 @@ mod tests {
         assert_eq!(back_refs[0].0, host_id);
     }
 
+    /// Pins issue #113: when a delete batch covers entities with no
+    /// inbound *or* outbound cross-refs, `unindex_cross_refs_batch` must
+    /// take the read-only fast path and skip the `reverse_refs` write
+    /// lock entirely. Observable via `unindex_cross_refs_fast_path_hits`.
+    #[test]
+    fn unindex_cross_refs_batch_takes_fast_path_when_no_inbound_refs() {
+        let store = UnifiedStore::new();
+
+        // Insert plain rows with zero cross-refs.
+        let mut ids = Vec::new();
+        for i in 0..16 {
+            let row = UnifiedEntity::table_row(
+                store.next_entity_id(),
+                "rows",
+                (i + 1) as u64,
+                vec![Value::text(format!("v{i}"))],
+            );
+            ids.push(store.insert_auto("rows", row).unwrap());
+        }
+
+        let before = store.unindex_cross_refs_fast_path_hits();
+        store.delete_batch("rows", &ids).unwrap();
+        let after = store.unindex_cross_refs_fast_path_hits();
+
+        // Exactly one fast-path hit recorded for the single batch call.
+        assert_eq!(
+            after - before,
+            1,
+            "expected unindex_cross_refs_batch to take the read-only fast path"
+        );
+
+        // And of course, the rows are gone.
+        for id in &ids {
+            assert!(store.get("rows", *id).is_none());
+        }
+    }
+
+    /// Inverse of the above: when at least one deleted entity *does*
+    /// have an inbound cross-ref, the slow path must run and the
+    /// fast-path counter must NOT advance.
+    #[test]
+    fn unindex_cross_refs_batch_uses_slow_path_when_inbound_refs_exist() {
+        let store = UnifiedStore::new();
+
+        let host = UnifiedEntity::table_row(
+            store.next_entity_id(),
+            "hosts",
+            1,
+            vec![Value::text("h".to_string())],
+        );
+        let host_id = store.insert_auto("hosts", host).unwrap();
+
+        let vuln = UnifiedEntity::table_row(
+            store.next_entity_id(),
+            "vulns",
+            1,
+            vec![Value::text("v".to_string())],
+        );
+        let vuln_id = store.insert_auto("vulns", vuln).unwrap();
+
+        store
+            .add_cross_ref("hosts", host_id, "vulns", vuln_id, RefType::RelatedTo, 1.0)
+            .unwrap();
+
+        let before = store.unindex_cross_refs_fast_path_hits();
+        // Deleting the *target* (vuln_id) — it has an inbound ref from host_id,
+        // so reverse_refs has it as a key and the slow path is mandatory.
+        store.delete_batch("vulns", &[vuln_id]).unwrap();
+        let after = store.unindex_cross_refs_fast_path_hits();
+
+        assert_eq!(
+            after, before,
+            "fast-path counter must not advance when inbound refs exist"
+        );
+
+        // Reverse ref is gone.
+        assert!(store.get_refs_to(vuln_id).is_empty());
+    }
+
     #[test]
     fn test_expand_refs() {
         let store = UnifiedStore::new();
