@@ -1119,7 +1119,14 @@ impl RedDBRuntime {
         })
     }
 
-    /// Execute an ASK query: search context + LLM synthesis.
+    /// Execute an ASK query: AskPipeline funnel + LLM synthesis.
+    ///
+    /// Issue #121: replaces the single broad `search_context` call with
+    /// the four-stage `AskPipeline::execute` funnel
+    /// (`extract_tokens` → `match_schema` → `vector_search_scoped` →
+    /// `filter_values`). The prompt context is still built via the
+    /// `format_minimal` stub below; the rich `PromptTemplate` lands in
+    /// slice #122.
     pub fn execute_ask(
         &self,
         raw_query: &str,
@@ -1130,106 +1137,22 @@ impl RedDBRuntime {
             AiProvider, AnthropicPromptRequest, OpenAiPromptRequest,
         };
 
-        // Step 1: Search context to find relevant entities. Issue #119:
-        // ASK is the canonical leak path (search results feed the LLM
-        // verbatim) — route through AuthorizedSearch so the candidate
-        // set stays inside `EffectiveScope.visible_collections`.
-        let ctx_input = SearchContextInput {
-            query: ask.question.clone(),
-            field: None,
-            vector: None,
-            collections: ask.collection.as_ref().map(|c| vec![c.clone()]),
-            graph_depth: ask.depth,
-            graph_max_edges: None,
-            max_cross_refs: None,
-            follow_cross_refs: None,
-            expand_graph: None,
-            global_scan: None,
-            reindex: None,
-            limit: ask.limit,
-            min_score: None,
-        };
+        // Stage 1-4: AskPipeline narrows the candidate set BEFORE any
+        // LLM call. Issue #119 / #120 / #121: scope-pre-filter +
+        // schema-vocabulary lookup + scoped vector search + value
+        // filter. Empty token sets short-circuit with a structured
+        // error inside the pipeline.
         let scope = self.ai_scope();
-        let context_result = if super::statement_frame::ReadFrame::visible_collections(&scope)
-            .is_some()
-        {
-            crate::runtime::authorized_search::AuthorizedSearch::execute_context(
-                self, &scope, ctx_input,
-            )?
-        } else {
-            self.search_context(ctx_input)?
-        };
+        let row_cap = ask.limit.unwrap_or(crate::runtime::ask_pipeline::DEFAULT_ROW_CAP);
+        let ask_context = crate::runtime::ask_pipeline::AskPipeline::execute_with_limit(
+            self,
+            &scope,
+            &ask.question,
+            row_cap,
+        )?;
 
-        // Step 2: Build rich context with schema + search results
-        let context_json =
-            crate::presentation::query_json::context_search_result_json(&context_result);
-        let context_str =
-            crate::json::to_string(&context_json).unwrap_or_else(|_| "{}".to_string());
-
-        // Include database schema info so the LLM knows the structure
-        let store = self.inner.db.store();
-        let all_collections = store.list_collections();
-        let mut schema_lines = Vec::new();
-        schema_lines.push("Database structure:".to_string());
-        for col_name in &all_collections {
-            if let Some(manager) = store.get_collection(col_name) {
-                let stats = manager.stats();
-                schema_lines.push(format!(
-                    "- Collection '{col_name}': {} entities",
-                    stats.total_entities
-                ));
-            }
-        }
-
-        // Include graph structure if there are graph entities
-        if !context_result.graph.nodes.is_empty() || !context_result.graph.edges.is_empty() {
-            schema_lines.push(String::new());
-            schema_lines.push("Graph relationships found:".to_string());
-            for edge in &context_result.graph.edges {
-                if let EntityKind::GraphEdge(ref ek) = &edge.entity.kind {
-                    schema_lines.push(format!(
-                        "- Edge '{}': {} → {}",
-                        ek.label, ek.from_node, ek.to_node
-                    ));
-                }
-            }
-        }
-
-        // Include connections map
-        if !context_result.connections.is_empty() {
-            schema_lines.push(String::new());
-            schema_lines.push("Entity connections:".to_string());
-            for conn in &context_result.connections {
-                let conn_type = match &conn.connection_type {
-                    ContextConnectionType::CrossRef(rt) => format!("cross-ref ({rt})"),
-                    ContextConnectionType::GraphEdge(et) => format!("graph edge ({et})"),
-                    ContextConnectionType::VectorSimilarity(s) => {
-                        format!("vector similarity ({s:.2})")
-                    }
-                };
-                schema_lines.push(format!(
-                    "- Entity {} → Entity {}: {conn_type} (weight={:.2})",
-                    conn.from_id, conn.to_id, conn.weight
-                ));
-            }
-        }
-
-        let schema_info = schema_lines.join("\n");
-
-        let system_prompt = format!(
-            "You are an AI assistant answering questions about data in RedDB, a multi-modal database \
-             that stores tables, graphs, vectors, documents, and key-values.\n\n\
-             {schema_info}\n\n\
-             Search results (entities found matching the question):\n{context_str}\n\n\
-             Instructions:\n\
-             - Use the database structure and search results above to answer the user's question.\n\
-             - For questions about table structure, refer to the collection descriptors.\n\
-             - For questions about relationships, refer to graph edges and connections.\n\
-             - If the context does not contain enough information, say so.\n\
-             - Cite which collections and entity types your answer is based on."
-        );
-
-        let full_prompt = format!("{system_prompt}\n\nQuestion: {}", ask.question);
+        let full_prompt = format_minimal(&ask_context, &ask.question);
+        let sources_count = ask_context.vector_hits.len() + ask_context.filtered_rows.len();
 
         // Step 3: Call LLM — use configured defaults if no provider/model specified
         let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self);
@@ -1295,10 +1218,7 @@ impl RedDBRuntime {
             "completion_tokens",
             Value::Integer(completion_tokens as i64),
         );
-        record.set(
-            "sources_count",
-            Value::Integer(context_result.summary.total_entities as i64),
-        );
+        record.set("sources_count", Value::Integer(sources_count as i64));
         result.push(record);
 
         Ok(RuntimeQueryResult {
@@ -1311,4 +1231,56 @@ impl RedDBRuntime {
             statement_type: "select",
         })
     }
+}
+
+/// Stub prompt formatter. Issue #121 keeps the funnel as the focus;
+/// the rich `PromptTemplate` (system prompt, schema preamble,
+/// connection map) lands in slice #122. Until then we hand the LLM
+/// a minimal context: the question, the candidate-collection list,
+/// the literal-filter rows, and the top vector hits.
+fn format_minimal(
+    ctx: &crate::runtime::ask_pipeline::AskContext,
+    question: &str,
+) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "You are an AI assistant answering questions about data in RedDB.\n\n",
+    );
+    if !ctx.candidates.collections.is_empty() {
+        out.push_str("Candidate collections (schema-vocabulary match):\n");
+        for collection in &ctx.candidates.collections {
+            out.push_str("- ");
+            out.push_str(collection);
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    if !ctx.filtered_rows.is_empty() {
+        out.push_str("Rows matching literal filters:\n");
+        for row in &ctx.filtered_rows {
+            out.push_str(&format!(
+                "- {} #{} (literal `{}`{})\n",
+                row.collection,
+                row.entity.id.raw(),
+                row.matched_literal,
+                row.matched_column
+                    .as_ref()
+                    .map(|c| format!(" in `{}`", c))
+                    .unwrap_or_default(),
+            ));
+        }
+        out.push('\n');
+    }
+    if !ctx.vector_hits.is_empty() {
+        out.push_str("Top vector matches:\n");
+        for hit in &ctx.vector_hits {
+            out.push_str(&format!(
+                "- {} #{} (score={:.3})\n",
+                hit.collection, hit.entity_id, hit.score,
+            ));
+        }
+        out.push('\n');
+    }
+    out.push_str(&format!("Question: {question}\n"));
+    out
 }
