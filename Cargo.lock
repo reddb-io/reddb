@@ -1996,6 +1996,7 @@ version = "0.2.9"
 dependencies = [
  "async-trait",
  "jsonwebtoken",
+ "proptest",
  "reddb-client-connector",
  "reddb-grpc-proto",
  "reddb-server",
