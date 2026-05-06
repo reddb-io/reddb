@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/vector_search_snapshots.rs
+expression: "fmt_parse_error(\"SEARCH SIMILAR [0.1, 0.2] COLLECTION c USING\")"
+---
+input: "SEARCH SIMILAR [0.1, 0.2] COLLECTION c USING"
+kind:  Syntax
+error: Parse error at 1:40: Unexpected token after query: USING

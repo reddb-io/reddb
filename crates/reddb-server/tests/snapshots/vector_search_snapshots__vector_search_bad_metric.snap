@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/vector_search_snapshots.rs
+expression: "fmt_parse_error(\"VECTOR SEARCH e SIMILAR TO [0.1] METRIC GLORP LIMIT 5\")"
+---
+input: "VECTOR SEARCH e SIMILAR TO [0.1] METRIC GLORP LIMIT 5"
+kind:  Syntax
+error: Parse error at 1:47: Unknown distance metric: GLORP. Valid: L2, COSINE, INNER_PRODUCT

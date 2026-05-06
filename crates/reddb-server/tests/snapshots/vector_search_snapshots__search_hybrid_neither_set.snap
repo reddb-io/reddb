@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/vector_search_snapshots.rs
+expression: "fmt_parse_error(\"SEARCH HYBRID COLLECTION c LIMIT 10\")"
+---
+input: "SEARCH HYBRID COLLECTION c LIMIT 10"
+kind:  Syntax
+error: Parse error at 1:15: SEARCH HYBRID requires at least SIMILAR or TEXT
