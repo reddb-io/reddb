@@ -2043,6 +2043,7 @@ dependencies = [
  "fs2",
  "hex",
  "hmac 0.13.0",
+ "http",
  "insta",
  "itoa",
  "jsonwebtoken",
