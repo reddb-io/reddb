@@ -236,16 +236,15 @@ file as issues from this slice — main agent reviews and decides.**
 
 ### B2 — Replace embedded `insert(single)` autocommit with the same batch port
 
-- **Problem.** `embedded.rs:58-74` is the same antipattern as B1
-  but for one row: build SQL, hand to `execute_query`. It's the
-  base-case for B1.
-- **Suspected fix.** Once B1 lands, route `insert` through a 1-row
-  `CreateRowsBatchInput`. Avoids the parser entirely on the
-  hot autocommit insert.
-- **Acceptance.** `embedded::insert` no longer touches
-  `runtime::execute_query`; in-process p50 for `insert_one`
-  matches `MutationEngine::append_one` overhead within fsync
-  variance.
+- **Status: SHIPPED in #111.** `EmbeddedClient::insert` now calls
+  `runtime.create_rows_batch_columnar(collection, column_names,
+  vec![row])` — same port `bulk_insert` uses (#110), one row.
+  Single-row + bulk share the same fast path; `insert` no longer
+  touches `execute_query`. Pinned by
+  `insert_emits_one_wal_record_per_call` in
+  `crates/reddb-client/tests/embedded_bulk_insert.rs`.
+- **Original problem.** `embedded.rs:58-74` was the same antipattern
+  as B1 but for one row: build SQL, hand to `execute_query`.
 
 ### B3 — Embedded driver doc: pin "use `bulk_insert` for hot writes"
 
@@ -290,8 +289,11 @@ file as issues from this slice — main agent reviews and decides.**
 
 - The fix is **one file** (`crates/reddb-client/src/embedded.rs`);
   no server-side changes — the runtime port already exists.
-- `build_insert_sql` and `value_to_sql_literal` become dead code
-  once B1 + B2 land; remove in the same PR.
+- `build_insert_sql` and `value_to_sql_literal` survive post-B1+B2:
+  the heterogeneous-payload fallback in `bulk_insert` still needs
+  them. Removing them requires either dropping the fallback or
+  porting it to the columnar path (TODO when heterogeneous shapes
+  stop appearing in real traffic).
 - The single-row `embedded::insert` (`:58-74`) hits the same
   pathology in miniature and is worth folding into the same fix.
 - Bench coverage for the embedded path is already wired:
