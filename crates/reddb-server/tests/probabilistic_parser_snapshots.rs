@@ -71,12 +71,12 @@ snap!(
 
 snap!(prob_sketch_width_no_value, "CREATE SKETCH s1 WIDTH");
 snap!(prob_sketch_width_negative, "CREATE SKETCH s1 WIDTH -1");
-// `Token::Depth` short-circuits the modifier loop; the trailing
-// integer is then consumed by the top-level dispatcher's "expect
-// EOF" check. This snapshot pins the resulting error so the
-// upcoming fix (FIXME #105-followup-1) flips it deliberately.
+// `Token::Depth` is now consumed via the typed-keyword path
+// (issue #115) so `CREATE SKETCH s1 DEPTH 5` parses cleanly. The
+// snapshot records the resulting `UNEXPECTED OK` so any future
+// regression that drops the typed consumer shows up as a diff.
 snap!(
-    prob_sketch_depth_after_name_breaks_top_level,
+    prob_sketch_depth_after_name_parses,
     "CREATE SKETCH s1 DEPTH 5"
 );
 

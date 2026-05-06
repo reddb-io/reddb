@@ -2,6 +2,5 @@
 source: crates/reddb-server/tests/probabilistic_parser_snapshots.rs
 expression: "fmt_parse_error(\"CREATE SKETCH s1 DEPTH 5\")"
 ---
+UNEXPECTED OK
 input: "CREATE SKETCH s1 DEPTH 5"
-kind:  Syntax
-error: Parse error at 1:18: Unexpected token after query: DEPTH
