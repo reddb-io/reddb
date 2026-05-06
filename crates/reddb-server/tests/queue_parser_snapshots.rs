@@ -66,13 +66,10 @@ snap!(
     create_queue_max_size_non_numeric,
     "CREATE QUEUE q MAX_SIZE forever"
 );
-// FIXME: bug — `MAX_SIZE 0` and negative values are accepted by the
-// parser today; the AST stores `max_size: Some(0)` which the
-// runtime then has to defend against. Pinning the current
-// behaviour as a snapshot so a future fix (file follow-up: tighten
-// MAX_SIZE to require a positive integer in the parser) lands as a
-// reviewable diff. See follow-up issue to be filed alongside #103.
-snap!(create_queue_max_size_zero_currently_accepted, "CREATE QUEUE q MAX_SIZE 0");
+// `MAX_SIZE 0` is now rejected by the parser via
+// `ValueOutOfRange` (issue #115). The snapshot pins the structured
+// error message so future tightening lands as a reviewable diff.
+snap!(create_queue_max_size_zero_rejected, "CREATE QUEUE q MAX_SIZE 0");
 snap!(create_queue_with_ttl_no_value, "CREATE QUEUE q WITH TTL");
 snap!(create_queue_with_dlq_no_name, "CREATE QUEUE q WITH DLQ");
 snap!(

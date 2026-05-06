@@ -75,16 +75,13 @@ snap!(
     "CREATE TIMESERIES m1 RETENTION 90 fortnights"
 );
 
-// FIXME(#TBD-min-collides-with-aggregate-keyword): the duration units
-// `min` / `max` / `avg` collide with the `MIN` / `MAX` / `AVG`
-// aggregate-function keywords in `lexer.rs`. `parse_duration_unit`
-// only inspects `Token::Ident`, so `RETENTION 1 min` slips into the
-// silent default-to-seconds branch and the trailing `Token::Min`
-// trips the parse loop with a confusing message. Pin the current
-// shape; the follow-up issue extends `parse_duration_unit` to handle
-// these specific tokens.
+// `parse_duration_unit` now recognises `Token::Min` as the minute
+// alias, so `RETENTION 1 min` parses cleanly. The snapshot still
+// records the parse outcome (now `UNEXPECTED OK`) so any future
+// regression that re-introduces the silent-default branch shows up
+// as a snapshot diff.
 snap!(
-    create_timeseries_retention_min_unit_silent_default,
+    create_timeseries_retention_min_unit_parses,
     "CREATE TIMESERIES m1 RETENTION 1 min"
 );
 snap!(
@@ -104,14 +101,12 @@ snap!(
     "CREATE HYPERTABLE metrics TIME_COLUMN ts"
 );
 
-// FIXME(#TBD): the `parse_duration_ns` helper only accepts the short-
-// suffix form (`'1d'`, `'5m'`); the long form `'1 day'` documented in
-// docs and TimescaleDB compatibility notes returns a generic "not a
-// valid duration literal" error. Pin the current message so the
-// follow-up issue can extend the helper without silently changing
-// wording.
+// `parse_duration_ns` now accepts the long-form duration literal
+// (`'1 day'`, `'2 hours'`) alongside the compact suffix form. The
+// snapshot pins the resulting `UNEXPECTED OK` so any future
+// regression that drops the long-form path shows up as a diff.
 snap!(
-    create_hypertable_chunk_interval_long_form,
+    create_hypertable_chunk_interval_long_form_parses,
     "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1 day'"
 );
 
