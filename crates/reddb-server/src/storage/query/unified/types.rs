@@ -613,3 +613,281 @@ pub struct QueryStats {
     /// Execution time in microseconds
     pub exec_time_us: u64,
 }
+
+#[cfg(test)]
+mod record_layout_tests {
+    //! Property tests for the schema-shared `UnifiedRecord` layout
+    //! introduced in issue #156. The invariants under test:
+    //!
+    //!   1. **get/set round-trip.** For any sequence of `set_owned`
+    //!      calls, `get(k)` returns the most recently inserted value.
+    //!   2. **Overflow promotion.** Keys that aren't in the shared
+    //!      schema land in the overflow HashMap; keys that *are* in
+    //!      the schema land in the parallel `Vec<Value>` slot.
+    //!   3. **Schema-mismatch handling.** A schema-built record
+    //!      reads exactly the same `(name, value)` pairs back out as
+    //!      a HashMap-built reference of the same data.
+    //!   4. **Multi-row scan parity.** A vector of records built with
+    //!      a shared schema produces identical projections to a
+    //!      vector built via per-row `set_owned` (the legacy
+    //!      HashMap-per-row shape).
+    //!
+    //! Schemaless records are also exercised by setting `proptest`
+    //! to drive empty-schema generators alongside the schemaful path.
+
+    use super::*;
+    use crate::storage::schema::Value;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+
+    fn arb_value() -> impl Strategy<Value = Value> {
+        prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Boolean),
+            any::<i64>().prop_map(Value::Integer),
+            any::<f64>()
+                .prop_filter("nan-free", |v| !v.is_nan())
+                .prop_map(Value::Float),
+            "[a-zA-Z0-9 ]{0,16}".prop_map(Value::text),
+        ]
+    }
+
+    fn arb_column_name() -> impl Strategy<Value = String> {
+        // Bounded ASCII so duplicate-key generation actually
+        // collides (broad alphabets just spew unique names).
+        "[a-d]{1,3}".prop_map(|s| s.to_string())
+    }
+
+    fn arb_schema() -> impl Strategy<Value = Vec<String>> {
+        // Up to 5 distinct columns. We dedupe so the schema slot
+        // semantics (one position per column) match the HashMap
+        // reference.
+        vec(arb_column_name(), 0..6).prop_map(|mut v| {
+            v.sort();
+            v.dedup();
+            v
+        })
+    }
+
+    fn arb_writes() -> impl Strategy<Value = Vec<(String, Value)>> {
+        vec((arb_column_name(), arb_value()), 0..16)
+    }
+
+    /// Build a `UnifiedRecord` via the schema-shared path: take the
+    /// caller's columns, intern them as `Arc<str>`, and insert each
+    /// `(k, v)` write through `set_owned`. Schema hits land in the
+    /// `Vec<Value>` slot; misses fall to overflow.
+    fn record_with_schema(schema: &[String], writes: &[(String, Value)]) -> UnifiedRecord {
+        let arc_schema: Arc<Vec<Arc<str>>> =
+            Arc::new(schema.iter().map(|s| Arc::from(s.as_str())).collect());
+        // Schema-bearing record starts with `Null` placeholders so
+        // unset columns are observable as `Some(Null)` rather than
+        // `None`. This mirrors how scan paths construct rows.
+        let mut rec = UnifiedRecord::with_schema(
+            Arc::clone(&arc_schema),
+            vec![Value::Null; schema.len()],
+        );
+        for (k, v) in writes {
+            rec.set_owned(k.clone(), v.clone());
+        }
+        rec
+    }
+
+    /// Reference: build the equivalent `HashMap<String, Value>` by
+    /// applying the same writes (last-write-wins). Then layer in any
+    /// schema entries that were never written so absent columns show
+    /// up as `Null` — same convention as `record_with_schema`.
+    fn hashmap_reference(
+        schema: &[String],
+        writes: &[(String, Value)],
+    ) -> std::collections::HashMap<String, Value> {
+        let mut map: std::collections::HashMap<String, Value> = schema
+            .iter()
+            .map(|c| (c.clone(), Value::Null))
+            .collect();
+        for (k, v) in writes {
+            map.insert(k.clone(), v.clone());
+        }
+        map
+    }
+
+    proptest! {
+        /// `get(k)` returns the last value written under `k`,
+        /// regardless of whether `k` is in the schema or only in
+        /// overflow.
+        #[test]
+        fn get_set_round_trip(schema in arb_schema(), writes in arb_writes()) {
+            let rec = record_with_schema(&schema, &writes);
+            let reference = hashmap_reference(&schema, &writes);
+            for (k, expected) in &reference {
+                prop_assert_eq!(rec.get(k), Some(expected), "key {}", k);
+            }
+        }
+
+        /// Keys outside the schema must promote to overflow; keys
+        /// inside the schema must land in the parallel vec (so the
+        /// overflow map either doesn't contain them or hasn't even
+        /// been allocated for the all-schema-hit case).
+        #[test]
+        fn overflow_promotion_only_for_missing_keys(
+            schema in arb_schema(),
+            writes in arb_writes(),
+        ) {
+            let rec = record_with_schema(&schema, &writes);
+
+            // Schema columns: never appear in the overflow map.
+            for col in &schema {
+                if let Some(over) = rec.overflow() {
+                    prop_assert!(
+                        !over.contains_key(col.as_str()),
+                        "schema column {} leaked into overflow",
+                        col
+                    );
+                }
+            }
+
+            // Out-of-schema writes: must appear in the overflow map.
+            for (k, _) in &writes {
+                if !schema.iter().any(|c| c == k) {
+                    let over = rec.overflow().expect("overflow allocated");
+                    prop_assert!(
+                        over.contains_key(k.as_str()),
+                        "out-of-schema key {} missing from overflow",
+                        k
+                    );
+                }
+            }
+        }
+
+        /// `iter_fields` yields the same `(name, value)` multiset as
+        /// the HashMap reference. Order isn't asserted (overflow is
+        /// arbitrary), but multiset equality catches drops/dupes.
+        #[test]
+        fn iter_fields_matches_hashmap(
+            schema in arb_schema(),
+            writes in arb_writes(),
+        ) {
+            let rec = record_with_schema(&schema, &writes);
+            let reference = hashmap_reference(&schema, &writes);
+
+            let mut got: Vec<(String, Value)> = rec
+                .iter_fields()
+                .map(|(k, v)| (k.as_ref().to_string(), v.clone()))
+                .collect();
+            let mut want: Vec<(String, Value)> = reference
+                .into_iter()
+                .collect();
+
+            got.sort_by(|a, b| a.0.cmp(&b.0));
+            want.sort_by(|a, b| a.0.cmp(&b.0));
+            prop_assert_eq!(got, want);
+        }
+
+        /// A vector of records that share one `Arc<Vec<Arc<str>>>`
+        /// schema produces the same projected output as a vector of
+        /// schemaless records that received the same writes via the
+        /// legacy `set_owned`-on-empty-schema path. This is the
+        /// scan-parity invariant.
+        #[test]
+        fn shared_schema_scan_parity(
+            schema in arb_schema().prop_filter("non-empty schema", |s| !s.is_empty()),
+            rows in vec(arb_writes(), 0..8),
+        ) {
+            // Build the shared-schema scan:
+            let arc_schema: Arc<Vec<Arc<str>>> =
+                Arc::new(schema.iter().map(|s| Arc::from(s.as_str())).collect());
+            let shared: Vec<UnifiedRecord> = rows
+                .iter()
+                .map(|row_writes| {
+                    let mut r = UnifiedRecord::with_schema(
+                        Arc::clone(&arc_schema),
+                        vec![Value::Null; schema.len()],
+                    );
+                    for (k, v) in row_writes {
+                        r.set_owned(k.clone(), v.clone());
+                    }
+                    r
+                })
+                .collect();
+
+            // Build the schemaless reference (no shared schema, every
+            // write goes straight to overflow):
+            let schemaless: Vec<UnifiedRecord> = rows
+                .iter()
+                .map(|row_writes| {
+                    let mut r = UnifiedRecord::schemaless();
+                    // Pre-populate the schema columns to Null so the
+                    // observable columns match the shared-schema path.
+                    for col in &schema {
+                        r.set_owned(col.clone(), Value::Null);
+                    }
+                    for (k, v) in row_writes {
+                        r.set_owned(k.clone(), v.clone());
+                    }
+                    r
+                })
+                .collect();
+
+            // Project both vectors over the schema columns — this is
+            // what wire/listener.rs does in the scan hot path. Same
+            // bytes in, same bytes out.
+            for (s_row, h_row) in shared.iter().zip(schemaless.iter()) {
+                for col in &schema {
+                    prop_assert_eq!(
+                        s_row.get(col),
+                        h_row.get(col),
+                        "column {} diverged on shared vs schemaless build",
+                        col
+                    );
+                }
+            }
+
+            // The shared-schema path keeps one `Arc` clone per row;
+            // sanity-check that we're actually exercising it.
+            for s_row in &shared {
+                prop_assert!(s_row.columnar().is_some() || schema.is_empty());
+            }
+        }
+
+        /// A schema with duplicate names resolves the LAST occurrence
+        /// — matching legacy `HashMap::insert` overwrite semantics.
+        #[test]
+        fn duplicate_schema_last_write_wins(
+            col in arb_column_name(),
+            v1 in arb_value(),
+            v2 in arb_value(),
+        ) {
+            let arc_schema: Arc<Vec<Arc<str>>> = Arc::new(vec![
+                Arc::from(col.as_str()),
+                Arc::from(col.as_str()),
+            ]);
+            let rec = UnifiedRecord::with_schema(arc_schema, vec![v1.clone(), v2.clone()]);
+            // The last slot wins on read.
+            prop_assert_eq!(rec.get(&col), Some(&v2));
+        }
+
+        /// Schemaless inserts (no schema known up front) materialise
+        /// every write in the overflow HashMap and read back via
+        /// `get`. The schema slice stays empty.
+        #[test]
+        fn schemaless_path_uses_overflow_only(writes in arb_writes()) {
+            let mut rec = UnifiedRecord::schemaless();
+            for (k, v) in &writes {
+                rec.set_owned(k.clone(), v.clone());
+            }
+
+            prop_assert!(rec.columns().is_empty());
+            prop_assert!(rec.schema_values().is_empty());
+
+            // Last-write-wins multiset: rebuild the reference.
+            let mut reference: std::collections::HashMap<String, Value> =
+                std::collections::HashMap::new();
+            for (k, v) in &writes {
+                reference.insert(k.clone(), v.clone());
+            }
+            for (k, v) in reference {
+                prop_assert_eq!(rec.get(&k), Some(&v));
+            }
+        }
+    }
+}
