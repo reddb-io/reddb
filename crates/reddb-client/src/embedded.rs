@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use reddb_server::RuntimeEntityPort;
 use reddb_server::api::RedDBOptions;
 use reddb_server::runtime::RedDBRuntime;
 use reddb_server::storage::query::unified::UnifiedRecord;
@@ -73,15 +74,66 @@ impl EmbeddedClient {
         })
     }
 
+    /// Routes through `runtime.create_rows_batch_columnar`, which fast-paths
+    /// to the prevalidated columnar kernel when the collection carries no
+    /// contract — same shape `MSG_BULK_INSERT_BINARY` already uses on the
+    /// wire path. Result: one WAL append per batch instead of one per row,
+    /// no per-row SQL build / lex / parse / plan, and no per-row `(String,
+    /// Value)` tuple materialisation when the collection is contract-free.
+    ///
+    /// Heterogeneous payloads (rows with differing key sets) fall back to
+    /// the per-row `execute_query` path so existing semantics are preserved
+    /// for callers that mix shapes.
     pub fn bulk_insert(&self, collection: &str, payloads: &[JsonValue]) -> Result<u64> {
-        let mut total = 0u64;
-        for payload in payloads {
-            let object = payload.as_object().ok_or_else(|| {
-                ClientError::new(
-                    ErrorCode::QueryError,
-                    "bulk_insert payloads must be JSON objects".to_string(),
+        if payloads.is_empty() {
+            return Ok(0);
+        }
+
+        // Validate every payload is a JSON object up-front. Mirrors the
+        // old loop's error contract.
+        let objects: Vec<&[(String, JsonValue)]> = payloads
+            .iter()
+            .map(|p| {
+                p.as_object().ok_or_else(|| {
+                    ClientError::new(
+                        ErrorCode::QueryError,
+                        "bulk_insert payloads must be JSON objects".to_string(),
+                    )
+                })
+            })
+            .collect::<Result<_>>()?;
+
+        // Columnar fast path requires a uniform schema (same column names in
+        // the same order across every row). When that holds we pay zero
+        // per-row SQL build / lex / parse cost. When it doesn't we fall back
+        // to the per-row loop so heterogeneous workloads stay correct.
+        if uniform_schema(&objects) {
+            let column_names: Vec<String> =
+                objects[0].iter().map(|(k, _)| k.clone()).collect();
+            let ncols = column_names.len();
+            let mut rows: Vec<Vec<SchemaValue>> = Vec::with_capacity(objects.len());
+            for obj in &objects {
+                let mut values = Vec::with_capacity(ncols);
+                for (_, v) in obj.iter() {
+                    values.push(json_value_to_schema_value(v));
+                }
+                rows.push(values);
+            }
+            let count = self
+                .runtime
+                .create_rows_batch_columnar(
+                    collection.to_string(),
+                    Arc::new(column_names),
+                    rows,
                 )
-            })?;
+                .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
+            return Ok(count as u64);
+        }
+
+        // Fallback: heterogeneous shapes. Per-row `execute_query` retains
+        // the old behaviour for mixed-key payloads.
+        let mut total = 0u64;
+        for object in &objects {
             let sql = build_insert_sql(collection, object);
             let qr = self
                 .runtime
@@ -109,6 +161,55 @@ impl EmbeddedClient {
 
     pub fn version() -> &'static str {
         env!("CARGO_PKG_VERSION")
+    }
+}
+
+/// True when every row carries the same column names in the same order.
+/// The columnar `create_rows_batch_columnar` port requires one shared
+/// `Arc<Vec<String>>` schema, so heterogeneous payloads have to fall
+/// back to the per-row path.
+fn uniform_schema(objects: &[&[(String, JsonValue)]]) -> bool {
+    let Some((first, rest)) = objects.split_first() else {
+        return true;
+    };
+    let ncols = first.len();
+    for row in rest {
+        if row.len() != ncols {
+            return false;
+        }
+        for ((k1, _), (k2, _)) in first.iter().zip(row.iter()) {
+            if k1 != k2 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Best-effort `JsonValue` → `SchemaValue` coercion for the columnar
+/// fast path. The contract-free branch in `create_rows_batch_columnar`
+/// stores values without column-type normalisation, so the choice here
+/// only affects what the row reads back as. The mapping mirrors what
+/// `value_to_sql_literal` would have produced through the SQL parser:
+/// integers stay integers, fractional numbers stay floats, arrays /
+/// objects are JSON-encoded into a `Text` value (the parser would have
+/// quoted them too, so the on-disk shape matches).
+fn json_value_to_schema_value(v: &JsonValue) -> SchemaValue {
+    match v {
+        JsonValue::Null => SchemaValue::Null,
+        JsonValue::Bool(b) => SchemaValue::Boolean(*b),
+        JsonValue::Number(n) => {
+            if n.is_finite() && n.fract() == 0.0 && *n >= i64::MIN as f64 && *n <= i64::MAX as f64
+            {
+                SchemaValue::Integer(*n as i64)
+            } else {
+                SchemaValue::Float(*n)
+            }
+        }
+        JsonValue::String(s) => SchemaValue::Text(std::sync::Arc::from(s.as_str())),
+        JsonValue::Array(_) | JsonValue::Object(_) => {
+            SchemaValue::Text(std::sync::Arc::from(v.to_json_string()))
+        }
     }
 }
 
