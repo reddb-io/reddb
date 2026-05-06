@@ -532,11 +532,24 @@ Driver docs live in `crates/reddb-client/README.md`, `drivers/js/README.md`, and
 `drivers/python/README.md`. The full protocol spec and roadmap are in
 [`PLAN_DRIVERS.md`](./PLAN_DRIVERS.md).
 
-For JavaScript and TypeScript, use the `@reddb-io/sdk` package in application code:
+For JavaScript and TypeScript, RedDB ships three packages under the
+`@reddb-io/` scope. Pick the one that matches your scenario — see the
+[JavaScript / TypeScript driver guide](./docs/guides/javascript-typescript-driver.md#package-matrix)
+for the full matrix and [ADR 0007](./docs/adr/0007-npm-package-matrix.md)
+for the rationale.
 
 ```bash
+# App code in Node, Bun, or Deno — full SDK with embedded, gRPC, and HTTP transports
 pnpm add @reddb-io/sdk
+
+# Thin remote-only client for serverless, edge, CI, or sidecar runtimes (~5 MB)
+pnpm add @reddb-io/client
+
+# CLI launcher — installs the `red` binary on PATH
+pnpm add -g @reddb-io/cli
 ```
+
+Application code with the SDK:
 
 ```ts
 import { connect } from '@reddb-io/sdk'
@@ -546,7 +559,7 @@ const result = await db.query('SELECT * FROM users')
 await db.close()
 ```
 
-Use `@reddb-io/cli` only when you want to launch the real `red` binary from npm:
+Launch the server from npm without a separate install step:
 
 ```bash
 npx @reddb-io/cli@latest version
