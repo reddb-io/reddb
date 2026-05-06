@@ -319,8 +319,13 @@ impl AuthStore {
 
         match self.bootstrap(&username, &password) {
             Ok(result) => {
+                // F-04: `username` is REDDB_USERNAME — operator-supplied
+                // (env), but still routed through the LogField escaper
+                // because env strings cross trust boundaries in some
+                // deployment models (k8s downward API, Vault sidecar,
+                // external secret operator). See ADR 0010.
                 tracing::info!(
-                    username = %username,
+                    username = %reddb_wire::audit_safe_log_field(&username),
                     "bootstrapped admin user from REDDB_USERNAME/REDDB_PASSWORD"
                 );
                 if let Some(ref cert) = result.certificate {
