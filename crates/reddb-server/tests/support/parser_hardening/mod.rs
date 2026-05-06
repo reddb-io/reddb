@@ -16,6 +16,7 @@ pub mod corpus;
 pub mod migration_grammar;
 pub mod secret_redactor;
 pub mod sql_grammar;
+pub mod vector_search_grammar;
 
 /// Parser-agnostic interface every consumer of the harness
 /// implements. The associated `Error` type lets callers preserve
