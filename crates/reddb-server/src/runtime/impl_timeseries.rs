@@ -80,6 +80,22 @@ impl RedDBRuntime {
             .db
             .persist_metadata()
             .map_err(|e| RedDBError::Internal(e.to_string()))?;
+        // Issue #120 — surface timeseries / hypertable in the
+        // schema-vocabulary. The hypertable variant carries the
+        // declared time column.
+        let columns: Vec<String> = query
+            .hypertable
+            .as_ref()
+            .map(|ht| vec![ht.time_column.clone()])
+            .unwrap_or_else(|| vec!["metric".to_string(), "value".to_string()]);
+        self.schema_vocabulary_apply(
+            crate::runtime::schema_vocabulary::DdlEvent::CreateCollection {
+                collection: query.name.clone(),
+                columns,
+                type_tags: Vec::new(),
+                description: None,
+            },
+        );
 
         let noun = if query.hypertable.is_some() {
             "hypertable"
@@ -144,6 +160,13 @@ impl RedDBRuntime {
             .db
             .persist_metadata()
             .map_err(|e| RedDBError::Internal(e.to_string()))?;
+        // Issue #120 — invalidate the schema-vocabulary entry for the
+        // dropped timeseries / hypertable.
+        self.schema_vocabulary_apply(
+            crate::runtime::schema_vocabulary::DdlEvent::DropCollection {
+                collection: query.name.clone(),
+            },
+        );
         Ok(RuntimeQueryResult::ok_message(
             raw_query.to_string(),
             &format!("timeseries '{}' dropped", query.name),
