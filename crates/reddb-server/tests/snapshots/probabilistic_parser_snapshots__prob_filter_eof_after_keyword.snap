@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/probabilistic_parser_snapshots.rs
+expression: "fmt_parse_error(\"FILTER\")"
+---
+input: "FILTER"
+kind:  Syntax
+error: Parse error at 1:7: Unexpected token: EOF (expected: ADD, CHECK, DELETE, COUNT, INFO)

@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/probabilistic_parser_snapshots.rs
+expression: "fmt_parse_error(\"CREATE SKETCH s1 WIDTH -1\")"
+---
+input: "CREATE SKETCH s1 WIDTH -1"
+kind:  Syntax
+error: Parse error at 1:24: Unexpected token: - (expected: integer)

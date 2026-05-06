@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/probabilistic_parser_snapshots.rs
+expression: "fmt_parse_error(\"HLL ADD visitors 'open\")"
+---
+input: "HLL ADD visitors 'open"
+kind:  Syntax
+error: Parse error at 1:19: Unterminated string

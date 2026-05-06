@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/probabilistic_parser_snapshots.rs
+expression: "fmt_parse_error(\"HLL ADD\")"
+---
+input: "HLL ADD"
+kind:  Syntax
+error: Parse error at 1:8: Unexpected token: EOF (expected: identifier)
