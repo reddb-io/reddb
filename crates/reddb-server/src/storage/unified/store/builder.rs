@@ -223,6 +223,71 @@ mod tests {
         assert!(store.get_refs_to(vuln_id).is_empty());
     }
 
+    /// Manual perf check for the #113 fast path. Pollutes `reverse_refs`
+    /// with a large dictionary of unrelated entries, then deletes a fresh
+    /// batch of cross-ref-free rows. The pre-fix code paid O(|reverse_refs|)
+    /// in `values_mut()` per call; the fast path makes it O(|batch|).
+    /// `cargo test --release -p reddb-server -- --ignored unindex_cross_refs_batch_fast_path_perf --nocapture`.
+    #[test]
+    #[ignore]
+    fn unindex_cross_refs_batch_fast_path_perf() {
+        let store = UnifiedStore::new();
+
+        // Seed a fat reverse_refs dictionary by creating cross-refs in
+        // a *separate* set of entities. These entries will be untouched
+        // by the delete batch below.
+        const SEED: usize = 50_000;
+        let mut sources = Vec::with_capacity(SEED);
+        let mut targets = Vec::with_capacity(SEED);
+        for i in 0..SEED {
+            let s = UnifiedEntity::table_row(
+                store.next_entity_id(),
+                "src",
+                (i + 1) as u64,
+                vec![],
+            );
+            sources.push(store.insert_auto("src", s).unwrap());
+            let t = UnifiedEntity::table_row(
+                store.next_entity_id(),
+                "tgt",
+                (i + 1) as u64,
+                vec![],
+            );
+            targets.push(store.insert_auto("tgt", t).unwrap());
+        }
+        for (s, t) in sources.iter().zip(targets.iter()) {
+            store
+                .add_cross_ref("src", *s, "tgt", *t, RefType::RelatedTo, 1.0)
+                .unwrap();
+        }
+
+        // Now insert a fresh batch of plain rows (no cross-refs at all).
+        const BATCH: usize = 100;
+        let mut victims = Vec::with_capacity(BATCH);
+        for i in 0..BATCH {
+            let row = UnifiedEntity::table_row(
+                store.next_entity_id(),
+                "rows",
+                (i + 1) as u64,
+                vec![],
+            );
+            victims.push(store.insert_auto("rows", row).unwrap());
+        }
+
+        let before_hits = store.unindex_cross_refs_fast_path_hits();
+        let start = std::time::Instant::now();
+        store.delete_batch("rows", &victims).unwrap();
+        let elapsed = start.elapsed();
+        let after_hits = store.unindex_cross_refs_fast_path_hits();
+
+        eprintln!(
+            "delete_batch({BATCH}) over {SEED} unrelated reverse-refs: \
+             {elapsed:?}, fast_path_hits +{}",
+            after_hits - before_hits,
+        );
+        assert_eq!(after_hits - before_hits, 1);
+    }
+
     #[test]
     fn test_expand_refs() {
         let store = UnifiedStore::new();
