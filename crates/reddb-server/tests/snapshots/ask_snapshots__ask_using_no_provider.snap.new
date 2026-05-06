@@ -1,5 +1,6 @@
 ---
 source: crates/reddb-server/tests/ask_snapshots.rs
+assertion_line: 66
 expression: "fmt_parse_error(\"ASK 'q' USING\")"
 ---
 input: "ASK 'q' USING"

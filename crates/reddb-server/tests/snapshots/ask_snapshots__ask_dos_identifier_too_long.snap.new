@@ -1,5 +1,6 @@
 ---
 source: crates/reddb-server/tests/ask_snapshots.rs
+assertion_line: 120
 expression: formatted
 ---
 kind:  IdentifierTooLong { limit_name: "max_identifier_chars", value: 8 }
