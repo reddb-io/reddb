@@ -58,6 +58,13 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
     "registry",
 ] }
 tracing-appender = "0.2"
+# `http::HeaderValue` is the typed return of `HeaderEscapeGuard`
+# (issue #176, ADR 0010). Using the same type the wider Rust HTTP
+# ecosystem agrees on means future swaps to hyper / axum inherit
+# the guard's contract for free. The crate is already in the
+# transitive graph via tonic; pinning it here makes the dep
+# explicit and survives if tonic ever drops it.
+http = "1"
 
 [features]
 default = []
