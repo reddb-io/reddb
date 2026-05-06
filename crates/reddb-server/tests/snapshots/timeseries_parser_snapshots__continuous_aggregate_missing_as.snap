@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/timeseries_parser_snapshots.rs
+expression: "fmt_parse_error(\"CREATE MATERIALIZED VIEW mv SELECT 1 FROM t\")"
+---
+input: "CREATE MATERIALIZED VIEW mv SELECT 1 FROM t"
+kind:  Syntax
+error: Parse error at 1:29: Unexpected token: SELECT (expected: AS)

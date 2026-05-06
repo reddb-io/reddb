@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/timeseries_parser_snapshots.rs
+expression: "fmt_parse_error(\"CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1 day'\")"
+---
+input: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1 day'"
+kind:  Syntax
+error: Parse error at 1:57: CHUNK_INTERVAL duration '1 day' is not a valid duration literal
