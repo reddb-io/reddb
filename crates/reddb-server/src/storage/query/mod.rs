@@ -48,6 +48,7 @@ pub mod ast;
 pub mod batch;
 pub mod binary;
 pub mod engine;
+pub mod evaluator;
 pub mod executor;
 pub mod executors;
 pub mod expr_typing;

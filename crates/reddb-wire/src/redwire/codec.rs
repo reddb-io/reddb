@@ -11,6 +11,11 @@ pub enum FrameError {
     PayloadTruncated { expected: u32, available: u32 },
     UnknownKind(u8),
     UnknownFlags(u8),
+    /// Catalog cross-check failed: the flag bits set on the frame are
+    /// not in `MessageKind::allowed_flags()` for this kind. The wire
+    /// catalog is the single source of truth for which bits a kind
+    /// may carry — see `frame.rs::MessageKind::allowed_flags`.
+    FlagsNotAllowedForKind { kind: u8, flags: u8 },
 }
 
 impl std::fmt::Display for FrameError {
@@ -27,6 +32,10 @@ impl std::fmt::Display for FrameError {
             ),
             Self::UnknownKind(byte) => write!(f, "unknown message kind 0x{byte:02x}"),
             Self::UnknownFlags(byte) => write!(f, "unknown flag bits 0x{byte:02x}"),
+            Self::FlagsNotAllowedForKind { kind, flags } => write!(
+                f,
+                "flag bits 0x{flags:02x} not allowed on kind 0x{kind:02x}"
+            ),
         }
     }
 }
@@ -104,6 +113,16 @@ pub fn decode_frame(bytes: &[u8]) -> Result<(Frame, usize), FrameError> {
         return Err(FrameError::UnknownFlags(flag_bits));
     }
     let flags = Flags::from_bits(flag_bits);
+    // Catalog cross-check: the kind's `allowed_flags()` is the single
+    // source of truth. Reject combinations the catalog forbids
+    // (e.g. COMPRESSED on tiny handshake payloads) so misframed
+    // frames fail at the boundary instead of reaching dispatch.
+    if !kind.permits_flags(flags) {
+        return Err(FrameError::FlagsNotAllowedForKind {
+            kind: bytes[4],
+            flags: flag_bits,
+        });
+    }
     let stream_id = u16::from_le_bytes([bytes[6], bytes[7]]);
     let correlation_id = u64::from_le_bytes([
         bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
@@ -206,6 +225,24 @@ mod tests {
             decode_frame(&bytes),
             Err(FrameError::UnknownFlags(_))
         ));
+    }
+
+    #[test]
+    fn flags_not_allowed_for_kind_rejected() {
+        // Ping is a handshake kind — the catalog forbids COMPRESSED
+        // on tiny handshake payloads. A frame with kind=Ping and the
+        // COMPRESSED bit set must be rejected at the boundary.
+        let mut bytes = vec![0u8; 16];
+        bytes[..4].copy_from_slice(&16u32.to_le_bytes());
+        bytes[4] = MessageKind::Ping as u8;
+        bytes[5] = Flags::COMPRESSED.bits();
+        match decode_frame(&bytes) {
+            Err(FrameError::FlagsNotAllowedForKind { kind, flags }) => {
+                assert_eq!(kind, MessageKind::Ping as u8);
+                assert_eq!(flags, Flags::COMPRESSED.bits());
+            }
+            other => panic!("expected FlagsNotAllowedForKind, got {other:?}"),
+        }
     }
 
     #[test]

@@ -53,6 +53,9 @@ pub enum BuildError {
     KindMissing,
     /// The encoded frame would exceed [`MAX_FRAME_SIZE`].
     PayloadTooLarge { encoded_len: usize, max: u32 },
+    /// Catalog cross-check failed: the requested flag set isn't in
+    /// `MessageKind::allowed_flags()` for the chosen kind.
+    FlagsNotAllowedForKind { kind: MessageKind, flags: u8 },
 }
 
 impl std::fmt::Display for BuildError {
@@ -62,6 +65,10 @@ impl std::fmt::Display for BuildError {
             Self::PayloadTooLarge { encoded_len, max } => write!(
                 f,
                 "FrameBuilder: encoded frame size {encoded_len} exceeds MAX_FRAME_SIZE ({max})"
+            ),
+            Self::FlagsNotAllowedForKind { kind, flags } => write!(
+                f,
+                "FrameBuilder: flag bits 0x{flags:02x} not allowed on kind {kind:?}"
             ),
         }
     }
@@ -207,6 +214,17 @@ impl FrameBuilder {
             flags = flags.insert(Flags::COMPRESSED);
         } else {
             flags = Flags::from_bits(flags.bits() & !Flags::COMPRESSED.bits());
+        }
+
+        // Catalog cross-check: the chosen kind's allowed_flags() is
+        // the producer-side mirror of the codec's decode-time check.
+        // Catches misframed builds (e.g. COMPRESSED on Hello) before
+        // they reach the wire.
+        if !kind.permits_flags(flags) {
+            return Err(BuildError::FlagsNotAllowedForKind {
+                kind,
+                flags: flags.bits(),
+            });
         }
 
         Ok(Frame {
@@ -362,6 +380,25 @@ mod tests {
             .build()
             .expect("build");
         assert!(frame.flags.contains(Flags::COMPRESSED));
+    }
+
+    #[test]
+    fn flags_not_allowed_for_kind_rejected_at_build() {
+        // Hello is a handshake kind — the catalog forbids COMPRESSED.
+        // The builder mirrors the codec's decode-time check so a
+        // misframed build fails before the bytes ever hit the wire.
+        let err = FrameBuilder::reply_to(1)
+            .kind(MessageKind::Hello)
+            .flags(Flags::COMPRESSED)
+            .build()
+            .unwrap_err();
+        match err {
+            BuildError::FlagsNotAllowedForKind { kind, flags } => {
+                assert_eq!(kind, MessageKind::Hello);
+                assert_eq!(flags, Flags::COMPRESSED.bits());
+            }
+            other => panic!("expected FlagsNotAllowedForKind, got {other:?}"),
+        }
     }
 
     #[test]
