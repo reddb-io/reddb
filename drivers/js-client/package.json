@@ -1,0 +1,52 @@
+{
+  "name": "@reddb-io/client",
+  "version": "0.2.9",
+  "description": "Thin remote-only RedDB driver. Downloads the `red_client` binary on install. Speaks RedWire/gRPC/HTTP. Embedded URIs (memory://, file://, red:///path) are rejected — use @reddb-io/sdk for those.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": {
+      "import": "./src/index.js",
+      "types": "./index.d.ts"
+    }
+  },
+  "types": "./index.d.ts",
+  "files": [
+    "src/",
+    "index.d.ts",
+    "postinstall.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "postinstall": "node postinstall.js",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@reddb-io/internal-asset-fetcher": "workspace:*"
+  },
+  "keywords": [
+    "reddb",
+    "database",
+    "client",
+    "driver",
+    "remote",
+    "thin-client",
+    "redwire",
+    "grpc",
+    "http"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/reddb-io/reddb",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/reddb-io/reddb.git",
+    "directory": "drivers/js-client"
+  },
+  "bugs": {
+    "url": "https://github.com/reddb-io/reddb/issues"
+  }
+}
