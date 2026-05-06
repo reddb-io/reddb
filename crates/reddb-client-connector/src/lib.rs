@@ -52,6 +52,7 @@ pub struct OperationStatus {
     pub message: String,
 }
 
+#[derive(Clone)]
 pub struct RedDBClient {
     inner: RedDbClient<Channel>,
     token: Option<String>,

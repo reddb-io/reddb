@@ -89,13 +89,22 @@ rustls-pemfile = { version = "2", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"], optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
 # OAuth-JWT smoke (`tests/redwire_oauth_smoke.rs`). Mints + decodes
 # RS256 tokens against an in-process JWKS server. Pulled only when
 # building tests. v10 requires opting into a crypto backend;
 # `rust_crypto` keeps the tests pure-Rust (no system C deps).
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 serde_json = "1"
+# Slow-mock RedDb gRPC server used by `tests/grpc_pool_concurrency.rs`
+# needs server-side tonic transport. The published crate keeps the
+# slim client-only feature set (`channel`, `codegen`); cargo unions
+# features across [dependencies] and [dev-dependencies], so this
+# only widens tonic during tests.
+tonic = { version = "0.14", default-features = false, features = ["channel", "codegen", "server", "router"] }
+reddb-grpc-proto = { version = "0.2", path = "../reddb-grpc-proto" }
+tokio-stream = { version = "0.1", features = ["net"] }
+async-trait = "0.1"
 
 [[bin]]
 name = "red_client"
