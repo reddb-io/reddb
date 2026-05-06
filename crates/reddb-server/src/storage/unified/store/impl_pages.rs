@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::unified::entity_cache::EntityCache;
 use parking_lot::RwLock;
 
 const ENTITY_RECORD_MAGIC: &[u8; 4] = b"RER1";
@@ -137,7 +138,7 @@ impl UnifiedStore {
             db_path: None,
             btree_indices: RwLock::new(HashMap::new()),
             context_index: ContextIndex::new(),
-            entity_cache: RwLock::new(HashMap::new()),
+            entity_cache: EntityCache::new(),
             graph_label_index: RwLock::new(HashMap::new()),
             paged_registry_dirty: AtomicBool::new(false),
             commit: None,
@@ -208,7 +209,7 @@ impl UnifiedStore {
             db_path: Some(path.to_path_buf()),
             btree_indices: RwLock::new(HashMap::new()),
             context_index: ContextIndex::new(),
-            entity_cache: RwLock::new(HashMap::new()),
+            entity_cache: EntityCache::new(),
             graph_label_index: RwLock::new(HashMap::new()),
             paged_registry_dirty: AtomicBool::new(false),
             commit,

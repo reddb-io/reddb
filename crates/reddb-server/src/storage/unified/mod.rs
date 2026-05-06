@@ -40,6 +40,7 @@ pub mod bitmap_index;
 pub mod bloom_index;
 pub mod context_index;
 pub mod devx;
+pub mod entity_cache;
 pub mod dsl;
 pub mod entity;
 pub mod hash_index;
