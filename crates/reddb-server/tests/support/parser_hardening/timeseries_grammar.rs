@@ -36,16 +36,11 @@ pub fn ident() -> impl Strategy<Value = String> {
 /// for the bare `RETENTION n unit` form. Mixes short + long aliases so
 /// the property tests exercise every match arm.
 ///
-/// FIXME(#TBD-min-collides-with-aggregate-keyword): the units `min`,
-/// `max`, `avg` collide with the `MIN` / `MAX` / `AVG` aggregate
-/// keywords in `lexer.rs`, so `RETENTION 1 min` lexes as `1
-/// Token::Min` instead of `1 Token::Ident("min")`. The
-/// `parse_duration_unit` helper only inspects `Token::Ident`, so the
-/// keyword collision falls into the silent default-to-seconds branch
-/// and the trailing `min` token then trips the top-level loop. The
-/// dedicated `create_timeseries_retention_min_unit_silent_default`
-/// snapshot pins the current shape; the follow-up issue tightens
-/// `parse_duration_unit` to also accept the aggregate-keyword tokens.
+/// `min` was previously excluded because it lexes as `Token::Min`
+/// (the aggregate-function keyword) and the helper only inspected
+/// `Token::Ident`. Issue #115 wired a dedicated `Token::Min` arm in
+/// `parse_duration_unit`, so the alias is now part of the valid-shape
+/// strategy.
 pub fn retention_unit() -> impl Strategy<Value = &'static str> {
     prop_oneof![
         Just("ms"),
@@ -54,6 +49,7 @@ pub fn retention_unit() -> impl Strategy<Value = &'static str> {
         Just("secs"),
         Just("seconds"),
         Just("m"),
+        Just("min"),
         Just("mins"),
         Just("minute"),
         Just("minutes"),
@@ -75,20 +71,26 @@ pub fn retention_clause() -> impl Strategy<Value = String> {
     (1u64..1000, retention_unit()).prop_map(|(n, u)| format!("RETENTION {} {}", n, u))
 }
 
-/// String-literal duration accepted by `CHUNK_INTERVAL` /  `TTL`. The
-/// underlying `parse_duration_ns` helper only supports the short
-/// suffixes (`ms`/`s`/`m`/`h`/`d`) packed into a single token — the
-/// long-form (`'1 day'`, `'5 minutes'`) is **not** accepted today and
-/// is exercised separately by the negative fuzz seeds.
+/// String-literal duration accepted by `CHUNK_INTERVAL` / `TTL`.
+/// `parse_duration_ns` accepts both the compact suffix form
+/// (`'5m'`, `'1d'`) and the long, TimescaleDB-compatible form
+/// (`'1 day'`, `'30 minutes'`); the strategy generates a mix.
 pub fn chunk_interval_literal() -> impl Strategy<Value = String> {
-    let unit = prop_oneof![
-        Just("ms"),
-        Just("s"),
-        Just("m"),
-        Just("h"),
-        Just("d"),
-    ];
-    (1u64..1000, unit).prop_map(|(n, u)| format!("'{}{}'", n, u))
+    let short = {
+        let unit = prop_oneof![Just("ms"), Just("s"), Just("m"), Just("h"), Just("d")];
+        (1u64..1000, unit).prop_map(|(n, u)| format!("'{}{}'", n, u))
+    };
+    let long = {
+        let unit = prop_oneof![
+            Just("ms"),
+            Just("seconds"),
+            Just("minutes"),
+            Just("hours"),
+            Just("days"),
+        ];
+        (1u64..1000, unit).prop_map(|(n, u)| format!("'{} {}'", n, u))
+    };
+    prop_oneof![short, long]
 }
 
 /// `CREATE TIMESERIES name [RETENTION ...] [CHUNK_SIZE n]

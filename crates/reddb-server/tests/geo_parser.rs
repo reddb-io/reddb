@@ -11,11 +11,9 @@
 //! `ParserLimits` cascade automatically — this file pins the
 //! contract.
 //!
-//! Phase A note (per AFK plan): no source modifications. Behaviours
-//! that the parser does not yet implement (e.g. lat/lon range
-//! validation, unary-minus in the SPATIAL position) are pinned via
-//! `#[ignore]`-marked FIXME tests so the regression appears as soon
-//! as the parser starts enforcing them.
+//! Phase B follow-up (issue #115): the FIXME pins below were flipped
+//! into regression guards once the parser landed lat/lon range
+//! validation, K/radius positivity checks, and unary-minus support.
 
 mod support {
     pub mod parser_hardening;
@@ -307,13 +305,10 @@ fn happy_nearest_at_origin_parses() {
     parse_query("SEARCH SPATIAL NEAREST 0.0 0.0 K 1 COLLECTION sites COLUMN location");
 }
 
-// ---- FIXME pins -------------------------------------------------
+// ---- regression guards (originally FIXME pins) ------------------
 //
-// These tests document parser behaviours that we believe are bugs,
-// but Phase A is tests-only — no source mods. Each test is marked
-// `#[ignore]` with a follow-up issue link. When the upstream fix
-// lands, dropping the `#[ignore]` flips the test into a regression
-// guard.
+// Phase B / issue #115 landed the parser fixes; the tests below were
+// flipped from `#[ignore]` FIXME pins into live guards.
 
 /// Regression guard for #107: `parse_float` accepts a unary `-`,
 /// so southern / western hemisphere coordinates parse cleanly.
@@ -330,47 +325,32 @@ fn negative_latitude_parses() {
     );
 }
 
-/// FIXME(#104-followup-2): the parser accepts out-of-range latitude
-/// (`> 90` or `< -90`) and longitude (`> 180` or `< -180`) at the
-/// parse layer. Geographic coordinates have well-defined bounds; a
-/// `Sema`-kind error pointing at the offending literal would catch
-/// typos at the earliest possible stage.
-///
-/// Expected once fixed: this input returns `Err` with a kind that
-/// names the out-of-range axis.
+/// Regression guard for #104-followup-2: the parser now rejects
+/// out-of-range latitude (`> 90` or `< -90`) and longitude
+/// (`> 180` or `< -180`) with a `ValueOutOfRange` error.
 #[test]
-#[ignore = "FIXME #104-followup-2: parser does not validate lat/lon ranges"]
-fn fixme_lat_out_of_range_accepted_today() {
+fn lat_out_of_range_rejected() {
     let r = parser::parse(
         "SEARCH SPATIAL RADIUS 91.0 0.0 10.0 COLLECTION sites COLUMN location",
     );
     assert!(r.is_err(), "lat=91 should be rejected as out-of-range");
 }
 
-/// FIXME(#104-followup-3): `K = 0` is a degenerate request — asking
-/// for the zero nearest neighbours — but the parser accepts it. A
-/// `Sema` error at parse time is cheaper than the empty-vec result
-/// the engine returns today.
-///
-/// Expected once fixed: this input returns `Err` with a message
-/// that mentions K must be ≥ 1.
+/// Regression guard for #104-followup-3: `K = 0` is degenerate;
+/// rejected at parse time with a `ValueOutOfRange` error.
 #[test]
-#[ignore = "FIXME #104-followup-3: parser accepts K=0 for NEAREST"]
-fn fixme_nearest_k_zero_accepted_today() {
+fn nearest_k_zero_rejected() {
     let r = parser::parse(
         "SEARCH SPATIAL NEAREST 0.0 0.0 K 0 COLLECTION sites COLUMN location",
     );
     assert!(r.is_err(), "K=0 should be rejected as degenerate");
 }
 
-/// FIXME(#104-followup-4): RADIUS `r = 0` parses, despite being a
-/// degenerate query (every match has distance ≥ 0). Like K=0, this
-/// is cheaper to reject at parse time than to handle in the engine.
-///
-/// Expected once fixed: this input returns `Err`.
+/// Regression guard for #104-followup-4: `RADIUS r = 0` is
+/// degenerate; rejected at parse time with a `ValueOutOfRange`
+/// error.
 #[test]
-#[ignore = "FIXME #104-followup-4: parser accepts radius=0 for RADIUS"]
-fn fixme_radius_zero_accepted_today() {
+fn radius_zero_rejected() {
     let r = parser::parse(
         "SEARCH SPATIAL RADIUS 0.0 0.0 0.0 COLLECTION sites COLUMN location",
     );
