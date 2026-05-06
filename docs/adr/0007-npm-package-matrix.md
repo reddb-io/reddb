@@ -1,4 +1,4 @@
-# ADR 0006 — npm package matrix (`cli` / `sdk` / `client`) and pinned-binary rationale
+# ADR 0007 — npm package matrix (`cli` / `sdk` / `client`) and pinned-binary rationale
 
 **Status:** Accepted
 **Date:** 2026-05-06

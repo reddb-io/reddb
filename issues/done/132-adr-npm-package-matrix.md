@@ -1,8 +1,8 @@
-# ADR 0006 — npm package matrix (cli / sdk / client) and pinned-binary rationale [AFK]
+# ADR 0007 — npm package matrix (cli / sdk / client) and pinned-binary rationale [AFK]
 
 GitHub: reddb-io/reddb#132
 
-Author `docs/adr/0006-npm-package-matrix.md` capturing the decision to ship three npm packages under `@reddb-io/` (`cli`, `sdk`, `client`) and the rules for how each acquires the underlying Rust binary on install.
+Author `docs/adr/0007-npm-package-matrix.md` capturing the decision to ship three npm packages under `@reddb-io/` (`cli`, `sdk`, `client`) and the rules for how each acquires the underlying Rust binary on install.
 
 The ADR must answer:
 
@@ -17,7 +17,7 @@ Format mirrors the existing ADRs in `docs/adr/0004-*` and `docs/adr/0005-*`.
 
 ## Acceptance Criteria
 
-- [ ] `docs/adr/0006-npm-package-matrix.md` exists and follows the 0004/0005 format.
+- [ ] `docs/adr/0007-npm-package-matrix.md` exists and follows the 0004/0005 format.
 - [ ] Three packages enumerated with target audience, install size budget, binary acquisition strategy.
 - [ ] SDK/client runtime lookup precedence documented (env → local node_modules); explicit statement that PATH is not consulted.
 - [ ] CLI postinstall version-compare flow (install / upgrade / skip) documented with rationale.
