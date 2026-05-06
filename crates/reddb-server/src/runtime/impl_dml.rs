@@ -2457,4 +2457,197 @@ mod tests {
             .unwrap();
         assert_eq!(deleted.affected_rows, 1);
     }
+
+    // ── #112: auto-index user `id` on first insert ─────────────────────
+
+    /// First insert into a fresh collection that carries a column named
+    /// `id` registers an implicit HASH index on `id`. Subsequent inserts
+    /// populate it transparently, and `WHERE id = N` lookups exercise
+    /// the hash-index fast path in `DmlTargetScan::find_target_ids`.
+    ///
+    /// This is the load-bearing acceptance test for #112 — without the
+    /// hook, `find_index_for_column` returns `None` and DELETE/UPDATE
+    /// fall through to a full segment scan (the 4× perf gap documented
+    /// in `docs/perf/delete-sequential-2026-05-06.md`).
+    #[test]
+    fn auto_index_id_fires_on_first_insert() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE bench_users (id INT, score INT)")
+            .unwrap();
+
+        // Pre-condition: no index on `id` yet.
+        assert!(
+            rt.index_store_ref()
+                .find_index_for_column("bench_users", "id")
+                .is_none(),
+            "freshly created collection should not have an `id` index"
+        );
+
+        // Single-row INSERT — drives `MutationEngine::append_one`.
+        rt.execute_query("INSERT INTO bench_users (id, score) VALUES (1, 10)")
+            .unwrap();
+
+        // Post-condition: hash index registered on `id`.
+        let registered = rt
+            .index_store_ref()
+            .find_index_for_column("bench_users", "id")
+            .expect("auto-index hook should have registered idx_id on first insert");
+        assert_eq!(registered.name, "idx_id");
+        assert_eq!(registered.collection, "bench_users");
+        assert_eq!(registered.columns, vec!["id".to_string()]);
+        assert!(matches!(
+            registered.method,
+            super::super::index_store::IndexMethodKind::Hash
+        ));
+
+        // Subsequent inserts populate the index; `WHERE id = N` should
+        // resolve via the hash fast path and round-trip every row.
+        for id in 2..=5 {
+            rt.execute_query(&format!(
+                "INSERT INTO bench_users (id, score) VALUES ({id}, {})",
+                id * 10
+            ))
+            .unwrap();
+        }
+        for id in 1..=5 {
+            let result = rt
+                .execute_query(&format!("SELECT score FROM bench_users WHERE id = {id}"))
+                .unwrap();
+            assert_eq!(result.result.records.len(), 1, "id={id} should match one row");
+        }
+
+        // Delete via the hash fast-path — exactly the bench scenario the
+        // perf doc identified as the 4× regression. With the index
+        // present, `find_target_ids` short-circuits before
+        // `for_each_entity_zoned` runs.
+        let deleted = rt
+            .execute_query("DELETE FROM bench_users WHERE id = 3")
+            .unwrap();
+        assert_eq!(deleted.affected_rows, 1);
+    }
+
+    /// Bulk INSERT (the multi-row VALUES path) drives
+    /// `MutationEngine::append_batch`. The hook must fire there too —
+    /// otherwise the batch entry points (gRPC binary bulk, HTTP bulk,
+    /// wire bulk INSERT) skip auto-indexing entirely.
+    #[test]
+    fn auto_index_id_fires_on_first_bulk_insert() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE bench_bulk (id INT, score INT)")
+            .unwrap();
+
+        rt.execute_query(
+            "INSERT INTO bench_bulk (id, score) VALUES (1, 10), (2, 20), (3, 30)",
+        )
+        .unwrap();
+
+        let registered = rt
+            .index_store_ref()
+            .find_index_for_column("bench_bulk", "id")
+            .expect("auto-index hook should fire on first bulk insert");
+        assert_eq!(registered.name, "idx_id");
+
+        // Every row populated via `index_entity_insert_batch`.
+        for id in 1..=3 {
+            let result = rt
+                .execute_query(&format!("SELECT score FROM bench_bulk WHERE id = {id}"))
+                .unwrap();
+            assert_eq!(result.result.records.len(), 1);
+        }
+    }
+
+    /// Hook is a no-op when the row carries no `id` column. Conservative
+    /// match (case-sensitive `id`) — `Id`, `ID`, and `red_entity_id`
+    /// don't trigger it.
+    #[test]
+    fn auto_index_id_skips_when_no_id_column() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE plain (uid INT, label TEXT)")
+            .unwrap();
+        rt.execute_query("INSERT INTO plain (uid, label) VALUES (1, 'a')")
+            .unwrap();
+
+        assert!(
+            rt.index_store_ref()
+                .find_index_for_column("plain", "id")
+                .is_none()
+        );
+        assert!(
+            rt.index_store_ref()
+                .find_index_for_column("plain", "uid")
+                .is_none()
+        );
+    }
+
+    /// Hook only fires once per collection. If an explicit
+    /// `CREATE INDEX ... USING BTREE` already covers `id`, the hook
+    /// detects it via `find_index_for_column` and does NOT clobber it
+    /// with a HASH index on the next insert.
+    #[test]
+    fn auto_index_id_skips_when_index_already_exists() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE pre (id INT, score INT)")
+            .unwrap();
+        // User-declared BTREE index on `id` before any insert.
+        rt.execute_query("CREATE INDEX user_idx ON pre (id) USING BTREE")
+            .unwrap();
+        rt.execute_query("INSERT INTO pre (id, score) VALUES (1, 10)")
+            .unwrap();
+
+        let registered = rt
+            .index_store_ref()
+            .find_index_for_column("pre", "id")
+            .expect("user index should still be there");
+        assert_eq!(
+            registered.name, "user_idx",
+            "auto-index hook must not overwrite an existing index"
+        );
+    }
+
+    /// Implicit `idx_id` is reaped when the collection drops. The
+    /// existing `execute_drop_table` walks `list_indices` and drops every
+    /// entry — confirm the auto-created index participates.
+    #[test]
+    fn auto_index_id_dropped_with_collection() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE ephemeral (id INT, score INT)")
+            .unwrap();
+        rt.execute_query("INSERT INTO ephemeral (id, score) VALUES (1, 10)")
+            .unwrap();
+        assert!(rt
+            .index_store_ref()
+            .find_index_for_column("ephemeral", "id")
+            .is_some());
+
+        rt.execute_query("DROP TABLE ephemeral").unwrap();
+
+        assert!(
+            rt.index_store_ref()
+                .find_index_for_column("ephemeral", "id")
+                .is_none(),
+            "implicit `idx_id` must be reaped when its collection drops"
+        );
+    }
+
+    /// Opt-out via `RedDBOptions::with_auto_index_id(false)` (which
+    /// forwards to `UnifiedStoreConfig::auto_index_id`). With the knob
+    /// off, first insert leaves the collection without an `id` index —
+    /// DELETE/UPDATE fall back to the scan path.
+    #[test]
+    fn auto_index_id_disabled_by_config() {
+        let opts = RedDBOptions::in_memory().with_auto_index_id(false);
+        let rt = RedDBRuntime::with_options(opts).unwrap();
+
+        rt.execute_query("CREATE TABLE off (id INT, score INT)")
+            .unwrap();
+        rt.execute_query("INSERT INTO off (id, score) VALUES (1, 10)")
+            .unwrap();
+
+        assert!(
+            rt.index_store_ref()
+                .find_index_for_column("off", "id")
+                .is_none(),
+            "with auto_index_id=false, no implicit index should be created"
+        );
+    }
 }

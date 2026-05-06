@@ -208,6 +208,12 @@ pub struct RedDBOptions {
     pub replication: ReplicationConfig,
     /// Authentication & authorization configuration.
     pub auth: AuthConfig,
+    /// Auto-create a HASH index on a user `id` column the first time a
+    /// row carrying that column is inserted into a collection. See
+    /// `UnifiedStoreConfig::auto_index_id`. Defaults to `true`; set to
+    /// `false` to opt out per workload (e.g. ingest pipelines that
+    /// don't need point-lookups by `id`).
+    pub auto_index_id: bool,
 }
 
 impl fmt::Debug for RedDBOptions {
@@ -258,6 +264,7 @@ impl Clone for RedDBOptions {
             remote_key: self.remote_key.clone(),
             replication: self.replication.clone(),
             auth: self.auth.clone(),
+            auto_index_id: self.auto_index_id,
         }
     }
 }
@@ -292,6 +299,7 @@ impl Default for RedDBOptions {
             remote_key: None,
             replication: ReplicationConfig::standalone(),
             auth: AuthConfig::default(),
+            auto_index_id: true,
         }
     }
 }
@@ -394,6 +402,14 @@ impl RedDBOptions {
 
     pub fn with_metadata<K: Into<String>, V: Into<String>>(mut self, key: K, value: V) -> Self {
         self.metadata.insert(key.into(), value.into());
+        self
+    }
+
+    /// Toggle the implicit HASH index on user `id` columns at first
+    /// insert (#112). Defaults to enabled — pass `false` to fall back
+    /// to the legacy "scan unless `CREATE INDEX` is issued" behaviour.
+    pub fn with_auto_index_id(mut self, enabled: bool) -> Self {
+        self.auto_index_id = enabled;
         self
     }
 

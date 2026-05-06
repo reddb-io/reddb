@@ -5,6 +5,7 @@ fn store_config_from_options(options: &RedDBOptions) -> UnifiedStoreConfig {
     let mut config = UnifiedStoreConfig::default()
         .with_durability_mode(options.durability_mode)
         .with_group_commit(options.group_commit);
+    config.auto_index_id = options.auto_index_id;
 
     if let Ok(value) = std::env::var("REDDB_DURABILITY") {
         if let Some(mode) = DurabilityMode::from_str(&value) {
