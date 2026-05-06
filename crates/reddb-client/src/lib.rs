@@ -51,6 +51,7 @@
 pub mod connect;
 pub mod connector;
 pub mod error;
+pub mod topology;
 pub mod types;
 
 #[cfg(feature = "embedded")]

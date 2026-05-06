@@ -245,6 +245,34 @@ impl GrpcClient {
         // `self`. Nothing explicit to do here.
         Ok(())
     }
+
+    /// Topology refresh hook (issue #168, ADR 0008).
+    ///
+    /// Single integration point between `GrpcClient` and the
+    /// [`crate::topology`] deep module. Lane O (#167) wires the
+    /// connector's `Topology` RPC; once those bytes land, callers
+    /// pass them straight in here and get back a merged
+    /// [`crate::topology::ClusterMembership`] ready for
+    /// the future `HealthAwareRouter` (lane Q, #171). No routing
+    /// changes happen here — this slice only emits the membership
+    /// data structure.
+    ///
+    /// `uri_seed` is the parsed `grpc://primary,replica1,...` host
+    /// list from the connection string. It's a hint, not a
+    /// constraint: advertised topology wins on every collision
+    /// (see [`crate::topology::TopologyConsumer::consume`]).
+    ///
+    /// Recoverable errors (`UnknownVersion`, `MalformedEnvelope`)
+    /// are surfaced typed; the caller is expected to log a one-line
+    /// warning and fall back to URI-only routing per ADR 0008 §4.
+    pub fn ingest_topology_bytes(
+        &self,
+        bytes: &[u8],
+        uri_seed: Option<crate::topology::UriSeed>,
+    ) -> std::result::Result<crate::topology::ClusterMembership, crate::topology::ConsumeError>
+    {
+        crate::topology::TopologyConsumer::consume_bytes(bytes, uri_seed)
+    }
 }
 
 fn parse_query_json(s: &str) -> Result<QueryResult> {
