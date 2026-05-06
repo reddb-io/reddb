@@ -37,6 +37,58 @@ jobs:
     steps:
       - run: echo "ok"
 
+  serialization-lint:
+    # Issue #180 / ADR 0010 — grep-based preflight that flags new
+    # untyped serialization across the four boundaries hardened by
+    # the typed guards (`HeaderEscapeGuard`, `AuditFieldEscaper`,
+    # `SerializedJsonField`, `ConnStringSanitizer`/`Tainted<T>`). The
+    # lint runs in seconds; it's a fast feedback loop independent of
+    # cargo cache state.
+    #
+    # Soft-fail mode: `continue-on-error: true` keeps the job
+    # advisory for one release cycle so contributors learn the new
+    # rule without breaking PRs on a class of bug grep is only
+    # syntactically aware of. Upgrade path:
+    #   1. Wait one release cycle of green/advisory runs.
+    #   2. Drain the residue tracked in
+    #      `scripts/lint-untyped-serialization-whitelist.txt` to
+    #      acceptable size (every entry has an issue).
+    #   3. Remove `continue-on-error` to flip to hard-fail; once
+    #      flipped, every new violation must either migrate to the
+    #      typed guard or land on the whitelist with a tracking
+    #      issue, same as clippy.
+    name: Lint (no untyped serialization)
+    needs: gate
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run grep-based serialization-boundary lint
+        run: bash scripts/lint-no-untyped-serialization.sh crates/
+      - name: Self-test against fixture (lint must catch every category)
+        # `tests/lint-fixtures/violations.rs.fixture` carries one
+        # violation per category. The lint is correct iff it exits
+        # non-zero on the fixture and the output names every category
+        # tag the script emits.
+        run: |
+          set +e
+          out=$(bash scripts/lint-no-untyped-serialization.sh tests/lint-fixtures/violations.rs.fixture 2>&1)
+          rc=$?
+          set -e
+          echo "$out"
+          if [ "$rc" -eq 0 ]; then
+            echo "FAIL: lint exited 0 against the fixture (it should catch every category)"
+            exit 1
+          fi
+          for cat in tracing+format header+format audit+format json+format tainted-unwrap header-from-str; do
+            if ! printf '%s' "$out" | grep -qF "[$cat]"; then
+              echo "FAIL: fixture is missing a violation for category [$cat]"
+              exit 1
+            fi
+          done
+          echo "OK: every lint category was triggered by the fixture"
+
   quality:
     name: Quality (fmt, check, clippy)
     needs: gate
