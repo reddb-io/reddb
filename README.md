@@ -356,6 +356,19 @@ Same storage format across all three. Start embedded, scale to server, expose to
 
 ## Performance
 
+> **Where RedDB wins.** Two scenarios in the canonical `duel-official`
+> benchmark show measurable wins over Postgres and Mongo today:
+>
+> - `typed_insert` — RedDB ≈ **16× faster** than PostgreSQL on typed
+>   single-row inserts.
+> - `disk_usage` — RedDB ≈ **1.5× faster** than MongoDB on the
+>   compact-write path.
+>
+> See [`docs/perf/wins.md`](docs/perf/wins.md) for the cited sessions
+> and reproducible commands. The honest counterpart — gaps where RedDB
+> is still behind — lives at
+> [`docs/perf/when-not-reddb.md`](docs/perf/when-not-reddb.md).
+
 RedDB uses multiple optimization techniques for fast queries at scale:
 
 - **Result Cache** -- identical SELECT queries return in <1ms; auto-invalidated on INSERT/UPDATE/DELETE (30s TTL, max 1000 entries)
