@@ -451,6 +451,163 @@ impl ReadFrame for StatementExecutionFrame {
     }
 }
 
+/// Lightweight `ReadFrame` carrier used by AI command entry points
+/// (`SEARCH SIMILAR`, `SEARCH CONTEXT`, `ASK`).
+///
+/// Issue #119 calls this struct `EffectiveScope`. It bundles the
+/// `(tenant, identity, role, visible_collections, snapshot)` tuple so
+/// every AI runtime entry can pass *one* value to `AuthorizedSearch`
+/// instead of re-reading thread-locals at every call site.
+///
+/// Built via `RedDBRuntime::ai_scope()` which sources tenant + identity
+/// from the per-statement thread-locals (identical to how
+/// `StatementExecutionFrame::build` derives them) and resolves
+/// `visible_collections` via the `AuthStore` cache.
+pub struct EffectiveScope {
+    pub(crate) tenant: Option<String>,
+    pub(crate) identity: Option<(String, Role)>,
+    pub(crate) snapshot: Snapshot,
+    pub(crate) visible_collections: Option<HashSet<String>>,
+}
+
+impl ReadFrame for EffectiveScope {
+    fn effective_scope(&self) -> Option<&str> {
+        self.tenant.as_deref()
+    }
+    fn identity(&self) -> Option<(&str, Role)> {
+        self.identity.as_ref().map(|(u, r)| (u.as_str(), *r))
+    }
+    fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
+    }
+    fn as_of_floor(&self) -> Option<Xid> {
+        None
+    }
+    fn cache_key(&self) -> &str {
+        ""
+    }
+    fn should_cache_result(&self) -> bool {
+        false
+    }
+    fn required_privilege(&self) -> Privilege {
+        Privilege::Read
+    }
+    fn lock_intent(&self) -> LockIntent {
+        LockIntent::Shared
+    }
+    fn visible_collections(&self) -> Option<&HashSet<String>> {
+        self.visible_collections.as_ref()
+    }
+}
+
+impl RedDBRuntime {
+    /// Build the AI command `EffectiveScope` from the current
+    /// statement thread-locals + auth store.
+    ///
+    /// Returns `None` for embedded callers (no auth store, no
+    /// identity) — `AuthorizedSearch` treats `None` as deny-default.
+    pub(crate) fn ai_scope(&self) -> EffectiveScope {
+        let tenant = super::impl_core::current_tenant();
+        let identity = super::impl_core::current_auth_identity();
+        let snapshot = self.current_snapshot();
+        let visible_collections = match (self.inner.auth_store.read().clone(), identity.as_ref()) {
+            (Some(store), Some((principal, role))) => {
+                let collections = self.inner.db.store().list_collections();
+                Some(store.visible_collections_for_scope(
+                    tenant.as_deref(),
+                    *role,
+                    principal,
+                    &collections,
+                ))
+            }
+            _ => None,
+        };
+        EffectiveScope {
+            tenant,
+            identity: identity.map(|(u, r)| (u, r)),
+            snapshot,
+            visible_collections,
+        }
+    }
+}
+
+/// Test fixtures for callers that need to drive `ReadFrame` without
+/// booting a runtime. Lives behind `cfg(test)` and `pub(crate)` so it
+/// only leaks across module boundaries inside the crate.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::{LockIntent, Privilege, ReadFrame};
+    use crate::auth::Role;
+    use crate::storage::transaction::snapshot::{Snapshot, Xid};
+    use std::collections::HashSet;
+
+    /// A `ReadFrame` impl with hand-set fields. Used by
+    /// `authorized_search` tests to assert the deny-default and
+    /// scope-trim behaviour without going through frame construction.
+    pub(crate) struct FakeReadFrame {
+        pub tenant: Option<String>,
+        pub identity: Option<(String, Role)>,
+        pub snapshot: Snapshot,
+        pub visible: Option<HashSet<String>>,
+    }
+
+    impl FakeReadFrame {
+        pub(crate) fn without_scope() -> Self {
+            Self {
+                tenant: None,
+                identity: None,
+                snapshot: Snapshot {
+                    xid: 0,
+                    in_progress: HashSet::new(),
+                },
+                visible: None,
+            }
+        }
+
+        pub(crate) fn with_visible(visible: HashSet<String>) -> Self {
+            Self {
+                tenant: Some("acme".to_string()),
+                identity: Some(("alice".to_string(), Role::Read)),
+                snapshot: Snapshot {
+                    xid: 0,
+                    in_progress: HashSet::new(),
+                },
+                visible: Some(visible),
+            }
+        }
+    }
+
+    impl ReadFrame for FakeReadFrame {
+        fn effective_scope(&self) -> Option<&str> {
+            self.tenant.as_deref()
+        }
+        fn identity(&self) -> Option<(&str, Role)> {
+            self.identity.as_ref().map(|(u, r)| (u.as_str(), *r))
+        }
+        fn snapshot(&self) -> &Snapshot {
+            &self.snapshot
+        }
+        fn as_of_floor(&self) -> Option<Xid> {
+            None
+        }
+        fn cache_key(&self) -> &str {
+            ""
+        }
+        fn should_cache_result(&self) -> bool {
+            false
+        }
+        fn required_privilege(&self) -> Privilege {
+            Privilege::Read
+        }
+        fn lock_intent(&self) -> LockIntent {
+            LockIntent::Shared
+        }
+        fn visible_collections(&self) -> Option<&HashSet<String>> {
+            self.visible.as_ref()
+        }
+    }
+}
+
 impl RedDBRuntime {
     fn own_transaction_xids(&self, conn_id: u64) -> HashSet<Xid> {
         let mut set = HashSet::new();
