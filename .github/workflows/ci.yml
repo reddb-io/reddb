@@ -3,16 +3,43 @@ name: CI
 on:
   push:
     branches: [ main, develop ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'CHANGELOG**'
+      - 'LICENSE**'
   pull_request:
     branches: [ main, develop ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'CHANGELOG**'
+      - 'LICENSE**'
+
+# Cost guard: a fresh push to a PR cancels the previous run. Devs
+# iterating on a branch don't double-pay 16 jobs per push.
+# Pushes to main/develop don't cancel — those are release-grade.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
 
 jobs:
+  # Sentinel job — short-circuits everything else when the PR is a draft.
+  # Push events evaluate `false` so they always run.
+  gate:
+    name: gate
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - run: echo "ok"
+
   quality:
     name: Quality (fmt, check, clippy)
+    needs: gate
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     env:
@@ -44,6 +71,7 @@ jobs:
     # PLAN.md B5 — compile every supported feature combination that
     # operators may select for release artifacts.
     name: Feature Matrix (${{ matrix.features.label }})
+    needs: gate
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     strategy:
@@ -86,6 +114,7 @@ jobs:
 
   tests:
     name: Test Suite
+    needs: gate
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 20
     env:
@@ -127,6 +156,7 @@ jobs:
     # time. `cargo package` with verify rebuilds the engine from the
     # tarball, so this also exercises the include manifest end-to-end.
     name: Publish Dry-Run (crates.io)
+    needs: gate
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
     env:
@@ -160,6 +190,7 @@ jobs:
 
   containers:
     name: Container Stack
+    needs: gate
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
     steps:
@@ -275,6 +306,7 @@ jobs:
     # test suite on Windows. Excludes Linux-only integration tests
     # (systemd install, mmap, Unix sockets) via cfg gates in the source.
     name: Windows (build + unit tests)
+    needs: gate
     runs-on: blacksmith-8vcpu-windows-2025
     timeout-minutes: 30
     steps:
@@ -299,6 +331,7 @@ jobs:
     # Mirror of the Windows job for Darwin; keeps the cross-platform
     # story complete. Same scope — library build + unit tests.
     name: macOS (build + unit tests)
+    needs: gate
     runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 30
     steps:
@@ -322,6 +355,7 @@ jobs:
     # Catches panics introduced by grammar changes; the long-window
     # nightly run lives in a separate scheduled workflow.
     name: Fuzz Parsers
+    needs: gate
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     env:
@@ -372,6 +406,7 @@ jobs:
 
   package:
     name: cargo publish dry-run
+    needs: gate
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
