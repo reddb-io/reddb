@@ -21,7 +21,7 @@
  *   - Cargo.toml                      (engine crate)
  *   - Cargo.lock                      (regenerated)
  *   - crates/reddb-client-connector/Cargo.toml (workspace internal)
- *   - drivers/js/package.json         (reddb npm)
+ *   - drivers/js/package.json         (@reddb-io/sdk npm)
  *   - drivers/python/Cargo.toml       (reddb-python internal name)
  *   - drivers/python/Cargo.lock       (regenerated)
  *   - drivers/python/pyproject.toml   (reddb PyPI)
