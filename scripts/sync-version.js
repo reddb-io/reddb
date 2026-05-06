@@ -18,6 +18,7 @@
  * and the engine + driver versions stay locked in sync.
  *
  * Files updated:
+ *   - package.json                    (@reddb-io/cli npm — source of truth)
  *   - Cargo.toml                      (engine crate)
  *   - Cargo.lock                      (regenerated)
  *   - crates/reddb-client-connector/Cargo.toml (workspace internal)
@@ -45,6 +46,11 @@ if (!version || !/^\d+\.\d+\.\d+/.test(version)) {
 }
 
 const targets = [
+  {
+    label: 'package.json (@reddb-io/cli)',
+    file: path.join(root, 'package.json'),
+    type: 'package-json',
+  },
   {
     label: 'Cargo.toml',
     file: path.join(root, 'Cargo.toml'),

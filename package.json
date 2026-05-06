@@ -1,5 +1,5 @@
 {
-  "name": "reddb-cli",
+  "name": "@reddb-io/cli",
   "version": "0.2.9",
   "description": "CLI launcher for RedDB. The JS/TS app driver is published as package `reddb`.",
   "type": "commonjs",
