@@ -1,7 +1,0 @@
----
-source: crates/reddb-server/tests/ask_snapshots.rs
-assertion_line: 120
-expression: formatted
----
-kind:  IdentifierTooLong { limit_name: "max_identifier_chars", value: 8 }
-error: Parse error at 1:15: identifier exceeds maximum length (max_identifier_chars = 8)
