@@ -1,0 +1,6 @@
+---
+source: crates/reddb-server/tests/ask_snapshots.rs
+expression: formatted
+---
+kind:  Syntax
+error: Parse error at 1:9: Unexpected token after query: USING

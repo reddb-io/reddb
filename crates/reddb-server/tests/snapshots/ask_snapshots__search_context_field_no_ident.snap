@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/ask_snapshots.rs
+expression: "fmt_parse_error(\"SEARCH CONTEXT 'q' FIELD\")"
+---
+input: "SEARCH CONTEXT 'q' FIELD"
+kind:  Syntax
+error: Parse error at 1:25: Unexpected token: EOF (expected: identifier)
