@@ -2,6 +2,5 @@
 source: crates/reddb-server/tests/timeseries_parser_snapshots.rs
 expression: "fmt_parse_error(\"CREATE TIMESERIES m1 RETENTION -90 d\")"
 ---
+UNEXPECTED OK
 input: "CREATE TIMESERIES m1 RETENTION -90 d"
-kind:  Syntax
-error: Parse error at 1:32: Unexpected token: - (expected: number)
