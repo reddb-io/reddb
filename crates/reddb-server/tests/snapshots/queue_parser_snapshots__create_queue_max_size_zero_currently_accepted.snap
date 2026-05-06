@@ -1,0 +1,6 @@
+---
+source: crates/reddb-server/tests/queue_parser_snapshots.rs
+expression: "fmt_parse_error(\"CREATE QUEUE q MAX_SIZE 0\")"
+---
+UNEXPECTED OK
+input: "CREATE QUEUE q MAX_SIZE 0"
