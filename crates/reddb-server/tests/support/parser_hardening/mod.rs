@@ -14,6 +14,7 @@ use reddb_server::storage::query::parser::ParserLimits;
 
 pub mod corpus;
 pub mod migration_grammar;
+pub mod queue_grammar;
 pub mod secret_redactor;
 pub mod sql_grammar;
 
