@@ -1,0 +1,352 @@
+//! Parser hardening test suite for the ASK / AI-extension surface
+//! (issue #101).
+//!
+//! Reuses the `tests/support/parser_hardening` harness from #87 to
+//! cover the `ASK '<question>' [USING …] [MODEL …] [DEPTH n]
+//! [LIMIT n] [COLLECTION col]` and the `SEARCH CONTEXT '<query>' …`
+//! shapes. Both reach the production parser through the standard
+//! `reddb_server::storage::query::parser::parse` entry point so
+//! `ParserLimits` cascade automatically.
+//!
+//! Phase A — tests-only. Bugs uncovered here are pinned with
+//! `FIXME(#101): …` in the failing assertion; follow-up issues fix
+//! the parser source without touching this file.
+
+mod support {
+    pub mod parser_hardening;
+}
+
+use proptest::prelude::*;
+use reddb_server::storage::query::ast::{QueryExpr, SearchCommand};
+use reddb_server::storage::query::parser::{self, ParseError, ParserLimits};
+use support::parser_hardening::{
+    self as harness, ask_grammar, assert_no_panic_on, corpus::ask_adversarial_inputs,
+    HardenedParser,
+};
+
+/// `HardenedParser` shim around the ASK / SEARCH CONTEXT surface.
+/// Both shapes share the top-level entry point with the rest of the
+/// SQL grammar, so the shim simply funnels into `parser::parse` —
+/// the property + snapshot suites below are what concentrate the
+/// coverage on the AI extension subset.
+pub struct AskParser;
+
+impl HardenedParser for AskParser {
+    type Error = ParseError;
+
+    fn parse(input: &str) -> Result<(), Self::Error> {
+        parser::parse(input).map(|_| ())
+    }
+
+    fn parse_with_limits(input: &str, limits: ParserLimits) -> Result<(), Self::Error> {
+        let mut p = parser::Parser::with_limits(input, limits)?;
+        p.parse().map(|_| ())
+    }
+}
+
+// ---- panic-safety on adversarial corpus -------------------------
+
+#[test]
+fn ask_parser_does_not_panic_on_adversarial_corpus() {
+    let handle = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            for (name, input) in ask_adversarial_inputs() {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    assert_no_panic_on::<AskParser>(&input);
+                }));
+                if result.is_err() {
+                    panic!("ask adversarial corpus entry {} panicked", name);
+                }
+            }
+        })
+        .expect("spawn corpus thread");
+    handle.join().expect("corpus thread panic");
+}
+
+// ---- property tests ---------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 256,
+        max_shrink_iters: 64,
+        ..ProptestConfig::default()
+    })]
+
+    /// Strategy 1: full ASK shape with all clauses optional
+    /// (USING excluded — see strategy 2 + FIXME(#101)). Generated
+    /// input must parse cleanly.
+    #[test]
+    fn proptest_ask_full_shape_roundtrips(s in ask_grammar::ask_stmt()) {
+        harness::roundtrip_property::<AskParser>(&s);
+        prop_assert!(
+            AskParser::parse(&s).is_ok(),
+            "ask full shape did not parse: {}", s
+        );
+    }
+
+    /// Strategy 2: ASK with the USING-provider clause concentrated.
+    ///
+    /// FIXME(#101): `parse_ask_query` calls `consume_ident_ci("USING")`
+    /// (parser/dml.rs:402) but `USING` lexes to `Token::Using`, so the
+    /// optional-clause loop never matches the keyword. The result is a
+    /// "Unexpected token after query: USING" error from the top-level
+    /// `parse` EOF check. Until a follow-up issue switches the call to
+    /// `self.consume(&Token::Using)`, this property only asserts the
+    /// parser does not *panic*. Once fixed, change the assertion to
+    /// `is_ok()` and drop the FIXME.
+    #[test]
+    fn proptest_ask_using_provider_no_panic(
+        s in ask_grammar::ask_using_provider_stmt(),
+    ) {
+        harness::roundtrip_property::<AskParser>(&s);
+    }
+
+    /// Strategy 3: ASK with the MODEL string-literal clause
+    /// concentrated. Pins the `MODEL '<name>'` slot.
+    #[test]
+    fn proptest_ask_model_ident_roundtrips(s in ask_grammar::ask_model_ident_stmt()) {
+        harness::roundtrip_property::<AskParser>(&s);
+        prop_assert!(
+            AskParser::parse(&s).is_ok(),
+            "ask MODEL '<name>' did not parse: {}", s
+        );
+    }
+
+    /// Strategy 4: SEARCH CONTEXT with optional FIELD / COLLECTION /
+    /// LIMIT / DEPTH clauses.
+    #[test]
+    fn proptest_search_context_roundtrips(s in ask_grammar::search_context_stmt()) {
+        harness::roundtrip_property::<AskParser>(&s);
+        prop_assert!(
+            AskParser::parse(&s).is_ok(),
+            "search context did not parse: {}", s
+        );
+    }
+
+    /// Strategy 5: ASK with depth + scope (LIMIT) numeric ranges.
+    #[test]
+    fn proptest_ask_depth_scope_roundtrips(s in ask_grammar::ask_depth_scope_stmt()) {
+        harness::roundtrip_property::<AskParser>(&s);
+        prop_assert!(
+            AskParser::parse(&s).is_ok(),
+            "ask DEPTH/LIMIT did not parse: {}", s
+        );
+    }
+
+    /// Arbitrary-bytes suffix on each AI keyword: never panic.
+    #[test]
+    fn proptest_ask_arbitrary_suffix_no_panic(
+        prefix in prop_oneof![
+            Just("ASK ".to_string()),
+            Just("ASK 'q' ".to_string()),
+            Just("SEARCH CONTEXT ".to_string()),
+            Just("SEARCH CONTEXT 'q' ".to_string()),
+        ],
+        suffix in ".{0,512}",
+    ) {
+        let s = format!("{}{}", prefix, suffix);
+        harness::roundtrip_property::<AskParser>(&s);
+    }
+
+    /// Tighter input-size limit refuses oversized ASK questions. The
+    /// 64-byte ceiling is well below the expanded input length so the
+    /// parser must reject before the lexer gets to the question body.
+    #[test]
+    fn proptest_ask_input_size_limit_enforced(len in 200usize..2000) {
+        let limits = ParserLimits {
+            max_input_bytes: 64,
+            ..ParserLimits::default()
+        };
+        let body = "x".repeat(len);
+        let input = format!("ASK '{}'", body);
+        let r = AskParser::parse_with_limits(&input, limits);
+        prop_assert!(r.is_err(), "oversized ASK question must error");
+    }
+}
+
+// ---- happy-path regression tests --------------------------------
+//
+// These pin the documented ASK / SEARCH CONTEXT shapes against
+// future grammar drift. The `parse_query` helper unwraps the
+// `QueryWithCte` envelope so each test asserts directly against the
+// AST node.
+
+fn parse_query(input: &str) -> QueryExpr {
+    parser::parse(input)
+        .unwrap_or_else(|e| panic!("expected ok for {input:?}, got error: {e}"))
+        .query
+}
+
+#[test]
+fn ask_minimal_question_parses() {
+    let q = parse_query("ASK 'why is the sky blue?'");
+    match q {
+        QueryExpr::Ask(ask) => {
+            assert_eq!(ask.question, "why is the sky blue?");
+            assert_eq!(ask.provider, None);
+            assert_eq!(ask.model, None);
+            assert_eq!(ask.depth, None);
+            assert_eq!(ask.limit, None);
+            assert_eq!(ask.collection, None);
+        }
+        other => panic!("expected Ask, got {other:?}"),
+    }
+}
+
+#[test]
+fn ask_with_model_only_parses() {
+    let q = parse_query("ASK 'q' MODEL 'gpt-4o-mini'");
+    match q {
+        QueryExpr::Ask(ask) => {
+            assert_eq!(ask.question, "q");
+            assert_eq!(ask.model.as_deref(), Some("gpt-4o-mini"));
+            assert_eq!(ask.provider, None);
+        }
+        other => panic!("expected Ask, got {other:?}"),
+    }
+}
+
+#[test]
+fn ask_with_depth_limit_collection_parses() {
+    let q = parse_query("ASK 'q' DEPTH 3 LIMIT 25 COLLECTION docs");
+    match q {
+        QueryExpr::Ask(ask) => {
+            assert_eq!(ask.depth, Some(3));
+            assert_eq!(ask.limit, Some(25));
+            assert_eq!(ask.collection.as_deref(), Some("docs"));
+            assert_eq!(ask.provider, None);
+        }
+        other => panic!("expected Ask, got {other:?}"),
+    }
+}
+
+#[test]
+fn ask_full_chain_without_using_parses() {
+    // `USING <provider>` is omitted — see
+    // `ask_using_provider_currently_errors_FIXME_101` below for the
+    // bug the omission works around. Every other documented clause
+    // is exercised here.
+    let q = parse_query(
+        "ASK 'what happened?' MODEL 'claude-3-5-sonnet' \
+         DEPTH 2 LIMIT 50 COLLECTION events",
+    );
+    match q {
+        QueryExpr::Ask(ask) => {
+            assert_eq!(ask.question, "what happened?");
+            assert_eq!(ask.model.as_deref(), Some("claude-3-5-sonnet"));
+            assert_eq!(ask.depth, Some(2));
+            assert_eq!(ask.limit, Some(50));
+            assert_eq!(ask.collection.as_deref(), Some("events"));
+            assert_eq!(ask.provider, None);
+        }
+        other => panic!("expected Ask, got {other:?}"),
+    }
+}
+
+/// FIXME(#101): pinned current-broken behaviour for the
+/// `USING <provider>` clause.
+///
+/// `parse_ask_query` (parser/dml.rs:402) uses
+/// `consume_ident_ci("USING")` to detect the clause, but `USING`
+/// lexes to `Token::Using` (a reserved keyword), not `Token::Ident`.
+/// The check therefore always returns `false`, the optional-clause
+/// loop exits, and the trailing tokens trigger the top-level
+/// `parse` EOF check with "Unexpected token after query: USING".
+///
+/// The migration parser had the same class of bug for `DEPENDS ON`
+/// / `FOR TENANT` / the `MIGRATION` keyword in `APPLY MIGRATION`,
+/// fixed in #92 by switching to `self.consume(&Token::…)`. The
+/// follow-up issue should apply the same fix here.
+///
+/// When the parser is fixed, this test will start failing. At that
+/// point, replace the assertion with the corresponding success
+/// shape (see the commented-out block below) and drop the FIXME.
+#[test]
+#[allow(non_snake_case)]
+fn ask_using_provider_currently_errors_FIXME_101() {
+    let result = parser::parse("ASK 'who?' USING openai");
+    let err = result.expect_err(
+        "FIXME(#101): if this fires, USING was fixed — flip this test to assert the success \
+         shape and drop the FIXME",
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("USING"),
+        "expected error to mention USING, got: {msg}"
+    );
+
+    // Post-fix expected shape (kept as documentation):
+    //
+    // let q = parse_query("ASK 'who?' USING openai");
+    // match q {
+    //     QueryExpr::Ask(ask) => {
+    //         assert_eq!(ask.question, "who?");
+    //         assert_eq!(ask.provider.as_deref(), Some("openai"));
+    //     }
+    //     other => panic!("expected Ask, got {other:?}"),
+    // }
+}
+
+#[test]
+fn search_context_minimal_parses_with_defaults() {
+    let q = parse_query("SEARCH CONTEXT 'find this'");
+    match q {
+        QueryExpr::SearchCommand(SearchCommand::Context {
+            query,
+            field,
+            collection,
+            limit,
+            depth,
+        }) => {
+            assert_eq!(query, "find this");
+            assert_eq!(field, None);
+            assert_eq!(collection, None);
+            // Default limit and depth are documented in
+            // `parse_search_context` (limit=25, depth=1).
+            assert_eq!(limit, 25);
+            assert_eq!(depth, 1);
+        }
+        other => panic!("expected SearchCommand::Context, got {other:?}"),
+    }
+}
+
+#[test]
+fn search_context_full_clause_chain_parses() {
+    let q = parse_query(
+        "SEARCH CONTEXT '000.000.000-00' FIELD cpf COLLECTION customers LIMIT 50 DEPTH 2",
+    );
+    match q {
+        QueryExpr::SearchCommand(SearchCommand::Context {
+            query,
+            field,
+            collection,
+            limit,
+            depth,
+        }) => {
+            assert_eq!(query, "000.000.000-00");
+            assert_eq!(field.as_deref(), Some("cpf"));
+            assert_eq!(collection.as_deref(), Some("customers"));
+            assert_eq!(limit, 50);
+            assert_eq!(depth, 2);
+        }
+        other => panic!("expected SearchCommand::Context, got {other:?}"),
+    }
+}
+
+#[test]
+fn ask_lowercase_keyword_parses() {
+    // The dispatch path uses `eq_ignore_ascii_case("ASK")`, so the
+    // lowercase form must round-trip. Pinning prevents a future
+    // tightening of the dispatcher from breaking case-insensitive
+    // RQL clients. (USING omitted — see
+    // `ask_using_provider_currently_errors_FIXME_101`.)
+    let q = parse_query("ask 'q' depth 3");
+    match q {
+        QueryExpr::Ask(ask) => {
+            assert_eq!(ask.question, "q");
+            assert_eq!(ask.depth, Some(3));
+        }
+        other => panic!("expected Ask, got {other:?}"),
+    }
+}
