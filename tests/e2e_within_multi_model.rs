@@ -41,7 +41,7 @@ fn within_filters_queue_messages() {
         .result
         .records
         .first()
-        .and_then(|r| r.values.get("len"))
+        .and_then(|r| r.get("len"))
         .cloned()
         .unwrap();
     assert_eq!(
@@ -57,7 +57,7 @@ fn within_filters_queue_messages() {
         .result
         .records
         .first()
-        .and_then(|r| r.values.get("len"))
+        .and_then(|r| r.get("len"))
         .cloned()
         .unwrap();
     assert_eq!(
@@ -72,7 +72,7 @@ fn within_filters_queue_messages() {
         .result
         .records
         .first()
-        .and_then(|r| r.values.get("len"))
+        .and_then(|r| r.get("len"))
         .cloned()
         .unwrap();
     assert_eq!(n, reddb::storage::schema::Value::UnsignedInteger(0));
@@ -216,7 +216,7 @@ fn within_typed_api_works_with_queue() {
         .result
         .records
         .first()
-        .and_then(|r| r.values.get("len"))
+        .and_then(|r| r.get("len"))
         .cloned()
         .unwrap();
     assert_eq!(n, reddb::storage::schema::Value::UnsignedInteger(1));

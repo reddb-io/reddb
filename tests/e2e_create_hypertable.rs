@@ -100,7 +100,7 @@ fn list_hypertables_surfaces_registered_entries() {
             query: "SELECT LIST_HYPERTABLES() AS names".into(),
         })
         .expect("list ok");
-    let names = r.result.records[0].values.get("names").expect("names");
+    let names = r.result.records[0].get("names").expect("names");
     use reddb::storage::schema::Value;
     let arr = match names {
         Value::Array(v) => v,

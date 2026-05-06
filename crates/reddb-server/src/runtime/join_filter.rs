@@ -475,7 +475,7 @@ pub(super) fn runtime_graph_join_record_keys(
     }
 
     for hint in ["_source_node", "_source_edge", "_linked_identity"] {
-        if let Some(value) = record.values.get(hint) {
+        if let Some(value) = record.get(hint) {
             keys.extend(runtime_join_lookup_keys(value));
         }
     }
@@ -515,7 +515,7 @@ pub(super) fn runtime_graph_join_probe_indexes(
         }
     }
     for hint in ["_source_node", "_source_edge", "_linked_identity"] {
-        if let Some(value) = left_record.values.get(hint) {
+        if let Some(value) = left_record.get(hint) {
             for key in runtime_join_lookup_keys(value) {
                 if let Some(indexes) = right_index.get(&key) {
                     candidates.extend(indexes.iter().copied());
@@ -592,10 +592,9 @@ pub(super) fn project_runtime_record_with_db(
 
     if select_all {
         for key in visible_value_keys(source) {
-            if let Some(value) = source.values.get(key.as_str()) {
-                record
-                    .values
-                    .insert(std::sync::Arc::from(key), value.clone());
+            if let Some(value) = source.get(key.as_str()) {
+                let cloned = value.clone();
+                record.set_arc(std::sync::Arc::from(key), cloned);
             }
         }
     }
@@ -635,9 +634,7 @@ pub(super) fn project_runtime_record_with_db(
             Projection::All => None,
         };
 
-        record
-            .values
-            .insert(std::sync::Arc::from(label), value.unwrap_or(Value::Null));
+        record.set_arc(std::sync::Arc::from(label), value.unwrap_or(Value::Null));
     }
 
     record
@@ -651,7 +648,7 @@ pub(super) fn resolve_runtime_projection_value(
     document_projection: bool,
     entity_projection: bool,
 ) -> Option<Value> {
-    source.values.get(column).cloned().or_else(|| {
+    source.get(column).cloned().or_else(|| {
         if document_projection || entity_projection {
             let field = FieldRef::TableColumn {
                 table: table_alias.or(table_name).unwrap_or_default().to_string(),
@@ -748,9 +745,8 @@ pub(super) fn collect_visible_columns(records: &[UnifiedRecord]) -> Vec<String> 
 
 pub(super) fn visible_value_keys(record: &UnifiedRecord) -> Vec<String> {
     let mut keys: Vec<String> = record
-        .values
-        .keys()
-        .filter_map(|key| {
+        .iter_fields()
+        .filter_map(|(key, _)| {
             let k: &str = key;
             if k.starts_with('_') {
                 None
@@ -1300,7 +1296,7 @@ pub(super) fn resolve_runtime_field(
     match field {
         FieldRef::TableColumn { table, column } => {
             if !table.is_empty() {
-                if let Some(value) = record.values.get(format!("{table}.{column}").as_str()) {
+                if let Some(value) = record.get(format!("{table}.{column}").as_str()) {
                     return Some(value.clone());
                 }
 
@@ -1312,13 +1308,12 @@ pub(super) fn resolve_runtime_field(
             }
 
             record
-                .values
                 .get(column.as_str())
                 .cloned()
                 .or_else(|| resolve_runtime_document_path(record, column))
         }
         FieldRef::NodeProperty { alias, property } => {
-            if let Some(value) = record.values.get(format!("{alias}.{property}").as_str()) {
+            if let Some(value) = record.get(format!("{alias}.{property}").as_str()) {
                 return Some(value.clone());
             }
 
@@ -1331,7 +1326,7 @@ pub(super) fn resolve_runtime_field(
             }
         }
         FieldRef::EdgeProperty { alias, property } => {
-            if let Some(value) = record.values.get(format!("{alias}.{property}").as_str()) {
+            if let Some(value) = record.get(format!("{alias}.{property}").as_str()) {
                 return Some(value.clone());
             }
 
@@ -1348,7 +1343,7 @@ pub(super) fn resolve_runtime_field(
             .nodes
             .get(alias)
             .map(|node| Value::NodeRef(node.id.clone()))
-            .or_else(|| record.values.get(format!("{alias}.id").as_str()).cloned()),
+            .or_else(|| record.get(format!("{alias}.id").as_str()).cloned()),
     }
 }
 
@@ -1377,7 +1372,7 @@ pub(super) fn resolve_runtime_document_path(record: &UnifiedRecord, path: &str) 
     // early exit based on the capability flag.
     let segments = parse_runtime_document_path(path);
     let (root, tail) = segments.split_first()?;
-    let root_value = record.values.get(root.as_str())?;
+    let root_value = record.get(root.as_str())?;
     resolve_runtime_document_path_from_value(root_value, tail)
 }
 
@@ -2705,9 +2700,9 @@ pub(super) fn eval_projection_value(proj: &Projection, source: &UnifiedRecord) -
                 }
                 return Some(Value::text(lit_val.to_string()));
             }
-            source.values.get(col.as_str()).cloned()
+            source.get(col.as_str()).cloned()
         }
-        Projection::Alias(col, _) => source.values.get(col.as_str()).cloned(),
+        Projection::Alias(col, _) => source.get(col.as_str()).cloned(),
         Projection::Field(field, _) => resolve_runtime_field(source, field, None, None),
         Projection::Function(name, inner_args) => {
             evaluate_scalar_function(name, inner_args, source)
@@ -3104,7 +3099,7 @@ fn resolve_geo_arg(arg: &Projection, source: &UnifiedRecord) -> Option<(f64, f64
                 }
             }
             // Column reference → look up in record values
-            let val = source.values.get(col.as_str())?;
+            let val = source.get(col.as_str())?;
             match val {
                 Value::GeoPoint(lat_micro, lon_micro) => Some((
                     crate::geo::micro_to_deg(*lat_micro),
@@ -3117,7 +3112,7 @@ fn resolve_geo_arg(arg: &Projection, source: &UnifiedRecord) -> Option<(f64, f64
                     if lat_keys.contains(&col.as_str()) {
                         let lon = lon_keys
                             .iter()
-                            .find_map(|k| source.values.get(*k))
+                            .find_map(|k| source.get(*k))
                             .and_then(|v| match v {
                                 Value::Float(f) => Some(*f),
                                 Value::Integer(n) => Some(*n as f64),
@@ -3336,7 +3331,7 @@ mod tests {
     fn extract_i(records: &[UnifiedRecord], col: &str) -> Vec<Option<i64>> {
         records
             .iter()
-            .map(|r| match r.values.get(col) {
+            .map(|r| match r.get(col) {
                 Some(Value::Integer(n)) => Some(*n),
                 _ => None,
             })
@@ -3346,7 +3341,7 @@ mod tests {
     fn extract_f(records: &[UnifiedRecord], col: &str) -> Vec<Option<f64>> {
         records
             .iter()
-            .map(|r| match r.values.get(col) {
+            .map(|r| match r.get(col) {
                 Some(Value::Float(n)) => Some(*n),
                 _ => None,
             })
@@ -3356,7 +3351,7 @@ mod tests {
     fn extract_t(records: &[UnifiedRecord], col: &str) -> Vec<Option<String>> {
         records
             .iter()
-            .map(|r| match r.values.get(col) {
+            .map(|r| match r.get(col) {
                 Some(Value::Text(s)) => Some(s.as_ref().to_string()),
                 _ => None,
             })

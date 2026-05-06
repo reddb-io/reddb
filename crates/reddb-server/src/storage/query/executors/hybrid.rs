@@ -151,9 +151,7 @@ impl HybridExecutor {
         result.stats = structured_result.stats;
 
         for (_key, mut record, score) in scored {
-            record
-                .values
-                .insert(Arc::from("_hybrid_score"), Value::Float(score as f64));
+            record.set_arc(Arc::from("_hybrid_score"), Value::Float(score as f64));
             result.push(record);
         }
 
@@ -178,7 +176,7 @@ impl HybridExecutor {
             .iter()
             .filter_map(|r| {
                 // Try to get ID from values
-                r.values.get("id").and_then(|v| match v {
+                r.get("id").and_then(|v| match v {
                     Value::Integer(i) => Some(*i as u64),
                     _ => None,
                 })
@@ -228,7 +226,7 @@ impl HybridExecutor {
             .records
             .iter()
             .filter_map(|r| {
-                r.values.get("id").and_then(|v| match v {
+                r.get("id").and_then(|v| match v {
                     Value::Integer(i) => Some(*i as u64),
                     _ => None,
                 })
@@ -370,9 +368,7 @@ impl HybridExecutor {
 
         for (key, score) in rrf_scores {
             if let Some(mut record) = record_map.remove(&key) {
-                record
-                    .values
-                    .insert(Arc::from("_rrf_score"), Value::Float(score));
+                record.set_arc(Arc::from("_rrf_score"), Value::Float(score));
                 result.push(record);
             }
         }
@@ -468,9 +464,7 @@ impl HybridExecutor {
         result.stats = QueryStats::merge(&structured_result.stats, &vector_result.stats);
 
         for (_key, mut record, score) in sorted {
-            record
-                .values
-                .insert(Arc::from("_union_score"), Value::Float(score as f64));
+            record.set_arc(Arc::from("_union_score"), Value::Float(score as f64));
             result.push(record);
         }
 
@@ -484,7 +478,7 @@ impl HybridExecutor {
     /// Get a unique key for a record (for deduplication)
     fn record_to_key(&self, record: &UnifiedRecord) -> String {
         // Try various ways to identify the record
-        if let Some(Value::Integer(id)) = record.values.get("id") {
+        if let Some(Value::Integer(id)) = record.get("id") {
             return format!("row:{}", id);
         }
         if let Some(first_node) = record.nodes.values().next() {
@@ -493,8 +487,9 @@ impl HybridExecutor {
         if let Some(first_vsr) = record.vector_results.first() {
             return format!("vec:{}:{}", first_vsr.collection, first_vsr.id);
         }
-        // Fallback: hash of all values
-        format!("hash:{:?}", record.values)
+        // Fallback: hash of all visible fields
+        let fields: Vec<_> = record.iter_fields().collect();
+        format!("hash:{:?}", fields)
     }
 
     /// Get vector similarity score for a structured record
@@ -504,7 +499,7 @@ impl HybridExecutor {
         vector_distances: &HashMap<String, f32>,
     ) -> f32 {
         // Try to find matching vector via ID
-        if let Some(Value::Integer(id)) = record.values.get("id") {
+        if let Some(Value::Integer(id)) = record.get("id") {
             // Check all collections in vector_distances
             for (key, distance) in vector_distances {
                 if key.ends_with(&format!(":{}", id)) {
@@ -516,7 +511,7 @@ impl HybridExecutor {
 
         // Try via cross-reference if available
         if let Some(ref unified_index) = self.unified_index {
-            if let Some(Value::Integer(id)) = record.values.get("id") {
+            if let Some(Value::Integer(id)) = record.get("id") {
                 // Look up if this row has a linked vector
                 // This requires the unified_index to track row->vector mappings
                 // For now, return 0 if no match found
@@ -569,10 +564,10 @@ impl InMemoryHybridExecutor {
     /// Add a structured record
     pub fn add_record(&mut self, id: u64, values: HashMap<String, Value>) {
         let mut record = UnifiedRecord::new();
-        record.values = values.into_iter().map(|(k, v)| (Arc::from(k), v)).collect();
-        record
-            .values
-            .insert(Arc::from("id"), Value::Integer(id as i64));
+        for (k, v) in values {
+            record.set_owned(k, v);
+        }
+        record.set_arc(Arc::from("id"), Value::Integer(id as i64));
         self.records.insert(id, record);
     }
 
@@ -651,9 +646,7 @@ impl InMemoryHybridExecutor {
 
         let mut result = UnifiedResult::with_columns(vec!["id".to_string()]);
         for (_key, mut record, score) in scored {
-            record
-                .values
-                .insert(Arc::from("_hybrid_score"), Value::Float(score as f64));
+            record.set_arc(Arc::from("_hybrid_score"), Value::Float(score as f64));
             result.push(record);
         }
 
@@ -667,7 +660,7 @@ impl InMemoryHybridExecutor {
     ) -> Result<UnifiedResult, ExecutionError> {
         let struct_ids: HashSet<i64> = structured
             .iter()
-            .filter_map(|r| match r.values.get("id") {
+            .filter_map(|r| match r.get("id") {
                 Some(Value::Integer(i)) => Some(*i),
                 _ => None,
             })
@@ -698,7 +691,7 @@ impl InMemoryHybridExecutor {
         let struct_ranks: HashMap<i64, u32> = structured
             .iter()
             .enumerate()
-            .filter_map(|(rank, r)| match r.values.get("id") {
+            .filter_map(|(rank, r)| match r.get("id") {
                 Some(Value::Integer(i)) => Some((*i, (rank + 1) as u32)),
                 _ => None,
             })
@@ -732,9 +725,7 @@ impl InMemoryHybridExecutor {
         let mut result =
             UnifiedResult::with_columns(vec!["id".to_string(), "distance".to_string()]);
         for (_key, mut record, score) in scored {
-            record
-                .values
-                .insert(Arc::from("_rrf_score"), Value::Float(score));
+            record.set_arc(Arc::from("_rrf_score"), Value::Float(score));
             result.push(record);
         }
 
@@ -742,7 +733,7 @@ impl InMemoryHybridExecutor {
     }
 
     fn get_vector_score(&self, record: &UnifiedRecord, vector_result: &UnifiedResult) -> f32 {
-        if let Some(Value::Integer(id)) = record.values.get("id") {
+        if let Some(Value::Integer(id)) = record.get("id") {
             for vr in &vector_result.records {
                 for vsr in &vr.vector_results {
                     if vsr.id == *id as u64 {
@@ -755,13 +746,14 @@ impl InMemoryHybridExecutor {
     }
 
     fn record_to_key_in_memory(&self, record: &UnifiedRecord) -> String {
-        if let Some(Value::Integer(id)) = record.values.get("id") {
+        if let Some(Value::Integer(id)) = record.get("id") {
             return format!("row:{}", id);
         }
         if let Some(first_vsr) = record.vector_results.first() {
             return format!("vec:{}:{}", first_vsr.collection, first_vsr.id);
         }
-        format!("hash:{:?}", record.values)
+        let fields: Vec<_> = record.iter_fields().collect();
+        format!("hash:{:?}", fields)
     }
 }
 
@@ -821,7 +813,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.len(), 3);
-        assert_eq!(result.records[0].values.get("id"), Some(&Value::Integer(1)));
+        assert_eq!(result.records[0].get("id"), Some(&Value::Integer(1)));
 
         // With pure vector ranking (weight=1), order should be 3, 1, 2
         let result = executor
@@ -829,7 +821,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.len(), 3);
-        assert_eq!(result.records[0].values.get("id"), Some(&Value::Integer(3)));
+        assert_eq!(result.records[0].get("id"), Some(&Value::Integer(3)));
     }
 
     #[test]
@@ -870,7 +862,7 @@ mod tests {
         let ids: HashSet<i64> = result
             .records
             .iter()
-            .filter_map(|r| match r.values.get("id") {
+            .filter_map(|r| match r.get("id") {
                 Some(Value::Integer(i)) => Some(*i),
                 _ => None,
             })
@@ -916,7 +908,7 @@ mod tests {
 
         // All records should have RRF scores
         for record in &result.records {
-            assert!(record.values.contains_key("_rrf_score"));
+            assert!(record.contains_column("_rrf_score"));
         }
     }
 }

@@ -42,7 +42,7 @@ fn prune_chunks_returns_overlapping_window() {
             ),
         })
         .expect("prune ok");
-    let kept = r.result.records[0].values.get("kept").expect("kept");
+    let kept = r.result.records[0].get("kept").expect("kept");
     let arr = match kept {
         Value::Array(v) => v,
         other => panic!("expected Array, got {other:?}"),
@@ -71,7 +71,7 @@ fn prune_wide_window_keeps_everything() {
             ),
         })
         .expect("ok");
-    let kept = r.result.records[0].values.get("kept").expect("kept");
+    let kept = r.result.records[0].get("kept").expect("kept");
     match kept {
         Value::Array(v) => assert_eq!(v.len(), 3),
         other => panic!("expected Array, got {other:?}"),
@@ -100,7 +100,7 @@ fn prune_narrow_window_keeps_nothing() {
             ),
         })
         .expect("ok");
-    let kept = r.result.records[0].values.get("kept").expect("kept");
+    let kept = r.result.records[0].get("kept").expect("kept");
     match kept {
         Value::Array(v) => assert!(v.is_empty(), "expected empty, got {v:?}"),
         other => panic!("expected Array, got {other:?}"),
@@ -139,7 +139,7 @@ fn prune_after_real_inserts_returns_expected_chunk() {
             ),
         })
         .expect("ok");
-    let kept = r.result.records[0].values.get("kept").expect("kept");
+    let kept = r.result.records[0].get("kept").expect("kept");
     match kept {
         Value::Array(v) => assert_eq!(v.len(), 1, "one overlapping chunk, got {v:?}"),
         other => panic!("expected Array, got {other:?}"),
@@ -193,6 +193,6 @@ fn prune_unknown_hypertable_returns_null() {
             query: "SELECT HYPERTABLE_PRUNE_CHUNKS('nope', 0, 1) AS kept".into(),
         })
         .expect("ok");
-    let kept = r.result.records[0].values.get("kept").expect("kept");
+    let kept = r.result.records[0].get("kept").expect("kept");
     assert!(matches!(kept, Value::Null), "expected Null, got {kept:?}");
 }

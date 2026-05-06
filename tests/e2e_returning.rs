@@ -25,15 +25,15 @@ fn returning_star_on_insert_returns_inserted_row() {
     assert_eq!(result.result.records.len(), 1);
 
     let rec = &result.result.records[0];
-    let name = rec.values.get("name").expect("name column present");
-    let age = rec.values.get("age").expect("age column present");
+    let name = rec.get("name").expect("name column present");
+    let age = rec.get("age").expect("age column present");
     assert!(
         matches!(name, Value::Text(s) if s.as_ref() == "alice"),
         "got {name:?}"
     );
     assert!(matches!(age, Value::Integer(30)), "got {age:?}");
     assert!(
-        rec.values.get("red_entity_id").is_some(),
+        rec.get("red_entity_id").is_some(),
         "RETURNING * on INSERT should include red_entity_id"
     );
     assert!(
@@ -54,9 +54,9 @@ fn returning_column_list_projects_subset() {
 
     assert_eq!(result.result.columns, vec!["name".to_string()]);
     let rec = &result.result.records[0];
-    assert!(matches!(rec.values.get("name"), Some(Value::Text(s)) if s.as_ref() == "bob"));
+    assert!(matches!(rec.get("name"), Some(Value::Text(s)) if s.as_ref() == "bob"));
     assert!(
-        rec.values.get("age").is_none(),
+        rec.get("age").is_none(),
         "age must not leak when not in RETURNING list"
     );
 }
@@ -111,13 +111,13 @@ fn returning_star_on_update_returns_post_image() {
     assert_eq!(result.result.records.len(), 1);
     let rec = &result.result.records[0];
     assert!(
-        matches!(rec.values.get("name"), Some(Value::Text(s)) if s.as_ref() == "u"),
+        matches!(rec.get("name"), Some(Value::Text(s)) if s.as_ref() == "u"),
         "name preserved in post-image"
     );
     assert!(
-        matches!(rec.values.get("age"), Some(Value::Integer(2))),
+        matches!(rec.get("age"), Some(Value::Integer(2))),
         "age must be the POST-update value (2), got {:?}",
-        rec.values.get("age")
+        rec.get("age")
     );
 }
 
@@ -138,9 +138,9 @@ fn returning_column_list_on_update_projects_subset() {
 
     assert_eq!(result.result.columns, vec!["age".to_string()]);
     let rec = &result.result.records[0];
-    assert!(matches!(rec.values.get("age"), Some(Value::Integer(6))));
+    assert!(matches!(rec.get("age"), Some(Value::Integer(6))));
     assert!(
-        rec.values.get("name").is_none(),
+        rec.get("name").is_none(),
         "name must not leak when not in RETURNING list"
     );
 }
@@ -167,7 +167,7 @@ fn returning_on_update_survives_where_column_mutation() {
     assert_eq!(result.affected_rows, 1);
     assert_eq!(result.result.records.len(), 1);
     assert!(matches!(
-        result.result.records[0].values.get("age"),
+        result.result.records[0].get("age"),
         Some(Value::Integer(99))
     ));
 }
@@ -209,8 +209,8 @@ fn returning_star_on_delete_returns_pre_image() {
     assert_eq!(result.affected_rows, 1);
     assert_eq!(result.result.records.len(), 1);
     let rec = &result.result.records[0];
-    assert!(matches!(rec.values.get("name"), Some(Value::Text(s)) if s.as_ref() == "d1"));
-    assert!(matches!(rec.values.get("age"), Some(Value::Integer(11))));
+    assert!(matches!(rec.get("name"), Some(Value::Text(s)) if s.as_ref() == "d1"));
+    assert!(matches!(rec.get("age"), Some(Value::Integer(11))));
 
     // Row is actually gone — a follow-up SELECT must not return it.
     let after = q
@@ -236,9 +236,9 @@ fn returning_column_list_on_delete_projects_subset() {
         .unwrap();
     assert_eq!(result.result.columns, vec!["name".to_string()]);
     let rec = &result.result.records[0];
-    assert!(matches!(rec.values.get("name"), Some(Value::Text(s)) if s.as_ref() == "k"));
+    assert!(matches!(rec.get("name"), Some(Value::Text(s)) if s.as_ref() == "k"));
     assert!(
-        rec.values.get("age").is_none(),
+        rec.get("age").is_none(),
         "age must not leak when not in RETURNING list"
     );
 }

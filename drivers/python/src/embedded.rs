@@ -128,7 +128,7 @@ fn map_query_result(qr: &reddb::runtime::RuntimeQueryResult) -> QueryRows {
 }
 
 fn record_to_pairs(record: &UnifiedRecord) -> Vec<(String, ScalarOut)> {
-    let mut entries: Vec<(&String, &SchemaValue)> = record.values.iter().collect();
+    let mut entries: Vec<(&String, &SchemaValue)> = record.iter_fields().collect();
     entries.sort_by(|a, b| a.0.cmp(b.0));
     entries
         .into_iter()

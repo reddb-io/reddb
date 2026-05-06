@@ -1197,15 +1197,15 @@ fn extract_runtime_vector_from_record(
         }
     }
 
-    if record.values.len() == 1 {
-        if let Some(value) = record.values.values().next() {
+    if record.field_count() == 1 {
+        if let Some((_, value)) = record.iter_fields().next() {
             if let Some(vector) = resolve_runtime_vector_value(db, value)? {
                 return Ok(Some(vector));
             }
         }
     }
 
-    for value in record.values.values() {
+    for (_, value) in record.iter_fields() {
         match value {
             Value::Vector(vector) => return Ok(Some(vector.clone())),
             Value::VectorRef(_, vector_id) => {
@@ -1396,7 +1396,7 @@ pub(super) fn runtime_record_identity_key(record: &UnifiedRecord) -> String {
         "_source_entity",
         "_linked_identity",
     ] {
-        if let Some(value) = record.values.get(key) {
+        if let Some(value) = record.get(key) {
             if let Some(fragment) = runtime_identity_fragment(value) {
                 return format!("link:{fragment}");
             }
@@ -1404,9 +1404,8 @@ pub(super) fn runtime_record_identity_key(record: &UnifiedRecord) -> String {
     }
 
     if let Some(value) = record
-        .values
         .get("entity_id")
-        .or_else(|| record.values.get("red_entity_id"))
+        .or_else(|| record.get("red_entity_id"))
     {
         if let Some(fragment) = runtime_identity_fragment(value) {
             return format!("entity:{fragment}");
@@ -1415,13 +1414,9 @@ pub(super) fn runtime_record_identity_key(record: &UnifiedRecord) -> String {
 
     if let (Some(collection), Some(row_id)) = (
         record
-            .values
             .get("red_collection")
             .and_then(runtime_value_text),
-        record
-            .values
-            .get("row_id")
-            .or_else(|| record.values.get("id")),
+        record.get("row_id").or_else(|| record.get("id")),
     ) {
         if let Some(fragment) = runtime_identity_fragment(row_id) {
             return format!("row:{collection}:{fragment}");
@@ -1432,17 +1427,17 @@ pub(super) fn runtime_record_identity_key(record: &UnifiedRecord) -> String {
         return format!("node:{alias}:{}", node.id);
     }
 
-    if let Some(value) = record
-        .values
-        .iter()
-        .find_map(|(key, value)| key.ends_with(".id").then_some(value))
+    if let Some(value) =
+        record
+            .iter_fields()
+            .find_map(|(key, value)| key.ends_with(".id").then_some(value))
     {
         if let Some(fragment) = runtime_identity_fragment(value) {
             return format!("ref:{fragment}");
         }
     }
 
-    if let Some(value) = record.values.get("id") {
+    if let Some(value) = record.get("id") {
         if let Some(fragment) = runtime_identity_fragment(value) {
             return format!("id:{fragment}");
         }
@@ -1467,7 +1462,7 @@ fn runtime_record_identity_fingerprint(record: &UnifiedRecord) -> u64 {
         }
     };
 
-    let mut value_keys: Vec<_> = record.values.iter().collect();
+    let mut value_keys: Vec<_> = record.iter_fields().collect();
     value_keys.sort_by(|left, right| left.0.cmp(right.0));
     for (key, value) in value_keys {
         mix(&mut hash, key.as_bytes());
@@ -1581,29 +1576,23 @@ pub(super) fn apply_runtime_identity_hints(record: &mut UnifiedRecord, entity: &
             let link_key: std::sync::Arc<str> = std::sync::Arc::from("_linked_identity");
             match cross_ref.ref_type {
                 RefType::VectorToRow | RefType::NodeToRow => {
-                    record
-                        .values
-                        .insert(std::sync::Arc::from("_source_row"), value.clone());
-                    record.values.entry(link_key).or_insert(value);
+                    record.set_arc(std::sync::Arc::from("_source_row"), value.clone());
+                    record.overflow_entry_or_insert(link_key, value);
                 }
                 RefType::VectorToNode | RefType::RowToNode => {
-                    record
-                        .values
-                        .insert(std::sync::Arc::from("_source_node"), value.clone());
-                    record.values.entry(link_key).or_insert(value);
+                    record.set_arc(std::sync::Arc::from("_source_node"), value.clone());
+                    record.overflow_entry_or_insert(link_key, value);
                 }
                 RefType::RowToEdge | RefType::EdgeToVector => {
-                    record
-                        .values
-                        .insert(std::sync::Arc::from("_source_edge"), value.clone());
-                    record.values.entry(link_key).or_insert(value);
+                    record.set_arc(std::sync::Arc::from("_source_edge"), value.clone());
+                    record.overflow_entry_or_insert(link_key, value);
                 }
                 _ => {
-                    record
-                        .values
-                        .entry(std::sync::Arc::from("_source_entity"))
-                        .or_insert(value.clone());
-                    record.values.entry(link_key).or_insert(value);
+                    record.overflow_entry_or_insert(
+                        std::sync::Arc::from("_source_entity"),
+                        value.clone(),
+                    );
+                    record.overflow_entry_or_insert(link_key, value);
                 }
             }
         }
@@ -1698,17 +1687,16 @@ pub(super) fn runtime_entity_vector_similarity(entity: &UnifiedEntity, query: &[
 
 pub(super) fn runtime_structured_score(record: &UnifiedRecord, rank: Option<usize>) -> f64 {
     if let Some(value) = record
-        .values
         .get("_score")
-        .or_else(|| record.values.get("final_score"))
-        .or_else(|| record.values.get("score"))
-        .or_else(|| record.values.get("hybrid_score"))
-        .or_else(|| record.values.get("graph_score"))
-        .or_else(|| record.values.get("table_score"))
-        .or_else(|| record.values.get("graph_match"))
-        .or_else(|| record.values.get("vector_similarity"))
-        .or_else(|| record.values.get("structured_match"))
-        .or_else(|| record.values.get("text_relevance"))
+        .or_else(|| record.get("final_score"))
+        .or_else(|| record.get("score"))
+        .or_else(|| record.get("hybrid_score"))
+        .or_else(|| record.get("graph_score"))
+        .or_else(|| record.get("table_score"))
+        .or_else(|| record.get("graph_match"))
+        .or_else(|| record.get("vector_similarity"))
+        .or_else(|| record.get("structured_match"))
+        .or_else(|| record.get("text_relevance"))
     {
         if let Some(number) = runtime_value_number(value) {
             return number;
@@ -1720,13 +1708,12 @@ pub(super) fn runtime_structured_score(record: &UnifiedRecord, rank: Option<usiz
 
 pub(super) fn runtime_vector_score(record: &UnifiedRecord) -> f64 {
     record
-        .values
         .get("_score")
-        .or_else(|| record.values.get("final_score"))
-        .or_else(|| record.values.get("score"))
-        .or_else(|| record.values.get("vector_similarity"))
-        .or_else(|| record.values.get("graph_score"))
-        .or_else(|| record.values.get("table_score"))
+        .or_else(|| record.get("final_score"))
+        .or_else(|| record.get("score"))
+        .or_else(|| record.get("vector_similarity"))
+        .or_else(|| record.get("graph_score"))
+        .or_else(|| record.get("table_score"))
         .and_then(runtime_value_number)
         .unwrap_or(0.0)
 }
@@ -1738,17 +1725,23 @@ pub(super) fn merge_hybrid_records(
     let mut merged = structured.cloned().unwrap_or_default();
 
     if let Some(vector_record) = vector {
-        for (key, value) in &vector_record.values {
-            let key_str: &str = key;
-            if let Some(existing) = merged.values.get(key_str) {
-                if existing != value {
-                    merged.values.insert(
+        // Collect first to avoid borrowing `merged` while we're
+        // iterating its sibling-record fields.
+        let pairs: Vec<(std::sync::Arc<str>, Value)> = vector_record
+            .iter_fields()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (key, value) in pairs {
+            let key_str: &str = &key;
+            if let Some(existing) = merged.get(key_str) {
+                if existing != &value {
+                    merged.set_arc(
                         std::sync::Arc::from(format!("vector.{key_str}")),
-                        value.clone(),
+                        value,
                     );
                 }
             } else {
-                merged.values.insert(key.clone(), value.clone());
+                merged.set_arc(key, value);
             }
         }
 
@@ -1795,17 +1788,21 @@ pub(super) fn merge_join_records(
     }
 
     if let Some(right_record) = right {
-        for (key, value) in &right_record.values {
-            let key_str: &str = key;
-            if merged.values.contains_key(key_str) {
+        let pairs: Vec<(std::sync::Arc<str>, Value)> = right_record
+            .iter_fields()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (key, value) in pairs {
+            let key_str: &str = &key;
+            if merged.contains_column(key_str) {
                 if let Some(prefix) = right_prefix {
-                    merged.values.insert(
+                    merged.set_arc(
                         std::sync::Arc::from(format!("{prefix}.{key_str}")),
-                        value.clone(),
+                        value,
                     );
                 }
             } else {
-                merged.values.insert(key.clone(), value.clone());
+                merged.set_arc(key, value);
             }
         }
 

@@ -55,7 +55,7 @@ fn format_runtime_result(result: &RuntimeQueryResult) -> String {
             .result
             .records
             .first()
-            .map(|record| record.values.keys().map(|k| k.to_string()).collect())
+            .map(|record| record.column_names().iter().map(|k| k.to_string()).collect())
             .unwrap_or_default();
         columns.sort();
         columns
@@ -68,7 +68,7 @@ fn format_runtime_result(result: &RuntimeQueryResult) -> String {
             columns
                 .iter()
                 .map(|column| {
-                    format_regress_value(record.values.get(column.as_str()).unwrap_or(&Value::Null))
+                    format_regress_value(record.get(column.as_str()).unwrap_or(&Value::Null))
                 })
                 .collect::<Vec<_>>()
         })
@@ -78,10 +78,10 @@ fn format_runtime_result(result: &RuntimeQueryResult) -> String {
 
 fn extract_message(records: &[UnifiedRecord]) -> Option<String> {
     let record = records.first()?;
-    if record.values.len() != 1 {
+    if record.field_count() != 1 {
         return None;
     }
-    record.values.get("message").map(format_regress_value)
+    record.get("message").map(format_regress_value)
 }
 
 fn format_regress_value(value: &Value) -> String {

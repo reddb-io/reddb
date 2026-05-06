@@ -294,12 +294,12 @@ where
         let mut hasher = DefaultHasher::new();
 
         // Hash all values in deterministic order
-        let mut keys: Vec<_> = record.values.keys().collect();
+        let mut keys = record.column_names();
         keys.sort();
 
-        for key in keys {
-            key.hash(&mut hasher);
-            if let Some(value) = record.values.get(key) {
+        for key in &keys {
+            (**key).hash(&mut hasher);
+            if let Some(value) = record.get(key) {
                 Self::hash_value(value, &mut hasher);
             }
         }

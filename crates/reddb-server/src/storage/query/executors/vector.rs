@@ -130,13 +130,9 @@ impl VectorExecutor {
             }
 
             // Add basic values to record
-            record
-                .values
-                .insert(Arc::from("id"), Value::Integer(sr.id as i64));
-            record
-                .values
-                .insert(Arc::from("distance"), Value::Float(sr.distance as f64));
-            record.values.insert(
+            record.set_arc(Arc::from("id"), Value::Integer(sr.id as i64));
+            record.set_arc(Arc::from("distance"), Value::Float(sr.distance as f64));
+            record.set_arc(
                 Arc::from("collection"),
                 Value::text(query.collection.clone()),
             );
@@ -398,13 +394,9 @@ impl InMemoryVectorExecutor {
                 }
             }
 
-            record
-                .values
-                .insert(Arc::from("id"), Value::Integer(vector_id as i64));
-            record
-                .values
-                .insert(Arc::from("distance"), Value::Float(dist as f64));
-            record.values.insert(
+            record.set_arc(Arc::from("id"), Value::Integer(vector_id as i64));
+            record.set_arc(Arc::from("distance"), Value::Float(dist as f64));
+            record.set_arc(
                 Arc::from("collection"),
                 Value::text(query.collection.clone()),
             );
@@ -551,12 +543,12 @@ fn vector_subquery_reference(
         .first()
         .ok_or_else(|| ExecutionError::new("Vector subquery returned no rows"))?;
 
-    let collection: String = match record.values.get("collection") {
+    let collection: String = match record.get("collection") {
         Some(Value::Text(collection)) => collection.to_string(),
         _ => default_collection.to_string(),
     };
 
-    let vector_id = match record.values.get("id") {
+    let vector_id = match record.get("id") {
         Some(Value::Integer(id)) if *id >= 0 => *id as u64,
         Some(Value::UnsignedInteger(id)) => *id,
         other => {
@@ -673,7 +665,7 @@ mod tests {
 
         // First result should be vector 1 (exact match)
         let first = &result.records[0];
-        assert_eq!(first.values.get("id"), Some(&Value::Integer(1)));
+        assert_eq!(first.get("id"), Some(&Value::Integer(1)));
     }
 
     #[test]
@@ -719,7 +711,7 @@ mod tests {
 
         // Only vector 1 matches (type=cve, severity=9)
         assert_eq!(result.len(), 1);
-        assert_eq!(result.records[0].values.get("id"), Some(&Value::Integer(1)));
+        assert_eq!(result.records[0].get("id"), Some(&Value::Integer(1)));
     }
 
     #[test]
@@ -798,7 +790,7 @@ mod tests {
 
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result.records[0].values.get("id"), Some(&Value::Integer(0)));
+        assert_eq!(result.records[0].get("id"), Some(&Value::Integer(0)));
     }
 
     #[test]
@@ -834,6 +826,6 @@ mod tests {
 
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result.records[0].values.get("id"), Some(&Value::Integer(0)));
+        assert_eq!(result.records[0].get("id"), Some(&Value::Integer(0)));
     }
 }
