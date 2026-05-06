@@ -14,10 +14,18 @@ SQL parser is the first consumer; subsequent slices (#88, #89,
 - `migration_grammar.rs` — proptest strategies for the migration
   DSL (CREATE/APPLY/ROLLBACK/EXPLAIN MIGRATION). Consumed by
   `tests/migration_parser.rs` (#88).
+- `vector_search_grammar.rs` — proptest strategies for the
+  vector-search surface (SEARCH SIMILAR / VECTOR SEARCH /
+  SEARCH HYBRID / HYBRID FROM / INSERT WITH AUTO EMBED).
+  Consumed by `tests/vector_search_parser.rs` and
+  `tests/vector_search_snapshots.rs` (#100).
 - `corpus.rs` — adversarial-input fixtures (deeply nested parens,
   long identifiers, oversized inputs) used by both property tests
   and fuzz seeds. `migration_adversarial_inputs()` covers the
-  migration DSL surface (#88).
+  migration DSL surface (#88). `vector_search_adversarial_inputs()`
+  covers the vector-search surface (#100): malformed vector
+  literals, NaN / Infinity / oversized-dim cases, AUTO EMBED edge
+  cases, HYBRID fusion-strategy errors.
 - `secret_redactor.rs` — shared `insta` filter set that masks
   secret-shaped substrings (bearer headers, JWTs, conn-string
   credential params, `sk_/rs_/reddb_` API keys) before insta
@@ -70,6 +78,8 @@ single unmasked match.
 - Property + snapshot suite (SQL): `cargo test -p reddb-server --test parser_hardening`
 - Property suite (migration DSL): `cargo test -p reddb-server --test migration_parser`
 - Snapshot suite (migration DSL): `cargo test -p reddb-server --test migration_parser_snapshots`
+- Property suite (vector-search): `cargo test -p reddb-server --test vector_search_parser`
+- Snapshot suite (vector-search): `cargo test -p reddb-server --test vector_search_snapshots`
 - Snapshot review: `cargo insta review` (writes accepted output
   back to `*.snap` files)
 - Fuzz smoke: `cargo fuzz run sql_parser -- -max_total_time=10`
