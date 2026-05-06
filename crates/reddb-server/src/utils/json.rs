@@ -106,6 +106,19 @@ impl JsonValue {
     }
 
     /// Serializes the value into a compact JSON string.
+    ///
+    /// **Deprecation note (ADR 0010 / issue #177):** the canonical
+    /// JSON encoder for serialization-boundary-sensitive paths
+    /// (audit log, HelloAck, PayloadReply, anything reaching a
+    /// downstream parser) is `crate::serde_json::Value::escape_string`
+    /// + `to_string_compact`. This local encoder is correct after
+    /// the F-01 hotfix (#181) but is not the canonical owner; new
+    /// audit / wire emission code should not call it. Existing MCP
+    /// JSON-RPC callers may keep using it pending a follow-up
+    /// retirement slice.
+    #[deprecated(
+        note = "Use crate::serde_json::Value::to_string_compact for boundary emission; see ADR 0010 / issue #177"
+    )]
     pub fn to_json_string(&self) -> String {
         let mut out = String::new();
         self.write_json(&mut out);
@@ -204,7 +217,13 @@ impl From<usize> for JsonValue {
 
 impl fmt::Display for JsonValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_json_string())
+        // Internal route — Display is the legacy entry point and
+        // routes through the (now deprecated for boundary use)
+        // `to_json_string`. Silence the warning here so the lint
+        // surfaces only at external call sites.
+        #[allow(deprecated)]
+        let s = self.to_json_string();
+        write!(f, "{s}")
     }
 }
 
@@ -515,6 +534,7 @@ mod tests {
     fn stringify_roundtrip() {
         let json = r#"{"message":"hello","value":42}"#;
         let value = parse_json(json).unwrap();
+        #[allow(deprecated)]
         let output = value.to_json_string();
         assert!(output.contains("hello"));
     }

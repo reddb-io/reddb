@@ -299,6 +299,43 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// F-02 (audit doc, 2026-05-06):
+/// PG3 wire encodes user-controlled bytes as `tag|value|NUL` C-strings
+/// in `ErrorResponse`, `NoticeResponse`, `CommandComplete`,
+/// `RowDescription` column names, and `ParameterStatus`. An embedded
+/// NUL in a user-supplied message field truncates the C-string and
+/// lets an attacker smuggle additional protocol fields into the frame.
+///
+/// Mitigation: every byte slice that gets followed by a `\0` terminator
+/// passes through `sanitize_cstring_bytes` first, which substitutes the
+/// Unicode replacement codepoint `U+FFFD` (3 UTF-8 bytes: `EF BF BD`)
+/// for any embedded NUL byte. The substitution preserves the visible
+/// shape of the message for debugging without giving an attacker a
+/// path to inject a synthetic protocol field. Emitting `U+FFFD` is
+/// safe for the PG client side: every PG client we know of reports
+/// errors as opaque strings rather than parsing them.
+fn sanitize_cstring_bytes(input: &[u8]) -> Vec<u8> {
+    if !input.contains(&0) {
+        return input.to_vec();
+    }
+    let mut out = Vec::with_capacity(input.len() + 8);
+    for &b in input {
+        if b == 0 {
+            // U+FFFD REPLACEMENT CHARACTER (UTF-8 EF BF BD)
+            out.extend_from_slice(&[0xEF, 0xBF, 0xBD]);
+        } else {
+            out.push(b);
+        }
+    }
+    out
+}
+
+#[inline]
+fn push_cstring(buf: &mut Vec<u8>, value: &str) {
+    buf.extend_from_slice(&sanitize_cstring_bytes(value.as_bytes()));
+    buf.push(0);
+}
+
 fn encode_backend(msg: &BackendMessage) -> (u8, Vec<u8>) {
     match msg {
         BackendMessage::AuthenticationOk => {
@@ -307,10 +344,9 @@ fn encode_backend(msg: &BackendMessage) -> (u8, Vec<u8>) {
         }
         BackendMessage::ParameterStatus { name, value } => {
             let mut buf = Vec::with_capacity(name.len() + value.len() + 2);
-            buf.extend_from_slice(name.as_bytes());
-            buf.push(0);
-            buf.extend_from_slice(value.as_bytes());
-            buf.push(0);
+            // F-02: name + value are user-controlled in some pathways.
+            push_cstring(&mut buf, name);
+            push_cstring(&mut buf, value);
             (b'S', buf)
         }
         BackendMessage::BackendKeyData { pid, key } => {
@@ -324,8 +360,8 @@ fn encode_backend(msg: &BackendMessage) -> (u8, Vec<u8>) {
             let mut buf = Vec::new();
             buf.extend_from_slice(&(cols.len() as i16).to_be_bytes());
             for col in cols {
-                buf.extend_from_slice(col.name.as_bytes());
-                buf.push(0);
+                // F-02: column name is user-derived (SELECT ... AS "x\0y").
+                push_cstring(&mut buf, &col.name);
                 buf.extend_from_slice(&col.table_oid.to_be_bytes());
                 buf.extend_from_slice(&col.column_attr.to_be_bytes());
                 buf.extend_from_slice(&col.type_oid.to_be_bytes());
@@ -345,6 +381,9 @@ fn encode_backend(msg: &BackendMessage) -> (u8, Vec<u8>) {
                         buf.extend_from_slice(&(-1i32).to_be_bytes());
                     }
                     Some(bytes) => {
+                        // DataRow uses length-prefixed bytes, NOT
+                        // C-strings — embedded NULs are legal here
+                        // and must NOT be sanitized.
                         buf.extend_from_slice(&(bytes.len() as i32).to_be_bytes());
                         buf.extend_from_slice(bytes);
                     }
@@ -354,8 +393,9 @@ fn encode_backend(msg: &BackendMessage) -> (u8, Vec<u8>) {
         }
         BackendMessage::CommandComplete(tag) => {
             let mut buf = Vec::with_capacity(tag.len() + 1);
-            buf.extend_from_slice(tag.as_bytes());
-            buf.push(0);
+            // F-02: command tag includes user-influenced row counts /
+            // statement classes; sanitize before NUL-terminating.
+            push_cstring(&mut buf, tag);
             (b'C', buf)
         }
         BackendMessage::ErrorResponse {
@@ -366,20 +406,16 @@ fn encode_backend(msg: &BackendMessage) -> (u8, Vec<u8>) {
             let mut buf = Vec::new();
             // Field 'S' = severity (ERROR, FATAL, PANIC, ...)
             buf.push(b'S');
-            buf.extend_from_slice(severity.as_bytes());
-            buf.push(0);
+            push_cstring(&mut buf, severity);
             // Field 'V' = non-localized severity (PG 9.6+).
             buf.push(b'V');
-            buf.extend_from_slice(severity.as_bytes());
-            buf.push(0);
+            push_cstring(&mut buf, severity);
             // Field 'C' = SQLSTATE.
             buf.push(b'C');
-            buf.extend_from_slice(code.as_bytes());
-            buf.push(0);
-            // Field 'M' = human message.
+            push_cstring(&mut buf, code);
+            // Field 'M' = human message — F-02 primary attack surface.
             buf.push(b'M');
-            buf.extend_from_slice(message.as_bytes());
-            buf.push(0);
+            push_cstring(&mut buf, message);
             // Trailing null terminator ends the field list.
             buf.push(0);
             (b'E', buf)
@@ -390,8 +426,8 @@ fn encode_backend(msg: &BackendMessage) -> (u8, Vec<u8>) {
             buf.extend_from_slice(b"NOTICE");
             buf.push(0);
             buf.push(b'M');
-            buf.extend_from_slice(message.as_bytes());
-            buf.push(0);
+            // F-02: message is user-influenced.
+            push_cstring(&mut buf, message);
             buf.push(0);
             (b'N', buf)
         }
@@ -512,5 +548,132 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(data[0], b'D');
+    }
+
+    // ---------------------------------------------------------------
+    // F-02 (audit doc 2026-05-06): NUL-injection rejection in PG3
+    // C-string fields. Replacement codepoint U+FFFD is emitted
+    // instead of the raw NUL so the field cannot be terminated
+    // prematurely on the wire.
+    // ---------------------------------------------------------------
+
+    fn count_nul(buf: &[u8]) -> usize {
+        buf.iter().filter(|&&b| b == 0).count()
+    }
+
+    #[tokio::test]
+    async fn pg3_nul_error_response_message_field_sanitized() {
+        let mut out: Vec<u8> = Vec::new();
+        write_frame(
+            &mut out,
+            &BackendMessage::ErrorResponse {
+                severity: "ERROR".to_string(),
+                code: "42000".to_string(),
+                message: "smuggled\0M\x00injection".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(out[0], b'E');
+        // ErrorResponse body: 4 inner C-string terminators (S/V/C/M)
+        // + 1 list-end terminator = 5 total NULs. The message field
+        // had 2 raw NULs in it; if not sanitized we'd see 7 NULs.
+        let body = &out[5..];
+        assert_eq!(
+            count_nul(body),
+            5,
+            "expected 5 NULs (4 field + 1 list-end), got {} :: body={:?}",
+            count_nul(body),
+            body
+        );
+        // U+FFFD must be present (EF BF BD).
+        assert!(
+            body.windows(3).any(|w| w == [0xEF, 0xBF, 0xBD]),
+            "expected U+FFFD substitution in body"
+        );
+    }
+
+    #[tokio::test]
+    async fn pg3_nul_notice_response_sanitized() {
+        let mut out: Vec<u8> = Vec::new();
+        write_frame(
+            &mut out,
+            &BackendMessage::NoticeResponse {
+                message: "evil\0field".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(out[0], b'N');
+        let body = &out[5..];
+        // 2 inner C-string terminators (S, M) + 1 list-end = 3 NULs.
+        assert_eq!(count_nul(body), 3);
+        assert!(body.windows(3).any(|w| w == [0xEF, 0xBF, 0xBD]));
+    }
+
+    #[tokio::test]
+    async fn pg3_nul_command_complete_sanitized() {
+        let mut out: Vec<u8> = Vec::new();
+        write_frame(
+            &mut out,
+            &BackendMessage::CommandComplete("SELECT\0;DROP".to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out[0], b'C');
+        let body = &out[5..];
+        // CommandComplete = single C-string + terminator -> 1 NUL.
+        assert_eq!(count_nul(body), 1);
+    }
+
+    #[tokio::test]
+    async fn pg3_nul_row_description_column_name_sanitized() {
+        let mut out: Vec<u8> = Vec::new();
+        write_frame(
+            &mut out,
+            &BackendMessage::RowDescription(vec![ColumnDescriptor {
+                name: "evil\0col".to_string(),
+                table_oid: 0,
+                column_attr: 0,
+                type_oid: 23,
+                type_size: 4,
+                type_mod: -1,
+                format: 0,
+            }]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out[0], b'T');
+        // The column-name region (after the i16 field count, before
+        // the OIDs) must contain exactly one terminator, not two.
+        let body = &out[5..];
+        // Skip 2 bytes (column count i16); next bytes up to the
+        // first NUL are the column name.
+        let name_region = &body[2..];
+        let first_nul = name_region.iter().position(|&b| b == 0).unwrap();
+        assert!(
+            name_region[..first_nul]
+                .windows(3)
+                .any(|w| w == [0xEF, 0xBF, 0xBD]),
+            "U+FFFD missing from sanitized column name"
+        );
+    }
+
+    #[test]
+    fn sanitize_cstring_fastpath_no_nul() {
+        let s = "no nuls here";
+        let out = sanitize_cstring_bytes(s.as_bytes());
+        assert_eq!(out, s.as_bytes());
+    }
+
+    #[test]
+    fn sanitize_cstring_substitutes_nul_with_replacement_codepoint() {
+        let s = b"a\0b\0c";
+        let out = sanitize_cstring_bytes(s);
+        // Each NUL becomes 3 bytes; total = 1 + 3 + 1 + 3 + 1 = 9.
+        assert_eq!(out.len(), 9);
+        assert!(!out.contains(&0));
+        assert_eq!(&out[1..4], &[0xEF, 0xBF, 0xBD]);
+        assert_eq!(&out[5..8], &[0xEF, 0xBF, 0xBD]);
     }
 }

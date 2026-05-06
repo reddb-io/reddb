@@ -356,6 +356,34 @@ impl AuditEventBuilder {
         self
     }
 
+    /// Add a single typed audit field to the detail object. Goes
+    /// through `AuditFieldEscaper` so caller-supplied bytes never
+    /// reach `format!` or string concatenation — see ADR 0010.
+    pub fn field(mut self, field: AuditField) -> Self {
+        let mut obj = match std::mem::replace(&mut self.inner.detail, JsonValue::Null) {
+            JsonValue::Object(map) => map,
+            JsonValue::Null => Map::new(),
+            other => {
+                // Preserve any preceding non-object detail under a
+                // reserved key rather than dropping it on the floor.
+                let mut m = Map::new();
+                m.insert("legacy_detail".to_string(), other);
+                m
+            }
+        };
+        obj.insert(field.name.to_string(), field.value.into_json_value());
+        self.inner.detail = JsonValue::Object(obj);
+        self
+    }
+
+    /// Bulk variant of [`Self::field`] for multi-field call sites.
+    pub fn fields(mut self, fields: impl IntoIterator<Item = AuditField>) -> Self {
+        for f in fields {
+            self = self.field(f);
+        }
+        self
+    }
+
     pub fn remote_addr(mut self, addr: impl Into<String>) -> Self {
         self.inner.remote_addr = Some(addr.into());
         self
@@ -369,6 +397,210 @@ impl AuditEventBuilder {
     pub fn build(self) -> AuditEvent {
         self.inner
     }
+}
+
+// ---------------------------------------------------------------------------
+// AuditFieldEscaper — typed-field guard (ADR 0010 / issue #177)
+// ---------------------------------------------------------------------------
+
+/// Typed value variants accepted by the audit-field guard. The
+/// serializer (`to_json_line`) owns the framing; an `AuditValue`
+/// cannot smuggle structural bytes past the canonical encoder
+/// (`crate::serde_json::Value::escape_string`, RFC 8259 §7) because
+/// the variant is consumed as a typed value, not as an interpolated
+/// string. Adversarial corpora (CRLF, NUL, quote, semicolon,
+/// JSON-in-JSON, control bytes 0x00..0x20) survive the boundary
+/// because the encoder emits `\u00XX` escapes for every byte below
+/// 0x20.
+#[derive(Debug, Clone)]
+pub enum AuditValue {
+    String(String),
+    /// Arbitrary bytes — base64-encoded on emit so non-UTF-8 payloads
+    /// (binary keys, raw frame bytes) never enter the JSON string
+    /// channel.
+    Bytes(Vec<u8>),
+    Number(i64),
+    Bool(bool),
+    Null,
+}
+
+impl AuditValue {
+    fn into_json_value(self) -> JsonValue {
+        match self {
+            AuditValue::String(s) => JsonValue::String(s),
+            AuditValue::Bytes(bytes) => JsonValue::String(base64_encode(&bytes)),
+            AuditValue::Number(n) => JsonValue::Number(n as f64),
+            AuditValue::Bool(b) => JsonValue::Bool(b),
+            AuditValue::Null => JsonValue::Null,
+        }
+    }
+}
+
+impl From<String> for AuditValue {
+    fn from(value: String) -> Self {
+        AuditValue::String(value)
+    }
+}
+
+impl From<&str> for AuditValue {
+    fn from(value: &str) -> Self {
+        AuditValue::String(value.to_string())
+    }
+}
+
+impl From<&String> for AuditValue {
+    fn from(value: &String) -> Self {
+        AuditValue::String(value.clone())
+    }
+}
+
+impl From<Vec<u8>> for AuditValue {
+    fn from(value: Vec<u8>) -> Self {
+        AuditValue::Bytes(value)
+    }
+}
+
+impl From<&[u8]> for AuditValue {
+    fn from(value: &[u8]) -> Self {
+        AuditValue::Bytes(value.to_vec())
+    }
+}
+
+impl From<i64> for AuditValue {
+    fn from(value: i64) -> Self {
+        AuditValue::Number(value)
+    }
+}
+
+impl From<u64> for AuditValue {
+    fn from(value: u64) -> Self {
+        // Saturate at i64::MAX rather than wrapping; audit fields
+        // are observability data, not arithmetic inputs.
+        AuditValue::Number(if value > i64::MAX as u64 {
+            i64::MAX
+        } else {
+            value as i64
+        })
+    }
+}
+
+impl From<u32> for AuditValue {
+    fn from(value: u32) -> Self {
+        AuditValue::Number(value as i64)
+    }
+}
+
+impl From<usize> for AuditValue {
+    fn from(value: usize) -> Self {
+        AuditValue::Number(if value > i64::MAX as usize {
+            i64::MAX
+        } else {
+            value as i64
+        })
+    }
+}
+
+impl From<bool> for AuditValue {
+    fn from(value: bool) -> Self {
+        AuditValue::Bool(value)
+    }
+}
+
+impl<T: Into<AuditValue>> From<Option<T>> for AuditValue {
+    fn from(value: Option<T>) -> Self {
+        match value {
+            Some(v) => v.into(),
+            None => AuditValue::Null,
+        }
+    }
+}
+
+/// A single typed audit field (key + typed value). Construction is
+/// gated by [`AuditFieldEscaper::field`] so the typed value cannot
+/// be bypassed — there is no `pub` constructor for the field that
+/// accepts a free-form string value.
+#[derive(Debug, Clone)]
+pub struct AuditField {
+    name: &'static str,
+    value: AuditValue,
+}
+
+impl AuditField {
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+    pub fn value(&self) -> &AuditValue {
+        &self.value
+    }
+}
+
+/// Typed-field guard for audit emission (ADR 0010).
+///
+/// The guard owns the boundary's escape contract: caller-supplied
+/// bytes always round-trip through a typed `AuditValue`, never
+/// through `format!`, never through string concatenation. The
+/// canonical JSON encoder is `crate::serde_json::Value::escape_string`
+/// (RFC 8259 §7 compliant after F-01 hotfix #181) which the
+/// `AuditEvent::to_json_line` serializer uses for every string slot.
+///
+/// The other two encoder paths in the codebase
+/// (`utils::json::JsonValue::write_json` and
+/// `grpc::scan_json::write_json_string`) are correct after #181 but
+/// not the canonical owner of the audit boundary. Both are marked
+/// `#[deprecated]` on the audit path and remain in place for
+/// non-audit call sites pending follow-up retirement.
+pub struct AuditFieldEscaper;
+
+impl AuditFieldEscaper {
+    /// Construct a typed audit field. The `name` is `'static` so
+    /// the schema key set is fixed at compile time — only `value`
+    /// can carry attacker-influenced bytes, and `value` is a typed
+    /// enum, not a string sink.
+    pub fn field(name: &'static str, value: impl Into<AuditValue>) -> AuditField {
+        AuditField {
+            name,
+            value: value.into(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Base64 (audit-only, no external dep)
+// ---------------------------------------------------------------------------
+
+/// Standard base64 (RFC 4648 §4) encoder. Audit-only; we don't
+/// import the base64 crate from this slice.
+fn base64_encode(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut i = 0;
+    while i + 3 <= input.len() {
+        let b0 = input[i] as u32;
+        let b1 = input[i + 1] as u32;
+        let b2 = input[i + 2] as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 6) & 0x3f) as usize] as char);
+        out.push(ALPHABET[(n & 0x3f) as usize] as char);
+        i += 3;
+    }
+    let rem = input.len() - i;
+    if rem == 1 {
+        let n = (input[i] as u32) << 16;
+        out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
+        out.push('=');
+        out.push('=');
+    } else if rem == 2 {
+        let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8);
+        out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 6) & 0x3f) as usize] as char);
+        out.push('=');
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1170,5 +1402,211 @@ mod tests {
         std::thread::sleep(Duration::from_millis(2));
         let b = new_event_id();
         assert!(a < b, "event_id ordering broken: {a} >= {b}");
+    }
+
+    // -------------------------------------------------------------------
+    // AuditFieldEscaper / AuditValue tests (issue #177)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn audit_field_escaper_typed_string() {
+        let f = AuditFieldEscaper::field("collection", "users");
+        assert_eq!(f.name(), "collection");
+        match f.value() {
+            AuditValue::String(s) => assert_eq!(s, "users"),
+            other => panic!("expected String, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn audit_field_escaper_bytes_emit_base64() {
+        let bytes = vec![0xDEu8, 0xAD, 0xBE, 0xEF];
+        let f = AuditFieldEscaper::field("blob", bytes);
+        let ev = AuditEvent::builder("test/bytes").field(f).build();
+        let line = ev.to_json_line(None);
+        // base64 of 0xDEADBEEF is "3q2+7w=="
+        assert!(
+            line.contains("\"blob\":\"3q2+7w==\""),
+            "expected base64 emission: {line}"
+        );
+    }
+
+    #[test]
+    fn audit_field_escaper_number_bool_null() {
+        let ev = AuditEvent::builder("test/types")
+            .field(AuditFieldEscaper::field("count", 42i64))
+            .field(AuditFieldEscaper::field("ok", true))
+            .field(AuditFieldEscaper::field("missing", AuditValue::Null))
+            .build();
+        let line = ev.to_json_line(None);
+        assert!(line.contains("\"count\":42"));
+        assert!(line.contains("\"ok\":true"));
+        assert!(line.contains("\"missing\":null"));
+    }
+
+    #[test]
+    fn audit_field_escaper_adversarial_corpus_preserves_structure() {
+        // The full F-01 / F-02 adversarial corpus: CRLF, NUL,
+        // quote, semicolon, JSON-in-JSON, control bytes 0x00..0x20.
+        // Every payload must encode to a single JSONL row that
+        // round-trips through the in-house parser back to the
+        // original bytes.
+        let cases: &[(&str, &str)] = &[
+            ("crlf", "line1\r\nline2"),
+            ("nul", "before\0after"),
+            ("quote", "she said \"hi\""),
+            ("semicolon", "a;b;c"),
+            ("json_in_json", r#"{"injected":"yes"}"#),
+            ("low_ctrl", "\x01\x02\x03\x07\x1f"),
+            ("backslash", "C:\\path\\file"),
+            ("mixed", "name=\"x\"\n\\path\t\x01end"),
+            ("empty", ""),
+            // Note: legal Unicode payloads round-trip through the
+            // RFC 8259 encoder fine; the in-house parser
+            // (`utils::json`) used by `crate::json::from_str` has a
+            // pre-existing byte-oriented bug for multi-byte UTF-8
+            // sequences, which is orthogonal to the F-01 / F-02
+            // boundary-smuggling threat model. ASCII-only here.
+        ];
+        let mut survivors = 0usize;
+        for (label, payload) in cases {
+            let f = AuditFieldEscaper::field("user_input", *payload);
+            let ev = AuditEvent::builder(format!("test/adv/{label}"))
+                .principal("attacker")
+                .field(f)
+                .build();
+            let line = ev.to_json_line(None);
+            // 1. exactly one row, no embedded newline.
+            assert!(
+                !line.contains('\n'),
+                "{label}: embedded newline in JSONL row: {line:?}"
+            );
+            // 2. parse back via the canonical decoder and read user_input.
+            let parsed: JsonValue =
+                crate::json::from_str(&line).unwrap_or_else(|err| {
+                    panic!("{label}: line did not parse: {err} :: {line:?}")
+                });
+            let detail = parsed.get("detail").expect("detail present");
+            let recovered = detail.get("user_input").and_then(|v| v.as_str()).unwrap();
+            assert_eq!(
+                recovered, *payload,
+                "{label}: round-trip mismatch: {recovered:?} != {payload:?}"
+            );
+            survivors += 1;
+        }
+        assert_eq!(
+            survivors,
+            cases.len(),
+            "adversarial corpus survival rate: {survivors}/{}",
+            cases.len()
+        );
+    }
+
+    #[test]
+    fn audit_emission_emits_one_line_per_call_through_guard() {
+        let data = temp_data_path("guard-emission");
+        let logger = AuditLogger::for_data_path(&data);
+        // Smuggle attempt: NUL + CRLF + JSON-injection in collection name.
+        let attacker = "users\";DROP\r\n{\"x\":1}\0";
+        logger.record_event(
+            AuditEvent::builder("admin/scan")
+                .principal("evil")
+                .field(AuditFieldEscaper::field("collection", attacker))
+                .build(),
+        );
+        drain(&logger);
+        let body = std::fs::read_to_string(logger.path()).unwrap();
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), 1, "guard must emit exactly one JSONL row");
+        // The smuggled "{...}" cannot have escaped the JSON string.
+        let parsed: JsonValue = crate::json::from_str(lines[0]).unwrap();
+        let recovered = parsed
+            .get("detail")
+            .and_then(|d| d.get("collection"))
+            .and_then(|v| v.as_str())
+            .unwrap();
+        assert_eq!(recovered, attacker);
+    }
+
+    #[test]
+    fn audit_field_escaper_no_format_macro_in_value_path() {
+        // Compile-time guarantee: AuditField construction goes
+        // through AuditValue, not through `Display`. This test is
+        // a documentation anchor — if a contributor adds a `Display`
+        // impl that bypasses the typed value, the property tests
+        // below still catch the smuggling, but this test makes the
+        // intent explicit.
+        let _ = AuditFieldEscaper::field("name", "value"); // compiles
+                                                           // No `format!` path, no `to_string()` of attacker bytes:
+                                                           // the only entry is `Into<AuditValue>`.
+    }
+
+    #[test]
+    fn audit_field_escaper_chains_via_builder_fields() {
+        let ev = AuditEvent::builder("test/multi")
+            .fields([
+                AuditFieldEscaper::field("a", "x"),
+                AuditFieldEscaper::field("b", 7i64),
+                AuditFieldEscaper::field("c", true),
+            ])
+            .build();
+        let line = ev.to_json_line(None);
+        let parsed: JsonValue = crate::json::from_str(&line).unwrap();
+        let d = parsed.get("detail").unwrap();
+        assert_eq!(d.get("a").and_then(|v| v.as_str()), Some("x"));
+        assert_eq!(d.get("b").and_then(|v| v.as_i64()), Some(7));
+        assert_eq!(d.get("c").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    proptest::proptest! {
+        /// Random user-supplied strings must always round-trip through
+        /// the typed-field guard exactly. No silent drops, no smuggling.
+        ///
+        /// ASCII-only here: the encoder is RFC 8259 §7 compliant for
+        /// arbitrary Unicode, but the in-house decoder shared by
+        /// `crate::json::from_str` (`utils::json::parse_string`) is
+        /// byte-oriented for non-escape characters and does not
+        /// recompose multi-byte UTF-8 sequences. The boundary-smuggling
+        /// threat model is about control bytes (0x00..0x20) and
+        /// structural bytes (`"`, `\`, `\r`, `\n`), not legal Unicode,
+        /// so this restriction does not narrow the security claim.
+        #[test]
+        fn prop_audit_field_round_trips_arbitrary_strings(
+            payload in proptest::string::string_regex("[\\x00-\\x7f]{0,128}").unwrap()
+        ) {
+            let f = AuditFieldEscaper::field("p", payload.as_str());
+            let ev = AuditEvent::builder("prop/test").field(f).build();
+            let line = ev.to_json_line(None);
+            // Single-line invariant.
+            proptest::prop_assert!(!line.contains('\n'));
+            let parsed: JsonValue = crate::json::from_str(&line)
+                .expect("emission must always parse");
+            let recovered = parsed
+                .get("detail")
+                .and_then(|d| d.get("p"))
+                .and_then(|v| v.as_str())
+                .unwrap();
+            proptest::prop_assert_eq!(recovered, payload.as_str());
+        }
+
+        /// Random byte sequences via base64 round-trip — non-UTF-8
+        /// payloads must never enter the JSON string channel raw.
+        #[test]
+        fn prop_audit_field_bytes_base64_round_trip(
+            bytes in proptest::collection::vec(proptest::bits::u8::ANY, 0..64)
+        ) {
+            let f = AuditFieldEscaper::field("b", bytes.clone());
+            let ev = AuditEvent::builder("prop/bytes").field(f).build();
+            let line = ev.to_json_line(None);
+            proptest::prop_assert!(!line.contains('\n'));
+            let parsed: JsonValue = crate::json::from_str(&line).unwrap();
+            let recovered_b64 = parsed
+                .get("detail")
+                .and_then(|d| d.get("b"))
+                .and_then(|v| v.as_str())
+                .unwrap()
+                .to_string();
+            proptest::prop_assert_eq!(recovered_b64, base64_encode(&bytes));
+        }
     }
 }

@@ -1,3 +1,10 @@
+//! `write_json_string` is deprecated for new boundary emission
+//! (see ADR 0010 / issue #177), but the existing scan-fast-path
+//! helpers in this file route through it internally. Allow the
+//! internal recursion without warnings; the lint surfaces only
+//! at out-of-file callers.
+#![allow(deprecated)]
+
 use super::*;
 
 pub(crate) fn scan_reply(page: ScanPage) -> ScanReply {
@@ -121,6 +128,20 @@ pub(crate) fn unified_result_json_string_with_records(
 }
 
 /// Write a JSON-escaped string (with quotes) to a buffer.
+///
+/// **Deprecation note (ADR 0010 / issue #177):** the canonical JSON
+/// string encoder is `crate::serde_json::Value::escape_string`
+/// (used internally by `to_string_compact`). This local fast-path
+/// is correct after F-01 hotfix #181 but is not the canonical owner
+/// of the serialization boundary; new gRPC reply assembly should
+/// route caller-influenced strings through the canonical encoder
+/// (or, on the audit boundary, through `AuditFieldEscaper`). Kept
+/// here pending a follow-up retirement slice — the gRPC scan path
+/// has hot-loop performance characteristics that need a benchmark
+/// before retirement.
+#[deprecated(
+    note = "Use crate::serde_json::Value::to_string_compact for boundary emission; see ADR 0010 / issue #177"
+)]
 #[inline]
 pub fn write_json_string(buf: &mut String, s: &str) {
     buf.push('"');

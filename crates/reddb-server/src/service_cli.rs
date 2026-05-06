@@ -914,12 +914,20 @@ fn handle_sighup_reload(runtime: &RedDBRuntime) {
         ts_unix_ms = now_ms,
         "SIGHUP received; secrets will be re-read from *_FILE on next access"
     );
-    runtime.audit_log().record(
-        "config/sighup_reload",
-        "system",
-        "secrets",
-        "ok",
-        crate::json::Value::Null,
+    // Routed through AuditFieldEscaper (ADR 0010 / issue #177) so
+    // every emission goes through the typed-field guard. The
+    // arguments here are static, but using the typed entry point
+    // keeps the discipline uniform across call sites.
+    use crate::runtime::audit_log::{
+        AuditAuthSource, AuditEvent, AuditFieldEscaper, Outcome,
+    };
+    runtime.audit_log().record_event(
+        AuditEvent::builder("config/sighup_reload")
+            .source(AuditAuthSource::System)
+            .resource("secrets")
+            .outcome(Outcome::Success)
+            .field(AuditFieldEscaper::field("ts_unix_ms", now_ms))
+            .build(),
     );
 }
 
