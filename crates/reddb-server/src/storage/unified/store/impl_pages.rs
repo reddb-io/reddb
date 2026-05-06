@@ -126,6 +126,13 @@ impl UnifiedStore {
         self.pager.as_ref()
     }
 
+    /// Borrow the immutable store configuration. Runtime hooks (e.g. the
+    /// `auto_index_id` first-insert hook in `MutationEngine`) read knobs
+    /// off this struct without going through the legacy global config tree.
+    pub fn config(&self) -> &UnifiedStoreConfig {
+        &self.config
+    }
+
     pub fn with_config(config: UnifiedStoreConfig) -> Self {
         Self {
             config,

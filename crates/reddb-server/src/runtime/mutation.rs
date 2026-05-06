@@ -133,6 +133,13 @@ impl<'rt> MutationEngine<'rt> {
             );
         }
 
+        // First-insert hook: if this row carries a column named `id` and
+        // no index covers `id` yet on this collection, build a HASH index
+        // implicitly so subsequent `WHERE id = N` lookups hit the
+        // hash-index fast path instead of the O(N) zone scan. See #112
+        // and `docs/perf/delete-sequential-2026-05-06.md`.
+        self.maybe_auto_index_id(&collection, &row.fields);
+
         // Secondary indexes (not handled by insert_auto)
         self.runtime
             .index_store_ref()
@@ -158,6 +165,16 @@ impl<'rt> MutationEngine<'rt> {
         rows: Vec<MutationRow>,
     ) -> RedDBResult<MutationResult> {
         let n = rows.len();
+
+        // First-insert hook for #112: if any row in the batch carries an
+        // `id` column and no index covers `id` yet, register a HASH
+        // index up front so the `index_entity_insert_batch` pass below
+        // populates it. Must run BEFORE the `has_secondary_indexes`
+        // probe — otherwise the field_snapshots clone is skipped and
+        // the brand-new index never sees the rows.
+        if let Some(first) = rows.first() {
+            self.maybe_auto_index_id(&collection, &first.fields);
+        }
 
         // If the collection has no registered secondary indexes the whole
         // `field_snapshots.push(row.fields.clone())` work is pure waste:
@@ -306,6 +323,78 @@ impl<'rt> MutationEngine<'rt> {
             .cdc_emit_insert_batch_no_cache_invalidate(&collection, &ids, "table");
 
         Ok(MutationResult { ids })
+    }
+
+    // ── Implicit primary-key index (#112) ────────────────────────────────
+    //
+    // When the first insert into a fresh collection carries a column
+    // named `id`, register a HASH index on it transparently. PG and
+    // Mongo both auto-index `id` (PG via `PRIMARY KEY`, Mongo via
+    // `_id`); RedDB previously did not, so `WHERE id = N` fell through
+    // to a full segment scan. Per the perf research in
+    // `docs/perf/delete-sequential-2026-05-06.md`, this opens a 4× gap
+    // on `delete_sequential` at 10k items.
+    //
+    // Match is **case-sensitive `id`** to start (conservative — does
+    // not auto-index `Id`, `ID`, or `red_entity_id`). The hook is a
+    // no-op once any index already covers the `id` column on the
+    // collection (whether auto-created here, or via explicit
+    // `CREATE INDEX ... USING HASH/BTREE`).
+    //
+    // Opt-out: set `UnifiedStoreConfig::auto_index_id = false`.
+    //
+    // Build cost is zero entities here — the hook fires before the
+    // first row is indexed, so the standard
+    // `index_entity_insert{,_batch}` call that follows populates it.
+    fn maybe_auto_index_id(&self, collection: &str, fields: &[(String, Value)]) {
+        if !self.store.config().auto_index_id {
+            return;
+        }
+        if !fields.iter().any(|(name, _)| name == "id") {
+            return;
+        }
+        let index_store = self.runtime.index_store_ref();
+        if index_store.find_index_for_column(collection, "id").is_some() {
+            return;
+        }
+
+        let columns = vec!["id".to_string()];
+        // Build with no entities — the caller's per-row index pass
+        // (`index_entity_insert` for single, `index_entity_insert_batch`
+        // for batch) is what populates the index. We cannot back-fill
+        // here because the rows haven't reached the segment yet.
+        if let Err(err) = index_store.create_index(
+            "idx_id",
+            collection,
+            &columns,
+            super::index_store::IndexMethodKind::Hash,
+            /* unique */ false,
+            &[],
+        ) {
+            // Surface the error in tracing but don't fail the insert —
+            // the row still lands; subsequent reads merely fall back to
+            // the scan path. Likely cause: the underlying hash index
+            // already exists from a previous registration that wasn't
+            // cleaned up.
+            tracing::debug!(
+                target: "reddb::runtime::auto_index_id",
+                collection = %collection,
+                error = %err,
+                "auto_index_id: failed to create implicit hash index on `id`"
+            );
+            return;
+        }
+        index_store.register(super::index_store::RegisteredIndex {
+            name: "idx_id".to_string(),
+            collection: collection.to_string(),
+            columns,
+            method: super::index_store::IndexMethodKind::Hash,
+            unique: false,
+        });
+        // Plan-cache invalidation so subsequent SELECT/UPDATE/DELETE
+        // pickers see the new index when planning. Mirrors the explicit
+        // `CREATE INDEX` path in `impl_ddl::execute_create_index`.
+        self.runtime.invalidate_plan_cache();
     }
 }
 
