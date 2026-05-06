@@ -209,10 +209,12 @@ fn happy_search_similar_vector_minimal() {
 
 #[test]
 fn happy_search_similar_vector_full_clauses() {
-    // Drops `USING openai` — that branch is blocked by bug #108.
-    // The non-USING clauses cover LIMIT + MIN_SCORE end-to-end.
+    // Kitchen-sink form: LIMIT + MIN_SCORE + USING. The USING
+    // branch is the regression guard for bug #108 — provider must
+    // round-trip via `Token::Using` rather than the keyword-vs-ident
+    // consumer that previously dropped it silently.
     let q = parse_query(
-        "SEARCH SIMILAR [0.1, 0.2] COLLECTION embeddings LIMIT 25 MIN_SCORE 0.75",
+        "SEARCH SIMILAR [0.1, 0.2] COLLECTION embeddings LIMIT 25 MIN_SCORE 0.75 USING openai",
     );
     match q {
         QueryExpr::SearchCommand(SearchCommand::Similar {
@@ -225,13 +227,7 @@ fn happy_search_similar_vector_full_clauses() {
             assert_eq!(collection, "embeddings");
             assert_eq!(limit, 25);
             assert!((min_score - 0.75).abs() < 1e-4);
-            // FIXME: bug — fix in #108. `USING <provider>` after
-            // SEARCH SIMILAR is parsed via `consume_search_ident`,
-            // which never matches `Token::Using`. So `provider` is
-            // always `None` even when the source spells `USING`.
-            // Once #108 lands, append ` USING openai` to the
-            // input above and assert `provider == Some("openai")`.
-            assert!(provider.is_none());
+            assert_eq!(provider.as_deref(), Some("openai"));
         }
         other => panic!("expected SearchCommand::Similar, got {other:?}"),
     }
@@ -371,13 +367,11 @@ fn happy_insert_auto_embed_default_provider() {
     }
 }
 
-// FIXME: bug — fix in #108. `parse_with_clauses` matches `USING`
-// and `MODEL` via `consume_ident_ci`, which never fires for these
-// reserved keyword tokens. Re-enable (drop `#[ignore]`) once #108
-// lands. The test body documents the post-fix expected AST so the
-// fix can land with confidence.
+// Regression guard for #108: `parse_with_clauses` now matches
+// `USING` via `Token::Using` (the typed-keyword consumer), so the
+// optional `USING <provider> MODEL '<m>'` suffix on
+// `WITH AUTO EMBED` parses end-to-end.
 #[test]
-#[ignore = "blocked by #108: WITH AUTO EMBED ... USING <provider> never matches Token::Using"]
 fn happy_insert_auto_embed_with_provider_and_model() {
     let q = parse_query(
         "INSERT INTO docs (id, body) VALUES (1, 'hello') \

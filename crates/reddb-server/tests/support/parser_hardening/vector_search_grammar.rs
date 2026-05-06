@@ -39,11 +39,6 @@ pub fn collection_name() -> impl Strategy<Value = String> {
 /// Generic "provider" identifier. Real providers are `openai`,
 /// `anthropic`, `ollama`, …; generated names dodge the secret-redactor
 /// by using a `p_` prefix.
-///
-/// Currently dead-code (the strategies that wire it land back on
-/// the moment #108 lands and `USING <provider>` parses again);
-/// kept here so the wiring is one line away.
-#[allow(dead_code)]
 pub fn provider_name() -> impl Strategy<Value = String> {
     "p_[a-z0-9]{1,8}".prop_map(|s| s)
 }
@@ -53,9 +48,6 @@ pub fn provider_name() -> impl Strategy<Value = String> {
 /// `text-embedding-3-small` aren't secrets, but we keep generated
 /// inputs synthetic so a future stricter redactor doesn't trip the
 /// snapshot lint.
-///
-/// Currently dead-code; same rationale as `provider_name`.
-#[allow(dead_code)]
 pub fn model_name() -> impl Strategy<Value = String> {
     "m_[a-z0-9]{1,10}".prop_map(|s| s)
 }
@@ -99,31 +91,28 @@ pub fn text_query_lit() -> impl Strategy<Value = String> {
 // Strategy 1: SEARCH SIMILAR [floats] (classic vector search)
 // ============================================================
 
-/// `SEARCH SIMILAR [v1, v2, …] COLLECTION col [LIMIT n] [MIN_SCORE f]`.
+/// `SEARCH SIMILAR [v1, v2, …] COLLECTION col [LIMIT n] [MIN_SCORE f] [USING provider]`.
 /// Dimensional sweep covers 1..32 — enough to catch single-element
 /// degenerate cases, mid-sized embeddings, and the comma-loop edge
 /// without bloating shrinking time.
-///
-/// FIXME: bug — fix in #108. `parse_search_similar` parses the
-/// optional `USING <provider>` clause via `consume_search_ident`,
-/// which only matches `Token::Ident`. Because `USING` is a reserved
-/// keyword (`Token::Using`), the branch never fires and the parser
-/// bails. Once #108 lands, re-add `[USING provider]` as an optional
-/// suffix below.
 pub fn search_similar_vector_stmt() -> impl Strategy<Value = String> {
     (
         vector_literal(1..=32),
         collection_name(),
         proptest::option::of(1u32..1000),
         proptest::option::of(finite_float_lit()),
+        proptest::option::of(provider_name()),
     )
-        .prop_map(|(vec_lit, coll, limit, min_score)| {
+        .prop_map(|(vec_lit, coll, limit, min_score, provider)| {
             let mut s = format!("SEARCH SIMILAR {} COLLECTION {}", vec_lit, coll);
             if let Some(l) = limit {
                 s.push_str(&format!(" LIMIT {}", l));
             }
             if let Some(ms) = min_score {
                 s.push_str(&format!(" MIN_SCORE {}", ms));
+            }
+            if let Some(p) = provider {
+                s.push_str(&format!(" USING {}", p));
             }
             s
         })
@@ -133,25 +122,25 @@ pub fn search_similar_vector_stmt() -> impl Strategy<Value = String> {
 // Strategy 2: SEARCH SIMILAR TEXT 'query' (semantic search)
 // ============================================================
 
-/// `SEARCH SIMILAR TEXT 'query' COLLECTION col [LIMIT n] [MIN_SCORE f]`.
-///
-/// FIXME: bug — fix in #108. Same `USING` keyword-vs-ident
-/// regression as `search_similar_vector_stmt` above. Re-add
-/// `[USING provider]` once #108 lands.
+/// `SEARCH SIMILAR TEXT 'query' COLLECTION col [LIMIT n] [MIN_SCORE f] [USING provider]`.
 pub fn search_similar_text_stmt() -> impl Strategy<Value = String> {
     (
         text_query_lit(),
         collection_name(),
         proptest::option::of(1u32..1000),
         proptest::option::of(finite_float_lit()),
+        proptest::option::of(provider_name()),
     )
-        .prop_map(|(text, coll, limit, min_score)| {
+        .prop_map(|(text, coll, limit, min_score, provider)| {
             let mut s = format!("SEARCH SIMILAR TEXT {} COLLECTION {}", text, coll);
             if let Some(l) = limit {
                 s.push_str(&format!(" LIMIT {}", l));
             }
             if let Some(ms) = min_score {
                 s.push_str(&format!(" MIN_SCORE {}", ms));
+            }
+            if let Some(p) = provider {
+                s.push_str(&format!(" USING {}", p));
             }
             s
         })
@@ -161,19 +150,12 @@ pub fn search_similar_text_stmt() -> impl Strategy<Value = String> {
 // Strategy 3: INSERT … WITH AUTO EMBED USING <provider>
 // ============================================================
 
-/// `INSERT INTO t (col_0[, col_1]) VALUES ('a'[, 'b']) WITH AUTO EMBED (field…)`.
+/// `INSERT INTO t (col_0[, col_1]) VALUES ('a'[, 'b']) WITH AUTO EMBED (field…) [USING provider] [MODEL '…']`.
 ///
 /// Generates 1..3 columns, matching values, 1..3 embed-target
-/// fields drawn from the same column pool.
-///
-/// FIXME: bug — fix in #108. `parse_with_clauses` parses
-/// `USING <provider>` and `MODEL '…'` via `consume_ident_ci`, which
-/// only matches `Token::Ident`. Because `USING` and `MODEL` are
-/// reserved keywords, the branches never fire and the parser bails.
-/// Once #108 lands, re-add `[USING provider]` and `[MODEL '…']` as
-/// optional suffixes below. `model_name()` is intentionally kept
-/// in the strategy module so that the moment #108 lands, no
-/// follow-up code wiring is needed.
+/// fields drawn from the same column pool. The `USING` / `MODEL`
+/// suffixes are independently optional so the proptest sweep
+/// exercises each combination.
 pub fn insert_auto_embed_stmt() -> impl Strategy<Value = String> {
     (
         ident(),
@@ -182,19 +164,28 @@ pub fn insert_auto_embed_stmt() -> impl Strategy<Value = String> {
         // first `n_embed` columns. Keeps the embed list always a
         // valid subset of declared columns.
         1usize..=3,
+        proptest::option::of(provider_name()),
+        proptest::option::of(model_name()),
     )
-        .prop_map(|(table, n_cols, n_embed_raw)| {
+        .prop_map(|(table, n_cols, n_embed_raw, provider, model)| {
             let n_embed = n_embed_raw.min(n_cols);
             let cols: Vec<String> = (0..n_cols).map(|i| format!("col_{}", i)).collect();
             let vals: Vec<String> = (0..n_cols).map(|i| format!("'v_{}'", i)).collect();
             let embed_fields: Vec<String> = cols.iter().take(n_embed).cloned().collect();
-            format!(
+            let mut s = format!(
                 "INSERT INTO {} ({}) VALUES ({}) WITH AUTO EMBED ({})",
                 table,
                 cols.join(", "),
                 vals.join(", "),
                 embed_fields.join(", "),
-            )
+            );
+            if let Some(p) = provider {
+                s.push_str(&format!(" USING {}", p));
+            }
+            if let Some(m) = model {
+                s.push_str(&format!(" MODEL '{}'", m));
+            }
+            s
         })
 }
 
