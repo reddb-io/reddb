@@ -112,3 +112,120 @@ pub fn migration_adversarial_inputs() -> Vec<(&'static str, String)> {
         ),
     ]
 }
+
+/// Adversarial inputs that target the Queue DSL surface (issue
+/// #103). Each entry probes a different parser arm in
+/// `parse_create_queue_body` / `parse_queue_command` /
+/// `parse_drop_queue_body`. None should panic; all should either
+/// parse or return an `Err`.
+pub fn queue_adversarial_inputs() -> Vec<(&'static str, String)> {
+    vec![
+        // CREATE QUEUE — invalid MAX_SIZE values.
+        ("queue_create_eof_after_keyword", "CREATE QUEUE".to_string()),
+        ("queue_create_missing_name", "CREATE QUEUE MAX_SIZE 100".to_string()),
+        (
+            "queue_create_max_size_negative",
+            "CREATE QUEUE q MAX_SIZE -1".to_string(),
+        ),
+        (
+            "queue_create_max_size_zero",
+            "CREATE QUEUE q MAX_SIZE 0".to_string(),
+        ),
+        (
+            "queue_create_max_size_non_numeric",
+            "CREATE QUEUE q MAX_SIZE forever".to_string(),
+        ),
+        (
+            "queue_create_max_size_eof",
+            "CREATE QUEUE q MAX_SIZE".to_string(),
+        ),
+        (
+            "queue_create_max_size_overflow",
+            "CREATE QUEUE q MAX_SIZE 99999999999999999999".to_string(),
+        ),
+        (
+            "queue_create_dangling_with",
+            "CREATE QUEUE q WITH".to_string(),
+        ),
+        (
+            "queue_create_with_ttl_no_value",
+            "CREATE QUEUE q WITH TTL".to_string(),
+        ),
+        (
+            "queue_create_with_dlq_no_name",
+            "CREATE QUEUE q WITH DLQ".to_string(),
+        ),
+        // PUSH — malformed and oversized payloads.
+        ("queue_push_eof", "QUEUE PUSH".to_string()),
+        ("queue_push_missing_payload", "QUEUE PUSH q".to_string()),
+        (
+            "queue_push_unterminated_string",
+            "QUEUE PUSH q 'no closing".to_string(),
+        ),
+        (
+            "queue_push_unbalanced_json",
+            "QUEUE PUSH q {job: 'hello'".to_string(),
+        ),
+        (
+            "queue_push_oversized_string_payload",
+            format!("QUEUE PUSH q '{}'", "x".repeat(2 * 1024 * 1024)),
+        ),
+        (
+            "queue_push_oversized_input",
+            "QUEUE PUSH q ".to_string() + &"x".repeat(2 * 1024 * 1024),
+        ),
+        (
+            "queue_push_priority_no_value",
+            "QUEUE PUSH q 'x' PRIORITY".to_string(),
+        ),
+        // POP / aliases.
+        ("queue_pop_eof", "QUEUE POP".to_string()),
+        (
+            "queue_pop_count_no_value",
+            "QUEUE POP q COUNT".to_string(),
+        ),
+        // Consumer group syntax.
+        ("queue_group_create_eof", "QUEUE GROUP CREATE".to_string()),
+        (
+            "queue_group_create_missing_group",
+            "QUEUE GROUP CREATE q".to_string(),
+        ),
+        (
+            "queue_read_missing_group_keyword",
+            "QUEUE READ q workers".to_string(),
+        ),
+        (
+            "queue_read_missing_consumer_name",
+            "QUEUE READ q GROUP g CONSUMER".to_string(),
+        ),
+        (
+            "queue_claim_missing_min_idle",
+            "QUEUE CLAIM q GROUP g CONSUMER c".to_string(),
+        ),
+        (
+            "queue_claim_min_idle_non_numeric",
+            "QUEUE CLAIM q GROUP g CONSUMER c MIN_IDLE forever".to_string(),
+        ),
+        (
+            "queue_ack_missing_message_id",
+            "QUEUE ACK q GROUP g".to_string(),
+        ),
+        (
+            "queue_unknown_subcommand",
+            "QUEUE FROBNICATE q".to_string(),
+        ),
+        // Bytes-level adversarial inputs.
+        (
+            "queue_garbage_after_keyword",
+            "QUEUE @#$%".to_string(),
+        ),
+        (
+            "queue_nul_byte",
+            "CREATE QUEUE q\0".to_string(),
+        ),
+        (
+            "queue_long_name",
+            format!("CREATE QUEUE {}", "q".repeat(10_000)),
+        ),
+    ]
+}
