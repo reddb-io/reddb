@@ -1,4 +1,4 @@
-# perf(storage): pager cache striped locks (Roadmap #3) [AFK]
+# perf(storage): pager cache striped locks (Roadmap #3) [HITL] (in flight via worktree agent)
 
 GitHub: reddb-io/reddb#158
 Parent: #152
