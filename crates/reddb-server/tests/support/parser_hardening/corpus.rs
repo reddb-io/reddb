@@ -112,3 +112,134 @@ pub fn migration_adversarial_inputs() -> Vec<(&'static str, String)> {
         ),
     ]
 }
+
+/// Adversarial inputs that target the geo / spatial surface (issue
+/// #104). These exercise `parse_search_spatial`, RTREE index DDL,
+/// and the geo scalar functions in projection position.
+///
+/// Out-of-range coordinates (lat=91, lon=-181) are included on
+/// purpose: the parser does not semantically validate ranges today,
+/// so these inputs *parse* (which is fine — the harness only
+/// guarantees no panics). Once range validation is added in a future
+/// slice the FIXME pin in `tests/geo_parser.rs` will start to fail
+/// and force a snapshot refresh.
+pub fn geo_adversarial_inputs() -> Vec<(&'static str, String)> {
+    vec![
+        // ----- bare / EOF shapes ---------------------------------
+        ("geo_eof_after_search_spatial", "SEARCH SPATIAL".to_string()),
+        (
+            "geo_eof_after_radius",
+            "SEARCH SPATIAL RADIUS".to_string(),
+        ),
+        (
+            "geo_eof_after_nearest",
+            "SEARCH SPATIAL NEAREST 0.0 0.0 K".to_string(),
+        ),
+        (
+            "geo_eof_after_bbox",
+            "SEARCH SPATIAL BBOX 0.0 0.0".to_string(),
+        ),
+        // ----- out-of-range latitude / longitude -----------------
+        (
+            "geo_lat_91_out_of_range",
+            "SEARCH SPATIAL RADIUS 91.0 0.0 10.0 COLLECTION c COLUMN col".to_string(),
+        ),
+        (
+            "geo_lon_181_out_of_range",
+            "SEARCH SPATIAL RADIUS 0.0 181.0 10.0 COLLECTION c COLUMN col".to_string(),
+        ),
+        (
+            "geo_nearest_lat_neg91",
+            // Note: leading unary `-` does not lex as a float here;
+            // it tokenises as Minus + Float(91.0). The parse_float
+            // call only accepts Float/Integer, so this *errors*
+            // before even reaching the range check. See FIXME pin.
+            "SEARCH SPATIAL NEAREST -91.0 0.0 K 5 COLLECTION c COLUMN col".to_string(),
+        ),
+        (
+            "geo_nearest_lon_neg181",
+            "SEARCH SPATIAL NEAREST 0.0 -181.0 K 5 COLLECTION c COLUMN col".to_string(),
+        ),
+        // ----- numeric edge cases --------------------------------
+        (
+            "geo_radius_negative",
+            // `parse_float` rejects unary minus; the parser surfaces
+            // an "expected number" error at the radius position.
+            "SEARCH SPATIAL RADIUS 0.0 0.0 -10.0 COLLECTION c COLUMN col".to_string(),
+        ),
+        (
+            "geo_radius_zero",
+            "SEARCH SPATIAL RADIUS 0.0 0.0 0.0 COLLECTION c COLUMN col".to_string(),
+        ),
+        (
+            "geo_nearest_k_zero",
+            "SEARCH SPATIAL NEAREST 0.0 0.0 K 0 COLLECTION c COLUMN col".to_string(),
+        ),
+        (
+            "geo_nearest_k_negative",
+            "SEARCH SPATIAL NEAREST 0.0 0.0 K -1 COLLECTION c COLUMN col".to_string(),
+        ),
+        (
+            "geo_radius_nan_literal",
+            // `NaN` is not a recognised literal in the lexer; this
+            // tokenises as an Ident and `parse_float` errors with
+            // "expected number". The harness only asserts no panic.
+            "SEARCH SPATIAL RADIUS NaN NaN 10.0 COLLECTION c COLUMN col".to_string(),
+        ),
+        (
+            "geo_radius_infinity_literal",
+            "SEARCH SPATIAL RADIUS Infinity 0.0 10.0 COLLECTION c COLUMN col".to_string(),
+        ),
+        // ----- structural malformations --------------------------
+        (
+            "geo_radius_missing_collection_kw",
+            "SEARCH SPATIAL RADIUS 0.0 0.0 10.0 sites COLUMN col".to_string(),
+        ),
+        (
+            "geo_radius_missing_column_kw",
+            "SEARCH SPATIAL RADIUS 0.0 0.0 10.0 COLLECTION sites col".to_string(),
+        ),
+        (
+            "geo_nearest_missing_k_kw",
+            "SEARCH SPATIAL NEAREST 0.0 0.0 5 COLLECTION sites COLUMN col".to_string(),
+        ),
+        (
+            "geo_unknown_subcommand",
+            "SEARCH SPATIAL POLYGON 0.0 0.0 COLLECTION c COLUMN col".to_string(),
+        ),
+        // ----- RTREE index DDL -----------------------------------
+        (
+            "geo_rtree_no_columns",
+            "CREATE INDEX gix ON sites () USING RTREE".to_string(),
+        ),
+        (
+            "geo_rtree_unknown_method",
+            "CREATE INDEX gix ON sites (location) USING WRONGTREE".to_string(),
+        ),
+        // ----- distance fns --------------------------------------
+        (
+            "geo_distance_no_args",
+            "SELECT GEO_DISTANCE() FROM t".to_string(),
+        ),
+        (
+            "geo_haversine_dangling_comma",
+            "SELECT HAVERSINE(0.0, 0.0, 1.0,) FROM t".to_string(),
+        ),
+        // ----- bulk / DoS shapes ---------------------------------
+        (
+            "geo_radius_oversized",
+            format!(
+                "SEARCH SPATIAL RADIUS 0.0 0.0 10.0 COLLECTION {} COLUMN col",
+                "c".repeat(10_000),
+            ),
+        ),
+        (
+            "geo_nul_byte",
+            "SEARCH SPATIAL RADIUS 0.0 0.0 10.0 COLLECTION c COLUMN col\0".to_string(),
+        ),
+        (
+            "geo_garbage_after_radius",
+            "SEARCH SPATIAL RADIUS @#$% COLLECTION c COLUMN col".to_string(),
+        ),
+    ]
+}
