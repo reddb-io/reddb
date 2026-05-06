@@ -30,13 +30,13 @@ pub const METRIC_CACHE_BLOB_L2_FULL_REJECTIONS_TOTAL: &str =
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlobCacheConfig {
-    pub l1_bytes_max: usize,
-    pub l2_bytes_max: u64,
-    pub l2_path: Option<PathBuf>,
-    pub max_namespaces: usize,
-    pub shard_count: usize,
-    pub content_metadata_keys_max: usize,
-    pub content_metadata_bytes_max: usize,
+    l1_bytes_max: usize,
+    l2_bytes_max: u64,
+    l2_path: Option<PathBuf>,
+    max_namespaces: usize,
+    shard_count: usize,
+    content_metadata_keys_max: usize,
+    content_metadata_bytes_max: usize,
 }
 
 impl Default for BlobCacheConfig {
@@ -54,6 +54,14 @@ impl Default for BlobCacheConfig {
 }
 
 impl BlobCacheConfig {
+    /// Returns a fresh builder primed with the cache defaults.
+    ///
+    /// Prefer this over field literals — fields are private so future
+    /// additions (PRD stories #8–#10) do not break callers.
+    pub fn builder() -> BlobCacheConfigBuilder {
+        BlobCacheConfigBuilder::new()
+    }
+
     pub fn with_l1_bytes_max(mut self, l1_bytes_max: usize) -> Self {
         self.l1_bytes_max = l1_bytes_max;
         self
@@ -83,6 +91,110 @@ impl BlobCacheConfig {
         self.content_metadata_keys_max = keys_max;
         self.content_metadata_bytes_max = bytes_max;
         self
+    }
+
+    pub fn l1_bytes_max(&self) -> usize {
+        self.l1_bytes_max
+    }
+
+    pub fn l2_bytes_max(&self) -> u64 {
+        self.l2_bytes_max
+    }
+
+    pub fn l2_path(&self) -> Option<&Path> {
+        self.l2_path.as_deref()
+    }
+
+    pub fn max_namespaces(&self) -> usize {
+        self.max_namespaces
+    }
+
+    pub fn shard_count(&self) -> usize {
+        self.shard_count
+    }
+
+    pub fn content_metadata_keys_max(&self) -> usize {
+        self.content_metadata_keys_max
+    }
+
+    pub fn content_metadata_bytes_max(&self) -> usize {
+        self.content_metadata_bytes_max
+    }
+}
+
+/// Builder for [`BlobCacheConfig`].
+///
+/// Created via [`BlobCacheConfig::builder`]. Each setter validates its
+/// argument; invalid configurations are rejected at [`build`](Self::build).
+#[derive(Debug, Clone)]
+pub struct BlobCacheConfigBuilder {
+    inner: BlobCacheConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlobCacheConfigError {
+    /// `shard_count` must be at least 1.
+    ZeroShardCount,
+    /// `max_namespaces` must be at least 1.
+    ZeroMaxNamespaces,
+}
+
+impl BlobCacheConfigBuilder {
+    fn new() -> Self {
+        Self {
+            inner: BlobCacheConfig::default(),
+        }
+    }
+
+    pub fn l1_bytes_max(mut self, value: usize) -> Self {
+        self.inner.l1_bytes_max = value;
+        self
+    }
+
+    pub fn l2_bytes_max(mut self, value: u64) -> Self {
+        self.inner.l2_bytes_max = value;
+        self
+    }
+
+    pub fn l2_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner.l2_path = Some(path.into());
+        self
+    }
+
+    pub fn max_namespaces(mut self, value: usize) -> Self {
+        self.inner.max_namespaces = value;
+        self
+    }
+
+    pub fn shard_count(mut self, value: usize) -> Self {
+        self.inner.shard_count = value;
+        self
+    }
+
+    pub fn content_metadata_keys_max(mut self, value: usize) -> Self {
+        self.inner.content_metadata_keys_max = value;
+        self
+    }
+
+    pub fn content_metadata_bytes_max(mut self, value: usize) -> Self {
+        self.inner.content_metadata_bytes_max = value;
+        self
+    }
+
+    pub fn try_build(self) -> Result<BlobCacheConfig, BlobCacheConfigError> {
+        if self.inner.shard_count == 0 {
+            return Err(BlobCacheConfigError::ZeroShardCount);
+        }
+        if self.inner.max_namespaces == 0 {
+            return Err(BlobCacheConfigError::ZeroMaxNamespaces);
+        }
+        Ok(self.inner)
+    }
+
+    /// Convenience wrapper around [`try_build`](Self::try_build) that
+    /// panics on invalid input. Tests and bootstrap code should prefer this.
+    pub fn build(self) -> BlobCacheConfig {
+        self.try_build().expect("blob cache config")
     }
 }
 
@@ -144,13 +256,13 @@ impl ScopedLabel {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlobCacheHit {
-    pub bytes: Arc<[u8]>,
-    pub content_metadata: BTreeMap<String, String>,
-    pub version: Option<u64>,
+    bytes: Arc<[u8]>,
+    content_metadata: BTreeMap<String, String>,
+    version: Option<u64>,
 }
 
 impl BlobCacheHit {
-    fn new(
+    pub(crate) fn new(
         bytes: Arc<[u8]>,
         content_metadata: BTreeMap<String, String>,
         version: Option<u64>,
@@ -160,6 +272,26 @@ impl BlobCacheHit {
             content_metadata,
             version,
         }
+    }
+
+    /// Cached payload, refcounted so duplicate readers share the buffer.
+    pub fn bytes(&self) -> &Arc<[u8]> {
+        &self.bytes
+    }
+
+    /// Convenience accessor returning a `&[u8]` view into [`bytes`](Self::bytes).
+    pub fn value(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Opaque content metadata captured on `put`.
+    pub fn content_metadata(&self) -> &BTreeMap<String, String> {
+        &self.content_metadata
+    }
+
+    /// Optional CAS / freshness version stamped on `put`.
+    pub fn version(&self) -> Option<u64> {
+        self.version
     }
 }
 
@@ -214,14 +346,42 @@ pub enum L1Admission {
     Never,
 }
 
+/// Three-valued answer for [`BlobCache::exists`].
+///
+/// Today the implementation always returns [`Present`](Self::Present) or
+/// [`Absent`](Self::Absent) — it tracks the answer authoritatively. The
+/// [`MaybePresent`](Self::MaybePresent) variant exists in the type so the
+/// upcoming Bloom synopsis (#146) can answer "probably yes" without forcing
+/// a metadata read, all without breaking the `exists` contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CachePresence {
+    /// The cache holds a live entry for this key.
+    Present,
+    /// The cache definitely does not hold this key (negative cache hit).
+    Absent,
+    /// A probabilistic synopsis cannot rule the key out without a deeper
+    /// lookup. Treat as a hit prospect: the caller should fetch.
+    MaybePresent,
+}
+
+impl From<bool> for CachePresence {
+    fn from(present: bool) -> Self {
+        if present {
+            CachePresence::Present
+        } else {
+            CachePresence::Absent
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlobCachePolicy {
-    pub ttl_ms: Option<u64>,
-    pub expires_at_unix_ms: Option<u64>,
-    pub max_blob_bytes: Option<usize>,
-    pub l1_admission: L1Admission,
-    pub priority: u8,
-    pub version: Option<u64>,
+    ttl_ms: Option<u64>,
+    expires_at_unix_ms: Option<u64>,
+    max_blob_bytes: Option<usize>,
+    l1_admission: L1Admission,
+    priority: u8,
+    version: Option<u64>,
 }
 
 impl Default for BlobCachePolicy {
@@ -238,6 +398,8 @@ impl Default for BlobCachePolicy {
 }
 
 impl BlobCachePolicy {
+    // ----- builder-style setters (consuming) -----------------------------
+
     pub fn ttl_ms(mut self, ttl_ms: u64) -> Self {
         self.ttl_ms = Some(ttl_ms);
         self
@@ -267,28 +429,137 @@ impl BlobCachePolicy {
         self.version = Some(version);
         self
     }
+
+    // ----- read-back accessors -------------------------------------------
+    //
+    // Setter methods consume `self` and return `Self`, so they cannot share
+    // a name with `&self` getters. The `*_value` suffix keeps both surfaces
+    // available without renaming the public builder API.
+
+    pub fn ttl_ms_value(&self) -> Option<u64> {
+        self.ttl_ms
+    }
+
+    pub fn expires_at_unix_ms_value(&self) -> Option<u64> {
+        self.expires_at_unix_ms
+    }
+
+    pub fn max_blob_bytes_value(&self) -> Option<usize> {
+        self.max_blob_bytes
+    }
+
+    pub fn l1_admission_value(&self) -> L1Admission {
+        self.l1_admission
+    }
+
+    pub fn priority_value(&self) -> u8 {
+        self.priority
+    }
+
+    pub fn version_value(&self) -> Option<u64> {
+        self.version
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BlobCacheStats {
-    pub hits: u64,
-    pub misses: u64,
-    pub insertions: u64,
-    pub evictions: u64,
-    pub expirations: u64,
-    pub invalidations: u64,
-    pub namespace_flushes: u64,
-    pub version_mismatches: u64,
-    pub entries: usize,
-    pub bytes_in_use: usize,
-    pub l1_bytes_max: usize,
-    pub l2_bytes_in_use: u64,
-    pub l2_bytes_max: u64,
-    pub l2_full_rejections: u64,
-    pub l2_metadata_reads: u64,
-    pub l2_negative_skips: u64,
-    pub namespaces: usize,
-    pub max_namespaces: usize,
+    hits: u64,
+    misses: u64,
+    insertions: u64,
+    evictions: u64,
+    expirations: u64,
+    invalidations: u64,
+    namespace_flushes: u64,
+    version_mismatches: u64,
+    entries: usize,
+    bytes_in_use: usize,
+    l1_bytes_max: usize,
+    l2_bytes_in_use: u64,
+    l2_bytes_max: u64,
+    l2_full_rejections: u64,
+    l2_metadata_reads: u64,
+    l2_negative_skips: u64,
+    namespaces: usize,
+    max_namespaces: usize,
+}
+
+impl BlobCacheStats {
+    /// Number of `get`/`exists` calls that resolved to `Present` /
+    /// `MaybePresent`. Both count as hit prospects.
+    pub fn hits(&self) -> u64 {
+        self.hits
+    }
+
+    /// Number of `get`/`exists` calls that resolved to `Absent`.
+    pub fn misses(&self) -> u64 {
+        self.misses
+    }
+
+    pub fn insertions(&self) -> u64 {
+        self.insertions
+    }
+
+    pub fn evictions(&self) -> u64 {
+        self.evictions
+    }
+
+    pub fn expirations(&self) -> u64 {
+        self.expirations
+    }
+
+    pub fn invalidations(&self) -> u64 {
+        self.invalidations
+    }
+
+    pub fn namespace_flushes(&self) -> u64 {
+        self.namespace_flushes
+    }
+
+    pub fn version_mismatches(&self) -> u64 {
+        self.version_mismatches
+    }
+
+    pub fn entries(&self) -> usize {
+        self.entries
+    }
+
+    /// Bytes resident in L1. Returned as `u64` for symmetry with
+    /// [`l2_bytes_in_use`](Self::l2_bytes_in_use); upcast is lossless.
+    pub fn bytes_in_use(&self) -> u64 {
+        self.bytes_in_use as u64
+    }
+
+    pub fn l1_bytes_max(&self) -> usize {
+        self.l1_bytes_max
+    }
+
+    pub fn l2_bytes_in_use(&self) -> u64 {
+        self.l2_bytes_in_use
+    }
+
+    pub fn l2_bytes_max(&self) -> u64 {
+        self.l2_bytes_max
+    }
+
+    pub fn l2_full_rejections(&self) -> u64 {
+        self.l2_full_rejections
+    }
+
+    pub fn l2_metadata_reads(&self) -> u64 {
+        self.l2_metadata_reads
+    }
+
+    pub fn l2_negative_skips(&self) -> u64 {
+        self.l2_negative_skips
+    }
+
+    pub fn namespaces(&self) -> usize {
+        self.namespaces
+    }
+
+    pub fn max_namespaces(&self) -> usize {
+        self.max_namespaces
+    }
 }
 
 #[derive(Debug)]
@@ -324,8 +595,8 @@ impl Entry {
             size,
             visited: true,
             expires_at_unix_ms: effective_expires_at_unix_ms(policy, now_ms),
-            priority: policy.priority,
-            version: policy.version,
+            priority: policy.priority_value(),
+            version: policy.version_value(),
             namespace_generation,
         }
     }
@@ -345,7 +616,7 @@ impl Entry {
 }
 
 fn effective_expires_at_unix_ms(policy: BlobCachePolicy, now_ms: u64) -> Option<u64> {
-    match (policy.ttl_ms, policy.expires_at_unix_ms) {
+    match (policy.ttl_ms_value(), policy.expires_at_unix_ms_value()) {
         (Some(ttl), Some(abs)) => Some(now_ms.saturating_add(ttl).min(abs)),
         (Some(ttl), None) => Some(now_ms.saturating_add(ttl)),
         (None, Some(abs)) => Some(abs),
@@ -1084,6 +1355,24 @@ fn rebuild_l2_synopsis(
     synopsis
 }
 
+/// Sharded, byte-bounded blob cache with optional durable L2 backing.
+///
+/// # Concurrency
+///
+/// `BlobCache` is `Send + Sync`. All public methods are safe to call from
+/// multiple threads concurrently. Internal sharding ensures disjoint-key
+/// contention does not serialize: independent keys land on independent
+/// `RwLock<Shard>` instances, and the global indexes (namespace set, tag /
+/// dependency maps) are read-mostly behind their own `RwLock`s.
+///
+/// `BlobCache` is **not** `Clone` — share ownership via `Arc<BlobCache>`.
+///
+/// # Blocking
+///
+/// All methods are synchronous. `put` may perform L2 disk I/O on the
+/// calling thread when an L2 path is configured; tokio callers should wrap
+/// `put` in `spawn_blocking`. `get`, `exists`, and the `invalidate_*`
+/// family touch L2 only on rehydrate / delete paths.
 pub struct BlobCache {
     config: BlobCacheConfig,
     shards: Vec<RwLock<Shard>>,
@@ -1095,6 +1384,15 @@ pub struct BlobCache {
     bytes_in_use: AtomicUsize,
     stats: AtomicStats,
 }
+
+// Compile-time guarantee that the documented `Send + Sync` contract above
+// stays in lockstep with the struct's interior. If this ever fails to
+// compile, the docstring is lying — fix the field that broke it, do not
+// remove this assertion.
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<BlobCache>();
+};
 
 impl BlobCache {
     pub fn new(config: BlobCacheConfig) -> Self {
@@ -1155,7 +1453,7 @@ impl BlobCache {
 
         let shard_idx = self.shard_index(&key);
         let mut shard = self.shards[shard_idx].write();
-        self.check_version(&shard, &key, input.policy.version, namespace_generation)?;
+        self.check_version(&shard, &key, input.policy.version_value(), namespace_generation)?;
         let entry = Entry::new(
             input.bytes,
             input.content_metadata,
@@ -1179,7 +1477,7 @@ impl BlobCache {
                 Err(err) => return Err(err),
             }
         }
-        let outcome = if matches!(input.policy.l1_admission, L1Admission::Never) {
+        let outcome = if matches!(input.policy.l1_admission_value(), L1Admission::Never) {
             let old_entry = shard.remove(&key);
             InsertOutcome {
                 old_entry,
@@ -1258,11 +1556,18 @@ impl BlobCache {
         }
     }
 
-    pub fn exists(&self, namespace: &str, key: &str) -> bool {
+    /// Probe whether `(namespace, key)` is cached.
+    ///
+    /// Returns a three-valued [`CachePresence`]: `Present` when an entry is
+    /// resident (L1 or rehydrated from L2), `Absent` when the cache can
+    /// authoritatively rule the key out, and `MaybePresent` when only a
+    /// probabilistic synopsis can answer (reserved for #146; never returned
+    /// today).
+    pub fn exists(&self, namespace: &str, key: &str) -> CachePresence {
         self.exists_at(namespace, key, unix_now_ms())
     }
 
-    fn exists_at(&self, namespace: &str, key: &str, now_ms: u64) -> bool {
+    fn exists_at(&self, namespace: &str, key: &str, now_ms: u64) -> CachePresence {
         let cache_key = BlobCacheKey::new(namespace, key);
         let namespace_generation = self.current_generation(namespace);
         let shard_idx = self.shard_index(&cache_key);
@@ -1270,7 +1575,7 @@ impl BlobCache {
         match shard.contains(&cache_key, now_ms, namespace_generation) {
             Lookup::Present => {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
-                true
+                CachePresence::Present
             }
             Lookup::Expired(entry) => {
                 drop(shard);
@@ -1280,13 +1585,13 @@ impl BlobCache {
                 }
                 self.stats.expirations.fetch_add(1, Ordering::Relaxed);
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
-                false
+                CachePresence::Absent
             }
             Lookup::Stale(entry) => {
                 drop(shard);
                 self.record_removed_entry(&cache_key, &entry);
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
-                false
+                CachePresence::Absent
             }
             Lookup::Miss => {
                 drop(shard);
@@ -1295,10 +1600,10 @@ impl BlobCache {
                     .is_some()
                 {
                     self.stats.hits.fetch_add(1, Ordering::Relaxed);
-                    return true;
+                    return CachePresence::Present;
                 }
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
-                false
+                CachePresence::Absent
             }
             Lookup::Hit(_) => unreachable!("exists cannot return a hit payload"),
         }
@@ -1372,14 +1677,36 @@ impl BlobCache {
         count.max(l2_count)
     }
 
+    /// Node-local batched invalidation for all entries carrying any of `tags`.
+    ///
+    /// Locks each affected shard once per call, so a batched invalidation
+    /// from a downstream adapter (#143) does not multiply lock acquisitions
+    /// the way N singular calls would.
+    pub fn invalidate_tags(&self, namespace: &str, tags: &[&str]) -> usize {
+        self.invalidate_indexed_many(namespace, tags, IndexedKind::Tag)
+    }
+
+    /// Node-local batched invalidation for all entries carrying any of `dependencies`.
+    pub fn invalidate_dependencies(&self, namespace: &str, dependencies: &[&str]) -> usize {
+        self.invalidate_indexed_many(namespace, dependencies, IndexedKind::Dependency)
+    }
+
     /// Node-local invalidation for all entries carrying `tag`.
+    #[deprecated(
+        since = "0.1.0",
+        note = "use `invalidate_tags(namespace, &[tag])` for batched callers"
+    )]
     pub fn invalidate_tag(&self, namespace: &str, tag: &str) -> usize {
-        self.invalidate_indexed(namespace, tag, IndexedKind::Tag)
+        self.invalidate_indexed_many(namespace, &[tag], IndexedKind::Tag)
     }
 
     /// Node-local invalidation for all entries carrying `dependency`.
+    #[deprecated(
+        since = "0.1.0",
+        note = "use `invalidate_dependencies(namespace, &[dependency])` for batched callers"
+    )]
     pub fn invalidate_dependency(&self, namespace: &str, dependency: &str) -> usize {
-        self.invalidate_indexed(namespace, dependency, IndexedKind::Dependency)
+        self.invalidate_indexed_many(namespace, &[dependency], IndexedKind::Dependency)
     }
 
     /// O(1) foreground namespace flush.
@@ -1445,7 +1772,7 @@ impl BlobCache {
     }
 
     fn validate_blob_size(&self, size: usize, policy: BlobCachePolicy) -> Result<(), CacheError> {
-        let max = policy.max_blob_bytes.unwrap_or(self.config.l1_bytes_max);
+        let max = policy.max_blob_bytes_value().unwrap_or(self.config.l1_bytes_max);
         if size > max {
             Err(CacheError::BlobTooLarge { size, max })
         } else {
@@ -1609,30 +1936,68 @@ impl BlobCache {
         self.stats.invalidations.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn invalidate_indexed(&self, namespace: &str, label: &str, kind: IndexedKind) -> usize {
-        if !self.namespace_exists(namespace) {
+    fn invalidate_indexed_many(
+        &self,
+        namespace: &str,
+        labels: &[&str],
+        kind: IndexedKind,
+    ) -> usize {
+        if labels.is_empty() || !self.namespace_exists(namespace) {
             return 0;
         }
-        let scoped = ScopedLabel::new(namespace, label);
-        let candidates = match kind {
-            IndexedKind::Tag => self.tag_index.read().get(&scoped).cloned(),
-            IndexedKind::Dependency => self.dependency_index.read().get(&scoped).cloned(),
-        };
-        let Some(candidates) = candidates else {
+
+        // Snapshot the candidate keys for every label up front so the
+        // shard-locking pass below sees a stable set. We deduplicate by
+        // BlobCacheKey so a key tagged with multiple invalidated labels is
+        // still removed (and counted) exactly once.
+        let mut candidates: HashMap<BlobCacheKey, HashSet<String>> = HashMap::new();
+        {
+            let index = match kind {
+                IndexedKind::Tag => self.tag_index.read(),
+                IndexedKind::Dependency => self.dependency_index.read(),
+            };
+            for label in labels {
+                let scoped = ScopedLabel::new(namespace, *label);
+                if let Some(keys) = index.get(&scoped) {
+                    for key in keys {
+                        candidates
+                            .entry(key.clone())
+                            .or_default()
+                            .insert((*label).to_string());
+                    }
+                }
+            }
+        }
+
+        if candidates.is_empty() {
             return 0;
-        };
+        }
+
+        // Group candidates by shard so each shard lock is taken at most
+        // once per call.
+        let mut by_shard: HashMap<usize, Vec<(BlobCacheKey, HashSet<String>)>> = HashMap::new();
+        for (key, matched_labels) in candidates {
+            let shard_idx = self.shard_index(&key);
+            by_shard
+                .entry(shard_idx)
+                .or_default()
+                .push((key, matched_labels));
+        }
 
         let mut removed = Vec::new();
-        for key in candidates {
-            let shard_idx = self.shard_index(&key);
+        for (shard_idx, keys) in by_shard {
             let mut shard = self.shards[shard_idx].write();
-            let matches_label = shard.entries.get(&key).is_some_and(|entry| match kind {
-                IndexedKind::Tag => entry.tags.contains(label),
-                IndexedKind::Dependency => entry.dependencies.contains(label),
-            });
-            if matches_label {
-                if let Some(entry) = shard.remove(&key) {
-                    removed.push((key, entry));
+            for (key, matched_labels) in keys {
+                let still_matches = shard.entries.get(&key).is_some_and(|entry| match kind {
+                    IndexedKind::Tag => matched_labels.iter().any(|l| entry.tags.contains(l)),
+                    IndexedKind::Dependency => matched_labels
+                        .iter()
+                        .any(|l| entry.dependencies.contains(l)),
+                });
+                if still_matches {
+                    if let Some(entry) = shard.remove(&key) {
+                        removed.push((key, entry));
+                    }
                 }
             }
         }
@@ -1752,7 +2117,7 @@ mod tests {
             .put("images", "hero", BlobCachePut::new(vec![1, 2, 3]))
             .expect("put");
 
-        assert!(cache.exists("images", "hero"));
+        assert_eq!(cache.exists("images", "hero"), CachePresence::Present);
         let hit = cache.get("images", "hero").expect("hit");
         assert_eq!(&*hit.bytes, &[1, 2, 3]);
 
@@ -1769,7 +2134,7 @@ mod tests {
     fn missing_key_updates_miss_counter() {
         let cache = small_cache(128);
         assert!(cache.get("images", "missing").is_none());
-        assert!(!cache.exists("images", "missing"));
+        assert_eq!(cache.exists("images", "missing"), CachePresence::Absent);
         let stats = cache.stats();
         assert_eq!(stats.hits, 0);
         assert_eq!(stats.misses, 2);
@@ -1899,7 +2264,7 @@ mod tests {
 
         assert!(cache.get_at("n", "ttl", 1_009).is_some());
         assert!(cache.get_at("n", "ttl", 1_010).is_none());
-        assert!(!cache.exists_at("n", "ttl", 1_011));
+        assert_eq!(cache.exists_at("n", "ttl", 1_011), CachePresence::Absent);
 
         let stats = cache.stats();
         assert_eq!(stats.expirations, 1);
@@ -2215,9 +2580,9 @@ mod tests {
             .put("n", "plain", BlobCachePut::new(b"c".to_vec()))
             .unwrap();
 
-        assert_eq!(cache.invalidate_tag("n", "hot"), 1);
+        assert_eq!(cache.invalidate_tags("n", &["hot"]), 1);
         assert!(cache.get("n", "tagged").is_none());
-        assert_eq!(cache.invalidate_dependency("n", "row:42"), 1);
+        assert_eq!(cache.invalidate_dependencies("n", &["row:42"]), 1);
         assert!(cache.get("n", "dependent").is_none());
         assert!(cache.get("n", "plain").is_some());
         assert_eq!(cache.stats().invalidations, 2);
@@ -2236,8 +2601,8 @@ mod tests {
         let before = cache.stats();
 
         assert_eq!(cache.invalidate_prefix("missing", "x"), 0);
-        assert_eq!(cache.invalidate_tag("n", "cold"), 0);
-        assert_eq!(cache.invalidate_dependency("n", "row:missing"), 0);
+        assert_eq!(cache.invalidate_tags("n", &["cold"]), 0);
+        assert_eq!(cache.invalidate_dependencies("n", &["row:missing"]), 0);
         assert_eq!(cache.stats(), before);
     }
 
@@ -2258,7 +2623,7 @@ mod tests {
         assert_eq!(after_flush.entries, 2, "foreground path does not sweep");
 
         assert!(cache.get("n", "a").is_none());
-        assert!(!cache.exists("n", "b"));
+        assert_eq!(cache.exists("n", "b"), CachePresence::Absent);
         cache
             .put("n", "c", BlobCachePut::new(b"c".to_vec()))
             .unwrap();
@@ -2467,7 +2832,7 @@ mod tests {
             .unwrap();
         assert_eq!(cache.invalidate_key("n", "deleted"), 1);
 
-        assert!(!cache.exists("n", "deleted"));
+        assert_eq!(cache.exists("n", "deleted"), CachePresence::Absent);
         let stats = cache.stats();
         assert_eq!(stats.l2_metadata_reads, 1);
 
@@ -2493,7 +2858,7 @@ mod tests {
             )
             .unwrap();
 
-        assert!(!cache.exists_at("n", "expired", 1_010));
+        assert_eq!(cache.exists_at("n", "expired", 1_010), CachePresence::Absent);
         let stats = cache.stats();
         assert_eq!(stats.l2_metadata_reads, 1);
         assert_eq!(stats.l2_bytes_in_use, 0);
@@ -2544,7 +2909,7 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(cache.invalidate_key("n", &key), 1);
-            assert!(!cache.exists("n", &key));
+            assert_eq!(cache.exists("n", &key), CachePresence::Absent);
         }
         assert_eq!(cache.stats().l2_metadata_reads, 1_000);
         let _ = std::fs::remove_file(&path);
@@ -2570,5 +2935,220 @@ mod tests {
             METRIC_CACHE_BLOB_L2_FULL_REJECTIONS_TOTAL,
             "reddb_cache_blob_l2_full_rejections_total"
         );
+    }
+
+    // -- API review #151 follow-ups -----------------------------------------
+
+    #[test]
+    fn cache_presence_from_bool_round_trips_present_and_absent() {
+        assert_eq!(CachePresence::from(true), CachePresence::Present);
+        assert_eq!(CachePresence::from(false), CachePresence::Absent);
+        // Today the implementation never emits MaybePresent — that variant
+        // is reserved for the Bloom synopsis (#146). The variant must still
+        // exist in the type so downstream callers can match on it without a
+        // future breaking change.
+        let _ = CachePresence::MaybePresent;
+    }
+
+    #[test]
+    fn exists_returns_present_or_absent_today() {
+        let cache = small_cache(128);
+        cache
+            .put("n", "k", BlobCachePut::new(b"v".to_vec()))
+            .unwrap();
+
+        assert_eq!(cache.exists("n", "k"), CachePresence::Present);
+        assert_eq!(cache.exists("n", "missing"), CachePresence::Absent);
+        assert_eq!(cache.exists("missing", "k"), CachePresence::Absent);
+    }
+
+    #[test]
+    fn invalidate_tags_batched_call_removes_keys_from_multiple_labels() {
+        let cache = small_cache(256);
+        cache
+            .put(
+                "n",
+                "a",
+                BlobCachePut::new(b"a".to_vec()).with_tags(["red"]),
+            )
+            .unwrap();
+        cache
+            .put(
+                "n",
+                "b",
+                BlobCachePut::new(b"b".to_vec()).with_tags(["green"]),
+            )
+            .unwrap();
+        cache
+            .put(
+                "n",
+                "c",
+                BlobCachePut::new(b"c".to_vec()).with_tags(["blue"]),
+            )
+            .unwrap();
+
+        // One batched call removes the two named tags but leaves "blue".
+        assert_eq!(cache.invalidate_tags("n", &["red", "green"]), 2);
+        assert!(cache.get("n", "a").is_none());
+        assert!(cache.get("n", "b").is_none());
+        assert!(cache.get("n", "c").is_some());
+        assert_eq!(cache.stats().invalidations(), 2);
+    }
+
+    #[test]
+    fn invalidate_dependencies_batched_call_dedups_multi_label_keys() {
+        let cache = small_cache(256);
+        cache
+            .put(
+                "n",
+                "shared",
+                BlobCachePut::new(b"x".to_vec()).with_dependencies(["row:1", "row:2"]),
+            )
+            .unwrap();
+
+        // The same key matches both dependencies; the batched form must
+        // count it once, not twice.
+        assert_eq!(cache.invalidate_dependencies("n", &["row:1", "row:2"]), 1);
+        assert!(cache.get("n", "shared").is_none());
+    }
+
+    #[test]
+    fn invalidate_tags_with_empty_slice_is_a_no_op() {
+        let cache = small_cache(128);
+        cache
+            .put(
+                "n",
+                "a",
+                BlobCachePut::new(b"a".to_vec()).with_tags(["x"]),
+            )
+            .unwrap();
+        assert_eq!(cache.invalidate_tags("n", &[]), 0);
+        assert_eq!(cache.invalidate_dependencies("n", &[]), 0);
+        assert!(cache.get("n", "a").is_some());
+    }
+
+    #[test]
+    fn blob_cache_config_builder_rejects_zero_shard_count() {
+        let err = BlobCacheConfig::builder()
+            .shard_count(0)
+            .try_build()
+            .expect_err("zero shard count must be rejected");
+        assert_eq!(err, BlobCacheConfigError::ZeroShardCount);
+    }
+
+    #[test]
+    fn blob_cache_config_builder_rejects_zero_max_namespaces() {
+        let err = BlobCacheConfig::builder()
+            .max_namespaces(0)
+            .try_build()
+            .expect_err("zero max_namespaces must be rejected");
+        assert_eq!(err, BlobCacheConfigError::ZeroMaxNamespaces);
+    }
+
+    #[test]
+    fn blob_cache_config_builder_constructs_cache_end_to_end() {
+        let config = BlobCacheConfig::builder()
+            .l1_bytes_max(64)
+            .max_namespaces(2)
+            .shard_count(1)
+            .build();
+        assert_eq!(config.l1_bytes_max(), 64);
+        assert_eq!(config.max_namespaces(), 2);
+        assert_eq!(config.shard_count(), 1);
+
+        let cache = BlobCache::new(config);
+        cache
+            .put("n", "k", BlobCachePut::new(b"v".to_vec()))
+            .unwrap();
+        assert_eq!(cache.exists("n", "k"), CachePresence::Present);
+    }
+
+    #[test]
+    fn blob_cache_stats_getters_match_internal_field_state() {
+        let cache = small_cache(128);
+        cache
+            .put("n", "k", BlobCachePut::new(b"abc".to_vec()))
+            .unwrap();
+        let _ = cache.get("n", "k");
+        let _ = cache.get("n", "missing");
+
+        let stats = cache.stats();
+        // Each getter must mirror the internal field that backs it.
+        assert_eq!(stats.hits(), stats.hits);
+        assert_eq!(stats.misses(), stats.misses);
+        assert_eq!(stats.insertions(), stats.insertions);
+        assert_eq!(stats.evictions(), stats.evictions);
+        assert_eq!(stats.expirations(), stats.expirations);
+        assert_eq!(stats.invalidations(), stats.invalidations);
+        assert_eq!(stats.namespace_flushes(), stats.namespace_flushes);
+        assert_eq!(stats.version_mismatches(), stats.version_mismatches);
+        assert_eq!(stats.entries(), stats.entries);
+        assert_eq!(stats.bytes_in_use(), stats.bytes_in_use as u64);
+        assert_eq!(stats.l1_bytes_max(), stats.l1_bytes_max);
+        assert_eq!(stats.l2_bytes_in_use(), stats.l2_bytes_in_use);
+        assert_eq!(stats.l2_bytes_max(), stats.l2_bytes_max);
+        assert_eq!(stats.l2_full_rejections(), stats.l2_full_rejections);
+        assert_eq!(stats.l2_metadata_reads(), stats.l2_metadata_reads);
+        assert_eq!(stats.l2_negative_skips(), stats.l2_negative_skips);
+        assert_eq!(stats.namespaces(), stats.namespaces);
+        assert_eq!(stats.max_namespaces(), stats.max_namespaces);
+    }
+
+    #[test]
+    fn blob_cache_hit_getters_expose_payload_and_metadata() {
+        let cache = small_cache(128);
+        let metadata = BTreeMap::from([("ct".to_string(), "t".to_string())]);
+        cache
+            .put(
+                "n",
+                "k",
+                BlobCachePut::new(b"hello".to_vec())
+                    .with_content_metadata(metadata.clone())
+                    .with_policy(BlobCachePolicy::default().version(7)),
+            )
+            .unwrap();
+        let hit = cache.get("n", "k").expect("hit");
+        assert_eq!(hit.value(), b"hello");
+        assert_eq!(&**hit.bytes(), b"hello");
+        assert_eq!(hit.content_metadata(), &metadata);
+        assert_eq!(hit.version(), Some(7));
+    }
+
+    #[test]
+    fn blob_cache_policy_setter_then_getter_round_trips() {
+        let policy = BlobCachePolicy::default()
+            .ttl_ms(60)
+            .expires_at_unix_ms(1_000)
+            .max_blob_bytes(512)
+            .l1_admission(L1Admission::Always)
+            .priority(7)
+            .version(42);
+        assert_eq!(policy.ttl_ms_value(), Some(60));
+        assert_eq!(policy.expires_at_unix_ms_value(), Some(1_000));
+        assert_eq!(policy.max_blob_bytes_value(), Some(512));
+        assert_eq!(policy.l1_admission_value(), L1Admission::Always);
+        assert_eq!(policy.priority_value(), 7);
+        assert_eq!(policy.version_value(), Some(42));
+    }
+
+    #[test]
+    fn blob_cache_is_send_and_sync_across_thread_boundary() {
+        // Belt and braces alongside the file-level `assert_send_sync` const:
+        // actually exercise the contract by sharing an `Arc<BlobCache>` with
+        // a worker thread.
+        use std::thread;
+        let cache = Arc::new(small_cache(128));
+        cache
+            .put("n", "k", BlobCachePut::new(b"v".to_vec()))
+            .unwrap();
+        let worker = {
+            let cache = Arc::clone(&cache);
+            thread::spawn(move || {
+                assert_eq!(cache.exists("n", "k"), CachePresence::Present);
+                cache.get("n", "k").map(|hit| hit.value().to_vec())
+            })
+        };
+        let observed = worker.join().expect("worker thread");
+        assert_eq!(observed.as_deref(), Some(b"v".as_slice()));
     }
 }

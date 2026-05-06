@@ -521,7 +521,7 @@ mod tests {
 
         // Entry must still be retrievable after a sweep when it has no TTL.
         let hit = cache.get("alive", "k").expect("entry survives sweep");
-        assert_eq!(&*hit.bytes, b"v");
+        assert_eq!(hit.value(), b"v");
     }
 
     /// Verifies the contract that a TTL'd entry is removable, even though
@@ -746,7 +746,7 @@ mod tests {
         let started = Instant::now();
         for _ in 0..10_000 {
             let hit = cache.get("readers", "k").expect("reader namespace alive");
-            assert_eq!(&*hit.bytes, b"hello");
+            assert_eq!(hit.value(), b"hello");
         }
         let elapsed = started.elapsed();
 
