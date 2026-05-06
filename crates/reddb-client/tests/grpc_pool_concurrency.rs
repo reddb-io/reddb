@@ -225,6 +225,7 @@ impl RedDb for SlowMock {
     stub_rpc!(auth_revoke_api_key, JsonPayloadRequest, PayloadReply);
     stub_rpc!(auth_change_password, JsonPayloadRequest, PayloadReply);
     stub_rpc!(auth_who_am_i, Empty, PayloadReply);
+    stub_rpc!(topology, TopologyRequest, TopologyReply);
 }
 
 /// Spawn the slow mock on `127.0.0.1:0` and return its bound address
