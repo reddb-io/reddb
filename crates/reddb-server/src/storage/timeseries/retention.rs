@@ -83,12 +83,41 @@ impl DownsamplePolicy {
     }
 }
 
-/// Parse a duration string (e.g., "5m", "1h", "30s") into nanoseconds
+/// Parse a duration string into nanoseconds.
+///
+/// Accepts both the compact suffix form (`"5m"`, `"1h"`, `"30s"`) and
+/// the long, TimescaleDB-compatible form (`"1 day"`, `"2 hours"`,
+/// `"30 minutes"`, `"90 days"`). The number and unit may be separated
+/// by any run of ASCII whitespace; unit comparison is case-insensitive
+/// for the long form.
 pub fn parse_duration_ns(s: &str) -> Option<u64> {
     let s = s.trim();
     if s == "raw" {
         return Some(0);
     }
+
+    // Try the long form first: a leading integer, optional whitespace,
+    // then a word-style unit. If that splits cleanly we are done.
+    let split = s
+        .find(|c: char| !c.is_ascii_digit())
+        .map(|i| s.split_at(i));
+    if let Some((num_part, rest)) = split {
+        if !num_part.is_empty() {
+            let unit_word = rest.trim_start();
+            // If the unit slot contains whitespace before the suffix
+            // it is the long form; if it is glued to the digits it
+            // is the short form and we fall through.
+            if rest.starts_with(|c: char| c.is_ascii_whitespace()) {
+                if let Some(mult) = long_form_multiplier(unit_word) {
+                    let num: u64 = num_part.parse().ok()?;
+                    return Some(num.checked_mul(mult)?);
+                }
+                return None;
+            }
+        }
+    }
+
+    // Compact suffix form: `"5m"`, `"1h"`, `"30s"`, `"100ms"`.
     let (num_str, unit) = if let Some(stripped) = s.strip_suffix("ms") {
         (stripped, "ms")
     } else if let Some(stripped) = s.strip_suffix('s') {
@@ -114,6 +143,20 @@ pub fn parse_duration_ns(s: &str) -> Option<u64> {
     };
 
     Some(num * multiplier)
+}
+
+/// Long-form duration unit (e.g. `"day"`, `"hours"`, `"minutes"`) →
+/// nanosecond multiplier. Returns `None` for unrecognised words; the
+/// caller treats that as a parse failure.
+fn long_form_multiplier(unit: &str) -> Option<u64> {
+    match unit.to_ascii_lowercase().as_str() {
+        "ms" | "msec" | "msecs" | "millisecond" | "milliseconds" => Some(1_000_000),
+        "s" | "sec" | "secs" | "second" | "seconds" => Some(1_000_000_000),
+        "m" | "min" | "mins" | "minute" | "minutes" => Some(60_000_000_000),
+        "h" | "hr" | "hrs" | "hour" | "hours" => Some(3_600_000_000_000),
+        "d" | "day" | "days" => Some(86_400_000_000_000),
+        _ => None,
+    }
 }
 
 // =============================================================================
