@@ -22,7 +22,7 @@ impl<'a> Parser<'a> {
             if self.consume(&Token::Priority)? {
                 priority = true;
             } else if self.consume_ident_ci("MAX_SIZE")? || self.consume_ident_ci("MAXSIZE")? {
-                max_size = Some(self.parse_integer()? as usize);
+                max_size = Some(self.parse_positive_integer("MAX_SIZE")? as usize);
             } else if self.consume_ident_ci("MAX_ATTEMPTS")?
                 || self.consume_ident_ci("MAXATTEMPTS")?
             {
