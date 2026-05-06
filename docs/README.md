@@ -246,7 +246,7 @@ curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | ba
 ### npx
 
 ```bash
-npx reddb-cli@latest server --path ./data/reddb.rdb --http-bind 127.0.0.1:8080
+npx @reddb-io/cli@latest server --path ./data/reddb.rdb --http-bind 127.0.0.1:8080
 ```
 
 ### JavaScript / TypeScript driver

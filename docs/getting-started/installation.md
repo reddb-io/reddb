@@ -8,7 +8,7 @@ That executable is the **`red` binary**, not the same thing as:
 - the wire binary protocol
 - the binary `.rdb` file format
 
-In JavaScript and TypeScript, use the `reddb` driver package in application code and `reddb-cli` only as the npm CLI launcher.
+In JavaScript and TypeScript, use the `reddb` driver package in application code and `@reddb-io/cli` only as the npm CLI launcher.
 
 If you want the terminology first, read [Modes and Transports](/getting-started/modes-and-transports.md).
 
@@ -62,24 +62,24 @@ red version
 
 ## Install with `npx`
 
-The `reddb-cli` npm package installs the real `red` binary and forwards CLI arguments directly to it.
+The `@reddb-io/cli` npm package installs the real `red` binary and forwards CLI arguments directly to it.
 
 Run a command through `npx`:
 
 ```bash
-npx reddb-cli@latest version
+npx @reddb-io/cli@latest version
 ```
 
 Start an HTTP server through `npx`:
 
 ```bash
-npx reddb-cli@latest server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
+npx @reddb-io/cli@latest server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
 ```
 
 If you use `pnpm`:
 
 ```bash
-pnpm dlx reddb-cli version
+pnpm dlx @reddb-io/cli version
 ```
 
 ## Install the JavaScript / TypeScript driver
