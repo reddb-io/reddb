@@ -14,12 +14,16 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tokio::sync::Mutex;
-
 use crate::connector::RedDBClient;
 
 use crate::error::{ClientError, ErrorCode, Result};
 use crate::types::{InsertResult, JsonValue, QueryResult, ValueOut};
+
+/// Default per-endpoint pool size when callers don't specify one.
+/// Each pooled `RedDBClient` is a clone of the same tonic channel,
+/// so this controls client-side dispatch parallelism, not the
+/// number of TCP connections (tonic multiplexes internally).
+pub const DEFAULT_POOL_SIZE: usize = 4;
 
 /// Async handle to a remote RedDB server over gRPC.
 ///
@@ -39,20 +43,46 @@ pub struct GrpcClient {
     force_primary: bool,
 }
 
+/// One remote endpoint plus a fixed pool of `RedDBClient` clones.
+///
+/// Each call picks `pool[next.fetch_add(1) % pool.len()]` and
+/// dispatches against a fresh clone of that slot. Tonic clients are
+/// cheap to clone (just an `Arc`-bumped channel handle), so the per-
+/// call clone is effectively free; the pool gives N-way client-side
+/// parallelism that the legacy `Mutex<RedDBClient>` couldn't.
 struct Endpoint {
     url: String,
-    inner: Mutex<RedDBClient>,
+    pool: Vec<RedDBClient>,
+    next: AtomicUsize,
 }
 
 impl Endpoint {
-    async fn connect(url: String) -> Result<Self> {
-        let inner = RedDBClient::connect(&url, None).await.map_err(|e| {
+    async fn connect(url: String, pool_size: usize) -> Result<Self> {
+        // `pool_size == 0` is a misconfiguration; clamp to 1 so we
+        // still return a working client (matches the legacy single-
+        // mutex path).
+        let n = pool_size.max(1);
+        let head = RedDBClient::connect(&url, None).await.map_err(|e| {
             ClientError::new(ErrorCode::IoError, format!("connect {url}: {e}"))
         })?;
+        let mut pool = Vec::with_capacity(n);
+        for _ in 0..(n - 1) {
+            pool.push(head.clone());
+        }
+        pool.push(head);
         Ok(Self {
             url,
-            inner: Mutex::new(inner),
+            pool,
+            next: AtomicUsize::new(0),
         })
+    }
+
+    /// Round-robin pick + clone. Returns an owned `RedDBClient` so
+    /// callers can `&mut` it without holding any lock.
+    fn pick(&self) -> RedDBClient {
+        // Length is >= 1 by construction (see `connect`).
+        let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.pool.len();
+        self.pool[idx].clone()
     }
 }
 
@@ -68,9 +98,21 @@ impl std::fmt::Debug for GrpcClient {
 }
 
 impl GrpcClient {
-    /// Single-host gRPC client. Equivalent to `connect_cluster(endpoint, &[], false)`.
+    /// Single-host gRPC client. Equivalent to
+    /// `connect_cluster(endpoint, &[], false)` with the default pool
+    /// size.
     pub async fn connect(endpoint: String) -> Result<Self> {
-        let primary = Endpoint::connect(endpoint).await?;
+        Self::connect_with_pool_size(endpoint, DEFAULT_POOL_SIZE).await
+    }
+
+    /// Single-host gRPC client with an explicit per-endpoint pool
+    /// size. `pool_size = 1` is kept as a sanity fallback that
+    /// disables the round-robin pool (one client clone per
+    /// endpoint); the underlying tonic channel still multiplexes
+    /// requests, so it behaves like the legacy single-channel path
+    /// without the legacy `Mutex` serialization.
+    pub async fn connect_with_pool_size(endpoint: String, pool_size: usize) -> Result<Self> {
+        let primary = Endpoint::connect(endpoint, pool_size).await?;
         Ok(Self {
             primary,
             replicas: Vec::new(),
@@ -87,10 +129,23 @@ impl GrpcClient {
         replicas: Vec<String>,
         force_primary: bool,
     ) -> Result<Self> {
-        let primary_ep = Endpoint::connect(primary).await?;
+        Self::connect_cluster_with_pool_size(primary, replicas, force_primary, DEFAULT_POOL_SIZE)
+            .await
+    }
+
+    /// Multi-host gRPC client with an explicit per-endpoint pool
+    /// size. The same `pool_size` is applied to every endpoint
+    /// (primary + replicas).
+    pub async fn connect_cluster_with_pool_size(
+        primary: String,
+        replicas: Vec<String>,
+        force_primary: bool,
+        pool_size: usize,
+    ) -> Result<Self> {
+        let primary_ep = Endpoint::connect(primary, pool_size).await?;
         let mut replica_eps = Vec::with_capacity(replicas.len());
         for url in replicas {
-            replica_eps.push(Endpoint::connect(url).await?);
+            replica_eps.push(Endpoint::connect(url, pool_size).await?);
         }
         Ok(Self {
             primary: primary_ep,
@@ -123,13 +178,11 @@ impl GrpcClient {
 
     pub async fn query(&self, sql: &str) -> Result<QueryResult> {
         let ep = self.read_endpoint();
-        let reply = {
-            let mut guard = ep.inner.lock().await;
-            guard
-                .query_reply(sql)
-                .await
-                .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?
-        };
+        let mut client = ep.pick();
+        let reply = client
+            .query_reply(sql)
+            .await
+            .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
         parse_query_json(&reply.result_json)
     }
 
@@ -141,14 +194,12 @@ impl GrpcClient {
             ));
         }
         let json_payload = payload.to_json_string();
-        let reply = {
-            // Writes always go to the primary.
-            let mut guard = self.primary.inner.lock().await;
-            guard
-                .create_row_entity(collection, &json_payload)
-                .await
-                .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?
-        };
+        // Writes always go to the primary.
+        let mut client = self.primary.pick();
+        let reply = client
+            .create_row_entity(collection, &json_payload)
+            .await
+            .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
         Ok(InsertResult {
             affected: 1,
             id: Some(reply.id.to_string()),
@@ -166,13 +217,11 @@ impl GrpcClient {
             }
             encoded.push(payload.to_json_string());
         }
-        let reply = {
-            let mut guard = self.primary.inner.lock().await;
-            guard
-                .bulk_create_rows(collection, encoded)
-                .await
-                .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?
-        };
+        let mut client = self.primary.pick();
+        let reply = client
+            .bulk_create_rows(collection, encoded)
+            .await
+            .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
         Ok(reply.count)
     }
 
@@ -183,13 +232,11 @@ impl GrpcClient {
                 "id must be a numeric string".to_string(),
             )
         })?;
-        {
-            let mut guard = self.primary.inner.lock().await;
-            guard
-                .delete_entity(collection, id)
-                .await
-                .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?
-        };
+        let mut client = self.primary.pick();
+        client
+            .delete_entity(collection, id)
+            .await
+            .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
         Ok(1)
     }
 
