@@ -100,13 +100,26 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: rui314/setup-mold@v1
       - uses: mozilla-actions/sccache-action@v0.0.10
+      # Sticky Disk for the cargo target dir — much larger working set
+      # than the 25GB cache cap, and 3s mount vs ~15s on Blacksmith's
+      # colocated cache (per docs). Persistent multimodel layer uses a
+      # separate target dir, also stickied to keep it warm across runs.
+      - uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-cargo-target
+          path: target
+      - uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-cargo-target-persistent
+          path: target/persistent-tests
+      # Cargo registry + git index stay on Swatinem (small, fits the
+      # standard cache and benefits from compression).
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ubuntu-rust-1.91.0
           cache-on-failure: "true"
-          workspaces: |
-            . -> target
-            . -> target/persistent-tests
+          # Skip target/ — handled by stickydisk above.
+          cache-targets: "false"
       - name: Build red_client (cross-binary smoke prereq)
         run: cargo build --locked --bin red_client -p reddb-client --no-default-features
       - name: red_client size budget
