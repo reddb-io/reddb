@@ -1615,6 +1615,105 @@ impl Default for IndexStore {
     }
 }
 
+// --------------------------------------------------------------------
+// IncrementalIndexMaintainer adapter (issue #160)
+//
+// Routes the maintainer's `IndexDeltaOp` stream through the existing
+// hash/bitmap manager methods — no parallel write paths. Composite
+// BTree and the sorted half of single-column BTree still flow through
+// `index_entity_insert`/`composite_entity_*` because those need the
+// raw `Value`, which the op stream doesn't carry; the maintainer
+// documents this restriction.
+// --------------------------------------------------------------------
+
+use crate::storage::unified::index::incremental::{
+    IndexMethodKind as IncMethodKind, SecondaryIndexBackend, SecondaryIndexHandle,
+};
+
+impl From<IndexMethodKind> for IncMethodKind {
+    fn from(value: IndexMethodKind) -> Self {
+        match value {
+            IndexMethodKind::Hash => IncMethodKind::Hash,
+            IndexMethodKind::Bitmap => IncMethodKind::Bitmap,
+            IndexMethodKind::Spatial => IncMethodKind::Spatial,
+            IndexMethodKind::BTree => IncMethodKind::BTree,
+        }
+    }
+}
+
+impl From<IncMethodKind> for IndexMethodKind {
+    fn from(value: IncMethodKind) -> Self {
+        match value {
+            IncMethodKind::Hash => IndexMethodKind::Hash,
+            IncMethodKind::Bitmap => IndexMethodKind::Bitmap,
+            IncMethodKind::Spatial => IndexMethodKind::Spatial,
+            IncMethodKind::BTree => IndexMethodKind::BTree,
+        }
+    }
+}
+
+impl SecondaryIndexBackend for IndexStore {
+    fn insert(
+        &self,
+        idx: &SecondaryIndexHandle,
+        key: &[u8],
+        row_id: EntityId,
+    ) -> Result<(), String> {
+        let collection = idx.collection.as_ref();
+        let Some(col) = idx.leading_column() else {
+            return Ok(());
+        };
+        match idx.method {
+            IncMethodKind::Hash => self
+                .hash
+                .insert(collection, idx.name.as_ref(), key.to_vec(), row_id)
+                .map_err(|e| e.to_string()),
+            IncMethodKind::Bitmap => self
+                .bitmap
+                .insert(collection, col, row_id, key)
+                .map_err(|e| e.to_string()),
+            IncMethodKind::BTree => {
+                // Single-col BTree: maintain the auxiliary hash side
+                // pocket. Sorted half is maintained by the caller via
+                // the pre-existing `index_entity_insert` route, which
+                // has access to the raw `Value`. Composite BTree:
+                // skipped (composite_entity_insert covers it).
+                if idx.columns.len() > 1 {
+                    return Ok(());
+                }
+                let aux = format!("{}_hash", idx.name);
+                self.hash
+                    .insert(collection, &aux, key.to_vec(), row_id)
+                    .map_err(|e| e.to_string())
+            }
+            IncMethodKind::Spatial => Ok(()),
+        }
+    }
+
+    fn remove(&self, idx: &SecondaryIndexHandle, key: &[u8], row_id: EntityId) {
+        let collection = idx.collection.as_ref();
+        let Some(col) = idx.leading_column() else {
+            return;
+        };
+        match idx.method {
+            IncMethodKind::Hash => {
+                let _ = self.hash.remove(collection, idx.name.as_ref(), key, row_id);
+            }
+            IncMethodKind::Bitmap => {
+                let _ = self.bitmap.remove(collection, col, row_id);
+            }
+            IncMethodKind::BTree => {
+                if idx.columns.len() > 1 {
+                    return;
+                }
+                let aux = format!("{}_hash", idx.name);
+                let _ = self.hash.remove(collection, &aux, key, row_id);
+            }
+            IncMethodKind::Spatial => {}
+        }
+    }
+}
+
 /// Convert a Value to bytes for index key
 fn value_to_bytes(value: &Value) -> Vec<u8> {
     match value {
