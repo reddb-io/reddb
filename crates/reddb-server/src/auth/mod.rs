@@ -17,9 +17,12 @@ pub mod middleware;
 pub mod oauth;
 pub mod policies;
 pub mod privileges;
+pub mod scope_cache;
 pub mod scram;
 pub mod store;
 pub mod vault;
+
+pub use scope_cache::{AuthCache, AuthCacheStats, ScopeKey, DEFAULT_TTL as DEFAULT_SCOPE_TTL};
 
 pub use cert::{
     CertAuthConfig, CertAuthError, CertAuthenticator, CertIdentity, CertIdentityMode,
