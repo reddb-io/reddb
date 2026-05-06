@@ -254,6 +254,17 @@ impl RedDBClient {
         Ok(resp.into_inner().payload)
     }
 
+    /// Fetch the canonical `Topology` payload (issue #167 / ADR 0008).
+    /// Returns the raw `topology_bytes` so the caller can hand them
+    /// straight to `TopologyConsumer::consume_bytes`. Engine-free —
+    /// this connector knows nothing about the wire schema beyond the
+    /// proto envelope.
+    pub async fn topology(&mut self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let req = self.auth_request(TopologyRequest {});
+        let resp = self.inner.topology(req).await?;
+        Ok(resp.into_inner().topology_bytes)
+    }
+
     pub async fn delete_entity(
         &mut self,
         collection: &str,

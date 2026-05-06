@@ -36,7 +36,10 @@ pub const DEFAULT_POOL_SIZE: usize = 4;
 /// pool is empty / `force_primary` is set).
 pub struct GrpcClient {
     primary: Endpoint,
-    replicas: Vec<Endpoint>,
+    /// Replica endpoints. Wrapped in `RwLock` so topology discovery
+    /// (issue #168 / #172) can swap in new replicas at runtime
+    /// without rebuilding the whole client.
+    replicas: RwLock<Vec<Endpoint>>,
     /// Round-robin counter for replica selection. Wraps cleanly
     /// (`Relaxed` is fine — exact ordering doesn't matter; spreading
     /// load across replicas does).
@@ -49,6 +52,10 @@ pub struct GrpcClient {
     /// `?route=primary` opt-out. When true, every operation hits the
     /// primary regardless of method type.
     force_primary: bool,
+    /// Per-endpoint pool size, threaded through topology discovery so
+    /// newly-discovered replicas inherit the same `Endpoint::connect`
+    /// pool size the original cluster was built with.
+    pool_size: usize,
     /// Health-aware routing state (issue #171). Replaces the dumb
     /// modulo round-robin with EWMA-RTT + circuit breaker per
     /// endpoint. Behind an `RwLock` so [`update_membership`] can
@@ -101,7 +108,8 @@ impl Endpoint {
 
 impl std::fmt::Debug for GrpcClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let replicas: Vec<&str> = self.replicas.iter().map(|e| e.url.as_str()).collect();
+        let replicas_guard = self.replicas.read().unwrap();
+        let replicas: Vec<&str> = replicas_guard.iter().map(|e| e.url.as_str()).collect();
         f.debug_struct("GrpcClient")
             .field("primary", &self.primary.url)
             .field("replicas", &replicas)
@@ -130,9 +138,10 @@ impl GrpcClient {
         let router = RwLock::new(HealthAwareRouter::with_force_primary(membership, true));
         Ok(Self {
             primary,
-            replicas: Vec::new(),
+            replicas: RwLock::new(Vec::new()),
             next_replica: AtomicUsize::new(0),
             force_primary: true,
+            pool_size,
             router,
         })
     }
@@ -173,9 +182,10 @@ impl GrpcClient {
         ));
         Ok(Self {
             primary: primary_ep,
-            replicas: replica_eps,
+            replicas: RwLock::new(replica_eps),
             next_replica: AtomicUsize::new(0),
             force_primary,
+            pool_size,
             router,
         })
     }
@@ -185,28 +195,39 @@ impl GrpcClient {
         &self.primary.url
     }
 
-    /// Diagnostic: replica URLs in declaration order.
-    pub fn replica_endpoints(&self) -> Vec<&str> {
-        self.replicas.iter().map(|e| e.url.as_str()).collect()
+    /// Diagnostic: replica URLs in declaration order. Cloned because
+    /// the inner pool sits behind an `RwLock` that we don't want to
+    /// hand out a borrow of.
+    pub fn replica_endpoints(&self) -> Vec<String> {
+        self.replicas
+            .read()
+            .unwrap()
+            .iter()
+            .map(|e| e.url.clone())
+            .collect()
     }
 
-    /// Pick the endpoint to dispatch a read against. Delegates to
-    /// [`HealthAwareRouter`] (issue #171): inverse-RTT weighted
-    /// across healthy replicas, fallback to primary when all are
-    /// unhealthy or `force_primary` is set. Returns the endpoint
-    /// reference plus the index the router used so the caller can
-    /// `observe(...)` the outcome.
-    fn read_endpoint(&self) -> (&Endpoint, usize) {
+    /// Pick a read-side connector clone. Delegates to
+    /// [`HealthAwareRouter`] (issue #171): inverse-RTT weighted across
+    /// healthy replicas, fallback to primary when all are unhealthy or
+    /// `force_primary` is set. Returns the connector clone plus the
+    /// index the router used so the caller can `observe(...)` the
+    /// outcome. We hand back an owned `RedDBClient` rather than an
+    /// `Endpoint` borrow so the read lock on the (now-mutable)
+    /// replica pool can drop before the RPC awaits.
+    fn read_endpoint(&self) -> (RedDBClient, usize) {
         let idx = self.router.read().unwrap().pick_read_index();
-        let ep = if idx == 0 {
-            &self.primary
-        } else {
-            // Index `i` (1-based) maps onto replica `i-1`. Guard
-            // against a stale router pointing past the current
-            // pool — fall back to primary.
-            self.replicas.get(idx - 1).unwrap_or(&self.primary)
-        };
-        (ep, idx)
+        if idx == 0 {
+            return (self.primary.pick(), 0);
+        }
+        // Index `i` (1-based) maps onto replica `i-1`. Guard against a
+        // stale router pointing past the current pool — fall back to
+        // primary.
+        let replicas = self.replicas.read().unwrap();
+        match replicas.get(idx - 1) {
+            Some(ep) => (ep.pick(), idx),
+            None => (self.primary.pick(), 0),
+        }
     }
 
     /// Refresh routing state from a new cluster membership. Called
@@ -216,6 +237,102 @@ impl GrpcClient {
         self.router.write().unwrap().update_membership(new_membership);
     }
 
+    /// Refresh the live replica pool from a topology advertisement.
+    ///
+    /// Walks `addrs` (the canonical "primary-first, then replicas"
+    /// order from `crate::topology::ClusterMembership`), opens any
+    /// new endpoints that aren't already in the pool, and drops the
+    /// ones that disappeared. Existing endpoints keep their pool +
+    /// connection state untouched. The router is then updated in
+    /// lockstep so `pick_read_index()` only returns indices that map
+    /// onto live `Endpoint`s.
+    ///
+    /// This is the only hook the topology refresh loop needs: the
+    /// caller decodes `TopologyReply.topology_bytes` via
+    /// [`crate::topology::TopologyConsumer`] and hands the resulting
+    /// `(primary_addr, replica_addrs)` straight in here.
+    pub async fn apply_topology(
+        &self,
+        primary_addr: &str,
+        replica_addrs: &[String],
+    ) -> Result<()> {
+        // Reject a primary swap — that would invalidate the writer
+        // path and is out of scope for this slice. ADR 0008 §2's
+        // "advertised primary always wins" still holds for the URI
+        // seed; cross-session primary failover is tracked separately.
+        if primary_addr != self.primary.url {
+            return Err(ClientError::new(
+                ErrorCode::InvalidUri,
+                format!(
+                    "topology advertised primary {} differs from connected {}; primary failover is out of scope for #172",
+                    primary_addr, self.primary.url
+                ),
+            ));
+        }
+        // Snapshot current URLs without holding the lock across the
+        // (potentially blocking) `Endpoint::connect` calls.
+        let current_urls: Vec<String> = self
+            .replicas
+            .read()
+            .unwrap()
+            .iter()
+            .map(|e| e.url.clone())
+            .collect();
+
+        // Build the new pool: keep existing endpoints, dial new ones.
+        let mut next: Vec<Endpoint> = Vec::with_capacity(replica_addrs.len());
+        for url in replica_addrs {
+            if current_urls.iter().any(|u| u == url) {
+                // Existing — move it across by re-acquiring the lock
+                // briefly. We swap_remove from the existing pool so
+                // we don't drop + reconnect.
+                let mut guard = self.replicas.write().unwrap();
+                if let Some(pos) = guard.iter().position(|e| e.url == *url) {
+                    next.push(guard.swap_remove(pos));
+                }
+            } else {
+                next.push(Endpoint::connect(url.clone(), self.pool_size).await?);
+            }
+        }
+        // Replace the live pool. Anything still left in the old guard
+        // is a dropped replica; let it Drop here (closes channels).
+        {
+            let mut guard = self.replicas.write().unwrap();
+            *guard = next;
+        }
+        // Sync the router's view of membership so its index space
+        // matches the pool's index space.
+        let membership = ClusterMembership::new(
+            self.primary.url.clone(),
+            replica_addrs.to_vec(),
+        );
+        self.router.write().unwrap().update_membership(membership);
+        Ok(())
+    }
+
+    /// Fetch a topology snapshot from the primary and apply it via
+    /// [`Self::apply_topology`]. Convenience for tests and the
+    /// background refresh loop.
+    pub async fn refresh_topology(&self) -> Result<()> {
+        let mut client = self.primary.pick();
+        let bytes = client.topology().await.map_err(|e| {
+            ClientError::new(ErrorCode::IoError, format!("topology rpc: {e}"))
+        })?;
+        let membership = crate::topology::TopologyConsumer::consume_bytes(&bytes, None)
+            .map_err(|e| {
+                ClientError::new(
+                    ErrorCode::QueryError,
+                    format!("decode topology: {e}"),
+                )
+            })?;
+        let replicas: Vec<String> = membership
+            .replicas
+            .iter()
+            .map(|r| r.addr.clone())
+            .collect();
+        self.apply_topology(&membership.primary.addr, &replicas).await
+    }
+
     /// Record an observation against an endpoint by index. Exposed
     /// for Lane P's probe loop and integration tests.
     pub(crate) fn observe(&self, idx: usize, outcome: Outcome) {
@@ -223,8 +340,7 @@ impl GrpcClient {
     }
 
     pub async fn query(&self, sql: &str) -> Result<QueryResult> {
-        let (ep, idx) = self.read_endpoint();
-        let mut client = ep.pick();
+        let (mut client, idx) = self.read_endpoint();
         let started = Instant::now();
         let reply = match client.query_reply(sql).await {
             Ok(r) => {
