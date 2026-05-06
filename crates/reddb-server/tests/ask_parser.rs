@@ -86,20 +86,18 @@ proptest! {
     }
 
     /// Strategy 2: ASK with the USING-provider clause concentrated.
-    ///
-    /// FIXME(#101): `parse_ask_query` calls `consume_ident_ci("USING")`
-    /// (parser/dml.rs:402) but `USING` lexes to `Token::Using`, so the
-    /// optional-clause loop never matches the keyword. The result is a
-    /// "Unexpected token after query: USING" error from the top-level
-    /// `parse` EOF check. Until a follow-up issue switches the call to
-    /// `self.consume(&Token::Using)`, this property only asserts the
-    /// parser does not *panic*. Once fixed, change the assertion to
-    /// `is_ok()` and drop the FIXME.
+    /// Now that #101 / #108 fixed `parse_ask_query` to match `USING`
+    /// via `Token::Using`, this property asserts the generated input
+    /// parses cleanly — same shape as the other strategies.
     #[test]
-    fn proptest_ask_using_provider_no_panic(
+    fn proptest_ask_using_provider_roundtrips(
         s in ask_grammar::ask_using_provider_stmt(),
     ) {
         harness::roundtrip_property::<AskParser>(&s);
+        prop_assert!(
+            AskParser::parse(&s).is_ok(),
+            "ask USING <provider> did not parse: {}", s
+        );
     }
 
     /// Strategy 3: ASK with the MODEL string-literal clause
@@ -223,10 +221,9 @@ fn ask_with_depth_limit_collection_parses() {
 
 #[test]
 fn ask_full_chain_without_using_parses() {
-    // `USING <provider>` is omitted — see
-    // `ask_using_provider_currently_errors_FIXME_101` below for the
-    // bug the omission works around. Every other documented clause
-    // is exercised here.
+    // `USING <provider>` is omitted here; the dedicated
+    // `ask_using_provider_parses` test pins the USING clause shape
+    // separately. Every other documented clause is exercised here.
     let q = parse_query(
         "ASK 'what happened?' MODEL 'claude-3-5-sonnet' \
          DEPTH 2 LIMIT 50 COLLECTION events",
@@ -244,48 +241,21 @@ fn ask_full_chain_without_using_parses() {
     }
 }
 
-/// FIXME(#101): pinned current-broken behaviour for the
-/// `USING <provider>` clause.
-///
-/// `parse_ask_query` (parser/dml.rs:402) uses
-/// `consume_ident_ci("USING")` to detect the clause, but `USING`
-/// lexes to `Token::Using` (a reserved keyword), not `Token::Ident`.
-/// The check therefore always returns `false`, the optional-clause
-/// loop exits, and the trailing tokens trigger the top-level
-/// `parse` EOF check with "Unexpected token after query: USING".
-///
-/// The migration parser had the same class of bug for `DEPENDS ON`
-/// / `FOR TENANT` / the `MIGRATION` keyword in `APPLY MIGRATION`,
-/// fixed in #92 by switching to `self.consume(&Token::…)`. The
-/// follow-up issue should apply the same fix here.
-///
-/// When the parser is fixed, this test will start failing. At that
-/// point, replace the assertion with the corresponding success
-/// shape (see the commented-out block below) and drop the FIXME.
+/// Regression guard for #101 / #108: `parse_ask_query` now matches
+/// `USING` via `Token::Using` (the typed-keyword consumer), so the
+/// optional `USING <provider>` clause on `ASK '…'` parses
+/// end-to-end. Mirrors the #92 fix that flipped `DEPENDS ON` /
+/// `FOR TENANT` / `APPLY MIGRATION` to typed consumers.
 #[test]
-#[allow(non_snake_case)]
-fn ask_using_provider_currently_errors_FIXME_101() {
-    let result = parser::parse("ASK 'who?' USING openai");
-    let err = result.expect_err(
-        "FIXME(#101): if this fires, USING was fixed — flip this test to assert the success \
-         shape and drop the FIXME",
-    );
-    let msg = err.to_string();
-    assert!(
-        msg.contains("USING"),
-        "expected error to mention USING, got: {msg}"
-    );
-
-    // Post-fix expected shape (kept as documentation):
-    //
-    // let q = parse_query("ASK 'who?' USING openai");
-    // match q {
-    //     QueryExpr::Ask(ask) => {
-    //         assert_eq!(ask.question, "who?");
-    //         assert_eq!(ask.provider.as_deref(), Some("openai"));
-    //     }
-    //     other => panic!("expected Ask, got {other:?}"),
-    // }
+fn ask_using_provider_parses() {
+    let q = parse_query("ASK 'who?' USING openai");
+    match q {
+        QueryExpr::Ask(ask) => {
+            assert_eq!(ask.question, "who?");
+            assert_eq!(ask.provider.as_deref(), Some("openai"));
+        }
+        other => panic!("expected Ask, got {other:?}"),
+    }
 }
 
 #[test]
@@ -339,8 +309,7 @@ fn ask_lowercase_keyword_parses() {
     // The dispatch path uses `eq_ignore_ascii_case("ASK")`, so the
     // lowercase form must round-trip. Pinning prevents a future
     // tightening of the dispatcher from breaking case-insensitive
-    // RQL clients. (USING omitted — see
-    // `ask_using_provider_currently_errors_FIXME_101`.)
+    // RQL clients.
     let q = parse_query("ask 'q' depth 3");
     match q {
         QueryExpr::Ask(ask) => {
