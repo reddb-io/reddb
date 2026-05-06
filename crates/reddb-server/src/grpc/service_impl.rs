@@ -2380,19 +2380,43 @@ async fn checkpoint(&self, _request: Request<Empty>) -> Result<Response<Operatio
 
 async fn topology(
     &self,
-    _request: Request<TopologyRequest>,
+    request: Request<TopologyRequest>,
 ) -> Result<Response<TopologyReply>, Status> {
-    // Wire surface only (#166). The TopologyAdvertiser landing in
-    // #167 will fill the body — this stub keeps the generated trait
-    // satisfied so the workspace compiles. Returning Unimplemented
-    // (rather than an empty payload) keeps the contract honest:
-    // a client probing the new RPC against a server that has not
-    // yet picked up the advertiser sees a status code it can fall
-    // back on, instead of an empty success that looks like "no
-    // replicas". See ADR 0008 §4 on the schema-evolution rule.
-    Err(Status::unimplemented(
-        "Topology RPC not yet wired (issue #167 TopologyAdvertiser)",
-    ))
+    // Issue #167: the advertiser is the deep module — this RPC
+    // resolves the auth context, snapshots the replica registry,
+    // and hands the inputs over. The capability gate (ADR 0008 §1)
+    // is enforced inside `TopologyAdvertiser::advertise`; we don't
+    // duplicate it here.
+    let auth = self.resolve_auth(request.metadata());
+    let primary_endpoint = reddb_wire::topology::Endpoint {
+        addr: self.runtime.config_string("red.grpc.advertise_addr", ""),
+        region: self.runtime.db().options().replication.region.clone(),
+    };
+    let db = self.runtime.db();
+    let (replicas, current_lsn, epoch) = match db.replication.as_ref() {
+        Some(repl) => (
+            repl.replica_snapshots(),
+            repl.wal_buffer.current_lsn(),
+            repl.topology_epoch(),
+        ),
+        // Standalone / replica role: advertise the primary slot
+        // empty and zero replicas. The consumer falls back to
+        // URI-only routing.
+        None => (Vec::new(), 0, 0),
+    };
+    let lag = crate::replication::LagConfig::from_now();
+    let topology = crate::replication::TopologyAdvertiser::advertise(
+        &replicas,
+        &auth,
+        epoch,
+        primary_endpoint,
+        current_lsn,
+        &lag,
+    );
+    let bytes = reddb_wire::encode_topology(&topology);
+    Ok(Response::new(TopologyReply {
+        topology_bytes: bytes,
+    }))
 }
 
 async fn replication_status(

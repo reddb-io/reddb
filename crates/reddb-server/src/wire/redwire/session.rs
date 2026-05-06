@@ -45,7 +45,13 @@ where
     // Discriminator byte was already consumed by the service-router
     // detector when it dispatched here. If callers wire this from
     // a non-router path they must consume it themselves first.
-    let session = perform_handshake(&mut stream, auth_store.as_deref(), oauth.as_deref()).await?;
+    let session = perform_handshake(
+        &mut stream,
+        runtime.as_ref(),
+        auth_store.as_deref(),
+        oauth.as_deref(),
+    )
+    .await?;
     if session.is_none() {
         return Ok(());
     }
@@ -226,6 +232,7 @@ where
 /// or the auth was refused (the failure frame is already on the wire).
 async fn perform_handshake<S>(
     stream: &mut S,
+    runtime: &RedDBRuntime,
     auth_store: Option<&AuthStore>,
     oauth: Option<&crate::auth::oauth::OAuthValidator>,
 ) -> io::Result<Option<AuthedSession>>
@@ -299,10 +306,23 @@ where
     };
 
     // Step 3: HelloAck.
+    //
+    // HelloAck is sent before any AuthResponse arrives, so the
+    // caller is unauthenticated at this point. The TopologyAdvertiser
+    // collapses anonymous to primary-only per ADR 0008 §3 — that's
+    // the correct payload for the bootstrap path. Authenticated
+    // principals get the full replica list via the gRPC `Topology`
+    // RPC after the connection is established.
     let server_features = 0u32;
+    let topology = build_topology_for_hello_ack(runtime);
     let ack_frame = FrameBuilder::reply_to(hello.correlation_id)
         .kind(MessageKind::HelloAck)
-        .payload(build_hello_ack(chosen_version, chosen, server_features))
+        .payload(build_hello_ack(
+            chosen_version,
+            chosen,
+            server_features,
+            topology.as_ref(),
+        ))
         .build()
         .map_err(|e| io::Error::other(format!("build HelloAck: {e}")))?;
     let ack = encode_frame(&ack_frame);
@@ -708,6 +728,48 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
         }
         Err(err) => error_frame(frame.correlation_id, &err.to_string()),
     }
+}
+
+/// Build the primary-only topology payload embedded in HelloAck
+/// (issue #167). Threads an anonymous auth context through
+/// `TopologyAdvertiser::advertise` because the principal is not yet
+/// known at HelloAck time — ADR 0008 §3 collapses anonymous to a
+/// primary-only payload, which is exactly the bootstrap shape we
+/// want here.
+///
+/// Returns `None` for non-primary roles or when the engine is not
+/// running with replication enabled. Old clients that don't
+/// understand the `topology` JSON key ignore it cleanly (ADR §4),
+/// so the absent-vs-present distinction is benign.
+fn build_topology_for_hello_ack(
+    runtime: &RedDBRuntime,
+) -> Option<reddb_wire::topology::Topology> {
+    use crate::auth::middleware::AuthResult;
+    use crate::replication::{LagConfig, TopologyAdvertiser};
+    use reddb_wire::topology::Endpoint;
+
+    let db = runtime.db();
+    let primary_endpoint = Endpoint {
+        addr: runtime.config_string("red.redwire.advertise_addr", ""),
+        region: db.options().replication.region.clone(),
+    };
+    let (replicas, current_lsn, epoch) = match db.replication.as_ref() {
+        Some(repl) => (
+            repl.replica_snapshots(),
+            repl.wal_buffer.current_lsn(),
+            repl.topology_epoch(),
+        ),
+        None => (Vec::new(), 0u64, 0u64),
+    };
+    let lag = LagConfig::from_now();
+    Some(TopologyAdvertiser::advertise(
+        &replicas,
+        &AuthResult::Anonymous,
+        epoch,
+        primary_endpoint,
+        current_lsn,
+        &lag,
+    ))
 }
 
 fn error_frame(correlation_id: u64, msg: &str) -> Frame {

@@ -100,7 +100,25 @@ impl Hello {
 /// Build the HelloAck the server sends back. `chosen_auth` is the
 /// strongest method both sides support; `chosen_version` is
 /// `min(client_max, server_max)`.
-pub fn build_hello_ack(chosen_version: u8, chosen_auth: &str, server_features: u32) -> Vec<u8> {
+///
+/// When `topology` is `Some(_)`, the canonical bytes are
+/// base64-wrapped via `encode_topology_for_hello_ack` and embedded
+/// under the JSON key `"topology"` per issue #166's HelloAck
+/// embedding shape. Old clients that do not understand the key
+/// ignore it cleanly (ADR 0008 §4).
+///
+/// HelloAck travels *before* the AuthResponse, so the caller is
+/// expected to thread an *anonymous* auth context through
+/// `TopologyAdvertiser::advertise` — which collapses the payload
+/// to primary-only per ADR 0008 §3. A post-handshake
+/// re-advertisement (full replica list for an authenticated
+/// principal) rides the gRPC `Topology` RPC.
+pub fn build_hello_ack(
+    chosen_version: u8,
+    chosen_auth: &str,
+    server_features: u32,
+    topology: Option<&reddb_wire::topology::Topology>,
+) -> Vec<u8> {
     let mut obj = crate::serde_json::Map::new();
     obj.insert(
         "version".to_string(),
@@ -118,6 +136,12 @@ pub fn build_hello_ack(chosen_version: u8, chosen_auth: &str, server_features: u
         "server".to_string(),
         JsonValue::String(format!("reddb/{}", env!("CARGO_PKG_VERSION"))),
     );
+    if let Some(topo) = topology {
+        obj.insert(
+            "topology".to_string(),
+            JsonValue::String(reddb_wire::topology::encode_topology_for_hello_ack(topo)),
+        );
+    }
     JsonValue::Object(obj).to_string_compact().into_bytes()
 }
 
@@ -643,5 +667,45 @@ mod tests {
     fn bearer_without_store_refuses() {
         let outcome = validate_auth_response("bearer", br#"{"token":"x"}"#, None);
         assert!(matches!(outcome, AuthOutcome::Refused(_)));
+    }
+
+    #[test]
+    fn hello_ack_omits_topology_field_when_caller_passes_none() {
+        // Backwards-compat: callers that haven't picked up the
+        // advertiser yet pass `None` and the JSON envelope keeps
+        // the same shape as pre-#167.
+        let bytes = build_hello_ack(1, "bearer", 0, None);
+        let s = std::str::from_utf8(&bytes).unwrap();
+        assert!(!s.contains("\"topology\""));
+    }
+
+    #[test]
+    fn hello_ack_embeds_topology_field_when_caller_passes_payload() {
+        // Issue #167: HelloAck builder inserts the canonical bytes
+        // base64-wrapped under JSON key `topology`. Round-trip via
+        // the wire decoder pins byte-for-byte equivalence with the
+        // canonical encoder (#166).
+        let topo = reddb_wire::topology::Topology {
+            epoch: 17,
+            primary: reddb_wire::topology::Endpoint {
+                addr: "primary:5050".into(),
+                region: "us-east-1".into(),
+            },
+            replicas: Vec::new(),
+        };
+        let bytes = build_hello_ack(1, "bearer", 0, Some(&topo));
+        let s = std::str::from_utf8(&bytes).unwrap();
+        assert!(s.contains("\"topology\""), "missing topology key in {s}");
+
+        // Extract and round-trip the field through the wire decoder.
+        let v: JsonValue = crate::serde_json::from_slice(&bytes).unwrap();
+        let field = v
+            .as_object()
+            .and_then(|o| o.get("topology"))
+            .and_then(|t| t.as_str())
+            .expect("topology key must be present and a string");
+        let decoded =
+            reddb_wire::topology::decode_topology_from_hello_ack(field).expect("decode");
+        assert_eq!(decoded.expect("v1 known"), topo);
     }
 }
