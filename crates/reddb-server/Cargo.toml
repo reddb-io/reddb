@@ -67,7 +67,7 @@ otel = []
 trybuild = "1"
 # OAuth-JWT end-to-end smoke. `jsonwebtoken` mints + decodes RS256
 # tokens; `serde_json` shapes the JWKS responses. Both are dev-only.
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 serde_json = "1"
 # Parser hardening harness (issue #87): property tests via proptest,
 # pinned error-message snapshots via insta. The `filters` feature
