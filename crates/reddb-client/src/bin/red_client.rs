@@ -276,7 +276,10 @@ fn resolve_target(uri: &str) -> Result<ResolvedTarget, EndpointError> {
         return Err(EndpointError::PgUnsupported);
     }
     let target = parse(uri).map_err(|e| match e.kind {
-        ParseErrorKind::Empty | ParseErrorKind::InvalidUri | ParseErrorKind::UnsupportedScheme => {
+        ParseErrorKind::Empty
+        | ParseErrorKind::InvalidUri
+        | ParseErrorKind::UnsupportedScheme
+        | ParseErrorKind::LimitExceeded => {
             EndpointError::ParseFailed(format!("{e}"))
         }
     })?;

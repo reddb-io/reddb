@@ -62,6 +62,12 @@ pub fn parse(uri: &str) -> Result<Target> {
                 .unwrap_or(&e.message);
             ClientError::unsupported_scheme(scheme)
         }
+        ParseErrorKind::LimitExceeded => {
+            // DoS guardrails added in #90 (max URI bytes, max query
+            // params, max cluster hosts). Surface as InvalidUri with
+            // the structured message intact.
+            ClientError::new(ErrorCode::InvalidUri, e.message)
+        }
     })?;
     Ok(map_target(target))
 }
