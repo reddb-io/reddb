@@ -22,8 +22,15 @@ CMD="cargo test --locked --test 'drill_*' --no-fail-fast"
 START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 LOG="$(mktemp -t reddb-drill-nightly.XXXXXX.log)"
 
+# Run the drill in the current shell so that PATH (sccache, mold, rustup
+# shims) and RUSTC_WRAPPER stay consistent with the runner environment.
+# Using `bash -lc` here re-sources /etc/profile and silently drops the
+# tool-cache PATH entries the workflow added, leaving RUSTC_WRAPPER=sccache
+# pointing at a binary that can't be resolved. See drill-nightly run
+# 25418720610 (issue #116) for the failure mode this avoids.
 set +e
-bash -lc "$CMD" >"$LOG" 2>&1
+# shellcheck disable=SC2086
+eval "$CMD" >"$LOG" 2>&1
 STATUS=$?
 set -e
 
