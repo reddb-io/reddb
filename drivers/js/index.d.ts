@@ -154,7 +154,7 @@ export function connect(uri: string, options?: ConnectOptions): Promise<RedDB>
  * can be passed to `connect(uri, { auth: { token } })`.
  *
  * @example
- * import { connect, login } from 'reddb'
+ * import { connect, login } from '@reddb-io/sdk'
  * const { token } = await login(
  *   'https://reddb.example.com/auth/login',
  *   { username: 'admin', password: 'secret' },

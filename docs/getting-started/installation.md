@@ -84,14 +84,14 @@ pnpm dlx @reddb-io/cli version
 
 ## Install the JavaScript / TypeScript driver
 
-Use the `reddb` package in app code:
+Use the `@reddb-io/sdk` package in app code:
 
 ```bash
-pnpm add reddb
+pnpm add @reddb-io/sdk
 ```
 
 ```ts
-import { connect } from 'reddb'
+import { connect } from '@reddb-io/sdk'
 
 const db = await connect('memory://')
 const result = await db.query('SELECT * FROM users LIMIT 10')

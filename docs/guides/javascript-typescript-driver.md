@@ -1,6 +1,6 @@
 # JavaScript and TypeScript Driver
 
-Use the `reddb` package for application code in Node, Bun, and Deno.
+Use the `@reddb-io/sdk` package for application code in Node, Bun, and Deno.
 
 Use `@reddb-io/cli` only when you want to launch the real `red` binary from npm:
 
@@ -12,20 +12,20 @@ npx @reddb-io/cli@latest server --http-bind 127.0.0.1:8080 --path ./data.rdb
 ## 1. Install the driver
 
 ```bash
-pnpm add reddb
+pnpm add @reddb-io/sdk
 ```
 
 Or:
 
 ```bash
-npm install reddb
-bun add reddb
+npm install @reddb-io/sdk
+bun add @reddb-io/sdk
 ```
 
 In Deno:
 
 ```ts
-import { connect } from 'npm:reddb'
+import { connect } from 'npm:@reddb-io/sdk'
 ```
 
 The package downloads the matching `red` binary during `postinstall`. If your
@@ -34,7 +34,7 @@ environment blocks install scripts, set `REDDB_BINARY_PATH=/path/to/red`.
 ## 2. Connect
 
 ```ts
-import { connect } from 'reddb'
+import { connect } from '@reddb-io/sdk'
 
 const memory = await connect('memory://')
 const persisted = await connect('file:///var/lib/reddb/data.rdb')
@@ -51,7 +51,7 @@ The driver forwards `grpc://...` to the binary via `red rpc --stdio --connect ..
 ## 3. Query and mutate data
 
 ```ts
-import { connect } from 'reddb'
+import { connect } from '@reddb-io/sdk'
 
 const db = await connect('memory://')
 
@@ -78,7 +78,7 @@ Available methods:
 ## 4. Error handling
 
 ```ts
-import { connect, RedDBError } from 'reddb'
+import { connect, RedDBError } from '@reddb-io/sdk'
 
 const db = await connect('memory://')
 
@@ -99,7 +99,7 @@ await db.close()
 If you already manage the `red` binary yourself:
 
 ```ts
-import { connect } from 'reddb'
+import { connect } from '@reddb-io/sdk'
 
 const db = await connect('memory://', {
   binary: '/usr/local/bin/red',
@@ -110,17 +110,17 @@ const db = await connect('memory://', {
 
 Use this rule:
 
-- application code: `reddb`
+- application code: `@reddb-io/sdk`
 - npm-launched CLI: `@reddb-io/cli`
 
 Examples:
 
 ```bash
-pnpm add reddb
+pnpm add @reddb-io/sdk
 ```
 
 ```ts
-import { connect } from 'reddb'
+import { connect } from '@reddb-io/sdk'
 ```
 
 ```bash

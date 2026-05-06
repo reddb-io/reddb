@@ -98,8 +98,8 @@ For dashboard / dev workloads pick HTTP or PG wire instead.
 
 | Driver | Status | RedWire | HTTP / HTTPS | PG wire | mTLS | OAuth-JWT | SCRAM |
 |--------|--------|---------|--------------|---------|------|-----------|-------|
-| `reddb` (JS / TS) | ✅ | TCP/TLS/mTLS | ✅ | via `pg` | ✅ | ✅ | ✅ |
-| `reddb` (Rust) | ✅ | TCP/TLS/mTLS | ✅ | via `tokio-postgres` | ✅ | ✅ | ✅ |
+| `@reddb-io/sdk` (JS / TS) | ✅ | TCP/TLS/mTLS | ✅ | via `pg` | ✅ | ✅ | ✅ |
+| `reddb-client` (Rust) | ✅ | TCP/TLS/mTLS | ✅ | via `tokio-postgres` | ✅ | ✅ | ✅ |
 | `reddb` (Python / PyO3) | ✅ embedded + HTTP | planned | ✅ | via `psycopg` | planned | planned | planned |
 
 ## Versioning Promise

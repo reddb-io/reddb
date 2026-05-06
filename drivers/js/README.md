@@ -1,6 +1,6 @@
-# reddb
+# @reddb-io/sdk
 
-Official RedDB driver for JavaScript and TypeScript. Speaks JSON-RPC 2.0 over
+Official RedDB SDK for JavaScript and TypeScript. Speaks JSON-RPC 2.0 over
 stdio to a local `red` binary, which is downloaded automatically on install.
 Works in **Node 18+**, **Bun** and **Deno** (via `npm:` specifier) — same
 package, no per-runtime fork.
@@ -16,28 +16,28 @@ npx @reddb-io/cli@latest server --http-bind 127.0.0.1:8080 --path ./data.rdb
 ## Install
 
 ```bash
-pnpm add reddb
+pnpm add @reddb-io/sdk
 # or
-npm install reddb
+npm install @reddb-io/sdk
 # or
-bun add reddb
+bun add @reddb-io/sdk
 ```
 
 In Deno:
 
 ```ts
-import { connect } from 'npm:reddb'
+import { connect } from 'npm:@reddb-io/sdk'
 ```
 
 The `postinstall` script downloads the matching `red` binary from GitHub
-Releases into `node_modules/reddb/bin/`. If your environment blocks postinstall
-scripts or has no network, set `REDDB_BINARY_PATH=/path/to/red` and the driver
-will use that instead.
+Releases into `node_modules/@reddb-io/sdk/bin/`. If your environment blocks
+postinstall scripts or has no network, set `REDDB_BINARY_PATH=/path/to/red`
+and the driver will use that instead.
 
 ## Quickstart
 
 ```js
-import { connect } from 'reddb'
+import { connect } from '@reddb-io/sdk'
 
 const db = await connect('memory://')        // ephemeral
 // or:  await connect('file:///var/lib/reddb/data.rdb')   // persisted
@@ -54,7 +54,7 @@ await db.close()
 TypeScript is the same API:
 
 ```ts
-import { connect, RedDBError } from 'reddb'
+import { connect, RedDBError } from '@reddb-io/sdk'
 
 const db = await connect('file:///var/lib/reddb/data.rdb')
 
@@ -95,7 +95,7 @@ Options:
 Examples:
 
 ```js
-import { connect } from 'reddb'
+import { connect } from '@reddb-io/sdk'
 
 const db = await connect('memory://')
 const persisted = await connect('file:///tmp/app.rdb')
@@ -126,7 +126,7 @@ with `RedDBError('CLIENT_CLOSED', ...)`.
 All RPC failures throw `RedDBError`:
 
 ```js
-import { RedDBError } from 'reddb'
+import { RedDBError } from '@reddb-io/sdk'
 
 try {
   await db.query('NOT VALID SQL')

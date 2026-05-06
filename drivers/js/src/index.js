@@ -2,7 +2,7 @@
  * RedDB JavaScript driver.
  *
  * Public API:
- *   import { connect } from 'reddb'
+ *   import { connect } from '@reddb-io/sdk'
  *   const db = await connect('file:///data.rdb')
  *   const result = await db.query('SELECT * FROM users LIMIT 10')
  *   const inserted = await db.insert('users', { name: 'Alice' })
