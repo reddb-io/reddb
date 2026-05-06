@@ -92,8 +92,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # OAuth-JWT smoke (`tests/redwire_oauth_smoke.rs`). Mints + decodes
 # RS256 tokens against an in-process JWKS server. Pulled only when
-# building tests.
-jsonwebtoken = "10"
+# building tests. v10 requires opting into a crypto backend;
+# `rust_crypto` keeps the tests pure-Rust (no system C deps).
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 serde_json = "1"
 
 [[bin]]
