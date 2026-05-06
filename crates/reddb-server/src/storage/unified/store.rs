@@ -242,6 +242,15 @@ pub struct UnifiedStoreConfig {
     pub manager_config: ManagerConfig,
     /// Automatically index cross-references on insert
     pub auto_index_refs: bool,
+    /// Automatically build a HASH index on a user `id` column the first
+    /// time a row carrying that column is inserted into a collection.
+    /// Mirrors PostgreSQL's implicit primary-key index and Mongo's `_id`
+    /// default index — without it, `WHERE id = N` falls through to a
+    /// full segment scan because RedDB has no concept of an automatic
+    /// primary-key index on user-declared columns. See `docs/perf/
+    /// delete-sequential-2026-05-06.md` for the perf rationale.
+    /// Defaults to `true`; set to `false` to opt out per workload.
+    pub auto_index_id: bool,
     /// Maximum cross-references per entity
     pub max_cross_refs: usize,
     /// Enable write-ahead logging
@@ -259,6 +268,7 @@ impl Default for UnifiedStoreConfig {
         Self {
             manager_config: ManagerConfig::default(),
             auto_index_refs: true,
+            auto_index_id: true,
             max_cross_refs: 1000,
             enable_wal: false,
             // Mirrors `RedDBOptions::default().durability_mode` — see
