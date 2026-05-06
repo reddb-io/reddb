@@ -36,7 +36,12 @@ drivers/python-asyncio/tests/__pycache__/
 drivers/zig/.zig-cache/
 skills-lock.json
 # AI tool metadata (local/runtime)
-wal/
+# Runtime WAL output dirs created by reddb-server / examples at runtime.
+# (Source-tree `crates/.../storage/wal/` is a Rust module, not a runtime
+# output dir, and must remain tracked — pin the rule to top-level + the
+# server crate's runtime location.)
+/wal/
+/crates/reddb-server/wal/
 # Runtime WAL — binary, machine-local, should never be versioned.
 wal.log
 node_modules
