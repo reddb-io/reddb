@@ -17,6 +17,8 @@ RedDB exposes multiple kinds of "structure", and they are not all the same thing
   │
   Is the access pattern key → value?
   ├─ yes ─── [Key-Value]
+  │          Need arbitrary bytes + TTL + invalidation?
+  │          └─ yes ─── [Cache]
   │
   Is it a queue of jobs / events for workers?
   ├─ yes ─── [Queues]
@@ -33,7 +35,7 @@ data; see [Competitive Positioning](/architecture/competitive-positioning.md)
 for why that's the RedDB advantage.
 
 The most important naming rule is this: a `collection` is the named logical container, while tables,
-documents, KV, graphs, vectors, time-series, and queues are user-facing data models or semantics used
+documents, KV, cache, graphs, vectors, time-series, and queues are user-facing data models or semantics used
 on top of collections. RedDB does not use a hierarchy where a collection contains multiple tables and
 documents as separate child objects in the traditional sense.
 
@@ -46,9 +48,9 @@ indexes and probabilistic sketches.
 
 | Layer | What it means | Examples |
 |:------|:--------------|:---------|
-| User-facing data models | The structures application code and query authors work with directly | Tables, Documents, KV, Graphs, Vectors, Time-Series, Queues |
+| User-facing data models | The structures application code and query authors work with directly | Tables, Documents, KV, Cache, Graphs, Vectors, Time-Series, Queues |
 | Native persisted entity kinds | The core entity shapes stored by the unified engine | `TableRow`, `GraphNode`, `GraphEdge`, `Vector`, `TimeSeriesPoint`, `QueueMessage` |
-| Supporting engine structures | Persistent or runtime objects that accelerate or extend the engine, but are not collection entities | Indexes, HyperLogLog, Count-Min Sketch, Cuckoo Filter |
+| Supporting engine structures | Persistent or runtime objects that accelerate or extend the engine, but are not collection entities | Indexes, Blob Cache, HyperLogLog, Count-Min Sketch, Cuckoo Filter |
 
 ## Collection First Mental Model
 
@@ -72,6 +74,7 @@ These are the main structures most users mean when they ask "what can I build in
 | Tables & Rows | `CREATE TABLE`, `INSERT INTO users (...)` | `SELECT`, `UPDATE`, `DELETE` | Structured records with typed fields | Native `TableRow` |
 | Documents | `INSERT INTO logs DOCUMENT (body) VALUES (...)` | `SELECT`, `FROM ANY`, field projections | Flexible JSON payloads | User-facing model over the unified collection path |
 | Key-Value | `INSERT INTO config KV (key, value) VALUES (...)` or KV HTTP API | KV API, `SELECT key, value FROM config` | Config, sessions, flags, cache-like lookups | User-facing model over the unified collection path |
+| Cache | Internal Blob Cache Interface first; public API later | Exact key lookup, existence check, invalidation APIs | Arbitrary cached blobs with rich TTL and durable L2 | Proposed supporting engine structure |
 | Graphs | `INSERT INTO network NODE ...`, `INSERT INTO network EDGE ...` | `MATCH`, `GRAPH ...`, `PATH ...` | Relationships, traversals, analytics | Native `GraphNode` and `GraphEdge` |
 | Vectors | `INSERT INTO embeddings VECTOR (...)` | `VECTOR SEARCH`, `HYBRID ... VECTOR SEARCH` | Embeddings, semantic retrieval, RAG | Native `Vector` |
 | Time-Series | `CREATE TIMESERIES`, `INSERT INTO cpu_metrics (...)` | `SELECT`, `time_bucket(...)`, range filters | Metrics, telemetry, sensor data | Native `TimeSeriesPoint` |
@@ -145,6 +148,7 @@ Use this as the fast decision tree:
 - Need tables where UPDATE/DELETE must be rejected (audit, ledger, events): use **Append-Only Tables**.
 - Need flexible JSON payloads: use **Documents**.
 - Need direct lookup by key: use **Key-Value**.
+- Need arbitrary cached bytes, rich TTL, and explicit invalidation: use **Cache**.
 - Need relationships, traversals, or graph analytics: use **Graphs**.
 - Need embedding similarity or semantic retrieval: use **Vectors**.
 - Need timestamp-first metrics with retention and downsampling: use **Time-Series**.
@@ -159,6 +163,7 @@ Use this as the fast decision tree:
 - [Append-Only Tables](/data-models/append-only-tables.md)
 - [Documents](/data-models/documents.md)
 - [Key-Value](/data-models/key-value.md)
+- [Cache](/data-models/cache.md)
 - [Graphs](/data-models/graphs.md)
 - [Vectors & Embeddings](/data-models/vectors.md)
 - [Time-Series](/data-models/timeseries.md)

@@ -129,3 +129,15 @@ The plan cache saves ~100us per query for repeated SQL patterns. It is especiall
 │   Hit → skip cross-collection scan for get_any(id)    │
 └──────────────────────────────────────────────────────┘
 ```
+
+## Proposed Blob Cache
+
+RedDB also has a proposed native **Blob Cache** module for Redis-adjacent cache
+workloads. Unlike the page cache, result cache, and entity cache, Blob Cache is
+designed around arbitrary byte values, rich TTL policy, durable L2 storage, fast
+existence checks, and explicit invalidation by key, prefix, tag, dependency, or
+namespace generation.
+
+See [Cache](/data-models/cache.md) and
+[ADR 0006](/adr/0006-tiered-blob-cache.md) for the proposed Interface and
+rollout plan.

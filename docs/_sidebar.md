@@ -39,6 +39,7 @@
   - [Append-Only Tables](/data-models/append-only-tables.md)
   - [Documents](/data-models/documents.md)
   - [Key-Value](/data-models/key-value.md)
+  - [Cache](/data-models/cache.md)
   - [Graphs](/data-models/graphs.md)
   - [Vectors & Embeddings](/data-models/vectors.md)
   - [Time-Series](/data-models/timeseries.md)
@@ -89,6 +90,7 @@
 
 - **ADRs**
   - [0001 — RedWire TCP Protocol](/adr/0001-redwire-tcp-protocol.md)
+  - [0006 — Tiered Blob Cache](/adr/0006-tiered-blob-cache.md)
 
 - **Vector Engine**
   - [HNSW Index](/vectors/hnsw.md)

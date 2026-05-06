@@ -1,18 +1,19 @@
-# Competitive Positioning — RedDB vs TimescaleDB vs ClickHouse
+# Competitive Positioning — RedDB vs TimescaleDB vs ClickHouse vs Redis
 
-We don't compete frontally with either system on their core
-strength. We compete by bundling 80% of both + a multi-model +
-AI-native engine they don't have.
+We don't compete frontally with each system on its core strength. We compete by
+bundling 80% of the useful parts + a multi-model + AI-native engine they don't
+have.
 
-## The three products
+## The products
 
 | System        | Core strength                                  | Weakness for our audience |
 |---------------|------------------------------------------------|---------------------------|
 | TimescaleDB   | Time-series on PostgreSQL, rich PG ecosystem   | Row-store OLAP; no native vectors / graph / ML |
 | ClickHouse    | Columnar OLAP; petabyte scale; SIMD execution  | Single model; AI / vectors / graph are bolt-ons |
-| RedDB         | Unified: tables + docs + vectors + graph + TS + KV + queue + logs + ML | Younger; OLAP SIMD still catching up |
+| Redis         | Memory-first cache and rich in-memory data types | Separate operational system; durability and SQL-aware invalidation are not its center |
+| RedDB         | Unified: tables + docs + vectors + graph + TS + KV + cache + queue + logs + ML | Younger; OLAP SIMD and memory-only cache latency still catching up |
 
-## What RedDB does that neither does
+## What RedDB does differently
 
 1. **Multi-model in one engine.** A single SQL query can join a
    table, a graph traversal, and a vector similarity — no federated
@@ -23,7 +24,11 @@ AI-native engine they don't have.
 3. **Log + queue models.** Append-only log collections run sub-ms;
    queues with consumer groups live in the same catalog. You don't
    need Kafka in front of your DB for most small/medium workloads.
-4. **Embedded or distributed.** The same binary runs single-node
+4. **Cache with database-native invalidation.** The proposed Blob Cache
+   gives RedDB a Redis-adjacent exact-key cache story: L1 memory, durable
+   L2 storage, rich TTL, fast existence checks, and table / collection
+   dependency invalidation in the same engine.
+5. **Embedded or distributed.** The same binary runs single-node
    (Rust crate or server) or scales out via WAL replication + quorum.
 
 ## What we're closing in on them
@@ -70,11 +75,23 @@ Tracked in the [12-week TS/CH parity plan](../../../.claude/plans/eu-recebi-esta
   Anthropic / Cohere / OpenAI / local-ollama providers. GPU path is
   a feature-flag item on the ML roadmap, not here.
 
+### Redis-adjacent cache positioning
+
+RedDB should not pitch itself as a total Redis clone. Redis remains stronger for
+purely memory-resident workloads and its mature data-type ecosystem. RedDB's
+cache advantage is for teams that already need the database and want cached
+artifacts to share durability, backup, replication, observability, and
+SQL-adjacent invalidation.
+
+Tracked in [ADR 0006](../adr/0006-tiered-blob-cache.md) and
+[Cache](/data-models/cache.md).
+
 ## Pitch
 
 > **"TimescaleDB + ClickHouse + pgvector + Feast + PySR + Cohere →
-> RedDB."**
+> Redis-backed cache patterns → RedDB."**
 >
-> You replace six systems with one engine that speaks SQL, scales
+> You replace several systems with one engine that speaks SQL, scales
 > on one or many nodes, and lets you train classifiers, run symbolic
-> regression, and cache semantic answers in the same query pipeline.
+> regression, cache semantic answers, and keep exact-key cached blobs
+> close to the data that invalidates them.
