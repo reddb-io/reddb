@@ -1,4 +1,5 @@
 packages:
   - "."
   - "drivers/js"
+  - "drivers/js-client"
   - "packages/*"
