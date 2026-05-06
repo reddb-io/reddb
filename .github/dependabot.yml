@@ -57,6 +57,12 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+    # `dtolnay/rust-toolchain` is pinned by Rust release (e.g. `@1.91.0`),
+    # not by action version. Dependabot mistakes the tag for an action
+    # version and tries to bump to nonexistent toolchains (e.g. 1.100.0).
+    # Manage this pin manually in the workflow files.
+    ignore:
+      - dependency-name: "dtolnay/rust-toolchain"
 
   # Docker base images.
   - package-ecosystem: docker
