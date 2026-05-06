@@ -119,6 +119,19 @@ pub fn build_hello_ack(
     server_features: u32,
     topology: Option<&reddb_wire::topology::Topology>,
 ) -> Vec<u8> {
+    use crate::json_field::SerializedJsonField;
+    // Every caller-influenced or composed string field is wired
+    // through the JSON-envelope guard so the field round-trips
+    // through the canonical RFC-8259 encoder rather than being
+    // string-concatenated. See ADR 0010 §3 and issue #178.
+    //
+    // `chosen_auth` is sourced from the client's Hello (an
+    // `auth_methods[]` entry the server picked), so it is caller-
+    // influenced. `server` is server-owned but composed via
+    // `format!` — wiring through the guard keeps the discipline
+    // uniform. `topology` is base64 over canonical bytes (#166)
+    // and structurally cannot contain delimiters, but the same
+    // guard applies for consistency.
     let mut obj = crate::serde_json::Map::new();
     obj.insert(
         "version".to_string(),
@@ -126,20 +139,18 @@ pub fn build_hello_ack(
     );
     obj.insert(
         "auth".to_string(),
-        JsonValue::String(chosen_auth.to_string()),
+        SerializedJsonField::tainted(chosen_auth),
     );
     obj.insert(
         "features".to_string(),
         JsonValue::Number(server_features as f64),
     );
-    obj.insert(
-        "server".to_string(),
-        JsonValue::String(format!("reddb/{}", env!("CARGO_PKG_VERSION"))),
-    );
+    let server_field = format!("reddb/{}", env!("CARGO_PKG_VERSION"));
+    obj.insert("server".to_string(), SerializedJsonField::tainted(&server_field));
     if let Some(topo) = topology {
         obj.insert(
             "topology".to_string(),
-            JsonValue::String(reddb_wire::topology::encode_topology_for_hello_ack(topo)),
+            SerializedJsonField::tainted(&reddb_wire::topology::encode_topology_for_hello_ack(topo)),
         );
     }
     JsonValue::Object(obj).to_string_compact().into_bytes()
@@ -248,16 +259,18 @@ pub fn build_auth_ok(
     role: Role,
     server_features: u32,
 ) -> Vec<u8> {
+    use crate::json_field::SerializedJsonField;
+    // `username` is caller-influenced (the client claimed it during
+    // bearer / SCRAM); `session_id` is server-issued but routed
+    // through the guard so the discipline is uniform. ADR 0010 §3 / #178.
     let mut obj = crate::serde_json::Map::new();
     obj.insert(
         "session_id".to_string(),
-        JsonValue::String(session_id.to_string()),
+        SerializedJsonField::tainted(session_id),
     );
-    obj.insert(
-        "username".to_string(),
-        JsonValue::String(username.to_string()),
-    );
-    obj.insert("role".to_string(), JsonValue::String(role.to_string()));
+    obj.insert("username".to_string(), SerializedJsonField::tainted(username));
+    let role_str = role.to_string();
+    obj.insert("role".to_string(), SerializedJsonField::tainted(&role_str));
     obj.insert(
         "features".to_string(),
         JsonValue::Number(server_features as f64),
@@ -266,8 +279,12 @@ pub fn build_auth_ok(
 }
 
 pub fn build_auth_fail(reason: &str) -> Vec<u8> {
+    use crate::json_field::SerializedJsonField;
+    // `reason` is composed from validator output that may include
+    // user-controlled fragments (e.g. token text, JWT claim names);
+    // wire it through the guard. ADR 0010 §3 / #178.
     let mut obj = crate::serde_json::Map::new();
-    obj.insert("reason".to_string(), JsonValue::String(reason.to_string()));
+    obj.insert("reason".to_string(), SerializedJsonField::tainted(reason));
     JsonValue::Object(obj).to_string_compact().into_bytes()
 }
 

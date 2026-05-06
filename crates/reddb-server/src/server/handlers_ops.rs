@@ -120,12 +120,13 @@ impl RedDBServer {
                 "missing".to_string(),
                 JsonValue::Array(missing.iter().cloned().map(JsonValue::String).collect()),
             );
+            // `missing` comes from the request — the joined string
+            // can carry user-controlled bytes. Route through the
+            // JSON-boundary guard. ADR 0010 §3 / #178.
+            let error_msg = format!("warmup precondition not met: {}", missing.join(", "));
             object.insert(
                 "error".to_string(),
-                JsonValue::String(format!(
-                    "warmup precondition not met: {}",
-                    missing.join(", ")
-                )),
+                crate::json_field::SerializedJsonField::tainted(&error_msg),
             );
             object.insert(
                 "readiness".to_string(),
