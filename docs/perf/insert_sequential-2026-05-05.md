@@ -145,10 +145,9 @@ from this slice. Recording attempts failed because:
 
 `strace` of a host-spawned `red` ran cleanly, but driving the
 real `bulk_insert_binary` workload over the wire requires the
-RedWire SCRAM handshake, which neither the bundled `node` driver
-(`drivers/node/index.js` — speaks the legacy 5-byte frame, no
-handshake) nor `red connect` (gRPC only) implement. Building a
-one-off Rust client to drive it is bigger than this slice.
+RedWire SCRAM handshake, which `red connect` (gRPC only) does
+not implement. Building a one-off Rust client to drive it is
+bigger than this slice.
 
 When the host kernel is reconfigured (`sysctl
 kernel.perf_event_paranoid=1`, `kernel.yama.ptrace_scope=0`), the
