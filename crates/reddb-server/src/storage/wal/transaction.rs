@@ -25,8 +25,11 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use parking_lot::{Mutex, MutexGuard};
+
+use super::append_coordinator::WalAppendCoordinator;
 use super::record::WalRecord;
 use super::writer::WalWriter;
 use crate::storage::engine::{Page, Pager, PAGE_SIZE};
@@ -206,38 +209,38 @@ impl Transaction {
             return Ok(());
         }
 
-        // ── Append phase ────────────────────────────────────────────
-        // Take the WAL lock briefly to append our PageWrite records
-        // and the Commit marker, then capture the resulting LSN and
-        // RELEASE the WAL lock so other concurrent writers can also
-        // append before the next group-commit fsync covers all of
-        // them in one syscall.
-        let commit_lsn = {
-            let mut wal = self.manager.wal_writer()?;
+        // ── Encode phase (no lock) ──────────────────────────────────
+        // Encode every WAL record into one contiguous byte blob
+        // OUTSIDE any lock. This is the bulk of the per-commit work
+        // and pays no contention cost — the old path encoded each
+        // record while holding `Mutex<WalWriter>`, which under 16-way
+        // concurrency produced the park-convoy that bottlenecked
+        // `concurrent` and `insert_sequential`.
+        let mut blob = Vec::with_capacity(64 + self.write_set.len() * (PAGE_SIZE + 32));
+        for (page_id, buffered) in &self.write_set {
+            let record = WalRecord::PageWrite {
+                tx_id: self.id,
+                page_id: *page_id,
+                data: buffered.data.to_vec(),
+            };
+            blob.extend_from_slice(&record.encode());
+        }
+        blob.extend_from_slice(&WalRecord::Commit { tx_id: self.id }.encode());
 
-            for (page_id, buffered) in &self.write_set {
-                let record = WalRecord::PageWrite {
-                    tx_id: self.id,
-                    page_id: *page_id,
-                    data: buffered.data.to_vec(),
-                };
-                wal.append(&record)?;
-            }
+        // ── Reserve + enqueue (lock-free) ───────────────────────────
+        // One atomic fetch_add reserves our LSN range; one
+        // SegQueue::push hands the bytes to the leader. Both
+        // operations are wait-free for the writer.
+        let commit_lsn = self.manager.coordinator.reserve_and_enqueue(blob);
 
-            let commit_record = WalRecord::Commit { tx_id: self.id };
-            wal.append(&commit_record)?;
-            wal.current_lsn()
-        };
-
-        // ── Group commit fsync ──────────────────────────────────────
-        // Wait until the WAL is durable up to our LSN. If another
-        // writer is already mid-fsync, we piggyback on it. If we are
-        // the first to arrive, we become the leader and run the
-        // single fsync that flushes every byte appended so far —
-        // including bytes from writers that took the WAL lock after
-        // we released it.
+        // ── Wait for durability ─────────────────────────────────────
+        // If `durable_lsn >= commit_lsn` already, the leader (some
+        // earlier thread) covered us — return immediately. Otherwise
+        // we either become the leader and drive the drain, or park
+        // on the coordinator's parking_lot::Condvar until a leader
+        // publishes a `durable_lsn` past our target.
         self.manager
-            .group_commit
+            .coordinator
             .commit_at_least(commit_lsn, &self.manager.wal)
             .map_err(TxError::Io)?;
 
@@ -270,11 +273,16 @@ impl Transaction {
             };
         }
 
-        // Write rollback record to WAL
-        let mut wal = self.manager.wal_writer()?;
-        let rollback_record = WalRecord::Rollback { tx_id: self.id };
-        wal.append(&rollback_record)?;
-        wal.sync()?;
+        // Route rollback through the coordinator so its bytes land
+        // in LSN order with any concurrent commits. Going around the
+        // coordinator (direct `wal.lock().append`) would race with
+        // the leader's `append_bytes` and corrupt the file.
+        let blob = WalRecord::Rollback { tx_id: self.id }.encode();
+        let target = self.manager.coordinator.reserve_and_enqueue(blob);
+        self.manager
+            .coordinator
+            .commit_at_least(target, &self.manager.wal)
+            .map_err(TxError::Io)?;
 
         // Clear write set
         self.write_set.clear();
@@ -292,11 +300,17 @@ impl Drop for Transaction {
         // If transaction is still active when dropped, it means it was neither
         // committed nor rolled back. This is a bug, but we'll clean up anyway.
         if self.state == TxState::Active {
-            // Try to write rollback record
-            if let Ok(mut wal) = self.manager.wal.lock() {
-                let _ = wal.append(&WalRecord::Rollback { tx_id: self.id });
-                let _ = wal.sync();
-            }
+            // Best-effort rollback through the coordinator. We can't
+            // bypass the coordinator with a direct `wal.lock()` here:
+            // any in-flight reservations would still be holding LSN
+            // slots ahead of us and the file would gain a hole. The
+            // coordinator handles ordering correctly even from Drop.
+            let blob = WalRecord::Rollback { tx_id: self.id }.encode();
+            let target = self.manager.coordinator.reserve_and_enqueue(blob);
+            let _ = self
+                .manager
+                .coordinator
+                .commit_at_least(target, &self.manager.wal);
             self.manager.unregister_transaction(self.id);
         }
     }
@@ -308,16 +322,24 @@ impl Drop for Transaction {
 pub struct TransactionManager {
     /// Pager for reading/writing pages
     pager: Arc<Pager>,
-    /// WAL writer
+    /// WAL writer protected by a `parking_lot::Mutex`. The mutex is
+    /// taken only by the leader-flush path inside the coordinator;
+    /// concurrent writers no longer contend on it during the
+    /// encode-and-append step. See [`WalAppendCoordinator`].
     wal: Mutex<WalWriter>,
     /// WAL file path
     wal_path: PathBuf,
     /// Active transaction IDs
     active_transactions: RwLock<Vec<u64>>,
-    /// Group-commit coordinator. Concurrent writers piggyback on a
-    /// single shared `wal.sync()` instead of paying one fsync per
-    /// commit. See `super::group_commit` for the algorithm.
-    group_commit: super::group_commit::GroupCommit,
+    /// Lock-free append coordinator. Replaces the per-commit
+    /// `wal.lock()` that used to serialise 16 concurrent writers
+    /// (Roadmap #2 / issue #157). Writers reserve an LSN range via
+    /// atomic fetch_add, push their encoded bytes onto a SegQueue,
+    /// then call `commit_at_least` to wait for durability. The
+    /// first thread into `commit_at_least` becomes the leader and
+    /// drives the WAL drain + fsync; everyone else parks on the
+    /// coordinator's condvar.
+    coordinator: WalAppendCoordinator,
 }
 
 impl TransactionManager {
@@ -330,6 +352,7 @@ impl TransactionManager {
     pub fn new(pager: Arc<Pager>, wal_path: impl AsRef<Path>) -> io::Result<Self> {
         let wal_path = wal_path.as_ref().to_path_buf();
         let wal = WalWriter::open(&wal_path)?;
+        let initial_current = wal.current_lsn();
         let initial_durable = wal.durable_lsn();
 
         Ok(Self {
@@ -337,14 +360,18 @@ impl TransactionManager {
             wal: Mutex::new(wal),
             wal_path,
             active_transactions: RwLock::new(Vec::new()),
-            group_commit: super::group_commit::GroupCommit::new(initial_durable),
+            coordinator: WalAppendCoordinator::new(initial_current, initial_durable),
         })
     }
 
     fn wal_writer(&self) -> Result<MutexGuard<'_, WalWriter>, TxError> {
-        self.wal
-            .lock()
-            .map_err(|_| TxError::LockPoisoned("wal writer"))
+        // parking_lot::Mutex does not poison on panic, so this is
+        // infallible. We keep the `Result` return type to avoid
+        // touching every call site, but the error variant is now
+        // unreachable in normal operation. Tests that previously
+        // poisoned the std::sync::Mutex deliberately have been
+        // adjusted to assert the new non-poisoning behaviour.
+        Ok(self.wal.lock())
     }
 
     fn active_transactions_write(&self) -> RwLockWriteGuard<'_, Vec<u64>> {
@@ -363,12 +390,15 @@ impl TransactionManager {
     pub fn begin(self: &Arc<Self>) -> Result<Transaction, TxError> {
         let tx_id = next_transaction_id();
 
-        // Write Begin record to WAL
-        {
-            let mut wal = self.wal_writer()?;
-            let begin_record = WalRecord::Begin { tx_id };
-            wal.append(&begin_record)?;
-        }
+        // Route the Begin record through the coordinator (same
+        // ordering guarantees as commit/rollback). Begin is not
+        // strictly required to be durable before subsequent appends
+        // — recovery treats a Begin without a matching Commit as a
+        // rolled-back txn — so we don't wait on `commit_at_least`.
+        // The bytes are queued and the next leader picks them up
+        // alongside our own Commit record when we eventually commit.
+        let blob = WalRecord::Begin { tx_id }.encode();
+        let _begin_lsn = self.coordinator.reserve_and_enqueue(blob);
 
         // Register transaction
         {
@@ -406,13 +436,12 @@ impl TransactionManager {
         &self.pager
     }
 
-    /// Sync WAL to disk
+    /// Sync WAL to disk. Drains every byte that has been reserved
+    /// via the coordinator — i.e. waits until the coordinator's
+    /// `next_lsn` is durable.
     pub fn sync_wal(&self) -> io::Result<()> {
-        let mut wal = self
-            .wal
-            .lock()
-            .map_err(|_| io::Error::other("transaction WAL lock poisoned"))?;
-        wal.sync()
+        let target = self.coordinator.next_lsn();
+        self.coordinator.commit_at_least(target, &self.wal)
     }
 
     /// Check if there are active transactions
@@ -656,7 +685,13 @@ mod tests {
     }
 
     #[test]
-    fn test_begin_returns_structured_error_when_wal_lock_is_poisoned() {
+    fn test_begin_succeeds_after_panic_in_lock_holder() {
+        // After Roadmap #2 the WAL mutex is `parking_lot::Mutex`,
+        // which does NOT poison on panic. A previous version of this
+        // test asserted that a panicking thread holding the lock
+        // produced a `TxError::LockPoisoned` on the next `begin()` —
+        // that was a property of `std::sync::Mutex`. The new
+        // contract is the opposite: writers continue uninterrupted.
         let dir = temp_dir();
         let _ = fs::create_dir_all(&dir);
         let db_path = dir.join("test.db");
@@ -667,17 +702,15 @@ mod tests {
 
         let poison_target = Arc::clone(&tm);
         let _ = std::thread::spawn(move || {
-            let _guard = poison_target
-                .wal
-                .lock()
-                .expect("wal lock should be acquired");
-            panic!("poison wal mutex");
+            let _guard = poison_target.wal.lock();
+            panic!("would-poison the wal mutex on std::sync");
         })
         .join();
 
+        // parking_lot recovers transparently. begin() must succeed.
         match tm.begin() {
-            Ok(_) => panic!("begin should fail after WAL lock poisoning"),
-            Err(err) => assert!(matches!(err, TxError::LockPoisoned("wal writer"))),
+            Ok(_) => {}
+            Err(err) => panic!("begin must succeed despite prior panic: {err:?}"),
         }
 
         cleanup(&dir);
