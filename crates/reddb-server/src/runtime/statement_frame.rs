@@ -147,6 +147,20 @@ pub(crate) trait ReadFrame {
     /// the parsed expression) even for transaction-control / SET /
     /// SHOW statements that need no collection lock at all.
     fn lock_intent(&self) -> LockIntent;
+
+    /// Set of collection ids the calling identity is allowed to
+    /// observe under the active `(tenant, role)` scope. Computed once
+    /// at frame-build time via the `AuthStore` visible-collections
+    /// cache (see `auth::scope_cache`) and used by `AuthorizedSearch`
+    /// to pre-filter SEARCH SIMILAR / SEARCH CONTEXT candidate sets
+    /// before any similarity score is computed (issue #119).
+    ///
+    /// `None` means the frame was built without an auth store wired —
+    /// embedded / single-tenant tests run that way. AI search call
+    /// sites refuse to proceed with `None`, which is the deny-default
+    /// the issue requires; pure SELECT paths fall back to the existing
+    /// per-row RLS gate.
+    fn visible_collections(&self) -> Option<&std::collections::HashSet<String>>;
 }
 
 /// Cheap first-word classification of a SQL statement, used at
@@ -233,6 +247,13 @@ pub(super) struct StatementExecutionFrame {
     /// Collection-level lock intent the statement implies. The
     /// lock-acquisition path short-circuits when this is `None`.
     lock_intent: LockIntent,
+    /// Set of collection ids the active `(tenant, role)` scope is
+    /// allowed to observe. Computed at frame-build time via the
+    /// `AuthStore` visibility cache and consumed by `AuthorizedSearch`
+    /// to gate SEARCH SIMILAR / SEARCH CONTEXT candidate sets before
+    /// scoring (issue #119). `None` when no auth store is wired
+    /// (embedded test mode) — AI search refuses on `None`.
+    visible_collections: Option<HashSet<String>>,
 }
 
 pub(super) struct StatementFrameGuards {
@@ -264,6 +285,27 @@ impl StatementExecutionFrame {
         let required_privilege = classify_privilege(query);
         let lock_intent = classify_lock_intent(query);
 
+        // Issue #119: resolve the visible-collections set for the
+        // active (tenant, role) scope. Only meaningful when an auth
+        // store is wired *and* an identity was captured — embedded
+        // anonymous callers fall back to `None`, and AI search call
+        // sites refuse on `None`.
+        let visible_collections = match (
+            runtime.inner.auth_store.read().clone(),
+            identity.as_ref(),
+        ) {
+            (Some(store), Some((principal, role))) => {
+                let collections = runtime.inner.db.store().list_collections();
+                Some(store.visible_collections_for_scope(
+                    effective_scope.as_deref(),
+                    *role,
+                    principal,
+                    &collections,
+                ))
+            }
+            _ => None,
+        };
+
         Ok(Self {
             tx_local_tenant,
             snapshot,
@@ -276,6 +318,7 @@ impl StatementExecutionFrame {
             as_of_floor,
             required_privilege,
             lock_intent,
+            visible_collections,
         })
     }
 
@@ -401,6 +444,10 @@ impl ReadFrame for StatementExecutionFrame {
 
     fn lock_intent(&self) -> LockIntent {
         self.lock_intent
+    }
+
+    fn visible_collections(&self) -> Option<&HashSet<String>> {
+        self.visible_collections.as_ref()
     }
 }
 

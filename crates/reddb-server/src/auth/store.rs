@@ -126,6 +126,16 @@ pub struct AuthStore {
     /// IAM evaluator and stays deny-by-default even if policies are
     /// later deleted. Persisted under `red.iam.enabled`.
     iam_authorization_enabled: AtomicBool,
+    /// `(tenant, role) → HashSet<CollectionId>` cache used by the AI
+    /// pipeline (issue #119). Distinct from `permission_cache`, which
+    /// is keyed by `UserId` and answers `(resource, action)` lookups —
+    /// this cache answers the inverse "what collections is this scope
+    /// allowed to read?" query that `AuthorizedSearch` uses to
+    /// pre-filter SEARCH SIMILAR / SEARCH CONTEXT candidates before any
+    /// similarity score is computed. Entries TTL out at 60s and are
+    /// invalidated explicitly on GRANT/REVOKE/CREATE POLICY/DROP
+    /// POLICY/DROP COLLECTION.
+    visible_collections_cache: super::scope_cache::AuthCache,
 }
 
 // Use fast-but-safe Argon2id params for auth hashing (smaller than the
@@ -165,6 +175,9 @@ impl AuthStore {
             group_attachments: RwLock::new(HashMap::new()),
             iam_effective_cache: RwLock::new(HashMap::new()),
             iam_authorization_enabled: AtomicBool::new(false),
+            visible_collections_cache: super::scope_cache::AuthCache::new(
+                super::scope_cache::DEFAULT_TTL,
+            ),
         }
     }
 
@@ -1203,6 +1216,12 @@ impl AuthStore {
             }
         }
 
+        // Issue #119: a fresh grant changes the visible-collections set
+        // for `(tenant, role)` callers under the same tenant. Drop those
+        // cache entries so the next AI command sees the new SELECT
+        // privilege immediately.
+        self.invalidate_visible_collections_for_tenant(g.tenant.as_deref());
+
         self.persist_acl_to_kv();
         Ok(())
     }
@@ -1259,9 +1278,88 @@ impl AuthStore {
         };
 
         if removed > 0 {
+            // Issue #119: REVOKE may shrink the visible-collections set
+            // for any `(tenant, role)` slot. We don't know the exact
+            // tenant when the principal is `Public`, so a `Public`
+            // revoke clears the whole cache; user revokes scope to the
+            // user's tenant.
+            match principal {
+                GrantPrincipal::User(uid) => {
+                    self.invalidate_visible_collections_for_tenant(uid.tenant.as_deref());
+                }
+                GrantPrincipal::Public | GrantPrincipal::Group(_) => {
+                    self.invalidate_visible_collections_cache();
+                }
+            }
             self.persist_acl_to_kv();
         }
         Ok(removed)
+    }
+
+    /// Compute the set of collection ids a given `(tenant, role)`
+    /// scope can read, consulting the explicit grant table. The result
+    /// is cached for `super::scope_cache::DEFAULT_TTL` (60s) and
+    /// invalidated on every GRANT/REVOKE/policy/collection mutation
+    /// that could change the answer.
+    ///
+    /// `all_collections` is the full list of collection ids known to
+    /// the storage layer. The runtime hands it in so this module stays
+    /// decoupled from the storage crate. Each collection passes through
+    /// `check_grant(SELECT)` under a synthetic `(principal, role,
+    /// tenant)` view.
+    ///
+    /// Why `(tenant, role)` and not `UserId`: the AI pipeline gates
+    /// rows by RLS and grant scope, both of which key off the role +
+    /// tenant pair, not the bare username. Two users that share a
+    /// tenant + role share a cache slot, dropping the steady-state
+    /// memory cost.
+    pub fn visible_collections_for_scope(
+        &self,
+        tenant: Option<&str>,
+        role: Role,
+        principal: &str,
+        all_collections: &[String],
+    ) -> std::collections::HashSet<String> {
+        let key = super::scope_cache::ScopeKey::new(tenant, role);
+        if let Some(hit) = self.visible_collections_cache.get(&key) {
+            return hit;
+        }
+        // Slow path: walk every collection through `check_grant`. We
+        // build the AuthzContext once, then reuse it per resource.
+        let ctx = AuthzContext {
+            principal,
+            effective_role: role,
+            tenant,
+        };
+        let mut visible = std::collections::HashSet::new();
+        for collection in all_collections {
+            let resource = Resource::table_from_name(collection);
+            if self.check_grant(&ctx, Action::Select, &resource).is_ok() {
+                visible.insert(collection.clone());
+            }
+        }
+        self.visible_collections_cache.insert(key, visible.clone());
+        visible
+    }
+
+    /// Stats probe required by issue #119 — exposes hit/miss counts and
+    /// invalidations for the visible-collections cache so metrics
+    /// pipelines can compute a hit rate.
+    pub fn auth_cache_stats(&self) -> super::scope_cache::AuthCacheStats {
+        self.visible_collections_cache.stats()
+    }
+
+    /// Drop every cached `(tenant, role)` entry. Called from CREATE
+    /// POLICY / DROP POLICY / DROP COLLECTION paths where the affected
+    /// tenant set is unknown.
+    pub fn invalidate_visible_collections_cache(&self) {
+        self.visible_collections_cache.invalidate_all();
+    }
+
+    /// Drop cached entries for one tenant. Called from GRANT / REVOKE
+    /// where the principal's tenant is known.
+    pub fn invalidate_visible_collections_for_tenant(&self, tenant: Option<&str>) {
+        self.visible_collections_cache.invalidate_tenant(tenant);
     }
 
     /// Snapshot of every grant the principal effectively has, including
@@ -1617,6 +1715,10 @@ impl AuthStore {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        // Issue #119: a policy mutation can change the visible-
+        // collections answer for any (tenant, role); we don't know
+        // which up-front, so blow the whole cache.
+        self.invalidate_visible_collections_cache();
         self.persist_iam_to_kv();
         Ok(())
     }
@@ -1657,6 +1759,9 @@ impl AuthStore {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        // Issue #119: dropping a policy can shrink any caller's visible
+        // set; clear the (tenant, role) cache so AI commands re-resolve.
+        self.invalidate_visible_collections_cache();
         self.persist_iam_to_kv();
         Ok(())
     }
