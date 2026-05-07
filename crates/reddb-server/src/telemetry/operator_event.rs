@@ -142,6 +142,12 @@ pub enum OperatorEvent {
         started_at_ms: u64,
         last_phase: crate::telemetry::admin_intent_log::IntentPhase,
     },
+    /// A config-file change was detected but one or more changed fields
+    /// require a full server restart to take effect. The change was NOT
+    /// applied; the operator must restart to pick it up.
+    ConfigChangeRequiresRestart {
+        fields_changed: String,
+    },
 }
 
 impl OperatorEvent {
@@ -320,6 +326,13 @@ impl OperatorEvent {
                     AuditFieldEscaper::field("last_phase", last_phase.to_string()),
                 ];
                 ("operator/dangling_admin_intent", fields, summary)
+            }
+            Self::ConfigChangeRequiresRestart { fields_changed } => {
+                let summary = format!(
+                    "config change requires restart: fields={fields_changed}"
+                );
+                let fields = vec![AuditFieldEscaper::field("fields_changed", fields_changed)];
+                ("operator/config_change_requires_restart", fields, summary)
             }
         }
     }

@@ -625,11 +625,30 @@ pub(super) fn project_runtime_record_with_db(
             Projection::Field(field, _) => {
                 resolve_runtime_field(source, field, table_name, table_alias)
             }
-            Projection::Expression(filter, _) => Some(Value::Boolean(
-                evaluate_runtime_filter_with_db(db, source, filter, table_name, table_alias),
-            )),
+            Projection::Expression(filter, _) => {
+                // Route through typed evaluator; fall back to filter-boolean path for
+                // shapes the evaluator doesn't cover (CONFIG / KV / ML_* references).
+                crate::storage::query::sql_lowering::projection_to_expr(projection)
+                    .and_then(|(expr, _)| {
+                        let row = RecordRow { record: source, table_name, table_alias };
+                        crate::storage::query::evaluator::evaluate(&expr, &row).ok()
+                    })
+                    .or_else(|| {
+                        Some(Value::Boolean(evaluate_runtime_filter_with_db(
+                            db, source, filter, table_name, table_alias,
+                        )))
+                    })
+            }
             Projection::Function(ref name, ref args) => {
-                evaluate_scalar_function_with_db(db, name, args, source)
+                // Route catalog-resolvable functions through the typed evaluator.
+                // Falls back to the legacy dispatcher for CONFIG/KV/ML_*/geo/time
+                // and any shape where argument resolution fails via evaluator.
+                crate::storage::query::sql_lowering::projection_to_expr(projection)
+                    .and_then(|(expr, _)| {
+                        let row = RecordRow { record: source, table_name, table_alias };
+                        crate::storage::query::evaluator::evaluate(&expr, &row).ok()
+                    })
+                    .or_else(|| evaluate_scalar_function_with_db(db, name, args, source))
             }
             Projection::All => None,
         };
@@ -2721,11 +2740,21 @@ pub(super) fn eval_projection_value(proj: &Projection, source: &UnifiedRecord) -
         Projection::Alias(col, _) => source.get(col.as_str()).cloned(),
         Projection::Field(field, _) => resolve_runtime_field(source, field, None, None),
         Projection::Function(name, inner_args) => {
-            evaluate_scalar_function(name, inner_args, source)
+            crate::storage::query::sql_lowering::projection_to_expr(proj)
+                .and_then(|(expr, _)| {
+                    let row = RecordRow { record: source, table_name: None, table_alias: None };
+                    crate::storage::query::evaluator::evaluate(&expr, &row).ok()
+                })
+                .or_else(|| evaluate_scalar_function(name, inner_args, source))
         }
-        Projection::Expression(filter, _) => Some(Value::Boolean(evaluate_runtime_filter(
-            source, filter, None, None,
-        ))),
+        Projection::Expression(filter, _) => {
+            crate::storage::query::sql_lowering::projection_to_expr(proj)
+                .and_then(|(expr, _)| {
+                    let row = RecordRow { record: source, table_name: None, table_alias: None };
+                    crate::storage::query::evaluator::evaluate(&expr, &row).ok()
+                })
+                .or_else(|| Some(Value::Boolean(evaluate_runtime_filter(source, filter, None, None))))
+        }
         Projection::All => None,
     }
 }
