@@ -72,6 +72,10 @@ impl EmbeddedRuntime {
     pub fn checkpoint(&self) -> Result<(), String> {
         self.runtime.checkpoint().map_err(|e| e.to_string())
     }
+
+    pub fn clone_runtime(&self) -> Arc<RedDBRuntime> {
+        self.runtime.clone()
+    }
 }
 
 fn build_insert_sql(collection: &str, fields: &[(String, ScalarOut)]) -> String {

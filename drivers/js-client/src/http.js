@@ -22,6 +22,14 @@
  *   auth.revoke_api_key → DELETE /auth/api-keys/:key
  *   auth.change_password→ POST /auth/change-password
  *
+ *   cache.get               → GET    /cache/ns/:ns/:key
+ *   cache.put               → PUT    /cache/ns/:ns/:key
+ *   cache.exists            → GET    /cache/ns/:ns/:key/exists
+ *   cache.invalidate        → DELETE /cache/ns/:ns/:key
+ *   cache.invalidate_prefix → DELETE /cache/ns/:ns?prefix=...
+ *   cache.invalidate_tags   → DELETE /cache/ns/:ns/tags  (body: {tags})
+ *   cache.flush_namespace   → POST   /admin/blob_cache/flush_namespace
+ *
  * Auth: every request after construction carries `Authorization:
  * Bearer <token>` (when set). `setToken(token)` updates it in
  * place — used by the login flow that exchanges credentials for
@@ -160,5 +168,33 @@ const ROUTES = {
         new_password,
       }),
     },
+  }),
+  'cache.get': (base, { namespace, key }) => ({
+    url: `${base}/cache/ns/${encodeURIComponent(namespace)}/${encodeURIComponent(key)}`,
+    init: { method: 'GET' },
+  }),
+  'cache.put': (base, { namespace, key, value, ttl_ms, tags, policy }) => ({
+    url: `${base}/cache/ns/${encodeURIComponent(namespace)}/${encodeURIComponent(key)}`,
+    init: { method: 'PUT', body: JSON.stringify({ value, ttl_ms, tags, policy }) },
+  }),
+  'cache.exists': (base, { namespace, key }) => ({
+    url: `${base}/cache/ns/${encodeURIComponent(namespace)}/${encodeURIComponent(key)}/exists`,
+    init: { method: 'GET' },
+  }),
+  'cache.invalidate': (base, { namespace, key }) => ({
+    url: `${base}/cache/ns/${encodeURIComponent(namespace)}/${encodeURIComponent(key)}`,
+    init: { method: 'DELETE' },
+  }),
+  'cache.invalidate_prefix': (base, { namespace, prefix }) => ({
+    url: `${base}/cache/ns/${encodeURIComponent(namespace)}?prefix=${encodeURIComponent(prefix)}`,
+    init: { method: 'DELETE' },
+  }),
+  'cache.invalidate_tags': (base, { namespace, tags }) => ({
+    url: `${base}/cache/ns/${encodeURIComponent(namespace)}/tags`,
+    init: { method: 'DELETE', body: JSON.stringify({ tags }) },
+  }),
+  'cache.flush_namespace': (base, { namespace }) => ({
+    url: `${base}/admin/blob_cache/flush_namespace`,
+    init: { method: 'POST', body: JSON.stringify({ namespace }) },
   }),
 }

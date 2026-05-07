@@ -36,8 +36,10 @@ import {
   isEmbeddedUri,
   rejectEmbeddedUri,
 } from './embedded-rejection.js'
+import { CacheClient } from './cache.js'
 
 export { RedDBError, EmbeddedNotSupported, EMBEDDED_REJECTION_MESSAGE, isEmbeddedUri }
+export { CacheClient } from './cache.js'
 export { parseUri, deriveLoginUrl } from './url.js'
 
 /**
@@ -246,6 +248,7 @@ export class RedDB {
   /** @param {HttpRpcClient | import('./redwire.js').RedWireClient} client */
   constructor(client) {
     this.client = client
+    this.cache = new CacheClient(client)
   }
 
   /** Execute a SQL query. Returns `{ statement, affected, columns, rows }`. */

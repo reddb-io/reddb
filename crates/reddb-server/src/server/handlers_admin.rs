@@ -89,6 +89,74 @@ fn sanitize_label(value: &str) -> String {
     out
 }
 
+/// Standard base64 decode (RFC 4648 §4, alphabet `A-Za-z0-9+/`).
+/// Returns `Err` on any invalid character; padding `=` is optional.
+fn b64_decode(input: &str) -> Result<Vec<u8>, String> {
+    let input = input.trim_end_matches('=');
+    let mut buf = Vec::with_capacity(input.len() * 3 / 4 + 1);
+
+    let lookup = |c: u8| -> Result<u32, String> {
+        match c {
+            b'A'..=b'Z' => Ok((c - b'A') as u32),
+            b'a'..=b'z' => Ok((c - b'a' + 26) as u32),
+            b'0'..=b'9' => Ok((c - b'0' + 52) as u32),
+            b'+' => Ok(62),
+            b'/' => Ok(63),
+            other => Err(format!("invalid base64 character: {}", other as char)),
+        }
+    };
+
+    let bytes: Vec<u8> = input.bytes().collect();
+    for chunk in bytes.chunks(4) {
+        let v: Vec<u32> = chunk
+            .iter()
+            .map(|&b| lookup(b))
+            .collect::<Result<_, _>>()?;
+        match v.len() {
+            4 => {
+                let n = (v[0] << 18) | (v[1] << 12) | (v[2] << 6) | v[3];
+                buf.push((n >> 16) as u8);
+                buf.push((n >> 8) as u8);
+                buf.push(n as u8);
+            }
+            3 => {
+                let n = (v[0] << 18) | (v[1] << 12) | (v[2] << 6);
+                buf.push((n >> 16) as u8);
+                buf.push((n >> 8) as u8);
+            }
+            2 => {
+                let n = (v[0] << 18) | (v[1] << 12);
+                buf.push((n >> 16) as u8);
+            }
+            _ => {}
+        }
+    }
+    Ok(buf)
+}
+
+/// Reject CR, LF, and NUL bytes in caller-controlled strings that flow into
+/// audit logs and response envelopes (ADR 0010).
+fn reject_smuggling_bytes(field: &str, value: &str) -> Option<HttpResponse> {
+    for (idx, byte) in value.as_bytes().iter().enumerate() {
+        match *byte {
+            b'\0' => {
+                return Some(json_error(
+                    400,
+                    format!("field `{field}` contains forbidden NUL byte at index {idx}"),
+                ));
+            }
+            b'\r' | b'\n' => {
+                return Some(json_error(
+                    400,
+                    format!("field `{field}` contains forbidden CR/LF byte at index {idx}"),
+                ));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 impl RedDBServer {
     /// `POST /admin/shutdown` — graceful shutdown coordinator.
     /// Returns 200 with the shutdown report when complete; 200 with
@@ -501,6 +569,150 @@ impl RedDBServer {
         );
 
         json_response(200, JsonValue::Object(object))
+    }
+
+    /// `POST /admin/cache/compare-and-set` — optimistic-lock put on the
+    /// runtime result Blob Cache (issue #195).
+    ///
+    /// Body (JSON):
+    ///
+    /// ```json
+    /// {
+    ///   "namespace":      "tenant-42:results",
+    ///   "key":            "query-abc",
+    ///   "expected_version": 3,
+    ///   "new_value_b64":  "<standard base64>",
+    ///   "new_version":    4,
+    ///   "ttl_ms":         60000
+    /// }
+    /// ```
+    ///
+    /// `ttl_ms` is optional. `expected_version` is informational —
+    /// the atomic guard comes from `BlobCache::put`'s internal
+    /// `check_version`: if the stored version ≥ `new_version` the
+    /// write is rejected with 409.
+    ///
+    /// Returns:
+    /// - 200 `{ committed: true, current_version }`
+    /// - 409 `{ committed: false, current_version, reason: "VersionMismatch" }`
+    /// - 400 malformed body / CRLF/NUL injection / bad base64
+    /// - 401 missing or wrong admin bearer token
+    pub(crate) fn handle_admin_blob_cache_compare_and_set(&self, body: Vec<u8>) -> HttpResponse {
+        use crate::storage::cache::blob::{BlobCachePut, BlobCachePolicy, CacheError};
+
+        if body.is_empty() {
+            return json_error(400, "missing JSON body");
+        }
+        let parsed: crate::serde_json::Value = match crate::serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(err) => return json_error(400, format!("invalid JSON body: {err}")),
+        };
+
+        let namespace = match parsed.get("namespace").and_then(|v| v.as_str()) {
+            Some(n) if !n.is_empty() => n.to_string(),
+            Some(_) => return json_error(400, "field `namespace` must not be empty"),
+            None => return json_error(400, "field `namespace` is required and must be a string"),
+        };
+        let key = match parsed.get("key").and_then(|v| v.as_str()) {
+            Some(k) if !k.is_empty() => k.to_string(),
+            Some(_) => return json_error(400, "field `key` must not be empty"),
+            None => return json_error(400, "field `key` is required and must be a string"),
+        };
+        let new_value_b64 = match parsed.get("new_value_b64").and_then(|v| v.as_str()) {
+            Some(v) => v.to_string(),
+            None => {
+                return json_error(400, "field `new_value_b64` is required and must be a string")
+            }
+        };
+        let new_version = match parsed.get("new_version").and_then(|v| v.as_u64()) {
+            Some(v) => v,
+            None => {
+                return json_error(
+                    400,
+                    "field `new_version` is required and must be a non-negative integer",
+                )
+            }
+        };
+        // expected_version is optional and informational; validate type if present.
+        if let Some(ev) = parsed.get("expected_version") {
+            if ev.as_u64().is_none() {
+                return json_error(
+                    400,
+                    "field `expected_version` must be a non-negative integer",
+                );
+            }
+        }
+        let ttl_ms = parsed.get("ttl_ms").and_then(|v| v.as_u64());
+
+        // Adversarial-byte rejection on caller-controlled strings.
+        if let Some(err) = reject_smuggling_bytes("namespace", &namespace) {
+            return err;
+        }
+        if let Some(err) = reject_smuggling_bytes("key", &key) {
+            return err;
+        }
+
+        // Base64 decode the payload.
+        let bytes = match b64_decode(&new_value_b64) {
+            Ok(b) => b,
+            Err(e) => return json_error(400, format!("invalid base64 in `new_value_b64`: {e}")),
+        };
+
+        // Build and execute the versioned put.
+        let policy = if let Some(ttl) = ttl_ms {
+            BlobCachePolicy::default().version(new_version).ttl_ms(ttl)
+        } else {
+            BlobCachePolicy::default().version(new_version)
+        };
+        let put = BlobCachePut::new(bytes).with_policy(policy);
+
+        match self.runtime.result_blob_cache().put(&namespace, &key, put) {
+            Ok(()) => {
+                let mut obj = Map::new();
+                obj.insert("committed".to_string(), JsonValue::Bool(true));
+                obj.insert(
+                    "current_version".to_string(),
+                    JsonValue::Number(new_version as f64),
+                );
+
+                let mut details = Map::new();
+                details.insert(
+                    "namespace".to_string(),
+                    crate::json_field::SerializedJsonField::tainted(&namespace),
+                );
+                details.insert(
+                    "key".to_string(),
+                    crate::json_field::SerializedJsonField::tainted(&key),
+                );
+                details.insert(
+                    "new_version".to_string(),
+                    JsonValue::Number(new_version as f64),
+                );
+                self.runtime.audit_log().record(
+                    "admin/cache/compare_and_set",
+                    "operator",
+                    "instance",
+                    "ok",
+                    JsonValue::Object(details),
+                );
+
+                json_response(200, JsonValue::Object(obj))
+            }
+            Err(CacheError::VersionMismatch { existing, .. }) => {
+                let mut obj = Map::new();
+                obj.insert("committed".to_string(), JsonValue::Bool(false));
+                obj.insert(
+                    "current_version".to_string(),
+                    JsonValue::Number(existing as f64),
+                );
+                obj.insert(
+                    "reason".to_string(),
+                    JsonValue::String("VersionMismatch".to_string()),
+                );
+                json_response(409, JsonValue::Object(obj))
+            }
+            Err(err) => json_error(500, format!("cache put failed: {err:?}")),
+        }
     }
 
     /// `POST /admin/readonly` — flip the public-mutation gate
@@ -2357,6 +2569,222 @@ mod tests {
         assert_eq!(
             parsed.get("namespace").and_then(|v| v.as_str()),
             Some("日本語-ns-🦀")
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Issue #195 — compare-and-set endpoint tests
+    // -------------------------------------------------------------------
+
+    fn cas_body(namespace: &str, key: &str, new_value: &[u8], new_version: u64) -> Vec<u8> {
+        let b64 = {
+            let mut s = String::new();
+            for chunk in new_value.chunks(3) {
+                const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                let b0 = chunk[0] as u32;
+                let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+                let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+                let n = (b0 << 16) | (b1 << 8) | b2;
+                s.push(CHARS[((n >> 18) & 63) as usize] as char);
+                s.push(CHARS[((n >> 12) & 63) as usize] as char);
+                s.push(if chunk.len() > 1 { CHARS[((n >> 6) & 63) as usize] as char } else { '=' });
+                s.push(if chunk.len() > 2 { CHARS[(n & 63) as usize] as char } else { '=' });
+            }
+            s
+        };
+        format!(
+            r#"{{"namespace":"{namespace}","key":"{key}","expected_version":0,"new_value_b64":"{b64}","new_version":{new_version}}}"#
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn cas_happy_first_write() {
+        let server = test_server();
+        let body = cas_body("ns1", "k1", b"hello", 1);
+        let resp = server.handle_admin_blob_cache_compare_and_set(body);
+        assert_eq!(resp.status, 200);
+        let parsed = parse_body(&resp);
+        assert_eq!(parsed.get("committed").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(parsed.get("current_version").and_then(|v| v.as_u64()), Some(1));
+    }
+
+    #[test]
+    fn cas_happy_update_increments_version() {
+        let server = test_server();
+        // First write at version 1.
+        server.handle_admin_blob_cache_compare_and_set(cas_body("ns2", "k2", b"v1", 1));
+        // Update to version 2 — existing (1) < new_version (2) → ok.
+        let resp = server.handle_admin_blob_cache_compare_and_set(cas_body("ns2", "k2", b"v2", 2));
+        assert_eq!(resp.status, 200);
+        let parsed = parse_body(&resp);
+        assert_eq!(parsed.get("committed").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(parsed.get("current_version").and_then(|v| v.as_u64()), Some(2));
+    }
+
+    #[test]
+    fn cas_conflict_same_version_returns_409() {
+        let server = test_server();
+        // Write version 5.
+        server.handle_admin_blob_cache_compare_and_set(cas_body("ns3", "k3", b"v1", 5));
+        // Try to write version 5 again — existing (5) >= new_version (5) → conflict.
+        let resp = server.handle_admin_blob_cache_compare_and_set(cas_body("ns3", "k3", b"v2", 5));
+        assert_eq!(resp.status, 409);
+        let parsed = parse_body(&resp);
+        assert_eq!(parsed.get("committed").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(
+            parsed.get("reason").and_then(|v| v.as_str()),
+            Some("VersionMismatch")
+        );
+    }
+
+    #[test]
+    fn cas_stale_expected_version_returns_409() {
+        let server = test_server();
+        // Write version 10.
+        server.handle_admin_blob_cache_compare_and_set(cas_body("ns4", "k4", b"v1", 10));
+        // Try version 9 (going backwards) — existing (10) >= new_version (9) → conflict.
+        let resp = server.handle_admin_blob_cache_compare_and_set(cas_body("ns4", "k4", b"v2", 9));
+        assert_eq!(resp.status, 409);
+        let parsed = parse_body(&resp);
+        assert_eq!(
+            parsed.get("current_version").and_then(|v| v.as_u64()),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn cas_crlf_in_namespace_returns_400() {
+        let server = test_server();
+        // Embed CRLF via JSON unicode escapes.
+        let body = b"{\"namespace\":\"real\\r\\ninjected\",\"key\":\"k\",\"expected_version\":0,\"new_value_b64\":\"aGk=\",\"new_version\":1}".to_vec();
+        let resp = server.handle_admin_blob_cache_compare_and_set(body);
+        assert_eq!(resp.status, 400);
+        let parsed = parse_body(&resp);
+        let msg = parsed.get("error").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(msg.contains("CR/LF"), "expected CR/LF error, got: {msg}");
+    }
+
+    #[test]
+    fn cas_nul_in_key_returns_400() {
+        let server = test_server();
+        let body = b"{\"namespace\":\"ns\",\"key\":\"k\\u0000nul\",\"expected_version\":0,\"new_value_b64\":\"aGk=\",\"new_version\":1}".to_vec();
+        let resp = server.handle_admin_blob_cache_compare_and_set(body);
+        assert_eq!(resp.status, 400);
+        let parsed = parse_body(&resp);
+        let msg = parsed.get("error").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(msg.contains("NUL"), "expected NUL error, got: {msg}");
+    }
+
+    #[test]
+    fn cas_bad_base64_returns_400() {
+        let server = test_server();
+        let body = br#"{"namespace":"ns","key":"k","expected_version":0,"new_value_b64":"!!!invalid!!!","new_version":1}"#.to_vec();
+        let resp = server.handle_admin_blob_cache_compare_and_set(body);
+        assert_eq!(resp.status, 400);
+        let parsed = parse_body(&resp);
+        let msg = parsed.get("error").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(msg.contains("base64"), "expected base64 error, got: {msg}");
+    }
+
+    #[test]
+    fn cas_missing_bearer_returns_401_via_route() {
+        use std::sync::Mutex;
+        static GUARD: Mutex<()> = Mutex::new(());
+        let _g = GUARD.lock().unwrap_or_else(|e| e.into_inner());
+
+        let prev = std::env::var("RED_ADMIN_TOKEN").ok();
+        unsafe { std::env::set_var("RED_ADMIN_TOKEN", "test-token-195"); }
+
+        let server = test_server();
+        let req = crate::server::transport::HttpRequest {
+            method: "POST".to_string(),
+            path: "/admin/cache/compare-and-set".to_string(),
+            query: std::collections::BTreeMap::new(),
+            headers: std::collections::BTreeMap::new(),
+            body: cas_body("ns", "k", b"v", 1),
+        };
+        let resp = server.route(req);
+        assert_eq!(resp.status, 401);
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("RED_ADMIN_TOKEN", v),
+                None => std::env::remove_var("RED_ADMIN_TOKEN"),
+            }
+        }
+    }
+
+    #[test]
+    fn cas_wrong_bearer_returns_401_via_route() {
+        use std::sync::Mutex;
+        static GUARD: Mutex<()> = Mutex::new(());
+        let _g = GUARD.lock().unwrap_or_else(|e| e.into_inner());
+
+        let prev = std::env::var("RED_ADMIN_TOKEN").ok();
+        unsafe { std::env::set_var("RED_ADMIN_TOKEN", "correct-token"); }
+
+        let server = test_server();
+        let mut headers = std::collections::BTreeMap::new();
+        headers.insert("authorization".to_string(), "Bearer wrong-token".to_string());
+        let req = crate::server::transport::HttpRequest {
+            method: "POST".to_string(),
+            path: "/admin/cache/compare-and-set".to_string(),
+            query: std::collections::BTreeMap::new(),
+            headers,
+            body: cas_body("ns", "k", b"v", 1),
+        };
+        let resp = server.route(req);
+        assert_eq!(resp.status, 401);
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("RED_ADMIN_TOKEN", v),
+                None => std::env::remove_var("RED_ADMIN_TOKEN"),
+            }
+        }
+    }
+
+    #[test]
+    fn cas_concurrent_race_exactly_one_commits() {
+        use std::sync::{Arc, Mutex};
+
+        // RedDBServer may not be Sync, so we protect it with a Mutex and share
+        // across threads. The BlobCache's check_version runs under a shard write
+        // lock, so even serialised calls exercise the version-monotonicity guard.
+        let server = Arc::new(Mutex::new(test_server()));
+        let committed = Arc::new(Mutex::new(0u32));
+        let conflicted = Arc::new(Mutex::new(0u32));
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let server = Arc::clone(&server);
+                let committed = Arc::clone(&committed);
+                let conflicted = Arc::clone(&conflicted);
+                std::thread::spawn(move || {
+                    // All threads try to write version 1 to the same key.
+                    let body = cas_body("race-ns", "race-key", b"payload", 1);
+                    let resp = {
+                        let s = server.lock().unwrap();
+                        s.handle_admin_blob_cache_compare_and_set(body)
+                    };
+                    match resp.status {
+                        200 => *committed.lock().unwrap() += 1,
+                        409 => *conflicted.lock().unwrap() += 1,
+                        s => panic!("unexpected status {s}"),
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+
+        assert_eq!(
+            *committed.lock().unwrap(),
+            1,
+            "exactly one CAS should commit (version 1 can only be written once)"
         );
     }
 

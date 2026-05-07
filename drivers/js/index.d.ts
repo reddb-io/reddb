@@ -115,7 +115,60 @@ export class RedDBError extends Error {
   constructor(code: string, message: string, data?: unknown)
 }
 
+// ---------------------------------------------------------------------------
+// Cache API
+// ---------------------------------------------------------------------------
+
+/** Options for cache.put(). Maps to Rust BlobCachePolicy fields. */
+export interface CachePutOptions {
+  /** Entry TTL in milliseconds. Omit to use the namespace default. */
+  ttl_ms?: number
+  /** Tags for group invalidation via cache.invalidateTags(). */
+  tags?: string[]
+  /** Extended TTL policy (idle eviction, stale-while-revalidate, jitter). */
+  policy?: {
+    idle_evict_ms?: number
+    stale_while_revalidate_ms?: number
+    jitter_ms?: number
+  }
+}
+
+export interface CacheGetResult {
+  /** Raw bytes of the cached value. null when not found. */
+  value: Uint8Array | null
+}
+
+export type CacheExistsStatus = 'present' | 'absent' | 'maybe'
+
+export interface CacheInvalidateResult {
+  removed: number
+}
+
+export class CacheClient {
+  /** Fetch a cached value. Returns Uint8Array on hit, null on miss. */
+  get(namespace: string, key: string): Promise<Uint8Array | null>
+  /** Store a value in the cache. */
+  put(
+    namespace: string,
+    key: string,
+    value: Uint8Array | Buffer | string,
+    opts?: CachePutOptions,
+  ): Promise<void>
+  /** Check whether a key exists. */
+  exists(namespace: string, key: string): Promise<CacheExistsStatus>
+  /** Remove a single entry. */
+  invalidate(namespace: string, key: string): Promise<void>
+  /** Remove all entries whose key starts with prefix. Returns count removed. */
+  invalidatePrefix(namespace: string, prefix: string): Promise<number>
+  /** Remove all entries tagged with any of the given tags. Returns count removed. */
+  invalidateTags(namespace: string, tags: string[]): Promise<number>
+  /** Remove all entries in a namespace (routes to POST /admin/blob_cache/flush_namespace). */
+  flushNamespace(namespace: string): Promise<void>
+}
+
 export class RedDB {
+  readonly cache: CacheClient
+
   query(sql: string): Promise<QueryResult>
   insert(collection: string, payload: Record<string, unknown>): Promise<InsertResult>
   bulkInsert(

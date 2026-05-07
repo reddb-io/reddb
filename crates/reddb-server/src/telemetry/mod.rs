@@ -31,8 +31,10 @@ use tracing_subscriber::{fmt, EnvFilter, Registry};
 const LOG_BUFFER_LINES: usize = 1_000_000;
 
 pub mod janitor;
+pub mod operator_event;
 #[cfg(feature = "otel")]
 pub mod otel;
+pub mod slow_query_logger;
 pub mod span;
 
 /// Stdio / file output format. `Pretty` renders human-readable coloured
