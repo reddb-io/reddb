@@ -9,6 +9,11 @@
 //! delegated to `LeaseLifecycle`; this module only owns env-var
 //! parsing, lifecycle construction, and the refresh thread.
 //!
+//! The refresh thread uses `LeaseTimerWheel` instead of a fixed
+//! `thread::sleep(ttl_ms / 3)` polling loop. The wheel wakes the
+//! thread exactly when the next refresh is due and reschedules after
+//! each successful refresh, so idle leases cost zero CPU.
+//!
 //! Env knobs:
 //!   * `RED_LEASE_REQUIRED` — `true` / `1` to enable. Default off.
 //!   * `RED_LEASE_TTL_SECS` — lease TTL in seconds. Default 60.
@@ -19,11 +24,12 @@
 
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::api::{RedDBError, RedDBResult};
 use crate::replication::lease::LeaseStore;
 use crate::runtime::lease_lifecycle::{LeaseLifecycle, MarkDraining};
+use crate::runtime::lease_timer_wheel::LeaseTimerWheel;
 use crate::runtime::RedDBRuntime;
 
 /// Try to start the writer-lease lifecycle if the operator opted in.
@@ -93,15 +99,19 @@ pub fn start_lease_loop_if_required(runtime: &RedDBRuntime) -> RedDBResult<()> {
 
 fn spawn_refresh_thread(runtime: RedDBRuntime, lifecycle: Arc<LeaseLifecycle>, ttl_ms: u64) {
     let interval = Duration::from_millis(ttl_ms.saturating_div(3).max(1_000));
+    // Timer wheel replaces thread::sleep(interval) — wakes exactly when the
+    // next refresh is due. Zero CPU during the idle window.
+    let wheel = Arc::new(LeaseTimerWheel::new(100));
+    wheel.schedule("lease-refresh".to_string(), Instant::now() + interval);
+
+    let wheel_for_handler = Arc::clone(&wheel);
     let _ = thread::Builder::new()
         .name("reddb-lease-refresh".into())
         .spawn(move || {
-            loop {
-                thread::sleep(interval);
-
-                // Bail out cleanly on shutdown — the holder thread
-                // would otherwise refresh past the runtime's lifetime
-                // and confuse the next writer's acquire attempt.
+            wheel.run_until_shutdown(move |_id| {
+                // Bail out cleanly on shutdown so the holder thread does not
+                // refresh past the runtime's lifetime and confuse the next
+                // writer's acquire attempt.
                 let phase = runtime.lifecycle().phase();
                 if matches!(
                     phase,
@@ -110,13 +120,18 @@ fn spawn_refresh_thread(runtime: RedDBRuntime, lifecycle: Arc<LeaseLifecycle>, t
                         | crate::runtime::lifecycle::Phase::Stopped
                 ) {
                     let _ = lifecycle.release();
-                    return;
+                    return false;
                 }
 
                 if lifecycle.refresh().is_err() {
-                    return;
+                    return false;
                 }
-            }
+
+                // Reschedule the next refresh.
+                wheel_for_handler
+                    .schedule("lease-refresh".to_string(), Instant::now() + interval);
+                true
+            });
         });
 }
 

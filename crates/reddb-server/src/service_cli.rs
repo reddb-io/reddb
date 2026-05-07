@@ -1398,6 +1398,23 @@ pub(crate) fn build_runtime_with_telemetry(
         msg
     })?;
 
+    // #213 — edge-triggered disk-space watchdog. Watches the data
+    // directory; falls back to polling when fanotify is unavailable
+    // (non-Linux or unprivileged container).
+    if let Some(data_path) = db_options.data_path.as_deref() {
+        let watch_dir = data_path.parent().unwrap_or(data_path);
+        crate::runtime::disk_space_monitor::DiskSpaceMonitor::new(watch_dir, 90).spawn();
+    }
+
+    // #214 — inotify config hot-reload watcher. Watches the config file
+    // (REDDB_CONFIG_FILE or /etc/reddb/config.json) for changes and
+    // applies hot-reloadable keys without restart.
+    {
+        let config_path = crate::runtime::config_overlay::config_file_path();
+        let store = runtime.db().store();
+        crate::runtime::config_watcher::ConfigWatcher::new(config_path, store).spawn();
+    }
+
     // Phase 6 logging: merge red_config overrides onto the CLI-built
     // telemetry config, then install the global subscriber.
     let merged = merge_telemetry_with_config(
