@@ -58,6 +58,37 @@ export class RedDBError extends Error {
   constructor(code: string, message: string, data?: unknown)
 }
 
+// ---------------------------------------------------------------------------
+// Cache API
+// ---------------------------------------------------------------------------
+
+export interface CachePutOptions {
+  ttl_ms?: number
+  tags?: string[]
+  policy?: {
+    idle_evict_ms?: number
+    stale_while_revalidate_ms?: number
+    jitter_ms?: number
+  }
+}
+
+export type CacheExistsStatus = 'present' | 'absent' | 'maybe'
+
+export class CacheClient {
+  get(namespace: string, key: string): Promise<Uint8Array | null>
+  put(
+    namespace: string,
+    key: string,
+    value: Uint8Array | Buffer | string,
+    opts?: CachePutOptions,
+  ): Promise<void>
+  exists(namespace: string, key: string): Promise<CacheExistsStatus>
+  invalidate(namespace: string, key: string): Promise<void>
+  invalidatePrefix(namespace: string, prefix: string): Promise<number>
+  invalidateTags(namespace: string, tags: string[]): Promise<number>
+  flushNamespace(namespace: string): Promise<void>
+}
+
 /**
  * Specialised error thrown when an embedded URI is passed to the
  * thin client. Always has `code === 'EmbeddedNotSupported'`. Use
@@ -76,6 +107,8 @@ export const EMBEDDED_REJECTION_MESSAGE: string
 export function isEmbeddedUri(uri: string): boolean
 
 export class RedDB {
+  readonly cache: CacheClient
+
   query(sql: string): Promise<QueryResult>
   insert(collection: string, payload: Record<string, unknown>): Promise<InsertResult>
   bulkInsert(

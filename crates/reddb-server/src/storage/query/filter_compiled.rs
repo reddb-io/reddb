@@ -36,6 +36,38 @@
 //!
 //! A fuzz test (`compiled_matches_legacy_for_random_filters`) exercises
 //! 1 000 random filter + row pairs to guard against drift.
+//!
+//! # Evaluator bypass contract
+//!
+//! `CompiledFilter::evaluate` dispatches every predicate through
+//! [`Predicate::evaluate`] rather than routing through
+//! `query::evaluator::evaluate`. This bypass is intentional for the hot
+//! path and is valid under the following preconditions:
+//!
+//! 1. **Pre-typed values.** `Filter` predicates are constructed from
+//!    values whose types have already been resolved by the query planner
+//!    (or a typed DSL caller). The planner guarantees that the column
+//!    type and predicate-value type are compatible before a
+//!    `CompiledFilter` is built.
+//!
+//! 2. **No implicit casts at eval time.** Because types are resolved
+//!    at plan time, `evaluator::evaluate`'s implicit-cast step (which
+//!    consults `schema::coercion_spine`) adds zero value at row-eval
+//!    time for ops in `FilterOp`: `Eq`, `Ne`, `Lt`, `Le`, `Gt`, `Ge`,
+//!    `IsNull`, `IsNotNull`, `Between`, `In`, `NotIn`, `Like`,
+//!    `NotLike`, `Contains`, `StartsWith`, `EndsWith`. The hand-rolled
+//!    `partial_compare_values` path is type-safe for these ops given
+//!    precondition 1.
+//!
+//! 3. **Parity test guards against drift.** `compiled_matches_legacy_for_random_filters`
+//!    exercises 1 000 random filter+row pairs comparing compiled output
+//!    to the legacy walker. Any semantic deviation from the accepted
+//!    behavior surfaces there.
+//!
+//! When a future slice migrates `Filter` construction to emit `Expr`
+//! trees (so the planner can enforce type contracts through the type
+//! system rather than by convention), the bypass should be removed and
+//! the ops above routed through `evaluator::evaluate`.
 
 use std::collections::HashMap;
 

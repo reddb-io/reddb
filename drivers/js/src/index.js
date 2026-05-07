@@ -42,8 +42,10 @@ import { RpcClient, RedDBError } from './protocol.js'
 import { HttpRpcClient } from './http.js'
 import { connectRedwire } from './redwire.js'
 import { parseUri, deriveLoginUrl } from './url.js'
+import { CacheClient } from './cache.js'
 
 export { RedDBError }
+export { CacheClient } from './cache.js'
 export { parseUri, deriveLoginUrl } from './url.js'
 
 /**
@@ -324,6 +326,7 @@ export class RedDB {
   /** @param {RpcClient} client */
   constructor(client) {
     this.client = client
+    this.cache = new CacheClient(client)
   }
 
   /** Execute a SQL query. Returns `{ statement, affected, columns, rows }`. */

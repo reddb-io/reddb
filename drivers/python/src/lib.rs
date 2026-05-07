@@ -633,6 +633,7 @@ fn reddb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(high_level::connect, m)?)?;
     m.add_class::<high_level::RedDb>()?;
     m.add_class::<high_level::RedDbError>()?;
+    m.add_class::<high_level::CacheClient>()?;
 
     // Legacy: keep the existing classes available for power users.
     m.add_function(wrap_pyfunction!(legacy_grpc_connect, m)?)?;

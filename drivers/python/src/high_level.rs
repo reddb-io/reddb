@@ -3,14 +3,20 @@
 //! Mirrors the JS and Rust drivers. Same connection-string contract,
 //! same method names, same error semantics. See `PLAN_DRIVERS.md`.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyList};
+use pyo3::types::{PyAny, PyBytes, PyDict, PyList};
 
 #[cfg(feature = "embedded")]
 use crate::embedded::{EmbeddedRuntime, QueryRows, ScalarOut};
+#[cfg(feature = "embedded")]
+use reddb::runtime::RedDBRuntime;
+#[cfg(feature = "embedded")]
+use reddb::storage::cache::{BlobCachePolicy, BlobCachePut};
+#[cfg(feature = "embedded")]
+use reddb::storage::cache::blob::CachePresence;
 
 use reddb::client::RedDBClient;
 
@@ -242,6 +248,21 @@ impl RedDb {
         Ok(out)
     }
 
+    /// Return the cache client for this connection.
+    #[getter]
+    fn cache(&self) -> PyResult<CacheClient> {
+        self.ensure_open()?;
+        match &self.backend {
+            #[cfg(feature = "embedded")]
+            Backend::Embedded(rt) => Ok(CacheClient {
+                backend: CacheBackend::Embedded(rt.clone_runtime()),
+            }),
+            Backend::Grpc(_) => Ok(CacheClient {
+                backend: CacheBackend::Grpc,
+            }),
+        }
+    }
+
     fn close(&mut self) -> PyResult<()> {
         if self.closed {
             return Ok(());
@@ -282,6 +303,134 @@ impl RedDb {
             ));
         }
         Ok(())
+    }
+}
+
+// -----------------------------------------------------------------------
+// CacheClient
+// -----------------------------------------------------------------------
+
+enum CacheBackend {
+    #[cfg(feature = "embedded")]
+    Embedded(Arc<RedDBRuntime>),
+    Grpc,
+}
+
+/// Cache client — exposes `cache.{get,put,exists,invalidate,
+/// invalidate_prefix,invalidate_tags,flush_namespace}`.
+///
+/// Obtain via `db.cache`.
+#[pyclass]
+pub struct CacheClient {
+    backend: CacheBackend,
+}
+
+#[pymethods]
+impl CacheClient {
+    /// Fetch a cached value. Returns bytes on hit, None on miss.
+    fn get<'py>(&self, py: Python<'py>, namespace: &str, key: &str) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        match &self.backend {
+            #[cfg(feature = "embedded")]
+            CacheBackend::Embedded(rt) => {
+                match rt.result_blob_cache().get(namespace, key) {
+                    Some(hit) => Ok(Some(PyBytes::new(py, hit.value()))),
+                    None => Ok(None),
+                }
+            }
+            CacheBackend::Grpc => Err(err("NOT_SUPPORTED", "cache not available over gRPC transport; use the HTTP transport")),
+        }
+    }
+
+    /// Store a value in the cache.
+    #[pyo3(signature = (namespace, key, value, *, ttl_ms=None, tags=None))]
+    fn put(
+        &self,
+        namespace: &str,
+        key: &str,
+        value: &[u8],
+        ttl_ms: Option<u64>,
+        tags: Option<Vec<String>>,
+    ) -> PyResult<()> {
+        match &self.backend {
+            #[cfg(feature = "embedded")]
+            CacheBackend::Embedded(rt) => {
+                let policy = match ttl_ms {
+                    Some(ms) => BlobCachePolicy::default().ttl_ms(ms),
+                    None => BlobCachePolicy::default(),
+                };
+                let mut put = BlobCachePut::new(value.to_vec()).with_policy(policy);
+                if let Some(t) = tags {
+                    put = put.with_tags(t);
+                }
+                rt.result_blob_cache()
+                    .put(namespace, key, put)
+                    .map_err(|e| err("CACHE_ERROR", e.to_string()))?;
+                Ok(())
+            }
+            CacheBackend::Grpc => Err(err("NOT_SUPPORTED", "cache not available over gRPC transport")),
+        }
+    }
+
+    /// Check whether a key is present. Returns 'present', 'absent', or 'maybe'.
+    fn exists(&self, namespace: &str, key: &str) -> PyResult<&'static str> {
+        match &self.backend {
+            #[cfg(feature = "embedded")]
+            CacheBackend::Embedded(rt) => {
+                let status = match rt.result_blob_cache().exists(namespace, key) {
+                    CachePresence::Present => "present",
+                    CachePresence::Absent => "absent",
+                    CachePresence::MaybePresent => "maybe",
+                };
+                Ok(status)
+            }
+            CacheBackend::Grpc => Err(err("NOT_SUPPORTED", "cache not available over gRPC transport")),
+        }
+    }
+
+    /// Remove a single entry. Returns number of entries removed.
+    fn invalidate(&self, namespace: &str, key: &str) -> PyResult<usize> {
+        match &self.backend {
+            #[cfg(feature = "embedded")]
+            CacheBackend::Embedded(rt) => {
+                Ok(rt.result_blob_cache().invalidate_key(namespace, key))
+            }
+            CacheBackend::Grpc => Err(err("NOT_SUPPORTED", "cache not available over gRPC transport")),
+        }
+    }
+
+    /// Remove all entries whose key starts with `prefix`. Returns count removed.
+    fn invalidate_prefix(&self, namespace: &str, prefix: &str) -> PyResult<usize> {
+        match &self.backend {
+            #[cfg(feature = "embedded")]
+            CacheBackend::Embedded(rt) => {
+                Ok(rt.result_blob_cache().invalidate_prefix(namespace, prefix))
+            }
+            CacheBackend::Grpc => Err(err("NOT_SUPPORTED", "cache not available over gRPC transport")),
+        }
+    }
+
+    /// Remove all entries tagged with any of the given tags. Returns count removed.
+    fn invalidate_tags(&self, namespace: &str, tags: Vec<String>) -> PyResult<usize> {
+        match &self.backend {
+            #[cfg(feature = "embedded")]
+            CacheBackend::Embedded(rt) => {
+                let tag_refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
+                Ok(rt.result_blob_cache().invalidate_tags(namespace, &tag_refs))
+            }
+            CacheBackend::Grpc => Err(err("NOT_SUPPORTED", "cache not available over gRPC transport")),
+        }
+    }
+
+    /// Remove all entries in a namespace.
+    fn flush_namespace(&self, namespace: &str) -> PyResult<()> {
+        match &self.backend {
+            #[cfg(feature = "embedded")]
+            CacheBackend::Embedded(rt) => {
+                rt.result_blob_cache().invalidate_namespace(namespace);
+                Ok(())
+            }
+            CacheBackend::Grpc => Err(err("NOT_SUPPORTED", "cache not available over gRPC transport")),
+        }
     }
 }
 
