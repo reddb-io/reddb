@@ -17,9 +17,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use parking_lot::RwLock;
 
 use super::compressor::{Compressed, CompressOpts, L2BlobCompressor};
+use super::extended_ttl::{EffectiveExpiry, ExpiryDecision, ExtendedTtlPolicy};
 use super::promotion_pool::{
     AsyncPromotionPool, PoolOpts, PromotionExecutor, PromotionRequest,
 };
+
+/// Test-only thread-local counter of how many times
+/// `EffectiveExpiry::compute` is invoked from `Shard::get`. Thread-local
+/// (rather than a global atomic) so the off-fast-path test does not race
+/// with other tests in the harness's parallel executor.
+#[cfg(test)]
+thread_local! {
+    static EFFECTIVE_EXPIRY_COMPUTE_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 pub const DEFAULT_BLOB_L1_BYTES_MAX: usize = 256 * 1024 * 1024;
 pub const DEFAULT_BLOB_L2_BYTES_MAX: u64 = 4 * 1024 * 1024 * 1024;
@@ -307,6 +317,10 @@ pub struct BlobCacheHit {
     bytes: Arc<[u8]>,
     content_metadata: BTreeMap<String, String>,
     version: Option<u64>,
+    /// `Some(remaining_ms)` when the hit came from the stale-while-revalidate
+    /// window of an `ExtendedTtlPolicy`; `None` when the entry was fresh.
+    /// Boolean staleness is just `.is_some()`.
+    stale_window_remaining_ms: Option<u64>,
 }
 
 impl BlobCacheHit {
@@ -319,6 +333,21 @@ impl BlobCacheHit {
             bytes,
             content_metadata,
             version,
+            stale_window_remaining_ms: None,
+        }
+    }
+
+    pub(crate) fn new_stale(
+        bytes: Arc<[u8]>,
+        content_metadata: BTreeMap<String, String>,
+        version: Option<u64>,
+        window_remaining_ms: u64,
+    ) -> Self {
+        Self {
+            bytes,
+            content_metadata,
+            version,
+            stale_window_remaining_ms: Some(window_remaining_ms),
         }
     }
 
@@ -340,6 +369,19 @@ impl BlobCacheHit {
     /// Optional CAS / freshness version stamped on `put`.
     pub fn version(&self) -> Option<u64> {
         self.version
+    }
+
+    /// `true` when the hit was served from the stale-while-revalidate window
+    /// of an `ExtendedTtlPolicy`. Always `false` when the extended policy is
+    /// `off()` or the entry was within its hard expiry.
+    pub fn is_stale(&self) -> bool {
+        self.stale_window_remaining_ms.is_some()
+    }
+
+    /// Remaining stale-window milliseconds when [`is_stale`](Self::is_stale)
+    /// is `true`; `None` when the hit was fresh.
+    pub fn stale_window_remaining_ms(&self) -> Option<u64> {
+        self.stale_window_remaining_ms
     }
 }
 
@@ -430,6 +472,12 @@ pub struct BlobCachePolicy {
     l1_admission: L1Admission,
     priority: u8,
     version: Option<u64>,
+    /// Extended TTL knobs (idle / stale-while-revalidate / jitter).
+    /// Defaults to [`ExtendedTtlPolicy::off`] so existing call sites and
+    /// stored entries continue to behave with hard-expiry-only semantics.
+    /// Wired into [`BlobCache::get`] behind the
+    /// `cache.blob.policy.extended` config knob (#194).
+    extended: ExtendedTtlPolicy,
 }
 
 impl Default for BlobCachePolicy {
@@ -441,6 +489,7 @@ impl Default for BlobCachePolicy {
             l1_admission: L1Admission::Auto,
             priority: 128,
             version: None,
+            extended: ExtendedTtlPolicy::off(),
         }
     }
 }
@@ -478,6 +527,15 @@ impl BlobCachePolicy {
         self
     }
 
+    /// Replace the extended TTL knobs in one chainable call. Defaults to
+    /// [`ExtendedTtlPolicy::off`]; setting an active policy turns on the
+    /// idle / stale-serve / jitter behaviours in [`BlobCache::get`] and
+    /// [`BlobCache::put`] for entries written with this policy.
+    pub fn extended(mut self, extended: ExtendedTtlPolicy) -> Self {
+        self.extended = extended;
+        self
+    }
+
     // ----- read-back accessors -------------------------------------------
     //
     // Setter methods consume `self` and return `Self`, so they cannot share
@@ -506,6 +564,13 @@ impl BlobCachePolicy {
 
     pub fn version_value(&self) -> Option<u64> {
         self.version
+    }
+
+    /// Read-back accessor for the extended TTL knobs. Mirrors the
+    /// `*_value` getter pattern used by every other [`BlobCachePolicy`]
+    /// field (#151 — fields are private; readers go through getters).
+    pub fn extended_value(&self) -> ExtendedTtlPolicy {
+        self.extended
     }
 }
 
@@ -552,6 +617,12 @@ pub struct BlobCacheStats {
     l2_compression_skipped_total: u64,
     /// Cumulative `(original_len - stored_len)` across compressed entries.
     l2_bytes_saved_total: u64,
+    /// Counter — L1 hits that served a stale entry from the SWR window of
+    /// an `ExtendedTtlPolicy` (#194). Stays 0 when extended is off.
+    l1_stale_serves_total: u64,
+    /// Counter — L1 entries evicted by the idle-TTL gate of an
+    /// `ExtendedTtlPolicy` (#194). Stays 0 when extended is off.
+    l1_idle_evicts_total: u64,
 }
 
 impl BlobCacheStats {
@@ -697,6 +768,20 @@ impl BlobCacheStats {
     pub fn l2_bytes_saved_total(&self) -> u64 {
         self.l2_bytes_saved_total
     }
+
+    /// Counter — L1 hits served as stale by the SWR window of an
+    /// `ExtendedTtlPolicy` (#194). `0` when no entry was written with an
+    /// active extended policy.
+    pub fn l1_stale_serves_total(&self) -> u64 {
+        self.l1_stale_serves_total
+    }
+
+    /// Counter — L1 entries evicted by the idle-TTL gate of an
+    /// `ExtendedTtlPolicy` (#194). `0` when no entry was written with an
+    /// active extended policy.
+    pub fn l1_idle_evicts_total(&self) -> u64 {
+        self.l1_idle_evicts_total
+    }
 }
 
 #[derive(Debug)]
@@ -711,6 +796,15 @@ struct Entry {
     priority: u8,
     version: Option<u64>,
     namespace_generation: u64,
+    /// Wall-clock time of the most recent access (`put` or successful
+    /// `get`). Updated on hits to drive [`ExtendedTtlPolicy::idle_ttl_ms`].
+    /// L1-only — never propagated to the L2 record (cache is the source of
+    /// truth for access patterns).
+    last_access_unix_ms: u64,
+    /// Extended TTL knobs captured from the [`BlobCachePolicy`] at insert
+    /// time, including any jitter expansion that was already applied to
+    /// `expires_at_unix_ms`.
+    extended: ExtendedTtlPolicy,
 }
 
 impl Entry {
@@ -722,6 +816,8 @@ impl Entry {
         policy: BlobCachePolicy,
         namespace_generation: u64,
         now_ms: u64,
+        namespace: &str,
+        key: &str,
     ) -> Self {
         let size = bytes.len();
         Self {
@@ -731,10 +827,12 @@ impl Entry {
             dependencies,
             size,
             visited: true,
-            expires_at_unix_ms: effective_expires_at_unix_ms(policy, now_ms),
+            expires_at_unix_ms: effective_expires_at_unix_ms(policy, now_ms, namespace, key),
             priority: policy.priority_value(),
             version: policy.version_value(),
             namespace_generation,
+            last_access_unix_ms: now_ms,
+            extended: policy.extended_value(),
         }
     }
 
@@ -746,14 +844,54 @@ impl Entry {
         )
     }
 
+    fn hit_stale(&self, window_remaining_ms: u64) -> BlobCacheHit {
+        BlobCacheHit::new_stale(
+            Arc::clone(&self.bytes),
+            self.content_metadata.clone(),
+            self.version,
+            window_remaining_ms,
+        )
+    }
+
     fn is_expired_at(&self, now_ms: u64) -> bool {
         self.expires_at_unix_ms
             .is_some_and(|expires_at| now_ms >= expires_at)
     }
 }
 
-fn effective_expires_at_unix_ms(policy: BlobCachePolicy, now_ms: u64) -> Option<u64> {
-    match (policy.ttl_ms_value(), policy.expires_at_unix_ms_value()) {
+/// Stable seed for [`EffectiveExpiry::jittered_ttl_ms`] derived from the
+/// (namespace, key, now_ms) triple. The same triple always yields the
+/// same seed so jitter is deterministic per insert.
+fn jitter_seed(namespace: &str, key: &str, now_ms: u64) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    namespace.hash(&mut hasher);
+    key.hash(&mut hasher);
+    now_ms.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn effective_expires_at_unix_ms(
+    policy: BlobCachePolicy,
+    now_ms: u64,
+    namespace: &str,
+    key: &str,
+) -> Option<u64> {
+    let extended = policy.extended_value();
+    // Jitter only applies to the relative `ttl_ms` knob; an absolute
+    // `expires_at_unix_ms` is treated as a hard ceiling and is never
+    // pushed out by jitter.
+    let jittered_ttl = policy.ttl_ms_value().map(|base| {
+        if extended.jitter_pct > 0 {
+            EffectiveExpiry::jittered_ttl_ms(
+                base,
+                extended.jitter_pct,
+                jitter_seed(namespace, key, now_ms),
+            )
+        } else {
+            base
+        }
+    });
+    match (jittered_ttl, policy.expires_at_unix_ms_value()) {
         (Some(ttl), Some(abs)) => Some(now_ms.saturating_add(ttl).min(abs)),
         (Some(ttl), None) => Some(now_ms.saturating_add(ttl)),
         (None, Some(abs)) => Some(abs),
@@ -787,12 +925,54 @@ impl Shard {
             let removed = self.remove(key).expect("entry exists");
             return Lookup::Stale(removed);
         }
-        if entry.is_expired_at(now_ms) {
-            let removed = self.remove(key).expect("entry exists");
-            return Lookup::Expired(removed);
+        // Fast path: extended is `off()` — bypass `EffectiveExpiry::compute`
+        // entirely and use the legacy hard-only check. No idle/stale/jitter
+        // semantics, no last_access bookkeeping for callers that opted out.
+        if !entry.extended.is_active() {
+            if entry.is_expired_at(now_ms) {
+                let removed = self.remove(key).expect("entry exists");
+                return Lookup::Expired(removed);
+            }
+            entry.visited = true;
+            entry.last_access_unix_ms = now_ms;
+            return Lookup::Hit(entry.hit());
         }
-        entry.visited = true;
-        Lookup::Hit(entry.hit())
+
+        // Extended path: route through `EffectiveExpiry::compute` for
+        // idle / stale-while-revalidate decisions.
+        #[cfg(test)]
+        EFFECTIVE_EXPIRY_COMPUTE_CALLS.with(|c| c.set(c.get() + 1));
+        let decision = EffectiveExpiry::compute(
+            entry.expires_at_unix_ms,
+            now_ms,
+            entry.last_access_unix_ms,
+            &entry.extended,
+        );
+        match decision {
+            ExpiryDecision::Fresh => {
+                entry.visited = true;
+                entry.last_access_unix_ms = now_ms;
+                Lookup::Hit(entry.hit())
+            }
+            ExpiryDecision::Stale { window_remaining_ms } => {
+                entry.visited = true;
+                entry.last_access_unix_ms = now_ms;
+                Lookup::Hit(entry.hit_stale(window_remaining_ms))
+            }
+            ExpiryDecision::Expired => {
+                // Distinguish idle eviction from hard expiry so the caller
+                // can bump the right counter. Hard expiry implies a
+                // concrete `expires_at_unix_ms` already passed; otherwise
+                // the kill came from the idle-TTL gate.
+                let killed_by_idle = !entry.is_expired_at(now_ms);
+                let removed = self.remove(key).expect("entry exists");
+                if killed_by_idle {
+                    Lookup::IdleEvicted(removed)
+                } else {
+                    Lookup::Expired(removed)
+                }
+            }
+        }
     }
 
     fn contains(&mut self, key: &BlobCacheKey, now_ms: u64, namespace_generation: u64) -> Lookup {
@@ -920,6 +1100,10 @@ enum Lookup {
     Hit(BlobCacheHit),
     Present,
     Expired(Entry),
+    /// Entry was killed by the idle TTL gate of an `ExtendedTtlPolicy`.
+    /// Distinguished from [`Expired`] so the cache-level counter for
+    /// idle evictions stays separate from hard-TTL expirations.
+    IdleEvicted(Entry),
     Stale(Entry),
     Miss,
 }
@@ -946,6 +1130,14 @@ struct AtomicStats {
     namespace_flushes: AtomicU64,
     version_mismatches: AtomicU64,
     l2_full_rejections: AtomicU64,
+    /// Counter incremented every time `BlobCache::get` returns a stale
+    /// entry from the SWR window of an `ExtendedTtlPolicy`. Stays at 0
+    /// when extended is `off()` for every entry.
+    l1_stale_serves: AtomicU64,
+    /// Counter incremented every time the idle-TTL gate of an
+    /// `ExtendedTtlPolicy` evicts an L1 entry. Stays at 0 when extended
+    /// is `off()` for every entry.
+    l1_idle_evicts: AtomicU64,
 }
 
 impl AtomicStats {
@@ -960,6 +1152,8 @@ impl AtomicStats {
             namespace_flushes: AtomicU64::new(0),
             version_mismatches: AtomicU64::new(0),
             l2_full_rejections: AtomicU64::new(0),
+            l1_stale_serves: AtomicU64::new(0),
+            l1_idle_evicts: AtomicU64::new(0),
         }
     }
 }
@@ -1433,6 +1627,15 @@ impl BlobCacheL2 {
             priority: record.priority,
             version: record.version,
             namespace_generation: record.namespace_generation,
+            // L2 records do not persist last_access (cache-source-of-truth)
+            // — seed with `now_ms` so an entry rehydrated from L2 starts
+            // its idle window fresh.
+            last_access_unix_ms: now_ms,
+            // L2 records do not persist the extended policy. Rehydrated
+            // entries start with `off()`, matching the historical
+            // hard-only semantics until they are overwritten by a fresh
+            // `put` carrying an explicit extended policy.
+            extended: ExtendedTtlPolicy::off(),
         })
     }
 
@@ -1959,6 +2162,8 @@ impl BlobCache {
             input.policy,
             namespace_generation,
             now_ms,
+            &namespace,
+            &key.key,
         );
         let entry_size = entry.size;
         if let Some(l2) = &self.l2 {
@@ -2041,6 +2246,9 @@ impl BlobCache {
         match shard.get(&cache_key, now_ms, namespace_generation) {
             Lookup::Hit(hit) => {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                if hit.is_stale() {
+                    self.stats.l1_stale_serves.fetch_add(1, Ordering::Relaxed);
+                }
                 Some(hit)
             }
             Lookup::Expired(entry) => {
@@ -2050,6 +2258,17 @@ impl BlobCache {
                     l2.delete_key(&cache_key);
                 }
                 self.stats.expirations.fetch_add(1, Ordering::Relaxed);
+                self.stats.misses.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+            Lookup::IdleEvicted(entry) => {
+                drop(shard);
+                self.record_removed_entry(&cache_key, &entry);
+                if let Some(l2) = &self.l2 {
+                    l2.delete_key(&cache_key);
+                }
+                self.stats.expirations.fetch_add(1, Ordering::Relaxed);
+                self.stats.l1_idle_evicts.fetch_add(1, Ordering::Relaxed);
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
                 None
             }
@@ -2139,6 +2358,17 @@ impl BlobCache {
                     l2.delete_key(&cache_key);
                 }
                 self.stats.expirations.fetch_add(1, Ordering::Relaxed);
+                self.stats.misses.fetch_add(1, Ordering::Relaxed);
+                CachePresence::Absent
+            }
+            Lookup::IdleEvicted(entry) => {
+                drop(shard);
+                self.record_removed_entry(&cache_key, &entry);
+                if let Some(l2) = &self.l2 {
+                    l2.delete_key(&cache_key);
+                }
+                self.stats.expirations.fetch_add(1, Ordering::Relaxed);
+                self.stats.l1_idle_evicts.fetch_add(1, Ordering::Relaxed);
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
                 CachePresence::Absent
             }
@@ -2346,6 +2576,8 @@ impl BlobCache {
                 .l2
                 .as_ref()
                 .map_or(0, |l2| l2.stats_bytes_saved_total()),
+            l1_stale_serves_total: self.stats.l1_stale_serves.load(Ordering::Relaxed),
+            l1_idle_evicts_total: self.stats.l1_idle_evicts.load(Ordering::Relaxed),
         }
     }
 
@@ -4697,5 +4929,262 @@ mod tests {
         assert!(stats.l2_bytes_saved_total() > 0);
 
         cleanup_l2(&path);
+    }
+
+    // ----------------------------------------------------------------------
+    // Extended TTL wiring (issue #194 lane 3/5)
+    // ----------------------------------------------------------------------
+
+    /// Backwards compat — when extended is `off()`, the cache must behave
+    /// exactly like the legacy hard-TTL path: past hard TTL → None, no
+    /// stale serve, no idle bookkeeping leaking.
+    #[test]
+    fn extended_off_preserves_legacy_hard_ttl_behavior() {
+        let cache = small_cache(128);
+        let policy = BlobCachePolicy::default().ttl_ms(50);
+        cache
+            .put_at(
+                "n",
+                "k",
+                BlobCachePut::new(b"ok".to_vec()).with_policy(policy),
+                1_000,
+            )
+            .unwrap();
+        // Past hard TTL → None.
+        assert!(cache.get_at("n", "k", 1_051).is_none());
+        let stats = cache.stats();
+        assert_eq!(stats.expirations(), 1);
+        assert_eq!(stats.l1_idle_evicts_total(), 0);
+        assert_eq!(stats.l1_stale_serves_total(), 0);
+    }
+
+    /// Idle TTL evicts an entry that has not been accessed within
+    /// `idle_ttl_ms`, even when its hard TTL is far in the future.
+    #[test]
+    fn extended_idle_ttl_evicts_dormant_entry() {
+        let cache = small_cache(128);
+        let extended = ExtendedTtlPolicy {
+            idle_ttl_ms: Some(100),
+            stale_serve_ms: None,
+            jitter_pct: 0,
+        };
+        let policy = BlobCachePolicy::default().ttl_ms(10_000).extended(extended);
+        cache
+            .put_at(
+                "n",
+                "k",
+                BlobCachePut::new(b"ok".to_vec()).with_policy(policy),
+                1_000,
+            )
+            .unwrap();
+        // 200ms after put, no intervening access → idle window blown.
+        assert!(cache.get_at("n", "k", 1_200).is_none());
+        let stats = cache.stats();
+        assert_eq!(stats.l1_idle_evicts_total(), 1);
+        assert_eq!(stats.expirations(), 1);
+    }
+
+    /// Idle TTL must reset on every successful `get`. Two accesses spaced
+    /// 150ms apart with `idle_ttl_ms = 200ms` keep the entry alive across
+    /// 250ms of wall clock.
+    #[test]
+    fn extended_idle_ttl_resets_on_access() {
+        let cache = small_cache(128);
+        let extended = ExtendedTtlPolicy {
+            idle_ttl_ms: Some(200),
+            stale_serve_ms: None,
+            jitter_pct: 0,
+        };
+        let policy = BlobCachePolicy::default().ttl_ms(10_000).extended(extended);
+        cache
+            .put_at(
+                "n",
+                "k",
+                BlobCachePut::new(b"ok".to_vec()).with_policy(policy),
+                1_000,
+            )
+            .unwrap();
+        // First access at +100ms — still within idle window, last_access
+        // bumps to 1_100.
+        assert!(cache.get_at("n", "k", 1_100).is_some());
+        // Second access at +250ms (= 150ms past the previous access):
+        // because last_access was reset, idle = 150 ≤ 200 → still Fresh.
+        assert!(cache.get_at("n", "k", 1_250).is_some());
+        let stats = cache.stats();
+        assert_eq!(stats.l1_idle_evicts_total(), 0);
+        assert_eq!(stats.hits(), 2);
+    }
+
+    /// SWR window — past hard TTL but inside `stale_serve_ms` returns a
+    /// `BlobCacheHit` flagged stale with the remaining window.
+    #[test]
+    fn extended_stale_serve_returns_stale_hit() {
+        let cache = small_cache(128);
+        let extended = ExtendedTtlPolicy {
+            idle_ttl_ms: None,
+            stale_serve_ms: Some(100),
+            jitter_pct: 0,
+        };
+        let policy = BlobCachePolicy::default().ttl_ms(50).extended(extended);
+        cache
+            .put_at(
+                "n",
+                "k",
+                BlobCachePut::new(b"ok".to_vec()).with_policy(policy),
+                1_000,
+            )
+            .unwrap();
+        // hard expires at 1_050, stale window runs to 1_150.
+        // get at 1_060 → Stale with ~90ms remaining.
+        let hit = cache.get_at("n", "k", 1_060).expect("stale hit");
+        assert!(hit.is_stale());
+        assert_eq!(hit.stale_window_remaining_ms(), Some(90));
+        let stats = cache.stats();
+        assert_eq!(stats.l1_stale_serves_total(), 1);
+    }
+
+    /// Past the cumulative `hard + stale_serve_ms` window, the entry is
+    /// hard-expired regardless of how big the stale window was.
+    #[test]
+    fn extended_stale_serve_expires_after_window_closes() {
+        let cache = small_cache(128);
+        let extended = ExtendedTtlPolicy {
+            idle_ttl_ms: None,
+            stale_serve_ms: Some(100),
+            jitter_pct: 0,
+        };
+        let policy = BlobCachePolicy::default().ttl_ms(50).extended(extended);
+        cache
+            .put_at(
+                "n",
+                "k",
+                BlobCachePut::new(b"ok".to_vec()).with_policy(policy),
+                1_000,
+            )
+            .unwrap();
+        // get at 1_200 → past 1_150 stale deadline → Expired.
+        assert!(cache.get_at("n", "k", 1_200).is_none());
+        let stats = cache.stats();
+        assert_eq!(stats.l1_stale_serves_total(), 0);
+        assert_eq!(stats.expirations(), 1);
+    }
+
+    /// Jitter at insert time spreads `expires_at_unix_ms` deterministically
+    /// inside `[base_ttl, base_ttl * (1 + pct/100)]` for unique keys.
+    #[test]
+    fn extended_jitter_spreads_expires_at_within_bound() {
+        let cache = BlobCache::new(
+            BlobCacheConfig::default()
+                .with_l1_bytes_max(1_024 * 1024)
+                .with_shard_count(1)
+                .with_max_namespaces(4),
+        );
+        let extended = ExtendedTtlPolicy {
+            idle_ttl_ms: None,
+            stale_serve_ms: None,
+            jitter_pct: 20,
+        };
+        let policy = BlobCachePolicy::default().ttl_ms(1_000).extended(extended);
+        let now = 10_000u64;
+        // Probe 1000 entries; each must remain Fresh at +1000ms (the base
+        // TTL floor) and Expired by +1200ms (the jittered ceiling, +20%).
+        for i in 0..1_000u32 {
+            let key = format!("k{i}");
+            cache
+                .put_at(
+                    "n",
+                    &key,
+                    BlobCachePut::new(vec![i as u8]).with_policy(policy),
+                    now,
+                )
+                .expect("put");
+            // At now + base_ttl - 1 → must still be Fresh (jitter only
+            // ever pushes expiry later, never earlier).
+            assert!(
+                cache.get_at("n", &key, now + 999).is_some(),
+                "entry {key} should be Fresh at base_ttl - 1",
+            );
+            // At now + base_ttl * (1 + pct/100) + 1 → must be Expired
+            // (jitter ceiling crossed).
+            assert!(
+                cache.get_at("n", &key, now + 1_201).is_none(),
+                "entry {key} should be Expired beyond jitter ceiling",
+            );
+        }
+    }
+
+    /// Jitter must be deterministic — same `(namespace, key, now_ms)`
+    /// triple must produce the same expires_at across independent caches.
+    #[test]
+    fn extended_jitter_is_deterministic_per_triple() {
+        let extended = ExtendedTtlPolicy {
+            idle_ttl_ms: None,
+            stale_serve_ms: None,
+            jitter_pct: 50,
+        };
+        let policy = BlobCachePolicy::default().ttl_ms(1_000).extended(extended);
+        let now = 42_000u64;
+
+        let cache_a = small_cache(1_024);
+        let cache_b = small_cache(1_024);
+        for key in ["alpha", "beta", "gamma", "delta", "epsilon"] {
+            cache_a
+                .put_at(
+                    "n",
+                    key,
+                    BlobCachePut::new(b"x".to_vec()).with_policy(policy),
+                    now,
+                )
+                .unwrap();
+            cache_b
+                .put_at(
+                    "n",
+                    key,
+                    BlobCachePut::new(b"x".to_vec()).with_policy(policy),
+                    now,
+                )
+                .unwrap();
+            // The two caches will have computed identical expires_at_unix_ms.
+            // Probe the boundary: any time `t` where one cache returns Some
+            // and the other returns None proves they diverge.
+            for t_offset in [999u64, 1_000, 1_100, 1_250, 1_499, 1_500, 1_501] {
+                let a = cache_a.get_at("n", key, now + t_offset).is_some();
+                let b = cache_b.get_at("n", key, now + t_offset).is_some();
+                assert_eq!(
+                    a, b,
+                    "jitter diverged for key={key} t_offset={t_offset}: a={a} b={b}",
+                );
+            }
+        }
+    }
+
+    /// Performance contract — when extended is `off()`,
+    /// `EffectiveExpiry::compute` must NEVER be called from the hot path.
+    /// Verified via a process-global counter incremented inside the
+    /// extended branch of `Shard::get`.
+    #[test]
+    fn extended_off_skips_effective_expiry_compute() {
+        // Thread-local counter — no cross-test race. Reset to 0 at the
+        // start so the absolute value below is the count contributed by
+        // this test alone.
+        EFFECTIVE_EXPIRY_COMPUTE_CALLS.with(|c| c.set(0));
+        let cache = small_cache(128);
+        let policy = BlobCachePolicy::default().ttl_ms(10_000); // extended defaults to off()
+        cache
+            .put_at(
+                "n",
+                "k",
+                BlobCachePut::new(b"ok".to_vec()).with_policy(policy),
+                1_000,
+            )
+            .unwrap();
+        for t in [1_001u64, 1_500, 2_000, 5_000, 9_999] {
+            let _ = cache.get_at("n", "k", t);
+        }
+        let calls = EFFECTIVE_EXPIRY_COMPUTE_CALLS.with(|c| c.get());
+        assert_eq!(
+            calls, 0,
+            "EffectiveExpiry::compute was invoked {calls} times despite extended=off()",
+        );
     }
 }
