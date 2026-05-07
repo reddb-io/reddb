@@ -151,6 +151,46 @@ pub enum OperatorEvent {
 }
 
 impl OperatorEvent {
+    /// All variant names as CamelCase strings, in declaration order.
+    pub fn all_variant_names() -> &'static [&'static str] {
+        &[
+            "ReplicationBroken",
+            "Divergence",
+            "WalFsyncFailed",
+            "DiskSpaceCritical",
+            "AuthBypass",
+            "AdminCapabilityGranted",
+            "SecretRotationFailed",
+            "ConfigChanged",
+            "StartupFailed",
+            "ShutdownForced",
+            "SchemaCorruption",
+            "CheckpointFailed",
+            "DanglingAdminIntent",
+            "ConfigChangeRequiresRestart",
+        ]
+    }
+
+    /// Return the CamelCase variant name for routing table lookup.
+    pub(super) fn variant_name(&self) -> &'static str {
+        match self {
+            Self::ReplicationBroken { .. } => "ReplicationBroken",
+            Self::Divergence { .. } => "Divergence",
+            Self::WalFsyncFailed { .. } => "WalFsyncFailed",
+            Self::DiskSpaceCritical { .. } => "DiskSpaceCritical",
+            Self::AuthBypass { .. } => "AuthBypass",
+            Self::AdminCapabilityGranted { .. } => "AdminCapabilityGranted",
+            Self::SecretRotationFailed { .. } => "SecretRotationFailed",
+            Self::ConfigChanged { .. } => "ConfigChanged",
+            Self::StartupFailed { .. } => "StartupFailed",
+            Self::ShutdownForced { .. } => "ShutdownForced",
+            Self::SchemaCorruption { .. } => "SchemaCorruption",
+            Self::CheckpointFailed { .. } => "CheckpointFailed",
+            Self::DanglingAdminIntent { .. } => "DanglingAdminIntent",
+            Self::ConfigChangeRequiresRestart { .. } => "ConfigChangeRequiresRestart",
+        }
+    }
+
     /// Emit the event.
     ///
     /// Execution order (per issue #202):
@@ -203,7 +243,7 @@ impl OperatorEvent {
     }
 
     /// Decompose `self` into `(action, audit_fields, human_summary)`.
-    fn decompose(self) -> (&'static str, Vec<AuditField>, String) {
+    pub(super) fn decompose(self) -> (&'static str, Vec<AuditField>, String) {
         match self {
             Self::ReplicationBroken { peer, reason } => {
                 let summary = format!("replication broken: peer={peer} reason={reason}");

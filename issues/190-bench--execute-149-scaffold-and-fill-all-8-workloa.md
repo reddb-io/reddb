@@ -27,3 +27,24 @@ Steps:
 
 - https://github.com/reddb-io/reddb/issues/189
 
+## Progress (2026-05-07)
+
+Steps 1–2 implemented AFK:
+
+- `crates/reddb-server/Cargo.toml`: added `criterion = "0.5"` + `tempfile = "3"`
+  to `[dev-dependencies]`; added `[[bench]] name = "blob_cache_bench" harness = false`.
+- `crates/reddb-server/benches/blob_cache_bench.rs` (NEW): criterion harness for
+  all 8 workloads (w1–w8), RedDB side only. L1 scaled to 8 MiB so the suite runs
+  on any host; relative numbers are host-invariant. Redis cells check
+  `REDIS_NO_PERSIST_ADDR` / `REDIS_AOF_ADDR` env vars and can be wired in once
+  Docker is available.
+- `bench/blob-cache/redis-up.sh` (NEW): starts both Redis 7.4 variants per
+  redis-setup.md; prints the env var exports needed before running the bench.
+- `bench/blob-cache/redis-down.sh` (NEW): stops containers; `--wipe-aof` flag
+  to also remove the AOF volume.
+
+Remaining (requires Docker + human run):
+- Step 3: run `REDIS_NO_PERSIST_ADDR=... REDIS_AOF_ADDR=... cargo bench -p reddb-server`
+- Step 4: fill TBD cells in docs/perf/blob-cache-bench-2026-05-06.md
+- Step 5: SIEVE vs W-TinyLFU comparison (w8 at WS=2.0×L1)
+

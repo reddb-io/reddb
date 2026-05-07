@@ -364,8 +364,15 @@ impl AdminIntentLog {
             Err(_) => return Vec::new(),
         };
 
-        // id → (op, started_at_ms, last_phase)
-        let mut intents: HashMap<String, (IntentOp, u64, IntentPhase)> = HashMap::new();
+        struct ScanEntry {
+            op: IntentOp,
+            started_at_ms: u64,
+            phase: IntentPhase,
+            args: Map<String, JsonValue>,
+            last_progress: Option<Map<String, JsonValue>>,
+        }
+
+        let mut intents: HashMap<String, ScanEntry> = HashMap::new();
 
         for raw_line in content.lines() {
             let line = raw_line.trim();
@@ -401,21 +408,44 @@ impl AdminIntentLog {
             };
             let ts = v.get("ts").and_then(|x| x.as_f64()).unwrap_or(0.0) as u64;
 
+            let args_map = v
+                .get("args")
+                .and_then(|x| x.as_object())
+                .cloned()
+                .unwrap_or_default();
+            let progress_map = v.get("progress").and_then(|x| x.as_object()).cloned();
+
             intents
                 .entry(id)
                 .and_modify(|e| {
-                    // Keep earliest ts, update to latest phase
-                    e.2 = phase.clone();
+                    // Keep earliest ts and args (from running record); update phase and progress.
+                    e.phase = phase.clone();
+                    if let Some(p) = progress_map.clone() {
+                        e.last_progress = Some(p);
+                    }
                 })
-                .or_insert((op, ts, phase));
+                .or_insert(ScanEntry {
+                    op,
+                    started_at_ms: ts,
+                    phase,
+                    args: args_map,
+                    last_progress: progress_map,
+                });
         }
 
         intents
             .into_iter()
-            .filter(|(_, (_, _, phase))| !phase.is_terminal())
-            .map(|(id_str, (op, ts, phase))| {
+            .filter(|(_, e)| !e.phase.is_terminal())
+            .map(|(id_str, e)| {
                 let id = Uuid::parse_str(&id_str).unwrap_or_else(|_| Uuid::new_v4());
-                UnfinishedIntent { id, op, started_at_ms: ts, last_phase: phase }
+                UnfinishedIntent {
+                    id,
+                    op: e.op,
+                    started_at_ms: e.started_at_ms,
+                    last_phase: e.phase,
+                    args: e.args,
+                    last_progress: e.last_progress,
+                }
             })
             .collect()
     }
@@ -430,6 +460,12 @@ pub struct UnfinishedIntent {
     pub op: IntentOp,
     pub started_at_ms: u64,
     pub last_phase: IntentPhase,
+    /// Args from the opening `running` record. Used by consumers to filter by
+    /// owner fields (e.g., `replica_id`) and implement single-resumer policy.
+    pub args: Map<String, JsonValue>,
+    /// Progress map from the most recent checkpoint record, if any. `None`
+    /// means the intent started but never reached a checkpoint.
+    pub last_progress: Option<Map<String, JsonValue>>,
 }
 
 // ---------------------------------------------------------------------------
