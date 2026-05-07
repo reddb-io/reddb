@@ -190,7 +190,10 @@ emit_violation() {
 #
 # Tracing's own field syntax (`user = %name`, `?value`) does not match
 # this rule — only `format!`/`write!` calls do. A constant-string log
-# (`info!("hello")`) does not match either.
+# (`info!("hello")`) does not match either. Both positional
+# (`tracing::warn!("x {}", format!(...))`) and keyed
+# (`tracing::error!(msg = format!(...))`) splices are caught — see
+# `tests/lint-fixtures/violations.rs.fixture` and PRD #201.
 # ----------------------------------------------------------------------
 scan_tracing_format() {
   local file="$1"

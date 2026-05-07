@@ -16,7 +16,7 @@
 
 use http::HeaderValue;
 
-fn category_tracing_format(user: &str) {
+fn category_tracing_format(user: &str, err: &str, addr: &str) {
     // [tracing+format] format!() inside a tracing log macro
     tracing::info!("login from {}", format!("user={user}"));
 
@@ -26,6 +26,19 @@ fn category_tracing_format(user: &str) {
         "rejected request: {}",
         format!("reason={user}")
     );
+
+    // [tracing+format] format!() spliced as a keyed argument value (PRD #201)
+    tracing::error!(message = format!("err: {err}"));
+
+    // [tracing+format] format!() in a positional arg of tracing::warn! (PRD #201)
+    tracing::warn!("connection from {}", format!("{addr:?}"));
+
+    // The next two MUST NOT trigger the lint (tracing field syntax is the
+    // sanctioned shape). They live here so CI exercises the negative path.
+    //   tracing::warn!(addr = ?addr, "connection accepted");
+    //   tracing::error!(?err, "operation failed");
+    tracing::warn!(addr = ?addr, "connection accepted");
+    tracing::error!(?err, "operation failed");
 }
 
 fn category_header_format(resp: ResponseBuilder, user: &str) {
