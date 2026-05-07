@@ -102,6 +102,12 @@ impl RedDBServer {
             ("POST", "/admin/backup") => self.handle_admin_backup(&query),
             // PLAN.md Phase 4.3 — dynamic read-only toggle.
             ("POST", "/admin/readonly") => self.handle_admin_readonly(body),
+            // Issue #148 — Blob Cache admin maintenance endpoints
+            // (closes sweeper.rs flag #4 + the operator UX gap from #148).
+            ("POST", "/admin/blob_cache/sweep") => self.handle_admin_blob_cache_sweep(body),
+            ("POST", "/admin/blob_cache/flush_namespace") => {
+                self.handle_admin_blob_cache_flush_namespace(body)
+            }
             // PLAN.md Phase 11.6 — manual replica → primary promotion.
             ("POST", "/admin/failover/promote") => self.handle_admin_failover_promote(body),
             // PLAN.md Phase 5.1 / 5.4 — observability endpoints.

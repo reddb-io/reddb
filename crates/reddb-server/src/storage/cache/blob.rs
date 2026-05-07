@@ -2126,6 +2126,17 @@ impl BlobCache {
         Self::new(BlobCacheConfig::default())
     }
 
+    /// Path to the L2 metadata B+ tree directory, when L2 is enabled.
+    ///
+    /// Used by the backup orchestrator (`include_blob_cache=true`) so it
+    /// can locate the on-disk L2 tree for tarball / per-file upload, and
+    /// by the runbook procedures in
+    /// `docs/operations/blob-cache-backup-restore.md` §2 / §3 to confirm
+    /// where on disk the cache lives.
+    pub fn l2_path(&self) -> Option<&std::path::Path> {
+        self.config.l2_path.as_deref()
+    }
+
     pub fn put(
         &self,
         namespace: impl Into<String>,

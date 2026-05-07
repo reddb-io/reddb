@@ -1,29 +1,31 @@
 # Blob Cache backup and restore — operator runbook
 
-Pre-admin-handler playbook for managing **L2 Blob Cache** state across
-backup, restore, and emergency invalidation. Pairs with:
+Operator playbook for managing **L2 Blob Cache** state across backup,
+restore, and emergency invalidation. Pairs with:
 
 - [ADR 0006 — tiered blob cache](../adr/0006-tiered-blob-cache.md) — L1/L2
   layout, membership synopsis, and recovery contract.
 - [ADR 0009 — performance gate scope](../adr/0009-performance-gate-scope.md) —
-  scope rules; cache backup is opt-in (deferred from #148).
+  scope rules; cache backup is opt-in.
 - [`crates/reddb-server/src/storage/cache/sweeper.rs`](../../crates/reddb-server/src/storage/cache/sweeper.rs)
-  — sweeper module landed by #148. The HTTP/CLI seams that will eventually
-  drive it are still flagged in that file.
+  — sweeper module landed by #148, now driven by the live admin endpoints
+  documented in §4.
 - [`docs/operations/blob-cache-dashboards.md`](blob-cache-dashboards.md) —
   in-flight via Lane #186; dashboards for the metrics this runbook references.
 - [`docs/guides/cache-comparison.md`](../guides/cache-comparison.md) — when
   to reach for the Blob Cache vs. result cache vs. external Redis.
 
-Several ergonomic seams (admin HTTP handler, `red admin blob-cache` CLI
-subcommand, `REDDB_CACHE_BLOB_CLEAR_ON_START` env var) are not yet shipped.
-Each gap is flagged inline so the runbook still tells you what to do today.
+The `include_blob_cache=true` backup flag and the two
+`POST /admin/blob_cache/*` endpoints are now live. The remaining
+ergonomic seams (`red admin blob-cache` CLI subcommand,
+`REDDB_CACHE_BLOB_CLEAR_ON_START` env var) are still pending; each gap
+is flagged inline so the runbook tells you what to do today.
 
 ---
 
-## 1. Current state of cache in backup (today)
+## 1. Cache in backup — default and opt-in
 
-**The Blob Cache is not part of a standard backup.** When you run
+**By default, the Blob Cache is not included in a backup.** When you run
 
 ```bash
 curl -X POST http://<host>:<port>/admin/backup \
@@ -35,24 +37,48 @@ manifest catalog (per [`docs/spec/manifest-format.md`](../spec/manifest-format.m
 **It does not include L1 entries, the L2 metadata B+ tree, or the L2 blob
 chains.**
 
-This is intentional. Per ADR 0006, the cache is by definition a *derived*
+This default is intentional. Per ADR 0006, the cache is a *derived*
 acceleration structure — its contents can always be rebuilt from the
 authoritative L1 (the unified store) plus cold reads. Skipping it from
 the standard catalog keeps backup cost bounded and stable as cache size
 grows independently of the working set.
 
-**Consequences for restore:** the cache starts empty, the membership
-synopsis is empty, and the L2 metadata B+ tree opens against whatever
-`cache.blob.l2_path` points at on the restored host (in a classic restore,
-nothing). Latency on the first wave of post-restore reads will reflect
-cold-path performance: every `get` misses both L1 and L2, falls through
-to the primary store, and warms the cache as it goes.
+**Consequences for restore (default posture):** the cache starts empty,
+the membership synopsis is empty, and the L2 metadata B+ tree opens
+against whatever `cache.blob.l2_path` points at on the restored host (in
+a classic restore, nothing). Latency on the first wave of post-restore
+reads will reflect cold-path performance: every `get` misses both L1 and
+L2, falls through to the primary store, and warms the cache as it goes.
 
-**The opt-in is flagged but not yet wired.** Sweeper module flag #3 calls
-out the planned `include_blob_cache: bool` knob on the backup orchestrator
-(`runtime/backup.rs` follow-up). Until that knob lands, **there is no
-supported way to include the cache in a standard backup**. The procedures
-in §2 below are the manual workaround.
+### 1.1 Opt in: `include_blob_cache`
+
+To preserve the warm L2 across a backup-restore cycle, flip the
+config-tree knob:
+
+```bash
+curl -X POST http://<host>:<port>/config \
+  -H "Authorization: Bearer $RED_ADMIN_TOKEN" \
+  -d '{"red.config.backup.include_blob_cache": true}'
+```
+
+With the knob set, every `POST /admin/backup` (or the scheduled
+backup-loop tick) additionally uploads the L2 pager file and its
+control sidecar to the configured remote backend, under the
+`{snapshot_prefix}blob_cache/` prefix (override via
+`red.config.backup.blob_cache_prefix`). On restore, place those two
+files back at `cache.blob.l2_path` (and `<l2_path>.blob-cache.ctl`)
+**before** server start; the cold-start synopsis rebuild in
+`BlobCache::new` (see `cache/blob.rs::rebuild_l2_synopsis`) re-indexes
+the metadata automatically.
+
+The L2 archive step is best-effort: per-file upload failures are logged
+but never abort the snapshot+WAL backup, because the cache is derived
+state. Watch `reddb_backup_failures_total` if you need an alert on
+silent regressions.
+
+The §2 manual procedure is still useful when the operator wants a
+point-in-time L2 capture decoupled from the standard backup cadence
+(host migrations, big-bang region cutovers).
 
 ---
 
@@ -183,49 +209,54 @@ into the per-namespace synopsis set.
 
 ---
 
-## 4. Sweeper invocation (when admin handler lands)
+## 4. Sweeper invocation (live admin endpoints)
 
-#148 deferred the HTTP handlers to a follow-up batch. **Today these
-endpoints do not exist** — the sweeper module is bounded scaffolding only.
-This section documents the contract so dashboards, smoke tests, and
-operator muscle memory are ready when the handlers ship.
+Both endpoints are now live. They are gated by `RED_ADMIN_TOKEN` (when
+set) like every other `/admin/*` route.
 
-### 4.1 Planned: `POST /admin/blob_cache/sweep`
+### 4.1 `POST /admin/blob_cache/sweep`
 
-```json
-{
-  "limit": { "either": { "entries": 10000, "millis": 200 } }
-}
+```bash
+curl -X POST http://<host>:<port>/admin/blob_cache/sweep \
+  -H "Authorization: Bearer $RED_ADMIN_TOKEN" \
+  -d '{"limit_entries": 10000, "limit_millis": 200}'
 ```
 
-Response shape (matching `SweepReport` in `sweeper.rs`):
+Both fields are optional:
+
+- Both omitted → unbounded sweep.
+- One field set → `SweepLimit::Entries(N)` or `SweepLimit::Millis(N)`.
+- Both set → first-bound-wins composite (`SweepLimit::Either`).
+
+Response shape (matching `SweepReport` in `sweeper.rs`, plus `ok`):
 
 ```json
 {
+  "ok": true,
   "entries_scanned": 0,
   "entries_evicted": 0,
   "bytes_reclaimed": 0,
   "elapsed_ms": 0,
-  "truncated_due_to_limit": false,
-  "by_namespace": []
+  "truncated_due_to_limit": false
 }
 ```
 
-`limit` accepts the three `SweepLimit` variants: `{"entries": N}`,
-`{"millis": N}`, or `{"either": {"entries": N, "millis": M}}`. When
-`truncated_due_to_limit` is `true`, schedule another sweep; the report is
-the operator's signal that there is more work waiting.
+When `truncated_due_to_limit` is `true`, schedule another sweep — the
+report signals that there is more work waiting.
 
-### 4.2 Planned: `POST /admin/blob_cache/flush_namespace`
+### 4.2 `POST /admin/blob_cache/flush_namespace`
 
-```json
-{ "namespace": "tenant-42:results" }
+```bash
+curl -X POST http://<host>:<port>/admin/blob_cache/flush_namespace \
+  -H "Authorization: Bearer $RED_ADMIN_TOKEN" \
+  -d '{"namespace": "tenant-42:results"}'
 ```
 
-Returns `NamespaceFlushReport`:
+Returns `NamespaceFlushReport` (plus `ok`):
 
 ```json
 {
+  "ok": true,
   "namespace": "tenant-42:results",
   "generation_before": 7,
   "generation_after": 8,
@@ -233,49 +264,55 @@ Returns `NamespaceFlushReport`:
 }
 ```
 
-Foreground-fast contract: `<100 µs` typical. If `elapsed_micros` regresses
-into milliseconds, page on-call — generation bump should never block.
+Foreground-fast contract: `<100 µs` typical. If `elapsed_micros`
+regresses into milliseconds, page on-call — generation bump should
+never block.
 
-### 4.3 Status today: UNAVAILABLE
+`namespace` is required, must be non-empty, and must contain no
+NUL/CR/LF bytes. The handler rejects adversarial inputs with `400` and
+a structured error message before they reach the cache or the audit
+log.
 
-Both endpoints are flagged as #148 follow-up (see flag #4 at the top of
-`sweeper.rs`). **Workaround until they ship:** restart the server. A
-restart drops L1 entirely (it is process-local) and re-opens L2 from disk.
-A `sweep_on_startup` runtime knob is also flagged (sweeper.rs flag #5)
-but not wired. Until it is, restart-driven sweep is the only handle
-operators have.
+### 4.3 Background sweeper
+
+A `sweep_on_startup` runtime knob is still flagged (sweeper.rs flag #5)
+but not wired. Until it lands, scheduled sweeps are operator-driven via
+§4.1 (e.g., a cron that POSTs every minute with a small per-call
+budget).
 
 ---
 
 ## 5. Namespace flush emergency procedure
 
-This is the procedure for "we just realised tenant X's cache contains
-data they should never have seen — purge it now." With the admin handler
-unavailable the options narrow.
+For "we just realised tenant X's cache contains data they should never
+have seen — purge it now."
 
-### 5.1 Direct call (requires custom CLI tool — NOT YET SHIPPED)
+### 5.1 Fast path: admin endpoint
 
-The fast path is `BlobCache::invalidate_namespace`, which bumps the
-generation counter under a brief write-lock and returns immediately. There
-is no in-tree binary that calls this method directly today.
-
-**Spec for the planned tool** (proposed; not yet implemented):
-
-```
-red admin blob-cache flush-namespace <namespace> \
-  [--bind <host>:<port>] \
-  [--token "$RED_ADMIN_TOKEN"]
+```bash
+curl -X POST http://<host>:<port>/admin/blob_cache/flush_namespace \
+  -H "Authorization: Bearer $RED_ADMIN_TOKEN" \
+  -d '{"namespace": "tenant-42:results"}'
 ```
 
-Output: the same `NamespaceFlushReport` JSON shown in §4.2. Implementation
-should call the admin HTTP endpoint when available and fall back to a
-direct in-process invocation for the embedded `red` deployment shape.
-Tracking of this CLI subcommand is folded into the #148 follow-up batch.
+This bumps the per-namespace generation counter under a brief
+write-lock; subsequent reads against the namespace miss until they
+re-warm from the primary store. Foreground-fast (`<100 µs` typical) —
+no service-impact window. See §4.2 for the full request/response
+contract.
 
-### 5.2 Fallback today: server restart with cleared cache
+### 5.2 CLI wrapper (NOT YET SHIPPED)
 
-Until the CLI tool ships, the only operator-driven namespace flush is a
-**server restart that re-opens L2 from a freshly-cleared directory**:
+A `red admin blob-cache flush-namespace <namespace>` CLI subcommand is
+proposed but not yet implemented. Until it lands, use the `curl`
+invocation in §5.1 from operator runbooks and incident scripts.
+
+### 5.3 Last resort: server restart with cleared cache
+
+For the rare case where the operator does **not** trust the
+generation-bump path (e.g., suspected corruption in the in-memory
+generation map), the heavy-handed fallback is a restart that re-opens
+L2 from a freshly-cleared directory:
 
 ```bash
 systemctl stop reddb
@@ -283,16 +320,12 @@ rm -rf "$L2_PATH"           # destroys ALL namespaces, not just one
 systemctl start reddb
 ```
 
-This is heavy-handed: it flushes every namespace and forces a cold L2
-re-warm against the primary. It is the only correctness-preserving option
-when the targeted namespace contains data that **must not** be served
-again under any circumstance.
+This flushes every namespace and forces a cold L2 re-warm against the
+primary. Use only when the §5.1 path is unavailable or distrusted.
 
 A planned environment variable, `REDDB_CACHE_BLOB_CLEAR_ON_START=1`,
-would make the restart-clear flow a one-line change without `rm -rf`.
-**This env var is not yet implemented**; it is filed alongside the #148
-follow-up so the full ergonomic story (`include_blob_cache`, admin
-handler, CLI tool, clear-on-start env) lands as a coherent batch.
+would make the restart-clear flow a one-line change without `rm -rf`;
+that knob remains unimplemented and is tracked separately.
 
 ---
 
@@ -306,15 +339,13 @@ L2 corruption scenarios and how they recover.
 `put` flushed blob bytes to L2 pages but before the metadata B+ tree
 commit. The pages are allocated but no record points at them.
 
-**Recovery:** automatic on first sweep call.
+**Recovery:** call the admin sweep endpoint (§4.1).
 `BlobCacheSweeper::reclaim_orphans` walks the L2 free-list, cross-checks
 each chain root against the metadata, and reclaims any chain with no
-metadata reference. Bounded by `SweepLimit`; if the report's
-`truncated_due_to_limit` is `true`, schedule another invocation until it
-is `false`. **Pre-admin-handler:** orphans accumulate silently until a
-sweep runs. Today, the only thing that triggers a sweep is a future
-runtime scheduler (sweeper.rs flag #5). Until then orphans sit on disk;
-they are not data-loss, only wasted L2 capacity.
+metadata reference. Bounded by the `limit_entries` / `limit_millis`
+fields; if the response's `truncated_due_to_limit` is `true`, POST
+again until it is `false`. The orphans-reclaim path is wired into
+`POST /admin/blob_cache/sweep` alongside the L1-expiry sweep.
 
 ### 6.2 L2 directory deletion
 
@@ -350,20 +381,21 @@ supposed to do — wait for it to warm.
 
 ---
 
-## 7. Items flagged as not-yet-shipped
+## 7. Capability status
 
-Tracked under #148 follow-up unless noted otherwise:
+Live (no workaround needed):
+
+| Capability | Where |
+|---|---|
+| `red.config.backup.include_blob_cache` config knob | §1.1, wired in `runtime/impl_core.rs::trigger_backup` |
+| `POST /admin/blob_cache/sweep` HTTP handler | §4.1 |
+| `POST /admin/blob_cache/flush_namespace` HTTP handler | §4.2, §5.1 |
+
+Still pending:
 
 | Capability | Status | Workaround in this runbook |
 |---|---|---|
-| `include_blob_cache: bool` on `runtime/backup.rs` | **Not wired** | Manual L2 dump (§2). |
-| `POST /admin/blob_cache/sweep` HTTP handler | **Not wired** | Restart server (§4.3). |
-| `POST /admin/blob_cache/flush_namespace` HTTP handler | **Not wired** | `rm -rf l2_path` + restart (§5.2). |
-| `red admin blob-cache flush-namespace` CLI | **Spec only** | Same as above. |
-| `REDDB_CACHE_BLOB_CLEAR_ON_START=1` env var | **Proposed, not implemented** | Manual `rm -rf` before start. |
-| `sweep_on_startup` runtime config | **Flagged in sweeper.rs** | Restart-driven sweep only. |
-| `red doctor verify-l2` subcommand | **Proposed** | Trust-but-verify the dump path manually. |
-
-When the orchestrator-batch lands, this runbook should be updated to
-collapse §4.3 and §5.2 into thin pointers to the new endpoints, and §7
-should shrink accordingly.
+| `red admin blob-cache flush-namespace` CLI | **Spec only** | `curl` invocation (§5.1) |
+| `REDDB_CACHE_BLOB_CLEAR_ON_START=1` env var | **Proposed, not implemented** | Manual `rm -rf` before start (§5.3) |
+| `sweep_on_startup` runtime config | **Flagged in sweeper.rs** | Operator-driven sweep cron (§4.3) |
+| `red doctor verify-l2` subcommand | **Proposed** | Trust-but-verify the dump path manually |

@@ -3025,6 +3025,19 @@ impl RedDBRuntime {
         self.inner.backup_scheduler.status()
     }
 
+    /// Borrow the runtime's result Blob Cache.
+    ///
+    /// Wired for the `/admin/blob_cache/sweep` and
+    /// `/admin/blob_cache/flush_namespace` HTTP handlers (issue #148
+    /// follow-up): both delegate to
+    /// `crate::storage::cache::sweeper::BlobCacheSweeper`, which takes a
+    /// `&BlobCache`. Also used by `trigger_backup` when
+    /// `red.config.backup.include_blob_cache=true` to locate the L2
+    /// directory for archival.
+    pub fn result_blob_cache(&self) -> &crate::storage::cache::BlobCache {
+        &self.inner.result_blob_cache
+    }
+
     /// PLAN.md Phase 11.4 — owned snapshot of every registered
     /// replica's state on this primary. Returns empty vec on
     /// non-primary instances or when no replicas are registered yet.
@@ -3431,6 +3444,53 @@ impl RedDBRuntime {
                     }
                 }
                 _ => {} // Local / RemoteWal / Quorum: no blocking yet
+            }
+
+            // Issue #148 follow-up — opt-in archive of the L2 Blob Cache
+            // directory tree. Default off so a standard backup stays
+            // small; flip via `red.config.backup.include_blob_cache=true`
+            // when warm-cache restore is required (per
+            // docs/operations/blob-cache-backup-restore.md §1).
+            //
+            // The L2 tree is *derived* state (ADR 0006) — its absence
+            // never causes data loss; it only affects post-restore
+            // p99 latency until the cache re-warms. We therefore log
+            // (not fail) on per-file upload errors so a partial L2
+            // upload never aborts a healthy snapshot+WAL backup.
+            if self.config_bool("red.config.backup.include_blob_cache", false) {
+                let blob_cache_prefix = self.config_string(
+                    "red.config.backup.blob_cache_prefix",
+                    &format!("{snapshot_prefix}blob_cache/"),
+                );
+                if let Some(l2_path) = self.inner.result_blob_cache.l2_path() {
+                    match crate::storage::cache::archive_blob_cache_l2(
+                        backend.as_ref(),
+                        l2_path,
+                        &blob_cache_prefix,
+                    ) {
+                        Ok(count) => {
+                            tracing::info!(
+                                target: "reddb::backup",
+                                files_uploaded = count,
+                                blob_cache_prefix = %blob_cache_prefix,
+                                "include_blob_cache: archived L2 directory"
+                            );
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                target: "reddb::backup",
+                                error = %err,
+                                blob_cache_prefix = %blob_cache_prefix,
+                                "include_blob_cache: L2 archive failed; backup proceeding (cache is derived state)"
+                            );
+                        }
+                    }
+                } else {
+                    tracing::debug!(
+                        target: "reddb::backup",
+                        "include_blob_cache=true but no L2 path configured; nothing to archive"
+                    );
+                }
             }
 
             uploaded = true;

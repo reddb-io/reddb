@@ -291,6 +291,218 @@ impl RedDBServer {
         }
     }
 
+    /// `POST /admin/blob_cache/sweep` — bounded sweep of expired L1
+    /// entries on the runtime result Blob Cache (issue #148 follow-up,
+    /// closing the deferred half wired by sweeper.rs flag #4).
+    ///
+    /// Body (JSON, all fields optional):
+    ///
+    /// ```json
+    /// { "limit_entries": 1000, "limit_millis": 100 }
+    /// ```
+    ///
+    /// - Both null / missing → unbounded sweep (`SweepLimit::Either`
+    ///   with `usize::MAX` / `u32::MAX` so the sweeper still has the
+    ///   single composite-bound code path).
+    /// - One field set → `SweepLimit::Entries` or `SweepLimit::Millis`.
+    /// - Both set → `SweepLimit::Either { entries, millis }` (first
+    ///   bound to fire wins).
+    ///
+    /// Returns the [`SweepReport`](crate::storage::cache::sweeper::SweepReport)
+    /// fields plus `ok:true`. Caller-influenced strings (none today —
+    /// the report holds only numeric fields) would round-trip through
+    /// `SerializedJsonField::tainted` per ADR 0010 §3.
+    pub(crate) fn handle_admin_blob_cache_sweep(&self, body: Vec<u8>) -> HttpResponse {
+        use crate::storage::cache::sweeper::{BlobCacheSweeper, SweepLimit};
+
+        let (limit_entries, limit_millis) = if body.is_empty() {
+            (None, None)
+        } else {
+            match crate::serde_json::from_slice::<crate::serde_json::Value>(&body) {
+                Ok(v) => {
+                    let entries = v.get("limit_entries").and_then(|n| n.as_u64()).map(|n| {
+                        usize::try_from(n).unwrap_or(usize::MAX)
+                    });
+                    let millis = v.get("limit_millis").and_then(|n| n.as_u64()).map(|n| {
+                        u32::try_from(n).unwrap_or(u32::MAX)
+                    });
+                    (entries, millis)
+                }
+                Err(err) => return json_error(400, format!("invalid JSON body: {err}")),
+            }
+        };
+
+        let limit = match (limit_entries, limit_millis) {
+            (None, None) => SweepLimit::Either {
+                entries: usize::MAX,
+                millis: u32::MAX,
+            },
+            (Some(e), None) => SweepLimit::Entries(e),
+            (None, Some(m)) => SweepLimit::Millis(m),
+            (Some(e), Some(m)) => SweepLimit::Either {
+                entries: e,
+                millis: m,
+            },
+        };
+
+        let report = BlobCacheSweeper::sweep_expired(self.runtime.result_blob_cache(), limit);
+
+        let mut object = Map::new();
+        object.insert("ok".to_string(), JsonValue::Bool(true));
+        object.insert(
+            "entries_scanned".to_string(),
+            JsonValue::Number(report.entries_scanned as f64),
+        );
+        object.insert(
+            "entries_evicted".to_string(),
+            JsonValue::Number(report.entries_evicted as f64),
+        );
+        object.insert(
+            "bytes_reclaimed".to_string(),
+            JsonValue::Number(report.bytes_reclaimed as f64),
+        );
+        object.insert(
+            "elapsed_ms".to_string(),
+            JsonValue::Number(report.elapsed_ms as f64),
+        );
+        object.insert(
+            "truncated_due_to_limit".to_string(),
+            JsonValue::Bool(report.truncated_due_to_limit),
+        );
+
+        // Audit. Operator-driven sweep is rare; logging it gives the
+        // log shipper a primary-key on which to graph cache-sweep cadence.
+        let mut details = Map::new();
+        details.insert(
+            "entries_evicted".to_string(),
+            JsonValue::Number(report.entries_evicted as f64),
+        );
+        details.insert(
+            "bytes_reclaimed".to_string(),
+            JsonValue::Number(report.bytes_reclaimed as f64),
+        );
+        details.insert(
+            "elapsed_ms".to_string(),
+            JsonValue::Number(report.elapsed_ms as f64),
+        );
+        self.runtime.audit_log().record(
+            "admin/blob_cache/sweep",
+            "operator",
+            "instance",
+            "ok",
+            JsonValue::Object(details),
+        );
+
+        json_response(200, JsonValue::Object(object))
+    }
+
+    /// `POST /admin/blob_cache/flush_namespace` — foreground-fast
+    /// namespace flush on the runtime result Blob Cache (issue #148
+    /// follow-up, closing sweeper.rs flag #4).
+    ///
+    /// Body (JSON):
+    ///
+    /// ```json
+    /// { "namespace": "tenant-42:results" }
+    /// ```
+    ///
+    /// Validation contract:
+    ///
+    /// - `namespace` is **required**, **non-empty**, and must contain
+    ///   no NUL or CR/LF bytes — the same constraints
+    ///   [`crate::server::header_escape_guard::HeaderEscapeGuard`]
+    ///   enforces on response headers, applied here on the request side
+    ///   so a CRLF-laden namespace cannot smuggle audit-log lines or
+    ///   sneak past the JSON-envelope guard. Reflected back into the
+    ///   response through
+    ///   [`crate::json_field::SerializedJsonField::tainted`] per ADR 0010 §3.
+    ///
+    /// Returns the [`NamespaceFlushReport`](crate::storage::cache::sweeper::NamespaceFlushReport)
+    /// fields plus `ok:true`.
+    pub(crate) fn handle_admin_blob_cache_flush_namespace(&self, body: Vec<u8>) -> HttpResponse {
+        use crate::storage::cache::sweeper::BlobCacheSweeper;
+
+        if body.is_empty() {
+            return json_error(400, "missing JSON body with required `namespace` field");
+        }
+        let parsed: crate::serde_json::Value =
+            match crate::serde_json::from_slice(&body) {
+                Ok(v) => v,
+                Err(err) => return json_error(400, format!("invalid JSON body: {err}")),
+            };
+        let namespace = match parsed.get("namespace").and_then(|v| v.as_str()) {
+            Some(n) => n.to_string(),
+            None => return json_error(400, "field `namespace` is required and must be a string"),
+        };
+        if namespace.is_empty() {
+            return json_error(400, "field `namespace` must not be empty");
+        }
+        // Adversarial-byte rejection. The namespace string is
+        // caller-controlled and may end up in audit logs, dashboards,
+        // and the response envelope. Reject CR/LF/NUL on the request
+        // side rather than relying on every downstream sink to escape.
+        for (idx, byte) in namespace.as_bytes().iter().enumerate() {
+            match *byte {
+                b'\0' => {
+                    return json_error(
+                        400,
+                        format!("field `namespace` contains forbidden NUL byte at index {idx}"),
+                    );
+                }
+                b'\r' | b'\n' => {
+                    return json_error(
+                        400,
+                        format!("field `namespace` contains forbidden CR/LF byte at index {idx}"),
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        let report = BlobCacheSweeper::flush_namespace(self.runtime.result_blob_cache(), &namespace);
+
+        let mut object = Map::new();
+        object.insert("ok".to_string(), JsonValue::Bool(true));
+        // Reflect the caller-supplied namespace back through the
+        // JSON-boundary guard so any high-bit / Unicode bytes round-trip
+        // through canonical RFC-8259 escaping.
+        object.insert(
+            "namespace".to_string(),
+            crate::json_field::SerializedJsonField::tainted(&report.namespace),
+        );
+        object.insert(
+            "generation_before".to_string(),
+            JsonValue::Number(report.generation_before as f64),
+        );
+        object.insert(
+            "generation_after".to_string(),
+            JsonValue::Number(report.generation_after as f64),
+        );
+        object.insert(
+            "elapsed_micros".to_string(),
+            JsonValue::Number(report.elapsed_micros as f64),
+        );
+
+        let mut details = Map::new();
+        details.insert(
+            "namespace".to_string(),
+            crate::json_field::SerializedJsonField::tainted(&report.namespace),
+        );
+        details.insert(
+            "elapsed_micros".to_string(),
+            JsonValue::Number(report.elapsed_micros as f64),
+        );
+        self.runtime.audit_log().record(
+            "admin/blob_cache/flush_namespace",
+            "operator",
+            "instance",
+            "ok",
+            JsonValue::Object(details),
+        );
+
+        json_response(200, JsonValue::Object(object))
+    }
+
     /// `POST /admin/readonly` — flip the public-mutation gate
     /// (PLAN.md Phase 4.3).
     ///
@@ -1995,6 +2207,228 @@ mod tests {
             "reddb_cache_blob_version_mismatch_total{namespace=\"runtime.result_cache\"}",
         ] {
             assert!(body.contains(needle), "missing metric line for {needle}");
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Issue #148 — Blob Cache admin endpoints (smoke + adversarial input)
+    // -------------------------------------------------------------------
+
+    fn test_server() -> RedDBServer {
+        let runtime =
+            crate::runtime::RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory())
+                .expect("runtime");
+        RedDBServer::new(runtime)
+    }
+
+    fn parse_body(resp: &HttpResponse) -> JsonValue {
+        let s = std::str::from_utf8(&resp.body).expect("utf8 body");
+        crate::serde_json::from_str::<JsonValue>(s).expect("JSON body")
+    }
+
+    #[test]
+    fn admin_blob_cache_sweep_happy_path_returns_well_formed_report() {
+        let server = test_server();
+        let body = br#"{"limit_entries": 100, "limit_millis": 50}"#.to_vec();
+        let resp = server.handle_admin_blob_cache_sweep(body);
+        assert_eq!(resp.status, 200);
+        let parsed = parse_body(&resp);
+        assert_eq!(parsed.get("ok").and_then(|v| v.as_bool()), Some(true));
+        // Sweeper today is bounded scaffolding; report must still be
+        // well-formed with all expected fields present.
+        for field in [
+            "entries_scanned",
+            "entries_evicted",
+            "bytes_reclaimed",
+            "elapsed_ms",
+            "truncated_due_to_limit",
+        ] {
+            assert!(
+                parsed.get(field).is_some(),
+                "missing field {field} in response: {parsed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_blob_cache_sweep_empty_body_uses_unbounded_default() {
+        let server = test_server();
+        let resp = server.handle_admin_blob_cache_sweep(Vec::new());
+        assert_eq!(resp.status, 200);
+        let parsed = parse_body(&resp);
+        assert_eq!(parsed.get("ok").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn admin_blob_cache_sweep_invalid_json_returns_400() {
+        let server = test_server();
+        let resp = server.handle_admin_blob_cache_sweep(b"not json".to_vec());
+        assert_eq!(resp.status, 400);
+    }
+
+    #[test]
+    fn admin_blob_cache_flush_namespace_happy_path() {
+        let server = test_server();
+        let body = br#"{"namespace": "tenant-42:results"}"#.to_vec();
+        let resp = server.handle_admin_blob_cache_flush_namespace(body);
+        assert_eq!(resp.status, 200);
+        let parsed = parse_body(&resp);
+        assert_eq!(parsed.get("ok").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            parsed.get("namespace").and_then(|v| v.as_str()),
+            Some("tenant-42:results")
+        );
+        assert!(parsed.get("elapsed_micros").is_some());
+        assert!(parsed.get("generation_before").is_some());
+        assert!(parsed.get("generation_after").is_some());
+    }
+
+    #[test]
+    fn admin_blob_cache_flush_namespace_missing_body_returns_400() {
+        let server = test_server();
+        let resp = server.handle_admin_blob_cache_flush_namespace(Vec::new());
+        assert_eq!(resp.status, 400);
+        let parsed = parse_body(&resp);
+        assert!(parsed
+            .get("error")
+            .and_then(|v| v.as_str())
+            .map(|s| s.contains("namespace"))
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn admin_blob_cache_flush_namespace_missing_field_returns_400() {
+        let server = test_server();
+        let body = br#"{"other": "x"}"#.to_vec();
+        let resp = server.handle_admin_blob_cache_flush_namespace(body);
+        assert_eq!(resp.status, 400);
+    }
+
+    #[test]
+    fn admin_blob_cache_flush_namespace_empty_string_returns_400() {
+        let server = test_server();
+        let body = br#"{"namespace": ""}"#.to_vec();
+        let resp = server.handle_admin_blob_cache_flush_namespace(body);
+        assert_eq!(resp.status, 400);
+    }
+
+    #[test]
+    fn admin_blob_cache_flush_namespace_rejects_crlf_smuggling_attempt() {
+        let server = test_server();
+        // Classic CRLF smuggling shape — the namespace tries to splice
+        // a fake audit line into structured logs.
+        let body = br#"{"namespace": "real-ns\r\nfake-audit: spliced"}"#.to_vec();
+        let resp = server.handle_admin_blob_cache_flush_namespace(body);
+        assert_eq!(resp.status, 400);
+        let parsed = parse_body(&resp);
+        let msg = parsed
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(msg.contains("CR/LF"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn admin_blob_cache_flush_namespace_rejects_nul_byte() {
+        let server = test_server();
+        // JSON ` ` decodes to a literal NUL byte after parse;
+        // the guard must reject it (NUL truncates downstream sinks
+        // like proxies and log shippers). Build the body with a
+        // string literal so the source file contains no raw NUL.
+        let body = b"{\"namespace\": \"with-nul-\\u0000-here\"}".to_vec();
+        let resp = server.handle_admin_blob_cache_flush_namespace(body);
+        assert_eq!(resp.status, 400);
+        let parsed = parse_body(&resp);
+        let msg = parsed
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(msg.contains("NUL"), "unexpected error: {msg}");
+    }
+
+
+    #[test]
+    fn admin_blob_cache_flush_namespace_response_round_trips_unicode() {
+        let server = test_server();
+        let body = r#"{"namespace": "日本語-ns-🦀"}"#.as_bytes().to_vec();
+        let resp = server.handle_admin_blob_cache_flush_namespace(body);
+        assert_eq!(resp.status, 200);
+        let parsed = parse_body(&resp);
+        assert_eq!(
+            parsed.get("namespace").and_then(|v| v.as_str()),
+            Some("日本語-ns-🦀")
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Routing-layer auth gate: when RED_ADMIN_TOKEN is set the routes
+    // must reject unauthenticated requests with 401. We exercise the
+    // route() entrypoint, not the handler directly, so the gate (which
+    // lives in is_authorized()) is on the path.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn admin_blob_cache_routes_reject_unauth_when_admin_token_set() {
+        // Serialize on a per-process mutex because RED_ADMIN_TOKEN is a
+        // process-wide env var; running other admin-auth tests in
+        // parallel would race the unset/set sequence.
+        use std::sync::Mutex;
+        static GUARD: Mutex<()> = Mutex::new(());
+        let _g = GUARD.lock().unwrap_or_else(|e| e.into_inner());
+
+        let prev = std::env::var("RED_ADMIN_TOKEN").ok();
+        // SAFETY: env mutation is unsafe in 2024; we serialize via
+        // GUARD above and restore the previous value at the end.
+        unsafe {
+            std::env::set_var("RED_ADMIN_TOKEN", "test-token-148");
+        }
+
+        let server = test_server();
+
+        // Sweep without auth → 401.
+        let req = crate::server::transport::HttpRequest {
+            method: "POST".to_string(),
+            path: "/admin/blob_cache/sweep".to_string(),
+            query: std::collections::BTreeMap::new(),
+            headers: std::collections::BTreeMap::new(),
+            body: br#"{"limit_entries":1}"#.to_vec(),
+        };
+        let resp = server.route(req);
+        assert_eq!(resp.status, 401, "sweep without admin token must be 401");
+
+        // Flush namespace without auth → 401.
+        let req = crate::server::transport::HttpRequest {
+            method: "POST".to_string(),
+            path: "/admin/blob_cache/flush_namespace".to_string(),
+            query: std::collections::BTreeMap::new(),
+            headers: std::collections::BTreeMap::new(),
+            body: br#"{"namespace":"x"}"#.to_vec(),
+        };
+        let resp = server.route(req);
+        assert_eq!(resp.status, 401, "flush without admin token must be 401");
+
+        // With matching bearer → 200.
+        let mut headers = std::collections::BTreeMap::new();
+        headers.insert(
+            "authorization".to_string(),
+            "Bearer test-token-148".to_string(),
+        );
+        let req = crate::server::transport::HttpRequest {
+            method: "POST".to_string(),
+            path: "/admin/blob_cache/flush_namespace".to_string(),
+            query: std::collections::BTreeMap::new(),
+            headers,
+            body: br#"{"namespace":"ok"}"#.to_vec(),
+        };
+        let resp = server.route(req);
+        assert_eq!(resp.status, 200, "flush with admin token must be 200");
+
+        // Restore previous env state.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("RED_ADMIN_TOKEN", v),
+                None => std::env::remove_var("RED_ADMIN_TOKEN"),
+            }
         }
     }
 }
