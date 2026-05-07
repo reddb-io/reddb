@@ -132,6 +132,16 @@ pub enum OperatorEvent {
         lsn: u64,
         error: String,
     },
+    /// An admin intent that was started but never reached a terminal phase
+    /// (completed or aborted). Emitted by [`super::admin_intent_log::AdminIntentLog::scan_and_report`]
+    /// at startup so operators can investigate interrupted operations.
+    DanglingAdminIntent {
+        id: crate::crypto::uuid::Uuid,
+        op: crate::telemetry::admin_intent_log::IntentOp,
+        /// Unix milliseconds when the intent was started.
+        started_at_ms: u64,
+        last_phase: crate::telemetry::admin_intent_log::IntentPhase,
+    },
 }
 
 impl OperatorEvent {
@@ -298,6 +308,18 @@ impl OperatorEvent {
                     AuditFieldEscaper::field("error", error),
                 ];
                 ("operator/checkpoint_failed", fields, summary)
+            }
+            Self::DanglingAdminIntent { id, op, started_at_ms, last_phase } => {
+                let summary = format!(
+                    "dangling admin intent: id={id} op={op} started_at_ms={started_at_ms} last_phase={last_phase}"
+                );
+                let fields = vec![
+                    AuditFieldEscaper::field("id", id.to_string()),
+                    AuditFieldEscaper::field("op", op.to_string()),
+                    AuditFieldEscaper::field("started_at_ms", started_at_ms),
+                    AuditFieldEscaper::field("last_phase", last_phase.to_string()),
+                ];
+                ("operator/dangling_admin_intent", fields, summary)
             }
         }
     }
