@@ -16,6 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock;
 
+use super::compressor::{Compressed, CompressOpts, L2BlobCompressor};
 use super::promotion_pool::{
     AsyncPromotionPool, PoolOpts, PromotionExecutor, PromotionRequest,
 };
@@ -40,6 +41,25 @@ pub const METRIC_CACHE_BLOB_SYNOPSIS_BYTES: &str = "cache_blob_synopsis_bytes";
 pub const DEFAULT_BLOB_SYNOPSIS_CAPACITY: usize = 10_000;
 pub const DEFAULT_BLOB_SYNOPSIS_FPR: f64 = 0.01;
 
+/// Switch for L2 zstd compression (issue #192, lane 2/5).
+///
+/// `On` (default) routes every L2 spill through [`L2BlobCompressor`]; payloads
+/// that fail the shrinkage gate or hit a precompressed-media content type are
+/// still stored raw, but the L2 entry header carries the v2 framing. `Off`
+/// skips the compress call entirely (CPU-saving), still emitting v2 framing
+/// with `tag=0` so the on-disk format stays uniform across modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum L2Compression {
+    Off,
+    On,
+}
+
+impl Default for L2Compression {
+    fn default() -> Self {
+        Self::On
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlobCacheConfig {
     l1_bytes_max: usize,
@@ -49,6 +69,7 @@ pub struct BlobCacheConfig {
     shard_count: usize,
     content_metadata_keys_max: usize,
     content_metadata_bytes_max: usize,
+    l2_compression: L2Compression,
 }
 
 impl Default for BlobCacheConfig {
@@ -61,6 +82,7 @@ impl Default for BlobCacheConfig {
             shard_count: DEFAULT_BLOB_SHARDS,
             content_metadata_keys_max: DEFAULT_CONTENT_METADATA_KEYS_MAX,
             content_metadata_bytes_max: DEFAULT_CONTENT_METADATA_BYTES_MAX,
+            l2_compression: L2Compression::default(),
         }
     }
 }
@@ -105,6 +127,11 @@ impl BlobCacheConfig {
         self
     }
 
+    pub fn with_l2_compression(mut self, compression: L2Compression) -> Self {
+        self.l2_compression = compression;
+        self
+    }
+
     pub fn l1_bytes_max(&self) -> usize {
         self.l1_bytes_max
     }
@@ -131,6 +158,10 @@ impl BlobCacheConfig {
 
     pub fn content_metadata_bytes_max(&self) -> usize {
         self.content_metadata_bytes_max
+    }
+
+    pub fn l2_compression(&self) -> L2Compression {
+        self.l2_compression
     }
 }
 
@@ -190,6 +221,11 @@ impl BlobCacheConfigBuilder {
 
     pub fn content_metadata_bytes_max(mut self, value: usize) -> Self {
         self.inner.content_metadata_bytes_max = value;
+        self
+    }
+
+    pub fn l2_compression(mut self, value: L2Compression) -> Self {
+        self.inner.l2_compression = value;
         self
     }
 
@@ -505,6 +541,17 @@ pub struct BlobCacheStats {
     promotion_dropped: u64,
     promotion_completed: u64,
     promotion_queue_depth: usize,
+    /// Numerator of the L2 compression ratio: sum of `original_len` over
+    /// entries that actually compressed (#192). Stored as the ratio's
+    /// component so [`BlobCacheStats`] stays `Eq` (avoids `f64` fields).
+    l2_compression_original_bytes: u64,
+    /// Denominator of the L2 compression ratio: sum of `stored_len` over
+    /// entries that actually compressed.
+    l2_compression_stored_bytes: u64,
+    /// Counter of L2 entries the compressor returned as `Raw` (any reason).
+    l2_compression_skipped_total: u64,
+    /// Cumulative `(original_len - stored_len)` across compressed entries.
+    l2_bytes_saved_total: u64,
 }
 
 impl BlobCacheStats {
@@ -621,6 +668,34 @@ impl BlobCacheStats {
     /// `0` when async promotion is disabled.
     pub fn promotion_queue_depth(&self) -> usize {
         self.promotion_queue_depth
+    }
+
+    /// Running average of `original_len / stored_len` for L2 entries that
+    /// the compressor actually shrank (#192). Returns `1.0` when no
+    /// compressed entry has been observed yet, regardless of how many
+    /// `Raw` entries have passed through (callers should pair this with
+    /// [`l2_compression_skipped_total`](Self::l2_compression_skipped_total)
+    /// to interpret).
+    pub fn l2_compression_ratio_observed(&self) -> f64 {
+        if self.l2_compression_stored_bytes == 0 {
+            return 1.0;
+        }
+        self.l2_compression_original_bytes as f64
+            / self.l2_compression_stored_bytes as f64
+    }
+
+    /// Number of L2 entries the compressor returned as `Raw` since boot —
+    /// any reason: payload below `min_bytes`, content type already
+    /// compressed, ratio gate fired, or `cache.blob.l2_compression = "off"`.
+    pub fn l2_compression_skipped_total(&self) -> u64 {
+        self.l2_compression_skipped_total
+    }
+
+    /// Cumulative `(original_len - stored_len)` across all L2 entries the
+    /// compressor shrank. Operators read this to size the L2 budget
+    /// multiplier from real workloads.
+    pub fn l2_bytes_saved_total(&self) -> u64 {
+        self.l2_bytes_saved_total
     }
 }
 
@@ -938,6 +1013,21 @@ impl L2Control {
     }
 }
 
+/// On-disk format marker for the bytes the L2 blob-chain holds.
+///
+/// `V1Raw` (= 0) is the legacy format: the chain bytes are the original
+/// payload verbatim. `V2Framed` (= 1) is the post-#192 format: the chain
+/// bytes are the [`Compressed`] disk encoding (1-byte tag, optional 4-byte
+/// `original_len`, then the encoded payload).
+///
+/// New writes always emit `V2Framed`. Reads dispatch on this field so older
+/// `V1Raw` entries on disk still decode correctly until they age out.
+const L2_FORMAT_V1_RAW: u8 = 0;
+const L2_FORMAT_V2_FRAMED: u8 = 1;
+
+const L2_FRAME_TAG_RAW: u8 = 0;
+const L2_FRAME_TAG_ZSTD: u8 = 1;
+
 #[derive(Debug, Clone)]
 struct L2Record {
     namespace: String,
@@ -950,6 +1040,12 @@ struct L2Record {
     page_count: u32,
     byte_len: u64,
     checksum: u32,
+    /// On-disk format tag for the blob chain. `0` means legacy raw bytes
+    /// (entries written before #192); `1` means the post-#192 framed
+    /// `Compressed` encoding. Forward-compat read: the field is parsed
+    /// optionally so records persisted before this byte was reserved
+    /// continue to deserialize as `V1Raw`.
+    format_version: u8,
 }
 
 impl L2Record {
@@ -966,6 +1062,7 @@ impl L2Record {
         out.extend_from_slice(&self.page_count.to_le_bytes());
         out.extend_from_slice(&self.byte_len.to_le_bytes());
         out.extend_from_slice(&self.checksum.to_le_bytes());
+        out.push(self.format_version);
         out
     }
 
@@ -992,6 +1089,14 @@ impl L2Record {
         } else {
             0
         };
+        // Optional `format_version` byte (added in #192 lane 2/5). Records
+        // written before this commit do not include it; they describe the
+        // legacy `V1Raw` chain layout.
+        let format_version = if bytes.len() >= 46 {
+            bytes[45]
+        } else {
+            L2_FORMAT_V1_RAW
+        };
         Ok(Self {
             namespace,
             key,
@@ -1003,12 +1108,65 @@ impl L2Record {
             page_count,
             byte_len,
             checksum,
+            format_version,
         })
     }
 
     fn is_expired_at(&self, now_ms: u64) -> bool {
         self.expires_at_unix_ms
             .is_some_and(|expires_at| now_ms >= expires_at)
+    }
+}
+
+/// Encode a [`Compressed`] payload into the V2 chain layout: `[tag]` for
+/// `Raw`, or `[tag, original_len_le32, encoded_bytes...]` for `Zstd`.
+///
+/// The header overhead (1 byte for `Raw`, 5 bytes for `Zstd`) is intentional
+/// — it lets the read path recover the original payload length without
+/// trusting the [`L2Record::byte_len`] field, and lets `decode_v2_frame`
+/// fail loudly on corruption rather than silently mis-slicing.
+fn encode_v2_frame(c: &Compressed) -> Vec<u8> {
+    match c {
+        Compressed::Raw(bytes) => {
+            let mut out = Vec::with_capacity(1 + bytes.len());
+            out.push(L2_FRAME_TAG_RAW);
+            out.extend_from_slice(bytes);
+            out
+        }
+        Compressed::Zstd { bytes, original_len } => {
+            let mut out = Vec::with_capacity(5 + bytes.len());
+            out.push(L2_FRAME_TAG_ZSTD);
+            out.extend_from_slice(&original_len.to_le_bytes());
+            out.extend_from_slice(bytes);
+            out
+        }
+    }
+}
+
+/// Decode the V2 chain layout produced by [`encode_v2_frame`].
+fn decode_v2_frame(bytes: &[u8]) -> Result<Compressed, CacheError> {
+    if bytes.is_empty() {
+        return Err(CacheError::L2Io(
+            "empty blob-cache L2 v2 frame".into(),
+        ));
+    }
+    match bytes[0] {
+        L2_FRAME_TAG_RAW => Ok(Compressed::Raw(bytes[1..].to_vec())),
+        L2_FRAME_TAG_ZSTD => {
+            if bytes.len() < 5 {
+                return Err(CacheError::L2Io(
+                    "truncated blob-cache L2 zstd frame".into(),
+                ));
+            }
+            let original_len = u32::from_le_bytes(bytes[1..5].try_into().expect("len checked"));
+            Ok(Compressed::Zstd {
+                bytes: bytes[5..].to_vec(),
+                original_len,
+            })
+        }
+        other => Err(CacheError::L2Io(format!(
+            "unknown blob-cache L2 frame tag {other}"
+        ))),
     }
 }
 
@@ -1164,6 +1322,19 @@ struct BlobCacheL2 {
     negative_skips: AtomicU64,
     synopsis_metadata_reads: AtomicU64,
     bytes_max: u64,
+    /// Number of L2 entries written through the `Zstd` variant.
+    compression_compressed_count: AtomicU64,
+    /// Sum of `original_len` over compressed entries (numerator of the
+    /// observed-ratio metric).
+    compression_original_bytes_sum: AtomicU64,
+    /// Sum of `stored_len` over compressed entries (denominator of the
+    /// observed-ratio metric).
+    compression_stored_bytes_sum: AtomicU64,
+    /// Cumulative bytes saved by the compressor across all L2 puts.
+    compression_bytes_saved: AtomicU64,
+    /// Number of L2 entries the compressor returned as `Raw` (any reason:
+    /// too small, precompressed media, ratio gate, or `compression="off"`).
+    compression_skipped_count: AtomicU64,
     #[cfg(test)]
     fault_after_blob_write: std::sync::atomic::AtomicBool,
 }
@@ -1196,6 +1367,11 @@ impl BlobCacheL2 {
             negative_skips: AtomicU64::new(0),
             synopsis_metadata_reads: AtomicU64::new(0),
             bytes_max,
+            compression_compressed_count: AtomicU64::new(0),
+            compression_original_bytes_sum: AtomicU64::new(0),
+            compression_stored_bytes_sum: AtomicU64::new(0),
+            compression_bytes_saved: AtomicU64::new(0),
+            compression_skipped_count: AtomicU64::new(0),
             #[cfg(test)]
             fault_after_blob_write: std::sync::atomic::AtomicBool::new(false),
         })
@@ -1230,13 +1406,25 @@ impl BlobCacheL2 {
             let _ = self.delete_key(key);
             return None;
         }
-        let bytes = self.read_blob_chain(record.root_page).ok()?;
-        if crate::storage::engine::crc32(&bytes) != record.checksum {
+        let chain_bytes = self.read_blob_chain(record.root_page).ok()?;
+        if crate::storage::engine::crc32(&chain_bytes) != record.checksum {
             return None;
         }
+        // Forward-compat: legacy `V1Raw` entries (written before #192 lane
+        // 2/5) keep their original bytes verbatim in the chain. New entries
+        // wrap a `Compressed` payload via `encode_v2_frame`. Dispatch on the
+        // record's format tag rather than guessing from the byte stream.
+        let payload = match record.format_version {
+            L2_FORMAT_V1_RAW => chain_bytes,
+            L2_FORMAT_V2_FRAMED => {
+                let framed = decode_v2_frame(&chain_bytes).ok()?;
+                L2BlobCompressor::decompress(&framed).ok()?
+            }
+            _ => return None,
+        };
         Some(Entry {
-            size: bytes.len(),
-            bytes: Arc::<[u8]>::from(bytes),
+            size: payload.len(),
+            bytes: Arc::<[u8]>::from(payload),
             content_metadata: BTreeMap::new(),
             tags: BTreeSet::new(),
             dependencies: BTreeSet::new(),
@@ -1253,12 +1441,17 @@ impl BlobCacheL2 {
         key: &BlobCacheKey,
         entry: &Entry,
         old_entry_size: u64,
+        compressed: Compressed,
     ) -> Result<(), CacheError> {
-        let new_size = entry.size as u64;
+        let original_len = entry.size as u64;
+        let stored_len = compressed.stored_len() as u64;
+        let was_compressed = compressed.is_compressed();
+        // Account against the *stored* length — this is the disk-capacity
+        // multiplier the L2 budget is meant to amplify (#192).
         let current = self.bytes_in_use.load(Ordering::Relaxed);
         let projected = current
             .saturating_sub(old_entry_size)
-            .saturating_add(new_size);
+            .saturating_add(stored_len);
         if projected > self.bytes_max {
             return Err(CacheError::L2Full {
                 size: projected,
@@ -1266,7 +1459,8 @@ impl BlobCacheL2 {
             });
         }
 
-        let (root_page, page_count, checksum) = self.write_blob_chain(&entry.bytes)?;
+        let framed = encode_v2_frame(&compressed);
+        let (root_page, page_count, checksum) = self.write_blob_chain(&framed)?;
         #[cfg(test)]
         if self
             .fault_after_blob_write
@@ -1284,8 +1478,9 @@ impl BlobCacheL2 {
             version: entry.version,
             root_page,
             page_count,
-            byte_len: new_size,
+            byte_len: stored_len,
             checksum,
+            format_version: L2_FORMAT_V2_FRAMED,
         };
         let encoded_key = encode_l2_key(&key.namespace, &key.key);
         let metadata = self.metadata.write();
@@ -1302,6 +1497,25 @@ impl BlobCacheL2 {
         control.bytes_in_use = projected;
         control.write(&self.control_path)?;
         self.add_synopsis_key(&key.namespace, &key.key);
+        // Compression observability counters (#192). Only `Zstd`-variant
+        // entries contribute to the saved-bytes / ratio aggregates; `Raw`
+        // entries (skip rules: too small, precompressed media, ratio gate)
+        // bump the `skipped` counter so operators can tell *why* the L2
+        // multiplier is not climbing.
+        if was_compressed {
+            self.compression_compressed_count
+                .fetch_add(1, Ordering::Relaxed);
+            self.compression_original_bytes_sum
+                .fetch_add(original_len, Ordering::Relaxed);
+            self.compression_stored_bytes_sum
+                .fetch_add(stored_len, Ordering::Relaxed);
+            // `original >= stored` always holds by the `max_ratio` gate.
+            self.compression_bytes_saved
+                .fetch_add(original_len.saturating_sub(stored_len), Ordering::Relaxed);
+        } else {
+            self.compression_skipped_count
+                .fetch_add(1, Ordering::Relaxed);
+        }
         Ok(())
     }
 
@@ -1432,6 +1646,22 @@ impl BlobCacheL2 {
             .sum()
     }
 
+    fn stats_compression_original_bytes(&self) -> u64 {
+        self.compression_original_bytes_sum.load(Ordering::Relaxed)
+    }
+
+    fn stats_compression_stored_bytes(&self) -> u64 {
+        self.compression_stored_bytes_sum.load(Ordering::Relaxed)
+    }
+
+    fn stats_compression_skipped_total(&self) -> u64 {
+        self.compression_skipped_count.load(Ordering::Relaxed)
+    }
+
+    fn stats_bytes_saved_total(&self) -> u64 {
+        self.compression_bytes_saved.load(Ordering::Relaxed)
+    }
+
     fn synopsis_may_contain(&self, namespace: &str, key: &str) -> bool {
         self.synopsis
             .read()
@@ -1461,6 +1691,50 @@ impl BlobCacheL2 {
     fn inject_fault_after_blob_write_once(&self) {
         self.fault_after_blob_write
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test-only escape hatch that synthesises a legacy `V1Raw` L2 entry —
+    /// raw payload bytes in the chain, `format_version = 0` in the
+    /// metadata. Used to verify forward-compat reads of entries written
+    /// before #192 lane 2/5 landed.
+    #[cfg(test)]
+    fn inject_v1_entry(
+        &self,
+        key: &BlobCacheKey,
+        payload: &[u8],
+    ) -> Result<(), CacheError> {
+        let (root_page, page_count, checksum) = self.write_blob_chain(payload)?;
+        let record = L2Record {
+            namespace: key.namespace.clone(),
+            key: key.key.clone(),
+            expires_at_unix_ms: None,
+            namespace_generation: 0,
+            priority: 128,
+            version: None,
+            root_page,
+            page_count,
+            byte_len: payload.len() as u64,
+            checksum,
+            format_version: L2_FORMAT_V1_RAW,
+        };
+        let encoded_key = encode_l2_key(&key.namespace, &key.key);
+        let metadata = self.metadata.write();
+        let _ = metadata.delete(&encoded_key);
+        metadata
+            .insert(&encoded_key, &record.encode())
+            .map_err(|err| CacheError::L2Io(err.to_string()))?;
+        let new_root = metadata.root_page_id();
+        drop(metadata);
+        let new_bytes = self
+            .bytes_in_use
+            .fetch_add(payload.len() as u64, Ordering::Relaxed)
+            .saturating_add(payload.len() as u64);
+        let mut control = self.control.write();
+        control.metadata_root = new_root;
+        control.bytes_in_use = new_bytes;
+        control.write(&self.control_path)?;
+        self.add_synopsis_key(&key.namespace, &key.key);
+        Ok(())
     }
 
     fn write_blob_chain(&self, payload: &[u8]) -> Result<(u32, u32, u32), CacheError> {
@@ -1689,7 +1963,28 @@ impl BlobCache {
         let entry_size = entry.size;
         if let Some(l2) = &self.l2 {
             let old_l2_size = l2.record_size(&key);
-            match l2.put(&key, &entry, old_l2_size) {
+            // Compression decision happens in the foreground put — the
+            // outcome (`Compressed::Raw` or `Compressed::Zstd`) is what
+            // gets framed and written to the chain (#192). When the knob
+            // is `Off`, skip the compressor entirely (CPU savings) and
+            // emit a `Raw` variant directly so the on-disk format stays
+            // uniform.
+            let compressed = match self.config.l2_compression {
+                L2Compression::Off => Compressed::Raw(entry.bytes.as_ref().to_vec()),
+                L2Compression::On => {
+                    let content_type = entry
+                        .content_metadata
+                        .get("content-type")
+                        .map(String::as_str);
+                    L2BlobCompressor::compress(
+                        entry.bytes.as_ref(),
+                        content_type,
+                        &CompressOpts::default(),
+                    )
+                    .map_err(|err| CacheError::L2Io(err.to_string()))?
+                }
+            };
+            match l2.put(&key, &entry, old_l2_size, compressed) {
                 Ok(()) => {}
                 Err(err @ CacheError::L2Full { .. }) => {
                     self.stats
@@ -2035,6 +2330,22 @@ impl BlobCache {
                 .promotion_pool
                 .get()
                 .map_or(0, |p| p.metrics().queue_depth),
+            l2_compression_original_bytes: self
+                .l2
+                .as_ref()
+                .map_or(0, |l2| l2.stats_compression_original_bytes()),
+            l2_compression_stored_bytes: self
+                .l2
+                .as_ref()
+                .map_or(0, |l2| l2.stats_compression_stored_bytes()),
+            l2_compression_skipped_total: self
+                .l2
+                .as_ref()
+                .map_or(0, |l2| l2.stats_compression_skipped_total()),
+            l2_bytes_saved_total: self
+                .l2
+                .as_ref()
+                .map_or(0, |l2| l2.stats_bytes_saved_total()),
         }
     }
 
@@ -2120,6 +2431,21 @@ impl BlobCache {
             .as_ref()
             .expect("L2 enabled")
             .inject_synopsis_maybe_present(namespace, key);
+    }
+
+    /// Test-only escape hatch (#192 lane 2/5): synthesise a legacy
+    /// `V1Raw` L2 entry on disk so the forward-compat read test can
+    /// verify pre-compression entries still rehydrate.
+    #[cfg(test)]
+    fn inject_l2_v1_entry(
+        &self,
+        namespace: &str,
+        key: &str,
+        payload: &[u8],
+    ) -> Result<(), CacheError> {
+        let l2 = self.l2.as_ref().expect("L2 enabled");
+        let cache_key = BlobCacheKey::new(namespace, key);
+        l2.inject_v1_entry(&cache_key, payload)
     }
 
     fn validate_blob_size(&self, size: usize, policy: BlobCachePolicy) -> Result<(), CacheError> {
@@ -4088,6 +4414,288 @@ mod tests {
         // Cleanup: tell the pool to stop. We can't call shutdown via the
         // cache (it's dropped) but we have the pool handle.
         Arc::clone(&pool).shutdown();
+        cleanup_l2(&path);
+    }
+
+    // -- L2 compression wiring (#192 lane 2/5) -----------------------------
+
+    /// Build a 4 KB payload of repetitive Lorem text — guaranteed to
+    /// compress well under the default zstd settings.
+    fn lorem_4kb() -> Vec<u8> {
+        let unit = b"Lorem ipsum dolor sit amet, consectetur adipiscing elit. \
+                     Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. \
+                     Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris \
+                     nisi ut aliquip ex ea commodo consequat. ";
+        let mut out = Vec::with_capacity(4096 + unit.len());
+        while out.len() < 4096 {
+            out.extend_from_slice(unit);
+        }
+        out.truncate(4096);
+        out
+    }
+
+    /// Linear congruential generator — deterministic high-entropy bytes
+    /// without pulling in `rand`.
+    fn pseudo_random(seed: u64, len: usize) -> Vec<u8> {
+        let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+        let mut out = Vec::with_capacity(len);
+        for _ in 0..len {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            out.push((state >> 33) as u8);
+        }
+        out
+    }
+
+    fn l2_cache_with_compression(path: &Path, mode: L2Compression) -> BlobCache {
+        // L1 is sized large enough to admit the blob (`validate_blob_size`
+        // checks against `l1_bytes_max`), but every put uses
+        // `L1Admission::Never` so the L2 path is what we exercise.
+        BlobCache::new(
+            BlobCacheConfig::default()
+                .with_l1_bytes_max(64 * 1024)
+                .with_shard_count(1)
+                .with_max_namespaces(4)
+                .with_l2_path(path)
+                .with_l2_compression(mode),
+        )
+    }
+
+    #[test]
+    fn l2_round_trip_compresses_text_payload_and_returns_original_bytes() {
+        let path = l2_path("compression-text");
+        let cache = l2_cache_with_compression(&path, L2Compression::On);
+        let payload = lorem_4kb();
+
+        cache
+            .put(
+                "n",
+                "doc",
+                BlobCachePut::new(payload.clone()).with_policy(
+                    BlobCachePolicy::default().l1_admission(L1Admission::Never),
+                ),
+            )
+            .expect("put");
+
+        // Round-trip through L2: bytes returned must match the original.
+        let hit = cache.get("n", "doc").expect("L2 hit");
+        assert_eq!(&*hit.bytes, &payload[..]);
+
+        // L2 budget accounting must reflect the *compressed* size, well
+        // below the original 4 KB.
+        let stats = cache.stats();
+        assert!(
+            stats.l2_bytes_in_use < payload.len() as u64,
+            "expected stored bytes < {}, got {}",
+            payload.len(),
+            stats.l2_bytes_in_use
+        );
+        assert_eq!(stats.l2_compression_skipped_total(), 0);
+        assert!(stats.l2_compression_ratio_observed() > 1.0);
+        assert!(stats.l2_bytes_saved_total() > 0);
+
+        cleanup_l2(&path);
+    }
+
+    #[test]
+    fn l2_round_trip_with_compression_off_stores_raw_bytes() {
+        let path = l2_path("compression-off");
+        let cache = l2_cache_with_compression(&path, L2Compression::Off);
+        let payload = lorem_4kb();
+
+        cache
+            .put(
+                "n",
+                "doc",
+                BlobCachePut::new(payload.clone()).with_policy(
+                    BlobCachePolicy::default().l1_admission(L1Admission::Never),
+                ),
+            )
+            .expect("put");
+
+        let hit = cache.get("n", "doc").expect("L2 hit");
+        assert_eq!(&*hit.bytes, &payload[..]);
+
+        let stats = cache.stats();
+        // `Off` skips the compress call entirely → entry counted as
+        // skipped, stored bytes equal original size.
+        assert_eq!(stats.l2_bytes_in_use, payload.len() as u64);
+        assert_eq!(stats.l2_compression_skipped_total(), 1);
+        assert_eq!(stats.l2_bytes_saved_total(), 0);
+        assert_eq!(stats.l2_compression_ratio_observed(), 1.0);
+
+        cleanup_l2(&path);
+    }
+
+    #[test]
+    fn l2_round_trip_with_image_content_type_stores_raw() {
+        let path = l2_path("compression-image-ct");
+        let cache = l2_cache_with_compression(&path, L2Compression::On);
+        // 4 KB of zero bytes would otherwise compress superbly; the
+        // content-type rule must short-circuit that.
+        let payload = vec![0u8; 4096];
+        let metadata = BTreeMap::from([(
+            "content-type".to_string(),
+            "image/png".to_string(),
+        )]);
+
+        cache
+            .put(
+                "n",
+                "img",
+                BlobCachePut::new(payload.clone())
+                    .with_content_metadata(metadata)
+                    .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
+            )
+            .expect("put");
+
+        let hit = cache.get("n", "img").expect("L2 hit");
+        assert_eq!(&*hit.bytes, &payload[..]);
+
+        let stats = cache.stats();
+        assert_eq!(stats.l2_bytes_in_use, payload.len() as u64);
+        assert_eq!(stats.l2_compression_skipped_total(), 1);
+        assert_eq!(stats.l2_bytes_saved_total(), 0);
+
+        cleanup_l2(&path);
+    }
+
+    #[test]
+    fn l2_round_trip_with_high_entropy_payload_falls_back_to_raw_via_ratio_gate() {
+        let path = l2_path("compression-entropy");
+        let cache = l2_cache_with_compression(&path, L2Compression::On);
+        // 8 KB of LCG output — zstd cannot meaningfully shrink it, so
+        // the `max_ratio` gate fires and the entry stores raw.
+        let payload = pseudo_random(0xCAFE_F00D, 8 * 1024);
+
+        cache
+            .put(
+                "n",
+                "noise",
+                BlobCachePut::new(payload.clone()).with_policy(
+                    BlobCachePolicy::default().l1_admission(L1Admission::Never),
+                ),
+            )
+            .expect("put");
+
+        let hit = cache.get("n", "noise").expect("L2 hit");
+        assert_eq!(&*hit.bytes, &payload[..]);
+
+        let stats = cache.stats();
+        assert_eq!(stats.l2_bytes_in_use, payload.len() as u64);
+        assert_eq!(stats.l2_compression_skipped_total(), 1);
+
+        cleanup_l2(&path);
+    }
+
+    #[test]
+    fn l2_forward_compat_reads_legacy_v1_entry_written_before_compression() {
+        let path = l2_path("compression-v1-compat");
+        let cache = l2_cache_with_compression(&path, L2Compression::On);
+        // Synthesise a legacy entry on disk: raw bytes, no v2 framing.
+        let payload = b"legacy-payload-pre-issue-192".to_vec();
+        cache
+            .inject_l2_v1_entry("n", "legacy", &payload)
+            .expect("inject v1");
+
+        // Subsequent `get` must dispatch on the record's `format_version`
+        // and return the raw bytes verbatim — no decompress, no framing.
+        let hit = cache.get("n", "legacy").expect("L2 hit");
+        assert_eq!(&*hit.bytes, &payload[..]);
+
+        cleanup_l2(&path);
+    }
+
+    #[test]
+    fn l2_budget_amplifies_when_entries_compress() {
+        // Original L2 budget that fits ~10 raw entries of 4 KB (40 KB
+        // total). With compression on, the *stored* bytes are far smaller,
+        // so all 10 entries must be admitted without `L2Full`.
+        let path = l2_path("compression-budget");
+        let payload = lorem_4kb();
+        let raw_total = (payload.len() * 10) as u64;
+        // Pick a budget below `raw_total` but above the expected
+        // compressed total. zstd typically shrinks Lorem to <30% so 25%
+        // of `raw_total` is a comfortable headroom.
+        let budget = raw_total / 4;
+        let cache = BlobCache::new(
+            BlobCacheConfig::default()
+                .with_l1_bytes_max(64 * 1024)
+                .with_shard_count(1)
+                .with_max_namespaces(4)
+                .with_l2_bytes_max(budget)
+                .with_l2_path(&path)
+                .with_l2_compression(L2Compression::On),
+        );
+
+        for i in 0..10 {
+            cache
+                .put(
+                    "n",
+                    &format!("doc{i}"),
+                    BlobCachePut::new(payload.clone()).with_policy(
+                        BlobCachePolicy::default().l1_admission(L1Admission::Never),
+                    ),
+                )
+                .expect("put admitted under compressed budget");
+        }
+
+        let stats = cache.stats();
+        assert_eq!(stats.l2_full_rejections(), 0, "no rejections expected");
+        assert!(
+            stats.l2_bytes_in_use <= budget,
+            "stored bytes {} exceed budget {}",
+            stats.l2_bytes_in_use,
+            budget
+        );
+        // Sanity: would have blown past the budget at raw sizing.
+        assert!(stats.l2_bytes_in_use < raw_total / 2);
+
+        cleanup_l2(&path);
+    }
+
+    #[test]
+    fn l2_compression_metrics_partition_compressible_and_skipped_entries() {
+        let path = l2_path("compression-metrics");
+        let cache = l2_cache_with_compression(&path, L2Compression::On);
+
+        // 10 compressible Lorem entries.
+        let payload = lorem_4kb();
+        for i in 0..10 {
+            cache
+                .put(
+                    "n",
+                    &format!("text{i}"),
+                    BlobCachePut::new(payload.clone()).with_policy(
+                        BlobCachePolicy::default().l1_admission(L1Admission::Never),
+                    ),
+                )
+                .expect("put");
+        }
+        // 5 high-entropy entries — these must hit the `max_ratio` gate
+        // and land in the `skipped` counter.
+        for i in 0..5 {
+            let bin = pseudo_random(0x1234_5678 ^ i as u64, 4 * 1024);
+            cache
+                .put(
+                    "n",
+                    &format!("bin{i}"),
+                    BlobCachePut::new(bin).with_policy(
+                        BlobCachePolicy::default().l1_admission(L1Admission::Never),
+                    ),
+                )
+                .expect("put");
+        }
+
+        let stats = cache.stats();
+        assert_eq!(stats.l2_compression_skipped_total(), 5);
+        assert!(
+            stats.l2_compression_ratio_observed() > 1.0,
+            "compressed entries did not contribute to ratio"
+        );
+        assert!(stats.l2_bytes_saved_total() > 0);
+
         cleanup_l2(&path);
     }
 }
