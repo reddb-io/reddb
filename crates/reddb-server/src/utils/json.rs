@@ -335,10 +335,13 @@ impl<'a> JsonParser<'a> {
         let mut result = String::new();
         while !self.eof() {
             let ch = self.current_char();
-            self.pos += 1;
             match ch {
-                b'"' => return Ok(result),
+                b'"' => {
+                    self.pos += 1;
+                    return Ok(result);
+                }
                 b'\\' => {
+                    self.pos += 1;
                     if self.eof() {
                         return Err("unexpected end of input in escape".to_string());
                     }
@@ -354,8 +357,41 @@ impl<'a> JsonParser<'a> {
                         b'r' => result.push('\r'),
                         b't' => result.push('\t'),
                         b'u' => {
+                            // RFC 8259 §7: `\uXXXX` covers code points in
+                            // the BMP. Code points above U+FFFF (e.g. emoji,
+                            // U+1F4A9 PILE OF POO) are represented in JSON
+                            // as a UTF-16 surrogate pair `💩` and
+                            // MUST be decoded as one Unicode scalar.
                             let code = self.parse_unicode_escape()?;
-                            if let Some(chr) = char::from_u32(code) {
+                            if (0xD800..=0xDBFF).contains(&code) {
+                                // High surrogate — must be followed by a
+                                // `\uXXXX` low surrogate.
+                                if self.pos + 2 > self.input.len()
+                                    || self.input[self.pos] != b'\\'
+                                    || self.input[self.pos + 1] != b'u'
+                                {
+                                    return Err(
+                                        "expected low surrogate after high surrogate".to_string(),
+                                    );
+                                }
+                                self.pos += 2;
+                                let low = self.parse_unicode_escape()?;
+                                if !(0xDC00..=0xDFFF).contains(&low) {
+                                    return Err("invalid low surrogate".to_string());
+                                }
+                                let scalar =
+                                    0x10000 + (((code - 0xD800) << 10) | (low - 0xDC00));
+                                if let Some(chr) = char::from_u32(scalar) {
+                                    result.push(chr);
+                                } else {
+                                    return Err("invalid unicode escape".to_string());
+                                }
+                            } else if (0xDC00..=0xDFFF).contains(&code) {
+                                return Err(
+                                    "unexpected low surrogate without preceding high surrogate"
+                                        .to_string(),
+                                );
+                            } else if let Some(chr) = char::from_u32(code) {
                                 result.push(chr);
                             } else {
                                 return Err("invalid unicode escape".to_string());
@@ -364,8 +400,27 @@ impl<'a> JsonParser<'a> {
                         _ => return Err("invalid escape sequence".to_string()),
                     }
                 }
-                _ => {
+                _ if ch < 0x80 => {
+                    // ASCII fast path: byte == codepoint.
+                    self.pos += 1;
                     result.push(ch as char);
+                }
+                _ => {
+                    // Multi-byte UTF-8 sequence. The parser's input came
+                    // from `&str` (validated UTF-8 at JsonParser::new), so
+                    // a complete codepoint starts here. Decoding byte-by-
+                    // byte via `ch as char` would map each continuation
+                    // byte to a Latin-1 codepoint, producing mojibake (the
+                    // root cause of issue #191 — `é` → `Ã©`, `🦀` → four
+                    // garbled chars). Instead, lift a full codepoint out
+                    // of the underlying UTF-8 stream.
+                    let next = std::str::from_utf8(&self.input[self.pos..])
+                        .map_err(|_| "invalid utf-8 in string body".to_string())?
+                        .chars()
+                        .next()
+                        .ok_or_else(|| "unterminated string literal".to_string())?;
+                    self.pos += next.len_utf8();
+                    result.push(next);
                 }
             }
         }

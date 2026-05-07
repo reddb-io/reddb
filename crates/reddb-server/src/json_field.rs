@@ -216,6 +216,31 @@ mod tests {
         assert_eq!(round_trip(payload), payload);
     }
 
+    /// Regression for issue #191: every input below uses multi-byte
+    /// UTF-8 sequences that the in-house JSON parser used to truncate
+    /// to Latin-1 (each continuation byte decoded as `ch as char`).
+    /// The corpus exercises the four payload classes named in the
+    /// issue: Latin extended, CJK, full emoji set (including
+    /// supplementary-plane code points that JSON encodes as a UTF-16
+    /// surrogate pair), and mixed RTL+LTR.
+    #[test]
+    fn json_field_tainted_round_trips_multibyte_utf8_corpus() {
+        let corpus: &[&str] = &[
+            // Latin-1 / extended Latin: 2-byte UTF-8.
+            "café — naïve façade — Œuvre",
+            // CJK ideographs: 3-byte UTF-8.
+            "日本語テスト — 中文 — 한국어",
+            // Supplementary-plane emoji: 4-byte UTF-8 (and the JSON
+            // form `💩` is a surrogate pair).
+            "🦀🚀💩🌍 family: 👨‍👩‍👧‍👦",
+            // Mixed RTL (Arabic, Hebrew) + LTR with bidi controls.
+            "Hello مرحبا שלום — mix",
+        ];
+        for payload in corpus {
+            assert_eq!(round_trip(payload), *payload, "payload {payload:?}");
+        }
+    }
+
     #[test]
     fn json_field_typed_emits_canonical_representation() {
         // `typed` for known-good values goes through JsonEncode and
