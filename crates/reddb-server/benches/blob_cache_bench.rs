@@ -101,12 +101,6 @@ fn w1_hot_l1_hit(c: &mut Criterion) {
         });
     });
 
-    #[cfg(feature = "bench-redis")]
-    bench_redis_get_single(&mut g, "Redis-no-persist", "REDIS_NO_PERSIST_ADDR");
-    #[cfg(feature = "bench-redis")]
-    bench_redis_get_pipeline(&mut g, "Redis-no-persist-pipelined", "REDIS_NO_PERSIST_ADDR");
-    #[cfg(feature = "bench-redis")]
-    bench_redis_get_single(&mut g, "Redis-aof-everysec", "REDIS_AOF_ADDR");
 
     g.finish();
 }
@@ -122,7 +116,7 @@ fn w2_cold_l2_miss(c: &mut Criterion) {
     const PAYLOAD_SIZE: usize = 16 * 1024; // 16 KB
 
     // Populate with full-size cache (L1 + L2).
-    let full_cache = make_cache_with_l2(L1, tmp.path());
+    let full_cache = make_cache_with_l2(L1, &tmp.path().join("cache.rdb"));
     let p = payload(PAYLOAD_SIZE);
     for i in 0..KEY_COUNT {
         full_cache
@@ -132,7 +126,7 @@ fn w2_cold_l2_miss(c: &mut Criterion) {
     drop(full_cache);
 
     // Reopen with tiny L1 so reads come from L2.
-    let cold_cache = make_cache_with_l2(1024, tmp.path());
+    let cold_cache = make_cache_with_l2(1024, &tmp.path().join("cache.rdb"));
 
     let mut g = c.benchmark_group("w2-cold-l2-miss");
     g.throughput(Throughput::Elements(1));
@@ -156,7 +150,7 @@ fn w2_cold_l2_miss(c: &mut Criterion) {
 fn w3_cold_absent(c: &mut Criterion) {
     let tmp = tempfile::tempdir().unwrap();
     // Populate a few keys so the namespace + synopsis exist.
-    let cache = make_cache_with_l2(L1, tmp.path());
+    let cache = make_cache_with_l2(L1, &tmp.path().join("cache.rdb"));
     let p = payload(64);
     for i in 0..100usize {
         cache.put(NS, key(i), BlobCachePut::new(p.clone())).unwrap();
@@ -185,8 +179,6 @@ fn w3_cold_absent(c: &mut Criterion) {
         });
     });
 
-    #[cfg(feature = "bench-redis")]
-    bench_redis_get_single(&mut g, "Redis-no-persist-nil", "REDIS_NO_PERSIST_ADDR");
 
     g.finish();
 }
@@ -200,14 +192,14 @@ fn w4_large_blob_l2_hit(c: &mut Criterion) {
     const BLOB_SIZE: usize = 5 * 1024 * 1024; // 5 MiB
     const KEY_COUNT: usize = 4;
 
-    let full = make_cache_with_l2(64 * 1024 * 1024, tmp.path()); // 64 MiB L1
+    let full = make_cache_with_l2(64 * 1024 * 1024, &tmp.path().join("cache.rdb")); // 64 MiB L1
     let p = payload(BLOB_SIZE);
     for i in 0..KEY_COUNT {
         full.put(NS, key(i), BlobCachePut::new(p.clone())).ok();
     }
     drop(full);
 
-    let cold = make_cache_with_l2(1024, tmp.path());
+    let cold = make_cache_with_l2(1024, &tmp.path().join("cache.rdb"));
 
     let mut g = c.benchmark_group("w4-large-blob-l2-hit");
     g.throughput(Throughput::Bytes(BLOB_SIZE as u64));
@@ -331,14 +323,14 @@ fn w7_restart_warm_cache(c: &mut Criterion) {
 
     // Populate phase.
     {
-        let cache = make_cache_with_l2(L1, tmp.path());
+        let cache = make_cache_with_l2(L1, &tmp.path().join("cache.rdb"));
         let p = payload(PAYLOAD_SIZE);
         for i in 0..KEY_COUNT {
             cache.put(NS, key(i), BlobCachePut::new(p.clone())).ok();
         }
     } // drop flushes L2
 
-    let l2_path = tmp.path().to_path_buf();
+    let l2_path = tmp.path().join("cache.rdb");
     let mut g = c.benchmark_group("w7-restart-warm-cache");
     g.sample_size(20);
     g.measurement_time(Duration::from_secs(10));

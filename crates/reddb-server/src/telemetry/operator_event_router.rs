@@ -121,6 +121,7 @@ impl std::error::Error for ConfigError {}
 // Token bucket (per-handler rate limit)
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 struct TokenBucket {
     tokens: f64,
     rate: f64,
@@ -159,6 +160,7 @@ impl TokenBucket {
 
 const QUEUE_CAPACITY: usize = 1_000;
 
+#[derive(Debug)]
 struct WebhookQueue {
     inner: Mutex<VecDeque<WebhookPayload>>,
     not_empty: Condvar,
@@ -206,7 +208,7 @@ impl WebhookQueue {
 // Webhook payload
 // ---------------------------------------------------------------------------
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct WebhookPayload {
     action: String,
     summary: String,
@@ -289,6 +291,7 @@ fn spawn_webhook_worker(
 // Effective handler (runtime form)
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 enum EffectiveHandler {
     AuditLog,
     Tracing,
@@ -334,6 +337,7 @@ pub struct RouterMetricsSnapshot {
 /// config strictly (unknown variant names / handler names / missing env vars
 /// all return `Err`). With an empty config the router behaves identically to
 /// the current `OperatorEvent::emit()`.
+#[derive(Debug)]
 pub struct OperatorEventRouter {
     audit_logger: Option<Arc<AuditLogger>>,
     default_route: Vec<Arc<EffectiveHandler>>,
