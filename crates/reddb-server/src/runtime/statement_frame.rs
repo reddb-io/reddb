@@ -471,6 +471,21 @@ pub struct EffectiveScope {
     pub(crate) visible_collections: Option<HashSet<String>>,
 }
 
+impl EffectiveScope {
+    /// Capability check used by the AI runtime (`runtime/ai/ner.rs`)
+    /// to gate LLM-backed NER calls behind `ai:ner:read`.
+    ///
+    /// Placeholder for now: always returns `false`. The auth engine's
+    /// capability matrix is future work; until it lands, every routed
+    /// LLM-NER call denies at the gate and `extract_tokens_routed`'s
+    /// heuristic fallback fires (see `ask_pipeline::extract_tokens_routed`).
+    /// Documented in code so the wire-up is a one-line change once
+    /// the auth engine learns capabilities.
+    pub fn has_capability(&self, _capability: &str) -> bool {
+        false
+    }
+}
+
 impl ReadFrame for EffectiveScope {
     fn effective_scope(&self) -> Option<&str> {
         self.tenant.as_deref()
