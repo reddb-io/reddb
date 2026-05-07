@@ -1665,8 +1665,44 @@ impl RedDBRuntime {
                 schema_vocabulary: parking_lot::RwLock::new(
                     crate::runtime::schema_vocabulary::SchemaVocabulary::new(),
                 ),
+                slow_query_logger: {
+                    // Issue #205 — slow-query sink lives in the same
+                    // directory the audit log uses, so backup/restore
+                    // ships them together. Threshold + sample-pct
+                    // default conservatively (1 s, 100% sampling) so
+                    // emitted lines are rare and complete. Operators
+                    // tune via env / config matrix in a follow-up.
+                    let log_dir = options
+                        .data_path
+                        .clone()
+                        .unwrap_or_else(|| std::env::temp_dir().join("reddb"));
+                    let threshold_ms = std::env::var("RED_SLOW_QUERY_THRESHOLD_MS")
+                        .ok()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(1000);
+                    let sample_pct = std::env::var("RED_SLOW_QUERY_SAMPLE_PCT")
+                        .ok()
+                        .and_then(|s| s.parse::<u8>().ok())
+                        .unwrap_or(100);
+                    crate::telemetry::slow_query_logger::SlowQueryLogger::new(
+                        crate::telemetry::slow_query_logger::SlowQueryOpts {
+                            log_dir,
+                            threshold_ms,
+                            sample_pct,
+                        },
+                    )
+                },
             }),
         };
+
+        // Issue #205 — install the process-wide OperatorEvent sink so
+        // emit sites buried in storage / replication / signal handlers
+        // can record without threading an `&AuditLogger` through every
+        // call stack. First registration wins; subsequent in-memory
+        // runtimes (test harnesses) fall through to tracing+eprintln.
+        crate::telemetry::operator_event::install_global_audit_sink(Arc::clone(
+            &runtime.inner.audit_log,
+        ));
 
         // PLAN.md Phase 9.1 — backfill cold-start phase markers
         // from the wall-clock captured before storage open. The
@@ -3689,8 +3725,45 @@ impl RedDBRuntime {
         self.execute_query(query)
     }
 
-    #[inline(never)]
+    /// Issue #205 — single lifecycle exit for slow-query logging.
+    ///
+    /// `execute_query_inner` does the real work; this wrapper times it
+    /// and, if elapsed exceeds the configured threshold, hands the
+    /// triple `(QueryKind, elapsed_ms, sql_redacted, scope)` to the
+    /// SlowQueryLogger. The threshold + sample_pct were captured at
+    /// SlowQueryLogger construction (runtime startup), so the per-call
+    /// cost on below-threshold paths is one relaxed atomic load.
     pub fn execute_query(&self, query: &str) -> RedDBResult<RuntimeQueryResult> {
+        let started = std::time::Instant::now();
+        let result = self.execute_query_inner(query);
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+
+        // Build EffectiveScope from the same thread-locals frame-build
+        // consults — keeps the slow-log row consistent with the audit /
+        // RLS view of "this statement". `ai_scope()` is the canonical
+        // builder.
+        let scope = self.ai_scope();
+        let kind = match result.as_ref().map(|r| r.statement_type).unwrap_or("select") {
+            "select" => crate::telemetry::slow_query_logger::QueryKind::Select,
+            "insert" => crate::telemetry::slow_query_logger::QueryKind::Insert,
+            "update" => crate::telemetry::slow_query_logger::QueryKind::Update,
+            "delete" => crate::telemetry::slow_query_logger::QueryKind::Delete,
+            _ => crate::telemetry::slow_query_logger::QueryKind::Internal,
+        };
+        // SQL redaction: pass the raw query through. The slow-query
+        // logger writes structured JSON so embedded literals stay
+        // escape-safe at the JSON boundary (proven by
+        // `adversarial_sql_is_escape_safe` in slow_query_logger.rs).
+        // PII redaction (e.g. literal masking) is a follow-up.
+        self.inner
+            .slow_query_logger
+            .record(kind, elapsed_ms, query.to_string(), &scope);
+
+        result
+    }
+
+    #[inline(never)]
+    fn execute_query_inner(&self, query: &str) -> RedDBResult<RuntimeQueryResult> {
         // ── ULTRA-TURBO: autocommit `SELECT * FROM t WHERE _entity_id = N` ──
         //
         // Moved above every boot-cost the normal path pays (WITHIN
@@ -3724,7 +3797,11 @@ impl RedDBRuntime {
         match crate::runtime::within_clause::try_strip_within_prefix(query) {
             Ok(Some((scope, inner))) => {
                 let _scope_guard = ScopeOverrideGuard::install(scope);
-                return self.execute_query(inner);
+                // Re-enter the inner path, NOT `execute_query`, so the
+                // slow-query lifecycle hook records exactly one row per
+                // top-level statement (the WITHIN-stripped form would
+                // double-record).
+                return self.execute_query_inner(inner);
             }
             Ok(None) => {}
             Err(msg) => return Err(RedDBError::Query(msg)),

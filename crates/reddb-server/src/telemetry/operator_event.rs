@@ -19,7 +19,39 @@
 //! *not* async so callers in crash paths, signal handlers, and `Drop` impls
 //! can call it without an async runtime.
 
+use std::sync::{Arc, OnceLock};
+
 use crate::runtime::audit_log::{AuditAuthSource, AuditEvent, AuditField, AuditFieldEscaper, AuditLogger, Outcome};
+
+// ---------------------------------------------------------------------------
+// Process-wide sink
+// ---------------------------------------------------------------------------
+//
+// The OperatorEvent enum is defined in `telemetry/` but the deepest
+// emit sites (storage layer, replication apply loop, signal handlers,
+// drop impls) cannot thread an `&AuditLogger` reference through their
+// call stacks without a sweeping refactor. To stay surgical (#205) we
+// expose a process-wide sink that the runtime registers at startup and
+// every emit site consults via `OperatorEvent::emit_global`.
+//
+// Trade-off: the sink is a `OnceLock<Arc<AuditLogger>>`, which means
+// emits that fire *before* the runtime registers the logger fall back
+// to `tracing::warn!` + `eprintln!` only — the audit copy is lost. The
+// tamper-evident audit copy is the primary record; the breadcrumb /
+// stderr fallbacks are the safety net the original `emit(&AuditLogger)`
+// shape already accepted, so the degradation is the same one already
+// documented in the module rustdoc.
+
+static GLOBAL_SINK: OnceLock<Arc<AuditLogger>> = OnceLock::new();
+
+/// Install the process-wide [`AuditLogger`] used by
+/// [`OperatorEvent::emit_global`]. Called once at runtime startup; a
+/// second call is a no-op (the first registration wins) so test
+/// harnesses that build multiple in-memory runtimes cannot stomp on
+/// each other's loggers — they fall back to tracing+eprintln.
+pub fn install_global_audit_sink(logger: Arc<AuditLogger>) {
+    let _ = GLOBAL_SINK.set(logger);
+}
 
 // ---------------------------------------------------------------------------
 // OperatorEvent
@@ -110,6 +142,22 @@ impl OperatorEvent {
     /// 2. `tracing::warn!` breadcrumb — lands in `red.log` / stderr.
     /// 3. `eprintln!` fallback — fires only if the audit write fails,
     ///    ensuring the event is never silently lost.
+    /// Emit the event using the process-wide sink installed by the
+    /// runtime at startup. When no sink is installed (early boot,
+    /// tests without an audit logger), the tracing breadcrumb and
+    /// eprintln fallback still fire so the event is never silently
+    /// lost.
+    pub fn emit_global(self) {
+        match GLOBAL_SINK.get() {
+            Some(logger) => self.emit(logger.as_ref()),
+            None => {
+                let (_, _, summary) = self.decompose();
+                tracing::warn!(target: "reddb::operator", "{summary}");
+                eprintln!("[reddb::operator] (no audit sink) {summary}");
+            }
+        }
+    }
+
     pub fn emit(self, audit: &AuditLogger) {
         let (action, fields, summary) = self.decompose();
 

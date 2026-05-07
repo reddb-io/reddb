@@ -800,6 +800,12 @@ struct RuntimeInner {
     /// #121) Stage 2 to narrow vector-search candidates before any
     /// embedding compute. Mutated only from DDL execution paths.
     schema_vocabulary: parking_lot::RwLock<crate::runtime::schema_vocabulary::SchemaVocabulary>,
+    /// Issue #205 — dedicated slow-query sink (`red-slow.log`).
+    /// Built once at runtime startup; below-threshold calls pay only a
+    /// single relaxed atomic load. Threshold + sample-pct come from
+    /// `runtime.slow_query.threshold_ms` / `.sample_pct` (config matrix)
+    /// at construction; live tuning via the config tree is a follow-up.
+    slow_query_logger: Arc<crate::telemetry::slow_query_logger::SlowQueryLogger>,
 }
 
 #[derive(Clone)]
