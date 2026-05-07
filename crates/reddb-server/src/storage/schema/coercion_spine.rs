@@ -440,4 +440,100 @@ mod tests {
             .expect("Float -> Integer resolves under current allows() rule");
         assert!(entry.lossy);
     }
+
+    // ── Acceptance-criteria pin tests ──────────────────────────────────────
+
+    /// Numeric promotion ladder: every implicit widening edge in the
+    /// catalog resolves through the spine. Covers Integer → BigInt,
+    /// Integer → Float, Integer → Decimal, BigInt → Float, and the
+    /// UnsignedInteger family.
+    #[test]
+    fn numeric_promotion_ladder_all_implicit_edges() {
+        let pairs = [
+            (DataType::Integer, DataType::BigInt),
+            (DataType::Integer, DataType::Float),
+            (DataType::Integer, DataType::Decimal),
+            (DataType::BigInt, DataType::Float),
+            (DataType::UnsignedInteger, DataType::Integer),
+            (DataType::UnsignedInteger, DataType::Float),
+        ];
+        for (src, tgt) in pairs {
+            let entry = resolve_cast(src, tgt)
+                .unwrap_or_else(|| panic!("{:?} → {:?} must be implicit", src, tgt));
+            assert!(!entry.lossy, "{:?} → {:?} should be lossless", src, tgt);
+        }
+    }
+
+    /// Integer → Text is registered at Explicit context only. The
+    /// spine's `resolve_cast` checks Implicit context, so it must
+    /// return None — no silent numeric-to-string coercion.
+    #[test]
+    fn integer_to_text_implicit_cast_rejected() {
+        assert!(
+            resolve_cast(DataType::Integer, DataType::Text).is_none(),
+            "Integer→Text must not be implicit; it is Explicit-only"
+        );
+    }
+
+    /// Text → Integer has no catalog entry at any context. The spine
+    /// must return None regardless; this guards against accidental
+    /// catalog additions that would open a silent parse path.
+    #[test]
+    fn text_to_integer_cast_rejected_by_spine() {
+        assert!(
+            resolve_cast(DataType::Text, DataType::Integer).is_none(),
+            "Text→Integer has no catalog entry"
+        );
+    }
+
+    /// Unknown (the type assigned to SQL NULLs whose type is not yet
+    /// inferred) as an operator operand: the catalog has no overloads
+    /// for Unknown, so resolve_binop returns None. This pins the
+    /// type-level half of NULL propagation — the evaluator handles
+    /// null Values at runtime, the spine rejects Unknown at planning.
+    #[test]
+    fn operator_with_unknown_null_type_returns_none() {
+        assert!(
+            resolve_binop(BinOp::Add, DataType::Unknown, DataType::Integer).is_none(),
+            "Unknown+Integer must not resolve"
+        );
+        assert!(
+            resolve_binop(BinOp::Eq, DataType::Integer, DataType::Unknown).is_none(),
+            "Integer=Unknown must not resolve"
+        );
+    }
+
+    /// Text + Text has no operator overload in the catalog (concat uses
+    /// `||`). Spine must return None, confirming text↔number arithmetic
+    /// is fully rejected even when both sides match.
+    #[test]
+    fn text_arithmetic_not_resolvable() {
+        assert!(
+            resolve_binop(BinOp::Add, DataType::Text, DataType::Text).is_none(),
+            "Text+Text must not resolve"
+        );
+        assert!(
+            resolve_binop(BinOp::Add, DataType::Text, DataType::Integer).is_none(),
+            "Text+Integer must not resolve"
+        );
+    }
+
+    /// Function overload selection: when two overloads exist (ABS(int)
+    /// and ABS(float)), calling with a type that coerces to both must
+    /// pick the exact match, not the coerced one.
+    #[test]
+    fn function_overload_selects_exact_over_coercion() {
+        let (int_entry, int_coercions) = resolve_function("ABS", &[DataType::Integer])
+            .expect("ABS(int) must resolve");
+        assert_eq!(int_entry.return_type, DataType::Integer);
+        assert!(int_coercions.is_identity());
+
+        let (float_entry, float_coercions) = resolve_function("ABS", &[DataType::Float])
+            .expect("ABS(float) must resolve");
+        assert_eq!(float_entry.return_type, DataType::Float);
+        assert!(float_coercions.is_identity());
+
+        // The two must be distinct overloads.
+        assert_ne!(int_entry.return_type, float_entry.return_type);
+    }
 }

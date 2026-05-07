@@ -1463,6 +1463,10 @@ fn main() {
             run_vcs_command(&result.flags, remaining);
         }
 
+        "admin" => {
+            run_admin_command(&result.flags, remaining);
+        }
+
         _ => {
             if wants_json(&result.flags) {
                 json_error("unknown", &format!("Unknown command: {}", cmd));
@@ -2625,6 +2629,370 @@ fn json_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+// ---------------------------------------------------------------------------
+// Admin command implementation
+// ---------------------------------------------------------------------------
+
+fn run_admin_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
+    let json_mode = wants_json(flags);
+    let bind = flag_string(flags, "bind").unwrap_or_else(|| "127.0.0.1:8080".to_string());
+    let token = flag_string(flags, "token")
+        .or_else(|| std::env::var("RED_ADMIN_TOKEN").ok())
+        .filter(|t| !t.trim().is_empty());
+
+    let subcommand = remaining.first().map(|s| s.as_str()).unwrap_or("help");
+    let args: Vec<&str> = remaining.iter().skip(1).map(|s| s.as_str()).collect();
+
+    match subcommand {
+        "cache" => run_admin_cache_command(flags, &bind, token.as_deref(), json_mode, &args),
+        "help" | _ => {
+            if json_mode {
+                json_ok(
+                    "admin",
+                    "{\"subcommands\":[\"cache\"],\"message\":\"use a subcommand, e.g. red admin cache stats\"}",
+                );
+            } else {
+                println!("Usage: red admin <subcommand>");
+                println!();
+                println!("Subcommands:");
+                println!("  cache    Blob cache admin operations");
+                println!();
+                println!("Flags:");
+                println!("  --bind <addr>   Server HTTP address (default: 127.0.0.1:8080, env: REDDB_BIND_ADDR)");
+                println!("  --token <tok>   Admin bearer token (env: RED_ADMIN_TOKEN)");
+                println!("  --json          JSON output");
+            }
+        }
+    }
+}
+
+fn run_admin_cache_command(
+    _flags: &HashMap<String, FlagValue>,
+    bind: &str,
+    token: Option<&str>,
+    json_mode: bool,
+    args: &[&str],
+) {
+    let subcommand = args.first().copied().unwrap_or("help");
+    let sub_args: &[&str] = if args.is_empty() { &[] } else { &args[1..] };
+
+    match subcommand {
+        "stats" => {
+            let path = "/admin/blob_cache/stats";
+            match get_from_http(bind, path, token) {
+                Ok((status, body)) if status < 400 => {
+                    if json_mode {
+                        print!("{body}");
+                    } else {
+                        print_cache_stats_pretty(&body);
+                    }
+                }
+                Ok((status, body)) => {
+                    if json_mode {
+                        json_error("admin.cache.stats", &format!("server returned {status}: {body}"));
+                    }
+                    eprintln!("error: server returned {status}: {body}");
+                    std::process::exit(1);
+                }
+                Err(err) => {
+                    if json_mode {
+                        json_error("admin.cache.stats", &err);
+                    }
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        "flush-namespace" => {
+            let ns = sub_args.first().copied().unwrap_or("");
+            if ns.is_empty() {
+                if json_mode {
+                    json_error("admin.cache.flush-namespace", "namespace argument is required");
+                }
+                eprintln!("error: namespace argument is required");
+                eprintln!("usage: red admin cache flush-namespace <namespace>");
+                std::process::exit(1);
+            }
+            let payload = format!("{{\"namespace\":\"{}\"}}", json_escape(ns));
+            match post_json_to_http_authed(bind, "/admin/blob_cache/flush_namespace", &payload, token) {
+                Ok(body) => {
+                    if json_mode {
+                        print!("{body}");
+                    } else {
+                        println!("flushed namespace: {ns}");
+                        println!("{body}");
+                    }
+                }
+                Err(err) => {
+                    if json_mode {
+                        json_error("admin.cache.flush-namespace", &err);
+                    }
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        "sweep" => {
+            let limit_entries: Option<u64> = sub_args
+                .windows(2)
+                .find(|w| w[0] == "--limit-entries")
+                .and_then(|w| w[1].parse().ok());
+            let limit_millis: Option<u64> = sub_args
+                .windows(2)
+                .find(|w| w[0] == "--limit-millis")
+                .and_then(|w| w[1].parse().ok());
+            let payload = match (limit_entries, limit_millis) {
+                (None, None) => "{}".to_string(),
+                (Some(e), None) => format!("{{\"limit_entries\":{e}}}"),
+                (None, Some(m)) => format!("{{\"limit_millis\":{m}}}"),
+                (Some(e), Some(m)) => format!("{{\"limit_entries\":{e},\"limit_millis\":{m}}}"),
+            };
+            match post_json_to_http_authed(bind, "/admin/blob_cache/sweep", &payload, token) {
+                Ok(body) => {
+                    if json_mode {
+                        print!("{body}");
+                    } else {
+                        println!("sweep complete");
+                        println!("{body}");
+                    }
+                }
+                Err(err) => {
+                    if json_mode {
+                        json_error("admin.cache.sweep", &err);
+                    }
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        "compare-and-set" => {
+            // Parse --namespace, --key, --expected-version, --value, --new-version from sub_args
+            let get_flag = |name: &str| -> Option<&str> {
+                sub_args.windows(2).find(|w| w[0] == name).map(|w| w[1])
+            };
+            let ns = match get_flag("--namespace") {
+                Some(v) => v,
+                None => {
+                    if json_mode {
+                        json_error("admin.cache.compare-and-set", "--namespace is required");
+                    }
+                    eprintln!("error: --namespace is required");
+                    std::process::exit(1);
+                }
+            };
+            let key = match get_flag("--key") {
+                Some(v) => v,
+                None => {
+                    if json_mode {
+                        json_error("admin.cache.compare-and-set", "--key is required");
+                    }
+                    eprintln!("error: --key is required");
+                    std::process::exit(1);
+                }
+            };
+            let new_version: u64 = match get_flag("--new-version").and_then(|v| v.parse().ok()) {
+                Some(v) => v,
+                None => {
+                    if json_mode {
+                        json_error("admin.cache.compare-and-set", "--new-version (u64) is required");
+                    }
+                    eprintln!("error: --new-version (u64) is required");
+                    std::process::exit(1);
+                }
+            };
+            let value_path = match get_flag("--value") {
+                Some(v) => v,
+                None => {
+                    if json_mode {
+                        json_error("admin.cache.compare-and-set", "--value <file> is required");
+                    }
+                    eprintln!("error: --value <file> is required");
+                    std::process::exit(1);
+                }
+            };
+            let raw_bytes = match std::fs::read(value_path) {
+                Ok(b) => b,
+                Err(err) => {
+                    if json_mode {
+                        json_error("admin.cache.compare-and-set", &format!("failed to read {value_path}: {err}"));
+                    }
+                    eprintln!("error: failed to read {value_path}: {err}");
+                    std::process::exit(1);
+                }
+            };
+            let b64 = bytes_to_base64(&raw_bytes);
+
+            let expected_version_field = get_flag("--expected-version")
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(|v| format!(",\"expected_version\":{v}"))
+                .unwrap_or_default();
+            let payload = format!(
+                "{{\"namespace\":\"{ns}\",\"key\":\"{key}\",\"new_value_b64\":\"{b64}\",\"new_version\":{new_version}{expected_version_field}}}",
+                ns = json_escape(ns),
+                key = json_escape(key),
+            );
+            match post_json_to_http_authed(bind, "/admin/cache/compare-and-set", &payload, token) {
+                Ok(body) => {
+                    if json_mode {
+                        print!("{body}");
+                    } else {
+                        println!("{body}");
+                    }
+                }
+                Err(err) => {
+                    if json_mode {
+                        json_error("admin.cache.compare-and-set", &err);
+                    }
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        "help" | _ => {
+            if json_mode {
+                json_ok(
+                    "admin.cache",
+                    "{\"subcommands\":[\"stats\",\"flush-namespace\",\"sweep\",\"compare-and-set\"]}",
+                );
+            } else {
+                println!("Usage: red admin cache <subcommand>");
+                println!();
+                println!("Subcommands:");
+                println!("  stats                          GET /admin/blob_cache/stats");
+                println!("  flush-namespace <ns>           POST /admin/blob_cache/flush_namespace");
+                println!("  sweep [--limit-entries N]      POST /admin/blob_cache/sweep");
+                println!("        [--limit-millis N]");
+                println!("  compare-and-set                POST /admin/cache/compare-and-set");
+                println!("    --namespace ns --key k");
+                println!("    --new-version V --value <file>");
+                println!("    [--expected-version V]");
+                println!();
+                println!("Env vars:");
+                println!("  REDDB_BIND_ADDR   Server HTTP address (overrides --bind)");
+                println!("  RED_ADMIN_TOKEN   Admin bearer token (overrides --token)");
+            }
+        }
+    }
+}
+
+fn format_cache_stats_pretty(body: &str) -> String {
+    let fields: &[(&str, &str)] = &[
+        ("hits", "Hits"),
+        ("misses", "Misses"),
+        ("insertions", "Insertions"),
+        ("evictions", "Evictions"),
+        ("expirations", "Expirations"),
+        ("invalidations", "Invalidations"),
+        ("namespace_flushes", "Namespace flushes"),
+        ("version_mismatches", "Version mismatches"),
+        ("entries", "Entries"),
+        ("bytes_in_use", "L1 bytes in use"),
+        ("l1_bytes_max", "L1 bytes max"),
+        ("l2_bytes_in_use", "L2 bytes in use"),
+        ("l2_bytes_max", "L2 bytes max"),
+        ("namespaces", "Namespaces"),
+        ("max_namespaces", "Max namespaces"),
+        ("l2_compression_ratio_observed", "L2 compression ratio"),
+        ("l2_bytes_saved_total", "L2 bytes saved total"),
+    ];
+    let parsed: Option<reddb::json::Value> = reddb::json::from_str(body).ok();
+    if let Some(obj) = parsed.as_ref().and_then(|v| v.as_object()) {
+        let mut out = format!("{:<30} {}\n{}\n", "Metric", "Value", "-".repeat(50));
+        for (key, label) in fields {
+            if let Some(val) = obj.get(*key) {
+                out.push_str(&format!("{:<30} {}\n", label, val));
+            }
+        }
+        out
+    } else {
+        format!("{body}\n")
+    }
+}
+
+fn print_cache_stats_pretty(body: &str) {
+    print!("{}", format_cache_stats_pretty(body));
+}
+
+fn bytes_to_base64(data: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut buf: u32 = 0;
+    let mut bits: u8 = 0;
+    for &b in data {
+        buf = (buf << 8) | b as u32;
+        bits += 8;
+        while bits >= 6 {
+            bits -= 6;
+            out.push(CHARS[((buf >> bits) & 0x3F) as usize] as char);
+        }
+    }
+    if bits > 0 {
+        out.push(CHARS[((buf << (6 - bits)) & 0x3F) as usize] as char);
+    }
+    while out.len() % 4 != 0 {
+        out.push('=');
+    }
+    out
+}
+
+fn post_json_to_http_authed(
+    bind_addr: &str,
+    path: &str,
+    payload: &str,
+    token: Option<&str>,
+) -> Result<String, String> {
+    let bind_addr = bind_addr
+        .trim()
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    let mut stream = TcpStream::connect(bind_addr)
+        .map_err(|err| format!("failed to connect to {bind_addr}: {err}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|err| format!("failed to set read timeout: {err}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .map_err(|err| format!("failed to set write timeout: {err}"))?;
+    let auth_line = token
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {host}\r\n{auth_line}Content-Type: application/json\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{payload}",
+        path = path,
+        host = bind_addr,
+        len = payload.len(),
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|err| format!("failed to write request: {err}"))?;
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|err| format!("failed to read response: {err}"))?;
+    let status_line = response
+        .lines()
+        .next()
+        .ok_or_else(|| "empty response from server".to_string())?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|v| v.parse::<u16>().ok())
+        .ok_or_else(|| format!("invalid response status line: {status_line}"))?;
+    let body = response
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b.to_string())
+        .unwrap_or_default();
+    if status >= 400 {
+        Err(format!("server responded with {status}: {body}"))
+    } else {
+        Ok(body)
+    }
+}
+
 fn post_json_to_http(bind_addr: &str, path: &str, payload: &str) -> Result<String, String> {
     let bind_addr = bind_addr
         .trim()
@@ -3360,5 +3728,73 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
         assert_eq!(config.router_bind_addr, None);
         assert_eq!(config.grpc_bind_addr, None);
         assert_eq!(config.http_bind_addr.as_deref(), Some("0.0.0.0:8080"));
+    }
+
+    // --- admin cache output format ---
+
+    #[test]
+    fn format_cache_stats_pretty_renders_header_and_known_fields() {
+        let body = r#"{"ok":true,"hits":10,"misses":2,"entries":5,"bytes_in_use":1024}"#;
+        let out = format_cache_stats_pretty(body);
+        assert!(out.contains("Metric"), "missing header row");
+        assert!(out.contains("Value"), "missing header row");
+        assert!(out.contains("Hits"), "missing Hits row");
+        assert!(out.contains("10"), "missing hits value");
+        assert!(out.contains("Misses"), "missing Misses row");
+        assert!(out.contains("2"), "missing misses value");
+        assert!(out.contains("Entries"), "missing Entries row");
+        assert!(out.contains("L1 bytes in use"), "missing bytes_in_use row");
+        // fields absent from JSON are silently omitted
+        assert!(!out.contains("Evictions"), "unexpected Evictions row");
+    }
+
+    #[test]
+    fn format_cache_stats_pretty_falls_back_to_raw_on_invalid_json() {
+        let body = "not json at all";
+        let out = format_cache_stats_pretty(body);
+        assert_eq!(out.trim(), "not json at all");
+    }
+
+    #[test]
+    fn format_cache_stats_pretty_renders_separator_line() {
+        let body = r#"{"hits":0}"#;
+        let out = format_cache_stats_pretty(body);
+        assert!(out.contains("--------------------------------------------------"));
+    }
+
+    // --- bytes_to_base64 (RFC 4648 §10 test vectors) ---
+
+    #[test]
+    fn bytes_to_base64_empty_input() {
+        assert_eq!(bytes_to_base64(b""), "");
+    }
+
+    #[test]
+    fn bytes_to_base64_one_byte() {
+        // b"f" → "Zg=="
+        assert_eq!(bytes_to_base64(b"f"), "Zg==");
+    }
+
+    #[test]
+    fn bytes_to_base64_two_bytes() {
+        // b"fo" → "Zm8="
+        assert_eq!(bytes_to_base64(b"fo"), "Zm8=");
+    }
+
+    #[test]
+    fn bytes_to_base64_three_bytes_no_padding() {
+        // b"foo" → "Zm9v"
+        assert_eq!(bytes_to_base64(b"foo"), "Zm9v");
+    }
+
+    #[test]
+    fn bytes_to_base64_rfc_test_vector_foobar() {
+        // b"foobar" → "Zm9vYmFy"
+        assert_eq!(bytes_to_base64(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn bytes_to_base64_binary_zeros() {
+        assert_eq!(bytes_to_base64(&[0u8, 0, 0]), "AAAA");
     }
 }

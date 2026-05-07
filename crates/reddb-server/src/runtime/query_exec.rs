@@ -1,5 +1,6 @@
 use super::*;
 use crate::storage::query::ast::{Expr, SelectItem};
+use crate::storage::query::evaluator;
 use crate::storage::query::sql_lowering::{
     effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
     effective_table_projections,
@@ -70,14 +71,11 @@ pub(super) fn execute_runtime_table_query(
             )
         });
         let mut records = if filter_matches {
-            vec![super::join_filter::project_runtime_record_with_db(
+            vec![project_scalar_via_evaluator(
                 Some(db),
-                &source,
+                &query.select_items,
                 &effective_projections,
-                None,
-                None,
-                false,
-                false,
+                &source,
             )]
         } else {
             Vec::new()
@@ -236,6 +234,47 @@ fn expr_is_source_free(expr: &Expr) -> bool {
 
 fn expr_is_path_like(expr: &Expr) -> bool {
     matches!(expr, Expr::Literal { .. } | Expr::Column { .. })
+}
+
+/// Evaluate a source-free scalar SELECT list via [`evaluator::evaluate`].
+///
+/// Used for `SELECT expr [AS alias] FROM any` when every expression is
+/// column-free (no table scan needed). Falls back to
+/// `join_filter::project_runtime_record_with_db` per-projection for special
+/// functions (CONFIG, KV, ML_*) that the new evaluator doesn't handle yet.
+fn project_scalar_via_evaluator(
+    db: Option<&RedDB>,
+    items: &[SelectItem],
+    projections: &[Projection],
+    source: &UnifiedRecord,
+) -> UnifiedRecord {
+    let empty_row: &dyn evaluator::Row = &|_: &FieldRef| -> Option<Value> { None };
+    let mut record = UnifiedRecord::new();
+    for (item, proj) in items.iter().zip(projections.iter()) {
+        let SelectItem::Expr { expr, .. } = item else {
+            continue;
+        };
+        let col_name = super::join_filter::projection_name(proj);
+        let value = match evaluator::evaluate(expr, empty_row) {
+            Ok(v) => v,
+            // Fall back for CONFIG, KV, ML_* and any other special-cased
+            // functions the evaluator does not cover yet.
+            Err(_) => super::join_filter::project_runtime_record_with_db(
+                db,
+                source,
+                std::slice::from_ref(proj),
+                None,
+                None,
+                false,
+                false,
+            )
+            .get(col_name.as_str())
+            .cloned()
+            .unwrap_or(Value::Null),
+        };
+        record.set(&col_name, value);
+    }
+    record
 }
 
 pub(super) fn evaluate_runtime_document_filter(

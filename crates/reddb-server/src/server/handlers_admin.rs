@@ -715,6 +715,49 @@ impl RedDBServer {
         }
     }
 
+    /// `GET /admin/blob_cache/stats` — blob cache telemetry snapshot.
+    ///
+    /// Returns a JSON object with the global [`BlobCacheStats`] counters.
+    /// Optional query parameter `namespace` is reserved for future
+    /// per-namespace filtering; the current implementation ignores it
+    /// and always returns instance-global counters.
+    pub(crate) fn handle_admin_blob_cache_stats(
+        &self,
+        _query: &std::collections::BTreeMap<String, String>,
+    ) -> HttpResponse {
+        let s = self.runtime.result_blob_cache().stats();
+        let mut obj = Map::new();
+        obj.insert("ok".to_string(), JsonValue::Bool(true));
+        obj.insert("hits".to_string(), JsonValue::Number(s.hits() as f64));
+        obj.insert("misses".to_string(), JsonValue::Number(s.misses() as f64));
+        obj.insert("insertions".to_string(), JsonValue::Number(s.insertions() as f64));
+        obj.insert("evictions".to_string(), JsonValue::Number(s.evictions() as f64));
+        obj.insert("expirations".to_string(), JsonValue::Number(s.expirations() as f64));
+        obj.insert("invalidations".to_string(), JsonValue::Number(s.invalidations() as f64));
+        obj.insert("namespace_flushes".to_string(), JsonValue::Number(s.namespace_flushes() as f64));
+        obj.insert("version_mismatches".to_string(), JsonValue::Number(s.version_mismatches() as f64));
+        obj.insert("entries".to_string(), JsonValue::Number(s.entries() as f64));
+        obj.insert("bytes_in_use".to_string(), JsonValue::Number(s.bytes_in_use() as f64));
+        obj.insert("l1_bytes_max".to_string(), JsonValue::Number(s.l1_bytes_max() as f64));
+        obj.insert("l2_bytes_in_use".to_string(), JsonValue::Number(s.l2_bytes_in_use() as f64));
+        obj.insert("l2_bytes_max".to_string(), JsonValue::Number(s.l2_bytes_max() as f64));
+        obj.insert("l2_full_rejections".to_string(), JsonValue::Number(s.l2_full_rejections() as f64));
+        obj.insert("l2_metadata_reads".to_string(), JsonValue::Number(s.l2_metadata_reads() as f64));
+        obj.insert("l2_negative_skips".to_string(), JsonValue::Number(s.l2_negative_skips() as f64));
+        obj.insert("synopsis_metadata_reads".to_string(), JsonValue::Number(s.synopsis_metadata_reads() as f64));
+        obj.insert("synopsis_bytes".to_string(), JsonValue::Number(s.synopsis_bytes() as f64));
+        obj.insert("namespaces".to_string(), JsonValue::Number(s.namespaces() as f64));
+        obj.insert("max_namespaces".to_string(), JsonValue::Number(s.max_namespaces() as f64));
+        obj.insert("promotion_queued".to_string(), JsonValue::Number(s.promotion_queued() as f64));
+        obj.insert("promotion_dropped".to_string(), JsonValue::Number(s.promotion_dropped() as f64));
+        obj.insert("promotion_completed".to_string(), JsonValue::Number(s.promotion_completed() as f64));
+        obj.insert("promotion_queue_depth".to_string(), JsonValue::Number(s.promotion_queue_depth() as f64));
+        obj.insert("l2_compression_ratio_observed".to_string(), JsonValue::Number(s.l2_compression_ratio_observed()));
+        obj.insert("l2_compression_skipped_total".to_string(), JsonValue::Number(s.l2_compression_skipped_total() as f64));
+        obj.insert("l2_bytes_saved_total".to_string(), JsonValue::Number(s.l2_bytes_saved_total() as f64));
+        json_response(200, JsonValue::Object(obj))
+    }
+
     /// `POST /admin/readonly` — flip the public-mutation gate
     /// (PLAN.md Phase 4.3).
     ///
