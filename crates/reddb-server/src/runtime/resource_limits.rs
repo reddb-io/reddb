@@ -116,6 +116,31 @@ impl ResourceLimits {
             _ => false,
         }
     }
+
+    /// Issue #205 — disk-headroom monitor. When `available_bytes` drops
+    /// below `threshold_bytes`, emit a `DiskSpaceCritical` operator
+    /// event. Returns whether the threshold was breached so callers
+    /// can also fail the path that triggered the check. Cheap to call
+    /// per-write: the threshold check is one branch and the emit only
+    /// runs on breach.
+    pub fn check_disk_headroom(
+        &self,
+        path: &str,
+        available_bytes: u64,
+        threshold_bytes: u64,
+    ) -> bool {
+        if threshold_bytes > 0 && available_bytes < threshold_bytes {
+            crate::telemetry::operator_event::OperatorEvent::DiskSpaceCritical {
+                path: path.to_string(),
+                available_bytes,
+                threshold_bytes,
+            }
+            .emit_global();
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Read the active cgroup memory cap, returning bytes when known.

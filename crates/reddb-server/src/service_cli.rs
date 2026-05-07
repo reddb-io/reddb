@@ -857,6 +857,15 @@ async fn spawn_lifecycle_signal_handler(runtime: RedDBRuntime) {
                     }
                     Err(err) => {
                         tracing::error!(error = %err, "graceful shutdown failed");
+                        // Issue #205 — graceful shutdown returning Err
+                        // means the runtime is exiting without a clean
+                        // flush/checkpoint. Operator-grade event so the
+                        // operator notices the dirty exit even when the
+                        // process restarts before they read tracing logs.
+                        crate::telemetry::operator_event::OperatorEvent::ShutdownForced {
+                            reason: format!("graceful shutdown failed: {err}"),
+                        }
+                        .emit_global();
                     }
                 }
                 std::process::exit(0);
@@ -1360,14 +1369,34 @@ pub(crate) fn build_runtime_with_telemetry(
     ),
     String,
 > {
-    let runtime = RedDBRuntime::with_options(db_options.clone()).map_err(|err| err.to_string())?;
+    let runtime = RedDBRuntime::with_options(db_options.clone()).map_err(|err| {
+        // Issue #205 — runtime construction failure is the canonical
+        // StartupFailed phase. The audit sink isn't installed yet
+        // (it would have been registered inside `with_options`), so
+        // the emit falls through to tracing+eprintln only — operator
+        // still sees it on stderr.
+        let msg = err.to_string();
+        crate::telemetry::operator_event::OperatorEvent::StartupFailed {
+            phase: "runtime_construction".to_string(),
+            error: msg.clone(),
+        }
+        .emit_global();
+        msg
+    })?;
 
     // PLAN.md Phase 5 / W6 — opt into serverless writer-lease fencing
     // when `RED_LEASE_REQUIRED=true`. Failure here aborts boot: the
     // operator asked for a fence; running unfenced would silently
     // expose split-brain risk.
-    crate::runtime::lease_loop::start_lease_loop_if_required(&runtime)
-        .map_err(|err| err.to_string())?;
+    crate::runtime::lease_loop::start_lease_loop_if_required(&runtime).map_err(|err| {
+        let msg = err.to_string();
+        crate::telemetry::operator_event::OperatorEvent::StartupFailed {
+            phase: "lease_loop".to_string(),
+            error: msg.clone(),
+        }
+        .emit_global();
+        msg
+    })?;
 
     // Phase 6 logging: merge red_config overrides onto the CLI-built
     // telemetry config, then install the global subscriber.
