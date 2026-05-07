@@ -273,7 +273,26 @@ NUL/CR/LF bytes. The handler rejects adversarial inputs with `400` and
 a structured error message before they reach the cache or the audit
 log.
 
-### 4.3 Background sweeper
+### 4.3 `GET /admin/blob_cache/stats`
+
+Returns a JSON snapshot of global blob cache counters. No body required.
+
+```bash
+curl http://<host>:<port>/admin/blob_cache/stats \
+  -H "Authorization: Bearer $RED_ADMIN_TOKEN"
+```
+
+CLI equivalent:
+
+```bash
+red admin cache stats --bind <host>:<port>
+red admin cache stats --bind <host>:<port> --pretty   # table format
+```
+
+Key fields: `hits`, `misses`, `entries`, `bytes_in_use`, `l2_bytes_in_use`,
+`namespaces`, `l2_compression_ratio_observed`.
+
+### 4.4 Background sweeper
 
 A `sweep_on_startup` runtime knob is still flagged (sweeper.rs flag #5)
 but not wired. Until it lands, scheduled sweeps are operator-driven via
@@ -301,11 +320,33 @@ re-warm from the primary store. Foreground-fast (`<100 µs` typical) —
 no service-impact window. See §4.2 for the full request/response
 contract.
 
-### 5.2 CLI wrapper (NOT YET SHIPPED)
+### 5.2 CLI wrapper
 
-A `red admin blob-cache flush-namespace <namespace>` CLI subcommand is
-proposed but not yet implemented. Until it lands, use the `curl`
-invocation in §5.1 from operator runbooks and incident scripts.
+The `red admin cache` subcommand tree is shipped as of #198. All four
+operations are available:
+
+```bash
+# Flush a namespace
+red admin cache flush-namespace tenant-42:results --bind <host>:<port>
+
+# Sweep expired entries
+red admin cache sweep --bind <host>:<port>
+red admin cache sweep --limit-entries 10000 --limit-millis 200 --bind <host>:<port>
+
+# Read stats
+red admin cache stats --bind <host>:<port>
+
+# CAS update
+red admin cache compare-and-set \
+  --namespace ns --key k \
+  --new-version 2 --value ./value.bin \
+  [--expected-version 1] \
+  --bind <host>:<port>
+```
+
+Set `RED_ADMIN_TOKEN` in the environment to pass the bearer token
+automatically (mirrors `--token`). Set `REDDB_BIND_ADDR` to avoid
+repeating `--bind`.
 
 ### 5.3 Last resort: server restart with cleared cache
 
@@ -390,12 +431,13 @@ Live (no workaround needed):
 | `red.config.backup.include_blob_cache` config knob | §1.1, wired in `runtime/impl_core.rs::trigger_backup` |
 | `POST /admin/blob_cache/sweep` HTTP handler | §4.1 |
 | `POST /admin/blob_cache/flush_namespace` HTTP handler | §4.2, §5.1 |
+| `GET /admin/blob_cache/stats` HTTP handler | §4.3 |
+| `red admin cache` CLI subcommands | §5.2 |
 
 Still pending:
 
 | Capability | Status | Workaround in this runbook |
 |---|---|---|
-| `red admin blob-cache flush-namespace` CLI | **Spec only** | `curl` invocation (§5.1) |
 | `REDDB_CACHE_BLOB_CLEAR_ON_START=1` env var | **Proposed, not implemented** | Manual `rm -rf` before start (§5.3) |
-| `sweep_on_startup` runtime config | **Flagged in sweeper.rs** | Operator-driven sweep cron (§4.3) |
+| `sweep_on_startup` runtime config | **Flagged in sweeper.rs** | Operator-driven sweep cron (§4.4) |
 | `red doctor verify-l2` subcommand | **Proposed** | Trust-but-verify the dump path manually |

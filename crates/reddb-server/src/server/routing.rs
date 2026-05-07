@@ -112,6 +112,10 @@ impl RedDBServer {
             ("POST", "/admin/cache/compare-and-set") => {
                 self.handle_admin_blob_cache_compare_and_set(body)
             }
+            // Issue #198 — blob cache stats endpoint.
+            ("GET", "/admin/blob_cache/stats") => {
+                self.handle_admin_blob_cache_stats(&query)
+            }
             // PLAN.md Phase 11.6 — manual replica → primary promotion.
             ("POST", "/admin/failover/promote") => self.handle_admin_failover_promote(body),
             // PLAN.md Phase 5.1 / 5.4 — observability endpoints.

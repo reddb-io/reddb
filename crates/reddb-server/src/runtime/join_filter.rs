@@ -804,6 +804,22 @@ pub(super) fn evaluate_runtime_filter(
     evaluate_runtime_filter_with_db(None, record, filter, table_name, table_alias)
 }
 
+/// Row adapter for the typed scalar evaluator — bridges `UnifiedRecord`
+/// to `crate::storage::query::evaluator::Row` so that `evaluator::evaluate`
+/// can look up columns via the same `resolve_runtime_field` path used by
+/// the rest of the runtime filter evaluation.
+struct RecordRow<'a> {
+    record: &'a UnifiedRecord,
+    table_name: Option<&'a str>,
+    table_alias: Option<&'a str>,
+}
+
+impl crate::storage::query::evaluator::Row for RecordRow<'_> {
+    fn get(&self, field: &FieldRef) -> Option<Value> {
+        resolve_runtime_field(self.record, field, self.table_name, self.table_alias)
+    }
+}
+
 pub(super) fn evaluate_runtime_filter_with_db(
     db: Option<&RedDB>,
     record: &UnifiedRecord,
@@ -832,25 +848,25 @@ pub(super) fn evaluate_runtime_filter_with_db(
             }
         }
         Filter::CompareExpr { lhs, op, rhs } => {
-            // Evaluate both sides as Expr trees and compare the
-            // resulting Values. Missing / null operands collapse to
-            // false so the predicate acts like SQL three-valued
-            // logic's UNKNOWN → not-matched.
-            let l = super::expr_eval::evaluate_runtime_expr_with_db(
-                db,
-                lhs,
-                record,
-                table_name,
-                table_alias,
-            );
-            let r = super::expr_eval::evaluate_runtime_expr_with_db(
-                db,
-                rhs,
-                record,
-                table_name,
-                table_alias,
-            );
-            match (l, r) {
+            // Route through the typed evaluator (catalog-resolved
+            // operator / cast / function dispatch). Falls back to the
+            // untyped expr_eval walker for CONFIG / KV / ML_* and any
+            // other shape the evaluator does not cover yet.
+            let row = RecordRow { record, table_name, table_alias };
+            let eval_side = |expr| {
+                crate::storage::query::evaluator::evaluate(expr, &row)
+                    .ok()
+                    .or_else(|| {
+                        super::expr_eval::evaluate_runtime_expr_with_db(
+                            db,
+                            expr,
+                            record,
+                            table_name,
+                            table_alias,
+                        )
+                    })
+            };
+            match (eval_side(lhs), eval_side(rhs)) {
                 (Some(lv), Some(rv)) => compare_runtime_values(&lv, &rv, *op),
                 _ => false,
             }
