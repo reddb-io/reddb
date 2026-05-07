@@ -368,6 +368,16 @@ impl AuthStore {
     fn persist_to_vault(&self) {
         if let Err(e) = self.persist_to_vault_result() {
             tracing::error!(err = %e, "vault persist failed");
+            // Issue #205 — vault persist is the secret-rotation
+            // serialization point: when this fails, freshly rotated
+            // credentials live only in memory and a process restart
+            // loses them. Operator-grade event so the operator can
+            // intervene before the next restart.
+            crate::telemetry::operator_event::OperatorEvent::SecretRotationFailed {
+                secret_ref: "auth_vault".to_string(),
+                error: e.to_string(),
+            }
+            .emit_global();
         }
     }
 
@@ -882,8 +892,22 @@ impl AuthStore {
             .get_mut(&id)
             .ok_or_else(|| AuthError::UserNotFound(id.to_string()))?;
 
+        let prior_role = user.role;
         user.role = new_role;
         user.updated_at = now_ms();
+
+        // Issue #205 — promotion to Admin is an operator-grade event:
+        // the new role grants destructive capabilities (DROP, ALTER,
+        // GRANT) that an operator must observe out-of-band even when
+        // the auth path itself is healthy.
+        if new_role == Role::Admin && prior_role != Role::Admin {
+            crate::telemetry::operator_event::OperatorEvent::AdminCapabilityGranted {
+                granted_to: id.to_string(),
+                capability: "Role::Admin".to_string(),
+                granted_by: "auth_store::change_role".to_string(),
+            }
+            .emit_global();
+        }
 
         // Downgrade any API keys that now exceed the user's role.
         for key in &mut user.api_keys {

@@ -2986,6 +2986,32 @@ impl RedDBRuntime {
                                     }
                                     Err(err) => {
                                         self.inner.replica_apply_metrics.record(err.kind());
+                                        // Issue #205 — emit operator-grade event
+                                        // for the two replication-fatal kinds. `Gap`
+                                        // / `Apply` / `Decode` already persist via
+                                        // `persist_replication_health`; the
+                                        // OperatorEvent variants only cover the
+                                        // two "stream is broken" / "follower
+                                        // diverged" conditions an operator must act
+                                        // on out-of-band.
+                                        match &err {
+                                            crate::replication::logical::LogicalApplyError::Divergence { lsn, expected: _, got: _ } => {
+                                                crate::telemetry::operator_event::OperatorEvent::Divergence {
+                                                    peer: "primary".to_string(),
+                                                    leader_lsn: *lsn,
+                                                    follower_lsn: since_lsn,
+                                                }
+                                                .emit_global();
+                                            }
+                                            crate::replication::logical::LogicalApplyError::Gap { last, next } => {
+                                                crate::telemetry::operator_event::OperatorEvent::ReplicationBroken {
+                                                    peer: "primary".to_string(),
+                                                    reason: format!("stalled gap last={last} next={next}"),
+                                                }
+                                                .emit_global();
+                                            }
+                                            _ => {}
+                                        }
                                         let kind = match &err {
                                             crate::replication::logical::LogicalApplyError::Gap { .. } => "stalled_gap",
                                             crate::replication::logical::LogicalApplyError::Divergence { .. } => "divergence",
@@ -3574,10 +3600,24 @@ impl RedDBRuntime {
         // prevent us from durably persisting what's already in memory.
         // The remote upload is the side-effect that risks clobbering a
         // peer's state, so it's behind the lease gate.
-        self.inner
-            .db
-            .flush_local_only()
-            .map_err(|err| RedDBError::Engine(err.to_string()))?;
+        self.inner.db.flush_local_only().map_err(|err| {
+            // Issue #205 — local flush failure is a CheckpointFailed
+            // operator-grade event. The local-flush path also covers
+            // the WAL fsync we depend on, so a failure here doubles as
+            // the WalFsyncFailed signal for the runtime entry point.
+            let msg = err.to_string();
+            crate::telemetry::operator_event::OperatorEvent::CheckpointFailed {
+                lsn: 0,
+                error: msg.clone(),
+            }
+            .emit_global();
+            crate::telemetry::operator_event::OperatorEvent::WalFsyncFailed {
+                path: "<flush_local_only>".to_string(),
+                error: msg.clone(),
+            }
+            .emit_global();
+            RedDBError::Engine(msg)
+        })?;
         if let Err(err) = self.assert_remote_write_allowed("checkpoint") {
             tracing::warn!(
                 target: "reddb::serverless::lease",
@@ -5711,9 +5751,24 @@ impl RedDBRuntime {
                 continue;
             };
             let Some((table, suffix)) = rest.rsplit_once('.') else {
+                // Issue #205 — a `tenant_tables.*` row that doesn't
+                // split cleanly is a schema-shape regression: the
+                // metadata writer must always emit the `.column`
+                // suffix, so reaching this branch means an upgrade
+                // with incompatible state or external tampering.
+                crate::telemetry::operator_event::OperatorEvent::SchemaCorruption {
+                    collection: "red_config".to_string(),
+                    detail: format!("malformed tenant_tables key: {key}"),
+                }
+                .emit_global();
                 continue;
             };
             if suffix != "column" {
+                crate::telemetry::operator_event::OperatorEvent::SchemaCorruption {
+                    collection: "red_config".to_string(),
+                    detail: format!("unexpected tenant_tables suffix: {key}"),
+                }
+                .emit_global();
                 continue;
             }
             match named.get("value") {

@@ -374,6 +374,26 @@ impl StatementExecutionFrame {
         if let Some((username, role)) = <Self as ReadFrame>::identity(self) {
             let needed = <Self as ReadFrame>::required_privilege(self);
             if !needed.is_satisfied_by(role) {
+                // Issue #205 — when the deep grant engine *also*
+                // denies, we treat this as an ordinary permission
+                // failure. But when an Admin-only statement reaches
+                // this gate without an auth_store wired (so the deep
+                // engine can't double-check), the coarse rejection is
+                // the only line of defence — emit an OperatorEvent so
+                // the operator notices an Admin-class statement was
+                // attempted with insufficient role.
+                if matches!(needed, Privilege::Admin)
+                    && runtime.inner.auth_store.read().is_none()
+                {
+                    crate::telemetry::operator_event::OperatorEvent::AuthBypass {
+                        principal: username.to_string(),
+                        resource: format!("statement requiring {needed:?}"),
+                        detail: format!(
+                            "auth_store not wired; coarse gate is sole defence (role={role:?})"
+                        ),
+                    }
+                    .emit_global();
+                }
                 return Err(RedDBError::Query(format!(
                     "permission denied: principal=`{username}` role=`{role:?}` lacks {needed:?} privilege"
                 )));

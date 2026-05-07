@@ -109,6 +109,17 @@ pub fn apply_config_file(store: &UnifiedStore, path: &str) -> usize {
             continue;
         }
         store.set_config_tree(&key, &value);
+        // Issue #205 — applying a config-file overlay mutates live
+        // runtime config. Each newly-seeded key is an operator-grade
+        // ConfigChanged event so the audit trail captures the boot
+        // overlay alongside admin-driven changes.
+        crate::telemetry::operator_event::OperatorEvent::ConfigChanged {
+            key: key.clone(),
+            old_value: String::new(),
+            new_value: format!("{value}"),
+            changed_by: format!("config_overlay::{path}"),
+        }
+        .emit_global();
         written += 1;
     }
     written
