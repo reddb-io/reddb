@@ -31,10 +31,15 @@
 //! directly.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use tracing::{debug, info_span, warn};
+use tracing::{debug, info, info_span, warn};
 
+use super::ai::ner::{
+    AuthContext as NerAuthContext, HeuristicFallback, LlmNer, NerError, NerProvider,
+    NER_CAPABILITY,
+};
 use super::statement_frame::{EffectiveScope, ReadFrame};
 use super::RedDBRuntime;
 use crate::api::{RedDBError, RedDBResult};
@@ -147,9 +152,12 @@ impl AskPipeline {
         );
         let _enter = span.enter();
 
-        // Stage 1.
+        // Stage 1. Routed through `extract_tokens_routed` so the
+        // `ai.ner.backend` config knob can swap the heuristic for the
+        // opt-in LLM NER without converting the surrounding pipeline
+        // to async (see `extract_tokens_routed` for the rationale).
         let stage1 = Instant::now();
-        let tokens = extract_tokens(question);
+        let tokens = extract_tokens_routed(runtime, scope, question)?;
         let extract_us = stage1.elapsed().as_micros() as u64;
         debug!(
             target: "ask_pipeline",
@@ -224,8 +232,153 @@ impl AskPipeline {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 1 — token / entity extraction (heuristic v1).
+// Stage 1 — token / entity extraction (heuristic v1) + opt-in LLM NER routing.
 // ---------------------------------------------------------------------------
+
+/// Stage-1 dispatcher honouring the `ai.ner.backend` config knob.
+///
+/// The pipeline (and `execute_with_limit` in particular) stays
+/// **sync** per #123 deepening to avoid an async cascade through the
+/// rest of `ask_pipeline`. When the operator turns on
+/// `ai.ner.backend = "llm"`, we contain the async surface here by
+/// using `tokio::runtime::Handle::current().block_on(...)` — works
+/// when called from inside an async context (the production HTTP
+/// handler path), falls back to the heuristic with a warn-log when
+/// no Tokio runtime is reachable (sync test contexts and embedded
+/// callers without a runtime).
+///
+/// Auth gate: `LlmNer::extract` checks `ai:ner:read`. Today
+/// `EffectiveScope::has_capability` is a placeholder that always
+/// returns `false`, so a LLM-backend-configured deployment will see
+/// every call deny at the gate and the configured `HeuristicFallback`
+/// fires. A one-shot info log makes that visible in operator logs.
+/// Wiring the real capability check into the auth engine is future
+/// work — the routing seam is in place so that landing the auth
+/// extension is a one-line `EffectiveScope` change.
+fn extract_tokens_routed(
+    runtime: &RedDBRuntime,
+    scope: &EffectiveScope,
+    question: &str,
+) -> RedDBResult<TokenSet> {
+    let backend = runtime.config_string("ai.ner.backend", "heuristic");
+    if backend != "llm" {
+        return Ok(extract_tokens(question));
+    }
+
+    let endpoint = runtime.config_string("ai.ner.endpoint", "");
+    let model = runtime.config_string("ai.ner.model", "");
+    let timeout_ms = runtime
+        .config_string("ai.ner.timeout_ms", "5000")
+        .parse::<u32>()
+        .unwrap_or(5000);
+    let fallback = match runtime
+        .config_string("ai.ner.fallback", "use_heuristic")
+        .as_str()
+    {
+        "empty_on_fail" => HeuristicFallback::EmptyOnFail,
+        "propagate" => HeuristicFallback::Propagate,
+        _ => HeuristicFallback::UseHeuristic,
+    };
+
+    // Endpoint shape decides provider; default to OpenAI-compat when
+    // unspecified — matches the documented config shape.
+    let provider = if endpoint.is_empty() && model.is_empty() {
+        // No network config provided — operator opted into "llm" but
+        // didn't wire a backend. Fall back to a Stub::Empty so the
+        // configured fallback policy fires deterministically.
+        NerProvider::Stub(super::ai::ner::StubBehavior::Empty)
+    } else {
+        NerProvider::OpenAiCompat {
+            endpoint,
+            model,
+        }
+    };
+
+    let mut ner = LlmNer::new(provider, fallback);
+    ner.timeout_ms = timeout_ms;
+
+    let auth = ScopeAuthAdapter(scope);
+    let llm_result = match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            // Use `block_on` from a thread that's not driving the
+            // current runtime — the typical caller is an Axum HTTP
+            // handler running on the multi-thread runtime, so we hop
+            // off via `block_in_place`.
+            tokio::task::block_in_place(|| {
+                handle.block_on(ner.extract(question, scope, &auth))
+            })
+        }
+        Err(_) => {
+            warn!(
+                target: "ask_pipeline",
+                "ai.ner.backend=llm configured but no Tokio runtime reachable from extract_tokens; using heuristic fallback"
+            );
+            return Ok(extract_tokens(question));
+        }
+    };
+
+    match llm_result {
+        Ok(tokens) => Ok(tokens),
+        Err(NerError::AuthDenied) => {
+            log_auth_denial_once();
+            // Auth denials never honour fallback inside `LlmNer`, so
+            // the routing layer applies the configured fallback here
+            // — this is the bridge until the auth engine wires the
+            // capability for real.
+            apply_fallback(fallback, question)
+        }
+        Err(err) => {
+            warn!(
+                target: "ask_pipeline",
+                error = %err,
+                "LlmNer extract failed; honouring HeuristicFallback policy"
+            );
+            apply_fallback(fallback, question)
+        }
+    }
+}
+
+fn apply_fallback(fallback: HeuristicFallback, question: &str) -> RedDBResult<TokenSet> {
+    match fallback {
+        HeuristicFallback::UseHeuristic => Ok(extract_tokens(question)),
+        HeuristicFallback::EmptyOnFail => Ok(TokenSet::default()),
+        HeuristicFallback::Propagate => Err(RedDBError::Query(
+            "ai.ner.backend=llm: extract failed and ai.ner.fallback=propagate".to_string(),
+        )),
+    }
+}
+
+/// One-shot info log for the auth-gate placeholder. Until the auth
+/// engine learns to grant `ai:ner:read`, every routed call denies —
+/// we emit the explainer once per process so logs aren't spammed.
+fn log_auth_denial_once() {
+    static EMITTED: AtomicBool = AtomicBool::new(false);
+    if !EMITTED.swap(true, Ordering::Relaxed) {
+        info!(
+            target: "ask_pipeline",
+            capability = NER_CAPABILITY,
+            "LlmNer routing configured but capability `{}` not yet wired into auth engine; falling back to heuristic",
+            NER_CAPABILITY
+        );
+    }
+}
+
+/// Adapter wrapping `EffectiveScope` so it can drive the
+/// `LlmNer`-side `AuthContext` trait without leaking that trait
+/// across the rest of the runtime.
+struct ScopeAuthAdapter<'a>(&'a EffectiveScope);
+
+impl<'a> std::fmt::Debug for ScopeAuthAdapter<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScopeAuthAdapter").finish_non_exhaustive()
+    }
+}
+
+impl<'a> NerAuthContext for ScopeAuthAdapter<'a> {
+    fn has_capability(&self, capability: &str) -> bool {
+        self.0.has_capability(capability)
+    }
+}
 
 /// Split a question into a [`TokenSet`]. Pure function — no runtime
 /// lookups.
@@ -887,5 +1040,130 @@ mod tests {
             + ctx.timings.schema_us
             + ctx.timings.vector_us
             + ctx.timings.filter_us;
+    }
+
+    // -- Stage 1 routing (Lane 4/5: LlmNer wiring) -------------------
+    //
+    // The routing dispatcher is an `extract_tokens_routed` helper that
+    // reads `ai.ner.backend` and either passes through to the heuristic
+    // (default) or routes through `LlmNer::extract`. Today the
+    // capability gate (`EffectiveScope::has_capability`) is a placeholder
+    // that always returns `false`, so the LLM path always denies and
+    // the configured `HeuristicFallback` policy fires. The tests below
+    // pin every observable: heuristic stays the default, `llm + auth
+    // denied` honours each fallback mode, and the one-shot info log is
+    // best-effort (we don't assert it directly to avoid a coupling to
+    // the global `tracing` subscriber).
+
+    fn write_config(rt: &RedDBRuntime, key: &str, value: &str) {
+        let store = rt.inner.db.store();
+        store.set_config_tree(
+            key,
+            &crate::serde_json::Value::String(value.to_string()),
+        );
+    }
+
+    /// Default backend stays heuristic — even with an open scope, the
+    /// pipeline returns the same tokens it would without any config.
+    #[test]
+    fn routed_default_backend_runs_heuristic() {
+        let rt = fresh_runtime();
+        let scope = make_scope(HashSet::new());
+        let tokens = extract_tokens_routed(&rt, &scope, "passport FDD-12313")
+            .expect("heuristic path is infallible");
+        assert!(tokens.keywords.contains(&"passport".to_string()));
+        assert!(tokens.literals.contains(&"FDD-12313".to_string()));
+    }
+
+    /// `backend = llm` with `fallback = use_heuristic`: capability
+    /// denies (placeholder) → fallback → heuristic tokens surface.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn routed_llm_auth_denied_uses_heuristic_fallback() {
+        let rt = fresh_runtime();
+        write_config(&rt, "ai.ner.backend", "llm");
+        write_config(&rt, "ai.ner.fallback", "use_heuristic");
+        let scope = make_scope(HashSet::new());
+        let tokens = tokio::task::spawn_blocking(move || {
+            extract_tokens_routed(&rt, &scope, "passport FDD-12313")
+        })
+        .await
+        .unwrap()
+        .expect("fallback policy keeps the call OK");
+        assert!(tokens.keywords.contains(&"passport".to_string()));
+        assert!(tokens.literals.contains(&"FDD-12313".to_string()));
+    }
+
+    /// `backend = llm` with `fallback = empty_on_fail`: auth denies →
+    /// fallback returns an empty `TokenSet`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn routed_llm_auth_denied_empty_on_fail() {
+        let rt = fresh_runtime();
+        write_config(&rt, "ai.ner.backend", "llm");
+        write_config(&rt, "ai.ner.fallback", "empty_on_fail");
+        let scope = make_scope(HashSet::new());
+        let tokens = tokio::task::spawn_blocking(move || {
+            extract_tokens_routed(&rt, &scope, "passport FDD-12313")
+        })
+        .await
+        .unwrap()
+        .expect("empty_on_fail returns Ok with empty TokenSet");
+        assert!(tokens.is_empty(), "expected empty TokenSet, got {tokens:?}");
+    }
+
+    /// `backend = llm` with `fallback = propagate`: auth denies →
+    /// `extract_tokens_routed` surfaces a `RedDBError::Query` so the
+    /// caller can decide.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn routed_llm_auth_denied_propagate_returns_error() {
+        let rt = fresh_runtime();
+        write_config(&rt, "ai.ner.backend", "llm");
+        write_config(&rt, "ai.ner.fallback", "propagate");
+        let scope = make_scope(HashSet::new());
+        let err = tokio::task::spawn_blocking(move || {
+            extract_tokens_routed(&rt, &scope, "passport FDD-12313")
+        })
+        .await
+        .unwrap()
+        .expect_err("propagate must surface the error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("propagate") || msg.contains("ai.ner.backend"),
+            "expected propagate error message, got: {msg}"
+        );
+    }
+
+    /// AskPipeline end-to-end with `backend = llm` and the default
+    /// `use_heuristic` fallback: the pipeline still returns tokens (via
+    /// fallback), Stage 1 is the only routed stage, and the rest of the
+    /// funnel runs unchanged.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn execute_with_llm_backend_falls_back_and_completes_pipeline() {
+        let rt = fresh_runtime();
+        write_config(&rt, "ai.ner.backend", "llm");
+        // default fallback is use_heuristic — leave it implicit.
+        rt.execute_query("CREATE TABLE travel (id INT, passport TEXT, notes TEXT)")
+            .expect("CREATE TABLE travel");
+        rt.execute_query(
+            "INSERT INTO travel (id, passport, notes) VALUES \
+             (2, 'PT-002', 'incident FDD-12313 escalated')",
+        )
+        .expect("seed rows");
+        let visible: HashSet<String> = ["travel".to_string()].into_iter().collect();
+        let scope = make_scope(visible);
+        let ctx = tokio::task::spawn_blocking(move || {
+            AskPipeline::execute(&rt, &scope, "passport FDD-12313")
+        })
+        .await
+        .unwrap()
+        .expect("pipeline runs");
+        assert!(ctx.tokens.keywords.contains(&"passport".to_string()));
+        assert!(ctx.tokens.literals.contains(&"FDD-12313".to_string()));
+        assert_eq!(ctx.candidates.collections, vec!["travel".to_string()]);
+        assert!(
+            ctx.filtered_rows
+                .iter()
+                .any(|r| r.matched_literal == "FDD-12313"),
+            "Stage 4 still runs after Stage 1 fallback"
+        );
     }
 }
