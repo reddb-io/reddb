@@ -140,6 +140,40 @@ pub const MATRIX: &[ConfigDefault] = &[
         tier: Tier::Critical,
         default: || JsonValue::Bool(true),
     },
+    // ai.ner.* — opt-in LLM backend for AskPipeline Stage 1 (issue #189).
+    // Default backend stays heuristic so existing deployments keep
+    // their current behaviour without operator action.
+    ConfigDefault {
+        key: "ai.ner.backend",
+        tier: Tier::Optional,
+        default: || text("heuristic"),
+    },
+    ConfigDefault {
+        key: "ai.ner.endpoint",
+        tier: Tier::Optional,
+        default: || text(""),
+    },
+    ConfigDefault {
+        key: "ai.ner.model",
+        tier: Tier::Optional,
+        default: || text(""),
+    },
+    ConfigDefault {
+        key: "ai.ner.timeout_ms",
+        tier: Tier::Optional,
+        default: || num(5000.0),
+    },
+    ConfigDefault {
+        key: "ai.ner.fallback",
+        tier: Tier::Optional,
+        default: || text("use_heuristic"),
+    },
+    // cache.blob.policy.* — extended TTL hot-path opt-in (issue #189).
+    ConfigDefault {
+        key: "cache.blob.policy.extended",
+        tier: Tier::Optional,
+        default: || text("off"),
+    },
 ];
 
 /// Fetch the JSON default for a matrix key. Returns `None` when the

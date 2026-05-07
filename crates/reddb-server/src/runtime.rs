@@ -812,6 +812,7 @@ pub struct RuntimeConnection {
     inner: Arc<RuntimeInner>,
 }
 
+pub mod ai;
 pub mod ask_pipeline;
 pub mod audit_log;
 pub mod audit_query;

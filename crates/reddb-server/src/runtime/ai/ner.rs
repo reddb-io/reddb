@@ -35,7 +35,8 @@
 
 use std::time::Duration;
 
-use serde_json::Value as JsonValue;
+use crate::serde_json as crate_json;
+use crate::serde_json::Value as JsonValue;
 
 use crate::runtime::ask_pipeline::{extract_tokens as heuristic_extract_tokens, TokenSet};
 use crate::runtime::statement_frame::EffectiveScope;
@@ -316,7 +317,7 @@ impl LlmNer {
         question: &str,
         scope: &EffectiveScope,
     ) -> Result<TokenSet, NerError> {
-        let body = serde_json::json!({
+        let body = crate_json::json!({
             "model": model,
             "response_format": { "type": "json_object" },
             "messages": [
@@ -351,7 +352,7 @@ impl LlmNer {
         question: &str,
         scope: &EffectiveScope,
     ) -> Result<TokenSet, NerError> {
-        let body = serde_json::json!({
+        let body = crate_json::json!({
             "model": model,
             "max_tokens": 1024,
             "system": NER_SYSTEM_PROMPT,
@@ -405,7 +406,7 @@ fn build_prompt(question: &str, scope: &EffectiveScope) -> String {
 #[cfg(feature = "ai-ner-network")]
 async fn http_post_json(
     endpoint: &str,
-    body: &serde_json::Value,
+    body: &crate_json::Value,
     timeout_ms: u32,
 ) -> Result<String, NerError> {
     let client = reqwest::Client::builder()
@@ -438,7 +439,7 @@ async fn http_post_json(
 
 #[cfg(feature = "ai-ner-network")]
 fn extract_openai_payload(raw: &str) -> Result<String, NerError> {
-    let v: JsonValue = serde_json::from_str(raw).map_err(|e| NerError::ResponseMalformed {
+    let v: JsonValue = crate_json::from_str(raw).map_err(|e| NerError::ResponseMalformed {
         reason: format!("outer json: {e}"),
     })?;
     v["choices"][0]["message"]["content"]
@@ -451,7 +452,7 @@ fn extract_openai_payload(raw: &str) -> Result<String, NerError> {
 
 #[cfg(feature = "ai-ner-network")]
 fn extract_anthropic_payload(raw: &str) -> Result<String, NerError> {
-    let v: JsonValue = serde_json::from_str(raw).map_err(|e| NerError::ResponseMalformed {
+    let v: JsonValue = crate_json::from_str(raw).map_err(|e| NerError::ResponseMalformed {
         reason: format!("outer json: {e}"),
     })?;
     v["content"][0]["text"]
@@ -478,7 +479,7 @@ fn scrub_excerpt(s: &str) -> String {
 /// All policy lives here so both the network and stub paths share the
 /// exact same defenses.
 fn parse_and_sanitize(raw: &str, max_tokens: usize) -> Result<TokenSet, NerError> {
-    let parsed: JsonValue = serde_json::from_str(raw).map_err(|e| NerError::ResponseMalformed {
+    let parsed: JsonValue = crate_json::from_str(raw).map_err(|e| NerError::ResponseMalformed {
         reason: format!("json parse: {e}"),
     })?;
     let obj = parsed.as_object().ok_or_else(|| NerError::ResponseMalformed {
@@ -847,7 +848,7 @@ mod tests {
     async fn token_cap_excess_is_rejected() {
         // Build a payload with 33 keywords (one over default 32).
         let kws: Vec<String> = (0..33).map(|i| format!("kw{i}")).collect();
-        let raw = serde_json::json!({ "keywords": kws }).to_string();
+        let raw = crate_json::json!({ "keywords": kws }).to_string();
         let ner = LlmNer::new(
             NerProvider::Stub(StubBehavior::RawJson(raw)),
             HeuristicFallback::Propagate,
@@ -865,7 +866,7 @@ mod tests {
     #[tokio::test]
     async fn token_cap_at_limit_succeeds() {
         let kws: Vec<String> = (0..DEFAULT_MAX_TOKENS).map(|i| format!("kw{i}")).collect();
-        let raw = serde_json::json!({ "keywords": kws }).to_string();
+        let raw = crate_json::json!({ "keywords": kws }).to_string();
         let ner = LlmNer::new(
             NerProvider::Stub(StubBehavior::RawJson(raw)),
             HeuristicFallback::Propagate,

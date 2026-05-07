@@ -29,6 +29,9 @@
 pub mod aggregates;
 pub mod bgwriter;
 pub mod blob;
+pub mod compressor;
+pub mod extended_ttl;
+pub mod promotion_pool;
 pub mod result;
 pub mod ring;
 pub mod sieve;
@@ -37,6 +40,12 @@ pub mod strategy;
 pub mod sweeper;
 
 pub use aggregates::{AggCacheStats, AggValue, AggregationCache, CardinalityEstimate, NumericAgg};
+pub use compressor::{CompressError, CompressOpts, Compressed, L2BlobCompressor};
+pub use extended_ttl::{EffectiveExpiry, ExpiryDecision, ExtendedTtlPolicy};
+pub use promotion_pool::{
+    AsyncPromotionPool, PoolOpts, PromotionExecutor, PromotionMetrics, PromotionRequest,
+    ScheduleOutcome,
+};
 pub use blob::{
     BlobCache, BlobCacheConfig, BlobCacheHit, BlobCachePolicy, BlobCachePut, BlobCacheStats,
     CacheError, L1Admission, DEFAULT_BLOB_L1_BYTES_MAX, DEFAULT_BLOB_L2_BYTES_MAX,
