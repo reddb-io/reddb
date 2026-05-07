@@ -33,6 +33,7 @@ const LOG_BUFFER_LINES: usize = 1_000_000;
 pub mod admin_intent_log;
 pub mod janitor;
 pub mod operator_event;
+pub mod operator_event_router;
 #[cfg(feature = "otel")]
 pub mod otel;
 pub mod slow_query_logger;
