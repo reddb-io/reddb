@@ -1672,9 +1672,14 @@ impl RedDBRuntime {
                     // default conservatively (1 s, 100% sampling) so
                     // emitted lines are rare and complete. Operators
                     // tune via env / config matrix in a follow-up.
+                    //
+                    // `data_path` points at the primary `.rdb` *file*
+                    // (mirrors AuditLogger::for_data_path), so we
+                    // anchor the slow log at its parent directory.
                     let log_dir = options
                         .data_path
-                        .clone()
+                        .as_ref()
+                        .and_then(|p| p.parent().map(std::path::PathBuf::from))
                         .unwrap_or_else(|| std::env::temp_dir().join("reddb"));
                     let threshold_ms = std::env::var("RED_SLOW_QUERY_THRESHOLD_MS")
                         .ok()
