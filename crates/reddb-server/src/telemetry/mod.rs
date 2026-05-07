@@ -30,6 +30,7 @@ use tracing_subscriber::{fmt, EnvFilter, Registry};
 /// painful than the memory.
 const LOG_BUFFER_LINES: usize = 1_000_000;
 
+pub mod admin_intent_log;
 pub mod janitor;
 pub mod operator_event;
 #[cfg(feature = "otel")]
