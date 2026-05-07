@@ -11,10 +11,14 @@ use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock;
+
+use super::promotion_pool::{
+    AsyncPromotionPool, PoolOpts, PromotionExecutor, PromotionRequest,
+};
 
 pub const DEFAULT_BLOB_L1_BYTES_MAX: usize = 256 * 1024 * 1024;
 pub const DEFAULT_BLOB_L2_BYTES_MAX: u64 = 4 * 1024 * 1024 * 1024;
@@ -495,6 +499,12 @@ pub struct BlobCacheStats {
     synopsis_bytes: u64,
     namespaces: usize,
     max_namespaces: usize,
+    /// Async promotion pool counters (issue #193). All zero when the
+    /// pool is not enabled (default — `cache.blob.async_promotion = "off"`).
+    promotion_queued: u64,
+    promotion_dropped: u64,
+    promotion_completed: u64,
+    promotion_queue_depth: usize,
 }
 
 impl BlobCacheStats {
@@ -587,6 +597,30 @@ impl BlobCacheStats {
 
     pub fn max_namespaces(&self) -> usize {
         self.max_namespaces
+    }
+
+    /// Total promotion requests successfully enqueued by `get` since boot.
+    /// `0` when async promotion is disabled.
+    pub fn promotion_queued(&self) -> u64 {
+        self.promotion_queued
+    }
+
+    /// Total promotion requests dropped on queue saturation since boot.
+    /// `0` when async promotion is disabled.
+    pub fn promotion_dropped(&self) -> u64 {
+        self.promotion_dropped
+    }
+
+    /// Total promotion requests executed by workers since boot.
+    /// `0` when async promotion is disabled.
+    pub fn promotion_completed(&self) -> u64 {
+        self.promotion_completed
+    }
+
+    /// Snapshot of pending requests in the promotion queue.
+    /// `0` when async promotion is disabled.
+    pub fn promotion_queue_depth(&self) -> usize {
+        self.promotion_queue_depth
     }
 }
 
@@ -1566,6 +1600,11 @@ pub struct BlobCache {
     l2: Option<Arc<BlobCacheL2>>,
     bytes_in_use: AtomicUsize,
     stats: AtomicStats,
+    /// Optional async L2->L1 promotion pool (issue #193). When `None`,
+    /// `get` performs the L1 promotion synchronously on the read path.
+    /// When set via `enable_async_promotion`, L2 hits return bytes to
+    /// the caller immediately and the L1 install runs on a worker.
+    promotion_pool: OnceLock<Arc<AsyncPromotionPool>>,
 }
 
 // Compile-time guarantee that the documented `Send + Sync` contract above
@@ -1602,6 +1641,7 @@ impl BlobCache {
             l2: l2.map(Arc::new),
             bytes_in_use: AtomicUsize::new(0),
             stats: AtomicStats::new(),
+            promotion_pool: OnceLock::new(),
         }
     }
 
@@ -1726,6 +1766,33 @@ impl BlobCache {
             }
             Lookup::Miss => {
                 drop(shard);
+                if let Some(pool) = self.promotion_pool.get() {
+                    // Async path: do the L2 read (we owe the bytes to the
+                    // caller right now) but defer the L1 install onto the
+                    // worker pool. Caller does not pay promotion bookkeeping.
+                    if let Some(l2) = self.l2.as_ref() {
+                        if let Some(entry) = l2.get(&cache_key, now_ms, namespace_generation) {
+                            let hit = entry.hit();
+                            // Drop the freshly-fetched Entry — the worker will
+                            // re-fetch it. Cost: one extra L2 metadata read +
+                            // blob read per L2 hit while async mode is on.
+                            // Acceptable trade-off for opt-in mode; documented
+                            // in the PR.
+                            drop(entry);
+                            let request = PromotionRequest {
+                                namespace: cache_key.namespace.clone(),
+                                key: cache_key.key.clone(),
+                                bytes: Arc::clone(hit.bytes()),
+                                policy: BlobCachePolicy::default(),
+                            };
+                            let _ = pool.schedule(request);
+                            self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                            return Some(hit);
+                        }
+                    }
+                    self.stats.misses.fetch_add(1, Ordering::Relaxed);
+                    return None;
+                }
                 if let Some(hit) =
                     self.rehydrate_l2_entry(&cache_key, now_ms, namespace_generation, shard_idx)
                 {
@@ -1952,7 +2019,87 @@ impl BlobCache {
             synopsis_bytes: self.l2.as_ref().map_or(0, |l2| l2.stats_synopsis_bytes()),
             namespaces: self.namespaces.read().len(),
             max_namespaces: self.config.max_namespaces,
+            promotion_queued: self
+                .promotion_pool
+                .get()
+                .map_or(0, |p| p.metrics().queued_total),
+            promotion_dropped: self
+                .promotion_pool
+                .get()
+                .map_or(0, |p| p.metrics().dropped_total),
+            promotion_completed: self
+                .promotion_pool
+                .get()
+                .map_or(0, |p| p.metrics().completed_total),
+            promotion_queue_depth: self
+                .promotion_pool
+                .get()
+                .map_or(0, |p| p.metrics().queue_depth),
         }
+    }
+
+    // -- Async promotion (issue #193) ---------------------------------------
+
+    /// Initialize the async L2->L1 promotion pool. Must be called on an
+    /// `Arc<Self>` so the executor closure can hold a `Weak<Self>` (no
+    /// reference cycle).
+    ///
+    /// Idempotent on first call only — `OnceLock` semantics: a second call
+    /// returns the previously-installed pool unchanged. The returned `Arc`
+    /// can be used by callers that want to inspect metrics directly; most
+    /// callers should ignore it and read metrics via `stats()`.
+    pub fn enable_async_promotion(self: &Arc<Self>, opts: PoolOpts) -> Arc<AsyncPromotionPool> {
+        let weak: Weak<Self> = Arc::downgrade(self);
+        let executor: PromotionExecutor = Arc::new(move |req| {
+            // Upgrade only at execution time. If the cache has been
+            // dropped, the worker silently no-ops (executor never holds
+            // a strong ref between calls).
+            let Some(cache) = weak.upgrade() else {
+                return Ok(());
+            };
+            cache.promote_from_l2(&req)
+        });
+        let pool = AsyncPromotionPool::new_with_executor(opts, executor);
+        match self.promotion_pool.set(Arc::clone(&pool)) {
+            Ok(()) => pool,
+            // Race: another caller already initialized. Drain ours and
+            // return the winner. The losing pool's workers are spawned;
+            // shutdown drains them out gracefully.
+            Err(losing_pool) => {
+                losing_pool.shutdown();
+                Arc::clone(self.promotion_pool.get().expect("OnceLock set+get inconsistency"))
+            }
+        }
+    }
+
+    /// Drain and stop the async promotion pool, if enabled. Safe to call
+    /// from `Drop` impls / test teardown — no-op when the pool was never
+    /// initialized.
+    pub fn shutdown_async_promotion(&self) {
+        if let Some(pool) = self.promotion_pool.get() {
+            Arc::clone(pool).shutdown();
+        }
+    }
+
+    /// Test-only escape hatch: schedule outcome of the most recent attempt
+    /// is internal; tests assert on `stats()` counters instead.
+    #[cfg(test)]
+    fn promotion_pool_handle(&self) -> Option<Arc<AsyncPromotionPool>> {
+        self.promotion_pool.get().cloned()
+    }
+
+    /// Test-only: install a custom executor (e.g. one that sleeps to
+    /// expose the hot-path / worker-path latency split). Used by the
+    /// async-promotion wiring tests in this file.
+    #[cfg(test)]
+    fn enable_async_promotion_with_executor(
+        self: &Arc<Self>,
+        opts: PoolOpts,
+        executor: PromotionExecutor,
+    ) -> Arc<AsyncPromotionPool> {
+        let pool = AsyncPromotionPool::new_with_executor(opts, executor);
+        let _ = self.promotion_pool.set(Arc::clone(&pool));
+        pool
     }
 
     pub fn config(&self) -> &BlobCacheConfig {
@@ -2014,6 +2161,18 @@ impl BlobCache {
         let l2 = self.l2.as_ref()?;
         let entry = l2.get(key, now_ms, namespace_generation)?;
         let hit = entry.hit();
+        self.do_l1_promotion_sync(key, entry, shard_idx);
+        Some(hit)
+    }
+
+    /// Pure L1 install bookkeeping: shard write-lock, byte accounting,
+    /// eviction loop. Extracted so the async promotion pool can call it
+    /// from a worker (issue #193, lane 1/5).
+    ///
+    /// This is intentionally side-effect-only — it does not touch hit/miss
+    /// stats (the caller already counted the hit) and does not return the
+    /// `BlobCacheHit` (the caller already handed bytes to the user).
+    fn do_l1_promotion_sync(&self, key: &BlobCacheKey, entry: Entry, shard_idx: usize) {
         let entry_size = entry.size;
         let mut shard = self.shards[shard_idx].write();
         let outcome = shard.insert(key.clone(), entry);
@@ -2027,7 +2186,26 @@ impl BlobCache {
                 .fetch_sub(old_size - entry_size, Ordering::Relaxed);
         }
         self.evict_until_within_budget(shard_idx);
-        Some(hit)
+    }
+
+    /// Worker-side promotion path: re-fetch the entry from L2 and run the
+    /// L1 install bookkeeping. Idempotent — re-promoting a key that the
+    /// hot path already promoted (race with another reader) is harmless.
+    /// Returns `Err` only when L2 is unavailable or the key is no longer
+    /// present at L2 (silently treated as a no-op upstream).
+    fn promote_from_l2(&self, req: &PromotionRequest) -> Result<(), String> {
+        let l2 = self
+            .l2
+            .as_ref()
+            .ok_or_else(|| "promotion executor invoked without L2 configured".to_string())?;
+        let cache_key = BlobCacheKey::new(req.namespace.as_str(), req.key.as_str());
+        let now_ms = unix_now_ms();
+        let namespace_generation = self.current_generation(req.namespace.as_str());
+        if let Some(entry) = l2.get(&cache_key, now_ms, namespace_generation) {
+            let shard_idx = self.shard_index(&cache_key);
+            self.do_l1_promotion_sync(&cache_key, entry, shard_idx);
+        }
+        Ok(())
     }
 
     fn ensure_namespace(&self, namespace: &str) -> Result<(), CacheError> {
@@ -3334,6 +3512,10 @@ mod tests {
         assert_eq!(stats.synopsis_bytes(), stats.synopsis_bytes);
         assert_eq!(stats.namespaces(), stats.namespaces);
         assert_eq!(stats.max_namespaces(), stats.max_namespaces);
+        assert_eq!(stats.promotion_queued(), stats.promotion_queued);
+        assert_eq!(stats.promotion_dropped(), stats.promotion_dropped);
+        assert_eq!(stats.promotion_completed(), stats.promotion_completed);
+        assert_eq!(stats.promotion_queue_depth(), stats.promotion_queue_depth);
     }
 
     #[test]
@@ -3677,5 +3859,235 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("blob-cache.ctl"));
         let _ = std::fs::remove_file(path.with_extension("dwb"));
+    }
+
+    // -- Async promotion wiring (issue #193, lane 1/5) ----------------------
+
+    fn cleanup_l2(path: &Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path.with_extension("blob-cache.ctl"));
+        let _ = std::fs::remove_file(path.with_extension("dwb"));
+    }
+
+    /// Slow executor that sleeps `delay` then increments a counter.
+    /// Used to make the hot-path / worker-path latency split observable
+    /// without relying on real L2 read time.
+    fn slow_executor(
+        delay: std::time::Duration,
+        counter: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> PromotionExecutor {
+        Arc::new(move |_req| {
+            std::thread::sleep(delay);
+            counter.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        })
+    }
+
+    /// Hot-path latency on an L2-hit drops to near-zero when async
+    /// promotion is enabled — the slow executor only blocks the worker.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn l2_hit_with_async_on_returns_immediately() {
+        let path = l2_path("async-on");
+        let cache = Arc::new(l2_cache(&path));
+        // Seed L2: put then evict from L1 by namespace flush so next get
+        // misses L1 and re-reads L2.
+        cache
+            .put("ns", "k", BlobCachePut::new(b"hello".to_vec()))
+            .expect("put");
+        // Force L1 eviction of "k" by overflowing the byte cap with fillers.
+        for i in 0..40 {
+            cache
+                .put("ns", &format!("filler{i}"), BlobCachePut::new(vec![0u8; 16]))
+                .expect("filler");
+        }
+
+        let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        cache.enable_async_promotion_with_executor(
+            PoolOpts {
+                queue_capacity: 16,
+                worker_count: 1,
+            },
+            slow_executor(std::time::Duration::from_millis(50), Arc::clone(&executed)),
+        );
+
+        let start = std::time::Instant::now();
+        let hit = cache.get("ns", "k").expect("L2 hit");
+        let elapsed = start.elapsed();
+        assert_eq!(&*hit.bytes, b"hello");
+        eprintln!("async-on hot-path latency: {elapsed:?}");
+        assert!(
+            elapsed < std::time::Duration::from_millis(20),
+            "hot path should not block on slow executor; elapsed={elapsed:?}"
+        );
+
+        // Wait for the worker to drain so cleanup is sound.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while executed.load(Ordering::Relaxed) == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(executed.load(Ordering::Relaxed) >= 1, "worker did not run");
+
+        cache.shutdown_async_promotion();
+        cleanup_l2(&path);
+    }
+
+    /// Same slow executor, but with async OFF (default). The hot path
+    /// pays the full sync promotion cost — but with no executor in the
+    /// loop it should still be fast. Sanity: opt-in didn't break legacy.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn l2_hit_with_async_off_uses_legacy_sync_path() {
+        let path = l2_path("async-off");
+        let cache = Arc::new(l2_cache(&path));
+        cache
+            .put("ns", "k", BlobCachePut::new(b"hello".to_vec()))
+            .expect("put");
+        for i in 0..40 {
+            cache
+                .put("ns", &format!("filler{i}"), BlobCachePut::new(vec![0u8; 16]))
+                .expect("filler");
+        }
+        // Async NOT enabled — pool is None.
+        assert!(cache.promotion_pool_handle().is_none());
+
+        let start = std::time::Instant::now();
+        let hit = cache.get("ns", "k").expect("L2 hit");
+        let elapsed = start.elapsed();
+        eprintln!("async-off (legacy sync) hot-path latency: {elapsed:?}");
+        assert_eq!(&*hit.bytes, b"hello");
+        // Stats show zero promotion activity in legacy mode.
+        let s = cache.stats();
+        assert_eq!(s.promotion_queued(), 0);
+        assert_eq!(s.promotion_completed(), 0);
+        assert_eq!(s.promotion_dropped(), 0);
+        assert_eq!(s.promotion_queue_depth(), 0);
+
+        cleanup_l2(&path);
+    }
+
+    /// Saturating the promotion queue does not corrupt `get`'s response —
+    /// the L2 read still happens on the hot path, so callers always see
+    /// the correct bytes even when the pool drops the promotion.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drop_on_saturation_never_loses_correctness() {
+        let path = l2_path("async-saturate");
+        let cache = Arc::new(l2_cache(&path));
+        // Seed many distinct keys in L2.
+        for i in 0..32 {
+            cache
+                .put("ns", &format!("k{i}"), BlobCachePut::new(vec![i as u8; 4]))
+                .expect("put");
+        }
+        // Evict L1.
+        for i in 0..40 {
+            cache
+                .put("ns", &format!("filler{i}"), BlobCachePut::new(vec![0u8; 16]))
+                .expect("filler");
+        }
+        // Tiny queue, sleep-forever-ish executor — first request blocks
+        // the worker, queue saturates almost instantly.
+        let blocked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        cache.enable_async_promotion_with_executor(
+            PoolOpts {
+                queue_capacity: 1,
+                worker_count: 1,
+            },
+            slow_executor(std::time::Duration::from_millis(500), Arc::clone(&blocked)),
+        );
+
+        // Hammer the cache; bytes must always come back unchanged.
+        for i in 0..32 {
+            let hit = cache.get("ns", &format!("k{i}")).expect("L2 hit");
+            assert_eq!(&*hit.bytes, &vec![i as u8; 4][..]);
+        }
+
+        let s = cache.stats();
+        assert!(
+            s.promotion_dropped() > 0,
+            "expected at least one drop under saturation; got {s:?}"
+        );
+
+        cache.shutdown_async_promotion();
+        cleanup_l2(&path);
+    }
+
+    /// Shutdown drains queued requests within a bounded budget.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn shutdown_drains_pool_within_budget() {
+        let path = l2_path("async-shutdown");
+        let cache = Arc::new(l2_cache(&path));
+        for i in 0..20 {
+            cache
+                .put("ns", &format!("k{i}"), BlobCachePut::new(vec![i as u8; 4]))
+                .expect("put");
+        }
+        for i in 0..40 {
+            cache
+                .put("ns", &format!("filler{i}"), BlobCachePut::new(vec![0u8; 16]))
+                .expect("filler");
+        }
+        let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        cache.enable_async_promotion_with_executor(
+            PoolOpts {
+                queue_capacity: 64,
+                worker_count: 2,
+            },
+            slow_executor(std::time::Duration::from_millis(1), Arc::clone(&executed)),
+        );
+
+        let mut scheduled = 0u64;
+        for i in 0..20 {
+            let _ = cache.get("ns", &format!("k{i}"));
+            // Each L2 hit schedules at most one promotion.
+            scheduled += 1;
+        }
+        cache.shutdown_async_promotion();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let s = cache.stats();
+            if s.promotion_completed() + s.promotion_dropped() >= scheduled {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("shutdown did not drain: {:?}", cache.stats());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        cleanup_l2(&path);
+    }
+
+    /// The executor closure holds only a `Weak<BlobCache>` — dropping the
+    /// `Arc<BlobCache>` releases the cache even while the pool is alive.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_arc_cycle_executor_holds_only_weak_reference() {
+        let path = l2_path("async-noarccycle");
+        let cache = Arc::new(l2_cache(&path));
+        let pool = cache.enable_async_promotion(PoolOpts {
+            queue_capacity: 4,
+            worker_count: 1,
+        });
+
+        // Construct the canary weak BEFORE we drop the strong arc.
+        let canary: Weak<BlobCache> = Arc::downgrade(&cache);
+        assert!(canary.upgrade().is_some());
+
+        // Drop the user-held strong arc. The pool itself may still hold
+        // refs to its own internal queue/executor, but the executor
+        // closure was built on a `Weak<BlobCache>`, so the cache should
+        // be deallocatable.
+        drop(cache);
+
+        // Pool is still alive (its workers are running), but the cache
+        // is gone — the canary cannot be upgraded.
+        assert!(
+            canary.upgrade().is_none(),
+            "BlobCache leaked: executor closure still holds a strong reference"
+        );
+
+        // Cleanup: tell the pool to stop. We can't call shutdown via the
+        // cache (it's dropped) but we have the pool handle.
+        Arc::clone(&pool).shutdown();
+        cleanup_l2(&path);
     }
 }

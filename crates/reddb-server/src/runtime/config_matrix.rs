@@ -174,6 +174,15 @@ pub const MATRIX: &[ConfigDefault] = &[
         tier: Tier::Optional,
         default: || text("off"),
     },
+    // cache.blob.async_promotion — async L2->L1 promotion pool opt-in
+    // (issue #193). When "on", L2 hits return bytes to the caller
+    // immediately and the L1 install runs on a background worker.
+    // Default "off" for safe rollout — legacy synchronous promotion path.
+    ConfigDefault {
+        key: "cache.blob.async_promotion",
+        tier: Tier::Optional,
+        default: || text("off"),
+    },
 ];
 
 /// Fetch the JSON default for a matrix key. Returns `None` when the
