@@ -299,6 +299,38 @@ Listing them here so nobody has to re-derive the boundary later:
 
 ---
 
+## Public API surface — decision (2026-05-07, resolves #200)
+
+The Blob Cache exposes itself through **two surfaces, by design**:
+
+1. **SDK** — `@reddb-io/sdk` (JS/TS, #196), `@reddb-io/client` (thin
+   remote, #196), and `drivers/python` (#197). Application code calls
+   `cache.get / put / invalidate` and gets typed responses without
+   protocol code. Developer-facing surface.
+2. **HTTP admin** — `/admin/cache/*` endpoints (compare-and-set #195,
+   sweep / flush-namespace / stats #198). Operators reach these through
+   `red admin cache` CLI subcommands. Operator-facing surface.
+
+**Explicitly killed in this decision:**
+
+- **SQL surface** (`CACHE INSERT / SELECT / DELETE`). Adds entanglement
+  with the query engine without a measurable adoption win. Cache is a
+  byte-blob primitive; SQL pushes it through a query planner that
+  doesn't help here. Bench `fc1d392a` shows L1 hot p50 = 259 ns; any
+  SQL-layer wrapping adds tens of microseconds of dispatch and breaks
+  the p50 guarantee.
+- **gRPC.** HTTP admin already covers the operator path; the SDKs
+  already cover the developer path. A third wire format adds generated-
+  code burden + protobuf schema drift without solving any problem the
+  SDK + HTTP combination doesn't already solve.
+
+Decision lives here (not in a standalone ADR) so the reader who asks
+"how do I call the cache?" finds the answer next to the comparison
+narrative and the migration discussion. Bench evidence at
+[`docs/perf/blob-cache-bench-2026-05-06.md`](../perf/blob-cache-bench-2026-05-06.md).
+
+---
+
 ## Where to go next
 
 - Architectural rationale and the full Interface sketch:
