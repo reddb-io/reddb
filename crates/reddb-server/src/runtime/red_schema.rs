@@ -182,13 +182,13 @@ fn collections_snapshot(
         })
         .filter(|collection| {
             tenant.is_none_or(|tenant| {
-                collection_tenant(store, &collection.name)
+                collection_tenant(store.as_ref(), &collection.name)
                     .as_deref()
                     .is_none_or(|owner| owner == tenant)
             })
         })
         .map(|collection| {
-            let collection_tenant = collection_tenant(store, &collection.name);
+            let collection_tenant = collection_tenant(store.as_ref(), &collection.name);
             let in_memory_bytes = store
                 .get_collection(&collection.name)
                 .map(|manager| manager.stats().total_memory_bytes as u64)
