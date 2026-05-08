@@ -116,7 +116,10 @@ fn select_star_from_red_collections_returns_collection_inventory() {
     );
     for numeric in ["entities", "segments", "indices", "in_memory_bytes"] {
         assert!(
-            matches!(acme.get(numeric), Some(Value::Integer(_))),
+            matches!(
+                acme.get(numeric),
+                Some(Value::Integer(_)) | Some(Value::UnsignedInteger(_))
+            ),
             "{numeric} should be an integer metric: {acme:?}"
         );
     }

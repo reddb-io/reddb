@@ -99,6 +99,7 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("set secret ")
         || lower.starts_with("set tenant")
         || lower.starts_with("show config")
+        || lower.starts_with("show collections")
         || lower.starts_with("show secret")
         || lower.starts_with("show tenant")
         || lower.starts_with("show policies")
