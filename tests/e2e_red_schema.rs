@@ -51,9 +51,15 @@ fn select_from_red_collections_materializes_catalog_rows() {
     let row = &result.result.records[0];
     assert_eq!(row.get("name"), Some(&Value::text("users")));
     assert_eq!(row.get("model"), Some(&Value::text("table")));
-    assert_eq!(row.get("schema_mode"), Some(&Value::text("strict")));
+    assert_eq!(
+        row.get("schema_mode"),
+        Some(&Value::text("semi_structured"))
+    );
     assert_eq!(row.get("entities"), Some(&Value::UnsignedInteger(1)));
-    assert!(matches!(row.get("indices"), Some(Value::Array(_))));
+    assert!(matches!(
+        row.get("indices"),
+        Some(Value::UnsignedInteger(_))
+    ));
     assert!(matches!(
         row.get("in_memory_bytes"),
         Some(Value::UnsignedInteger(_))

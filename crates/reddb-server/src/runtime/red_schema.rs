@@ -189,6 +189,7 @@ fn collections_snapshot(
         })
         .map(|collection| {
             let collection_tenant = collection_tenant(store.as_ref(), &collection.name);
+            let visible_tenant = collection_tenant.as_deref().or(tenant);
             let in_memory_bytes = store
                 .get_collection(&collection.name)
                 .map(|manager| manager.stats().total_memory_bytes as u64)
@@ -203,7 +204,7 @@ fn collections_snapshot(
                     Value::UnsignedInteger(collection.segments as u64),
                     Value::UnsignedInteger(collection.indices.len() as u64),
                     Value::UnsignedInteger(in_memory_bytes),
-                    collection_tenant.map(Value::text).unwrap_or(Value::Null),
+                    visible_tenant.map(Value::text).unwrap_or(Value::Null),
                 ],
             )
         })
