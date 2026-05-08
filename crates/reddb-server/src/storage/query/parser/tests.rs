@@ -1221,6 +1221,22 @@ fn test_parse_top_level_kv_put_get_delete() {
         panic!("Expected Kv Delete");
     }
 
+    let query = parse("CAS sessions.42 EXPECT 'old' SET 'new' EXPIRE 5 s").unwrap();
+    if let QueryExpr::Kv(crate::storage::query::ast::KvQuery::Cas {
+        key,
+        expected,
+        new_value,
+        ttl_ms,
+    }) = query
+    {
+        assert_eq!(key, "sessions.42");
+        assert_eq!(expected, crate::storage::schema::Value::text("old"));
+        assert_eq!(new_value, crate::storage::schema::Value::text("new"));
+        assert_eq!(ttl_ms, Some(5_000));
+    } else {
+        panic!("Expected Kv Cas");
+    }
+
     let query = parse("INCR sessions.42 BY -5 EXPIRE 10 s").unwrap();
     if let QueryExpr::Kv(crate::storage::query::ast::KvQuery::Incr { key, by, ttl_ms }) = query {
         assert_eq!(key, "sessions.42");

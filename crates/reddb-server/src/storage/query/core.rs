@@ -1638,6 +1638,13 @@ pub enum KvQuery {
     Get { key: String },
     /// `DELETE key`
     Delete { key: String },
+    /// `CAS key EXPECT expected SET new [EXPIRE duration]`
+    Cas {
+        key: String,
+        expected: Value,
+        new_value: Value,
+        ttl_ms: Option<u64>,
+    },
     /// `INCR key [BY n] [EXPIRE duration]` / `DECR key [BY n] [EXPIRE duration]`
     Incr {
         key: String,

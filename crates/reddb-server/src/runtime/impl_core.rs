@@ -3941,7 +3941,7 @@ impl RedDBRuntime {
             .to_ascii_uppercase();
         let is_kv_command = matches!(
             first_word.as_str(),
-            "PUT" | "GET" | "DELETE" | "INCR" | "DECR"
+            "PUT" | "GET" | "DELETE" | "CAS" | "INCR" | "DECR"
         );
 
         // ── Result cache: return cached result if still fresh (30s TTL) ──

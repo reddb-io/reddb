@@ -87,6 +87,7 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("delete ")
         || lower.starts_with("put ")
         || lower.starts_with("get ")
+        || lower.starts_with("cas ")
         || lower.starts_with("incr ")
         || lower.starts_with("decr ")
         || lower.starts_with("create ")
@@ -222,6 +223,10 @@ mod tests {
         );
         assert_eq!(detect_mode("PUT session = 'abc'"), QueryMode::Sql);
         assert_eq!(detect_mode("GET session"), QueryMode::Sql);
+        assert_eq!(
+            detect_mode("CAS session EXPECT 'abc' SET 'def'"),
+            QueryMode::Sql
+        );
         assert_eq!(detect_mode("INCR session BY 1"), QueryMode::Sql);
         assert_eq!(detect_mode("DECR session BY 1"), QueryMode::Sql);
         assert_eq!(

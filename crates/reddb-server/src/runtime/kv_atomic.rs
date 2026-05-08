@@ -45,6 +45,12 @@ impl<'a> KvAtomicOps<'a> {
             } => self.set(raw_query, key, value.clone(), *ttl_ms, *if_not_exists),
             KvQuery::Get { key } => self.get(raw_query, key),
             KvQuery::Delete { key } => self.delete(raw_query, key),
+            KvQuery::Cas {
+                key,
+                expected,
+                new_value,
+                ttl_ms,
+            } => self.compare_and_set(raw_query, key, expected, new_value.clone(), *ttl_ms),
             KvQuery::Incr { key, by, ttl_ms } => self.incr_query(raw_query, key, *by, *ttl_ms),
         }
     }
@@ -91,7 +97,8 @@ impl<'a> KvAtomicOps<'a> {
             value,
             metadata,
         })?;
-        self.runtime.kv_clear_deleted(&target.collection, &target.key);
+        self.runtime
+            .kv_clear_deleted(&target.collection, &target.key);
         self.runtime.note_table_write(&target.collection);
 
         Ok(RuntimeQueryResult::dml_result(
@@ -128,7 +135,8 @@ impl<'a> KvAtomicOps<'a> {
         let target = self.resolve_target(key, false);
         let affected = if let Some(entry) = self.find_live_entry(&target)? {
             self.delete_entity(&target.collection, entry.id)?;
-            self.runtime.kv_mark_deleted(&target.collection, &target.key);
+            self.runtime
+                .kv_mark_deleted(&target.collection, &target.key);
             self.runtime.note_table_write(&target.collection);
             1
         } else {
@@ -140,6 +148,48 @@ impl<'a> KvAtomicOps<'a> {
             "delete",
             "runtime-kv",
         ))
+    }
+
+    pub fn compare_and_set(
+        &self,
+        raw_query: &str,
+        key: &str,
+        expected: &Value,
+        new_value: Value,
+        ttl_ms: Option<u64>,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        self.runtime
+            .check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        let target = self.resolve_target(key, true);
+        let lock = self.runtime.kv_atomic_lock(&target.collection, &target.key);
+        let _guard = lock.lock();
+
+        let existing = self.find_live_entry(&target)?;
+        let observed = existing
+            .as_ref()
+            .map(|entry| entry.value.clone())
+            .unwrap_or(Value::Null);
+
+        let ok = values_typed_equal(&observed, expected);
+        let current = if ok {
+            if let Some(entry) = existing {
+                self.delete_entity(&target.collection, entry.id)?;
+            }
+            self.runtime.create_kv(CreateKvInput {
+                collection: target.collection.clone(),
+                key: target.key.clone(),
+                value: new_value.clone(),
+                metadata: ttl_metadata_fields(ttl_ms),
+            })?;
+            self.runtime
+                .kv_clear_deleted(&target.collection, &target.key);
+            self.runtime.note_table_write(&target.collection);
+            new_value
+        } else {
+            observed
+        };
+
+        Ok(cas_result(raw_query, ok, current))
     }
 
     pub fn incr(
@@ -440,6 +490,27 @@ fn kv_counter_i64(value: &Value) -> RedDBResult<i64> {
     }
 }
 
+fn cas_result(raw_query: &str, ok: bool, current: Value) -> RuntimeQueryResult {
+    let mut result = UnifiedResult::with_columns(vec!["ok".to_string(), "current".to_string()]);
+    let mut record = UnifiedRecord::new();
+    record.set("ok", Value::Boolean(ok));
+    record.set("current", current);
+    result.push(record);
+    RuntimeQueryResult {
+        query: raw_query.to_string(),
+        mode: QueryMode::Sql,
+        statement: "cas",
+        engine: "runtime-kv",
+        affected_rows: u64::from(ok),
+        statement_type: "update",
+        result,
+    }
+}
+
+fn values_typed_equal(left: &Value, right: &Value) -> bool {
+    std::mem::discriminant(left) == std::mem::discriminant(right) && left == right
+}
+
 fn ttl_metadata_fields(ttl_ms: Option<u64>) -> Vec<(String, MetadataValue)> {
     ttl_ms
         .map(|ttl| vec![("_ttl_ms".to_string(), ttl_metadata_value(ttl))])
@@ -593,6 +664,95 @@ mod tests {
     }
 
     #[test]
+    fn cas_updates_only_when_expected_value_matches() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("PUT feature = 'old'").unwrap();
+
+        let success = rt
+            .execute_query("CAS feature EXPECT 'old' SET 'new'")
+            .unwrap();
+        assert_eq!(success.affected_rows, 1);
+        assert_eq!(
+            success.result.records[0].get("ok"),
+            Some(&Value::Boolean(true))
+        );
+        assert_eq!(
+            success.result.records[0].get("current"),
+            Some(&Value::text("new"))
+        );
+
+        let failure = rt
+            .execute_query("CAS feature EXPECT 'old' SET 'stale'")
+            .unwrap();
+        assert_eq!(failure.affected_rows, 0);
+        assert_eq!(
+            failure.result.records[0].get("ok"),
+            Some(&Value::Boolean(false))
+        );
+        assert_eq!(
+            failure.result.records[0].get("current"),
+            Some(&Value::text("new"))
+        );
+
+        let got = rt.execute_query("GET feature").unwrap();
+        assert_eq!(
+            got.result.records[0].get("value"),
+            Some(&Value::text("new"))
+        );
+    }
+
+    #[test]
+    fn cas_expect_null_creates_absent_key() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+
+        let created = rt
+            .execute_query("CAS session EXPECT NULL SET 'abc'")
+            .unwrap();
+        assert_eq!(
+            created.result.records[0].get("ok"),
+            Some(&Value::Boolean(true))
+        );
+        assert_eq!(
+            created.result.records[0].get("current"),
+            Some(&Value::text("abc"))
+        );
+
+        let got = rt.execute_query("GET session").unwrap();
+        assert_eq!(
+            got.result.records[0].get("value"),
+            Some(&Value::text("abc"))
+        );
+    }
+
+    #[test]
+    fn cas_uses_typed_equality_without_numeric_coercion() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("PUT typed = 1").unwrap();
+
+        let failure = rt.execute_query("CAS typed EXPECT 1.0 SET 2").unwrap();
+        assert_eq!(
+            failure.result.records[0].get("ok"),
+            Some(&Value::Boolean(false))
+        );
+        assert_eq!(
+            failure.result.records[0].get("current"),
+            Some(&Value::Integer(1))
+        );
+    }
+
+    #[test]
+    fn cas_ttl_applies_on_success() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+
+        rt.execute_query("CAS short EXPECT NULL SET 'gone' EXPIRE 1 ms")
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let got = rt.execute_query("GET short").unwrap();
+        assert!(got.result.records.is_empty());
+    }
+
+    #[test]
     fn concurrent_incr_converges() {
         let rt =
             std::sync::Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap());
@@ -614,5 +774,34 @@ mod tests {
             got.result.records[0].get("value"),
             Some(&Value::Integer(100))
         );
+    }
+
+    #[test]
+    fn concurrent_cas_same_expected_succeeds_once() {
+        let rt =
+            std::sync::Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap());
+        rt.execute_query("PUT latch = 0").unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(32));
+        let mut handles = Vec::new();
+
+        for _ in 0..32 {
+            let rt = std::sync::Arc::clone(&rt);
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                let result = rt.execute_query("CAS latch EXPECT 0 SET 1").unwrap();
+                result.result.records[0].get("ok") == Some(&Value::Boolean(true))
+            }));
+        }
+
+        let successes = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .filter(|ok| *ok)
+            .count();
+
+        assert_eq!(successes, 1);
+        let got = rt.execute_query("GET latch").unwrap();
+        assert_eq!(got.result.records[0].get("value"), Some(&Value::Integer(1)));
     }
 }

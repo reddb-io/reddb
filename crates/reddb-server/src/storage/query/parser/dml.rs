@@ -412,6 +412,29 @@ impl<'a> Parser<'a> {
         Ok(QueryExpr::Kv(KvQuery::Delete { key }))
     }
 
+    /// Parse: CAS key EXPECT expected SET new [EXPIRE duration]
+    pub fn parse_kv_cas_query(&mut self) -> Result<QueryExpr, ParseError> {
+        self.expect_ident_ci("CAS")?;
+        let key = self.parse_kv_key()?;
+        self.expect_ident_ci("EXPECT")?;
+        let expected = self.parse_expr_value()?;
+        self.expect(Token::Set)?;
+        let new_value = self.parse_expr_value()?;
+
+        let ttl_ms = if self.consume_ident_ci("EXPIRE")? {
+            Some(self.parse_ttl_duration()?)
+        } else {
+            None
+        };
+
+        Ok(QueryExpr::Kv(KvQuery::Cas {
+            key,
+            expected,
+            new_value,
+            ttl_ms,
+        }))
+    }
+
     /// Parse: INCR key [BY n] [EXPIRE duration]
     pub fn parse_kv_incr_query(&mut self) -> Result<QueryExpr, ParseError> {
         self.expect_ident_ci("INCR")?;
