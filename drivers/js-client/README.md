@@ -87,8 +87,11 @@ await connect('red://user:pass@host:5050')
 
 ## KV API
 
-`db.kv.put(collection, key, value)`, `db.kv.get(collection, key)`, and
-`db.kv.delete(collection, key)` expose the high-level key-value surface.
+`db.kv.put(collection, key, value)`, `db.kv.get(collection, key)`,
+`db.kv.delete(collection, key)`, and
+`db.kv.cas(collection, key, expected, value[, ttlMs])` expose the
+high-level key-value surface. `db.kv.compareAndSet(...)` is an alias
+for `cas`.
 HTTP connections target `PUT|GET|DELETE /collections/<collection>/kv/<key>`.
 For compatibility with current servers, the driver falls back to the legacy
 `/collections/<collection>/kvs/<key>` route when the canonical route returns

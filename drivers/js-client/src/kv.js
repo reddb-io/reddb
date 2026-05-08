@@ -1,5 +1,5 @@
 /**
- * KV client — exposes `kv.{put,get,delete,incr,decr}` through the underlying transport.
+ * KV client — exposes `kv.{put,get,delete,incr,decr,cas}` through the underlying transport.
  *
  * HTTP uses the REST KV endpoint. RedWire transports may bridge the same
  * method names directly or fall back to SQL while dedicated wire frames are
@@ -65,5 +65,37 @@ export class KvClient {
    */
   async decr(collection, key, by = 1, ttlMs = undefined) {
     return await this._client.call('kv.decr', { collection, key: String(key), by, ttlMs })
+  }
+
+  /**
+   * Compare-and-set a key when its current value exactly matches `expected`.
+   * @param {string} collection
+   * @param {string | number} key
+   * @param {unknown} expected
+   * @param {unknown} value
+   * @param {number | undefined} [ttlMs]
+   * @returns {Promise<object>}
+   */
+  async cas(collection, key, expected, value, ttlMs = undefined) {
+    return await this._client.call('kv.cas', {
+      collection,
+      key: String(key),
+      expected,
+      value,
+      ttlMs,
+    })
+  }
+
+  /**
+   * Alias for {@link cas}.
+   * @param {string} collection
+   * @param {string | number} key
+   * @param {unknown} expected
+   * @param {unknown} value
+   * @param {number | undefined} [ttlMs]
+   * @returns {Promise<object>}
+   */
+  async compareAndSet(collection, key, expected, value, ttlMs = undefined) {
+    return await this.cas(collection, key, expected, value, ttlMs)
   }
 }

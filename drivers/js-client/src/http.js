@@ -19,6 +19,7 @@
  *   kv.delete           → DELETE /collections/:name/kv/:key  (fallback: /kvs/:key)
  *   kv.incr             → POST   /collections/:name/kv/:key/incr?by=n
  *   kv.decr             → POST   /collections/:name/kv/:key/decr?by=n
+ *   kv.cas              → POST   /query  (runtime CAS SQL)
  *   health              → GET  /health
  *   version             → GET  /admin/version
  *   auth.login          → POST /auth/login
@@ -174,6 +175,10 @@ const ROUTES = {
     url: kvCounterUrl(base, params, 'decr'),
     init: { method: 'POST' },
   }),
+  'kv.cas': (base, params) => ({
+    url: `${base}/query`,
+    init: { method: 'POST', body: JSON.stringify({ query: kvCasSql(params) }) },
+  }),
   'auth.login': (base, { username, password }) => ({
     url: `${base}/auth/login`,
     init: { method: 'POST', body: JSON.stringify({ username, password }) },
@@ -235,4 +240,28 @@ function kvCounterUrl(base, { collection, key, by = 1, ttlMs }, op) {
   query.set('by', String(by))
   if (ttlMs !== undefined && ttlMs !== null) query.set('ttl_ms', String(ttlMs))
   return `${base}/collections/${encodeURIComponent(collection)}/kv/${encodeURIComponent(key)}/${op}?${query.toString()}`
+}
+
+function kvCasSql({ collection, key, expected, value, ttlMs }) {
+  const ttl = ttlMs === undefined || ttlMs === null ? '' : ` EXPIRE ${Number(ttlMs)} ms`
+  return `CAS ${sqlIdent(collection)}.${sqlLiteral(String(key))} EXPECT ${sqlLiteral(expected)} SET ${sqlLiteral(value)}${ttl}`
+}
+
+function sqlIdent(value) {
+  const s = String(value)
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(s)) return s
+  return `"${s.replaceAll('"', '""')}"`
+}
+
+function sqlLiteral(value) {
+  if (value == null) return 'NULL'
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new TypeError('KV numeric value must be finite')
+    return String(value)
+  }
+  if (typeof value === 'boolean') return value ? 'true' : 'false'
+  if (typeof value === 'object') {
+    return `'${JSON.stringify(value).replaceAll("'", "''")}'`
+  }
+  return `'${String(value).replaceAll("'", "''")}'`
 }

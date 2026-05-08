@@ -21,6 +21,7 @@ Method                      Endpoint
 ``kv_put``                  ``PUT  /collections/{name}/kv/{key}`` (fallback ``/kvs/{key}``)
 ``kv_get``                  ``GET  /collections/{name}/kv/{key}`` (fallback ``/kvs/{key}``)
 ``kv_delete``               ``DELETE /collections/{name}/kv/{key}`` (fallback ``/kvs/{key}``)
+``kv_cas``                  ``POST /query`` (runtime CAS SQL)
 ``ping`` / health           ``GET  /health``
 ``login``                   ``POST /auth/login``
 ==========================  =================================================
@@ -135,6 +136,16 @@ class HttpClient:
         self, collection: str, key: str, by: int = 1, ttl_ms: int | None = None
     ) -> dict[str, Any]:
         return await self._request_kv_counter("decr", collection, key, by, ttl_ms)
+
+    async def kv_cas(
+        self,
+        collection: str,
+        key: str,
+        expected: Any,
+        value: Any,
+        ttl_ms: int | None = None,
+    ) -> dict[str, Any]:
+        return await self.query(_kv_cas_sql(collection, key, expected, value, ttl_ms))
 
     async def scan(self, collection: str, **params: Any) -> dict[str, Any]:
         url = f"/collections/{quote(collection)}/scan"
@@ -259,6 +270,36 @@ def _parse_response(response: httpx.Response) -> Any:
             )
         return parsed.get("result", parsed)
     return parsed
+
+
+def _sql_ident(value: str) -> str:
+    if value.replace("_", "a").isalnum() and not value[:1].isdigit():
+        return value
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _sql_literal(value: Any) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, (dict, list)):
+        import json
+
+        value = json.dumps(value, separators=(",", ":"))
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _kv_cas_sql(
+    collection: str, key: str, expected: Any, value: Any, ttl_ms: int | None
+) -> str:
+    ttl = "" if ttl_ms is None else f" EXPIRE {int(ttl_ms)} ms"
+    return (
+        f"CAS {_sql_ident(collection)}.{_sql_literal(str(key))} "
+        f"EXPECT {_sql_literal(expected)} SET {_sql_literal(value)}{ttl}"
+    )
 
 
 __all__ = ["HttpClient", "DEFAULT_TIMEOUT_SECS"]

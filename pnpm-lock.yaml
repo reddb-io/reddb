@@ -20,6 +20,9 @@ importers:
       '@reddb-io/internal-asset-fetcher':
         specifier: workspace:*
         version: link:../../packages/internal-asset-fetcher
+      '@reddb-io/internal-bin-resolver':
+        specifier: workspace:*
+        version: link:../../packages/internal-bin-resolver
 
   drivers/js-client:
     dependencies:

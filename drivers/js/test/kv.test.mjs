@@ -90,3 +90,31 @@ test('kv HTTP route falls back to legacy /kvs endpoint on 404', async () => {
     await stub.close()
   }
 })
+
+test('kv.cas sends runtime CAS query over HTTP', async () => {
+  const seen = []
+  const stub = await startMockServer({
+    'GET /health': () => ({ ok: true, version: 'mock' }),
+    'POST /query': (body) => {
+      seen.push(body)
+      return { ok: true, result: { rows: [{ ok: true, current: 'new' }] } }
+    },
+  })
+  try {
+    const db = await connect(stub.baseUrl)
+    const out = await db.kv.cas('app', 'theme', 'old', 'new', 500)
+    assert.deepEqual(out, { rows: [{ ok: true, current: 'new' }] })
+    assert.deepEqual(seen, [
+      { query: "CAS app.'theme' EXPECT 'old' SET 'new' EXPIRE 500 ms" },
+    ])
+    assert.deepEqual(
+      await db.kv.compareAndSet('app', 'theme', 'new', { mode: 'dark' }),
+      { rows: [{ ok: true, current: 'new' }] },
+    )
+    assert.deepEqual(seen[1], {
+      query: 'CAS app.\'theme\' EXPECT \'new\' SET \'{"mode":"dark"}\'',
+    })
+  } finally {
+    await stub.close()
+  }
+})

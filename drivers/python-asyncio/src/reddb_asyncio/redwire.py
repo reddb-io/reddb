@@ -306,6 +306,16 @@ class RedwireClient:
     ) -> dict[str, Any]:
         return await self.query(_kv_counter_sql("DECR", collection, key, by, ttl_ms))
 
+    async def kv_cas(
+        self,
+        collection: str,
+        key: str,
+        expected: Any,
+        value: Any,
+        ttl_ms: int | None = None,
+    ) -> dict[str, Any]:
+        return await self.query(_kv_cas_sql(collection, key, expected, value, ttl_ms))
+
     async def ping(self) -> None:
         resp = await self._round_trip(
             Frame(kind=Kind.Ping, correlation_id=self._corr())
@@ -602,6 +612,16 @@ def _kv_counter_sql(
 ) -> str:
     ttl = "" if ttl_ms is None else f" EXPIRE {int(ttl_ms)} ms"
     return f"{op} {_sql_ident(collection)}.{_sql_literal(str(key))} BY {int(by)}{ttl}"
+
+
+def _kv_cas_sql(
+    collection: str, key: str, expected: Any, value: Any, ttl_ms: int | None
+) -> str:
+    ttl = "" if ttl_ms is None else f" EXPIRE {int(ttl_ms)} ms"
+    return (
+        f"CAS {_sql_ident(collection)}.{_sql_literal(str(key))} "
+        f"EXPECT {_sql_literal(expected)} SET {_sql_literal(value)}{ttl}"
+    )
 
 
 def _json_loads(buf: bytes) -> dict[str, Any]:

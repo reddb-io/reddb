@@ -153,6 +153,16 @@ class _RedwireAdapter:
     ) -> dict[str, Any]:
         return await self._client.kv_decr(collection, key, by, ttl_ms)
 
+    async def kv_cas(
+        self,
+        collection: str,
+        key: str,
+        expected: Any,
+        value: Any,
+        ttl_ms: int | None = None,
+    ) -> dict[str, Any]:
+        return await self._client.kv_cas(collection, key, expected, value, ttl_ms)
+
     async def ping(self) -> dict[str, Any]:
         await self._client.ping()
         return {"ok": True}
@@ -238,3 +248,23 @@ class KvClient:
         self, collection: str, key: str, by: int = 1, ttl_ms: int | None = None
     ) -> dict[str, Any]:
         return await self._t.kv_decr(collection, str(key), by, ttl_ms)
+
+    async def cas(
+        self,
+        collection: str,
+        key: str,
+        expected: Any,
+        value: Any,
+        ttl_ms: int | None = None,
+    ) -> dict[str, Any]:
+        return await self._t.kv_cas(collection, str(key), expected, value, ttl_ms)
+
+    async def compare_and_set(
+        self,
+        collection: str,
+        key: str,
+        expected: Any,
+        value: Any,
+        ttl_ms: int | None = None,
+    ) -> dict[str, Any]:
+        return await self.cas(collection, key, expected, value, ttl_ms)

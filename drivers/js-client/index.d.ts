@@ -60,6 +60,13 @@ export interface KvCounterResult {
   key?: string
   value: number
 }
+export interface KvCasResult {
+  ok?: boolean
+  current?: unknown
+  affected?: number
+  columns?: string[]
+  rows?: Array<Record<string, unknown>>
+}
 export interface HealthResult { ok: boolean; version: string }
 export interface VersionResult { version: string; protocol: string }
 
@@ -121,6 +128,8 @@ export class KvClient {
   delete(collection: string, key: string | number): Promise<KvDeleteResult>
   incr(collection: string, key: string | number, by?: number, ttlMs?: number): Promise<KvCounterResult>
   decr(collection: string, key: string | number, by?: number, ttlMs?: number): Promise<KvCounterResult>
+  cas(collection: string, key: string | number, expected: unknown, value: unknown, ttlMs?: number): Promise<KvCasResult>
+  compareAndSet(collection: string, key: string | number, expected: unknown, value: unknown, ttlMs?: number): Promise<KvCasResult>
 }
 
 /**

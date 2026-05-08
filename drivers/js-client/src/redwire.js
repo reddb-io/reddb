@@ -233,6 +233,7 @@ export class RedWireClient {
     if (method === 'kv.delete') return this.#query(kvDeleteSql(params))
     if (method === 'kv.incr') return this.#query(kvIncrSql(params))
     if (method === 'kv.decr') return this.#query(kvDecrSql(params))
+    if (method === 'kv.cas') return this.#query(kvCasSql(params))
     if (method === 'health' || method === 'version') return this.#ping()
     throw new RedDBError(
       'UNKNOWN_METHOD',
@@ -383,6 +384,11 @@ function kvIncrSql({ collection, key, by = 1, ttlMs }) {
 
 function kvDecrSql({ collection, key, by = 1, ttlMs }) {
   return kvCounterSql('DECR', collection, key, by, ttlMs)
+}
+
+function kvCasSql({ collection, key, expected, value, ttlMs }) {
+  const ttl = ttlMs === undefined || ttlMs === null ? '' : ` EXPIRE ${Number(ttlMs)} ms`
+  return `CAS ${sqlIdent(collection)}.${sqlLiteral(String(key))} EXPECT ${sqlLiteral(expected)} SET ${sqlLiteral(value)}${ttl}`
 }
 
 function kvCounterSql(op, collection, key, by, ttlMs) {

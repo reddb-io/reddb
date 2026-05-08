@@ -100,6 +100,14 @@ export interface KvCounterResult {
   value: number
 }
 
+export interface KvCasResult {
+  ok?: boolean
+  current?: unknown
+  affected?: number
+  columns?: string[]
+  rows?: Array<Record<string, unknown>>
+}
+
 export interface HealthResult {
   ok: boolean
   version: string
@@ -207,6 +215,10 @@ export class KvClient {
   incr(collection: string, key: string | number, by?: number, ttlMs?: number): Promise<KvCounterResult>
   /** Atomically decrement an integer key and return the new value. */
   decr(collection: string, key: string | number, by?: number, ttlMs?: number): Promise<KvCounterResult>
+  /** Compare-and-set a key when its current value exactly matches `expected`. */
+  cas(collection: string, key: string | number, expected: unknown, value: unknown, ttlMs?: number): Promise<KvCasResult>
+  /** Alias for cas(). */
+  compareAndSet(collection: string, key: string | number, expected: unknown, value: unknown, ttlMs?: number): Promise<KvCasResult>
 }
 
 export class RedDB {

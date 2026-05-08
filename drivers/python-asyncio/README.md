@@ -90,6 +90,13 @@ from reddb_asyncio import (
 * `await db.bulk_insert(collection, payloads)`
 * `await db.get(collection, id)`
 * `await db.delete(collection, id)`
+* `await db.kv.put(collection, key, value)`
+* `await db.kv.get(collection, key)`
+* `await db.kv.delete(collection, key)`
+* `await db.kv.incr(collection, key, by=1, ttl_ms=None)`
+* `await db.kv.decr(collection, key, by=1, ttl_ms=None)`
+* `await db.kv.cas(collection, key, expected, value, ttl_ms=None)`
+* `await db.kv.compare_and_set(collection, key, expected, value, ttl_ms=None)`
 * `await db.ping()`
 * `await db.close()`
 * `async with await connect(uri) as db: ...`

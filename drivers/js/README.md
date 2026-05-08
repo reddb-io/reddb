@@ -118,6 +118,11 @@ const custom = await connect('memory://', { binary: '/usr/local/bin/red' })
 
 ### `db.kv.delete(collection, key) → Promise<object>`
 
+### `db.kv.cas(collection, key, expected, value[, ttlMs]) → Promise<object>`
+
+Atomically replaces a key only when the current value exactly matches
+`expected`. `db.kv.compareAndSet(...)` is an alias.
+
 HTTP connections target `PUT|GET|DELETE /collections/<collection>/kv/<key>`.
 For compatibility with current servers, the driver falls back to the legacy
 `/collections/<collection>/kvs/<key>` route when the canonical route returns
