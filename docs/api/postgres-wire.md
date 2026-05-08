@@ -105,6 +105,28 @@ RedDB values are returned in PG text format under the following OIDs:
 | Vector / NodeRef / EdgeRef | 25 (text) | Serialised string |
 | Null | — | NULL bytes |
 
+## Catalog compatibility
+
+PG-wire translates a focused PostgreSQL catalog slice from RedDB's `red.*`
+virtual schema so generic clients can inspect tables, columns, and indexes
+without RedDB-specific metadata calls.
+
+Supported read-only views:
+
+| PostgreSQL relation | RedDB source |
+|---------------------|--------------|
+| `information_schema.tables` | `red.collections` |
+| `information_schema.columns` | `red.columns` |
+| `pg_catalog.pg_tables` | `red.collections` |
+| `pg_catalog.pg_indexes` | `red.indices` |
+| `pg_catalog.pg_namespace` | synthetic `red` namespace |
+| `pg_catalog.pg_class` | `red.collections` + `red.indices` |
+| `pg_catalog.pg_attribute` | `red.columns` |
+
+The translator handles simple equality filters on table/schema/column names and
+`COUNT(*)` probes. It is intentionally read-only and only runs for `SELECT` or
+`WITH` queries that reference the supported catalog relations.
+
 ## Session state
 
 Every PG-wire connection gets its own thread context, so session-local
