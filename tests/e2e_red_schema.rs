@@ -118,27 +118,14 @@ fn red_schema_dml_is_read_only() {
         "UPDATE red.collections SET name = 'x'",
         "DELETE FROM red.collections WHERE name = 'x'",
     ] {
-        let err = rt
-            .execute_query(sql)
-            .unwrap_err_or_else(|| panic!("expected read-only error for {sql}"))
-            .to_string();
+        let err = match rt.execute_query(sql) {
+            Ok(_) => panic!("expected read-only error for {sql}"),
+            Err(err) => err.to_string(),
+        };
         assert!(
             err.contains("system schema is read-only"),
             "{sql} returned unexpected error: {err}"
         );
     }
     cleanup_scope();
-}
-
-trait UnwrapErrOrElse<T, E> {
-    fn unwrap_err_or_else(self, f: impl FnOnce() -> !) -> E;
-}
-
-impl<T, E> UnwrapErrOrElse<T, E> for Result<T, E> {
-    fn unwrap_err_or_else(self, f: impl FnOnce() -> !) -> E {
-        match self {
-            Ok(_) => f(),
-            Err(err) => err,
-        }
-    }
 }
