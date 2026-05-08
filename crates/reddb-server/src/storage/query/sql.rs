@@ -116,29 +116,31 @@ pub enum SqlCommand {
     ExplainMigration(ExplainMigrationQuery),
 }
 
-fn show_collections_by_model(model: &str) -> TableQuery {
-    let model_filter = Filter::Compare {
-        field: FieldRef::column("red.collections", "model"),
+fn collection_model_filter(model: &str) -> Filter {
+    Filter::Compare {
+        field: FieldRef::column("", "model"),
         op: CompareOp::Eq,
         value: Value::Text(model.to_string().into()),
-    };
-    let model_expr = Expr::BinaryOp {
-        op: BinOp::Eq,
-        lhs: Box::new(Expr::Column {
-            field: FieldRef::column("red.collections", "model"),
-            span: Span::synthetic(),
-        }),
-        rhs: Box::new(Expr::Literal {
-            value: Value::Text(model.to_string().into()),
-            span: Span::synthetic(),
-        }),
-        span: Span::synthetic(),
-    };
+    }
+}
 
+fn add_table_filter(query: &mut TableQuery, filter: Filter) {
+    let combined = match query.filter.take() {
+        Some(existing) => existing.and(filter),
+        None => filter,
+    };
+    query.where_expr = Some(filter_to_expr(&combined));
+    query.filter = Some(combined);
+}
+
+fn parse_show_collections_by_model(
+    parser: &mut Parser<'_>,
+    model: &str,
+) -> Result<TableQuery, ParseError> {
     let mut query = TableQuery::new("red.collections");
-    query.filter = Some(model_filter);
-    query.where_expr = Some(model_expr);
-    query
+    parser.parse_table_clauses(&mut query)?;
+    add_table_filter(&mut query, collection_model_filter(model));
+    Ok(query)
 }
 
 #[derive(Debug, Clone)]
@@ -1466,19 +1468,36 @@ impl<'a> Parser<'a> {
                     }
                     Ok(SqlCommand::Select(query))
                 } else if self.consume_ident_ci("TABLES")? {
-                    Ok(SqlCommand::Select(show_collections_by_model("table")))
+                    Ok(SqlCommand::Select(parse_show_collections_by_model(
+                        self, "table",
+                    )?))
                 } else if self.consume_ident_ci("QUEUES")? {
-                    Ok(SqlCommand::Select(show_collections_by_model("queue")))
-                } else if self.consume_ident_ci("VECTORS")? {
-                    Ok(SqlCommand::Select(show_collections_by_model("vector")))
+                    Ok(SqlCommand::Select(parse_show_collections_by_model(
+                        self, "queue",
+                    )?))
+                } else if self.consume(&Token::Vectors)? || self.consume_ident_ci("VECTORS")? {
+                    Ok(SqlCommand::Select(parse_show_collections_by_model(
+                        self, "vector",
+                    )?))
                 } else if self.consume_ident_ci("DOCUMENTS")? {
-                    Ok(SqlCommand::Select(show_collections_by_model("document")))
-                } else if self.consume_ident_ci("TIMESERIES")? {
-                    Ok(SqlCommand::Select(show_collections_by_model("timeseries")))
+                    Ok(SqlCommand::Select(parse_show_collections_by_model(
+                        self, "document",
+                    )?))
+                } else if self.consume(&Token::Timeseries)?
+                    || self.consume_ident_ci("TIMESERIES")?
+                {
+                    Ok(SqlCommand::Select(parse_show_collections_by_model(
+                        self,
+                        "timeseries",
+                    )?))
                 } else if self.consume_ident_ci("GRAPHS")? {
-                    Ok(SqlCommand::Select(show_collections_by_model("graph")))
-                } else if self.consume_ident_ci("KV")? {
-                    Ok(SqlCommand::Select(show_collections_by_model("kv")))
+                    Ok(SqlCommand::Select(parse_show_collections_by_model(
+                        self, "graph",
+                    )?))
+                } else if self.consume(&Token::Kv)? || self.consume_ident_ci("KV")? {
+                    Ok(SqlCommand::Select(parse_show_collections_by_model(
+                        self, "kv",
+                    )?))
                 } else if self.consume(&Token::Schema)? || self.consume_ident_ci("SCHEMA")? {
                     let collection = self.parse_dotted_admin_path(false)?;
                     let mut query = TableQuery::new("red.columns");
