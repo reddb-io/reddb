@@ -62,6 +62,8 @@ mod vector;
 mod tests;
 #[cfg(test)]
 mod json_literal_table;
+#[cfg(test)]
+mod property_tests;
 
 pub use error::{ParseError, ParseErrorKind, SafeTokenDisplay};
 pub use limits::ParserLimits;
