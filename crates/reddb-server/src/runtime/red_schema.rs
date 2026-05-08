@@ -6,17 +6,19 @@
 //! normal parsing. Execution then intercepts that identifier and
 //! materializes rows from the live catalog snapshot.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::*;
 use crate::catalog::{CollectionModel, SchemaMode};
 use crate::storage::query::sql_lowering::{effective_table_filter, effective_table_projections};
+use crate::storage::unified::UnifiedStore;
 
 pub(super) const COLLECTIONS: &str = "red.collections";
 pub(super) const COLLECTIONS_INTERNAL: &str = "__red_schema_collections";
 pub(super) const READ_ONLY_ERROR: &str = "system schema is read-only";
 
-const COLLECTION_COLUMNS: [&str; 8] = [
+const COLLECTION_COLUMNS: [&str; 9] = [
     "name",
     "model",
     "schema_mode",
@@ -24,6 +26,7 @@ const COLLECTION_COLUMNS: [&str; 8] = [
     "segments",
     "indices",
     "in_memory_bytes",
+    "internal",
     "tenant_id",
 ];
 
@@ -173,6 +176,7 @@ fn collections_snapshot(
             .collect::<Vec<_>>(),
     );
     let store = runtime.db().store();
+    let internal_registry = InternalCollectionRegistry::from_store(store.as_ref());
 
     snapshot
         .collections
@@ -190,6 +194,7 @@ fn collections_snapshot(
         .map(|collection| {
             let collection_tenant = collection_tenant(store.as_ref(), &collection.name);
             let visible_tenant = collection_tenant.as_deref().or(tenant);
+            let internal = internal_registry.is_internal(&collection.name);
             let in_memory_bytes = store
                 .get_collection(&collection.name)
                 .map(|manager| manager.stats().total_memory_bytes as u64)
@@ -202,13 +207,67 @@ fn collections_snapshot(
                     Value::text(schema_mode_name(collection.schema_mode)),
                     Value::UnsignedInteger(collection.entities as u64),
                     Value::UnsignedInteger(collection.segments as u64),
-                    Value::UnsignedInteger(collection.indices.len() as u64),
+                    Value::Array(collection.indices.into_iter().map(Value::text).collect()),
                     Value::UnsignedInteger(in_memory_bytes),
+                    Value::Boolean(internal),
                     visible_tenant.map(Value::text).unwrap_or(Value::Null),
                 ],
             )
         })
         .collect()
+}
+
+struct InternalCollectionRegistry {
+    dlqs: HashSet<String>,
+}
+
+impl InternalCollectionRegistry {
+    fn from_store(store: &UnifiedStore) -> Self {
+        Self {
+            dlqs: discover_queue_dlqs(store),
+        }
+    }
+
+    fn is_internal(&self, collection: &str) -> bool {
+        collection.starts_with("red_")
+            || collection == "audit_log"
+            || collection == "__tenant_iso"
+            || collection.starts_with("__tenant_")
+            || collection.starts_with("__policy_")
+            || self.dlqs.contains(collection)
+    }
+}
+
+fn discover_queue_dlqs(store: &UnifiedStore) -> HashSet<String> {
+    const QUEUE_META_COLLECTION: &str = "red_queue_meta";
+
+    let Some(manager) = store.get_collection(QUEUE_META_COLLECTION) else {
+        return HashSet::new();
+    };
+
+    manager
+        .query_all(|entity| {
+            entity
+                .data
+                .as_row()
+                .is_some_and(|row| row_text(row, "kind").as_deref() == Some("queue_config"))
+        })
+        .into_iter()
+        .filter_map(|entity| {
+            let row = entity.data.as_row()?;
+            row_text(row, "dlq")
+        })
+        .collect()
+}
+
+fn row_text(row: &crate::storage::unified::entity::RowData, field: &str) -> Option<String> {
+    match row.get_field(field)?.clone() {
+        Value::Text(value) => Some(value.to_string()),
+        Value::NodeRef(value) => Some(value),
+        Value::EdgeRef(value) => Some(value),
+        Value::TableRef(value) => Some(value),
+        _ => None,
+    }
 }
 
 fn collection_tenant(
