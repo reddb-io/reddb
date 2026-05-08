@@ -17,6 +17,20 @@ fn exec(rt: &RedDBRuntime, sql: &str) {
         .unwrap_or_else(|err| panic!("{sql}: {err:?}"));
 }
 
+fn text<'a>(row: &'a reddb::storage::query::unified::UnifiedRecord, field: &str) -> &'a str {
+    match row.get(field) {
+        Some(Value::Text(value)) => value.as_ref(),
+        other => panic!("expected {field} text, got {other:?} in {row:?}"),
+    }
+}
+
+fn bool_field(row: &reddb::storage::query::unified::UnifiedRecord, field: &str) -> bool {
+    match row.get(field) {
+        Some(Value::Boolean(value)) => *value,
+        other => panic!("expected {field} bool, got {other:?} in {row:?}"),
+    }
+}
+
 fn cleanup_scope() {
     clear_current_auth_identity();
     clear_current_tenant();
@@ -67,6 +81,173 @@ fn select_from_red_collections_materializes_catalog_rows() {
     ));
     assert_eq!(row.get("internal"), Some(&Value::Boolean(false)));
 
+    cleanup_scope();
+}
+
+#[test]
+fn select_from_red_columns_materializes_table_schema() {
+    cleanup_scope();
+    let rt = runtime();
+    exec(
+        &rt,
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT UNIQUE, name TEXT DEFAULT = 'unknown', active BOOLEAN NOT NULL)",
+    );
+
+    let result = rt
+        .execute_query("SELECT * FROM red.columns WHERE collection = 'users'")
+        .expect("red.columns select");
+
+    assert_eq!(
+        result.result.columns,
+        vec![
+            "collection",
+            "name",
+            "type",
+            "nullable",
+            "default_value",
+            "is_primary_key",
+            "is_unique",
+        ]
+    );
+    assert_eq!(result.result.records.len(), 4);
+
+    let id = result
+        .result
+        .records
+        .iter()
+        .find(|row| text(row, "name") == "id")
+        .expect("id column");
+    assert_eq!(text(id, "collection"), "users");
+    assert_eq!(text(id, "type"), "INTEGER");
+    assert!(!bool_field(id, "nullable"));
+    assert!(bool_field(id, "is_primary_key"));
+    assert!(bool_field(id, "is_unique"));
+
+    let email = result
+        .result
+        .records
+        .iter()
+        .find(|row| text(row, "name") == "email")
+        .expect("email column");
+    assert!(bool_field(email, "nullable"));
+    assert!(bool_field(email, "is_unique"));
+
+    let active = result
+        .result
+        .records
+        .iter()
+        .find(|row| text(row, "name") == "active")
+        .expect("active column");
+    assert_eq!(text(active, "type"), "BOOLEAN");
+    assert!(!bool_field(active, "nullable"));
+
+    cleanup_scope();
+}
+
+#[test]
+fn show_schema_desugars_to_red_columns_collection_filter() {
+    cleanup_scope();
+    let rt = runtime();
+    exec(
+        &rt,
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)",
+    );
+
+    let via_select = rt
+        .execute_query("SELECT name, type FROM red.columns WHERE collection = 'users'")
+        .expect("red.columns select");
+    let via_show = rt
+        .execute_query("SHOW SCHEMA users")
+        .expect("SHOW SCHEMA users");
+
+    assert_eq!(
+        via_show.result.columns,
+        vec![
+            "collection",
+            "name",
+            "type",
+            "nullable",
+            "default_value",
+            "is_primary_key",
+            "is_unique"
+        ]
+    );
+    let show_pairs: Vec<_> = via_show
+        .result
+        .records
+        .iter()
+        .map(|row| (text(row, "name").to_string(), text(row, "type").to_string()))
+        .collect();
+    let select_pairs: Vec<_> = via_select
+        .result
+        .records
+        .iter()
+        .map(|row| (text(row, "name").to_string(), text(row, "type").to_string()))
+        .collect();
+    assert_eq!(show_pairs, select_pairs);
+
+    cleanup_scope();
+}
+
+#[test]
+fn red_columns_infers_document_top_level_fields_as_nullable_schema() {
+    cleanup_scope();
+    let rt = runtime();
+    exec(
+        &rt,
+        r#"INSERT INTO logs DOCUMENT (body) VALUES ({"level":"warn","ip":"10.0.0.1"})"#,
+    );
+    exec(
+        &rt,
+        r#"INSERT INTO logs DOCUMENT (body) VALUES ({"level":"info","msg":"login"})"#,
+    );
+
+    let result = rt
+        .execute_query("SELECT * FROM red.columns WHERE collection = 'logs'")
+        .expect("document red.columns select");
+
+    let names: Vec<_> = result
+        .result
+        .records
+        .iter()
+        .map(|row| text(row, "name").to_string())
+        .collect();
+    assert!(names.contains(&"body".to_string()), "names = {names:?}");
+    assert!(names.contains(&"level".to_string()), "names = {names:?}");
+    assert!(names.contains(&"ip".to_string()), "names = {names:?}");
+    assert!(names.contains(&"msg".to_string()), "names = {names:?}");
+
+    let level = result
+        .result
+        .records
+        .iter()
+        .find(|row| text(row, "name") == "level")
+        .expect("level field");
+    assert_eq!(text(level, "type"), "TEXT");
+    assert!(!bool_field(level, "nullable"));
+
+    let ip = result
+        .result
+        .records
+        .iter()
+        .find(|row| text(row, "name") == "ip")
+        .expect("ip field");
+    assert!(bool_field(ip, "nullable"));
+
+    cleanup_scope();
+}
+
+#[test]
+fn red_columns_returns_empty_for_schemaless_table_contract() {
+    cleanup_scope();
+    let rt = runtime();
+    exec(&rt, "INSERT INTO scratch (id, note) VALUES (1, 'loose')");
+
+    let result = rt
+        .execute_query("SELECT * FROM red.columns WHERE collection = 'scratch'")
+        .expect("schemaless red.columns select");
+
+    assert_eq!(result.result.records.len(), 0);
     cleanup_scope();
 }
 

@@ -1478,6 +1478,15 @@ impl<'a> Parser<'a> {
                     Ok(SqlCommand::Select(show_collections_by_model("graph")))
                 } else if self.consume_ident_ci("KV")? {
                     Ok(SqlCommand::Select(show_collections_by_model("kv")))
+                } else if self.consume(&Token::Schema)? || self.consume_ident_ci("SCHEMA")? {
+                    let collection = self.parse_dotted_admin_path(false)?;
+                    let mut query = TableQuery::new("red.columns");
+                    query.filter = Some(Filter::compare(
+                        FieldRef::column("", "collection"),
+                        CompareOp::Eq,
+                        Value::text(collection),
+                    ));
+                    Ok(SqlCommand::Select(query))
                 } else if self.consume_ident_ci("SECRET")? || self.consume_ident_ci("SECRETS")? {
                     let prefix = if !self.check(&Token::Eof) {
                         Some(self.parse_dotted_admin_path(true)?)
@@ -1503,6 +1512,7 @@ impl<'a> Parser<'a> {
                             "TIMESERIES",
                             "GRAPHS",
                             "KV",
+                            "SCHEMA",
                             "TENANT",
                             "POLICIES",
                             "EFFECTIVE",

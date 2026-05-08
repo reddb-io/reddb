@@ -55,3 +55,35 @@ Current columns:
 | `in_memory_bytes` | Approximate resident memory used by collection metadata and caches. |
 | `internal`        | `true` for runtime-owned collections and artifacts such as DLQs, `audit_log`, and `red_*` stores. |
 | `tenant_id`       | Tenant owning the collection, or `NULL` for global/unscoped collections. |
+
+## `red.columns`
+
+`red.columns` exposes the column-level schema known for collections.
+
+```sql
+SELECT * FROM red.columns WHERE collection = 'users';
+```
+
+`SHOW SCHEMA <name>` is syntax sugar for:
+
+```sql
+SELECT * FROM red.columns WHERE collection = '<name>';
+```
+
+Current columns:
+
+| Column           | Description |
+|------------------|-------------|
+| `collection`     | Collection name. |
+| `name`           | Column or inferred top-level field name. |
+| `type`           | Declared SQL type, or inferred runtime value type when available. |
+| `nullable`       | Whether the column or inferred field may be `NULL` or absent. |
+| `default_value`  | Declared default expression, or `NULL` when no default is known. |
+| `is_primary_key` | Whether the column is declared as a primary key. |
+| `is_unique`      | Whether the column has a declared unique constraint or is a primary key. |
+
+For explicit `CREATE TABLE` collections, rows come from the stored collection
+contract. Document collections without an explicit schema expose inferred
+top-level fields when RedDB can inspect flattened document fields; fields missing
+from at least one observed document are reported as nullable. Schemaless table
+contracts with no stored schema return no rows.
