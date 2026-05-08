@@ -1,15 +1,15 @@
 use crate::storage::query::ast::{
-    AlterTableQuery, AlterUserStmt, ApplyMigrationQuery, AskQuery, CompareOp, CopyFormat,
+    AlterTableQuery, AlterUserStmt, ApplyMigrationQuery, AskQuery, BinOp, CompareOp, CopyFormat,
     CopyFromQuery, CreateForeignTableQuery, CreateIndexQuery, CreateMigrationQuery,
     CreatePolicyQuery, CreateQueueQuery, CreateSchemaQuery, CreateSequenceQuery, CreateServerQuery,
     CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery, CreateViewQuery, DeleteQuery,
     DropForeignTableQuery, DropIndexQuery, DropPolicyQuery, DropQueueQuery, DropSchemaQuery,
     DropSequenceQuery, DropServerQuery, DropTableQuery, DropTimeSeriesQuery, DropTreeQuery,
-    DropViewQuery, ExplainAlterQuery, ExplainMigrationQuery, FieldRef, ForeignColumnDef, GrantStmt,
-    GraphCommand, GraphQuery, HybridQuery, InsertQuery, JoinQuery, MaintenanceCommand, PathQuery,
-    PolicyAction, ProbabilisticCommand, QueryExpr, QueueCommand, RefreshMaterializedViewQuery,
-    RevokeStmt, RollbackMigrationQuery, SearchCommand, TableQuery, TreeCommand, TxnControl,
-    UpdateQuery, VectorQuery,
+    DropViewQuery, ExplainAlterQuery, ExplainMigrationQuery, Expr, FieldRef, Filter,
+    ForeignColumnDef, GrantStmt, GraphCommand, GraphQuery, HybridQuery, InsertQuery, JoinQuery,
+    MaintenanceCommand, PathQuery, PolicyAction, ProbabilisticCommand, QueryExpr, QueueCommand,
+    RefreshMaterializedViewQuery, RevokeStmt, RollbackMigrationQuery, SearchCommand, Span,
+    TableQuery, TreeCommand, TxnControl, UpdateQuery, VectorQuery,
 };
 use crate::storage::query::parser::{ParseError, Parser, SafeTokenDisplay};
 use crate::storage::query::Token;
@@ -113,6 +113,31 @@ pub enum SqlCommand {
     ApplyMigration(ApplyMigrationQuery),
     RollbackMigration(RollbackMigrationQuery),
     ExplainMigration(ExplainMigrationQuery),
+}
+
+fn show_collections_by_model(model: &str) -> TableQuery {
+    let model_filter = Filter::Compare {
+        field: FieldRef::column("red.collections", "model"),
+        op: CompareOp::Eq,
+        value: Value::Text(model.to_string().into()),
+    };
+    let model_expr = Expr::BinaryOp {
+        op: BinOp::Eq,
+        lhs: Box::new(Expr::Column {
+            field: FieldRef::column("red.collections", "model"),
+            span: Span::synthetic(),
+        }),
+        rhs: Box::new(Expr::Literal {
+            value: Value::Text(model.to_string().into()),
+            span: Span::synthetic(),
+        }),
+        span: Span::synthetic(),
+    };
+
+    let mut query = TableQuery::new("red.collections");
+    query.filter = Some(model_filter);
+    query.where_expr = Some(model_expr);
+    query
 }
 
 #[derive(Debug, Clone)]
@@ -1439,6 +1464,20 @@ impl<'a> Parser<'a> {
                         });
                     }
                     Ok(SqlCommand::Select(query))
+                } else if self.consume_ident_ci("TABLES")? {
+                    Ok(SqlCommand::Select(show_collections_by_model("table")))
+                } else if self.consume_ident_ci("QUEUES")? {
+                    Ok(SqlCommand::Select(show_collections_by_model("queue")))
+                } else if self.consume_ident_ci("VECTORS")? {
+                    Ok(SqlCommand::Select(show_collections_by_model("vector")))
+                } else if self.consume_ident_ci("DOCUMENTS")? {
+                    Ok(SqlCommand::Select(show_collections_by_model("document")))
+                } else if self.consume_ident_ci("TIMESERIES")? {
+                    Ok(SqlCommand::Select(show_collections_by_model("timeseries")))
+                } else if self.consume_ident_ci("GRAPHS")? {
+                    Ok(SqlCommand::Select(show_collections_by_model("graph")))
+                } else if self.consume_ident_ci("KV")? {
+                    Ok(SqlCommand::Select(show_collections_by_model("kv")))
                 } else if self.consume_ident_ci("SECRET")? || self.consume_ident_ci("SECRETS")? {
                     let prefix = if !self.check(&Token::Eof) {
                         Some(self.parse_dotted_admin_path(true)?)
@@ -1457,6 +1496,13 @@ impl<'a> Parser<'a> {
                             "SECRET",
                             "SECRETS",
                             "COLLECTIONS",
+                            "TABLES",
+                            "QUEUES",
+                            "VECTORS",
+                            "DOCUMENTS",
+                            "TIMESERIES",
+                            "GRAPHS",
+                            "KV",
                             "TENANT",
                             "POLICIES",
                             "EFFECTIVE",
