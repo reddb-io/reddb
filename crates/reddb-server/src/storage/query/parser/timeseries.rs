@@ -183,10 +183,7 @@ impl<'a> Parser<'a> {
                 // silently default to seconds.
                 let kw = self.peek().clone();
                 Err(ParseError::new(
-                    format!(
-                        "unknown duration unit '{}', expected s/m/h/d",
-                        kw
-                    ),
+                    format!("unknown duration unit '{}', expected s/m/h/d", kw),
                     self.position(),
                 ))
             }

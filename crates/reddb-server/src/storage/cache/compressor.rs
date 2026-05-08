@@ -118,7 +118,10 @@ impl fmt::Display for CompressError {
             Self::ZstdDecode(msg) => write!(f, "zstd decode failed: {msg}"),
             Self::UnknownFormat => write!(f, "unknown compressed format"),
             Self::OversizeOriginal(n) => {
-                write!(f, "payload of {n} bytes exceeds u32::MAX original-length cap")
+                write!(
+                    f,
+                    "payload of {n} bytes exceeds u32::MAX original-length cap"
+                )
             }
         }
     }
@@ -314,7 +317,10 @@ mod tests {
         let compressed = L2BlobCompressor::compress(&input, Some("text/plain"), &opts)
             .expect("compress text payload");
         match compressed {
-            Compressed::Zstd { bytes, original_len } => {
+            Compressed::Zstd {
+                bytes,
+                original_len,
+            } => {
                 assert_eq!(original_len as usize, input.len());
                 let ratio = bytes.len() as f64 / input.len() as f64;
                 assert!(
@@ -352,7 +358,8 @@ mod tests {
     fn image_svg_is_compressed_as_exception() {
         // SVG is XML text and should be eligible for compression.
         let mut input = Vec::new();
-        let chunk = b"<svg xmlns='http://www.w3.org/2000/svg'><rect width='10' height='10'/></svg>\n";
+        let chunk =
+            b"<svg xmlns='http://www.w3.org/2000/svg'><rect width='10' height='10'/></svg>\n";
         while input.len() < 4096 {
             input.extend_from_slice(chunk);
         }
@@ -399,8 +406,9 @@ mod tests {
         // Encode 1024 bytes but lie about the original length so the post-decode
         // verification step trips.
         let input = lorem_4kb();
-        let truthful = L2BlobCompressor::compress(&input, Some("text/plain"), &CompressOpts::default())
-            .unwrap();
+        let truthful =
+            L2BlobCompressor::compress(&input, Some("text/plain"), &CompressOpts::default())
+                .unwrap();
         let lying = match truthful {
             Compressed::Zstd { bytes, .. } => Compressed::Zstd {
                 bytes,
@@ -424,8 +432,7 @@ mod tests {
         let backing = [0u8; 16];
         let fake_len = (u32::MAX as usize) + 1;
         // Build a slice with an inflated length that we promise never to read.
-        let oversized: &[u8] =
-            unsafe { std::slice::from_raw_parts(backing.as_ptr(), fake_len) };
+        let oversized: &[u8] = unsafe { std::slice::from_raw_parts(backing.as_ptr(), fake_len) };
         let err = L2BlobCompressor::compress(oversized, None, &CompressOpts::default())
             .expect_err("must reject oversize input");
         match err {

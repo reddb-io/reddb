@@ -1098,7 +1098,6 @@ impl Value {
         buf
     }
 
-
     /// Deserialize value from bytes.
     ///
     /// Delegates to [`super::value_codec::decode`].

@@ -538,8 +538,7 @@ pub fn decode(data: &[u8]) -> Result<(Value, usize), ValueError> {
             if data.len() < offset + len as usize {
                 return Err(ValueError::TruncatedData);
             }
-            let node_id =
-                String::from_utf8_lossy(&data[offset..offset + len as usize]).to_string();
+            let node_id = String::from_utf8_lossy(&data[offset..offset + len as usize]).to_string();
             offset += len as usize;
             Value::NodeRef(node_id)
         }
@@ -549,8 +548,7 @@ pub fn decode(data: &[u8]) -> Result<(Value, usize), ValueError> {
             if data.len() < offset + len as usize {
                 return Err(ValueError::TruncatedData);
             }
-            let edge_id =
-                String::from_utf8_lossy(&data[offset..offset + len as usize]).to_string();
+            let edge_id = String::from_utf8_lossy(&data[offset..offset + len as usize]).to_string();
             offset += len as usize;
             Value::EdgeRef(edge_id)
         }
@@ -573,8 +571,7 @@ pub fn decode(data: &[u8]) -> Result<(Value, usize), ValueError> {
             if data.len() < offset + len as usize + 8 {
                 return Err(ValueError::TruncatedData);
             }
-            let table =
-                String::from_utf8_lossy(&data[offset..offset + len as usize]).to_string();
+            let table = String::from_utf8_lossy(&data[offset..offset + len as usize]).to_string();
             offset += len as usize;
             let row_id = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
             offset += 8;

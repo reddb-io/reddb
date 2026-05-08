@@ -709,7 +709,10 @@ where
 
     /// Get all cached keys
     pub fn keys(&self) -> Vec<K> {
-        recover_read_guard(&self.entries, "entries").keys().cloned().collect()
+        recover_read_guard(&self.entries, "entries")
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// Get dirty page count

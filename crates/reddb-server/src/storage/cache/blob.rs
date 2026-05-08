@@ -16,11 +16,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock;
 
-use super::compressor::{Compressed, CompressOpts, L2BlobCompressor};
+use super::compressor::{CompressOpts, Compressed, L2BlobCompressor};
 use super::extended_ttl::{EffectiveExpiry, ExpiryDecision, ExtendedTtlPolicy};
-use super::promotion_pool::{
-    AsyncPromotionPool, PoolOpts, PromotionExecutor, PromotionRequest,
-};
+use super::promotion_pool::{AsyncPromotionPool, PoolOpts, PromotionExecutor, PromotionRequest};
 
 /// Test-only thread-local counter of how many times
 /// `EffectiveExpiry::compute` is invoked from `Shard::get`. Thread-local
@@ -751,8 +749,7 @@ impl BlobCacheStats {
         if self.l2_compression_stored_bytes == 0 {
             return 1.0;
         }
-        self.l2_compression_original_bytes as f64
-            / self.l2_compression_stored_bytes as f64
+        self.l2_compression_original_bytes as f64 / self.l2_compression_stored_bytes as f64
     }
 
     /// Number of L2 entries the compressor returned as `Raw` since boot —
@@ -954,7 +951,9 @@ impl Shard {
                 entry.last_access_unix_ms = now_ms;
                 Lookup::Hit(entry.hit())
             }
-            ExpiryDecision::Stale { window_remaining_ms } => {
+            ExpiryDecision::Stale {
+                window_remaining_ms,
+            } => {
                 entry.visited = true;
                 entry.last_access_unix_ms = now_ms;
                 Lookup::Hit(entry.hit_stale(window_remaining_ms))
@@ -1327,7 +1326,10 @@ fn encode_v2_frame(c: &Compressed) -> Vec<u8> {
             out.extend_from_slice(bytes);
             out
         }
-        Compressed::Zstd { bytes, original_len } => {
+        Compressed::Zstd {
+            bytes,
+            original_len,
+        } => {
             let mut out = Vec::with_capacity(5 + bytes.len());
             out.push(L2_FRAME_TAG_ZSTD);
             out.extend_from_slice(&original_len.to_le_bytes());
@@ -1340,9 +1342,7 @@ fn encode_v2_frame(c: &Compressed) -> Vec<u8> {
 /// Decode the V2 chain layout produced by [`encode_v2_frame`].
 fn decode_v2_frame(bytes: &[u8]) -> Result<Compressed, CacheError> {
     if bytes.is_empty() {
-        return Err(CacheError::L2Io(
-            "empty blob-cache L2 v2 frame".into(),
-        ));
+        return Err(CacheError::L2Io("empty blob-cache L2 v2 frame".into()));
     }
     match bytes[0] {
         L2_FRAME_TAG_RAW => Ok(Compressed::Raw(bytes[1..].to_vec())),
@@ -1451,8 +1451,8 @@ mod synopsis_filter {
         pub(super) fn insert(&mut self, key: &str) {
             let (h1, h2) = double_hash(key);
             for i in 0..self.hash_count {
-                let bit = (h1.wrapping_add((i as u64).wrapping_mul(h2))
-                    % self.bit_count as u64) as usize;
+                let bit =
+                    (h1.wrapping_add((i as u64).wrapping_mul(h2)) % self.bit_count as u64) as usize;
                 self.bits[bit / 64] |= 1u64 << (bit % 64);
             }
         }
@@ -1460,8 +1460,8 @@ mod synopsis_filter {
         pub(super) fn contains(&self, key: &str) -> bool {
             let (h1, h2) = double_hash(key);
             for i in 0..self.hash_count {
-                let bit = (h1.wrapping_add((i as u64).wrapping_mul(h2))
-                    % self.bit_count as u64) as usize;
+                let bit =
+                    (h1.wrapping_add((i as u64).wrapping_mul(h2)) % self.bit_count as u64) as usize;
                 if self.bits[bit / 64] & (1u64 << (bit % 64)) == 0 {
                     return false;
                 }
@@ -1591,8 +1591,7 @@ impl BlobCacheL2 {
                 // Bloom synopsis said MaybePresent but the authoritative
                 // metadata B+ tree disagrees: a false positive (or stale
                 // bit). Count it for FPR observability.
-                self.synopsis_metadata_reads
-                    .fetch_add(1, Ordering::Relaxed);
+                self.synopsis_metadata_reads.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
         };
@@ -1901,11 +1900,7 @@ impl BlobCacheL2 {
     /// metadata. Used to verify forward-compat reads of entries written
     /// before #192 lane 2/5 landed.
     #[cfg(test)]
-    fn inject_v1_entry(
-        &self,
-        key: &BlobCacheKey,
-        payload: &[u8],
-    ) -> Result<(), CacheError> {
+    fn inject_v1_entry(&self, key: &BlobCacheKey, payload: &[u8]) -> Result<(), CacheError> {
         let (root_page, page_count, checksum) = self.write_blob_chain(payload)?;
         let record = L2Record {
             namespace: key.namespace.clone(),
@@ -2026,9 +2021,7 @@ fn encode_l2_key(namespace: &str, key: &str) -> Vec<u8> {
     out
 }
 
-fn rebuild_l2_synopsis(
-    metadata: &crate::storage::engine::BTree,
-) -> HashMap<String, BloomFilter> {
+fn rebuild_l2_synopsis(metadata: &crate::storage::engine::BTree) -> HashMap<String, BloomFilter> {
     let mut synopsis: HashMap<String, BloomFilter> = HashMap::new();
     let Ok(mut cursor) = metadata.cursor_first() else {
         return synopsis;
@@ -2177,7 +2170,12 @@ impl BlobCache {
 
         let shard_idx = self.shard_index(&key);
         let mut shard = self.shards[shard_idx].write();
-        self.check_version(&shard, &key, input.policy.version_value(), namespace_generation)?;
+        self.check_version(
+            &shard,
+            &key,
+            input.policy.version_value(),
+            namespace_generation,
+        )?;
         let entry = Entry::new(
             input.bytes,
             input.content_metadata,
@@ -2634,7 +2632,11 @@ impl BlobCache {
             // shutdown drains them out gracefully.
             Err(losing_pool) => {
                 losing_pool.shutdown();
-                Arc::clone(self.promotion_pool.get().expect("OnceLock set+get inconsistency"))
+                Arc::clone(
+                    self.promotion_pool
+                        .get()
+                        .expect("OnceLock set+get inconsistency"),
+                )
             }
         }
     }
@@ -2705,7 +2707,9 @@ impl BlobCache {
     }
 
     fn validate_blob_size(&self, size: usize, policy: BlobCachePolicy) -> Result<(), CacheError> {
-        let max = policy.max_blob_bytes_value().unwrap_or(self.config.l1_bytes_max);
+        let max = policy
+            .max_blob_bytes_value()
+            .unwrap_or(self.config.l1_bytes_max);
         if size > max {
             Err(CacheError::BlobTooLarge { size, max })
         } else {
@@ -3802,10 +3806,7 @@ mod tests {
         // — but `exists` must surface that ambiguity as `MaybePresent`, not a
         // false `Present`. The authoritative `get` then returns None and
         // bumps the synopsis-false-positive counter.
-        assert_eq!(
-            cache.exists("n", "deleted"),
-            CachePresence::MaybePresent
-        );
+        assert_eq!(cache.exists("n", "deleted"), CachePresence::MaybePresent);
         assert!(cache.get("n", "deleted").is_none());
         let stats = cache.stats();
         assert_eq!(stats.l2_metadata_reads, 1);
@@ -3933,7 +3934,10 @@ mod tests {
             METRIC_CACHE_BLOB_SYNOPSIS_METADATA_READS_TOTAL,
             "cache_blob_synopsis_metadata_reads_total"
         );
-        assert_eq!(METRIC_CACHE_BLOB_SYNOPSIS_BYTES, "cache_blob_synopsis_bytes");
+        assert_eq!(
+            METRIC_CACHE_BLOB_SYNOPSIS_BYTES,
+            "cache_blob_synopsis_bytes"
+        );
     }
 
     // -- API review #151 follow-ups -----------------------------------------
@@ -4015,11 +4019,7 @@ mod tests {
     fn invalidate_tags_with_empty_slice_is_a_no_op() {
         let cache = small_cache(128);
         cache
-            .put(
-                "n",
-                "a",
-                BlobCachePut::new(b"a".to_vec()).with_tags(["x"]),
-            )
+            .put("n", "a", BlobCachePut::new(b"a".to_vec()).with_tags(["x"]))
             .unwrap();
         assert_eq!(cache.invalidate_tags("n", &[]), 0);
         assert_eq!(cache.invalidate_dependencies("n", &[]), 0);
@@ -4164,10 +4164,7 @@ mod tests {
 
     /// Tiny shared helper for the Bloom-filter property tests below.
     fn fpr_for(filter: &super::synopsis_filter::BloomFilter, negatives: &[String]) -> f64 {
-        let positives = negatives
-            .iter()
-            .filter(|key| filter.contains(key))
-            .count() as f64;
+        let positives = negatives.iter().filter(|key| filter.contains(key)).count() as f64;
         positives / negatives.len().max(1) as f64
     }
 
@@ -4337,8 +4334,9 @@ mod tests {
                     let _ = cache.put(
                         "n",
                         &key,
-                        BlobCachePut::new(b"v".to_vec())
-                            .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
+                        BlobCachePut::new(b"v".to_vec()).with_policy(
+                            BlobCachePolicy::default().l1_admission(L1Admission::Never),
+                        ),
                     );
                 }
                 1 => {
@@ -4403,8 +4401,9 @@ mod tests {
                     let _ = cache.put(
                         "n",
                         &key,
-                        BlobCachePut::new(b"x".to_vec())
-                            .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
+                        BlobCachePut::new(b"x".to_vec()).with_policy(
+                            BlobCachePolicy::default().l1_admission(L1Admission::Never),
+                        ),
                     );
                     i += 1;
                 }
@@ -4481,7 +4480,11 @@ mod tests {
         // Force L1 eviction of "k" by overflowing the byte cap with fillers.
         for i in 0..40 {
             cache
-                .put("ns", &format!("filler{i}"), BlobCachePut::new(vec![0u8; 16]))
+                .put(
+                    "ns",
+                    &format!("filler{i}"),
+                    BlobCachePut::new(vec![0u8; 16]),
+                )
                 .expect("filler");
         }
 
@@ -4527,7 +4530,11 @@ mod tests {
             .expect("put");
         for i in 0..40 {
             cache
-                .put("ns", &format!("filler{i}"), BlobCachePut::new(vec![0u8; 16]))
+                .put(
+                    "ns",
+                    &format!("filler{i}"),
+                    BlobCachePut::new(vec![0u8; 16]),
+                )
                 .expect("filler");
         }
         // Async NOT enabled — pool is None.
@@ -4564,7 +4571,11 @@ mod tests {
         // Evict L1.
         for i in 0..40 {
             cache
-                .put("ns", &format!("filler{i}"), BlobCachePut::new(vec![0u8; 16]))
+                .put(
+                    "ns",
+                    &format!("filler{i}"),
+                    BlobCachePut::new(vec![0u8; 16]),
+                )
                 .expect("filler");
         }
         // Tiny queue, sleep-forever-ish executor — first request blocks
@@ -4606,7 +4617,11 @@ mod tests {
         }
         for i in 0..40 {
             cache
-                .put("ns", &format!("filler{i}"), BlobCachePut::new(vec![0u8; 16]))
+                .put(
+                    "ns",
+                    &format!("filler{i}"),
+                    BlobCachePut::new(vec![0u8; 16]),
+                )
                 .expect("filler");
         }
         let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -4731,9 +4746,8 @@ mod tests {
             .put(
                 "n",
                 "doc",
-                BlobCachePut::new(payload.clone()).with_policy(
-                    BlobCachePolicy::default().l1_admission(L1Admission::Never),
-                ),
+                BlobCachePut::new(payload.clone())
+                    .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
             )
             .expect("put");
 
@@ -4767,9 +4781,8 @@ mod tests {
             .put(
                 "n",
                 "doc",
-                BlobCachePut::new(payload.clone()).with_policy(
-                    BlobCachePolicy::default().l1_admission(L1Admission::Never),
-                ),
+                BlobCachePut::new(payload.clone())
+                    .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
             )
             .expect("put");
 
@@ -4794,10 +4807,7 @@ mod tests {
         // 4 KB of zero bytes would otherwise compress superbly; the
         // content-type rule must short-circuit that.
         let payload = vec![0u8; 4096];
-        let metadata = BTreeMap::from([(
-            "content-type".to_string(),
-            "image/png".to_string(),
-        )]);
+        let metadata = BTreeMap::from([("content-type".to_string(), "image/png".to_string())]);
 
         cache
             .put(
@@ -4832,9 +4842,8 @@ mod tests {
             .put(
                 "n",
                 "noise",
-                BlobCachePut::new(payload.clone()).with_policy(
-                    BlobCachePolicy::default().l1_admission(L1Admission::Never),
-                ),
+                BlobCachePut::new(payload.clone())
+                    .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
             )
             .expect("put");
 
@@ -4894,9 +4903,8 @@ mod tests {
                 .put(
                     "n",
                     &format!("doc{i}"),
-                    BlobCachePut::new(payload.clone()).with_policy(
-                        BlobCachePolicy::default().l1_admission(L1Admission::Never),
-                    ),
+                    BlobCachePut::new(payload.clone())
+                        .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
                 )
                 .expect("put admitted under compressed budget");
         }
@@ -4927,9 +4935,8 @@ mod tests {
                 .put(
                     "n",
                     &format!("text{i}"),
-                    BlobCachePut::new(payload.clone()).with_policy(
-                        BlobCachePolicy::default().l1_admission(L1Admission::Never),
-                    ),
+                    BlobCachePut::new(payload.clone())
+                        .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
                 )
                 .expect("put");
         }
@@ -4941,9 +4948,8 @@ mod tests {
                 .put(
                     "n",
                     &format!("bin{i}"),
-                    BlobCachePut::new(bin).with_policy(
-                        BlobCachePolicy::default().l1_admission(L1Admission::Never),
-                    ),
+                    BlobCachePut::new(bin)
+                        .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
                 )
                 .expect("put");
         }
@@ -5228,9 +5234,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).ok();
         std::fs::write(&ctl, b"not-a-valid-control-file").unwrap();
 
-        let result = BlobCache::open_with_l2(
-            BlobCacheConfig::default().with_l2_path(&path),
-        );
+        let result = BlobCache::open_with_l2(BlobCacheConfig::default().with_l2_path(&path));
         match &result {
             Err(CacheError::L2Io(_)) => {}
             Err(other) => panic!("expected L2Io error, got: {other:?}"),
@@ -5253,9 +5257,7 @@ mod tests {
         // Create the pager path as a directory so opening it as a file fails.
         std::fs::create_dir_all(&path).unwrap();
 
-        let result = BlobCache::open_with_l2(
-            BlobCacheConfig::default().with_l2_path(&path),
-        );
+        let result = BlobCache::open_with_l2(BlobCacheConfig::default().with_l2_path(&path));
         assert!(
             result.is_err(),
             "expected Err when l2_path is a directory, got Ok",

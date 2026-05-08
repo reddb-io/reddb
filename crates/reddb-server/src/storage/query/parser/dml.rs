@@ -18,7 +18,9 @@ pub(crate) const JSON_LITERAL_MAX_DEPTH: u32 = 128;
 /// Walk a parsed `JsonValue` tree and bail out if nesting exceeds
 /// `JSON_LITERAL_MAX_DEPTH`. Iterative to avoid the very stack
 /// overflow we're trying to prevent.
-pub(crate) fn json_literal_depth_check(value: &crate::utils::json::JsonValue) -> Result<(), String> {
+pub(crate) fn json_literal_depth_check(
+    value: &crate::utils::json::JsonValue,
+) -> Result<(), String> {
     use crate::utils::json::JsonValue;
     let mut stack: Vec<(&JsonValue, u32)> = vec![(value, 1)];
     while let Some((node, depth)) = stack.pop() {
@@ -148,7 +150,7 @@ impl<'a> Parser<'a> {
                     // landing in the JSON/audit/log/gRPC error sinks.
                     format!("unsupported TTL unit {other:?}"),
                     self.position(),
-                ))
+                ));
             }
         };
 
@@ -516,21 +518,19 @@ impl<'a> Parser<'a> {
                 // canonical JsonValue then re-encode via `to_vec` so
                 // the on-disk bytes match the quoted form.
                 self.advance()?;
-                let json_value =
-                    crate::utils::json::parse_json(&raw).map_err(|err| {
-                        ParseError::new(
-                            // F-05: render the underlying parse-error string
-                            // via `{:?}` so any user fragment serde echoed
-                            // back (unexpected character, key text, …) is
-                            // Debug-escaped before reaching the downstream
-                            // JSON / audit / log / gRPC sinks.
-                            format!("invalid JSON object literal: {:?}", err.to_string()),
-                            self.position(),
-                        )
-                    })?;
-                json_literal_depth_check(&json_value).map_err(|err| {
-                    ParseError::new(err, self.position())
+                let json_value = crate::utils::json::parse_json(&raw).map_err(|err| {
+                    ParseError::new(
+                        // F-05: render the underlying parse-error string
+                        // via `{:?}` so any user fragment serde echoed
+                        // back (unexpected character, key text, …) is
+                        // Debug-escaped before reaching the downstream
+                        // JSON / audit / log / gRPC sinks.
+                        format!("invalid JSON object literal: {:?}", err.to_string()),
+                        self.position(),
+                    )
                 })?;
+                json_literal_depth_check(&json_value)
+                    .map_err(|err| ParseError::new(err, self.position()))?;
                 let canonical = crate::serde_json::Value::from(json_value);
                 let bytes = crate::json::to_vec(&canonical).map_err(|err| {
                     ParseError::new(

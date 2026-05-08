@@ -813,10 +813,9 @@ impl UnifiedStore {
             let _ = self.unindex_cross_refs(*entity_id);
         }
         self.btree_indices.write().remove(name);
-        self.entity_cache
-            .retain(|entity_id, (collection, _)| {
-                collection != name && !entity_ids.iter().any(|id| id.raw() == entity_id)
-            });
+        self.entity_cache.retain(|entity_id, (collection, _)| {
+            collection != name && !entity_ids.iter().any(|id| id.raw() == entity_id)
+        });
         self.remove_from_graph_label_index_batch(name, &entity_ids);
         self.mark_paged_registry_dirty();
         Ok(())
@@ -1065,10 +1064,7 @@ mod tests {
         }
 
         let fsyncs = coord.fsync_count();
-        assert!(
-            fsyncs > 0,
-            "expected at least one fsync, got {fsyncs}"
-        );
+        assert!(fsyncs > 0, "expected at least one fsync, got {fsyncs}");
         assert!(
             fsyncs < WRITERS as u64,
             "expected fsyncs ({fsyncs}) to be strictly less than \
@@ -1125,10 +1121,7 @@ mod tests {
         // The point of the assertion is to confirm the env override
         // is wired through — the open() above used the env knob.
         let fsyncs = coord.fsync_count();
-        assert!(
-            fsyncs >= 1,
-            "expected at least one fsync, got {fsyncs}"
-        );
+        assert!(fsyncs >= 1, "expected at least one fsync, got {fsyncs}");
 
         std::env::remove_var("REDDB_GROUP_COMMIT_WINDOW_US");
         drop(coord);

@@ -59,11 +59,11 @@ mod tree;
 mod vector;
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod json_literal_table;
 #[cfg(test)]
 mod property_tests;
+#[cfg(test)]
+mod tests;
 
 pub use error::{ParseError, ParseErrorKind, SafeTokenDisplay};
 pub use limits::ParserLimits;
@@ -385,11 +385,7 @@ impl<'a> Parser<'a> {
                 n
             }
             other => {
-                return Err(ParseError::expected(
-                    vec!["number"],
-                    other,
-                    self.position(),
-                ));
+                return Err(ParseError::expected(vec!["number"], other, self.position()));
             }
         };
         Ok(if negate { -value } else { value })

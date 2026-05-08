@@ -9,8 +9,8 @@
 use proptest::prelude::*;
 
 use crate::storage::query::ast::{
-    CompareOp, FieldRef, Filter, InsertEntityType, InsertQuery, Projection, QueryExpr, QueueCommand,
-    QueueSide, TableQuery,
+    CompareOp, FieldRef, Filter, InsertEntityType, InsertQuery, Projection, QueryExpr,
+    QueueCommand, QueueSide, TableQuery,
 };
 use crate::storage::query::renderer::render;
 use crate::storage::schema::Value;

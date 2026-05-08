@@ -381,7 +381,10 @@ mod tests {
         while let Some(r) = pool.queue.pop() {
             seen.push(r.key);
         }
-        assert_eq!(seen, vec!["b".to_string(), "c".to_string(), "d".to_string()]);
+        assert_eq!(
+            seen,
+            vec!["b".to_string(), "c".to_string(), "d".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -566,8 +569,7 @@ mod tests {
     /// scheduled. Catches accidental Arc/Box mix-ups in the queue plumbing.
     #[tokio::test]
     async fn executor_receives_unmodified_request() {
-        let captured: Arc<Mutex<Vec<(String, String, usize)>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let captured: Arc<Mutex<Vec<(String, String, usize)>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_exec = Arc::clone(&captured);
         let executor: PromotionExecutor = Arc::new(move |req| {
             captured_for_exec
