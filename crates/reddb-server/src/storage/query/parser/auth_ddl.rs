@@ -585,7 +585,7 @@ impl<'a> Parser<'a> {
         loop {
             if self.consume_ident_ci("PUBLIC")? {
                 out.push(GrantPrincipalRef::Public);
-            } else if self.consume_ident_ci("GROUP")? {
+            } else if self.consume(&Token::Group)? || self.consume_ident_ci("GROUP")? {
                 let g = self.expect_ident()?;
                 out.push(GrantPrincipalRef::Group(g));
             } else {

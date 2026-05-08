@@ -41,7 +41,7 @@ impl<'a> Parser<'a> {
                 }
                 self.consume_ident_ci("ROWS")?;
             } else if self.consume_ident_ci("NO")? {
-                self.consume_ident_ci("ROLLBACK")?;
+                let _ = self.consume(&Token::Rollback)? || self.consume_ident_ci("ROLLBACK")?;
                 no_rollback = true;
             } else {
                 break;

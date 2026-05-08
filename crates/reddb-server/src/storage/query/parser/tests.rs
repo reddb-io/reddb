@@ -2764,6 +2764,542 @@ fn test_parse_hll_commands() {
 }
 
 #[test]
+fn test_parse_auth_grant_revoke_and_alter_user_forms() {
+    use crate::storage::query::ast::{AlterUserAttribute, GrantObjectKind, GrantPrincipalRef};
+
+    let query =
+        parse("GRANT ALL PRIVILEGES ON DATABASE maindb TO PUBLIC WITH GRANT OPTION").unwrap();
+    let QueryExpr::Grant(grant) = query else {
+        panic!("Expected Grant");
+    };
+    assert!(grant.all);
+    assert_eq!(grant.actions, vec!["ALL"]);
+    assert_eq!(grant.object_kind, GrantObjectKind::Database);
+    assert_eq!(grant.objects[0].name, "maindb");
+    assert!(matches!(grant.principals[0], GrantPrincipalRef::Public));
+    assert!(grant.with_grant_option);
+
+    let query =
+        parse("GRANT SELECT, UPDATE (name, email) ON TABLE public.users TO tenant1.alice").unwrap();
+    let QueryExpr::Grant(grant) = query else {
+        panic!("Expected Grant");
+    };
+    assert_eq!(grant.actions, vec!["SELECT", "UPDATE"]);
+    assert_eq!(
+        grant.columns.as_deref(),
+        Some(&["name".to_string(), "email".to_string()][..])
+    );
+    assert_eq!(grant.object_kind, GrantObjectKind::Table);
+    assert_eq!(grant.objects[0].schema.as_deref(), Some("public"));
+    assert_eq!(grant.objects[0].name, "users");
+    assert!(matches!(
+        &grant.principals[0],
+        GrantPrincipalRef::User { tenant: Some(t), name } if t == "tenant1" && name == "alice"
+    ));
+
+    let query = parse("REVOKE GRANT OPTION FOR USAGE ON SCHEMA analytics FROM analysts").unwrap();
+    let QueryExpr::Revoke(revoke) = query else {
+        panic!("Expected Revoke");
+    };
+    assert!(revoke.grant_option_for);
+    assert_eq!(revoke.actions, vec!["USAGE"]);
+    assert_eq!(revoke.object_kind, GrantObjectKind::Schema);
+    assert!(matches!(
+        &revoke.principals[0],
+        GrantPrincipalRef::User { tenant: None, name } if name == "analysts"
+    ));
+
+    let query = parse(
+        "ALTER USER tenant1.alice VALID UNTIL '2030-01-01' CONNECTION LIMIT 5 DISABLE SET search_path = 'public,analytics' ADD GROUP analysts DROP GROUP temp PASSWORD 'newpw'",
+    )
+    .unwrap();
+    let QueryExpr::AlterUser(stmt) = query else {
+        panic!("Expected AlterUser");
+    };
+    assert_eq!(stmt.tenant.as_deref(), Some("tenant1"));
+    assert_eq!(stmt.username, "alice");
+    assert!(
+        matches!(stmt.attributes[0], AlterUserAttribute::ValidUntil(ref s) if s == "2030-01-01")
+    );
+    assert!(matches!(
+        stmt.attributes[1],
+        AlterUserAttribute::ConnectionLimit(5)
+    ));
+    assert!(matches!(stmt.attributes[2], AlterUserAttribute::Disable));
+    assert!(
+        matches!(stmt.attributes[3], AlterUserAttribute::SetSearchPath(ref s) if s == "public,analytics")
+    );
+    assert!(matches!(stmt.attributes[4], AlterUserAttribute::AddGroup(ref g) if g == "analysts"));
+    assert!(matches!(stmt.attributes[5], AlterUserAttribute::DropGroup(ref g) if g == "temp"));
+    assert!(matches!(stmt.attributes[6], AlterUserAttribute::Password(ref p) if p == "newpw"));
+
+    let query = parse(
+        "GRANT INSERT, DELETE, TRUNCATE, REFERENCES, EXECUTE ON FUNCTION public.recalc TO GROUP analysts, bob",
+    )
+    .unwrap();
+    let QueryExpr::Grant(grant) = query else {
+        panic!("Expected Grant");
+    };
+    assert_eq!(
+        grant.actions,
+        vec!["INSERT", "DELETE", "TRUNCATE", "REFERENCES", "EXECUTE"]
+    );
+    assert_eq!(grant.object_kind, GrantObjectKind::Function);
+    assert_eq!(grant.objects[0].schema.as_deref(), Some("public"));
+    assert!(matches!(
+        &grant.principals[0],
+        GrantPrincipalRef::Group(group) if group == "analysts"
+    ));
+    assert!(matches!(
+        &grant.principals[1],
+        GrantPrincipalRef::User { tenant: None, name } if name == "bob"
+    ));
+
+    let query = parse("REVOKE ALL ON public.users, audit.events FROM GROUP analysts").unwrap();
+    let QueryExpr::Revoke(revoke) = query else {
+        panic!("Expected Revoke");
+    };
+    assert!(revoke.all);
+    assert_eq!(revoke.object_kind, GrantObjectKind::Table);
+    assert_eq!(revoke.objects.len(), 2);
+    assert!(matches!(
+        &revoke.principals[0],
+        GrantPrincipalRef::Group(group) if group == "analysts"
+    ));
+
+    let query = parse("ALTER USER bob ENABLE SET search_path TO 'public'").unwrap();
+    let QueryExpr::AlterUser(stmt) = query else {
+        panic!("Expected AlterUser");
+    };
+    assert_eq!(stmt.tenant, None);
+    assert_eq!(stmt.username, "bob");
+    assert!(matches!(stmt.attributes[0], AlterUserAttribute::Enable));
+    assert!(
+        matches!(stmt.attributes[1], AlterUserAttribute::SetSearchPath(ref s) if s == "public")
+    );
+}
+
+#[test]
+fn test_parse_iam_policy_forms() {
+    use crate::storage::query::ast::PolicyPrincipalRef;
+
+    let query = parse("CREATE POLICY 'readonly' AS '{\"Statement\":[]}'").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::CreateIamPolicy { ref id, ref json }
+            if id == "readonly" && json == "{\"Statement\":[]}"
+    ));
+
+    let query = parse("DROP POLICY 'readonly'").unwrap();
+    assert!(matches!(query, QueryExpr::DropIamPolicy { ref id } if id == "readonly"));
+
+    let query = parse("ATTACH POLICY 'readonly' TO USER tenant1.alice").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::AttachPolicy {
+            ref policy_id,
+            principal: PolicyPrincipalRef::User(ref user),
+        } if policy_id == "readonly"
+            && user.tenant.as_deref() == Some("tenant1")
+            && user.username == "alice"
+    ));
+
+    let query = parse("DETACH POLICY 'readonly' FROM GROUP analysts").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::DetachPolicy {
+            ref policy_id,
+            principal: PolicyPrincipalRef::Group(ref group),
+        } if policy_id == "readonly" && group == "analysts"
+    ));
+
+    let query = parse("SHOW POLICIES FOR GROUP analysts").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ShowPolicies {
+            filter: Some(PolicyPrincipalRef::Group(ref group)),
+        } if group == "analysts"
+    ));
+
+    let query =
+        parse("SHOW EFFECTIVE PERMISSIONS FOR tenant1.alice ON table:public.orders").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ShowEffectivePermissions {
+            ref user,
+            resource: Some(ref resource),
+        } if user.tenant.as_deref() == Some("tenant1")
+            && user.username == "alice"
+            && resource.kind == "table"
+            && resource.name == "public.orders"
+    ));
+
+    let query = parse("SIMULATE tenant1.alice ACTION SELECT ON 'table:public.orders'").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::SimulatePolicy {
+            ref user,
+            ref action,
+            ref resource,
+        } if user.tenant.as_deref() == Some("tenant1")
+            && user.username == "alice"
+            && action == "select"
+            && resource.kind == "table"
+            && resource.name == "public.orders"
+    ));
+
+    let query = parse("SHOW POLICIES").unwrap();
+    assert!(matches!(query, QueryExpr::ShowPolicies { filter: None }));
+
+    let query = parse("SHOW POLICIES FOR USER alice").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ShowPolicies {
+            filter: Some(PolicyPrincipalRef::User(ref user)),
+        } if user.tenant.is_none() && user.username == "alice"
+    ));
+
+    let query = parse("SHOW EFFECTIVE PERMISSIONS FOR alice").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ShowEffectivePermissions {
+            ref user,
+            resource: None,
+        } if user.tenant.is_none() && user.username == "alice"
+    ));
+
+    let query = parse("SIMULATE alice ACTION 'iam:PassRole' ON TABLE:public.orders").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::SimulatePolicy {
+            ref user,
+            ref action,
+            ref resource,
+        } if user.tenant.is_none()
+            && user.username == "alice"
+            && action == "iam:PassRole"
+            && resource.kind == "table"
+            && resource.name == "public.orders"
+    ));
+
+    for sql in [
+        "ATTACH ROLE 'readonly' TO USER alice",
+        "DETACH POLICY 'readonly' TO USER alice",
+        "SHOW EFFECTIVE ACTIONS FOR alice",
+        "SIMULATE alice ON SELECT ON table:public.orders",
+        "SIMULATE alice ACTION SELECT ON 'missing-colon'",
+    ] {
+        assert!(parse(sql).is_err(), "{sql}");
+    }
+}
+
+#[test]
+fn test_parse_auth_error_forms() {
+    for sql in [
+        "GRANT UNKNOWN ON TABLE users TO alice",
+        "GRANT SELECT users TO alice",
+        "GRANT SELECT ON TABLE users TO GROUP",
+        "GRANT SELECT ON TABLE users TO alice WITH OPTION",
+        "GRANT SELECT ON TABLE users TO alice WITH GRANT",
+        "REVOKE GRANT SELECT ON TABLE users FROM alice",
+        "REVOKE GRANT OPTION SELECT ON TABLE users FROM alice",
+        "ALTER USER alice",
+        "ALTER USER alice VALID '2030-01-01'",
+        "ALTER USER alice CONNECTION 5",
+        "ALTER USER alice SET timezone = 'UTC'",
+        "ALTER USER alice SET search_path 'public'",
+        "ALTER USER alice ADD ROLE analysts",
+        "ALTER USER alice DROP ROLE analysts",
+        "ATTACH POLICY 'readonly' TO ROLE analysts",
+        "SIMULATE alice ACTION SELECT ON table public.orders",
+        "SIMULATE alice ACTION 42 ON table:public.orders",
+    ] {
+        assert!(parse(sql).is_err(), "{sql}");
+    }
+}
+
+#[test]
+fn test_parse_migration_forms() {
+    use crate::storage::query::ast::ApplyMigrationTarget;
+
+    let query = parse(
+        "CREATE MIGRATION m2 DEPENDS ON m0, m1 BATCH 500 ROWS NO ROLLBACK AS CREATE TABLE accounts (id INTEGER)",
+    )
+    .unwrap();
+    let QueryExpr::CreateMigration(migration) = query else {
+        panic!("Expected CreateMigration");
+    };
+    assert_eq!(migration.name, "m2");
+    assert_eq!(migration.depends_on, vec!["m0", "m1"]);
+    assert_eq!(migration.batch_size, Some(500));
+    assert!(migration.no_rollback);
+    assert_eq!(migration.body, "CREATE TABLE accounts ( id INTEGER )");
+
+    let query = parse("APPLY MIGRATION * FOR TENANT tenant1").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ApplyMigration(apply)
+            if matches!(apply.target, ApplyMigrationTarget::All)
+                && apply.for_tenant.as_deref() == Some("tenant1")
+    ));
+
+    let query = parse("ROLLBACK MIGRATION m2").unwrap();
+    assert!(matches!(query, QueryExpr::RollbackMigration(r) if r.name == "m2"));
+
+    let query = parse("EXPLAIN MIGRATION m2").unwrap();
+    assert!(matches!(query, QueryExpr::ExplainMigration(e) if e.name == "m2"));
+
+    let query = parse("APPLY MIGRATION m2 FOR TENANT 'tenant-string'").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ApplyMigration(apply)
+            if matches!(apply.target, ApplyMigrationTarget::Named(ref name) if name == "m2")
+                && apply.for_tenant.as_deref() == Some("tenant-string")
+    ));
+
+    let query = parse("CREATE MIGRATION m3 CREATE INDEX idx ON accounts (id)").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::CreateMigration(migration)
+            if migration.name == "m3"
+                && migration.depends_on.is_empty()
+                && migration.batch_size.is_none()
+                && !migration.no_rollback
+                && migration.body == "CREATE INDEX idx ON accounts ( id )"
+    ));
+
+    for sql in [
+        "APPLY m2",
+        "APPLY MIGRATION * FOR m2",
+        "APPLY MIGRATION * FOR TENANT 42",
+        "CREATE MIGRATION m4 DEPENDS m3 AS SELECT 1",
+    ] {
+        assert!(parse(sql).is_err(), "{sql}");
+    }
+}
+
+#[test]
+fn test_parse_probabilistic_command_matrix() {
+    use crate::storage::query::ast::ProbabilisticCommand;
+
+    let query = parse("CREATE HLL IF NOT EXISTS visitors").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::CreateHll {
+            ref name,
+            if_not_exists: true,
+        }) if name == "visitors"
+    ));
+
+    let query = parse("HLL COUNT visitors signups").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::HllCount { ref names })
+            if names == &vec!["visitors".to_string(), "signups".to_string()]
+    ));
+
+    let query = parse("HLL MERGE all_visitors visitors signups").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::HllMerge {
+            ref dest,
+            ref sources,
+        }) if dest == "all_visitors"
+            && sources == &vec!["visitors".to_string(), "signups".to_string()]
+    ));
+
+    let query = parse("HLL INFO visitors").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::HllInfo { ref name })
+            if name == "visitors"
+    ));
+
+    let query = parse("DROP HLL IF EXISTS visitors").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::DropHll {
+            ref name,
+            if_exists: true,
+        }) if name == "visitors"
+    ));
+
+    let query = parse("CREATE SKETCH IF NOT EXISTS freqs WIDTH 2048 DEPTH 7").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::CreateSketch {
+            ref name,
+            width: 2048,
+            depth: 7,
+            if_not_exists: true,
+        }) if name == "freqs"
+    ));
+
+    let query = parse("SKETCH ADD freqs 'red' 3").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::SketchAdd {
+            ref name,
+            ref element,
+            count: 3,
+        }) if name == "freqs" && element == "red"
+    ));
+
+    let query = parse("SKETCH ADD freqs 'blue'").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::SketchAdd {
+            ref name,
+            ref element,
+            count: 1,
+        }) if name == "freqs" && element == "blue"
+    ));
+
+    let query = parse("SKETCH COUNT freqs 'red'").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::SketchCount {
+            ref name,
+            ref element,
+        }) if name == "freqs" && element == "red"
+    ));
+
+    let query = parse("SKETCH MERGE total freqs other_freqs").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::SketchMerge {
+            ref dest,
+            ref sources,
+        }) if dest == "total" && sources == &vec!["freqs".to_string(), "other_freqs".to_string()]
+    ));
+
+    let query = parse("SKETCH INFO freqs").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::SketchInfo { ref name })
+            if name == "freqs"
+    ));
+
+    let query = parse("DROP SKETCH IF EXISTS freqs").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::DropSketch {
+            ref name,
+            if_exists: true,
+        }) if name == "freqs"
+    ));
+
+    let query = parse("CREATE FILTER IF NOT EXISTS seen CAPACITY 4096").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::CreateFilter {
+            ref name,
+            capacity: 4096,
+            if_not_exists: true,
+        }) if name == "seen"
+    ));
+
+    let query = parse("FILTER ADD seen 'a'").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::FilterAdd {
+            ref name,
+            ref element,
+        }) if name == "seen" && element == "a"
+    ));
+
+    let query = parse("FILTER CHECK seen 'a'").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::FilterCheck {
+            ref name,
+            ref element,
+        }) if name == "seen" && element == "a"
+    ));
+
+    let query = parse("FILTER DELETE seen 'a'").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::FilterDelete {
+            ref name,
+            ref element,
+        }) if name == "seen" && element == "a"
+    ));
+
+    let query = parse("FILTER COUNT seen").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::FilterCount { ref name })
+            if name == "seen"
+    ));
+
+    let query = parse("FILTER INFO seen").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::FilterInfo { ref name })
+            if name == "seen"
+    ));
+
+    let query = parse("DROP FILTER IF EXISTS seen").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::DropFilter {
+            ref name,
+            if_exists: true,
+        }) if name == "seen"
+    ));
+
+    let query = parse("CREATE HLL visitors2").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::CreateHll {
+            ref name,
+            if_not_exists: false,
+        }) if name == "visitors2"
+    ));
+
+    let query = parse("CREATE SKETCH freqs2 DEPTH 3 WIDTH 512").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::CreateSketch {
+            ref name,
+            width: 512,
+            depth: 3,
+            if_not_exists: false,
+        }) if name == "freqs2"
+    ));
+
+    let query = parse("CREATE FILTER seen2").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::CreateFilter {
+            ref name,
+            capacity: 100_000,
+            if_not_exists: false,
+        }) if name == "seen2"
+    ));
+
+    let query = parse("DROP FILTER seen2").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::DropFilter {
+            ref name,
+            if_exists: false,
+        }) if name == "seen2"
+    ));
+
+    for sql in [
+        "HLL DESCRIBE visitors",
+        "SKETCH DESCRIBE freqs",
+        "FILTER DESCRIBE seen",
+        "CREATE BLOOM seen",
+        "DROP BLOOM seen",
+    ] {
+        assert!(parse(sql).is_err(), "{sql}");
+    }
+}
+
+#[test]
 fn test_parse_transaction_control() {
     use crate::storage::query::ast::TxnControl;
 
@@ -3513,21 +4049,30 @@ fn doc_form_queue_push_raw_json_literal() {
 fn doc_form_queue_rpush_raw_json_literal() {
     // docs/data-models/queues.md:39
     let q = parse(r#"QUEUE RPUSH tasks {"job":"process","id":456}"#).unwrap();
-    assert!(matches!(q, QueryExpr::QueueCommand(QueueCommand::Push { .. })));
+    assert!(matches!(
+        q,
+        QueryExpr::QueueCommand(QueueCommand::Push { .. })
+    ));
 }
 
 #[test]
 fn doc_form_queue_lpush_raw_json_literal() {
     // docs/data-models/queues.md:42
     let q = parse(r#"QUEUE LPUSH tasks {"urgent":true}"#).unwrap();
-    assert!(matches!(q, QueryExpr::QueueCommand(QueueCommand::Push { .. })));
+    assert!(matches!(
+        q,
+        QueryExpr::QueueCommand(QueueCommand::Push { .. })
+    ));
 }
 
 #[test]
 fn doc_form_queue_push_raw_json_with_priority_suffix() {
     // docs/data-models/queues.md:45
     let q = parse(r#"QUEUE PUSH urgent_tasks {"job":"deploy"} PRIORITY 10"#).unwrap();
-    let QueryExpr::QueueCommand(QueueCommand::Push { priority, value, .. }) = q else {
+    let QueryExpr::QueueCommand(QueueCommand::Push {
+        priority, value, ..
+    }) = q
+    else {
         panic!("expected Push");
     };
     assert_eq!(priority, Some(10));
@@ -3537,14 +4082,15 @@ fn doc_form_queue_push_raw_json_with_priority_suffix() {
 #[test]
 fn doc_form_insert_document_with_raw_json_literal_in_values() {
     // README.md:44, landing +page.svelte:54/150/492
-    let q = parse(
-        r#"INSERT INTO logs DOCUMENT (body) VALUES ({"level":"warn","ip":"10.0.0.1"})"#,
-    )
-    .unwrap();
+    let q = parse(r#"INSERT INTO logs DOCUMENT (body) VALUES ({"level":"warn","ip":"10.0.0.1"})"#)
+        .unwrap();
     // We don't pin the exact AST shape — just prove it parses to *some* insert.
     match q {
         QueryExpr::Insert(_) => {}
-        other => panic!("expected Insert/InsertDocument, got: {:?}", std::mem::discriminant(&other)),
+        other => panic!(
+            "expected Insert/InsertDocument, got: {:?}",
+            std::mem::discriminant(&other)
+        ),
     }
 }
 
