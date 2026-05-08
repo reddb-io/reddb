@@ -41,7 +41,7 @@ that data lives.
 INSERT INTO users (name, email) VALUES ('Alice', 'alice@co.com')
 
 -- JSON documents
-INSERT INTO logs DOCUMENT (body) VALUES ('{"level":"info","msg":"login"}')
+INSERT INTO logs DOCUMENT (body) VALUES ({"level":"info","msg":"login"})
 
 -- Graph edges
 INSERT INTO network EDGE (label, from, to) VALUES ('CONNECTS', 1, 2)
@@ -54,7 +54,7 @@ PUT config.theme = 'dark'
 
 -- Time-series metrics (with retention & downsampling)
 CREATE TIMESERIES cpu_metrics RETENTION 90 d
-INSERT INTO cpu_metrics (metric, value, tags) VALUES ('cpu.idle', 95.2, '{"host":"srv1"}')
+INSERT INTO cpu_metrics (metric, value, tags) VALUES ('cpu.idle', 95.2, {"host":"srv1"})
 
 -- Hypertables + partition TTL + continuous aggregates (logs / events / telemetry)
 CREATE HYPERTABLE access_log (ts BIGINT, service TEXT, status INT, latency_ms INT)
@@ -65,7 +65,7 @@ CREATE TABLE audit_log (id BIGINT, action TEXT) APPEND ONLY
 
 -- Message queues (FIFO, priority, consumer groups)
 CREATE QUEUE tasks MAX_SIZE 10000
-QUEUE PUSH tasks '{"job":"process","id":123}'
+QUEUE PUSH tasks {"job":"process","id":123}
 QUEUE POP tasks
 ```
 

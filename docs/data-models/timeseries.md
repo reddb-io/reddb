@@ -59,16 +59,16 @@ INSERT INTO cpu_metrics (metric, value, tags)
 
 -- Explicit timestamp (nanoseconds since epoch)
 INSERT INTO cpu_metrics (metric, value, tags, timestamp)
-  VALUES ('cpu.idle', 94.8, '{"host":"srv1"}', 1704067200000000000)
+  VALUES ('cpu.idle', 94.8, {"host":"srv1"}, 1704067200000000000)
 ```
 
 Bulk insert:
 
 ```sql
 INSERT INTO cpu_metrics (metric, value, tags)
-  VALUES ('cpu.idle', 95.2, '{"host":"srv1"}'),
-         ('cpu.idle', 92.1, '{"host":"srv2"}'),
-         ('mem.used', 72.5, '{"host":"srv1"}')
+  VALUES ('cpu.idle', 95.2, {"host":"srv1"}),
+         ('cpu.idle', 92.1, {"host":"srv2"}),
+         ('mem.used', 72.5, {"host":"srv1"})
 ```
 
 ## Querying Time-Series Data

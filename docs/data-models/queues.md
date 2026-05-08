@@ -35,14 +35,14 @@ CREATE QUEUE tasks WITH DLQ failed_tasks MAX_ATTEMPTS 3
 
 ```sql
 -- Push to back (default, FIFO enqueue)
-QUEUE PUSH tasks '{"job":"process","id":123}'
-QUEUE RPUSH tasks '{"job":"process","id":456}'
+QUEUE PUSH tasks {"job":"process","id":123}
+QUEUE RPUSH tasks {"job":"process","id":456}
 
 -- Push to front (deque operation)
-QUEUE LPUSH tasks '{"urgent":true}'
+QUEUE LPUSH tasks {"urgent":true}
 
 -- Push with priority (priority queues only)
-QUEUE PUSH urgent_tasks '{"job":"deploy"}' PRIORITY 10
+QUEUE PUSH urgent_tasks {"job":"deploy"} PRIORITY 10
 ```
 
 ### Pop (Dequeue)
@@ -126,9 +126,9 @@ When created with `PRIORITY`, the queue dequeues highest-priority messages first
 ```sql
 CREATE QUEUE alerts PRIORITY
 
-QUEUE PUSH alerts '{"level":"info"}' PRIORITY 1
-QUEUE PUSH alerts '{"level":"critical"}' PRIORITY 10
-QUEUE PUSH alerts '{"level":"warning"}' PRIORITY 5
+QUEUE PUSH alerts {"level":"info"} PRIORITY 1
+QUEUE PUSH alerts {"level":"critical"} PRIORITY 10
+QUEUE PUSH alerts {"level":"warning"} PRIORITY 5
 
 -- Returns: critical (10), then warning (5), then info (1)
 QUEUE POP alerts
