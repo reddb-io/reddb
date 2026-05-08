@@ -1,0 +1,4 @@
+input = "APPLY MIGRATION *"
+expected_kind = "ApplyMigration"
+source = "docs/migrations/commands.md:218"
+kind = "positive"

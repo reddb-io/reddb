@@ -1,0 +1,4 @@
+input = "CREATE MIGRATION add_archived_at AS ALTER TABLE users ADD COLUMN archived_at TIMESTAMP"
+expected_kind = "CreateMigration"
+source = "docs/migrations/commands.md:144"
+kind = "positive"

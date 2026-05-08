@@ -1,0 +1,4 @@
+input = "ROLLBACK MIGRATION add_archived_at"
+expected_kind = "RollbackMigration"
+source = "docs/migrations/commands.md:297"
+kind = "positive"
