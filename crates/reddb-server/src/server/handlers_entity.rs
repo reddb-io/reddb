@@ -305,6 +305,43 @@ impl RedDBServer {
             Ok(value) => value,
             Err(err) => return json_error(400, err.to_string()),
         };
+        let tags = match parse_kv_tags_arg(&payload) {
+            Ok(tags) => tags,
+            Err(err) => return json_error(400, err),
+        };
+
+        if !tags.is_empty() {
+            let _ = self
+                .runtime
+                .db()
+                .store()
+                .get_or_create_collection(collection);
+            let result = crate::runtime::kv_atomic::KvAtomicOps::new(&self.runtime).set(
+                "HTTP PUT KV",
+                &format!("{collection}.{key}"),
+                value.clone(),
+                None,
+                &tags,
+                false,
+            );
+            if let Err(err) = result {
+                return json_error(400, err.to_string());
+            }
+            return match HttpKvOps::new(self).get(collection, key) {
+                Ok(Some((stored, id))) => json_response(
+                    200,
+                    kv_envelope(collection, key)
+                        .with_found(true)
+                        .with_value(&stored)
+                        .with_entity_id(id)
+                        .with_created(false)
+                        .with_tags(&tags)
+                        .into_json(),
+                ),
+                Ok(None) => json_error(500, "tagged KV put did not create a readable entry"),
+                Err(err) => json_error(400, err.to_string()),
+            };
+        }
 
         match HttpKvOps::new(self).put(collection, key, value, Some(value_arg.clone())) {
             Ok(KvPutOutcome { value, id, created }) => {
@@ -318,6 +355,51 @@ impl RedDBServer {
                         .with_created(created)
                         .into_json(),
                 )
+            }
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
+    pub(crate) fn handle_invalidate_kv_tags(
+        &self,
+        collection: &str,
+        body: Vec<u8>,
+    ) -> HttpResponse {
+        let payload = match parse_json_body_allow_empty(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+        let tags = match parse_kv_tags_arg(&payload) {
+            Ok(tags) if !tags.is_empty() => tags,
+            Ok(_) => return json_error(400, "field 'tags' must contain at least one tag"),
+            Err(err) => return json_error(400, err),
+        };
+
+        match crate::runtime::kv_atomic::KvAtomicOps::new(&self.runtime).invalidate_tags(
+            "HTTP INVALIDATE TAGS",
+            collection,
+            &tags,
+        ) {
+            Ok(result) => {
+                let mut object = Map::new();
+                object.insert("ok".to_string(), JsonValue::Bool(true));
+                object.insert(
+                    "collection".to_string(),
+                    JsonValue::String(collection.to_string()),
+                );
+                object.insert(
+                    "tags".to_string(),
+                    JsonValue::Array(tags.into_iter().map(JsonValue::String).collect()),
+                );
+                object.insert(
+                    "invalidated".to_string(),
+                    JsonValue::Number(result.affected_rows as f64),
+                );
+                object.insert(
+                    "affected".to_string(),
+                    JsonValue::Number(result.affected_rows as f64),
+                );
+                json_response(200, JsonValue::Object(object))
             }
             Err(err) => json_error(400, err.to_string()),
         }
@@ -783,8 +865,31 @@ impl KvEnvelope {
         self
     }
 
+    fn with_tags(mut self, tags: &[String]) -> Self {
+        self.object.insert(
+            "tags".to_string(),
+            JsonValue::Array(tags.iter().cloned().map(JsonValue::String).collect()),
+        );
+        self
+    }
+
     fn into_json(self) -> JsonValue {
         JsonValue::Object(self.object)
+    }
+}
+
+fn parse_kv_tags_arg(payload: &JsonValue) -> Result<Vec<String>, String> {
+    match payload.get("tags") {
+        None | Some(JsonValue::Null) => Ok(Vec::new()),
+        Some(JsonValue::Array(values)) => values
+            .iter()
+            .map(|value| match value {
+                JsonValue::String(tag) if !tag.is_empty() => Ok(tag.clone()),
+                JsonValue::String(_) => Err("KV tags must be non-empty strings".to_string()),
+                _ => Err("field 'tags' must be an array of strings".to_string()),
+            })
+            .collect(),
+        Some(_) => Err("field 'tags' must be an array of strings".to_string()),
     }
 }
 
@@ -903,6 +1008,52 @@ mod tests {
         assert_eq!(
             decr_json.get("value").and_then(JsonValue::as_f64),
             Some(3.0)
+        );
+    }
+
+    #[test]
+    fn http_kv_tags_can_be_invalidated_in_batch() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime starts");
+        let server = RedDBServer::new(runtime);
+
+        let a = server.route(request(
+            "PUT",
+            "/collections/sessions/kv/a",
+            r#"{"value":"one","tags":["active","user"]}"#,
+        ));
+        assert_eq!(a.status, 200);
+        let b = server.route(request(
+            "PUT",
+            "/collections/sessions/kv/b",
+            r#"{"value":"two","tags":["admin"]}"#,
+        ));
+        assert_eq!(b.status, 200);
+
+        let invalidated = server.route(request(
+            "POST",
+            "/collections/sessions/kv/invalidate-tags",
+            r#"{"tags":["active"]}"#,
+        ));
+        assert_eq!(invalidated.status, 200);
+        let invalidated_json = response_json(&invalidated);
+        assert_eq!(
+            invalidated_json
+                .get("invalidated")
+                .and_then(JsonValue::as_f64),
+            Some(1.0)
+        );
+
+        assert_eq!(
+            server
+                .route(request("GET", "/collections/sessions/kv/a", ""))
+                .status,
+            404
+        );
+        assert_eq!(
+            server
+                .route(request("GET", "/collections/sessions/kv/b", ""))
+                .status,
+            200
         );
     }
 }

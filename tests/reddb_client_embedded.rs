@@ -1,6 +1,6 @@
 //! Smoke test for the embedded backend.
 
-use reddb_client::{ErrorCode, JsonValue, Reddb};
+use reddb_client::{ErrorCode, JsonValue, Reddb, ValueOut};
 
 #[tokio::test]
 async fn connect_memory_then_version() {
@@ -51,6 +51,43 @@ async fn bulk_insert_returns_total_affected() {
     ];
     let n = db.bulk_insert("items", &payloads).await.expect("bulk");
     assert_eq!(n, 3);
+}
+
+#[tokio::test]
+async fn kv_tags_can_be_invalidated_from_rust_client() {
+    let db = Reddb::connect("memory://").await.expect("connect");
+
+    db.kv_set(
+        "sessions",
+        "a",
+        &JsonValue::string("one"),
+        &["active".to_string(), "user".to_string()],
+    )
+    .await
+    .expect("set tagged a");
+    db.kv_set(
+        "sessions",
+        "b",
+        &JsonValue::string("two"),
+        &["admin".to_string()],
+    )
+    .await
+    .expect("set tagged b");
+
+    assert_eq!(
+        db.kv_get("sessions", "a").await.expect("get a"),
+        Some(ValueOut::String("one".to_string()))
+    );
+    let invalidated = db
+        .kv_invalidate_tags("sessions", &["active".to_string()])
+        .await
+        .expect("invalidate tags");
+    assert_eq!(invalidated, 1);
+    assert_eq!(db.kv_get("sessions", "a").await.expect("get a"), None);
+    assert_eq!(
+        db.kv_get("sessions", "b").await.expect("get b"),
+        Some(ValueOut::String("two".to_string()))
+    );
 }
 
 #[tokio::test]

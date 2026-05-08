@@ -1016,6 +1016,14 @@ impl RedDBServer {
                         _ => json_error(405, "method not allowed for KV counter endpoint"),
                     };
                 }
+                if let Some(collection) =
+                    collection_kv_collection_action_path(&path, "invalidate-tags")
+                {
+                    return match method.as_str() {
+                        "POST" => self.handle_invalidate_kv_tags(collection, body),
+                        _ => json_error(405, "method not allowed for KV tag invalidation endpoint"),
+                    };
+                }
 
                 // KV routes: /collections/{collection}/kv/{key}
                 if let Some((collection, key)) = collection_kv_path(&path) {
@@ -1662,6 +1670,21 @@ fn collection_kv_action_path<'a>(path: &'a str, action: &str) -> Option<(&'a str
     collection_kv_path(base)
 }
 
+fn collection_kv_collection_action_path<'a>(path: &'a str, action: &str) -> Option<&'a str> {
+    let prefix = "/collections/";
+    let suffix = format!("/kv/{action}");
+    let trimmed = path
+        .trim_end_matches('/')
+        .strip_prefix(prefix)?
+        .strip_suffix(&suffix)?;
+    let collection = trimmed.trim_matches('/');
+    if collection.is_empty() || collection.contains('/') {
+        None
+    } else {
+        Some(collection)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1701,6 +1724,24 @@ mod tests {
         );
         assert_eq!(
             collection_kv_action_path("/collections/cfg/kv/theme/incr", "decr"),
+            None
+        );
+    }
+
+    #[test]
+    fn collection_kv_collection_action_path_extracts_tag_invalidation_route() {
+        assert_eq!(
+            collection_kv_collection_action_path(
+                "/collections/cfg/kv/invalidate-tags",
+                "invalidate-tags"
+            ),
+            Some("cfg")
+        );
+        assert_eq!(
+            collection_kv_collection_action_path(
+                "/collections/cfg/kv/theme/invalidate-tags",
+                "invalidate-tags"
+            ),
             None
         );
     }

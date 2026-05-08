@@ -139,6 +139,21 @@ fn number_array_field(description: &str) -> JsonValue {
     JsonValue::Object(f)
 }
 
+/// Array-of-strings field descriptor.
+fn string_array_field(description: &str) -> JsonValue {
+    let mut items = Map::new();
+    items.insert("type".to_string(), JsonValue::String("string".to_string()));
+
+    let mut f = Map::new();
+    f.insert("type".to_string(), JsonValue::String("array".to_string()));
+    f.insert("items".to_string(), JsonValue::Object(items));
+    f.insert(
+        "description".to_string(),
+        JsonValue::String(description.to_string()),
+    );
+    JsonValue::Object(f)
+}
+
 /// Return all tool definitions exposed by the RedDB MCP server.
 pub fn all_tools() -> Vec<ToolDef> {
     vec![
@@ -246,6 +261,7 @@ pub fn all_tools() -> Vec<ToolDef> {
                         JsonValue::Object(f)
                     }),
                     ("metadata", object_field("Optional metadata key/value pairs")),
+                    ("tags", string_array_field("Optional invalidation tags")),
                 ],
                 vec!["collection", "key", "value"],
             ),
@@ -285,6 +301,17 @@ pub fn all_tools() -> Vec<ToolDef> {
                     ("ttl_ms", "integer", "Optional TTL refresh in milliseconds"),
                 ],
                 vec!["collection", "key"],
+            ),
+        },
+        ToolDef {
+            name: "reddb_kv_invalidate_tags",
+            description: "Delete key-value entries from a collection that carry any of the given tags.",
+            input_schema: schema_with_nested(
+                vec![
+                    ("collection", string_field("Collection name")),
+                    ("tags", string_array_field("Tags to invalidate")),
+                ],
+                vec!["collection", "tags"],
             ),
         },
         ToolDef {
@@ -559,6 +586,7 @@ mod tests {
         assert!(names.contains(&"reddb_kv_delete"));
         assert!(names.contains(&"reddb_kv_incr"));
         assert!(names.contains(&"reddb_kv_decr"));
+        assert!(names.contains(&"reddb_kv_invalidate_tags"));
         assert!(names.contains(&"reddb_delete"));
         assert!(names.contains(&"reddb_search_vector"));
         assert!(names.contains(&"reddb_search_text"));

@@ -244,6 +244,73 @@ impl Reddb {
         kv_counter_value(&result)
     }
 
+    pub async fn kv_get(&self, collection: &str, key: &str) -> Result<Option<ValueOut>> {
+        match self {
+            #[cfg(feature = "http")]
+            Reddb::Http(c) => c
+                .kv_get(collection, key)
+                .await
+                .map(|value| value.and_then(serde_json_to_value_out)),
+            _ => {
+                let result = self
+                    .query(&format!("GET {}", kv_qualified_key(collection, key)))
+                    .await?;
+                Ok(result
+                    .rows
+                    .first()
+                    .and_then(|row| row.iter().find(|(name, _)| name == "value"))
+                    .map(|(_, value)| value.clone()))
+            }
+        }
+    }
+
+    pub async fn kv_set(
+        &self,
+        collection: &str,
+        key: &str,
+        value: &JsonValue,
+        tags: &[String],
+    ) -> Result<()> {
+        match self {
+            #[cfg(feature = "http")]
+            Reddb::Http(c) => {
+                c.kv_set(collection, key, value, tags).await?;
+                Ok(())
+            }
+            _ => {
+                self.query(&kv_set_sql(collection, key, value, tags))
+                    .await?;
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn kv_delete(&self, collection: &str, key: &str) -> Result<bool> {
+        match self {
+            #[cfg(feature = "http")]
+            Reddb::Http(c) => c.kv_delete(collection, key).await,
+            _ => {
+                let result = self
+                    .query(&format!("DELETE {}", kv_qualified_key(collection, key)))
+                    .await?;
+                Ok(result.affected > 0)
+            }
+        }
+    }
+
+    pub async fn kv_invalidate_tags(&self, collection: &str, tags: &[String]) -> Result<u64> {
+        match self {
+            #[cfg(feature = "http")]
+            Reddb::Http(c) => c.kv_invalidate_tags(collection, tags).await,
+            _ => {
+                let result = self
+                    .query(&kv_invalidate_tags_sql(collection, tags))
+                    .await?;
+                Ok(result.affected)
+            }
+        }
+    }
+
     pub async fn close(&self) -> Result<()> {
         match self {
             #[cfg(feature = "embedded")]
@@ -271,6 +338,67 @@ fn kv_counter_sql(op: &str, collection: &str, key: &str, by: i64, ttl_ms: Option
         sql_ident(collection),
         sql_literal(key)
     )
+}
+
+fn kv_qualified_key(collection: &str, key: &str) -> String {
+    format!("{}.{}", sql_ident(collection), sql_literal(key))
+}
+
+fn kv_set_sql(collection: &str, key: &str, value: &JsonValue, tags: &[String]) -> String {
+    let tags = if tags.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " TAGS [{}]",
+            tags.iter()
+                .map(|tag| sql_ident(tag))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    format!(
+        "PUT {} = {}{}",
+        kv_qualified_key(collection, key),
+        json_value_sql(value),
+        tags
+    )
+}
+
+fn kv_invalidate_tags_sql(collection: &str, tags: &[String]) -> String {
+    format!(
+        "INVALIDATE TAGS [{}] FROM {}",
+        tags.iter()
+            .map(|tag| sql_ident(tag))
+            .collect::<Vec<_>>()
+            .join(", "),
+        sql_ident(collection)
+    )
+}
+
+fn json_value_sql(value: &JsonValue) -> String {
+    match value {
+        JsonValue::Null => "NULL".to_string(),
+        JsonValue::Bool(value) => value.to_string(),
+        JsonValue::Number(value) if value.fract() == 0.0 && value.is_finite() => {
+            format!("{}", *value as i64)
+        }
+        JsonValue::Number(value) => value.to_string(),
+        JsonValue::String(value) => sql_literal(value),
+        JsonValue::Array(_) | JsonValue::Object(_) => sql_literal(&value.to_json_string()),
+    }
+}
+
+fn serde_json_to_value_out(value: serde_json::Value) -> Option<ValueOut> {
+    match value {
+        serde_json::Value::Null => Some(ValueOut::Null),
+        serde_json::Value::Bool(value) => Some(ValueOut::Bool(value)),
+        serde_json::Value::Number(value) => value
+            .as_i64()
+            .map(ValueOut::Integer)
+            .or_else(|| value.as_f64().map(ValueOut::Float)),
+        serde_json::Value::String(value) => Some(ValueOut::String(value)),
+        _ => None,
+    }
 }
 
 fn kv_counter_value(result: &QueryResult) -> Result<i64> {

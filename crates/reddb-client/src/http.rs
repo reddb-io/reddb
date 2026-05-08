@@ -11,6 +11,10 @@
 //!   bulk_insert        → POST /collections/:name/bulk/rows
 //!   get                → GET  /collections/:name/{id}
 //!   delete             → DELETE /collections/:name/{id}
+//!   kv.set            → PUT /collections/:name/kv/:key
+//!   kv.get            → GET /collections/:name/kv/:key
+//!   kv.delete         → DELETE /collections/:name/kv/:key
+//!   kv.invalidateTags → POST /collections/:name/kv/invalidate-tags
 //!   health             → GET  /health
 //!   version            → GET  /admin/version
 //!   auth.login         → POST /auth/login
@@ -177,6 +181,87 @@ impl HttpClient {
         Ok(value
             .as_object()
             .and_then(|o| o.get("affected"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0))
+    }
+
+    pub async fn kv_get(&self, collection: &str, key: &str) -> Result<Option<Value>> {
+        let url_path = format!(
+            "/collections/{}/kv/{}",
+            urlencoded(collection),
+            urlencoded(key),
+        );
+        let url = format!("{}{}", self.base_url, url_path);
+        let resp = self
+            .inner
+            .get(&url)
+            .headers(self.headers())
+            .send()
+            .await
+            .map_err(net_err)?;
+        match decode_envelope(resp).await {
+            Ok(value) => Ok(value.as_object().and_then(|o| o.get("value")).cloned()),
+            Err(err) if err.code == ErrorCode::NotFound => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub async fn kv_set(
+        &self,
+        collection: &str,
+        key: &str,
+        value: &JsonValue,
+        tags: &[String],
+    ) -> Result<Value> {
+        let url_path = format!(
+            "/collections/{}/kv/{}",
+            urlencoded(collection),
+            urlencoded(key),
+        );
+        let mut body = serde_json::Map::new();
+        body.insert("value".to_string(), json_value_to_serde(value));
+        if !tags.is_empty() {
+            body.insert(
+                "tags".to_string(),
+                Value::Array(tags.iter().cloned().map(Value::String).collect()),
+            );
+        }
+        self.send_json(Method::PUT, &url_path, &Value::Object(body))
+            .await
+    }
+
+    pub async fn kv_delete(&self, collection: &str, key: &str) -> Result<bool> {
+        let url_path = format!(
+            "/collections/{}/kv/{}",
+            urlencoded(collection),
+            urlencoded(key),
+        );
+        let url = format!("{}{}", self.base_url, url_path);
+        let resp = self
+            .inner
+            .delete(&url)
+            .headers(self.headers())
+            .send()
+            .await
+            .map_err(net_err)?;
+        match decode_envelope(resp).await {
+            Ok(value) => Ok(value
+                .as_object()
+                .and_then(|o| o.get("deleted"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)),
+            Err(err) if err.code == ErrorCode::NotFound => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub async fn kv_invalidate_tags(&self, collection: &str, tags: &[String]) -> Result<u64> {
+        let url_path = format!("/collections/{}/kv/invalidate-tags", urlencoded(collection),);
+        let body = serde_json::json!({ "tags": tags });
+        let value = self.send_json(Method::POST, &url_path, &body).await?;
+        Ok(value
+            .as_object()
+            .and_then(|o| o.get("invalidated").or_else(|| o.get("affected")))
             .and_then(|v| v.as_u64())
             .unwrap_or(0))
     }

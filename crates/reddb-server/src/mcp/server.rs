@@ -216,6 +216,7 @@ impl McpServer {
             "reddb_kv_delete" => self.tool_kv_delete(args),
             "reddb_kv_incr" => self.tool_kv_incr(args, false),
             "reddb_kv_decr" => self.tool_kv_incr(args, true),
+            "reddb_kv_invalidate_tags" => self.tool_kv_invalidate_tags(args),
             "reddb_delete" => self.tool_delete(args),
             "reddb_search_vector" => self.tool_search_vector(args),
             "reddb_search_text" => self.tool_search_text(args),
@@ -550,9 +551,10 @@ impl McpServer {
             .map_err(|e| format!("{}", e))?;
 
         let metadata = parse_metadata_arg(args)?;
+        let tags = parse_tags_arg(args)?;
 
         let ops = McpKvOps::new(&self.runtime);
-        let outcome = ops.set(collection, key, sv, value_arg.clone(), metadata)?;
+        let outcome = ops.set(collection, key, sv, value_arg.clone(), metadata, &tags)?;
 
         let mut obj = Map::new();
         obj.insert("ok".to_string(), JsonValue::Bool(true));
@@ -569,6 +571,12 @@ impl McpServer {
         );
         obj.insert("created".to_string(), JsonValue::Bool(outcome.created));
         obj.insert("updated".to_string(), JsonValue::Bool(!outcome.created));
+        if !tags.is_empty() {
+            obj.insert(
+                "tags".to_string(),
+                JsonValue::Array(tags.into_iter().map(JsonValue::String).collect()),
+            );
+        }
         json_to_string(&JsonValue::Object(obj)).map_err(|e| format!("serialization error: {}", e))
     }
 
@@ -625,6 +633,35 @@ impl McpServer {
         );
         obj.insert("key".to_string(), JsonValue::String(key.to_string()));
         obj.insert("value".to_string(), JsonValue::Number(value as f64));
+        json_to_string(&JsonValue::Object(obj)).map_err(|e| format!("serialization error: {}", e))
+    }
+
+    fn tool_kv_invalidate_tags(&self, args: &JsonValue) -> Result<String, String> {
+        let collection = args
+            .get("collection")
+            .and_then(|v| v.as_str())
+            .ok_or("missing required field 'collection'")?;
+        let tags = parse_tags_arg(args)?;
+        if tags.is_empty() {
+            return Err("field 'tags' must contain at least one tag".to_string());
+        }
+
+        let affected = McpKvOps::new(&self.runtime).invalidate_tags(collection, &tags)?;
+        let mut obj = Map::new();
+        obj.insert("ok".to_string(), JsonValue::Bool(true));
+        obj.insert(
+            "collection".to_string(),
+            JsonValue::String(collection.to_string()),
+        );
+        obj.insert(
+            "tags".to_string(),
+            JsonValue::Array(tags.into_iter().map(JsonValue::String).collect()),
+        );
+        obj.insert(
+            "invalidated".to_string(),
+            JsonValue::Number(affected as f64),
+        );
+        obj.insert("affected".to_string(), JsonValue::Number(affected as f64));
         json_to_string(&JsonValue::Object(obj)).map_err(|e| format!("serialization error: {}", e))
     }
 
@@ -1165,6 +1202,21 @@ fn parse_metadata_arg(
     }
 }
 
+fn parse_tags_arg(args: &JsonValue) -> Result<Vec<String>, String> {
+    match args.get("tags") {
+        None | Some(JsonValue::Null) => Ok(Vec::new()),
+        Some(JsonValue::Array(values)) => values
+            .iter()
+            .map(|value| match value {
+                JsonValue::String(tag) if !tag.is_empty() => Ok(tag.clone()),
+                JsonValue::String(_) => Err("KV tags must be non-empty strings".to_string()),
+                _ => Err("field 'tags' must be an array of strings".to_string()),
+            })
+            .collect(),
+        Some(_) => Err("field 'tags' must be an array of strings".to_string()),
+    }
+}
+
 struct McpKvOps<'a> {
     runtime: &'a RedDBRuntime,
 }
@@ -1193,7 +1245,34 @@ impl<'a> McpKvOps<'a> {
         value: Value,
         json_value: JsonValue,
         metadata: Vec<(String, crate::storage::unified::MetadataValue)>,
+        tags: &[String],
     ) -> Result<McpKvSetOutcome, String> {
+        if !tags.is_empty() {
+            let _ = self
+                .runtime
+                .db()
+                .store()
+                .get_or_create_collection(collection);
+            crate::runtime::kv_atomic::KvAtomicOps::new(self.runtime)
+                .set(
+                    "MCP KV SET",
+                    &format!("{collection}.{key}"),
+                    value.clone(),
+                    None,
+                    tags,
+                    false,
+                )
+                .map_err(|e| format!("{}", e))?;
+            let (stored, id) = self
+                .get(collection, key)?
+                .ok_or_else(|| "tagged KV set did not create a readable entry".to_string())?;
+            return Ok(McpKvSetOutcome {
+                value: stored,
+                id,
+                created: false,
+            });
+        }
+
         let uc = EntityUseCases::new(self.runtime);
         match uc.get_kv(collection, key).map_err(|e| format!("{}", e))? {
             Some((_, existing_id)) => {
@@ -1249,6 +1328,13 @@ impl<'a> McpKvOps<'a> {
     ) -> Result<i64, String> {
         crate::runtime::kv_atomic::KvAtomicOps::new(self.runtime)
             .incr(collection, key, by, ttl_ms)
+            .map_err(|e| format!("{}", e))
+    }
+
+    fn invalidate_tags(&self, collection: &str, tags: &[String]) -> Result<u64, String> {
+        crate::runtime::kv_atomic::KvAtomicOps::new(self.runtime)
+            .invalidate_tags("MCP INVALIDATE TAGS", collection, tags)
+            .map(|result| result.affected_rows)
             .map_err(|e| format!("{}", e))
     }
 }
@@ -1475,5 +1561,58 @@ mod tests {
             missing.get("found").and_then(JsonValue::as_bool),
             Some(false)
         );
+    }
+
+    #[test]
+    fn mcp_kv_tags_can_be_invalidated_in_batch() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime starts");
+        let server = McpServer::new(runtime);
+
+        let tagged = object(vec![
+            ("collection", JsonValue::String("sessions".to_string())),
+            ("key", JsonValue::String("a".to_string())),
+            ("value", JsonValue::String("one".to_string())),
+            (
+                "tags",
+                JsonValue::Array(vec![
+                    JsonValue::String("active".to_string()),
+                    JsonValue::String("user".to_string()),
+                ]),
+            ),
+        ]);
+        server.tool_kv_set(&tagged).expect("tagged set");
+        let other = object(vec![
+            ("collection", JsonValue::String("sessions".to_string())),
+            ("key", JsonValue::String("b".to_string())),
+            ("value", JsonValue::String("two".to_string())),
+            (
+                "tags",
+                JsonValue::Array(vec![JsonValue::String("admin".to_string())]),
+            ),
+        ]);
+        server.tool_kv_set(&other).expect("tagged set");
+
+        let invalidated = parse_tool_json(
+            server
+                .tool_kv_invalidate_tags(&object(vec![
+                    ("collection", JsonValue::String("sessions".to_string())),
+                    (
+                        "tags",
+                        JsonValue::Array(vec![JsonValue::String("active".to_string())]),
+                    ),
+                ]))
+                .expect("invalidate tags"),
+        );
+        assert_eq!(
+            invalidated.get("invalidated").and_then(JsonValue::as_f64),
+            Some(1.0)
+        );
+
+        let get_a = object(vec![
+            ("collection", JsonValue::String("sessions".to_string())),
+            ("key", JsonValue::String("a".to_string())),
+        ]);
+        let a = parse_tool_json(server.tool_kv_get(&get_a).expect("kv get"));
+        assert_eq!(a.get("found").and_then(JsonValue::as_bool), Some(false));
     }
 }
