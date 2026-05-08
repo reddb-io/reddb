@@ -115,7 +115,7 @@ impl GrpcTlsOptions {
 impl Default for GrpcServerOptions {
     fn default() -> Self {
         Self {
-            bind_addr: "127.0.0.1:5055".to_string(),
+            bind_addr: "127.0.0.1:5555".to_string(),
             tls: None,
         }
     }
