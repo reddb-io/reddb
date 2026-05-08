@@ -364,7 +364,7 @@ impl<'a> Parser<'a> {
                 self.expect(Token::On)?;
                 self.expect(Token::LParen)?;
                 // Dotted paths allowed (`metadata.tenant`, `payload.org`).
-                let mut path = self.expect_ident()?;
+                let mut path = self.expect_ident_or_keyword()?;
                 while self.consume(&Token::Dot)? {
                     let next = self.expect_ident_or_keyword()?;
                     path = format!("{path}.{next}");
@@ -613,7 +613,7 @@ impl<'a> Parser<'a> {
                     // reaching downstream serialization sinks.
                     format!("unsupported TTL unit {other:?}"),
                     self.position(),
-                ))
+                ));
             }
         };
 
