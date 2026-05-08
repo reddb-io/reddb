@@ -112,6 +112,17 @@ const custom = await connect('memory://', { binary: '/usr/local/bin/red' })
 
 ### `db.delete(collection, id) → Promise<{ affected }>`
 
+### `db.kv.put(collection, key, value) → Promise<object>`
+
+### `db.kv.get(collection, key) → Promise<{ value }>`
+
+### `db.kv.delete(collection, key) → Promise<object>`
+
+HTTP connections target `PUT|GET|DELETE /collections/<collection>/kv/<key>`.
+For compatibility with current servers, the driver falls back to the legacy
+`/collections/<collection>/kvs/<key>` route when the canonical route returns
+404.
+
 ### `db.health() → Promise<{ ok, version }>`
 
 ### `db.version() → Promise<{ version, protocol }>`

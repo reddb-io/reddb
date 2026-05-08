@@ -130,7 +130,8 @@ impl UnifiedExecutor {
             QueryExpr::Hybrid(_) => Err(ExecutionError::new(
                 "Hybrid queries require VectorStore integration",
             )),
-            QueryExpr::Insert(_)
+            QueryExpr::Kv(_)
+            | QueryExpr::Insert(_)
             | QueryExpr::Update(_)
             | QueryExpr::Delete(_)
             | QueryExpr::CreateTable(_)
@@ -356,7 +357,8 @@ impl UnifiedExecutor {
                     "Hybrid queries not yet implemented in UnifiedExecutor",
                 ))
             }
-            QueryExpr::Insert(_)
+            QueryExpr::Kv(_)
+            | QueryExpr::Insert(_)
             | QueryExpr::Update(_)
             | QueryExpr::Delete(_)
             | QueryExpr::CreateTable(_)

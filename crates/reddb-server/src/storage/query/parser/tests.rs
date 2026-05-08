@@ -1190,6 +1190,39 @@ fn test_parse_delete_returning_columns() {
 }
 
 #[test]
+fn test_parse_top_level_kv_put_get_delete() {
+    let query = parse("PUT session = 'abc' EXPIRE 2 m IF NOT EXISTS").unwrap();
+    if let QueryExpr::Kv(crate::storage::query::ast::KvQuery::Put {
+        key,
+        value,
+        ttl_ms,
+        if_not_exists,
+    }) = query
+    {
+        assert_eq!(key, "session");
+        assert_eq!(value, crate::storage::schema::Value::text("abc"));
+        assert_eq!(ttl_ms, Some(120_000));
+        assert!(if_not_exists);
+    } else {
+        panic!("Expected Kv Put");
+    }
+
+    let query = parse("GET sessions.42").unwrap();
+    if let QueryExpr::Kv(crate::storage::query::ast::KvQuery::Get { key }) = query {
+        assert_eq!(key, "sessions.42");
+    } else {
+        panic!("Expected Kv Get");
+    }
+
+    let query = parse("DELETE sessions.42").unwrap();
+    if let QueryExpr::Kv(crate::storage::query::ast::KvQuery::Delete { key }) = query {
+        assert_eq!(key, "sessions.42");
+    } else {
+        panic!("Expected Kv Delete");
+    }
+}
+
+#[test]
 fn test_parse_insert_mixed_types() {
     let query =
         parse("INSERT INTO metrics (name, value, active) VALUES ('cpu', 3.14, true)").unwrap();

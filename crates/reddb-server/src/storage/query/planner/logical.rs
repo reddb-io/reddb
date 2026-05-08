@@ -608,6 +608,7 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
         QueryExpr::Insert(_)
         | QueryExpr::Update(_)
         | QueryExpr::Delete(_)
+        | QueryExpr::Kv(_)
         | QueryExpr::CreateTable(_)
         | QueryExpr::DropTable(_)
         | QueryExpr::AlterTable(_)

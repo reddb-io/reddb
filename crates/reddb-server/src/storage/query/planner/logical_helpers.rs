@@ -378,7 +378,8 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         QueryExpr::Vector(query) => query.alias.as_deref() == Some(table) || table == "vector",
         QueryExpr::Hybrid(query) => query.alias.as_deref() == Some(table) || table == "hybrid",
         QueryExpr::Join(query) => join_query_exposes_field_table(query, table),
-        QueryExpr::Insert(_)
+        QueryExpr::Kv(_)
+        | QueryExpr::Insert(_)
         | QueryExpr::Update(_)
         | QueryExpr::Delete(_)
         | QueryExpr::CreateTable(_)
@@ -728,6 +729,7 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::Insert(_) => "insert",
         QueryExpr::Update(_) => "update",
         QueryExpr::Delete(_) => "delete",
+        QueryExpr::Kv(_) => "kv",
         QueryExpr::CreateTable(_) => "create_table",
         QueryExpr::DropTable(_) => "drop_table",
         QueryExpr::AlterTable(_) => "alter_table",

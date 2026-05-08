@@ -18,6 +18,9 @@ Method                      Endpoint
 ``scan``                    ``GET  /collections/{name}/scan?limit=...``
 ``get``                     ``GET  /collections/{name}/{id}``
 ``delete``                  ``DELETE /collections/{name}/{id}``
+``kv_put``                  ``PUT  /collections/{name}/kv/{key}`` (fallback ``/kvs/{key}``)
+``kv_get``                  ``GET  /collections/{name}/kv/{key}`` (fallback ``/kvs/{key}``)
+``kv_delete``               ``DELETE /collections/{name}/kv/{key}`` (fallback ``/kvs/{key}``)
 ``ping`` / health           ``GET  /health``
 ``login``                   ``POST /auth/login``
 ==========================  =================================================
@@ -109,6 +112,20 @@ class HttpClient:
         url = f"/collections/{quote(collection)}/{quote(str(doc_id))}"
         return await self._request("DELETE", url)
 
+    async def kv_put(self, collection: str, key: str, value: Any) -> dict[str, Any]:
+        return await self._request_with_legacy_kv(
+            "PUT",
+            collection,
+            key,
+            json_body={"value": value},
+        )
+
+    async def kv_get(self, collection: str, key: str) -> dict[str, Any]:
+        return await self._request_with_legacy_kv("GET", collection, key)
+
+    async def kv_delete(self, collection: str, key: str) -> dict[str, Any]:
+        return await self._request_with_legacy_kv("DELETE", collection, key)
+
     async def scan(self, collection: str, **params: Any) -> dict[str, Any]:
         url = f"/collections/{quote(collection)}/scan"
         return await self._request("GET", url, params=params or None)
@@ -143,6 +160,36 @@ class HttpClient:
                 params=params,
                 headers=self._headers(),
             )
+        except httpx.HTTPError as exc:  # pragma: no cover - network
+            raise HttpError(str(exc), status=0, body="") from exc
+        return _parse_response(response)
+
+    async def _request_with_legacy_kv(
+        self,
+        method: str,
+        collection: str,
+        key: str,
+        *,
+        json_body: Any | None = None,
+    ) -> Any:
+        collection_q = quote(collection)
+        key_q = quote(str(key))
+        canonical = f"/collections/{collection_q}/kv/{key_q}"
+        legacy = f"/collections/{collection_q}/kvs/{key_q}"
+        try:
+            response = await self._client.request(
+                method,
+                canonical,
+                json=json_body,
+                headers=self._headers(),
+            )
+            if response.status_code == 404:
+                response = await self._client.request(
+                    method,
+                    legacy,
+                    json=json_body,
+                    headers=self._headers(),
+                )
         except httpx.HTTPError as exc:  # pragma: no cover - network
             raise HttpError(str(exc), status=0, body="") from exc
         return _parse_response(response)

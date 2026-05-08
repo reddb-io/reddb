@@ -259,7 +259,8 @@ pub(crate) fn runtime_join_table_context(
         QueryExpr::Vector(vector) => (Some("vector"), vector.alias.as_deref().or(Some("vector"))),
         QueryExpr::Hybrid(hybrid) => (Some("hybrid"), hybrid.alias.as_deref().or(Some("hybrid"))),
         QueryExpr::Join(_) => (Some("join"), Some("join")),
-        QueryExpr::Insert(_)
+        QueryExpr::Kv(_)
+        | QueryExpr::Insert(_)
         | QueryExpr::Update(_)
         | QueryExpr::Delete(_)
         | QueryExpr::CreateTable(_)

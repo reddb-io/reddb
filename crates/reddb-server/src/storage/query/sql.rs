@@ -50,6 +50,7 @@ pub enum SqlCommand {
     Insert(InsertQuery),
     Update(UpdateQuery),
     Delete(DeleteQuery),
+    Kv(crate::storage::query::ast::KvQuery),
     ExplainAlter(ExplainAlterQuery),
     CreateTable(CreateTableQuery),
     DropTable(DropTableQuery),
@@ -127,6 +128,7 @@ pub enum SqlMutation {
     Insert(InsertQuery),
     Update(UpdateQuery),
     Delete(DeleteQuery),
+    Kv(crate::storage::query::ast::KvQuery),
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +192,7 @@ impl SqlStatement {
             SqlStatement::Mutation(SqlMutation::Insert(query)) => SqlCommand::Insert(query),
             SqlStatement::Mutation(SqlMutation::Update(query)) => SqlCommand::Update(query),
             SqlStatement::Mutation(SqlMutation::Delete(query)) => SqlCommand::Delete(query),
+            SqlStatement::Mutation(SqlMutation::Kv(query)) => SqlCommand::Kv(query),
             SqlStatement::Schema(SqlSchemaCommand::ExplainAlter(query)) => {
                 SqlCommand::ExplainAlter(query)
             }
@@ -338,6 +341,7 @@ impl SqlCommand {
             SqlCommand::Insert(query) => QueryExpr::Insert(query),
             SqlCommand::Update(query) => QueryExpr::Update(query),
             SqlCommand::Delete(query) => QueryExpr::Delete(query),
+            SqlCommand::Kv(query) => QueryExpr::Kv(query),
             SqlCommand::ExplainAlter(query) => QueryExpr::ExplainAlter(query),
             SqlCommand::CreateTable(query) => QueryExpr::CreateTable(query),
             SqlCommand::DropTable(query) => QueryExpr::DropTable(query),
@@ -392,6 +396,7 @@ impl SqlCommand {
             SqlCommand::Insert(query) => SqlStatement::Mutation(SqlMutation::Insert(query)),
             SqlCommand::Update(query) => SqlStatement::Mutation(SqlMutation::Update(query)),
             SqlCommand::Delete(query) => SqlStatement::Mutation(SqlMutation::Delete(query)),
+            SqlCommand::Kv(query) => SqlStatement::Mutation(SqlMutation::Kv(query)),
             SqlCommand::ExplainAlter(query) => {
                 SqlStatement::Schema(SqlSchemaCommand::ExplainAlter(query))
             }
@@ -553,6 +558,11 @@ impl<'a> Parser<'a> {
                 self.parse_sql_statement().map(FrontendStatement::Sql)
             }
             Token::Ident(name)
+                if name.eq_ignore_ascii_case("PUT") || name.eq_ignore_ascii_case("GET") =>
+            {
+                self.parse_sql_statement().map(FrontendStatement::Sql)
+            }
+            Token::Ident(name)
                 if name.eq_ignore_ascii_case("GRANT")
                     || name.eq_ignore_ascii_case("REVOKE")
                     || name.eq_ignore_ascii_case("SIMULATE")
@@ -662,8 +672,8 @@ impl<'a> Parser<'a> {
             other => Err(ParseError::expected(
                 vec![
                     "SELECT", "MATCH", "PATH", "FROM", "VECTOR", "HYBRID", "INSERT", "UPDATE",
-                    "DELETE", "CREATE", "DROP", "ALTER", "GRAPH", "SEARCH", "ASK", "QUEUE", "HLL",
-                    "TREE", "SKETCH", "FILTER", "SET", "SHOW",
+                    "DELETE", "PUT", "GET", "CREATE", "DROP", "ALTER", "GRAPH", "SEARCH", "ASK",
+                    "QUEUE", "HLL", "TREE", "SKETCH", "FILTER", "SET", "SHOW",
                 ],
                 other,
                 self.position(),
@@ -728,7 +738,7 @@ impl<'a> Parser<'a> {
                     self.advance()?; // SECRET
                     let key = self.parse_dotted_admin_path(true)?;
                     Ok(SqlCommand::DeleteSecret { key })
-                } else {
+                } else if matches!(self.peek_next()?, Token::From) {
                     match self.parse_delete_query()? {
                         QueryExpr::Delete(query) => Ok(SqlCommand::Delete(query)),
                         other => Err(ParseError::new(
@@ -736,6 +746,34 @@ impl<'a> Parser<'a> {
                             self.position(),
                         )),
                     }
+                } else {
+                    match self.parse_kv_delete_query()? {
+                        QueryExpr::Kv(query) => Ok(SqlCommand::Kv(query)),
+                        other => Err(ParseError::new(
+                            format!(
+                                "internal: DELETE key produced unexpected query kind {other:?}"
+                            ),
+                            self.position(),
+                        )),
+                    }
+                }
+            }
+            Token::Ident(name) if name.eq_ignore_ascii_case("PUT") => {
+                match self.parse_kv_put_query()? {
+                    QueryExpr::Kv(query) => Ok(SqlCommand::Kv(query)),
+                    other => Err(ParseError::new(
+                        format!("internal: PUT produced unexpected query kind {other:?}"),
+                        self.position(),
+                    )),
+                }
+            }
+            Token::Ident(name) if name.eq_ignore_ascii_case("GET") => {
+                match self.parse_kv_get_query()? {
+                    QueryExpr::Kv(query) => Ok(SqlCommand::Kv(query)),
+                    other => Err(ParseError::new(
+                        format!("internal: GET produced unexpected query kind {other:?}"),
+                        self.position(),
+                    )),
                 }
             }
             Token::Explain => {

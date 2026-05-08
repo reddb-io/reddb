@@ -70,6 +70,29 @@ export interface DeleteResult {
   affected: number
 }
 
+export interface KvPutResult {
+  ok?: boolean
+  affected?: number
+  id?: string | number
+  collection?: string
+  key?: string
+}
+
+export interface KvGetResult {
+  ok?: boolean
+  collection?: string
+  key?: string
+  value: unknown
+  id?: string | number
+}
+
+export interface KvDeleteResult {
+  ok?: boolean
+  deleted?: boolean
+  affected?: number
+  key?: string
+}
+
 export interface HealthResult {
   ok: boolean
   version: string
@@ -166,8 +189,18 @@ export class CacheClient {
   flushNamespace(namespace: string): Promise<void>
 }
 
+export class KvClient {
+  /** Store or replace a key in a collection. */
+  put(collection: string, key: string | number, value: unknown): Promise<KvPutResult>
+  /** Fetch a key from a collection. */
+  get(collection: string, key: string | number): Promise<KvGetResult>
+  /** Delete a key from a collection. */
+  delete(collection: string, key: string | number): Promise<KvDeleteResult>
+}
+
 export class RedDB {
   readonly cache: CacheClient
+  readonly kv: KvClient
 
   query(sql: string): Promise<QueryResult>
   insert(collection: string, payload: Record<string, unknown>): Promise<InsertResult>

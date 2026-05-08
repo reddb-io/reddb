@@ -134,6 +134,15 @@ class _RedwireAdapter:
     async def delete(self, collection: str, doc_id: str) -> dict[str, Any]:
         return await self._client.delete(collection, doc_id)
 
+    async def kv_put(self, collection: str, key: str, value: Any) -> dict[str, Any]:
+        return await self._client.kv_put(collection, key, value)
+
+    async def kv_get(self, collection: str, key: str) -> dict[str, Any]:
+        return await self._client.kv_get(collection, key)
+
+    async def kv_delete(self, collection: str, key: str) -> dict[str, Any]:
+        return await self._client.kv_delete(collection, key)
+
     async def ping(self) -> dict[str, Any]:
         await self._client.ping()
         return {"ok": True}
@@ -160,6 +169,7 @@ class Reddb:
 
     def __init__(self, transport: Any) -> None:
         self._t = transport
+        self.kv = KvClient(transport)
 
     async def __aenter__(self) -> "Reddb":
         return self
@@ -192,3 +202,19 @@ class Reddb:
     def transport(self) -> Any:
         """Underlying transport handle (RedwireClient / HttpClient)."""
         return self._t
+
+
+class KvClient:
+    """High-level KV facade exposed as ``db.kv``."""
+
+    def __init__(self, transport: Any) -> None:
+        self._t = transport
+
+    async def put(self, collection: str, key: str, value: Any) -> dict[str, Any]:
+        return await self._t.kv_put(collection, str(key), value)
+
+    async def get(self, collection: str, key: str) -> dict[str, Any]:
+        return await self._t.kv_get(collection, str(key))
+
+    async def delete(self, collection: str, key: str) -> dict[str, Any]:
+        return await self._t.kv_delete(collection, str(key))

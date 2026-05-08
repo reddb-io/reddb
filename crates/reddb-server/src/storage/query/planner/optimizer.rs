@@ -283,7 +283,8 @@ impl JoinReorderingPass {
                 hq.limit.map(|l| base.min(l as f64)).unwrap_or(base)
             }
             // DML/DDL/Command statements return minimal result sets
-            QueryExpr::Insert(_)
+            QueryExpr::Kv(_)
+            | QueryExpr::Insert(_)
             | QueryExpr::Update(_)
             | QueryExpr::Delete(_)
             | QueryExpr::CreateTable(_)

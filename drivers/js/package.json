@@ -20,7 +20,7 @@
   ],
   "scripts": {
     "postinstall": "node postinstall.js",
-    "test": "node --test test/cache.test.mjs && node test/smoke.test.mjs"
+    "test": "node --test test/cache.test.mjs test/kv.test.mjs && node test/smoke.test.mjs"
   },
   "engines": {
     "node": ">=18"

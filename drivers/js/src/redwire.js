@@ -228,6 +228,9 @@ export class RedWireClient {
     }
     if (method === 'get') return this.#getOrDelete(MessageKind.Get, MessageKind.Result, params)
     if (method === 'delete') return this.#getOrDelete(MessageKind.Delete, MessageKind.DeleteOk, params)
+    if (method === 'kv.put') return this.#query(kvPutSql(params))
+    if (method === 'kv.get') return this.#query(kvGetSql(params))
+    if (method === 'kv.delete') return this.#query(kvDeleteSql(params))
     if (method === 'health' || method === 'version') return this.#ping()
     throw new RedDBError(
       'UNKNOWN_METHOD',
@@ -358,6 +361,37 @@ export class RedWireClient {
     this.nextCorr = this.nextCorr + 1n
     return c
   }
+}
+
+function kvPutSql({ collection, key, value }) {
+  return `INSERT INTO ${sqlIdent(collection)} KV (key, value) VALUES (${sqlLiteral(String(key))}, ${sqlLiteral(value)})`
+}
+
+function kvGetSql({ collection, key }) {
+  return `SELECT KV(${sqlLiteral(String(collection))}, ${sqlLiteral(String(key))})`
+}
+
+function kvDeleteSql({ collection, key }) {
+  return `DELETE FROM ${sqlIdent(collection)} WHERE key = ${sqlLiteral(String(key))}`
+}
+
+function sqlIdent(value) {
+  const s = String(value)
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(s)) return s
+  return `"${s.replaceAll('"', '""')}"`
+}
+
+function sqlLiteral(value) {
+  if (value == null) return 'NULL'
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new TypeError('KV numeric value must be finite')
+    return String(value)
+  }
+  if (typeof value === 'boolean') return value ? 'true' : 'false'
+  if (typeof value === 'object') {
+    return `'${JSON.stringify(value).replaceAll("'", "''")}'`
+  }
+  return `'${String(value).replaceAll("'", "''")}'`
 }
 
 // ---------------------------------------------------------------------------

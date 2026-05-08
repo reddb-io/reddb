@@ -1,8 +1,8 @@
 //! DML SQL Parser: INSERT, UPDATE, DELETE
 
 use super::super::ast::{
-    AskQuery, DeleteQuery, Expr, Filter, InsertEntityType, InsertQuery, QueryExpr, ReturningItem,
-    UpdateQuery,
+    AskQuery, DeleteQuery, Expr, Filter, InsertEntityType, InsertQuery, KvQuery, QueryExpr,
+    ReturningItem, UpdateQuery,
 };
 use super::super::lexer::Token;
 use super::error::ParseError;
@@ -18,7 +18,9 @@ pub(crate) const JSON_LITERAL_MAX_DEPTH: u32 = 128;
 /// Walk a parsed `JsonValue` tree and bail out if nesting exceeds
 /// `JSON_LITERAL_MAX_DEPTH`. Iterative to avoid the very stack
 /// overflow we're trying to prevent.
-pub(crate) fn json_literal_depth_check(value: &crate::utils::json::JsonValue) -> Result<(), String> {
+pub(crate) fn json_literal_depth_check(
+    value: &crate::utils::json::JsonValue,
+) -> Result<(), String> {
     use crate::utils::json::JsonValue;
     let mut stack: Vec<(&JsonValue, u32)> = vec![(value, 1)];
     while let Some((node, depth)) = stack.pop() {
@@ -148,7 +150,7 @@ impl<'a> Parser<'a> {
                     // landing in the JSON/audit/log/gRPC error sinks.
                     format!("unsupported TTL unit {other:?}"),
                     self.position(),
-                ))
+                ));
             }
         };
 
@@ -367,6 +369,73 @@ impl<'a> Parser<'a> {
         }))
     }
 
+    /// Parse: PUT key = value [EXPIRE duration] [IF NOT EXISTS]
+    pub fn parse_kv_put_query(&mut self) -> Result<QueryExpr, ParseError> {
+        self.expect_ident_ci("PUT")?;
+        let key = self.parse_kv_key()?;
+        self.expect(Token::Eq)?;
+        let value = self.parse_expr_value()?;
+
+        let ttl_ms = if self.consume_ident_ci("EXPIRE")? {
+            Some(self.parse_ttl_duration()?)
+        } else {
+            None
+        };
+
+        let if_not_exists = if self.consume(&Token::If)? {
+            self.expect(Token::Not)?;
+            self.expect(Token::Exists)?;
+            true
+        } else {
+            false
+        };
+
+        Ok(QueryExpr::Kv(KvQuery::Put {
+            key,
+            value,
+            ttl_ms,
+            if_not_exists,
+        }))
+    }
+
+    /// Parse: GET key
+    pub fn parse_kv_get_query(&mut self) -> Result<QueryExpr, ParseError> {
+        self.expect_ident_ci("GET")?;
+        let key = self.parse_kv_key()?;
+        Ok(QueryExpr::Kv(KvQuery::Get { key }))
+    }
+
+    /// Parse: DELETE key
+    pub fn parse_kv_delete_query(&mut self) -> Result<QueryExpr, ParseError> {
+        self.expect(Token::Delete)?;
+        let key = self.parse_kv_key()?;
+        Ok(QueryExpr::Kv(KvQuery::Delete { key }))
+    }
+
+    fn parse_kv_key(&mut self) -> Result<String, ParseError> {
+        let mut key = self.parse_kv_key_part()?;
+        while self.consume(&Token::Dot)? {
+            let part = self.parse_kv_key_part()?;
+            key.push('.');
+            key.push_str(&part);
+        }
+        Ok(key)
+    }
+
+    fn parse_kv_key_part(&mut self) -> Result<String, ParseError> {
+        match self.peek().clone() {
+            Token::Ident(part) | Token::String(part) => {
+                self.advance()?;
+                Ok(part)
+            }
+            Token::Integer(part) => {
+                self.advance()?;
+                Ok(part.to_string())
+            }
+            _ => self.expect_ident_or_keyword(),
+        }
+    }
+
     /// Parse optional `RETURNING (* | col [, col ...])` clause.
     /// Returns `None` if no RETURNING token, errors if RETURNING is present
     /// but not followed by `*` or a non-empty column list.
@@ -516,21 +585,19 @@ impl<'a> Parser<'a> {
                 // canonical JsonValue then re-encode via `to_vec` so
                 // the on-disk bytes match the quoted form.
                 self.advance()?;
-                let json_value =
-                    crate::utils::json::parse_json(&raw).map_err(|err| {
-                        ParseError::new(
-                            // F-05: render the underlying parse-error string
-                            // via `{:?}` so any user fragment serde echoed
-                            // back (unexpected character, key text, …) is
-                            // Debug-escaped before reaching the downstream
-                            // JSON / audit / log / gRPC sinks.
-                            format!("invalid JSON object literal: {:?}", err.to_string()),
-                            self.position(),
-                        )
-                    })?;
-                json_literal_depth_check(&json_value).map_err(|err| {
-                    ParseError::new(err, self.position())
+                let json_value = crate::utils::json::parse_json(&raw).map_err(|err| {
+                    ParseError::new(
+                        // F-05: render the underlying parse-error string
+                        // via `{:?}` so any user fragment serde echoed
+                        // back (unexpected character, key text, …) is
+                        // Debug-escaped before reaching the downstream
+                        // JSON / audit / log / gRPC sinks.
+                        format!("invalid JSON object literal: {:?}", err.to_string()),
+                        self.position(),
+                    )
                 })?;
+                json_literal_depth_check(&json_value)
+                    .map_err(|err| ParseError::new(err, self.position()))?;
                 let canonical = crate::serde_json::Value::from(json_value);
                 let bytes = crate::json::to_vec(&canonical).map_err(|err| {
                     ParseError::new(

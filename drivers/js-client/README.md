@@ -44,6 +44,8 @@ const db = await connect('red://reddb.example.com:5050', {
 })
 
 await db.insert('users', { name: 'Alice' })
+await db.kv.put('settings', 'theme', 'dark')
+const theme = await db.kv.get('settings', 'theme')
 const result = await db.query('SELECT * FROM users LIMIT 10')
 console.log(result.rows)
 
@@ -82,6 +84,15 @@ await connect('red://host:5050?token=sk-abc')
 // Username + password (driver calls /auth/login first):
 await connect('red://user:pass@host:5050')
 ```
+
+## KV API
+
+`db.kv.put(collection, key, value)`, `db.kv.get(collection, key)`, and
+`db.kv.delete(collection, key)` expose the high-level key-value surface.
+HTTP connections target `PUT|GET|DELETE /collections/<collection>/kv/<key>`.
+For compatibility with current servers, the driver falls back to the legacy
+`/collections/<collection>/kvs/<key>` route when the canonical route returns
+404.
 
 ## Environment overrides
 

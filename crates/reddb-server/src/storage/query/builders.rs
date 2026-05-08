@@ -247,6 +247,7 @@ impl JoinQueryBuilder {
             QueryExpr::Vector(vector) => vector.alias = Some(alias.clone()),
             QueryExpr::Hybrid(hybrid) => hybrid.alias = Some(alias.clone()),
             QueryExpr::Join(_)
+            | QueryExpr::Kv(_)
             | QueryExpr::Insert(_)
             | QueryExpr::Update(_)
             | QueryExpr::Delete(_)

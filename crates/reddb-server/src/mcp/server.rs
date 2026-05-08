@@ -213,6 +213,7 @@ impl McpServer {
             "reddb_insert_document" => self.tool_insert_document(args),
             "reddb_kv_get" => self.tool_kv_get(args),
             "reddb_kv_set" => self.tool_kv_set(args),
+            "reddb_kv_delete" => self.tool_kv_delete(args),
             "reddb_delete" => self.tool_delete(args),
             "reddb_search_vector" => self.tool_search_vector(args),
             "reddb_search_text" => self.tool_search_text(args),
@@ -497,13 +498,19 @@ impl McpServer {
             .and_then(|v| v.as_str())
             .ok_or("missing required field 'key'")?;
 
-        let uc = EntityUseCases::new(&self.runtime);
-        match uc.get_kv(collection, key).map_err(|e| format!("{}", e))? {
+        let ops = McpKvOps::new(&self.runtime);
+        match ops.get(collection, key)? {
             Some((value, entity_id)) => {
                 let mut obj = Map::new();
+                obj.insert("ok".to_string(), JsonValue::Bool(true));
                 obj.insert("found".to_string(), JsonValue::Bool(true));
+                obj.insert(
+                    "collection".to_string(),
+                    JsonValue::String(collection.to_string()),
+                );
                 obj.insert("key".to_string(), JsonValue::String(key.to_string()));
                 obj.insert("value".to_string(), storage_value_to_json(&value));
+                obj.insert("id".to_string(), JsonValue::Number(entity_id.raw() as f64));
                 obj.insert(
                     "entity_id".to_string(),
                     JsonValue::Number(entity_id.raw() as f64),
@@ -513,7 +520,12 @@ impl McpServer {
             }
             None => {
                 let mut obj = Map::new();
+                obj.insert("ok".to_string(), JsonValue::Bool(true));
                 obj.insert("found".to_string(), JsonValue::Bool(false));
+                obj.insert(
+                    "collection".to_string(),
+                    JsonValue::String(collection.to_string()),
+                );
                 obj.insert("key".to_string(), JsonValue::String(key.to_string()));
                 json_to_string(&JsonValue::Object(obj))
                     .map_err(|e| format!("serialization error: {}", e))
@@ -537,18 +549,49 @@ impl McpServer {
 
         let metadata = parse_metadata_arg(args)?;
 
-        let uc = EntityUseCases::new(&self.runtime);
-        let output = uc
-            .create_kv(CreateKvInput {
-                collection: collection.to_string(),
-                key: key.to_string(),
-                value: sv,
-                metadata,
-            })
-            .map_err(|e| format!("{}", e))?;
+        let ops = McpKvOps::new(&self.runtime);
+        let outcome = ops.set(collection, key, sv, value_arg.clone(), metadata)?;
 
-        let json = created_entity_output_json(&output);
-        json_to_string(&json).map_err(|e| format!("serialization error: {}", e))
+        let mut obj = Map::new();
+        obj.insert("ok".to_string(), JsonValue::Bool(true));
+        obj.insert(
+            "collection".to_string(),
+            JsonValue::String(collection.to_string()),
+        );
+        obj.insert("key".to_string(), JsonValue::String(key.to_string()));
+        obj.insert("value".to_string(), storage_value_to_json(&outcome.value));
+        obj.insert("id".to_string(), JsonValue::Number(outcome.id.raw() as f64));
+        obj.insert(
+            "entity_id".to_string(),
+            JsonValue::Number(outcome.id.raw() as f64),
+        );
+        obj.insert("created".to_string(), JsonValue::Bool(outcome.created));
+        obj.insert("updated".to_string(), JsonValue::Bool(!outcome.created));
+        json_to_string(&JsonValue::Object(obj)).map_err(|e| format!("serialization error: {}", e))
+    }
+
+    fn tool_kv_delete(&self, args: &JsonValue) -> Result<String, String> {
+        let collection = args
+            .get("collection")
+            .and_then(|v| v.as_str())
+            .ok_or("missing required field 'collection'")?;
+        let key = args
+            .get("key")
+            .and_then(|v| v.as_str())
+            .ok_or("missing required field 'key'")?;
+
+        let ops = McpKvOps::new(&self.runtime);
+        let deleted = ops.delete(collection, key)?;
+
+        let mut obj = Map::new();
+        obj.insert("ok".to_string(), JsonValue::Bool(true));
+        obj.insert(
+            "collection".to_string(),
+            JsonValue::String(collection.to_string()),
+        );
+        obj.insert("key".to_string(), JsonValue::String(key.to_string()));
+        obj.insert("deleted".to_string(), JsonValue::Bool(deleted));
+        json_to_string(&JsonValue::Object(obj)).map_err(|e| format!("serialization error: {}", e))
     }
 
     fn tool_delete(&self, args: &JsonValue) -> Result<String, String> {
@@ -1088,6 +1131,82 @@ fn parse_metadata_arg(
     }
 }
 
+struct McpKvOps<'a> {
+    runtime: &'a RedDBRuntime,
+}
+
+struct McpKvSetOutcome {
+    value: Value,
+    id: EntityId,
+    created: bool,
+}
+
+impl<'a> McpKvOps<'a> {
+    fn new(runtime: &'a RedDBRuntime) -> Self {
+        Self { runtime }
+    }
+
+    fn get(&self, collection: &str, key: &str) -> Result<Option<(Value, EntityId)>, String> {
+        EntityUseCases::new(self.runtime)
+            .get_kv(collection, key)
+            .map_err(|e| format!("{}", e))
+    }
+
+    fn set(
+        &self,
+        collection: &str,
+        key: &str,
+        value: Value,
+        json_value: JsonValue,
+        metadata: Vec<(String, crate::storage::unified::MetadataValue)>,
+    ) -> Result<McpKvSetOutcome, String> {
+        let uc = EntityUseCases::new(self.runtime);
+        match uc.get_kv(collection, key).map_err(|e| format!("{}", e))? {
+            Some((_, existing_id)) => {
+                let mut payload = Map::new();
+                payload.insert("value".to_string(), json_value.clone());
+                uc.patch(crate::application::PatchEntityInput {
+                    collection: collection.to_string(),
+                    id: existing_id,
+                    payload: JsonValue::Object(payload),
+                    operations: vec![crate::application::PatchEntityOperation {
+                        op: crate::application::PatchEntityOperationType::Set,
+                        path: vec!["value".to_string()],
+                        value: Some(json_value),
+                    }],
+                })
+                .map_err(|e| format!("{}", e))?;
+                Ok(McpKvSetOutcome {
+                    value,
+                    id: existing_id,
+                    created: false,
+                })
+            }
+            None => {
+                let output = uc
+                    .create_kv(CreateKvInput {
+                        collection: collection.to_string(),
+                        key: key.to_string(),
+                        value: value.clone(),
+                        metadata,
+                    })
+                    .map_err(|e| format!("{}", e))?;
+                Ok(McpKvSetOutcome {
+                    value,
+                    id: output.id,
+                    created: true,
+                })
+            }
+        }
+    }
+
+    fn delete(&self, collection: &str, key: &str) -> Result<bool, String> {
+        EntityUseCases::new(self.runtime)
+            .delete_kv(collection, key)
+            .map_err(|e| format!("{}", e))
+    }
+}
+
 // Convert a storage Value to JSON (local helper to avoid visibility issues).
 fn get_str_field<'a>(args: &'a JsonValue, field: &str) -> Result<&'a str, String> {
     args.get(field)
@@ -1212,5 +1331,71 @@ impl McpServer {
             })
             .collect();
         json_to_string(&JsonValue::Array(arr))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn object(fields: Vec<(&str, JsonValue)>) -> JsonValue {
+        let mut map = Map::new();
+        for (key, value) in fields {
+            map.insert(key.to_string(), value);
+        }
+        JsonValue::Object(map)
+    }
+
+    fn parse_tool_json(text: String) -> JsonValue {
+        json_from_str(&text).expect("tool response is json")
+    }
+
+    #[test]
+    fn mcp_kv_set_get_delete_roundtrips_and_set_upserts() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime starts");
+        let server = McpServer::new(runtime);
+        let args = |value: &str| {
+            object(vec![
+                ("collection", JsonValue::String("kv_default".to_string())),
+                ("key", JsonValue::String("theme".to_string())),
+                ("value", JsonValue::String(value.to_string())),
+            ])
+        };
+
+        let created = parse_tool_json(server.tool_kv_set(&args("dark")).expect("kv set"));
+        assert_eq!(created.get("ok").and_then(JsonValue::as_bool), Some(true));
+        assert_eq!(
+            created.get("created").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+
+        let updated = parse_tool_json(server.tool_kv_set(&args("light")).expect("kv set"));
+        assert_eq!(
+            updated.get("updated").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+
+        let get_args = object(vec![
+            ("collection", JsonValue::String("kv_default".to_string())),
+            ("key", JsonValue::String("theme".to_string())),
+        ]);
+        let found = parse_tool_json(server.tool_kv_get(&get_args).expect("kv get"));
+        assert_eq!(found.get("found").and_then(JsonValue::as_bool), Some(true));
+        assert_eq!(
+            found.get("value").and_then(JsonValue::as_str),
+            Some("light")
+        );
+
+        let deleted = parse_tool_json(server.tool_kv_delete(&get_args).expect("kv delete"));
+        assert_eq!(
+            deleted.get("deleted").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+
+        let missing = parse_tool_json(server.tool_kv_get(&get_args).expect("kv get"));
+        assert_eq!(
+            missing.get("found").and_then(JsonValue::as_bool),
+            Some(false)
+        );
     }
 }

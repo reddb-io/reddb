@@ -34,6 +34,26 @@ export interface InsertResult { affected: number; id?: string | number }
 export interface BulkInsertResult { affected: number }
 export interface GetResult { entity: Record<string, unknown> | null }
 export interface DeleteResult { affected: number }
+export interface KvPutResult {
+  ok?: boolean
+  affected?: number
+  id?: string | number
+  collection?: string
+  key?: string
+}
+export interface KvGetResult {
+  ok?: boolean
+  collection?: string
+  key?: string
+  value: unknown
+  id?: string | number
+}
+export interface KvDeleteResult {
+  ok?: boolean
+  deleted?: boolean
+  affected?: number
+  key?: string
+}
 export interface HealthResult { ok: boolean; version: string }
 export interface VersionResult { version: string; protocol: string }
 
@@ -89,6 +109,12 @@ export class CacheClient {
   flushNamespace(namespace: string): Promise<void>
 }
 
+export class KvClient {
+  put(collection: string, key: string | number, value: unknown): Promise<KvPutResult>
+  get(collection: string, key: string | number): Promise<KvGetResult>
+  delete(collection: string, key: string | number): Promise<KvDeleteResult>
+}
+
 /**
  * Specialised error thrown when an embedded URI is passed to the
  * thin client. Always has `code === 'EmbeddedNotSupported'`. Use
@@ -108,6 +134,7 @@ export function isEmbeddedUri(uri: string): boolean
 
 export class RedDB {
   readonly cache: CacheClient
+  readonly kv: KvClient
 
   query(sql: string): Promise<QueryResult>
   insert(collection: string, payload: Record<string, unknown>): Promise<InsertResult>

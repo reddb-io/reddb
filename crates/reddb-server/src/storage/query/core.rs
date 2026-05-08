@@ -27,6 +27,8 @@ pub enum QueryExpr {
     Update(UpdateQuery),
     /// DELETE FROM table WHERE filter
     Delete(DeleteQuery),
+    /// Top-level key-value operations.
+    Kv(KvQuery),
     /// CREATE TABLE name (columns)
     CreateTable(CreateTableQuery),
     /// DROP TABLE name
@@ -1620,6 +1622,22 @@ pub struct DeleteQuery {
     pub filter: Option<Filter>,
     /// Optional RETURNING clause items.
     pub returning: Option<Vec<ReturningItem>>,
+}
+
+/// Top-level key-value operations.
+#[derive(Debug, Clone)]
+pub enum KvQuery {
+    /// `PUT key = value [EXPIRE duration] [IF NOT EXISTS]`
+    Put {
+        key: String,
+        value: Value,
+        ttl_ms: Option<u64>,
+        if_not_exists: bool,
+    },
+    /// `GET key`
+    Get { key: String },
+    /// `DELETE key`
+    Delete { key: String },
 }
 
 /// CREATE TABLE name (columns)

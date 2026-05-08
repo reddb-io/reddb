@@ -280,6 +280,22 @@ class RedwireClient:
         )
         return _expect_json(resp, ok_kinds=(Kind.DeleteOk,))
 
+    async def kv_put(self, collection: str, key: str, value: Any) -> dict[str, Any]:
+        return await self.query(
+            f"INSERT INTO {_sql_ident(collection)} KV (key, value) "
+            f"VALUES ({_sql_literal(str(key))}, {_sql_literal(value)})"
+        )
+
+    async def kv_get(self, collection: str, key: str) -> dict[str, Any]:
+        return await self.query(
+            f"SELECT KV({_sql_literal(collection)}, {_sql_literal(str(key))})"
+        )
+
+    async def kv_delete(self, collection: str, key: str) -> dict[str, Any]:
+        return await self.query(
+            f"DELETE FROM {_sql_ident(collection)} WHERE key = {_sql_literal(str(key))}"
+        )
+
     async def ping(self) -> None:
         resp = await self._round_trip(
             Frame(kind=Kind.Ping, correlation_id=self._corr())
@@ -551,6 +567,24 @@ def _hello_methods(auth: str) -> list[str]:
 
 def _json_bytes(obj: Any) -> bytes:
     return json.dumps(obj, separators=(",", ":")).encode("utf-8")
+
+
+def _sql_ident(value: str) -> str:
+    if value.replace("_", "a").isalnum() and not value[:1].isdigit():
+        return value
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _sql_literal(value: Any) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, (dict, list)):
+        value = json.dumps(value, separators=(",", ":"))
+    return "'" + str(value).replace("'", "''") + "'"
 
 
 def _json_loads(buf: bytes) -> dict[str, Any]:

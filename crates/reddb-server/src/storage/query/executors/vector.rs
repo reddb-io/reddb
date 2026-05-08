@@ -572,6 +572,7 @@ fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::Insert(_) => "insert",
         QueryExpr::Update(_) => "update",
         QueryExpr::Delete(_) => "delete",
+        QueryExpr::Kv(_) => "kv",
         QueryExpr::CreateTable(_) => "create_table",
         QueryExpr::DropTable(_) => "drop_table",
         QueryExpr::AlterTable(_) => "alter_table",

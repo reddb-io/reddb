@@ -15,7 +15,7 @@ The driver speaks both RedWire (binary TCP / TLS) and HTTP/HTTPS.
 The transport is selected by the URI scheme.
 """
 
-from .client import Reddb, connect
+from .client import KvClient, Reddb, connect
 from .errors import (
     AuthRefused,
     CompressedButNoZstd,
@@ -54,6 +54,7 @@ __all__ = [
     # Top-level facade.
     "connect",
     "Reddb",
+    "KvClient",
     # URL parsing.
     "ParsedUri",
     "parse_uri",

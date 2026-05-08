@@ -849,6 +849,7 @@ mod impl_tree;
 mod impl_vcs;
 mod index_store;
 mod join_filter;
+pub mod kv_atomic;
 pub mod lease_lifecycle;
 pub mod lease_loop;
 pub mod lease_timer_wheel;
@@ -869,10 +870,10 @@ pub mod within_clause;
 pub mod write_gate;
 
 pub use self::graph_dsl::*;
-pub use self::statement_frame::EffectiveScope;
 use self::join_filter::*;
 use self::query_exec::*;
 use self::record_search::*;
+pub use self::statement_frame::EffectiveScope;
 
 /// Re-exports for transports + tests that need per-connection
 /// isolation, tenant / auth thread-locals, and MVCC snapshot

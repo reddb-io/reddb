@@ -773,6 +773,7 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
             cache_scope_insert(scopes, &query.vector.collection);
             collect_vector_source_scopes(scopes, &query.vector.query_vector);
         }
+        QueryExpr::Kv(_) => {}
         QueryExpr::Insert(query) => cache_scope_insert(scopes, &query.table),
         QueryExpr::Update(query) => cache_scope_insert(scopes, &query.table),
         QueryExpr::Delete(query) => cache_scope_insert(scopes, &query.table),
@@ -3788,7 +3789,11 @@ impl RedDBRuntime {
         // RLS view of "this statement". `ai_scope()` is the canonical
         // builder.
         let scope = self.ai_scope();
-        let kind = match result.as_ref().map(|r| r.statement_type).unwrap_or("select") {
+        let kind = match result
+            .as_ref()
+            .map(|r| r.statement_type)
+            .unwrap_or("select")
+        {
             "select" => crate::telemetry::slow_query_logger::QueryKind::Select,
             "insert" => crate::telemetry::slow_query_logger::QueryKind::Insert,
             "update" => crate::telemetry::slow_query_logger::QueryKind::Update,
@@ -4232,6 +4237,9 @@ impl RedDBRuntime {
             QueryExpr::Insert(ref insert) => self.execute_insert(query, insert),
             QueryExpr::Update(ref update) => self.execute_update(query, update),
             QueryExpr::Delete(ref delete) => self.execute_delete(query, delete),
+            QueryExpr::Kv(ref kv) => {
+                crate::runtime::kv_atomic::KvAtomicOps::new(self).execute(query, kv)
+            }
             // DDL execution
             QueryExpr::CreateTable(ref create) => self.execute_create_table(query, create),
             QueryExpr::DropTable(ref drop_tbl) => self.execute_drop_table(query, drop_tbl),

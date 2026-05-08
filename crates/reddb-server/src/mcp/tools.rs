@@ -251,6 +251,17 @@ pub fn all_tools() -> Vec<ToolDef> {
             ),
         },
         ToolDef {
+            name: "reddb_kv_delete",
+            description: "Delete a key-value pair from a collection.",
+            input_schema: schema(
+                vec![
+                    ("collection", "string", "Collection name"),
+                    ("key", "string", "Key to delete"),
+                ],
+                vec!["collection", "key"],
+            ),
+        },
+        ToolDef {
             name: "reddb_delete",
             description: "Delete an entity by ID from a collection.",
             input_schema: schema(
@@ -508,7 +519,7 @@ mod tests {
     #[test]
     fn test_all_tools_defined() {
         let tools = all_tools();
-        assert!(tools.len() >= 24);
+        assert!(tools.len() >= 25);
         let names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         assert!(names.contains(&"reddb_query"));
         assert!(names.contains(&"reddb_collections"));
@@ -519,6 +530,7 @@ mod tests {
         assert!(names.contains(&"reddb_insert_document"));
         assert!(names.contains(&"reddb_kv_get"));
         assert!(names.contains(&"reddb_kv_set"));
+        assert!(names.contains(&"reddb_kv_delete"));
         assert!(names.contains(&"reddb_delete"));
         assert!(names.contains(&"reddb_search_vector"));
         assert!(names.contains(&"reddb_search_text"));

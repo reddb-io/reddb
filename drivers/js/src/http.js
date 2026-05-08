@@ -14,6 +14,9 @@
  *   bulk_insert         → POST /collections/:name/bulk/rows
  *   get                 → GET  /collections/:name/{id}      (entity scan + filter)
  *   delete              → DELETE /collections/:name/{id}
+ *   kv.put              → PUT    /collections/:name/kv/:key  (fallback: /kvs/:key)
+ *   kv.get              → GET    /collections/:name/kv/:key  (fallback: /kvs/:key)
+ *   kv.delete           → DELETE /collections/:name/kv/:key  (fallback: /kvs/:key)
  *   health              → GET  /health
  *   version             → GET  /admin/version
  *   auth.login          → POST /auth/login
@@ -72,8 +75,11 @@ export class HttpRpcClient {
         `HTTP transport has no route for method '${method}'`,
       )
     }
-    const { url, init } = route(this.baseUrl, params)
-    const response = await fetch(url, this.attachAuth(init))
+    const { url, legacyUrl, init } = route(this.baseUrl, params)
+    let response = await fetch(url, this.attachAuth(init))
+    if (response.status === 404 && legacyUrl) {
+      response = await fetch(legacyUrl, this.attachAuth(init))
+    }
     return parseResponse(response)
   }
 
@@ -141,6 +147,21 @@ const ROUTES = {
   }),
   delete: (base, { collection, id }) => ({
     url: `${base}/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
+    init: { method: 'DELETE' },
+  }),
+  'kv.put': (base, { collection, key, value }) => ({
+    url: `${base}/collections/${encodeURIComponent(collection)}/kv/${encodeURIComponent(key)}`,
+    legacyUrl: `${base}/collections/${encodeURIComponent(collection)}/kvs/${encodeURIComponent(key)}`,
+    init: { method: 'PUT', body: JSON.stringify({ value }) },
+  }),
+  'kv.get': (base, { collection, key }) => ({
+    url: `${base}/collections/${encodeURIComponent(collection)}/kv/${encodeURIComponent(key)}`,
+    legacyUrl: `${base}/collections/${encodeURIComponent(collection)}/kvs/${encodeURIComponent(key)}`,
+    init: { method: 'GET' },
+  }),
+  'kv.delete': (base, { collection, key }) => ({
+    url: `${base}/collections/${encodeURIComponent(collection)}/kv/${encodeURIComponent(key)}`,
+    legacyUrl: `${base}/collections/${encodeURIComponent(collection)}/kvs/${encodeURIComponent(key)}`,
     init: { method: 'DELETE' },
   }),
   'auth.login': (base, { username, password }) => ({
