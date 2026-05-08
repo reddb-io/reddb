@@ -100,6 +100,10 @@ export interface KvCounterResult {
   value: number
 }
 
+export interface KvWatchOptions {
+  signal?: AbortSignal
+}
+
 export interface HealthResult {
   ok: boolean
   version: string
@@ -207,6 +211,8 @@ export class KvClient {
   incr(collection: string, key: string | number, by?: number, ttlMs?: number): Promise<KvCounterResult>
   /** Atomically decrement an integer key and return the new value. */
   decr(collection: string, key: string | number, by?: number, ttlMs?: number): Promise<KvCounterResult>
+  /** Watch a single key over HTTP SSE. */
+  watch(collection: string, key: string | number, options?: KvWatchOptions): AsyncIterable<unknown>
 }
 
 export class RedDB {

@@ -1,13 +1,15 @@
 /**
- * KV client — exposes `kv.{put,get,delete,incr,decr}` through the underlying transport.
+ * KV client — exposes `kv.{put,get,delete,incr,decr,watch}` through the underlying transport.
  *
  * HTTP uses the REST KV endpoint. RedWire transports may bridge the same
  * method names directly or fall back to SQL while dedicated wire frames are
  * still landing server-side.
  */
 
+import { RedDBError } from './protocol.js'
+
 export class KvClient {
-  /** @param {{ call: Function }} client */
+  /** @param {{ call: Function, watch?: Function }} client */
   constructor(client) {
     this._client = client
   }
@@ -65,5 +67,27 @@ export class KvClient {
    */
   async decr(collection, key, by = 1, ttlMs = undefined) {
     return await this._client.call('kv.decr', { collection, key: String(key), by, ttlMs })
+  }
+
+  /**
+   * Watch a single key. Returns an AsyncIterable that yields parsed SSE
+   * `data:` payloads from GET /collections/:collection/kv/:key/watch.
+   * @param {string} collection
+   * @param {string | number} key
+   * @param {{ signal?: AbortSignal }} [options]
+   * @returns {AsyncIterable<unknown>}
+   */
+  watch(collection, key, options = {}) {
+    if (typeof this._client.watch !== 'function') {
+      throw new RedDBError(
+        'WATCH_TRANSPORT_UNSUPPORTED',
+        'kv.watch is only available on HTTP/HTTPS connections',
+      )
+    }
+    return this._client.watch('kv.watch', {
+      collection,
+      key: String(key),
+      signal: options.signal,
+    })
   }
 }

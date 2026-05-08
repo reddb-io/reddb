@@ -60,6 +60,10 @@ export interface KvCounterResult {
   key?: string
   value: number
 }
+
+export interface KvWatchOptions {
+  signal?: AbortSignal
+}
 export interface HealthResult { ok: boolean; version: string }
 export interface VersionResult { version: string; protocol: string }
 
@@ -121,6 +125,7 @@ export class KvClient {
   delete(collection: string, key: string | number): Promise<KvDeleteResult>
   incr(collection: string, key: string | number, by?: number, ttlMs?: number): Promise<KvCounterResult>
   decr(collection: string, key: string | number, by?: number, ttlMs?: number): Promise<KvCounterResult>
+  watch(collection: string, key: string | number, options?: KvWatchOptions): AsyncIterable<unknown>
 }
 
 /**

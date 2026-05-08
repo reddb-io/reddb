@@ -21,6 +21,7 @@ Method                      Endpoint
 ``kv_put``                  ``PUT  /collections/{name}/kv/{key}`` (fallback ``/kvs/{key}``)
 ``kv_get``                  ``GET  /collections/{name}/kv/{key}`` (fallback ``/kvs/{key}``)
 ``kv_delete``               ``DELETE /collections/{name}/kv/{key}`` (fallback ``/kvs/{key}``)
+``kv_watch``                ``GET  /collections/{name}/kv/{key}/watch`` (SSE)
 ``ping`` / health           ``GET  /health``
 ``login``                   ``POST /auth/login``
 ==========================  =================================================
@@ -28,6 +29,8 @@ Method                      Endpoint
 
 from __future__ import annotations
 
+import json
+from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import quote
 
@@ -135,6 +138,36 @@ class HttpClient:
         self, collection: str, key: str, by: int = 1, ttl_ms: int | None = None
     ) -> dict[str, Any]:
         return await self._request_kv_counter("decr", collection, key, by, ttl_ms)
+
+    async def kv_watch(self, collection: str, key: str) -> AsyncIterator[Any]:
+        """Watch a single KV key via HTTP SSE.
+
+        Yields parsed JSON ``data:`` payloads when possible, otherwise
+        yields raw data strings.
+        """
+
+        collection_q = quote(collection)
+        key_q = quote(str(key))
+        headers = {**self._headers(), "accept": "text/event-stream"}
+        try:
+            async with self._client.stream(
+                "GET",
+                f"/collections/{collection_q}/kv/{key_q}/watch",
+                headers=headers,
+            ) as response:
+                if response.is_error:
+                    await response.aread()
+                    _parse_response(response)
+                data: list[str] = []
+                async for line in response.aiter_lines():
+                    event = _consume_sse_line(line, data)
+                    data = event["data"]
+                    if event["emit"]:
+                        yield event["value"]
+                if data:
+                    yield _parse_sse_data(data)
+        except httpx.HTTPError as exc:  # pragma: no cover - network
+            raise HttpError(str(exc), status=0, body="") from exc
 
     async def scan(self, collection: str, **params: Any) -> dict[str, Any]:
         url = f"/collections/{quote(collection)}/scan"
@@ -259,6 +292,31 @@ def _parse_response(response: httpx.Response) -> Any:
             )
         return parsed.get("result", parsed)
     return parsed
+
+
+def _consume_sse_line(line: str, data: list[str]) -> dict[str, Any]:
+    if line == "":
+        if not data:
+            return {"emit": False, "data": data}
+        return {"emit": True, "value": _parse_sse_data(data), "data": []}
+    if line.startswith(":"):
+        return {"emit": False, "data": data}
+    field, sep, value = line.partition(":")
+    if sep and value.startswith(" "):
+        value = value[1:]
+    if field == "data":
+        data.append(value)
+    return {"emit": False, "data": data}
+
+
+def _parse_sse_data(lines: list[str]) -> Any:
+    text = "\n".join(lines)
+    if text == "":
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
 
 
 __all__ = ["HttpClient", "DEFAULT_TIMEOUT_SECS"]

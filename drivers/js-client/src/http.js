@@ -19,6 +19,7 @@
  *   kv.delete           → DELETE /collections/:name/kv/:key  (fallback: /kvs/:key)
  *   kv.incr             → POST   /collections/:name/kv/:key/incr?by=n
  *   kv.decr             → POST   /collections/:name/kv/:key/decr?by=n
+ *   kv.watch            → GET    /collections/:name/kv/:key/watch (SSE)
  *   health              → GET  /health
  *   version             → GET  /admin/version
  *   auth.login          → POST /auth/login
@@ -83,6 +84,26 @@ export class HttpRpcClient {
       response = await fetch(legacyUrl, this.attachAuth(init))
     }
     return parseResponse(response)
+  }
+
+  /**
+   * Streaming RPC entry point. Currently supports kv.watch over HTTP SSE.
+   */
+  async *watch(method, params = {}) {
+    const route = WATCH_ROUTES[method]
+    if (!route) {
+      throw new RedDBError(
+        'UNKNOWN_METHOD',
+        `HTTP transport has no streaming route for method '${method}'`,
+      )
+    }
+    const { url, init } = route(this.baseUrl, params)
+    const response = await fetch(url, this.attachAuth(init))
+    if (!response.ok) {
+      await parseResponse(response)
+      throw new RedDBError(`HTTP_${response.status}`, `watch failed with status ${response.status}`)
+    }
+    yield* parseSse(response)
   }
 
   attachAuth(init) {
@@ -230,9 +251,79 @@ const ROUTES = {
   }),
 }
 
+const WATCH_ROUTES = {
+  'kv.watch': (base, { collection, key, signal }) => ({
+    url: `${base}/collections/${encodeURIComponent(collection)}/kv/${encodeURIComponent(key)}/watch`,
+    init: {
+      method: 'GET',
+      headers: { accept: 'text/event-stream' },
+      ...(signal ? { signal } : {}),
+    },
+  }),
+}
+
 function kvCounterUrl(base, { collection, key, by = 1, ttlMs }, op) {
   const query = new URLSearchParams()
   query.set('by', String(by))
   if (ttlMs !== undefined && ttlMs !== null) query.set('ttl_ms', String(ttlMs))
   return `${base}/collections/${encodeURIComponent(collection)}/kv/${encodeURIComponent(key)}/${op}?${query.toString()}`
+}
+
+async function* parseSse(response) {
+  if (!response.body) {
+    throw new RedDBError('WATCH_NO_BODY', 'watch response did not include a stream body')
+  }
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let data = []
+
+  for await (const chunk of response.body) {
+    buffer += decoder.decode(chunk, { stream: true })
+    let line
+    while (([line, buffer] = nextLine(buffer))[0] !== null) {
+      const event = consumeSseLine(line, data)
+      data = event.nextData
+      if (event.emit) yield event.value
+    }
+  }
+
+  buffer += decoder.decode()
+  if (buffer.length > 0) {
+    const event = consumeSseLine(buffer, data)
+    data = event.nextData
+    if (event.emit) yield event.value
+  }
+  if (data.length > 0) yield parseSseData(data)
+}
+
+function nextLine(buffer) {
+  const lf = buffer.indexOf('\n')
+  if (lf === -1) return [null, buffer]
+  const raw = buffer.slice(0, lf)
+  return [raw.endsWith('\r') ? raw.slice(0, -1) : raw, buffer.slice(lf + 1)]
+}
+
+function consumeSseLine(line, data) {
+  if (line === '') {
+    if (data.length === 0) return { emit: false, nextData: data }
+    return { emit: true, value: parseSseData(data), nextData: [] }
+  }
+  if (line.startsWith(':')) return { emit: false, nextData: data }
+  const colon = line.indexOf(':')
+  const field = colon === -1 ? line : line.slice(0, colon)
+  let value = colon === -1 ? '' : line.slice(colon + 1)
+  if (value.startsWith(' ')) value = value.slice(1)
+  if (field === 'data') data.push(value)
+  return { emit: false, nextData: data }
+}
+
+function parseSseData(lines) {
+  const text = lines.join('\n')
+  if (text.length === 0) return null
+  try {
+    return JSON.parse(text)
+  } catch {
+    return text
+  }
 }

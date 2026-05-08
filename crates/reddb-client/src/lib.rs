@@ -244,6 +244,21 @@ impl Reddb {
         kv_counter_value(&result)
     }
 
+    /// Open a single-key KV watch stream over the HTTP backend.
+    ///
+    /// Available when the `http` feature is enabled. Non-HTTP handles return
+    /// a protocol error because the current watch endpoint is HTTP SSE only.
+    #[cfg(feature = "http")]
+    pub async fn kv_watch(&self, collection: &str, key: &str) -> Result<reqwest::Response> {
+        match self {
+            Reddb::Http(c) => c.kv_watch(collection, key).await,
+            _ => Err(ClientError::new(
+                ErrorCode::Protocol,
+                "kv.watch is only available on HTTP/HTTPS connections",
+            )),
+        }
+    }
+
     pub async fn close(&self) -> Result<()> {
         match self {
             #[cfg(feature = "embedded")]

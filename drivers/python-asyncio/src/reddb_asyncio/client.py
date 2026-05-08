@@ -9,6 +9,7 @@ URI.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any
 
 from .errors import RedDBError, UnsupportedScheme
@@ -153,6 +154,12 @@ class _RedwireAdapter:
     ) -> dict[str, Any]:
         return await self._client.kv_decr(collection, key, by, ttl_ms)
 
+    async def kv_watch(self, collection: str, key: str) -> AsyncIterator[Any]:
+        raise RedDBError(
+            "kv.watch is only available on HTTP/HTTPS connections",
+            code="WATCH_TRANSPORT_UNSUPPORTED",
+        )
+
     async def ping(self) -> dict[str, Any]:
         await self._client.ping()
         return {"ok": True}
@@ -238,3 +245,7 @@ class KvClient:
         self, collection: str, key: str, by: int = 1, ttl_ms: int | None = None
     ) -> dict[str, Any]:
         return await self._t.kv_decr(collection, str(key), by, ttl_ms)
+
+    async def watch(self, collection: str, key: str) -> AsyncIterator[Any]:
+        async for event in self._t.kv_watch(collection, str(key)):
+            yield event

@@ -26,6 +26,15 @@ async function startMockServer(handlers) {
         const parsed = body ? JSON.parse(body) : {}
         const out = await handler(parsed, req)
         res.statusCode = out?.status ?? 200
+        if (out?.headers) {
+          for (const [name, value] of Object.entries(out.headers)) {
+            res.setHeader(name, value)
+          }
+        }
+        if (out?.bodyText != null) {
+          res.end(out.bodyText)
+          return
+        }
         res.setHeader('content-type', 'application/json')
         res.end(JSON.stringify(out?.body ?? out))
       } catch (err) {
@@ -66,6 +75,36 @@ test('kv.put/get/delete use canonical /kv endpoint', async () => {
     assert.deepEqual(seen[0], { value: 'dark' })
     assert.equal((await db.kv.get('app', 'theme')).value, 'dark')
     assert.deepEqual(await db.kv.delete('app', 'theme'), { ok: true, deleted: true, key: 'theme' })
+  } finally {
+    await stub.close()
+  }
+})
+
+test('kv.watch opens canonical SSE endpoint and yields parsed events', async () => {
+  const stub = await startMockServer({
+    'GET /health': () => ({ ok: true, version: 'mock' }),
+    'GET /collections/app/kv/theme/watch': (_body, req) => {
+      assert.equal(req.headers.accept, 'text/event-stream')
+      return {
+        headers: { 'content-type': 'text/event-stream' },
+        bodyText:
+          ': ready\n\n'
+          + 'event: put\n'
+          + 'data: {"collection":"app","key":"theme","value":"dark"}\n\n'
+          + 'data: plain-text\n\n',
+      }
+    },
+  })
+  try {
+    const db = await connect(stub.baseUrl)
+    const events = []
+    for await (const event of db.kv.watch('app', 'theme')) {
+      events.push(event)
+    }
+    assert.deepEqual(events, [
+      { collection: 'app', key: 'theme', value: 'dark' },
+      'plain-text',
+    ])
   } finally {
     await stub.close()
   }

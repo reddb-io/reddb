@@ -11,12 +11,13 @@
 //!   bulk_insert        → POST /collections/:name/bulk/rows
 //!   get                → GET  /collections/:name/{id}
 //!   delete             → DELETE /collections/:name/{id}
+//!   kv_watch           → GET /collections/:name/kv/:key/watch (SSE)
 //!   health             → GET  /health
 //!   version            → GET  /admin/version
 //!   auth.login         → POST /auth/login
 //!   auth.whoami        → GET  /auth/whoami
 
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Client, ClientBuilder, Method, StatusCode};
 use serde_json::Value;
 
@@ -179,6 +180,37 @@ impl HttpClient {
             .and_then(|o| o.get("affected"))
             .and_then(|v| v.as_u64())
             .unwrap_or(0))
+    }
+
+    /// Open a single-key KV watch stream.
+    ///
+    /// The returned `reqwest::Response` is the raw HTTP SSE response from
+    /// `GET /collections/:collection/kv/:key/watch`; callers can consume it
+    /// with `bytes_stream()` or another SSE parser of their choice.
+    pub async fn kv_watch(&self, collection: &str, key: &str) -> Result<reqwest::Response> {
+        let url_path = format!(
+            "/collections/{}/kv/{}/watch",
+            urlencoded(collection),
+            urlencoded(key),
+        );
+        let url = format!("{}{}", self.base_url, url_path);
+        let mut headers = self.headers();
+        headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
+        let resp = self
+            .inner
+            .get(&url)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(net_err)?;
+        if !resp.status().is_success() {
+            decode_envelope(resp).await?;
+            return Err(ClientError::new(
+                ErrorCode::Protocol,
+                "watch request failed without an error body",
+            ));
+        }
+        Ok(resp)
     }
 
     pub async fn close(&self) -> Result<()> {
