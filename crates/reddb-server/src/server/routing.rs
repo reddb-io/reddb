@@ -1,4 +1,57 @@
 use super::*;
+use std::sync::{Mutex, OnceLock};
+
+const CATALOG_DEPRECATION_DATE: &str = "2026-08-08";
+const CATALOG_DEPRECATION_LOG_INTERVAL: Duration = Duration::from_secs(60);
+
+fn deprecated_catalog_response(endpoint: &'static str, mut response: HttpResponse) -> HttpResponse {
+    warn_deprecated_catalog_endpoint(endpoint);
+
+    response.extra_headers.push((
+        "Deprecation",
+        crate::server::header_escape_guard::HeaderEscapeGuard::header_value(
+            CATALOG_DEPRECATION_DATE,
+        )
+        .expect("catalog deprecation date is a valid HTTP header value"),
+    ));
+    response.extra_headers.push((
+        "Sunset",
+        crate::server::header_escape_guard::HeaderEscapeGuard::header_value(
+            CATALOG_DEPRECATION_DATE,
+        )
+        .expect("catalog sunset date is a valid HTTP header value"),
+    ));
+    response
+}
+
+fn warn_deprecated_catalog_endpoint(endpoint: &'static str) {
+    static LAST_WARNED: OnceLock<Mutex<BTreeMap<&'static str, SystemTime>>> = OnceLock::new();
+
+    let now = SystemTime::now();
+    let mut last_warned = match LAST_WARNED
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+    {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let should_warn = last_warned
+        .get(endpoint)
+        .and_then(|last| now.duration_since(*last).ok())
+        .map(|elapsed| elapsed >= CATALOG_DEPRECATION_LOG_INTERVAL)
+        .unwrap_or(true);
+
+    if should_warn {
+        last_warned.insert(endpoint, now);
+        tracing::warn!(
+            target: "reddb::http",
+            endpoint,
+            deprecation = CATALOG_DEPRECATION_DATE,
+            sunset = CATALOG_DEPRECATION_DATE,
+            "deprecated catalog endpoint used"
+        );
+    }
+}
 
 impl RedDBServer {
     pub(crate) fn route(&self, request: HttpRequest) -> HttpResponse {
@@ -278,17 +331,23 @@ impl RedDBServer {
             ),
             ("GET", "/catalog/collections/readiness") => {
                 let catalog = self.catalog_use_cases().snapshot();
-                json_response(
-                    200,
-                    crate::presentation::catalog_json::catalog_collection_readiness_json(
-                        &catalog.collections,
+                deprecated_catalog_response(
+                    "/catalog/collections/readiness",
+                    json_response(
+                        200,
+                        crate::presentation::catalog_json::catalog_collection_readiness_json(
+                            &catalog.collections,
+                        ),
                     ),
                 )
             }
-            ("GET", "/catalog/collections/readiness/attention") => json_response(
-                200,
-                crate::presentation::catalog_json::catalog_collection_attention_json(
-                    &self.catalog_use_cases().collection_attention(),
+            ("GET", "/catalog/collections/readiness/attention") => deprecated_catalog_response(
+                "/catalog/collections/readiness/attention",
+                json_response(
+                    200,
+                    crate::presentation::catalog_json::catalog_collection_attention_json(
+                        &self.catalog_use_cases().collection_attention(),
+                    ),
                 ),
             ),
             ("GET", "/catalog/consistency") => json_response(
@@ -297,80 +356,114 @@ impl RedDBServer {
                     &self.catalog_use_cases().consistency_report(),
                 ),
             ),
-            ("GET", "/catalog/indexes/declared") => json_response(
-                200,
-                crate::presentation::admin_json::indexes_json(
-                    &self.catalog_use_cases().declared_indexes(),
+            ("GET", "/catalog/indexes/declared") => deprecated_catalog_response(
+                "/catalog/indexes/declared",
+                json_response(
+                    200,
+                    crate::presentation::admin_json::indexes_json(
+                        &self.catalog_use_cases().declared_indexes(),
+                    ),
                 ),
             ),
-            ("GET", "/catalog/indexes/operational") => json_response(
-                200,
-                crate::presentation::admin_json::indexes_json(&self.catalog_use_cases().indexes()),
-            ),
-            ("GET", "/catalog/indexes/status") => json_response(
-                200,
-                crate::presentation::catalog_json::catalog_index_statuses_json(
-                    &self.catalog_use_cases().index_statuses(),
+            ("GET", "/catalog/indexes/operational") => deprecated_catalog_response(
+                "/catalog/indexes/operational",
+                json_response(
+                    200,
+                    crate::presentation::admin_json::indexes_json(
+                        &self.catalog_use_cases().indexes(),
+                    ),
                 ),
             ),
-            ("GET", "/catalog/indexes/attention") => json_response(
-                200,
-                crate::presentation::catalog_json::catalog_index_attention_json(
-                    &self.catalog_use_cases().index_attention(),
+            ("GET", "/catalog/indexes/status") => deprecated_catalog_response(
+                "/catalog/indexes/status",
+                json_response(
+                    200,
+                    crate::presentation::catalog_json::catalog_index_statuses_json(
+                        &self.catalog_use_cases().index_statuses(),
+                    ),
                 ),
             ),
-            ("GET", "/catalog/graph/projections/declared") => {
+            ("GET", "/catalog/indexes/attention") => deprecated_catalog_response(
+                "/catalog/indexes/attention",
+                json_response(
+                    200,
+                    crate::presentation::catalog_json::catalog_index_attention_json(
+                        &self.catalog_use_cases().index_attention(),
+                    ),
+                ),
+            ),
+            ("GET", "/catalog/graph/projections/declared") => deprecated_catalog_response(
+                "/catalog/graph/projections/declared",
                 match self.catalog_use_cases().graph_projections() {
                     Ok(projections) => json_response(
                         200,
                         crate::presentation::admin_json::graph_projections_json(&projections),
                     ),
                     Err(err) => json_error(404, err.to_string()),
-                }
-            }
-            ("GET", "/catalog/graph/projections/operational") => json_response(
-                200,
-                crate::presentation::admin_json::graph_projections_json(
-                    &self.catalog_use_cases().operational_graph_projections(),
+                },
+            ),
+            ("GET", "/catalog/graph/projections/operational") => deprecated_catalog_response(
+                "/catalog/graph/projections/operational",
+                json_response(
+                    200,
+                    crate::presentation::admin_json::graph_projections_json(
+                        &self.catalog_use_cases().operational_graph_projections(),
+                    ),
                 ),
             ),
-            ("GET", "/catalog/graph/projections/status") => json_response(
-                200,
-                crate::presentation::catalog_json::catalog_graph_projection_statuses_json(
-                    &self.catalog_use_cases().graph_projection_statuses(),
+            ("GET", "/catalog/graph/projections/status") => deprecated_catalog_response(
+                "/catalog/graph/projections/status",
+                json_response(
+                    200,
+                    crate::presentation::catalog_json::catalog_graph_projection_statuses_json(
+                        &self.catalog_use_cases().graph_projection_statuses(),
+                    ),
                 ),
             ),
-            ("GET", "/catalog/graph/projections/attention") => json_response(
-                200,
-                crate::presentation::catalog_json::catalog_graph_projection_attention_json(
-                    &self.catalog_use_cases().graph_projection_attention(),
+            ("GET", "/catalog/graph/projections/attention") => deprecated_catalog_response(
+                "/catalog/graph/projections/attention",
+                json_response(
+                    200,
+                    crate::presentation::catalog_json::catalog_graph_projection_attention_json(
+                        &self.catalog_use_cases().graph_projection_attention(),
+                    ),
                 ),
             ),
-            ("GET", "/catalog/analytics-jobs/declared") => {
+            ("GET", "/catalog/analytics-jobs/declared") => deprecated_catalog_response(
+                "/catalog/analytics-jobs/declared",
                 match self.catalog_use_cases().analytics_jobs() {
                     Ok(jobs) => json_response(
                         200,
                         crate::presentation::admin_json::analytics_jobs_json(&jobs),
                     ),
                     Err(err) => json_error(404, err.to_string()),
-                }
-            }
-            ("GET", "/catalog/analytics-jobs/operational") => json_response(
-                200,
-                crate::presentation::admin_json::analytics_jobs_json(
-                    &self.catalog_use_cases().operational_analytics_jobs(),
+                },
+            ),
+            ("GET", "/catalog/analytics-jobs/operational") => deprecated_catalog_response(
+                "/catalog/analytics-jobs/operational",
+                json_response(
+                    200,
+                    crate::presentation::admin_json::analytics_jobs_json(
+                        &self.catalog_use_cases().operational_analytics_jobs(),
+                    ),
                 ),
             ),
-            ("GET", "/catalog/analytics-jobs/status") => json_response(
-                200,
-                crate::presentation::catalog_json::catalog_analytics_job_statuses_json(
-                    &self.catalog_use_cases().analytics_job_statuses(),
+            ("GET", "/catalog/analytics-jobs/status") => deprecated_catalog_response(
+                "/catalog/analytics-jobs/status",
+                json_response(
+                    200,
+                    crate::presentation::catalog_json::catalog_analytics_job_statuses_json(
+                        &self.catalog_use_cases().analytics_job_statuses(),
+                    ),
                 ),
             ),
-            ("GET", "/catalog/analytics-jobs/attention") => json_response(
-                200,
-                crate::presentation::catalog_json::catalog_analytics_job_attention_json(
-                    &self.catalog_use_cases().analytics_job_attention(),
+            ("GET", "/catalog/analytics-jobs/attention") => deprecated_catalog_response(
+                "/catalog/analytics-jobs/attention",
+                json_response(
+                    200,
+                    crate::presentation::catalog_json::catalog_analytics_job_attention_json(
+                        &self.catalog_use_cases().analytics_job_attention(),
+                    ),
                 ),
             ),
             ("GET", "/physical/metadata") => match self.native_use_cases().physical_metadata() {
@@ -1498,6 +1591,52 @@ fn token_fingerprint(token: &str) -> String {
     let digest = crate::crypto::sha256(token.as_bytes());
     crate::utils::to_hex_prefix(&digest, 8)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(path: &str) -> HttpRequest {
+        HttpRequest {
+            method: "GET".to_string(),
+            path: path.to_string(),
+            query: BTreeMap::new(),
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn deprecated_catalog_endpoint_returns_deprecation_headers() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let server = RedDBServer::new(runtime);
+
+        let response = server.route(request("/catalog/indexes/status"));
+
+        assert_eq!(response.status, 200);
+        assert!(response.extra_headers.iter().any(|(name, value)| {
+            *name == "Deprecation" && value.to_str().ok() == Some(CATALOG_DEPRECATION_DATE)
+        }));
+        assert!(response.extra_headers.iter().any(|(name, value)| {
+            *name == "Sunset" && value.to_str().ok() == Some(CATALOG_DEPRECATION_DATE)
+        }));
+    }
+
+    #[test]
+    fn canonical_catalog_endpoint_is_not_deprecated() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let server = RedDBServer::new(runtime);
+
+        let response = server.route(request("/catalog"));
+
+        assert_eq!(response.status, 200);
+        assert!(response
+            .extra_headers
+            .iter()
+            .all(|(name, _)| *name != "Deprecation" && *name != "Sunset"));
+    }
+}
+
 fn collection_from_scan_path(path: &str) -> Option<&str> {
     let prefix = "/collections/";
     let suffix = "/scan";
