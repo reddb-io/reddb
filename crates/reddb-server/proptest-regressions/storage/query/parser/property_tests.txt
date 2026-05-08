@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f52c47fe8d8f79df66673a58579940a8124e85d99c5cc905570903d668966614 # shrinks to ast = Table(TableQuery { table: "a", source: None, alias: None, select_items: [], columns: [Column("a")], where_expr: None, filter: None, group_by_exprs: [], group_by: [], having_expr: None, having: None, order_by: [], limit: None, offset: None, expand: None, as_of: None })
+cc 04559d85bba6a63f69900558b63ab1122ddb69588cb080c1036dc5a1045b0acb # shrinks to ast = Table(TableQuery { table: "a", source: None, alias: None, select_items: [], columns: [Column("a0")], where_expr: None, filter: Some(Compare { field: TableColumn { table: "", column: "a" }, op: Eq, value: Integer(0) }), group_by_exprs: [], group_by: [], having_expr: None, having: None, order_by: [], limit: None, offset: None, expand: None, as_of: None })
+cc 2e7429730ee16b6cb851e2724b85168c1a408dc3b6983a4b26eebeca9284e678 # shrinks to ast = Insert(InsertQuery { table: "k", entity_type: Row, columns: ["a", "a", "a"], value_exprs: [], values: [[Integer(0), Integer(0), Integer(0)]], returning: None, ttl_ms: None, expires_at_ms: None, with_metadata: [], auto_embed: None })
+cc ee7c4721cb6f49b184a99b7719ea1063c2fc595737651d5cadcaa99602ae03bf # shrinks to ast = QueueCommand(Push { queue: "k", value: Json([123, 34, 97, 34, 58, 48, 125]), side: Right, priority: None })

@@ -61,6 +61,7 @@ pub mod optimizer;
 pub mod parser;
 pub mod planner;
 pub mod rag;
+pub mod renderer;
 pub mod similarity;
 pub mod sort;
 pub mod sql;
