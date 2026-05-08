@@ -21,6 +21,30 @@ const INDEX_COLUMNS: [&str; 10] = [
     "requires_rebuild",
 ];
 
+const POLICY_COLUMNS: [&str; 8] = [
+    "name",
+    "collection",
+    "kind",
+    "effect",
+    "actions",
+    "principals",
+    "predicate",
+    "enabled",
+];
+
+const STATS_COLUMNS: [&str; 10] = [
+    "collection",
+    "entities",
+    "segments",
+    "growing_count",
+    "sealed_count",
+    "archived_count",
+    "seal_ops",
+    "compact_ops",
+    "last_write_ms",
+    "attention_score",
+];
+
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime")
 }
@@ -48,6 +72,47 @@ fn cleanup_scope() {
     clear_current_auth_identity();
     clear_current_tenant();
     clear_current_connection_id();
+}
+
+fn query_snapshot(rt: &RedDBRuntime, sql: &str) -> (Vec<String>, Vec<Vec<Value>>) {
+    let result = rt
+        .execute_query(sql)
+        .unwrap_or_else(|err| panic!("{sql}: {err:?}"))
+        .result;
+    let rows = result
+        .records
+        .iter()
+        .map(|record| {
+            result
+                .columns
+                .iter()
+                .map(|column| record.get(column).cloned().unwrap_or(Value::Null))
+                .collect()
+        })
+        .collect();
+    (result.columns, rows)
+}
+
+fn seed_stable_introspection_fixture(rt: &RedDBRuntime) {
+    exec(
+        rt,
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT UNIQUE, active BOOLEAN NOT NULL)",
+    );
+    exec(rt, "CREATE TABLE projects (id INT, owner TEXT)");
+    exec(
+        rt,
+        "CREATE INDEX users_email_idx ON users (email) USING HASH",
+    );
+    exec(
+        rt,
+        "INSERT INTO users (id, email, active) VALUES (1, 'a@example.com', true)",
+    );
+    exec(rt, "INSERT INTO projects (id, owner) VALUES (1, 'alice')");
+    exec(
+        rt,
+        "CREATE POLICY active_users ON users FOR SELECT TO reader USING (active = true)",
+    );
+    exec(rt, "ALTER TABLE users ENABLE ROW LEVEL SECURITY");
 }
 
 fn text_field<'a>(
@@ -108,6 +173,108 @@ fn select_from_red_collections_materializes_catalog_rows() {
         Some(Value::UnsignedInteger(_))
     ));
     assert_eq!(row.get("internal"), Some(&Value::Boolean(false)));
+
+    cleanup_scope();
+}
+
+#[test]
+fn red_schema_introspection_is_stable_across_virtual_tables() {
+    cleanup_scope();
+    let rt = runtime();
+    seed_stable_introspection_fixture(&rt);
+
+    let cases = [
+        (
+            "SELECT * FROM red.collections WHERE name IN ('projects', 'users') ORDER BY name",
+            vec![
+                "name",
+                "model",
+                "schema_mode",
+                "entities",
+                "segments",
+                "indices",
+                "in_memory_bytes",
+                "on_disk_bytes",
+                "internal",
+                "tenant_id",
+            ],
+        ),
+        (
+            "SELECT * FROM red.columns WHERE collection = 'users' ORDER BY name",
+            vec![
+                "collection",
+                "name",
+                "type",
+                "nullable",
+                "default_value",
+                "is_primary_key",
+                "is_unique",
+            ],
+        ),
+        (
+            "SELECT * FROM red.indices WHERE collection = 'users' ORDER BY name",
+            INDEX_COLUMNS.to_vec(),
+        ),
+        (
+            "SELECT * FROM red.policies WHERE collection = 'users' ORDER BY name",
+            POLICY_COLUMNS.to_vec(),
+        ),
+        (
+            "SELECT * FROM red.stats WHERE collection IN ('projects', 'users') ORDER BY collection",
+            STATS_COLUMNS.to_vec(),
+        ),
+    ];
+
+    for (sql, expected_columns) in cases {
+        let first = query_snapshot(&rt, sql);
+        let second = query_snapshot(&rt, sql);
+
+        assert_eq!(first.0, expected_columns, "{sql}");
+        assert_eq!(first, second, "{sql} changed between reads");
+        assert!(!first.1.is_empty(), "{sql} returned no rows");
+    }
+
+    cleanup_scope();
+}
+
+#[test]
+fn show_commands_match_red_schema_queries_for_stable_introspection() {
+    cleanup_scope();
+    let rt = runtime();
+    seed_stable_introspection_fixture(&rt);
+
+    for (show_sql, select_sql) in [
+        (
+            "SHOW COLLECTIONS WHERE name IN ('projects', 'users') ORDER BY name",
+            "SELECT * FROM red.collections WHERE name IN ('projects', 'users') AND internal = false ORDER BY name",
+        ),
+        (
+            "SHOW TABLES WHERE name IN ('projects', 'users') ORDER BY name",
+            "SELECT * FROM red.collections WHERE model = 'table' AND name IN ('projects', 'users') ORDER BY name",
+        ),
+        (
+            "SHOW SCHEMA users",
+            "SELECT * FROM red.columns WHERE collection = 'users'",
+        ),
+        (
+            "SHOW INDICES ON users ORDER BY name",
+            "SELECT * FROM red.indices WHERE collection = 'users' ORDER BY name",
+        ),
+        (
+            "SHOW POLICIES ON users ORDER BY name",
+            "SELECT * FROM red.policies WHERE collection = 'users' ORDER BY name",
+        ),
+        (
+            "SHOW STATS users",
+            "SELECT * FROM red.stats WHERE collection = 'users'",
+        ),
+    ] {
+        assert_eq!(
+            query_snapshot(&rt, show_sql),
+            query_snapshot(&rt, select_sql),
+            "{show_sql} should match {select_sql}",
+        );
+    }
 
     cleanup_scope();
 }
