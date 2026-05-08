@@ -1,0 +1,4 @@
+input = "INSERT INTO config KV (key, value) VALUES ('max_retries', 5)"
+expected_kind = "Insert"
+source = "docs/data-models/overview.md:76"
+kind = "positive"

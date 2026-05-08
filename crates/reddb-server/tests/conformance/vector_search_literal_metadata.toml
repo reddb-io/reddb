@@ -1,0 +1,4 @@
+input = "VECTOR SEARCH embeddings SIMILAR TO [0.12, 0.91, 0.44] LIMIT 5"
+expected_kind = "Vector"
+source = "docs/data-models/vectors.md:16"
+kind = "positive"

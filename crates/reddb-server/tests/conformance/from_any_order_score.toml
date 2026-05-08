@@ -1,0 +1,4 @@
+input = "FROM ANY ORDER BY _score DESC LIMIT 10"
+expected_kind = "Table"
+source = "docs/query/universal.md:16"
+kind = "positive"

@@ -1,0 +1,4 @@
+input = "CREATE QUEUE tasks WITH DLQ failed_tasks MAX_ATTEMPTS 3"
+expected_kind = "CreateQueue"
+source = "docs/data-models/queues.md:29"
+kind = "positive"

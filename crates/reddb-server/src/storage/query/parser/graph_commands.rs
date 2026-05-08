@@ -43,16 +43,19 @@ impl<'a> Parser<'a> {
     fn parse_graph_neighborhood(&mut self) -> Result<QueryExpr, ParseError> {
         self.advance()?; // consume NEIGHBORHOOD
         let source = self.parse_string()?;
-        let depth = if self.consume(&Token::Depth)? {
-            self.parse_integer()? as u32
-        } else {
-            3
-        };
-        let direction = if self.consume(&Token::Direction)? {
-            self.expect_ident_or_keyword()?
-        } else {
-            "outgoing".to_string()
-        };
+        let mut depth = 3;
+        let mut direction = "outgoing".to_string();
+
+        loop {
+            if self.consume(&Token::Depth)? {
+                depth = self.parse_integer()? as u32;
+            } else if self.consume(&Token::Direction)? {
+                direction = self.expect_ident_or_keyword()?;
+            } else {
+                break;
+            }
+        }
+
         Ok(QueryExpr::GraphCommand(GraphCommand::Neighborhood {
             source,
             depth,

@@ -1,0 +1,4 @@
+input = "SELECT value FROM config WHERE key = 'max_retries'"
+expected_kind = "Table"
+source = "docs/data-models/key-value.md:118"
+kind = "positive"

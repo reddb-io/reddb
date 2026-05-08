@@ -85,8 +85,15 @@ fn conformance_dir() -> PathBuf {
         .join("conformance")
 }
 
-#[test]
-fn conformance_corpus() {
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("crate lives under <repo>/crates/reddb-server")
+        .to_path_buf()
+}
+
+fn conformance_cases() -> Vec<(PathBuf, ConformanceCase)> {
     let dir = conformance_dir();
     let entries: Vec<_> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("cannot read {}: {}", dir.display(), e))
@@ -100,37 +107,73 @@ fn conformance_corpus() {
         dir.display()
     );
 
+    entries
+        .into_iter()
+        .map(|entry| {
+            let path = entry.path();
+            let raw = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+            let case: ConformanceCase = toml::from_str(&raw)
+                .unwrap_or_else(|e| panic!("parse toml {}: {}", path.display(), e));
+            (path, case)
+        })
+        .collect()
+}
+
+fn validate_source_reference(root: &std::path::Path, source: &str) -> Result<(), String> {
+    if source.starts_with("proptest-regression:") {
+        return Ok(());
+    }
+
+    let Some((file, line)) = source.rsplit_once(':') else {
+        return Err("expected source in file:line form".to_string());
+    };
+    let line: usize = line
+        .parse()
+        .map_err(|_| format!("source line is not numeric: {line:?}"))?;
+    if line == 0 {
+        return Err("source line must be 1-based".to_string());
+    }
+
+    let path = root.join(file);
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let count = raw.lines().count();
+    if line > count {
+        return Err(format!(
+            "source line {line} is past end of {} ({count} lines)",
+            path.display()
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn conformance_corpus() {
     let mut failures = Vec::new();
 
-    for entry in entries {
-        let path = entry.path();
-        let raw =
-            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
-        let case: ConformanceCase = toml::from_str(&raw)
-            .unwrap_or_else(|e| panic!("parse toml {}: {}", path.display(), e));
-
+    for (path, case) in conformance_cases() {
         let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
 
         match case.kind.as_str() {
-            "positive" => {
-                match parser::parse(&case.input) {
-                    Ok(qwc) => {
-                        let got = variant_name(&qwc.query);
-                        if got != case.expected_kind {
-                            failures.push(format!(
-                                "[{}] (source: {})\n  input:    {}\n  expected: {}\n  got:      {}",
-                                file_name, case.source, case.input, case.expected_kind, got
-                            ));
-                        }
-                    }
-                    Err(e) => {
+            "positive" => match parser::parse(&case.input) {
+                Ok(qwc) => {
+                    let got = variant_name(&qwc.query);
+                    if got != case.expected_kind {
                         failures.push(format!(
-                            "[{}] (source: {})\n  input:    {}\n  expected: {} — parse error: {}",
-                            file_name, case.source, case.input, case.expected_kind, e
+                            "[{}] (source: {})\n  input:    {}\n  expected: {}\n  got:      {}",
+                            file_name, case.source, case.input, case.expected_kind, got
                         ));
                     }
                 }
-            }
+                Err(e) => {
+                    failures.push(format!(
+                        "[{}] (source: {})\n  input:    {}\n  expected: {} — parse error: {}",
+                        file_name, case.source, case.input, case.expected_kind, e
+                    ));
+                }
+            },
             "negative" => {
                 if parser::parse(&case.input).is_ok() {
                     failures.push(format!(
@@ -150,5 +193,25 @@ fn conformance_corpus() {
 
     if !failures.is_empty() {
         panic!("conformance failures:\n\n{}", failures.join("\n\n"));
+    }
+}
+
+#[test]
+fn conformance_sources_exist() {
+    let root = repo_root();
+    let mut failures = Vec::new();
+
+    for (path, case) in conformance_cases() {
+        if let Err(e) = validate_source_reference(&root, &case.source) {
+            let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
+            failures.push(format!("[{}] source {:?}: {}", file_name, case.source, e));
+        }
+    }
+
+    if !failures.is_empty() {
+        panic!(
+            "conformance source reference failures:\n\n{}",
+            failures.join("\n\n")
+        );
     }
 }

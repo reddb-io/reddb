@@ -1,0 +1,4 @@
+input = "QUEUE READ tasks GROUP workers CONSUMER worker1 COUNT 5"
+expected_kind = "QueueCommand"
+source = "docs/data-models/queues.md:97"
+kind = "positive"

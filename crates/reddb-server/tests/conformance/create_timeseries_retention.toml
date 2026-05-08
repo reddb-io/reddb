@@ -1,0 +1,4 @@
+input = "CREATE TIMESERIES cpu_metrics RETENTION 90 d"
+expected_kind = "CreateTimeSeries"
+source = "docs/data-models/timeseries.md:16"
+kind = "positive"

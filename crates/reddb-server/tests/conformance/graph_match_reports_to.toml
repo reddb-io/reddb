@@ -1,0 +1,4 @@
+input = "MATCH (a:person)-[r:REPORTS_TO]->(b:person) RETURN a.name, b.name, r.since"
+expected_kind = "Graph"
+source = "docs/query/graph-commands.md:10"
+kind = "positive"

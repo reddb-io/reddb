@@ -1,0 +1,4 @@
+input = "FROM hosts h JOIN ANY a ON h.id = a._entity_id RETURN h.id, a._score"
+expected_kind = "Join"
+source = "crates/reddb-server/src/storage/query/parser/tests.rs:669"
+kind = "positive"

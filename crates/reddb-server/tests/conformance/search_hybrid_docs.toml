@@ -1,0 +1,4 @@
+input = "SEARCH HYBRID TEXT 'neural networks' VECTOR [0.15, 0.89, 0.40] IN docs K 10"
+expected_kind = "SearchCommand"
+source = "docs/data-models/vectors.md:38"
+kind = "positive"

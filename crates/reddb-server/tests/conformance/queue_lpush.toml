@@ -1,0 +1,4 @@
+input = 'QUEUE LPUSH tasks {"urgent":true}'
+expected_kind = "QueueCommand"
+source = "docs/data-models/queues.md:42"
+kind = "positive"

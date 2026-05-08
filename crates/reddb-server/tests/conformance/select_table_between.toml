@@ -1,0 +1,4 @@
+input = "SELECT * FROM users WHERE age BETWEEN 18 AND 65"
+expected_kind = "Table"
+source = "docs/data-models/tables.md:102"
+kind = "positive"

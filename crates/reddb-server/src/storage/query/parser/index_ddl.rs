@@ -29,7 +29,7 @@ impl<'a> Parser<'a> {
         self.expect(Token::LParen)?;
         let mut columns = Vec::new();
         loop {
-            columns.push(self.expect_ident()?);
+            columns.push(self.expect_ident_or_keyword()?);
             if !self.consume(&Token::Comma)? {
                 break;
             }
