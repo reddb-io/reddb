@@ -181,7 +181,7 @@ of characters within one segment of `spec`.
 |---|---|---|---|
 | `table` | `table:[schema.]name` | `table:public.orders` | Schema defaults to `public` if omitted. |
 | `table` (glob) | `table:schema.*` | `table:billing.*` | All tables in the schema. |
-| `column` | `column:[schema.]table.column` | `column:users.email` | Canonical PII/audit vocabulary; verify the query path has column enforcement before relying on it alone. |
+| `column` | `column:[schema.]table.column` | `column:users.email` | Canonical PII/audit vocabulary. The foundational `ColumnPolicyGate` enforces resolved table projections where query paths opt into it. |
 | `schema` | `schema:name.*` | `schema:billing.*` | Implies access to every object in the schema. |
 | `function` | `function:name` | `function:hash_pwd` | For `execute` action. |
 | Tenant-qualified resource | `<kind>:tenant/<tenant>/<name>` | `table:tenant/acme/public.*` | Explicit cross-tenant form; prefer unqualified resources plus `tenant_match` for ordinary tenant policies. |
@@ -532,7 +532,7 @@ How ten common scenarios look in Postgres `GRANT`, AWS IAM, and RedDB.
 |---|---|
 | **Postgres** | `REVOKE SELECT (email, phone) ON users FROM PUBLIC;` then column-level `GRANT` to others. |
 | **AWS IAM** | Not natively supported — needs an attribute-level Lake Formation policy. |
-| **RedDB** | Canonical policy vocabulary: `{"effect":"deny","actions":["select"],"resources":["column:users.email","column:users.phone"]}`. Until the target query path has column enforcement, prefer safe views/RLS/generated columns. |
+| **RedDB** | Canonical policy vocabulary: `{"effect":"deny","actions":["select"],"resources":["column:users.email","column:users.phone"]}`. The `ColumnPolicyGate` applies these denies to resolved table projections; until every SQL path is wired through it, prefer safe views/RLS/generated columns on unverified paths. |
 
 ### 3. Expire access after a date
 
@@ -894,6 +894,13 @@ a single policy — that's an AWS IAM antipattern that doesn't translate.
 A. Not in v1. `column:users.profile.address` resolves to the column
 `profile`, not the JSON sub-path. Use a generated column or RLS for sub-path
 gating today.
+
+**Q. How are column policies evaluated?**
+A. The gate checks table access first (`table:[schema.]table`). If the table
+decision allows, projected columns inherit that allow unless a matching
+`column:[schema.]table.column` statement explicitly denies them. Explicit
+column allows are recorded, but they do not bypass a missing or denied table
+allow.
 
 **Q. Can I version policies?**
 A. Yes — every `policy:put` returns an etag. The previous version is kept in

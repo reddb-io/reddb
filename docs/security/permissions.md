@@ -219,9 +219,11 @@ runtime hooks should use.
 | `column:<table>.<column>` | Column in a table | `column:users.email` |
 | `column:<schema>.<table>.<column>` | Schema-qualified column | `column:billing.invoices.total` |
 
-Table resources are the primary enforcement path today. Column resources are
-valid for policy simulation and audit vocabulary. Where column enforcement is
-not yet wired in a query path, expose safe views or use RLS/generation
+Table resources are the coarse prerequisite for data access. Column resources
+are enforced by the foundational `ColumnPolicyGate` for resolved projections
+where the query path calls it: table allow is required, explicit column deny
+wins, and column default-deny inherits the table allow. Where a query path is
+not yet wired through the gate, expose safe views or use RLS/generation
 patterns instead of relying on a column deny alone.
 
 ### Collection umbrella
@@ -996,7 +998,7 @@ Avoid these unless you have a documented reason:
 | Put tenant ids only in collection names | Use `SET TENANT` and RLS too |
 | Rely on PUBLIC in production | Use a group with explicit membership |
 | Reuse one service account for read and write paths | Split `svc_ingest`, `svc_reader`, `svc_worker` |
-| Use column deny as the only PII guard before runtime hook exists | Use safe views, RLS, generated columns, or omit fields at query boundary |
+| Use column deny on a query path not yet wired through `ColumnPolicyGate` | Use safe views, RLS, generated columns, or omit fields at query boundary |
 | Give graph analytics to every graph reader | Use a separate analytics account |
 | Give queue producers `select/update` | Producers usually need only `insert` |
 
