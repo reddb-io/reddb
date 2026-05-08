@@ -6,17 +6,70 @@
 //! To add a case: copy any existing `.toml` file, edit `input` / `expected_kind`
 //! / `source`. No code changes required. See `tests/conformance/README.md`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use reddb_server::storage::query::{ast::QueryExpr, parser};
+use reddb_server::storage::query::{
+    ast::{QueryExpr, QueryWithCte},
+    parser::{self, ParseError, ParseErrorKind, Parser, ParserLimits},
+};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 struct ConformanceCase {
     input: String,
-    expected_kind: String,
+    input_repeat_count: Option<usize>,
+    input_prefix: Option<String>,
+    input_suffix: Option<String>,
+    expected_kind: Option<String>,
+    expected_error_substring: Option<String>,
+    expected_error_kind: Option<String>,
+    max_depth: Option<usize>,
+    max_input_bytes: Option<usize>,
+    max_identifier_chars: Option<usize>,
     source: String,
     kind: String,
+}
+
+impl ConformanceCase {
+    fn expanded_input(&self) -> String {
+        let mut input = String::new();
+        if let Some(prefix) = &self.input_prefix {
+            input.push_str(prefix);
+        }
+        for _ in 0..self.input_repeat_count.unwrap_or(1) {
+            input.push_str(&self.input);
+        }
+        if let Some(suffix) = &self.input_suffix {
+            input.push_str(suffix);
+        }
+        input
+    }
+
+    fn parser_limits(&self) -> ParserLimits {
+        let mut limits = ParserLimits::default();
+        if let Some(max_depth) = self.max_depth {
+            limits.max_depth = max_depth;
+        }
+        if let Some(max_input_bytes) = self.max_input_bytes {
+            limits.max_input_bytes = max_input_bytes;
+        }
+        if let Some(max_identifier_chars) = self.max_identifier_chars {
+            limits.max_identifier_chars = max_identifier_chars;
+        }
+        limits
+    }
+
+    fn parse(&self, input: &str) -> Result<QueryWithCte, ParseError> {
+        if self.max_depth.is_some()
+            || self.max_input_bytes.is_some()
+            || self.max_identifier_chars.is_some()
+        {
+            let mut parser = Parser::with_limits(input, self.parser_limits())?;
+            parser.parse_with_cte()
+        } else {
+            parser::parse(input)
+        }
+    }
 }
 
 fn variant_name(q: &QueryExpr) -> &'static str {
@@ -93,13 +146,25 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn collect_toml_cases(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in
+        std::fs::read_dir(dir).unwrap_or_else(|e| panic!("cannot read {}: {}", dir.display(), e))
+    {
+        let entry = entry.unwrap_or_else(|e| panic!("read_dir entry under {}: {e}", dir.display()));
+        let path = entry.path();
+        if path.is_dir() {
+            collect_toml_cases(&path, out);
+        } else if path.extension().map(|x| x == "toml").unwrap_or(false) {
+            out.push(path);
+        }
+    }
+}
+
 fn conformance_cases() -> Vec<(PathBuf, ConformanceCase)> {
     let dir = conformance_dir();
-    let entries: Vec<_> = std::fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("cannot read {}: {}", dir.display(), e))
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map(|x| x == "toml").unwrap_or(false))
-        .collect();
+    let mut entries = Vec::new();
+    collect_toml_cases(&dir, &mut entries);
+    entries.sort();
 
     assert!(
         !entries.is_empty(),
@@ -109,8 +174,7 @@ fn conformance_cases() -> Vec<(PathBuf, ConformanceCase)> {
 
     entries
         .into_iter()
-        .map(|entry| {
-            let path = entry.path();
+        .map(|path| {
             let raw = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
             let case: ConformanceCase = toml::from_str(&raw)
@@ -149,39 +213,77 @@ fn validate_source_reference(root: &std::path::Path, source: &str) -> Result<(),
     Ok(())
 }
 
+fn parse_error_kind_name(kind: &ParseErrorKind) -> &'static str {
+    match kind {
+        ParseErrorKind::Syntax => "Syntax",
+        ParseErrorKind::DepthLimit { .. } => "DepthLimit",
+        ParseErrorKind::InputTooLarge { .. } => "InputTooLarge",
+        ParseErrorKind::IdentifierTooLong { .. } => "IdentifierTooLong",
+        ParseErrorKind::ValueOutOfRange { .. } => "ValueOutOfRange",
+    }
+}
+
 #[test]
 fn conformance_corpus() {
     let mut failures = Vec::new();
 
     for (path, case) in conformance_cases() {
         let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let input = case.expanded_input();
 
         match case.kind.as_str() {
-            "positive" => match parser::parse(&case.input) {
+            "positive" => match case.parse(&input) {
                 Ok(qwc) => {
                     let got = variant_name(&qwc.query);
-                    if got != case.expected_kind {
+                    let expected = case.expected_kind.as_deref().unwrap_or("<missing>");
+                    if got != expected {
                         failures.push(format!(
                             "[{}] (source: {})\n  input:    {}\n  expected: {}\n  got:      {}",
-                            file_name, case.source, case.input, case.expected_kind, got
+                            file_name, case.source, input, expected, got
                         ));
                     }
                 }
                 Err(e) => {
+                    let expected = case.expected_kind.as_deref().unwrap_or("<missing>");
                     failures.push(format!(
                         "[{}] (source: {})\n  input:    {}\n  expected: {} — parse error: {}",
-                        file_name, case.source, case.input, case.expected_kind, e
+                        file_name, case.source, input, expected, e
                     ));
                 }
             },
-            "negative" => {
-                if parser::parse(&case.input).is_ok() {
+            "negative" => match case.parse(&input) {
+                Ok(_) => {
                     failures.push(format!(
                         "[{}] (source: {})\n  input:    {}\n  expected: parse failure, but it succeeded",
-                        file_name, case.source, case.input
+                        file_name, case.source, input
                     ));
                 }
-            }
+                Err(e) => {
+                    let rendered = e.to_string();
+                    let Some(expected_substring) = case.expected_error_substring.as_deref() else {
+                        failures.push(format!(
+                            "[{}] negative case is missing expected_error_substring",
+                            file_name
+                        ));
+                        continue;
+                    };
+                    if !rendered.contains(expected_substring) {
+                        failures.push(format!(
+                            "[{}] (source: {})\n  input:    {}\n  expected error substring: {:?}\n  got:      {}",
+                            file_name, case.source, input, expected_substring, rendered
+                        ));
+                    }
+                    if let Some(expected_kind) = case.expected_error_kind.as_deref() {
+                        let got_kind = parse_error_kind_name(&e.kind);
+                        if got_kind != expected_kind {
+                            failures.push(format!(
+                                "[{}] (source: {})\n  input:    {}\n  expected error kind: {}\n  got:      {} ({:?})",
+                                file_name, case.source, input, expected_kind, got_kind, e.kind
+                            ));
+                        }
+                    }
+                }
+            },
             other => {
                 failures.push(format!(
                     "[{}] unknown kind {:?} — must be 'positive' or 'negative'",

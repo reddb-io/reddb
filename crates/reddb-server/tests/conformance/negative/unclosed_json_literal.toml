@@ -1,0 +1,5 @@
+input = 'INSERT INTO events (body) VALUES ({"level": "warn"'
+expected_error_substring = "unterminated JSON object literal"
+expected_error_kind = "Syntax"
+source = "crates/reddb-server/src/storage/query/lexer.rs:1375"
+kind = "negative"

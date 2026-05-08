@@ -1,0 +1,5 @@
+input = "SEARCH SPATIAL RADIUS 91 0 1 COLLECTION sites COLUMN location"
+expected_error_substring = "lat must be in -90.0..=90.0"
+expected_error_kind = "ValueOutOfRange"
+source = "crates/reddb-server/src/storage/query/parser/search_commands.rs:329"
+kind = "negative"

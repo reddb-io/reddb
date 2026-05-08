@@ -1,0 +1,5 @@
+input = "QUEUE READ tasks GROUP workers CONSUMER"
+expected_error_substring = "Unexpected token: EOF"
+expected_error_kind = "Syntax"
+source = "crates/reddb-server/src/storage/query/parser/queue.rs:207"
+kind = "negative"

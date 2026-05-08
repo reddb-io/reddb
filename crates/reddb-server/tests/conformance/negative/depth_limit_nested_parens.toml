@@ -1,0 +1,9 @@
+input_prefix = "SELECT "
+input = "("
+input_repeat_count = 50
+input_suffix = "1 FROM t"
+max_depth = 8
+expected_error_substring = "recursion depth limit exceeded"
+expected_error_kind = "DepthLimit"
+source = "crates/reddb-server/src/storage/query/parser/error.rs:93"
+kind = "negative"

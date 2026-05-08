@@ -1,0 +1,5 @@
+input = "SELECT SUM(COUNT(id)) FROM users"
+expected_error_substring = "aggregate function is not valid inside another expression"
+expected_error_kind = "Syntax"
+source = "crates/reddb-server/src/storage/query/parser/table.rs:230"
+kind = "negative"

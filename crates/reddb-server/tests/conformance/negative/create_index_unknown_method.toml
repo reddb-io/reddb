@@ -1,0 +1,5 @@
+input = "CREATE INDEX idx ON users (email) USING BRIN"
+expected_error_substring = "unknown index method"
+expected_error_kind = "Syntax"
+source = "crates/reddb-server/src/storage/query/parser/index_ddl.rs:98"
+kind = "negative"

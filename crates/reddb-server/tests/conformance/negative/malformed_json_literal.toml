@@ -1,0 +1,5 @@
+input = 'INSERT INTO events (body) VALUES ({"level": })'
+expected_error_substring = "invalid JSON object literal"
+expected_error_kind = "Syntax"
+source = "crates/reddb-server/src/storage/query/parser/dml.rs:532"
+kind = "negative"

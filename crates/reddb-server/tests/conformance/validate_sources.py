@@ -43,7 +43,8 @@ def validate_source(source: str) -> str | None:
 
 def main() -> int:
     failures: list[str] = []
-    for case_path in sorted(CASE_DIR.glob("*.toml")):
+    case_paths = sorted(CASE_DIR.rglob("*.toml"))
+    for case_path in case_paths:
         with case_path.open("rb") as handle:
             case = tomllib.load(handle)
         error = validate_source(str(case.get("source", "")))
@@ -56,7 +57,7 @@ def main() -> int:
             print(f"  - {failure}", file=sys.stderr)
         return 1
 
-    print(f"validated {len(list(CASE_DIR.glob('*.toml')))} conformance source references")
+    print(f"validated {len(case_paths)} conformance source references")
     return 0
 
 

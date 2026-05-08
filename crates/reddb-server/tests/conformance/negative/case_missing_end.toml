@@ -1,0 +1,5 @@
+input = "SELECT CASE WHEN active THEN 1 FROM users"
+expected_error_substring = "expected END to close CASE expression"
+expected_error_kind = "Syntax"
+source = "crates/reddb-server/src/storage/query/parser/expr.rs:541"
+kind = "negative"

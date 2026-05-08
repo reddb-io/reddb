@@ -23,6 +23,24 @@ kind = "positive"
 | `source`        | `file:line` of the doc example this pins        |
 | `kind`          | `positive` (must parse) or `negative` (must fail) |
 
+Negative cases live under `negative/` and must include the expected rendered
+error fragment:
+
+```toml
+input = "INSERT INTO users (id)"
+expected_error_substring = "Unexpected token: <EOF>"
+expected_error_kind = "Syntax"
+source = "crates/reddb-server/src/storage/query/parser/error.rs:81"
+kind = "negative"
+```
+
+`expected_error_kind` is optional, but should be used when the case is meant to
+exercise a `ParseErrorKind` branch (`Syntax`, `DepthLimit`, `InputTooLarge`,
+`IdentifierTooLong`, `ValueOutOfRange`). Very large or repetitive inputs can be
+assembled with `input_repeat_count`, `input_prefix`, and `input_suffix`.
+Cases that need smaller parser DoS limits can set `max_depth`,
+`max_input_bytes`, or `max_identifier_chars`.
+
 3. Run `cargo test -p reddb-server --test conformance` — it should pass.
 
 No code changes needed. The runner discovers new files automatically.

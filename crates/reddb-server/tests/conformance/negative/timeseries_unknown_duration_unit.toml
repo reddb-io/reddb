@@ -1,0 +1,5 @@
+input = "CREATE TIMESERIES cpu RETENTION 1 fortnight"
+expected_error_substring = "unknown duration unit"
+expected_error_kind = "Syntax"
+source = "crates/reddb-server/src/storage/query/parser/timeseries.rs:167"
+kind = "negative"

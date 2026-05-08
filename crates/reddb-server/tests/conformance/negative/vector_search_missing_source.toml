@@ -1,0 +1,5 @@
+input = "VECTOR SEARCH embeddings SIMILAR TO LIMIT 5"
+expected_error_substring = "Unexpected token: LIMIT"
+expected_error_kind = "Syntax"
+source = "crates/reddb-server/src/storage/query/parser/vector.rs:145"
+kind = "negative"

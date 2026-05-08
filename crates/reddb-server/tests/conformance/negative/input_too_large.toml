@@ -1,0 +1,7 @@
+input = "x"
+input_repeat_count = 32
+max_input_bytes = 16
+expected_error_substring = "input exceeds maximum size"
+expected_error_kind = "InputTooLarge"
+source = "crates/reddb-server/src/storage/query/parser/error.rs:106"
+kind = "negative"

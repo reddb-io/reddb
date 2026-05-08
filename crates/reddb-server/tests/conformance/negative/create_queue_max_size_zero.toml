@@ -1,0 +1,5 @@
+input = "CREATE QUEUE tasks MAX_SIZE 0"
+expected_error_substring = "MAX_SIZE must be a positive integer"
+expected_error_kind = "ValueOutOfRange"
+source = "crates/reddb-server/src/storage/query/parser/mod.rs:347"
+kind = "negative"

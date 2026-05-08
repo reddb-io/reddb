@@ -1,0 +1,5 @@
+input = "SELECT $foo.bar FROM users"
+expected_error_substring = "unknown $ reference"
+expected_error_kind = "Syntax"
+source = "crates/reddb-server/src/storage/query/parser/expr.rs:293"
+kind = "negative"

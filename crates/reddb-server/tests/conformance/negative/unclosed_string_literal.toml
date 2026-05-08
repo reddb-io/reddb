@@ -1,0 +1,5 @@
+input = "SELECT 'unterminated FROM users"
+expected_error_substring = "Unterminated string"
+expected_error_kind = "Syntax"
+source = "crates/reddb-server/src/storage/query/lexer.rs:904"
+kind = "negative"
