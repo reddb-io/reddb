@@ -61,7 +61,8 @@ pub(super) fn red_query(
         )));
     }
 
-    let caller_is_admin = frame.identity().is_none_or(|(_, role)| role.can_admin());
+    let caller_is_admin = frame.identity().is_some_and(|(_, role)| role.can_admin())
+        || (frame.identity().is_none() && frame.effective_scope().is_none());
     if !caller_is_admin && frame.effective_scope().is_none() {
         return Err(RedDBError::Query(
             "red.collections requires an active tenant".to_string(),
@@ -179,7 +180,15 @@ fn collections_snapshot(
         .filter(|collection| {
             visible_collections.is_none_or(|visible| visible.contains(&collection.name))
         })
+        .filter(|collection| {
+            tenant.is_none_or(|tenant| {
+                collection_tenant(store, &collection.name)
+                    .as_deref()
+                    .is_none_or(|owner| owner == tenant)
+            })
+        })
         .map(|collection| {
+            let collection_tenant = collection_tenant(store, &collection.name);
             let in_memory_bytes = store
                 .get_collection(&collection.name)
                 .map(|manager| manager.stats().total_memory_bytes as u64)
@@ -192,13 +201,23 @@ fn collections_snapshot(
                     Value::text(schema_mode_name(collection.schema_mode)),
                     Value::UnsignedInteger(collection.entities as u64),
                     Value::UnsignedInteger(collection.segments as u64),
-                    Value::Array(collection.indices.into_iter().map(Value::text).collect()),
+                    Value::UnsignedInteger(collection.indices.len() as u64),
                     Value::UnsignedInteger(in_memory_bytes),
-                    tenant.map(Value::text).unwrap_or(Value::Null),
+                    collection_tenant.map(Value::text).unwrap_or(Value::Null),
                 ],
             )
         })
         .collect()
+}
+
+fn collection_tenant(
+    store: &crate::storage::unified::UnifiedStore,
+    collection: &str,
+) -> Option<String> {
+    match store.get_config(&format!("red.collection_tenants.{collection}")) {
+        Some(Value::Text(value)) => Some(value.to_string()),
+        _ => None,
+    }
 }
 
 fn collection_model_name(model: CollectionModel) -> &'static str {

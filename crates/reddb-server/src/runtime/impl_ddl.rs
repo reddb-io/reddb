@@ -54,6 +54,12 @@ impl RedDBRuntime {
             .db
             .save_collection_contract(contract)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        if let Some(tenant_id) = crate::runtime::impl_core::current_tenant() {
+            store.set_config_tree(
+                &format!("red.collection_tenants.{}", query.name),
+                &crate::serde_json::Value::String(tenant_id),
+            );
+        }
         self.inner
             .db
             .persist_metadata()
@@ -62,11 +68,7 @@ impl RedDBRuntime {
         self.invalidate_result_cache();
         // Issue #120 — feed the create into the schema-vocabulary
         // reverse index so AskPipeline (#121) sees this collection.
-        let columns: Vec<String> = query
-            .columns
-            .iter()
-            .map(|col| col.name.clone())
-            .collect();
+        let columns: Vec<String> = query.columns.iter().map(|col| col.name.clone()).collect();
         self.schema_vocabulary_apply(
             crate::runtime::schema_vocabulary::DdlEvent::CreateCollection {
                 collection: query.name.clone(),
@@ -552,13 +554,11 @@ impl RedDBRuntime {
         // Issue #120 — surface the index name + indexed columns in
         // the schema-vocabulary so AskPipeline (#121) can resolve
         // "the email index" back to its collection.
-        self.schema_vocabulary_apply(
-            crate::runtime::schema_vocabulary::DdlEvent::CreateIndex {
-                collection: query.table.clone(),
-                index: query.name.clone(),
-                columns: query.columns.clone(),
-            },
-        );
+        self.schema_vocabulary_apply(crate::runtime::schema_vocabulary::DdlEvent::CreateIndex {
+            collection: query.table.clone(),
+            index: query.name.clone(),
+            columns: query.columns.clone(),
+        });
 
         let method_str = format!("{}", query.method);
         let unique_str = if query.unique { "unique " } else { "" };
@@ -604,12 +604,10 @@ impl RedDBRuntime {
         self.inner.index_store.drop_index(&query.name, &query.table);
         self.invalidate_plan_cache();
         // Issue #120 — keep the schema-vocabulary index entry in sync.
-        self.schema_vocabulary_apply(
-            crate::runtime::schema_vocabulary::DdlEvent::DropIndex {
-                collection: query.table.clone(),
-                index: query.name.clone(),
-            },
-        );
+        self.schema_vocabulary_apply(crate::runtime::schema_vocabulary::DdlEvent::DropIndex {
+            collection: query.table.clone(),
+            index: query.name.clone(),
+        });
 
         Ok(RuntimeQueryResult::ok_message(
             raw_query.to_string(),
