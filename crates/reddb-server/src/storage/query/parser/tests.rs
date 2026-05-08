@@ -1647,6 +1647,37 @@ fn test_parse_show_indices_on_desugars_with_collection_filter() {
 }
 
 #[test]
+fn test_parse_show_policies_desugars_to_red_policies_select() {
+    let query = parse("SHOW POLICIES").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.policies");
+        assert!(tq.columns.is_empty());
+        assert!(tq.select_items.is_empty());
+        assert!(tq.filter.is_none());
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
+fn test_parse_show_policies_on_desugars_with_collection_filter() {
+    let query = parse("SHOW POLICIES ON users").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.policies");
+        assert!(matches!(
+            tq.filter,
+            Some(Filter::Compare {
+                field: FieldRef::TableColumn { ref column, .. },
+                op: CompareOp::Eq,
+                value: crate::storage::schema::Value::Text(ref value),
+            }) if column == "collection" && value.as_ref() == "users"
+        ));
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
 fn test_parse_dollar_secret_reference_projection() {
     let query = parse("SELECT $secret.mycompany.stripe.key AS secret_value FROM tokens").unwrap();
     if let QueryExpr::Table(tq) = query {
@@ -3615,7 +3646,7 @@ fn test_parse_iam_policy_forms() {
     ));
 
     let query = parse("SHOW POLICIES").unwrap();
-    assert!(matches!(query, QueryExpr::ShowPolicies { filter: None }));
+    assert!(matches!(query, QueryExpr::Table(ref tq) if tq.table == "red.policies"));
 
     let query = parse("SHOW POLICIES FOR USER alice").unwrap();
     assert!(matches!(

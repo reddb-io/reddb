@@ -1502,6 +1502,40 @@ impl<'a> Parser<'a> {
                     }
                     self.parse_table_clauses(&mut query)?;
                     Ok(SqlCommand::Select(query))
+                } else if self.consume_ident_ci("POLICIES")? {
+                    if self.consume(&Token::For)? || self.consume_ident_ci("FOR")? {
+                        let principal = self.parse_iam_principal_kind()?;
+                        return Ok(SqlCommand::IamPolicy(QueryExpr::ShowPolicies {
+                            filter: Some(principal),
+                        }));
+                    }
+                    let mut query = TableQuery::new("red.policies");
+                    let collection_filter =
+                        if self.consume(&Token::On)? || self.consume_ident_ci("ON")? {
+                            let collection = self.parse_dotted_admin_path(false)?;
+                            Some(Filter::Compare {
+                                field: FieldRef::TableColumn {
+                                    table: String::new(),
+                                    column: "collection".to_string(),
+                                },
+                                op: CompareOp::Eq,
+                                value: Value::text(collection),
+                            })
+                        } else {
+                            None
+                        };
+                    self.parse_table_clauses(&mut query)?;
+                    if let Some(collection_filter) = collection_filter {
+                        let combined = match query.filter.take() {
+                            Some(existing) => {
+                                Filter::And(Box::new(collection_filter), Box::new(existing))
+                            }
+                            None => collection_filter,
+                        };
+                        query.where_expr = Some(filter_to_expr(&combined));
+                        query.filter = Some(combined);
+                    }
+                    Ok(SqlCommand::Select(query))
                 } else if self.consume_ident_ci("SECRET")? || self.consume_ident_ci("SECRETS")? {
                     let prefix = if !self.check(&Token::Eof) {
                         Some(self.parse_dotted_admin_path(true)?)
@@ -1529,8 +1563,8 @@ impl<'a> Parser<'a> {
                             "KV",
                             "SCHEMA",
                             "INDICES",
-                            "TENANT",
                             "POLICIES",
+                            "TENANT",
                             "EFFECTIVE",
                         ],
                         self.peek(),
