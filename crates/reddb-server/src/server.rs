@@ -339,9 +339,55 @@ impl RedDBServer {
         stream.set_write_timeout(Some(Duration::from_millis(self.options.write_timeout_ms)))?;
 
         let request = HttpRequest::read_from(&mut stream, self.options.max_body_bytes)?;
+        if let Some((collection, key)) = kv_watch_path(&request.path) {
+            return self.handle_kv_watch_connection(&mut stream, &request, collection, key);
+        }
         let response = self.route(request);
         stream.write_all(&response.to_http_bytes())?;
         stream.flush()?;
+        Ok(())
+    }
+
+    fn handle_kv_watch_connection(
+        &self,
+        stream: &mut TcpStream,
+        request: &HttpRequest,
+        collection: &str,
+        key: &str,
+    ) -> io::Result<()> {
+        let response = if request.method != "GET" {
+            Some(json_error(405, "method not allowed for KV watch endpoint"))
+        } else if !self.surface_allows(&request.path) {
+            Some(json_error(404, "not found on this listener"))
+        } else if !self.is_authorized(&request.method, &request.path, &request.headers) {
+            Some(json_error(401, "unauthorized"))
+        } else {
+            None
+        };
+        if let Some(response) = response {
+            stream.write_all(&response.to_http_bytes())?;
+            stream.flush()?;
+            return Ok(());
+        }
+
+        stream.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n",
+        )?;
+        stream.flush()?;
+
+        let mut watch = self
+            .runtime
+            .kv_watch_blocking_subscribe(collection.to_string(), key.to_string());
+        while let Some(event) = watch.next_event() {
+            let payload = event.to_json_value().to_string_compact();
+            let frame = format!("event: kv\nid: {}\ndata: {}\n\n", event.lsn, payload);
+            if stream.write_all(frame.as_bytes()).is_err() {
+                break;
+            }
+            if stream.flush().is_err() {
+                break;
+            }
+        }
         Ok(())
     }
 
@@ -378,5 +424,17 @@ impl RedDBServer {
         tls_stream.write_all(&response.to_http_bytes())?;
         tls_stream.flush()?;
         Ok(())
+    }
+}
+
+fn kv_watch_path(path: &str) -> Option<(&str, &str)> {
+    let trimmed = path.strip_prefix("/collections/")?;
+    let (collection, rest) = trimmed.split_once("/kv/")?;
+    let key = rest.strip_suffix("/watch")?.trim_matches('/');
+    let collection = collection.trim_matches('/');
+    if collection.is_empty() || key.is_empty() {
+        None
+    } else {
+        Some((collection, key))
     }
 }

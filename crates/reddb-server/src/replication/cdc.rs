@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::json::{Map, Value as JsonValue};
+use tokio::sync::broadcast;
 
 /// Type of change operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +59,52 @@ pub struct ChangeEvent {
     /// Downstream CDC consumers can use this to skip replaying
     /// updates that touched columns they don't care about.
     pub changed_columns: Option<Vec<String>>,
+    /// Optional KV-specific payload for WATCH subscribers.
+    pub kv: Option<KvWatchEvent>,
+}
+
+/// A single key-value WATCH event.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KvWatchEvent {
+    /// Collection containing the key.
+    pub collection: String,
+    /// Key that changed.
+    pub key: String,
+    /// Operation that committed.
+    pub op: ChangeOperation,
+    /// Previous value, when known.
+    pub before: Option<JsonValue>,
+    /// New value, when present.
+    pub after: Option<JsonValue>,
+    /// CDC LSN assigned at commit observation time.
+    pub lsn: u64,
+    /// Commit/observation timestamp in unix milliseconds.
+    pub committed_at: u64,
+}
+
+impl KvWatchEvent {
+    pub fn to_json_value(&self) -> JsonValue {
+        let mut object = Map::new();
+        object.insert("key".to_string(), JsonValue::String(self.key.clone()));
+        object.insert(
+            "op".to_string(),
+            JsonValue::String(self.op.as_str().to_string()),
+        );
+        object.insert(
+            "before".to_string(),
+            self.before.clone().unwrap_or(JsonValue::Null),
+        );
+        object.insert(
+            "after".to_string(),
+            self.after.clone().unwrap_or(JsonValue::Null),
+        );
+        object.insert("lsn".to_string(), JsonValue::Number(self.lsn as f64));
+        object.insert(
+            "committed_at".to_string(),
+            JsonValue::Number(self.committed_at as f64),
+        );
+        JsonValue::Object(object)
+    }
 }
 
 /// Structured logical WAL record serialized into the replication buffer and
@@ -211,6 +258,7 @@ pub struct CdcBuffer {
     next_lsn: AtomicU64,
     events: parking_lot::Mutex<VecDeque<ChangeEvent>>,
     max_size: usize,
+    kv_watch_tx: broadcast::Sender<KvWatchEvent>,
 }
 
 impl CdcBuffer {
@@ -220,6 +268,7 @@ impl CdcBuffer {
             next_lsn: AtomicU64::new(0),
             events: parking_lot::Mutex::new(VecDeque::with_capacity(max_size.min(10_000))),
             max_size,
+            kv_watch_tx: broadcast::channel(max_size.clamp(1024, 65_536)).0,
         }
     }
 
@@ -264,6 +313,7 @@ impl CdcBuffer {
             entity_id,
             entity_kind: entity_kind.to_string(),
             changed_columns,
+            kv: None,
         };
 
         // Short-hold ring push. Under heavy contention parking_lot
@@ -276,6 +326,58 @@ impl CdcBuffer {
         events.push_back(event);
 
         event_lsn
+    }
+
+    /// Emit a KV-specific change event through the CDC buffer and WATCH channel.
+    pub fn emit_kv(
+        &self,
+        operation: ChangeOperation,
+        collection: &str,
+        key: &str,
+        entity_id: u64,
+        before: Option<JsonValue>,
+        after: Option<JsonValue>,
+    ) -> u64 {
+        let event_lsn = self.next_lsn.fetch_add(1, Ordering::AcqRel) + 1;
+        let committed_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let kv = KvWatchEvent {
+            collection: collection.to_string(),
+            key: key.to_string(),
+            op: operation,
+            before,
+            after,
+            lsn: event_lsn,
+            committed_at,
+        };
+
+        let event = ChangeEvent {
+            lsn: event_lsn,
+            timestamp: committed_at,
+            operation,
+            collection: collection.to_string(),
+            entity_id,
+            entity_kind: "kv".to_string(),
+            changed_columns: Some(vec!["value".to_string()]),
+            kv: Some(kv.clone()),
+        };
+
+        let mut events = self.events.lock();
+        if events.len() >= self.max_size {
+            events.pop_front();
+        }
+        events.push_back(event);
+        drop(events);
+
+        let _ = self.kv_watch_tx.send(kv);
+        event_lsn
+    }
+
+    /// Subscribe to the CDC-backed KV WATCH channel.
+    pub fn subscribe_kv(&self) -> broadcast::Receiver<KvWatchEvent> {
+        self.kv_watch_tx.subscribe()
     }
 
     /// Emit many same-collection events with one LSN reservation and one
@@ -329,6 +431,7 @@ impl CdcBuffer {
                 entity_id,
                 entity_kind: entity_kind.clone(),
                 changed_columns: None,
+                kv: None,
             });
         }
     }
@@ -479,6 +582,37 @@ mod tests {
         assert_eq!(events[0].lsn, 3);
         assert_eq!(events[2].lsn, 5);
         assert_eq!(buf.current_lsn(), 5);
+    }
+
+    #[test]
+    fn test_emit_kv_publishes_watch_event_and_cdc_payload() {
+        let buf = CdcBuffer::new(100);
+        let mut watch = buf.subscribe_kv();
+
+        let lsn = buf.emit_kv(
+            ChangeOperation::Update,
+            "settings",
+            "theme",
+            42,
+            Some(crate::json!("light")),
+            Some(crate::json!("dark")),
+        );
+
+        let event = watch.try_recv().expect("watch event");
+        assert_eq!(event.collection, "settings");
+        assert_eq!(event.key, "theme");
+        assert_eq!(event.op, ChangeOperation::Update);
+        assert_eq!(event.before, Some(crate::json!("light")));
+        assert_eq!(event.after, Some(crate::json!("dark")));
+        assert_eq!(event.lsn, lsn);
+
+        let events = buf.poll(0, 10);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].entity_kind, "kv");
+        assert_eq!(
+            events[0].kv.as_ref().map(|kv| kv.key.as_str()),
+            Some("theme")
+        );
     }
 
     #[test]

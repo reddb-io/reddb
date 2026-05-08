@@ -2504,6 +2504,9 @@ impl RuntimeEntityPort for RedDBRuntime {
     }
 
     fn create_kv(&self, input: CreateKvInput) -> RedDBResult<CreateEntityOutput> {
+        let collection = input.collection.clone();
+        let key = input.key.clone();
+        let after = crate::presentation::entity_json::storage_value_to_json(&input.value);
         let fields = vec![
             (
                 "key".to_string(),
@@ -2518,7 +2521,16 @@ impl RuntimeEntityPort for RedDBRuntime {
             node_links: Vec::new(),
             vector_links: Vec::new(),
         };
-        self.create_row(row_input)
+        let output = self.create_row(row_input)?;
+        self.cdc_emit_kv(
+            crate::replication::cdc::ChangeOperation::Insert,
+            &collection,
+            &key,
+            output.id.raw(),
+            None,
+            Some(after),
+        );
+        Ok(output)
     }
 
     fn create_timeseries_point(
@@ -2611,7 +2623,7 @@ impl RuntimeEntityPort for RedDBRuntime {
     fn delete_kv(&self, collection: &str, key: &str) -> RedDBResult<bool> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let found = self.get_kv(collection, key)?;
-        if let Some((_, id)) = found {
+        if let Some((value, id)) = found {
             let db = self.db();
             let store = db.store();
             let deleted = store
@@ -2619,6 +2631,16 @@ impl RuntimeEntityPort for RedDBRuntime {
                 .map_err(|err| crate::RedDBError::Internal(err.to_string()))?;
             if deleted {
                 store.context_index().remove_entity(id);
+                self.cdc_emit_kv(
+                    crate::replication::cdc::ChangeOperation::Delete,
+                    collection,
+                    key,
+                    id.raw(),
+                    Some(crate::presentation::entity_json::storage_value_to_json(
+                        &value,
+                    )),
+                    None,
+                );
             }
             Ok(deleted)
         } else {

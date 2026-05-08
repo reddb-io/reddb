@@ -321,9 +321,11 @@ impl RedDBServer {
             Some(other) => Value::Json(crate::json::to_vec(other).unwrap_or_default()),
         };
 
+        let after_json = crate::presentation::entity_json::storage_value_to_json(&value);
+
         // Try to find existing KV to update, otherwise create
         match self.entity_use_cases().get_kv(collection, key) {
-            Ok(Some((_, existing_id))) => {
+            Ok(Some((before, existing_id))) => {
                 // Update existing
                 match self.entity_use_cases().patch(PatchEntityInput {
                     collection: collection.to_string(),
@@ -335,10 +337,22 @@ impl RedDBServer {
                         value: payload.get("value").cloned(),
                     }],
                 }) {
-                    Ok(output) => json_response(
-                        200,
-                        crate::presentation::entity_json::created_entity_output_json(&output),
-                    ),
+                    Ok(output) => {
+                        self.runtime.cdc_emit_kv(
+                            crate::replication::cdc::ChangeOperation::Update,
+                            collection,
+                            key,
+                            existing_id.raw(),
+                            Some(crate::presentation::entity_json::storage_value_to_json(
+                                &before,
+                            )),
+                            Some(after_json),
+                        );
+                        json_response(
+                            200,
+                            crate::presentation::entity_json::created_entity_output_json(&output),
+                        )
+                    }
                     Err(err) => json_error(400, err.to_string()),
                 }
             }

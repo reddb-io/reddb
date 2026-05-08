@@ -3087,6 +3087,37 @@ impl RedDBRuntime {
         self.inner.cdc.current_lsn()
     }
 
+    pub fn kv_watch_subscribe(
+        &self,
+        collection: impl Into<String>,
+        key: impl Into<String>,
+    ) -> crate::runtime::kv_watch::KvWatchStream {
+        crate::runtime::kv_watch::KvWatchStream::subscribe(&self.inner.cdc, collection, key)
+    }
+
+    pub fn kv_watch_blocking_subscribe(
+        &self,
+        collection: impl Into<String>,
+        key: impl Into<String>,
+    ) -> crate::runtime::kv_watch::BlockingKvWatchStream {
+        crate::runtime::kv_watch::BlockingKvWatchStream::subscribe(&self.inner.cdc, collection, key)
+    }
+
+    pub(crate) fn cdc_emit_kv(
+        &self,
+        operation: crate::replication::cdc::ChangeOperation,
+        collection: &str,
+        key: &str,
+        entity_id: u64,
+        before: Option<crate::json::Value>,
+        after: Option<crate::json::Value>,
+    ) -> u64 {
+        self.invalidate_result_cache_for_table(collection);
+        self.inner
+            .cdc
+            .emit_kv(operation, collection, key, entity_id, before, after)
+    }
+
     /// Get backup scheduler status.
     pub fn backup_status(&self) -> crate::replication::scheduler::BackupStatus {
         self.inner.backup_scheduler.status()
