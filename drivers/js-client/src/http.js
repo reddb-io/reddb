@@ -17,6 +17,8 @@
  *   kv.put              → PUT    /collections/:name/kv/:key  (fallback: /kvs/:key)
  *   kv.get              → GET    /collections/:name/kv/:key  (fallback: /kvs/:key)
  *   kv.delete           → DELETE /collections/:name/kv/:key  (fallback: /kvs/:key)
+ *   kv.incr             → POST   /collections/:name/kv/:key/incr?by=n
+ *   kv.decr             → POST   /collections/:name/kv/:key/decr?by=n
  *   health              → GET  /health
  *   version             → GET  /admin/version
  *   auth.login          → POST /auth/login
@@ -164,6 +166,14 @@ const ROUTES = {
     legacyUrl: `${base}/collections/${encodeURIComponent(collection)}/kvs/${encodeURIComponent(key)}`,
     init: { method: 'DELETE' },
   }),
+  'kv.incr': (base, params) => ({
+    url: kvCounterUrl(base, params, 'incr'),
+    init: { method: 'POST' },
+  }),
+  'kv.decr': (base, params) => ({
+    url: kvCounterUrl(base, params, 'decr'),
+    init: { method: 'POST' },
+  }),
   'auth.login': (base, { username, password }) => ({
     url: `${base}/auth/login`,
     init: { method: 'POST', body: JSON.stringify({ username, password }) },
@@ -218,4 +228,11 @@ const ROUTES = {
     url: `${base}/admin/blob_cache/flush_namespace`,
     init: { method: 'POST', body: JSON.stringify({ namespace }) },
   }),
+}
+
+function kvCounterUrl(base, { collection, key, by = 1, ttlMs }, op) {
+  const query = new URLSearchParams()
+  query.set('by', String(by))
+  if (ttlMs !== undefined && ttlMs !== null) query.set('ttl_ms', String(ttlMs))
+  return `${base}/collections/${encodeURIComponent(collection)}/kv/${encodeURIComponent(key)}/${op}?${query.toString()}`
 }

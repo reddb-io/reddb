@@ -1638,6 +1638,12 @@ pub enum KvQuery {
     Get { key: String },
     /// `DELETE key`
     Delete { key: String },
+    /// `INCR key [BY n] [EXPIRE duration]` / `DECR key [BY n] [EXPIRE duration]`
+    Incr {
+        key: String,
+        by: i64,
+        ttl_ms: Option<u64>,
+    },
 }
 
 /// CREATE TABLE name (columns)

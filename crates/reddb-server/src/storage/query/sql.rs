@@ -558,7 +558,10 @@ impl<'a> Parser<'a> {
                 self.parse_sql_statement().map(FrontendStatement::Sql)
             }
             Token::Ident(name)
-                if name.eq_ignore_ascii_case("PUT") || name.eq_ignore_ascii_case("GET") =>
+                if name.eq_ignore_ascii_case("PUT")
+                    || name.eq_ignore_ascii_case("GET")
+                    || name.eq_ignore_ascii_case("INCR")
+                    || name.eq_ignore_ascii_case("DECR") =>
             {
                 self.parse_sql_statement().map(FrontendStatement::Sql)
             }
@@ -672,8 +675,8 @@ impl<'a> Parser<'a> {
             other => Err(ParseError::expected(
                 vec![
                     "SELECT", "MATCH", "PATH", "FROM", "VECTOR", "HYBRID", "INSERT", "UPDATE",
-                    "DELETE", "PUT", "GET", "CREATE", "DROP", "ALTER", "GRAPH", "SEARCH", "ASK",
-                    "QUEUE", "HLL", "TREE", "SKETCH", "FILTER", "SET", "SHOW",
+                    "DELETE", "PUT", "GET", "INCR", "DECR", "CREATE", "DROP", "ALTER", "GRAPH",
+                    "SEARCH", "ASK", "QUEUE", "HLL", "TREE", "SKETCH", "FILTER", "SET", "SHOW",
                 ],
                 other,
                 self.position(),
@@ -772,6 +775,24 @@ impl<'a> Parser<'a> {
                     QueryExpr::Kv(query) => Ok(SqlCommand::Kv(query)),
                     other => Err(ParseError::new(
                         format!("internal: GET produced unexpected query kind {other:?}"),
+                        self.position(),
+                    )),
+                }
+            }
+            Token::Ident(name) if name.eq_ignore_ascii_case("INCR") => {
+                match self.parse_kv_incr_query()? {
+                    QueryExpr::Kv(query) => Ok(SqlCommand::Kv(query)),
+                    other => Err(ParseError::new(
+                        format!("internal: INCR produced unexpected query kind {other:?}"),
+                        self.position(),
+                    )),
+                }
+            }
+            Token::Ident(name) if name.eq_ignore_ascii_case("DECR") => {
+                match self.parse_kv_decr_query()? {
+                    QueryExpr::Kv(query) => Ok(SqlCommand::Kv(query)),
+                    other => Err(ParseError::new(
+                        format!("internal: DECR produced unexpected query kind {other:?}"),
                         self.position(),
                     )),
                 }

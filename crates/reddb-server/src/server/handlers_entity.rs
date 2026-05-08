@@ -334,6 +334,50 @@ impl RedDBServer {
         }
     }
 
+    pub(crate) fn handle_incr_kv(
+        &self,
+        collection: &str,
+        key: &str,
+        query: &BTreeMap<String, String>,
+        decr: bool,
+    ) -> HttpResponse {
+        let by = match query.get("by") {
+            Some(value) => match value.parse::<i64>() {
+                Ok(value) => value,
+                Err(_) => return json_error(400, "query parameter 'by' must be an integer"),
+            },
+            None => 1,
+        };
+        let ttl_ms = query
+            .get("ttl_ms")
+            .or_else(|| query.get("ttlMs"))
+            .or_else(|| query.get("expire_ms"))
+            .map(|value| value.parse::<u64>())
+            .transpose();
+        let ttl_ms = match ttl_ms {
+            Ok(value) => value,
+            Err(_) => return json_error(400, "TTL query parameter must be an unsigned integer"),
+        };
+        let delta = if decr {
+            match by.checked_neg() {
+                Some(value) => value,
+                None => return json_error(400, "DECR BY value overflows i64"),
+            }
+        } else {
+            by
+        };
+
+        match HttpKvOps::new(self).incr(collection, key, delta, ttl_ms) {
+            Ok(value) => json_response(
+                200,
+                kv_envelope(collection, key)
+                    .with_value(&Value::Integer(value))
+                    .into_json(),
+            ),
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
     // ── Document endpoint ───────────────────────────────────────────
 
     pub(crate) fn handle_create_document(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
@@ -671,6 +715,11 @@ impl<'a> HttpKvOps<'a> {
     fn delete(&self, collection: &str, key: &str) -> RedDBResult<bool> {
         self.server.entity_use_cases().delete_kv(collection, key)
     }
+
+    fn incr(&self, collection: &str, key: &str, by: i64, ttl_ms: Option<u64>) -> RedDBResult<i64> {
+        crate::runtime::kv_atomic::KvAtomicOps::new(&self.server.runtime)
+            .incr(collection, key, by, ttl_ms)
+    }
 }
 
 fn kv_patch_payload(value: JsonValue) -> JsonValue {
@@ -829,6 +878,32 @@ mod tests {
 
         let missing = server.route(request("GET", "/collections/kv_default/kv/theme", ""));
         assert_eq!(missing.status, 404);
+    }
+
+    #[test]
+    fn http_kv_incr_and_decr_return_post_update_value() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime starts");
+        let server = RedDBServer::new(runtime);
+
+        let mut incr = request("POST", "/collections/kv_default/kv/views/incr", "");
+        incr.query.insert("by".to_string(), "5".to_string());
+        let incr = server.route(incr);
+        assert_eq!(incr.status, 200);
+        let incr_json = response_json(&incr);
+        assert_eq!(
+            incr_json.get("value").and_then(JsonValue::as_f64),
+            Some(5.0)
+        );
+
+        let mut decr = request("POST", "/collections/kv_default/kv/views/decr", "");
+        decr.query.insert("by".to_string(), "2".to_string());
+        let decr = server.route(decr);
+        assert_eq!(decr.status, 200);
+        let decr_json = response_json(&decr);
+        assert_eq!(
+            decr_json.get("value").and_then(JsonValue::as_f64),
+            Some(3.0)
+        );
     }
 }
 

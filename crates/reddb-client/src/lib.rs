@@ -218,6 +218,32 @@ impl Reddb {
         }
     }
 
+    pub async fn kv_incr(
+        &self,
+        collection: &str,
+        key: &str,
+        by: i64,
+        ttl_ms: Option<u64>,
+    ) -> Result<i64> {
+        let result = self
+            .query(&kv_counter_sql("INCR", collection, key, by, ttl_ms))
+            .await?;
+        kv_counter_value(&result)
+    }
+
+    pub async fn kv_decr(
+        &self,
+        collection: &str,
+        key: &str,
+        by: i64,
+        ttl_ms: Option<u64>,
+    ) -> Result<i64> {
+        let result = self
+            .query(&kv_counter_sql("DECR", collection, key, by, ttl_ms))
+            .await?;
+        kv_counter_value(&result)
+    }
+
     pub async fn close(&self) -> Result<()> {
         match self {
             #[cfg(feature = "embedded")]
@@ -234,4 +260,46 @@ impl Reddb {
 /// Crate version (matches the engine version when published in lockstep).
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+fn kv_counter_sql(op: &str, collection: &str, key: &str, by: i64, ttl_ms: Option<u64>) -> String {
+    let ttl = ttl_ms
+        .map(|ms| format!(" EXPIRE {ms} ms"))
+        .unwrap_or_default();
+    format!(
+        "{op} {}.{} BY {by}{ttl}",
+        sql_ident(collection),
+        sql_literal(key)
+    )
+}
+
+fn kv_counter_value(result: &QueryResult) -> Result<i64> {
+    result
+        .rows
+        .first()
+        .and_then(|row| row.iter().find(|(name, _)| name == "value"))
+        .and_then(|(_, value)| match value {
+            ValueOut::Integer(value) => Some(*value),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            ClientError::new(
+                ErrorCode::Protocol,
+                "KV counter response did not contain an integer 'value' column",
+            )
+        })
+}
+
+fn sql_ident(value: &str) -> String {
+    if value.chars().enumerate().all(|(index, ch)| {
+        ch == '_' || ch.is_ascii_alphanumeric() && (index > 0 || !ch.is_ascii_digit())
+    }) {
+        value.to_string()
+    } else {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    }
+}
+
+fn sql_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }

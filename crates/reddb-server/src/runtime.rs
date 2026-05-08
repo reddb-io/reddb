@@ -635,6 +635,10 @@ struct RuntimeInner {
         std::collections::VecDeque<String>,
     )>,
     result_cache_shadow_divergences: std::sync::atomic::AtomicU64,
+    /// Process-local per-key KV locks for atomic read-modify-write counters.
+    kv_atomic_locks: parking_lot::RwLock<HashMap<(String, String), Arc<parking_lot::Mutex<()>>>>,
+    /// Process-local KV tombstones for the top-level KV DSL.
+    kv_deleted_keys: parking_lot::RwLock<HashSet<(String, String)>>,
     /// Process-local queue message locks used to emulate `SKIP LOCKED`-style
     /// claim semantics for concurrent queue consumers inside this runtime.
     queue_message_locks: parking_lot::RwLock<HashMap<String, Arc<parking_lot::Mutex<()>>>>,
@@ -871,6 +875,7 @@ pub mod write_gate;
 
 pub use self::graph_dsl::*;
 use self::join_filter::*;
+pub use self::kv_atomic::KvAtomicOps;
 use self::query_exec::*;
 use self::record_search::*;
 pub use self::statement_frame::EffectiveScope;

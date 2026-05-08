@@ -412,6 +412,65 @@ impl<'a> Parser<'a> {
         Ok(QueryExpr::Kv(KvQuery::Delete { key }))
     }
 
+    /// Parse: INCR key [BY n] [EXPIRE duration]
+    pub fn parse_kv_incr_query(&mut self) -> Result<QueryExpr, ParseError> {
+        self.expect_ident_ci("INCR")?;
+        let key = self.parse_kv_key()?;
+        self.parse_kv_counter_tail(key, 1)
+    }
+
+    /// Parse: DECR key [BY n] [EXPIRE duration]
+    pub fn parse_kv_decr_query(&mut self) -> Result<QueryExpr, ParseError> {
+        self.expect_ident_ci("DECR")?;
+        let key = self.parse_kv_key()?;
+        self.parse_kv_counter_tail(key, -1)
+    }
+
+    fn parse_kv_counter_tail(
+        &mut self,
+        key: String,
+        default_direction: i64,
+    ) -> Result<QueryExpr, ParseError> {
+        let mut magnitude = 1_i64;
+        let mut ttl_ms = None;
+
+        while !matches!(self.peek(), Token::Eof | Token::Semi) {
+            if self.consume(&Token::By)? {
+                magnitude = self.parse_signed_integer()?;
+            } else if self.consume_ident_ci("EXPIRE")? {
+                ttl_ms = Some(self.parse_ttl_duration()?);
+            } else {
+                return Err(ParseError::expected(
+                    vec!["BY", "EXPIRE"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+        }
+
+        let by = magnitude
+            .checked_mul(default_direction)
+            .ok_or_else(|| ParseError::new("INCR/DECR BY value overflows i64", self.position()))?;
+        Ok(QueryExpr::Kv(KvQuery::Incr { key, by, ttl_ms }))
+    }
+
+    fn parse_signed_integer(&mut self) -> Result<i64, ParseError> {
+        let negative = if matches!(self.peek(), Token::Minus | Token::Dash) {
+            self.advance()?;
+            true
+        } else {
+            false
+        };
+        let value = self.parse_integer()?;
+        if negative {
+            value
+                .checked_neg()
+                .ok_or_else(|| ParseError::new("integer literal overflows i64", self.position()))
+        } else {
+            Ok(value)
+        }
+    }
+
     fn parse_kv_key(&mut self) -> Result<String, ParseError> {
         let mut key = self.parse_kv_key_part()?;
         while self.consume(&Token::Dot)? {

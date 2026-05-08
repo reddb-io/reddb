@@ -1220,6 +1220,24 @@ fn test_parse_top_level_kv_put_get_delete() {
     } else {
         panic!("Expected Kv Delete");
     }
+
+    let query = parse("INCR sessions.42 BY -5 EXPIRE 10 s").unwrap();
+    if let QueryExpr::Kv(crate::storage::query::ast::KvQuery::Incr { key, by, ttl_ms }) = query {
+        assert_eq!(key, "sessions.42");
+        assert_eq!(by, -5);
+        assert_eq!(ttl_ms, Some(10_000));
+    } else {
+        panic!("Expected Kv Incr");
+    }
+
+    let query = parse("DECR sessions.42 BY -2").unwrap();
+    if let QueryExpr::Kv(crate::storage::query::ast::KvQuery::Incr { key, by, ttl_ms }) = query {
+        assert_eq!(key, "sessions.42");
+        assert_eq!(by, 2);
+        assert_eq!(ttl_ms, None);
+    } else {
+        panic!("Expected Kv Decr");
+    }
 }
 
 #[test]

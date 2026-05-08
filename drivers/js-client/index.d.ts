@@ -54,6 +54,12 @@ export interface KvDeleteResult {
   affected?: number
   key?: string
 }
+export interface KvCounterResult {
+  ok?: boolean
+  collection?: string
+  key?: string
+  value: number
+}
 export interface HealthResult { ok: boolean; version: string }
 export interface VersionResult { version: string; protocol: string }
 
@@ -113,6 +119,8 @@ export class KvClient {
   put(collection: string, key: string | number, value: unknown): Promise<KvPutResult>
   get(collection: string, key: string | number): Promise<KvGetResult>
   delete(collection: string, key: string | number): Promise<KvDeleteResult>
+  incr(collection: string, key: string | number, by?: number, ttlMs?: number): Promise<KvCounterResult>
+  decr(collection: string, key: string | number, by?: number, ttlMs?: number): Promise<KvCounterResult>
 }
 
 /**

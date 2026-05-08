@@ -231,6 +231,8 @@ export class RedWireClient {
     if (method === 'kv.put') return this.#query(kvPutSql(params))
     if (method === 'kv.get') return this.#query(kvGetSql(params))
     if (method === 'kv.delete') return this.#query(kvDeleteSql(params))
+    if (method === 'kv.incr') return this.#query(kvIncrSql(params))
+    if (method === 'kv.decr') return this.#query(kvDecrSql(params))
     if (method === 'health' || method === 'version') return this.#ping()
     throw new RedDBError(
       'UNKNOWN_METHOD',
@@ -373,6 +375,19 @@ function kvGetSql({ collection, key }) {
 
 function kvDeleteSql({ collection, key }) {
   return `DELETE FROM ${sqlIdent(collection)} WHERE key = ${sqlLiteral(String(key))}`
+}
+
+function kvIncrSql({ collection, key, by = 1, ttlMs }) {
+  return kvCounterSql('INCR', collection, key, by, ttlMs)
+}
+
+function kvDecrSql({ collection, key, by = 1, ttlMs }) {
+  return kvCounterSql('DECR', collection, key, by, ttlMs)
+}
+
+function kvCounterSql(op, collection, key, by, ttlMs) {
+  const ttl = ttlMs === undefined || ttlMs === null ? '' : ` EXPIRE ${Number(ttlMs)} ms`
+  return `${op} ${sqlIdent(collection)}.${sqlLiteral(String(key))} BY ${Number(by)}${ttl}`
 }
 
 function sqlIdent(value) {

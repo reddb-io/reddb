@@ -214,6 +214,8 @@ impl McpServer {
             "reddb_kv_get" => self.tool_kv_get(args),
             "reddb_kv_set" => self.tool_kv_set(args),
             "reddb_kv_delete" => self.tool_kv_delete(args),
+            "reddb_kv_incr" => self.tool_kv_incr(args, false),
+            "reddb_kv_decr" => self.tool_kv_incr(args, true),
             "reddb_delete" => self.tool_delete(args),
             "reddb_search_vector" => self.tool_search_vector(args),
             "reddb_search_text" => self.tool_search_text(args),
@@ -591,6 +593,38 @@ impl McpServer {
         );
         obj.insert("key".to_string(), JsonValue::String(key.to_string()));
         obj.insert("deleted".to_string(), JsonValue::Bool(deleted));
+        json_to_string(&JsonValue::Object(obj)).map_err(|e| format!("serialization error: {}", e))
+    }
+
+    fn tool_kv_incr(&self, args: &JsonValue, decr: bool) -> Result<String, String> {
+        let collection = args
+            .get("collection")
+            .and_then(|v| v.as_str())
+            .ok_or("missing required field 'collection'")?;
+        let key = args
+            .get("key")
+            .and_then(|v| v.as_str())
+            .ok_or("missing required field 'key'")?;
+        let by = optional_i64_arg(args, "by")?.unwrap_or(1);
+        let ttl_ms = optional_u64_arg(args, "ttl_ms")?;
+        let delta = if decr {
+            by.checked_neg()
+                .ok_or_else(|| "DECR BY value overflows i64".to_string())?
+        } else {
+            by
+        };
+
+        let ops = McpKvOps::new(&self.runtime);
+        let value = ops.incr(collection, key, delta, ttl_ms)?;
+
+        let mut obj = Map::new();
+        obj.insert("ok".to_string(), JsonValue::Bool(true));
+        obj.insert(
+            "collection".to_string(),
+            JsonValue::String(collection.to_string()),
+        );
+        obj.insert("key".to_string(), JsonValue::String(key.to_string()));
+        obj.insert("value".to_string(), JsonValue::Number(value as f64));
         json_to_string(&JsonValue::Object(obj)).map_err(|e| format!("serialization error: {}", e))
     }
 
@@ -1205,6 +1239,18 @@ impl<'a> McpKvOps<'a> {
             .delete_kv(collection, key)
             .map_err(|e| format!("{}", e))
     }
+
+    fn incr(
+        &self,
+        collection: &str,
+        key: &str,
+        by: i64,
+        ttl_ms: Option<u64>,
+    ) -> Result<i64, String> {
+        crate::runtime::kv_atomic::KvAtomicOps::new(self.runtime)
+            .incr(collection, key, by, ttl_ms)
+            .map_err(|e| format!("{}", e))
+    }
 }
 
 // Convert a storage Value to JSON (local helper to avoid visibility issues).
@@ -1212,6 +1258,38 @@ fn get_str_field<'a>(args: &'a JsonValue, field: &str) -> Result<&'a str, String
     args.get(field)
         .and_then(|v| v.as_str())
         .ok_or_else(|| format!("missing '{field}'"))
+}
+
+fn optional_i64_arg(args: &JsonValue, field: &str) -> Result<Option<i64>, String> {
+    args.get(field)
+        .map(|value| match value {
+            JsonValue::Number(number)
+                if number.is_finite() && number.fract().abs() < f64::EPSILON =>
+            {
+                Ok(*number as i64)
+            }
+            JsonValue::String(text) => text
+                .parse::<i64>()
+                .map_err(|_| format!("field '{field}' must be an integer")),
+            _ => Err(format!("field '{field}' must be an integer")),
+        })
+        .transpose()
+}
+
+fn optional_u64_arg(args: &JsonValue, field: &str) -> Result<Option<u64>, String> {
+    args.get(field)
+        .map(|value| match value {
+            JsonValue::Number(number)
+                if number.is_finite() && *number >= 0.0 && number.fract().abs() < f64::EPSILON =>
+            {
+                Ok(*number as u64)
+            }
+            JsonValue::String(text) => text
+                .parse::<u64>()
+                .map_err(|_| format!("field '{field}' must be an unsigned integer")),
+            _ => Err(format!("field '{field}' must be an unsigned integer")),
+        })
+        .transpose()
 }
 
 // Auth tool implementations

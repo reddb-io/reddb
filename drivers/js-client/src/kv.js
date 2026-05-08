@@ -1,5 +1,5 @@
 /**
- * KV client — exposes `kv.{put,get,delete}` through the underlying transport.
+ * KV client — exposes `kv.{put,get,delete,incr,decr}` through the underlying transport.
  *
  * HTTP uses the REST KV endpoint. RedWire transports may bridge the same
  * method names directly or fall back to SQL while dedicated wire frames are
@@ -41,5 +41,29 @@ export class KvClient {
    */
   async delete(collection, key) {
     return await this._client.call('kv.delete', { collection, key: String(key) })
+  }
+
+  /**
+   * Atomically increment an integer key and return the new value.
+   * @param {string} collection
+   * @param {string | number} key
+   * @param {number} [by]
+   * @param {number | undefined} [ttlMs]
+   * @returns {Promise<object>}
+   */
+  async incr(collection, key, by = 1, ttlMs = undefined) {
+    return await this._client.call('kv.incr', { collection, key: String(key), by, ttlMs })
+  }
+
+  /**
+   * Atomically decrement an integer key and return the new value.
+   * @param {string} collection
+   * @param {string | number} key
+   * @param {number} [by]
+   * @param {number | undefined} [ttlMs]
+   * @returns {Promise<object>}
+   */
+  async decr(collection, key, by = 1, ttlMs = undefined) {
+    return await this._client.call('kv.decr', { collection, key: String(key), by, ttlMs })
   }
 }

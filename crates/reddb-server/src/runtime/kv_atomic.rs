@@ -8,6 +8,8 @@ use crate::storage::schema::Value;
 use crate::storage::unified::MetadataValue;
 use crate::storage::{EntityData, EntityId};
 
+use std::sync::Arc;
+
 use super::{RedDBRuntime, RuntimeQueryResult};
 
 pub const DEFAULT_KV_COLLECTION: &str = "kv_default";
@@ -43,6 +45,7 @@ impl<'a> KvAtomicOps<'a> {
             } => self.set(raw_query, key, value.clone(), *ttl_ms, *if_not_exists),
             KvQuery::Get { key } => self.get(raw_query, key),
             KvQuery::Delete { key } => self.delete(raw_query, key),
+            KvQuery::Incr { key, by, ttl_ms } => self.incr_query(raw_query, key, *by, *ttl_ms),
         }
     }
 
@@ -84,10 +87,11 @@ impl<'a> KvAtomicOps<'a> {
 
         self.runtime.create_kv(CreateKvInput {
             collection: target.collection.clone(),
-            key: target.key,
+            key: target.key.clone(),
             value,
             metadata,
         })?;
+        self.runtime.kv_clear_deleted(&target.collection, &target.key);
         self.runtime.note_table_write(&target.collection);
 
         Ok(RuntimeQueryResult::dml_result(
@@ -124,6 +128,7 @@ impl<'a> KvAtomicOps<'a> {
         let target = self.resolve_target(key, false);
         let affected = if let Some(entry) = self.find_live_entry(&target)? {
             self.delete_entity(&target.collection, entry.id)?;
+            self.runtime.kv_mark_deleted(&target.collection, &target.key);
             self.runtime.note_table_write(&target.collection);
             1
         } else {
@@ -135,6 +140,83 @@ impl<'a> KvAtomicOps<'a> {
             "delete",
             "runtime-kv",
         ))
+    }
+
+    pub fn incr(
+        &self,
+        collection: &str,
+        key: &str,
+        by: i64,
+        ttl_ms: Option<u64>,
+    ) -> RedDBResult<i64> {
+        self.runtime
+            .check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        let lock = self.runtime.kv_atomic_lock(collection, key);
+        let _guard = lock.lock();
+        let target = KvTarget {
+            collection: collection.to_string(),
+            key: key.to_string(),
+        };
+
+        match self.find_live_entry(&target)? {
+            Some(entry) => {
+                let current = kv_counter_i64(&entry.value)?;
+                let next = current
+                    .checked_add(by)
+                    .ok_or_else(|| RedDBError::Query("INCR/DECR counter overflow".to_string()))?;
+                self.update_counter_value(&target, entry.id, next, ttl_ms)?;
+                Ok(next)
+            }
+            None => {
+                self.runtime.create_kv(CreateKvInput {
+                    collection: collection.to_string(),
+                    key: key.to_string(),
+                    value: Value::Integer(by),
+                    metadata: ttl_metadata_fields(ttl_ms),
+                })?;
+                self.runtime.kv_clear_deleted(collection, key);
+                self.runtime.note_table_write(collection);
+                Ok(by)
+            }
+        }
+    }
+
+    pub fn decr(
+        &self,
+        collection: &str,
+        key: &str,
+        by: i64,
+        ttl_ms: Option<u64>,
+    ) -> RedDBResult<i64> {
+        let delta = by
+            .checked_neg()
+            .ok_or_else(|| RedDBError::Query("DECR BY value overflows i64".to_string()))?;
+        self.incr(collection, key, delta, ttl_ms)
+    }
+
+    fn incr_query(
+        &self,
+        raw_query: &str,
+        key: &str,
+        by: i64,
+        ttl_ms: Option<u64>,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let target = self.resolve_target(key, true);
+        let value = self.incr(&target.collection, &target.key, by, ttl_ms)?;
+        let mut result = UnifiedResult::with_columns(vec!["key".to_string(), "value".to_string()]);
+        let mut record = UnifiedRecord::new();
+        record.set("key", Value::text(target.key));
+        record.set("value", Value::Integer(value));
+        result.push(record);
+        Ok(RuntimeQueryResult {
+            query: raw_query.to_string(),
+            mode: QueryMode::Sql,
+            statement: "incr",
+            engine: "runtime-kv",
+            affected_rows: 1,
+            statement_type: "update",
+            result,
+        })
     }
 
     fn resolve_target(&self, key: &str, create_default: bool) -> KvTarget {
@@ -160,12 +242,18 @@ impl<'a> KvAtomicOps<'a> {
     }
 
     fn find_live_entry(&self, target: &KvTarget) -> RedDBResult<Option<KvEntry>> {
+        if self.runtime.kv_is_deleted(&target.collection, &target.key) {
+            return Ok(None);
+        }
         let store = self.runtime.db().store();
         let Some(manager) = store.get_collection(&target.collection) else {
             return Ok(None);
         };
 
         for entity in manager.query_all(|_| true) {
+            if manager.get(entity.id).is_none() {
+                continue;
+            }
             let EntityData::Row(row) = &entity.data else {
                 continue;
             };
@@ -217,14 +305,25 @@ impl<'a> KvAtomicOps<'a> {
     }
 
     fn delete_entity(&self, collection: &str, id: EntityId) -> RedDBResult<()> {
-        let deleted = self
-            .runtime
-            .db()
-            .store()
-            .delete_batch(collection, &[id])
+        let store = self.runtime.db().store();
+        if let Some(manager) = store.get_collection(collection) {
+            if let Some(mut entity) = manager.get(id) {
+                if let EntityData::Row(row) = &mut entity.data {
+                    if let Some(named) = row.named.as_mut() {
+                        named.insert(
+                            "key".to_string(),
+                            Value::text(format!("__reddb_deleted_kv_{}", id.raw())),
+                        );
+                    }
+                }
+                let _ = manager.update(entity);
+            }
+        }
+        let deleted = store
+            .delete(collection, id)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
-        if !deleted.is_empty() {
-            self.runtime.db().store().context_index().remove_entity(id);
+        if deleted {
+            store.context_index().remove_entity(id);
             self.runtime.cdc_emit(
                 crate::replication::cdc::ChangeOperation::Delete,
                 collection,
@@ -233,6 +332,125 @@ impl<'a> KvAtomicOps<'a> {
             );
         }
         Ok(())
+    }
+
+    fn update_counter_value(
+        &self,
+        target: &KvTarget,
+        id: EntityId,
+        next: i64,
+        ttl_ms: Option<u64>,
+    ) -> RedDBResult<()> {
+        let store = self.runtime.db().store();
+        let manager = store.get_collection(&target.collection).ok_or_else(|| {
+            RedDBError::NotFound(format!("collection not found: {}", target.collection))
+        })?;
+        let mut entity = manager.get(id).ok_or_else(|| {
+            RedDBError::NotFound(format!(
+                "KV key disappeared during atomic update: {}",
+                target.key
+            ))
+        })?;
+
+        let EntityData::Row(row) = &mut entity.data else {
+            return Err(RedDBError::Query(format!(
+                "KV key {} is not backed by a table row",
+                target.key
+            )));
+        };
+        let named = row.named.as_mut().ok_or_else(|| {
+            RedDBError::Query(format!("KV key {} has no named fields", target.key))
+        })?;
+        named.insert("value".to_string(), Value::Integer(next));
+        entity.updated_at = current_unix_secs();
+
+        manager
+            .update(entity.clone())
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        if let Some(ttl_ms) = ttl_ms {
+            let mut metadata = store
+                .get_metadata(&target.collection, id)
+                .unwrap_or_default();
+            metadata.set("_ttl_ms", ttl_metadata_value(ttl_ms));
+            manager
+                .set_metadata(id, metadata)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        }
+        store
+            .persist_entities_to_pager(&target.collection, std::slice::from_ref(&entity))
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.runtime.note_table_write(&target.collection);
+        self.runtime.cdc_emit(
+            crate::replication::cdc::ChangeOperation::Update,
+            &target.collection,
+            id.raw(),
+            "kv",
+        );
+        Ok(())
+    }
+}
+
+impl RedDBRuntime {
+    pub(crate) fn kv_atomic_lock(
+        &self,
+        collection: &str,
+        key: &str,
+    ) -> Arc<parking_lot::Mutex<()>> {
+        let map_key = (collection.to_string(), key.to_string());
+        if let Some(lock) = self.inner.kv_atomic_locks.read().get(&map_key).cloned() {
+            return lock;
+        }
+
+        let mut locks = self.inner.kv_atomic_locks.write();
+        locks
+            .entry(map_key)
+            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
+            .clone()
+    }
+
+    fn kv_mark_deleted(&self, collection: &str, key: &str) {
+        self.inner
+            .kv_deleted_keys
+            .write()
+            .insert((collection.to_string(), key.to_string()));
+    }
+
+    fn kv_clear_deleted(&self, collection: &str, key: &str) {
+        self.inner
+            .kv_deleted_keys
+            .write()
+            .remove(&(collection.to_string(), key.to_string()));
+    }
+
+    fn kv_is_deleted(&self, collection: &str, key: &str) -> bool {
+        self.inner
+            .kv_deleted_keys
+            .read()
+            .contains(&(collection.to_string(), key.to_string()))
+    }
+}
+
+fn kv_counter_i64(value: &Value) -> RedDBResult<i64> {
+    match value {
+        Value::Integer(v) => Ok(*v),
+        Value::UnsignedInteger(v) if *v <= i64::MAX as u64 => Ok(*v as i64),
+        _ => Err(RedDBError::Query(
+            "INCR/DECR requires the existing KV value to be an integer".to_string(),
+        )),
+    }
+}
+
+fn ttl_metadata_fields(ttl_ms: Option<u64>) -> Vec<(String, MetadataValue)> {
+    ttl_ms
+        .map(|ttl| vec![("_ttl_ms".to_string(), ttl_metadata_value(ttl))])
+        .unwrap_or_default()
+}
+
+fn ttl_metadata_value(ttl_ms: u64) -> MetadataValue {
+    if ttl_ms <= i64::MAX as u64 {
+        MetadataValue::Int(ttl_ms as i64)
+    } else {
+        MetadataValue::Timestamp(ttl_ms)
     }
 }
 
@@ -253,6 +471,13 @@ fn current_unix_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn current_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[cfg(test)]
@@ -305,8 +530,7 @@ mod tests {
     #[test]
     fn dotted_key_routes_to_existing_collection() {
         let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
-        rt.execute_query("CREATE TABLE sessions (key TEXT, value TEXT)")
-            .unwrap();
+        rt.db().store().get_or_create_collection("sessions");
 
         rt.execute_query("PUT sessions.42 = 'abc'").unwrap();
 
@@ -331,5 +555,64 @@ mod tests {
 
         let got = rt.execute_query("GET short").unwrap();
         assert!(got.result.records.is_empty());
+    }
+
+    #[test]
+    fn incr_decr_initialize_and_return_post_update_value() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+
+        let first = rt.execute_query("INCR visits BY 5").unwrap();
+        assert_eq!(
+            first.result.records[0].get("value"),
+            Some(&Value::Integer(5))
+        );
+
+        let second = rt.execute_query("DECR visits BY 2").unwrap();
+        assert_eq!(
+            second.result.records[0].get("value"),
+            Some(&Value::Integer(3))
+        );
+
+        let got = rt.execute_query("GET visits").unwrap();
+        assert_eq!(got.result.records[0].get("value"), Some(&Value::Integer(3)));
+    }
+
+    #[test]
+    fn incr_errors_on_non_integer_without_mutating() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("PUT visits = 'nope'").unwrap();
+
+        let err = rt.execute_query("INCR visits").unwrap_err();
+        assert!(err.to_string().contains("existing KV value"));
+
+        let got = rt.execute_query("GET visits").unwrap();
+        assert_eq!(
+            got.result.records[0].get("value"),
+            Some(&Value::text("nope"))
+        );
+    }
+
+    #[test]
+    fn concurrent_incr_converges() {
+        let rt =
+            std::sync::Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap());
+        let mut handles = Vec::new();
+
+        for _ in 0..100 {
+            let rt = std::sync::Arc::clone(&rt);
+            handles.push(std::thread::spawn(move || {
+                rt.execute_query("INCR counter").unwrap();
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let got = rt.execute_query("GET counter").unwrap();
+        assert_eq!(
+            got.result.records[0].get("value"),
+            Some(&Value::Integer(100))
+        );
     }
 }

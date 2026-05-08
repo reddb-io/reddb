@@ -93,6 +93,13 @@ export interface KvDeleteResult {
   key?: string
 }
 
+export interface KvCounterResult {
+  ok?: boolean
+  collection?: string
+  key?: string
+  value: number
+}
+
 export interface HealthResult {
   ok: boolean
   version: string
@@ -196,6 +203,10 @@ export class KvClient {
   get(collection: string, key: string | number): Promise<KvGetResult>
   /** Delete a key from a collection. */
   delete(collection: string, key: string | number): Promise<KvDeleteResult>
+  /** Atomically increment an integer key and return the new value. */
+  incr(collection: string, key: string | number, by?: number, ttlMs?: number): Promise<KvCounterResult>
+  /** Atomically decrement an integer key and return the new value. */
+  decr(collection: string, key: string | number, by?: number, ttlMs?: number): Promise<KvCounterResult>
 }
 
 export class RedDB {

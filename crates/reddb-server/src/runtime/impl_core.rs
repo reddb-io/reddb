@@ -1598,6 +1598,8 @@ impl RedDBRuntime {
                     std::collections::VecDeque::new(),
                 )),
                 result_cache_shadow_divergences: std::sync::atomic::AtomicU64::new(0),
+                kv_atomic_locks: parking_lot::RwLock::new(HashMap::new()),
+                kv_deleted_keys: parking_lot::RwLock::new(HashSet::new()),
                 queue_message_locks: parking_lot::RwLock::new(HashMap::new()),
                 planner_dirty_tables: parking_lot::RwLock::new(HashSet::new()),
                 ec_registry: Arc::new(crate::ec::config::EcRegistry::new()),
@@ -3931,12 +3933,23 @@ impl RedDBRuntime {
             return result;
         }
 
+        let first_word = query
+            .trim()
+            .split_ascii_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        let is_kv_command = matches!(
+            first_word.as_str(),
+            "PUT" | "GET" | "DELETE" | "INCR" | "DECR"
+        );
+
         // ── Result cache: return cached result if still fresh (30s TTL) ──
         // Safety check goes through `ReadFrame::should_cache_result()` so
         // the volatile-builtin / active-tx-with-uncommitted-writes
         // decision is not re-derived from globals here.
         let frame_iface: &dyn super::statement_frame::ReadFrame = &frame;
-        if frame_iface.should_cache_result() {
+        if !is_kv_command && frame_iface.should_cache_result() {
             if let Some(result) = self.get_result_cache_entry(frame_iface.cache_key()) {
                 return Ok(result);
             }
@@ -3957,12 +3970,6 @@ impl RedDBRuntime {
         // reuses the same plan across thousands of varying literals).
         // INSERT is still bypassed — its shape changes per column set
         // and bulk paths don't go through here anyway.
-        let first_word = query
-            .trim()
-            .split_ascii_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_ascii_uppercase();
         let is_insert = first_word == "INSERT";
 
         // Fused normalize+extract: one byte-scan produces both the

@@ -296,6 +296,16 @@ class RedwireClient:
             f"DELETE FROM {_sql_ident(collection)} WHERE key = {_sql_literal(str(key))}"
         )
 
+    async def kv_incr(
+        self, collection: str, key: str, by: int = 1, ttl_ms: int | None = None
+    ) -> dict[str, Any]:
+        return await self.query(_kv_counter_sql("INCR", collection, key, by, ttl_ms))
+
+    async def kv_decr(
+        self, collection: str, key: str, by: int = 1, ttl_ms: int | None = None
+    ) -> dict[str, Any]:
+        return await self.query(_kv_counter_sql("DECR", collection, key, by, ttl_ms))
+
     async def ping(self) -> None:
         resp = await self._round_trip(
             Frame(kind=Kind.Ping, correlation_id=self._corr())
@@ -585,6 +595,13 @@ def _sql_literal(value: Any) -> str:
     if isinstance(value, (dict, list)):
         value = json.dumps(value, separators=(",", ":"))
     return "'" + str(value).replace("'", "''") + "'"
+
+
+def _kv_counter_sql(
+    op: str, collection: str, key: str, by: int, ttl_ms: int | None
+) -> str:
+    ttl = "" if ttl_ms is None else f" EXPIRE {int(ttl_ms)} ms"
+    return f"{op} {_sql_ident(collection)}.{_sql_literal(str(key))} BY {int(by)}{ttl}"
 
 
 def _json_loads(buf: bytes) -> dict[str, Any]:

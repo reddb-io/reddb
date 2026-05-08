@@ -126,6 +126,16 @@ class HttpClient:
     async def kv_delete(self, collection: str, key: str) -> dict[str, Any]:
         return await self._request_with_legacy_kv("DELETE", collection, key)
 
+    async def kv_incr(
+        self, collection: str, key: str, by: int = 1, ttl_ms: int | None = None
+    ) -> dict[str, Any]:
+        return await self._request_kv_counter("incr", collection, key, by, ttl_ms)
+
+    async def kv_decr(
+        self, collection: str, key: str, by: int = 1, ttl_ms: int | None = None
+    ) -> dict[str, Any]:
+        return await self._request_kv_counter("decr", collection, key, by, ttl_ms)
+
     async def scan(self, collection: str, **params: Any) -> dict[str, Any]:
         url = f"/collections/{quote(collection)}/scan"
         return await self._request("GET", url, params=params or None)
@@ -193,6 +203,25 @@ class HttpClient:
         except httpx.HTTPError as exc:  # pragma: no cover - network
             raise HttpError(str(exc), status=0, body="") from exc
         return _parse_response(response)
+
+    async def _request_kv_counter(
+        self,
+        op: str,
+        collection: str,
+        key: str,
+        by: int,
+        ttl_ms: int | None,
+    ) -> Any:
+        collection_q = quote(collection)
+        key_q = quote(str(key))
+        params: dict[str, Any] = {"by": by}
+        if ttl_ms is not None:
+            params["ttl_ms"] = ttl_ms
+        return await self._request(
+            "POST",
+            f"/collections/{collection_q}/kv/{key_q}/{op}",
+            params=params,
+        )
 
     async def _post_json(self, path: str, body: Any) -> Any:
         headers = {**self._headers(), "content-type": "application/json"}

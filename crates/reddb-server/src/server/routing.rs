@@ -1003,6 +1003,20 @@ impl RedDBServer {
                     }
                 }
 
+                // KV counter routes: /collections/{collection}/kv/{key}/incr
+                if let Some((collection, key)) = collection_kv_action_path(&path, "incr") {
+                    return match method.as_str() {
+                        "POST" => self.handle_incr_kv(collection, key, &query, false),
+                        _ => json_error(405, "method not allowed for KV counter endpoint"),
+                    };
+                }
+                if let Some((collection, key)) = collection_kv_action_path(&path, "decr") {
+                    return match method.as_str() {
+                        "POST" => self.handle_incr_kv(collection, key, &query, true),
+                        _ => json_error(405, "method not allowed for KV counter endpoint"),
+                    };
+                }
+
                 // KV routes: /collections/{collection}/kv/{key}
                 if let Some((collection, key)) = collection_kv_path(&path) {
                     return match method.as_str() {
@@ -1642,6 +1656,12 @@ fn collection_kv_path(path: &str) -> Option<(&str, &str)> {
     }
 }
 
+fn collection_kv_action_path<'a>(path: &'a str, action: &str) -> Option<(&'a str, &'a str)> {
+    let suffix = format!("/{action}");
+    let base = path.trim_end_matches('/').strip_suffix(&suffix)?;
+    collection_kv_path(base)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1667,6 +1687,22 @@ mod tests {
         assert_eq!(collection_kv_path("/collections//kv/theme"), None);
         assert_eq!(collection_kv_path("/collections/a/b/kv/theme"), None);
         assert_eq!(collection_kv_path("/collections/cfg/kv/"), None);
+    }
+
+    #[test]
+    fn collection_kv_action_path_extracts_counter_routes() {
+        assert_eq!(
+            collection_kv_action_path("/collections/cfg/kv/theme/incr", "incr"),
+            Some(("cfg", "theme"))
+        );
+        assert_eq!(
+            collection_kv_action_path("/collections/cfg/kv/theme/decr", "decr"),
+            Some(("cfg", "theme"))
+        );
+        assert_eq!(
+            collection_kv_action_path("/collections/cfg/kv/theme/incr", "decr"),
+            None
+        );
     }
 }
 

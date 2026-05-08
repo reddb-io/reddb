@@ -143,6 +143,16 @@ class _RedwireAdapter:
     async def kv_delete(self, collection: str, key: str) -> dict[str, Any]:
         return await self._client.kv_delete(collection, key)
 
+    async def kv_incr(
+        self, collection: str, key: str, by: int = 1, ttl_ms: int | None = None
+    ) -> dict[str, Any]:
+        return await self._client.kv_incr(collection, key, by, ttl_ms)
+
+    async def kv_decr(
+        self, collection: str, key: str, by: int = 1, ttl_ms: int | None = None
+    ) -> dict[str, Any]:
+        return await self._client.kv_decr(collection, key, by, ttl_ms)
+
     async def ping(self) -> dict[str, Any]:
         await self._client.ping()
         return {"ok": True}
@@ -218,3 +228,13 @@ class KvClient:
 
     async def delete(self, collection: str, key: str) -> dict[str, Any]:
         return await self._t.kv_delete(collection, str(key))
+
+    async def incr(
+        self, collection: str, key: str, by: int = 1, ttl_ms: int | None = None
+    ) -> dict[str, Any]:
+        return await self._t.kv_incr(collection, str(key), by, ttl_ms)
+
+    async def decr(
+        self, collection: str, key: str, by: int = 1, ttl_ms: int | None = None
+    ) -> dict[str, Any]:
+        return await self._t.kv_decr(collection, str(key), by, ttl_ms)

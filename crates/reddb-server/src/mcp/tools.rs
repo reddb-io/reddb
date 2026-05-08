@@ -262,6 +262,32 @@ pub fn all_tools() -> Vec<ToolDef> {
             ),
         },
         ToolDef {
+            name: "reddb_kv_incr",
+            description: "Atomically increment an integer key-value counter and return the new value.",
+            input_schema: schema(
+                vec![
+                    ("collection", "string", "Collection name"),
+                    ("key", "string", "Key to increment"),
+                    ("by", "integer", "Increment amount (default 1)"),
+                    ("ttl_ms", "integer", "Optional TTL refresh in milliseconds"),
+                ],
+                vec!["collection", "key"],
+            ),
+        },
+        ToolDef {
+            name: "reddb_kv_decr",
+            description: "Atomically decrement an integer key-value counter and return the new value.",
+            input_schema: schema(
+                vec![
+                    ("collection", "string", "Collection name"),
+                    ("key", "string", "Key to decrement"),
+                    ("by", "integer", "Decrement amount (default 1)"),
+                    ("ttl_ms", "integer", "Optional TTL refresh in milliseconds"),
+                ],
+                vec!["collection", "key"],
+            ),
+        },
+        ToolDef {
             name: "reddb_delete",
             description: "Delete an entity by ID from a collection.",
             input_schema: schema(
@@ -531,6 +557,8 @@ mod tests {
         assert!(names.contains(&"reddb_kv_get"));
         assert!(names.contains(&"reddb_kv_set"));
         assert!(names.contains(&"reddb_kv_delete"));
+        assert!(names.contains(&"reddb_kv_incr"));
+        assert!(names.contains(&"reddb_kv_decr"));
         assert!(names.contains(&"reddb_delete"));
         assert!(names.contains(&"reddb_search_vector"));
         assert!(names.contains(&"reddb_search_text"));

@@ -85,6 +85,10 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("insert ")
         || lower.starts_with("update ")
         || lower.starts_with("delete ")
+        || lower.starts_with("put ")
+        || lower.starts_with("get ")
+        || lower.starts_with("incr ")
+        || lower.starts_with("decr ")
         || lower.starts_with("create ")
         || lower.starts_with("drop ")
         || lower.starts_with("alter ")
@@ -216,6 +220,10 @@ mod tests {
             detect_mode("DELETE FROM logs WHERE age > 30"),
             QueryMode::Sql
         );
+        assert_eq!(detect_mode("PUT session = 'abc'"), QueryMode::Sql);
+        assert_eq!(detect_mode("GET session"), QueryMode::Sql);
+        assert_eq!(detect_mode("INCR session BY 1"), QueryMode::Sql);
+        assert_eq!(detect_mode("DECR session BY 1"), QueryMode::Sql);
         assert_eq!(
             detect_mode("QUEUE GROUP CREATE tasks workers"),
             QueryMode::Sql
