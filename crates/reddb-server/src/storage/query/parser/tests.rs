@@ -1598,6 +1598,24 @@ fn test_parse_typed_show_desugars_to_red_collections_model_filter() {
 }
 
 #[test]
+fn test_parse_show_schema_desugars_to_red_columns_select() {
+    let query = parse("SHOW SCHEMA users").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.columns");
+        assert!(matches!(
+            tq.filter,
+            Some(Filter::Compare {
+                field: FieldRef::TableColumn { ref column, .. },
+                op: CompareOp::Eq,
+                value: crate::storage::schema::Value::Text(ref value),
+            }) if column == "collection" && value.as_ref() == "users"
+        ));
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
 fn test_parse_dollar_secret_reference_projection() {
     let query = parse("SELECT $secret.mycompany.stripe.key AS secret_value FROM tokens").unwrap();
     if let QueryExpr::Table(tq) = query {

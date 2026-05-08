@@ -6,16 +6,20 @@
 //! normal parsing. Execution then intercepts that identifier and
 //! materializes rows from the live catalog snapshot.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use super::*;
 use crate::catalog::{CollectionModel, SchemaMode};
 use crate::storage::query::sql_lowering::{effective_table_filter, effective_table_projections};
+use crate::storage::schema::DataType;
+use crate::storage::unified::EntityData;
 use crate::storage::unified::UnifiedStore;
 
 pub(super) const COLLECTIONS: &str = "red.collections";
 pub(super) const COLLECTIONS_INTERNAL: &str = "__red_schema_collections";
+pub(super) const COLUMNS: &str = "red.columns";
+pub(super) const COLUMNS_INTERNAL: &str = "__red_schema_columns";
 pub(super) const READ_ONLY_ERROR: &str = "system schema is read-only";
 
 const COLLECTION_COLUMNS: [&str; 9] = [
@@ -30,8 +34,34 @@ const COLLECTION_COLUMNS: [&str; 9] = [
     "tenant_id",
 ];
 
+const COLUMN_COLUMNS: [&str; 7] = [
+    "collection",
+    "name",
+    "type",
+    "nullable",
+    "default_value",
+    "is_primary_key",
+    "is_unique",
+];
+
 pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
-    replace_case_insensitive_outside_quotes(query, COLLECTIONS, COLLECTIONS_INTERNAL)
+    let mut rewritten = query.to_string();
+    let mut changed = false;
+
+    if let Some(next) =
+        replace_case_insensitive_outside_quotes(&rewritten, COLLECTIONS, COLLECTIONS_INTERNAL)
+    {
+        rewritten = next;
+        changed = true;
+    }
+    if let Some(next) =
+        replace_case_insensitive_outside_quotes(&rewritten, COLUMNS, COLUMNS_INTERNAL)
+    {
+        rewritten = next;
+        changed = true;
+    }
+
+    changed.then_some(rewritten)
 }
 
 pub(super) fn references_system_schema(query: &str) -> bool {
@@ -49,7 +79,10 @@ pub(super) fn is_system_schema_write(query: &str) -> bool {
 }
 
 pub(super) fn is_virtual_table(table: &str) -> bool {
-    table.eq_ignore_ascii_case(COLLECTIONS_INTERNAL) || table.eq_ignore_ascii_case(COLLECTIONS)
+    table.eq_ignore_ascii_case(COLLECTIONS_INTERNAL)
+        || table.eq_ignore_ascii_case(COLLECTIONS)
+        || table.eq_ignore_ascii_case(COLUMNS_INTERNAL)
+        || table.eq_ignore_ascii_case(COLUMNS)
 }
 
 pub(super) fn red_query(
@@ -63,13 +96,15 @@ pub(super) fn red_query(
             "unknown system schema relation `{virtual_name}`"
         )));
     }
+    let virtual_kind = virtual_table_kind(virtual_name)?;
 
     let caller_is_admin = frame.identity().is_some_and(|(_, role)| role.can_admin())
         || (frame.identity().is_none() && frame.effective_scope().is_none());
     if !caller_is_admin && frame.effective_scope().is_none() {
-        return Err(RedDBError::Query(
-            "red.collections requires an active tenant".to_string(),
-        ));
+        return Err(RedDBError::Query(format!(
+            "{} requires an active tenant",
+            virtual_kind.public_name()
+        )));
     }
 
     let tenant = frame.effective_scope();
@@ -79,7 +114,10 @@ pub(super) fn red_query(
         frame.visible_collections()
     };
     let db = runtime.db();
-    let mut records = collections_snapshot(runtime, tenant, visible_collections);
+    let mut records = match virtual_kind {
+        VirtualTableKind::Collections => collections_snapshot(runtime, tenant, visible_collections),
+        VirtualTableKind::Columns => columns_snapshot(runtime, visible_collections),
+    };
 
     let table_name = query.table.as_str();
     let table_alias = query.alias.as_deref();
@@ -144,7 +182,8 @@ pub(super) fn red_query(
             .iter()
             .any(|projection| matches!(projection, Projection::All))
     {
-        COLLECTION_COLUMNS
+        virtual_kind
+            .columns()
             .iter()
             .map(|name| name.to_string())
             .collect()
@@ -161,6 +200,40 @@ pub(super) fn red_query(
         records,
         pre_serialized_json: None,
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum VirtualTableKind {
+    Collections,
+    Columns,
+}
+
+impl VirtualTableKind {
+    fn columns(self) -> &'static [&'static str] {
+        match self {
+            Self::Collections => &COLLECTION_COLUMNS,
+            Self::Columns => &COLUMN_COLUMNS,
+        }
+    }
+
+    fn public_name(self) -> &'static str {
+        match self {
+            Self::Collections => COLLECTIONS,
+            Self::Columns => COLUMNS,
+        }
+    }
+}
+
+fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
+    if name.eq_ignore_ascii_case(COLLECTIONS_INTERNAL) || name.eq_ignore_ascii_case(COLLECTIONS) {
+        return Ok(VirtualTableKind::Collections);
+    }
+    if name.eq_ignore_ascii_case(COLUMNS_INTERNAL) || name.eq_ignore_ascii_case(COLUMNS) {
+        return Ok(VirtualTableKind::Columns);
+    }
+    Err(RedDBError::Query(format!(
+        "unknown system schema relation `{name}`"
+    )))
 }
 
 fn collections_snapshot(
@@ -207,7 +280,7 @@ fn collections_snapshot(
                     Value::text(schema_mode_name(collection.schema_mode)),
                     Value::UnsignedInteger(collection.entities as u64),
                     Value::UnsignedInteger(collection.segments as u64),
-                    Value::Array(collection.indices.into_iter().map(Value::text).collect()),
+                    Value::UnsignedInteger(collection.indices.len() as u64),
                     Value::UnsignedInteger(in_memory_bytes),
                     Value::Boolean(internal),
                     visible_tenant.map(Value::text).unwrap_or(Value::Null),
@@ -256,6 +329,166 @@ fn discover_queue_dlqs(store: &UnifiedStore) -> HashSet<String> {
         .filter_map(|entity| {
             let row = entity.data.as_row()?;
             row_text(row, "dlq")
+        })
+        .collect()
+}
+
+fn columns_snapshot(
+    runtime: &RedDBRuntime,
+    visible_collections: Option<&std::collections::HashSet<String>>,
+) -> Vec<UnifiedRecord> {
+    let db = runtime.db();
+    let mut records = Vec::new();
+    let schema = Arc::new(
+        COLUMN_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let snapshot = db.catalog_model_snapshot();
+    let contracts = db.collection_contracts();
+    let contracts_by_name: HashMap<_, _> = contracts
+        .iter()
+        .map(|contract| (contract.name.as_str(), contract))
+        .collect();
+
+    for collection in snapshot.collections {
+        if visible_collections.is_some_and(|visible| !visible.contains(&collection.name)) {
+            continue;
+        }
+        let Some(contract) = contracts_by_name.get(collection.name.as_str()).copied() else {
+            continue;
+        };
+
+        if !contract.declared_columns.is_empty() {
+            records.extend(contract.declared_columns.iter().map(|column| {
+                column_record(
+                    Arc::clone(&schema),
+                    &collection.name,
+                    &column.name,
+                    column
+                        .sql_type
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| column.data_type.clone()),
+                    !(column.not_null || column.primary_key),
+                    column.default.as_deref(),
+                    column.primary_key,
+                    column.unique || column.primary_key,
+                )
+            }));
+        } else if collection.model == CollectionModel::Document
+            || contract.declared_model == CollectionModel::Document
+        {
+            records.extend(infer_document_columns(
+                runtime,
+                &collection.name,
+                Arc::clone(&schema),
+            ));
+        }
+    }
+
+    records
+}
+
+fn column_record(
+    schema: Arc<Vec<Arc<str>>>,
+    collection: &str,
+    name: &str,
+    data_type: String,
+    nullable: bool,
+    default_value: Option<&str>,
+    is_primary_key: bool,
+    is_unique: bool,
+) -> UnifiedRecord {
+    UnifiedRecord::with_schema(
+        schema,
+        vec![
+            Value::text(collection),
+            Value::text(name),
+            Value::text(data_type),
+            Value::Boolean(nullable),
+            default_value.map(Value::text).unwrap_or(Value::Null),
+            Value::Boolean(is_primary_key),
+            Value::Boolean(is_unique),
+        ],
+    )
+}
+
+#[derive(Debug, Clone)]
+struct InferredColumn {
+    data_type: Option<DataType>,
+    seen: usize,
+    saw_null: bool,
+}
+
+fn infer_document_columns(
+    runtime: &RedDBRuntime,
+    collection: &str,
+    schema: Arc<Vec<Arc<str>>>,
+) -> Vec<UnifiedRecord> {
+    let mut fields: BTreeMap<String, InferredColumn> = BTreeMap::new();
+    let mut document_count = 0usize;
+
+    for (_, entity) in runtime
+        .db()
+        .store()
+        .query_all(|entity| entity.kind.collection() == collection)
+    {
+        let EntityData::Row(row) = entity.data else {
+            continue;
+        };
+        if !row
+            .iter_fields()
+            .any(|(name, value)| name == "body" && matches!(value, Value::Json(_) | Value::Text(_)))
+        {
+            continue;
+        }
+
+        document_count += 1;
+        for (name, value) in row.iter_fields() {
+            let entry = fields.entry(name.to_string()).or_insert(InferredColumn {
+                data_type: None,
+                seen: 0,
+                saw_null: false,
+            });
+            entry.seen += 1;
+            if value.is_null() {
+                entry.saw_null = true;
+                continue;
+            }
+            let value_type = value.data_type();
+            entry.data_type = match entry.data_type {
+                None => Some(value_type),
+                Some(existing) if existing == value_type => Some(existing),
+                Some(_) => Some(DataType::Unknown),
+            };
+        }
+    }
+
+    if document_count == 0 {
+        return Vec::new();
+    }
+
+    fields
+        .into_iter()
+        .map(|(name, inferred)| {
+            let data_type = inferred
+                .data_type
+                .filter(|data_type| *data_type != DataType::Unknown)
+                .map(|data_type| data_type.to_string())
+                .unwrap_or_else(|| "UNKNOWN".to_string());
+            let nullable = inferred.saw_null || inferred.seen < document_count;
+            column_record(
+                Arc::clone(&schema),
+                collection,
+                &name,
+                data_type,
+                nullable,
+                None,
+                false,
+                false,
+            )
         })
         .collect()
 }
