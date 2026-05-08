@@ -81,6 +81,7 @@ fn select_from_red_collections_materializes_catalog_rows() {
             "segments",
             "indices",
             "in_memory_bytes",
+            "on_disk_bytes",
             "internal",
             "tenant_id"
         ]
@@ -100,6 +101,10 @@ fn select_from_red_collections_materializes_catalog_rows() {
     ));
     assert!(matches!(
         row.get("in_memory_bytes"),
+        Some(Value::UnsignedInteger(_))
+    ));
+    assert!(matches!(
+        row.get("on_disk_bytes"),
         Some(Value::UnsignedInteger(_))
     ));
     assert_eq!(row.get("internal"), Some(&Value::Boolean(false)));

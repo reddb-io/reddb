@@ -30,7 +30,7 @@ pub(super) const STATS: &str = "red.stats";
 pub(super) const STATS_INTERNAL: &str = "__red_schema_stats";
 pub(super) const READ_ONLY_ERROR: &str = "system schema is read-only";
 
-const COLLECTION_COLUMNS: [&str; 9] = [
+const COLLECTION_COLUMNS: [&str; 10] = [
     "name",
     "model",
     "schema_mode",
@@ -38,6 +38,7 @@ const COLLECTION_COLUMNS: [&str; 9] = [
     "segments",
     "indices",
     "in_memory_bytes",
+    "on_disk_bytes",
     "internal",
     "tenant_id",
 ];
@@ -785,6 +786,10 @@ fn collections_snapshot(
                 .get_collection(&collection.name)
                 .map(|manager| manager.stats().total_memory_bytes as u64)
                 .unwrap_or(0);
+            let on_disk_bytes = crate::storage::disk_accountant::bytes_on_disk_for(
+                store.as_ref(),
+                &collection.name,
+            );
             UnifiedRecord::with_schema(
                 Arc::clone(&schema),
                 vec![
@@ -795,6 +800,7 @@ fn collections_snapshot(
                     Value::UnsignedInteger(collection.segments as u64),
                     Value::UnsignedInteger(collection.indices.len() as u64),
                     Value::UnsignedInteger(in_memory_bytes),
+                    Value::UnsignedInteger(on_disk_bytes),
                     Value::Boolean(internal),
                     visible_tenant.map(Value::text).unwrap_or(Value::Null),
                 ],

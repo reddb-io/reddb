@@ -53,8 +53,16 @@ Current columns:
 | `segments`        | Number of backing storage segments. |
 | `indices`         | Secondary index names attached to the collection. |
 | `in_memory_bytes` | Approximate resident memory used by collection metadata and caches. |
+| `on_disk_bytes`   | Approximate primary B-tree bytes currently reachable from the collection root. Cached for up to 30 seconds. |
 | `internal`        | `true` for runtime-owned collections and artifacts such as DLQs, `audit_log`, and `red_*` stores. |
 | `tenant_id`       | Tenant owning the collection, or `NULL` for global/unscoped collections. |
+
+`on_disk_bytes` is a conservative storage estimate, not a full database-file
+ownership report. It walks the live collection primary B-tree when the local
+page store exposes a root page, then multiplies reachable B-tree pages by the
+fixed 4 KiB page size. It excludes shared file header pages, native metadata,
+freelist pages, WAL bytes, double-write buffers, sidecar files, and collection
+artifacts that are not reachable from the primary B-tree root.
 
 ## `red.columns`
 
