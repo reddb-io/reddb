@@ -1411,6 +1411,10 @@ impl<'a> Parser<'a> {
                         None
                     };
                     Ok(SqlCommand::ShowConfig { prefix })
+                } else if self.consume_ident_ci("COLLECTIONS")? {
+                    let mut query = TableQuery::new("red.collections");
+                    self.parse_table_clauses(&mut query)?;
+                    Ok(SqlCommand::Select(query))
                 } else if self.consume_ident_ci("SECRET")? || self.consume_ident_ci("SECRETS")? {
                     let prefix = if !self.check(&Token::Eof) {
                         Some(self.parse_dotted_admin_path(true)?)
@@ -1428,6 +1432,7 @@ impl<'a> Parser<'a> {
                             "CONFIG",
                             "SECRET",
                             "SECRETS",
+                            "COLLECTIONS",
                             "TENANT",
                             "POLICIES",
                             "EFFECTIVE",

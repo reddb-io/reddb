@@ -1506,6 +1506,37 @@ fn test_parse_show_secrets_all() {
 }
 
 #[test]
+fn test_parse_show_collections_desugars_to_red_collections_select() {
+    let query = parse("SHOW COLLECTIONS").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.collections");
+        assert!(tq.columns.is_empty());
+        assert!(tq.select_items.is_empty());
+        assert!(tq.filter.is_none());
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
+fn test_parse_show_collections_where_desugars_with_filter() {
+    let query = parse("SHOW COLLECTIONS WHERE model = 'table'").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.collections");
+        assert!(matches!(
+            tq.filter,
+            Some(Filter::Compare {
+                field: FieldRef::TableColumn { ref column, .. },
+                op: CompareOp::Eq,
+                value: crate::storage::schema::Value::Text(ref value),
+            }) if column == "model" && value.as_ref() == "table"
+        ));
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
 fn test_parse_dollar_secret_reference_projection() {
     let query = parse("SELECT $secret.mycompany.stripe.key AS secret_value FROM tokens").unwrap();
     if let QueryExpr::Table(tq) = query {
