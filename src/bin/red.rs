@@ -2,7 +2,7 @@
 ///
 /// Parses argv using the schema-driven CLI parser, routes to the
 /// appropriate command, and dispatches execution.
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -2099,6 +2099,27 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_description("Open a local .rdb file in embedded mode"),
             );
         }
+        Some("admin") => {
+            flags.extend(vec![
+                cli::types::FlagSchema::new("bind")
+                    .with_short('b')
+                    .with_description("Server HTTP address")
+                    .with_default("127.0.0.1:8080"),
+                cli::types::FlagSchema::new("token")
+                    .with_short('t')
+                    .with_description("Admin bearer token (env: RED_ADMIN_TOKEN)"),
+                cli::types::FlagSchema::boolean("csv")
+                    .with_description("Emit CSV for tabular admin catalog commands"),
+                cli::types::FlagSchema::new("limit")
+                    .with_description("Max rows for list/stats/query commands"),
+                cli::types::FlagSchema::new("type")
+                    .with_description("Filter red.admin collections list by model"),
+                cli::types::FlagSchema::boolean("include-internal")
+                    .with_description("Include internal collections in admin collections list"),
+                cli::types::FlagSchema::new("collection")
+                    .with_description("Filter red.admin indices/policies by collection"),
+            ]);
+        }
         Some("dump") => {
             flags.extend(vec![
                 cli::types::FlagSchema::new("path")
@@ -2252,6 +2273,19 @@ fn build_completion_tree() -> Vec<(String, Vec<(String, Vec<String>)>)> {
         ("delete".to_string(), vec![]),
         ("tick".to_string(), vec![]),
         ("health".to_string(), vec![]),
+        (
+            "admin".to_string(),
+            vec![
+                (
+                    "collections".to_string(),
+                    vec!["list".to_string(), "show".to_string(), "stats".to_string()],
+                ),
+                ("indices".to_string(), vec!["list".to_string()]),
+                ("policies".to_string(), vec!["list".to_string()]),
+                ("query".to_string(), vec![]),
+                ("cache".to_string(), vec![]),
+            ],
+        ),
         ("status".to_string(), vec![]),
         ("mcp".to_string(), vec![]),
         ("connect".to_string(), vec![]),
@@ -2645,24 +2679,590 @@ fn run_admin_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
 
     match subcommand {
         "cache" => run_admin_cache_command(flags, &bind, token.as_deref(), json_mode, &args),
+        "collections" => {
+            run_admin_collections_command(flags, &bind, token.as_deref(), json_mode, &args)
+        }
+        "indices" => run_admin_indices_command(flags, &bind, token.as_deref(), json_mode, &args),
+        "policies" => run_admin_policies_command(flags, &bind, token.as_deref(), json_mode, &args),
+        "query" => run_admin_query_command(flags, &bind, token.as_deref(), json_mode, &args),
         "help" | _ => {
             if json_mode {
                 json_ok(
                     "admin",
-                    "{\"subcommands\":[\"cache\"],\"message\":\"use a subcommand, e.g. red admin cache stats\"}",
+                    "{\"subcommands\":[\"cache\",\"collections\",\"indices\",\"policies\",\"query\"],\"message\":\"use a subcommand, e.g. red admin collections list\"}",
                 );
             } else {
                 println!("Usage: red admin <subcommand>");
                 println!();
                 println!("Subcommands:");
-                println!("  cache    Blob cache admin operations");
+                println!("  cache        Blob cache admin operations");
+                println!("  collections  Collection catalog queries via red.collections/red.columns/red.stats");
+                println!("  indices      Index catalog queries via red.indices");
+                println!("  policies     Policy catalog queries via red.policies");
+                println!("  query        Run a native SQL catalog query via /query");
                 println!();
                 println!("Flags:");
                 println!("  --bind <addr>   Server HTTP address (default: 127.0.0.1:8080, env: REDDB_BIND_ADDR)");
                 println!("  --token <tok>   Admin bearer token (env: RED_ADMIN_TOKEN)");
                 println!("  --json          JSON output");
+                println!("  --csv           CSV output for tabular commands");
+                println!("  --limit <n>     Limit rows for list/stats/query commands");
+                println!("  --no-color      Disable ANSI colors");
             }
         }
+    }
+}
+
+fn run_admin_collections_command(
+    flags: &HashMap<String, FlagValue>,
+    bind: &str,
+    token: Option<&str>,
+    json_mode: bool,
+    args: &[&str],
+) {
+    let subcommand = args.first().copied().unwrap_or("help");
+    let sub_args: &[&str] = if args.is_empty() { &[] } else { &args[1..] };
+    let format = admin_output_format(flags, json_mode);
+    let use_color = !flag_bool(flags, "no-color");
+
+    match subcommand {
+        "list" => {
+            let mut filters = Vec::new();
+            if !flag_bool(flags, "include-internal") {
+                filters.push("internal = false".to_string());
+            }
+            if let Some(model) = flag_string(flags, "type").filter(|s| !s.is_empty()) {
+                filters.push(format!("model = '{}'", sql_string_literal(&model)));
+            }
+            let mut sql = "SELECT * FROM red.collections".to_string();
+            if !filters.is_empty() {
+                sql.push_str(" WHERE ");
+                sql.push_str(&filters.join(" AND "));
+            }
+            push_limit(&mut sql, flags);
+            emit_admin_query_result(
+                "admin.collections.list",
+                bind,
+                token,
+                &sql,
+                format,
+                use_color,
+            );
+        }
+        "show" => {
+            let Some(name) = sub_args.first().copied().filter(|s| !s.is_empty()) else {
+                admin_usage_error(
+                    "admin.collections.show",
+                    "collection name is required",
+                    "usage: red admin collections show <name>",
+                    json_mode,
+                );
+            };
+            emit_admin_collection_show(bind, token, name, format, use_color);
+        }
+        "stats" => {
+            let mut sql = "SELECT * FROM red.stats".to_string();
+            if let Some(name) = sub_args.first().copied().filter(|s| !s.is_empty()) {
+                sql.push_str(" WHERE collection = '");
+                sql.push_str(&sql_string_literal(name));
+                sql.push('\'');
+            }
+            push_limit(&mut sql, flags);
+            emit_admin_query_result(
+                "admin.collections.stats",
+                bind,
+                token,
+                &sql,
+                format,
+                use_color,
+            );
+        }
+        "help" | _ => {
+            if json_mode {
+                json_ok(
+                    "admin.collections",
+                    "{\"subcommands\":[\"list\",\"show\",\"stats\"]}",
+                );
+            } else {
+                println!("Usage: red admin collections <list|show|stats> [args]");
+                println!();
+                println!("Subcommands:");
+                println!("  list [--type table|queue|vector|document|timeseries|graph|kv] [--include-internal]");
+                println!("  show <name>");
+                println!("  stats [<name>]");
+                println!();
+                println!("Flags: --json --csv --limit <n> --no-color --bind <addr> --token <tok>");
+            }
+        }
+    }
+}
+
+fn run_admin_indices_command(
+    flags: &HashMap<String, FlagValue>,
+    bind: &str,
+    token: Option<&str>,
+    json_mode: bool,
+    args: &[&str],
+) {
+    let subcommand = args.first().copied().unwrap_or("help");
+    let format = admin_output_format(flags, json_mode);
+    let use_color = !flag_bool(flags, "no-color");
+    match subcommand {
+        "list" => {
+            let mut sql = "SELECT * FROM red.indices".to_string();
+            if let Some(collection) = flag_string(flags, "collection").filter(|s| !s.is_empty()) {
+                sql.push_str(" WHERE collection = '");
+                sql.push_str(&sql_string_literal(&collection));
+                sql.push('\'');
+            }
+            push_limit(&mut sql, flags);
+            emit_admin_query_result("admin.indices.list", bind, token, &sql, format, use_color);
+        }
+        "help" | _ => {
+            if json_mode {
+                json_ok("admin.indices", "{\"subcommands\":[\"list\"]}");
+            } else {
+                println!("Usage: red admin indices list [--collection <name>]");
+                println!("Flags: --json --csv --limit <n> --no-color --bind <addr> --token <tok>");
+            }
+        }
+    }
+}
+
+fn run_admin_policies_command(
+    flags: &HashMap<String, FlagValue>,
+    bind: &str,
+    token: Option<&str>,
+    json_mode: bool,
+    args: &[&str],
+) {
+    let subcommand = args.first().copied().unwrap_or("help");
+    let format = admin_output_format(flags, json_mode);
+    let use_color = !flag_bool(flags, "no-color");
+    match subcommand {
+        "list" => {
+            let mut sql = "SELECT * FROM red.policies".to_string();
+            if let Some(collection) = flag_string(flags, "collection").filter(|s| !s.is_empty()) {
+                sql.push_str(" WHERE collection = '");
+                sql.push_str(&sql_string_literal(&collection));
+                sql.push('\'');
+            }
+            push_limit(&mut sql, flags);
+            emit_admin_query_result("admin.policies.list", bind, token, &sql, format, use_color);
+        }
+        "help" | _ => {
+            if json_mode {
+                json_ok("admin.policies", "{\"subcommands\":[\"list\"]}");
+            } else {
+                println!("Usage: red admin policies list [--collection <name>]");
+                println!("Flags: --json --csv --limit <n> --no-color --bind <addr> --token <tok>");
+            }
+        }
+    }
+}
+
+fn run_admin_query_command(
+    flags: &HashMap<String, FlagValue>,
+    bind: &str,
+    token: Option<&str>,
+    json_mode: bool,
+    args: &[&str],
+) {
+    let Some(sql) = args.first().copied().filter(|s| !s.is_empty()) else {
+        admin_usage_error(
+            "admin.query",
+            "SQL argument is required",
+            "usage: red admin query \"SELECT * FROM red.collections\"",
+            json_mode,
+        );
+    };
+    let mut sql = sql.to_string();
+    push_limit(&mut sql, flags);
+    emit_admin_query_result(
+        "admin.query",
+        bind,
+        token,
+        &sql,
+        admin_output_format(flags, json_mode),
+        !flag_bool(flags, "no-color"),
+    );
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdminOutputFormat {
+    Text,
+    Json,
+    Csv,
+}
+
+#[derive(Debug, Clone)]
+struct AdminQueryTable {
+    columns: Vec<String>,
+    rows: Vec<BTreeMap<String, reddb::json::Value>>,
+}
+
+fn admin_output_format(flags: &HashMap<String, FlagValue>, json_mode: bool) -> AdminOutputFormat {
+    if json_mode {
+        AdminOutputFormat::Json
+    } else if flag_bool(flags, "csv") || flag_string(flags, "output").as_deref() == Some("csv") {
+        AdminOutputFormat::Csv
+    } else {
+        AdminOutputFormat::Text
+    }
+}
+
+fn admin_usage_error(command: &str, message: &str, usage: &str, json_mode: bool) -> ! {
+    if json_mode {
+        json_error(command, message);
+    }
+    eprintln!("error: {message}");
+    eprintln!("{usage}");
+    std::process::exit(1);
+}
+
+fn sql_string_literal(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+fn push_limit(sql: &mut String, flags: &HashMap<String, FlagValue>) {
+    let Some(limit) = flag_string(flags, "limit")
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<u64>().ok())
+    else {
+        return;
+    };
+    if !sql.to_ascii_lowercase().contains(" limit ") {
+        sql.push_str(" LIMIT ");
+        sql.push_str(&limit.to_string());
+    }
+}
+
+fn emit_admin_query_result(
+    command: &str,
+    bind: &str,
+    token: Option<&str>,
+    sql: &str,
+    format: AdminOutputFormat,
+    use_color: bool,
+) {
+    match admin_query_table(bind, token, sql) {
+        Ok(table) => match format {
+            AdminOutputFormat::Json => println!("{}", admin_rows_json(&table.rows)),
+            AdminOutputFormat::Csv => print!("{}", format_admin_csv(&table)),
+            AdminOutputFormat::Text => print!("{}", format_admin_table(&table, use_color)),
+        },
+        Err(err) => {
+            if format == AdminOutputFormat::Json {
+                json_error(command, &err);
+            }
+            eprintln!("error: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn emit_admin_collection_show(
+    bind: &str,
+    token: Option<&str>,
+    name: &str,
+    format: AdminOutputFormat,
+    use_color: bool,
+) {
+    let escaped = sql_string_literal(name);
+    let queries = [
+        (
+            "collection",
+            format!("SELECT * FROM red.collections WHERE name = '{escaped}'"),
+        ),
+        (
+            "schema",
+            format!("SELECT * FROM red.columns WHERE collection = '{escaped}'"),
+        ),
+        (
+            "indices",
+            format!("SELECT * FROM red.indices WHERE collection = '{escaped}'"),
+        ),
+        (
+            "policies",
+            format!("SELECT * FROM red.policies WHERE collection = '{escaped}'"),
+        ),
+        (
+            "stats",
+            format!("SELECT * FROM red.stats WHERE collection = '{escaped}'"),
+        ),
+    ];
+
+    let mut sections = Vec::new();
+    for (label, sql) in queries {
+        match admin_query_table(bind, token, &sql) {
+            Ok(table) => sections.push((label.to_string(), table)),
+            Err(err) => {
+                if format == AdminOutputFormat::Json {
+                    json_error("admin.collections.show", &err);
+                }
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    match format {
+        AdminOutputFormat::Json => println!("{}", admin_sections_json(&sections)),
+        AdminOutputFormat::Csv => print!("{}", format_admin_sections_csv(&sections)),
+        AdminOutputFormat::Text => {
+            print!("{}", format_admin_sections_text(name, &sections, use_color))
+        }
+    }
+}
+
+fn admin_query_table(
+    bind: &str,
+    token: Option<&str>,
+    sql: &str,
+) -> Result<AdminQueryTable, String> {
+    let payload = format!("{{\"query\":\"{}\"}}", json_escape(sql));
+    let body = post_json_to_http_authed(bind, "/query", &payload, token)?;
+    admin_table_from_query_response(&body)
+}
+
+fn admin_table_from_query_response(body: &str) -> Result<AdminQueryTable, String> {
+    let parsed: reddb::json::Value =
+        reddb::json::from_str(body).map_err(|err| format!("invalid query JSON response: {err}"))?;
+    let result = parsed
+        .get("result")
+        .ok_or_else(|| "query response missing result".to_string())?;
+    let columns = result
+        .get("columns")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "query response missing result.columns".to_string())?
+        .iter()
+        .filter_map(|value| value.as_str().map(ToString::to_string))
+        .collect::<Vec<_>>();
+    let records = result
+        .get("records")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "query response missing result.records".to_string())?;
+    let rows = records
+        .iter()
+        .map(|record| {
+            record
+                .get("values")
+                .and_then(|values| values.as_object())
+                .cloned()
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
+    Ok(AdminQueryTable { columns, rows })
+}
+
+fn admin_rows_json(rows: &[BTreeMap<String, reddb::json::Value>]) -> String {
+    let values = rows
+        .iter()
+        .cloned()
+        .map(reddb::json::Value::Object)
+        .collect::<Vec<_>>();
+    reddb::json::Value::Array(values).to_string_compact()
+}
+
+fn admin_sections_json(sections: &[(String, AdminQueryTable)]) -> String {
+    let mut object = BTreeMap::new();
+    for (name, table) in sections {
+        let rows = table
+            .rows
+            .iter()
+            .cloned()
+            .map(reddb::json::Value::Object)
+            .collect::<Vec<_>>();
+        object.insert(name.clone(), reddb::json::Value::Array(rows));
+    }
+    reddb::json::Value::Object(object).to_string_compact()
+}
+
+fn format_admin_table(table: &AdminQueryTable, use_color: bool) -> String {
+    if table.rows.is_empty() {
+        return "(no rows)\n".to_string();
+    }
+    let columns = if table.columns.is_empty() {
+        infer_admin_columns(&table.rows)
+    } else {
+        table.columns.clone()
+    };
+    let widths = admin_column_widths(&columns, &table.rows);
+    let mut out = String::new();
+    for (i, column) in columns.iter().enumerate() {
+        if i > 0 {
+            out.push_str("  ");
+        }
+        let label = if use_color {
+            format!("\x1b[36;1m{column}\x1b[0m")
+        } else {
+            column.clone()
+        };
+        out.push_str(&format!("{label:<width$}", width = widths[i]));
+    }
+    out.push('\n');
+    out.push_str(
+        &widths
+            .iter()
+            .map(|width| "-".repeat(*width))
+            .collect::<Vec<_>>()
+            .join("  "),
+    );
+    out.push('\n');
+    for row in &table.rows {
+        for (i, column) in columns.iter().enumerate() {
+            if i > 0 {
+                out.push_str("  ");
+            }
+            let value = row
+                .get(column)
+                .map(admin_json_value_display)
+                .unwrap_or_default();
+            out.push_str(&format!("{value:<width$}", width = widths[i]));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn format_admin_sections_text(
+    collection: &str,
+    sections: &[(String, AdminQueryTable)],
+    use_color: bool,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Collection: {collection}\n"));
+    for (name, table) in sections {
+        out.push('\n');
+        let title = if use_color {
+            format!("\x1b[35;1m{name}\x1b[0m")
+        } else {
+            name.clone()
+        };
+        out.push_str(&title);
+        out.push('\n');
+        out.push_str(&format_admin_table(table, use_color));
+    }
+    out
+}
+
+fn format_admin_csv(table: &AdminQueryTable) -> String {
+    let columns = if table.columns.is_empty() {
+        infer_admin_columns(&table.rows)
+    } else {
+        table.columns.clone()
+    };
+    let mut out = String::new();
+    out.push_str(
+        &columns
+            .iter()
+            .map(|value| csv_escape(value))
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    out.push('\n');
+    for row in &table.rows {
+        out.push_str(
+            &columns
+                .iter()
+                .map(|column| {
+                    row.get(column)
+                        .map(admin_json_value_display)
+                        .map(|value| csv_escape(&value))
+                        .unwrap_or_default()
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        out.push('\n');
+    }
+    out
+}
+
+fn format_admin_sections_csv(sections: &[(String, AdminQueryTable)]) -> String {
+    let mut out = String::new();
+    for (section, table) in sections {
+        let columns = if table.columns.is_empty() {
+            infer_admin_columns(&table.rows)
+        } else {
+            table.columns.clone()
+        };
+        out.push_str("section,");
+        out.push_str(
+            &columns
+                .iter()
+                .map(|value| csv_escape(value))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        out.push('\n');
+        for row in &table.rows {
+            out.push_str(&csv_escape(section));
+            out.push(',');
+            out.push_str(
+                &columns
+                    .iter()
+                    .map(|column| {
+                        row.get(column)
+                            .map(admin_json_value_display)
+                            .map(|value| csv_escape(&value))
+                            .unwrap_or_default()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn infer_admin_columns(rows: &[BTreeMap<String, reddb::json::Value>]) -> Vec<String> {
+    let mut columns = Vec::new();
+    for row in rows {
+        for key in row.keys() {
+            if !columns.contains(key) {
+                columns.push(key.clone());
+            }
+        }
+    }
+    columns
+}
+
+fn admin_column_widths(
+    columns: &[String],
+    rows: &[BTreeMap<String, reddb::json::Value>],
+) -> Vec<usize> {
+    columns
+        .iter()
+        .map(|column| {
+            let value_width = rows
+                .iter()
+                .filter_map(|row| row.get(column))
+                .map(|value| admin_json_value_display(value).len())
+                .max()
+                .unwrap_or(0);
+            column.len().max(value_width)
+        })
+        .collect()
+}
+
+fn admin_json_value_display(value: &reddb::json::Value) -> String {
+    match value {
+        reddb::json::Value::Null => "".to_string(),
+        reddb::json::Value::String(s) => s.clone(),
+        reddb::json::Value::Bool(b) => b.to_string(),
+        reddb::json::Value::Number(n) if n.fract() == 0.0 => (*n as i64).to_string(),
+        reddb::json::Value::Number(n) => n.to_string(),
+        reddb::json::Value::Array(_) | reddb::json::Value::Object(_) => value.to_string_compact(),
+    }
+}
+
+fn csv_escape(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
     }
 }
 
@@ -2689,7 +3289,10 @@ fn run_admin_cache_command(
                 }
                 Ok((status, body)) => {
                     if json_mode {
-                        json_error("admin.cache.stats", &format!("server returned {status}: {body}"));
+                        json_error(
+                            "admin.cache.stats",
+                            &format!("server returned {status}: {body}"),
+                        );
                     }
                     eprintln!("error: server returned {status}: {body}");
                     std::process::exit(1);
@@ -2708,14 +3311,22 @@ fn run_admin_cache_command(
             let ns = sub_args.first().copied().unwrap_or("");
             if ns.is_empty() {
                 if json_mode {
-                    json_error("admin.cache.flush-namespace", "namespace argument is required");
+                    json_error(
+                        "admin.cache.flush-namespace",
+                        "namespace argument is required",
+                    );
                 }
                 eprintln!("error: namespace argument is required");
                 eprintln!("usage: red admin cache flush-namespace <namespace>");
                 std::process::exit(1);
             }
             let payload = format!("{{\"namespace\":\"{}\"}}", json_escape(ns));
-            match post_json_to_http_authed(bind, "/admin/blob_cache/flush_namespace", &payload, token) {
+            match post_json_to_http_authed(
+                bind,
+                "/admin/blob_cache/flush_namespace",
+                &payload,
+                token,
+            ) {
                 Ok(body) => {
                     if json_mode {
                         print!("{body}");
@@ -2797,7 +3408,10 @@ fn run_admin_cache_command(
                 Some(v) => v,
                 None => {
                     if json_mode {
-                        json_error("admin.cache.compare-and-set", "--new-version (u64) is required");
+                        json_error(
+                            "admin.cache.compare-and-set",
+                            "--new-version (u64) is required",
+                        );
                     }
                     eprintln!("error: --new-version (u64) is required");
                     std::process::exit(1);
@@ -2817,7 +3431,10 @@ fn run_admin_cache_command(
                 Ok(b) => b,
                 Err(err) => {
                     if json_mode {
-                        json_error("admin.cache.compare-and-set", &format!("failed to read {value_path}: {err}"));
+                        json_error(
+                            "admin.cache.compare-and-set",
+                            &format!("failed to read {value_path}: {err}"),
+                        );
                     }
                     eprintln!("error: failed to read {value_path}: {err}");
                     std::process::exit(1);
@@ -3760,6 +4377,68 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
         let body = r#"{"hits":0}"#;
         let out = format_cache_stats_pretty(body);
         assert!(out.contains("--------------------------------------------------"));
+    }
+
+    // --- admin catalog output format ---
+
+    fn sample_admin_query_body() -> &'static str {
+        r#"{"ok":true,"result":{"columns":["name","model","internal"],"records":[{"values":{"name":"users","model":"table","internal":false},"nodes":{},"edges":{},"paths":[],"vector_results":[]},{"values":{"name":"red.collections","model":"table","internal":true},"nodes":{},"edges":{},"paths":[],"vector_results":[]}],"stats":{"rows_scanned":2}}}"#
+    }
+
+    #[test]
+    fn admin_table_from_query_response_extracts_columns_and_rows() {
+        let table = admin_table_from_query_response(sample_admin_query_body()).unwrap();
+        assert_eq!(table.columns, vec!["name", "model", "internal"]);
+        assert_eq!(table.rows.len(), 2);
+        assert_eq!(
+            table.rows[0].get("name").and_then(|v| v.as_str()),
+            Some("users")
+        );
+    }
+
+    #[test]
+    fn format_admin_table_renders_plain_table_when_color_disabled() {
+        let table = admin_table_from_query_response(sample_admin_query_body()).unwrap();
+        let out = format_admin_table(&table, false);
+        assert!(out.contains("name"));
+        assert!(out.contains("users"));
+        assert!(out.contains("red.collections"));
+        assert!(!out.contains("\x1b["));
+    }
+
+    #[test]
+    fn format_admin_table_renders_ansi_header_when_color_enabled() {
+        let table = admin_table_from_query_response(sample_admin_query_body()).unwrap();
+        let out = format_admin_table(&table, true);
+        assert!(out.contains("\x1b[36;1mname\x1b[0m"));
+    }
+
+    #[test]
+    fn admin_rows_json_outputs_bare_array_for_jq() {
+        let table = admin_table_from_query_response(sample_admin_query_body()).unwrap();
+        let out = admin_rows_json(&table.rows);
+        assert!(out.starts_with('['));
+        assert!(out.contains(r#""name":"users""#));
+        assert!(!out.contains(r#""ok""#));
+    }
+
+    #[test]
+    fn format_admin_csv_escapes_commas_and_quotes() {
+        let table = AdminQueryTable {
+            columns: vec!["name".to_string(), "model".to_string()],
+            rows: vec![BTreeMap::from([
+                (
+                    "name".to_string(),
+                    reddb::json::Value::String("weird,\"name\"".to_string()),
+                ),
+                (
+                    "model".to_string(),
+                    reddb::json::Value::String("table".to_string()),
+                ),
+            ])],
+        };
+        let out = format_admin_csv(&table);
+        assert_eq!(out, "name,model\n\"weird,\"\"name\"\"\",table\n");
     }
 
     // --- bytes_to_base64 (RFC 4648 §10 test vectors) ---
