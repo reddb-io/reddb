@@ -334,7 +334,7 @@ impl<'a> Parser<'a> {
 
     // ----- helpers used by the IAM policy parsers -----
 
-    fn parse_iam_principal_kind(&mut self) -> Result<PolicyPrincipalRef, ParseError> {
+    pub(crate) fn parse_iam_principal_kind(&mut self) -> Result<PolicyPrincipalRef, ParseError> {
         if self.consume_ident_ci("USER")? {
             let user = self.parse_iam_user_ref()?;
             Ok(PolicyPrincipalRef::User(user))

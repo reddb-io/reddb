@@ -119,3 +119,36 @@ Current columns:
 | `in_sync`          | Whether declared and operational index state agree. |
 | `queryable`        | Whether the index can currently serve queries. |
 | `requires_rebuild` | Whether the index should be rebuilt before it is considered healthy. |
+
+## `red.policies`
+
+`SHOW POLICIES` is syntax sugar for:
+
+```sql
+SELECT * FROM red.policies;
+```
+
+`SHOW POLICIES ON <name>` narrows that scan to one collection:
+
+```sql
+SELECT * FROM red.policies WHERE collection = '<name>';
+```
+
+Current columns:
+
+| Column       | Description |
+|--------------|-------------|
+| `name`       | Policy name. IAM statement rows use the policy id, suffixed with `:<sid>` or `#<index>` when one policy has multiple statements. |
+| `collection` | Collection targeted by the policy when it can be resolved from the local registry. |
+| `kind`       | `rls` for row-level security policies or `iam` for IAM policy statements. |
+| `effect`     | `allow` or `deny`. RLS policies are represented as `allow` predicates. |
+| `actions`    | Action names the policy covers. RLS `ALL` is shown as `*`. |
+| `principals` | RLS roles, or `*` when the RLS policy applies to all roles. |
+| `predicate`  | Raw-ish RLS predicate text rendered from the stored predicate AST, or `NULL` for IAM policies. |
+| `enabled`    | Whether the policy is active. IAM policy documents are shown as enabled when stored; RLS follows the collection's row-level-security flag. |
+
+Limitations: IAM policy attachments are currently exposed by principal, not by
+collection, so `red.policies` only reports IAM rows whose statement resources
+resolve to exact `table:<collection>` or `collection:<collection>` resources.
+The `principals` column is empty for IAM rows until attachment enumeration is
+available from the auth registry.

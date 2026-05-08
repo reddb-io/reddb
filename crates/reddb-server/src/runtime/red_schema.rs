@@ -2,15 +2,17 @@
 //!
 //! The SQL parser does not currently accept schema-qualified table
 //! identifiers in `FROM`, so the runtime rewrites the small virtual
-//! surface it owns (`red.collections`, `red.columns`, `red.indices`) to an
-//! internal identifier before normal parsing. Execution then intercepts that identifier and
-//! materializes rows from the live catalog snapshot.
+//! surface it owns (`red.collections`, `red.columns`, `red.indices`,
+//! `red.policies`) to internal identifiers before normal parsing. Execution
+//! then intercepts that identifier and materializes rows from the live catalog snapshot.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use super::*;
+use crate::auth::policies::{ActionPattern, Effect, Policy, ResourcePattern, Statement};
 use crate::catalog::{CollectionModel, SchemaMode};
+use crate::storage::query::ast::{Expr, FieldRef, Filter, PolicyAction, UnaryOp};
 use crate::storage::query::sql_lowering::{effective_table_filter, effective_table_projections};
 use crate::storage::schema::DataType;
 use crate::storage::unified::EntityData;
@@ -22,6 +24,8 @@ pub(super) const COLUMNS: &str = "red.columns";
 pub(super) const COLUMNS_INTERNAL: &str = "__red_schema_columns";
 pub(super) const INDICES: &str = "red.indices";
 pub(super) const INDICES_INTERNAL: &str = "__red_schema_indices";
+pub(super) const POLICIES: &str = "red.policies";
+pub(super) const POLICIES_INTERNAL: &str = "__red_schema_policies";
 pub(super) const READ_ONLY_ERROR: &str = "system schema is read-only";
 
 const COLLECTION_COLUMNS: [&str; 9] = [
@@ -59,6 +63,17 @@ const INDEX_COLUMNS: [&str; 10] = [
     "requires_rebuild",
 ];
 
+const POLICY_COLUMNS: [&str; 8] = [
+    "name",
+    "collection",
+    "kind",
+    "effect",
+    "actions",
+    "principals",
+    "predicate",
+    "enabled",
+];
+
 pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
     let mut rewritten = query.to_string();
     let mut changed = false;
@@ -67,6 +82,7 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
         (COLLECTIONS, COLLECTIONS_INTERNAL),
         (COLUMNS, COLUMNS_INTERNAL),
         (INDICES, INDICES_INTERNAL),
+        (POLICIES, POLICIES_INTERNAL),
     ] {
         if let Some(next) = replace_case_insensitive_outside_quotes(&rewritten, public, internal) {
             rewritten = next;
@@ -98,6 +114,8 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(COLUMNS)
         || table.eq_ignore_ascii_case(INDICES_INTERNAL)
         || table.eq_ignore_ascii_case(INDICES)
+        || table.eq_ignore_ascii_case(POLICIES_INTERNAL)
+        || table.eq_ignore_ascii_case(POLICIES)
 }
 
 pub(super) fn red_query(
@@ -133,6 +151,7 @@ pub(super) fn red_query(
         VirtualTableKind::Collections => collections_snapshot(runtime, tenant, visible_collections),
         VirtualTableKind::Columns => columns_snapshot(runtime, visible_collections),
         VirtualTableKind::Indices => indices_snapshot(runtime, visible_collections),
+        VirtualTableKind::Policies => policies_snapshot(runtime, tenant, visible_collections),
     };
 
     let table_name = query.table.as_str();
@@ -223,6 +242,7 @@ enum VirtualTableKind {
     Collections,
     Columns,
     Indices,
+    Policies,
 }
 
 impl VirtualTableKind {
@@ -231,6 +251,7 @@ impl VirtualTableKind {
             Self::Collections => &COLLECTION_COLUMNS,
             Self::Columns => &COLUMN_COLUMNS,
             Self::Indices => &INDEX_COLUMNS,
+            Self::Policies => &POLICY_COLUMNS,
         }
     }
 
@@ -239,6 +260,7 @@ impl VirtualTableKind {
             Self::Collections => COLLECTIONS,
             Self::Columns => COLUMNS,
             Self::Indices => INDICES,
+            Self::Policies => POLICIES,
         }
     }
 }
@@ -252,6 +274,9 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
     }
     if name.eq_ignore_ascii_case(INDICES_INTERNAL) || name.eq_ignore_ascii_case(INDICES) {
         return Ok(VirtualTableKind::Indices);
+    }
+    if name.eq_ignore_ascii_case(POLICIES_INTERNAL) || name.eq_ignore_ascii_case(POLICIES) {
+        return Ok(VirtualTableKind::Policies);
     }
     Err(RedDBError::Query(format!(
         "unknown system schema relation `{name}`"
@@ -345,6 +370,357 @@ fn index_method_kind_name(kind: super::index_store::IndexMethodKind) -> &'static
         super::index_store::IndexMethodKind::BTree => "btree",
         super::index_store::IndexMethodKind::Bitmap => "bitmap",
         super::index_store::IndexMethodKind::Spatial => "spatial.rtree",
+    }
+}
+
+fn policies_snapshot(
+    runtime: &RedDBRuntime,
+    tenant: Option<&str>,
+    visible_collections: Option<&HashSet<String>>,
+) -> Vec<UnifiedRecord> {
+    let schema = Arc::new(
+        POLICY_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let mut records = Vec::new();
+
+    let enabled = runtime.inner.rls_enabled_tables.read().clone();
+    let rls_policies = runtime.inner.rls_policies.read();
+    let mut rls_entries: Vec<_> = rls_policies.iter().collect();
+    rls_entries.sort_by(
+        |((left_collection, left_name), _), ((right_collection, right_name), _)| {
+            left_collection
+                .cmp(right_collection)
+                .then_with(|| left_name.cmp(right_name))
+        },
+    );
+    for ((collection, _), policy) in rls_entries {
+        if !collection_is_visible(collection, visible_collections) {
+            continue;
+        }
+        records.push(policy_record(
+            &schema,
+            policy.name.clone(),
+            Some(collection.clone()),
+            "rls",
+            "allow",
+            rls_actions(policy.action),
+            rls_principals(policy.role.as_deref()),
+            Value::text(render_filter_for_catalog(&policy.using)),
+            Value::Boolean(enabled.contains(collection)),
+        ));
+    }
+    drop(rls_policies);
+
+    let auth_store = runtime.inner.auth_store.read().clone();
+    if let Some(auth_store) = auth_store {
+        for policy in auth_store.list_policies() {
+            if !iam_policy_visible_to_tenant(&policy, tenant) {
+                continue;
+            }
+            for (statement_index, statement) in policy.statements.iter().enumerate() {
+                let collection_names = iam_statement_collections(statement);
+                if collection_names.is_empty() {
+                    records.push(iam_policy_record(
+                        &schema,
+                        &policy,
+                        statement_index,
+                        statement,
+                        None,
+                    ));
+                    continue;
+                }
+                for collection in collection_names {
+                    if !collection_is_visible(&collection, visible_collections) {
+                        continue;
+                    }
+                    records.push(iam_policy_record(
+                        &schema,
+                        &policy,
+                        statement_index,
+                        statement,
+                        Some(collection),
+                    ));
+                }
+            }
+        }
+    }
+
+    records
+}
+
+fn collection_is_visible(collection: &str, visible_collections: Option<&HashSet<String>>) -> bool {
+    visible_collections.is_none_or(|visible| visible.contains(collection))
+}
+
+fn iam_policy_visible_to_tenant(policy: &Policy, tenant: Option<&str>) -> bool {
+    match (tenant, policy.tenant.as_deref()) {
+        (None, _) => true,
+        (Some(_), None) => true,
+        (Some(active), Some(policy_tenant)) => active == policy_tenant,
+    }
+}
+
+fn policy_record(
+    schema: &Arc<Vec<Arc<str>>>,
+    name: String,
+    collection: Option<String>,
+    kind: &'static str,
+    effect: &'static str,
+    actions: Vec<String>,
+    principals: Vec<String>,
+    predicate: Value,
+    enabled: Value,
+) -> UnifiedRecord {
+    UnifiedRecord::with_schema(
+        Arc::clone(schema),
+        vec![
+            Value::text(name),
+            collection.map(Value::text).unwrap_or(Value::Null),
+            Value::text(kind),
+            Value::text(effect),
+            Value::Array(actions.into_iter().map(Value::text).collect()),
+            Value::Array(principals.into_iter().map(Value::text).collect()),
+            predicate,
+            enabled,
+        ],
+    )
+}
+
+fn iam_policy_record(
+    schema: &Arc<Vec<Arc<str>>>,
+    policy: &Policy,
+    statement_index: usize,
+    statement: &Statement,
+    collection: Option<String>,
+) -> UnifiedRecord {
+    let name = statement
+        .sid
+        .as_ref()
+        .map(|sid| format!("{}:{sid}", policy.id))
+        .unwrap_or_else(|| {
+            if policy.statements.len() > 1 {
+                format!("{}#{}", policy.id, statement_index)
+            } else {
+                policy.id.clone()
+            }
+        });
+    policy_record(
+        schema,
+        name,
+        collection,
+        "iam",
+        iam_effect(statement.effect),
+        iam_actions(&statement.actions),
+        Vec::new(),
+        Value::Null,
+        Value::Boolean(true),
+    )
+}
+
+fn rls_actions(action: Option<PolicyAction>) -> Vec<String> {
+    match action {
+        Some(PolicyAction::Select) => vec!["select".to_string()],
+        Some(PolicyAction::Insert) => vec!["insert".to_string()],
+        Some(PolicyAction::Update) => vec!["update".to_string()],
+        Some(PolicyAction::Delete) => vec!["delete".to_string()],
+        None => vec!["*".to_string()],
+    }
+}
+
+fn rls_principals(role: Option<&str>) -> Vec<String> {
+    role.map(|role| vec![role.to_string()])
+        .unwrap_or_else(|| vec!["*".to_string()])
+}
+
+fn iam_effect(effect: Effect) -> &'static str {
+    match effect {
+        Effect::Allow => "allow",
+        Effect::Deny => "deny",
+    }
+}
+
+fn iam_actions(actions: &[ActionPattern]) -> Vec<String> {
+    actions.iter().map(render_action_pattern).collect()
+}
+
+fn render_action_pattern(action: &ActionPattern) -> String {
+    match action {
+        ActionPattern::Exact(value) => value.clone(),
+        ActionPattern::Wildcard => "*".to_string(),
+        ActionPattern::Prefix(prefix) => format!("{prefix}:*"),
+    }
+}
+
+fn iam_statement_collections(statement: &Statement) -> Vec<String> {
+    let mut out = Vec::new();
+    for resource in &statement.resources {
+        match resource {
+            ResourcePattern::Exact { kind, name }
+                if kind.eq_ignore_ascii_case("table")
+                    || kind.eq_ignore_ascii_case("collection") =>
+            {
+                out.push(name.clone());
+            }
+            _ => {}
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn render_filter_for_catalog(filter: &Filter) -> String {
+    match filter {
+        Filter::Compare { field, op, value } => {
+            format!(
+                "{} {} {}",
+                render_field_for_catalog(field),
+                op,
+                crate::storage::query::renderer::render_value_sql(value)
+            )
+        }
+        Filter::CompareFields { left, op, right } => {
+            format!(
+                "{} {} {}",
+                render_field_for_catalog(left),
+                op,
+                render_field_for_catalog(right)
+            )
+        }
+        Filter::CompareExpr { lhs, op, rhs } => {
+            format!(
+                "{} {} {}",
+                render_expr_for_catalog(lhs),
+                op,
+                render_expr_for_catalog(rhs)
+            )
+        }
+        Filter::And(left, right) => format!(
+            "({}) AND ({})",
+            render_filter_for_catalog(left),
+            render_filter_for_catalog(right)
+        ),
+        Filter::Or(left, right) => format!(
+            "({}) OR ({})",
+            render_filter_for_catalog(left),
+            render_filter_for_catalog(right)
+        ),
+        Filter::Not(inner) => format!("NOT ({})", render_filter_for_catalog(inner)),
+        Filter::IsNull(field) => format!("{} IS NULL", render_field_for_catalog(field)),
+        Filter::IsNotNull(field) => format!("{} IS NOT NULL", render_field_for_catalog(field)),
+        Filter::In { field, values } => format!(
+            "{} IN ({})",
+            render_field_for_catalog(field),
+            values
+                .iter()
+                .map(crate::storage::query::renderer::render_value_sql)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Filter::Between { field, low, high } => format!(
+            "{} BETWEEN {} AND {}",
+            render_field_for_catalog(field),
+            crate::storage::query::renderer::render_value_sql(low),
+            crate::storage::query::renderer::render_value_sql(high)
+        ),
+        Filter::Like { field, pattern } => {
+            format!("{} LIKE '{}'", render_field_for_catalog(field), pattern)
+        }
+        Filter::StartsWith { field, prefix } => {
+            format!(
+                "{} STARTS WITH '{}'",
+                render_field_for_catalog(field),
+                prefix
+            )
+        }
+        Filter::EndsWith { field, suffix } => {
+            format!("{} ENDS WITH '{}'", render_field_for_catalog(field), suffix)
+        }
+        Filter::Contains { field, substring } => {
+            format!(
+                "{} CONTAINS '{}'",
+                render_field_for_catalog(field),
+                substring
+            )
+        }
+    }
+}
+
+fn render_expr_for_catalog(expr: &Expr) -> String {
+    match expr {
+        Expr::Literal { value, .. } => crate::storage::query::renderer::render_value_sql(value),
+        Expr::Column { field, .. } => render_field_for_catalog(field),
+        Expr::Parameter { index, .. } => format!("${index}"),
+        Expr::BinaryOp { op, lhs, rhs, .. } => format!(
+            "{} {:?} {}",
+            render_expr_for_catalog(lhs),
+            op,
+            render_expr_for_catalog(rhs)
+        ),
+        Expr::UnaryOp { op, operand, .. } => match op {
+            UnaryOp::Not => format!("NOT {}", render_expr_for_catalog(operand)),
+            UnaryOp::Neg => format!("-{}", render_expr_for_catalog(operand)),
+        },
+        Expr::Cast { inner, target, .. } => {
+            format!("CAST({} AS {:?})", render_expr_for_catalog(inner), target)
+        }
+        Expr::FunctionCall { name, args, .. } => format!(
+            "{}({})",
+            name,
+            args.iter()
+                .map(render_expr_for_catalog)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Expr::Case { .. } => format!("{expr:?}"),
+        Expr::IsNull {
+            operand, negated, ..
+        } => format!(
+            "{} IS {}NULL",
+            render_expr_for_catalog(operand),
+            if *negated { "NOT " } else { "" }
+        ),
+        Expr::InList {
+            target,
+            values,
+            negated,
+            ..
+        } => format!(
+            "{} {}IN ({})",
+            render_expr_for_catalog(target),
+            if *negated { "NOT " } else { "" },
+            values
+                .iter()
+                .map(render_expr_for_catalog)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Expr::Between {
+            target,
+            low,
+            high,
+            negated,
+            ..
+        } => format!(
+            "{} {}BETWEEN {} AND {}",
+            render_expr_for_catalog(target),
+            if *negated { "NOT " } else { "" },
+            render_expr_for_catalog(low),
+            render_expr_for_catalog(high)
+        ),
+    }
+}
+
+fn render_field_for_catalog(field: &FieldRef) -> String {
+    match field {
+        FieldRef::TableColumn { table, column } if table.is_empty() => column.clone(),
+        FieldRef::TableColumn { table, column } => format!("{table}.{column}"),
+        FieldRef::NodeProperty { alias, property } => format!("{alias}.{property}"),
+        FieldRef::EdgeProperty { alias, property } => format!("{alias}.{property}"),
+        FieldRef::NodeId { alias } => format!("{alias}.id"),
     }
 }
 
