@@ -56,8 +56,8 @@ impl ServerTransport {
 
     pub const fn default_bind_addr(self) -> &'static str {
         match self {
-            Self::Grpc => "127.0.0.1:5055",
-            Self::Http => "127.0.0.1:8080",
+            Self::Grpc => "127.0.0.1:5555",
+            Self::Http => "127.0.0.1:5055",
             Self::Wire => "127.0.0.1:5050",
         }
     }
@@ -217,7 +217,7 @@ impl ServerCommandConfig {
                 let primary_addr = self
                     .primary_addr
                     .clone()
-                    .unwrap_or_else(|| "http://127.0.0.1:5055".to_string());
+                    .unwrap_or_else(|| "http://127.0.0.1:5555".to_string());
                 // Public-mutation rejection on replicas is enforced by
                 // `WriteGate` at the runtime/RPC boundary (PLAN.md W1).
                 // Leaving `options.read_only = false` keeps the pager
@@ -1886,12 +1886,12 @@ mod tests {
             run_group: "reddb".to_string(),
             data_path: PathBuf::from("/var/lib/reddb/data.rdb"),
             router_bind_addr: None,
-            grpc_bind_addr: Some("0.0.0.0:5055".to_string()),
+            grpc_bind_addr: Some("0.0.0.0:5555".to_string()),
             http_bind_addr: None,
         };
 
         let unit = render_systemd_unit(&config);
-        assert!(unit.contains("ExecStart=/usr/local/bin/red server --path /var/lib/reddb/data.rdb --grpc-bind 0.0.0.0:5055"));
+        assert!(unit.contains("ExecStart=/usr/local/bin/red server --path /var/lib/reddb/data.rdb --grpc-bind 0.0.0.0:5555"));
         assert!(unit.contains("ReadWritePaths=/var/lib/reddb"));
     }
 
@@ -1905,7 +1905,7 @@ mod tests {
             data_path: PathBuf::from("/srv/reddb/live/data.rdb"),
             router_bind_addr: None,
             grpc_bind_addr: None,
-            http_bind_addr: Some("127.0.0.1:8080".to_string()),
+            http_bind_addr: Some("127.0.0.1:5055".to_string()),
         };
 
         assert_eq!(config.data_dir(), PathBuf::from("/srv/reddb/live"));
@@ -1924,13 +1924,13 @@ mod tests {
             run_group: "reddb".to_string(),
             data_path: PathBuf::from("/var/lib/reddb/data.rdb"),
             router_bind_addr: None,
-            grpc_bind_addr: Some("0.0.0.0:5055".to_string()),
-            http_bind_addr: Some("0.0.0.0:8080".to_string()),
+            grpc_bind_addr: Some("0.0.0.0:5555".to_string()),
+            http_bind_addr: Some("0.0.0.0:5055".to_string()),
         };
 
         let unit = render_systemd_unit(&config);
-        assert!(unit.contains("--grpc-bind 0.0.0.0:5055"));
-        assert!(unit.contains("--http-bind 0.0.0.0:8080"));
+        assert!(unit.contains("--grpc-bind 0.0.0.0:5555"));
+        assert!(unit.contains("--http-bind 0.0.0.0:5055"));
     }
 
     #[test]

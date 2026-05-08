@@ -56,7 +56,7 @@ Set an API key and go. Every provider that exposes an OpenAI-compatible API work
 
 ```bash
 export REDDB_GROQ_API_KEY=gsk_xxx
-red server --path ./data/reddb.rdb --http-bind 127.0.0.1:8080
+red server --path ./data/reddb.rdb --http-bind 127.0.0.1:5055
 ```
 
 ## Semantic search built in
@@ -246,7 +246,7 @@ curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | ba
 ### npx
 
 ```bash
-npx @reddb-io/cli@latest server --path ./data/reddb.rdb --http-bind 127.0.0.1:8080
+npx @reddb-io/cli@latest server --path ./data/reddb.rdb --http-bind 127.0.0.1:5055
 ```
 
 ### JavaScript / TypeScript driver
@@ -268,19 +268,19 @@ await db.close()
 Start the server:
 
 ```bash
-red server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:5055 --http-bind 127.0.0.1:8080
+red server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:5555 --http-bind 127.0.0.1:5055
 ```
 
 Check health:
 
 ```bash
-curl -s http://127.0.0.1:8080/health
+curl -s http://127.0.0.1:5055/health
 ```
 
 Run a query:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/query \
+curl -X POST http://127.0.0.1:5055/query \
   -H 'content-type: application/json' \
   -d '{"query":"SELECT * FROM hosts"}'
 ```
@@ -288,7 +288,7 @@ curl -X POST http://127.0.0.1:8080/query \
 Ask a question:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/ai/ask \
+curl -X POST http://127.0.0.1:5055/ai/ask \
   -H 'content-type: application/json' \
   -d '{"question":"what happened on host 10.0.0.1?","provider":"groq","model":"llama-3.3-70b-versatile"}'
 ```
@@ -296,7 +296,7 @@ curl -X POST http://127.0.0.1:8080/ai/ask \
 Connect via gRPC REPL:
 
 ```bash
-red connect 127.0.0.1:5055
+red connect 127.0.0.1:5555
 ```
 
 ## Start here
