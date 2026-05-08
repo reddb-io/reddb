@@ -697,3 +697,449 @@ fn render_group_by_function_arg(arg: &Projection) -> Option<String> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::query::ast::{AsOfClause, BinOp, CompareOp, ExpandOptions, TableSource};
+
+    fn parse_table(sql: &str) -> TableQuery {
+        let parsed = super::super::parse(sql).unwrap().query;
+        let QueryExpr::Table(table) = parsed else {
+            panic!("expected table query");
+        };
+        table
+    }
+
+    fn col(name: &str) -> Expr {
+        Expr::Column {
+            field: FieldRef::TableColumn {
+                table: String::new(),
+                column: name.to_string(),
+            },
+            span: Span::synthetic(),
+        }
+    }
+
+    #[test]
+    fn helper_function_catalogs_cover_all_names() {
+        for name in [
+            "GEO_DISTANCE",
+            "GEO_DISTANCE_VINCENTY",
+            "GEO_BEARING",
+            "GEO_MIDPOINT",
+            "HAVERSINE",
+            "VINCENTY",
+            "TIME_BUCKET",
+            "UPPER",
+            "LOWER",
+            "LENGTH",
+            "CHAR_LENGTH",
+            "CHARACTER_LENGTH",
+            "OCTET_LENGTH",
+            "BIT_LENGTH",
+            "SUBSTRING",
+            "SUBSTR",
+            "POSITION",
+            "TRIM",
+            "LTRIM",
+            "RTRIM",
+            "BTRIM",
+            "CONCAT",
+            "CONCAT_WS",
+            "REVERSE",
+            "LEFT",
+            "RIGHT",
+            "QUOTE_LITERAL",
+            "ABS",
+            "ROUND",
+            "COALESCE",
+            "STDDEV",
+            "VARIANCE",
+            "MEDIAN",
+            "PERCENTILE",
+            "GROUP_CONCAT",
+            "STRING_AGG",
+            "FIRST",
+            "LAST",
+            "ARRAY_AGG",
+            "COUNT_DISTINCT",
+            "MONEY",
+            "MONEY_ASSET",
+            "MONEY_MINOR",
+            "MONEY_SCALE",
+            "VERIFY_PASSWORD",
+            "CAST",
+            "CASE",
+        ] {
+            assert!(is_scalar_function(name), "{name}");
+        }
+        assert!(!is_scalar_function("NOT_A_FUNCTION"));
+
+        for name in [
+            "COUNT",
+            "AVG",
+            "SUM",
+            "MIN",
+            "MAX",
+            "STDDEV",
+            "VARIANCE",
+            "MEDIAN",
+            "PERCENTILE",
+            "GROUP_CONCAT",
+            "STRING_AGG",
+            "FIRST",
+            "LAST",
+            "ARRAY_AGG",
+            "COUNT_DISTINCT",
+        ] {
+            assert!(is_aggregate_function(name), "{name}");
+        }
+        assert!(!is_aggregate_function("LOWER"));
+
+        assert_eq!(aggregate_token_name(&Token::Count), Some("COUNT"));
+        assert_eq!(aggregate_token_name(&Token::Sum), Some("SUM"));
+        assert_eq!(aggregate_token_name(&Token::Avg), Some("AVG"));
+        assert_eq!(aggregate_token_name(&Token::Min), Some("MIN"));
+        assert_eq!(aggregate_token_name(&Token::Max), Some("MAX"));
+        assert_eq!(aggregate_token_name(&Token::First), Some("FIRST"));
+        assert_eq!(aggregate_token_name(&Token::Last), Some("LAST"));
+        assert_eq!(aggregate_token_name(&Token::Ident("COUNT".into())), None);
+
+        assert_eq!(scalar_token_name(&Token::Left), Some("LEFT"));
+        assert_eq!(scalar_token_name(&Token::Right), Some("RIGHT"));
+        assert_eq!(scalar_token_name(&Token::Ident("LEFT".into())), None);
+
+        for unit in [
+            "ms",
+            "msec",
+            "millisecond",
+            "milliseconds",
+            "s",
+            "sec",
+            "secs",
+            "second",
+            "seconds",
+            "m",
+            "min",
+            "mins",
+            "minute",
+            "minutes",
+            "h",
+            "hr",
+            "hrs",
+            "hour",
+            "hours",
+            "d",
+            "day",
+            "days",
+        ] {
+            assert!(is_duration_unit(unit), "{unit}");
+        }
+        assert!(!is_duration_unit("fortnight"));
+    }
+
+    #[test]
+    fn projection_and_group_render_helpers_cover_aliases_and_exprs() {
+        let field = FieldRef::TableColumn {
+            table: String::new(),
+            column: "name".into(),
+        };
+        let filter = Filter::Compare {
+            field: field.clone(),
+            op: CompareOp::Eq,
+            value: Value::text("alice"),
+        };
+
+        assert_eq!(
+            attach_projection_alias(Projection::Field(field.clone(), None), Some("n".into())),
+            Projection::Field(field.clone(), Some("n".into()))
+        );
+        assert_eq!(
+            attach_projection_alias(
+                Projection::Expression(Box::new(filter.clone()), None),
+                Some("ok".into())
+            ),
+            Projection::Expression(Box::new(filter), Some("ok".into()))
+        );
+        assert_eq!(
+            attach_projection_alias(
+                Projection::Function("LOWER".into(), vec![]),
+                Some("l".into())
+            ),
+            Projection::Function("LOWER:l".into(), vec![])
+        );
+        assert_eq!(
+            attach_projection_alias(
+                Projection::Function("LOWER:l".into(), vec![]),
+                Some("ignored".into())
+            ),
+            Projection::Function("LOWER:l".into(), vec![])
+        );
+        assert_eq!(
+            attach_projection_alias(Projection::Column("name".into()), Some("n".into())),
+            Projection::Alias("name".into(), "n".into())
+        );
+        assert_eq!(
+            attach_projection_alias(Projection::All, Some("ignored".into())),
+            Projection::All
+        );
+
+        assert_eq!(render_group_by_expr(&col("dept")).as_deref(), Some("dept"));
+        assert_eq!(
+            render_group_by_expr(&Expr::Column {
+                field: FieldRef::TableColumn {
+                    table: "employees".into(),
+                    column: "dept".into()
+                },
+                span: Span::synthetic()
+            })
+            .as_deref(),
+            Some("employees.dept")
+        );
+        assert_eq!(
+            render_group_by_expr(&Expr::Column {
+                field: FieldRef::NodeId { alias: "n".into() },
+                span: Span::synthetic()
+            }),
+            Some("NodeId { alias: \"n\" }".into())
+        );
+        assert_eq!(
+            render_group_by_expr(&Expr::Literal {
+                value: Value::Null,
+                span: Span::synthetic()
+            })
+            .as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            render_group_by_expr(&Expr::Literal {
+                value: Value::text("5m"),
+                span: Span::synthetic()
+            })
+            .as_deref(),
+            Some("5m")
+        );
+        assert_eq!(
+            render_group_by_expr(&Expr::Literal {
+                value: Value::Integer(7),
+                span: Span::synthetic()
+            })
+            .as_deref(),
+            Some("7")
+        );
+        assert_eq!(
+            render_group_by_expr(&Expr::FunctionCall {
+                name: "TIME_BUCKET".into(),
+                args: vec![
+                    col("ts"),
+                    Expr::Literal {
+                        value: Value::text("5m"),
+                        span: Span::synthetic()
+                    }
+                ],
+                span: Span::synthetic()
+            })
+            .as_deref(),
+            Some("TIME_BUCKET(ts,5m)")
+        );
+        assert_eq!(
+            render_group_by_expr(&Expr::FunctionCall {
+                name: "LOWER".into(),
+                args: vec![col("dept")],
+                span: Span::synthetic()
+            })
+            .as_deref(),
+            Some("LOWER()")
+        );
+
+        assert_eq!(
+            render_group_by_function_arg(&Projection::Column("LIT:5m".into())),
+            Some("5m".into())
+        );
+        assert_eq!(
+            render_group_by_function_arg(&Projection::Column("dept".into())),
+            Some("dept".into())
+        );
+        assert_eq!(
+            render_group_by_function_arg(&Projection::All),
+            Some("*".into())
+        );
+        assert_eq!(
+            render_group_by_function_arg(&Projection::Function("LOWER".into(), vec![])),
+            None
+        );
+    }
+
+    #[test]
+    fn expression_aggregate_detection_branches() {
+        let count = Expr::FunctionCall {
+            name: "COUNT".into(),
+            args: vec![col("id")],
+            span: Span::synthetic(),
+        };
+        assert!(contains_nested_aggregate(&count));
+        assert!(is_plain_aggregate_expr(&count));
+
+        let nested = Expr::FunctionCall {
+            name: "SUM".into(),
+            args: vec![count.clone()],
+            span: Span::synthetic(),
+        };
+        assert!(contains_nested_aggregate(&nested));
+        assert!(!is_plain_aggregate_expr(&nested));
+
+        let binary = Expr::BinaryOp {
+            op: BinOp::Add,
+            lhs: Box::new(col("a")),
+            rhs: Box::new(count.clone()),
+            span: Span::synthetic(),
+        };
+        assert!(contains_nested_aggregate(&binary));
+
+        let unary = Expr::UnaryOp {
+            op: UnaryOp::Not,
+            operand: Box::new(count.clone()),
+            span: Span::synthetic(),
+        };
+        assert!(contains_nested_aggregate(&unary));
+
+        let cast = Expr::Cast {
+            inner: Box::new(count.clone()),
+            target: crate::storage::schema::DataType::Integer,
+            span: Span::synthetic(),
+        };
+        assert!(contains_nested_aggregate(&cast));
+
+        let case = Expr::Case {
+            branches: vec![(col("flag"), count.clone())],
+            else_: Some(Box::new(col("fallback"))),
+            span: Span::synthetic(),
+        };
+        assert!(contains_nested_aggregate(&case));
+
+        let in_list = Expr::InList {
+            target: Box::new(col("id")),
+            values: vec![count.clone()],
+            negated: false,
+            span: Span::synthetic(),
+        };
+        assert!(contains_nested_aggregate(&in_list));
+
+        let between = Expr::Between {
+            target: Box::new(col("id")),
+            low: Box::new(col("low")),
+            high: Box::new(count),
+            negated: false,
+            span: Span::synthetic(),
+        };
+        assert!(contains_nested_aggregate(&between));
+        assert!(!contains_nested_aggregate(&Expr::Parameter {
+            index: 1,
+            span: Span::synthetic()
+        }));
+
+        assert!(super::super::parse("SELECT SUM(COUNT(id)) FROM t").is_err());
+    }
+
+    #[test]
+    fn table_clause_parsing_covers_as_of_order_offset_and_expand() {
+        let table = parse_table(
+            "SELECT name FROM users AS OF COMMIT 'abc123' \
+             WHERE deleted_at IS NULL \
+             ORDER BY LOWER(name) ASC NULLS FIRST, created_at DESC NULLS LAST \
+             LIMIT 10 OFFSET 5 WITH EXPAND GRAPH DEPTH 3, CROSS_REFS",
+        );
+        assert!(matches!(table.as_of, Some(AsOfClause::Commit(ref v)) if v == "abc123"));
+        assert!(table.filter.is_some());
+        assert_eq!(table.order_by.len(), 2);
+        assert!(table.order_by[0].expr.is_some());
+        assert!(table.order_by[0].ascending);
+        assert!(table.order_by[0].nulls_first);
+        assert!(!table.order_by[1].ascending);
+        assert!(!table.order_by[1].nulls_first);
+        assert_eq!(table.limit, Some(10));
+        assert_eq!(table.offset, Some(5));
+        assert!(matches!(
+            table.expand,
+            Some(ExpandOptions {
+                graph: true,
+                graph_depth: 3,
+                cross_refs: true,
+                ..
+            })
+        ));
+
+        let table = parse_table("SELECT * FROM users AS OF BRANCH 'main'");
+        assert!(matches!(table.as_of, Some(AsOfClause::Branch(ref v)) if v == "main"));
+
+        let table = parse_table("SELECT * FROM users AS OF TAG 'v1'");
+        assert!(matches!(table.as_of, Some(AsOfClause::Tag(ref v)) if v == "v1"));
+
+        let table = parse_table("SELECT * FROM users AS OF TIMESTAMP 1710000000000");
+        assert!(matches!(
+            table.as_of,
+            Some(AsOfClause::TimestampMs(1_710_000_000_000))
+        ));
+
+        let table = parse_table("SELECT * FROM users AS OF SNAPSHOT 42");
+        assert!(matches!(table.as_of, Some(AsOfClause::Snapshot(42))));
+
+        let table = parse_table("SELECT * FROM users WITH EXPAND");
+        assert!(matches!(
+            table.expand,
+            Some(ExpandOptions {
+                graph: true,
+                graph_depth: 1,
+                cross_refs: true,
+                ..
+            })
+        ));
+
+        assert!(super::super::parse("SELECT * FROM users AS OF SNAPSHOT -1").is_err());
+        assert!(super::super::parse("SELECT * FROM users AS OF UNKNOWN 'x'").is_err());
+    }
+
+    #[test]
+    fn direct_parser_helpers_cover_projection_group_order_and_literals() {
+        let mut parser = Parser::new("name, LOWER(email) AS email_l").unwrap();
+        let projections = parser.parse_projection_list().unwrap();
+        assert_eq!(projections.len(), 2);
+
+        let mut parser = Parser::new("dept, TIME_BUCKET(5 m)").unwrap();
+        let group_by = parser.parse_group_by_list().unwrap();
+        assert_eq!(group_by, vec!["dept", "TIME_BUCKET(5m)"]);
+
+        let mut parser = Parser::new("LOWER(name) DESC, created_at").unwrap();
+        let order_by = parser.parse_order_by_list().unwrap();
+        assert_eq!(order_by.len(), 2);
+        assert!(order_by[0].expr.is_some());
+        assert!(!order_by[0].ascending);
+        assert!(order_by[0].nulls_first);
+        assert!(order_by[1].ascending);
+        assert!(!order_by[1].nulls_first);
+
+        let mut parser = Parser::new("-5 ms").unwrap();
+        assert_eq!(parser.parse_function_literal_arg().unwrap(), "-5ms");
+        let mut parser = Parser::new("2.0 H").unwrap();
+        assert_eq!(parser.parse_function_literal_arg().unwrap(), "2h");
+        let mut parser = Parser::new("bad").unwrap();
+        assert!(parser.parse_function_literal_arg().is_err());
+    }
+
+    #[test]
+    fn from_subquery_source_is_preserved() {
+        let parsed = super::super::parse("FROM (SELECT id FROM users) AS u RETURN u.id")
+            .unwrap()
+            .query;
+        let QueryExpr::Table(table) = parsed else {
+            panic!("expected table query");
+        };
+        assert_eq!(table.table, "__subq_u");
+        assert_eq!(table.alias.as_deref(), Some("u"));
+        assert!(matches!(table.source, Some(TableSource::Subquery(_))));
+        assert_eq!(table.select_items.len(), 1);
+
+        assert!(super::super::parse("FROM (MATCH (n) RETURN n) AS g").is_err());
+    }
+}

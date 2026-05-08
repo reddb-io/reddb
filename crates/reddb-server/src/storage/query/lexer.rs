@@ -545,7 +545,10 @@ pub struct LexerError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LexerLimitHit {
     /// Identifier length cap.
-    IdentifierTooLong { limit_name: &'static str, value: usize },
+    IdentifierTooLong {
+        limit_name: &'static str,
+        value: usize,
+    },
 }
 
 impl LexerError {
@@ -864,6 +867,25 @@ impl<'a> Lexer<'a> {
         while let Some(ch) = self.peek() {
             if ch.is_whitespace() {
                 self.advance();
+            } else if ch == '-' && self.input[self.offset as usize..].starts_with("--") {
+                self.advance();
+                self.advance();
+                while let Some(c) = self.peek() {
+                    if c == '\n' {
+                        break;
+                    }
+                    self.advance();
+                }
+            } else if ch == '/' && self.input[self.offset as usize..].starts_with("/*") {
+                self.advance();
+                self.advance();
+                while let Some(c) = self.peek() {
+                    self.advance();
+                    if c == '*' && self.peek() == Some('/') {
+                        self.advance();
+                        break;
+                    }
+                }
             } else {
                 break;
             }
@@ -1557,10 +1579,7 @@ mod tests {
     #[test]
     fn test_json_literal_empty_object() {
         let tokens = tokenize("{ }");
-        assert_eq!(
-            tokens,
-            vec![Token::JsonLiteral("{ }".into()), Token::Eof]
-        );
+        assert_eq!(tokens, vec![Token::JsonLiteral("{ }".into()), Token::Eof]);
     }
 
     #[test]
@@ -1568,10 +1587,7 @@ mod tests {
         let tokens = tokenize(r#"{"a":1}"#);
         assert_eq!(
             tokens,
-            vec![
-                Token::JsonLiteral(r#"{"a":1}"#.into()),
-                Token::Eof
-            ]
+            vec![Token::JsonLiteral(r#"{"a":1}"#.into()), Token::Eof]
         );
     }
 
@@ -1809,5 +1825,498 @@ mod tests {
                 Token::Eof
             ]
         );
+    }
+
+    #[test]
+    fn test_keyword_matrix_and_alias_spellings() {
+        let cases = [
+            ("SELECT", Token::Select),
+            ("FROM", Token::From),
+            ("WHERE", Token::Where),
+            ("AND", Token::And),
+            ("OR", Token::Or),
+            ("NOT", Token::Not),
+            ("MATCH", Token::Match),
+            ("RETURN", Token::Return),
+            ("JOIN", Token::Join),
+            ("GRAPH", Token::Graph),
+            ("PATH", Token::Path),
+            ("TO", Token::To),
+            ("VIA", Token::Via),
+            ("ON", Token::On),
+            ("AS", Token::As),
+            ("IS", Token::Is),
+            ("NULL", Token::Null),
+            ("BETWEEN", Token::Between),
+            ("LIKE", Token::Like),
+            ("IN", Token::In),
+            ("ORDER", Token::Order),
+            ("BY", Token::By),
+            ("ASC", Token::Asc),
+            ("DESC", Token::Desc),
+            ("NULLS", Token::Nulls),
+            ("FIRST", Token::First),
+            ("LAST", Token::Last),
+            ("LIMIT", Token::Limit),
+            ("OFFSET", Token::Offset),
+            ("INNER", Token::Inner),
+            ("LEFT", Token::Left),
+            ("RIGHT", Token::Right),
+            ("OUTER", Token::Outer),
+            ("FULL", Token::Full),
+            ("CROSS", Token::Cross),
+            ("STARTS", Token::Starts),
+            ("ENDS", Token::Ends),
+            ("WITH", Token::With),
+            ("CONTAINS", Token::Contains),
+            ("TRUE", Token::True),
+            ("FALSE", Token::False),
+            ("ENRICH", Token::Enrich),
+            ("GROUP", Token::Group),
+            ("COUNT", Token::Count),
+            ("SUM", Token::Sum),
+            ("AVG", Token::Avg),
+            ("MIN", Token::Min),
+            ("MAX", Token::Max),
+            ("DISTINCT", Token::Distinct),
+            ("VECTOR", Token::Vector),
+            ("SEARCH", Token::Search),
+            ("SIMILAR", Token::Similar),
+            ("COLLECTION", Token::Collection),
+            ("METRIC", Token::Metric),
+            ("THRESHOLD", Token::Threshold),
+            ("K", Token::K),
+            ("HYBRID", Token::Hybrid),
+            ("FUSION", Token::Fusion),
+            ("RERANK", Token::Rerank),
+            ("RRF", Token::Rrf),
+            ("INTERSECTION", Token::Intersection),
+            ("UNION", Token::Union),
+            ("RECURSIVE", Token::Recursive),
+            ("ALL", Token::All),
+            ("WEIGHT", Token::Weight),
+            ("L2", Token::L2),
+            ("COSINE", Token::Cosine),
+            ("INNER_PRODUCT", Token::InnerProduct),
+            ("INNERPRODUCT", Token::InnerProduct),
+            ("INCLUDE", Token::Include),
+            ("METADATA", Token::Metadata),
+            ("VECTORS", Token::Vectors),
+            ("EXPLAIN", Token::Explain),
+            ("FOR", Token::For),
+            ("FORMAT", Token::Format),
+            ("JSON", Token::Json),
+            ("INSERT", Token::Insert),
+            ("INTO", Token::Into),
+            ("VALUES", Token::Values),
+            ("UPDATE", Token::Update),
+            ("SET", Token::Set),
+            ("DELETE", Token::Delete),
+            ("CREATE", Token::Create),
+            ("TABLE", Token::Table),
+            ("DROP", Token::Drop),
+            ("ALTER", Token::Alter),
+            ("ADD", Token::Add),
+            ("COLUMN", Token::Column),
+            ("PRIMARY", Token::Primary),
+            ("KEY", Token::Key),
+            ("DEFAULT", Token::Default),
+            ("COMPRESS", Token::Compress),
+            ("INDEX", Token::Index),
+            ("UNIQUE", Token::Unique),
+            ("IF", Token::If),
+            ("EXISTS", Token::Exists),
+            ("RETURNING", Token::Returning),
+            ("CASCADE", Token::Cascade),
+            ("RENAME", Token::Rename),
+            ("USING", Token::Using),
+            ("NODE", Token::Node),
+            ("EDGE", Token::Edge),
+            ("DOCUMENT", Token::Document),
+            ("KV", Token::Kv),
+            ("TIMESERIES", Token::Timeseries),
+            ("RETENTION", Token::Retention),
+            ("QUEUE", Token::Queue),
+            ("TREE", Token::Tree),
+            ("PUSH", Token::Push),
+            ("POP", Token::Pop),
+            ("PEEK", Token::Peek),
+            ("PURGE", Token::Purge),
+            ("ACK", Token::Ack),
+            ("NACK", Token::Nack),
+            ("PRIORITY", Token::Priority),
+            ("LPUSH", Token::Ident("LPUSH".into())),
+            ("RPUSH", Token::Ident("RPUSH".into())),
+            ("LPOP", Token::Ident("LPOP".into())),
+            ("RPOP", Token::Ident("RPOP".into())),
+            ("NEIGHBORHOOD", Token::Neighborhood),
+            ("SHORTEST_PATH", Token::ShortestPath),
+            ("SHORTESTPATH", Token::ShortestPath),
+            ("CENTRALITY", Token::Centrality),
+            ("COMMUNITY", Token::Community),
+            ("COMPONENTS", Token::Components),
+            ("CYCLES", Token::Cycles),
+            ("TRAVERSE", Token::Traverse),
+            ("DEPTH", Token::Depth),
+            ("DIRECTION", Token::Direction),
+            ("ALGORITHM", Token::Algorithm),
+            ("STRATEGY", Token::Strategy),
+            ("MAX_ITERATIONS", Token::MaxIterations),
+            ("MAXITERATIONS", Token::MaxIterations),
+            ("MAX_LENGTH", Token::MaxLength),
+            ("MAXLENGTH", Token::MaxLength),
+            ("MODE", Token::Mode),
+            ("CLUSTERING", Token::Clustering),
+            ("TOPOLOGICAL_SORT", Token::TopologicalSort),
+            ("TOPOLOGICALSORT", Token::TopologicalSort),
+            ("PROPERTIES", Token::Properties),
+            ("TEXT", Token::Text),
+            ("FUZZY", Token::Fuzzy),
+            ("MIN_SCORE", Token::MinScore),
+            ("MINSCORE", Token::MinScore),
+            ("BEGIN", Token::Begin),
+            ("COMMIT", Token::Commit),
+            ("ROLLBACK", Token::Rollback),
+            ("SAVEPOINT", Token::Savepoint),
+            ("RELEASE", Token::Release),
+            ("START", Token::Start),
+            ("TRANSACTION", Token::Transaction),
+            ("WORK", Token::Work),
+            ("VACUUM", Token::Vacuum),
+            ("ANALYZE", Token::Analyze),
+            ("SCHEMA", Token::Schema),
+            ("SEQUENCE", Token::Sequence),
+            ("INCREMENT", Token::Increment),
+            ("COPY", Token::Copy),
+            ("HEADER", Token::Header),
+            ("DELIMITER", Token::Delimiter),
+            ("VIEW", Token::View),
+            ("MATERIALIZED", Token::Materialized),
+            ("REFRESH", Token::Refresh),
+            ("PARTITION", Token::Partition),
+            ("RANGE", Token::Range),
+            ("LIST", Token::List),
+            ("HASH", Token::Hash),
+            ("ATTACH", Token::Attach),
+            ("DETACH", Token::Detach),
+            ("OF", Token::Of),
+            ("POLICY", Token::Policy),
+            ("ENABLE", Token::Enable),
+            ("DISABLE", Token::Disable),
+            ("SECURITY", Token::Security),
+            ("ROW", Token::Row),
+            ("LEVEL", Token::Level),
+            ("FOREIGN", Token::Foreign),
+            ("SERVER", Token::Server),
+            ("WRAPPER", Token::Wrapper),
+            ("OPTIONS", Token::Options),
+            ("DATA", Token::Data),
+            ("plain_ident", Token::Ident("plain_ident".into())),
+        ];
+
+        for (input, expected) in cases {
+            let tokens = tokenize(input);
+            assert_eq!(tokens, vec![expected, Token::Eof], "{input}");
+        }
+    }
+
+    #[test]
+    fn test_display_all_token_variants() {
+        let cases = [
+            (Token::Select, "SELECT"),
+            (Token::From, "FROM"),
+            (Token::Where, "WHERE"),
+            (Token::And, "AND"),
+            (Token::Or, "OR"),
+            (Token::Not, "NOT"),
+            (Token::Match, "MATCH"),
+            (Token::Return, "RETURN"),
+            (Token::Join, "JOIN"),
+            (Token::Graph, "GRAPH"),
+            (Token::Path, "PATH"),
+            (Token::To, "TO"),
+            (Token::Via, "VIA"),
+            (Token::On, "ON"),
+            (Token::As, "AS"),
+            (Token::Is, "IS"),
+            (Token::Null, "NULL"),
+            (Token::Between, "BETWEEN"),
+            (Token::Like, "LIKE"),
+            (Token::In, "IN"),
+            (Token::Order, "ORDER"),
+            (Token::By, "BY"),
+            (Token::Asc, "ASC"),
+            (Token::Desc, "DESC"),
+            (Token::Nulls, "NULLS"),
+            (Token::First, "FIRST"),
+            (Token::Last, "LAST"),
+            (Token::Limit, "LIMIT"),
+            (Token::Offset, "OFFSET"),
+            (Token::Inner, "INNER"),
+            (Token::Left, "LEFT"),
+            (Token::Right, "RIGHT"),
+            (Token::Outer, "OUTER"),
+            (Token::Full, "FULL"),
+            (Token::Cross, "CROSS"),
+            (Token::Starts, "STARTS"),
+            (Token::Ends, "ENDS"),
+            (Token::With, "WITH"),
+            (Token::Contains, "CONTAINS"),
+            (Token::True, "TRUE"),
+            (Token::False, "FALSE"),
+            (Token::Enrich, "ENRICH"),
+            (Token::Group, "GROUP"),
+            (Token::Count, "COUNT"),
+            (Token::Sum, "SUM"),
+            (Token::Avg, "AVG"),
+            (Token::Min, "MIN"),
+            (Token::Max, "MAX"),
+            (Token::Distinct, "DISTINCT"),
+            (Token::Vector, "VECTOR"),
+            (Token::Search, "SEARCH"),
+            (Token::Similar, "SIMILAR"),
+            (Token::Collection, "COLLECTION"),
+            (Token::Metric, "METRIC"),
+            (Token::Threshold, "THRESHOLD"),
+            (Token::K, "K"),
+            (Token::Hybrid, "HYBRID"),
+            (Token::Fusion, "FUSION"),
+            (Token::Rerank, "RERANK"),
+            (Token::Rrf, "RRF"),
+            (Token::Intersection, "INTERSECTION"),
+            (Token::Union, "UNION"),
+            (Token::Recursive, "RECURSIVE"),
+            (Token::All, "ALL"),
+            (Token::Weight, "WEIGHT"),
+            (Token::L2, "L2"),
+            (Token::Cosine, "COSINE"),
+            (Token::InnerProduct, "INNER_PRODUCT"),
+            (Token::Include, "INCLUDE"),
+            (Token::Metadata, "METADATA"),
+            (Token::Vectors, "VECTORS"),
+            (Token::Explain, "EXPLAIN"),
+            (Token::For, "FOR"),
+            (Token::Format, "FORMAT"),
+            (Token::Json, "JSON"),
+            (Token::Insert, "INSERT"),
+            (Token::Into, "INTO"),
+            (Token::Values, "VALUES"),
+            (Token::Update, "UPDATE"),
+            (Token::Set, "SET"),
+            (Token::Delete, "DELETE"),
+            (Token::Create, "CREATE"),
+            (Token::Table, "TABLE"),
+            (Token::Drop, "DROP"),
+            (Token::Alter, "ALTER"),
+            (Token::Add, "ADD"),
+            (Token::Column, "COLUMN"),
+            (Token::Primary, "PRIMARY"),
+            (Token::Key, "KEY"),
+            (Token::Default, "DEFAULT"),
+            (Token::Compress, "COMPRESS"),
+            (Token::Index, "INDEX"),
+            (Token::Unique, "UNIQUE"),
+            (Token::If, "IF"),
+            (Token::Exists, "EXISTS"),
+            (Token::Returning, "RETURNING"),
+            (Token::Cascade, "CASCADE"),
+            (Token::Rename, "RENAME"),
+            (Token::Using, "USING"),
+            (Token::Node, "NODE"),
+            (Token::Edge, "EDGE"),
+            (Token::Document, "DOCUMENT"),
+            (Token::Kv, "KV"),
+            (Token::Timeseries, "TIMESERIES"),
+            (Token::Retention, "RETENTION"),
+            (Token::Queue, "QUEUE"),
+            (Token::Tree, "TREE"),
+            (Token::Push, "PUSH"),
+            (Token::Pop, "POP"),
+            (Token::Peek, "PEEK"),
+            (Token::Purge, "PURGE"),
+            (Token::Ack, "ACK"),
+            (Token::Nack, "NACK"),
+            (Token::Priority, "PRIORITY"),
+            (Token::Neighborhood, "NEIGHBORHOOD"),
+            (Token::ShortestPath, "SHORTEST_PATH"),
+            (Token::Centrality, "CENTRALITY"),
+            (Token::Community, "COMMUNITY"),
+            (Token::Components, "COMPONENTS"),
+            (Token::Cycles, "CYCLES"),
+            (Token::Traverse, "TRAVERSE"),
+            (Token::Depth, "DEPTH"),
+            (Token::Direction, "DIRECTION"),
+            (Token::Algorithm, "ALGORITHM"),
+            (Token::Strategy, "STRATEGY"),
+            (Token::MaxIterations, "MAX_ITERATIONS"),
+            (Token::MaxLength, "MAX_LENGTH"),
+            (Token::Mode, "MODE"),
+            (Token::Clustering, "CLUSTERING"),
+            (Token::TopologicalSort, "TOPOLOGICAL_SORT"),
+            (Token::Properties, "PROPERTIES"),
+            (Token::Text, "TEXT"),
+            (Token::Fuzzy, "FUZZY"),
+            (Token::MinScore, "MIN_SCORE"),
+            (Token::Begin, "BEGIN"),
+            (Token::Commit, "COMMIT"),
+            (Token::Rollback, "ROLLBACK"),
+            (Token::Savepoint, "SAVEPOINT"),
+            (Token::Release, "RELEASE"),
+            (Token::Start, "START"),
+            (Token::Transaction, "TRANSACTION"),
+            (Token::Work, "WORK"),
+            (Token::Vacuum, "VACUUM"),
+            (Token::Analyze, "ANALYZE"),
+            (Token::Schema, "SCHEMA"),
+            (Token::Sequence, "SEQUENCE"),
+            (Token::Increment, "INCREMENT"),
+            (Token::Copy, "COPY"),
+            (Token::Header, "HEADER"),
+            (Token::Delimiter, "DELIMITER"),
+            (Token::View, "VIEW"),
+            (Token::Materialized, "MATERIALIZED"),
+            (Token::Refresh, "REFRESH"),
+            (Token::Partition, "PARTITION"),
+            (Token::Range, "RANGE"),
+            (Token::List, "LIST"),
+            (Token::Hash, "HASH"),
+            (Token::Attach, "ATTACH"),
+            (Token::Detach, "DETACH"),
+            (Token::Of, "OF"),
+            (Token::Policy, "POLICY"),
+            (Token::Enable, "ENABLE"),
+            (Token::Disable, "DISABLE"),
+            (Token::Security, "SECURITY"),
+            (Token::Row, "ROW"),
+            (Token::Level, "LEVEL"),
+            (Token::Foreign, "FOREIGN"),
+            (Token::Server, "SERVER"),
+            (Token::Wrapper, "WRAPPER"),
+            (Token::Options, "OPTIONS"),
+            (Token::Data, "DATA"),
+            (Token::String("x".into()), "'x'"),
+            (Token::Integer(7), "7"),
+            (Token::Float(1.5), "1.5"),
+            (Token::JsonLiteral(r#"{"x":1}"#.into()), r#"{"x":1}"#),
+            (Token::Ident("id".into()), "id"),
+            (Token::Eq, "="),
+            (Token::Ne, "<>"),
+            (Token::Lt, "<"),
+            (Token::Le, "<="),
+            (Token::Gt, ">"),
+            (Token::Ge, ">="),
+            (Token::Plus, "+"),
+            (Token::Minus, "-"),
+            (Token::Star, "*"),
+            (Token::Slash, "/"),
+            (Token::Percent, "%"),
+            (Token::LParen, "("),
+            (Token::RParen, ")"),
+            (Token::LBracket, "["),
+            (Token::RBracket, "]"),
+            (Token::LBrace, "{"),
+            (Token::RBrace, "}"),
+            (Token::Comma, ","),
+            (Token::Dot, "."),
+            (Token::Colon, ":"),
+            (Token::Semi, ";"),
+            (Token::Dollar, "$"),
+            (Token::Arrow, "->"),
+            (Token::ArrowLeft, "<-"),
+            (Token::Dash, "-"),
+            (Token::DotDot, ".."),
+            (Token::Pipe, "|"),
+            (Token::DoublePipe, "||"),
+            (Token::Eof, "EOF"),
+        ];
+
+        for (token, expected) in cases {
+            assert_eq!(token.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn test_string_escape_and_error_matrix() {
+        let tokens = tokenize(
+            r#"'line\nrow' 'carriage\rreturn' 'tab\tstop' 'slash\\' 'quote\'' "dq\"" 'raw\z'"#,
+        );
+        assert_eq!(
+            tokens,
+            vec![
+                Token::String("line\nrow".into()),
+                Token::String("carriage\rreturn".into()),
+                Token::String("tab\tstop".into()),
+                Token::String("slash\\".into()),
+                Token::String("quote'".into()),
+                Token::String("dq\"".into()),
+                Token::String(r"raw\z".into()),
+                Token::Eof
+            ]
+        );
+
+        let mut lexer = Lexer::new("'unterminated");
+        assert!(lexer
+            .next_token()
+            .unwrap_err()
+            .message
+            .contains("Unterminated string"));
+
+        let mut lexer = Lexer::new(r"'bad\");
+        assert!(lexer
+            .next_token()
+            .unwrap_err()
+            .message
+            .contains("Unterminated string"));
+    }
+
+    #[test]
+    fn test_operator_comment_peek_limit_and_tokenize_paths() {
+        let tokens = tokenize("!= % ; $ || | 123.abc 1..2 1e+2 <- -> /* block */ SELECT");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ne,
+                Token::Percent,
+                Token::Semi,
+                Token::Dollar,
+                Token::DoublePipe,
+                Token::Pipe,
+                Token::Integer(123),
+                Token::Dot,
+                Token::Ident("abc".into()),
+                Token::Integer(1),
+                Token::DotDot,
+                Token::Integer(2),
+                Token::Float(1e2),
+                Token::ArrowLeft,
+                Token::Arrow,
+                Token::Select,
+                Token::Eof,
+            ]
+        );
+
+        let mut lexer = Lexer::new("SELECT FROM");
+        assert_eq!(lexer.peek_token().unwrap().token, Token::Select);
+        assert_eq!(lexer.next_token().unwrap().token, Token::Select);
+        assert_eq!(lexer.next_token().unwrap().token, Token::From);
+
+        let mut lexer = Lexer::new("!");
+        assert!(lexer
+            .next_token()
+            .unwrap_err()
+            .message
+            .contains("Expected '=' after '!'"));
+
+        let limits = crate::storage::query::parser::ParserLimits {
+            max_identifier_chars: 3,
+            ..crate::storage::query::parser::ParserLimits::default()
+        };
+        let mut lexer = Lexer::with_limits("abcd", limits);
+        assert_eq!(lexer.max_identifier_chars(), 3);
+        let err = lexer.next_token().unwrap_err();
+        assert!(matches!(
+            err.limit_hit,
+            Some(LexerLimitHit::IdentifierTooLong { value: 3, .. })
+        ));
     }
 }

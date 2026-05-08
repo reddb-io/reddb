@@ -711,6 +711,46 @@ fn test_parse_left_join() {
 }
 
 #[test]
+fn test_parse_table_join_variants_and_from_subquery() {
+    let query =
+        parse("FROM users u RIGHT OUTER JOIN orders o ON u.id = o.user_id RETURN u.id, o.id")
+            .unwrap();
+    let QueryExpr::Join(join) = query else {
+        panic!("Expected JoinQuery");
+    };
+    assert_eq!(join.join_type, JoinType::RightOuter);
+    assert_eq!(join.return_.len(), 2);
+
+    let query =
+        parse("FROM users u FULL OUTER JOIN profiles p ON u.id = p.user_id WHERE p.id IS NOT NULL")
+            .unwrap();
+    let QueryExpr::Join(join) = query else {
+        panic!("Expected JoinQuery");
+    };
+    assert_eq!(join.join_type, JoinType::FullOuter);
+    assert!(join.filter.is_some());
+
+    let query = parse("FROM users u CROSS JOIN regions r LIMIT 5 OFFSET 2").unwrap();
+    let QueryExpr::Join(join) = query else {
+        panic!("Expected JoinQuery");
+    };
+    assert_eq!(join.join_type, JoinType::Cross);
+    assert_eq!(join.limit, Some(5));
+    assert_eq!(join.offset, Some(2));
+
+    let query = parse("FROM (SELECT id FROM users WHERE active = true) AS u RETURN u.id").unwrap();
+    let QueryExpr::Table(table) = query else {
+        panic!("Expected TableQuery");
+    };
+    assert_eq!(table.table, "__subq_u");
+    assert_eq!(table.alias.as_deref(), Some("u"));
+    assert_eq!(table.columns.len(), 1);
+    assert!(table.source.is_some());
+
+    assert!(parse("FROM (MATCH (n) RETURN n) AS g").is_err());
+}
+
+#[test]
 fn test_parse_join_vector_query() {
     let query = parse(
         "FROM docs d JOIN VECTOR SEARCH embeddings SIMILAR TO [0.1, 0.2] LIMIT 5 AS sim ON d.id = sim.entity_id RETURN d.id, sim.score",
