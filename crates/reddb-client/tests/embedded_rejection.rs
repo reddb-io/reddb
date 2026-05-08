@@ -66,7 +66,10 @@ fn rejects_red_memory_alias() {
 #[test]
 fn rejects_red_file_path() {
     let (code, _stdout, _stderr) = run_red_client("red:///var/lib/data.rdb");
-    assert_eq!(code, 2, "expected exit code 2 for `red:///path` (embedded form)");
+    assert_eq!(
+        code, 2,
+        "expected exit code 2 for `red:///path` (embedded form)"
+    );
 }
 
 #[test]

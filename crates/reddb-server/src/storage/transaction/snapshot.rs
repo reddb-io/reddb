@@ -235,7 +235,9 @@ impl SnapshotManager {
             // `fetch_add(BATCH)` on the global counter — equivalent to
             // BATCH back-to-back `begin()` calls in terms of xid
             // numbering, but with zero `state.write()` traffic.
-            let start = self.next_xid.fetch_add(AUTOCOMMIT_POOL_BATCH, Ordering::Relaxed);
+            let start = self
+                .next_xid
+                .fetch_add(AUTOCOMMIT_POOL_BATCH, Ordering::Relaxed);
             pool.next = start;
             pool.end = start + AUTOCOMMIT_POOL_BATCH;
         }

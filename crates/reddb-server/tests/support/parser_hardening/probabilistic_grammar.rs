@@ -84,11 +84,9 @@ pub fn opt_if_exists() -> impl Strategy<Value = &'static str> {
 pub fn create_drop_stmt() -> impl Strategy<Value = String> {
     prop_oneof![
         // CREATE HLL
-        (opt_if_not_exists(), ident())
-            .prop_map(|(ine, n)| format!("CREATE HLL{} {}", ine, n)),
+        (opt_if_not_exists(), ident()).prop_map(|(ine, n)| format!("CREATE HLL{} {}", ine, n)),
         // CREATE SKETCH (bare)
-        (opt_if_not_exists(), ident())
-            .prop_map(|(ine, n)| format!("CREATE SKETCH{} {}", ine, n)),
+        (opt_if_not_exists(), ident()).prop_map(|(ine, n)| format!("CREATE SKETCH{} {}", ine, n)),
         // CREATE SKETCH name WIDTH w
         (opt_if_not_exists(), ident(), 1u32..=10_000u32)
             .prop_map(|(ine, n, w)| format!("CREATE SKETCH{} {} WIDTH {}", ine, n, w)),
@@ -96,13 +94,17 @@ pub fn create_drop_stmt() -> impl Strategy<Value = String> {
         (opt_if_not_exists(), ident(), 1u32..=128u32)
             .prop_map(|(ine, n, d)| format!("CREATE SKETCH{} {} DEPTH {}", ine, n, d)),
         // CREATE SKETCH name WIDTH w DEPTH d
-        (opt_if_not_exists(), ident(), 1u32..=10_000u32, 1u32..=128u32)
+        (
+            opt_if_not_exists(),
+            ident(),
+            1u32..=10_000u32,
+            1u32..=128u32
+        )
             .prop_map(|(ine, n, w, d)| {
                 format!("CREATE SKETCH{} {} WIDTH {} DEPTH {}", ine, n, w, d)
             }),
         // CREATE FILTER (bare)
-        (opt_if_not_exists(), ident())
-            .prop_map(|(ine, n)| format!("CREATE FILTER{} {}", ine, n)),
+        (opt_if_not_exists(), ident()).prop_map(|(ine, n)| format!("CREATE FILTER{} {}", ine, n)),
         // CREATE FILTER name CAPACITY c
         (opt_if_not_exists(), ident(), 1u32..=1_000_000u32)
             .prop_map(|(ine, n, c)| format!("CREATE FILTER{} {} CAPACITY {}", ine, n, c)),
@@ -128,10 +130,7 @@ pub fn create_drop_stmt() -> impl Strategy<Value = String> {
 /// distinct call-sites a regression would touch in
 /// `parse_hll_command`.
 pub fn hll_op_stmt() -> impl Strategy<Value = String> {
-    let add = (
-        ident(),
-        prop::collection::vec(string_element(), 1..=8),
-    )
+    let add = (ident(), prop::collection::vec(string_element(), 1..=8))
         .prop_map(|(name, els)| format!("HLL ADD {} {}", name, els.join(" ")));
     let count = prop::collection::vec(ident(), 1..=4)
         .prop_map(|names| format!("HLL COUNT {}", names.join(" ")));
@@ -152,10 +151,9 @@ pub fn hll_op_stmt() -> impl Strategy<Value = String> {
 pub fn sketch_op_stmt() -> impl Strategy<Value = String> {
     let add_with_count = (ident(), string_element(), 1u64..=1_000_000u64)
         .prop_map(|(n, e, c)| format!("SKETCH ADD {} {} {}", n, e, c));
-    let add_no_count = (ident(), string_element())
-        .prop_map(|(n, e)| format!("SKETCH ADD {} {}", n, e));
-    let count = (ident(), string_element())
-        .prop_map(|(n, e)| format!("SKETCH COUNT {} {}", n, e));
+    let add_no_count =
+        (ident(), string_element()).prop_map(|(n, e)| format!("SKETCH ADD {} {}", n, e));
+    let count = (ident(), string_element()).prop_map(|(n, e)| format!("SKETCH COUNT {} {}", n, e));
     let merge = (ident(), prop::collection::vec(ident(), 1..=4))
         .prop_map(|(dest, srcs)| format!("SKETCH MERGE {} {}", dest, srcs.join(" ")));
     let info = ident().prop_map(|n| format!("SKETCH INFO {}", n));
@@ -172,12 +170,10 @@ pub fn sketch_op_stmt() -> impl Strategy<Value = String> {
 /// vs the `CHECK`/`INFO` ident-based branches is a frequent source
 /// of grammar drift.
 pub fn filter_op_stmt() -> impl Strategy<Value = String> {
-    let add = (ident(), string_element())
-        .prop_map(|(n, e)| format!("FILTER ADD {} {}", n, e));
-    let check = (ident(), string_element())
-        .prop_map(|(n, e)| format!("FILTER CHECK {} {}", n, e));
-    let delete = (ident(), string_element())
-        .prop_map(|(n, e)| format!("FILTER DELETE {} {}", n, e));
+    let add = (ident(), string_element()).prop_map(|(n, e)| format!("FILTER ADD {} {}", n, e));
+    let check = (ident(), string_element()).prop_map(|(n, e)| format!("FILTER CHECK {} {}", n, e));
+    let delete =
+        (ident(), string_element()).prop_map(|(n, e)| format!("FILTER DELETE {} {}", n, e));
     let count = ident().prop_map(|n| format!("FILTER COUNT {}", n));
     let info = ident().prop_map(|n| format!("FILTER INFO {}", n));
     prop_oneof![add, check, delete, count, info]
@@ -201,14 +197,12 @@ pub fn modifier_stmt() -> impl Strategy<Value = String> {
         (ident(), 1u32..=1_000_000u32)
             .prop_map(|(n, c)| format!("CREATE FILTER IF NOT EXISTS {} CAPACITY {}", n, c)),
         // CREATE SKETCH name WIDTH w
-        (ident(), 1u32..=10_000u32)
-            .prop_map(|(n, w)| format!("CREATE SKETCH {} WIDTH {}", n, w)),
+        (ident(), 1u32..=10_000u32).prop_map(|(n, w)| format!("CREATE SKETCH {} WIDTH {}", n, w)),
         // CREATE SKETCH IF NOT EXISTS name WIDTH w
         (ident(), 1u32..=10_000u32)
             .prop_map(|(n, w)| format!("CREATE SKETCH IF NOT EXISTS {} WIDTH {}", n, w)),
         // CREATE SKETCH name DEPTH d
-        (ident(), 1u32..=128u32)
-            .prop_map(|(n, d)| format!("CREATE SKETCH {} DEPTH {}", n, d)),
+        (ident(), 1u32..=128u32).prop_map(|(n, d)| format!("CREATE SKETCH {} DEPTH {}", n, d)),
         // CREATE SKETCH name WIDTH w DEPTH d
         (ident(), 1u32..=10_000u32, 1u32..=128u32)
             .prop_map(|(n, w, d)| format!("CREATE SKETCH {} WIDTH {} DEPTH {}", n, w, d)),

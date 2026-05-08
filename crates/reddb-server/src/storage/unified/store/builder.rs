@@ -240,19 +240,9 @@ mod tests {
         let mut sources = Vec::with_capacity(SEED);
         let mut targets = Vec::with_capacity(SEED);
         for i in 0..SEED {
-            let s = UnifiedEntity::table_row(
-                store.next_entity_id(),
-                "src",
-                (i + 1) as u64,
-                vec![],
-            );
+            let s = UnifiedEntity::table_row(store.next_entity_id(), "src", (i + 1) as u64, vec![]);
             sources.push(store.insert_auto("src", s).unwrap());
-            let t = UnifiedEntity::table_row(
-                store.next_entity_id(),
-                "tgt",
-                (i + 1) as u64,
-                vec![],
-            );
+            let t = UnifiedEntity::table_row(store.next_entity_id(), "tgt", (i + 1) as u64, vec![]);
             targets.push(store.insert_auto("tgt", t).unwrap());
         }
         for (s, t) in sources.iter().zip(targets.iter()) {
@@ -265,12 +255,8 @@ mod tests {
         const BATCH: usize = 100;
         let mut victims = Vec::with_capacity(BATCH);
         for i in 0..BATCH {
-            let row = UnifiedEntity::table_row(
-                store.next_entity_id(),
-                "rows",
-                (i + 1) as u64,
-                vec![],
-            );
+            let row =
+                UnifiedEntity::table_row(store.next_entity_id(), "rows", (i + 1) as u64, vec![]);
             victims.push(store.insert_auto("rows", row).unwrap());
         }
 

@@ -3788,7 +3788,11 @@ impl RedDBRuntime {
         // RLS view of "this statement". `ai_scope()` is the canonical
         // builder.
         let scope = self.ai_scope();
-        let kind = match result.as_ref().map(|r| r.statement_type).unwrap_or("select") {
+        let kind = match result
+            .as_ref()
+            .map(|r| r.statement_type)
+            .unwrap_or("select")
+        {
             "select" => crate::telemetry::slow_query_logger::QueryKind::Select,
             "insert" => crate::telemetry::slow_query_logger::QueryKind::Insert,
             "update" => crate::telemetry::slow_query_logger::QueryKind::Update,

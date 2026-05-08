@@ -426,7 +426,10 @@ mod catalog_tests {
         // Streamed envelopes.
         assert_eq!(MessageKind::BulkStreamStart.class(), MessageClass::Streamed);
         assert_eq!(MessageKind::BulkStreamRows.class(), MessageClass::Streamed);
-        assert_eq!(MessageKind::BulkStreamCommit.class(), MessageClass::Streamed);
+        assert_eq!(
+            MessageKind::BulkStreamCommit.class(),
+            MessageClass::Streamed
+        );
         assert_eq!(MessageKind::BulkStreamAck.class(), MessageClass::Streamed);
         assert_eq!(MessageKind::RowDescription.class(), MessageClass::Streamed);
         assert_eq!(MessageKind::StreamEnd.class(), MessageClass::Streamed);

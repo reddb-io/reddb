@@ -15,8 +15,7 @@
 
 #![allow(dead_code)]
 
-const ALNUM: &[u8] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
 /// Deterministic alphanumeric body of length `len`. Tiny LCG keyed
 /// on `seed`. Body alone never matches a token regex — those need

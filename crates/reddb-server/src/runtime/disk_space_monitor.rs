@@ -124,7 +124,12 @@ impl FanotifyWatcher {
         use std::os::unix::ffi::OsStrExt;
 
         // FAN_CLOEXEC | FAN_CLASS_NOTIF
-        let fd = unsafe { libc::fanotify_init(libc::FAN_CLOEXEC | libc::FAN_CLASS_NOTIF, libc::O_RDONLY as libc::c_uint) };
+        let fd = unsafe {
+            libc::fanotify_init(
+                libc::FAN_CLOEXEC | libc::FAN_CLASS_NOTIF,
+                libc::O_RDONLY as libc::c_uint,
+            )
+        };
         if fd < 0 {
             return Err(());
         }
@@ -157,12 +162,7 @@ impl FanotifyWatcher {
 
     /// Block-read fanotify events using a background blocking thread so the
     /// tokio executor doesn't stall. Each event wakes a check.
-    async fn run_loop(
-        &self,
-        path: &Path,
-        critical_pct: u8,
-        last_emit: &mut Option<Instant>,
-    ) {
+    async fn run_loop(&self, path: &Path, critical_pct: u8, last_emit: &mut Option<Instant>) {
         let fd = self.fd;
         let path = path.to_path_buf();
 
@@ -174,9 +174,7 @@ impl FanotifyWatcher {
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
             loop {
-                let n = unsafe {
-                    libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
-                };
+                let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
                 if n <= 0 {
                     break;
                 }
@@ -256,7 +254,7 @@ mod tests {
         // Simulate two consecutive calls when disk is "full" by passing a
         // synthetic path check via a local helper.
         let mut last: Option<Instant> = Some(Instant::now()); // pretend just emitted
-        // disk_free_total("/nonexistent") → None → check returns false, no emit
+                                                              // disk_free_total("/nonexistent") → None → check returns false, no emit
         let fired = check(Path::new("/nonexistent-path-for-test"), 1, &mut last);
         assert!(!fired); // can't get disk stats for nonexistent path
     }

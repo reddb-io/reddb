@@ -354,7 +354,10 @@ impl<'rt> MutationEngine<'rt> {
             return;
         }
         let index_store = self.runtime.index_store_ref();
-        if index_store.find_index_for_column(collection, "id").is_some() {
+        if index_store
+            .find_index_for_column(collection, "id")
+            .is_some()
+        {
             return;
         }
 

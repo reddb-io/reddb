@@ -19,8 +19,8 @@ pub use conn_string::{
 };
 pub use redwire::{BuildError, FrameBuilder};
 pub use sanitizer::{
-    audit_safe_log_field, Boundary, ConnStringSanitizer, EscapeError, EscapedFor,
-    ParsedConnString, Tainted, TaintedRef, TaintedTarget,
+    audit_safe_log_field, Boundary, ConnStringSanitizer, EscapeError, EscapedFor, ParsedConnString,
+    Tainted, TaintedRef, TaintedTarget,
 };
 pub use topology::{
     decode_topology, encode_topology, Endpoint, ReplicaInfo, Topology, TopologyError,

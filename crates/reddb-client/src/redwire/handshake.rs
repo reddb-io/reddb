@@ -29,9 +29,9 @@ where
     let mut hello_obj = serde_json::Map::new();
     hello_obj.insert(
         "versions".into(),
-        serde_json::Value::Array(vec![serde_json::Value::Number(
-            serde_json::Number::from(SUPPORTED_VERSION),
-        )]),
+        serde_json::Value::Array(vec![serde_json::Value::Number(serde_json::Number::from(
+            SUPPORTED_VERSION,
+        ))]),
     );
     hello_obj.insert(
         "auth_methods".into(),
@@ -109,8 +109,10 @@ where
     let final_frame = read_frame(stream).await?;
     match final_frame.kind {
         MessageKind::AuthOk => {
-            let parsed: serde_json::Value = serde_json::from_slice(&final_frame.payload)
-                .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode auth_ok: {e}")))?;
+            let parsed: serde_json::Value =
+                serde_json::from_slice(&final_frame.payload).map_err(|e| {
+                    ClientError::new(ErrorCode::Protocol, format!("decode auth_ok: {e}"))
+                })?;
             let session_id = parsed
                 .as_object()
                 .and_then(|o| o.get("session_id"))
@@ -129,8 +131,8 @@ where
             })
         }
         MessageKind::AuthFail => {
-            let reason = parse_reason(&final_frame.payload)
-                .unwrap_or_else(|| "auth refused".into());
+            let reason =
+                parse_reason(&final_frame.payload).unwrap_or_else(|| "auth refused".into());
             Ok(HandshakeOutcome::Refused(reason))
         }
         other => Err(ClientError::new(

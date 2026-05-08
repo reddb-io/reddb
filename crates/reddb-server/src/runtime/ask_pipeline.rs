@@ -37,14 +37,13 @@ use std::time::Instant;
 use tracing::{debug, info, info_span, warn};
 
 use super::ai::ner::{
-    AuthContext as NerAuthContext, HeuristicFallback, LlmNer, NerError, NerProvider,
-    NER_CAPABILITY,
+    AuthContext as NerAuthContext, HeuristicFallback, LlmNer, NerError, NerProvider, NER_CAPABILITY,
 };
 use super::statement_frame::{EffectiveScope, ReadFrame};
 use super::RedDBRuntime;
 use crate::api::{RedDBError, RedDBResult};
-use crate::storage::unified::entity::{EntityData, UnifiedEntity};
 use crate::storage::schema::Value;
+use crate::storage::unified::entity::{EntityData, UnifiedEntity};
 
 /// Default cap for Stage 4 row output. Override per-call via
 /// [`AskPipeline::execute_with_limit`].
@@ -288,10 +287,7 @@ fn extract_tokens_routed(
         // configured fallback policy fires deterministically.
         NerProvider::Stub(super::ai::ner::StubBehavior::Empty)
     } else {
-        NerProvider::OpenAiCompat {
-            endpoint,
-            model,
-        }
+        NerProvider::OpenAiCompat { endpoint, model }
     };
 
     let mut ner = LlmNer::new(provider, fallback);
@@ -304,9 +300,7 @@ fn extract_tokens_routed(
             // current runtime — the typical caller is an Axum HTTP
             // handler running on the multi-thread runtime, so we hop
             // off via `block_in_place`.
-            tokio::task::block_in_place(|| {
-                handle.block_on(ner.extract(question, scope, &auth))
-            })
+            tokio::task::block_in_place(|| handle.block_on(ner.extract(question, scope, &auth)))
         }
         Err(_) => {
             warn!(
@@ -397,14 +391,13 @@ pub fn extract_tokens(question: &str) -> TokenSet {
     let mut chars = question.chars().peekable();
     let mut buf = String::new();
 
-    let flush =
-        |buf: &mut String, keywords: &mut Vec<String>, literals: &mut Vec<String>| {
-            if buf.is_empty() {
-                return;
-            }
-            let word = std::mem::take(buf);
-            classify_token(&word, keywords, literals);
-        };
+    let flush = |buf: &mut String, keywords: &mut Vec<String>, literals: &mut Vec<String>| {
+        if buf.is_empty() {
+            return;
+        }
+        let word = std::mem::take(buf);
+        classify_token(&word, keywords, literals);
+    };
 
     while let Some(ch) = chars.next() {
         if ch.is_alphanumeric() || ch == '_' || ch == '-' {
@@ -438,7 +431,9 @@ fn classify_token(word: &str, keywords: &mut Vec<String>, literals: &mut Vec<Str
     // Literal: shape `[A-Z0-9-]{3,}` with at least one digit, OR
     // pure-digit run of length ≥ 6.
     let is_upper_id_shape = word.len() >= 3
-        && word.chars().all(|c| c.is_ascii_digit() || c == '-' || c.is_ascii_uppercase())
+        && word
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '-' || c.is_ascii_uppercase())
         && word.chars().any(|c| c.is_ascii_digit())
         && word.chars().any(|c| c.is_ascii_uppercase() || c == '-');
     let is_long_digit_run = word.len() >= 6 && word.chars().all(|c| c.is_ascii_digit());
@@ -478,9 +473,9 @@ fn classify_token(word: &str, keywords: &mut Vec<String>, literals: &mut Vec<Str
 /// Sorted ascii lowercase stop-word list. Kept tiny and curated so a
 /// regression in Stage 2 candidate-narrowing surfaces fast.
 const STOP_WORDS: &[&str] = &[
-    "a", "about", "an", "and", "are", "as", "at", "be", "by", "do", "for", "from",
-    "how", "in", "is", "it", "of", "on", "or", "que", "qual", "quais", "sobre", "te",
-    "the", "to", "what", "where", "which", "with",
+    "a", "about", "an", "and", "are", "as", "at", "be", "by", "do", "for", "from", "how", "in",
+    "is", "it", "of", "on", "or", "que", "qual", "quais", "sobre", "te", "the", "to", "what",
+    "where", "which", "with",
 ];
 
 // ---------------------------------------------------------------------------
@@ -670,9 +665,7 @@ pub fn filter_values(
             .unwrap_or(&[]);
 
         for entity in manager.query_all(|_| true) {
-            if let Some(hit) =
-                literal_match_in_entity(&entity, &tokens.literals, hint_columns)
-            {
+            if let Some(hit) = literal_match_in_entity(&entity, &tokens.literals, hint_columns) {
                 out.push(FilteredRow {
                     collection: collection.clone(),
                     entity,
@@ -788,10 +781,7 @@ mod tests {
             tokens.keywords.iter().filter(|k| *k == "passport").count(),
             1
         );
-        assert_eq!(
-            tokens.literals.iter().filter(|l| *l == "FDD-1").count(),
-            1
-        );
+        assert_eq!(tokens.literals.iter().filter(|l| *l == "FDD-1").count(), 1);
     }
 
     // -- Stage 4 helper ----------------------------------------------
@@ -807,11 +797,10 @@ mod tests {
 
     #[test]
     fn first_literal_in_value_no_match_returns_none() {
-        assert!(first_literal_in_value(
-            &Value::text("nothing here"),
-            &["FDD-12313".to_string()],
-        )
-        .is_none());
+        assert!(
+            first_literal_in_value(&Value::text("nothing here"), &["FDD-12313".to_string()],)
+                .is_none()
+        );
     }
 
     // -- Pipeline-wide -----------------------------------------------
@@ -974,10 +963,8 @@ mod tests {
         // The collection name itself + a `passport` column both feed
         // Stage 2's vocabulary; either one is enough for the question
         // "passport FDD-12313" to land here.
-        rt.execute_query(
-            "CREATE TABLE travel (id INT, passport TEXT, notes TEXT)",
-        )
-        .expect("CREATE TABLE travel");
+        rt.execute_query("CREATE TABLE travel (id INT, passport TEXT, notes TEXT)")
+            .expect("CREATE TABLE travel");
         rt.execute_query(
             "INSERT INTO travel (id, passport, notes) VALUES \
              (1, 'BR-001', 'unrelated note'), \
@@ -988,10 +975,8 @@ mod tests {
         // Out-of-scope collection — must NEVER surface in Stage 4.
         rt.execute_query("CREATE TABLE secrets (id INT, passport TEXT)")
             .expect("CREATE TABLE secrets");
-        rt.execute_query(
-            "INSERT INTO secrets (id, passport) VALUES (99, 'FDD-12313')",
-        )
-        .expect("seed secrets");
+        rt.execute_query("INSERT INTO secrets (id, passport) VALUES (99, 'FDD-12313')")
+            .expect("seed secrets");
 
         let visible: HashSet<String> = ["travel".to_string()].into_iter().collect();
         let scope = make_scope(visible);
@@ -1057,10 +1042,7 @@ mod tests {
 
     fn write_config(rt: &RedDBRuntime, key: &str, value: &str) {
         let store = rt.inner.db.store();
-        store.set_config_tree(
-            key,
-            &crate::serde_json::Value::String(value.to_string()),
-        );
+        store.set_config_tree(key, &crate::serde_json::Value::String(value.to_string()));
     }
 
     /// Default backend stays heuristic — even with an open scope, the

@@ -43,7 +43,10 @@ impl fmt::Display for IntentLogError {
         match self {
             Self::Io(e) => write!(f, "intent log I/O: {e}"),
             Self::TooLarge { bytes } => {
-                write!(f, "intent record too large: {bytes} bytes (max {MAX_RECORD_BYTES})")
+                write!(
+                    f,
+                    "intent record too large: {bytes} bytes (max {MAX_RECORD_BYTES})"
+                )
             }
             Self::SyncFailed(e) => write!(f, "intent log fsync failed: {e}"),
         }
@@ -117,9 +120,10 @@ impl IntentPhase {
             "running" => Some(Self::Running),
             "completed" => Some(Self::Completed),
             "aborted" => Some(Self::Aborted),
-            _ if s.starts_with("checkpoint_") => {
-                s["checkpoint_".len()..].parse::<u32>().ok().map(Self::Checkpoint)
-            }
+            _ if s.starts_with("checkpoint_") => s["checkpoint_".len()..]
+                .parse::<u32>()
+                .ok()
+                .map(Self::Checkpoint),
             _ => None,
         }
     }
@@ -135,8 +139,7 @@ impl fmt::Display for IntentPhase {
 // Redaction helpers
 // ---------------------------------------------------------------------------
 
-const SENSITIVE_SUBSTRINGS: &[&str] =
-    &["password", "secret", "token", "key", "credential", "auth"];
+const SENSITIVE_SUBSTRINGS: &[&str] = &["password", "secret", "token", "key", "credential", "auth"];
 
 fn is_sensitive_key(k: &str) -> bool {
     let lower = k.to_ascii_lowercase();
@@ -271,7 +274,10 @@ impl AdminIntentLog {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, IntentLogError> {
         let path = path.as_ref().to_path_buf();
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
-        Ok(Self { path, file: Mutex::new(file) })
+        Ok(Self {
+            path,
+            file: Mutex::new(file),
+        })
     }
 
     /// Begin a new intent. Writes the opening record and fsyncs.
@@ -284,7 +290,16 @@ impl AdminIntentLog {
         let id = Uuid::new_v7();
         let ts = now_unix_millis();
         let args_json = args.to_json_value();
-        let record = build_record(id, op, &IntentPhase::Running, ts, actor, &args_json, None, None);
+        let record = build_record(
+            id,
+            op,
+            &IntentPhase::Running,
+            ts,
+            actor,
+            &args_json,
+            None,
+            None,
+        );
         let line = serialize_record(&record)?;
 
         {
@@ -596,7 +611,10 @@ mod tests {
         let first_line = body.lines().next().unwrap();
         let v: JsonValue = crate::json::from_str(first_line).unwrap();
         assert_eq!(v.get("phase").and_then(|x| x.as_str()), Some("running"));
-        assert_eq!(v.get("op").and_then(|x| x.as_str()), Some("replica_bootstrap"));
+        assert_eq!(
+            v.get("op").and_then(|x| x.as_str()),
+            Some("replica_bootstrap")
+        );
         assert_eq!(v.get("actor").and_then(|x| x.as_str()), Some("ops-bot"));
     }
 
@@ -740,7 +758,7 @@ mod tests {
         // Reopen and scan — should not panic
         let log2 = AdminIntentLog::open(&path).unwrap();
         let unfinished = log2.list_unfinished(); // aborted is terminal, so 0
-        // The important assertion: we got here without panic
+                                                 // The important assertion: we got here without panic
         assert_eq!(unfinished.len(), 0);
     }
 
@@ -754,7 +772,9 @@ mod tests {
         let args = IntentArgs::new()
             .insert("password", JsonValue::String("hunter2".to_string()))
             .insert("host", JsonValue::String("db.internal".to_string()));
-        let h = log.begin(IntentOp::ReplicaBootstrap, "admin", args).unwrap();
+        let h = log
+            .begin(IntentOp::ReplicaBootstrap, "admin", args)
+            .unwrap();
         h.complete(None).unwrap();
 
         let body = std::fs::read_to_string(&path).unwrap();
@@ -839,10 +859,7 @@ mod tests {
             line_count += 1;
         }
         // 3 writers × 20 ops × 2 records (begin + complete) = 120 minimum
-        assert!(
-            line_count >= 120,
-            "expected ≥120 lines, got {line_count}"
-        );
+        assert!(line_count >= 120, "expected ≥120 lines, got {line_count}");
 
         let _ = std::fs::remove_file(&path);
     }

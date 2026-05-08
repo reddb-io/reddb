@@ -119,9 +119,9 @@ impl CoercionSpine for BuiltinSpine {
             // synthesizing a temporary entry on the heap.
             return None;
         }
-        super::cast_catalog::CAST_CATALOG.iter().find(|e| {
-            e.src == from && e.target == to && e.context.allows(CastContext::Implicit)
-        })
+        super::cast_catalog::CAST_CATALOG
+            .iter()
+            .find(|e| e.src == from && e.target == to && e.context.allows(CastContext::Implicit))
     }
 
     fn resolve_binop(
@@ -166,8 +166,16 @@ impl CoercionSpine for BuiltinSpine {
             let score = lhs_exact + rhs_exact;
             let coercions = OperandCoercions {
                 casts: vec![
-                    if lhs_exact == 1 { None } else { Some(entry.lhs_type) },
-                    if rhs_exact == 1 { None } else { Some(entry.rhs_type) },
+                    if lhs_exact == 1 {
+                        None
+                    } else {
+                        Some(entry.lhs_type)
+                    },
+                    if rhs_exact == 1 {
+                        None
+                    } else {
+                        Some(entry.rhs_type)
+                    },
                 ],
             };
             match best {
@@ -385,8 +393,8 @@ mod tests {
     /// not implicit.
     #[test]
     fn function_exact_match_emits_identity() {
-        let (entry, coercions) = resolve_function("LENGTH", &[DataType::Text])
-            .expect("LENGTH(text) must resolve");
+        let (entry, coercions) =
+            resolve_function("LENGTH", &[DataType::Text]).expect("LENGTH(text) must resolve");
         assert_eq!(entry.name, "LENGTH");
         assert!(coercions.is_identity());
     }
@@ -411,8 +419,8 @@ mod tests {
     /// one (would require a cast).
     #[test]
     fn function_picks_exact_overload_over_cast_overload() {
-        let (entry, coercions) = resolve_function("ABS", &[DataType::Integer])
-            .expect("ABS(int) must resolve");
+        let (entry, coercions) =
+            resolve_function("ABS", &[DataType::Integer]).expect("ABS(int) must resolve");
         assert_eq!(entry.return_type, DataType::Integer);
         assert!(coercions.is_identity());
     }
@@ -523,13 +531,13 @@ mod tests {
     /// pick the exact match, not the coerced one.
     #[test]
     fn function_overload_selects_exact_over_coercion() {
-        let (int_entry, int_coercions) = resolve_function("ABS", &[DataType::Integer])
-            .expect("ABS(int) must resolve");
+        let (int_entry, int_coercions) =
+            resolve_function("ABS", &[DataType::Integer]).expect("ABS(int) must resolve");
         assert_eq!(int_entry.return_type, DataType::Integer);
         assert!(int_coercions.is_identity());
 
-        let (float_entry, float_coercions) = resolve_function("ABS", &[DataType::Float])
-            .expect("ABS(float) must resolve");
+        let (float_entry, float_coercions) =
+            resolve_function("ABS", &[DataType::Float]).expect("ABS(float) must resolve");
         assert_eq!(float_entry.return_type, DataType::Float);
         assert!(float_coercions.is_identity());
 

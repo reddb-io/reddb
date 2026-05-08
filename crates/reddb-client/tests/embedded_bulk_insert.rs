@@ -82,7 +82,10 @@ fn bulk_insert_emits_one_wal_record_per_batch() {
     let perrow_size = {
         let db = EmbeddedClient::open(perrow_path.clone()).expect("open perrow db");
         for i in 0..N {
-            let sql = format!("INSERT INTO users (name, age) VALUES ('user_{i}', {})", 20 + i);
+            let sql = format!(
+                "INSERT INTO users (name, age) VALUES ('user_{i}', {})",
+                20 + i
+            );
             db.query(&sql).expect("per-row insert");
         }
         let after = wal_size(&perrow_path);

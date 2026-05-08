@@ -630,12 +630,20 @@ pub(super) fn project_runtime_record_with_db(
                 // shapes the evaluator doesn't cover (CONFIG / KV / ML_* references).
                 crate::storage::query::sql_lowering::projection_to_expr(projection)
                     .and_then(|(expr, _)| {
-                        let row = RecordRow { record: source, table_name, table_alias };
+                        let row = RecordRow {
+                            record: source,
+                            table_name,
+                            table_alias,
+                        };
                         crate::storage::query::evaluator::evaluate(&expr, &row).ok()
                     })
                     .or_else(|| {
                         Some(Value::Boolean(evaluate_runtime_filter_with_db(
-                            db, source, filter, table_name, table_alias,
+                            db,
+                            source,
+                            filter,
+                            table_name,
+                            table_alias,
                         )))
                     })
             }
@@ -645,7 +653,11 @@ pub(super) fn project_runtime_record_with_db(
                 // and any shape where argument resolution fails via evaluator.
                 crate::storage::query::sql_lowering::projection_to_expr(projection)
                     .and_then(|(expr, _)| {
-                        let row = RecordRow { record: source, table_name, table_alias };
+                        let row = RecordRow {
+                            record: source,
+                            table_name,
+                            table_alias,
+                        };
                         crate::storage::query::evaluator::evaluate(&expr, &row).ok()
                     })
                     .or_else(|| evaluate_scalar_function_with_db(db, name, args, source))
@@ -871,7 +883,11 @@ pub(super) fn evaluate_runtime_filter_with_db(
             // operator / cast / function dispatch). Falls back to the
             // untyped expr_eval walker for CONFIG / KV / ML_* and any
             // other shape the evaluator does not cover yet.
-            let row = RecordRow { record, table_name, table_alias };
+            let row = RecordRow {
+                record,
+                table_name,
+                table_alias,
+            };
             let eval_side = |expr| {
                 crate::storage::query::evaluator::evaluate(expr, &row)
                     .ok()
@@ -2742,7 +2758,11 @@ pub(super) fn eval_projection_value(proj: &Projection, source: &UnifiedRecord) -
         Projection::Function(name, inner_args) => {
             crate::storage::query::sql_lowering::projection_to_expr(proj)
                 .and_then(|(expr, _)| {
-                    let row = RecordRow { record: source, table_name: None, table_alias: None };
+                    let row = RecordRow {
+                        record: source,
+                        table_name: None,
+                        table_alias: None,
+                    };
                     crate::storage::query::evaluator::evaluate(&expr, &row).ok()
                 })
                 .or_else(|| evaluate_scalar_function(name, inner_args, source))
@@ -2750,10 +2770,18 @@ pub(super) fn eval_projection_value(proj: &Projection, source: &UnifiedRecord) -
         Projection::Expression(filter, _) => {
             crate::storage::query::sql_lowering::projection_to_expr(proj)
                 .and_then(|(expr, _)| {
-                    let row = RecordRow { record: source, table_name: None, table_alias: None };
+                    let row = RecordRow {
+                        record: source,
+                        table_name: None,
+                        table_alias: None,
+                    };
                     crate::storage::query::evaluator::evaluate(&expr, &row).ok()
                 })
-                .or_else(|| Some(Value::Boolean(evaluate_runtime_filter(source, filter, None, None))))
+                .or_else(|| {
+                    Some(Value::Boolean(evaluate_runtime_filter(
+                        source, filter, None, None,
+                    )))
+                })
         }
         Projection::All => None,
     }
@@ -3155,14 +3183,15 @@ fn resolve_geo_arg(arg: &Projection, source: &UnifiedRecord) -> Option<(f64, f64
                     let lat_keys = ["lat", "latitude"];
                     let lon_keys = ["lon", "longitude", "lng"];
                     if lat_keys.contains(&col.as_str()) {
-                        let lon = lon_keys
-                            .iter()
-                            .find_map(|k| source.get(*k))
-                            .and_then(|v| match v {
-                                Value::Float(f) => Some(*f),
-                                Value::Integer(n) => Some(*n as f64),
-                                _ => None,
-                            })?;
+                        let lon =
+                            lon_keys
+                                .iter()
+                                .find_map(|k| source.get(*k))
+                                .and_then(|v| match v {
+                                    Value::Float(f) => Some(*f),
+                                    Value::Integer(n) => Some(*n as f64),
+                                    _ => None,
+                                })?;
                         Some((*f, lon))
                     } else {
                         None

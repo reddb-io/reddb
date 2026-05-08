@@ -571,8 +571,7 @@ impl AuditFieldEscaper {
 /// Standard base64 (RFC 4648 §4) encoder. Audit-only; we don't
 /// import the base64 crate from this slice.
 fn base64_encode(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
     let mut i = 0;
     while i + 3 <= input.len() {
@@ -1482,10 +1481,8 @@ mod tests {
                 "{label}: embedded newline in JSONL row: {line:?}"
             );
             // 2. parse back via the canonical decoder and read user_input.
-            let parsed: JsonValue =
-                crate::json::from_str(&line).unwrap_or_else(|err| {
-                    panic!("{label}: line did not parse: {err} :: {line:?}")
-                });
+            let parsed: JsonValue = crate::json::from_str(&line)
+                .unwrap_or_else(|err| panic!("{label}: line did not parse: {err} :: {line:?}"));
             let detail = parsed.get("detail").expect("detail present");
             let recovered = detail.get("user_input").and_then(|v| v.as_str()).unwrap();
             assert_eq!(

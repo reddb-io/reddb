@@ -624,7 +624,10 @@ pub(crate) fn handle_merge_show(_runtime: &RedDBRuntime, msid: &str) -> HttpResp
     // both the bare echo and the URL-composed form through the
     // JSON-boundary guard. ADR 0010 §3 / #178.
     let mut map = Map::new();
-    map.insert("id".to_string(), crate::json_field::SerializedJsonField::tainted(msid));
+    map.insert(
+        "id".to_string(),
+        crate::json_field::SerializedJsonField::tainted(msid),
+    );
     let conflicts_url = format!("/repo/merges/{msid}/conflicts");
     map.insert(
         "conflicts_url".to_string(),

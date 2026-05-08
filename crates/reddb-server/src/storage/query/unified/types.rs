@@ -292,8 +292,7 @@ impl UnifiedRecord {
                 return;
             }
         }
-        self.overflow_mut()
-            .insert(Arc::from(column), value);
+        self.overflow_mut().insert(Arc::from(column), value);
     }
 
     /// Set a column value from an already-owned String key. If the
@@ -683,10 +682,8 @@ mod record_layout_tests {
         // Schema-bearing record starts with `Null` placeholders so
         // unset columns are observable as `Some(Null)` rather than
         // `None`. This mirrors how scan paths construct rows.
-        let mut rec = UnifiedRecord::with_schema(
-            Arc::clone(&arc_schema),
-            vec![Value::Null; schema.len()],
-        );
+        let mut rec =
+            UnifiedRecord::with_schema(Arc::clone(&arc_schema), vec![Value::Null; schema.len()]);
         for (k, v) in writes {
             rec.set_owned(k.clone(), v.clone());
         }
@@ -701,10 +698,8 @@ mod record_layout_tests {
         schema: &[String],
         writes: &[(String, Value)],
     ) -> std::collections::HashMap<String, Value> {
-        let mut map: std::collections::HashMap<String, Value> = schema
-            .iter()
-            .map(|c| (c.clone(), Value::Null))
-            .collect();
+        let mut map: std::collections::HashMap<String, Value> =
+            schema.iter().map(|c| (c.clone(), Value::Null)).collect();
         for (k, v) in writes {
             map.insert(k.clone(), v.clone());
         }

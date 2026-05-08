@@ -50,7 +50,9 @@ pub struct ReplicaBootstrapper {
 
 impl ReplicaBootstrapper {
     pub fn new(node_id: impl Into<String>) -> Self {
-        Self { node_id: node_id.into() }
+        Self {
+            node_id: node_id.into(),
+        }
     }
 
     /// Scan `log` for unfinished bootstrap intents.
@@ -85,7 +87,9 @@ impl ReplicaBootstrapper {
             .map(|f| f as u64)
             .unwrap_or(0);
 
-        Some(ResumePoint { last_applied_lsn: lsn })
+        Some(ResumePoint {
+            last_applied_lsn: lsn,
+        })
     }
 
     /// Begin a fresh bootstrap intent.
@@ -103,7 +107,11 @@ impl ReplicaBootstrapper {
             .insert("source_lsn", JsonValue::Number(source_lsn as f64))
             .insert("target_lsn_hint", JsonValue::Number(target_lsn_hint as f64));
         let handle = log.begin(IntentOp::ReplicaBootstrap, &self.node_id, args)?;
-        Ok(BootstrapHandle { handle, checkpoint_n: 0, last_applied_lsn: 0 })
+        Ok(BootstrapHandle {
+            handle,
+            checkpoint_n: 0,
+            last_applied_lsn: 0,
+        })
     }
 }
 
@@ -131,7 +139,10 @@ impl<'a> BootstrapHandle<'a> {
     ) -> Result<(), IntentLogError> {
         self.checkpoint_n += 1;
         let progress = IntentProgress::new()
-            .insert("last_applied_lsn", JsonValue::Number(last_applied_lsn as f64))
+            .insert(
+                "last_applied_lsn",
+                JsonValue::Number(last_applied_lsn as f64),
+            )
             .insert("batches_applied", JsonValue::Number(batches_applied as f64));
         self.handle.checkpoint(self.checkpoint_n, Some(progress))?;
         self.last_applied_lsn = last_applied_lsn;
@@ -158,7 +169,11 @@ mod tests {
 
     fn tmp_path(label: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("reddb-bootstrap-{}-{}.log", label, std::process::id()));
+        p.push(format!(
+            "reddb-bootstrap-{}-{}.log",
+            label,
+            std::process::id()
+        ));
         p
     }
 

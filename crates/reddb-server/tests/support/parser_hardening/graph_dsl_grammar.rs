@@ -93,9 +93,7 @@ pub fn prop_pair() -> impl Strategy<Value = String> {
 /// same brace.
 pub fn brace_props() -> impl Strategy<Value = String> {
     (1usize..=3usize, proptest::collection::vec(prop_value(), 3)).prop_map(|(n, vals)| {
-        let pairs: Vec<String> = (0..n)
-            .map(|i| format!("prop_{}: {}", i, vals[i]))
-            .collect();
+        let pairs: Vec<String> = (0..n).map(|i| format!("prop_{}: {}", i, vals[i])).collect();
         format!("{{{}}}", pairs.join(", "))
     })
 }
@@ -253,8 +251,12 @@ pub fn path_query_stmt() -> impl Strategy<Value = String> {
 pub fn graph_traversal_stmt() -> impl Strategy<Value = String> {
     prop_oneof![
         // NEIGHBORHOOD
-        (str_lit(), proptest::option::of(1u32..10), proptest::option::of(0u8..3u8)).prop_map(
-            |(src, depth, dir)| {
+        (
+            str_lit(),
+            proptest::option::of(1u32..10),
+            proptest::option::of(0u8..3u8)
+        )
+            .prop_map(|(src, depth, dir)| {
                 let mut s = format!("GRAPH NEIGHBORHOOD {}", src);
                 if let Some(d) = depth {
                     s.push_str(&format!(" DEPTH {}", d));
@@ -268,8 +270,7 @@ pub fn graph_traversal_stmt() -> impl Strategy<Value = String> {
                     s.push_str(&format!(" DIRECTION {}", dir_str));
                 }
                 s
-            },
-        ),
+            },),
         // TRAVERSE
         (
             str_lit(),
@@ -329,18 +330,19 @@ pub fn graph_traversal_stmt() -> impl Strategy<Value = String> {
 /// must Err — but never panic. Used only by the panic-safety
 /// proptest, never by the valid-shape one.
 pub fn create_node_attempt_stmt() -> impl Strategy<Value = String> {
-    (ident(), node_label(), proptest::option::of(brace_props())).prop_map(|(alias, label, props)| {
-        let body = props.unwrap_or_default();
-        format!("CREATE NODE ({}: {} {})", alias, label, body)
-    })
+    (ident(), node_label(), proptest::option::of(brace_props())).prop_map(
+        |(alias, label, props)| {
+            let body = props.unwrap_or_default();
+            format!("CREATE NODE ({}: {} {})", alias, label, body)
+        },
+    )
 }
 
 /// User-attempted `CREATE EDGE` shape. Same caveat as
 /// [`create_node_attempt_stmt`]: parser must Err, must not panic.
 pub fn create_edge_attempt_stmt() -> impl Strategy<Value = String> {
-    (ident(), ident(), edge_label()).prop_map(|(from, to, label)| {
-        format!("CREATE EDGE ({})-[:{}]->({})", from, to, label)
-    })
+    (ident(), ident(), edge_label())
+        .prop_map(|(from, to, label)| format!("CREATE EDGE ({})-[:{}]->({})", from, to, label))
 }
 
 /// Top-level union: any of the valid-shape graph DSL strategies.

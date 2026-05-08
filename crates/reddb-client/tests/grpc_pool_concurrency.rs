@@ -55,9 +55,8 @@ macro_rules! stub_rpc {
             _request: Request<$req>,
         ) -> ::core::pin::Pin<
             Box<
-                dyn ::core::future::Future<
-                        Output = Result<Response<$resp>, Status>,
-                    > + ::core::marker::Send
+                dyn ::core::future::Future<Output = Result<Response<$resp>, Status>>
+                    + ::core::marker::Send
                     + 'async_trait,
             >,
         >
@@ -74,10 +73,7 @@ struct SlowMock;
 
 #[tonic::async_trait]
 impl RedDb for SlowMock {
-    async fn query(
-        &self,
-        _request: Request<QueryRequest>,
-    ) -> Result<Response<QueryReply>, Status> {
+    async fn query(&self, _request: Request<QueryRequest>) -> Result<Response<QueryReply>, Status> {
         tokio::time::sleep(RTT).await;
         Ok(Response::new(QueryReply {
             ok: true,
@@ -88,8 +84,7 @@ impl RedDb for SlowMock {
             record_count: 0,
             // Minimal valid JSON the client's `parse_query_json`
             // accepts. Empty rows + columns is fine.
-            result_json: r#"{"statement":"select","affected":0,"columns":[],"rows":[]}"#
-                .into(),
+            result_json: r#"{"statement":"select","affected":0,"columns":[],"rows":[]}"#.into(),
         }))
     }
 
@@ -132,11 +127,19 @@ impl RedDb for SlowMock {
     stub_rpc!(native_physical_state, Empty, PayloadReply);
     stub_rpc!(native_vector_artifacts, Empty, PayloadReply);
     stub_rpc!(inspect_native_vector_artifacts, Empty, PayloadReply);
-    stub_rpc!(inspect_native_vector_artifact, CollectionRequest, PayloadReply);
+    stub_rpc!(
+        inspect_native_vector_artifact,
+        CollectionRequest,
+        PayloadReply
+    );
     stub_rpc!(native_header_repair_policy, Empty, PayloadReply);
     stub_rpc!(repair_native_header, Empty, OperationReply);
     stub_rpc!(warmup_native_vector_artifacts, Empty, PayloadReply);
-    stub_rpc!(warmup_native_vector_artifact, CollectionRequest, PayloadReply);
+    stub_rpc!(
+        warmup_native_vector_artifact,
+        CollectionRequest,
+        PayloadReply
+    );
     stub_rpc!(repair_native_physical_state, Empty, OperationReply);
     stub_rpc!(rebuild_physical_metadata, Empty, OperationReply);
     stub_rpc!(manifest, ManifestRequest, PayloadReply);
@@ -152,7 +155,11 @@ impl RedDb for SlowMock {
     stub_rpc!(warmup_index, IndexNameRequest, PayloadReply);
     stub_rpc!(rebuild_indexes, CollectionRequest, PayloadReply);
     stub_rpc!(graph_projections, Empty, PayloadReply);
-    stub_rpc!(save_graph_projection, GraphProjectionUpsertRequest, PayloadReply);
+    stub_rpc!(
+        save_graph_projection,
+        GraphProjectionUpsertRequest,
+        PayloadReply
+    );
     stub_rpc!(save_analytics_job, JsonPayloadRequest, PayloadReply);
     stub_rpc!(queue_analytics_job, JsonPayloadRequest, PayloadReply);
     stub_rpc!(start_analytics_job, JsonPayloadRequest, PayloadReply);
@@ -160,7 +167,11 @@ impl RedDb for SlowMock {
     stub_rpc!(mark_analytics_job_stale, JsonPayloadRequest, PayloadReply);
     stub_rpc!(fail_analytics_job, JsonPayloadRequest, PayloadReply);
     stub_rpc!(materialize_graph_projection, IndexNameRequest, PayloadReply);
-    stub_rpc!(mark_graph_projection_materializing, IndexNameRequest, PayloadReply);
+    stub_rpc!(
+        mark_graph_projection_materializing,
+        IndexNameRequest,
+        PayloadReply
+    );
     stub_rpc!(mark_graph_projection_stale, IndexNameRequest, PayloadReply);
     stub_rpc!(fail_graph_projection, IndexNameRequest, PayloadReply);
     stub_rpc!(analytics_jobs, Empty, PayloadReply);
@@ -183,7 +194,11 @@ impl RedDb for SlowMock {
     stub_rpc!(graph_centrality, JsonPayloadRequest, PayloadReply);
     stub_rpc!(graph_community, JsonPayloadRequest, PayloadReply);
     stub_rpc!(graph_clustering, JsonPayloadRequest, PayloadReply);
-    stub_rpc!(graph_personalized_pagerank, JsonPayloadRequest, PayloadReply);
+    stub_rpc!(
+        graph_personalized_pagerank,
+        JsonPayloadRequest,
+        PayloadReply
+    );
     stub_rpc!(graph_hits, JsonPayloadRequest, PayloadReply);
     stub_rpc!(graph_cycles, JsonPayloadRequest, PayloadReply);
     stub_rpc!(graph_topological_sort, JsonPayloadRequest, PayloadReply);
@@ -198,7 +213,11 @@ impl RedDb for SlowMock {
     stub_rpc!(bulk_create_nodes, JsonBulkCreateRequest, BulkEntityReply);
     stub_rpc!(bulk_create_edges, JsonBulkCreateRequest, BulkEntityReply);
     stub_rpc!(bulk_create_vectors, JsonBulkCreateRequest, BulkEntityReply);
-    stub_rpc!(bulk_create_documents, JsonBulkCreateRequest, BulkEntityReply);
+    stub_rpc!(
+        bulk_create_documents,
+        JsonBulkCreateRequest,
+        BulkEntityReply
+    );
     stub_rpc!(ask, JsonPayloadRequest, PayloadReply);
     stub_rpc!(embeddings, JsonPayloadRequest, PayloadReply);
     stub_rpc!(ai_prompt, JsonPayloadRequest, PayloadReply);
@@ -258,9 +277,7 @@ async fn drive_pooled(client: Arc<GrpcClient>) -> Duration {
     let mut handles = Vec::with_capacity(N);
     for _ in 0..N {
         let c = client.clone();
-        handles.push(tokio::spawn(async move {
-            c.query("select 1").await
-        }));
+        handles.push(tokio::spawn(async move { c.query("select 1").await }));
     }
     for h in handles {
         h.await
@@ -281,7 +298,10 @@ async fn drive_legacy_mutex(client: Arc<Mutex<RedDBClient>>) -> Duration {
         let c = client.clone();
         handles.push(tokio::spawn(async move {
             let mut guard = c.lock().await;
-            guard.query_reply("select 1").await.map_err(|e| e.to_string())
+            guard
+                .query_reply("select 1")
+                .await
+                .map_err(|e| e.to_string())
         }));
     }
     for h in handles {

@@ -154,11 +154,7 @@ impl HttpResponse {
     /// routed through `HeaderEscapeGuard::header_value`. There is no
     /// raw-string overload by design (#176 / ADR 0010).
     #[allow(dead_code)]
-    pub(crate) fn with_header(
-        mut self,
-        name: &'static str,
-        value: http::HeaderValue,
-    ) -> Self {
+    pub(crate) fn with_header(mut self, name: &'static str, value: http::HeaderValue) -> Self {
         self.extra_headers.push((name, value));
         self
     }
@@ -377,9 +373,8 @@ mod transport_tests {
         let head = String::from_utf8_lossy(&bytes);
         // Exactly one CRLFCRLF separator between headers and body.
         assert_eq!(head.matches("\r\n\r\n").count(), 1);
-        assert!(head.starts_with(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
-        ));
+        assert!(head
+            .starts_with("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "));
     }
 }
 pub(crate) fn split_target(target: &str) -> (String, BTreeMap<String, String>) {

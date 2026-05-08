@@ -280,22 +280,15 @@ impl RedDBServer {
     // ── KV endpoints ─────────────────────────────────────────────────
 
     pub(crate) fn handle_get_kv(&self, collection: &str, key: &str) -> HttpResponse {
-        match self.entity_use_cases().get_kv(collection, key) {
-            Ok(Some((value, id))) => {
-                let mut object = Map::new();
-                object.insert("ok".to_string(), JsonValue::Bool(true));
-                object.insert(
-                    "collection".to_string(),
-                    JsonValue::String(collection.to_string()),
-                );
-                object.insert("key".to_string(), JsonValue::String(key.to_string()));
-                object.insert(
-                    "value".to_string(),
-                    crate::presentation::entity_json::storage_value_to_json(&value),
-                );
-                object.insert("id".to_string(), JsonValue::Number(id.raw() as f64));
-                json_response(200, JsonValue::Object(object))
-            }
+        match HttpKvOps::new(self).get(collection, key) {
+            Ok(Some((value, id))) => json_response(
+                200,
+                kv_envelope(collection, key)
+                    .with_found(true)
+                    .with_value(&value)
+                    .with_entity_id(id)
+                    .into_json(),
+            ),
             Ok(None) => json_error(404, format!("key not found: {key}")),
             Err(err) => json_error(400, err.to_string()),
         }
@@ -307,69 +300,35 @@ impl RedDBServer {
             Err(response) => return response,
         };
 
-        let value = match payload.get("value") {
-            Some(JsonValue::String(s)) => Value::text(s.clone()),
-            Some(JsonValue::Number(n)) => {
-                if n.fract().abs() < f64::EPSILON {
-                    Value::Integer(*n as i64)
-                } else {
-                    Value::Float(*n)
-                }
-            }
-            Some(JsonValue::Bool(b)) => Value::Boolean(*b),
-            Some(JsonValue::Null) | None => Value::Null,
-            Some(other) => Value::Json(crate::json::to_vec(other).unwrap_or_default()),
+        let value_arg = payload.get("value").unwrap_or(&JsonValue::Null);
+        let value = match crate::application::entity::json_to_storage_value(value_arg) {
+            Ok(value) => value,
+            Err(err) => return json_error(400, err.to_string()),
         };
 
-        // Try to find existing KV to update, otherwise create
-        match self.entity_use_cases().get_kv(collection, key) {
-            Ok(Some((_, existing_id))) => {
-                // Update existing
-                match self.entity_use_cases().patch(PatchEntityInput {
-                    collection: collection.to_string(),
-                    id: existing_id,
-                    payload: payload.clone(),
-                    operations: vec![PatchEntityOperation {
-                        op: PatchEntityOperationType::Set,
-                        path: vec!["value".to_string()],
-                        value: payload.get("value").cloned(),
-                    }],
-                }) {
-                    Ok(output) => json_response(
-                        200,
-                        crate::presentation::entity_json::created_entity_output_json(&output),
-                    ),
-                    Err(err) => json_error(400, err.to_string()),
-                }
-            }
-            Ok(None) => {
-                // Create new
-                match self.entity_use_cases().create_kv(CreateKvInput {
-                    collection: collection.to_string(),
-                    key: key.to_string(),
-                    value,
-                    metadata: Vec::new(),
-                }) {
-                    Ok(output) => json_response(
-                        201,
-                        crate::presentation::entity_json::created_entity_output_json(&output),
-                    ),
-                    Err(err) => json_error(400, err.to_string()),
-                }
+        match HttpKvOps::new(self).put(collection, key, value, Some(value_arg.clone())) {
+            Ok(KvPutOutcome { value, id, created }) => {
+                let status = if created { 201 } else { 200 };
+                json_response(
+                    status,
+                    kv_envelope(collection, key)
+                        .with_found(true)
+                        .with_value(&value)
+                        .with_entity_id(id)
+                        .with_created(created)
+                        .into_json(),
+                )
             }
             Err(err) => json_error(400, err.to_string()),
         }
     }
 
     pub(crate) fn handle_delete_kv(&self, collection: &str, key: &str) -> HttpResponse {
-        match self.entity_use_cases().delete_kv(collection, key) {
-            Ok(true) => {
-                let mut object = Map::new();
-                object.insert("ok".to_string(), JsonValue::Bool(true));
-                object.insert("deleted".to_string(), JsonValue::Bool(true));
-                object.insert("key".to_string(), JsonValue::String(key.to_string()));
-                json_response(200, JsonValue::Object(object))
-            }
+        match HttpKvOps::new(self).delete(collection, key) {
+            Ok(true) => json_response(
+                200,
+                kv_envelope(collection, key).with_deleted(true).into_json(),
+            ),
             Ok(false) => json_error(404, format!("key not found: {key}")),
             Err(err) => json_error(400, err.to_string()),
         }
@@ -641,6 +600,235 @@ impl RedDBServer {
             Err(err @ RedDBError::NotFound(_)) => json_error(404, err.to_string()),
             Err(err) => json_error(400, err.to_string()),
         }
+    }
+}
+
+struct HttpKvOps<'a> {
+    server: &'a RedDBServer,
+}
+
+struct KvPutOutcome {
+    value: Value,
+    id: EntityId,
+    created: bool,
+}
+
+impl<'a> HttpKvOps<'a> {
+    fn new(server: &'a RedDBServer) -> Self {
+        Self { server }
+    }
+
+    fn get(
+        &self,
+        collection: &str,
+        key: &str,
+    ) -> RedDBResult<Option<(crate::storage::schema::Value, EntityId)>> {
+        self.server.entity_use_cases().get_kv(collection, key)
+    }
+
+    fn put(
+        &self,
+        collection: &str,
+        key: &str,
+        value: Value,
+        json_value: Option<JsonValue>,
+    ) -> RedDBResult<KvPutOutcome> {
+        let uc = self.server.entity_use_cases();
+        match uc.get_kv(collection, key)? {
+            Some((_, existing_id)) => {
+                uc.patch(PatchEntityInput {
+                    collection: collection.to_string(),
+                    id: existing_id,
+                    payload: kv_patch_payload(json_value.clone().unwrap_or(JsonValue::Null)),
+                    operations: vec![PatchEntityOperation {
+                        op: PatchEntityOperationType::Set,
+                        path: vec!["value".to_string()],
+                        value: json_value,
+                    }],
+                })?;
+                Ok(KvPutOutcome {
+                    value,
+                    id: existing_id,
+                    created: false,
+                })
+            }
+            None => {
+                let output = uc.create_kv(CreateKvInput {
+                    collection: collection.to_string(),
+                    key: key.to_string(),
+                    value: value.clone(),
+                    metadata: Vec::new(),
+                })?;
+                Ok(KvPutOutcome {
+                    value,
+                    id: output.id,
+                    created: true,
+                })
+            }
+        }
+    }
+
+    fn delete(&self, collection: &str, key: &str) -> RedDBResult<bool> {
+        self.server.entity_use_cases().delete_kv(collection, key)
+    }
+}
+
+fn kv_patch_payload(value: JsonValue) -> JsonValue {
+    let mut payload = Map::new();
+    payload.insert("value".to_string(), value);
+    JsonValue::Object(payload)
+}
+
+fn kv_envelope(collection: &str, key: &str) -> KvEnvelope {
+    KvEnvelope {
+        object: {
+            let mut object = Map::new();
+            object.insert("ok".to_string(), JsonValue::Bool(true));
+            object.insert(
+                "collection".to_string(),
+                JsonValue::String(collection.to_string()),
+            );
+            object.insert("key".to_string(), JsonValue::String(key.to_string()));
+            object
+        },
+    }
+}
+
+struct KvEnvelope {
+    object: Map<String, JsonValue>,
+}
+
+impl KvEnvelope {
+    fn with_found(mut self, found: bool) -> Self {
+        self.object
+            .insert("found".to_string(), JsonValue::Bool(found));
+        self
+    }
+
+    fn with_value(mut self, value: &Value) -> Self {
+        self.object.insert(
+            "value".to_string(),
+            crate::presentation::entity_json::storage_value_to_json(value),
+        );
+        self
+    }
+
+    fn with_entity_id(mut self, id: EntityId) -> Self {
+        let id_value = JsonValue::Number(id.raw() as f64);
+        self.object.insert("id".to_string(), id_value.clone());
+        self.object.insert("entity_id".to_string(), id_value);
+        self
+    }
+
+    fn with_created(mut self, created: bool) -> Self {
+        self.object
+            .insert("created".to_string(), JsonValue::Bool(created));
+        self.object
+            .insert("updated".to_string(), JsonValue::Bool(!created));
+        self
+    }
+
+    fn with_deleted(mut self, deleted: bool) -> Self {
+        self.object
+            .insert("deleted".to_string(), JsonValue::Bool(deleted));
+        self
+    }
+
+    fn into_json(self) -> JsonValue {
+        JsonValue::Object(self.object)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(method: &str, path: &str, body: &str) -> HttpRequest {
+        HttpRequest {
+            method: method.to_string(),
+            path: path.to_string(),
+            query: BTreeMap::new(),
+            headers: BTreeMap::new(),
+            body: body.as_bytes().to_vec(),
+        }
+    }
+
+    fn response_json(response: &HttpResponse) -> JsonValue {
+        let text = std::str::from_utf8(&response.body).expect("response body is utf8");
+        parse_json(text).expect("response body is json").into()
+    }
+
+    #[test]
+    fn http_kv_canonical_route_put_get_delete_uses_common_envelope() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime starts");
+        let server = RedDBServer::new(runtime);
+
+        let created = server.route(request(
+            "PUT",
+            "/collections/kv_default/kv/theme",
+            r#"{"value":"dark"}"#,
+        ));
+        assert_eq!(created.status, 201);
+        let created_json = response_json(&created);
+        assert_eq!(
+            created_json.get("ok").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            created_json.get("collection").and_then(JsonValue::as_str),
+            Some("kv_default")
+        );
+        assert_eq!(
+            created_json.get("key").and_then(JsonValue::as_str),
+            Some("theme")
+        );
+        assert_eq!(
+            created_json.get("value").and_then(JsonValue::as_str),
+            Some("dark")
+        );
+        assert_eq!(
+            created_json.get("created").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+
+        let updated = server.route(request(
+            "PUT",
+            "/collections/kv_default/kv/theme",
+            r#"{"value":"light"}"#,
+        ));
+        assert_eq!(updated.status, 200);
+        let updated_json = response_json(&updated);
+        assert_eq!(
+            updated_json.get("updated").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+
+        let found = server.route(request("GET", "/collections/kv_default/kv/theme", ""));
+        assert_eq!(found.status, 200);
+        let found_json = response_json(&found);
+        assert_eq!(
+            found_json.get("ok").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            found_json.get("found").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            found_json.get("value").and_then(JsonValue::as_str),
+            Some("light")
+        );
+
+        let deleted = server.route(request("DELETE", "/collections/kv_default/kv/theme", ""));
+        assert_eq!(deleted.status, 200);
+        let deleted_json = response_json(&deleted);
+        assert_eq!(
+            deleted_json.get("deleted").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+
+        let missing = server.route(request("GET", "/collections/kv_default/kv/theme", ""));
+        assert_eq!(missing.status, 404);
     }
 }
 

@@ -2689,7 +2689,10 @@ fn run_admin_cache_command(
                 }
                 Ok((status, body)) => {
                     if json_mode {
-                        json_error("admin.cache.stats", &format!("server returned {status}: {body}"));
+                        json_error(
+                            "admin.cache.stats",
+                            &format!("server returned {status}: {body}"),
+                        );
                     }
                     eprintln!("error: server returned {status}: {body}");
                     std::process::exit(1);
@@ -2708,14 +2711,22 @@ fn run_admin_cache_command(
             let ns = sub_args.first().copied().unwrap_or("");
             if ns.is_empty() {
                 if json_mode {
-                    json_error("admin.cache.flush-namespace", "namespace argument is required");
+                    json_error(
+                        "admin.cache.flush-namespace",
+                        "namespace argument is required",
+                    );
                 }
                 eprintln!("error: namespace argument is required");
                 eprintln!("usage: red admin cache flush-namespace <namespace>");
                 std::process::exit(1);
             }
             let payload = format!("{{\"namespace\":\"{}\"}}", json_escape(ns));
-            match post_json_to_http_authed(bind, "/admin/blob_cache/flush_namespace", &payload, token) {
+            match post_json_to_http_authed(
+                bind,
+                "/admin/blob_cache/flush_namespace",
+                &payload,
+                token,
+            ) {
                 Ok(body) => {
                     if json_mode {
                         print!("{body}");
@@ -2797,7 +2808,10 @@ fn run_admin_cache_command(
                 Some(v) => v,
                 None => {
                     if json_mode {
-                        json_error("admin.cache.compare-and-set", "--new-version (u64) is required");
+                        json_error(
+                            "admin.cache.compare-and-set",
+                            "--new-version (u64) is required",
+                        );
                     }
                     eprintln!("error: --new-version (u64) is required");
                     std::process::exit(1);
@@ -2817,7 +2831,10 @@ fn run_admin_cache_command(
                 Ok(b) => b,
                 Err(err) => {
                     if json_mode {
-                        json_error("admin.cache.compare-and-set", &format!("failed to read {value_path}: {err}"));
+                        json_error(
+                            "admin.cache.compare-and-set",
+                            &format!("failed to read {value_path}: {err}"),
+                        );
                     }
                     eprintln!("error: failed to read {value_path}: {err}");
                     std::process::exit(1);

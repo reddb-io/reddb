@@ -45,7 +45,10 @@ pub struct ConfigWatcher {
 
 impl ConfigWatcher {
     pub fn new(path: impl Into<PathBuf>, store: Arc<UnifiedStore>) -> Self {
-        Self { path: path.into(), store }
+        Self {
+            path: path.into(),
+            store,
+        }
     }
 
     /// Spawn the watcher as a detached background thread (lives until
@@ -116,9 +119,7 @@ fn run_inotify(path: &std::path::Path, store: &UnifiedStore) -> bool {
     // Blocking read loop — owns the fd until process exit or read error.
     let mut buf = vec![0u8; 4096];
     loop {
-        let n = unsafe {
-            libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
-        };
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
         if n <= 0 {
             break;
         }

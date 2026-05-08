@@ -79,7 +79,9 @@ impl<'a> Parser<'a> {
     fn parse_not_expr(&mut self) -> Result<Filter, ParseError> {
         if self.consume(&Token::Not)? {
             self.enter_depth()?;
-            let result = self.parse_not_expr().map(|expr| Filter::Not(Box::new(expr)));
+            let result = self
+                .parse_not_expr()
+                .map(|expr| Filter::Not(Box::new(expr)));
             self.exit_depth();
             result
         } else {

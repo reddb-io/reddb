@@ -111,8 +111,10 @@ fn dos_limit_deeply_nested_select_subquery_does_not_overflow_stack() {
             assert!(
                 matches!(
                     err.kind,
-                    ParseErrorKind::DepthLimit { limit_name: "max_depth", .. }
-                        | ParseErrorKind::Syntax
+                    ParseErrorKind::DepthLimit {
+                        limit_name: "max_depth",
+                        ..
+                    } | ParseErrorKind::Syntax
                 ),
                 "expected DepthLimit or Syntax (Phase A), got: {:?}",
                 err.kind
@@ -158,15 +160,19 @@ fn dos_limit_deeply_nested_from_subquery_returns_depth_limit() {
             assert!(
                 matches!(
                     err.kind,
-                    ParseErrorKind::DepthLimit { limit_name: "max_depth", .. }
-                        | ParseErrorKind::Syntax
+                    ParseErrorKind::DepthLimit {
+                        limit_name: "max_depth",
+                        ..
+                    } | ParseErrorKind::Syntax
                 ),
                 "expected DepthLimit or Syntax (Phase A), got: {:?}",
                 err.kind
             );
         })
         .expect("spawn deep-FROM-subquery thread");
-    handle.join().expect("deep-FROM-subquery thread must not panic");
+    handle
+        .join()
+        .expect("deep-FROM-subquery thread must not panic");
 }
 
 // ---- property tests ---------------------------------------------

@@ -63,14 +63,8 @@ pub fn adversarial_inputs() -> Vec<(&'static str, String)> {
 pub fn timeseries_adversarial_inputs() -> Vec<(&'static str, String)> {
     vec![
         // CREATE TIMESERIES surface --------------------------------
-        (
-            "ts_eof_after_create",
-            "CREATE TIMESERIES".to_string(),
-        ),
-        (
-            "ts_eof_after_name",
-            "CREATE TIMESERIES m1".to_string(),
-        ),
+        ("ts_eof_after_create", "CREATE TIMESERIES".to_string()),
+        ("ts_eof_after_name", "CREATE TIMESERIES m1".to_string()),
         (
             "ts_retention_no_value",
             "CREATE TIMESERIES m1 RETENTION".to_string(),
@@ -100,10 +94,7 @@ pub fn timeseries_adversarial_inputs() -> Vec<(&'static str, String)> {
             "CREATE TIMESERIES m1 DOWNSAMPLE 1h-5m-avg".to_string(),
         ),
         // CREATE HYPERTABLE surface --------------------------------
-        (
-            "ht_eof_after_create",
-            "CREATE HYPERTABLE".to_string(),
-        ),
+        ("ht_eof_after_create", "CREATE HYPERTABLE".to_string()),
         (
             "ht_missing_time_column",
             "CREATE HYPERTABLE metrics CHUNK_INTERVAL '1d'".to_string(),
@@ -187,25 +178,19 @@ pub fn migration_adversarial_inputs() -> Vec<(&'static str, String)> {
             "migration_dangling_depends_comma",
             "CREATE MIGRATION m1 DEPENDS ON a, AS CREATE TABLE t (id INTEGER)".to_string(),
         ),
-        (
-            "migration_apply_eof",
-            "APPLY MIGRATION".to_string(),
-        ),
-        (
-            "migration_rollback_eof",
-            "ROLLBACK MIGRATION".to_string(),
-        ),
-        (
-            "migration_explain_eof",
-            "EXPLAIN MIGRATION".to_string(),
-        ),
+        ("migration_apply_eof", "APPLY MIGRATION".to_string()),
+        ("migration_rollback_eof", "ROLLBACK MIGRATION".to_string()),
+        ("migration_explain_eof", "EXPLAIN MIGRATION".to_string()),
         (
             "migration_apply_for_no_tenant",
             "APPLY MIGRATION m1 FOR".to_string(),
         ),
         (
             "migration_long_name",
-            format!("CREATE MIGRATION {} AS CREATE TABLE t (id INTEGER)", "m".repeat(10_000)),
+            format!(
+                "CREATE MIGRATION {} AS CREATE TABLE t (id INTEGER)",
+                "m".repeat(10_000)
+            ),
         ),
         (
             "migration_deep_paren_body",
@@ -223,10 +208,7 @@ pub fn migration_adversarial_inputs() -> Vec<(&'static str, String)> {
             "migration_nul_byte",
             "CREATE MIGRATION m1 AS CREATE TABLE t (id INTEGER)\0".to_string(),
         ),
-        (
-            "migration_garbage",
-            "CREATE MIGRATION @#$%".to_string(),
-        ),
+        ("migration_garbage", "CREATE MIGRATION @#$%".to_string()),
     ]
 }
 
@@ -244,10 +226,7 @@ pub fn geo_adversarial_inputs() -> Vec<(&'static str, String)> {
     vec![
         // ----- bare / EOF shapes ---------------------------------
         ("geo_eof_after_search_spatial", "SEARCH SPATIAL".to_string()),
-        (
-            "geo_eof_after_radius",
-            "SEARCH SPATIAL RADIUS".to_string(),
-        ),
+        ("geo_eof_after_radius", "SEARCH SPATIAL RADIUS".to_string()),
         (
             "geo_eof_after_nearest",
             "SEARCH SPATIAL NEAREST 0.0 0.0 K".to_string(),
@@ -393,10 +372,7 @@ pub fn graph_dsl_adversarial_inputs() -> Vec<(&'static str, String)> {
         (
             "graph_match_deep_chain",
             // 200 hops of `(x)-[]->` to stress the depth tracker.
-            format!(
-                "MATCH (a){} RETURN a",
-                "-[]->(x)".repeat(200),
-            ),
+            format!("MATCH (a){} RETURN a", "-[]->(x)".repeat(200),),
         ),
         (
             "graph_match_long_alias",
@@ -414,11 +390,17 @@ pub fn graph_dsl_adversarial_inputs() -> Vec<(&'static str, String)> {
         // PATH FROM ... TO ... surface
         ("graph_path_eof", "PATH".to_string()),
         ("graph_path_no_to", "PATH FROM host('x')".to_string()),
-        ("graph_path_garbage_via", "PATH FROM host('a') TO host('b') VIA @#$%".to_string()),
+        (
+            "graph_path_garbage_via",
+            "PATH FROM host('a') TO host('b') VIA @#$%".to_string(),
+        ),
         // GRAPH command surface
         ("graph_cmd_eof", "GRAPH".to_string()),
         ("graph_cmd_unknown_subcmd", "GRAPH NONESUCH".to_string()),
-        ("graph_neighborhood_no_src", "GRAPH NEIGHBORHOOD".to_string()),
+        (
+            "graph_neighborhood_no_src",
+            "GRAPH NEIGHBORHOOD".to_string(),
+        ),
         (
             "graph_shortest_path_no_to",
             "GRAPH SHORTEST_PATH 'a'".to_string(),
@@ -445,7 +427,10 @@ pub fn queue_adversarial_inputs() -> Vec<(&'static str, String)> {
     vec![
         // CREATE QUEUE — invalid MAX_SIZE values.
         ("queue_create_eof_after_keyword", "CREATE QUEUE".to_string()),
-        ("queue_create_missing_name", "CREATE QUEUE MAX_SIZE 100".to_string()),
+        (
+            "queue_create_missing_name",
+            "CREATE QUEUE MAX_SIZE 100".to_string(),
+        ),
         (
             "queue_create_max_size_negative",
             "CREATE QUEUE q MAX_SIZE -1".to_string(),
@@ -503,10 +488,7 @@ pub fn queue_adversarial_inputs() -> Vec<(&'static str, String)> {
         ),
         // POP / aliases.
         ("queue_pop_eof", "QUEUE POP".to_string()),
-        (
-            "queue_pop_count_no_value",
-            "QUEUE POP q COUNT".to_string(),
-        ),
+        ("queue_pop_count_no_value", "QUEUE POP q COUNT".to_string()),
         // Consumer group syntax.
         ("queue_group_create_eof", "QUEUE GROUP CREATE".to_string()),
         (
@@ -533,19 +515,10 @@ pub fn queue_adversarial_inputs() -> Vec<(&'static str, String)> {
             "queue_ack_missing_message_id",
             "QUEUE ACK q GROUP g".to_string(),
         ),
-        (
-            "queue_unknown_subcommand",
-            "QUEUE FROBNICATE q".to_string(),
-        ),
+        ("queue_unknown_subcommand", "QUEUE FROBNICATE q".to_string()),
         // Bytes-level adversarial inputs.
-        (
-            "queue_garbage_after_keyword",
-            "QUEUE @#$%".to_string(),
-        ),
-        (
-            "queue_nul_byte",
-            "CREATE QUEUE q\0".to_string(),
-        ),
+        ("queue_garbage_after_keyword", "QUEUE @#$%".to_string()),
+        ("queue_nul_byte", "CREATE QUEUE q\0".to_string()),
         (
             "queue_long_name",
             format!("CREATE QUEUE {}", "q".repeat(10_000)),
@@ -562,35 +535,17 @@ pub fn ask_adversarial_inputs() -> Vec<(&'static str, String)> {
             "ask_unterminated_string",
             "ASK 'open question without closing quote".to_string(),
         ),
-        (
-            "ask_using_no_provider",
-            "ASK 'q' USING".to_string(),
-        ),
-        (
-            "ask_model_no_string",
-            "ASK 'q' MODEL".to_string(),
-        ),
+        ("ask_using_no_provider", "ASK 'q' USING".to_string()),
+        ("ask_model_no_string", "ASK 'q' MODEL".to_string()),
         (
             "ask_model_unquoted_ident",
             // MODEL slot expects a string literal, not a bare ident.
             "ASK 'q' MODEL gpt4".to_string(),
         ),
-        (
-            "ask_depth_no_int",
-            "ASK 'q' DEPTH".to_string(),
-        ),
-        (
-            "ask_depth_negative",
-            "ASK 'q' DEPTH -1".to_string(),
-        ),
-        (
-            "ask_limit_garbage",
-            "ASK 'q' LIMIT @#$%".to_string(),
-        ),
-        (
-            "ask_collection_no_ident",
-            "ASK 'q' COLLECTION".to_string(),
-        ),
+        ("ask_depth_no_int", "ASK 'q' DEPTH".to_string()),
+        ("ask_depth_negative", "ASK 'q' DEPTH -1".to_string()),
+        ("ask_limit_garbage", "ASK 'q' LIMIT @#$%".to_string()),
+        ("ask_collection_no_ident", "ASK 'q' COLLECTION".to_string()),
         (
             "ask_more_than_five_clauses",
             // Parser caps the optional-clause loop at 5 iterations;
@@ -615,15 +570,9 @@ pub fn ask_adversarial_inputs() -> Vec<(&'static str, String)> {
             "ask_nul_byte_in_question",
             "ASK 'q\0nul' USING openai".to_string(),
         ),
-        (
-            "ask_garbage_payload",
-            "ASK @#$%".to_string(),
-        ),
+        ("ask_garbage_payload", "ASK @#$%".to_string()),
         // SEARCH CONTEXT adversarial shapes
-        (
-            "search_context_eof",
-            "SEARCH CONTEXT".to_string(),
-        ),
+        ("search_context_eof", "SEARCH CONTEXT".to_string()),
         (
             "search_context_missing_string",
             "SEARCH CONTEXT FIELD x".to_string(),
@@ -668,13 +617,15 @@ pub fn vector_search_adversarial_inputs() -> Vec<(&'static str, String)> {
             "SEARCH SIMILAR [0.1, @#$, 0.3] COLLECTION c".to_string(),
         ),
         // ---- gigantic dims -------------------------------------
-        (
-            "vector_huge_dim_4096",
-            {
-                let dims: Vec<String> = (0..4096).map(|i| format!("{:.4}", i as f32 / 4096.0)).collect();
-                format!("SEARCH SIMILAR [{}] COLLECTION big LIMIT 5", dims.join(", "))
-            },
-        ),
+        ("vector_huge_dim_4096", {
+            let dims: Vec<String> = (0..4096)
+                .map(|i| format!("{:.4}", i as f32 / 4096.0))
+                .collect();
+            format!(
+                "SEARCH SIMILAR [{}] COLLECTION big LIMIT 5",
+                dims.join(", ")
+            )
+        }),
         (
             "vector_silly_dim_50000_under_limit",
             // Stays under the 1 MiB max_input_bytes default by
@@ -711,7 +662,10 @@ pub fn vector_search_adversarial_inputs() -> Vec<(&'static str, String)> {
         ),
         // ---- structural breakage -------------------------------
         ("similar_eof", "SEARCH SIMILAR".to_string()),
-        ("similar_no_collection", "SEARCH SIMILAR [0.1, 0.2]".to_string()),
+        (
+            "similar_no_collection",
+            "SEARCH SIMILAR [0.1, 0.2]".to_string(),
+        ),
         (
             "similar_no_collection_name",
             "SEARCH SIMILAR [0.1] COLLECTION".to_string(),
@@ -772,10 +726,7 @@ pub fn probabilistic_adversarial_inputs() -> Vec<(&'static str, String)> {
         ("prob_create_hll_no_name", "CREATE HLL".to_string()),
         ("prob_create_sketch_no_name", "CREATE SKETCH".to_string()),
         ("prob_create_filter_no_name", "CREATE FILTER".to_string()),
-        (
-            "prob_create_unknown_kind",
-            "CREATE BLOOM b1".to_string(),
-        ),
+        ("prob_create_unknown_kind", "CREATE BLOOM b1".to_string()),
         (
             "prob_create_hll_dangling_if",
             "CREATE HLL IF NOT EXISTS".to_string(),
@@ -836,27 +787,15 @@ pub fn probabilistic_adversarial_inputs() -> Vec<(&'static str, String)> {
         ),
         // ----- HLL operational surface ---------------------------
         ("prob_hll_eof_after_keyword", "HLL".to_string()),
-        (
-            "prob_hll_unknown_subcmd",
-            "HLL FROBNICATE x".to_string(),
-        ),
+        ("prob_hll_unknown_subcmd", "HLL FROBNICATE x".to_string()),
         ("prob_hll_add_no_name", "HLL ADD".to_string()),
-        (
-            "prob_hll_add_no_payload",
-            "HLL ADD visitors".to_string(),
-        ),
+        ("prob_hll_add_no_payload", "HLL ADD visitors".to_string()),
         (
             "prob_hll_add_unterminated_string",
             "HLL ADD visitors 'open".to_string(),
         ),
-        (
-            "prob_hll_count_no_name",
-            "HLL COUNT".to_string(),
-        ),
-        (
-            "prob_hll_merge_no_dest",
-            "HLL MERGE".to_string(),
-        ),
+        ("prob_hll_count_no_name", "HLL COUNT".to_string()),
+        ("prob_hll_merge_no_dest", "HLL MERGE".to_string()),
         // ----- SKETCH operational surface ------------------------
         ("prob_sketch_eof_after_keyword", "SKETCH".to_string()),
         ("prob_sketch_add_no_name", "SKETCH ADD".to_string()),
@@ -880,10 +819,7 @@ pub fn probabilistic_adversarial_inputs() -> Vec<(&'static str, String)> {
         // ----- FILTER operational surface ------------------------
         ("prob_filter_eof_after_keyword", "FILTER".to_string()),
         ("prob_filter_add_no_name", "FILTER ADD".to_string()),
-        (
-            "prob_filter_add_no_element",
-            "FILTER ADD seen".to_string(),
-        ),
+        ("prob_filter_add_no_element", "FILTER ADD seen".to_string()),
         (
             "prob_filter_check_no_element",
             "FILTER CHECK seen".to_string(),
@@ -892,20 +828,14 @@ pub fn probabilistic_adversarial_inputs() -> Vec<(&'static str, String)> {
             "prob_filter_delete_no_element",
             "FILTER DELETE seen".to_string(),
         ),
-        (
-            "prob_filter_count_no_name",
-            "FILTER COUNT".to_string(),
-        ),
+        ("prob_filter_count_no_name", "FILTER COUNT".to_string()),
         (
             "prob_filter_check_unquoted_element",
             "FILTER CHECK seen bareword".to_string(),
         ),
         // ----- DROP envelope -------------------------------------
         ("prob_drop_eof", "DROP".to_string()),
-        (
-            "prob_drop_unknown_kind",
-            "DROP BLOOM b1".to_string(),
-        ),
+        ("prob_drop_unknown_kind", "DROP BLOOM b1".to_string()),
         (
             "prob_drop_hll_dangling_if",
             "DROP HLL IF EXISTS".to_string(),
@@ -933,14 +863,8 @@ pub fn probabilistic_adversarial_inputs() -> Vec<(&'static str, String)> {
                 format!("HLL ADD visitors {}", els.join(" "))
             },
         ),
-        (
-            "prob_nul_byte_after_create",
-            "CREATE HLL h1\0".to_string(),
-        ),
-        (
-            "prob_garbage_after_filter_kw",
-            "FILTER @#$%".to_string(),
-        ),
+        ("prob_nul_byte_after_create", "CREATE HLL h1\0".to_string()),
+        ("prob_garbage_after_filter_kw", "FILTER @#$%".to_string()),
         (
             "prob_unicode_in_element",
             "FILTER ADD seen '雪 ❄ ε≈μ'".to_string(),
@@ -1086,4 +1010,3 @@ pub fn subquery_adversarial_inputs() -> Vec<(&'static str, String)> {
         ),
     ]
 }
-

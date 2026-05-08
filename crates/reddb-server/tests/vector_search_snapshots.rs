@@ -121,14 +121,8 @@ snap_redacted!(search_hybrid_eof, "SEARCH HYBRID");
 // VECTOR SEARCH … SIMILAR TO error scenarios
 // ============================================================
 
-snap_redacted!(
-    vector_search_eof_after_keyword,
-    "VECTOR SEARCH"
-);
-snap_redacted!(
-    vector_search_no_similar_to,
-    "VECTOR SEARCH e [0.1, 0.2]"
-);
+snap_redacted!(vector_search_eof_after_keyword, "VECTOR SEARCH");
+snap_redacted!(vector_search_no_similar_to, "VECTOR SEARCH e [0.1, 0.2]");
 snap_redacted!(
     vector_search_bad_metric,
     "VECTOR SEARCH e SIMILAR TO [0.1] METRIC GLORP LIMIT 5"
@@ -255,9 +249,8 @@ fn happy_search_similar_text_semantic() {
 
 #[test]
 fn happy_search_hybrid_vector_and_text() {
-    let q = parse_query(
-        "SEARCH HYBRID SIMILAR [0.1, 0.2] TEXT 'ssh exploit' COLLECTION svc LIMIT 30",
-    );
+    let q =
+        parse_query("SEARCH HYBRID SIMILAR [0.1, 0.2] TEXT 'ssh exploit' COLLECTION svc LIMIT 30");
     match q {
         QueryExpr::SearchCommand(SearchCommand::Hybrid {
             vector,
@@ -337,9 +330,8 @@ fn happy_hybrid_from_fusion_rerank() {
 
 #[test]
 fn happy_hybrid_from_fusion_rrf_with_k() {
-    let q = parse_query(
-        "HYBRID FROM hosts VECTOR SEARCH e SIMILAR TO [0.1] FUSION RRF(30) LIMIT 10",
-    );
+    let q =
+        parse_query("HYBRID FROM hosts VECTOR SEARCH e SIMILAR TO [0.1] FUSION RRF(30) LIMIT 10");
     match q {
         QueryExpr::Hybrid(h) => match h.fusion {
             FusionStrategy::RRF { k } => assert_eq!(k, 30),
@@ -353,9 +345,7 @@ fn happy_hybrid_from_fusion_rrf_with_k() {
 fn happy_insert_auto_embed_default_provider() {
     // Default provider is "openai" (per dml.rs L196). USING is
     // omitted on purpose to pin the default-provider path.
-    let q = parse_query(
-        "INSERT INTO docs (id, body) VALUES (1, 'hello') WITH AUTO EMBED (body)",
-    );
+    let q = parse_query("INSERT INTO docs (id, body) VALUES (1, 'hello') WITH AUTO EMBED (body)");
     match q {
         QueryExpr::Insert(i) => {
             let cfg = i.auto_embed.as_ref().expect("auto_embed must be set");

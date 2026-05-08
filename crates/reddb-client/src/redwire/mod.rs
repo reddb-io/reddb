@@ -239,8 +239,10 @@ impl RedWireClient {
         let resp = self.read_frame().await?;
         match resp.kind {
             MessageKind::Result => {
-                let value: serde_json::Value = serde_json::from_slice(&resp.payload)
-                    .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode result: {e}")))?;
+                let value: serde_json::Value =
+                    serde_json::from_slice(&resp.payload).map_err(|e| {
+                        ClientError::new(ErrorCode::Protocol, format!("decode result: {e}"))
+                    })?;
                 Ok(QueryResult::from_envelope(value))
             }
             MessageKind::Error => {
@@ -293,8 +295,9 @@ impl RedWireClient {
         let resp = self.read_frame().await?;
         match resp.kind {
             MessageKind::BulkOk => {
-                let v: serde_json::Value = serde_json::from_slice(&resp.payload)
-                    .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode bulk_ok: {e}")))?;
+                let v: serde_json::Value = serde_json::from_slice(&resp.payload).map_err(|e| {
+                    ClientError::new(ErrorCode::Protocol, format!("decode bulk_ok: {e}"))
+                })?;
                 let affected = v
                     .as_object()
                     .and_then(|o| o.get("affected"))
@@ -317,13 +320,19 @@ impl RedWireClient {
     /// server emits on a `Get` frame: `{ ok, found, ... }`.
     pub async fn get(&mut self, collection: &str, id: &str) -> Result<serde_json::Value> {
         let mut obj = serde_json::Map::new();
-        obj.insert("collection".into(), serde_json::Value::String(collection.to_string()));
+        obj.insert(
+            "collection".into(),
+            serde_json::Value::String(collection.to_string()),
+        );
         obj.insert("id".into(), serde_json::Value::String(id.to_string()));
         let bytes = serde_json::to_vec(&serde_json::Value::Object(obj))
             .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("encode get: {e}")))?;
         let corr = self.next_corr();
         let req = Frame::new(MessageKind::Get, corr, bytes);
-        self.stream.write_all(&encode_frame(&req)).await.map_err(io_err)?;
+        self.stream
+            .write_all(&encode_frame(&req))
+            .await
+            .map_err(io_err)?;
         let resp = self.read_frame().await?;
         match resp.kind {
             MessageKind::Result => serde_json::from_slice(&resp.payload)
@@ -342,18 +351,25 @@ impl RedWireClient {
     /// Delete by primary id. Returns the affected count.
     pub async fn delete(&mut self, collection: &str, id: &str) -> Result<u64> {
         let mut obj = serde_json::Map::new();
-        obj.insert("collection".into(), serde_json::Value::String(collection.to_string()));
+        obj.insert(
+            "collection".into(),
+            serde_json::Value::String(collection.to_string()),
+        );
         obj.insert("id".into(), serde_json::Value::String(id.to_string()));
         let bytes = serde_json::to_vec(&serde_json::Value::Object(obj))
             .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("encode delete: {e}")))?;
         let corr = self.next_corr();
         let req = Frame::new(MessageKind::Delete, corr, bytes);
-        self.stream.write_all(&encode_frame(&req)).await.map_err(io_err)?;
+        self.stream
+            .write_all(&encode_frame(&req))
+            .await
+            .map_err(io_err)?;
         let resp = self.read_frame().await?;
         match resp.kind {
             MessageKind::DeleteOk => {
-                let v: serde_json::Value = serde_json::from_slice(&resp.payload)
-                    .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode delete_ok: {e}")))?;
+                let v: serde_json::Value = serde_json::from_slice(&resp.payload).map_err(|e| {
+                    ClientError::new(ErrorCode::Protocol, format!("decode delete_ok: {e}"))
+                })?;
                 Ok(v.as_object()
                     .and_then(|o| o.get("affected"))
                     .and_then(|x| x.as_u64())
@@ -400,11 +416,7 @@ impl RedWireClient {
             if row.len() != columns.len() {
                 return Err(ClientError::new(
                     ErrorCode::Protocol,
-                    format!(
-                        "row had {} values for {} columns",
-                        row.len(),
-                        columns.len()
-                    ),
+                    format!("row had {} values for {} columns", row.len(), columns.len()),
                 ));
             }
             for v in row {

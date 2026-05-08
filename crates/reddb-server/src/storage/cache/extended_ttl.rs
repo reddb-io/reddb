@@ -189,9 +189,7 @@ impl EffectiveExpiry {
 
         // Numerical Recipes LCG: x_{n+1} = 1664525 * x_n + 1013904223 mod 2^64
         // One step is sufficient for "spread", we don't need crypto quality.
-        let mixed = seed
-            .wrapping_mul(1_664_525)
-            .wrapping_add(1_013_904_223);
+        let mixed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
 
         // offset ∈ [0, pct] inclusive → pct+1 buckets.
         let offset = mixed % (pct + 1);
@@ -349,7 +347,12 @@ mod tests {
             jitter_pct: 0,
         };
         let d = EffectiveExpiry::compute(Some(100), 120, 120, &ext);
-        assert_eq!(d, ExpiryDecision::Stale { window_remaining_ms: 30 });
+        assert_eq!(
+            d,
+            ExpiryDecision::Stale {
+                window_remaining_ms: 30
+            }
+        );
     }
 
     #[test]
@@ -361,7 +364,12 @@ mod tests {
             jitter_pct: 0,
         };
         let d = EffectiveExpiry::compute(Some(100), 150, 150, &ext);
-        assert_eq!(d, ExpiryDecision::Stale { window_remaining_ms: 0 });
+        assert_eq!(
+            d,
+            ExpiryDecision::Stale {
+                window_remaining_ms: 0
+            }
+        );
     }
 
     #[test]
@@ -556,7 +564,11 @@ mod tests {
     ) -> ExpiryDecision {
         // Step 1: idle TTL.
         if let Some(idle) = ext.idle_ttl_ms {
-            let elapsed = if now >= last_access { now - last_access } else { 0 };
+            let elapsed = if now >= last_access {
+                now - last_access
+            } else {
+                0
+            };
             if elapsed > idle {
                 return ExpiryDecision::Expired;
             }
@@ -591,21 +603,41 @@ mod tests {
         // pulling proptest. Each tuple is checked against the reference.
         let mut state: u64 = 0x1234_5678_9ABC_DEF0;
         for _ in 0..5_000 {
-            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             let hard = if state & 1 == 0 {
                 None
             } else {
                 Some((state >> 1) % 10_000)
             };
-            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             let now = state % 12_000;
-            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             let last_access = state % 12_000;
-            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-            let idle = if state & 1 == 0 { None } else { Some((state >> 1) % 5_000) };
-            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-            let stale = if state & 1 == 0 { None } else { Some((state >> 1) % 5_000) };
-            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            let idle = if state & 1 == 0 {
+                None
+            } else {
+                Some((state >> 1) % 5_000)
+            };
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            let stale = if state & 1 == 0 {
+                None
+            } else {
+                Some((state >> 1) % 5_000)
+            };
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             let jitter = (state % 256) as u8;
 
             let ext = ExtendedTtlPolicy {

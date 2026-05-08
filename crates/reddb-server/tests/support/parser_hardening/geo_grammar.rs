@@ -185,20 +185,14 @@ pub fn distance_fn_stmt() -> impl Strategy<Value = String> {
         Just("HAVERSINE"),
         Just("VINCENTY"),
     ];
-    (
-        fn_name,
-        lat_lit(),
-        lon_lit(),
-        lat_lit(),
-        lon_lit(),
-        ident(),
-    )
-        .prop_map(|(f, lat1, lon1, lat2, lon2, table)| {
+    (fn_name, lat_lit(), lon_lit(), lat_lit(), lon_lit(), ident()).prop_map(
+        |(f, lat1, lon1, lat2, lon2, table)| {
             format!(
                 "SELECT {}({}, {}, {}, {}) FROM {}",
                 f, lat1, lon1, lat2, lon2, table,
             )
-        })
+        },
+    )
 }
 
 /// Top-level union: any of the geo shapes the test suite covers.

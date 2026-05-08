@@ -12,7 +12,9 @@ use std::sync::Arc;
 use reddb::api::RedDBOptions;
 use reddb::wire::redwire::{start_redwire_listener, RedWireConfig};
 use reddb::RedDBRuntime;
-use reddb_client::redwire::{Auth, BinaryValue, ConnectOptions, Flags, Frame, MessageKind, RedWireClient};
+use reddb_client::redwire::{
+    Auth, BinaryValue, ConnectOptions, Flags, Frame, MessageKind, RedWireClient,
+};
 use tokio::net::TcpListener;
 
 async fn start_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
@@ -223,11 +225,7 @@ async fn scram_sha_256_end_to_end() {
     let client_first = format!("n,,{client_first_bare}");
     send_frame(
         &mut socket,
-        reddb_client::redwire::Frame::new(
-            MessageKind::AuthResponse,
-            2,
-            client_first.into_bytes(),
-        ),
+        reddb_client::redwire::Frame::new(MessageKind::AuthResponse, 2, client_first.into_bytes()),
     )
     .await;
 
@@ -259,11 +257,7 @@ async fn scram_sha_256_end_to_end() {
     let client_final = format!("{client_final_no_proof},p={proof_b64}");
     send_frame(
         &mut socket,
-        reddb_client::redwire::Frame::new(
-            MessageKind::AuthResponse,
-            3,
-            client_final.into_bytes(),
-        ),
+        reddb_client::redwire::Frame::new(MessageKind::AuthResponse, 3, client_final.into_bytes()),
     )
     .await;
 
@@ -284,8 +278,7 @@ async fn scram_sha_256_end_to_end() {
     // Tiny base64 helpers — keep the test self-contained without
     // pulling another crate.
     fn base64_encode(bytes: &[u8]) -> String {
-        const A: &[u8; 64] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
         let chunks = bytes.chunks_exact(3);
         let rem = chunks.remainder();

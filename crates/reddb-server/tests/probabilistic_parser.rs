@@ -413,7 +413,9 @@ fn filter_capacity_negative_surfaces_positive_integer_error() {
     match r {
         Err(e) => {
             assert!(
-                format!("{e}").to_lowercase().contains("must be a positive integer"),
+                format!("{e}")
+                    .to_lowercase()
+                    .contains("must be a positive integer"),
                 "expected 'must be a positive integer' message, got: {e}"
             );
         }

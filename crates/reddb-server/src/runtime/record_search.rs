@@ -1413,9 +1413,7 @@ pub(super) fn runtime_record_identity_key(record: &UnifiedRecord) -> String {
     }
 
     if let (Some(collection), Some(row_id)) = (
-        record
-            .get("red_collection")
-            .and_then(runtime_value_text),
+        record.get("red_collection").and_then(runtime_value_text),
         record.get("row_id").or_else(|| record.get("id")),
     ) {
         if let Some(fragment) = runtime_identity_fragment(row_id) {
@@ -1427,10 +1425,9 @@ pub(super) fn runtime_record_identity_key(record: &UnifiedRecord) -> String {
         return format!("node:{alias}:{}", node.id);
     }
 
-    if let Some(value) =
-        record
-            .iter_fields()
-            .find_map(|(key, value)| key.ends_with(".id").then_some(value))
+    if let Some(value) = record
+        .iter_fields()
+        .find_map(|(key, value)| key.ends_with(".id").then_some(value))
     {
         if let Some(fragment) = runtime_identity_fragment(value) {
             return format!("ref:{fragment}");
@@ -1735,10 +1732,7 @@ pub(super) fn merge_hybrid_records(
             let key_str: &str = &key;
             if let Some(existing) = merged.get(key_str) {
                 if existing != &value {
-                    merged.set_arc(
-                        std::sync::Arc::from(format!("vector.{key_str}")),
-                        value,
-                    );
+                    merged.set_arc(std::sync::Arc::from(format!("vector.{key_str}")), value);
                 }
             } else {
                 merged.set_arc(key, value);
@@ -1796,10 +1790,7 @@ pub(super) fn merge_join_records(
             let key_str: &str = &key;
             if merged.contains_column(key_str) {
                 if let Some(prefix) = right_prefix {
-                    merged.set_arc(
-                        std::sync::Arc::from(format!("{prefix}.{key_str}")),
-                        value,
-                    );
+                    merged.set_arc(std::sync::Arc::from(format!("{prefix}.{key_str}")), value);
                 }
             } else {
                 merged.set_arc(key, value);

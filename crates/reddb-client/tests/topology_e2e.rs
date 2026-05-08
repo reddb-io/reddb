@@ -115,9 +115,8 @@ macro_rules! stub_rpc {
             _request: Request<$req>,
         ) -> ::core::pin::Pin<
             Box<
-                dyn ::core::future::Future<
-                        Output = Result<Response<$resp>, Status>,
-                    > + ::core::marker::Send
+                dyn ::core::future::Future<Output = Result<Response<$resp>, Status>>
+                    + ::core::marker::Send
                     + 'async_trait,
             >,
         >
@@ -132,10 +131,7 @@ macro_rules! stub_rpc {
 
 #[tonic::async_trait]
 impl RedDb for MockServer {
-    async fn query(
-        &self,
-        _request: Request<QueryRequest>,
-    ) -> Result<Response<QueryReply>, Status> {
+    async fn query(&self, _request: Request<QueryRequest>) -> Result<Response<QueryReply>, Status> {
         self.counters.query.fetch_add(1, Ordering::Relaxed);
         Ok(Response::new(QueryReply {
             ok: true,
@@ -144,8 +140,7 @@ impl RedDb for MockServer {
             engine: "mock".into(),
             columns: vec![],
             record_count: 0,
-            result_json: r#"{"statement":"select","affected":0,"columns":[],"rows":[]}"#
-                .into(),
+            result_json: r#"{"statement":"select","affected":0,"columns":[],"rows":[]}"#.into(),
         }))
     }
 
@@ -215,11 +210,19 @@ impl RedDb for MockServer {
     stub_rpc!(native_physical_state, Empty, PayloadReply);
     stub_rpc!(native_vector_artifacts, Empty, PayloadReply);
     stub_rpc!(inspect_native_vector_artifacts, Empty, PayloadReply);
-    stub_rpc!(inspect_native_vector_artifact, CollectionRequest, PayloadReply);
+    stub_rpc!(
+        inspect_native_vector_artifact,
+        CollectionRequest,
+        PayloadReply
+    );
     stub_rpc!(native_header_repair_policy, Empty, PayloadReply);
     stub_rpc!(repair_native_header, Empty, OperationReply);
     stub_rpc!(warmup_native_vector_artifacts, Empty, PayloadReply);
-    stub_rpc!(warmup_native_vector_artifact, CollectionRequest, PayloadReply);
+    stub_rpc!(
+        warmup_native_vector_artifact,
+        CollectionRequest,
+        PayloadReply
+    );
     stub_rpc!(repair_native_physical_state, Empty, OperationReply);
     stub_rpc!(rebuild_physical_metadata, Empty, OperationReply);
     stub_rpc!(manifest, ManifestRequest, PayloadReply);
@@ -235,7 +238,11 @@ impl RedDb for MockServer {
     stub_rpc!(warmup_index, IndexNameRequest, PayloadReply);
     stub_rpc!(rebuild_indexes, CollectionRequest, PayloadReply);
     stub_rpc!(graph_projections, Empty, PayloadReply);
-    stub_rpc!(save_graph_projection, GraphProjectionUpsertRequest, PayloadReply);
+    stub_rpc!(
+        save_graph_projection,
+        GraphProjectionUpsertRequest,
+        PayloadReply
+    );
     stub_rpc!(save_analytics_job, JsonPayloadRequest, PayloadReply);
     stub_rpc!(queue_analytics_job, JsonPayloadRequest, PayloadReply);
     stub_rpc!(start_analytics_job, JsonPayloadRequest, PayloadReply);
@@ -243,7 +250,11 @@ impl RedDb for MockServer {
     stub_rpc!(mark_analytics_job_stale, JsonPayloadRequest, PayloadReply);
     stub_rpc!(fail_analytics_job, JsonPayloadRequest, PayloadReply);
     stub_rpc!(materialize_graph_projection, IndexNameRequest, PayloadReply);
-    stub_rpc!(mark_graph_projection_materializing, IndexNameRequest, PayloadReply);
+    stub_rpc!(
+        mark_graph_projection_materializing,
+        IndexNameRequest,
+        PayloadReply
+    );
     stub_rpc!(mark_graph_projection_stale, IndexNameRequest, PayloadReply);
     stub_rpc!(fail_graph_projection, IndexNameRequest, PayloadReply);
     stub_rpc!(analytics_jobs, Empty, PayloadReply);
@@ -266,7 +277,11 @@ impl RedDb for MockServer {
     stub_rpc!(graph_centrality, JsonPayloadRequest, PayloadReply);
     stub_rpc!(graph_community, JsonPayloadRequest, PayloadReply);
     stub_rpc!(graph_clustering, JsonPayloadRequest, PayloadReply);
-    stub_rpc!(graph_personalized_pagerank, JsonPayloadRequest, PayloadReply);
+    stub_rpc!(
+        graph_personalized_pagerank,
+        JsonPayloadRequest,
+        PayloadReply
+    );
     stub_rpc!(graph_hits, JsonPayloadRequest, PayloadReply);
     stub_rpc!(graph_cycles, JsonPayloadRequest, PayloadReply);
     stub_rpc!(graph_topological_sort, JsonPayloadRequest, PayloadReply);
@@ -279,7 +294,11 @@ impl RedDb for MockServer {
     stub_rpc!(bulk_create_nodes, JsonBulkCreateRequest, BulkEntityReply);
     stub_rpc!(bulk_create_edges, JsonBulkCreateRequest, BulkEntityReply);
     stub_rpc!(bulk_create_vectors, JsonBulkCreateRequest, BulkEntityReply);
-    stub_rpc!(bulk_create_documents, JsonBulkCreateRequest, BulkEntityReply);
+    stub_rpc!(
+        bulk_create_documents,
+        JsonBulkCreateRequest,
+        BulkEntityReply
+    );
     stub_rpc!(ask, JsonPayloadRequest, PayloadReply);
     stub_rpc!(embeddings, JsonPayloadRequest, PayloadReply);
     stub_rpc!(ai_prompt, JsonPayloadRequest, PayloadReply);
@@ -375,10 +394,8 @@ async fn topology_e2e_distributes_reads_across_discovered_replicas() {
     let (replica_b_addr, replica_b_counters, replica_b_shutdown) =
         spawn_mock(Role::Replica, topology_bytes.clone()).await;
 
-    *topology_bytes.lock().unwrap() = make_topology_bytes(
-        &primary_addr,
-        &[replica_a_addr, replica_b_addr],
-    );
+    *topology_bytes.lock().unwrap() =
+        make_topology_bytes(&primary_addr, &[replica_a_addr, replica_b_addr]);
 
     // 2) Connect with a primary-only URI. Cluster constructor would
     //    seed force_primary=false; the single-host one defaults to
@@ -391,10 +408,7 @@ async fn topology_e2e_distributes_reads_across_discovered_replicas() {
 
     // 3) One topology refresh — the canonical "advertised replicas
     //    join the rotation" event.
-    client
-        .refresh_topology()
-        .await
-        .expect("refresh_topology");
+    client.refresh_topology().await.expect("refresh_topology");
 
     // The discovery RPC counted on the primary.
     assert_eq!(
@@ -455,10 +469,8 @@ async fn topology_e2e_distributes_reads_across_discovered_replicas() {
     // `create_row` on the trait). 10 writes is plenty to assert
     // pinning.
     for i in 0..10u64 {
-        let v = reddb_client::JsonValue::object(vec![(
-            "v",
-            reddb_client::JsonValue::number(i as f64),
-        )]);
+        let v =
+            reddb_client::JsonValue::object(vec![("v", reddb_client::JsonValue::number(i as f64))]);
         client.insert("widgets", &v).await.expect("insert");
     }
     assert_eq!(
@@ -498,10 +510,8 @@ async fn topology_e2e_deregister_reflected_within_refresh_interval() {
     let (replica_b_addr, replica_b_counters, replica_b_shutdown) =
         spawn_mock(Role::Replica, topology_bytes.clone()).await;
 
-    *topology_bytes.lock().unwrap() = make_topology_bytes(
-        &primary_addr,
-        &[replica_a_addr, replica_b_addr],
-    );
+    *topology_bytes.lock().unwrap() =
+        make_topology_bytes(&primary_addr, &[replica_a_addr, replica_b_addr]);
 
     let primary_url = format!("http://{primary_addr}");
     let client = GrpcClient::connect_cluster(primary_url, Vec::new(), false)
@@ -616,10 +626,8 @@ async fn topology_e2e_force_primary_preserves_pre_prd_baseline() {
         spawn_mock(Role::Replica, topology_bytes.clone()).await;
     let (replica_b_addr, replica_b_counters, replica_b_shutdown) =
         spawn_mock(Role::Replica, topology_bytes.clone()).await;
-    *topology_bytes.lock().unwrap() = make_topology_bytes(
-        &primary_addr,
-        &[replica_a_addr, replica_b_addr],
-    );
+    *topology_bytes.lock().unwrap() =
+        make_topology_bytes(&primary_addr, &[replica_a_addr, replica_b_addr]);
 
     let primary_url = format!("http://{primary_addr}");
     // force_primary = true mimics the pre-PRD "URI-only routing"
@@ -669,17 +677,14 @@ async fn topology_perf_capture() {
         spawn_mock(Role::Replica, topology_bytes.clone()).await;
     let (replica_b_addr, _, replica_b_shutdown) =
         spawn_mock(Role::Replica, topology_bytes.clone()).await;
-    *topology_bytes.lock().unwrap() = make_topology_bytes(
-        &primary_addr,
-        &[replica_a_addr, replica_b_addr],
-    );
+    *topology_bytes.lock().unwrap() =
+        make_topology_bytes(&primary_addr, &[replica_a_addr, replica_b_addr]);
     let primary_url = format!("http://{primary_addr}");
 
     fn pct(samples: &[u128], pct: f64) -> u128 {
         let mut s = samples.to_vec();
         s.sort_unstable();
-        let idx = ((s.len() as f64) * pct)
-            .clamp(0.0, s.len() as f64 - 1.0) as usize;
+        let idx = ((s.len() as f64) * pct).clamp(0.0, s.len() as f64 - 1.0) as usize;
         s[idx]
     }
 

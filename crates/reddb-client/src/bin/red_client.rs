@@ -84,9 +84,7 @@ async fn main() -> ExitCode {
 
     match target {
         ResolvedTarget::Grpc(endpoint) => run_grpc(endpoint, parsed).await,
-        ResolvedTarget::RedWire { host, port, tls } => {
-            run_redwire(host, port, tls, parsed).await
-        }
+        ResolvedTarget::RedWire { host, port, tls } => run_redwire(host, port, tls, parsed).await,
         ResolvedTarget::Http(base_url) => run_http(base_url, parsed).await,
     }
 }
@@ -98,10 +96,9 @@ async fn run_http(base_url: String, parsed: ParsedArgs) -> ExitCode {
     };
     match parsed.command {
         Some(Command::OneShot(sql)) => {
-            let result = tokio::task::spawn_blocking(move || {
-                http_query_one_shot(&base_url, &sql, &auth)
-            })
-            .await;
+            let result =
+                tokio::task::spawn_blocking(move || http_query_one_shot(&base_url, &sql, &auth))
+                    .await;
             match result {
                 Ok(Ok(body)) => {
                     println!("{body}");
@@ -118,9 +115,7 @@ async fn run_http(base_url: String, parsed: ParsedArgs) -> ExitCode {
             }
         }
         Some(Command::Repl) | None => {
-            eprintln!(
-                "red_client: REPL over HTTP is not yet wired; pass `-c \"<SQL>\"` for now."
-            );
+            eprintln!("red_client: REPL over HTTP is not yet wired; pass `-c \"<SQL>\"` for now.");
             ExitCode::from(EXIT_TRANSPORT_UNSUPPORTED)
         }
     }
@@ -236,9 +231,7 @@ fn parse_argv(args: &[String]) -> Result<ParsedArgs, String> {
             }
             _ => {
                 if uri.is_some() {
-                    return Err(format!(
-                        "red_client: unexpected positional argument: {a}"
-                    ));
+                    return Err(format!("red_client: unexpected positional argument: {a}"));
                 }
                 uri = Some(a.clone());
                 i += 1;
@@ -279,9 +272,7 @@ fn resolve_target(uri: &str) -> Result<ResolvedTarget, EndpointError> {
         ParseErrorKind::Empty
         | ParseErrorKind::InvalidUri
         | ParseErrorKind::UnsupportedScheme
-        | ParseErrorKind::LimitExceeded => {
-            EndpointError::ParseFailed(format!("{e}"))
-        }
+        | ParseErrorKind::LimitExceeded => EndpointError::ParseFailed(format!("{e}")),
     })?;
     match target {
         ConnectionTarget::Memory | ConnectionTarget::File { .. } => Err(EndpointError::Embedded),
@@ -300,8 +291,10 @@ fn resolve_target(uri: &str) -> Result<ResolvedTarget, EndpointError> {
 /// target — they are explicit "use the embedded engine" requests.
 fn is_embedded_uri(uri: &str) -> bool {
     let trimmed = uri.trim();
-    matches!(trimmed, "red://" | "red:" | "red:///" | "red://:memory" | "red://:memory:")
-        || trimmed.starts_with("red:///")
+    matches!(
+        trimmed,
+        "red://" | "red:" | "red:///" | "red://:memory" | "red://:memory:"
+    ) || trimmed.starts_with("red:///")
 }
 
 fn print_usage_to_stdout() {

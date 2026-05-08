@@ -128,8 +128,7 @@ fn spawn_refresh_thread(runtime: RedDBRuntime, lifecycle: Arc<LeaseLifecycle>, t
                 }
 
                 // Reschedule the next refresh.
-                wheel_for_handler
-                    .schedule("lease-refresh".to_string(), Instant::now() + interval);
+                wheel_for_handler.schedule("lease-refresh".to_string(), Instant::now() + interval);
                 true
             });
         });

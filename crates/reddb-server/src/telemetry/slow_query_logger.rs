@@ -152,18 +152,9 @@ impl SlowQueryLogger {
             "duration_ms".to_string(),
             crate::json::Value::Number(duration_ms as f64),
         );
-        map.insert(
-            "sql".to_string(),
-            crate::json::Value::String(sql_redacted),
-        );
-        map.insert(
-            "tenant".to_string(),
-            crate::json::Value::String(tenant),
-        );
-        map.insert(
-            "identity".to_string(),
-            crate::json::Value::String(identity),
-        );
+        map.insert("sql".to_string(), crate::json::Value::String(sql_redacted));
+        map.insert("tenant".to_string(), crate::json::Value::String(tenant));
+        map.insert("identity".to_string(), crate::json::Value::String(identity));
 
         let obj = crate::json::Value::Object(map);
         if let Ok(mut line) = crate::json::to_string(&obj) {
@@ -249,7 +240,11 @@ mod tests {
 
         flush(&log);
         let lines = read_log_lines(&dir);
-        assert!(lines.is_empty(), "expected zero writes, got {}", lines.len());
+        assert!(
+            lines.is_empty(),
+            "expected zero writes, got {}",
+            lines.len()
+        );
     }
 
     #[test]
@@ -287,10 +282,7 @@ mod tests {
         assert_eq!(lines.len(), 1, "expected 1 line");
         let v = &lines[0];
         assert_eq!(v.get("kind").and_then(|x| x.as_str()), Some("select"));
-        assert_eq!(
-            v.get("duration_ms").and_then(|x| x.as_i64()),
-            Some(100)
-        );
+        assert_eq!(v.get("duration_ms").and_then(|x| x.as_i64()), Some(100));
         let sql = v.get("sql").and_then(|x| x.as_str());
         assert_eq!(sql, Some("SELECT * FROM t"));
     }
@@ -301,7 +293,12 @@ mod tests {
         let log = logger(&dir, 0, 100);
         let scope = empty_scope();
 
-        log.record(QueryKind::Insert, 42, "INSERT INTO t VALUES (1)".into(), &scope);
+        log.record(
+            QueryKind::Insert,
+            42,
+            "INSERT INTO t VALUES (1)".into(),
+            &scope,
+        );
         flush(&log);
 
         let lines = read_log_lines(&dir);
@@ -345,12 +342,7 @@ mod tests {
 
         let calls = 10_000u64;
         for i in 0..calls {
-            log.record(
-                QueryKind::Select,
-                1,
-                format!("SELECT {i}"),
-                &scope,
-            );
+            log.record(QueryKind::Select, 1, format!("SELECT {i}"), &scope);
         }
         flush(&log);
 

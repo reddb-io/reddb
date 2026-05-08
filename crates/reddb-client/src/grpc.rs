@@ -82,9 +82,9 @@ impl Endpoint {
         // still return a working client (matches the legacy single-
         // mutex path).
         let n = pool_size.max(1);
-        let head = RedDBClient::connect(&url, None).await.map_err(|e| {
-            ClientError::new(ErrorCode::IoError, format!("connect {url}: {e}"))
-        })?;
+        let head = RedDBClient::connect(&url, None)
+            .await
+            .map_err(|e| ClientError::new(ErrorCode::IoError, format!("connect {url}: {e}")))?;
         let mut pool = Vec::with_capacity(n);
         for _ in 0..(n - 1) {
             pool.push(head.clone());
@@ -234,7 +234,10 @@ impl GrpcClient {
     /// by Lane P's TopologyConsumer when it observes a topology
     /// delta.
     pub fn update_membership(&self, new_membership: ClusterMembership) {
-        self.router.write().unwrap().update_membership(new_membership);
+        self.router
+            .write()
+            .unwrap()
+            .update_membership(new_membership);
     }
 
     /// Refresh the live replica pool from a topology advertisement.
@@ -251,11 +254,7 @@ impl GrpcClient {
     /// caller decodes `TopologyReply.topology_bytes` via
     /// [`crate::topology::TopologyConsumer`] and hands the resulting
     /// `(primary_addr, replica_addrs)` straight in here.
-    pub async fn apply_topology(
-        &self,
-        primary_addr: &str,
-        replica_addrs: &[String],
-    ) -> Result<()> {
+    pub async fn apply_topology(&self, primary_addr: &str, replica_addrs: &[String]) -> Result<()> {
         // Reject a primary swap — that would invalidate the writer
         // path and is out of scope for this slice. ADR 0008 §2's
         // "advertised primary always wins" still holds for the URI
@@ -302,10 +301,7 @@ impl GrpcClient {
         }
         // Sync the router's view of membership so its index space
         // matches the pool's index space.
-        let membership = ClusterMembership::new(
-            self.primary.url.clone(),
-            replica_addrs.to_vec(),
-        );
+        let membership = ClusterMembership::new(self.primary.url.clone(), replica_addrs.to_vec());
         self.router.write().unwrap().update_membership(membership);
         Ok(())
     }
@@ -315,22 +311,17 @@ impl GrpcClient {
     /// background refresh loop.
     pub async fn refresh_topology(&self) -> Result<()> {
         let mut client = self.primary.pick();
-        let bytes = client.topology().await.map_err(|e| {
-            ClientError::new(ErrorCode::IoError, format!("topology rpc: {e}"))
-        })?;
-        let membership = crate::topology::TopologyConsumer::consume_bytes(&bytes, None)
-            .map_err(|e| {
-                ClientError::new(
-                    ErrorCode::QueryError,
-                    format!("decode topology: {e}"),
-                )
+        let bytes = client
+            .topology()
+            .await
+            .map_err(|e| ClientError::new(ErrorCode::IoError, format!("topology rpc: {e}")))?;
+        let membership =
+            crate::topology::TopologyConsumer::consume_bytes(&bytes, None).map_err(|e| {
+                ClientError::new(ErrorCode::QueryError, format!("decode topology: {e}"))
             })?;
-        let replicas: Vec<String> = membership
-            .replicas
-            .iter()
-            .map(|r| r.addr.clone())
-            .collect();
-        self.apply_topology(&membership.primary.addr, &replicas).await
+        let replicas: Vec<String> = membership.replicas.iter().map(|r| r.addr.clone()).collect();
+        self.apply_topology(&membership.primary.addr, &replicas)
+            .await
     }
 
     /// Record an observation against an endpoint by index. Exposed

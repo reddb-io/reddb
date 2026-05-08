@@ -219,8 +219,13 @@ fn err_cases() -> Vec<ErrCase> {
 #[test]
 fn ok_cases_match_expected_target() {
     for c in ok_cases() {
-        let got = parse(c.input).unwrap_or_else(|e| panic!("{}: {input} => err {e}", c.name, input = c.input));
-        assert_eq!(got, c.expect, "{}: {} => unexpected target", c.name, c.input);
+        let got = parse(c.input)
+            .unwrap_or_else(|e| panic!("{}: {input} => err {e}", c.name, input = c.input));
+        assert_eq!(
+            got, c.expect,
+            "{}: {} => unexpected target",
+            c.name, c.input
+        );
     }
 }
 

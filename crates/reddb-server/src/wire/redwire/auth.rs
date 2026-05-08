@@ -146,11 +146,16 @@ pub fn build_hello_ack(
         JsonValue::Number(server_features as f64),
     );
     let server_field = format!("reddb/{}", env!("CARGO_PKG_VERSION"));
-    obj.insert("server".to_string(), SerializedJsonField::tainted(&server_field));
+    obj.insert(
+        "server".to_string(),
+        SerializedJsonField::tainted(&server_field),
+    );
     if let Some(topo) = topology {
         obj.insert(
             "topology".to_string(),
-            SerializedJsonField::tainted(&reddb_wire::topology::encode_topology_for_hello_ack(topo)),
+            SerializedJsonField::tainted(&reddb_wire::topology::encode_topology_for_hello_ack(
+                topo,
+            )),
         );
     }
     JsonValue::Object(obj).to_string_compact().into_bytes()
@@ -268,7 +273,10 @@ pub fn build_auth_ok(
         "session_id".to_string(),
         SerializedJsonField::tainted(session_id),
     );
-    obj.insert("username".to_string(), SerializedJsonField::tainted(username));
+    obj.insert(
+        "username".to_string(),
+        SerializedJsonField::tainted(username),
+    );
     let role_str = role.to_string();
     obj.insert("role".to_string(), SerializedJsonField::tainted(&role_str));
     obj.insert(
@@ -721,8 +729,7 @@ mod tests {
             .and_then(|o| o.get("topology"))
             .and_then(|t| t.as_str())
             .expect("topology key must be present and a string");
-        let decoded =
-            reddb_wire::topology::decode_topology_from_hello_ack(field).expect("decode");
+        let decoded = reddb_wire::topology::decode_topology_from_hello_ack(field).expect("decode");
         assert_eq!(decoded.expect("v1 known"), topo);
     }
 }

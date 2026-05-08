@@ -382,9 +382,7 @@ impl StatementExecutionFrame {
                 // the only line of defence — emit an OperatorEvent so
                 // the operator notices an Admin-class statement was
                 // attempted with insufficient role.
-                if matches!(needed, Privilege::Admin)
-                    && runtime.inner.auth_store.read().is_none()
-                {
+                if matches!(needed, Privilege::Admin) && runtime.inner.auth_store.read().is_none() {
                     crate::telemetry::operator_event::OperatorEvent::AuthBypass {
                         principal: username.to_string(),
                         resource: format!("statement requiring {needed:?}"),

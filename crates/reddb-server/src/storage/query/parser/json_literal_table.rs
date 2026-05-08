@@ -57,11 +57,7 @@ fn assert_bytewise_equivalent(raw: &str) {
         panic!("expected Value::Json for `{}`, got {:?}", raw, v);
     };
     let expected = canonical_json_bytes(raw);
-    assert_eq!(
-        bare_bytes, expected,
-        "bytewise mismatch for `{}`",
-        raw
-    );
+    assert_eq!(bare_bytes, expected, "bytewise mismatch for `{}`", raw);
 }
 
 // ============================================================================
@@ -95,9 +91,7 @@ fn happy_array_value() {
 
 #[test]
 fn happy_mixed_types() {
-    assert_bytewise_equivalent(
-        r#"{"s":"x","i":1,"f":3.14,"b":true,"n":null,"a":[1,2]}"#,
-    );
+    assert_bytewise_equivalent(r#"{"s":"x","i":1,"f":3.14,"b":true,"n":null,"a":[1,2]}"#);
 }
 
 #[test]
@@ -221,9 +215,7 @@ fn ctx_update_set() {
 
 #[test]
 fn ctx_select_projection() {
-    let q = parse(r#"SELECT {"k":1} AS lit FROM dual"#)
-        .unwrap()
-        .query;
+    let q = parse(r#"SELECT {"k":1} AS lit FROM dual"#).unwrap().query;
     assert!(matches!(q, QueryExpr::Table(_)));
 }
 
@@ -245,11 +237,9 @@ fn ctx_function_arg() {
 
 #[test]
 fn ctx_batched_insert_mixing_forms() {
-    let q = parse(
-        r#"INSERT INTO logs (body) VALUES ({"a":1}), ('{"b":2}')"#,
-    )
-    .unwrap()
-    .query;
+    let q = parse(r#"INSERT INTO logs (body) VALUES ({"a":1}), ('{"b":2}')"#)
+        .unwrap()
+        .query;
     let QueryExpr::Insert(ins) = q else {
         panic!("expected insert");
     };
@@ -295,7 +285,10 @@ fn err_trailing_comma() {
 fn err_single_quotes_inside_object() {
     // `{"a":'x'}` — single-quoted string is not valid JSON.
     let r = parse(r#"INSERT INTO t (body) VALUES ({"a":'x'})"#);
-    assert!(r.is_err(), "single-quoted value inside JSON literal must error");
+    assert!(
+        r.is_err(),
+        "single-quoted value inside JSON literal must error"
+    );
 }
 
 #[test]
@@ -516,7 +509,9 @@ fn dos_payload_size_exceeded() {
     // the JSON sub-mode's JSON_LITERAL_MAX_BYTES (16 MiB) or the
     // outer parser's max_input_bytes (1 MiB by default per #87).
     assert!(
-        msg.contains("JSON_LITERAL_MAX_BYTES") || msg.contains("InputTooLarge") || msg.contains("max_input_bytes"),
+        msg.contains("JSON_LITERAL_MAX_BYTES")
+            || msg.contains("InputTooLarge")
+            || msg.contains("max_input_bytes"),
         "expected size-limit error, got: {}",
         err
     );

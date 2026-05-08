@@ -113,9 +113,7 @@ impl RedDBServer {
                 self.handle_admin_blob_cache_compare_and_set(body)
             }
             // Issue #198 — blob cache stats endpoint.
-            ("GET", "/admin/blob_cache/stats") => {
-                self.handle_admin_blob_cache_stats(&query)
-            }
+            ("GET", "/admin/blob_cache/stats") => self.handle_admin_blob_cache_stats(&query),
             // PLAN.md Phase 11.6 — manual replica → primary promotion.
             ("POST", "/admin/failover/promote") => self.handle_admin_failover_promote(body),
             // PLAN.md Phase 5.1 / 5.4 — observability endpoints.
@@ -1005,7 +1003,7 @@ impl RedDBServer {
                     }
                 }
 
-                // KV routes: /collections/{collection}/kvs/{key}
+                // KV routes: /collections/{collection}/kv/{key}
                 if let Some((collection, key)) = collection_kv_path(&path) {
                     return match method.as_str() {
                         "GET" => self.handle_get_kv(collection, key),
@@ -1625,17 +1623,50 @@ fn graph_projection_named_action_path(path: &str, action: &str) -> Option<String
     }
 }
 
-/// Match `/collections/:name/kvs/:key` to extract collection and key.
+/// Match `/collections/:name/kv/:key` to extract collection and key.
+///
+/// The legacy plural `/kvs/:key` route is still accepted so older
+/// clients keep working while the canonical #241 path moves to `/kv/`.
 fn collection_kv_path(path: &str) -> Option<(&str, &str)> {
     let prefix = "/collections/";
     let trimmed = path.strip_prefix(prefix)?;
-    let (collection, rest) = trimmed.split_once("/kvs/")?;
+    let (collection, rest) = trimmed
+        .split_once("/kv/")
+        .or_else(|| trimmed.split_once("/kvs/"))?;
     let collection = collection.trim_matches('/');
     let key = rest.trim_matches('/');
-    if collection.is_empty() || key.is_empty() {
+    if collection.is_empty() || collection.contains('/') || key.is_empty() {
         None
     } else {
         Some((collection, key))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collection_kv_path_matches_canonical_and_legacy_routes() {
+        assert_eq!(
+            collection_kv_path("/collections/cfg/kv/theme"),
+            Some(("cfg", "theme"))
+        );
+        assert_eq!(
+            collection_kv_path("/collections/cfg/kvs/theme"),
+            Some(("cfg", "theme"))
+        );
+        assert_eq!(
+            collection_kv_path("/collections/cfg/kv/a/b"),
+            Some(("cfg", "a/b"))
+        );
+    }
+
+    #[test]
+    fn collection_kv_path_rejects_missing_or_nested_collection() {
+        assert_eq!(collection_kv_path("/collections//kv/theme"), None);
+        assert_eq!(collection_kv_path("/collections/a/b/kv/theme"), None);
+        assert_eq!(collection_kv_path("/collections/cfg/kv/"), None);
     }
 }
 

@@ -166,10 +166,7 @@ impl QueryResult {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let affected = obj
-            .get("affected")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let affected = obj.get("affected").and_then(|v| v.as_u64()).unwrap_or(0);
         Self {
             statement,
             affected,
