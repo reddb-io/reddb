@@ -3887,7 +3887,16 @@ impl RedDBRuntime {
             ));
         }
 
-        let frame = super::statement_frame::StatementExecutionFrame::build(self, query)?;
+        if super::red_schema::is_system_schema_write(query) {
+            return Err(RedDBError::Query(
+                super::red_schema::READ_ONLY_ERROR.to_string(),
+            ));
+        }
+
+        let rewritten_query = super::red_schema::rewrite_virtual_names(query);
+        let execution_query = rewritten_query.as_deref().unwrap_or(query);
+
+        let frame = super::statement_frame::StatementExecutionFrame::build(self, execution_query)?;
         let _frame_guards = frame.install(self);
 
         // Phase 6 logging: enter a span stamped with conn_id / tenant
@@ -3908,8 +3917,8 @@ impl RedDBRuntime {
         // subquery-in-FROM machinery handles execution. Recursive
         // CTEs are rejected explicitly until fixpoint execution wires
         // through the runtime.
-        if has_with_prefix(query) {
-            let parsed = crate::storage::query::parser::parse(query)
+        if has_with_prefix(execution_query) {
+            let parsed = crate::storage::query::parser::parse(execution_query)
                 .map_err(|e| RedDBError::Query(e.to_string()))?;
             if parsed.with_clause.is_some() {
                 let rewritten = crate::storage::query::executors::inline_ctes(parsed)
@@ -3922,7 +3931,7 @@ impl RedDBRuntime {
         }
 
         // ── TURBO: bypass SQL parse for SELECT * FROM x WHERE _entity_id = N ──
-        if let Some(result) = self.try_fast_entity_lookup(query) {
+        if let Some(result) = self.try_fast_entity_lookup(execution_query) {
             return result;
         }
 
@@ -3937,7 +3946,7 @@ impl RedDBRuntime {
             }
         }
 
-        let mode = detect_mode(query);
+        let mode = detect_mode(execution_query);
         if matches!(mode, QueryMode::Unknown) {
             return Err(RedDBError::Query("unable to detect query mode".to_string()));
         }
@@ -3952,7 +3961,7 @@ impl RedDBRuntime {
         // reuses the same plan across thousands of varying literals).
         // INSERT is still bypassed — its shape changes per column set
         // and bulk paths don't go through here anyway.
-        let first_word = query
+        let first_word = execution_query
             .trim()
             .split_ascii_whitespace()
             .next()
@@ -3968,12 +3977,12 @@ impl RedDBRuntime {
         let (cache_key, prescan_binds) = if is_insert {
             (String::new(), Vec::new())
         } else {
-            crate::storage::query::planner::cache_key::normalize_and_extract(query)
+            crate::storage::query::planner::cache_key::normalize_and_extract(execution_query)
         };
 
         let expr = if is_insert {
             // Bypass plan cache for INSERT — shape varies per query.
-            parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?
+            parse_multi(execution_query).map_err(|err| RedDBError::Query(err.to_string()))?
         } else {
             // ── Hot path: read lock only (no writer serialization on cache hits) ──
             //
@@ -4003,12 +4012,13 @@ impl RedDBRuntime {
                         )
                     {
                         bound
-                    } else if exact_query.as_deref() == Some(query) {
+                    } else if exact_query.as_deref() == Some(execution_query) {
                         // Bind failed but exact query matches — use as-is.
                         optimized
                     } else {
                         // Bind failed and literals differ: re-parse fresh.
-                        parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?
+                        parse_multi(execution_query)
+                            .map_err(|err| RedDBError::Query(err.to_string()))?
                     }
                 } else {
                     // No parameters means either there truly are no literals,
@@ -4016,16 +4026,17 @@ impl RedDBRuntime {
                     // parameterization (for example graph/queue commands).
                     // Reusing a normalized-cache hit across a different exact
                     // query can therefore leak stale literals into execution.
-                    if exact_query.as_deref() == Some(query) {
+                    if exact_query.as_deref() == Some(execution_query) {
                         optimized
                     } else {
-                        parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?
+                        parse_multi(execution_query)
+                            .map_err(|err| RedDBError::Query(err.to_string()))?
                     }
                 }
             } else {
                 // Cache miss — parse, parameterize, store.
-                let parsed =
-                    parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?;
+                let parsed = parse_multi(execution_query)
+                    .map_err(|err| RedDBError::Query(err.to_string()))?;
                 let (cached_expr, parameter_count) = if let Some(prepared) =
                     crate::storage::query::planner::shape::parameterize_query_expr(&parsed)
                 {
@@ -4044,7 +4055,7 @@ impl RedDBRuntime {
                         cache_key.clone(),
                         crate::storage::query::planner::CachedPlan::new(plan)
                             .with_shape_key(cache_key.clone())
-                            .with_exact_query(query.to_string())
+                            .with_exact_query(execution_query.to_string())
                             .with_parameter_count(parameter_count),
                     );
                 }
@@ -4094,6 +4105,23 @@ impl RedDBRuntime {
                 })
             }
             QueryExpr::Table(table) => {
+                if super::red_schema::is_virtual_table(&table.table) {
+                    return Ok(RuntimeQueryResult {
+                        query: query.to_string(),
+                        mode,
+                        statement,
+                        engine: "runtime-red-schema",
+                        result: super::red_schema::red_query(
+                            self,
+                            &table.table,
+                            &table,
+                            &frame as &dyn super::statement_frame::ReadFrame,
+                        )?,
+                        affected_rows: 0,
+                        statement_type: "select",
+                    });
+                }
+
                 // Foreign-table intercept (Phase 3.2.2 PG parity).
                 //
                 // When the referenced table matches a `CREATE FOREIGN TABLE`
@@ -4229,6 +4257,21 @@ impl RedDBRuntime {
                 statement_type: "select",
             }),
             // DML execution
+            QueryExpr::Insert(ref insert) if super::red_schema::is_virtual_table(&insert.table) => {
+                Err(RedDBError::Query(
+                    super::red_schema::READ_ONLY_ERROR.to_string(),
+                ))
+            }
+            QueryExpr::Update(ref update) if super::red_schema::is_virtual_table(&update.table) => {
+                Err(RedDBError::Query(
+                    super::red_schema::READ_ONLY_ERROR.to_string(),
+                ))
+            }
+            QueryExpr::Delete(ref delete) if super::red_schema::is_virtual_table(&delete.table) => {
+                Err(RedDBError::Query(
+                    super::red_schema::READ_ONLY_ERROR.to_string(),
+                ))
+            }
             QueryExpr::Insert(ref insert) => self.execute_insert(query, insert),
             QueryExpr::Update(ref update) => self.execute_update(query, update),
             QueryExpr::Delete(ref delete) => self.execute_delete(query, delete),
@@ -5416,19 +5459,38 @@ impl RedDBRuntime {
                     "graph queries cannot be used as prepared statements".to_string(),
                 ))
             }
-            QueryExpr::Table(table) => Ok(RuntimeQueryResult {
-                query: query_str.to_string(),
-                mode,
-                statement,
-                engine: "runtime-table",
-                result: execute_runtime_table_query(
-                    &self.inner.db,
-                    &table,
-                    Some(&self.inner.index_store),
-                )?,
-                affected_rows: 0,
-                statement_type: "select",
-            }),
+            QueryExpr::Table(table) => {
+                if super::red_schema::is_virtual_table(&table.table) {
+                    let scope = self.ai_scope();
+                    return Ok(RuntimeQueryResult {
+                        query: query_str.to_string(),
+                        mode,
+                        statement,
+                        engine: "runtime-red-schema",
+                        result: super::red_schema::red_query(
+                            self,
+                            &table.table,
+                            &table,
+                            &scope as &dyn super::statement_frame::ReadFrame,
+                        )?,
+                        affected_rows: 0,
+                        statement_type: "select",
+                    });
+                }
+                Ok(RuntimeQueryResult {
+                    query: query_str.to_string(),
+                    mode,
+                    statement,
+                    engine: "runtime-table",
+                    result: execute_runtime_table_query(
+                        &self.inner.db,
+                        &table,
+                        Some(&self.inner.index_store),
+                    )?,
+                    affected_rows: 0,
+                    statement_type: "select",
+                })
+            }
             QueryExpr::Join(join) => Ok(RuntimeQueryResult {
                 query: query_str.to_string(),
                 mode,
