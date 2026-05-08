@@ -19,17 +19,23 @@ use std::hash::Hash;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-fn recover_read_guard<'a, T>(lock: &'a RwLock<T>) -> RwLockReadGuard<'a, T> {
+fn recover_read_guard<'a, T>(lock: &'a RwLock<T>, name: &str) -> RwLockReadGuard<'a, T> {
     match lock.read() {
         Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
+        Err(poisoned) => {
+            tracing::warn!(lock = name, "RwLock poisoned, recovering read guard");
+            poisoned.into_inner()
+        }
     }
 }
 
-fn recover_write_guard<'a, T>(lock: &'a RwLock<T>) -> RwLockWriteGuard<'a, T> {
+fn recover_write_guard<'a, T>(lock: &'a RwLock<T>, name: &str) -> RwLockWriteGuard<'a, T> {
     match lock.write() {
         Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
+        Err(poisoned) => {
+            tracing::warn!(lock = name, "RwLock poisoned, recovering write guard");
+            poisoned.into_inner()
+        }
     }
 }
 
@@ -359,13 +365,13 @@ where
     ) -> Arc<super::ring::BufferRing<K, V>> {
         // Fast path: ring already exists.
         {
-            let rings = recover_read_guard(&self.rings);
+            let rings = recover_read_guard(&self.rings, "rings");
             if let Some(r) = rings.get(&strategy) {
                 return Arc::clone(r);
             }
         }
         // Slow path: create under write lock, double-check first.
-        let mut rings = recover_write_guard(&self.rings);
+        let mut rings = recover_write_guard(&self.rings, "rings");
         if let Some(r) = rings.get(&strategy) {
             return Arc::clone(r);
         }
@@ -380,14 +386,14 @@ where
         &self,
         strategy: super::strategy::BufferAccessStrategy,
     ) -> Option<Arc<super::ring::BufferRing<K, V>>> {
-        let rings = recover_read_guard(&self.rings);
+        let rings = recover_read_guard(&self.rings, "rings");
         rings.get(&strategy).cloned()
     }
 
     /// Drop every strategy ring. Used by tests and by post-checkpoint
     /// cleanup.
     pub fn clear_strategy_rings(&self) {
-        let rings = recover_read_guard(&self.rings);
+        let rings = recover_read_guard(&self.rings, "rings");
         for ring in rings.values() {
             ring.clear();
         }
@@ -395,7 +401,7 @@ where
 
     /// Get an entry from cache
     pub fn get(&self, key: &K) -> Option<V> {
-        let entries = recover_read_guard(&self.entries);
+        let entries = recover_read_guard(&self.entries, "entries");
 
         if let Some(entry) = entries.get(key) {
             // Set visited flag (no lock needed - atomic)
@@ -416,14 +422,14 @@ where
 
     /// Check if key exists in cache
     pub fn contains(&self, key: &K) -> bool {
-        recover_read_guard(&self.entries).contains_key(key)
+        recover_read_guard(&self.entries, "entries").contains_key(key)
     }
 
     /// Insert an entry into cache
     pub fn insert(&self, key: K, value: V) -> Option<V> {
         // Check if update first (no locks held while checking)
         {
-            let entries = recover_read_guard(&self.entries);
+            let entries = recover_read_guard(&self.entries, "entries");
             if let Some(entry) = entries.get(&key) {
                 entry.set_visited(true);
                 let old_value = entry.value.clone();
@@ -445,8 +451,8 @@ where
         };
 
         // Now acquire locks in consistent order: entries first, then slots
-        let mut entries = recover_write_guard(&self.entries);
-        let mut slots = recover_write_guard(&self.slots);
+        let mut entries = recover_write_guard(&self.entries, "entries");
+        let mut slots = recover_write_guard(&self.slots, "slots");
 
         // Double-check the key wasn't inserted while we waited
         if entries.contains_key(&key) {
@@ -483,7 +489,7 @@ where
 
     /// Update existing entry (internal)
     fn update_existing(&self, key: K, new_value: V, old_value: V) -> Option<V> {
-        let mut entries = recover_write_guard(&self.entries);
+        let mut entries = recover_write_guard(&self.entries, "entries");
 
         if let Some(old_entry) = entries.get(&key) {
             let index = old_entry.index;
@@ -497,10 +503,10 @@ where
 
     /// Remove an entry from cache
     pub fn remove(&self, key: &K) -> Option<V> {
-        let mut entries = recover_write_guard(&self.entries);
+        let mut entries = recover_write_guard(&self.entries, "entries");
 
         if let Some(entry) = entries.remove(key) {
-            let mut slots = recover_write_guard(&self.slots);
+            let mut slots = recover_write_guard(&self.slots, "slots");
             slots[entry.index] = Slot::Empty;
             self.count.fetch_sub(1, Ordering::Release);
 
@@ -535,49 +541,59 @@ where
         for _ in 0..max_sweeps {
             let current_hand = self.hand.load(Ordering::Relaxed);
 
-            // Acquire both locks in consistent order: entries first, then slots
-            let mut entries = recover_write_guard(&self.entries);
-            let mut slots = recover_write_guard(&self.slots);
+            // Extract eviction candidate under locks, then release before I/O.
+            // Invariant: the entry is removed from both `entries` and `slots`
+            // atomically under the write locks; writeback runs after locks drop.
+            let eviction: Option<(K, Arc<CacheEntry<V>>)> = {
+                let mut entries = recover_write_guard(&self.entries, "entries");
+                let mut slots = recover_write_guard(&self.slots, "slots");
 
-            if let Slot::Occupied(ref key) = slots[current_hand] {
-                if let Some(entry) = entries.get(key) {
-                    if entry.is_pinned() {
-                        // Can't evict pinned entry, advance hand
-                    } else if entry.is_visited() {
-                        // Reset visited flag, give second chance
-                        entry.set_visited(false);
-                    } else {
-                        // Evict this entry
-                        let key_clone = key.clone();
-                        let Some(entry) = entries.remove(&key_clone) else {
-                            let next = (current_hand + 1) % capacity;
-                            self.hand.store(next, Ordering::Relaxed);
-                            continue;
-                        };
-
-                        // Writeback if dirty
-                        if entry.is_dirty() {
-                            let _ = self.writer.write_page(&key_clone, &entry.value);
-                            if self.config.collect_stats {
-                                self.stats.writebacks.fetch_add(1, Ordering::Relaxed);
+                if let Slot::Occupied(ref key) = slots[current_hand] {
+                    if let Some(entry) = entries.get(key) {
+                        if entry.is_pinned() {
+                            None
+                        } else if entry.is_visited() {
+                            entry.set_visited(false);
+                            None
+                        } else {
+                            let key_clone = key.clone();
+                            match entries.remove(&key_clone) {
+                                None => {
+                                    // Defensive: key was present in slot but not entries map.
+                                    let next = (current_hand + 1) % capacity;
+                                    self.hand.store(next, Ordering::Relaxed);
+                                    continue;
+                                }
+                                Some(entry) => {
+                                    slots[current_hand] = Slot::Empty;
+                                    self.count.fetch_sub(1, Ordering::Release);
+                                    let next = (current_hand + 1) % capacity;
+                                    self.hand.store(next, Ordering::Relaxed);
+                                    Some((key_clone, entry))
+                                }
                             }
                         }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+                // locks dropped here — write_page runs without contention
+            };
 
-                        slots[current_hand] = Slot::Empty;
-                        self.count.fetch_sub(1, Ordering::Release);
-
-                        if self.config.collect_stats {
-                            self.stats.evictions.fetch_add(1, Ordering::Relaxed);
-                            self.stats.sweeps.fetch_add(1, Ordering::Relaxed);
-                        }
-
-                        // Advance hand for next eviction
-                        let next = (current_hand + 1) % capacity;
-                        self.hand.store(next, Ordering::Relaxed);
-
-                        return Some(current_hand);
+            if let Some((key_clone, entry)) = eviction {
+                if entry.is_dirty() {
+                    let _ = self.writer.write_page(&key_clone, &entry.value);
+                    if self.config.collect_stats {
+                        self.stats.writebacks.fetch_add(1, Ordering::Relaxed);
                     }
                 }
+                if self.config.collect_stats {
+                    self.stats.evictions.fetch_add(1, Ordering::Relaxed);
+                    self.stats.sweeps.fetch_add(1, Ordering::Relaxed);
+                }
+                return Some(current_hand);
             }
 
             // Advance hand and try next slot
@@ -594,7 +610,7 @@ where
 
     /// Pin a page (prevent eviction)
     pub fn pin(&self, key: &K) -> bool {
-        let entries = recover_read_guard(&self.entries);
+        let entries = recover_read_guard(&self.entries, "entries");
         if let Some(entry) = entries.get(key) {
             entry.pin();
             true
@@ -605,7 +621,7 @@ where
 
     /// Unpin a page
     pub fn unpin(&self, key: &K) -> bool {
-        let entries = recover_read_guard(&self.entries);
+        let entries = recover_read_guard(&self.entries, "entries");
         if let Some(entry) = entries.get(key) {
             entry.unpin();
             true
@@ -616,7 +632,7 @@ where
 
     /// Mark a page as dirty
     pub fn mark_dirty(&self, key: &K) -> bool {
-        let entries = recover_read_guard(&self.entries);
+        let entries = recover_read_guard(&self.entries, "entries");
         if let Some(entry) = entries.get(key) {
             entry.mark_dirty();
             true
@@ -627,7 +643,7 @@ where
 
     /// Flush all dirty pages
     pub fn flush(&self) -> std::io::Result<usize> {
-        let entries = recover_read_guard(&self.entries);
+        let entries = recover_read_guard(&self.entries, "entries");
         let mut flushed = 0;
 
         for (key, entry) in entries.iter() {
@@ -652,8 +668,8 @@ where
         // Flush dirty pages first
         let _ = self.flush();
 
-        let mut entries = recover_write_guard(&self.entries);
-        let mut slots = recover_write_guard(&self.slots);
+        let mut entries = recover_write_guard(&self.entries, "entries");
+        let mut slots = recover_write_guard(&self.slots, "slots");
 
         entries.clear();
         for slot in slots.iter_mut() {
@@ -693,14 +709,12 @@ where
 
     /// Get all cached keys
     pub fn keys(&self) -> Vec<K> {
-        recover_read_guard(&self.entries).keys().cloned().collect()
+        recover_read_guard(&self.entries, "entries").keys().cloned().collect()
     }
 
     /// Get dirty page count
     pub fn dirty_count(&self) -> usize {
-        self.entries
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        recover_read_guard(&self.entries, "entries")
             .values()
             .filter(|e| e.is_dirty())
             .count()
@@ -1126,5 +1140,105 @@ mod tests {
             cache.get_with(&1, BufferAccessStrategy::SequentialScan),
             Some("a".to_string())
         );
+    }
+
+    // ---------------------------------------------------------------
+    // evict_one lock-release + poison recovery tests (issue #221)
+    // ---------------------------------------------------------------
+
+    use std::time::{Duration, Instant};
+
+    /// Slow writer that blocks for `delay_ms` milliseconds on each writeback.
+    /// Used to verify that evict_one releases locks before calling write_page.
+    struct SlowWriter {
+        delay: Duration,
+        /// Set to true the moment write_page is entered (before sleep).
+        writing: Arc<AtomicBool>,
+    }
+
+    impl PageWriter<u64, String> for SlowWriter {
+        fn write_page(&self, _key: &u64, _value: &String) -> std::io::Result<()> {
+            self.writing.store(true, Ordering::SeqCst);
+            std::thread::sleep(self.delay);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn evict_one_releases_locks_before_writeback() {
+        // Cache with capacity 1 so any new insert triggers eviction.
+        const DELAY_MS: u64 = 300;
+        let writing = Arc::new(AtomicBool::new(false));
+        let cache = Arc::new(PageCache::with_writer(
+            CacheConfig::with_capacity(1),
+            SlowWriter {
+                delay: Duration::from_millis(DELAY_MS),
+                writing: Arc::clone(&writing),
+            },
+        ));
+
+        // Fill the single slot with a dirty entry.
+        cache.insert(0u64, "dirty".to_string());
+        cache.mark_dirty(&0);
+
+        let cache2 = Arc::clone(&cache);
+        let writing2 = Arc::clone(&writing);
+
+        // Thread A: triggers eviction of key 0 → write_page blocks DELAY_MS ms.
+        let thread_a = std::thread::spawn(move || {
+            cache2.insert(1u64, "new".to_string());
+        });
+
+        // Wait until write_page has been entered (locks must be released by then).
+        while !writing2.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+
+        // Thread B: should be able to read from the cache immediately because
+        // locks are no longer held during writeback.
+        let start = Instant::now();
+        let _ = cache.get(&1u64);
+        let elapsed = start.elapsed();
+
+        thread_a.join().unwrap();
+
+        // If locks were still held during write_page, elapsed would be ~DELAY_MS.
+        // With the fix, it should be well under 10% of DELAY_MS.
+        assert!(
+            elapsed < Duration::from_millis(DELAY_MS / 10),
+            "get() blocked for {elapsed:?} — locks were probably still held during writeback"
+        );
+    }
+
+    #[test]
+    fn recover_write_guard_handles_poisoned_lock() {
+        let lock: RwLock<u32> = RwLock::new(42);
+
+        // Poison the lock by panicking while holding the write guard.
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = lock.write().unwrap();
+            panic!("intentional poison");
+        });
+
+        assert!(lock.write().is_err(), "lock must be poisoned after panic");
+
+        // recover_write_guard must return the inner value without panicking.
+        let guard = recover_write_guard(&lock, "test_lock");
+        assert_eq!(*guard, 42);
+    }
+
+    #[test]
+    fn recover_read_guard_handles_poisoned_lock() {
+        let lock: RwLock<u32> = RwLock::new(99);
+
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = lock.write().unwrap();
+            panic!("intentional poison");
+        });
+
+        assert!(lock.read().is_err(), "lock must be poisoned after panic");
+
+        let guard = recover_read_guard(&lock, "test_lock");
+        assert_eq!(*guard, 99);
     }
 }
