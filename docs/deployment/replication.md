@@ -28,18 +28,18 @@ flowchart LR
 red server \
   --path ./data/primary.rdb \
   --role primary \
-  --grpc-bind 0.0.0.0:50051 \
-  --http-bind 0.0.0.0:8080
+  --grpc-bind 0.0.0.0:5555 \
+  --http-bind 0.0.0.0:5055
 ```
 
 ### Replica
 
 ```bash
 red replica \
-  --primary-addr http://primary-host:50051 \
+  --primary-addr http://primary-host:5555 \
   --path ./data/replica.rdb \
-  --grpc-bind 0.0.0.0:50051 \
-  --http-bind 0.0.0.0:8080
+  --grpc-bind 0.0.0.0:5555 \
+  --http-bind 0.0.0.0:5055
 ```
 
 Recommended topology:

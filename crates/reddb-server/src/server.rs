@@ -122,7 +122,7 @@ pub struct ServerOptions {
 impl Default for ServerOptions {
     fn default() -> Self {
         Self {
-            bind_addr: "127.0.0.1:8080".to_string(),
+            bind_addr: "127.0.0.1:5055".to_string(),
             max_body_bytes: 1024 * 1024,
             read_timeout_ms: 5_000,
             write_timeout_ms: 5_000,
