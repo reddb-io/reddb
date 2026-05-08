@@ -51,6 +51,35 @@ Reusable vocabulary for code, docs, and architecture decisions. New terms join t
 - **AuditLogger** — structured JSON-line emitter with file rotation, secret redaction, and typed fields via `AuditFieldEscaper` (per PRD #177). The sink for operator-grade events.
 - **Lossy log writer** — `tracing_appender::NonBlocking` configured with `lossy: true`: hot path pushes onto an MPSC channel; a dedicated worker thread owns the file/stderr fd. On buffer saturation, lines drop rather than backpressure the hot path. Mirror of PG's `logging_collector` subprocess pattern.
 
+## Catalog & Discovery
+
+- **Collection** — root container in RedDB. Every persisted dataset is a Collection regardless of model. The `model` discriminator narrows to `table`, `document`, `queue`, `vector`, `graph`, `timeseries`, or `kv`. Name resolution, ACLs, and storage segments all happen at Collection granularity.
+- **CollectionDescriptor** — canonical metadata struct (`catalog.rs:33`) emitted by the catalog snapshot: name, model, schema_mode, entities count, segments count, indices, attention flags. Source of truth for any introspection surface (HTTP `/catalog`, SQL `SHOW`, Postgres-wire `pg_class`).
+- **`SHOW COLLECTIONS`** — canonical SQL/RQL discovery command. Lists every Collection regardless of model. **Not yet implemented** as of 2026-05-08; today only `GET /catalog` HTTP exposes the snapshot.
+- **`SHOW TABLES` / `SHOW GRAPHS` / `SHOW QUEUES` / `SHOW VECTORS` / `SHOW DOCUMENTS` / `SHOW TIMESERIES` / `SHOW KV`** — typed filters over `SHOW COLLECTIONS`. Each returns only Collections whose `model` matches the keyword. **Not yet implemented**. Faithful-to-type rule: a user asking "show me my tables" should not see queues mixed in.
+- **`red` schema** — reserved schema namespace for RedDB-native virtual tables exposing engine introspection: `red.collections`, `red.indices`, `red.stats`, etc. The `red.*` prefix is the canonical RedDB-native form; `pg_catalog.*` views (`pg_class`, `pg_tables`, `pg_indexes`) layer Postgres-wire compatibility on top by translating column shape. Distinct from the column-level `red_*` prefix used for synthetic fields like `red_entity_id` and `red_capabilities`.
+- **`SHOW COLLECTIONS` desugaring** — parser-level macro: `SHOW COLLECTIONS` → `SELECT name, model, schema_mode, entities, segments, indices, in_memory_bytes, on_disk_bytes, attention FROM red.collections`. Typed variants apply a `WHERE model = '<kind>'` filter.
+- **Wire adapter** — each non-native wire (Postgres, future MySQL/Mongo) is a translation layer in its own `wire/<protocol>/` module. The engine speaks **only** RedDB-native concepts (`red.collections`, `SHOW COLLECTIONS`, etc). Adapters interpret incoming protocol-specific introspection (PG `pg_class`/`pg_attribute`, Mongo `listCollections`) and rewrite to the native form before the query reaches the engine. Postgres-specific concepts like `relkind`, OIDs, and `attnotnull` live exclusively in `wire/postgres/translator.rs`. See ADR 0010.
+- **Internal collection** — `CollectionDescriptor.internal: bool` flag (to be added) hiding system-managed collections (DLQs declared via `WITH DLQ`, audit_log, auto-policy artifacts) from default `SHOW COLLECTIONS` output. `SHOW COLLECTIONS INCLUDING INTERNAL` reveals them. Tenant filtering still applies — internal collections are scoped, not invisible.
+- **`red.*` read access** — universally readable by any authenticated principal *within their `EffectiveScope`*. No capability check on read; tenant filtering is mandatory and enforced by the engine, not by user-defined policies. Write/update on `red.*` is gated by `cluster:admin`. See ADR 0011 §read access.
+- **Catalog snapshot freshness** — `red.*` columns split into two consistency tiers: hot fields (`name`, `model`, `entities`, `segments`, `attention`, `in_memory_bytes`) read directly from the live catalog snapshot every query (sub-ms). Cold fields requiring B-tree walks (`on_disk_bytes`) cache 30s per-collection. Read-after-write within the same node is strong; cross-node in clusters is eventually consistent.
+
+## Events & Subscriptions
+
+- **Event-enabled collection** — a Collection (table/document/vector/graph/timeseries/kv) declared with `WITH EVENTS [TO <queue>] [REDACT (...)] [WHERE ...]`. Mutations to it emit events to a queue. Queues themselves cannot emit events (loop prevention).
+- **Auto-event queue** — when `WITH EVENTS` omits `TO`, engine auto-creates queue `<collection>_events` with mode `FANOUT`. Visible in `SHOW COLLECTIONS` (not internal).
+- **Event payload** — JSON envelope: `op` (insert/update/delete/truncate/drop), `collection`, `id` (PK if declared, else synthetic), `ts`, `lsn`, `tenant`, `before`, `after`. Per-collection ordered by `lsn`. `event_id = BLAKE3(collection || id || lsn || op)` for idempotency.
+- **Outbox path** — default delivery mode (`runtime.events.delivery_mode = outbox`). Mutation commits to WAL with outbox entry; background drain pushes to subscriber queue. Backpressure: drain blocks if queue full, after N retries pushes to `<queue>_outbox_dlq`. Alternative `sync` mode forces commit-blocked-on-queue-write.
+- **REDACT clause** — subscription-level field redaction at producer time. `WITH EVENTS TO audit REDACT (email, phone)` strips those fields from `before`/`after` before enqueueing. Engine warns (not errors) when source has `DENY select` policies on columns not covered by REDACT.
+- **Subscription** — `(source_collection, target_queue, operations, filter, redact)` tuple persisted in catalog. Multiple subscriptions per collection allowed. Tenant-scoped by default; cross-tenant requires `events:cluster_subscribe` capability. Creating one needs `select` on source + `write` on target queue.
+- **EVENTS BACKFILL** — operator command `EVENTS BACKFILL <collection> [WHERE ...] TO <queue> [LIMIT N]` enqueues synthetic-flagged events for existing rows. Idempotent via deterministic `event_id`. Default subscription has no backfill — only future mutations.
+- **Synthetic event** — event with `synthetic: true` produced by BACKFILL. Distinct from real-time events so consumers can choose to ignore historical payloads.
+
+## Queue modes
+
+- **`FANOUT` queue** — every consumer (or consumer group) receives every message. Equivalent to publishing across multiple Kafka consumer groups or RabbitMQ fanout exchange. Default mode for auto-event queues.
+- **`WORK` queue** — consumers compete for messages; each message delivered to one consumer in the group. Equivalent to RabbitMQ work queue or Pulsar Shared subscription. Default for `CREATE QUEUE` without explicit mode.
+
 ## Performance gate
 
 - **Scenario-specific gate** — per ADR 0009, RedDB does not commit to "20% faster than every competitor on every scenario". Instead, it commits to winning where the unified-engine architecture structurally outperforms (typed_insert, disk_usage, cross-model queries) and to parity-or-close-gap elsewhere.
