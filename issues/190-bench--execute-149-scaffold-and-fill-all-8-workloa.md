@@ -43,8 +43,32 @@ Steps 1–2 implemented AFK:
 - `bench/blob-cache/redis-down.sh` (NEW): stops containers; `--wipe-aof` flag
   to also remove the AOF volume.
 
+## Progress (2026-05-07, second AFK pass)
+
+Added stats instrumentation to `benches/blob_cache_bench.rs` so that the
+remaining deferred RedDB-only cells auto-populate the next time anyone runs
+the bench (no Docker required for these cells):
+
+- **w3** (synopsis skip-rate): prints `[w3 stats] synopsis skip-rate: X%` to
+  stderr via `BlobCacheStats::l2_negative_skips()` / `misses()` after the
+  criterion group finishes.
+- **w6** (invalidated count): captures `invalidate_dependencies()` return value
+  (it returns `usize`) via an `Arc<AtomicUsize>` shared with the closure;
+  prints `[w6 stats] BlobCache invalidated_count: N` after `g.finish()`.
+- **w7** (entries reachable post-restart): opens the L2 path one more time after
+  the bench and prints `[w7 stats] entries reachable post-restart: N` via
+  `BlobCacheStats::entries()`.
+- **w8** (hit-rate + evictions, SIEVE): adds a standalone 50K-op measurement
+  loop per WS size (not inside criterion timing) and prints
+  `[w8 hit-rate stats] SIEVE WS-X: hit-rate=Y% hits=... misses=... evictions=...`
+  to stderr. W-TinyLFU row remains `n/a` (not implemented).
+
 Remaining (requires Docker + human run):
 - Step 3: run `REDIS_NO_PERSIST_ADDR=... REDIS_AOF_ADDR=... cargo bench -p reddb-server`
-- Step 4: fill TBD cells in docs/perf/blob-cache-bench-2026-05-06.md
-- Step 5: SIEVE vs W-TinyLFU comparison (w8 at WS=2.0×L1)
+  (RedDB-only cells + stats lines print without env vars; Redis env vars add the
+  Redis baseline rows)
+- Step 4: fill TBD/deferred cells in docs/perf/blob-cache-bench-2026-05-06.md
+  using the criterion output + the `[wN stats]` stderr lines
+- Step 5: SIEVE vs W-TinyLFU comparison — w8 hit-rate output fills the SIEVE row;
+  W-TinyLFU row stays `n/a` until implemented as an opt-in flag
 

@@ -179,8 +179,21 @@ fn w3_cold_absent(c: &mut Criterion) {
         });
     });
 
-
     g.finish();
+
+    // Synopsis effectiveness: print l2_negative_skips / total misses.
+    let s = cache.stats();
+    let total_misses = s.misses();
+    let synopsis_skips = s.l2_negative_skips();
+    let skip_rate = if total_misses > 0 {
+        synopsis_skips as f64 / total_misses as f64 * 100.0
+    } else {
+        0.0
+    };
+    eprintln!(
+        "\n[w3 stats] synopsis skip-rate: {skip_rate:.1}% \
+         (l2_negative_skips={synopsis_skips}, total_misses={total_misses})"
+    );
 }
 
 // ── Workload 4 — large-blob-l2-hit (5 MiB) ──────────────────────────────────
@@ -263,6 +276,10 @@ fn w6_dependency_invalidation(c: &mut Criterion) {
 
     let mut rc = ResultCache::new(L1);
 
+    // Tracks the last observed invalidated-entry count across iter_custom calls.
+    let last_invalidated = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let last_inv_ref = last_invalidated.clone();
+
     let mut g = c.benchmark_group("w6-dependency-invalidation");
     g.sample_size(30);
 
@@ -281,8 +298,9 @@ fn w6_dependency_invalidation(c: &mut Criterion) {
                     cache.put(NS, key(i), put).ok();
                 }
                 let t = Instant::now();
-                black_box(cache.invalidate_dependencies(NS, &["table:users"]));
+                let count = cache.invalidate_dependencies(NS, &["table:users"]);
                 total += t.elapsed();
+                last_inv_ref.store(count, std::sync::atomic::Ordering::Relaxed);
             }
             total
         });
@@ -309,6 +327,11 @@ fn w6_dependency_invalidation(c: &mut Criterion) {
     });
 
     g.finish();
+
+    let invalidated = last_invalidated.load(std::sync::atomic::Ordering::Relaxed);
+    eprintln!(
+        "\n[w6 stats] BlobCache invalidated_count (last iter, 25% of {KEY_COUNT}): {invalidated}"
+    );
 }
 
 // ── Workload 7 — restart-warm-cache ──────────────────────────────────────────
@@ -349,6 +372,11 @@ fn w7_restart_warm_cache(c: &mut Criterion) {
     });
 
     g.finish();
+
+    // Entries reachable post-restart.
+    let check = make_cache_with_l2(L1, &l2_path);
+    let s = check.stats();
+    eprintln!("\n[w7 stats] entries reachable post-restart: {}", s.entries());
 }
 
 // ── Workload 8 — mixed-blob admission ────────────────────────────────────────
@@ -422,6 +450,58 @@ fn w8_mixed_blob_admission(c: &mut Criterion) {
     }
 
     g.finish();
+
+    // Hit-rate + eviction measurement (standalone, not folded into criterion timing).
+    // Creates a fresh cache per WS size, runs 50K mixed ops, reads stats.
+    eprintln!("\n[w8 hit-rate stats]");
+    for (label, ws_bytes) in workloads {
+        let small_count = (ws_bytes * 70 / 100) / 1024;
+        let medium_count = (ws_bytes * 25 / 100) / (100 * 1024);
+        let large_count = (ws_bytes * 5 / 100) / (1024 * 1024);
+        let total_keys = (small_count + medium_count + large_count).max(1);
+
+        let cache = make_cache_l1_only(L1);
+        // Warm fill
+        for i in 0..total_keys {
+            let put = if i < small_count {
+                BlobCachePut::new(small_payload.clone())
+            } else if i < small_count + medium_count {
+                BlobCachePut::new(medium_payload.clone())
+            } else {
+                BlobCachePut::new(large_payload.clone())
+            };
+            cache.put(NS, key(i), put).ok();
+        }
+        // 50K mixed ops (80/20 read/write)
+        for i in 0..50_000usize {
+            if i % 5 == 0 {
+                let idx = i % total_keys;
+                let put = if idx < small_count {
+                    BlobCachePut::new(small_payload.clone())
+                } else if idx < small_count + medium_count {
+                    BlobCachePut::new(medium_payload.clone())
+                } else {
+                    BlobCachePut::new(large_payload.clone())
+                };
+                cache.put(NS, key(idx), put).ok();
+            } else {
+                black_box(cache.get(NS, &key(i % total_keys)));
+            }
+        }
+        let s = cache.stats();
+        let total_ops = s.hits() + s.misses();
+        let hit_rate = if total_ops > 0 {
+            s.hits() as f64 / total_ops as f64 * 100.0
+        } else {
+            0.0
+        };
+        eprintln!(
+            "  SIEVE {label}: hit-rate={hit_rate:.1}% hits={} misses={} evictions={}",
+            s.hits(),
+            s.misses(),
+            s.evictions()
+        );
+    }
 }
 
 // ── Redis helpers (gated on REDIS_NO_PERSIST_ADDR / REDIS_AOF_ADDR env vars) ─
