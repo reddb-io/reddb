@@ -1,0 +1,4 @@
+input = "SELECT ip, hostname FROM hosts"
+expected_kind = "Table"
+source = "README.md:30"
+kind = "positive"

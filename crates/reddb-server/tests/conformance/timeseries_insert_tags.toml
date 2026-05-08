@@ -1,0 +1,4 @@
+input = "INSERT INTO cpu_metrics (metric, value, tags) VALUES ('cpu.idle', 95.2, {\"host\":\"srv1\"})"
+expected_kind = "Insert"
+source = "docs/data-models/timeseries.md:62"
+kind = "positive"

@@ -1,0 +1,4 @@
+input = "SELECT a FROM a"
+expected_kind = "Table"
+source = "proptest-regression: shrinks to single-letter table+col"
+kind = "positive"

@@ -1,0 +1,4 @@
+input = "CREATE TABLE hosts (ip TEXT, hostname TEXT, port INTEGER)"
+expected_kind = "CreateTable"
+source = "docs/data-models/tables.md:1"
+kind = "positive"

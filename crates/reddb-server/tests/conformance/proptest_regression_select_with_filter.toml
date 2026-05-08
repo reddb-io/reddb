@@ -1,0 +1,4 @@
+input = "SELECT a0 FROM a WHERE a = 0"
+expected_kind = "Table"
+source = "proptest-regression: single-letter table, col+digit, integer filter"
+kind = "positive"

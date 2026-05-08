@@ -1,0 +1,4 @@
+input = 'INSERT INTO logs DOCUMENT (body) VALUES ({"level":"warn","ip":"10.0.0.1"})'
+expected_kind = "Insert"
+source = "README.md:44"
+kind = "positive"

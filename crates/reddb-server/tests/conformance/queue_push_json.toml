@@ -1,0 +1,4 @@
+input = 'QUEUE PUSH tasks {"job":"process","id":123}'
+expected_kind = "QueueCommand"
+source = "docs/data-models/queues.md:38"
+kind = "positive"

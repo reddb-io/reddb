@@ -1,0 +1,4 @@
+input = "INSERT INTO tb1 (aa1, aa1, aa1) VALUES (0, 0, 0)"
+expected_kind = "Insert"
+source = "proptest-regression: duplicate column names in INSERT (original shrunk to 'k' which is a reserved token)"
+kind = "positive"

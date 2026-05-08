@@ -1,0 +1,4 @@
+input = 'QUEUE PUSH qu1 {"a":0}'
+expected_kind = "QueueCommand"
+source = "proptest-regression: minimal queue push with raw JSON (original shrunk to 'k' which is a reserved token)"
+kind = "positive"
