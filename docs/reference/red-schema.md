@@ -26,6 +26,22 @@ internal filter unless `INCLUDING INTERNAL` is present:
 SHOW COLLECTIONS WHERE model = 'table';
 ```
 
+Typed collection shortcuts are also syntax sugar over `red.collections`:
+
+```sql
+SHOW TABLES;
+SHOW QUEUES;
+SHOW VECTORS;
+SHOW DOCUMENTS;
+SHOW TIMESERIES;
+SHOW GRAPHS;
+SHOW KV;
+```
+
+These expand to `SELECT * FROM red.collections WHERE model = '<type>'`, using
+`table`, `queue`, `vector`, `document`, `timeseries`, `graph`, and `kv`
+respectively.
+
 Current columns:
 
 | Column            | Description |

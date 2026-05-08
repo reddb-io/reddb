@@ -1568,6 +1568,36 @@ fn test_parse_show_collections_where_desugars_with_filter() {
 }
 
 #[test]
+fn test_parse_typed_show_desugars_to_red_collections_model_filter() {
+    for (input, model) in [
+        ("SHOW TABLES", "table"),
+        ("SHOW QUEUES", "queue"),
+        ("SHOW VECTORS", "vector"),
+        ("SHOW DOCUMENTS", "document"),
+        ("SHOW TIMESERIES", "timeseries"),
+        ("SHOW GRAPHS", "graph"),
+        ("SHOW KV", "kv"),
+    ] {
+        let query = parse(input).unwrap();
+        if let QueryExpr::Table(tq) = query {
+            assert_eq!(tq.table, "red.collections");
+            assert!(tq.columns.is_empty());
+            assert!(tq.select_items.is_empty());
+            assert!(matches!(
+                tq.filter,
+                Some(Filter::Compare {
+                    field: FieldRef::TableColumn { ref column, .. },
+                    op: CompareOp::Eq,
+                    value: crate::storage::schema::Value::Text(ref value),
+                }) if column == "model" && value.as_ref() == model
+            ));
+        } else {
+            panic!("Expected Table for {input}");
+        }
+    }
+}
+
+#[test]
 fn test_parse_dollar_secret_reference_projection() {
     let query = parse("SELECT $secret.mycompany.stripe.key AS secret_value FROM tokens").unwrap();
     if let QueryExpr::Table(tq) = query {

@@ -1,0 +1,4 @@
+input = "SHOW KV"
+expected_kind = "Table"
+source = "docs/reference/red-schema.md:30"
+kind = "positive"

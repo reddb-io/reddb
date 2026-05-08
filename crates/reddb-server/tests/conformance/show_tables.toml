@@ -1,0 +1,4 @@
+input = "SHOW TABLES"
+expected_kind = "Table"
+source = "docs/reference/red-schema.md:24"
+kind = "positive"
