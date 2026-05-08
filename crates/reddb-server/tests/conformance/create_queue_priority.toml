@@ -1,0 +1,4 @@
+input = "CREATE QUEUE urgent_tasks PRIORITY"
+expected_kind = "CreateQueue"
+source = "docs/data-models/queues.md:26"
+kind = "positive"

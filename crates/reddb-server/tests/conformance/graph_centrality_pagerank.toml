@@ -1,0 +1,4 @@
+input = "GRAPH CENTRALITY ALGORITHM pagerank"
+expected_kind = "GraphCommand"
+source = "docs/data-models/graphs.md:184"
+kind = "positive"

@@ -1,0 +1,4 @@
+input = "BEGIN"
+expected_kind = "TransactionControl"
+source = "docs/query/transactions.md:14"
+kind = "positive"

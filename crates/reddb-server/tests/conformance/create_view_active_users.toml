@@ -1,0 +1,4 @@
+input = "CREATE VIEW active_users AS SELECT id, email, last_seen FROM users WHERE status = 'active'"
+expected_kind = "CreateView"
+source = "docs/query/views.md:11"
+kind = "positive"

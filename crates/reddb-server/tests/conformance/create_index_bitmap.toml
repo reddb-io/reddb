@@ -1,0 +1,4 @@
+input = "CREATE INDEX idx_status ON orders (status) USING BITMAP"
+expected_kind = "CreateIndex"
+source = "docs/query/create-index.md:44"
+kind = "positive"

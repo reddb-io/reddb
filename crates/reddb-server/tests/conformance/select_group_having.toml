@@ -1,0 +1,4 @@
+input = "SELECT dept FROM employees GROUP BY dept HAVING dept > 5 ORDER BY dept"
+expected_kind = "Table"
+source = "docs/query/select.md:161"
+kind = "positive"

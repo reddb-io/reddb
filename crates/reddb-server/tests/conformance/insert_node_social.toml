@@ -1,0 +1,4 @@
+input = "INSERT INTO social NODE (label, name) VALUES ('User', 'alice')"
+expected_kind = "Insert"
+source = "docs/query/transactions.md:16"
+kind = "positive"

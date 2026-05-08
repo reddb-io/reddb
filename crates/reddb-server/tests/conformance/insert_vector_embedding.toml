@@ -1,0 +1,4 @@
+input = "INSERT INTO embeddings VECTOR (dense, content) VALUES ([0.12, 0.91, 0.44], 'vector content text')"
+expected_kind = "Insert"
+source = "docs/data-models/overview.md:79"
+kind = "positive"

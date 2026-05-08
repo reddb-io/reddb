@@ -1,0 +1,4 @@
+input = "GRAPH NEIGHBORHOOD 'alice' DIRECTION outgoing DEPTH 2"
+expected_kind = "GraphCommand"
+source = "docs/query/graph-commands.md:40"
+kind = "positive"

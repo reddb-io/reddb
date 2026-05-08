@@ -1,0 +1,4 @@
+input = "INSERT INTO network EDGE (label, from, to) VALUES ('CONNECTS', 1, 2)"
+expected_kind = "Insert"
+source = "README.md:47"
+kind = "positive"

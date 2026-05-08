@@ -1,0 +1,4 @@
+input = "FROM ANY WHERE _kind = 'document' AND _collection = 'events' LIMIT 20"
+expected_kind = "Table"
+source = "docs/data-models/documents.md:140"
+kind = "positive"

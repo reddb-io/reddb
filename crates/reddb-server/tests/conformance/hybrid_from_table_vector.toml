@@ -1,0 +1,4 @@
+input = "HYBRID FROM company WHERE department = 'Engineering' VECTOR SEARCH skills SIMILAR TO 'machine learning' FUSION RRF LIMIT 10"
+expected_kind = "Hybrid"
+source = "docs/guides/multi-model-queries.md:128"
+kind = "positive"

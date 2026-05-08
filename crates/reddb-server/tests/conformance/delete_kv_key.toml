@@ -1,0 +1,4 @@
+input = "DELETE FROM config WHERE key = 'max_retries'"
+expected_kind = "Delete"
+source = "docs/data-models/key-value.md:156"
+kind = "positive"

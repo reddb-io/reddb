@@ -1,0 +1,4 @@
+input = "CREATE UNIQUE INDEX idx_api_key ON tokens (key) USING HASH"
+expected_kind = "CreateIndex"
+source = "docs/query/create-index.md:32"
+kind = "positive"

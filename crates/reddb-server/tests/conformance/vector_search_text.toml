@@ -1,0 +1,4 @@
+input = "VECTOR SEARCH docs SIMILAR TO 'machine learning fundamentals' LIMIT 5"
+expected_kind = "Vector"
+source = "docs/data-models/vectors.md:139"
+kind = "positive"

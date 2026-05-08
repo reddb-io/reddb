@@ -1,0 +1,4 @@
+input = "INSERT INTO cpu_metrics (metric, value, tags, timestamp) VALUES ('cpu.idle', 94.8, {host: 'srv1', region: 'us-east'}, 1704067200000000000)"
+expected_kind = "Insert"
+source = "docs/query/insert.md:34"
+kind = "positive"

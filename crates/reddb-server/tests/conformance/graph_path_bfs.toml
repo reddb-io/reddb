@@ -1,0 +1,4 @@
+input = "PATH FROM 'web-server-01' TO 'db-primary' ALGORITHM bfs"
+expected_kind = "Path"
+source = "docs/query/graph-commands.md:155"
+kind = "positive"

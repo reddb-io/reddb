@@ -23,11 +23,18 @@ impl<'a> Parser<'a> {
             Vec::new()
         };
 
-        let max_length = if self.consume(&Token::Limit)? {
-            self.parse_integer()? as u32
-        } else {
-            10 // Default
-        };
+        let mut max_length = 10;
+        loop {
+            if self.consume(&Token::Algorithm)? {
+                let _ = self.expect_ident_or_keyword()?;
+            } else if self.consume(&Token::Direction)? {
+                let _ = self.expect_ident_or_keyword()?;
+            } else if self.consume(&Token::Limit)? {
+                max_length = self.parse_integer()? as u32;
+            } else {
+                break;
+            }
+        }
 
         let filter = if self.consume(&Token::Where)? {
             Some(self.parse_filter()?)
@@ -54,9 +61,16 @@ impl<'a> Parser<'a> {
 
     /// Parse node selector: host('id'), ByType, etc.
     fn parse_node_selector(&mut self) -> Result<NodeSelector, ParseError> {
+        if let Token::String(id) = self.peek().clone() {
+            self.advance()?;
+            return Ok(NodeSelector::ById(id));
+        }
+
         let name = self.expect_ident()?;
 
-        self.expect(Token::LParen)?;
+        if !self.consume(&Token::LParen)? {
+            return Ok(NodeSelector::ById(name));
+        }
 
         let selector = match name.to_lowercase().as_str() {
             "host" | "node" | "id" => {

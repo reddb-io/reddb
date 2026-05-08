@@ -92,14 +92,14 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parse: SEARCH TEXT 'query string' [COLLECTION col] [LIMIT n] [FUZZY]
+    /// Parse: SEARCH TEXT 'query string' [COLLECTION|IN col] [LIMIT n] [FUZZY]
     fn parse_search_text(&mut self) -> Result<QueryExpr, ParseError> {
         self.advance()?; // consume TEXT
 
         let query = self.parse_string()?;
 
         // Optional COLLECTION
-        let collection = if self.consume(&Token::Collection)? {
+        let collection = if self.consume(&Token::Collection)? || self.consume(&Token::In)? {
             Some(self.expect_ident()?)
         } else {
             None
@@ -123,23 +123,22 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parse: SEARCH HYBRID [SIMILAR [v1, v2, ...]] [TEXT 'query'] COLLECTION col [LIMIT n]
+    /// Parse: SEARCH HYBRID [SIMILAR|VECTOR [v1, v2, ...]] [TEXT 'query'] COLLECTION|IN col [LIMIT|K n]
     fn parse_search_hybrid(&mut self) -> Result<QueryExpr, ParseError> {
         self.advance()?; // consume HYBRID
 
-        // Optional SIMILAR vector
-        let vector = if self.consume(&Token::Similar)? {
-            Some(self.parse_vector_literal()?)
-        } else {
-            None
-        };
+        let mut vector = None;
+        let mut query = None;
 
-        // Optional TEXT query
-        let query = if self.consume(&Token::Text)? {
-            Some(self.parse_string()?)
-        } else {
-            None
-        };
+        loop {
+            if self.consume(&Token::Similar)? || self.consume(&Token::Vector)? {
+                vector = Some(self.parse_vector_literal()?);
+            } else if self.consume(&Token::Text)? {
+                query = Some(self.parse_string()?);
+            } else {
+                break;
+            }
+        }
 
         // Require at least one of vector or text
         if vector.is_none() && query.is_none() {
@@ -149,15 +148,22 @@ impl<'a> Parser<'a> {
             ));
         }
 
-        // Parse COLLECTION — tolerate collection names that collide
+        // Parse COLLECTION/IN — tolerate collection names that collide
         // with reserved keywords (e.g. `data`, `text`, `nodes`) by
         // falling back to `expect_ident_or_keyword` and lowercasing the
         // keyword form so the stored name matches the source casing.
-        self.expect(Token::Collection)?;
+        if !(self.consume(&Token::Collection)? || self.consume(&Token::In)?) {
+            return Err(ParseError::expected(
+                vec!["COLLECTION", "IN"],
+                self.peek(),
+                self.position(),
+            ));
+        }
         let collection = self.expect_collection_name()?;
 
         // Optional LIMIT
-        let limit = if self.consume(&Token::Limit)? {
+        let limit = if self.consume(&Token::Limit)? || self.consume(&Token::K)? {
+            let _ = self.consume(&Token::Eq)?;
             self.parse_integer()? as usize
         } else {
             10

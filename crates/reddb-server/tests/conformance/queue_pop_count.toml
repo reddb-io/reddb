@@ -1,0 +1,4 @@
+input = "QUEUE POP tasks COUNT 5"
+expected_kind = "QueueCommand"
+source = "docs/data-models/queues.md:59"
+kind = "positive"

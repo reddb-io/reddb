@@ -1,0 +1,4 @@
+input = "DELETE FROM users WHERE name = 'Alice'"
+expected_kind = "Delete"
+source = "docs/query/delete.md:16"
+kind = "positive"
