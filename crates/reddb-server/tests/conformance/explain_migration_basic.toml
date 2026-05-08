@@ -1,0 +1,4 @@
+input = "EXPLAIN MIGRATION backfill_scores"
+expected_kind = "ExplainMigration"
+source = "docs/migrations/commands.md:349"
+kind = "positive"

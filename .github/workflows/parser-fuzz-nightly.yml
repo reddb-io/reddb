@@ -1,0 +1,84 @@
+name: Parser Fuzz Nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 90
+    concurrency:
+      group: parser-fuzz-nightly-${{ github.ref }}-${{ matrix.target }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - sql_parser
+          - migration_parser
+          - conn_string_parser
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: parser-fuzz-nightly
+          cache-on-failure: "true"
+          workspaces: |
+            . -> target
+            fuzz -> fuzz/target
+
+      - name: Restore evolved corpus cache
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: parser-fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            parser-fuzz-corpus-${{ matrix.target }}-
+
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --locked
+
+      - name: Seed corpus from parser conformance
+        run: python3 scripts/seed-parser-fuzz-corpus.py
+
+      - name: Run ${{ matrix.target }}
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=3600
+
+      - name: Upload evolved corpus
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parser-fuzz-corpus-${{ matrix.target }}
+          path: fuzz/corpus/${{ matrix.target }}
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parser-fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Open release-blocker issue for crash
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash scripts/report-parser-fuzz-crashes.sh ${{ matrix.target }}
