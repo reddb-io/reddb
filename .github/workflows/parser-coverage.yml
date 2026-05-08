@@ -1,0 +1,209 @@
+name: Parser Coverage
+
+# Runs on every PR touching the query parser/lexer.
+# Posts a per-file coverage table as a PR comment (warn-only, never blocks).
+# On push to main, saves a coverage snapshot used as the delta baseline in PRs.
+#
+# Blocking merge on coverage thresholds is a future PRD — see
+# crates/reddb-server/AGENTS.md for details.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/reddb-server/src/storage/query/**'
+      - 'Cargo.lock'
+  pull_request:
+    paths:
+      - 'crates/reddb-server/src/storage/query/**'
+      - 'Cargo.lock'
+
+concurrency:
+  group: parser-coverage-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  parser-coverage:
+    name: Parser Coverage Report
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      pull-requests: write
+    timeout-minutes: 25
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@1.91.0
+        with:
+          components: llvm-tools-preview
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '28.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: rui314/setup-mold@v1
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-rust-1.91.0-llvm-cov
+          cache-on-failure: "true"
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Run coverage (lib, parser + lexer scope)
+        run: |
+          cargo llvm-cov \
+            --lib \
+            -p reddb-server \
+            --lcov \
+            --output-path lcov.info
+
+      # Restore the most recent main-branch snapshot for delta calculation.
+      # Missing cache is non-fatal — delta column shows "n/a" instead.
+      - name: Restore main coverage baseline
+        if: github.event_name == 'pull_request'
+        id: cache-baseline
+        uses: actions/cache/restore@v4
+        with:
+          path: coverage-baseline.json
+          key: parser-coverage-main-${{ github.event.pull_request.base.sha }}
+          restore-keys: parser-coverage-main-
+
+      - name: Extract per-file coverage and build report
+        id: report
+        run: |
+          # Parse LCOV → TSV "relpath hit_lines total_lines" for parser/* and lexer.rs
+          awk '
+            /^SF:/ { f=$0; sub(/^SF:/,"",f); lh=0; lf=0 }
+            /^LH:/ { lh=$0; sub(/^LH:/,"",lh) }
+            /^LF:/ { lf=$0; sub(/^LF:/,"",lf) }
+            /^end_of_record/ {
+              if (f ~ /storage\/query\/parser\/|storage\/query\/lexer\.rs/) {
+                n=f; sub(/.*storage\/query\//,"",n)
+                print n "\t" lh "\t" lf
+              }
+            }
+          ' lcov.info | sort > current.tsv
+
+          # Produce coverage report and update the baseline snapshot.
+          python3 - <<'PYEOF'
+          import json, os
+
+          THRESHOLD = 90.0
+
+          # Read old baseline BEFORE overwriting with current data.
+          baseline = {}
+          if os.path.exists("coverage-baseline.json"):
+            with open("coverage-baseline.json") as f:
+              baseline = json.load(f)
+
+          # Parse TSV into current stats.
+          current = {}
+          with open("current.tsv") as f:
+            for line in f:
+              parts = line.rstrip("\n").split("\t")
+              if len(parts) == 3:
+                name, lh, lf = parts[0], int(parts[1]), int(parts[2])
+                current[name] = {"lh": lh, "lf": lf}
+
+          # Overwrite baseline file with current data so the save step
+          # (push-to-main only) picks up the fresh snapshot.
+          with open("coverage-baseline.json", "w") as f:
+            json.dump(current, f)
+
+          # Build markdown table
+          rows = []
+          for name, v in sorted(current.items()):
+            lh, lf = v["lh"], v["lf"]
+            pct = (lh / lf * 100.0) if lf > 0 else 0.0
+            mark = "✅" if pct >= THRESHOLD else "❌"
+
+            delta_str = "n/a"
+            if name in baseline:
+              b = baseline[name]
+              b_pct = (b["lh"] / b["lf"] * 100.0) if b["lf"] > 0 else 0.0
+              d = pct - b_pct
+              delta_str = f"+{d:.1f}" if d >= 0 else f"{d:.1f}"
+
+            gap = pct - THRESHOLD
+            gap_str = f"+{gap:.1f}" if gap >= 0 else f"{gap:.1f}"
+            rows.append(f"| `{name}` | {pct:.1f}% | {delta_str} | {mark} {gap_str} |")
+
+          header = "| Arquivo | Coverage | Delta | Threshold (90%) |"
+          sep    = "|---------|----------|-------|-----------------|"
+
+          if rows:
+            table = "\n".join([header, sep] + rows)
+          else:
+            table = "_No parser/lexer files found in coverage report._"
+
+          body = f"""<!-- parser-coverage-comment -->
+## Parser Coverage Report
+
+{table}
+
+> ℹ️ This comment is advisory — it does not block merge.
+> Blocking merge on threshold is a future PRD (see `crates/reddb-server/AGENTS.md`).
+> Run locally: `cargo llvm-cov --lib -p reddb-server -- storage::query`
+"""
+
+          with open("coverage-comment.md", "w") as f:
+            f.write(body)
+          PYEOF
+
+          # Expose comment body as step output (multiline via heredoc delimiter)
+          {
+            echo "body<<COVERAGE_BODY_EOF"
+            cat coverage-comment.md
+            echo "COVERAGE_BODY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # Save snapshot for future PRs targeting main.
+      # Path matches the restore step so cache keys are symmetric.
+      - name: Save main coverage baseline
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: coverage-baseline.json
+          key: parser-coverage-main-${{ github.sha }}
+
+      - name: Post or update PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = '<!-- parser-coverage-comment -->';
+            const body = `${{ steps.report.outputs.body }}`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
