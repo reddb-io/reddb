@@ -2483,6 +2483,60 @@ fn test_parse_create_timeseries_with_downsample() {
 }
 
 #[test]
+fn test_parse_timeseries_duration_downsample_and_hypertable_forms() {
+    let query =
+        parse("CREATE TIMESERIES IF NOT EXISTS metrics CHUNK_SIZE 2048 RETENTION 5 min").unwrap();
+    let QueryExpr::CreateTimeSeries(ts) = query else {
+        panic!("Expected CreateTimeSeriesQuery");
+    };
+    assert_eq!(ts.name, "metrics");
+    assert!(ts.if_not_exists);
+    assert_eq!(ts.chunk_size, Some(2048));
+    assert_eq!(ts.retention_ms, Some(5 * 60_000));
+
+    let query = parse("CREATE TIMESERIES metrics DOWNSAMPLE 1.5h:raw, 10m:1m:sum").unwrap();
+    let QueryExpr::CreateTimeSeries(ts) = query else {
+        panic!("Expected CreateTimeSeriesQuery");
+    };
+    assert_eq!(
+        ts.downsample_policies,
+        vec!["1.5h:raw:avg".to_string(), "10m:1m:sum".to_string()]
+    );
+
+    let query = parse(
+        "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1d' TTL '2h' RETENTION 7 day",
+    )
+    .unwrap();
+    let QueryExpr::CreateTimeSeries(ts) = query else {
+        panic!("Expected CreateTimeSeriesQuery");
+    };
+    let hypertable = ts.hypertable.expect("hypertable ddl");
+    assert_eq!(hypertable.time_column, "ts");
+    assert_eq!(hypertable.chunk_interval_ns, 86_400_000_000_000);
+    assert_eq!(hypertable.default_ttl_ns, Some(7_200_000_000_000));
+    assert_eq!(ts.retention_ms, Some(7 * 86_400_000));
+
+    let query = parse("DROP HYPERTABLE IF EXISTS metrics").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::DropTimeSeries(ts) if ts.name == "metrics" && ts.if_exists
+    ));
+
+    for sql in [
+        "CREATE TIMESERIES metrics RETENTION 1 fortnights",
+        "CREATE TIMESERIES metrics RETENTION 1 MAX",
+        "CREATE TIMESERIES metrics RETENTION 1 AVG",
+        "CREATE TIMESERIES metrics DOWNSAMPLE raw:",
+        "CREATE HYPERTABLE metrics CHUNK_INTERVAL '1d'",
+        "CREATE HYPERTABLE metrics TIME_COLUMN ts",
+        "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL 42",
+        "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL 'nope'",
+    ] {
+        assert!(parse(sql).is_err(), "{sql}");
+    }
+}
+
+#[test]
 fn test_parse_create_queue() {
     let query = parse("CREATE QUEUE tasks MAX_SIZE 1000 PRIORITY").unwrap();
     if let QueryExpr::CreateQueue(q) = query {
@@ -2505,6 +2559,141 @@ fn test_parse_create_queue_with_dlq_and_attempts() {
         assert_eq!(q.max_attempts, 5);
     } else {
         panic!("Expected CreateQueueQuery");
+    }
+}
+
+#[test]
+fn test_parse_queue_control_and_group_command_forms() {
+    use crate::storage::query::ast::QueueSide;
+
+    let query = parse("CREATE QUEUE IF NOT EXISTS tasks WITH TTL 2.5 s").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::CreateQueue(q)
+            if q.name == "tasks" && q.if_not_exists && q.ttl_ms == Some(2_500)
+    ));
+
+    for (sql, expected_ttl_ms) in [
+        ("CREATE QUEUE q_ms WITH TTL 10 ms", 10),
+        ("CREATE QUEUE q_min WITH TTL 2 mins", 120_000),
+        ("CREATE QUEUE q_hr WITH TTL 3 hrs", 10_800_000),
+        ("CREATE QUEUE q_day WITH TTL 1 day", 86_400_000),
+        ("CREATE QUEUE q_default WITH TTL 4", 4_000),
+    ] {
+        let query = parse(sql).unwrap();
+        assert!(matches!(
+            query,
+            QueryExpr::CreateQueue(q) if q.ttl_ms == Some(expected_ttl_ms)
+        ));
+    }
+
+    let query = parse("CREATE QUEUE retries MAXATTEMPTS 0 MAXSIZE 10").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::CreateQueue(q)
+            if q.max_attempts == 1 && q.max_size == Some(10)
+    ));
+
+    let query = parse("QUEUE PEEK tasks 5").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::QueueCommand(QueueCommand::Peek { queue, count })
+            if queue == "tasks" && count == 5
+    ));
+
+    let query = parse("QUEUE PEEK tasks").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::QueueCommand(QueueCommand::Peek { queue, count })
+            if queue == "tasks" && count == 1
+    ));
+
+    let query = parse("QUEUE LEN tasks").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::QueueCommand(QueueCommand::Len { queue }) if queue == "tasks"
+    ));
+
+    let query = parse("QUEUE PURGE tasks").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::QueueCommand(QueueCommand::Purge { queue }) if queue == "tasks"
+    ));
+
+    let query = parse("QUEUE GROUP CREATE tasks workers").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::QueueCommand(QueueCommand::GroupCreate { queue, group })
+            if queue == "tasks" && group == "workers"
+    ));
+
+    let query = parse("QUEUE READ tasks GROUP workers CONSUMER worker1 COUNT 10").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::QueueCommand(QueueCommand::GroupRead {
+            queue,
+            group,
+            consumer,
+            count,
+        }) if queue == "tasks" && group == "workers" && consumer == "worker1" && count == 10
+    ));
+
+    let query = parse("QUEUE ACK tasks GROUP workers 'msg-1'").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::QueueCommand(QueueCommand::Ack {
+            queue,
+            group,
+            message_id,
+        }) if queue == "tasks" && group == "workers" && message_id == "msg-1"
+    ));
+
+    let query = parse("QUEUE NACK tasks GROUP workers 'msg-2'").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::QueueCommand(QueueCommand::Nack {
+            queue,
+            group,
+            message_id,
+        }) if queue == "tasks" && group == "workers" && message_id == "msg-2"
+    ));
+
+    let query = parse("QUEUE RPUSH tasks 'right' PRIORITY 9").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::QueueCommand(QueueCommand::Push {
+            queue,
+            side: QueueSide::Right,
+            priority: Some(9),
+            ..
+        }) if queue == "tasks"
+    ));
+
+    let query = parse("QUEUE POP tasks COUNT 3").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::QueueCommand(QueueCommand::Pop {
+            queue,
+            side: QueueSide::Left,
+            count: 3,
+        }) if queue == "tasks"
+    ));
+
+    let query = parse("DROP QUEUE tasks").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::DropQueue(q) if q.name == "tasks" && !q.if_exists
+    ));
+
+    for sql in [
+        "CREATE QUEUE q WITH TTL 5 fortnights",
+        "QUEUE READ tasks workers CONSUMER worker1",
+        "QUEUE CLAIM tasks GROUP workers CONSUMER worker1",
+        "QUEUE CLAIM tasks GROUP workers MIN_IDLE 1",
+        "QUEUE ACK tasks GROUP workers",
+        "QUEUE UNKNOWN tasks",
+    ] {
+        assert!(parse(sql).is_err(), "{sql}");
     }
 }
 
