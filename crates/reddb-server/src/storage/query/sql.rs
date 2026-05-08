@@ -12,6 +12,7 @@ use crate::storage::query::ast::{
     TableQuery, TreeCommand, TxnControl, UpdateQuery, VectorQuery,
 };
 use crate::storage::query::parser::{ParseError, Parser, SafeTokenDisplay};
+use crate::storage::query::sql_lowering::filter_to_expr;
 use crate::storage::query::Token;
 use crate::storage::schema::Value;
 
@@ -1487,6 +1488,20 @@ impl<'a> Parser<'a> {
                         Value::text(collection),
                     ));
                     Ok(SqlCommand::Select(query))
+                } else if self.consume_ident_ci("INDICES")? {
+                    let mut query = TableQuery::new("red.indices");
+                    if self.consume(&Token::On)? {
+                        let collection = self.expect_ident_or_keyword()?;
+                        let filter = Filter::Compare {
+                            field: FieldRef::column("red.indices", "collection"),
+                            op: CompareOp::Eq,
+                            value: Value::text(collection),
+                        };
+                        query.where_expr = Some(filter_to_expr(&filter));
+                        query.filter = Some(filter);
+                    }
+                    self.parse_table_clauses(&mut query)?;
+                    Ok(SqlCommand::Select(query))
                 } else if self.consume_ident_ci("SECRET")? || self.consume_ident_ci("SECRETS")? {
                     let prefix = if !self.check(&Token::Eof) {
                         Some(self.parse_dotted_admin_path(true)?)
@@ -1513,6 +1528,7 @@ impl<'a> Parser<'a> {
                             "GRAPHS",
                             "KV",
                             "SCHEMA",
+                            "INDICES",
                             "TENANT",
                             "POLICIES",
                             "EFFECTIVE",

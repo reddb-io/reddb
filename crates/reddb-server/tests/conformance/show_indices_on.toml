@@ -1,0 +1,4 @@
+input = "SHOW INDICES ON users"
+expected_kind = "Table"
+source = "docs/reference/red-schema.md:40"
+kind = "positive"

@@ -1,0 +1,4 @@
+input = "SHOW INDICES"
+expected_kind = "Table"
+source = "docs/reference/red-schema.md:34"
+kind = "positive"

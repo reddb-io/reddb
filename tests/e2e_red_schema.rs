@@ -8,6 +8,19 @@ use reddb::runtime::mvcc::{
 use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
 
+const INDEX_COLUMNS: [&str; 10] = [
+    "collection",
+    "name",
+    "kind",
+    "declared",
+    "operational",
+    "enabled",
+    "build_state",
+    "in_sync",
+    "queryable",
+    "requires_rebuild",
+];
+
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime")
 }
@@ -35,6 +48,16 @@ fn cleanup_scope() {
     clear_current_auth_identity();
     clear_current_tenant();
     clear_current_connection_id();
+}
+
+fn text_field<'a>(
+    record: &'a reddb::storage::query::unified::UnifiedRecord,
+    field: &str,
+) -> &'a str {
+    match record.get(field) {
+        Some(Value::Text(value)) => value.as_ref(),
+        other => panic!("expected text field {field}, got {other:?}"),
+    }
 }
 
 #[test]
@@ -145,6 +168,37 @@ fn select_from_red_columns_materializes_table_schema() {
 }
 
 #[test]
+fn select_from_red_indices_materializes_index_status_rows() {
+    cleanup_scope();
+    let rt = runtime();
+    exec(&rt, "CREATE TABLE users (id INT, email TEXT)");
+    exec(
+        &rt,
+        "CREATE INDEX users_email_idx ON users (email) USING HASH",
+    );
+
+    let result = rt
+        .execute_query("SELECT * FROM red.indices WHERE collection = 'users'")
+        .expect("red.indices select");
+
+    assert_eq!(result.result.columns, INDEX_COLUMNS.map(str::to_string));
+    let row = result
+        .result
+        .records
+        .iter()
+        .find(|record| text_field(record, "name") == "users_email_idx")
+        .expect("users_email_idx row");
+    assert_eq!(row.get("collection"), Some(&Value::text("users")));
+    assert_eq!(row.get("kind"), Some(&Value::text("hash")));
+    assert_eq!(row.get("enabled"), Some(&Value::Boolean(true)));
+    assert_eq!(row.get("build_state"), Some(&Value::text("ready")));
+    assert_eq!(row.get("queryable"), Some(&Value::Boolean(true)));
+    assert_eq!(row.get("requires_rebuild"), Some(&Value::Boolean(false)));
+
+    cleanup_scope();
+}
+
+#[test]
 fn show_schema_desugars_to_red_columns_collection_filter() {
     cleanup_scope();
     let rt = runtime();
@@ -233,6 +287,49 @@ fn red_columns_infers_document_top_level_fields_as_nullable_schema() {
         .find(|row| text(row, "name") == "ip")
         .expect("ip field");
     assert!(bool_field(ip, "nullable"));
+
+    cleanup_scope();
+}
+
+#[test]
+fn show_indices_lists_all_and_show_indices_on_filters_collection() {
+    cleanup_scope();
+    let rt = runtime();
+    exec(&rt, "CREATE TABLE users (id INT, email TEXT)");
+    exec(&rt, "CREATE TABLE orders (id INT, total INT)");
+    exec(
+        &rt,
+        "CREATE INDEX users_email_idx ON users (email) USING HASH",
+    );
+    exec(
+        &rt,
+        "CREATE INDEX orders_total_idx ON orders (total) USING BTREE",
+    );
+
+    let all = rt.execute_query("SHOW INDICES").expect("SHOW INDICES");
+    let all_names: Vec<String> = all
+        .result
+        .records
+        .iter()
+        .map(|record| text_field(record, "name").to_string())
+        .collect();
+    assert!(all_names.iter().any(|name| name == "users_email_idx"));
+    assert!(all_names.iter().any(|name| name == "orders_total_idx"));
+
+    let filtered = rt
+        .execute_query("SHOW INDICES ON users")
+        .expect("SHOW INDICES ON users");
+    assert_eq!(filtered.result.columns, INDEX_COLUMNS.map(str::to_string));
+    assert!(filtered
+        .result
+        .records
+        .iter()
+        .any(|record| text_field(record, "name") == "users_email_idx"));
+    assert!(filtered
+        .result
+        .records
+        .iter()
+        .all(|record| text_field(record, "collection") == "users"));
 
     cleanup_scope();
 }

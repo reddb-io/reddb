@@ -87,3 +87,35 @@ contract. Document collections without an explicit schema expose inferred
 top-level fields when RedDB can inspect flattened document fields; fields missing
 from at least one observed document are reported as nullable. Schemaless table
 contracts with no stored schema return no rows.
+
+## `red.indices`
+
+`red.indices` exposes visible index metadata from the live catalog and local
+runtime index store.
+
+`SHOW INDICES` is syntax sugar for:
+
+```sql
+SELECT * FROM red.indices;
+```
+
+`SHOW INDICES ON <collection>` filters by collection:
+
+```sql
+SELECT * FROM red.indices WHERE collection = '<collection>';
+```
+
+Current columns:
+
+| Column             | Description |
+|--------------------|-------------|
+| `collection`       | Collection that owns the index, or `NULL` for unscoped catalog indexes. |
+| `name`             | Index name. |
+| `kind`             | Index implementation kind, such as `hash`, `btree`, `bitmap`, or `spatial.rtree`. |
+| `declared`         | Whether the index is declared in catalog metadata. |
+| `operational`      | Whether an operational index artifact is present. |
+| `enabled`          | Whether the index is enabled. |
+| `build_state`      | Current build state, such as `ready`, `building`, `stale`, `failed`, or `declared-unbuilt`. |
+| `in_sync`          | Whether declared and operational index state agree. |
+| `queryable`        | Whether the index can currently serve queries. |
+| `requires_rebuild` | Whether the index should be rebuilt before it is considered healthy. |

@@ -1616,6 +1616,37 @@ fn test_parse_show_schema_desugars_to_red_columns_select() {
 }
 
 #[test]
+fn test_parse_show_indices_desugars_to_red_indices_select() {
+    let query = parse("SHOW INDICES").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.indices");
+        assert!(tq.columns.is_empty());
+        assert!(tq.select_items.is_empty());
+        assert!(tq.filter.is_none());
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
+fn test_parse_show_indices_on_desugars_with_collection_filter() {
+    let query = parse("SHOW INDICES ON users").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.indices");
+        assert!(matches!(
+            tq.filter,
+            Some(Filter::Compare {
+                field: FieldRef::TableColumn { ref column, .. },
+                op: CompareOp::Eq,
+                value: crate::storage::schema::Value::Text(ref value),
+            }) if column == "collection" && value.as_ref() == "users"
+        ));
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
 fn test_parse_dollar_secret_reference_projection() {
     let query = parse("SELECT $secret.mycompany.stripe.key AS secret_value FROM tokens").unwrap();
     if let QueryExpr::Table(tq) = query {

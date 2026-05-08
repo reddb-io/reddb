@@ -2,8 +2,8 @@
 //!
 //! The SQL parser does not currently accept schema-qualified table
 //! identifiers in `FROM`, so the runtime rewrites the small virtual
-//! surface it owns (`red.collections`) to an internal identifier before
-//! normal parsing. Execution then intercepts that identifier and
+//! surface it owns (`red.collections`, `red.columns`, `red.indices`) to an
+//! internal identifier before normal parsing. Execution then intercepts that identifier and
 //! materializes rows from the live catalog snapshot.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -20,6 +20,8 @@ pub(super) const COLLECTIONS: &str = "red.collections";
 pub(super) const COLLECTIONS_INTERNAL: &str = "__red_schema_collections";
 pub(super) const COLUMNS: &str = "red.columns";
 pub(super) const COLUMNS_INTERNAL: &str = "__red_schema_columns";
+pub(super) const INDICES: &str = "red.indices";
+pub(super) const INDICES_INTERNAL: &str = "__red_schema_indices";
 pub(super) const READ_ONLY_ERROR: &str = "system schema is read-only";
 
 const COLLECTION_COLUMNS: [&str; 9] = [
@@ -44,21 +46,32 @@ const COLUMN_COLUMNS: [&str; 7] = [
     "is_unique",
 ];
 
+const INDEX_COLUMNS: [&str; 10] = [
+    "collection",
+    "name",
+    "kind",
+    "declared",
+    "operational",
+    "enabled",
+    "build_state",
+    "in_sync",
+    "queryable",
+    "requires_rebuild",
+];
+
 pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
     let mut rewritten = query.to_string();
     let mut changed = false;
 
-    if let Some(next) =
-        replace_case_insensitive_outside_quotes(&rewritten, COLLECTIONS, COLLECTIONS_INTERNAL)
-    {
-        rewritten = next;
-        changed = true;
-    }
-    if let Some(next) =
-        replace_case_insensitive_outside_quotes(&rewritten, COLUMNS, COLUMNS_INTERNAL)
-    {
-        rewritten = next;
-        changed = true;
+    for (public, internal) in [
+        (COLLECTIONS, COLLECTIONS_INTERNAL),
+        (COLUMNS, COLUMNS_INTERNAL),
+        (INDICES, INDICES_INTERNAL),
+    ] {
+        if let Some(next) = replace_case_insensitive_outside_quotes(&rewritten, public, internal) {
+            rewritten = next;
+            changed = true;
+        }
     }
 
     changed.then_some(rewritten)
@@ -83,6 +96,8 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(COLLECTIONS)
         || table.eq_ignore_ascii_case(COLUMNS_INTERNAL)
         || table.eq_ignore_ascii_case(COLUMNS)
+        || table.eq_ignore_ascii_case(INDICES_INTERNAL)
+        || table.eq_ignore_ascii_case(INDICES)
 }
 
 pub(super) fn red_query(
@@ -117,6 +132,7 @@ pub(super) fn red_query(
     let mut records = match virtual_kind {
         VirtualTableKind::Collections => collections_snapshot(runtime, tenant, visible_collections),
         VirtualTableKind::Columns => columns_snapshot(runtime, visible_collections),
+        VirtualTableKind::Indices => indices_snapshot(runtime, visible_collections),
     };
 
     let table_name = query.table.as_str();
@@ -206,6 +222,7 @@ pub(super) fn red_query(
 enum VirtualTableKind {
     Collections,
     Columns,
+    Indices,
 }
 
 impl VirtualTableKind {
@@ -213,6 +230,7 @@ impl VirtualTableKind {
         match self {
             Self::Collections => &COLLECTION_COLUMNS,
             Self::Columns => &COLUMN_COLUMNS,
+            Self::Indices => &INDEX_COLUMNS,
         }
     }
 
@@ -220,6 +238,7 @@ impl VirtualTableKind {
         match self {
             Self::Collections => COLLECTIONS,
             Self::Columns => COLUMNS,
+            Self::Indices => INDICES,
         }
     }
 }
@@ -231,9 +250,102 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
     if name.eq_ignore_ascii_case(COLUMNS_INTERNAL) || name.eq_ignore_ascii_case(COLUMNS) {
         return Ok(VirtualTableKind::Columns);
     }
+    if name.eq_ignore_ascii_case(INDICES_INTERNAL) || name.eq_ignore_ascii_case(INDICES) {
+        return Ok(VirtualTableKind::Indices);
+    }
     Err(RedDBError::Query(format!(
         "unknown system schema relation `{name}`"
     )))
+}
+
+fn indices_snapshot(
+    runtime: &RedDBRuntime,
+    visible_collections: Option<&std::collections::HashSet<String>>,
+) -> Vec<UnifiedRecord> {
+    let snapshot = runtime.db().catalog_model_snapshot();
+    let schema = Arc::new(
+        INDEX_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let mut rows = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for status in snapshot.index_statuses {
+        if !index_collection_visible(status.collection.as_deref(), visible_collections) {
+            continue;
+        }
+        seen.insert((status.collection.clone(), status.name.clone()));
+        rows.push(index_status_record(Arc::clone(&schema), status));
+    }
+
+    for collection in snapshot.collections {
+        if !visible_collections.is_none_or(|visible| visible.contains(&collection.name)) {
+            continue;
+        }
+        for index in runtime.index_store_ref().list_indices(&collection.name) {
+            let key = (Some(index.collection.clone()), index.name.clone());
+            if !seen.insert(key) {
+                continue;
+            }
+            rows.push(UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(index.collection),
+                    Value::text(index.name),
+                    Value::text(index_method_kind_name(index.method)),
+                    Value::Boolean(true),
+                    Value::Boolean(true),
+                    Value::Boolean(true),
+                    Value::text("ready"),
+                    Value::Boolean(true),
+                    Value::Boolean(true),
+                    Value::Boolean(false),
+                ],
+            ));
+        }
+    }
+
+    rows
+}
+
+fn index_status_record(
+    schema: Arc<Vec<Arc<str>>>,
+    status: crate::catalog::CatalogIndexStatus,
+) -> UnifiedRecord {
+    UnifiedRecord::with_schema(
+        schema,
+        vec![
+            status.collection.map(Value::text).unwrap_or(Value::Null),
+            Value::text(status.name),
+            Value::text(status.kind),
+            Value::Boolean(status.declared),
+            Value::Boolean(status.operational),
+            Value::Boolean(status.enabled),
+            status.build_state.map(Value::text).unwrap_or(Value::Null),
+            Value::Boolean(status.in_sync),
+            Value::Boolean(status.queryable),
+            Value::Boolean(status.requires_rebuild),
+        ],
+    )
+}
+
+fn index_collection_visible(
+    collection: Option<&str>,
+    visible_collections: Option<&std::collections::HashSet<String>>,
+) -> bool {
+    visible_collections
+        .is_none_or(|visible| collection.is_some_and(|collection| visible.contains(collection)))
+}
+
+fn index_method_kind_name(kind: super::index_store::IndexMethodKind) -> &'static str {
+    match kind {
+        super::index_store::IndexMethodKind::Hash => "hash",
+        super::index_store::IndexMethodKind::BTree => "btree",
+        super::index_store::IndexMethodKind::Bitmap => "bitmap",
+        super::index_store::IndexMethodKind::Spatial => "spatial.rtree",
+    }
 }
 
 fn collections_snapshot(
@@ -619,6 +731,18 @@ mod tests {
         assert_eq!(
             rewritten,
             "SELECT 'red.collections' AS x FROM __red_schema_collections"
+        );
+    }
+
+    #[test]
+    fn rewrite_handles_multiple_virtual_tables() {
+        let rewritten = rewrite_virtual_names(
+            "SELECT * FROM red.indices WHERE collection IN (SELECT name FROM red.collections)",
+        )
+        .unwrap();
+        assert_eq!(
+            rewritten,
+            "SELECT * FROM __red_schema_indices WHERE collection IN (SELECT name FROM __red_schema_collections)"
         );
     }
 }
