@@ -9,10 +9,10 @@ Use `POST /query` with the corresponding `red.*` SQL relation instead. `GET /cat
 
 | Legacy endpoint | SQL substitute |
 |:----------------|:---------------|
-| `GET /catalog/indexes/declared` | `SELECT * FROM red.indexes WHERE declared = true` |
-| `GET /catalog/indexes/operational` | `SELECT * FROM red.indexes WHERE operational = true` |
-| `GET /catalog/indexes/status` | `SELECT * FROM red.indexes` |
-| `GET /catalog/indexes/attention` | `SELECT * FROM red.indexes WHERE needs_attention = true` |
+| `GET /catalog/indexes/declared` | `SELECT * FROM red.indices WHERE declared = true` |
+| `GET /catalog/indexes/operational` | `SELECT * FROM red.indices WHERE operational = true` |
+| `GET /catalog/indexes/status` | `SELECT * FROM red.indices` |
+| `GET /catalog/indexes/attention` | `SELECT * FROM red.indices WHERE requires_rebuild = true OR in_sync = false OR queryable = false` |
 | `GET /catalog/graph/projections/declared` | `SELECT * FROM red.graph_projections WHERE declared = true` |
 | `GET /catalog/graph/projections/operational` | `SELECT * FROM red.graph_projections WHERE operational = true` |
 | `GET /catalog/graph/projections/status` | `SELECT * FROM red.graph_projections` |
@@ -21,5 +21,5 @@ Use `POST /query` with the corresponding `red.*` SQL relation instead. `GET /cat
 | `GET /catalog/analytics-jobs/operational` | `SELECT * FROM red.analytics_jobs WHERE operational = true` |
 | `GET /catalog/analytics-jobs/status` | `SELECT * FROM red.analytics_jobs` |
 | `GET /catalog/analytics-jobs/attention` | `SELECT * FROM red.analytics_jobs WHERE needs_attention = true` |
-| `GET /catalog/collections/readiness` | `SELECT name, query_ready, write_ready, repair_ready FROM red.collections` |
-| `GET /catalog/collections/readiness/attention` | `SELECT name, query_ready, write_ready, repair_ready FROM red.collections WHERE query_ready = false OR write_ready = false OR repair_ready = false` |
+| `GET /catalog/collections/readiness` | No exact implemented `red.*` equivalent yet; use `SELECT name, model, schema_mode, entities, segments, internal, tenant_id FROM red.collections` plus `red.stats` for operational counters. |
+| `GET /catalog/collections/readiness/attention` | No exact implemented `red.*` equivalent yet; use `SELECT * FROM red.stats WHERE attention_score > 0` for currently exposed collection attention. |

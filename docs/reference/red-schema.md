@@ -4,6 +4,26 @@ RedDB exposes internal metadata through read-only `red.*` collections. These
 collections are queryable with ordinary SQL once the corresponding runtime
 catalog is available.
 
+Implemented relations:
+
+| Relation          | Primary shortcut commands |
+|-------------------|---------------------------|
+| `red.collections` | `SHOW COLLECTIONS`, `SHOW TABLES`, `SHOW QUEUES`, `SHOW VECTORS`, `SHOW DOCUMENTS`, `SHOW TIMESERIES`, `SHOW GRAPHS`, `SHOW KV` |
+| `red.columns`     | `SHOW SCHEMA <collection>` |
+| `red.indices`     | `SHOW INDICES`, `SHOW INDICES ON <collection>` |
+| `red.policies`    | `SHOW POLICIES`, `SHOW POLICIES ON <collection>` |
+| `red.stats`       | `SHOW STATS`, `SHOW STATS <collection>` |
+
+The `red.*` relations are virtual runtime tables, not user collections. `SELECT`
+queries support ordinary projection, `WHERE`, `ORDER BY`, `LIMIT`, and `OFFSET`
+clauses after the virtual table has been materialized. `INSERT`, `UPDATE`, and
+`DELETE` against `red.*` fail with `system schema is read-only`.
+
+Non-admin identities must have an active tenant before reading `red.*`; otherwise
+the query fails with an active-tenant requirement. Tenant-scoped reads are limited
+to the caller's visible collections. Cluster admins and tenant-less local/admin
+execution can read across tenant scopes.
+
 ## `red.collections`
 
 `SHOW COLLECTIONS` is syntax sugar for a `red.collections` query that hides
@@ -42,16 +62,19 @@ These expand to `SELECT * FROM red.collections WHERE model = '<type>'`, using
 `table`, `queue`, `vector`, `document`, `timeseries`, `graph`, and `kv`
 respectively.
 
+Unlike `SHOW COLLECTIONS`, typed shortcuts currently only add the model filter;
+they do not automatically add `internal = false`.
+
 Current columns:
 
 | Column            | Description |
 |-------------------|-------------|
 | `name`            | Collection name. |
-| `model`           | Logical model, such as table, document, graph, vector, queue, time-series, or mixed. |
+| `model`           | Logical model, such as `table`, `document`, `graph`, `vector`, `queue`, `time_series`, or `mixed`. |
 | `schema_mode`     | Schema contract mode for the collection. |
 | `entities`        | Number of live entities in the collection. |
 | `segments`        | Number of backing storage segments. |
-| `indices`         | Secondary index names attached to the collection. |
+| `indices`         | Number of secondary index declarations attached to the collection. |
 | `in_memory_bytes` | Approximate resident memory used by collection metadata and caches. |
 | `on_disk_bytes`   | Approximate primary B-tree bytes currently reachable from the collection root. Cached for up to 30 seconds. |
 | `internal`        | `true` for runtime-owned collections and artifacts such as DLQs, `audit_log`, and `red_*` stores. |
@@ -63,6 +86,11 @@ page store exposes a root page, then multiplies reachable B-tree pages by the
 fixed 4 KiB page size. It excludes shared file header pages, native metadata,
 freelist pages, WAL bytes, double-write buffers, sidecar files, and collection
 artifacts that are not reachable from the primary B-tree root.
+
+Internal collection detection currently marks queue DLQs, `audit_log`,
+`red_*` stores, `__tenant_iso`, `__tenant_*`, and `__policy_*` collections as
+internal. Direct `SELECT` queries over `red.collections` include those rows unless
+the query filters them out.
 
 ## `red.columns`
 
@@ -190,3 +218,29 @@ Current columns:
 | `compact_ops`     | Number of compaction operations reported by `ManagerStats`, or `0` when unavailable. |
 | `last_write_ms`   | Last write timestamp in Unix milliseconds. Currently `NULL` because collection-level write timestamps are not exposed by `ManagerStats` or the catalog snapshot APIs. |
 | `attention_score` | Catalog attention score for the collection. Larger numbers indicate more severe drift, rebuild, rematerialization, or rerun needs. |
+
+## `SHOW SAMPLE`
+
+`SHOW SAMPLE <collection>` is syntax sugar for a limited collection scan:
+
+```sql
+SELECT * FROM <collection> LIMIT 10;
+```
+
+An explicit limit overrides the default:
+
+```sql
+SHOW SAMPLE users LIMIT 5;
+```
+
+`SHOW SAMPLE` uses the normal `SELECT` execution path, including tenant filters
+and the usual missing-collection errors. It does not accept `WHERE` or
+`ORDER BY`; use an explicit `SELECT` when filtering or ordering is required.
+
+## HTTP catalog deprecation
+
+Granular `GET /catalog/*` endpoints are deprecated in favor of `POST /query`
+against `red.*` relations where an equivalent implemented relation exists. See
+[`docs/api/deprecated-catalog-endpoints.md`](../api/deprecated-catalog-endpoints.md)
+for endpoint-specific substitutes and sunset headers. The canonical implemented
+index relation is `red.indices`.
