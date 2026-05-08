@@ -199,6 +199,53 @@ fn select_from_red_indices_materializes_index_status_rows() {
 }
 
 #[test]
+fn select_from_red_stats_materializes_collection_counters() {
+    cleanup_scope();
+    let rt = runtime();
+    exec(&rt, "CREATE TABLE users (id INT, name TEXT)");
+    exec(&rt, "INSERT INTO users (id, name) VALUES (1, 'alice')");
+
+    let result = rt
+        .execute_query("SELECT * FROM red.stats WHERE collection = 'users'")
+        .expect("red.stats select");
+
+    assert_eq!(
+        result.result.columns,
+        vec![
+            "collection",
+            "entities",
+            "segments",
+            "growing_count",
+            "sealed_count",
+            "archived_count",
+            "seal_ops",
+            "compact_ops",
+            "last_write_ms",
+            "attention_score"
+        ]
+    );
+    assert_eq!(result.result.records.len(), 1);
+    let row = &result.result.records[0];
+    assert_eq!(row.get("collection"), Some(&Value::text("users")));
+    assert_eq!(row.get("entities"), Some(&Value::UnsignedInteger(1)));
+    assert!(matches!(
+        row.get("segments"),
+        Some(Value::UnsignedInteger(_))
+    ));
+    assert!(matches!(
+        row.get("growing_count"),
+        Some(Value::UnsignedInteger(_))
+    ));
+    assert_eq!(row.get("last_write_ms"), Some(&Value::Null));
+    assert!(matches!(
+        row.get("attention_score"),
+        Some(Value::UnsignedInteger(_))
+    ));
+
+    cleanup_scope();
+}
+
+#[test]
 fn show_schema_desugars_to_red_columns_collection_filter() {
     cleanup_scope();
     let rt = runtime();
@@ -330,6 +377,43 @@ fn show_indices_lists_all_and_show_indices_on_filters_collection() {
         .records
         .iter()
         .all(|record| text_field(record, "collection") == "users"));
+
+    cleanup_scope();
+}
+
+#[test]
+fn show_stats_desugars_to_red_stats() {
+    cleanup_scope();
+    let rt = runtime();
+    exec(&rt, "CREATE TABLE users (id INT)");
+    exec(&rt, "CREATE TABLE projects (id INT)");
+    exec(&rt, "INSERT INTO users (id) VALUES (1)");
+
+    let single = rt
+        .execute_query("SHOW STATS users")
+        .expect("show stats users");
+    assert_eq!(single.result.records.len(), 1);
+    assert_eq!(
+        single.result.records[0].get("collection"),
+        Some(&Value::text("users"))
+    );
+    assert_eq!(
+        single.result.records[0].get("attention_score"),
+        Some(&Value::UnsignedInteger(0))
+    );
+
+    let all = rt.execute_query("SHOW STATS").expect("show stats");
+    let collections = all
+        .result
+        .records
+        .iter()
+        .filter_map(|record| match record.get("collection") {
+            Some(Value::Text(name)) => Some(name.as_ref()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(collections.contains(&"users"));
+    assert!(collections.contains(&"projects"));
 
     cleanup_scope();
 }

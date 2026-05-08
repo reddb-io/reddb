@@ -3,8 +3,8 @@
 //! The SQL parser does not currently accept schema-qualified table
 //! identifiers in `FROM`, so the runtime rewrites the small virtual
 //! surface it owns (`red.collections`, `red.columns`, `red.indices`,
-//! `red.policies`) to internal identifiers before normal parsing. Execution
-//! then intercepts that identifier and materializes rows from the live catalog snapshot.
+//! `red.policies`, `red.stats`) to internal identifiers before normal parsing.
+//! Execution then intercepts that identifier and materializes rows from the live catalog snapshot.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -26,6 +26,8 @@ pub(super) const INDICES: &str = "red.indices";
 pub(super) const INDICES_INTERNAL: &str = "__red_schema_indices";
 pub(super) const POLICIES: &str = "red.policies";
 pub(super) const POLICIES_INTERNAL: &str = "__red_schema_policies";
+pub(super) const STATS: &str = "red.stats";
+pub(super) const STATS_INTERNAL: &str = "__red_schema_stats";
 pub(super) const READ_ONLY_ERROR: &str = "system schema is read-only";
 
 const COLLECTION_COLUMNS: [&str; 9] = [
@@ -74,6 +76,19 @@ const POLICY_COLUMNS: [&str; 8] = [
     "enabled",
 ];
 
+const STATS_COLUMNS: [&str; 10] = [
+    "collection",
+    "entities",
+    "segments",
+    "growing_count",
+    "sealed_count",
+    "archived_count",
+    "seal_ops",
+    "compact_ops",
+    "last_write_ms",
+    "attention_score",
+];
+
 pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
     let mut rewritten = query.to_string();
     let mut changed = false;
@@ -83,6 +98,7 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
         (COLUMNS, COLUMNS_INTERNAL),
         (INDICES, INDICES_INTERNAL),
         (POLICIES, POLICIES_INTERNAL),
+        (STATS, STATS_INTERNAL),
     ] {
         if let Some(next) = replace_case_insensitive_outside_quotes(&rewritten, public, internal) {
             rewritten = next;
@@ -116,6 +132,8 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(INDICES)
         || table.eq_ignore_ascii_case(POLICIES_INTERNAL)
         || table.eq_ignore_ascii_case(POLICIES)
+        || table.eq_ignore_ascii_case(STATS_INTERNAL)
+        || table.eq_ignore_ascii_case(STATS)
 }
 
 pub(super) fn red_query(
@@ -152,6 +170,7 @@ pub(super) fn red_query(
         VirtualTableKind::Columns => columns_snapshot(runtime, visible_collections),
         VirtualTableKind::Indices => indices_snapshot(runtime, visible_collections),
         VirtualTableKind::Policies => policies_snapshot(runtime, tenant, visible_collections),
+        VirtualTableKind::Stats => stats_snapshot(runtime, visible_collections),
     };
 
     let table_name = query.table.as_str();
@@ -243,6 +262,7 @@ enum VirtualTableKind {
     Columns,
     Indices,
     Policies,
+    Stats,
 }
 
 impl VirtualTableKind {
@@ -252,6 +272,7 @@ impl VirtualTableKind {
             Self::Columns => &COLUMN_COLUMNS,
             Self::Indices => &INDEX_COLUMNS,
             Self::Policies => &POLICY_COLUMNS,
+            Self::Stats => &STATS_COLUMNS,
         }
     }
 
@@ -261,6 +282,7 @@ impl VirtualTableKind {
             Self::Columns => COLUMNS,
             Self::Indices => INDICES,
             Self::Policies => POLICIES,
+            Self::Stats => STATS,
         }
     }
 }
@@ -277,6 +299,9 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
     }
     if name.eq_ignore_ascii_case(POLICIES_INTERNAL) || name.eq_ignore_ascii_case(POLICIES) {
         return Ok(VirtualTableKind::Policies);
+    }
+    if name.eq_ignore_ascii_case(STATS_INTERNAL) || name.eq_ignore_ascii_case(STATS) {
+        return Ok(VirtualTableKind::Stats);
     }
     Err(RedDBError::Query(format!(
         "unknown system schema relation `{name}`"
@@ -772,6 +797,77 @@ fn collections_snapshot(
                     Value::UnsignedInteger(in_memory_bytes),
                     Value::Boolean(internal),
                     visible_tenant.map(Value::text).unwrap_or(Value::Null),
+                ],
+            )
+        })
+        .collect()
+}
+
+fn stats_snapshot(
+    runtime: &RedDBRuntime,
+    visible_collections: Option<&std::collections::HashSet<String>>,
+) -> Vec<UnifiedRecord> {
+    let snapshot = runtime.db().catalog_model_snapshot();
+    let schema = Arc::new(
+        STATS_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let store = runtime.db().store();
+
+    snapshot
+        .collections
+        .into_iter()
+        .filter(|collection| {
+            visible_collections.is_none_or(|visible| visible.contains(&collection.name))
+        })
+        .map(|collection| {
+            let manager_stats = store
+                .get_collection(&collection.name)
+                .map(|manager| manager.stats());
+            let entities = manager_stats
+                .as_ref()
+                .map(|stats| stats.total_entities)
+                .unwrap_or(collection.entities);
+            let growing_count = manager_stats
+                .as_ref()
+                .map(|stats| stats.growing_count)
+                .unwrap_or(0);
+            let sealed_count = manager_stats
+                .as_ref()
+                .map(|stats| stats.sealed_count)
+                .unwrap_or(0);
+            let archived_count = manager_stats
+                .as_ref()
+                .map(|stats| stats.archived_count)
+                .unwrap_or(0);
+            let segments = manager_stats
+                .as_ref()
+                .map(|stats| stats.growing_count + stats.sealed_count + stats.archived_count)
+                .unwrap_or(collection.segments);
+            let seal_ops = manager_stats
+                .as_ref()
+                .map(|stats| stats.seal_ops)
+                .unwrap_or(0);
+            let compact_ops = manager_stats
+                .as_ref()
+                .map(|stats| stats.compact_ops)
+                .unwrap_or(0);
+
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(collection.name),
+                    Value::UnsignedInteger(entities as u64),
+                    Value::UnsignedInteger(segments as u64),
+                    Value::UnsignedInteger(growing_count as u64),
+                    Value::UnsignedInteger(sealed_count as u64),
+                    Value::UnsignedInteger(archived_count as u64),
+                    Value::UnsignedInteger(seal_ops),
+                    Value::UnsignedInteger(compact_ops),
+                    Value::Null,
+                    Value::UnsignedInteger(collection.attention_score as u64),
                 ],
             )
         })

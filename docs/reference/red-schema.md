@@ -152,3 +152,33 @@ collection, so `red.policies` only reports IAM rows whose statement resources
 resolve to exact `table:<collection>` or `collection:<collection>` resources.
 The `principals` column is empty for IAM rows until attachment enumeration is
 available from the auth registry.
+
+## `red.stats`
+
+`red.stats` exposes one operational stats row per visible collection. `SHOW
+STATS` is syntax sugar for:
+
+```sql
+SELECT * FROM red.stats;
+```
+
+`SHOW STATS <name>` adds a collection filter:
+
+```sql
+SELECT * FROM red.stats WHERE collection = '<name>';
+```
+
+Current columns:
+
+| Column            | Description |
+|-------------------|-------------|
+| `collection`      | Collection name. |
+| `entities`        | Live entity count from `ManagerStats` when available, otherwise the catalog snapshot count. |
+| `segments`        | Segment count from `ManagerStats` when available, otherwise the catalog snapshot count. |
+| `growing_count`   | Number of growing segments reported by `ManagerStats`, or `0` when unavailable. |
+| `sealed_count`    | Number of sealed segments reported by `ManagerStats`, or `0` when unavailable. |
+| `archived_count`  | Number of archived segments reported by `ManagerStats`, or `0` when unavailable. |
+| `seal_ops`        | Number of seal operations reported by `ManagerStats`, or `0` when unavailable. |
+| `compact_ops`     | Number of compaction operations reported by `ManagerStats`, or `0` when unavailable. |
+| `last_write_ms`   | Last write timestamp in Unix milliseconds. Currently `NULL` because collection-level write timestamps are not exposed by `ManagerStats` or the catalog snapshot APIs. |
+| `attention_score` | Catalog attention score for the collection. Larger numbers indicate more severe drift, rebuild, rematerialization, or rerun needs. |

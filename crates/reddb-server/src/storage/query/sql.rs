@@ -1536,6 +1536,37 @@ impl<'a> Parser<'a> {
                         query.filter = Some(combined);
                     }
                     Ok(SqlCommand::Select(query))
+                } else if self.consume_ident_ci("STATS")? {
+                    let mut query = TableQuery::new("red.stats");
+                    let collection = match self.peek().clone() {
+                        Token::Ident(name) => {
+                            self.advance()?;
+                            Some(name)
+                        }
+                        Token::String(name) => {
+                            self.advance()?;
+                            Some(name)
+                        }
+                        _ => None,
+                    };
+                    self.parse_table_clauses(&mut query)?;
+                    if let Some(collection) = collection {
+                        let filter = Filter::compare(
+                            FieldRef::column("red.stats", "collection"),
+                            CompareOp::Eq,
+                            Value::text(collection),
+                        );
+                        let expr = filter_to_expr(&filter);
+                        query.where_expr = Some(match query.where_expr.take() {
+                            Some(existing) => Expr::binop(BinOp::And, existing, expr),
+                            None => expr,
+                        });
+                        query.filter = Some(match query.filter.take() {
+                            Some(existing) => existing.and(filter),
+                            None => filter,
+                        });
+                    }
+                    Ok(SqlCommand::Select(query))
                 } else if self.consume_ident_ci("SECRET")? || self.consume_ident_ci("SECRETS")? {
                     let prefix = if !self.check(&Token::Eof) {
                         Some(self.parse_dotted_admin_path(true)?)
@@ -1564,6 +1595,7 @@ impl<'a> Parser<'a> {
                             "SCHEMA",
                             "INDICES",
                             "POLICIES",
+                            "STATS",
                             "TENANT",
                             "EFFECTIVE",
                         ],
