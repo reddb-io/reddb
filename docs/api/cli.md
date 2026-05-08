@@ -25,6 +25,7 @@ red <command> [args] [flags]
 | `service` | Install or inspect a systemd service |
 | `mcp` | Start MCP server for AI agent integration |
 | `auth` | Authentication commands (bootstrap implemented) |
+| `admin` | Operator catalog and cache commands |
 | `connect` | Connect to a remote RedDB server (interactive REPL) |
 | `version` | Show version information |
 
@@ -304,6 +305,20 @@ red auth bootstrap --password s3cret!
 ```
 
 `create-user`, `list-users`, and `login` are listed in help output but are not wired in the current CLI command dispatcher.
+
+## red admin
+
+Run operator commands against the HTTP server. Catalog commands are SQL wrappers
+over the read-only `red.*` collections; see [`docs/cli/red-admin.md`](../cli/red-admin.md).
+
+```bash
+red admin collections list [--type table] [--include-internal] [--json|--csv]
+red admin collections show <name>
+red admin collections stats [<name>]
+red admin indices list [--collection <name>]
+red admin policies list [--collection <name>]
+red admin query "SELECT * FROM red.collections LIMIT 20"
+```
 
 ## red connect
 
