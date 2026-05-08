@@ -3486,3 +3486,94 @@ fn dos_limit_chained_not_in_where_does_not_overflow_stack() {
         .expect("spawn deep-NOT thread");
     handle.join().expect("deep-NOT thread must not panic");
 }
+
+// ---------------------------------------------------------------------------
+// Documented raw JSON literal forms (audit: cover every example we ship in
+// docs and landing page so the docs cannot lie). Each test parses the exact
+// string a user would copy from the doc and asserts the resulting AST.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn doc_form_queue_push_raw_json_literal() {
+    // docs/data-models/queues.md:38, README.md:68
+    let q = parse(r#"QUEUE PUSH tasks {"job":"process","id":123}"#).unwrap();
+    let QueryExpr::QueueCommand(QueueCommand::Push { queue, value, .. }) = q else {
+        panic!("expected Push");
+    };
+    assert_eq!(queue, "tasks");
+    let crate::storage::schema::Value::Json(bytes) = value else {
+        panic!("expected Value::Json, got {value:?}");
+    };
+    let v: crate::json::Value = crate::json::from_slice(&bytes).unwrap();
+    assert_eq!(v.get("job").and_then(|x| x.as_str()), Some("process"));
+    assert_eq!(v.get("id").and_then(|x| x.as_i64()), Some(123));
+}
+
+#[test]
+fn doc_form_queue_rpush_raw_json_literal() {
+    // docs/data-models/queues.md:39
+    let q = parse(r#"QUEUE RPUSH tasks {"job":"process","id":456}"#).unwrap();
+    assert!(matches!(q, QueryExpr::QueueCommand(QueueCommand::Push { .. })));
+}
+
+#[test]
+fn doc_form_queue_lpush_raw_json_literal() {
+    // docs/data-models/queues.md:42
+    let q = parse(r#"QUEUE LPUSH tasks {"urgent":true}"#).unwrap();
+    assert!(matches!(q, QueryExpr::QueueCommand(QueueCommand::Push { .. })));
+}
+
+#[test]
+fn doc_form_queue_push_raw_json_with_priority_suffix() {
+    // docs/data-models/queues.md:45
+    let q = parse(r#"QUEUE PUSH urgent_tasks {"job":"deploy"} PRIORITY 10"#).unwrap();
+    let QueryExpr::QueueCommand(QueueCommand::Push { priority, value, .. }) = q else {
+        panic!("expected Push");
+    };
+    assert_eq!(priority, Some(10));
+    assert!(matches!(value, crate::storage::schema::Value::Json(_)));
+}
+
+#[test]
+fn doc_form_insert_document_with_raw_json_literal_in_values() {
+    // README.md:44, landing +page.svelte:54/150/492
+    let q = parse(
+        r#"INSERT INTO logs DOCUMENT (body) VALUES ({"level":"warn","ip":"10.0.0.1"})"#,
+    )
+    .unwrap();
+    // We don't pin the exact AST shape — just prove it parses to *some* insert.
+    match q {
+        QueryExpr::Insert(_) => {}
+        other => panic!("expected Insert/InsertDocument, got: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
+fn doc_form_timeseries_insert_with_raw_json_tags_3_tuple() {
+    // landing +page.svelte:59/497, data-types.ts:604, README.md:57
+    let q = parse(
+        r#"INSERT INTO cpu_metrics (metric, value, tags) VALUES ('cpu.idle', 95.2, {"host":"srv1"})"#,
+    )
+    .unwrap();
+    assert!(matches!(q, QueryExpr::Insert(_)));
+}
+
+#[test]
+fn doc_form_timeseries_insert_with_raw_json_tags_4_tuple() {
+    // docs/data-models/timeseries.md:62
+    let q = parse(
+        r#"INSERT INTO cpu_metrics (metric, value, tags, timestamp) VALUES ('cpu.idle', 94.8, {"host":"srv1"}, 1704067200000000000)"#,
+    )
+    .unwrap();
+    assert!(matches!(q, QueryExpr::Insert(_)));
+}
+
+#[test]
+fn doc_form_timeseries_multi_row_insert_with_raw_json_tags() {
+    // docs/data-models/timeseries.md:69 — multi-row VALUES with raw JSON
+    let q = parse(
+        r#"INSERT INTO cpu_metrics (metric, value, tags) VALUES ('cpu.idle', 95.2, {"host":"srv1"}), ('cpu.busy', 4.8, {"host":"srv1"})"#,
+    )
+    .unwrap();
+    assert!(matches!(q, QueryExpr::Insert(_)));
+}
