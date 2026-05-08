@@ -572,6 +572,7 @@ impl RedDBRuntime {
                             collection: query.table.clone(),
                             key,
                             value,
+                            tags: Vec::new(),
                             metadata,
                         };
                         self.create_kv(input)?;

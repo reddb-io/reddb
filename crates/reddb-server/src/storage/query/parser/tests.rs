@@ -1978,6 +1978,29 @@ fn test_parse_insert_kv() {
 }
 
 #[test]
+fn test_parse_kv_put_tags_and_invalidate_tags() {
+    let put = parse("PUT session:abc = 'blob' EXPIRE 30s TAGS [user:42, org:7]").unwrap();
+    match put {
+        QueryExpr::KvPut(query) => {
+            assert_eq!(query.collection, crate::runtime::KV_DEFAULT_COLLECTION);
+            assert_eq!(query.key, "session:abc");
+            assert_eq!(query.tags, vec!["user:42", "org:7"]);
+            assert_eq!(query.ttl_ms, Some(30_000));
+        }
+        other => panic!("expected KvPut, got {other:?}"),
+    }
+
+    let invalidate = parse("INVALIDATE TAGS [user:42, org:99] FROM sessions").unwrap();
+    match invalidate {
+        QueryExpr::KvInvalidateTags(query) => {
+            assert_eq!(query.collection, "sessions");
+            assert_eq!(query.tags, vec!["user:42", "org:99"]);
+        }
+        other => panic!("expected KvInvalidateTags, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_parse_insert_vector_array_literal() {
     // Test array literal parsing in VALUES
     let query = parse("INSERT INTO emb VECTOR (dense) VALUES ([1, 2, 3])").unwrap();

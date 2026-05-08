@@ -1906,6 +1906,8 @@ pub(super) fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::Vector(_) => "vector",
         QueryExpr::Hybrid(_) => "hybrid",
         QueryExpr::Insert(_) => "insert",
+        QueryExpr::KvPut(_) => "kv_put",
+        QueryExpr::KvInvalidateTags(_) => "kv_invalidate_tags",
         QueryExpr::Update(_) => "update",
         QueryExpr::Delete(_) => "delete",
         QueryExpr::CreateTable(_) => "create_table",

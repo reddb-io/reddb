@@ -612,6 +612,13 @@ struct RuntimeResultCacheEntry {
 }
 
 pub const METRIC_CACHE_SHADOW_DIVERGENCE_TOTAL: &str = "cache_shadow_divergence_total";
+pub const KV_DEFAULT_COLLECTION: &str = "kv_default";
+
+#[derive(Debug, Default)]
+struct KvTagIndex {
+    by_tag: HashMap<(String, String), HashSet<u64>>,
+    by_entity: HashMap<(String, u64), HashSet<String>>,
+}
 
 struct RuntimeInner {
     db: Arc<RedDB>,
@@ -635,6 +642,7 @@ struct RuntimeInner {
         std::collections::VecDeque<String>,
     )>,
     result_cache_shadow_divergences: std::sync::atomic::AtomicU64,
+    kv_tag_index: parking_lot::RwLock<KvTagIndex>,
     /// Process-local queue message locks used to emulate `SKIP LOCKED`-style
     /// claim semantics for concurrent queue consumers inside this runtime.
     queue_message_locks: parking_lot::RwLock<HashMap<String, Arc<parking_lot::Mutex<()>>>>,

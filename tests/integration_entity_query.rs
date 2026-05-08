@@ -510,6 +510,7 @@ fn test_kv_set_get_delete() {
             collection: "kv_crud".into(),
             key: format!("key_{}", i),
             value: Value::text(format!("value_{}", i)),
+            tags: Vec::new(),
             metadata: vec![],
         });
         assert!(
@@ -541,6 +542,7 @@ fn test_kv_set_get_delete() {
         collection: "kv_crud".into(),
         key: "key_0".into(),
         value: Value::text("overwritten"),
+        tags: Vec::new(),
         metadata: vec![],
     })
     .expect("re-create with new value should succeed");
@@ -596,6 +598,7 @@ fn test_kv_list_all() {
                 collection: "kv_list".into(),
                 key: format!("setting.{}", i),
                 value: Value::Integer(i * 100),
+                tags: Vec::new(),
                 metadata: vec![],
             })
             .expect("create_kv should succeed");
@@ -611,6 +614,39 @@ fn test_kv_list_all() {
     let page = page.unwrap();
     assert_eq!(page.items.len(), 10, "scan should return all 10 KV pairs");
     assert_eq!(page.total, 10, "total should be 10");
+}
+
+#[test]
+fn test_kv_tags_invalidation_removes_any_matching_tag() {
+    let rt = rt();
+    let entity = EntityUseCases::new(&rt);
+
+    rt.execute_query("PUT session:42 = 'blob' TAGS [user:42, org:7]")
+        .expect("tagged PUT should succeed");
+
+    let miss = rt
+        .execute_query("INVALIDATE TAGS [org:99] FROM kv_default")
+        .expect("nonmatching invalidation should succeed");
+    assert_eq!(miss.affected_rows, 0);
+    assert!(
+        entity
+            .get_kv(reddb::runtime::KV_DEFAULT_COLLECTION, "session:42")
+            .unwrap()
+            .is_some(),
+        "nonmatching tag must not remove the key"
+    );
+
+    let removed = rt
+        .execute_query("INVALIDATE TAGS [user:42] FROM kv_default")
+        .expect("matching invalidation should succeed");
+    assert_eq!(removed.affected_rows, 1);
+    assert!(
+        entity
+            .get_kv(reddb::runtime::KV_DEFAULT_COLLECTION, "session:42")
+            .unwrap()
+            .is_none(),
+        "matching tag should remove the key"
+    );
 }
 
 // 9. test_node_create_with_properties
@@ -3008,6 +3044,7 @@ fn test_kv_function_filters_rows_and_uses_bare_default() {
             collection: "cfg_lookup".into(),
             key: "default.role".into(),
             value: Value::text("admin"),
+            tags: Vec::new(),
             metadata: vec![],
         })
         .expect("create_kv should succeed");
@@ -3074,6 +3111,7 @@ fn test_update_accepts_config_assignment_and_kv_filter() {
             collection: "cfg_update".into(),
             key: "default.role".into(),
             value: Value::text("admin"),
+            tags: Vec::new(),
             metadata: vec![],
         })
         .expect("create_kv should succeed");

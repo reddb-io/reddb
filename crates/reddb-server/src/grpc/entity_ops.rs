@@ -121,6 +121,7 @@ pub(crate) fn create_kv_reply(
             collection: request.collection,
             key,
             value,
+            tags: Vec::new(),
             metadata: Vec::new(),
         })
         .map(entity_reply_from_output)

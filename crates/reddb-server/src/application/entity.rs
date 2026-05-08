@@ -217,6 +217,7 @@ pub struct CreateKvInput {
     pub collection: String,
     pub key: String,
     pub value: Value,
+    pub tags: Vec<String>,
     pub metadata: Vec<(String, MetadataValue)>,
 }
 

@@ -606,6 +606,8 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
         }
         // DML/DDL statements produce a simple passthrough plan node
         QueryExpr::Insert(_)
+        | QueryExpr::KvPut(_)
+        | QueryExpr::KvInvalidateTags(_)
         | QueryExpr::Update(_)
         | QueryExpr::Delete(_)
         | QueryExpr::CreateTable(_)

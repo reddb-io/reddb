@@ -444,6 +444,7 @@ pub fn build_api_fixture(rt: &RedDBRuntime) {
             collection: "settings".into(),
             key: "feature_flag".into(),
             value: Value::Boolean(true),
+            tags: Vec::new(),
             metadata: vec![],
         })
         .expect("api kv feature_flag should succeed");
@@ -452,6 +453,7 @@ pub fn build_api_fixture(rt: &RedDBRuntime) {
             collection: "settings".into(),
             key: "max_retries".into(),
             value: Value::Integer(3),
+            tags: Vec::new(),
             metadata: vec![],
         })
         .expect("api kv max_retries should succeed");

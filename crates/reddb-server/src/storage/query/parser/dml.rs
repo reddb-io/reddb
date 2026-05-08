@@ -123,7 +123,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse TTL duration value using the same logic as CREATE TABLE ... WITH TTL.
-    fn parse_ttl_duration(&mut self) -> Result<u64, ParseError> {
+    pub(crate) fn parse_ttl_duration(&mut self) -> Result<u64, ParseError> {
         // Reuse the DDL TTL parser: expects a number followed by optional unit
         let ttl_value = self.parse_float()?;
         let ttl_unit = match self.peek() {

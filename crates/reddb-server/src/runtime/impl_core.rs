@@ -85,6 +85,20 @@ fn secret_sql_value_to_string(value: &Value) -> RedDBResult<String> {
     }
 }
 
+fn schema_value_to_json(value: &Value) -> JsonValue {
+    match value {
+        Value::Null => JsonValue::Null,
+        Value::Boolean(value) => JsonValue::Bool(*value),
+        Value::Integer(value) => JsonValue::Number(*value as f64),
+        Value::UnsignedInteger(value) => JsonValue::Number(*value as f64),
+        Value::Float(value) => JsonValue::Number(*value),
+        Value::Text(value) => JsonValue::String(value.to_string()),
+        Value::Json(bytes) => crate::serde_json::from_slice(bytes)
+            .unwrap_or_else(|_| JsonValue::String(value.to_string())),
+        _ => JsonValue::String(value.to_string()),
+    }
+}
+
 /// Snapshot + manager pair used for read-path visibility checks.
 ///
 /// The manager is needed in addition to the snapshot because `aborted`
@@ -774,6 +788,8 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
             collect_vector_source_scopes(scopes, &query.vector.query_vector);
         }
         QueryExpr::Insert(query) => cache_scope_insert(scopes, &query.table),
+        QueryExpr::KvPut(query) => cache_scope_insert(scopes, &query.collection),
+        QueryExpr::KvInvalidateTags(query) => cache_scope_insert(scopes, &query.collection),
         QueryExpr::Update(query) => cache_scope_insert(scopes, &query.table),
         QueryExpr::Delete(query) => cache_scope_insert(scopes, &query.table),
         QueryExpr::CreateTable(query) => cache_scope_insert(scopes, &query.name),
@@ -1434,9 +1450,11 @@ pub(super) fn intent_lock_modes_for(
         // read-side arm above. P1.T4 expands only the TableQuery-ish
         // writes; non-tabular kinds inherit when their DML variants
         // land in later phases.
-        QueryExpr::Insert(_) | QueryExpr::Update(_) | QueryExpr::Delete(_) => {
-            Some((IntentExclusive, IntentExclusive))
-        }
+        QueryExpr::Insert(_)
+        | QueryExpr::KvPut(_)
+        | QueryExpr::KvInvalidateTags(_)
+        | QueryExpr::Update(_)
+        | QueryExpr::Delete(_) => Some((IntentExclusive, IntentExclusive)),
 
         // DDL — IX / X. A DDL against collection `c` blocks all
         // other writers + readers on `c` but leaves other collections
@@ -1495,6 +1513,8 @@ fn walk_collections(expr: &QueryExpr, out: &mut Vec<String>) {
             walk_collections(&j.right, out);
         }
         QueryExpr::Insert(i) => out.push(i.table.clone()),
+        QueryExpr::KvPut(q) => out.push(q.collection.clone()),
+        QueryExpr::KvInvalidateTags(q) => out.push(q.collection.clone()),
         QueryExpr::Update(u) => out.push(u.table.clone()),
         QueryExpr::Delete(d) => out.push(d.table.clone()),
 
@@ -1597,6 +1617,7 @@ impl RedDBRuntime {
                     std::collections::VecDeque::new(),
                 )),
                 result_cache_shadow_divergences: std::sync::atomic::AtomicU64::new(0),
+                kv_tag_index: parking_lot::RwLock::new(KvTagIndex::default()),
                 queue_message_locks: parking_lot::RwLock::new(HashMap::new()),
                 planner_dirty_tables: parking_lot::RwLock::new(HashSet::new()),
                 ec_registry: Arc::new(crate::ec::config::EcRegistry::new()),
@@ -3105,6 +3126,137 @@ impl RedDBRuntime {
         &self.inner.result_blob_cache
     }
 
+    pub(crate) fn kv_tags_set<I>(&self, collection: &str, id: crate::storage::EntityId, tags: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let entity_key = (collection.to_string(), id.raw());
+        let new_tags: HashSet<String> = tags
+            .into_iter()
+            .filter(|tag| !tag.is_empty())
+            .collect();
+        let mut index = self.inner.kv_tag_index.write();
+        if let Some(old_tags) = index.by_entity.remove(&entity_key) {
+            for tag in old_tags {
+                let tag_key = (collection.to_string(), tag);
+                if let Some(ids) = index.by_tag.get_mut(&tag_key) {
+                    ids.remove(&id.raw());
+                    if ids.is_empty() {
+                        index.by_tag.remove(&tag_key);
+                    }
+                }
+            }
+        }
+        if new_tags.is_empty() {
+            return;
+        }
+        for tag in &new_tags {
+            index
+                .by_tag
+                .entry((collection.to_string(), tag.clone()))
+                .or_default()
+                .insert(id.raw());
+        }
+        index.by_entity.insert(entity_key, new_tags);
+    }
+
+    pub(crate) fn kv_tags_remove_entity(&self, collection: &str, id: crate::storage::EntityId) {
+        self.kv_tags_set(collection, id, Vec::<String>::new());
+    }
+
+    pub fn put_kv(
+        &self,
+        collection: &str,
+        key: &str,
+        value: Value,
+        ttl_ms: Option<u64>,
+        tags: Vec<String>,
+    ) -> RedDBResult<crate::application::CreateEntityOutput> {
+        if let Some((_, existing_id)) =
+            crate::application::EntityUseCases::new(self).get_kv(collection, key)?
+        {
+            let value_json = schema_value_to_json(&value);
+            let mut payload = crate::serde_json::Map::new();
+            payload.insert("value".to_string(), value_json.clone());
+            let output = crate::application::EntityUseCases::new(self).patch(
+                crate::application::PatchEntityInput {
+                    collection: collection.to_string(),
+                    id: existing_id,
+                    payload: JsonValue::Object(payload),
+                    operations: vec![crate::application::PatchEntityOperation {
+                        op: crate::application::PatchEntityOperationType::Set,
+                        path: vec!["value".to_string()],
+                        value: Some(value_json),
+                    }],
+                },
+            )?;
+            self.kv_tags_set(collection, existing_id, tags);
+            self.invalidate_result_cache();
+            return Ok(output);
+        }
+
+        let mut metadata = Vec::new();
+        if let Some(ttl) = ttl_ms {
+            metadata.push((
+                "_ttl_ms".to_string(),
+                if ttl <= i64::MAX as u64 {
+                    UnifiedMetadataValue::Int(ttl as i64)
+                } else {
+                    UnifiedMetadataValue::Timestamp(ttl)
+                },
+            ));
+        }
+        let output = crate::application::EntityUseCases::new(self).create_kv(
+            crate::application::CreateKvInput {
+                collection: collection.to_string(),
+                key: key.to_string(),
+                value,
+                tags,
+                metadata,
+            },
+        )?;
+        self.invalidate_result_cache();
+        Ok(output)
+    }
+
+    pub fn invalidate_kv_tags(&self, collection: &str, tags: &[String]) -> RedDBResult<u64> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        if tags.is_empty() {
+            return Ok(0);
+        }
+
+        let ids: HashSet<u64> = {
+            let index = self.inner.kv_tag_index.read();
+            tags.iter()
+                .flat_map(|tag| {
+                    index
+                        .by_tag
+                        .get(&(collection.to_string(), tag.clone()))
+                        .into_iter()
+                        .flat_map(|ids| ids.iter().copied())
+                })
+                .collect()
+        };
+
+        let store = self.inner.db.store();
+        let mut removed = 0;
+        for raw_id in ids {
+            let id = crate::storage::EntityId::new(raw_id);
+            let deleted = store
+                .delete(collection, id)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            self.kv_tags_remove_entity(collection, id);
+            if deleted {
+                store.context_index().remove_entity(id);
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            self.invalidate_result_cache();
+        }
+        Ok(removed)
+    }
+
     /// PLAN.md Phase 11.4 — owned snapshot of every registered
     /// replica's state on this primary. Returns empty vec on
     /// non-primary instances or when no replicas are registered yet.
@@ -4230,6 +4382,30 @@ impl RedDBRuntime {
             }),
             // DML execution
             QueryExpr::Insert(ref insert) => self.execute_insert(query, insert),
+            QueryExpr::KvPut(ref put) => {
+                self.put_kv(
+                    &put.collection,
+                    &put.key,
+                    put.value.clone(),
+                    put.ttl_ms,
+                    put.tags.clone(),
+                )?;
+                Ok(RuntimeQueryResult::dml_result(
+                    query.to_string(),
+                    1,
+                    "kv_put",
+                    "runtime-kv",
+                ))
+            }
+            QueryExpr::KvInvalidateTags(ref invalidate) => {
+                let removed = self.invalidate_kv_tags(&invalidate.collection, &invalidate.tags)?;
+                Ok(RuntimeQueryResult::dml_result(
+                    query.to_string(),
+                    removed,
+                    "kv_invalidate_tags",
+                    "runtime-kv",
+                ))
+            }
             QueryExpr::Update(ref update) => self.execute_update(query, update),
             QueryExpr::Delete(ref delete) => self.execute_delete(query, delete),
             // DDL execution
@@ -6539,6 +6715,24 @@ impl RedDBRuntime {
         let (action, resource) = match expr {
             QueryExpr::Table(t) => (Action::Select, Resource::table_from_name(&t.table)),
             QueryExpr::Insert(i) => (Action::Insert, Resource::table_from_name(&i.table)),
+            QueryExpr::KvPut(q) => (Action::Insert, Resource::table_from_name(&q.collection)),
+            QueryExpr::KvInvalidateTags(q) => {
+                let auth_store = self
+                    .inner
+                    .auth_store
+                    .read()
+                    .clone()
+                    .ok_or_else(|| "auth store unavailable".to_string())?;
+                return self.check_policy_management_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    "kv:invalidate",
+                    "kv",
+                    &q.collection,
+                );
+            }
             QueryExpr::Update(u) => (Action::Update, Resource::table_from_name(&u.table)),
             QueryExpr::Delete(d) => (Action::Delete, Resource::table_from_name(&d.table)),
             // Joins inherit the read privilege from any constituent

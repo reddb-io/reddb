@@ -260,6 +260,8 @@ pub(crate) fn runtime_join_table_context(
         QueryExpr::Hybrid(hybrid) => (Some("hybrid"), hybrid.alias.as_deref().or(Some("hybrid"))),
         QueryExpr::Join(_) => (Some("join"), Some("join")),
         QueryExpr::Insert(_)
+        | QueryExpr::KvPut(_)
+        | QueryExpr::KvInvalidateTags(_)
         | QueryExpr::Update(_)
         | QueryExpr::Delete(_)
         | QueryExpr::CreateTable(_)

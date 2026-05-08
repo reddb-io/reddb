@@ -6,10 +6,10 @@ use crate::storage::query::ast::{
     DropIndexQuery, DropPolicyQuery, DropQueueQuery, DropSchemaQuery, DropSequenceQuery,
     DropServerQuery, DropTableQuery, DropTimeSeriesQuery, DropTreeQuery, DropViewQuery,
     ExplainAlterQuery, ExplainMigrationQuery, ForeignColumnDef, GrantStmt, GraphCommand,
-    GraphQuery, HybridQuery, InsertQuery, JoinQuery, MaintenanceCommand, PathQuery, PolicyAction,
-    ProbabilisticCommand, QueryExpr, QueueCommand, RefreshMaterializedViewQuery, RevokeStmt,
-    RollbackMigrationQuery, SearchCommand, TableQuery, TreeCommand, TxnControl, UpdateQuery,
-    VectorQuery,
+    GraphQuery, HybridQuery, InsertQuery, JoinQuery, KvInvalidateTagsQuery, KvPutQuery,
+    MaintenanceCommand, PathQuery, PolicyAction, ProbabilisticCommand, QueryExpr, QueueCommand,
+    RefreshMaterializedViewQuery, RevokeStmt, RollbackMigrationQuery, SearchCommand, TableQuery,
+    TreeCommand, TxnControl, UpdateQuery, VectorQuery,
 };
 use crate::storage::query::parser::{ParseError, Parser, SafeTokenDisplay};
 use crate::storage::query::Token;
@@ -48,6 +48,8 @@ pub enum SqlCommand {
     Select(TableQuery),
     Join(JoinQuery),
     Insert(InsertQuery),
+    KvPut(KvPutQuery),
+    KvInvalidateTags(KvInvalidateTagsQuery),
     Update(UpdateQuery),
     Delete(DeleteQuery),
     ExplainAlter(ExplainAlterQuery),
@@ -125,6 +127,8 @@ pub enum SqlQuery {
 #[derive(Debug, Clone)]
 pub enum SqlMutation {
     Insert(InsertQuery),
+    KvPut(KvPutQuery),
+    KvInvalidateTags(KvInvalidateTagsQuery),
     Update(UpdateQuery),
     Delete(DeleteQuery),
 }
@@ -188,6 +192,10 @@ impl SqlStatement {
             SqlStatement::Query(SqlQuery::Select(query)) => SqlCommand::Select(query),
             SqlStatement::Query(SqlQuery::Join(query)) => SqlCommand::Join(query),
             SqlStatement::Mutation(SqlMutation::Insert(query)) => SqlCommand::Insert(query),
+            SqlStatement::Mutation(SqlMutation::KvPut(query)) => SqlCommand::KvPut(query),
+            SqlStatement::Mutation(SqlMutation::KvInvalidateTags(query)) => {
+                SqlCommand::KvInvalidateTags(query)
+            }
             SqlStatement::Mutation(SqlMutation::Update(query)) => SqlCommand::Update(query),
             SqlStatement::Mutation(SqlMutation::Delete(query)) => SqlCommand::Delete(query),
             SqlStatement::Schema(SqlSchemaCommand::ExplainAlter(query)) => {
@@ -330,12 +338,33 @@ pub fn parse_frontend(input: &str) -> Result<FrontendStatement, ParseError> {
     Ok(statement)
 }
 
+fn kv_text_token(token: &Token) -> Option<String> {
+    match token {
+        Token::Ident(s) | Token::String(s) => Some(s.clone()),
+        Token::Integer(n) => Some(n.to_string()),
+        Token::Float(n) => Some(n.to_string()),
+        Token::True => Some("true".to_string()),
+        Token::False => Some("false".to_string()),
+        Token::Null => Some("null".to_string()),
+        Token::Dot => Some(".".to_string()),
+        Token::Colon => Some(":".to_string()),
+        Token::Dash | Token::Minus => Some("-".to_string()),
+        Token::Slash => Some("/".to_string()),
+        Token::Key => Some("KEY".to_string()),
+        Token::Default => Some("DEFAULT".to_string()),
+        Token::Kv => Some("KV".to_string()),
+        _ => None,
+    }
+}
+
 impl SqlCommand {
     pub fn into_query_expr(self) -> QueryExpr {
         match self {
             SqlCommand::Select(query) => QueryExpr::Table(query),
             SqlCommand::Join(query) => QueryExpr::Join(query),
             SqlCommand::Insert(query) => QueryExpr::Insert(query),
+            SqlCommand::KvPut(query) => QueryExpr::KvPut(query),
+            SqlCommand::KvInvalidateTags(query) => QueryExpr::KvInvalidateTags(query),
             SqlCommand::Update(query) => QueryExpr::Update(query),
             SqlCommand::Delete(query) => QueryExpr::Delete(query),
             SqlCommand::ExplainAlter(query) => QueryExpr::ExplainAlter(query),
@@ -390,6 +419,10 @@ impl SqlCommand {
             SqlCommand::Select(query) => SqlStatement::Query(SqlQuery::Select(query)),
             SqlCommand::Join(query) => SqlStatement::Query(SqlQuery::Join(query)),
             SqlCommand::Insert(query) => SqlStatement::Mutation(SqlMutation::Insert(query)),
+            SqlCommand::KvPut(query) => SqlStatement::Mutation(SqlMutation::KvPut(query)),
+            SqlCommand::KvInvalidateTags(query) => {
+                SqlStatement::Mutation(SqlMutation::KvInvalidateTags(query))
+            }
             SqlCommand::Update(query) => SqlStatement::Mutation(SqlMutation::Update(query)),
             SqlCommand::Delete(query) => SqlStatement::Mutation(SqlMutation::Delete(query)),
             SqlCommand::ExplainAlter(query) => {
@@ -556,7 +589,9 @@ impl<'a> Parser<'a> {
                 if name.eq_ignore_ascii_case("GRANT")
                     || name.eq_ignore_ascii_case("REVOKE")
                     || name.eq_ignore_ascii_case("SIMULATE")
-                    || name.eq_ignore_ascii_case("APPLY") =>
+                    || name.eq_ignore_ascii_case("APPLY")
+                    || name.eq_ignore_ascii_case("PUT")
+                    || name.eq_ignore_ascii_case("INVALIDATE") =>
             {
                 self.parse_sql_statement().map(FrontendStatement::Sql)
             }
@@ -689,6 +724,93 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn parse_kv_put_command(&mut self) -> Result<KvPutQuery, ParseError> {
+        self.consume_ident_ci("PUT")?;
+        let key = self.parse_kv_text_until(&[Token::Eq])?;
+        self.expect(Token::Eq)?;
+        let value = self.parse_value()?;
+
+        let mut ttl_ms = None;
+        let mut tags = Vec::new();
+        while !self.check(&Token::Eof) {
+            if self.consume_ident_ci("EXPIRE")? {
+                ttl_ms = Some(self.parse_ttl_duration()?);
+            } else if self.consume_ident_ci("TAGS")? {
+                tags = self.parse_kv_tags_list()?;
+            } else {
+                return Err(ParseError::expected(
+                    vec!["EXPIRE", "TAGS", "end of query"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+        }
+
+        Ok(KvPutQuery {
+            collection: crate::runtime::KV_DEFAULT_COLLECTION.to_string(),
+            key,
+            value,
+            ttl_ms,
+            tags,
+        })
+    }
+
+    fn parse_kv_invalidate_tags_command(&mut self) -> Result<KvInvalidateTagsQuery, ParseError> {
+        self.consume_ident_ci("INVALIDATE")?;
+        if !self.consume_ident_ci("TAGS")? {
+            return Err(ParseError::expected(
+                vec!["TAGS"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        let tags = self.parse_kv_tags_list()?;
+        self.expect(Token::From)?;
+        let collection = self.expect_ident_or_keyword()?;
+        Ok(KvInvalidateTagsQuery { collection, tags })
+    }
+
+    fn parse_kv_tags_list(&mut self) -> Result<Vec<String>, ParseError> {
+        self.expect(Token::LBracket)?;
+        let mut tags = Vec::new();
+        if self.consume(&Token::RBracket)? {
+            return Ok(tags);
+        }
+        loop {
+            let tag = self.parse_kv_text_until(&[Token::Comma, Token::RBracket])?;
+            tags.push(tag);
+            if self.consume(&Token::Comma)? {
+                continue;
+            }
+            self.expect(Token::RBracket)?;
+            break;
+        }
+        Ok(tags)
+    }
+
+    fn parse_kv_text_until(&mut self, terminators: &[Token]) -> Result<String, ParseError> {
+        let mut out = String::new();
+        while !terminators.iter().any(|token| self.check(token)) && !self.check(&Token::Eof) {
+            let Some(piece) = kv_text_token(self.peek()) else {
+                return Err(ParseError::expected(
+                    vec!["KV key/tag text"],
+                    self.peek(),
+                    self.position(),
+                ));
+            };
+            out.push_str(&piece);
+            self.advance()?;
+        }
+        if out.is_empty() {
+            return Err(ParseError::expected(
+                vec!["KV key/tag text"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        Ok(out)
+    }
+
     /// Parse any SQL/RQL-style command through a single frontend module.
     pub fn parse_sql_command(&mut self) -> Result<SqlCommand, ParseError> {
         match self.peek() {
@@ -714,6 +836,13 @@ impl<'a> Parser<'a> {
                     self.position(),
                 )),
             },
+            Token::Ident(name) if name.eq_ignore_ascii_case("PUT") => {
+                self.parse_kv_put_command().map(SqlCommand::KvPut)
+            }
+            Token::Ident(name) if name.eq_ignore_ascii_case("INVALIDATE") => {
+                self.parse_kv_invalidate_tags_command()
+                    .map(SqlCommand::KvInvalidateTags)
+            }
             Token::Update => match self.parse_update_query()? {
                 QueryExpr::Update(query) => Ok(SqlCommand::Update(query)),
                 other => Err(ParseError::new(

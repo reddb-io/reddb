@@ -213,6 +213,7 @@ impl RedDBServer {
             collection: RED_CONFIG_COLLECTION.to_string(),
             key: key.clone(),
             value: store_value,
+            tags: Vec::new(),
             metadata: Vec::new(),
         }) {
             Ok(_) => {
@@ -283,6 +284,7 @@ impl RedDBServer {
                     collection: RED_CONFIG_COLLECTION.to_string(),
                     key: key.clone(),
                     value: store_value,
+                    tags: Vec::new(),
                     metadata: Vec::new(),
                 })
                 .is_ok()
@@ -943,6 +945,7 @@ impl RedDBServer {
                 collection: RED_CONFIG_COLLECTION.to_string(),
                 key: key_name.clone(),
                 value: Value::text(secret_path.clone()),
+                tags: Vec::new(),
                 metadata: metadata.clone(),
             }) {
                 Ok(output) => saved_keys.push((key_name, output.id.raw())),
@@ -960,6 +963,7 @@ impl RedDBServer {
                 collection: RED_CONFIG_COLLECTION.to_string(),
                 key: base_key.clone(),
                 value: Value::text(api_base.clone()),
+                tags: Vec::new(),
                 metadata: Vec::new(),
             }) {
                 Ok(output) => saved_keys.push((base_key, output.id.raw())),
@@ -1011,6 +1015,7 @@ impl RedDBServer {
                 collection: RED_CONFIG_COLLECTION.to_string(),
                 key: "red.config.ai.default.provider".to_string(),
                 value: Value::text(provider.token().to_string()),
+                tags: Vec::new(),
                 metadata: Vec::new(),
             });
 
@@ -1023,6 +1028,7 @@ impl RedDBServer {
                 collection: RED_CONFIG_COLLECTION.to_string(),
                 key: "red.config.ai.default.model".to_string(),
                 value: Value::text(model.clone()),
+                tags: Vec::new(),
                 metadata: Vec::new(),
             });
 

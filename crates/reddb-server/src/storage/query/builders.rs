@@ -248,6 +248,8 @@ impl JoinQueryBuilder {
             QueryExpr::Hybrid(hybrid) => hybrid.alias = Some(alias.clone()),
             QueryExpr::Join(_)
             | QueryExpr::Insert(_)
+            | QueryExpr::KvPut(_)
+            | QueryExpr::KvInvalidateTags(_)
             | QueryExpr::Update(_)
             | QueryExpr::Delete(_)
             | QueryExpr::CreateTable(_)

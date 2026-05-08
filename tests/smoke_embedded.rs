@@ -247,6 +247,7 @@ fn smoke_kv_crud() {
         collection: "config".into(),
         key: "app.name".into(),
         value: Value::text("RedDB"),
+        tags: Vec::new(),
         metadata: vec![],
     });
     assert!(out.is_ok(), "create_kv should succeed: {:?}", out.err());

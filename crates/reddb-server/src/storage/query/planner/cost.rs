@@ -289,6 +289,8 @@ impl CostEstimator {
             QueryExpr::Hybrid(hq) => self.estimate_hybrid(hq),
             // DML/DDL statements have minimal query cost
             QueryExpr::Insert(_)
+            | QueryExpr::KvPut(_)
+            | QueryExpr::KvInvalidateTags(_)
             | QueryExpr::Update(_)
             | QueryExpr::Delete(_)
             | QueryExpr::CreateTable(_)
@@ -360,6 +362,8 @@ impl CostEstimator {
             QueryExpr::Hybrid(hq) => self.estimate_hybrid_cardinality(hq),
             // DML/DDL/Command statements return affected-row count or nothing
             QueryExpr::Insert(_)
+            | QueryExpr::KvPut(_)
+            | QueryExpr::KvInvalidateTags(_)
             | QueryExpr::Update(_)
             | QueryExpr::Delete(_)
             | QueryExpr::CreateTable(_)

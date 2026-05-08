@@ -321,41 +321,35 @@ impl RedDBServer {
             Some(other) => Value::Json(crate::json::to_vec(other).unwrap_or_default()),
         };
 
-        // Try to find existing KV to update, otherwise create
-        match self.entity_use_cases().get_kv(collection, key) {
-            Ok(Some((_, existing_id))) => {
-                // Update existing
-                match self.entity_use_cases().patch(PatchEntityInput {
-                    collection: collection.to_string(),
-                    id: existing_id,
-                    payload: payload.clone(),
-                    operations: vec![PatchEntityOperation {
-                        op: PatchEntityOperationType::Set,
-                        path: vec!["value".to_string()],
-                        value: payload.get("value").cloned(),
-                    }],
-                }) {
-                    Ok(output) => json_response(
-                        200,
-                        crate::presentation::entity_json::created_entity_output_json(&output),
-                    ),
-                    Err(err) => json_error(400, err.to_string()),
-                }
-            }
-            Ok(None) => {
-                // Create new
-                match self.entity_use_cases().create_kv(CreateKvInput {
-                    collection: collection.to_string(),
-                    key: key.to_string(),
-                    value,
-                    metadata: Vec::new(),
-                }) {
-                    Ok(output) => json_response(
-                        201,
-                        crate::presentation::entity_json::created_entity_output_json(&output),
-                    ),
-                    Err(err) => json_error(400, err.to_string()),
-                }
+        let tags = json_string_array_field(&payload, "tags").unwrap_or_default();
+        let status = match self.entity_use_cases().get_kv(collection, key) {
+            Ok(Some(_)) => 200,
+            Ok(None) => 201,
+            Err(err) => return json_error(400, err.to_string()),
+        };
+        match self.runtime().put_kv(collection, key, value, None, tags) {
+            Ok(output) => json_response(
+                status,
+                crate::presentation::entity_json::created_entity_output_json(&output),
+            ),
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
+    pub(crate) fn handle_invalidate_kv_tags(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
+        let payload = match parse_json_body_allow_empty(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+        let Some(tags) = json_string_array_field(&payload, "tags") else {
+            return json_error(400, "field 'tags' must be an array of strings");
+        };
+        match self.runtime().invalidate_kv_tags(collection, &tags) {
+            Ok(count) => {
+                let mut object = Map::new();
+                object.insert("ok".to_string(), JsonValue::Bool(true));
+                object.insert("count".to_string(), JsonValue::Number(count as f64));
+                json_response(200, JsonValue::Object(object))
             }
             Err(err) => json_error(400, err.to_string()),
         }
@@ -700,6 +694,19 @@ fn parse_tree_properties(payload: &JsonValue) -> Result<Vec<(String, Value)>, St
             crate::application::entity::json_to_storage_value(value)
                 .map(|value| (key.clone(), value))
                 .map_err(|err| format!("invalid property '{}': {}", key, err))
+        })
+        .collect()
+}
+
+fn json_string_array_field(payload: &JsonValue, field: &str) -> Option<Vec<String>> {
+    let JsonValue::Array(values) = payload.get(field)? else {
+        return None;
+    };
+    values
+        .iter()
+        .map(|value| match value {
+            JsonValue::String(value) => Some(value.clone()),
+            _ => None,
         })
         .collect()
 }

@@ -284,6 +284,8 @@ impl JoinReorderingPass {
             }
             // DML/DDL/Command statements return minimal result sets
             QueryExpr::Insert(_)
+            | QueryExpr::KvPut(_)
+            | QueryExpr::KvInvalidateTags(_)
             | QueryExpr::Update(_)
             | QueryExpr::Delete(_)
             | QueryExpr::CreateTable(_)

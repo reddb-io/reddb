@@ -23,6 +23,10 @@ pub enum QueryExpr {
     Hybrid(HybridQuery),
     /// INSERT INTO table (cols) VALUES (vals)
     Insert(InsertQuery),
+    /// PUT key = value [EXPIRE duration] [TAGS [...]]
+    KvPut(KvPutQuery),
+    /// INVALIDATE TAGS [...] FROM collection
+    KvInvalidateTags(KvInvalidateTagsQuery),
     /// UPDATE table SET col=val WHERE filter
     Update(UpdateQuery),
     /// DELETE FROM table WHERE filter
@@ -1566,6 +1570,21 @@ pub struct InsertQuery {
     pub with_metadata: Vec<(String, Value)>,
     /// Auto-embed fields on insert (from WITH AUTO EMBED clause)
     pub auto_embed: Option<AutoEmbedConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct KvPutQuery {
+    pub collection: String,
+    pub key: String,
+    pub value: Value,
+    pub ttl_ms: Option<u64>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct KvInvalidateTagsQuery {
+    pub collection: String,
+    pub tags: Vec<String>,
 }
 
 /// Configuration for automatic embedding generation on INSERT.

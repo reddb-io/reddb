@@ -185,6 +185,8 @@ impl RewriteRule for NormalizeRule {
             }
             // DML/DDL/Command statements pass through without normalization
             other @ (QueryExpr::Insert(_)
+            | QueryExpr::KvPut(_)
+            | QueryExpr::KvInvalidateTags(_)
             | QueryExpr::Update(_)
             | QueryExpr::Delete(_)
             | QueryExpr::CreateTable(_)
@@ -296,6 +298,8 @@ impl RewriteRule for SimplifyFiltersRule {
             }
             // DML/DDL/Command statements pass through without filter simplification
             other @ (QueryExpr::Insert(_)
+            | QueryExpr::KvPut(_)
+            | QueryExpr::KvInvalidateTags(_)
             | QueryExpr::Update(_)
             | QueryExpr::Delete(_)
             | QueryExpr::CreateTable(_)
@@ -366,6 +370,8 @@ impl RewriteRule for SimplifyFiltersRule {
             QueryExpr::Hybrid(_) => true, // May have filters in structured part
             // DML/DDL/Command statements are not applicable for filter simplification
             QueryExpr::Insert(_)
+            | QueryExpr::KvPut(_)
+            | QueryExpr::KvInvalidateTags(_)
             | QueryExpr::Update(_)
             | QueryExpr::Delete(_)
             | QueryExpr::CreateTable(_)

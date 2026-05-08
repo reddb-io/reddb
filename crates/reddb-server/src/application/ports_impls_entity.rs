@@ -2504,6 +2504,8 @@ impl RuntimeEntityPort for RedDBRuntime {
     }
 
     fn create_kv(&self, input: CreateKvInput) -> RedDBResult<CreateEntityOutput> {
+        let tags = input.tags;
+        let collection = input.collection;
         let fields = vec![
             (
                 "key".to_string(),
@@ -2512,13 +2514,15 @@ impl RuntimeEntityPort for RedDBRuntime {
             ("value".to_string(), input.value),
         ];
         let row_input = CreateRowInput {
-            collection: input.collection,
+            collection: collection.clone(),
             fields,
             metadata: input.metadata,
             node_links: Vec::new(),
             vector_links: Vec::new(),
         };
-        self.create_row(row_input)
+        let output = self.create_row(row_input)?;
+        self.kv_tags_set(&collection, output.id, tags);
+        Ok(output)
     }
 
     fn create_timeseries_point(
@@ -2619,6 +2623,7 @@ impl RuntimeEntityPort for RedDBRuntime {
                 .map_err(|err| crate::RedDBError::Internal(err.to_string()))?;
             if deleted {
                 store.context_index().remove_entity(id);
+                self.kv_tags_remove_entity(collection, id);
             }
             Ok(deleted)
         } else {

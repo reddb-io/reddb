@@ -203,3 +203,61 @@ fn revoke_removes_synthetic_grant_policy() {
     });
     assert!(denied.is_err(), "revoke should remove the allow policy");
 }
+
+#[test]
+fn kv_tag_invalidation_requires_kv_invalidate_policy_action() {
+    let (rt, store) = runtime_with_auth();
+
+    let put_only = r#"{
+        "id":"kv-put-only",
+        "version":1,
+        "statements":[
+            {"effect":"allow","actions":["insert"],"resources":["table:kv_default"]}
+        ]
+    }"#;
+    store
+        .put_policy(reddb::auth::policies::Policy::from_json_str(put_only).unwrap())
+        .unwrap();
+    store
+        .attach_policy(
+            reddb::auth::store::PrincipalRef::User(reddb::auth::UserId::platform("alice")),
+            "kv-put-only",
+        )
+        .unwrap();
+
+    let put = as_user("alice", Role::Write, || {
+        rt.execute_query("PUT session:42 = 'blob' TAGS [user:42]")
+    });
+    assert!(put.is_ok(), "insert policy should allow tagged PUT: {put:?}");
+
+    let denied = as_user("alice", Role::Write, || {
+        rt.execute_query("INVALIDATE TAGS [user:42] FROM kv_default")
+    });
+    assert!(
+        denied.is_err(),
+        "missing kv:invalidate action must deny invalidation"
+    );
+
+    let invalidate = r#"{
+        "id":"kv-invalidate",
+        "version":1,
+        "statements":[
+            {"effect":"allow","actions":["kv:invalidate"],"resources":["kv:kv_default"]}
+        ]
+    }"#;
+    store
+        .put_policy(reddb::auth::policies::Policy::from_json_str(invalidate).unwrap())
+        .unwrap();
+    store
+        .attach_policy(
+            reddb::auth::store::PrincipalRef::User(reddb::auth::UserId::platform("alice")),
+            "kv-invalidate",
+        )
+        .unwrap();
+
+    let allowed = as_user("alice", Role::Write, || {
+        rt.execute_query("INVALIDATE TAGS [user:42] FROM kv_default")
+    })
+    .expect("kv:invalidate policy should allow invalidation");
+    assert_eq!(allowed.affected_rows, 1);
+}

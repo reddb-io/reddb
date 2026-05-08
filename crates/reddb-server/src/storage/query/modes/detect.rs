@@ -77,6 +77,8 @@ pub fn detect_mode(input: &str) -> QueryMode {
             | "detach"
             | "simulate"
             | "apply"
+            | "put"
+            | "invalidate"
     ) {
         return QueryMode::Sql;
     }

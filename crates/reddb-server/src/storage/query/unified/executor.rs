@@ -131,6 +131,8 @@ impl UnifiedExecutor {
                 "Hybrid queries require VectorStore integration",
             )),
             QueryExpr::Insert(_)
+            | QueryExpr::KvPut(_)
+            | QueryExpr::KvInvalidateTags(_)
             | QueryExpr::Update(_)
             | QueryExpr::Delete(_)
             | QueryExpr::CreateTable(_)
@@ -357,6 +359,8 @@ impl UnifiedExecutor {
                 ))
             }
             QueryExpr::Insert(_)
+            | QueryExpr::KvPut(_)
+            | QueryExpr::KvInvalidateTags(_)
             | QueryExpr::Update(_)
             | QueryExpr::Delete(_)
             | QueryExpr::CreateTable(_)

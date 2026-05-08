@@ -543,6 +543,7 @@ impl McpServer {
                 collection: collection.to_string(),
                 key: key.to_string(),
                 value: sv,
+                tags: Vec::new(),
                 metadata,
             })
             .map_err(|e| format!("{}", e))?;

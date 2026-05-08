@@ -1006,6 +1006,12 @@ impl RedDBServer {
                 }
 
                 // KV routes: /collections/{collection}/kvs/{key}
+                if let Some(collection) = collection_kv_invalidate_tags_path(&path) {
+                    return match method.as_str() {
+                        "POST" => self.handle_invalidate_kv_tags(collection, body),
+                        _ => json_error(405, "method not allowed for KV tag invalidation endpoint"),
+                    };
+                }
                 if let Some((collection, key)) = collection_kv_path(&path) {
                     return match method.as_str() {
                         "GET" => self.handle_get_kv(collection, key),
@@ -1622,6 +1628,22 @@ fn graph_projection_named_action_path(path: &str, action: &str) -> Option<String
         None
     } else {
         Some(name.to_string())
+    }
+}
+
+/// Match `/collections/:name/kvs/invalidate_tags` to extract collection name.
+fn collection_kv_invalidate_tags_path(path: &str) -> Option<&str> {
+    let prefix = "/collections/";
+    let trimmed = path.strip_prefix(prefix)?;
+    let (collection, rest) = trimmed.split_once("/kvs/")?;
+    if rest.trim_matches('/') != "invalidate_tags" {
+        return None;
+    }
+    let collection = collection.trim_matches('/');
+    if collection.is_empty() {
+        None
+    } else {
+        Some(collection)
     }
 }
 
