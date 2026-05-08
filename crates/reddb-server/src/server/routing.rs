@@ -1016,6 +1016,12 @@ impl RedDBServer {
                         _ => json_error(405, "method not allowed for KV counter endpoint"),
                     };
                 }
+                if let Some((collection, key)) = collection_kv_action_path(&path, "cas") {
+                    return match method.as_str() {
+                        "POST" => self.handle_cas_kv(collection, key, &query, body),
+                        _ => json_error(405, "method not allowed for KV CAS endpoint"),
+                    };
+                }
 
                 // KV routes: /collections/{collection}/kv/{key}
                 if let Some((collection, key)) = collection_kv_path(&path) {

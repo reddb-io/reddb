@@ -262,6 +262,28 @@ pub fn all_tools() -> Vec<ToolDef> {
             ),
         },
         ToolDef {
+            name: "reddb_kv_cas",
+            description: "Compare-and-set a key-value pair. Succeeds when the current value is typed-equal to expected; expected null creates only when absent.",
+            input_schema: schema_with_nested(
+                vec![
+                    ("collection", string_field("Collection name")),
+                    ("key", string_field("Key to compare and set")),
+                    ("expected", {
+                        let mut f = Map::new();
+                        f.insert("description".to_string(), JsonValue::String("Expected current value; null means the key must be absent".to_string()));
+                        JsonValue::Object(f)
+                    }),
+                    ("value", {
+                        let mut f = Map::new();
+                        f.insert("description".to_string(), JsonValue::String("New value to store when comparison succeeds".to_string()));
+                        JsonValue::Object(f)
+                    }),
+                    ("ttl_ms", integer_field("Optional TTL for the new value in milliseconds")),
+                ],
+                vec!["collection", "key", "expected", "value"],
+            ),
+        },
+        ToolDef {
             name: "reddb_kv_incr",
             description: "Atomically increment an integer key-value counter and return the new value.",
             input_schema: schema(
@@ -557,6 +579,7 @@ mod tests {
         assert!(names.contains(&"reddb_kv_get"));
         assert!(names.contains(&"reddb_kv_set"));
         assert!(names.contains(&"reddb_kv_delete"));
+        assert!(names.contains(&"reddb_kv_cas"));
         assert!(names.contains(&"reddb_kv_incr"));
         assert!(names.contains(&"reddb_kv_decr"));
         assert!(names.contains(&"reddb_delete"));

@@ -378,6 +378,43 @@ impl RedDBServer {
         }
     }
 
+    pub(crate) fn handle_cas_kv(
+        &self,
+        collection: &str,
+        key: &str,
+        query: &BTreeMap<String, String>,
+        body: Vec<u8>,
+    ) -> HttpResponse {
+        let payload = match parse_json_body_allow_empty(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+        let Some(expected_arg) = payload.get("expected") else {
+            return json_error(400, "JSON body must contain field 'expected'");
+        };
+        let Some(new_arg) = payload.get("value").or_else(|| payload.get("new_value")) else {
+            return json_error(400, "JSON body must contain field 'value' or 'new_value'");
+        };
+        let ttl_ms = match kv_ttl_ms_from_payload_or_query(&payload, query) {
+            Ok(ttl_ms) => ttl_ms,
+            Err(message) => return json_error(400, message),
+        };
+
+        if let Err(err) = self.runtime.check_write(WriteKind::Dml) {
+            return json_error(403, err.to_string());
+        }
+        let _ = self.runtime.db().store().get_or_create_collection(collection);
+
+        let sql = kv_cas_sql(collection, key, expected_arg, new_arg, ttl_ms);
+        match self.runtime.execute_query(&sql) {
+            Ok(result) => match kv_cas_envelope_from_result(&result) {
+                Ok(body) => json_response(200, body),
+                Err(message) => json_error(500, message),
+            },
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
     // ── Document endpoint ───────────────────────────────────────────
 
     pub(crate) fn handle_create_document(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
@@ -788,6 +825,96 @@ impl KvEnvelope {
     }
 }
 
+fn kv_ttl_ms_from_payload_or_query(
+    payload: &JsonValue,
+    query: &BTreeMap<String, String>,
+) -> Result<Option<u64>, &'static str> {
+    if let Some(value) = payload.get("ttl_ms").or_else(|| payload.get("ttlMs")) {
+        return json_number_to_u64(value)
+            .map(Some)
+            .ok_or("field 'ttl_ms' must be an unsigned integer");
+    }
+    query
+        .get("ttl_ms")
+        .or_else(|| query.get("ttlMs"))
+        .or_else(|| query.get("expire_ms"))
+        .map(|value| value.parse::<u64>())
+        .transpose()
+        .map_err(|_| "TTL query parameter must be an unsigned integer")
+}
+
+fn json_number_to_u64(value: &JsonValue) -> Option<u64> {
+    let n = value.as_f64()?;
+    if n.is_finite() && n >= 0.0 && n.fract().abs() < f64::EPSILON && n <= u64::MAX as f64 {
+        Some(n as u64)
+    } else {
+        None
+    }
+}
+
+fn kv_cas_sql(
+    collection: &str,
+    key: &str,
+    expected: &JsonValue,
+    new_value: &JsonValue,
+    ttl_ms: Option<u64>,
+) -> String {
+    let ttl = ttl_ms
+        .map(|ms| format!(" EXPIRE {ms} ms"))
+        .unwrap_or_default();
+    format!(
+        "CAS {}.{} EXPECT {} SET {}{}",
+        sql_string_literal(collection),
+        sql_string_literal(key),
+        json_as_sql_literal(expected),
+        json_as_sql_literal(new_value),
+        ttl
+    )
+}
+
+fn json_as_sql_literal(value: &JsonValue) -> String {
+    match value {
+        JsonValue::Null => "NULL".to_string(),
+        JsonValue::Bool(true) => "true".to_string(),
+        JsonValue::Bool(false) => "false".to_string(),
+        JsonValue::Number(n) => {
+            if n.is_finite() && n.fract().abs() < f64::EPSILON {
+                (*n as i64).to_string()
+            } else {
+                n.to_string()
+            }
+        }
+        JsonValue::String(value) => sql_string_literal(value),
+        JsonValue::Array(_) | JsonValue::Object(_) => value.to_string(),
+    }
+}
+
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn kv_cas_envelope_from_result(
+    result: &crate::runtime::RuntimeQueryResult,
+) -> Result<JsonValue, String> {
+    let record = result
+        .result
+        .records
+        .first()
+        .ok_or_else(|| "CAS result did not contain a row".to_string())?;
+    let ok = match record.get("ok") {
+        Some(Value::Boolean(value)) => *value,
+        other => return Err(format!("CAS result had invalid ok column: {other:?}")),
+    };
+    let current = record.get("current").cloned().unwrap_or(Value::Null);
+    let mut object = Map::new();
+    object.insert("ok".to_string(), JsonValue::Bool(ok));
+    object.insert(
+        "current".to_string(),
+        crate::presentation::entity_json::storage_value_to_json(&current),
+    );
+    Ok(JsonValue::Object(object))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -903,6 +1030,44 @@ mod tests {
         assert_eq!(
             decr_json.get("value").and_then(JsonValue::as_f64),
             Some(3.0)
+        );
+    }
+
+    #[test]
+    fn http_kv_cas_creates_updates_and_reports_conflict_current() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime starts");
+        let server = RedDBServer::new(runtime);
+
+        let created = server.route(request(
+            "POST",
+            "/collections/locks/kv/deploy/cas",
+            r#"{"expected":null,"value":"worker-7"}"#,
+        ));
+        assert_eq!(created.status, 200);
+        let created_json = response_json(&created);
+        assert_eq!(
+            created_json.get("ok").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            created_json.get("current").and_then(JsonValue::as_str),
+            Some("worker-7")
+        );
+
+        let conflict = server.route(request(
+            "POST",
+            "/collections/locks/kv/deploy/cas",
+            r#"{"expected":null,"value":"worker-8"}"#,
+        ));
+        assert_eq!(conflict.status, 200);
+        let conflict_json = response_json(&conflict);
+        assert_eq!(
+            conflict_json.get("ok").and_then(JsonValue::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            conflict_json.get("current").and_then(JsonValue::as_str),
+            Some("worker-7")
         );
     }
 }

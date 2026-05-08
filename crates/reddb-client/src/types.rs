@@ -185,3 +185,13 @@ pub struct InsertResult {
     /// Present when the engine surfaces an inserted entity id.
     pub id: Option<String>,
 }
+
+/// Result of a key-value compare-and-set operation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CasResult {
+    /// True when the stored value matched `expected` and was replaced.
+    pub ok: bool,
+    /// The value observed by CAS. On success this is the newly stored value;
+    /// on conflict it is the current stored value.
+    pub current: JsonValue,
+}

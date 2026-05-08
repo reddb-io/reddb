@@ -214,6 +214,7 @@ impl McpServer {
             "reddb_kv_get" => self.tool_kv_get(args),
             "reddb_kv_set" => self.tool_kv_set(args),
             "reddb_kv_delete" => self.tool_kv_delete(args),
+            "reddb_kv_cas" => self.tool_kv_cas(args),
             "reddb_kv_incr" => self.tool_kv_incr(args, false),
             "reddb_kv_decr" => self.tool_kv_incr(args, true),
             "reddb_delete" => self.tool_delete(args),
@@ -594,6 +595,25 @@ impl McpServer {
         obj.insert("key".to_string(), JsonValue::String(key.to_string()));
         obj.insert("deleted".to_string(), JsonValue::Bool(deleted));
         json_to_string(&JsonValue::Object(obj)).map_err(|e| format!("serialization error: {}", e))
+    }
+
+    fn tool_kv_cas(&self, args: &JsonValue) -> Result<String, String> {
+        let collection = args
+            .get("collection")
+            .and_then(|v| v.as_str())
+            .ok_or("missing required field 'collection'")?;
+        let key = args
+            .get("key")
+            .and_then(|v| v.as_str())
+            .ok_or("missing required field 'key'")?;
+        let expected = args
+            .get("expected")
+            .ok_or("missing required field 'expected'")?;
+        let value = args.get("value").ok_or("missing required field 'value'")?;
+        let ttl_ms = optional_u64_arg(args, "ttl_ms")?;
+
+        let outcome = McpKvOps::new(&self.runtime).cas(collection, key, expected, value, ttl_ms)?;
+        json_to_string(&outcome).map_err(|e| format!("serialization error: {}", e))
     }
 
     fn tool_kv_incr(&self, args: &JsonValue, decr: bool) -> Result<String, String> {
@@ -1251,6 +1271,87 @@ impl<'a> McpKvOps<'a> {
             .incr(collection, key, by, ttl_ms)
             .map_err(|e| format!("{}", e))
     }
+
+    fn cas(
+        &self,
+        collection: &str,
+        key: &str,
+        expected: &JsonValue,
+        value: &JsonValue,
+        ttl_ms: Option<u64>,
+    ) -> Result<JsonValue, String> {
+        self.runtime
+            .check_write(crate::runtime::write_gate::WriteKind::Dml)
+            .map_err(|e| format!("{}", e))?;
+        let _ = self.runtime.db().store().get_or_create_collection(collection);
+
+        let sql = mcp_kv_cas_sql(collection, key, expected, value, ttl_ms);
+        let result = self
+            .runtime
+            .execute_query(&sql)
+            .map_err(|e| format!("{}", e))?;
+        mcp_kv_cas_envelope_from_result(&result)
+    }
+}
+
+fn mcp_kv_cas_sql(
+    collection: &str,
+    key: &str,
+    expected: &JsonValue,
+    new_value: &JsonValue,
+    ttl_ms: Option<u64>,
+) -> String {
+    let ttl = ttl_ms
+        .map(|ms| format!(" EXPIRE {ms} ms"))
+        .unwrap_or_default();
+    format!(
+        "CAS {}.{} EXPECT {} SET {}{}",
+        mcp_sql_string_literal(collection),
+        mcp_sql_string_literal(key),
+        mcp_json_as_sql_literal(expected),
+        mcp_json_as_sql_literal(new_value),
+        ttl
+    )
+}
+
+fn mcp_json_as_sql_literal(value: &JsonValue) -> String {
+    match value {
+        JsonValue::Null => "NULL".to_string(),
+        JsonValue::Bool(true) => "true".to_string(),
+        JsonValue::Bool(false) => "false".to_string(),
+        JsonValue::Number(n) => {
+            if n.is_finite() && n.fract().abs() < f64::EPSILON {
+                (*n as i64).to_string()
+            } else {
+                n.to_string()
+            }
+        }
+        JsonValue::String(value) => mcp_sql_string_literal(value),
+        JsonValue::Array(_) | JsonValue::Object(_) => value.to_string(),
+    }
+}
+
+fn mcp_sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn mcp_kv_cas_envelope_from_result(
+    result: &crate::runtime::RuntimeQueryResult,
+) -> Result<JsonValue, String> {
+    let record = result
+        .result
+        .records
+        .first()
+        .ok_or_else(|| "CAS result did not contain a row".to_string())?;
+    let ok = match record.get("ok") {
+        Some(Value::Boolean(value)) => *value,
+        other => return Err(format!("CAS result had invalid ok column: {other:?}")),
+    };
+    let current = record.get("current").cloned().unwrap_or(Value::Null);
+    let mut object = Map::new();
+    object.insert("ok".to_string(), JsonValue::Bool(ok));
+    object.insert("current".to_string(), storage_value_to_json(&current));
+    Ok(JsonValue::Object(object))
 }
 
 // Convert a storage Value to JSON (local helper to avoid visibility issues).
@@ -1474,6 +1575,42 @@ mod tests {
         assert_eq!(
             missing.get("found").and_then(JsonValue::as_bool),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn mcp_kv_cas_returns_current_on_success_and_conflict() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime starts");
+        let server = McpServer::new(runtime);
+        let args = |expected: JsonValue, value: &str| {
+            object(vec![
+                ("collection", JsonValue::String("locks".to_string())),
+                ("key", JsonValue::String("deploy".to_string())),
+                ("expected", expected),
+                ("value", JsonValue::String(value.to_string())),
+            ])
+        };
+
+        let acquired = parse_tool_json(
+            server
+                .tool_kv_cas(&args(JsonValue::Null, "worker-7"))
+                .expect("kv cas"),
+        );
+        assert_eq!(acquired.get("ok").and_then(JsonValue::as_bool), Some(true));
+        assert_eq!(
+            acquired.get("current").and_then(JsonValue::as_str),
+            Some("worker-7")
+        );
+
+        let conflict = parse_tool_json(
+            server
+                .tool_kv_cas(&args(JsonValue::Null, "worker-8"))
+                .expect("kv cas"),
+        );
+        assert_eq!(conflict.get("ok").and_then(JsonValue::as_bool), Some(false));
+        assert_eq!(
+            conflict.get("current").and_then(JsonValue::as_str),
+            Some("worker-7")
         );
     }
 }

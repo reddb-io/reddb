@@ -70,7 +70,7 @@ pub mod redwire;
 pub mod http;
 
 pub use error::{ClientError, ErrorCode, Result};
-pub use types::{InsertResult, JsonValue, QueryResult, ValueOut};
+pub use types::{CasResult, InsertResult, JsonValue, QueryResult, ValueOut};
 
 // Back-compat re-exports for the previous `reddb-client-internal`
 // crate. Workspace consumers (`reddb-server::rpc_stdio`, the `red`
@@ -244,6 +244,26 @@ impl Reddb {
         kv_counter_value(&result)
     }
 
+    pub async fn kv_cas(
+        &self,
+        collection: &str,
+        key: &str,
+        expected: &JsonValue,
+        value: &JsonValue,
+        ttl_ms: Option<u64>,
+    ) -> Result<CasResult> {
+        match self {
+            #[cfg(feature = "http")]
+            Reddb::Http(c) => c.kv_cas(collection, key, expected, value, ttl_ms).await,
+            _ => {
+                let result = self
+                    .query(&kv_cas_sql(collection, key, expected, value, ttl_ms))
+                    .await?;
+                kv_cas_value(&result)
+            }
+        }
+    }
+
     pub async fn close(&self) -> Result<()> {
         match self {
             #[cfg(feature = "embedded")]
@@ -273,6 +293,26 @@ fn kv_counter_sql(op: &str, collection: &str, key: &str, by: i64, ttl_ms: Option
     )
 }
 
+fn kv_cas_sql(
+    collection: &str,
+    key: &str,
+    expected: &JsonValue,
+    value: &JsonValue,
+    ttl_ms: Option<u64>,
+) -> String {
+    let ttl = ttl_ms
+        .map(|ms| format!(" EXPIRE {ms} ms"))
+        .unwrap_or_default();
+    format!(
+        "CAS {}.{} EXPECT {} SET {}{}",
+        sql_literal(collection),
+        sql_literal(key),
+        json_value_sql_literal(expected),
+        json_value_sql_literal(value),
+        ttl
+    )
+}
+
 fn kv_counter_value(result: &QueryResult) -> Result<i64> {
     result
         .rows
@@ -290,6 +330,34 @@ fn kv_counter_value(result: &QueryResult) -> Result<i64> {
         })
 }
 
+fn kv_cas_value(result: &QueryResult) -> Result<CasResult> {
+    let row = result.rows.first().ok_or_else(|| {
+        ClientError::new(
+            ErrorCode::Protocol,
+            "KV CAS response did not contain a result row",
+        )
+    })?;
+    let ok = row
+        .iter()
+        .find(|(name, _)| name == "ok")
+        .and_then(|(_, value)| match value {
+            ValueOut::Bool(value) => Some(*value),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            ClientError::new(
+                ErrorCode::Protocol,
+                "KV CAS response did not contain a boolean 'ok' column",
+            )
+        })?;
+    let current = row
+        .iter()
+        .find(|(name, _)| name == "current")
+        .map(|(_, value)| value_out_to_json(value))
+        .unwrap_or(JsonValue::Null);
+    Ok(CasResult { ok, current })
+}
+
 fn sql_ident(value: &str) -> String {
     if value.chars().enumerate().all(|(index, ch)| {
         ch == '_' || ch.is_ascii_alphanumeric() && (index > 0 || !ch.is_ascii_digit())
@@ -302,4 +370,71 @@ fn sql_ident(value: &str) -> String {
 
 fn sql_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+fn json_value_sql_literal(value: &JsonValue) -> String {
+    match value {
+        JsonValue::Null => "NULL".to_string(),
+        JsonValue::Bool(true) => "true".to_string(),
+        JsonValue::Bool(false) => "false".to_string(),
+        JsonValue::Number(n) => {
+            if n.is_finite() && n.fract().abs() < f64::EPSILON {
+                (*n as i64).to_string()
+            } else {
+                n.to_string()
+            }
+        }
+        JsonValue::String(value) => sql_literal(value),
+        JsonValue::Array(_) | JsonValue::Object(_) => value.to_json_string(),
+    }
+}
+
+fn value_out_to_json(value: &ValueOut) -> JsonValue {
+    match value {
+        ValueOut::Null => JsonValue::Null,
+        ValueOut::Bool(value) => JsonValue::Bool(*value),
+        ValueOut::Integer(value) => JsonValue::Number(*value as f64),
+        ValueOut::Float(value) => JsonValue::Number(*value),
+        ValueOut::String(value) => JsonValue::String(value.clone()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kv_cas_sql_quotes_collection_key_and_values() {
+        let sql = kv_cas_sql(
+            "locks",
+            "deploy",
+            &JsonValue::Null,
+            &JsonValue::String("worker-7".to_string()),
+            Some(30_000),
+        );
+        assert_eq!(
+            sql,
+            "CAS 'locks'.'deploy' EXPECT NULL SET 'worker-7' EXPIRE 30000 ms"
+        );
+    }
+
+    #[test]
+    fn kv_cas_value_reads_ok_and_current() {
+        let result = QueryResult {
+            statement: "update".to_string(),
+            affected: 0,
+            columns: vec!["ok".to_string(), "current".to_string()],
+            rows: vec![vec![
+                ("ok".to_string(), ValueOut::Bool(false)),
+                ("current".to_string(), ValueOut::String("worker-7".to_string())),
+            ]],
+        };
+        assert_eq!(
+            kv_cas_value(&result).expect("cas result"),
+            CasResult {
+                ok: false,
+                current: JsonValue::String("worker-7".to_string())
+            }
+        );
+    }
 }

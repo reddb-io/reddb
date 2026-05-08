@@ -21,7 +21,7 @@ use reqwest::{Client, ClientBuilder, Method, StatusCode};
 use serde_json::Value;
 
 use crate::error::{ClientError, ErrorCode, Result};
-use crate::types::{InsertResult, JsonValue, QueryResult};
+use crate::types::{CasResult, InsertResult, JsonValue, QueryResult};
 
 /// HTTP/HTTPS client. Talks the REST surface at the configured
 /// `base_url`. `Authorization: Bearer <token>` set when the user
@@ -159,6 +159,66 @@ impl HttpClient {
             .unwrap_or(0))
     }
 
+    pub async fn kv_cas(
+        &self,
+        collection: &str,
+        key: &str,
+        expected: &JsonValue,
+        value: &JsonValue,
+        ttl_ms: Option<u64>,
+    ) -> Result<CasResult> {
+        let url_path = format!(
+            "/collections/{}/kv/{}/cas",
+            urlencoded(collection),
+            urlencoded(key),
+        );
+        let mut body = serde_json::Map::new();
+        body.insert("expected".to_string(), json_value_to_serde(expected));
+        body.insert("value".to_string(), json_value_to_serde(value));
+        if let Some(ttl_ms) = ttl_ms {
+            body.insert("ttl_ms".to_string(), Value::Number(ttl_ms.into()));
+        }
+        let url = format!("{}{}", self.base_url, url_path);
+        let resp = self
+            .inner
+            .post(&url)
+            .headers(self.headers())
+            .json(&Value::Object(body))
+            .send()
+            .await
+            .map_err(net_err)?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| ClientError::new(ErrorCode::Network, format!("read body: {e}")))?;
+        let body = if text.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_str::<Value>(&text)
+                .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("bad JSON: {e}")))?
+        };
+        if !status.is_success() {
+            return Err(http_err(status, Some(body)));
+        }
+        let ok = body
+            .as_object()
+            .and_then(|o| o.get("ok"))
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| {
+                ClientError::new(
+                    ErrorCode::Protocol,
+                    "KV CAS response did not contain boolean field 'ok'",
+                )
+            })?;
+        let current = body
+            .as_object()
+            .and_then(|o| o.get("current"))
+            .map(serde_to_json_value)
+            .unwrap_or(JsonValue::Null);
+        Ok(CasResult { ok, current })
+    }
+
     pub async fn delete(&self, collection: &str, id: &str) -> Result<u64> {
         let url_path = format!(
             "/collections/{}/{}",
@@ -291,5 +351,21 @@ fn json_value_to_serde(v: &JsonValue) -> Value {
     match serde_json::from_str::<Value>(&v.to_json_string()) {
         Ok(v) => v,
         Err(_) => Value::Null,
+    }
+}
+
+fn serde_to_json_value(value: &Value) -> JsonValue {
+    match value {
+        Value::Null => JsonValue::Null,
+        Value::Bool(value) => JsonValue::Bool(*value),
+        Value::Number(value) => JsonValue::Number(value.as_f64().unwrap_or(0.0)),
+        Value::String(value) => JsonValue::String(value.clone()),
+        Value::Array(values) => JsonValue::Array(values.iter().map(serde_to_json_value).collect()),
+        Value::Object(values) => JsonValue::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), serde_to_json_value(value)))
+                .collect(),
+        ),
     }
 }
