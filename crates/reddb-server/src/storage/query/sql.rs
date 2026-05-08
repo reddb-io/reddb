@@ -1,15 +1,15 @@
 use crate::storage::query::ast::{
-    AlterTableQuery, AlterUserStmt, ApplyMigrationQuery, AskQuery, CopyFormat, CopyFromQuery,
-    CreateForeignTableQuery, CreateIndexQuery, CreateMigrationQuery, CreatePolicyQuery,
-    CreateQueueQuery, CreateSchemaQuery, CreateSequenceQuery, CreateServerQuery, CreateTableQuery,
-    CreateTimeSeriesQuery, CreateTreeQuery, CreateViewQuery, DeleteQuery, DropForeignTableQuery,
-    DropIndexQuery, DropPolicyQuery, DropQueueQuery, DropSchemaQuery, DropSequenceQuery,
-    DropServerQuery, DropTableQuery, DropTimeSeriesQuery, DropTreeQuery, DropViewQuery,
-    ExplainAlterQuery, ExplainMigrationQuery, ForeignColumnDef, GrantStmt, GraphCommand,
-    GraphQuery, HybridQuery, InsertQuery, JoinQuery, MaintenanceCommand, PathQuery, PolicyAction,
-    ProbabilisticCommand, QueryExpr, QueueCommand, RefreshMaterializedViewQuery, RevokeStmt,
-    RollbackMigrationQuery, SearchCommand, TableQuery, TreeCommand, TxnControl, UpdateQuery,
-    VectorQuery,
+    AlterTableQuery, AlterUserStmt, ApplyMigrationQuery, AskQuery, CompareOp, CopyFormat,
+    CopyFromQuery, CreateForeignTableQuery, CreateIndexQuery, CreateMigrationQuery,
+    CreatePolicyQuery, CreateQueueQuery, CreateSchemaQuery, CreateSequenceQuery, CreateServerQuery,
+    CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery, CreateViewQuery, DeleteQuery,
+    DropForeignTableQuery, DropIndexQuery, DropPolicyQuery, DropQueueQuery, DropSchemaQuery,
+    DropSequenceQuery, DropServerQuery, DropTableQuery, DropTimeSeriesQuery, DropTreeQuery,
+    DropViewQuery, ExplainAlterQuery, ExplainMigrationQuery, FieldRef, ForeignColumnDef, GrantStmt,
+    GraphCommand, GraphQuery, HybridQuery, InsertQuery, JoinQuery, MaintenanceCommand, PathQuery,
+    PolicyAction, ProbabilisticCommand, QueryExpr, QueueCommand, RefreshMaterializedViewQuery,
+    RevokeStmt, RollbackMigrationQuery, SearchCommand, TableQuery, TreeCommand, TxnControl,
+    UpdateQuery, VectorQuery,
 };
 use crate::storage::query::parser::{ParseError, Parser, SafeTokenDisplay};
 use crate::storage::query::Token;
@@ -1413,7 +1413,31 @@ impl<'a> Parser<'a> {
                     Ok(SqlCommand::ShowConfig { prefix })
                 } else if self.consume_ident_ci("COLLECTIONS")? {
                     let mut query = TableQuery::new("red.collections");
+                    let include_internal = if self.consume_ident_ci("INCLUDING")? {
+                        if !self.consume_ident_ci("INTERNAL")? {
+                            return Err(ParseError::expected(
+                                vec!["INTERNAL"],
+                                self.peek(),
+                                self.position(),
+                            ));
+                        }
+                        true
+                    } else {
+                        false
+                    };
                     self.parse_table_clauses(&mut query)?;
+                    if !include_internal {
+                        let user_filter = query.filter.take();
+                        let hide_internal = crate::storage::query::ast::Filter::Compare {
+                            field: FieldRef::column("", "internal"),
+                            op: CompareOp::Eq,
+                            value: Value::Boolean(false),
+                        };
+                        query.filter = Some(match user_filter {
+                            Some(filter) => filter.and(hide_internal),
+                            None => hide_internal,
+                        });
+                    }
                     Ok(SqlCommand::Select(query))
                 } else if self.consume_ident_ci("SECRET")? || self.consume_ident_ci("SECRETS")? {
                     let prefix = if !self.check(&Token::Eof) {

@@ -1512,6 +1512,26 @@ fn test_parse_show_collections_desugars_to_red_collections_select() {
         assert_eq!(tq.table, "red.collections");
         assert!(tq.columns.is_empty());
         assert!(tq.select_items.is_empty());
+        assert!(matches!(
+            tq.filter,
+            Some(Filter::Compare {
+                field: FieldRef::TableColumn { ref column, .. },
+                op: CompareOp::Eq,
+                value: crate::storage::schema::Value::Boolean(false),
+            }) if column == "internal"
+        ));
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
+fn test_parse_show_collections_including_internal_desugars_without_filter() {
+    let query = parse("SHOW COLLECTIONS INCLUDING INTERNAL").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.collections");
+        assert!(tq.columns.is_empty());
+        assert!(tq.select_items.is_empty());
         assert!(tq.filter.is_none());
     } else {
         panic!("Expected Table");
@@ -1525,11 +1545,22 @@ fn test_parse_show_collections_where_desugars_with_filter() {
         assert_eq!(tq.table, "red.collections");
         assert!(matches!(
             tq.filter,
-            Some(Filter::Compare {
-                field: FieldRef::TableColumn { ref column, .. },
-                op: CompareOp::Eq,
-                value: crate::storage::schema::Value::Text(ref value),
-            }) if column == "model" && value.as_ref() == "table"
+            Some(Filter::And(ref left, ref right))
+                if matches!(
+                    left.as_ref(),
+                    Filter::Compare {
+                        field: FieldRef::TableColumn { column, .. },
+                        op: CompareOp::Eq,
+                        value: crate::storage::schema::Value::Text(value),
+                    } if column == "model" && value.as_ref() == "table"
+                ) && matches!(
+                    right.as_ref(),
+                    Filter::Compare {
+                        field: FieldRef::TableColumn { column, .. },
+                        op: CompareOp::Eq,
+                        value: crate::storage::schema::Value::Boolean(false),
+                    } if column == "internal"
+                )
         ));
     } else {
         panic!("Expected Table");

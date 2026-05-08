@@ -44,6 +44,7 @@ fn select_from_red_collections_materializes_catalog_rows() {
             "segments",
             "indices",
             "in_memory_bytes",
+            "internal",
             "tenant_id"
         ]
     );
@@ -64,6 +65,7 @@ fn select_from_red_collections_materializes_catalog_rows() {
         row.get("in_memory_bytes"),
         Some(Value::UnsignedInteger(_))
     ));
+    assert_eq!(row.get("internal"), Some(&Value::Boolean(false)));
 
     cleanup_scope();
 }

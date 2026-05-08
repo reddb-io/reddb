@@ -6,13 +6,21 @@ catalog is available.
 
 ## `red.collections`
 
-`SHOW COLLECTIONS` is syntax sugar for:
+`SHOW COLLECTIONS` is syntax sugar for a `red.collections` query that hides
+internal collections:
 
 ```sql
-SELECT * FROM red.collections;
+SELECT * FROM red.collections WHERE internal = false;
 ```
 
-Filters are preserved during desugaring:
+Use `INCLUDING INTERNAL` to include runtime-owned collections and artifacts:
+
+```sql
+SHOW COLLECTIONS INCLUDING INTERNAL;
+```
+
+Filters are preserved during desugaring and are combined with the default
+internal filter unless `INCLUDING INTERNAL` is present:
 
 ```sql
 SHOW COLLECTIONS WHERE model = 'table';
@@ -27,6 +35,7 @@ Current columns:
 | `schema_mode`     | Schema contract mode for the collection. |
 | `entities`        | Number of live entities in the collection. |
 | `segments`        | Number of backing storage segments. |
-| `indices`         | Number of secondary indexes attached to the collection. |
+| `indices`         | Secondary index names attached to the collection. |
 | `in_memory_bytes` | Approximate resident memory used by collection metadata and caches. |
+| `internal`        | `true` for runtime-owned collections and artifacts such as DLQs, `audit_log`, and `red_*` stores. |
 | `tenant_id`       | Tenant owning the collection, or `NULL` for global/unscoped collections. |

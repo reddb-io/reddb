@@ -15,7 +15,7 @@ use reddb::storage::query::unified::UnifiedRecord;
 use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
 
-const COLLECTION_COLUMNS: [&str; 8] = [
+const COLLECTION_COLUMNS: [&str; 9] = [
     "name",
     "model",
     "schema_mode",
@@ -23,6 +23,7 @@ const COLLECTION_COLUMNS: [&str; 8] = [
     "segments",
     "indices",
     "in_memory_bytes",
+    "internal",
     "tenant_id",
 ];
 
@@ -70,6 +71,13 @@ fn text_field<'a>(record: &'a UnifiedRecord, field: &str) -> &'a str {
     }
 }
 
+fn bool_field(record: &UnifiedRecord, field: &str) -> bool {
+    match record.get(field) {
+        Some(Value::Boolean(value)) => *value,
+        other => panic!("expected {field} bool field, got {other:?} in {record:?}"),
+    }
+}
+
 fn names(records: &[UnifiedRecord]) -> Vec<String> {
     let mut out: Vec<String> = records
         .iter()
@@ -114,7 +122,7 @@ fn select_star_from_red_collections_returns_collection_inventory() {
         matches!(acme.get("schema_mode"), Some(Value::Text(_))),
         "schema_mode should be present: {acme:?}"
     );
-    for numeric in ["entities", "segments", "indices", "in_memory_bytes"] {
+    for numeric in ["entities", "segments", "in_memory_bytes"] {
         assert!(
             matches!(
                 acme.get(numeric),
@@ -123,6 +131,11 @@ fn select_star_from_red_collections_returns_collection_inventory() {
             "{numeric} should be an integer metric: {acme:?}"
         );
     }
+    assert!(
+        matches!(acme.get("indices"), Some(Value::Array(_))),
+        "indices should be an array metric: {acme:?}"
+    );
+    assert_eq!(bool_field(acme, "internal"), false);
 }
 
 #[test]
@@ -131,8 +144,8 @@ fn show_collections_reaches_same_result_as_selecting_red_collections() {
     seed_collection_inventory(&rt);
 
     let via_select = rt
-        .execute_query("SELECT * FROM red.collections")
-        .expect("SELECT * FROM red.collections should execute");
+        .execute_query("SELECT * FROM red.collections WHERE internal = false")
+        .expect("filtered SELECT * FROM red.collections should execute");
     let via_show = rt
         .execute_query("SHOW COLLECTIONS")
         .expect("SHOW COLLECTIONS should execute");
@@ -142,6 +155,44 @@ fn show_collections_reaches_same_result_as_selecting_red_collections() {
     assert_eq!(
         names(&via_show.result.records),
         names(&via_select.result.records)
+    );
+}
+
+#[test]
+fn dlq_is_internal_and_show_collections_hides_it_by_default() {
+    let rt = open_runtime();
+    exec(&rt, "CREATE QUEUE foo WITH DLQ failed_foo");
+
+    let catalog = rt
+        .execute_query("SELECT name, internal FROM red.collections WHERE name = 'failed_foo'")
+        .expect("red.collections should include DLQ metadata");
+    assert_eq!(catalog.result.records.len(), 1);
+    assert_eq!(bool_field(&catalog.result.records[0], "internal"), true);
+
+    let shown = rt
+        .execute_query("SHOW COLLECTIONS")
+        .expect("SHOW COLLECTIONS should execute");
+    let shown_names = names(&shown.result.records);
+    assert!(shown_names.iter().any(|name| name == "foo"));
+    assert!(
+        !shown_names.iter().any(|name| name == "failed_foo"),
+        "default SHOW COLLECTIONS should hide DLQs: {shown_names:?}"
+    );
+}
+
+#[test]
+fn show_collections_including_internal_returns_dlq() {
+    let rt = open_runtime();
+    exec(&rt, "CREATE QUEUE foo WITH DLQ failed_foo");
+
+    let shown = rt
+        .execute_query("SHOW COLLECTIONS INCLUDING INTERNAL")
+        .expect("SHOW COLLECTIONS INCLUDING INTERNAL should execute");
+    let shown_names = names(&shown.result.records);
+    assert!(shown_names.iter().any(|name| name == "foo"));
+    assert!(
+        shown_names.iter().any(|name| name == "failed_foo"),
+        "INCLUDING INTERNAL should reveal DLQs: {shown_names:?}"
     );
 }
 
