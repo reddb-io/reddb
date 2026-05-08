@@ -1202,6 +1202,166 @@ fn test_parse_insert_with_secret_literal_constructor() {
 }
 
 #[test]
+fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
+    use crate::storage::query::ast::{Expr, ReturningItem};
+    use crate::storage::schema::Value;
+
+    let query = parse(
+        "INSERT INTO docs (id, body) VALUES (1, 'hello') WITH AUTO EMBED (body) USING ollama MODEL 'nomic-embed-text'",
+    )
+    .unwrap();
+    let QueryExpr::Insert(insert) = query else {
+        panic!("Expected InsertQuery");
+    };
+    let auto_embed = insert.auto_embed.expect("auto embed config");
+    assert_eq!(auto_embed.fields, vec!["body"]);
+    assert_eq!(auto_embed.provider, "ollama");
+    assert_eq!(auto_embed.model.as_deref(), Some("nomic-embed-text"));
+
+    let query = parse("INSERT INTO docs (body) VALUES ('hello') WITH AUTO EMBED (body)").unwrap();
+    let QueryExpr::Insert(insert) = query else {
+        panic!("Expected InsertQuery");
+    };
+    let auto_embed = insert.auto_embed.expect("auto embed config");
+    assert_eq!(auto_embed.provider, "openai");
+    assert_eq!(auto_embed.model, None);
+
+    let query = parse(
+        "INSERT INTO payloads (tags, body) VALUES (['a', true, null], {'kind' = 'event', count: 2})",
+    )
+    .unwrap();
+    let QueryExpr::Insert(insert) = query else {
+        panic!("Expected InsertQuery");
+    };
+    assert!(matches!(insert.values[0][0], Value::Json(_)));
+    assert!(matches!(insert.values[0][1], Value::Json(_)));
+
+    let query =
+        parse("INSERT INTO cache (key) VALUES ('k') WITH EXPIRES AT '1735689600000'").unwrap();
+    let QueryExpr::Insert(insert) = query else {
+        panic!("Expected InsertQuery");
+    };
+    assert_eq!(insert.expires_at_ms, Some(1_735_689_600_000));
+
+    let query = parse(
+        "INSERT INTO events (name) VALUES ('login') WITH TTL 42 WITH METADATA (empty = [], mixed = ['a', true, null, 3, 1.5], nested = {kind: 'event', attrs: {ok: true}}, raw = {\"x\":1})",
+    )
+    .unwrap();
+    let QueryExpr::Insert(insert) = query else {
+        panic!("Expected InsertQuery");
+    };
+    assert_eq!(insert.ttl_ms, Some(42_000));
+    assert_eq!(insert.with_metadata.len(), 4);
+    assert!(insert
+        .with_metadata
+        .iter()
+        .all(|(_, value)| matches!(value, Value::Json(_))));
+
+    let query =
+        parse("UPDATE counters SET value = value + 1 WHERE id = 7 LIMIT 50 RETURNING id").unwrap();
+    let QueryExpr::Update(update) = query else {
+        panic!("Expected UpdateQuery");
+    };
+    assert_eq!(update.limit, Some(50));
+    assert_eq!(update.assignment_exprs.len(), 1);
+    assert!(update.assignments.is_empty());
+    assert!(matches!(
+        update.returning.as_deref(),
+        Some([ReturningItem::Column(col)]) if col == "id"
+    ));
+    assert!(matches!(
+        update.assignment_exprs[0].1,
+        Expr::BinaryOp { .. } | Expr::FunctionCall { .. }
+    ));
+
+    let query =
+        parse("ASK 'why did login fail?' USING openai MODEL 'gpt-4.1-mini' DEPTH 3 LIMIT 25 COLLECTION events")
+            .unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::Ask(ask)
+            if ask.question == "why did login fail?"
+                && ask.provider.as_deref() == Some("openai")
+                && ask.model.as_deref() == Some("gpt-4.1-mini")
+                && ask.depth == Some(3)
+                && ask.limit == Some(25)
+                && ask.collection.as_deref() == Some("events")
+    ));
+
+    for sql in [
+        "INSERT INTO docs (body) VALUES ('x') WITH UNKNOWN",
+        "INSERT INTO docs (body) VALUES ('x') WITH TTL 1 parsec",
+        "INSERT INTO docs (body) VALUES ('x') WITH EXPIRES AT 'tomorrow'",
+        "INSERT INTO docs (body) VALUES ('x') WITH EXPIRES AT true",
+        "INSERT INTO docs (body) VALUES ('x') WITH METADATA (source)",
+        "INSERT INTO docs (body) VALUES ('x') WITH AUTO EMBED ()",
+        "INSERT INTO docs (body) VALUES ('x') WITH AUTO EMBED (body) USING",
+        "ASK",
+        "ASK 'q' MODEL gpt4",
+        "ASK 'q' DEPTH",
+        "ASK 'q' COLLECTION",
+    ] {
+        assert!(parse(sql).is_err(), "{sql}");
+    }
+}
+
+#[test]
+fn test_parse_dml_literal_value_array_and_object_branches() {
+    use crate::storage::schema::Value;
+
+    let mut parser = Parser::new("[1, 2.5]").unwrap();
+    let value = parser.parse_literal_value().unwrap();
+    assert!(matches!(value, Value::Vector(values) if values == vec![1.0, 2.5]));
+
+    let mut parser = Parser::new("[]").unwrap();
+    let value = parser.parse_literal_value().unwrap();
+    let Value::Json(bytes) = value else {
+        panic!("Expected Value::Json");
+    };
+    let parsed: crate::json::Value = crate::json::from_slice(&bytes).unwrap();
+    assert!(parsed.as_array().is_some_and(|items| items.is_empty()));
+
+    let mut parser = Parser::new("[PASSWORD('pw')]").unwrap();
+    let value = parser.parse_literal_value().unwrap();
+    let Value::Json(bytes) = value else {
+        panic!("Expected Value::Json");
+    };
+    let parsed: crate::json::Value = crate::json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        parsed.as_array().and_then(|items| items.first()),
+        Some(&crate::json::Value::Null)
+    );
+
+    let mut parser = Parser::new(
+        "{'quoted': 'text', ident = 1, type: true, nested: {ok: false}, raw: {\"x\":1}, secret: SECRET('s')}",
+    )
+    .unwrap();
+    let value = parser.parse_literal_value().unwrap();
+    let Value::Json(bytes) = value else {
+        panic!("Expected Value::Json");
+    };
+    let parsed: crate::json::Value = crate::json::from_slice(&bytes).unwrap();
+    assert_eq!(parsed.get("quoted").and_then(|v| v.as_str()), Some("text"));
+    assert_eq!(parsed.get("ident").and_then(|v| v.as_f64()), Some(1.0));
+    assert_eq!(parsed.get("type").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        parsed
+            .get("nested")
+            .and_then(|v| v.get("ok"))
+            .and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        parsed
+            .get("raw")
+            .and_then(|v| v.get("x"))
+            .and_then(|v| v.as_f64()),
+        Some(1.0)
+    );
+    assert_eq!(parsed.get("secret"), Some(&crate::json::Value::Null));
+}
+
+#[test]
 fn test_parse_update_with_where() {
     let query = parse("UPDATE hosts SET hostname = 'new-name' WHERE ip = '10.0.0.1'").unwrap();
     if let QueryExpr::Update(uq) = query {
@@ -1515,6 +1675,142 @@ fn test_parse_alter_table_rename_column() {
         }
     } else {
         panic!("Expected AlterTableQuery");
+    }
+}
+
+#[test]
+fn test_parse_ddl_table_options_types_and_alter_forms() {
+    use crate::storage::query::ast::{AlterOperation, ExplainFormat, PartitionKind};
+
+    let mut legacy_parser = Parser::new(
+        "CREATE TABLE legacy (id INT, body TEXT) WITH CONTEXT INDEX ON (body) WITH TIMESTAMPS = true WITH TTL 2 h",
+    )
+    .unwrap();
+    let legacy = legacy_parser.parse_create_table_query().unwrap();
+    let QueryExpr::CreateTable(table) = legacy else {
+        panic!("Expected CreateTableQuery");
+    };
+    assert_eq!(table.name, "legacy");
+    assert_eq!(table.context_index_fields, vec!["body"]);
+    assert!(table.context_index_enabled);
+    assert!(table.timestamps);
+    assert_eq!(table.default_ttl_ms, Some(7_200_000));
+
+    let mut legacy_parser = Parser::new("DROP TABLE IF EXISTS legacy").unwrap();
+    let legacy = legacy_parser.parse_drop_table_query().unwrap();
+    assert!(matches!(
+        legacy,
+        QueryExpr::DropTable(drop) if drop.name == "legacy" && drop.if_exists
+    ));
+
+    let query = parse(
+        "CREATE TABLE IF NOT EXISTS audit (\
+         id DECIMAL(10) PRIMARY KEY, \
+         tags ARRAY(TEXT), \
+         active BOOLEAN DEFAULT = true, \
+         score FLOAT DEFAULT = 1.5, \
+         deleted_at TEXT DEFAULT = null\
+         ) WITH (tenant_by = 'tenant_id', append_only = true, timestamps = true, context_index = false)",
+    )
+    .unwrap();
+    let QueryExpr::CreateTable(table) = query else {
+        panic!("Expected CreateTableQuery");
+    };
+    assert_eq!(table.name, "audit");
+    assert!(table.if_not_exists);
+    assert_eq!(table.tenant_by.as_deref(), Some("tenant_id"));
+    assert!(table.append_only);
+    assert!(table.timestamps);
+    assert!(!table.context_index_enabled);
+    assert_eq!(table.columns[0].decimal_precision, Some(10));
+    assert_eq!(table.columns[1].array_element.as_deref(), Some("TEXT"));
+    assert_eq!(table.columns[2].default.as_deref(), Some("true"));
+    assert_eq!(table.columns[3].default.as_deref(), Some("1.5"));
+    assert_eq!(table.columns[4].default.as_deref(), Some("null"));
+
+    let query =
+        parse("CREATE TABLE events (id INT) PARTITION BY HASH (id) APPEND ONLY TENANT BY (metadata.tenant)")
+            .unwrap();
+    let QueryExpr::CreateTable(table) = query else {
+        panic!("Expected CreateTableQuery");
+    };
+    assert_eq!(
+        table.partition_by.expect("partition").kind,
+        PartitionKind::Hash
+    );
+    assert!(table.append_only);
+    assert_eq!(table.tenant_by.as_deref(), Some("METADATA.tenant"));
+
+    let query =
+        parse("EXPLAIN ALTER FOR CREATE TABLE users (id INT, email TEXT NOT NULL) FORMAT JSON")
+            .unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ExplainAlter(explain) if matches!(explain.format, ExplainFormat::Json)
+            && explain.target.name == "users"
+    ));
+
+    let query = parse(
+        "ALTER TABLE users ADD nickname TEXT DEFAULT = 'n/a', DROP old_name, RENAME nickname TO display_name",
+    )
+    .unwrap();
+    let QueryExpr::AlterTable(alter) = query else {
+        panic!("Expected AlterTableQuery");
+    };
+    assert_eq!(alter.operations.len(), 3);
+    assert!(matches!(alter.operations[0], AlterOperation::AddColumn(_)));
+    assert!(matches!(alter.operations[1], AlterOperation::DropColumn(_)));
+    assert!(matches!(
+        alter.operations[2],
+        AlterOperation::RenameColumn { .. }
+    ));
+
+    let query = parse("ALTER TABLE users ENABLE TENANCY ON (metadata.tenant)").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::AlterTable(alter)
+            if matches!(&alter.operations[0], AlterOperation::EnableTenancy { column } if column == "METADATA.tenant")
+    ));
+
+    let query = parse("ALTER TABLE users DISABLE TENANCY").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::AlterTable(alter)
+            if matches!(alter.operations[0], AlterOperation::DisableTenancy)
+    ));
+
+    let query = parse("ALTER TABLE users SET APPEND_ONLY = false").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::AlterTable(alter)
+            if matches!(alter.operations[0], AlterOperation::SetAppendOnly(false))
+    ));
+
+    let query = parse("ALTER TABLE users SET VERSIONED = true").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::AlterTable(alter)
+            if matches!(alter.operations[0], AlterOperation::SetVersioned(true))
+    ));
+
+    for sql in [
+        "CREATE TABLE bad (id INT NOT UNIQUE)",
+        "CREATE TABLE bad (id INT DEFAULT = {})",
+        "CREATE TABLE bad (id INT) WITH (tenant_by = 42)",
+        "CREATE TABLE bad (id INT) WITH (append_only = maybe)",
+        "CREATE TABLE bad (id INT) WITH unknown = true",
+        "CREATE TABLE bad (id INT) WITH TTL 0.1 ms",
+        "CREATE TABLE bad (id INT) WITH TTL 1 parsec",
+        "CREATE TABLE bad (id INT) WITH TTL -1 s",
+        "CREATE TABLE bad (id INT) PARTITION BY RANDOM (id)",
+        "CREATE TABLE bad (id INT) APPEND SOMETIMES",
+        "CREATE TABLE bad (id INT) TENANT id",
+        "EXPLAIN ALTER FOR CREATE TABLE bad (id INT) FORMAT YAML",
+        "ALTER TABLE users ENABLE TENANCY id",
+        "ALTER TABLE users SET OTHER = true",
+        "ALTER TABLE users UNKNOWN action",
+    ] {
+        assert!(parse(sql).is_err(), "{sql}");
     }
 }
 
