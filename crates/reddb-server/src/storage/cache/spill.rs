@@ -288,6 +288,8 @@ pub enum SpillError {
     DirectoryCreation(io::Error),
     /// Invalid checksum on reload
     ChecksumMismatch,
+    /// Segment name contains path-traversal characters
+    InvalidName(String),
 }
 
 impl std::fmt::Display for SpillError {
@@ -299,8 +301,17 @@ impl std::fmt::Display for SpillError {
             Self::AlreadySpilled(s) => write!(f, "Segment already spilled: {}", s),
             Self::DirectoryCreation(e) => write!(f, "Failed to create spill dir: {}", e),
             Self::ChecksumMismatch => write!(f, "Checksum mismatch on reload"),
+            Self::InvalidName(s) => write!(f, "Invalid spill segment name: {}", s),
         }
     }
+}
+
+/// Reject names that could escape the spill directory when used as a filename component.
+fn sanitize_spill_name(name: &str) -> Result<(), SpillError> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(SpillError::InvalidName(name.to_string()));
+    }
+    Ok(())
 }
 
 impl std::error::Error for SpillError {}
@@ -503,9 +514,17 @@ impl SpillManager {
             return Err(SpillError::AlreadySpilled(name.to_string()));
         }
 
+        // Validate name before using it as a filename component
+        sanitize_spill_name(name)?;
+
         // Generate spill file path
         let filename = format!("{}-{}.spill", name, std::process::id());
         let path = self.config.spill_dir.join(&filename);
+
+        // Paranoia check: path must stay within spill dir
+        if !path.starts_with(&self.config.spill_dir) {
+            return Err(SpillError::InvalidName(name.to_string()));
+        }
 
         // Write data with checksum
         let file = File::create(&path)?;
@@ -513,10 +532,9 @@ impl SpillManager {
 
         // Header: magic(4) + version(1) + checksum(4) + size(8)
         writer.write_all(b"SPIL")?; // Magic
-        writer.write_all(&[1u8])?; // Version
+        writer.write_all(&[2u8])?; // Version 2 — crc32 checksum
 
-        // Calculate simple checksum
-        let checksum = data.iter().fold(0u32, |acc, &b| acc.wrapping_add(b as u32));
+        let checksum = crate::storage::engine::crc32::crc32(data);
         writer.write_all(&checksum.to_le_bytes())?;
         writer.write_all(&(data.len() as u64).to_le_bytes())?;
 
@@ -600,8 +618,12 @@ impl SpillManager {
         let mut data = vec![0u8; size];
         reader.read_exact(&mut data)?;
 
-        // Validate checksum
-        let actual_checksum = data.iter().fold(0u32, |acc, &b| acc.wrapping_add(b as u32));
+        // Validate checksum — v1 used wrapping-add fold, v2 uses crc32
+        let actual_checksum = match version[0] {
+            1 => data.iter().fold(0u32, |acc, &b| acc.wrapping_add(b as u32)),
+            2 => crate::storage::engine::crc32::crc32(&data),
+            _ => return Err(SpillError::ChecksumMismatch),
+        };
         if actual_checksum != expected_checksum {
             return Err(SpillError::ChecksumMismatch);
         }
@@ -941,5 +963,75 @@ mod tests {
 
         let util = manager.utilization();
         assert!((util - 0.5).abs() < 0.001);
+    }
+
+    // Data section starts at byte 17: 4 (magic) + 1 (version) + 4 (checksum) + 8 (size)
+    const HEADER_LEN: usize = 17;
+
+    #[test]
+    fn test_v2_round_trip() {
+        let manager = SpillManager::new(test_config());
+        manager.register_segment("rt_seg", 100);
+        let data: Vec<u8> = (0u8..=127).collect();
+        manager.spill("rt_seg", &data).unwrap();
+        let out = manager.reload("rt_seg").unwrap().unwrap();
+        assert_eq!(out, data);
+    }
+
+    #[test]
+    fn test_single_byte_mutation_detected() {
+        let manager = SpillManager::new(test_config());
+        manager.register_segment("mut_seg", 100);
+        let data = b"hello world mutation test data!!";
+        let path = manager.spill("mut_seg", data).unwrap();
+
+        // Flip a byte in the data section
+        let mut raw = std::fs::read(&path).unwrap();
+        raw[HEADER_LEN] ^= 0xFF;
+        std::fs::write(&path, &raw).unwrap();
+
+        let result = manager.reload("mut_seg");
+        assert!(
+            matches!(result, Err(SpillError::ChecksumMismatch)),
+            "expected ChecksumMismatch, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_byte_permutation_detected() {
+        // The old fold checksum is commutative — swapping two bytes leaves the
+        // sum unchanged. CRC-32 is not commutative, so v2 catches this.
+        let manager = SpillManager::new(test_config());
+        manager.register_segment("perm_seg", 100);
+        let data = b"abcdefghij"; // all distinct bytes
+        let path = manager.spill("perm_seg", data).unwrap();
+
+        // Swap two bytes in the data section
+        let mut raw = std::fs::read(&path).unwrap();
+        raw.swap(HEADER_LEN, HEADER_LEN + 1);
+        std::fs::write(&path, &raw).unwrap();
+
+        let result = manager.reload("perm_seg");
+        assert!(
+            matches!(result, Err(SpillError::ChecksumMismatch)),
+            "expected ChecksumMismatch, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_path_traversal_rejected() {
+        let manager = SpillManager::new(test_config());
+        for bad_name in &["../foo", "/etc/passwd", "a/b"] {
+            manager.register_segment(bad_name, 100);
+            let result = manager.spill(bad_name, b"data");
+            assert!(
+                matches!(result, Err(SpillError::InvalidName(_))),
+                "expected InvalidName for {:?}, got {:?}",
+                bad_name,
+                result
+            );
+        }
     }
 }
