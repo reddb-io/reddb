@@ -44,6 +44,7 @@ impl<'a> KvAtomicOps<'a> {
                 if_not_exists,
             } => self.set(raw_query, key, value.clone(), *ttl_ms, *if_not_exists),
             KvQuery::Get { key } => self.get(raw_query, key),
+            KvQuery::Watch { key } => self.watch_hint(raw_query, key),
             KvQuery::Delete { key } => self.delete(raw_query, key),
             KvQuery::Incr { key, by, ttl_ms } => self.incr_query(raw_query, key, *by, *ttl_ms),
         }
@@ -60,6 +61,8 @@ impl<'a> KvAtomicOps<'a> {
         self.runtime
             .check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let target = self.resolve_target(key, true);
+        let after_json = crate::presentation::entity_json::storage_value_to_json(&value);
+        let mut before_json = None;
 
         if let Some(existing) = self.find_live_entry(&target)? {
             if if_not_exists {
@@ -70,6 +73,9 @@ impl<'a> KvAtomicOps<'a> {
                     "runtime-kv",
                 ));
             }
+            before_json = Some(crate::presentation::entity_json::storage_value_to_json(
+                &existing.value,
+            ));
             self.delete_entity(&target.collection, existing.id)?;
         }
 
@@ -85,7 +91,7 @@ impl<'a> KvAtomicOps<'a> {
             ));
         }
 
-        self.runtime.create_kv(CreateKvInput {
+        let output = self.runtime.create_kv(CreateKvInput {
             collection: target.collection.clone(),
             key: target.key.clone(),
             value,
@@ -93,6 +99,18 @@ impl<'a> KvAtomicOps<'a> {
         })?;
         self.runtime.kv_clear_deleted(&target.collection, &target.key);
         self.runtime.note_table_write(&target.collection);
+        self.runtime.cdc_emit_kv(
+            if before_json.is_some() {
+                crate::replication::cdc::ChangeOperation::Update
+            } else {
+                crate::replication::cdc::ChangeOperation::Insert
+            },
+            &target.collection,
+            &target.key,
+            output.id.raw(),
+            before_json,
+            Some(after_json),
+        );
 
         Ok(RuntimeQueryResult::dml_result(
             raw_query.to_string(),
@@ -122,14 +140,43 @@ impl<'a> KvAtomicOps<'a> {
         })
     }
 
+    pub fn watch_hint(&self, raw_query: &str, key: &str) -> RedDBResult<RuntimeQueryResult> {
+        let target = self.resolve_target(key, false);
+        let endpoint = format!("/collections/{}/kv/{}/watch", target.collection, target.key);
+        let mut result =
+            UnifiedResult::with_columns(vec!["key".to_string(), "watch_url".to_string()]);
+        let mut record = UnifiedRecord::new();
+        record.set("key", Value::text(key.to_string()));
+        record.set("watch_url", Value::text(endpoint));
+        result.push(record);
+        Ok(RuntimeQueryResult {
+            query: raw_query.to_string(),
+            mode: QueryMode::Sql,
+            statement: "watch",
+            engine: "runtime-kv",
+            affected_rows: 0,
+            statement_type: "select",
+            result,
+        })
+    }
+
     pub fn delete(&self, raw_query: &str, key: &str) -> RedDBResult<RuntimeQueryResult> {
         self.runtime
             .check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let target = self.resolve_target(key, false);
         let affected = if let Some(entry) = self.find_live_entry(&target)? {
+            let before_json = crate::presentation::entity_json::storage_value_to_json(&entry.value);
             self.delete_entity(&target.collection, entry.id)?;
             self.runtime.kv_mark_deleted(&target.collection, &target.key);
             self.runtime.note_table_write(&target.collection);
+            self.runtime.cdc_emit_kv(
+                crate::replication::cdc::ChangeOperation::Delete,
+                &target.collection,
+                &target.key,
+                entry.id.raw(),
+                Some(before_json),
+                None,
+            );
             1
         } else {
             0
@@ -165,10 +212,22 @@ impl<'a> KvAtomicOps<'a> {
                     .checked_add(by)
                     .ok_or_else(|| RedDBError::Query("INCR/DECR counter overflow".to_string()))?;
                 self.update_counter_value(&target, entry.id, next, ttl_ms)?;
+                self.runtime.cdc_emit_kv(
+                    crate::replication::cdc::ChangeOperation::Update,
+                    &target.collection,
+                    &target.key,
+                    entry.id.raw(),
+                    Some(crate::presentation::entity_json::storage_value_to_json(
+                        &Value::Integer(current),
+                    )),
+                    Some(crate::presentation::entity_json::storage_value_to_json(
+                        &Value::Integer(next),
+                    )),
+                );
                 Ok(next)
             }
             None => {
-                self.runtime.create_kv(CreateKvInput {
+                let output = self.runtime.create_kv(CreateKvInput {
                     collection: collection.to_string(),
                     key: key.to_string(),
                     value: Value::Integer(by),
@@ -176,6 +235,16 @@ impl<'a> KvAtomicOps<'a> {
                 })?;
                 self.runtime.kv_clear_deleted(collection, key);
                 self.runtime.note_table_write(collection);
+                self.runtime.cdc_emit_kv(
+                    crate::replication::cdc::ChangeOperation::Insert,
+                    collection,
+                    key,
+                    output.id.raw(),
+                    None,
+                    Some(crate::presentation::entity_json::storage_value_to_json(
+                        &Value::Integer(by),
+                    )),
+                );
                 Ok(by)
             }
         }

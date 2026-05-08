@@ -854,6 +854,7 @@ mod impl_vcs;
 mod index_store;
 mod join_filter;
 pub mod kv_atomic;
+pub mod kv_watch;
 pub mod lease_lifecycle;
 pub mod lease_loop;
 pub mod lease_timer_wheel;

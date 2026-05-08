@@ -1300,7 +1300,7 @@ impl RedDBServer {
     /// this listener given its `ServerSurface` (Public / AdminOnly /
     /// MetricsOnly). `/health/*` always passes so orchestrator
     /// probes work on every bind.
-    fn surface_allows(&self, path: &str) -> bool {
+    pub(crate) fn surface_allows(&self, path: &str) -> bool {
         match self.options.surface {
             crate::server::ServerSurface::Public => true,
             crate::server::ServerSurface::AdminOnly => {
@@ -1316,7 +1316,12 @@ impl RedDBServer {
         }
     }
 
-    fn is_authorized(&self, method: &str, path: &str, headers: &BTreeMap<String, String>) -> bool {
+    pub(crate) fn is_authorized(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &BTreeMap<String, String>,
+    ) -> bool {
         // PLAN.md Phase 1.2 — health probes are unauthenticated by
         // contract: orchestrator probes can't carry tokens and a 401
         // there would mark the pod unhealthy on the first scrape.

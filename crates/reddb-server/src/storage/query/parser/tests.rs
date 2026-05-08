@@ -1214,6 +1214,13 @@ fn test_parse_top_level_kv_put_get_delete() {
         panic!("Expected Kv Get");
     }
 
+    let query = parse("WATCH sessions.42").unwrap();
+    if let QueryExpr::Kv(crate::storage::query::ast::KvQuery::Watch { key }) = query {
+        assert_eq!(key, "sessions.42");
+    } else {
+        panic!("Expected Kv Watch");
+    }
+
     let query = parse("DELETE sessions.42").unwrap();
     if let QueryExpr::Kv(crate::storage::query::ast::KvQuery::Delete { key }) = query {
         assert_eq!(key, "sessions.42");

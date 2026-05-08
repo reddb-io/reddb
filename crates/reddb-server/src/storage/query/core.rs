@@ -1636,6 +1636,8 @@ pub enum KvQuery {
     },
     /// `GET key`
     Get { key: String },
+    /// `WATCH key`
+    Watch { key: String },
     /// `DELETE key`
     Delete { key: String },
     /// `INCR key [BY n] [EXPIRE duration]` / `DECR key [BY n] [EXPIRE duration]`

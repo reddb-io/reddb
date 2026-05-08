@@ -405,6 +405,13 @@ impl<'a> Parser<'a> {
         Ok(QueryExpr::Kv(KvQuery::Get { key }))
     }
 
+    /// Parse: WATCH key
+    pub fn parse_kv_watch_query(&mut self) -> Result<QueryExpr, ParseError> {
+        self.expect_ident_ci("WATCH")?;
+        let key = self.parse_kv_key()?;
+        Ok(QueryExpr::Kv(KvQuery::Watch { key }))
+    }
+
     /// Parse: DELETE key
     pub fn parse_kv_delete_query(&mut self) -> Result<QueryExpr, ParseError> {
         self.expect(Token::Delete)?;
