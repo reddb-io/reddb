@@ -282,13 +282,14 @@ mod backup_helpers_tests {
 
         // 1+2: put entries + drop the cache so L2 fsyncs.
         {
-            let cache = BlobCache::new(
+            let cache = BlobCache::open_with_l2(
                 BlobCacheConfig::default()
                     .with_l1_bytes_max(64 * 1024)
                     .with_shard_count(2)
                     .with_max_namespaces(8)
                     .with_l2_path(&l2_src),
-            );
+            )
+            .expect("open l2 src");
             cache
                 .put("ns-a", "k1", BlobCachePut::new(b"value-1".to_vec()))
                 .expect("put k1");
@@ -313,13 +314,14 @@ mod backup_helpers_tests {
         //    addressable. The synopsis rebuild fires automatically in
         //    BlobCache::new (per blob.rs::rebuild_l2_synopsis at
         //    blob.rs:1069-1085).
-        let restored_cache = BlobCache::new(
+        let restored_cache = BlobCache::open_with_l2(
             BlobCacheConfig::default()
                 .with_l1_bytes_max(64 * 1024)
                 .with_shard_count(2)
                 .with_max_namespaces(8)
                 .with_l2_path(&l2_dst),
-        );
+        )
+        .expect("open l2 dst");
         let hit_a = restored_cache.get("ns-a", "k1").expect("k1 survives restore");
         assert_eq!(hit_a.value(), b"value-1");
         let hit_b = restored_cache.get("ns-b", "k2").expect("k2 survives restore");
@@ -345,9 +347,10 @@ mod backup_helpers_tests {
         let l2_dst = dst_dir.join("blob-cache.rdb");
 
         {
-            let cache = BlobCache::new(
+            let cache = BlobCache::open_with_l2(
                 BlobCacheConfig::default().with_l2_path(&l2_src),
-            );
+            )
+            .expect("open l2 src");
             cache
                 .put("ns", "k", BlobCachePut::new(b"value".to_vec()))
                 .expect("put k");
@@ -355,9 +358,10 @@ mod backup_helpers_tests {
 
         // Note: NO archive step. The fresh L2 path stays empty, mirroring
         // the default backup posture (include_blob_cache=false).
-        let cold_cache = BlobCache::new(
+        let cold_cache = BlobCache::open_with_l2(
             BlobCacheConfig::default().with_l2_path(&l2_dst),
-        );
+        )
+        .expect("open l2 dst");
         assert!(
             cold_cache.get("ns", "k").is_none(),
             "restore without include_blob_cache must yield a cold cache"

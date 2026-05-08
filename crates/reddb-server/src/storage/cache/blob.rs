@@ -2094,7 +2094,21 @@ const _: fn() = || {
 };
 
 impl BlobCache {
+    /// Infallible constructor. Panics if `config.l2_path` is set and the L2
+    /// file cannot be opened — use [`BlobCache::open_with_l2`] instead for
+    /// configs that include an L2 path so boot errors are handled gracefully.
     pub fn new(config: BlobCacheConfig) -> Self {
+        Self::try_new(config).expect("open blob-cache L2")
+    }
+
+    /// Fallible constructor for configs that include an L2 path.
+    /// Returns `Err(CacheError::L2Io(...))` on invalid path, corrupt control
+    /// sidecar, or any other recoverable I/O failure — the process stays alive.
+    pub fn open_with_l2(config: BlobCacheConfig) -> Result<Self, CacheError> {
+        Self::try_new(config)
+    }
+
+    fn try_new(config: BlobCacheConfig) -> Result<Self, CacheError> {
         let config = BlobCacheConfig {
             shard_count: config.shard_count.max(1),
             ..config
@@ -2103,12 +2117,11 @@ impl BlobCache {
             .l2_path
             .clone()
             .map(|path| BlobCacheL2::open(path, config.l2_bytes_max))
-            .transpose()
-            .expect("open blob-cache L2");
+            .transpose()?;
         let shards = (0..config.shard_count)
             .map(|_| RwLock::new(Shard::new()))
             .collect();
-        Self {
+        Ok(Self {
             config,
             shards,
             namespaces: RwLock::new(HashSet::new()),
@@ -2119,7 +2132,7 @@ impl BlobCache {
             bytes_in_use: AtomicUsize::new(0),
             stats: AtomicStats::new(),
             promotion_pool: OnceLock::new(),
-        }
+        })
     }
 
     pub fn with_defaults() -> Self {
@@ -3052,13 +3065,14 @@ mod tests {
     }
 
     fn l2_cache(path: &Path) -> BlobCache {
-        BlobCache::new(
+        BlobCache::open_with_l2(
             BlobCacheConfig::default()
                 .with_l1_bytes_max(128)
                 .with_shard_count(1)
                 .with_max_namespaces(4)
                 .with_l2_path(path),
         )
+        .expect("l2_cache test helper")
     }
 
     #[test]
@@ -3698,13 +3712,14 @@ mod tests {
     #[test]
     fn l2_rejects_put_when_hard_byte_cap_is_exceeded() {
         let path = l2_path("full");
-        let cache = BlobCache::new(
+        let cache = BlobCache::open_with_l2(
             BlobCacheConfig::default()
                 .with_l1_bytes_max(128)
                 .with_shard_count(1)
                 .with_l2_bytes_max(2)
                 .with_l2_path(&path),
-        );
+        )
+        .expect("open l2");
         let err = cache
             .put("n", "large", BlobCachePut::new(vec![1, 2, 3]))
             .expect_err("L2 cap rejects");
@@ -4695,7 +4710,7 @@ mod tests {
         // L1 is sized large enough to admit the blob (`validate_blob_size`
         // checks against `l1_bytes_max`), but every put uses
         // `L1Admission::Never` so the L2 path is what we exercise.
-        BlobCache::new(
+        BlobCache::open_with_l2(
             BlobCacheConfig::default()
                 .with_l1_bytes_max(64 * 1024)
                 .with_shard_count(1)
@@ -4703,6 +4718,7 @@ mod tests {
                 .with_l2_path(path)
                 .with_l2_compression(mode),
         )
+        .expect("l2_cache_with_compression test helper")
     }
 
     #[test]
@@ -4862,7 +4878,7 @@ mod tests {
         // compressed total. zstd typically shrinks Lorem to <30% so 25%
         // of `raw_total` is a comfortable headroom.
         let budget = raw_total / 4;
-        let cache = BlobCache::new(
+        let cache = BlobCache::open_with_l2(
             BlobCacheConfig::default()
                 .with_l1_bytes_max(64 * 1024)
                 .with_shard_count(1)
@@ -4870,7 +4886,8 @@ mod tests {
                 .with_l2_bytes_max(budget)
                 .with_l2_path(&path)
                 .with_l2_compression(L2Compression::On),
-        );
+        )
+        .expect("open l2");
 
         for i in 0..10 {
             cache
@@ -5197,5 +5214,52 @@ mod tests {
             calls, 0,
             "EffectiveExpiry::compute was invoked {calls} times despite extended=off()",
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // open_with_l2 error-path tests (#220)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn open_with_l2_returns_err_on_corrupt_control_sidecar() {
+        let path = l2_path("corrupt-ctl");
+        // Write garbage to the control sidecar so L2Control::read returns Err.
+        let ctl = path.with_extension("blob-cache.ctl");
+        std::fs::create_dir_all(path.parent().unwrap()).ok();
+        std::fs::write(&ctl, b"not-a-valid-control-file").unwrap();
+
+        let result = BlobCache::open_with_l2(
+            BlobCacheConfig::default().with_l2_path(&path),
+        );
+        match &result {
+            Err(CacheError::L2Io(_)) => {}
+            Err(other) => panic!("expected L2Io error, got: {other:?}"),
+            Ok(_) => panic!("expected L2Io error, got Ok(BlobCache)"),
+        }
+        // Process is still alive — test reaches here.
+        let _ = std::fs::remove_file(&ctl);
+    }
+
+    #[test]
+    fn open_with_l2_returns_err_on_readonly_path() {
+        // Create the pager file's parent as a file (so opening the pager path
+        // as a file underneath it fails with an I/O error).
+        let path = l2_path("readonly");
+        // Write a regular file at the path so Pager::open gets an I/O error
+        // when it tries to create/open the pager file (or the control sidecar
+        // can't be created because the path itself is a directory with no write
+        // permission — use a read-only directory instead).
+        std::fs::create_dir_all(path.parent().unwrap()).ok();
+        // Create the pager path as a directory so opening it as a file fails.
+        std::fs::create_dir_all(&path).unwrap();
+
+        let result = BlobCache::open_with_l2(
+            BlobCacheConfig::default().with_l2_path(&path),
+        );
+        assert!(
+            result.is_err(),
+            "expected Err when l2_path is a directory, got Ok",
+        );
+        let _ = std::fs::remove_dir_all(&path);
     }
 }
