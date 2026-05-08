@@ -1709,6 +1709,38 @@ fn test_parse_show_stats_name_desugars_with_collection_filter() {
 }
 
 #[test]
+fn test_parse_show_sample_desugars_to_limited_select() {
+    let query = parse("SHOW SAMPLE users").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "users");
+        assert!(tq.columns.is_empty());
+        assert!(tq.select_items.is_empty());
+        assert_eq!(tq.limit, Some(10));
+        assert!(tq.filter.is_none());
+        assert!(tq.order_by.is_empty());
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
+fn test_parse_show_sample_accepts_explicit_limit() {
+    let query = parse("SHOW SAMPLE users LIMIT 5").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "users");
+        assert_eq!(tq.limit, Some(5));
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
+fn test_parse_show_sample_rejects_where_and_order_by() {
+    assert!(parse("SHOW SAMPLE users WHERE active = true").is_err());
+    assert!(parse("SHOW SAMPLE users ORDER BY id").is_err());
+}
+
+#[test]
 fn test_parse_dollar_secret_reference_projection() {
     let query = parse("SELECT $secret.mycompany.stripe.key AS secret_value FROM tokens").unwrap();
     if let QueryExpr::Table(tq) = query {
