@@ -1,0 +1,4 @@
+input = "SHOW SAMPLE users LIMIT 5"
+expected_kind = "Table"
+source = "crates/reddb-server/src/storage/query/parser/tests.rs:1556"
+kind = "positive"

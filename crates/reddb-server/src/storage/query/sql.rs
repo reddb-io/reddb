@@ -1567,6 +1567,14 @@ impl<'a> Parser<'a> {
                         });
                     }
                     Ok(SqlCommand::Select(query))
+                } else if self.consume_ident_ci("SAMPLE")? {
+                    let mut query = TableQuery::new(&self.expect_ident()?);
+                    query.limit = if self.consume(&Token::Limit)? {
+                        Some(self.parse_integer()? as u64)
+                    } else {
+                        Some(10)
+                    };
+                    Ok(SqlCommand::Select(query))
                 } else if self.consume_ident_ci("SECRET")? || self.consume_ident_ci("SECRETS")? {
                     let prefix = if !self.check(&Token::Eof) {
                         Some(self.parse_dotted_admin_path(true)?)
@@ -1594,6 +1602,7 @@ impl<'a> Parser<'a> {
                             "KV",
                             "SCHEMA",
                             "INDICES",
+                            "SAMPLE",
                             "POLICIES",
                             "STATS",
                             "TENANT",

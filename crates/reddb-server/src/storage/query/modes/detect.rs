@@ -100,6 +100,7 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("set tenant")
         || lower.starts_with("show config")
         || lower.starts_with("show collections")
+        || lower.starts_with("show sample ")
         || lower.starts_with("show secret")
         || lower.starts_with("show tenant")
         || lower.starts_with("show policies")
@@ -240,6 +241,7 @@ mod tests {
         );
         assert_eq!(detect_mode("SHOW SECRET red.secret"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW SECRETS"), QueryMode::Sql);
+        assert_eq!(detect_mode("SHOW SAMPLE users"), QueryMode::Sql);
     }
 
     #[test]
