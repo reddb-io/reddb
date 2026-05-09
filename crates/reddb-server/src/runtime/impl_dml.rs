@@ -2495,8 +2495,14 @@ mod tests {
             .get("lsn")
             .and_then(crate::json::Value::as_u64)
             .is_some());
-        assert!(event.get("tenant").is_some_and(crate::json::Value::is_null));
-        assert!(event.get("before").is_some_and(crate::json::Value::is_null));
+        assert!(matches!(
+            event.get("tenant"),
+            Some(crate::json::Value::Null)
+        ));
+        assert!(matches!(
+            event.get("before"),
+            Some(crate::json::Value::Null)
+        ));
         let after = event
             .get("after")
             .and_then(crate::json::Value::as_object)

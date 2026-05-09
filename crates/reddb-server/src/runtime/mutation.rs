@@ -474,16 +474,26 @@ fn insert_event_payload(
     redact_fields: &[String],
 ) -> RedDBResult<Vec<u8>> {
     let mut object = JsonMap::new();
+    let subject_id = after
+        .get("id")
+        .cloned()
+        .unwrap_or(JsonValue::Number(id as f64));
+    let subject_id_for_hash = json_id_for_hash(&subject_id);
     object.insert(
         "event_id".to_string(),
-        JsonValue::String(deterministic_event_id(collection, id, lsn, "insert")),
+        JsonValue::String(deterministic_event_id(
+            collection,
+            &subject_id_for_hash,
+            lsn,
+            "insert",
+        )),
     );
     object.insert("op".to_string(), JsonValue::String("insert".to_string()));
     object.insert(
         "collection".to_string(),
         JsonValue::String(collection.to_string()),
     );
-    object.insert("id".to_string(), JsonValue::Number(id as f64));
+    object.insert("id".to_string(), subject_id);
     object.insert(
         "ts".to_string(),
         JsonValue::Number(current_unix_ms() as f64),
@@ -504,14 +514,27 @@ fn insert_event_payload(
         .map_err(|err| RedDBError::Internal(format!("encode insert event payload: {err}")))
 }
 
-fn deterministic_event_id(collection: &str, id: u64, lsn: u64, op: &str) -> String {
+fn deterministic_event_id(collection: &str, id: &str, lsn: u64, op: &str) -> String {
     let mut hasher = crate::crypto::sha256::Sha256::new();
     hasher.update(collection.as_bytes());
     hasher.update(&[0]);
-    hasher.update(&id.to_le_bytes());
+    hasher.update(id.as_bytes());
+    hasher.update(&[0]);
     hasher.update(&lsn.to_le_bytes());
     hasher.update(op.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+fn json_id_for_hash(value: &JsonValue) -> String {
+    match value {
+        JsonValue::String(value) => value.clone(),
+        JsonValue::Number(value) => value.to_string(),
+        JsonValue::Bool(value) => value.to_string(),
+        JsonValue::Null => "null".to_string(),
+        JsonValue::Array(_) | JsonValue::Object(_) => {
+            crate::json::to_string(value).unwrap_or_else(|_| "structured".to_string())
+        }
+    }
 }
 
 fn table_row_after_json(entity: &UnifiedEntity) -> JsonValue {
