@@ -2638,7 +2638,7 @@ impl RedDBRuntime {
         collection: &str,
         entity_id: u64,
         entity_kind: &str,
-    ) {
+    ) -> u64 {
         let lsn = self
             .inner
             .cdc
@@ -2673,6 +2673,7 @@ impl RedDBRuntime {
                 let _ = spool.append(record.lsn, &encoded);
             }
         }
+        lsn
     }
 
     pub(crate) fn cdc_emit_insert_batch_no_cache_invalidate(
@@ -2680,34 +2681,35 @@ impl RedDBRuntime {
         collection: &str,
         ids: &[EntityId],
         entity_kind: &str,
-    ) {
+    ) -> Vec<u64> {
         if ids.is_empty() {
-            return;
+            return Vec::new();
         }
 
         // Without logical replication, CDC only needs the in-memory event
         // ring. Reserve all LSNs and push the batch under one mutex instead
         // of taking the ring lock once per inserted row.
         if self.inner.db.replication.is_none() {
-            self.inner.cdc.emit_batch_same_collection(
+            return self.inner.cdc.emit_batch_same_collection(
                 crate::replication::cdc::ChangeOperation::Insert,
                 collection,
                 entity_kind,
                 ids.iter().map(|id| id.raw()),
             );
-            return;
         }
 
         // Replication needs one logical-WAL record per entity with the
         // serialized entity bytes, so keep the existing per-row path.
-        for &id in ids {
-            self.cdc_emit_no_cache_invalidate(
-                crate::replication::cdc::ChangeOperation::Insert,
-                collection,
-                id.raw(),
-                entity_kind,
-            );
-        }
+        ids.iter()
+            .map(|id| {
+                self.cdc_emit_no_cache_invalidate(
+                    crate::replication::cdc::ChangeOperation::Insert,
+                    collection,
+                    id.raw(),
+                    entity_kind,
+                )
+            })
+            .collect()
     }
 
     pub fn cdc_emit(
@@ -2716,7 +2718,7 @@ impl RedDBRuntime {
         collection: &str,
         entity_id: u64,
         entity_kind: &str,
-    ) {
+    ) -> u64 {
         let lsn = self
             .inner
             .cdc
@@ -2757,6 +2759,7 @@ impl RedDBRuntime {
                 let _ = spool.append(record.lsn, &encoded);
             }
         }
+        lsn
     }
 
     pub(crate) fn cdc_emit_prebuilt(
@@ -3788,7 +3791,11 @@ impl RedDBRuntime {
         // RLS view of "this statement". `ai_scope()` is the canonical
         // builder.
         let scope = self.ai_scope();
-        let kind = match result.as_ref().map(|r| r.statement_type).unwrap_or("select") {
+        let kind = match result
+            .as_ref()
+            .map(|r| r.statement_type)
+            .unwrap_or("select")
+        {
             "select" => crate::telemetry::slow_query_logger::QueryKind::Select,
             "insert" => crate::telemetry::slow_query_logger::QueryKind::Insert,
             "update" => crate::telemetry::slow_query_logger::QueryKind::Update,
