@@ -6,6 +6,7 @@
 use crate::application::ports::RuntimeEntityPort;
 use crate::storage::unified::{Metadata, MetadataValue};
 
+use super::impl_core::{current_auth_identity, current_connection_id, current_tenant};
 use super::*;
 
 /// Default collection name for bare-key KV operations.
@@ -22,6 +23,16 @@ fn keyed_model_name(model: crate::catalog::CollectionModel) -> &'static str {
         crate::catalog::CollectionModel::Config => "config",
         _ => "collection",
     }
+}
+
+#[derive(Debug, Clone)]
+struct VaultEntry {
+    id: crate::storage::EntityId,
+    value: crate::storage::schema::Value,
+    metadata: Metadata,
+    created_at: u64,
+    updated_at: u64,
+    sequence_id: u64,
 }
 
 /// Atomic KV operations interface — the seam that transports and drivers depend on.
@@ -295,6 +306,37 @@ impl<'a> KvAtomicOps<'a> {
         Ok(None)
     }
 
+    fn get_vault_entry(&self, collection: &str, key: &str) -> RedDBResult<Option<VaultEntry>> {
+        self.ensure_declared_model(crate::catalog::CollectionModel::Vault, collection)?;
+        let store = self.runtime.inner.db.store();
+        let Some(manager) = store.get_collection(collection) else {
+            return Ok(None);
+        };
+        let entities = manager.query_all(|_| true);
+        for entity in entities {
+            if let crate::storage::EntityData::Row(ref row) = entity.data {
+                if let Some(crate::storage::schema::Value::Text(ref k)) = row.get_field("key") {
+                    if &**k == key {
+                        let value = row
+                            .get_field("value")
+                            .cloned()
+                            .unwrap_or(crate::storage::schema::Value::Null);
+                        let metadata = manager.get_metadata(entity.id).unwrap_or_default();
+                        return Ok(Some(VaultEntry {
+                            id: entity.id,
+                            value,
+                            metadata,
+                            created_at: entity.created_at,
+                            updated_at: entity.updated_at,
+                            sequence_id: entity.sequence_id,
+                        }));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
     fn ensure_declared_model(
         &self,
         model: crate::catalog::CollectionModel,
@@ -357,6 +399,159 @@ impl RedDBRuntime {
         auth_store.vault_secret_key().ok_or_else(|| {
             RedDBError::Query("vault sealed_unavailable: cluster vault key is missing".to_string())
         })
+    }
+
+    fn unseal_vault_value(
+        &self,
+        collection: &str,
+        sealed: &crate::storage::schema::Value,
+    ) -> RedDBResult<crate::storage::schema::Value> {
+        let crate::storage::schema::Value::Secret(payload) = sealed else {
+            return Err(RedDBError::Query(
+                "vault unseal failed: stored value is not sealed".to_string(),
+            ));
+        };
+        if payload.len() < 12 {
+            return Err(RedDBError::Query(
+                "vault unseal failed: sealed payload is truncated".to_string(),
+            ));
+        }
+        let key = self.vault_encryption_key(collection)?;
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(&payload[..12]);
+        let aad = format!("reddb.vault.{collection}");
+        let plaintext = crate::crypto::aes_gcm::aes256_gcm_decrypt(
+            &key,
+            &nonce,
+            aad.as_bytes(),
+            &payload[12..],
+        )
+        .map_err(|_| RedDBError::Query("vault unseal failed: decryption failed".to_string()))?;
+        let (value, consumed) =
+            crate::storage::schema::Value::from_bytes(&plaintext).map_err(|err| {
+                RedDBError::Query(format!("vault unseal failed: bad plaintext value: {err}"))
+            })?;
+        if consumed != plaintext.len() {
+            return Err(RedDBError::Query(
+                "vault unseal failed: trailing plaintext bytes".to_string(),
+            ));
+        }
+        Ok(value)
+    }
+
+    fn vault_target_resource(collection: &str, key: &str) -> String {
+        format!("{collection}.{key}")
+    }
+
+    fn current_vault_actor() -> String {
+        current_auth_identity()
+            .map(|(principal, _)| principal)
+            .unwrap_or_else(|| "anonymous".to_string())
+    }
+
+    fn vault_request_id() -> String {
+        let conn_id = current_connection_id();
+        if conn_id == 0 {
+            "embedded".to_string()
+        } else {
+            format!("conn-{conn_id}")
+        }
+    }
+
+    fn check_vault_capability(
+        &self,
+        action: &str,
+        collection: &str,
+        key: &str,
+    ) -> Result<(), String> {
+        let Some(auth_store) = self.inner.auth_store.read().clone() else {
+            return Ok(());
+        };
+        if !auth_store.iam_authorization_enabled() {
+            return Ok(());
+        }
+        let Some((principal, role)) = current_auth_identity() else {
+            return Err(
+                "IAM authorization is enabled; vault capability check requires an authenticated principal"
+                    .to_string(),
+            );
+        };
+        let tenant = current_tenant();
+        let principal_id = crate::auth::UserId::from_parts(tenant.as_deref(), &principal);
+        let mut resource = crate::auth::policies::ResourceRef::new(
+            "vault",
+            Self::vault_target_resource(collection, key),
+        );
+        if let Some(ref tenant) = tenant {
+            resource = resource.with_tenant(tenant.clone());
+        }
+        let ctx = crate::auth::policies::EvalContext {
+            principal_tenant: tenant.clone(),
+            current_tenant: tenant,
+            peer_ip: None,
+            mfa_present: false,
+            now_ms: crate::utils::now_unix_millis() as u128,
+            principal_is_admin_role: role == crate::auth::Role::Admin,
+        };
+        if auth_store.check_policy_authz(&principal_id, action, &resource, &ctx) {
+            Ok(())
+        } else {
+            Err(format!(
+                "principal=`{}` action=`{}` resource=`vault:{}` denied by IAM policy",
+                principal,
+                action,
+                Self::vault_target_resource(collection, key)
+            ))
+        }
+    }
+
+    fn audit_vault_unseal(
+        &self,
+        collection: &str,
+        key: &str,
+        outcome: crate::runtime::audit_log::Outcome,
+        reason: &str,
+        entry: Option<&VaultEntry>,
+    ) {
+        let actor = Self::current_vault_actor();
+        let request_id = Self::vault_request_id();
+        let mut builder = crate::runtime::audit_log::AuditEvent::builder("vault/unseal")
+            .principal(actor.clone())
+            .source(crate::runtime::audit_log::AuditAuthSource::Password)
+            .resource(format!(
+                "vault:{}",
+                Self::vault_target_resource(collection, key)
+            ))
+            .outcome(outcome)
+            .correlation_id(request_id.clone())
+            .fields([
+                crate::runtime::audit_log::AuditFieldEscaper::field("actor", actor),
+                crate::runtime::audit_log::AuditFieldEscaper::field("collection", collection),
+                crate::runtime::audit_log::AuditFieldEscaper::field("key", key),
+                crate::runtime::audit_log::AuditFieldEscaper::field(
+                    "target",
+                    Self::vault_target_resource(collection, key),
+                ),
+                crate::runtime::audit_log::AuditFieldEscaper::field("reason", reason),
+                crate::runtime::audit_log::AuditFieldEscaper::field("request_id", request_id),
+                crate::runtime::audit_log::AuditFieldEscaper::field(
+                    "connection_id",
+                    current_connection_id(),
+                ),
+            ]);
+        if let Some(tenant) = current_tenant() {
+            builder = builder.tenant(tenant);
+        }
+        if let Some(entry) = entry {
+            builder = builder.fields([
+                crate::runtime::audit_log::AuditFieldEscaper::field("entity_id", entry.id.raw()),
+                crate::runtime::audit_log::AuditFieldEscaper::field(
+                    "sequence_id",
+                    entry.sequence_id,
+                ),
+            ]);
+        }
+        self.audit_log().record_event(builder.build());
     }
 
     /// Dispatch a `KV PUT / GET / DELETE` command.
@@ -428,26 +623,12 @@ impl RedDBRuntime {
                 key,
             } => {
                 if *model == crate::catalog::CollectionModel::Vault {
-                    let present = ops.get(*model, collection, key)?.is_some();
-                    let status = if !self.vault_key_available(collection) {
-                        "sealed_unavailable"
-                    } else if present {
-                        "sealed"
-                    } else {
-                        "missing"
-                    };
-                    let mut result = UnifiedResult::with_columns(vec![
-                        "collection".into(),
-                        "key".into(),
-                        "value".into(),
-                        "status".into(),
-                    ]);
-                    let mut record = UnifiedRecord::new();
-                    record.set("collection", Value::text(collection.clone()));
-                    record.set("key", Value::text(key.clone()));
-                    record.set("value", Value::text(if present { "***" } else { "" }));
-                    record.set("status", Value::text(status));
-                    result.push(record);
+                    self.check_vault_capability("vault:read_metadata", collection, key)
+                        .map_err(RedDBError::Query)?;
+                    let entry = ops.get_vault_entry(collection, key)?;
+                    let key_available = self.vault_key_available(collection);
+                    let result =
+                        vault_metadata_result(collection, key, entry.as_ref(), key_available);
                     return Ok(RuntimeQueryResult {
                         query: raw_query.to_string(),
                         mode: crate::storage::query::modes::QueryMode::Sql,
@@ -484,6 +665,75 @@ impl RedDBRuntime {
                     affected_rows: 0,
                     statement_type: "select",
                 })
+            }
+
+            KvCommand::Unseal { collection, key } => {
+                let entry = ops.get_vault_entry(collection, key)?;
+                if let Err(reason) = self.check_vault_capability("vault:unseal", collection, key) {
+                    self.audit_vault_unseal(
+                        collection,
+                        key,
+                        crate::runtime::audit_log::Outcome::Denied,
+                        &reason,
+                        entry.as_ref(),
+                    );
+                    return Err(RedDBError::Query(reason));
+                }
+                let Some(entry) = entry else {
+                    let reason = "not_found";
+                    self.audit_vault_unseal(
+                        collection,
+                        key,
+                        crate::runtime::audit_log::Outcome::Denied,
+                        reason,
+                        None,
+                    );
+                    return Err(RedDBError::NotFound(format!(
+                        "vault secret '{}.{}' not found",
+                        collection, key
+                    )));
+                };
+                match self.unseal_vault_value(collection, &entry.value) {
+                    Ok(value) => {
+                        self.audit_vault_unseal(
+                            collection,
+                            key,
+                            crate::runtime::audit_log::Outcome::Success,
+                            "ok",
+                            Some(&entry),
+                        );
+                        let mut result = UnifiedResult::with_columns(vec![
+                            "collection".into(),
+                            "key".into(),
+                            "value".into(),
+                        ]);
+                        let mut record = UnifiedRecord::new();
+                        record.set("collection", Value::text(collection.clone()));
+                        record.set("key", Value::text(key.clone()));
+                        record.set("value", value);
+                        result.push(record);
+                        Ok(RuntimeQueryResult {
+                            query: raw_query.to_string(),
+                            mode: crate::storage::query::modes::QueryMode::Sql,
+                            statement: "vault_unseal",
+                            engine: "vault",
+                            result,
+                            affected_rows: 0,
+                            statement_type: "select",
+                        })
+                    }
+                    Err(err) => {
+                        let reason = err.to_string();
+                        self.audit_vault_unseal(
+                            collection,
+                            key,
+                            crate::runtime::audit_log::Outcome::Error,
+                            &reason,
+                            Some(&entry),
+                        );
+                        Err(err)
+                    }
+                }
             }
 
             KvCommand::Incr {
@@ -620,6 +870,82 @@ fn ttl_metadata(ttl_ms: Option<u64>) -> Option<Metadata> {
         .into_iter()
         .collect(),
     ))
+}
+
+fn vault_metadata_result(
+    collection: &str,
+    key: &str,
+    entry: Option<&VaultEntry>,
+    key_available: bool,
+) -> UnifiedResult {
+    let mut result = UnifiedResult::with_columns(vec![
+        "collection".into(),
+        "key".into(),
+        "version".into(),
+        "fingerprint".into(),
+        "tags".into(),
+        "created_at".into(),
+        "updated_at".into(),
+        "value".into(),
+        "status".into(),
+    ]);
+    let mut record = UnifiedRecord::new();
+    record.set("collection", Value::text(collection.to_string()));
+    record.set("key", Value::text(key.to_string()));
+    match entry {
+        Some(entry) => {
+            record.set("version", Value::Integer(entry.sequence_id as i64));
+            record.set("fingerprint", Value::text(vault_fingerprint(&entry.value)));
+            record.set("tags", vault_tags_value(&entry.metadata));
+            record.set("created_at", Value::TimestampMs(entry.created_at as i64));
+            record.set("updated_at", Value::TimestampMs(entry.updated_at as i64));
+            record.set("value", Value::text("***"));
+            record.set(
+                "status",
+                Value::text(if key_available {
+                    "sealed"
+                } else {
+                    "sealed_unavailable"
+                }),
+            );
+        }
+        None => {
+            record.set("version", Value::Null);
+            record.set("fingerprint", Value::Null);
+            record.set("tags", Value::Array(Vec::new()));
+            record.set("created_at", Value::Null);
+            record.set("updated_at", Value::Null);
+            record.set("value", Value::text(""));
+            record.set("status", Value::text("missing"));
+        }
+    }
+    result.push(record);
+    result
+}
+
+fn vault_fingerprint(value: &Value) -> String {
+    match value {
+        Value::Secret(payload) => crate::utils::to_hex(&crate::crypto::sha256::sha256(payload)),
+        other => crate::utils::to_hex(&crate::crypto::sha256::sha256(&other.to_bytes())),
+    }
+}
+
+fn vault_tags_value(metadata: &Metadata) -> Value {
+    match metadata.get("tags") {
+        Some(MetadataValue::Array(values)) => Value::Array(
+            values
+                .iter()
+                .filter_map(|value| match value {
+                    MetadataValue::String(tag) => Some(Value::text(tag.clone())),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        Some(MetadataValue::String(tag)) if !tag.is_empty() => {
+            Value::Array(vec![Value::text(tag.clone())])
+        }
+        _ => Value::Array(Vec::new()),
+    }
 }
 
 fn decode_vault_key(hex_key: &str) -> RedDBResult<[u8; 32]> {

@@ -702,6 +702,15 @@ impl<'a> Parser<'a> {
                     )),
                 }
             }
+            Token::Ident(name) if name.eq_ignore_ascii_case("UNSEAL") => {
+                match self.parse_unseal_vault_command()? {
+                    QueryExpr::KvCommand(command) => Ok(FrontendStatement::KvCommand(command)),
+                    other => Err(ParseError::new(
+                        format!("internal: UNSEAL VAULT produced unexpected query kind {other:?}"),
+                        self.position(),
+                    )),
+                }
+            }
             Token::Queue => match self.parse_queue_command()? {
                 QueryExpr::QueueCommand(command) => Ok(FrontendStatement::QueueCommand(command)),
                 other => Err(ParseError::new(

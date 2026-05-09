@@ -5493,3 +5493,24 @@ fn test_parse_vault_put_uses_vault_model() {
         panic!("expected Vault KvCommand::Put");
     }
 }
+
+#[test]
+fn test_parse_unseal_vault_command() {
+    let q = parse("UNSEAL VAULT secrets.api_key").unwrap();
+    if let QueryExpr::KvCommand(KvCommand::Unseal { collection, key }) = q {
+        assert_eq!(collection, "secrets");
+        assert_eq!(key, "api_key");
+    } else {
+        panic!("expected Vault KvCommand::Unseal");
+    }
+}
+
+#[test]
+fn test_parse_vault_unseal_command() {
+    let q = parse("VAULT UNSEAL secrets.api_key").unwrap();
+    assert!(matches!(
+        q,
+        QueryExpr::KvCommand(KvCommand::Unseal { collection, key })
+            if collection == "secrets" && key == "api_key"
+    ));
+}

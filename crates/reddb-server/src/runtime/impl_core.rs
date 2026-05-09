@@ -895,6 +895,7 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
             match cmd {
                 KvCommand::Put { collection, .. }
                 | KvCommand::Get { collection, .. }
+                | KvCommand::Unseal { collection, .. }
                 | KvCommand::Delete { collection, .. }
                 | KvCommand::Incr { collection, .. }
                 | KvCommand::Cas { collection, .. } => cache_scope_insert(scopes, collection),
@@ -5458,6 +5459,9 @@ impl RedDBRuntime {
                     | KvCommand::Delete {
                         collection, model, ..
                     } => (collection.as_str(), *model),
+                    KvCommand::Unseal { collection, .. } => {
+                        (collection.as_str(), CollectionModel::Vault)
+                    }
                 };
                 Some((collection, model))
             }

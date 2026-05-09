@@ -62,6 +62,18 @@ impl<'a> Parser<'a> {
                     key,
                 }))
             }
+            Token::Ident(ref name) if name.eq_ignore_ascii_case("UNSEAL") => {
+                self.advance()?;
+                if model != CollectionModel::Vault {
+                    return Err(ParseError::expected(
+                        vec!["PUT", "GET", "DELETE", "INCR", "DECR", "CAS"],
+                        self.peek(),
+                        self.position(),
+                    ));
+                }
+                let (collection, key) = self.parse_kv_key()?;
+                Ok(QueryExpr::KvCommand(KvCommand::Unseal { collection, key }))
+            }
             Token::Delete => {
                 self.advance()?;
                 let (collection, key) = self.parse_kv_key()?;
@@ -93,11 +105,35 @@ impl<'a> Parser<'a> {
                 self.parse_kv_cas(model)
             }
             _ => Err(ParseError::expected(
-                vec!["PUT", "GET", "DELETE", "INCR", "DECR", "CAS"],
+                if model == CollectionModel::Vault {
+                    vec!["PUT", "GET", "UNSEAL", "DELETE", "INCR", "DECR", "CAS"]
+                } else {
+                    vec!["PUT", "GET", "DELETE", "INCR", "DECR", "CAS"]
+                },
                 self.peek(),
                 self.position(),
             )),
         }
+    }
+
+    /// Parse `UNSEAL VAULT <collection.key>`.
+    pub fn parse_unseal_vault_command(&mut self) -> Result<QueryExpr, ParseError> {
+        if !self.consume_ident_ci("UNSEAL")? {
+            return Err(ParseError::expected(
+                vec!["UNSEAL"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        if !self.consume_ident_ci("VAULT")? {
+            return Err(ParseError::expected(
+                vec!["VAULT"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        let (collection, key) = self.parse_kv_key()?;
+        Ok(QueryExpr::KvCommand(KvCommand::Unseal { collection, key }))
     }
 
     fn parse_kv_put(&mut self, model: CollectionModel) -> Result<QueryExpr, ParseError> {

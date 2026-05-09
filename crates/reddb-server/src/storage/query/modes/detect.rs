@@ -95,6 +95,7 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("queue ")
         || lower.starts_with("tree ")
         || lower.starts_with("vault ")
+        || lower.starts_with("unseal vault ")
         || lower.starts_with("search ")
         || lower.starts_with("ask ")
         || lower.starts_with("put config ")
