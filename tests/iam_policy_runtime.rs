@@ -327,6 +327,99 @@ fn update_set_column_policy_uses_tenant_context() {
 }
 
 #[test]
+fn vector_search_blocks_denied_content_projection() {
+    let (rt, store) = runtime_with_auth();
+    rt.execute_query(
+        "INSERT INTO embeddings VECTOR (dense, content) VALUES ([1.0, 0.0], 'secret')",
+    )
+    .unwrap();
+
+    attach_platform_policy(
+        &store,
+        r#"{
+            "id":"vector-content-deny",
+            "version":1,
+            "statements":[
+                {"effect":"allow","actions":["select"],"resources":["table:embeddings"]},
+                {"effect":"deny","actions":["select"],"resources":["column:embeddings.content"]}
+            ]
+        }"#,
+    );
+
+    let denied = as_user("alice", Role::Write, || {
+        rt.execute_query("VECTOR SEARCH embeddings SIMILAR TO [1.0, 0.0] LIMIT 1")
+    });
+    let err = denied.expect_err("content projection should be denied");
+    assert!(
+        err.to_string().contains("column:embeddings.content"),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn graph_match_blocks_denied_node_property_projection() {
+    let (rt, store) = runtime_with_auth();
+    rt.execute_query(
+        "INSERT INTO social NODE (label, name, secret) VALUES ('User', 'alice', 'pii')",
+    )
+    .unwrap();
+
+    attach_platform_policy(
+        &store,
+        r#"{
+            "id":"graph-secret-deny",
+            "version":1,
+            "statements":[
+                {"effect":"allow","actions":["select"],"resources":["table:graph"]},
+                {"effect":"deny","actions":["select"],"resources":["column:graph.secret"]}
+            ]
+        }"#,
+    );
+
+    let denied = as_user("alice", Role::Write, || {
+        rt.execute_query("MATCH (n:User) RETURN n.secret")
+    });
+    let err = denied.expect_err("graph property projection should be denied");
+    assert!(
+        err.to_string().contains("column:graph.secret"),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn timeseries_select_blocks_denied_tags_projection() {
+    let (rt, store) = runtime_with_auth();
+    rt.execute_query("CREATE TIMESERIES metrics RETENTION 7 d")
+        .unwrap();
+    rt.execute_query(
+        "INSERT INTO metrics (metric, value, tags, timestamp) VALUES \
+         ('cpu', 50.0, {tenant: 'acme', host: 'a1'}, 1704067200000000000)",
+    )
+    .unwrap();
+
+    attach_platform_policy(
+        &store,
+        r#"{
+            "id":"timeseries-tags-deny",
+            "version":1,
+            "statements":[
+                {"effect":"allow","actions":["select"],"resources":["table:metrics"]},
+                {"effect":"deny","actions":["select"],"resources":["column:metrics.tags"]}
+            ]
+        }"#,
+    );
+
+    let denied = as_user("alice", Role::Write, || {
+        rt.execute_query("SELECT tags FROM metrics")
+    });
+    let err = denied.expect_err("timeseries tags projection should be denied");
+    assert!(
+        err.to_string().contains("column:metrics.tags"),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
 fn group_policy_applies_through_alter_user_membership() {
     let (rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE orders (id INT)").unwrap();

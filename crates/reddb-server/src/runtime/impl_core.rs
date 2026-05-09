@@ -3788,7 +3788,11 @@ impl RedDBRuntime {
         // RLS view of "this statement". `ai_scope()` is the canonical
         // builder.
         let scope = self.ai_scope();
-        let kind = match result.as_ref().map(|r| r.statement_type).unwrap_or("select") {
+        let kind = match result
+            .as_ref()
+            .map(|r| r.statement_type)
+            .unwrap_or("select")
+        {
             "select" => crate::telemetry::slow_query_logger::QueryKind::Select,
             "insert" => crate::telemetry::slow_query_logger::QueryKind::Insert,
             "update" => crate::telemetry::slow_query_logger::QueryKind::Update,
@@ -6600,6 +6604,33 @@ impl RedDBRuntime {
         // Map QueryExpr → (Action, Resource).
         let (action, resource) = match expr {
             QueryExpr::Table(t) => (Action::Select, Resource::table_from_name(&t.table)),
+            QueryExpr::Graph(g) => {
+                if auth_store.iam_authorization_enabled() {
+                    self.check_graph_property_projection_privilege(
+                        &auth_store,
+                        &principal_id,
+                        role,
+                        tenant.as_deref(),
+                        g,
+                    )?;
+                    return Ok(());
+                }
+                return Ok(());
+            }
+            QueryExpr::Vector(v) => {
+                if auth_store.iam_authorization_enabled() {
+                    self.check_table_like_column_projection_privilege(
+                        &auth_store,
+                        &principal_id,
+                        role,
+                        tenant.as_deref(),
+                        &v.collection,
+                        &["content".to_string()],
+                    )?;
+                    return Ok(());
+                }
+                return Ok(());
+            }
             QueryExpr::Insert(i) => (Action::Insert, Resource::table_from_name(&i.table)),
             QueryExpr::Update(u) => (Action::Update, Resource::table_from_name(&u.table)),
             QueryExpr::Delete(d) => (Action::Delete, Resource::table_from_name(&d.table)),
@@ -6836,6 +6867,49 @@ impl RedDBRuntime {
             )),
             None => Ok(()),
         }
+    }
+
+    fn check_graph_property_projection_privilege(
+        &self,
+        auth_store: &Arc<crate::auth::store::AuthStore>,
+        principal: &crate::auth::UserId,
+        role: crate::auth::Role,
+        tenant: Option<&str>,
+        query: &crate::storage::query::ast::GraphQuery,
+    ) -> Result<(), String> {
+        let columns = explicit_graph_projection_properties(query);
+        if columns.is_empty() {
+            return Ok(());
+        }
+        self.check_table_like_column_projection_privilege(
+            auth_store, principal, role, tenant, "graph", &columns,
+        )
+    }
+
+    fn check_table_like_column_projection_privilege(
+        &self,
+        auth_store: &Arc<crate::auth::store::AuthStore>,
+        principal: &crate::auth::UserId,
+        role: crate::auth::Role,
+        tenant: Option<&str>,
+        table: &str,
+        columns: &[String],
+    ) -> Result<(), String> {
+        let iam_ctx = runtime_iam_context(role, tenant);
+        let request =
+            crate::auth::ColumnAccessRequest::select(table.to_string(), columns.iter().cloned());
+        let outcome = auth_store.check_column_projection_authz(principal, &request, &iam_ctx);
+        if outcome.allowed() {
+            return Ok(());
+        }
+        let denied = outcome
+            .first_denied_column()
+            .map(|d| d.resource.name.clone())
+            .unwrap_or_else(|| format!("{table}.<unknown>"));
+        Err(format!(
+            "principal=`{}` action=`select` resource=`column:{}` denied by IAM policy",
+            principal, denied
+        ))
     }
 
     fn check_policy_management_privilege(
@@ -7931,6 +8005,53 @@ fn runtime_iam_context(
         mfa_present: false,
         now_ms: crate::auth::now_ms(),
         principal_is_admin_role: role == crate::auth::Role::Admin,
+    }
+}
+
+fn explicit_table_projection_columns(
+    query: &crate::storage::query::ast::TableQuery,
+) -> Vec<String> {
+    use crate::storage::query::ast::{FieldRef, Projection};
+
+    let mut columns = Vec::new();
+    for projection in crate::storage::query::sql_lowering::effective_table_projections(query) {
+        match projection {
+            Projection::Column(column) | Projection::Alias(column, _) => {
+                push_unique(&mut columns, column)
+            }
+            Projection::Field(FieldRef::TableColumn { column, .. }, _) => {
+                push_unique(&mut columns, column)
+            }
+            // SELECT * and expression/function projections need the
+            // executor-wide column-policy context mapped in
+            // docs/security/select-relational-column-policy-audit-2026-05-08.md.
+            _ => {}
+        }
+    }
+    columns
+}
+
+fn explicit_graph_projection_properties(
+    query: &crate::storage::query::ast::GraphQuery,
+) -> Vec<String> {
+    use crate::storage::query::ast::{FieldRef, Projection};
+
+    let mut columns = Vec::new();
+    for projection in &query.return_ {
+        match projection {
+            Projection::Field(FieldRef::NodeProperty { property, .. }, _)
+            | Projection::Field(FieldRef::EdgeProperty { property, .. }, _) => {
+                push_unique(&mut columns, property.clone())
+            }
+            _ => {}
+        }
+    }
+    columns
+}
+
+fn push_unique(columns: &mut Vec<String>, column: String) {
+    if !columns.iter().any(|existing| existing == &column) {
+        columns.push(column);
     }
 }
 

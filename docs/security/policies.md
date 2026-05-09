@@ -86,10 +86,13 @@ curl -sX POST http://127.0.0.1:8080/admin/policies/simulate \
 ```
 
 Runtime note: table-level `select`/`insert`/`update`/`delete` policy checks
-are wired today. `column:*` is the canonical resource vocabulary for PII
-simulation and audit trails; use safe views, RLS, generated columns, or query
-boundary filtering until a specific SQL path has column-level enforcement
-wired. The model-by-model status lives in the
+are wired today. Explicit column/property projections now consult the shared
+`ColumnPolicyGate` for relational `SELECT`, `VECTOR SEARCH` result `content`,
+timeseries `SELECT` fields such as `tags`, and `MATCH ... RETURN n.property`
+through the global `column:graph.<property>` namespace. `SELECT *`, joins,
+graph collection-specific property resources, expression/function projections,
+and index-only executor threading are still tracked as remaining coverage gaps.
+The model-by-model status lives in the
 [Permissioning Handbook](permissions.md#current-enforcement-map).
 
 For larger examples across tables, documents, KV, graphs, vectors,
