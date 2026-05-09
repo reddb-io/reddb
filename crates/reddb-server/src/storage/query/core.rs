@@ -1676,6 +1676,9 @@ pub struct CreateTableQuery {
     /// parse time. Corresponds to `CREATE TABLE ... APPEND ONLY` or
     /// `WITH (append_only = true)`. Default false (mutable).
     pub append_only: bool,
+    /// Declarative event subscriptions for this table. #291 stores
+    /// metadata only; event emission is intentionally out of scope.
+    pub subscriptions: Vec<crate::catalog::SubscriptionDescriptor>,
 }
 
 /// `PARTITION BY RANGE|LIST|HASH (column)` clause.
@@ -1795,6 +1798,10 @@ pub enum AlterOperation {
     /// rows become part of the history accessible via AS OF as long
     /// as their xmin is still pinned by an existing commit.
     SetVersioned(bool),
+    /// `ENABLE EVENTS ...` — install or re-enable table event subscription metadata.
+    EnableEvents(crate::catalog::SubscriptionDescriptor),
+    /// `DISABLE EVENTS` — mark all table event subscriptions disabled.
+    DisableEvents,
 }
 
 // ============================================================================

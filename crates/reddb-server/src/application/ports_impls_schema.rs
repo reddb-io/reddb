@@ -69,6 +69,7 @@ impl RuntimeSchemaPort for RedDBRuntime {
             partition_by: partition_by.map(to_partition_spec),
             tenant_by,
             append_only,
+            subscriptions: Vec::new(),
         };
         RedDBRuntime::execute_create_table(self, &raw_query, &query)
     }
