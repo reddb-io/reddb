@@ -2450,6 +2450,10 @@ pub enum KvCommand {
         collection: String,
         key: String,
     },
+    Unseal {
+        collection: String,
+        key: String,
+    },
     Delete {
         model: CollectionModel,
         collection: String,
