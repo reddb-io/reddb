@@ -1,4 +1,4 @@
 input = "TRUNCATE TIMESERIES metrics"
 expected_kind = "Truncate"
-source = "issues/308-ddl-truncate-polymorphic-per-model-truncate-truncate-queue-alias.md:25"
+source = "docs/query/ddl.md:170"
 kind = "positive"

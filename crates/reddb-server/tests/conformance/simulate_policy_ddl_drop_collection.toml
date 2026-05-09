@@ -1,0 +1,4 @@
+input = "SIMULATE alice ACTION drop ON 'collection:users'"
+expected_kind = "SimulatePolicy"
+source = "docs/query/ddl.md:179"
+kind = "positive"

@@ -135,6 +135,15 @@ fn variant_name(q: &QueryExpr) -> &'static str {
         QueryExpr::DropServer(_) => "DropServer",
         QueryExpr::CreateForeignTable(_) => "CreateForeignTable",
         QueryExpr::DropForeignTable(_) => "DropForeignTable",
+        QueryExpr::Grant(_) => "Grant",
+        QueryExpr::Revoke(_) => "Revoke",
+        QueryExpr::CreateIamPolicy { .. } => "CreateIamPolicy",
+        QueryExpr::DropIamPolicy { .. } => "DropIamPolicy",
+        QueryExpr::AttachPolicy { .. } => "AttachPolicy",
+        QueryExpr::DetachPolicy { .. } => "DetachPolicy",
+        QueryExpr::ShowPolicies { .. } => "ShowPolicies",
+        QueryExpr::ShowEffectivePermissions { .. } => "ShowEffectivePermissions",
+        QueryExpr::SimulatePolicy { .. } => "SimulatePolicy",
         _ => "Unknown",
     }
 }

@@ -1,0 +1,4 @@
+input = "DROP QUEUE tasks"
+expected_kind = "DropQueue"
+source = "docs/query/ddl.md:161"
+kind = "positive"

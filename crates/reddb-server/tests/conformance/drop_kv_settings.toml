@@ -1,4 +1,4 @@
 input = "DROP KV settings"
 expected_kind = "DropKv"
-source = "issues/307-ddl-foundation-drop-polymorphic-per-model-drop-graph-vector-document-kv-if-exist.md:24"
+source = "docs/query/ddl.md:160"
 kind = "positive"

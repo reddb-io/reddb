@@ -1,4 +1,4 @@
 input = "DROP COLLECTION IF EXISTS missing"
 expected_kind = "DropCollection"
-source = "issues/307-ddl-foundation-drop-polymorphic-per-model-drop-graph-vector-document-kv-if-exist.md:24"
+source = "docs/query/ddl.md:163"
 kind = "positive"

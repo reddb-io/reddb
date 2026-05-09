@@ -1,0 +1,4 @@
+input = "CREATE POLICY 'ddl-truncate-deny' AS '{\"Statement\":[{\"Effect\":\"Deny\",\"Action\":[\"truncate\"],\"Resource\":[\"collection:users\"]}]}'"
+expected_kind = "CreateIamPolicy"
+source = "docs/query/ddl.md:178"
+kind = "positive"
