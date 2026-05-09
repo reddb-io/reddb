@@ -16,7 +16,7 @@ After Target 4 (`PLAN.md`), this module also contains:
 
 ## Invariants
 
-### 1. `visited` is the only signal the SIEVE hand uses
+### 1. `visited` is the only signal the page-cache SIEVE hand uses
 
 `CacheEntry::visited: AtomicBool` (`sieve.rs:48`) is set on every successful
 `get` and cleared by the eviction hand in `evict_one()` (`sieve.rs:340-476`).
@@ -29,6 +29,12 @@ The hand sweeps forward; on each entry it checks `visited`:
 queues, generation marks). The SIEVE invariant is that this single bit
 captures both recency and frequency well enough for the workload — adding
 state defeats the simplicity that makes it fast.
+
+Decision #218: this invariant applies to the homogeneous `sieve.rs::PageCache`
+workload. The Blob Cache L1 shard is the documented exception: because it
+protects user-visible cached blobs across L1/L2 tiers, `blob::Shard` may use
+`BlobCachePolicy::priority` as a bounded eviction bias before falling back to
+the `visited` sweep. Do not copy that second signal back into `PageCache`.
 
 ### 2. The cache **never** writes to disk
 
