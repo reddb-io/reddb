@@ -85,6 +85,7 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("insert ")
         || lower.starts_with("update ")
         || lower.starts_with("delete ")
+        || lower.starts_with("truncate ")
         || lower.starts_with("create ")
         || lower.starts_with("drop ")
         || lower.starts_with("alter ")

@@ -795,6 +795,90 @@ impl RedDBRuntime {
         self.drop_collection_storage(raw_query, name, label)
     }
 
+    pub fn execute_truncate(
+        &self,
+        raw_query: &str,
+        query: &TruncateQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        if is_system_schema_name(&query.name) {
+            return Err(RedDBError::Query("system schema is read-only".to_string()));
+        }
+
+        let label = query
+            .model
+            .map(polymorphic_resolver::model_name)
+            .unwrap_or("collection");
+        let store = self.inner.db.store();
+        if store.get_collection(&query.name).is_none() {
+            if query.if_exists {
+                return Ok(RuntimeQueryResult::ok_message(
+                    raw_query.to_string(),
+                    &format!("{label} '{}' does not exist", query.name),
+                    "truncate",
+                ));
+            }
+            return Err(RedDBError::NotFound(format!(
+                "{label} '{}' not found",
+                query.name
+            )));
+        }
+
+        let actual =
+            polymorphic_resolver::resolve(&query.name, &self.inner.db.catalog_model_snapshot())?;
+        if let Some(expected) = query.model {
+            polymorphic_resolver::ensure_model_match(expected, actual)?;
+        }
+
+        if actual == CollectionModel::Queue {
+            return self.execute_queue_command(
+                raw_query,
+                &QueueCommand::Purge {
+                    queue: query.name.clone(),
+                },
+            );
+        }
+
+        let affected = self.truncate_collection_entities(&query.name)?;
+        self.inner.db.invalidate_vector_index(&query.name);
+        self.clear_table_planner_stats(&query.name);
+        self.invalidate_result_cache();
+
+        Ok(RuntimeQueryResult::ok_message(
+            raw_query.to_string(),
+            &format!("{affected} entities truncated from {label} '{}'", query.name),
+            "truncate",
+        ))
+    }
+
+    fn truncate_collection_entities(&self, name: &str) -> RedDBResult<u64> {
+        let store = self.inner.db.store();
+        let Some(manager) = store.get_collection(name) else {
+            return Ok(0);
+        };
+        let entities = manager.query_all(|_| true);
+        if entities.is_empty() {
+            return Ok(0);
+        }
+
+        for entity in &entities {
+            let fields = entity_index_fields(&entity.data);
+            self.inner
+                .index_store
+                .index_entity_delete(name, entity.id, &fields)
+                .map_err(RedDBError::Internal)?;
+        }
+
+        let ids = entities.iter().map(|entity| entity.id).collect::<Vec<_>>();
+        let deleted_ids = store
+            .delete_batch(name, &ids)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        for id in &deleted_ids {
+            store.context_index().remove_entity(*id);
+        }
+        Ok(deleted_ids.len() as u64)
+    }
+
     fn drop_collection_storage(
         &self,
         raw_query: &str,
@@ -847,6 +931,30 @@ impl RedDBRuntime {
 
 pub(crate) fn is_system_schema_name(name: &str) -> bool {
     name == "red" || name.starts_with("red.")
+}
+
+fn entity_index_fields(data: &EntityData) -> Vec<(String, Value)> {
+    match data {
+        EntityData::Row(row) => {
+            if let Some(ref named) = row.named {
+                named.iter().map(|(key, value)| (key.clone(), value.clone())).collect()
+            } else if let Some(ref schema) = row.schema {
+                schema
+                    .iter()
+                    .zip(row.columns.iter())
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }
+        EntityData::Node(node) => node
+            .properties
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn collection_contract_from_create_table(
@@ -1206,4 +1314,57 @@ fn current_unix_ms() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::storage::schema::Value;
+    use crate::{RedDBOptions, RedDBRuntime};
+
+    #[test]
+    fn truncate_table_clears_rows_and_preserves_schema_and_indexes() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE users (id INT, name TEXT)")
+            .unwrap();
+        rt.execute_query("INSERT INTO users (id, name) VALUES (1, 'ana'), (2, 'bob')")
+            .unwrap();
+        rt.execute_query("CREATE INDEX idx_users_id ON users (id) USING HASH")
+            .unwrap();
+
+        let truncated = rt.execute_query("TRUNCATE TABLE users").unwrap();
+        assert_eq!(truncated.statement_type, "truncate");
+        assert_eq!(truncated.affected_rows, 0);
+
+        let empty = rt.execute_query("SELECT id FROM users").unwrap();
+        assert!(empty.result.records.is_empty());
+
+        rt.execute_query("INSERT INTO users (id, name) VALUES (3, 'cy')")
+            .unwrap();
+        let selected = rt.execute_query("SELECT name FROM users WHERE id = 3").unwrap();
+        let name = selected.result.records[0].get("name").unwrap();
+        assert_eq!(name, &Value::text("cy"));
+        assert!(rt.db().collection_contract("users").is_some());
+        assert_eq!(rt.inner.index_store.list_indices("users").len(), 1);
+    }
+
+    #[test]
+    fn truncate_collection_is_polymorphic_and_typed_mismatch_fails() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE QUEUE tasks").unwrap();
+        rt.execute_query("QUEUE PUSH tasks {'job':'a'}").unwrap();
+
+        let err = rt.execute_query("TRUNCATE TABLE tasks").unwrap_err();
+        assert!(format!("{err}").contains("model mismatch: expected table, got queue"));
+
+        rt.execute_query("TRUNCATE COLLECTION tasks").unwrap();
+        let len = rt.execute_query("QUEUE LEN tasks").unwrap();
+        assert_eq!(len.result.records[0].get("len"), Some(&Value::UnsignedInteger(0)));
+    }
+
+    #[test]
+    fn truncate_system_schema_is_read_only() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        let err = rt.execute_query("TRUNCATE COLLECTION red.collections").unwrap_err();
+        assert!(format!("{err}").contains("system schema is read-only"));
+    }
 }
