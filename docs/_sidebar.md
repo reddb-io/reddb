@@ -19,6 +19,7 @@
   - [INSERT](/query/insert.md)
   - [UPDATE](/query/update.md)
   - [DELETE](/query/delete.md)
+  - [DDL](/query/ddl.md)
   - [CREATE TABLE](/query/create-table.md)
   - [CREATE INDEX](/query/create-index.md)
   - [Transactions & MVCC](/query/transactions.md)

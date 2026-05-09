@@ -1,0 +1,4 @@
+input = "DROP TIMESERIES metrics"
+expected_kind = "DropTimeSeries"
+source = "docs/query/ddl.md:159"
+kind = "positive"

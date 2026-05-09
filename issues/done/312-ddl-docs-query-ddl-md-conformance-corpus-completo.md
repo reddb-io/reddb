@@ -51,3 +51,14 @@ End-to-end:
 - #307
 - #308
 - (slice 3 — auth — para casos auth no corpus)
+
+## Completion notes
+
+- Added canonical `docs/query/ddl.md` for polymorphic and typed DDL.
+- Updated queue docs to make `TRUNCATE QUEUE` canonical and `QUEUE PURGE` an alias.
+- Expanded parser conformance corpus with DROP, TRUNCATE, `QUEUE PURGE`, and DDL auth policy cases.
+- Repointed existing DDL DROP/TRUNCATE conformance cases at the canonical DDL doc.
+- Validation:
+  - `python3 crates/reddb-server/tests/conformance/validate_sources.py`
+  - `CARGO_BUILD_JOBS=1 cargo check -p reddb-server --lib`
+  - `cargo test -p reddb-server --test conformance` was attempted, but the local build was blocked by concurrent cargo builds in other worktrees and was stopped after waiting.

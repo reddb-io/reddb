@@ -1,0 +1,4 @@
+input = "CREATE POLICY 'ddl-drop-users' AS '{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"drop\"],\"Resource\":[\"collection:users\"]}]}'"
+expected_kind = "CreateIamPolicy"
+source = "docs/query/ddl.md:177"
+kind = "positive"

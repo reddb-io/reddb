@@ -1,0 +1,4 @@
+input = "QUEUE PURGE tasks"
+expected_kind = "QueueCommand"
+source = "docs/query/ddl.md:175"
+kind = "positive"

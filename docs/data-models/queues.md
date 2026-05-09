@@ -139,7 +139,8 @@ QUEUE PEEK tasks 5
 
 ```sql
 QUEUE LEN tasks        -- message count
-QUEUE PURGE tasks      -- remove all messages (alias: TRUNCATE QUEUE tasks)
+TRUNCATE QUEUE tasks   -- remove all messages (canonical DDL)
+QUEUE PURGE tasks      -- backward-compatible alias for TRUNCATE QUEUE
 ```
 
 ## Consumer Groups
