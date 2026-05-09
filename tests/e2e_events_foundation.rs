@@ -48,6 +48,97 @@ fn setup_event_queue_group(rt: &RedDBRuntime, queue: &str) {
     exec(rt, &format!("QUEUE GROUP CREATE {queue} evt_readers"));
 }
 
+fn text(record: &reddb::storage::query::unified::UnifiedRecord, field: &str) -> String {
+    match record.get(field) {
+        Some(Value::Text(value)) => value.to_string(),
+        other => panic!("expected text field {field}, got {other:?}"),
+    }
+}
+
+fn uint(record: &reddb::storage::query::unified::UnifiedRecord, field: &str) -> u64 {
+    match record.get(field) {
+        Some(Value::UnsignedInteger(value)) => *value,
+        Some(Value::Integer(value)) if *value >= 0 => *value as u64,
+        other => panic!("expected unsigned integer field {field}, got {other:?}"),
+    }
+}
+
+fn text_array(record: &reddb::storage::query::unified::UnifiedRecord, field: &str) -> Vec<String> {
+    match record.get(field) {
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| match value {
+                Value::Text(text) => text.to_string(),
+                other => panic!("expected text array item in {field}, got {other:?}"),
+            })
+            .collect(),
+        other => panic!("expected array field {field}, got {other:?}"),
+    }
+}
+
+#[test]
+fn red_subscriptions_lists_event_subscription_status() {
+    let rt = rt();
+
+    exec(
+        &rt,
+        "CREATE TABLE users (id INT, email TEXT, status TEXT) WITH EVENTS (INSERT, UPDATE) REDACT (email) WHERE status = 'active'",
+    );
+
+    let result = exec(
+        &rt,
+        "SELECT name, collection, target_queue, mode, ops_filter, where_filter, redact_fields, enabled, outbox_lag_ms, dlq_count, created_at FROM red.subscriptions",
+    );
+
+    assert_eq!(result.result.records.len(), 1);
+    let row = &result.result.records[0];
+    assert_eq!(text(row, "collection"), "users");
+    assert_eq!(text(row, "target_queue"), "users_events");
+    assert_eq!(text(row, "mode"), "FANOUT");
+    assert_eq!(
+        text_array(row, "ops_filter"),
+        vec!["INSERT".to_string(), "UPDATE".to_string()]
+    );
+    assert_eq!(text(row, "where_filter"), "status = 'active'");
+    assert_eq!(text_array(row, "redact_fields"), vec!["email".to_string()]);
+    assert_eq!(row.get("enabled"), Some(&Value::Boolean(true)));
+    assert_eq!(uint(row, "outbox_lag_ms"), 0);
+    assert_eq!(uint(row, "dlq_count"), 0);
+    assert!(matches!(row.get("created_at"), Some(Value::TimestampMs(_))));
+}
+
+#[test]
+fn events_status_filters_subscriptions_by_collection() {
+    let rt = rt();
+
+    exec(&rt, "CREATE TABLE users (id INT) WITH EVENTS TO users_audit");
+    exec(&rt, "CREATE TABLE orders (id INT) WITH EVENTS TO orders_audit");
+
+    let result = exec(&rt, "EVENTS STATUS users");
+
+    assert_eq!(result.result.records.len(), 1);
+    assert_eq!(text(&result.result.records[0], "collection"), "users");
+    assert_eq!(
+        text(&result.result.records[0], "target_queue"),
+        "users_audit"
+    );
+}
+
+#[test]
+fn events_status_reports_outbox_dlq_count() {
+    let rt = rt();
+
+    exec(&rt, "CREATE QUEUE audit_events FANOUT MAX_SIZE 1");
+    exec(&rt, "CREATE TABLE users (id INT) WITH EVENTS TO audit_events");
+    exec(&rt, "INSERT INTO users (id) VALUES (1)");
+    exec(&rt, "INSERT INTO users (id) VALUES (2)");
+
+    let result = exec(&rt, "EVENTS STATUS users");
+
+    assert_eq!(result.result.records.len(), 1);
+    assert_eq!(uint(&result.result.records[0], "dlq_count"), 1);
+}
+
 #[test]
 fn create_table_with_events_persists_subscription_and_auto_queue() {
     let rt = rt();

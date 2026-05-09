@@ -13,6 +13,7 @@ Implemented relations:
 | `red.indices`     | `SHOW INDICES`, `SHOW INDICES ON <collection>` |
 | `red.policies`    | `SHOW POLICIES`, `SHOW POLICIES ON <collection>` |
 | `red.stats`       | `SHOW STATS`, `SHOW STATS <collection>` |
+| `red.subscriptions` | `EVENTS STATUS`, `EVENTS STATUS <collection>` |
 
 The `red.*` relations are virtual runtime tables, not user collections. `SELECT`
 queries support ordinary projection, `WHERE`, `ORDER BY`, `LIMIT`, and `OFFSET`
@@ -219,6 +220,40 @@ Current columns:
 | `compact_ops`     | Number of compaction operations reported by `ManagerStats`, or `0` when unavailable. |
 | `last_write_ms`   | Last write timestamp in Unix milliseconds. Currently `NULL` because collection-level write timestamps are not exposed by `ManagerStats` or the catalog snapshot APIs. |
 | `attention_score` | Catalog attention score for the collection. Larger numbers indicate more severe drift, rebuild, rematerialization, or rerun needs. |
+
+## `red.subscriptions`
+
+`red.subscriptions` exposes event subscription metadata from the live catalog.
+`EVENTS STATUS` is syntax sugar for:
+
+```sql
+SELECT * FROM red.subscriptions;
+```
+
+`EVENTS STATUS <collection>` adds a collection filter:
+
+```sql
+SELECT * FROM red.subscriptions WHERE collection = '<collection>';
+```
+
+Current columns:
+
+| Column          | Description |
+|-----------------|-------------|
+| `name`          | Subscription name. Unnamed legacy/default subscriptions are exposed as `<collection>_to_<target_queue>`. |
+| `collection`    | Source collection whose mutations produce events. |
+| `target_queue`  | Queue receiving event payloads. |
+| `mode`          | Target queue mode, `FANOUT` or `WORK`. |
+| `ops_filter`    | Array of explicitly configured operations (`INSERT`, `UPDATE`, `DELETE`). Empty means all supported mutation operations. |
+| `where_filter`  | Stored subscription predicate text, or `NULL` when no predicate is configured. |
+| `redact_fields` | Array of redact paths applied before enqueueing event payloads. |
+| `enabled`       | Whether the subscription currently emits events. |
+| `outbox_lag_ms` | Current outbox delivery lag in milliseconds. This is `0` for the current synchronous outbox enqueue slice. |
+| `dlq_count`     | Messages currently present in `<target_queue>_outbox_dlq`. |
+| `created_at`    | Subscription catalog creation timestamp. Current metadata stores this at the source collection contract granularity. |
+
+`EVENTS BACKFILL STATUS <collection>` is reserved for the backfill runtime
+slice and is not exposed by this relation yet.
 
 ## `SHOW SAMPLE`
 

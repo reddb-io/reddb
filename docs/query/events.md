@@ -37,6 +37,14 @@ clause, and follow the active tenant scope. `EVENTS BACKFILL STATUS <collection>
 is reserved for the status slice and currently returns an explicit
 not-implemented error.
 
+Inspect subscriptions with `EVENTS STATUS`:
+
+```sql
+EVENTS STATUS;
+EVENTS STATUS users;
+SELECT * FROM red.subscriptions;
+```
+
 Queues cannot subscribe to events themselves:
 
 ```sql
