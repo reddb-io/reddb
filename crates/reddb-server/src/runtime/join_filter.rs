@@ -1936,6 +1936,7 @@ pub(super) fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::AlterQueue(_) => "alter_queue",
         QueryExpr::DropQueue(_) => "drop_queue",
         QueryExpr::QueueCommand(_) => "queue_command",
+        QueryExpr::KvCommand(_) => "kv_command",
         QueryExpr::CreateTree(_) => "create_tree",
         QueryExpr::DropTree(_) => "drop_tree",
         QueryExpr::TreeCommand(_) => "tree_command",

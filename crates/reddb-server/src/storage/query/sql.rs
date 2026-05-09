@@ -9,7 +9,8 @@ use crate::storage::query::ast::{
     DropServerQuery, DropTableQuery, DropTimeSeriesQuery, DropTreeQuery, DropVectorQuery,
     DropViewQuery, ExplainAlterQuery, ExplainMigrationQuery, Expr, FieldRef, Filter,
     ForeignColumnDef, GrantStmt, GraphCommand, GraphQuery, HybridQuery, InsertQuery, JoinQuery,
-    MaintenanceCommand, PathQuery, PolicyAction, ProbabilisticCommand, QueryExpr, QueueCommand,
+    KvCommand, MaintenanceCommand, PathQuery, PolicyAction, ProbabilisticCommand, QueryExpr,
+    QueueCommand,
     RefreshMaterializedViewQuery, RevokeStmt, RollbackMigrationQuery, SearchCommand, Span,
     TableQuery, TreeCommand, TruncateQuery, TxnControl, UpdateQuery, VectorQuery,
 };
@@ -45,6 +46,7 @@ pub enum FrontendStatement {
     QueueCommand(QueueCommand),
     TreeCommand(TreeCommand),
     ProbabilisticCommand(ProbabilisticCommand),
+    KvCommand(KvCommand),
 }
 
 #[derive(Debug, Clone)]
@@ -372,6 +374,7 @@ impl FrontendStatement {
             FrontendStatement::ProbabilisticCommand(command) => {
                 QueryExpr::ProbabilisticCommand(command)
             }
+            FrontendStatement::KvCommand(command) => QueryExpr::KvCommand(command),
         }
     }
 }
@@ -706,6 +709,13 @@ impl<'a> Parser<'a> {
                     self.position(),
                 )),
             },
+            Token::Kv => match self.parse_kv_command()? {
+                QueryExpr::KvCommand(command) => Ok(FrontendStatement::KvCommand(command)),
+                other => Err(ParseError::new(
+                    format!("internal: KV produced unexpected query kind {other:?}"),
+                    self.position(),
+                )),
+            },
             Token::Tree => match self.parse_tree_command()? {
                 QueryExpr::TreeCommand(command) => Ok(FrontendStatement::TreeCommand(command)),
                 other => Err(ParseError::new(
@@ -750,7 +760,7 @@ impl<'a> Parser<'a> {
                 vec![
                     "SELECT", "MATCH", "PATH", "FROM", "VECTOR", "HYBRID", "INSERT", "UPDATE",
                     "DELETE", "TRUNCATE", "CREATE", "DROP", "ALTER", "GRAPH", "SEARCH", "ASK",
-                    "QUEUE", "HLL", "TREE", "SKETCH", "FILTER", "SET", "SHOW",
+                    "QUEUE", "KV", "HLL", "TREE", "SKETCH", "FILTER", "SET", "SHOW",
                 ],
                 other,
                 self.position(),

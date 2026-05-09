@@ -165,6 +165,9 @@ impl RedDBServer {
     }
 
     /// Fast bulk insert for rows through the canonical runtime batch path.
+    /// When the body contains `auto_embed`, embeddings are generated in a single
+    /// provider round-trip before any rows are inserted (so a provider failure
+    /// leaves the collection untouched).
     pub(crate) fn handle_bulk_create_rows_fast(
         &self,
         collection: &str,
@@ -194,6 +197,10 @@ impl RedDBServer {
             }
         }
 
+        if let Some(auto_embed) = payload.get("auto_embed") {
+            return self.handle_bulk_rows_with_embed(collection, rows, auto_embed);
+        }
+
         let count = rows.len();
         if let Err(err) =
             self.entity_use_cases()
@@ -209,6 +216,132 @@ impl RedDBServer {
         let mut object = Map::new();
         object.insert("ok".to_string(), JsonValue::Bool(true));
         object.insert("count".to_string(), JsonValue::Number(count as f64));
+        json_response(200, JsonValue::Object(object))
+    }
+
+    /// Bulk insert with AUTO EMBED: embed all rows in one provider batch call,
+    /// then insert rows. Provider failure aborts before any row is written.
+    fn handle_bulk_rows_with_embed(
+        &self,
+        collection: &str,
+        rows: Vec<crate::application::CreateRowInput>,
+        auto_embed_json: &JsonValue,
+    ) -> HttpResponse {
+        let provider_str = match auto_embed_json.get("provider").and_then(JsonValue::as_str) {
+            Some(p) => p,
+            None => return json_error(400, "auto_embed.provider is required"),
+        };
+        let fields: Vec<String> = match auto_embed_json
+            .get("fields")
+            .and_then(JsonValue::as_array)
+        {
+            Some(arr) => arr
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+            None => return json_error(400, "auto_embed.fields is required"),
+        };
+        if fields.is_empty() {
+            return json_error(400, "auto_embed.fields cannot be empty");
+        }
+        let model = auto_embed_json
+            .get("model")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                std::env::var("REDDB_OPENAI_EMBEDDING_MODEL")
+                    .ok()
+                    .unwrap_or_else(|| crate::ai::DEFAULT_OPENAI_EMBEDDING_MODEL.to_string())
+            });
+
+        let provider = match crate::ai::parse_provider(provider_str) {
+            Ok(p) => p,
+            Err(e) => return json_error(400, e.to_string()),
+        };
+        let api_key =
+            match crate::ai::resolve_api_key_from_runtime(&provider, None, &self.runtime) {
+                Ok(k) => k,
+                Err(e) => return json_error(400, e.to_string()),
+            };
+
+        // Collect one text per row by joining the requested fields.
+        let texts: Vec<String> = rows
+            .iter()
+            .map(|row| {
+                let parts: Vec<String> = fields
+                    .iter()
+                    .filter_map(|field| {
+                        row.fields.iter().find(|(k, _)| k == field).and_then(
+                            |(_, v)| match v {
+                                Value::Text(t) if !t.is_empty() => Some(t.to_string()),
+                                _ => None,
+                            },
+                        )
+                    })
+                    .collect();
+                parts.join(" ")
+            })
+            .collect();
+
+        // Embed BEFORE insert so a provider failure leaves the collection untouched.
+        let batch_client =
+            crate::runtime::ai::batch_client::AiBatchClient::from_runtime(&self.runtime);
+        let embeddings = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| {
+                handle.block_on(batch_client.embed_batch(&provider, &model, &api_key, texts.clone()))
+            }),
+            Err(_) => {
+                return json_error(500, "AUTO EMBED requires a Tokio runtime context")
+            }
+        };
+        let embeddings = match embeddings {
+            Ok(e) => e,
+            Err(e) => return json_error(502, format!("embedding provider error: {e}")),
+        };
+
+        let count = rows.len();
+        if let Err(err) =
+            self.entity_use_cases()
+                .create_rows_batch(crate::application::CreateRowsBatchInput {
+                    collection: collection.to_string(),
+                    rows,
+                    suppress_events: false,
+                })
+        {
+            return json_error(400, err.to_string());
+        }
+
+        // Store vectors for rows with non-empty embeddings.
+        let mut embedded_count = 0usize;
+        for (combined, dense) in texts.iter().zip(embeddings) {
+            if dense.is_empty() || combined.trim().is_empty() {
+                continue;
+            }
+            if self
+                .entity_use_cases()
+                .create_vector(crate::application::CreateVectorInput {
+                    collection: collection.to_string(),
+                    dense,
+                    content: Some(combined.clone()),
+                    metadata: Vec::new(),
+                    link_row: None,
+                    link_node: None,
+                })
+                .is_ok()
+            {
+                embedded_count += 1;
+            }
+        }
+
+        let mut object = Map::new();
+        object.insert("ok".to_string(), JsonValue::Bool(true));
+        object.insert("created_count".to_string(), JsonValue::Number(count as f64));
+        object.insert(
+            "embedded_count".to_string(),
+            JsonValue::Number(embedded_count as f64),
+        );
+        // One batch call regardless of row count — the whole point of this slice.
+        object.insert("provider_requests".to_string(), JsonValue::Number(1.0));
         json_response(200, JsonValue::Object(object))
     }
 
@@ -736,5 +869,101 @@ fn parse_tree_position_input(
             ))
         }
         Some(_) => Err("field 'position' must be 'first', 'last', or an integer".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{RedDBOptions, RedDBRuntime};
+
+    fn make_server() -> RedDBServer {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        RedDBServer::new(rt)
+    }
+
+    fn post_bulk_rows(server: &RedDBServer, collection: &str, body: &str) -> HttpResponse {
+        server.handle_bulk_create_rows_fast(collection, body.as_bytes().to_vec())
+    }
+
+    #[test]
+    fn bulk_create_rows_legacy_path_unchanged() {
+        let server = make_server();
+        // CREATE the collection first
+        let ddl = r#"{"query": "CREATE TABLE articles (id INTEGER, title TEXT)"}"#;
+        let r = server.handle_query(ddl.as_bytes().to_vec());
+        assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+
+        let body = r#"{"items": [{"fields": {"id": 1, "title": "hello"}}, {"fields": {"id": 2, "title": "world"}}]}"#;
+        let r = post_bulk_rows(&server, "articles", body);
+        assert_eq!(r.status, 200);
+        let parsed = crate::json::parse_json(std::str::from_utf8(&r.body).unwrap()).unwrap();
+        assert_eq!(parsed.get("count").and_then(|v| v.as_f64()), Some(2.0));
+        // legacy response has no embedded_count field
+        assert!(parsed.get("embedded_count").is_none());
+    }
+
+    #[test]
+    fn bulk_rows_with_embed_missing_provider_returns_400() {
+        let server = make_server();
+        let ddl = r#"{"query": "CREATE TABLE docs (body TEXT)"}"#;
+        server.handle_query(ddl.as_bytes().to_vec());
+
+        let body = r#"{"items": [{"fields": {"body": "hello"}}], "auto_embed": {"fields": ["body"]}}"#;
+        let r = post_bulk_rows(&server, "docs", body);
+        assert_eq!(r.status, 400);
+        let text = String::from_utf8_lossy(&r.body);
+        assert!(text.contains("provider"), "expected provider error, got: {text}");
+    }
+
+    #[test]
+    fn bulk_rows_with_embed_missing_fields_returns_400() {
+        let server = make_server();
+        let ddl = r#"{"query": "CREATE TABLE docs (body TEXT)"}"#;
+        server.handle_query(ddl.as_bytes().to_vec());
+
+        let body = r#"{"items": [{"fields": {"body": "hello"}}], "auto_embed": {"provider": "openai"}}"#;
+        let r = post_bulk_rows(&server, "docs", body);
+        assert_eq!(r.status, 400);
+        let text = String::from_utf8_lossy(&r.body);
+        assert!(text.contains("fields"), "expected fields error, got: {text}");
+    }
+
+    #[test]
+    fn bulk_rows_with_embed_empty_fields_returns_400() {
+        let server = make_server();
+        let ddl = r#"{"query": "CREATE TABLE docs (body TEXT)"}"#;
+        server.handle_query(ddl.as_bytes().to_vec());
+
+        let body = r#"{"items": [{"fields": {"body": "hello"}}], "auto_embed": {"provider": "openai", "fields": []}}"#;
+        let r = post_bulk_rows(&server, "docs", body);
+        assert_eq!(r.status, 400);
+        let text = String::from_utf8_lossy(&r.body);
+        assert!(text.contains("fields"), "expected fields error, got: {text}");
+    }
+
+    #[test]
+    fn bulk_rows_with_embed_invalid_provider_returns_400() {
+        let server = make_server();
+        let ddl = r#"{"query": "CREATE TABLE docs (body TEXT)"}"#;
+        server.handle_query(ddl.as_bytes().to_vec());
+
+        let body = r#"{"items": [{"fields": {"body": "hello"}}], "auto_embed": {"provider": "not-a-real-provider", "fields": ["body"]}}"#;
+        let r = post_bulk_rows(&server, "docs", body);
+        assert_eq!(r.status, 400);
+    }
+
+    #[test]
+    fn bulk_rows_empty_items_returns_400() {
+        let server = make_server();
+        let r = post_bulk_rows(&server, "any", r#"{"items": []}"#);
+        assert_eq!(r.status, 400);
+    }
+
+    #[test]
+    fn bulk_rows_missing_items_returns_400() {
+        let server = make_server();
+        let r = post_bulk_rows(&server, "any", r#"{"rows": []}"#);
+        assert_eq!(r.status, 400);
     }
 }

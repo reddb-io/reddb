@@ -890,6 +890,16 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
         | QueryExpr::ApplyMigration(_)
         | QueryExpr::RollbackMigration(_)
         | QueryExpr::ExplainMigration(_) => {}
+        QueryExpr::KvCommand(cmd) => {
+            use crate::storage::query::ast::KvCommand;
+            match cmd {
+                KvCommand::Put { collection, .. }
+                | KvCommand::Get { collection, .. }
+                | KvCommand::Delete { collection, .. }
+                | KvCommand::Incr { collection, .. }
+                | KvCommand::Cas { collection, .. } => cache_scope_insert(scopes, collection),
+            }
+        }
     }
 }
 
@@ -4333,6 +4343,7 @@ impl RedDBRuntime {
             QueryExpr::AlterQueue(ref q) => self.execute_alter_queue(query, q),
             QueryExpr::DropQueue(ref q) => self.execute_drop_queue(query, q),
             QueryExpr::QueueCommand(ref cmd) => self.execute_queue_command(query, cmd),
+            QueryExpr::KvCommand(ref cmd) => self.execute_kv_command(query, cmd),
             QueryExpr::CreateTree(ref tree) => self.execute_create_tree(query, tree),
             QueryExpr::DropTree(ref tree) => self.execute_drop_tree(query, tree),
             QueryExpr::TreeCommand(ref cmd) => self.execute_tree_command(query, cmd),

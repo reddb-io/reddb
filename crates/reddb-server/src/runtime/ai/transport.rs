@@ -6,7 +6,7 @@
 
 use std::fmt;
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::runtime::RedDBRuntime;
 

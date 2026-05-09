@@ -107,6 +107,7 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("show documents")
         || lower.starts_with("show timeseries")
         || lower.starts_with("show graphs")
+        || lower.starts_with("kv ")
         || lower.starts_with("show kv")
         || lower.starts_with("show schema")
         || lower.starts_with("show indices")

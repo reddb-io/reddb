@@ -134,6 +134,28 @@ curl -X POST http://127.0.0.1:8080/collections/embeddings/bulk/vectors \
   ]'
 ```
 
+### Bulk Insert with AUTO EMBED
+
+Add `auto_embed` to the bulk rows body to generate embeddings for all rows in one provider batch call. The engine embeds before inserting, so a provider failure leaves the collection untouched.
+
+```bash
+curl -X POST http://127.0.0.1:8080/collections/articles/bulk/rows \
+  -H 'content-type: application/json' \
+  -d '{
+    "items": [
+      {"fields": {"id": 1, "title": "hello world"}},
+      {"fields": {"id": 2, "title": "another document"}}
+    ],
+    "auto_embed": {
+      "provider": "openai",
+      "fields": ["title"],
+      "model": "text-embedding-3-small"
+    }
+  }'
+```
+
+Response: `{"ok": true, "created_count": 2, "embedded_count": 2, "provider_requests": 1}`
+
 ## gRPC Bulk Insert
 
 ```bash
