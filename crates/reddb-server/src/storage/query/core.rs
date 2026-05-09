@@ -2251,7 +2251,7 @@ pub enum QueueCommand {
     },
     GroupRead {
         queue: String,
-        group: String,
+        group: Option<String>,
         consumer: String,
         count: usize,
     },

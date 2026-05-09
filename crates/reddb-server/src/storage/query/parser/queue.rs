@@ -199,10 +199,19 @@ impl<'a> Parser<'a> {
             Token::Ident(ref name) if name.eq_ignore_ascii_case("READ") => {
                 self.advance()?;
                 let queue = self.expect_ident()?;
-                self.expect(Token::Group)?;
-                let group = self.expect_ident()?;
+                let group = if self.consume(&Token::Group)? {
+                    Some(self.expect_ident()?)
+                } else {
+                    None
+                };
                 // CONSUMER consumer_name
-                self.consume_ident_ci("CONSUMER")?;
+                if !self.consume_ident_ci("CONSUMER")? {
+                    return Err(ParseError::expected(
+                        vec!["CONSUMER"],
+                        self.peek(),
+                        self.position(),
+                    ));
+                }
                 let consumer = self.expect_ident()?;
                 let count = if self.consume(&Token::Count)? {
                     self.parse_integer()? as usize
