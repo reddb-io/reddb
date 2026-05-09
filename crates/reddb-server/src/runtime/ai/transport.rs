@@ -108,6 +108,7 @@ pub enum AiHttpMethod {
 #[derive(Debug, Clone)]
 pub struct AiHttpRequest {
     pub provider: String,
+    pub model: Option<String>,
     pub method: AiHttpMethod,
     pub url: String,
     pub headers: Vec<(String, String)>,
@@ -118,6 +119,7 @@ impl AiHttpRequest {
     pub fn post_json(provider: impl Into<String>, url: impl Into<String>, body: String) -> Self {
         Self {
             provider: provider.into(),
+            model: None,
             method: AiHttpMethod::Post,
             url: url.into(),
             headers: vec![
@@ -132,12 +134,19 @@ impl AiHttpRequest {
         self.headers.push((name.into(), value.into()));
         self
     }
+
+    pub fn model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AiHttpResponse {
     pub status_code: u16,
     pub body: String,
+    pub attempt_count: u32,
+    pub total_wait_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,11 +209,30 @@ impl AiTransport {
     ) -> Result<AiHttpResponse, AiTransportError> {
         let mut attempt = 0;
         let mut total_wait = Duration::ZERO;
+        let started = Instant::now();
+        let provider = request.provider.clone();
+        let model = request
+            .model
+            .as_deref()
+            .filter(|model| !model.trim().is_empty())
+            .unwrap_or("unknown")
+            .to_string();
 
         loop {
             attempt += 1;
             match self.try_request_once(request.clone()).await {
-                Ok(response) if response.status_code < 400 => return Ok(response),
+                Ok(mut response) if response.status_code < 400 => {
+                    let duration_ms = millis_u64(started.elapsed());
+                    crate::runtime::ai::metrics::record_provider_request(
+                        &provider,
+                        &model,
+                        "ok",
+                        duration_ms,
+                    );
+                    response.attempt_count = attempt;
+                    response.total_wait_ms = millis_u64(total_wait);
+                    return Ok(response);
+                }
                 Ok(response) => {
                     let status_code = Some(response.status_code);
                     let message = format!("HTTP status {}", response.status_code);
@@ -217,8 +245,35 @@ impl AiTransport {
                         message,
                     };
                     if !retryable || attempt >= self.config.retry.max_attempts {
+                        let status = http_status_label(response.status_code);
+                        crate::runtime::ai::metrics::record_provider_request(
+                            &provider,
+                            &model,
+                            status,
+                            millis_u64(started.elapsed()),
+                        );
+                        tracing::warn!(
+                            target: "reddb::developer",
+                            provider = %provider,
+                            model = %model,
+                            status_code = response.status_code,
+                            attempt_count = attempt,
+                            total_wait_ms = millis_u64(total_wait),
+                            "ai provider request failed"
+                        );
                         return Err(error);
                     }
+                    let reason = retry_reason_for_status(response.status_code);
+                    crate::runtime::ai::metrics::record_provider_retry(&provider, reason);
+                    tracing::debug!(
+                        target: "reddb::developer",
+                        provider = %provider,
+                        model = %model,
+                        status_code = response.status_code,
+                        attempt_count = attempt,
+                        reason = reason,
+                        "ai provider request retry scheduled"
+                    );
                 }
                 Err(error) => {
                     let retryable = error.retryable;
@@ -230,8 +285,35 @@ impl AiTransport {
                         message: error.message,
                     };
                     if !retryable || attempt >= self.config.retry.max_attempts {
+                        crate::runtime::ai::metrics::record_provider_request(
+                            &provider,
+                            &model,
+                            "transport_error",
+                            millis_u64(started.elapsed()),
+                        );
+                        tracing::warn!(
+                            target: "reddb::developer",
+                            provider = %provider,
+                            model = %model,
+                            status_code = tracing::field::Empty,
+                            attempt_count = attempt,
+                            total_wait_ms = millis_u64(total_wait),
+                            "ai provider request failed"
+                        );
                         return Err(error);
                     }
+                    crate::runtime::ai::metrics::record_provider_retry(
+                        &provider,
+                        "transport_error",
+                    );
+                    tracing::debug!(
+                        target: "reddb::developer",
+                        provider = %provider,
+                        model = %model,
+                        attempt_count = attempt,
+                        reason = "transport_error",
+                        "ai provider request retry scheduled"
+                    );
                 }
             }
 
@@ -293,7 +375,12 @@ fn send_blocking(
                         retryable: is_retryable_ureq_error(&err),
                         message: format!("failed to read response body: {err}"),
                     })?;
-            Ok(AiHttpResponse { status_code, body })
+            Ok(AiHttpResponse {
+                status_code,
+                body,
+                attempt_count: 1,
+                total_wait_ms: 0,
+            })
         }
         Err(err) => Err(TransportAttemptError {
             retryable: is_retryable_ureq_error(&err),
@@ -313,6 +400,28 @@ fn backoff_delay(config: &AiRetryConfig, attempt: u32) -> Duration {
 
 fn is_retryable_status(status: u16) -> bool {
     status == 429 || (500..=599).contains(&status)
+}
+
+fn retry_reason_for_status(status: u16) -> &'static str {
+    if status == 429 {
+        "http_429"
+    } else if (500..=599).contains(&status) {
+        "http_5xx"
+    } else {
+        "http_error"
+    }
+}
+
+fn http_status_label(status: u16) -> &'static str {
+    if status == 429 {
+        "http_429"
+    } else if (400..=499).contains(&status) {
+        "http_4xx"
+    } else if (500..=599).contains(&status) {
+        "http_5xx"
+    } else {
+        "http_error"
+    }
 }
 
 fn is_retryable_ureq_error(err: &ureq::Error) -> bool {

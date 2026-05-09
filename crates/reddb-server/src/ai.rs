@@ -248,9 +248,9 @@ pub async fn openai_prompt_async(
         request.temperature,
         request.max_output_tokens,
     );
-    let http_req =
-        crate::runtime::ai::transport::AiHttpRequest::post_json("openai", url, payload)
-            .header("authorization", format!("Bearer {}", request.api_key));
+    let http_req = crate::runtime::ai::transport::AiHttpRequest::post_json("openai", url, payload)
+        .model(request.model.clone())
+        .header("authorization", format!("Bearer {}", request.api_key));
 
     let response = transport
         .request(http_req)
@@ -291,6 +291,7 @@ pub async fn anthropic_prompt_async(
     );
     let http_req =
         crate::runtime::ai::transport::AiHttpRequest::post_json("anthropic", url, payload)
+            .model(request.model.clone())
             .header("x-api-key", request.api_key)
             .header("anthropic-version", request.anthropic_version);
 
@@ -312,6 +313,10 @@ pub(crate) fn parse_embedding_vectors(body: &str) -> Result<Vec<Vec<f32>>, Strin
     parse_openai_embedding_response(body)
         .map(|r| r.embeddings)
         .map_err(|e| e.to_string())
+}
+
+pub(crate) fn parse_embedding_response(body: &str) -> Result<OpenAiEmbeddingResponse, String> {
+    parse_openai_embedding_response(body).map_err(|e| e.to_string())
 }
 
 fn build_openai_embedding_payload(
