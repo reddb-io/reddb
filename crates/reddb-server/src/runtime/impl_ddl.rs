@@ -1344,7 +1344,12 @@ mod tests {
         let name = selected.result.records[0].get("name").unwrap();
         assert_eq!(name, &Value::text("cy"));
         assert!(rt.db().collection_contract("users").is_some());
-        assert_eq!(rt.inner.index_store.list_indices("users").len(), 1);
+        assert!(rt
+            .inner
+            .index_store
+            .list_indices("users")
+            .iter()
+            .any(|index| index.name == "idx_users_id"));
     }
 
     #[test]

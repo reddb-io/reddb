@@ -582,6 +582,7 @@ impl<'a> Parser<'a> {
             | Token::Insert
             | Token::Update
             | Token::Delete
+            | Token::Truncate
             | Token::Explain
             | Token::Create
             | Token::Drop
@@ -710,8 +711,8 @@ impl<'a> Parser<'a> {
             other => Err(ParseError::expected(
                 vec![
                     "SELECT", "MATCH", "PATH", "FROM", "VECTOR", "HYBRID", "INSERT", "UPDATE",
-                    "DELETE", "CREATE", "DROP", "ALTER", "GRAPH", "SEARCH", "ASK", "QUEUE", "HLL",
-                    "TREE", "SKETCH", "FILTER", "SET", "SHOW",
+                    "DELETE", "TRUNCATE", "CREATE", "DROP", "ALTER", "GRAPH", "SEARCH", "ASK",
+                    "QUEUE", "HLL", "TREE", "SKETCH", "FILTER", "SET", "SHOW",
                 ],
                 other,
                 self.position(),
