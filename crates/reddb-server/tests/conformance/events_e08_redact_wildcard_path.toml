@@ -1,0 +1,4 @@
+input = "CREATE TABLE messages (id INT, body JSON) WITH EVENTS REDACT (body.*.email)"
+expected_kind = "CreateTable"
+source = "docs/data-models/events.md:311"
+kind = "positive"

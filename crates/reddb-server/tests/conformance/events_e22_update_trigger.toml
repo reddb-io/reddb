@@ -1,0 +1,4 @@
+input = "UPDATE users SET name = 'Ada Lovelace' WHERE id = 1"
+expected_kind = "Update"
+source = "docs/data-models/events.md:367"
+kind = "positive"

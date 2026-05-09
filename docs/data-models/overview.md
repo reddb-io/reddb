@@ -79,6 +79,7 @@ These are the main structures most users mean when they ask "what can I build in
 | Vectors | `INSERT INTO embeddings VECTOR (...)` | `VECTOR SEARCH`, `HYBRID ... VECTOR SEARCH` | Embeddings, semantic retrieval, RAG | Native `Vector` |
 | Time-Series | `CREATE TIMESERIES`, `INSERT INTO cpu_metrics (...)` | `SELECT`, `time_bucket(...)`, range filters | Metrics, telemetry, sensor data | Native `TimeSeriesPoint` |
 | Queues & Deques | `CREATE QUEUE`, `QUEUE PUSH`, `QUEUE READ`, `QUEUE ACK` | Queue commands and consumer-group flow | Job queues, retries, DLQ, work distribution | Native `QueueMessage` |
+| Events | `WITH EVENTS`, `ALTER TABLE ... ADD SUBSCRIPTION` | Queue reads over event payloads | CDC, audit, cache invalidation, downstream sync | Event envelope stored as queue messages |
 
 ## Native Persisted Entity Kinds
 

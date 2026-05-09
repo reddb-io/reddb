@@ -1,0 +1,4 @@
+input = "DELETE FROM users WHERE id = 1"
+expected_kind = "Delete"
+source = "docs/data-models/events.md:371"
+kind = "positive"

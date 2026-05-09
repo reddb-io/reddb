@@ -1,6 +1,8 @@
 # Event Subscriptions
 
-`WITH EVENTS` declares table-to-queue event subscription metadata. This foundation persists the subscription in the collection catalog and creates the target queue when it is missing. It does not emit row-change events yet.
+`WITH EVENTS` declares collection-to-queue event subscriptions. The canonical
+data-model guide is [Events](../data-models/events.md); this page is the compact
+SQL/RQL syntax reference.
 
 ```sql
 CREATE TABLE users (id INT, email TEXT) WITH EVENTS;

@@ -1,0 +1,4 @@
+input = "ALTER TABLE users ENABLE EVENTS TO global_audit ON ALL TENANTS"
+expected_kind = "AlterTable"
+source = "docs/data-models/events.md:351"
+kind = "positive"

@@ -49,6 +49,7 @@
   - [Continuous Aggregates](/data-models/continuous-aggregates.md)
   - [Partition TTL](/data-models/partition-ttl.md)
   - [Queues & Deques](/data-models/queues.md)
+  - [Events](/data-models/events.md)
   - [Probabilistic Structures](/data-models/probabilistic.md)
 
 - **APIs**

@@ -1,0 +1,4 @@
+input = "TRUNCATE TABLE users"
+expected_kind = "Truncate"
+source = "docs/data-models/events.md:375"
+kind = "positive"

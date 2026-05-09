@@ -1,0 +1,4 @@
+input = "CREATE TABLE docs (id INT, body JSON) WITH EVENTS REDACT (body.user.email)"
+expected_kind = "CreateTable"
+source = "docs/data-models/events.md:307"
+kind = "positive"

@@ -1,0 +1,4 @@
+input = "CREATE TABLE users (id INT, email TEXT, name TEXT) WITH EVENTS"
+expected_kind = "CreateTable"
+source = "docs/data-models/events.md:283"
+kind = "positive"

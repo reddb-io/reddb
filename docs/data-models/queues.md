@@ -4,6 +4,10 @@ RedDB includes a built-in message queue with FIFO/LIFO ordering, priority suppor
 
 Every queue operates in one of two modes: **WORK** (task distribution — each message goes to one consumer) or **FANOUT** (broadcast — every consumer gets every message). Choose the mode at creation time; change it at runtime with `ALTER QUEUE SET MODE`.
 
+Queues are also the delivery target for [Events](events.md). A collection
+declared with `WITH EVENTS` emits mutation payloads into a queue; queues
+themselves cannot emit events, which prevents subscription cycles.
+
 ## Quick Start
 
 ```sql
