@@ -4,9 +4,9 @@ use super::*;
 use crate::catalog::SubscriptionOperation;
 use crate::storage::engine::vector_metadata::MetadataValue;
 use crate::storage::query::ast::{
-    CompareOp, ConfigCommand, DistanceMetric, EdgeDirection, FieldRef, Filter, FusionStrategy,
-    JoinType, KvCommand, MetadataFilter, Projection, QueueCommand, TableQuery, TreeCommand,
-    TreePosition, VectorSource,
+    CompareOp, ConfigCommand, ConfigValueType, DistanceMetric, EdgeDirection, FieldRef, Filter,
+    FusionStrategy, JoinType, KvCommand, MetadataFilter, Projection, QueueCommand, TableQuery,
+    TreeCommand, TreePosition, VectorSource,
 };
 
 /// Test helper that returns the legacy `QueryExpr` shape. The
@@ -5361,11 +5361,13 @@ fn test_parse_put_config() {
         collection,
         key,
         value,
+        value_type,
     }) = q
     {
         assert_eq!(collection, "app");
         assert_eq!(key, "feature_flag");
         assert_eq!(value, Value::Boolean(true));
+        assert_eq!(value_type, None);
     } else {
         panic!("expected ConfigCommand::Put");
     }
@@ -5373,18 +5375,39 @@ fn test_parse_put_config() {
 
 #[test]
 fn test_parse_rotate_config() {
-    let q = parse("ROTATE CONFIG app api_key = 'v2'").unwrap();
+    let q = parse("ROTATE CONFIG app api_key = 'v2' TYPE string").unwrap();
     if let QueryExpr::ConfigCommand(ConfigCommand::Rotate {
         collection,
         key,
         value,
+        value_type,
     }) = q
     {
         assert_eq!(collection, "app");
         assert_eq!(key, "api_key");
         assert_eq!(value, Value::text("v2"));
+        assert_eq!(value_type, Some(ConfigValueType::String));
     } else {
         panic!("expected ConfigCommand::Rotate");
+    }
+}
+
+#[test]
+fn test_parse_put_config_with_schema_type() {
+    let q = parse("PUT CONFIG app feature_flag = true WITH TYPE bool").unwrap();
+    if let QueryExpr::ConfigCommand(ConfigCommand::Put {
+        collection,
+        key,
+        value,
+        value_type,
+    }) = q
+    {
+        assert_eq!(collection, "app");
+        assert_eq!(key, "feature_flag");
+        assert_eq!(value, Value::Boolean(true));
+        assert_eq!(value_type, Some(ConfigValueType::Bool));
+    } else {
+        panic!("expected ConfigCommand::Put");
     }
 }
 

@@ -1,6 +1,6 @@
 //! Parser for stable CONFIG keyed commands.
 
-use super::super::ast::{ConfigCommand, QueryExpr};
+use super::super::ast::{ConfigCommand, ConfigValueType, QueryExpr};
 use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
@@ -57,6 +57,7 @@ impl<'a> Parser<'a> {
                 })?;
                 self.expect(Token::Eq)?;
                 let value = self.parse_value()?;
+                let value_type = self.parse_config_value_type()?;
                 if self.consume_ident_ci("TTL")? || self.consume_ident_ci("EXPIRE")? {
                     self.consume_config_tail()?;
                     return Ok(QueryExpr::ConfigCommand(
@@ -71,6 +72,7 @@ impl<'a> Parser<'a> {
                     collection,
                     key,
                     value,
+                    value_type,
                 }))
             }
             "GET" => Ok(QueryExpr::ConfigCommand(ConfigCommand::Get {
@@ -85,6 +87,7 @@ impl<'a> Parser<'a> {
                 })?;
                 self.expect(Token::Eq)?;
                 let value = self.parse_value()?;
+                let value_type = self.parse_config_value_type()?;
                 if self.consume_ident_ci("TTL")? || self.consume_ident_ci("EXPIRE")? {
                     self.consume_config_tail()?;
                     return Ok(QueryExpr::ConfigCommand(
@@ -99,6 +102,7 @@ impl<'a> Parser<'a> {
                     collection,
                     key,
                     value,
+                    value_type,
                 }))
             }
             "DELETE" => Ok(QueryExpr::ConfigCommand(ConfigCommand::Delete {
@@ -128,5 +132,34 @@ impl<'a> Parser<'a> {
             self.advance()?;
         }
         Ok(())
+    }
+
+    fn parse_config_value_type(&mut self) -> Result<Option<ConfigValueType>, ParseError> {
+        let has_with = self.consume(&Token::With)?;
+        let has_type = self.consume_ident_ci("TYPE")?;
+        let has_schema = if !has_type {
+            self.consume(&Token::Schema)?
+        } else {
+            false
+        };
+        if !has_with && !has_type && !has_schema {
+            return Ok(None);
+        }
+        if has_with && !has_type && !has_schema {
+            return Err(ParseError::expected(
+                vec!["TYPE", "SCHEMA"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        let raw_type = self.expect_ident_or_keyword()?;
+        let Some(value_type) = ConfigValueType::parse(&raw_type) else {
+            return Err(ParseError::expected(
+                vec!["bool", "int", "string", "url", "object", "array"],
+                self.peek(),
+                self.position(),
+            ));
+        };
+        Ok(Some(value_type))
     }
 }

@@ -2472,12 +2472,48 @@ pub enum KvCommand {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigValueType {
+    Bool,
+    Int,
+    String,
+    Url,
+    Object,
+    Array,
+}
+
+impl ConfigValueType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bool => "bool",
+            Self::Int => "int",
+            Self::String => "string",
+            Self::Url => "url",
+            Self::Object => "object",
+            Self::Array => "array",
+        }
+    }
+
+    pub fn parse(input: &str) -> Option<Self> {
+        match input.to_ascii_lowercase().as_str() {
+            "bool" | "boolean" => Some(Self::Bool),
+            "int" | "integer" => Some(Self::Int),
+            "string" | "str" | "text" => Some(Self::String),
+            "url" => Some(Self::Url),
+            "object" | "json_object" => Some(Self::Object),
+            "array" | "list" => Some(Self::Array),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ConfigCommand {
     Put {
         collection: String,
         key: String,
         value: Value,
+        value_type: Option<ConfigValueType>,
     },
     Get {
         collection: String,
@@ -2487,6 +2523,7 @@ pub enum ConfigCommand {
         collection: String,
         key: String,
         value: Value,
+        value_type: Option<ConfigValueType>,
     },
     Delete {
         collection: String,

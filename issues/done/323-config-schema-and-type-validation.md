@@ -20,11 +20,11 @@ Add optional type/schema validation for Config entries so stable settings can re
 
 ## Acceptance criteria
 
-- [ ] Config entries can declare or attach expected value types such as bool, int, string, url, object, or array.
-- [ ] `PUT CONFIG` and `ROTATE CONFIG` reject values that do not match the declared type/schema.
-- [ ] Schema/type metadata is visible in Config metadata/history.
-- [ ] Schema changes are versioned or audited so operators can explain why a later value was accepted/rejected.
-- [ ] Normal KV remains schemaless and Vault remains opaque except for content metadata.
+- [x] Config entries can declare or attach expected value types such as bool, int, string, url, object, or array.
+- [x] `PUT CONFIG` and `ROTATE CONFIG` reject values that do not match the declared type/schema.
+- [x] Schema/type metadata is visible in Config metadata/history.
+- [x] Schema changes are versioned or audited so operators can explain why a later value was accepted/rejected.
+- [x] Normal KV remains schemaless and Vault remains opaque except for content metadata.
 
 ## Blocked by
 
