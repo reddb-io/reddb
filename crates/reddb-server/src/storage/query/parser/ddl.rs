@@ -1,7 +1,8 @@
 //! DDL SQL Parser: CREATE TABLE, DROP TABLE, ALTER TABLE
 
 use super::super::ast::{
-    AlterOperation, AlterTableQuery, CreateColumnDef, CreateTableQuery, DropTableQuery,
+    AlterOperation, AlterTableQuery, CreateColumnDef, CreateTableQuery, DropCollectionQuery,
+    DropDocumentQuery, DropGraphQuery, DropKvQuery, DropTableQuery, DropVectorQuery,
     ExplainAlterQuery, ExplainFormat, PartitionKind, PartitionSpec, QueryExpr,
 };
 use super::super::lexer::Token;
@@ -306,8 +307,54 @@ impl<'a> Parser<'a> {
     /// Parse the body of DROP TABLE after DROP TABLE has been consumed
     pub fn parse_drop_table_body(&mut self) -> Result<QueryExpr, ParseError> {
         let if_exists = self.match_if_exists()?;
-        let name = self.expect_ident()?;
+        let name = self.parse_drop_collection_name()?;
         Ok(QueryExpr::DropTable(DropTableQuery { name, if_exists }))
+    }
+
+    pub fn parse_drop_graph_body(&mut self) -> Result<QueryExpr, ParseError> {
+        let if_exists = self.match_if_exists()?;
+        let name = self.parse_drop_collection_name()?;
+        Ok(QueryExpr::DropGraph(DropGraphQuery { name, if_exists }))
+    }
+
+    pub fn parse_drop_vector_body(&mut self) -> Result<QueryExpr, ParseError> {
+        let if_exists = self.match_if_exists()?;
+        let name = self.parse_drop_collection_name()?;
+        Ok(QueryExpr::DropVector(DropVectorQuery { name, if_exists }))
+    }
+
+    pub fn parse_drop_document_body(&mut self) -> Result<QueryExpr, ParseError> {
+        let if_exists = self.match_if_exists()?;
+        let name = self.parse_drop_collection_name()?;
+        Ok(QueryExpr::DropDocument(DropDocumentQuery { name, if_exists }))
+    }
+
+    pub fn parse_drop_kv_body(&mut self) -> Result<QueryExpr, ParseError> {
+        let if_exists = self.match_if_exists()?;
+        let name = self.parse_drop_collection_name()?;
+        Ok(QueryExpr::DropKv(DropKvQuery { name, if_exists }))
+    }
+
+    pub fn parse_drop_collection_body(&mut self) -> Result<QueryExpr, ParseError> {
+        let if_exists = self.match_if_exists()?;
+        let name = self.parse_drop_collection_name()?;
+        Ok(QueryExpr::DropCollection(DropCollectionQuery {
+            name,
+            if_exists,
+        }))
+    }
+
+    pub(crate) fn parse_drop_collection_name(&mut self) -> Result<String, ParseError> {
+        let mut name = self.expect_ident()?;
+        while self.consume(&Token::Dot)? {
+            if self.consume(&Token::Star)? {
+                name.push_str(".*");
+                break;
+            }
+            let next = self.expect_ident_or_keyword()?;
+            name = format!("{name}.{next}");
+        }
+        Ok(name)
     }
 
     /// Parse: ALTER TABLE name ADD/DROP/RENAME COLUMN ...
