@@ -128,3 +128,93 @@ fn secret_reference_compares_vault_value_without_reparsing_sql() {
     drop(rt);
     let _ = std::fs::remove_file(path);
 }
+
+// ── Issue #299 conformance: queue full → DLQ routing ─────────────────────────
+
+#[test]
+fn event_routes_to_outbox_dlq_when_target_queue_full() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("CREATE QUEUE user_events MAX_SIZE 1").expect("create queue");
+    rt.execute_query("CREATE TABLE users (id INT, name TEXT) WITH EVENTS TO user_events")
+        .expect("create table with events");
+
+    // First insert fills the queue (max_size=1).
+    rt.execute_query("INSERT INTO users (id, name) VALUES (1, 'Alice')")
+        .expect("first insert");
+
+    // Second insert should overflow and route to DLQ.
+    rt.execute_query("INSERT INTO users (id, name) VALUES (2, 'Bob')")
+        .expect("second insert");
+
+    // DLQ must exist and hold the overflow event.
+    let dlq_result = rt
+        .execute_query("QUEUE LEN user_events_outbox_dlq")
+        .expect("DLQ is queryable");
+    let dlq_len = match dlq_result.result.records[0].get("len") {
+        Some(Value::UnsignedInteger(n)) => *n as usize,
+        other => panic!("expected len, got {other:?}"),
+    };
+    assert!(
+        dlq_len >= 1,
+        "overflow event should be in user_events_outbox_dlq, got {dlq_len}"
+    );
+}
+
+#[test]
+fn target_queue_stays_at_max_size_on_overflow() {
+    // Verifies the drain retry path: the original queue is not written past
+    // its max_size — overflow goes to DLQ instead.
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("CREATE QUEUE orders_events MAX_SIZE 1").expect("create queue");
+    rt.execute_query("CREATE TABLE orders (id INT) WITH EVENTS TO orders_events")
+        .expect("create table");
+
+    rt.execute_query("INSERT INTO orders (id) VALUES (1)").expect("first insert");
+    rt.execute_query("INSERT INTO orders (id) VALUES (2)").expect("second insert");
+    rt.execute_query("INSERT INTO orders (id) VALUES (3)").expect("third insert");
+
+    // Original queue must not exceed max_size.
+    let q_result = rt
+        .execute_query("QUEUE LEN orders_events")
+        .expect("queue is queryable");
+    let q_len = match q_result.result.records[0].get("len") {
+        Some(Value::UnsignedInteger(n)) => *n as usize,
+        other => panic!("expected len, got {other:?}"),
+    };
+    assert_eq!(q_len, 1, "target queue must not exceed max_size; overflow routed to DLQ");
+
+    // DLQ must have the 2 overflow events.
+    let dlq_result = rt
+        .execute_query("QUEUE LEN orders_events_outbox_dlq")
+        .expect("DLQ is queryable");
+    let dlq_len = match dlq_result.result.records[0].get("len") {
+        Some(Value::UnsignedInteger(n)) => *n as usize,
+        other => panic!("expected len, got {other:?}"),
+    };
+    assert_eq!(dlq_len, 2, "two overflow events should be in DLQ");
+}
+
+#[test]
+fn dlq_is_auto_created_on_first_overflow() {
+    // Verifies DLQ auto-creation — no explicit CREATE QUEUE for the DLQ.
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("CREATE QUEUE logs_events MAX_SIZE 1").expect("create queue");
+    rt.execute_query("CREATE TABLE logs (msg TEXT) WITH EVENTS TO logs_events")
+        .expect("create table");
+
+    rt.execute_query("INSERT INTO logs (msg) VALUES ('first')").expect("first insert");
+    rt.execute_query("INSERT INTO logs (msg) VALUES ('second')").expect("second insert → DLQ");
+
+    // DLQ was never explicitly created but must exist now.
+    let dlq_check = rt.execute_query("QUEUE LEN logs_events_outbox_dlq");
+    assert!(
+        dlq_check.is_ok(),
+        "DLQ should be auto-created on first overflow: {:?}",
+        dlq_check.err()
+    );
+    let dlq_len = match dlq_check.unwrap().result.records[0].get("len") {
+        Some(Value::UnsignedInteger(n)) => *n as usize,
+        other => panic!("expected len, got {other:?}"),
+    };
+    assert_eq!(dlq_len, 1, "one event in auto-created DLQ");
+}

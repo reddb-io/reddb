@@ -1,6 +1,7 @@
 //! Queue DDL and command execution
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::storage::queue::QueueMode;
@@ -9,9 +10,33 @@ use crate::storage::unified::{Metadata, MetadataValue, UnifiedStore};
 
 use super::*;
 
+// ---------------------------------------------------------------------------
+// Outbox metrics (exposed via /metrics)
+// ---------------------------------------------------------------------------
+
+/// Total event push attempts that failed (queue full or other error) and
+/// triggered DLQ routing.
+pub static EVENTS_DRAIN_RETRIES_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Total events routed to the dead-letter queue.
+pub static EVENTS_DLQ_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Total events successfully enqueued to their target queue.
+pub static EVENTS_ENQUEUED_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Warn when total estimated outbox payload bytes exceed this value (1 GiB).
+const OUTBOX_WARN_BYTES: u64 = 1 << 30;
+
+/// Route all new events to DLQ when estimated outbox exceeds this value (10 GiB).
+const OUTBOX_MAX_BYTES: u64 = 10 * (1 << 30);
+
+/// Running estimate of bytes pending in event queues (approximate; not decremented on consume).
+static OUTBOX_APPROX_BYTES: AtomicU64 = AtomicU64::new(0);
+
 const QUEUE_META_COLLECTION: &str = "red_queue_meta";
 const QUEUE_POSITION_CENTER: u64 = u64::MAX / 2;
 const WORK_DEFAULT_GROUP: &str = "_work_default";
+const FANOUT_GROUP_PREFIX: &str = "_fanout_";
 
 #[derive(Debug, Clone)]
 struct QueueRuntimeConfig {
@@ -63,9 +88,100 @@ impl RedDBRuntime {
         payload: Value,
     ) -> RedDBResult<EntityId> {
         let store = self.inner.db.store();
-        ensure_queue_exists(store.as_ref(), queue)?;
+        // Auto-create the queue if it does not exist yet.
+        if store.get_collection(queue).is_none() {
+            crate::runtime::impl_ddl::ensure_event_target_queue_pub(self, queue)?;
+        }
+
+        // Estimate payload bytes for outbox watermark checks.
+        let payload_bytes = estimate_payload_bytes(&payload);
+        let outbox_bytes = OUTBOX_APPROX_BYTES.fetch_add(payload_bytes, Ordering::Relaxed);
+
+        // Hard limit: route directly to DLQ without even trying.
+        if outbox_bytes > OUTBOX_MAX_BYTES {
+            OUTBOX_APPROX_BYTES.fetch_sub(payload_bytes, Ordering::Relaxed);
+            EVENTS_DRAIN_RETRIES_TOTAL.fetch_add(1, Ordering::Relaxed);
+            return self.route_event_to_outbox_dlq(queue, payload, "outbox_max_bytes_exceeded");
+        }
+
+        // Soft limit: warn once per crossing.
+        if outbox_bytes > OUTBOX_WARN_BYTES && outbox_bytes - payload_bytes <= OUTBOX_WARN_BYTES {
+            tracing::warn!(
+                outbox_bytes,
+                warn_threshold = OUTBOX_WARN_BYTES,
+                "event outbox approaching capacity warning threshold"
+            );
+            crate::telemetry::operator_event::OperatorEvent::OutboxDlqActivated {
+                queue: queue.to_string(),
+                dlq: format!("{queue}_outbox_dlq"),
+                reason: "outbox_warn_bytes_exceeded".to_string(),
+            }
+            .emit_global();
+        }
+
         let config = load_queue_config(store.as_ref(), queue);
-        let position = next_queue_position(store.as_ref(), queue, QueueSide::Right)?;
+
+        // If the target queue has a max_size and is full, route to DLQ.
+        if let Some(max_size) = config.max_size {
+            let current_len =
+                load_queue_message_views(store.as_ref(), queue).unwrap_or_default().len();
+            if current_len >= max_size {
+                OUTBOX_APPROX_BYTES.fetch_sub(payload_bytes, Ordering::Relaxed);
+                EVENTS_DRAIN_RETRIES_TOTAL.fetch_add(1, Ordering::Relaxed);
+                return self.route_event_to_outbox_dlq(queue, payload, "queue_full");
+            }
+            // Warn at 80% capacity.
+            if current_len * 10 >= max_size * 8 {
+                tracing::warn!(
+                    queue = %queue,
+                    size = current_len,
+                    max = max_size,
+                    "event target queue near capacity"
+                );
+            }
+        }
+
+        let id = self.enqueue_event_payload_raw(store.as_ref(), queue, &config, payload)?;
+        EVENTS_ENQUEUED_TOTAL.fetch_add(1, Ordering::Relaxed);
+        Ok(id)
+    }
+
+    /// Route a failed event to `<queue>_outbox_dlq`, auto-creating it if needed.
+    fn route_event_to_outbox_dlq(
+        &self,
+        queue: &str,
+        payload: Value,
+        reason: &str,
+    ) -> RedDBResult<EntityId> {
+        let dlq_name = format!("{queue}_outbox_dlq");
+        EVENTS_DLQ_TOTAL.fetch_add(1, Ordering::Relaxed);
+
+        crate::telemetry::operator_event::OperatorEvent::OutboxDlqActivated {
+            queue: queue.to_string(),
+            dlq: dlq_name.clone(),
+            reason: reason.to_string(),
+        }
+        .emit_global();
+
+        let store = self.inner.db.store();
+        if store.get_collection(&dlq_name).is_none() {
+            crate::runtime::impl_ddl::ensure_event_target_queue_pub(self, &dlq_name)?;
+        }
+        let dlq_config = load_queue_config(store.as_ref(), &dlq_name);
+        let id = self.enqueue_event_payload_raw(store.as_ref(), &dlq_name, &dlq_config, payload)?;
+        EVENTS_ENQUEUED_TOTAL.fetch_add(1, Ordering::Relaxed);
+        Ok(id)
+    }
+
+    /// Low-level event message insert — no size checks, no DLQ routing.
+    fn enqueue_event_payload_raw(
+        &self,
+        store: &UnifiedStore,
+        queue: &str,
+        config: &QueueRuntimeConfig,
+        payload: Value,
+    ) -> RedDBResult<EntityId> {
+        let position = next_queue_position(store, queue, QueueSide::Right)?;
         let mut entity = UnifiedEntity::new(
             EntityId::new(0),
             EntityKind::QueueMessage {
@@ -220,6 +336,20 @@ impl RedDBRuntime {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         let store = self.inner.db.store();
         ensure_queue_exists(store.as_ref(), &query.name)?;
+
+        let pending = load_pending_entries(store.as_ref(), &query.name, None, None)
+            .unwrap_or_default();
+        if !pending.is_empty() {
+            tracing::warn!(
+                queue = %query.name,
+                pending_count = pending.len(),
+                new_mode = %query.mode.as_str(),
+                "ALTER QUEUE SET MODE: {} in-flight messages will drain with old mode; \
+                 new reads use {}",
+                pending.len(),
+                query.mode.as_str(),
+            );
+        }
 
         let mut config = load_queue_config(store.as_ref(), &query.name);
         config.mode = query.mode;
@@ -554,7 +684,9 @@ impl RedDBRuntime {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
                 let config = load_queue_config(store.as_ref(), queue);
-                let group = resolve_read_group(store.as_ref(), queue, group.as_deref(), &config)?;
+                let group =
+                    resolve_read_group(store.as_ref(), queue, group.as_deref(), consumer, &config)?;
+                let group = group.as_str();
                 let pending = load_pending_entries(store.as_ref(), queue, Some(group), None)?;
                 let pending_ids = pending
                     .iter()
@@ -601,14 +733,21 @@ impl RedDBRuntime {
                         continue;
                     };
 
-                    let attempts = increment_queue_attempts(store.as_ref(), queue, current.id)?;
-                    if attempts > current.max_attempts {
+                    // FANOUT: each consumer group has independent delivery count.
+                    // Incrementing global attempts would conflate all groups' reads.
+                    let delivery_count = if config.mode == QueueMode::Fanout {
+                        1u32
+                    } else {
+                        increment_queue_attempts(store.as_ref(), queue, current.id)?
+                    };
+                    if delivery_count > current.max_attempts {
                         let _ = move_message_to_dlq_or_drop(
                             Some(self),
                             store.as_ref(),
                             queue,
                             current.id,
                             &config,
+                            Some(group),
                             "max_attempts_exceeded",
                         )?;
                         continue;
@@ -622,7 +761,7 @@ impl RedDBRuntime {
                         current.id,
                         consumer,
                         delivered_at_ns,
-                        attempts,
+                        delivery_count,
                     )?;
 
                     let mut record = UnifiedRecord::new();
@@ -631,9 +770,9 @@ impl RedDBRuntime {
                     record.set("consumer", Value::text(consumer.clone()));
                     record.set(
                         "delivery_count",
-                        Value::UnsignedInteger(u64::from(attempts)),
+                        Value::UnsignedInteger(u64::from(delivery_count)),
                     );
-                    record.set("attempts", Value::UnsignedInteger(u64::from(attempts)));
+                    record.set("attempts", Value::UnsignedInteger(u64::from(delivery_count)));
                     result.push(record);
                 }
                 if !result.records.is_empty() {
@@ -746,11 +885,16 @@ impl RedDBRuntime {
                     }
 
                     let payload = queue_message_payload(store.as_ref(), queue, current.message_id)?;
-                    let attempts =
-                        increment_queue_attempts(store.as_ref(), queue, current.message_id)?;
-                    if attempts
-                        > queue_message_max_attempts(store.as_ref(), queue, current.message_id)?
-                    {
+                    let next_delivery_count = current.delivery_count.saturating_add(1);
+                    let max_attempts =
+                        queue_message_max_attempts(store.as_ref(), queue, current.message_id)?;
+                    // FANOUT: use per-group delivery count; skip global attempts increment.
+                    let attempts = if config.mode == QueueMode::Fanout {
+                        next_delivery_count
+                    } else {
+                        increment_queue_attempts(store.as_ref(), queue, current.message_id)?
+                    };
+                    if attempts > max_attempts {
                         delete_meta_entity(store.as_ref(), current.entity_id);
                         let _ = move_message_to_dlq_or_drop(
                             Some(self),
@@ -758,6 +902,7 @@ impl RedDBRuntime {
                             queue,
                             current.message_id,
                             &config,
+                            Some(group),
                             "claim_max_attempts_exceeded",
                         )?;
                         continue;
@@ -770,7 +915,7 @@ impl RedDBRuntime {
                         current.message_id,
                         consumer,
                         current_time_ns,
-                        current.delivery_count.saturating_add(1),
+                        next_delivery_count,
                     )?;
 
                     let mut record = UnifiedRecord::new();
@@ -782,7 +927,7 @@ impl RedDBRuntime {
                     record.set("consumer", Value::text(consumer.clone()));
                     record.set(
                         "delivery_count",
-                        Value::UnsignedInteger(u64::from(current.delivery_count.saturating_add(1))),
+                        Value::UnsignedInteger(u64::from(next_delivery_count)),
                     );
                     result.push(record);
                 }
@@ -809,6 +954,7 @@ impl RedDBRuntime {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
                 require_queue_group(store.as_ref(), queue, group)?;
+                let config = load_queue_config(store.as_ref(), queue);
                 let message_id = parse_message_id(message_id)?;
                 let message_lock = queue_message_lock_handle(self, queue, message_id);
                 let _guard = message_lock.lock();
@@ -816,7 +962,12 @@ impl RedDBRuntime {
                 delete_meta_entity(store.as_ref(), pending.entity_id);
                 save_queue_ack(store.as_ref(), queue, group, message_id)?;
 
-                if queue_message_completed_for_all_groups(store.as_ref(), queue, message_id)? {
+                // FANOUT: each consumer group independently tracks its ack state.
+                // Messages stay alive until TTL/PURGE — deleting on ack would
+                // remove the message before late-joining consumers can read it.
+                if config.mode != QueueMode::Fanout
+                    && queue_message_completed_for_all_groups(store.as_ref(), queue, message_id)?
+                {
                     delete_message_with_state(Some(self), store.as_ref(), queue, message_id)?;
                 }
                 self.invalidate_result_cache();
@@ -842,7 +993,12 @@ impl RedDBRuntime {
                 let pending = require_pending_entry(store.as_ref(), queue, group, message_id)?;
                 delete_meta_entity(store.as_ref(), pending.entity_id);
 
-                let attempts = queue_message_attempts(store.as_ref(), queue, message_id)?;
+                // FANOUT: use per-group delivery_count for max_attempts check.
+                let attempts = if config.mode == QueueMode::Fanout {
+                    pending.delivery_count
+                } else {
+                    queue_message_attempts(store.as_ref(), queue, message_id)?
+                };
                 let max_attempts = queue_message_max_attempts(store.as_ref(), queue, message_id)?;
                 let message = if attempts >= max_attempts {
                     let target = move_message_to_dlq_or_drop(
@@ -851,6 +1007,7 @@ impl RedDBRuntime {
                         queue,
                         message_id,
                         &config,
+                        Some(group),
                         "nack_max_attempts_exceeded",
                     )?;
                     match target {
@@ -920,6 +1077,10 @@ fn load_queue_config(store: &UnifiedStore, queue: &str) -> QueueRuntimeConfig {
         .unwrap_or(default)
 }
 
+pub(super) fn queue_mode_str(store: &UnifiedStore, queue: &str) -> &'static str {
+    load_queue_config(store, queue).mode.as_str()
+}
+
 fn save_queue_config(
     store: &UnifiedStore,
     queue: &str,
@@ -986,23 +1147,31 @@ fn require_queue_group(store: &UnifiedStore, queue: &str, group: &str) -> RedDBR
     }
 }
 
-fn resolve_read_group<'a>(
+fn resolve_read_group(
     store: &UnifiedStore,
     queue: &str,
-    group: Option<&'a str>,
+    group: Option<&str>,
+    consumer: &str,
     config: &QueueRuntimeConfig,
-) -> RedDBResult<&'a str> {
+) -> RedDBResult<String> {
     if let Some(group) = group {
         require_queue_group(store, queue, group)?;
-        return Ok(group);
+        return Ok(group.to_string());
     }
 
     match config.mode {
-        QueueMode::Work | QueueMode::Fanout => {
+        QueueMode::Work => {
             if !queue_group_exists(store, queue, WORK_DEFAULT_GROUP)? {
                 save_queue_group(store, queue, WORK_DEFAULT_GROUP)?;
             }
-            Ok(WORK_DEFAULT_GROUP)
+            Ok(WORK_DEFAULT_GROUP.to_string())
+        }
+        QueueMode::Fanout => {
+            let fanout_group = format!("{FANOUT_GROUP_PREFIX}{consumer}");
+            if !queue_group_exists(store, queue, &fanout_group)? {
+                save_queue_group(store, queue, &fanout_group)?;
+            }
+            Ok(fanout_group)
         }
     }
 }
@@ -1487,6 +1656,9 @@ fn move_message_to_dlq_or_drop(
     queue: &str,
     message_id: EntityId,
     config: &QueueRuntimeConfig,
+    // For FANOUT: the consumer group that exhausted attempts. Only that
+    // group's copy is retired; the message stays alive until all groups finish.
+    group: Option<&str>,
     _reason: &str,
 ) -> RedDBResult<Option<String>> {
     let data = queue_message_data(store, queue, message_id)?;
@@ -1522,12 +1694,36 @@ fn move_message_to_dlq_or_drop(
                 .set_metadata(dlq, inserted_id, queue_message_ttl_metadata(ttl_ms))
                 .map_err(|err| RedDBError::Internal(err.to_string()))?;
         }
-        delete_message_with_state(runtime, store, queue, message_id)?;
+        retire_message_for_group(runtime, store, queue, message_id, group, config)?;
         Ok(Some(dlq.clone()))
     } else {
-        delete_message_with_state(runtime, store, queue, message_id)?;
+        retire_message_for_group(runtime, store, queue, message_id, group, config)?;
         Ok(None)
     }
+}
+
+/// Retire a message for a specific group (FANOUT) or globally (WORK/no group).
+/// In FANOUT mode the message is group-acked but NOT physically deleted —
+/// other consumer groups must still be able to read it. Cleanup happens via TTL/PURGE.
+fn retire_message_for_group(
+    runtime: Option<&RedDBRuntime>,
+    store: &UnifiedStore,
+    queue: &str,
+    message_id: EntityId,
+    group: Option<&str>,
+    config: &QueueRuntimeConfig,
+) -> RedDBResult<()> {
+    if let Some(g) = group {
+        save_queue_ack(store, queue, g, message_id)?;
+        if config.mode != QueueMode::Fanout
+            && queue_message_completed_for_all_groups(store, queue, message_id)?
+        {
+            delete_message_with_state(runtime, store, queue, message_id)?;
+        }
+    } else {
+        delete_message_with_state(runtime, store, queue, message_id)?;
+    }
+    Ok(())
 }
 
 fn queue_manager(
@@ -1725,4 +1921,13 @@ fn queue_message_ttl_metadata(ttl_ms: u64) -> Metadata {
         .into_iter()
         .collect(),
     )
+}
+
+/// Rough payload byte estimate for outbox watermark tracking.
+fn estimate_payload_bytes(payload: &Value) -> u64 {
+    match payload {
+        Value::Json(v) => v.len() as u64,
+        Value::Text(s) => s.len() as u64,
+        _ => 64,
+    }
 }

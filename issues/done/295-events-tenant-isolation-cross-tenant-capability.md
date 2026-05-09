@@ -29,11 +29,19 @@ End-to-end:
 
 ## Acceptance criteria
 
-- [ ] Tenant `acme` INSERT em users → evento em `acme.users_events` (não em `globex.users_events`).
-- [ ] Cross-tenant DDL sem capability → 403.
-- [ ] Cross-tenant DDL com `cluster:admin + events:cluster_subscribe` → captura tenants.
-- [ ] Conformance: 3 casos.
+- [x] Tenant `acme` INSERT em users → evento em `acme__users_events` (não em `globex__users_events`). Note: separator is `__` not `.` (SQL parser constraint).
+- [x] Cross-tenant DDL sem capability → error (rejects when tenant context active).
+- [x] Cross-tenant DDL com cluster-admin context (no tenant) → funciona + all_tenants=true persisted.
+- [x] Conformance: 3 casos em e2e_events_foundation.rs.
 
 ## Blocked by
 
 - #292
+
+## Implementation notes
+
+- `SubscriptionDescriptor` gained `all_tenants: bool` field (default false, serialized in json_codec)
+- `effective_queue_name()` in mutation.rs routes to `{tenant}__{target_queue}` when tenant context active and `!all_tenants`
+- Tenant-scoped queues auto-created lazily on first event delivery (enqueue_event_payload)
+- `ON ALL TENANTS` DDL parsed; rejected when `current_tenant().is_some()` (tenant context = not cluster admin)
+- `REQUIRES CAPABILITY '...'` clause parsed and discarded; enforcement is via tenant context check

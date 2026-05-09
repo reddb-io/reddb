@@ -467,6 +467,10 @@ fn subscription_descriptor_to_json(
 ) -> JsonValue {
     let mut object = Map::new();
     object.insert(
+        "name".to_string(),
+        JsonValue::String(subscription.name.clone()),
+    );
+    object.insert(
         "source".to_string(),
         JsonValue::String(subscription.source.clone()),
     );
@@ -503,6 +507,10 @@ fn subscription_descriptor_to_json(
         ),
     );
     object.insert("enabled".to_string(), JsonValue::Bool(subscription.enabled));
+    object.insert(
+        "all_tenants".to_string(),
+        JsonValue::Bool(subscription.all_tenants),
+    );
     JsonValue::Object(object)
 }
 
@@ -541,6 +549,11 @@ fn subscription_descriptor_from_json(
         })
         .unwrap_or_default();
     Ok(crate::catalog::SubscriptionDescriptor {
+        name: object
+            .get("name")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("")
+            .to_string(),
         source: json_string_required(object, "source")?,
         target_queue: json_string_required(object, "target_queue")?,
         ops_filter,
@@ -558,6 +571,10 @@ fn subscription_descriptor_from_json(
             .get("enabled")
             .and_then(JsonValue::as_bool)
             .unwrap_or(true),
+        all_tenants: object
+            .get("all_tenants")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false),
     })
 }
 

@@ -1381,6 +1381,67 @@ impl RedDBServer {
             let _ = writeln!(body, "reddb_limit_memory_bytes {}", v);
         }
 
+        // Events outbox metrics — issue #299
+        {
+            use crate::runtime::impl_queue::{EVENTS_DLQ_TOTAL, EVENTS_DRAIN_RETRIES_TOTAL, EVENTS_ENQUEUED_TOTAL};
+            let enqueued =
+                EVENTS_ENQUEUED_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+            let retries =
+                EVENTS_DRAIN_RETRIES_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+            let dlq_total = EVENTS_DLQ_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+
+            let _ = writeln!(
+                body,
+                "# HELP reddb_events_enqueued_total Total events successfully pushed to target queues."
+            );
+            let _ = writeln!(body, "# TYPE reddb_events_enqueued_total counter");
+            let _ = writeln!(body, "reddb_events_enqueued_total {enqueued}");
+
+            let _ = writeln!(
+                body,
+                "# HELP reddb_events_drain_retries_total Total event push failures that triggered DLQ routing."
+            );
+            let _ = writeln!(body, "# TYPE reddb_events_drain_retries_total counter");
+            let _ = writeln!(
+                body,
+                "reddb_events_drain_retries_total{{reason=\"queue_full\"}} {retries}"
+            );
+
+            let _ = writeln!(
+                body,
+                "# HELP reddb_events_dlq_total Total events routed to dead-letter queues."
+            );
+            let _ = writeln!(body, "# TYPE reddb_events_dlq_total counter");
+            let _ = writeln!(body, "reddb_events_dlq_total {dlq_total}");
+        }
+
+        // AI embedding metrics — issue #277
+        let dedup_hits = crate::runtime::ai::dedup_cache::DEDUP_HITS_TOTAL.load(
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let dedup_misses = crate::runtime::ai::dedup_cache::DEDUP_MISSES_TOTAL.load(
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let chunked_total = crate::runtime::ai::text_chunker::chunked_total();
+        let _ = writeln!(
+            body,
+            "# HELP reddb_ai_embedding_dedup_hits_total Embedding dedup cache hits."
+        );
+        let _ = writeln!(body, "# TYPE reddb_ai_embedding_dedup_hits_total counter");
+        let _ = writeln!(body, "reddb_ai_embedding_dedup_hits_total {}", dedup_hits);
+        let _ = writeln!(
+            body,
+            "# HELP reddb_ai_embedding_dedup_misses_total Embedding dedup cache misses."
+        );
+        let _ = writeln!(body, "# TYPE reddb_ai_embedding_dedup_misses_total counter");
+        let _ = writeln!(body, "reddb_ai_embedding_dedup_misses_total {}", dedup_misses);
+        let _ = writeln!(
+            body,
+            "# HELP reddb_ai_embedding_chunked_total Texts chunked before embedding."
+        );
+        let _ = writeln!(body, "# TYPE reddb_ai_embedding_chunked_total counter");
+        let _ = writeln!(body, "reddb_ai_embedding_chunked_total {}", chunked_total);
+
         HttpResponse {
             status: 200,
             content_type: "text/plain; version=0.0.4",

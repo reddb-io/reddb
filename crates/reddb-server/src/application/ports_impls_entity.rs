@@ -2121,7 +2121,10 @@ impl RuntimeEntityPort for RedDBRuntime {
 
         // Route through MutationEngine: single bulk_insert + one CDC batch
         // instead of N separate cdc_emit() calls (each acquires a write lock).
-        let engine = self.mutation_engine();
+        let engine = {
+            let e = self.mutation_engine();
+            if input.suppress_events { e.with_suppress_events() } else { e }
+        };
         let mutation_rows: Vec<crate::runtime::mutation::MutationRow> = prepared_rows
             .into_iter()
             .map(|(fields, metadata, node_links, vector_links)| {
@@ -2325,6 +2328,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         self.create_rows_batch(CreateRowsBatchInput {
             collection,
             rows: tuple_rows,
+            suppress_events: false,
         })
         .map(|out| out.len())
     }

@@ -144,6 +144,7 @@ fn arb_insert_query() -> impl Strategy<Value = QueryExpr> {
                 expires_at_ms: None,
                 with_metadata: Vec::new(),
                 auto_embed: None,
+                suppress_events: false,
             })
         })
 }

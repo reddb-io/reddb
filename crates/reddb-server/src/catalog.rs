@@ -60,12 +60,19 @@ impl SubscriptionOperation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubscriptionDescriptor {
+    /// Logical name for this subscription. Empty string for legacy unnamed subscriptions.
+    pub name: String,
     pub source: String,
     pub target_queue: String,
     pub ops_filter: Vec<SubscriptionOperation>,
     pub where_filter: Option<String>,
     pub redact_fields: Vec<String>,
     pub enabled: bool,
+    /// When true, events are routed to the bare `target_queue` regardless of
+    /// the current tenant — a cluster-wide subscription. When false (default),
+    /// events are namespaced as `{tenant}/{target_queue}` whenever a tenant
+    /// context is active, enforcing per-tenant isolation.
+    pub all_tenants: bool,
 }
 
 #[derive(Debug, Clone)]

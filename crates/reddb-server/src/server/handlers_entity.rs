@@ -200,6 +200,7 @@ impl RedDBServer {
                 .create_rows_batch(crate::application::CreateRowsBatchInput {
                     collection: collection.to_string(),
                     rows,
+                    suppress_events: false,
                 })
         {
             return json_error(400, err.to_string());

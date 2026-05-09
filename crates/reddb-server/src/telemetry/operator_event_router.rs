@@ -599,6 +599,18 @@ mod tests {
             OperatorEvent::SchemaCorruption { collection: "c".into(), detail: "d".into() },
             OperatorEvent::CheckpointFailed { lsn: 1, error: "e".into() },
             OperatorEvent::ConfigChangeRequiresRestart { fields_changed: "f".into() },
+            OperatorEvent::SubscriptionSchemaChange {
+                collection: "c".into(),
+                subscription_names: "sub1".into(),
+                fields_added: "phone".into(),
+                fields_removed: "".into(),
+                lsn: 42,
+            },
+            OperatorEvent::OutboxDlqActivated {
+                queue: "users_events".into(),
+                dlq: "users_events_outbox_dlq".into(),
+                reason: "queue_full".into(),
+            },
         ];
 
         // Verify count matches all_variant_names minus DanglingAdminIntent
@@ -661,6 +673,26 @@ mod tests {
             OperatorEvent::DanglingAdminIntent { .. } => {
                 // Not cloneable without crypto type impls; skip.
                 OperatorEvent::ShutdownForced { reason: "clone_placeholder".into() }
+            }
+            OperatorEvent::SubscriptionSchemaChange {
+                collection,
+                subscription_names,
+                fields_added,
+                fields_removed,
+                lsn,
+            } => OperatorEvent::SubscriptionSchemaChange {
+                collection: collection.clone(),
+                subscription_names: subscription_names.clone(),
+                fields_added: fields_added.clone(),
+                fields_removed: fields_removed.clone(),
+                lsn: *lsn,
+            },
+            OperatorEvent::OutboxDlqActivated { queue, dlq, reason } => {
+                OperatorEvent::OutboxDlqActivated {
+                    queue: queue.clone(),
+                    dlq: dlq.clone(),
+                    reason: reason.clone(),
+                }
             }
         }
     }

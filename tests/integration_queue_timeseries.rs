@@ -321,6 +321,65 @@ fn test_queue_mode_persists_and_defaults_to_work() {
     assert_eq!(mode("default_tasks"), Some(QueueMode::Fanout));
 }
 
+// Conformance: WORK→FANOUT mode transition.
+// In-flight messages (pending before ALTER) drain with old WORK mode.
+// New messages pushed after ALTER are delivered with FANOUT semantics.
+#[test]
+fn test_alter_queue_work_to_fanout_transition() {
+    let rt = rt();
+
+    exec(&rt, "CREATE QUEUE alerts WORK");
+
+    // Push 2 messages before the mode switch.
+    exec(&rt, "QUEUE PUSH alerts 'pre-1'");
+    exec(&rt, "QUEUE PUSH alerts 'pre-2'");
+
+    // Consumer alice reads one message in WORK mode — it lands in _work_default pending.
+    let read = exec(&rt, "QUEUE READ alerts CONSUMER alice COUNT 1");
+    assert_eq!(read.result.records.len(), 1, "alice should get 1 message");
+    let pre_msg_id = text(&read.result.records[0], "message_id");
+
+    // ALTER: switch to FANOUT. In-flight message for alice is still pending (old mode).
+    let alter = exec(&rt, "ALTER QUEUE alerts SET MODE FANOUT");
+    assert!(
+        text(&alter.result.records[0], "message").contains("fanout"),
+        "result should confirm new mode"
+    );
+
+    // Push a new message after the mode switch.
+    exec(&rt, "QUEUE PUSH alerts 'post-1'");
+
+    // Bob reads — should get both the remaining pre-2 AND post-1 in FANOUT semantics
+    // (each fanout consumer gets every message not yet acked for their group).
+    let bob_reads: Vec<_> = {
+        let mut msgs = Vec::new();
+        loop {
+            let r = exec(&rt, "QUEUE READ alerts CONSUMER bob COUNT 10");
+            if r.result.records.is_empty() {
+                break;
+            }
+            for rec in &r.result.records {
+                msgs.push(text(rec, "payload"));
+            }
+        }
+        msgs
+    };
+    assert!(
+        bob_reads.contains(&"pre-2".to_string()),
+        "bob should get pre-2 (not yet acked) after FANOUT switch"
+    );
+    assert!(
+        bob_reads.contains(&"post-1".to_string()),
+        "bob should get post-1 pushed after FANOUT switch"
+    );
+
+    // Alice can still ack her in-flight message from the old WORK pending.
+    exec(
+        &rt,
+        &format!("QUEUE ACK alerts GROUP _work_default '{pre_msg_id}'"),
+    );
+}
+
 #[test]
 fn test_work_queue_implicit_consumers_share_default_group() {
     let rt = rt();
@@ -361,6 +420,110 @@ fn test_work_queue_implicit_consumers_share_default_group() {
 
     let pending = exec(&rt, "QUEUE PENDING work_tasks GROUP _work_default");
     assert_eq!(pending.result.records.len(), 100);
+}
+
+// Conformance: FANOUT semantics — each consumer receives every message independently.
+#[test]
+fn test_fanout_queue_broadcast_all_consumers_get_all_messages() {
+    let rt = rt();
+
+    exec(&rt, "CREATE QUEUE notifications FANOUT");
+    for i in 0..100 {
+        exec(&rt, &format!("QUEUE PUSH notifications 'msg-{i}'"));
+    }
+
+    let consumers = ["alice", "bob", "carol"];
+    let mut per_consumer_ids: HashMap<&str, HashSet<String>> = HashMap::new();
+
+    for consumer in &consumers {
+        let mut seen = HashSet::new();
+        loop {
+            let read = exec(
+                &rt,
+                &format!("QUEUE READ notifications CONSUMER {consumer} COUNT 10"),
+            );
+            if read.result.records.is_empty() {
+                break;
+            }
+            for record in &read.result.records {
+                let msg_id = text(record, "message_id");
+                let fanout_group = format!("_fanout_{consumer}");
+                exec(
+                    &rt,
+                    &format!("QUEUE ACK notifications GROUP {fanout_group} '{msg_id}'"),
+                );
+                seen.insert(text(record, "payload"));
+            }
+        }
+        per_consumer_ids.insert(consumer, seen);
+    }
+
+    // Every consumer must have received all 100 messages.
+    for consumer in &consumers {
+        assert_eq!(
+            per_consumer_ids[consumer].len(),
+            100,
+            "consumer {consumer} should receive all 100 messages in FANOUT mode"
+        );
+    }
+}
+
+#[test]
+fn test_fanout_queue_ack_isolation() {
+    let rt = rt();
+
+    exec(&rt, "CREATE QUEUE events FANOUT");
+    exec(&rt, "QUEUE PUSH events 'hello'");
+
+    // alice reads and acks
+    let read_alice = exec(&rt, "QUEUE READ events CONSUMER alice COUNT 1");
+    assert_eq!(read_alice.result.records.len(), 1);
+    let msg_id = text(&read_alice.result.records[0], "message_id");
+    exec(
+        &rt,
+        &format!("QUEUE ACK events GROUP _fanout_alice '{msg_id}'"),
+    );
+
+    // bob has not yet read — message must still be visible to bob
+    let read_bob = exec(&rt, "QUEUE READ events CONSUMER bob COUNT 1");
+    assert_eq!(
+        read_bob.result.records.len(),
+        1,
+        "bob must still see the message after alice acked it"
+    );
+    let bob_msg_id = text(&read_bob.result.records[0], "message_id");
+    assert_eq!(msg_id, bob_msg_id, "alice and bob see the same message");
+}
+
+#[test]
+fn test_fanout_queue_dlq_per_consumer() {
+    let rt = rt();
+
+    // max_attempts=1 so a single nack triggers DLQ
+    exec(
+        &rt,
+        "CREATE QUEUE alerts FANOUT WITH DLQ alerts_dlq MAX_ATTEMPTS 1",
+    );
+    exec(&rt, "QUEUE PUSH alerts 'critical'");
+
+    // alice reads and nacks — should move to alice's DLQ (group-level ack),
+    // but bob must still be able to read the message.
+    let read_alice = exec(&rt, "QUEUE READ alerts CONSUMER alice COUNT 1");
+    assert_eq!(read_alice.result.records.len(), 1);
+    let msg_id = text(&read_alice.result.records[0], "message_id");
+    // delivery_count=1, max_attempts=1 → nack triggers DLQ
+    exec(
+        &rt,
+        &format!("QUEUE NACK alerts GROUP _fanout_alice '{msg_id}'"),
+    );
+
+    // bob must still receive the message
+    let read_bob = exec(&rt, "QUEUE READ alerts CONSUMER bob COUNT 1");
+    assert_eq!(
+        read_bob.result.records.len(),
+        1,
+        "bob must not be affected by alice's DLQ move"
+    );
 }
 
 #[test]
@@ -609,4 +772,43 @@ fn test_timeseries_time_bucket_aggregate_query() {
 
     assert_eq!(rows[0], (0, 15.0, 2));
     assert_eq!(rows[1], (five_minutes_ns, 30.0, 1));
+}
+
+#[test]
+fn test_queue_mode_visible_in_red_collections() {
+    let rt = rt();
+
+    exec(&rt, "CREATE QUEUE notifications FANOUT");
+    exec(&rt, "CREATE QUEUE tasks WORK");
+
+    let result = exec(
+        &rt,
+        "SELECT name, queue_mode FROM red.collections WHERE model = 'queue'",
+    );
+
+    let queue_modes: std::collections::HashMap<String, String> = result
+        .result
+        .records
+        .iter()
+        .filter(|r| r.get("queue_mode") != Some(&Value::Null))
+        .map(|r| (text(r, "name"), text(r, "queue_mode")))
+        .collect();
+
+    assert_eq!(queue_modes.get("notifications").map(String::as_str), Some("fanout"));
+    assert_eq!(queue_modes.get("tasks").map(String::as_str), Some("work"));
+}
+
+#[test]
+fn test_non_queue_collections_have_null_queue_mode() {
+    let rt = rt();
+
+    exec(&rt, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
+
+    let result = exec(
+        &rt,
+        "SELECT name, queue_mode FROM red.collections WHERE name = 'users'",
+    );
+
+    assert_eq!(result.result.records.len(), 1);
+    assert_eq!(result.result.records[0].get("queue_mode"), Some(&Value::Null));
 }

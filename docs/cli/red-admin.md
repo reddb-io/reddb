@@ -54,6 +54,44 @@ red admin collections stats
 red admin collections stats users
 ```
 
+Drop a collection (interactive confirmation required):
+
+```bash
+red admin collections drop users
+```
+
+Skip confirmation with `--yes`:
+
+```bash
+red admin collections drop users --yes
+```
+
+Suppress error when collection does not exist:
+
+```bash
+red admin collections drop users --if-exists --yes
+```
+
+Truncate a collection (clears all rows, no confirmation):
+
+```bash
+red admin collections truncate users
+```
+
+```bash
+red admin collections truncate users --if-exists
+```
+
+All write commands support `--json` for scripting:
+
+```bash
+red admin collections drop users --yes --json
+# {"ok":true,"command":"admin.collections.drop","collection":"users","affected_rows":0}
+
+red admin collections truncate users --json
+# {"ok":true,"command":"admin.collections.truncate","collection":"users","affected_rows":42}
+```
+
 ## Indices
 
 List all visible index metadata:

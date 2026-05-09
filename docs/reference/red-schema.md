@@ -79,6 +79,7 @@ Current columns:
 | `on_disk_bytes`   | Approximate primary B-tree bytes currently reachable from the collection root. Cached for up to 30 seconds. |
 | `internal`        | `true` for runtime-owned collections and artifacts such as DLQs, `audit_log`, and `red_*` stores. |
 | `tenant_id`       | Tenant owning the collection, or `NULL` for global/unscoped collections. |
+| `queue_mode`      | `fanout` or `work` for queue collections; `NULL` for all other models. See [Queue Modes](../data-models/queues.md#queue-modes). |
 
 `on_disk_bytes` is a conservative storage estimate, not a full database-file
 ownership report. It walks the live collection primary B-tree when the local

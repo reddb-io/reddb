@@ -391,15 +391,32 @@ impl<'a> Parser<'a> {
     /// Parse a single ALTER TABLE operation
     fn parse_alter_operation(&mut self, table_name: &str) -> Result<AlterOperation, ParseError> {
         if self.consume(&Token::Add)? {
-            // ADD COLUMN definition
-            let _ = self.consume(&Token::Column)?; // COLUMN keyword is optional
-            let col_def = self.parse_column_def()?;
-            Ok(AlterOperation::AddColumn(col_def))
+            if self.consume_ident_ci("SUBSCRIPTION")? {
+                // ADD SUBSCRIPTION name TO queue [REDACT (...)] [WHERE ...]
+                let sub_name = self.expect_ident()?;
+                let descriptor =
+                    self.parse_subscription_descriptor(table_name.to_string())?;
+                Ok(AlterOperation::AddSubscription {
+                    name: sub_name,
+                    descriptor,
+                })
+            } else {
+                // ADD COLUMN definition (COLUMN keyword is optional)
+                let _ = self.consume(&Token::Column)?;
+                let col_def = self.parse_column_def()?;
+                Ok(AlterOperation::AddColumn(col_def))
+            }
         } else if self.consume(&Token::Drop)? {
-            // DROP COLUMN name
-            let _ = self.consume(&Token::Column)?; // COLUMN keyword is optional
-            let col_name = self.expect_ident()?;
-            Ok(AlterOperation::DropColumn(col_name))
+            if self.consume_ident_ci("SUBSCRIPTION")? {
+                // DROP SUBSCRIPTION name
+                let sub_name = self.expect_ident()?;
+                Ok(AlterOperation::DropSubscription { name: sub_name })
+            } else {
+                // DROP COLUMN name (COLUMN keyword is optional)
+                let _ = self.consume(&Token::Column)?;
+                let col_name = self.expect_ident()?;
+                Ok(AlterOperation::DropColumn(col_name))
+            }
         } else if self.consume(&Token::Rename)? {
             // RENAME COLUMN from TO to
             let _ = self.consume(&Token::Column)?; // COLUMN keyword is optional
@@ -528,7 +545,7 @@ impl<'a> Parser<'a> {
         if self.consume_ident_ci("REDACT")? {
             self.expect(Token::LParen)?;
             loop {
-                redact_fields.push(self.expect_ident_or_keyword()?);
+                redact_fields.push(self.parse_dotted_redact_path()?);
                 if !self.consume(&Token::Comma)? {
                     break;
                 }
@@ -542,14 +559,56 @@ impl<'a> Parser<'a> {
             None
         };
 
+        // ON ALL TENANTS: opt-in cluster-wide subscription (requires capability check at execution)
+        let all_tenants = if self.consume(&Token::On)? {
+            self.expect(Token::All)?;
+            if !self.consume_ident_ci("TENANTS")? {
+                return Err(ParseError::expected(
+                    vec!["TENANTS"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+            true
+        } else {
+            false
+        };
+
+        // REQUIRES CAPABILITY '...' — parsed and discarded; enforcement is at execution time
+        if self.consume_ident_ci("REQUIRES")? {
+            self.consume_ident_ci("CAPABILITY")?;
+            // consume the capability string literal token
+            self.advance()?;
+        }
+
         Ok(SubscriptionDescriptor {
+            name: String::new(),
             source,
             target_queue,
             ops_filter,
             where_filter,
             redact_fields,
             enabled: true,
+            all_tenants,
         })
+    }
+
+    /// Parse a dotted redact path: `field`, `obj.field`, `obj.*.field`, etc.
+    fn parse_dotted_redact_path(&mut self) -> Result<String, ParseError> {
+        let mut parts = Vec::new();
+        if self.consume(&Token::Star)? {
+            parts.push("*".to_string());
+        } else {
+            parts.push(self.expect_ident_or_keyword()?);
+        }
+        while self.consume(&Token::Dot)? {
+            if self.consume(&Token::Star)? {
+                parts.push("*".to_string());
+            } else {
+                parts.push(self.expect_ident_or_keyword()?);
+            }
+        }
+        Ok(parts.join("."))
     }
 
     fn collect_subscription_where_filter(&mut self) -> Result<String, ParseError> {

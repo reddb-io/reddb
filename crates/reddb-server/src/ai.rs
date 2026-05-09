@@ -221,6 +221,99 @@ pub fn anthropic_prompt(request: AnthropicPromptRequest) -> RedDBResult<AiPrompt
     parse_anthropic_prompt_response(&body, &request.model)
 }
 
+/// Async OpenAI chat-completion prompt via [`AiTransport`].
+///
+/// Uses the transport's connection pool and retry policy (429/5xx backoff)
+/// instead of the one-shot blocking path in [`openai_prompt`].
+pub async fn openai_prompt_async(
+    transport: &crate::runtime::ai::transport::AiTransport,
+    request: OpenAiPromptRequest,
+) -> RedDBResult<AiPromptResponse> {
+    if request.model.trim().is_empty() {
+        return Err(RedDBError::Query(
+            "OpenAI prompt model cannot be empty".to_string(),
+        ));
+    }
+    if request.prompt.trim().is_empty() {
+        return Err(RedDBError::Query("prompt cannot be empty".to_string()));
+    }
+
+    let url = format!(
+        "{}/chat/completions",
+        request.api_base.trim_end_matches('/')
+    );
+    let payload = build_openai_prompt_payload(
+        &request.model,
+        &request.prompt,
+        request.temperature,
+        request.max_output_tokens,
+    );
+    let http_req =
+        crate::runtime::ai::transport::AiHttpRequest::post_json("openai", url, payload)
+            .header("authorization", format!("Bearer {}", request.api_key));
+
+    let response = transport
+        .request(http_req)
+        .await
+        .map_err(|e| RedDBError::Query(e.to_string()))?;
+
+    parse_openai_prompt_response(&response.body, &request.model)
+}
+
+/// Async Anthropic messages-API prompt via [`AiTransport`].
+///
+/// Uses the transport's connection pool and retry policy (429/5xx backoff)
+/// instead of the one-shot blocking path in [`anthropic_prompt`].
+pub async fn anthropic_prompt_async(
+    transport: &crate::runtime::ai::transport::AiTransport,
+    request: AnthropicPromptRequest,
+) -> RedDBResult<AiPromptResponse> {
+    if request.api_key.trim().is_empty() {
+        return Err(RedDBError::Query(
+            "Anthropic API key cannot be empty".to_string(),
+        ));
+    }
+    if request.model.trim().is_empty() {
+        return Err(RedDBError::Query(
+            "Anthropic model cannot be empty".to_string(),
+        ));
+    }
+    if request.prompt.trim().is_empty() {
+        return Err(RedDBError::Query("prompt cannot be empty".to_string()));
+    }
+
+    let url = format!("{}/messages", request.api_base.trim_end_matches('/'));
+    let payload = build_anthropic_prompt_payload(
+        &request.model,
+        &request.prompt,
+        request.temperature,
+        request.max_output_tokens,
+    );
+    let http_req =
+        crate::runtime::ai::transport::AiHttpRequest::post_json("anthropic", url, payload)
+            .header("x-api-key", request.api_key)
+            .header("anthropic-version", request.anthropic_version);
+
+    let response = transport
+        .request(http_req)
+        .await
+        .map_err(|e| RedDBError::Query(e.to_string()))?;
+
+    parse_anthropic_prompt_response(&response.body, &request.model)
+}
+
+/// Build an OpenAI-compatible embedding request payload.
+pub(crate) fn build_embedding_payload(model: &str, inputs: &[String]) -> String {
+    build_openai_embedding_payload(model, inputs, None)
+}
+
+/// Parse an OpenAI-compatible embedding response, returning only the vectors.
+pub(crate) fn parse_embedding_vectors(body: &str) -> Result<Vec<Vec<f32>>, String> {
+    parse_openai_embedding_response(body)
+        .map(|r| r.embeddings)
+        .map_err(|e| e.to_string())
+}
+
 fn build_openai_embedding_payload(
     model: &str,
     inputs: &[String],
@@ -687,6 +780,52 @@ mod tests {
         .expect("resolve");
 
         assert_eq!(resolved, "default-vault-key");
+    }
+
+    #[tokio::test]
+    async fn openai_prompt_async_rejects_empty_model() {
+        let transport = crate::runtime::ai::transport::AiTransport::new(Default::default());
+        let request = OpenAiPromptRequest {
+            api_key: "key".to_string(),
+            model: "  ".to_string(),
+            prompt: "hello".to_string(),
+            temperature: None,
+            max_output_tokens: None,
+            api_base: "https://api.openai.com/v1".to_string(),
+        };
+        let err = openai_prompt_async(&transport, request).await.unwrap_err();
+        assert!(err.to_string().contains("model cannot be empty"));
+    }
+
+    #[tokio::test]
+    async fn openai_prompt_async_rejects_empty_prompt() {
+        let transport = crate::runtime::ai::transport::AiTransport::new(Default::default());
+        let request = OpenAiPromptRequest {
+            api_key: "key".to_string(),
+            model: "gpt-4.1-mini".to_string(),
+            prompt: "".to_string(),
+            temperature: None,
+            max_output_tokens: None,
+            api_base: "https://api.openai.com/v1".to_string(),
+        };
+        let err = openai_prompt_async(&transport, request).await.unwrap_err();
+        assert!(err.to_string().contains("prompt cannot be empty"));
+    }
+
+    #[tokio::test]
+    async fn anthropic_prompt_async_rejects_empty_api_key() {
+        let transport = crate::runtime::ai::transport::AiTransport::new(Default::default());
+        let request = AnthropicPromptRequest {
+            api_key: "  ".to_string(),
+            model: "claude-3-5-haiku-latest".to_string(),
+            prompt: "hello".to_string(),
+            temperature: None,
+            max_output_tokens: None,
+            api_base: "https://api.anthropic.com/v1".to_string(),
+            anthropic_version: DEFAULT_ANTHROPIC_VERSION.to_string(),
+        };
+        let err = anthropic_prompt_async(&transport, request).await.unwrap_err();
+        assert!(err.to_string().contains("API key cannot be empty"));
     }
 }
 

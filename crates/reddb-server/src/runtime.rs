@@ -844,7 +844,7 @@ mod impl_migrations;
 mod impl_native;
 mod impl_physical;
 mod impl_probabilistic;
-mod impl_queue;
+pub mod impl_queue;
 mod impl_search;
 mod impl_timeseries;
 mod impl_tree;

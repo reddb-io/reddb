@@ -2794,7 +2794,7 @@ impl RedDBRuntime {
         entity_kind: &str,
         metadata: Option<&crate::storage::Metadata>,
         invalidate_cache: bool,
-    ) {
+    ) -> u64 {
         self.cdc_emit_prebuilt_with_columns(
             operation,
             collection,
@@ -2821,7 +2821,7 @@ impl RedDBRuntime {
         metadata: Option<&crate::storage::Metadata>,
         invalidate_cache: bool,
         changed_columns: Option<Vec<String>>,
-    ) {
+    ) -> u64 {
         if invalidate_cache {
             self.invalidate_result_cache();
         }
@@ -2860,6 +2860,8 @@ impl RedDBRuntime {
                 let _ = spool.append(record.lsn, &encoded);
             }
         }
+
+        lsn
     }
 
     pub(crate) fn cdc_emit_prebuilt_batch<'a, I>(
@@ -6990,17 +6992,52 @@ impl RedDBRuntime {
                     "*",
                 );
             }
-            // DDL — gate on Admin via the legacy fallback. The grant
-            // engine could add fine-grained DDL grants later; today
-            // those statements stay Admin-only.
+            // DROP and TRUNCATE — Write-role gate + per-collection IAM policy
+            // when IAM mode is active. Other DDL stays role-only for now.
+            QueryExpr::DropTable(q) => {
+                return self.check_ddl_collection_privilege(
+                    &auth_store, &principal_id, role, tenant.as_deref(), &username,
+                    "drop", &q.name,
+                );
+            }
+            QueryExpr::DropGraph(q) => {
+                return self.check_ddl_collection_privilege(
+                    &auth_store, &principal_id, role, tenant.as_deref(), &username,
+                    "drop", &q.name,
+                );
+            }
+            QueryExpr::DropVector(q) => {
+                return self.check_ddl_collection_privilege(
+                    &auth_store, &principal_id, role, tenant.as_deref(), &username,
+                    "drop", &q.name,
+                );
+            }
+            QueryExpr::DropDocument(q) => {
+                return self.check_ddl_collection_privilege(
+                    &auth_store, &principal_id, role, tenant.as_deref(), &username,
+                    "drop", &q.name,
+                );
+            }
+            QueryExpr::DropKv(q) => {
+                return self.check_ddl_collection_privilege(
+                    &auth_store, &principal_id, role, tenant.as_deref(), &username,
+                    "drop", &q.name,
+                );
+            }
+            QueryExpr::DropCollection(q) => {
+                return self.check_ddl_collection_privilege(
+                    &auth_store, &principal_id, role, tenant.as_deref(), &username,
+                    "drop", &q.name,
+                );
+            }
+            QueryExpr::Truncate(q) => {
+                return self.check_ddl_collection_privilege(
+                    &auth_store, &principal_id, role, tenant.as_deref(), &username,
+                    "truncate", &q.name,
+                );
+            }
+            // Remaining DDL — gate on Write role. Fine-grained grants TBD.
             QueryExpr::CreateTable(_)
-            | QueryExpr::DropTable(_)
-            | QueryExpr::DropGraph(_)
-            | QueryExpr::DropVector(_)
-            | QueryExpr::DropDocument(_)
-            | QueryExpr::DropKv(_)
-            | QueryExpr::DropCollection(_)
-            | QueryExpr::Truncate(_)
             | QueryExpr::AlterTable(_)
             | QueryExpr::CreateIndex(_)
             | QueryExpr::DropIndex(_)
@@ -7236,6 +7273,81 @@ impl RedDBRuntime {
             Err(format!(
                 "principal=`{}` action=`{}` resource=`{}:{}` denied by IAM policy",
                 principal, action, resource.kind, resource.name
+            ))
+        }
+    }
+
+    /// IAM privilege check for DROP / TRUNCATE on a named collection.
+    ///
+    /// In legacy mode (IAM not enabled): requires Write role.
+    /// In IAM mode: requires an explicit `drop` / `truncate` policy on
+    /// `collection:<name>` (Admin role auto-passes via AdminBypass).
+    /// Records an audit log entry for both allow and deny outcomes.
+    fn check_ddl_collection_privilege(
+        &self,
+        auth_store: &Arc<crate::auth::store::AuthStore>,
+        principal: &crate::auth::UserId,
+        role: crate::auth::Role,
+        tenant: Option<&str>,
+        username: &str,
+        action: &str,
+        collection: &str,
+    ) -> Result<(), String> {
+        if role < crate::auth::Role::Write {
+            let msg = format!(
+                "principal=`{}` role=`{:?}` cannot issue DDL",
+                username, role
+            );
+            self.inner.audit_log.record(
+                action,
+                username,
+                collection,
+                "denied",
+                crate::json::Value::Null,
+            );
+            return Err(msg);
+        }
+
+        if !auth_store.iam_authorization_enabled() {
+            self.inner.audit_log.record(
+                action,
+                username,
+                collection,
+                "ok",
+                crate::json::Value::Null,
+            );
+            return Ok(());
+        }
+
+        let resource_name = collection.to_string();
+        let mut resource = crate::auth::policies::ResourceRef::new(
+            "collection".to_string(),
+            resource_name.clone(),
+        );
+        if let Some(t) = tenant {
+            resource = resource.with_tenant(t.to_string());
+        }
+        let ctx = runtime_iam_context(role, tenant);
+        if auth_store.check_policy_authz(principal, action, &resource, &ctx) {
+            self.inner.audit_log.record(
+                action,
+                username,
+                &resource_name,
+                "ok",
+                crate::json::Value::Null,
+            );
+            Ok(())
+        } else {
+            self.inner.audit_log.record(
+                action,
+                username,
+                &resource_name,
+                "denied",
+                crate::json::Value::Null,
+            );
+            Err(format!(
+                "principal=`{}` action=`{}` resource=`collection:{}` denied by IAM policy",
+                username, action, resource_name
             ))
         }
     }

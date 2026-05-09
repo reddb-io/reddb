@@ -206,9 +206,15 @@ impl RedDBRuntime {
         Ok(Some(augmented))
     }
 
-    fn delete_entities_batch(&self, collection: &str, ids: &[EntityId]) -> RedDBResult<u64> {
+    /// Returns `(affected_count, lsns)`. For the txn (xmax-stamp) path,
+    /// `lsns` is empty — events fire at commit time (not yet implemented).
+    fn delete_entities_batch(
+        &self,
+        collection: &str,
+        ids: &[EntityId],
+    ) -> RedDBResult<(u64, Vec<u64>)> {
         if ids.is_empty() {
-            return Ok(0);
+            return Ok((0, vec![]));
         }
 
         // Phase 2.3.2b: when the DELETE is running inside a BEGIN-wrapped
@@ -219,7 +225,7 @@ impl RedDBRuntime {
         if let Some(xid) = self.current_xid() {
             let store = self.db().store();
             let Some(manager) = store.get_collection(collection) else {
-                return Ok(0);
+                return Ok((0, vec![]));
             };
             let conn_id = crate::runtime::impl_core::current_connection_id();
             let mut marked: u64 = 0;
@@ -238,7 +244,7 @@ impl RedDBRuntime {
                     marked += 1;
                 }
             }
-            return Ok(marked);
+            return Ok((marked, vec![]));
         }
 
         let store = self.db().store();
@@ -246,25 +252,29 @@ impl RedDBRuntime {
             .delete_batch(collection, ids)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         if deleted_ids.is_empty() {
-            return Ok(0);
+            return Ok((0, vec![]));
         }
 
+        let mut lsns = Vec::with_capacity(deleted_ids.len());
         for id in &deleted_ids {
             store.context_index().remove_entity(*id);
-            self.cdc_emit(
+            let lsn = self.cdc_emit(
                 crate::replication::cdc::ChangeOperation::Delete,
                 collection,
                 id.raw(),
                 "entity",
             );
+            lsns.push(lsn);
         }
 
-        Ok(deleted_ids.len() as u64)
+        Ok((deleted_ids.len() as u64, lsns))
     }
 
-    fn flush_update_chunk(&self, applied: &[AppliedEntityMutation]) {
+    /// Flushes context-index updates and CDC for each applied mutation.
+    /// Returns one LSN per entity in the same order as `applied`.
+    fn flush_update_chunk(&self, applied: &[AppliedEntityMutation]) -> Vec<u64> {
         if applied.is_empty() {
-            return;
+            return Vec::new();
         }
 
         let store = self.db().store();
@@ -278,18 +288,19 @@ impl RedDBRuntime {
             );
         }
 
-        self.cdc_emit_prebuilt_batch(
-            crate::replication::cdc::ChangeOperation::Update,
-            "entity",
-            applied.iter().map(|item| {
-                (
-                    item.collection.as_str(),
-                    &item.entity,
-                    item.metadata.as_ref(),
-                )
-            }),
-            false,
-        );
+        let mut lsns = Vec::with_capacity(applied.len());
+        for item in applied {
+            let lsn = self.cdc_emit_prebuilt(
+                crate::replication::cdc::ChangeOperation::Update,
+                &item.collection,
+                &item.entity,
+                "entity",
+                item.metadata.as_ref(),
+                false,
+            );
+            lsns.push(lsn);
+        }
+        lsns
     }
 
     fn persist_update_chunk(&self, applied: &[AppliedEntityMutation]) -> RedDBResult<()> {
@@ -391,6 +402,7 @@ impl RedDBRuntime {
             let outputs = self.create_rows_batch(CreateRowsBatchInput {
                 collection: query.table.clone(),
                 rows,
+                suppress_events: query.suppress_events,
             })?;
             inserted_count = outputs.len() as u64;
 
@@ -583,7 +595,7 @@ impl RedDBRuntime {
             }
         }
 
-        // Auto-embed pipeline: generate embeddings for specified fields
+        // Auto-embed pipeline: batch-embed fields across all inserted rows via AiBatchClient.
         if let Some(ref embed_config) = query.auto_embed {
             let store = self.inner.db.store();
             let provider = crate::ai::parse_provider(&embed_config.provider)?;
@@ -593,9 +605,8 @@ impl RedDBRuntime {
                     .ok()
                     .unwrap_or_else(|| crate::ai::DEFAULT_OPENAI_EMBEDDING_MODEL.to_string())
             });
-            let api_base = provider.resolve_api_base();
 
-            // Collect texts from the last inserted rows
+            // Collect the just-inserted rows (most-recently appended, reversed back to insert order).
             let manager = store
                 .get_collection(&query.table)
                 .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
@@ -606,37 +617,61 @@ impl RedDBRuntime {
                 .take(effective_rows.len())
                 .collect();
 
-            for entity in &recent {
-                let mut texts = Vec::new();
-                if let EntityData::Row(ref row) = entity.data {
-                    if let Some(ref named) = row.named {
-                        for field in &embed_config.fields {
-                            if let Some(Value::Text(text)) = named.get(field) {
-                                if !text.is_empty() {
-                                    texts.push(text.clone());
-                                }
+            // Collector phase: (entity_index, combined_text) for rows that have non-empty fields.
+            let entity_combos: Vec<(usize, String)> = recent
+                .iter()
+                .enumerate()
+                .filter_map(|(i, entity)| {
+                    if let EntityData::Row(ref row) = entity.data {
+                        if let Some(ref named) = row.named {
+                            let texts: Vec<String> = embed_config
+                                .fields
+                                .iter()
+                                .filter_map(|field| match named.get(field) {
+                                    Some(Value::Text(t)) if !t.is_empty() => Some(t.to_string()),
+                                    _ => None,
+                                })
+                                .collect();
+                            if !texts.is_empty() {
+                                return Some((i, texts.join(" ")));
                             }
                         }
                     }
-                }
-                if texts.is_empty() {
-                    continue;
-                }
+                    None
+                })
+                .collect();
 
-                let combined = texts.join(" ");
-                let response = crate::ai::openai_embeddings(crate::ai::OpenAiEmbeddingRequest {
-                    api_key: api_key.clone(),
-                    model: model.clone(),
-                    inputs: vec![combined.clone()],
-                    dimensions: None,
-                    api_base: api_base.clone(),
-                })?;
+            if !entity_combos.is_empty() {
+                // Batch phase: single provider round-trip for all rows.
+                let batch_texts: Vec<String> =
+                    entity_combos.iter().map(|(_, t)| t.clone()).collect();
 
-                if let Some(dense) = response.embeddings.into_iter().next() {
+                let batch_client =
+                    crate::runtime::ai::batch_client::AiBatchClient::from_runtime(self);
+
+                let embeddings = match tokio::runtime::Handle::try_current() {
+                    Ok(handle) => tokio::task::block_in_place(|| {
+                        handle.block_on(
+                            batch_client.embed_batch(&provider, &model, &api_key, batch_texts),
+                        )
+                    }),
+                    Err(_) => {
+                        return Err(RedDBError::Query(
+                            "AUTO EMBED requires a Tokio runtime context".to_string(),
+                        ));
+                    }
+                }
+                .map_err(|e| RedDBError::Query(e.to_string()))?;
+
+                // Distribute phase: persist one vector per non-empty embedding.
+                for ((_, combined), dense) in entity_combos.iter().zip(embeddings) {
+                    if dense.is_empty() {
+                        continue;
+                    }
                     self.create_vector(CreateVectorInput {
                         collection: query.table.clone(),
                         dense,
-                        content: Some(combined),
+                        content: Some(combined.clone()),
                         metadata: Vec::new(),
                         link_row: None,
                         link_node: None,
@@ -919,7 +954,10 @@ impl RedDBRuntime {
             }
             self.persist_update_chunk(&applied_chunk)?;
             affected += applied_chunk.len() as u64;
-            self.flush_update_chunk(&applied_chunk);
+            let lsns = self.flush_update_chunk(&applied_chunk);
+            if !query.suppress_events {
+                self.emit_update_events_for_collection(&query.table, &applied_chunk, &lsns)?;
+            }
         }
 
         if affected > 0 {
@@ -1232,10 +1270,42 @@ impl RedDBRuntime {
         );
         let ids_to_delete = scan.find_target_ids()?;
 
+        // For event-enabled collections, snapshot the pre-delete state
+        // before rows are physically removed.
+        let needs_delete_events = !query.suppress_events
+            && self.collection_has_delete_subscriptions(&query.table);
+        let mut pre_images: HashMap<u64, crate::json::Value> = if needs_delete_events {
+            let store = self.db().store();
+            ids_to_delete
+                .iter()
+                .filter_map(|&id| {
+                    store
+                        .get(&query.table, id)
+                        .map(|e| (id.raw(), crate::runtime::mutation::entity_row_json(&e)))
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
+
         let mut affected: u64 = 0;
         for chunk in ids_to_delete.chunks(UPDATE_APPLY_CHUNK_SIZE) {
-            affected += self.delete_entities_batch(&query.table, chunk)?;
+            let (count, lsns) = self.delete_entities_batch(&query.table, chunk)?;
+            affected += count;
+            if needs_delete_events && !lsns.is_empty() {
+                // lsns.len() == actually-deleted entities; align with chunk ids.
+                // `delete_batch` may skip missing entities, so we correlate by
+                // the number returned (they're emitted in chunk order).
+                let deleted_chunk = &chunk[..lsns.len().min(chunk.len())];
+                self.emit_delete_events_for_collection(
+                    &query.table,
+                    deleted_chunk,
+                    &lsns,
+                    &pre_images,
+                )?;
+            }
         }
+        pre_images.clear();
 
         if affected > 0 {
             self.note_table_write(&query.table);
@@ -2819,6 +2889,281 @@ mod tests {
                 .find_index_for_column("off", "id")
                 .is_none(),
             "with auto_index_id=false, no implicit index should be created"
+        );
+    }
+
+    // ── #293: UPDATE / DELETE events ─────────────────────────────────────
+
+    #[test]
+    fn update_single_row_emits_update_event() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query(
+            "CREATE TABLE users (id INT, name TEXT) WITH EVENTS (UPDATE) TO audit_log",
+        )
+        .unwrap();
+        rt.execute_query("INSERT INTO users (id, name) VALUES (1, 'Alice')")
+            .unwrap();
+
+        rt.execute_query("UPDATE users SET name = 'Bob' WHERE id = 1")
+            .unwrap();
+
+        let events = queue_payloads(&rt, "audit_log");
+        assert_eq!(events.len(), 1, "expected exactly 1 update event");
+        let event = events[0].as_object().expect("event payload object");
+        assert_eq!(
+            event.get("op").and_then(crate::json::Value::as_str),
+            Some("update")
+        );
+        assert_eq!(
+            event.get("collection").and_then(crate::json::Value::as_str),
+            Some("users")
+        );
+        assert!(event
+            .get("event_id")
+            .and_then(crate::json::Value::as_str)
+            .is_some_and(|v| !v.is_empty()));
+        let before = event
+            .get("before")
+            .and_then(crate::json::Value::as_object)
+            .expect("before must be an object");
+        let after = event
+            .get("after")
+            .and_then(crate::json::Value::as_object)
+            .expect("after must be an object");
+        assert_eq!(
+            before.get("name").and_then(crate::json::Value::as_str),
+            Some("Alice"),
+            "before.name should be the old value"
+        );
+        assert_eq!(
+            after.get("name").and_then(crate::json::Value::as_str),
+            Some("Bob"),
+            "after.name should be the new value"
+        );
+    }
+
+    #[test]
+    fn update_event_only_includes_changed_fields() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query(
+            "CREATE TABLE users (id INT, name TEXT, email TEXT) WITH EVENTS (UPDATE) TO evts",
+        )
+        .unwrap();
+        rt.execute_query("INSERT INTO users (id, name, email) VALUES (1, 'Alice', 'a@x.com')")
+            .unwrap();
+
+        rt.execute_query("UPDATE users SET name = 'Bob' WHERE id = 1")
+            .unwrap();
+
+        let events = queue_payloads(&rt, "evts");
+        assert_eq!(events.len(), 1);
+        let event = events[0].as_object().unwrap();
+        let before = event.get("before").and_then(crate::json::Value::as_object).unwrap();
+        let after = event.get("after").and_then(crate::json::Value::as_object).unwrap();
+        // Only changed field included.
+        assert!(before.contains_key("name"), "before must include changed field");
+        assert!(after.contains_key("name"), "after must include changed field");
+        // Unchanged fields must not appear.
+        assert!(
+            !before.contains_key("email"),
+            "before must not include unchanged email"
+        );
+        assert!(
+            !after.contains_key("email"),
+            "after must not include unchanged email"
+        );
+    }
+
+    #[test]
+    fn multi_row_update_emits_one_event_per_row() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE items (id INT, status TEXT) WITH EVENTS (UPDATE) TO evts")
+            .unwrap();
+        rt.execute_query(
+            "INSERT INTO items (id, status) VALUES (1, 'new'), (2, 'new'), (3, 'new')",
+        )
+        .unwrap();
+
+        rt.execute_query("UPDATE items SET status = 'done'")
+            .unwrap();
+
+        let events = queue_payloads(&rt, "evts");
+        assert_eq!(events.len(), 3, "expected one update event per row");
+        for event in &events {
+            let obj = event.as_object().unwrap();
+            assert_eq!(
+                obj.get("op").and_then(crate::json::Value::as_str),
+                Some("update")
+            );
+        }
+    }
+
+    #[test]
+    fn delete_single_row_emits_delete_event() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query(
+            "CREATE TABLE users (id INT, name TEXT) WITH EVENTS (DELETE) TO del_log",
+        )
+        .unwrap();
+        rt.execute_query("INSERT INTO users (id, name) VALUES (42, 'Alice')")
+            .unwrap();
+
+        rt.execute_query("DELETE FROM users WHERE id = 42")
+            .unwrap();
+
+        let events = queue_payloads(&rt, "del_log");
+        assert_eq!(events.len(), 1);
+        let event = events[0].as_object().expect("event payload object");
+        assert_eq!(
+            event.get("op").and_then(crate::json::Value::as_str),
+            Some("delete")
+        );
+        assert_eq!(
+            event.get("collection").and_then(crate::json::Value::as_str),
+            Some("users")
+        );
+        assert!(event
+            .get("event_id")
+            .and_then(crate::json::Value::as_str)
+            .is_some_and(|v| !v.is_empty()));
+        let before = event
+            .get("before")
+            .and_then(crate::json::Value::as_object)
+            .expect("before must be an object for delete");
+        assert_eq!(
+            before.get("id").and_then(crate::json::Value::as_u64),
+            Some(42)
+        );
+        assert_eq!(
+            before.get("name").and_then(crate::json::Value::as_str),
+            Some("Alice")
+        );
+        assert!(matches!(
+            event.get("after"),
+            Some(crate::json::Value::Null)
+        ));
+    }
+
+    #[test]
+    fn multi_row_delete_emits_one_event_per_row() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query(
+            "CREATE TABLE items (id INT, val INT) WITH EVENTS (DELETE) TO del_log",
+        )
+        .unwrap();
+        rt.execute_query("INSERT INTO items (id, val) VALUES (1, 10), (2, 20), (3, 30)")
+            .unwrap();
+
+        rt.execute_query("DELETE FROM items").unwrap();
+
+        let events = queue_payloads(&rt, "del_log");
+        assert_eq!(events.len(), 3, "expected one delete event per deleted row");
+        for event in &events {
+            let obj = event.as_object().unwrap();
+            assert_eq!(
+                obj.get("op").and_then(crate::json::Value::as_str),
+                Some("delete")
+            );
+            assert!(matches!(obj.get("after"), Some(crate::json::Value::Null)));
+        }
+    }
+
+    #[test]
+    fn ops_filter_update_does_not_emit_on_insert_or_delete() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query(
+            "CREATE TABLE users (id INT, name TEXT) WITH EVENTS (UPDATE) TO evts",
+        )
+        .unwrap();
+
+        rt.execute_query("INSERT INTO users (id, name) VALUES (1, 'Alice')")
+            .unwrap();
+        rt.execute_query("DELETE FROM users WHERE id = 1")
+            .unwrap();
+
+        let events = queue_payloads(&rt, "evts");
+        assert!(
+            events.is_empty(),
+            "UPDATE-only filter must not emit INSERT or DELETE events"
+        );
+    }
+
+    // ── SUPPRESS EVENTS ────────────────────────────────────────────────────
+
+    #[test]
+    fn suppress_events_on_insert_emits_no_events() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE users (id INT, name TEXT) WITH EVENTS TO evts")
+            .unwrap();
+
+        rt.execute_query("INSERT INTO users (id, name) VALUES (1, 'Alice') SUPPRESS EVENTS")
+            .unwrap();
+
+        let events = queue_payloads(&rt, "evts");
+        assert!(
+            events.is_empty(),
+            "SUPPRESS EVENTS must prevent INSERT events"
+        );
+    }
+
+    #[test]
+    fn suppress_events_on_update_emits_no_events() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE users (id INT, name TEXT) WITH EVENTS TO evts")
+            .unwrap();
+        rt.execute_query("INSERT INTO users (id, name) VALUES (1, 'Alice')")
+            .unwrap();
+        // drain the INSERT event
+        let _ = queue_payloads(&rt, "evts");
+        // Force pop to drain; simpler: just check new count after UPDATE
+        rt.execute_query("QUEUE PURGE evts").unwrap();
+
+        rt.execute_query("UPDATE users SET name = 'Bob' WHERE id = 1 SUPPRESS EVENTS")
+            .unwrap();
+
+        let events = queue_payloads(&rt, "evts");
+        assert!(
+            events.is_empty(),
+            "SUPPRESS EVENTS must prevent UPDATE events"
+        );
+    }
+
+    #[test]
+    fn suppress_events_on_delete_emits_no_events() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query(
+            "CREATE TABLE users (id INT, name TEXT) WITH EVENTS (INSERT, DELETE) TO evts",
+        )
+        .unwrap();
+        rt.execute_query("INSERT INTO users (id, name) VALUES (1, 'Alice') SUPPRESS EVENTS")
+            .unwrap();
+
+        rt.execute_query("DELETE FROM users WHERE id = 1 SUPPRESS EVENTS")
+            .unwrap();
+
+        let events = queue_payloads(&rt, "evts");
+        assert!(
+            events.is_empty(),
+            "SUPPRESS EVENTS must prevent DELETE events"
+        );
+    }
+
+    #[test]
+    fn normal_insert_after_suppress_still_emits() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE users (id INT, name TEXT) WITH EVENTS TO evts")
+            .unwrap();
+
+        rt.execute_query("INSERT INTO users (id, name) VALUES (1, 'Alice') SUPPRESS EVENTS")
+            .unwrap();
+        rt.execute_query("INSERT INTO users (id, name) VALUES (2, 'Bob')")
+            .unwrap();
+
+        let events = queue_payloads(&rt, "evts");
+        assert_eq!(events.len(), 1, "only the non-suppressed INSERT should emit");
+        assert_eq!(
+            events[0].get("id").and_then(crate::json::Value::as_u64),
+            Some(2)
         );
     }
 }

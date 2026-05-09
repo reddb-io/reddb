@@ -148,6 +148,8 @@ pub struct CreateRowInput {
 pub struct CreateRowsBatchInput {
     pub collection: String,
     pub rows: Vec<CreateRowInput>,
+    /// When true, no event subscriptions fire for this batch (SUPPRESS EVENTS).
+    pub suppress_events: bool,
 }
 
 #[derive(Debug, Clone)]

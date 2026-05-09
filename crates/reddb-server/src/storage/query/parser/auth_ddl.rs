@@ -484,10 +484,14 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 Ok("DELETE".to_string())
             }
+            Token::Truncate => {
+                self.advance()?;
+                Ok("TRUNCATE".to_string())
+            }
             Token::Ident(name)
                 if matches!(
                     name.to_ascii_uppercase().as_str(),
-                    "TRUNCATE" | "REFERENCES" | "EXECUTE" | "USAGE"
+                    "REFERENCES" | "EXECUTE" | "USAGE"
                 ) =>
             {
                 let upper = name.to_ascii_uppercase();

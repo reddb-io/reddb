@@ -30,7 +30,7 @@ pub(super) const STATS: &str = "red.stats";
 pub(super) const STATS_INTERNAL: &str = "__red_schema_stats";
 pub(super) const READ_ONLY_ERROR: &str = "system schema is read-only";
 
-const COLLECTION_COLUMNS: [&str; 10] = [
+const COLLECTION_COLUMNS: [&str; 11] = [
     "name",
     "model",
     "schema_mode",
@@ -41,6 +41,7 @@ const COLLECTION_COLUMNS: [&str; 10] = [
     "on_disk_bytes",
     "internal",
     "tenant_id",
+    "queue_mode",
 ];
 
 const COLUMN_COLUMNS: [&str; 7] = [
@@ -120,7 +121,7 @@ pub(super) fn is_system_schema_write(query: &str) -> bool {
         .split(|c: char| c.is_whitespace() || c == '(' || c == ';')
         .next()
         .unwrap_or("");
-    matches_ignore_ascii_case(first, &["INSERT", "UPDATE", "DELETE"])
+    matches_ignore_ascii_case(first, &["INSERT", "UPDATE", "DELETE", "TRUNCATE"])
         && references_system_schema(query)
 }
 
@@ -790,6 +791,11 @@ fn collections_snapshot(
                 store.as_ref(),
                 &collection.name,
             );
+            let queue_mode = if collection.model == CollectionModel::Queue {
+                Value::text(super::impl_queue::queue_mode_str(store.as_ref(), &collection.name))
+            } else {
+                Value::Null
+            };
             UnifiedRecord::with_schema(
                 Arc::clone(&schema),
                 vec![
@@ -803,6 +809,7 @@ fn collections_snapshot(
                     Value::UnsignedInteger(on_disk_bytes),
                     Value::Boolean(internal),
                     visible_tenant.map(Value::text).unwrap_or(Value::Null),
+                    queue_mode,
                 ],
             )
         })
@@ -1202,6 +1209,12 @@ fn find_case_insensitive_outside_quotes(haystack: &str, needle: &str) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collection_columns_includes_queue_mode() {
+        assert!(COLLECTION_COLUMNS.contains(&"queue_mode"));
+        assert_eq!(COLLECTION_COLUMNS.len(), 11);
+    }
 
     #[test]
     fn rewrite_skips_quoted_literals() {

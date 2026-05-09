@@ -153,7 +153,7 @@ pub(crate) fn bulk_create_rows_fast(
 
     let outputs = runtime
         .entity_use_cases()
-        .create_rows_batch(crate::application::CreateRowsBatchInput { collection, rows })
+        .create_rows_batch(crate::application::CreateRowsBatchInput { collection, rows, suppress_events: false })
         .map_err(entity_error_to_status)?;
 
     let items: Vec<_> = outputs
@@ -307,7 +307,7 @@ pub(crate) fn bulk_insert_binary(
 
     let outputs = runtime
         .entity_use_cases()
-        .create_rows_batch(crate::application::CreateRowsBatchInput { collection, rows })
+        .create_rows_batch(crate::application::CreateRowsBatchInput { collection, rows, suppress_events: false })
         .map_err(entity_error_to_status)?;
     let first_id = outputs.first().map(|output| output.id.raw()).unwrap_or(0);
 

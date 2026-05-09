@@ -2118,6 +2118,11 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_description("Include internal collections in admin collections list"),
                 cli::types::FlagSchema::new("collection")
                     .with_description("Filter red.admin indices/policies by collection"),
+                cli::types::FlagSchema::boolean("yes")
+                    .with_short('y')
+                    .with_description("Skip interactive confirmation for destructive commands"),
+                cli::types::FlagSchema::boolean("if-exists")
+                    .with_description("Suppress error when collection does not exist"),
             ]);
         }
         Some("dump") => {
@@ -2278,7 +2283,13 @@ fn build_completion_tree() -> Vec<(String, Vec<(String, Vec<String>)>)> {
             vec![
                 (
                     "collections".to_string(),
-                    vec!["list".to_string(), "show".to_string(), "stats".to_string()],
+                    vec![
+                        "list".to_string(),
+                        "show".to_string(),
+                        "stats".to_string(),
+                        "drop".to_string(),
+                        "truncate".to_string(),
+                    ],
                 ),
                 ("indices".to_string(), vec!["list".to_string()]),
                 ("policies".to_string(), vec!["list".to_string()]),
@@ -2777,19 +2788,69 @@ fn run_admin_collections_command(
                 use_color,
             );
         }
+        "drop" => {
+            let Some(name) = sub_args.first().copied().filter(|s| !s.is_empty()) else {
+                admin_usage_error(
+                    "admin.collections.drop",
+                    "collection name is required",
+                    "usage: red admin collections drop <name> [--if-exists] [--yes] [--json]",
+                    json_mode,
+                );
+            };
+            let if_exists = flag_bool(flags, "if-exists");
+            let skip_confirm = flag_bool(flags, "yes");
+            if !skip_confirm && !json_mode {
+                eprint!(
+                    "Drop collection '{name}'? This is irreversible. Type 'yes' to confirm: "
+                );
+                let mut answer = String::new();
+                std::io::stdin()
+                    .read_line(&mut answer)
+                    .unwrap_or_default();
+                if answer.trim() != "yes" {
+                    eprintln!("Aborted.");
+                    std::process::exit(1);
+                }
+            }
+            let sql = if if_exists {
+                format!("DROP COLLECTION IF EXISTS {name}")
+            } else {
+                format!("DROP COLLECTION {name}")
+            };
+            admin_execute_ddl_command("admin.collections.drop", bind, token, &sql, name, "dropped", json_mode);
+        }
+        "truncate" => {
+            let Some(name) = sub_args.first().copied().filter(|s| !s.is_empty()) else {
+                admin_usage_error(
+                    "admin.collections.truncate",
+                    "collection name is required",
+                    "usage: red admin collections truncate <name> [--if-exists] [--json]",
+                    json_mode,
+                );
+            };
+            let if_exists = flag_bool(flags, "if-exists");
+            let sql = if if_exists {
+                format!("TRUNCATE COLLECTION IF EXISTS {name}")
+            } else {
+                format!("TRUNCATE COLLECTION {name}")
+            };
+            admin_execute_ddl_command("admin.collections.truncate", bind, token, &sql, name, "truncated", json_mode);
+        }
         "help" | _ => {
             if json_mode {
                 json_ok(
                     "admin.collections",
-                    "{\"subcommands\":[\"list\",\"show\",\"stats\"]}",
+                    "{\"subcommands\":[\"list\",\"show\",\"stats\",\"drop\",\"truncate\"]}",
                 );
             } else {
-                println!("Usage: red admin collections <list|show|stats> [args]");
+                println!("Usage: red admin collections <list|show|stats|drop|truncate> [args]");
                 println!();
                 println!("Subcommands:");
                 println!("  list [--type table|queue|vector|document|timeseries|graph|kv] [--include-internal]");
                 println!("  show <name>");
                 println!("  stats [<name>]");
+                println!("  drop <name> [--if-exists] [--yes]");
+                println!("  truncate <name> [--if-exists]");
                 println!();
                 println!("Flags: --json --csv --limit <n> --no-color --bind <addr> --token <tok>");
             }
@@ -3023,6 +3084,44 @@ fn admin_query_table(
     let payload = format!("{{\"query\":\"{}\"}}", json_escape(sql));
     let body = post_json_to_http_authed(bind, "/query", &payload, token)?;
     admin_table_from_query_response(&body)
+}
+
+fn admin_execute_ddl_command(
+    command: &str,
+    bind: &str,
+    token: Option<&str>,
+    sql: &str,
+    name: &str,
+    verb: &str,
+    json_mode: bool,
+) {
+    let payload = format!("{{\"query\":\"{}\"}}", json_escape(sql));
+    match post_json_to_http_authed(bind, "/query", &payload, token) {
+        Ok(body) => {
+            let affected = parse_affected_rows_from_body(&body);
+            if json_mode {
+                println!(
+                    "{{\"ok\":true,\"command\":\"{command}\",\"collection\":\"{name}\",\"affected_rows\":{affected}}}"
+                );
+            } else {
+                println!("Collection '{name}' {verb}. ({affected} rows affected)");
+            }
+        }
+        Err(err) => {
+            if json_mode {
+                json_error(command, &err);
+            }
+            eprintln!("error: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn parse_affected_rows_from_body(body: &str) -> u64 {
+    reddb::json::from_str::<reddb::json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("affected_rows").and_then(|n| n.as_f64()).map(|f| f as u64))
+        .unwrap_or(0)
 }
 
 fn admin_table_from_query_response(body: &str) -> Result<AdminQueryTable, String> {

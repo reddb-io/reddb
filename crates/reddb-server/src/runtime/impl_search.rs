@@ -1168,9 +1168,54 @@ impl RedDBRuntime {
         let model = ask.model.clone().unwrap_or(default_model);
         let api_base = provider.resolve_api_base();
 
-        let response = match provider {
-            AiProvider::Anthropic => {
-                let resp = anthropic_prompt(AnthropicPromptRequest {
+        let transport =
+            crate::runtime::ai::transport::AiTransport::from_runtime(self);
+        let response = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => match provider {
+                AiProvider::Anthropic => tokio::task::block_in_place(|| {
+                    handle.block_on(crate::ai::anthropic_prompt_async(
+                        &transport,
+                        AnthropicPromptRequest {
+                            api_key,
+                            model: model.clone(),
+                            prompt: full_prompt,
+                            temperature: Some(0.3),
+                            max_output_tokens: Some(1024),
+                            api_base,
+                            anthropic_version: crate::ai::DEFAULT_ANTHROPIC_VERSION.to_string(),
+                        },
+                    ))
+                })
+                .map(|resp| {
+                    (
+                        resp.output_text,
+                        resp.prompt_tokens.unwrap_or(0),
+                        resp.completion_tokens.unwrap_or(0),
+                    )
+                })?,
+                _ => tokio::task::block_in_place(|| {
+                    handle.block_on(crate::ai::openai_prompt_async(
+                        &transport,
+                        OpenAiPromptRequest {
+                            api_key,
+                            model: model.clone(),
+                            prompt: full_prompt,
+                            temperature: Some(0.3),
+                            max_output_tokens: Some(1024),
+                            api_base,
+                        },
+                    ))
+                })
+                .map(|resp| {
+                    (
+                        resp.output_text,
+                        resp.prompt_tokens.unwrap_or(0),
+                        resp.completion_tokens.unwrap_or(0),
+                    )
+                })?,
+            },
+            Err(_) => match provider {
+                AiProvider::Anthropic => anthropic_prompt(AnthropicPromptRequest {
                     api_key,
                     model: model.clone(),
                     prompt: full_prompt,
@@ -1178,28 +1223,30 @@ impl RedDBRuntime {
                     max_output_tokens: Some(1024),
                     api_base,
                     anthropic_version: crate::ai::DEFAULT_ANTHROPIC_VERSION.to_string(),
-                })?;
-                (
-                    resp.output_text,
-                    resp.prompt_tokens.unwrap_or(0),
-                    resp.completion_tokens.unwrap_or(0),
-                )
-            }
-            _ => {
-                let resp = openai_prompt(OpenAiPromptRequest {
+                })
+                .map(|resp| {
+                    (
+                        resp.output_text,
+                        resp.prompt_tokens.unwrap_or(0),
+                        resp.completion_tokens.unwrap_or(0),
+                    )
+                })?,
+                _ => openai_prompt(OpenAiPromptRequest {
                     api_key,
                     model: model.clone(),
                     prompt: full_prompt,
                     temperature: Some(0.3),
                     max_output_tokens: Some(1024),
                     api_base,
-                })?;
-                (
-                    resp.output_text,
-                    resp.prompt_tokens.unwrap_or(0),
-                    resp.completion_tokens.unwrap_or(0),
-                )
-            }
+                })
+                .map(|resp| {
+                    (
+                        resp.output_text,
+                        resp.prompt_tokens.unwrap_or(0),
+                        resp.completion_tokens.unwrap_or(0),
+                    )
+                })?,
+            },
         };
 
         let (answer, prompt_tokens, completion_tokens) = response;

@@ -1582,6 +1582,8 @@ pub struct InsertQuery {
     pub with_metadata: Vec<(String, Value)>,
     /// Auto-embed fields on insert (from WITH AUTO EMBED clause)
     pub auto_embed: Option<AutoEmbedConfig>,
+    /// Skip event subscription emission for this statement (SUPPRESS EVENTS).
+    pub suppress_events: bool,
 }
 
 /// Configuration for automatic embedding generation on INSERT.
@@ -1623,6 +1625,8 @@ pub struct UpdateQuery {
     /// data migrations (#37) which run the same UPDATE body in a
     /// loop, advancing a checkpoint between batches.
     pub limit: Option<u64>,
+    /// Skip event subscription emission for this statement (SUPPRESS EVENTS).
+    pub suppress_events: bool,
 }
 
 /// DELETE FROM table WHERE filter
@@ -1636,6 +1640,8 @@ pub struct DeleteQuery {
     pub filter: Option<Filter>,
     /// Optional RETURNING clause items.
     pub returning: Option<Vec<ReturningItem>>,
+    /// Skip event subscription emission for this statement (SUPPRESS EVENTS).
+    pub suppress_events: bool,
 }
 
 /// CREATE TABLE name (columns)
@@ -1858,6 +1864,13 @@ pub enum AlterOperation {
     EnableEvents(crate::catalog::SubscriptionDescriptor),
     /// `DISABLE EVENTS` — mark all table event subscriptions disabled.
     DisableEvents,
+    /// `ADD SUBSCRIPTION name TO queue [REDACT (...)] [WHERE ...]` — add a named subscription.
+    AddSubscription {
+        name: String,
+        descriptor: crate::catalog::SubscriptionDescriptor,
+    },
+    /// `DROP SUBSCRIPTION name` — remove a named subscription by name.
+    DropSubscription { name: String },
 }
 
 // ============================================================================

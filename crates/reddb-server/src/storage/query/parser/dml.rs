@@ -110,6 +110,13 @@ impl<'a> Parser<'a> {
 
         let returning = self.parse_returning_clause()?;
 
+        let suppress_events = if self.consume_ident_ci("SUPPRESS")? {
+            self.expect_ident_ci("EVENTS")?;
+            true
+        } else {
+            false
+        };
+
         Ok(QueryExpr::Insert(InsertQuery {
             table,
             entity_type,
@@ -121,6 +128,7 @@ impl<'a> Parser<'a> {
             expires_at_ms,
             with_metadata,
             auto_embed,
+            suppress_events,
         }))
     }
 
@@ -331,6 +339,13 @@ impl<'a> Parser<'a> {
 
         let returning = self.parse_returning_clause()?;
 
+        let suppress_events = if self.consume_ident_ci("SUPPRESS")? {
+            self.expect_ident_ci("EVENTS")?;
+            true
+        } else {
+            false
+        };
+
         Ok(QueryExpr::Update(UpdateQuery {
             table,
             assignment_exprs,
@@ -342,6 +357,7 @@ impl<'a> Parser<'a> {
             with_metadata,
             returning,
             limit,
+            suppress_events,
         }))
     }
 
@@ -361,11 +377,19 @@ impl<'a> Parser<'a> {
 
         let returning = self.parse_returning_clause()?;
 
+        let suppress_events = if self.consume_ident_ci("SUPPRESS")? {
+            self.expect_ident_ci("EVENTS")?;
+            true
+        } else {
+            false
+        };
+
         Ok(QueryExpr::Delete(DeleteQuery {
             table,
             where_expr,
             filter,
             returning,
+            suppress_events,
         }))
     }
 

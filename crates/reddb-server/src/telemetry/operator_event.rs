@@ -148,6 +148,26 @@ pub enum OperatorEvent {
     ConfigChangeRequiresRestart {
         fields_changed: String,
     },
+    /// An ALTER TABLE on a collection with active event subscriptions
+    /// added or removed columns. Downstream consumers may see a different
+    /// payload shape starting at `lsn`.
+    SubscriptionSchemaChange {
+        collection: String,
+        /// Comma-separated subscription names affected.
+        subscription_names: String,
+        /// Comma-separated columns added (empty string if none).
+        fields_added: String,
+        /// Comma-separated columns removed (empty string if none).
+        fields_removed: String,
+        lsn: u64,
+    },
+    /// An event could not be delivered to its target queue after all
+    /// retry attempts, and was routed to the dead-letter queue instead.
+    OutboxDlqActivated {
+        queue: String,
+        dlq: String,
+        reason: String,
+    },
 }
 
 impl OperatorEvent {
@@ -168,6 +188,8 @@ impl OperatorEvent {
             "CheckpointFailed",
             "DanglingAdminIntent",
             "ConfigChangeRequiresRestart",
+            "SubscriptionSchemaChange",
+            "OutboxDlqActivated",
         ]
     }
 
@@ -188,6 +210,8 @@ impl OperatorEvent {
             Self::CheckpointFailed { .. } => "CheckpointFailed",
             Self::DanglingAdminIntent { .. } => "DanglingAdminIntent",
             Self::ConfigChangeRequiresRestart { .. } => "ConfigChangeRequiresRestart",
+            Self::SubscriptionSchemaChange { .. } => "SubscriptionSchemaChange",
+            Self::OutboxDlqActivated { .. } => "OutboxDlqActivated",
         }
     }
 
@@ -373,6 +397,36 @@ impl OperatorEvent {
                 );
                 let fields = vec![AuditFieldEscaper::field("fields_changed", fields_changed)];
                 ("operator/config_change_requires_restart", fields, summary)
+            }
+            Self::SubscriptionSchemaChange {
+                collection,
+                subscription_names,
+                fields_added,
+                fields_removed,
+                lsn,
+            } => {
+                let summary = format!(
+                    "subscription schema change: collection={collection} subscriptions=[{subscription_names}] added=[{fields_added}] removed=[{fields_removed}] lsn={lsn}"
+                );
+                let fields = vec![
+                    AuditFieldEscaper::field("collection", collection),
+                    AuditFieldEscaper::field("subscription_names", subscription_names),
+                    AuditFieldEscaper::field("fields_added", fields_added),
+                    AuditFieldEscaper::field("fields_removed", fields_removed),
+                    AuditFieldEscaper::field("lsn", lsn),
+                ];
+                ("operator/subscription_schema_change", fields, summary)
+            }
+            Self::OutboxDlqActivated { queue, dlq, reason } => {
+                let summary = format!(
+                    "outbox DLQ activated: queue={queue} dlq={dlq} reason={reason}"
+                );
+                let fields = vec![
+                    AuditFieldEscaper::field("queue", queue),
+                    AuditFieldEscaper::field("dlq", dlq),
+                    AuditFieldEscaper::field("reason", reason),
+                ];
+                ("operator/outbox_dlq_activated", fields, summary)
             }
         }
     }

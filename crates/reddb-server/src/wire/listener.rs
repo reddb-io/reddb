@@ -206,7 +206,7 @@ pub(crate) fn handle_bulk_insert(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<
         rows.push(input);
     }
 
-    match runtime.create_rows_batch(crate::application::CreateRowsBatchInput { collection, rows }) {
+    match runtime.create_rows_batch(crate::application::CreateRowsBatchInput { collection, rows, suppress_events: false }) {
         Ok(outputs) => {
             let count = outputs.len() as u64;
             let mut resp = Vec::with_capacity(13);
