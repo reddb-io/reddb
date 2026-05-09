@@ -5,10 +5,27 @@
 //! eviction, namespace caps, and opaque content metadata. Durable L2 storage,
 //! dependency invalidation, and public APIs land in follow-up slices.
 
+mod config;
+mod entry;
+
+pub use config::{
+    BlobCacheConfig, BlobCacheConfigBuilder, BlobCacheConfigError, L2Compression,
+    DEFAULT_BLOB_L1_BYTES_MAX, DEFAULT_BLOB_L2_BYTES_MAX, DEFAULT_BLOB_MAX_NAMESPACES,
+    DEFAULT_BLOB_SHARDS, DEFAULT_BLOB_SYNOPSIS_CAPACITY, DEFAULT_BLOB_SYNOPSIS_FPR,
+    DEFAULT_CONTENT_METADATA_BYTES_MAX, DEFAULT_CONTENT_METADATA_KEYS_MAX,
+    METRIC_CACHE_BLOB_L1_BYTES_IN_USE, METRIC_CACHE_BLOB_L2_BYTES_IN_USE,
+    METRIC_CACHE_BLOB_L2_FULL_REJECTIONS_TOTAL, METRIC_CACHE_BLOB_SYNOPSIS_BYTES,
+    METRIC_CACHE_BLOB_SYNOPSIS_METADATA_READS_TOTAL, METRIC_CACHE_VERSION_MISMATCH_TOTAL,
+};
+use entry::{
+    decode_v2_frame, effective_expires_at_unix_ms, encode_l2_key, encode_v2_frame, jitter_seed,
+    read_l2_string, write_l2_string, Entry, L2Control, L2Record, L2_BLOB_MAGIC, L2_CONTROL_MAGIC,
+    L2_FORMAT_V1_RAW, L2_FORMAT_V2_FRAMED, L2_FRAME_TAG_RAW, L2_FRAME_TAG_ZSTD, L2_METADATA_MAGIC,
+};
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
@@ -16,11 +33,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock;
 
-use super::compressor::{Compressed, CompressOpts, L2BlobCompressor};
+use super::compressor::{CompressOpts, Compressed, L2BlobCompressor};
 use super::extended_ttl::{EffectiveExpiry, ExpiryDecision, ExtendedTtlPolicy};
-use super::promotion_pool::{
-    AsyncPromotionPool, PoolOpts, PromotionExecutor, PromotionRequest,
-};
+use super::promotion_pool::{AsyncPromotionPool, PoolOpts, PromotionExecutor, PromotionRequest};
 
 /// Test-only thread-local counter of how many times
 /// `EffectiveExpiry::compute` is invoked from `Shard::get`. Thread-local
@@ -29,231 +44,6 @@ use super::promotion_pool::{
 #[cfg(test)]
 thread_local! {
     static EFFECTIVE_EXPIRY_COMPUTE_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-pub const DEFAULT_BLOB_L1_BYTES_MAX: usize = 256 * 1024 * 1024;
-pub const DEFAULT_BLOB_L2_BYTES_MAX: u64 = 4 * 1024 * 1024 * 1024;
-pub const DEFAULT_BLOB_MAX_NAMESPACES: usize = 256;
-pub const DEFAULT_BLOB_SHARDS: usize = 64;
-pub const DEFAULT_CONTENT_METADATA_KEYS_MAX: usize = 32;
-pub const DEFAULT_CONTENT_METADATA_BYTES_MAX: usize = 4 * 1024;
-pub const METRIC_CACHE_BLOB_L1_BYTES_IN_USE: &str = "cache_blob_l1_bytes_in_use";
-pub const METRIC_CACHE_VERSION_MISMATCH_TOTAL: &str = "cache_version_mismatch_total";
-pub const METRIC_CACHE_BLOB_L2_BYTES_IN_USE: &str = "reddb_cache_blob_l2_bytes_in_use";
-pub const METRIC_CACHE_BLOB_L2_FULL_REJECTIONS_TOTAL: &str =
-    "reddb_cache_blob_l2_full_rejections_total";
-pub const METRIC_CACHE_BLOB_SYNOPSIS_METADATA_READS_TOTAL: &str =
-    "cache_blob_synopsis_metadata_reads_total";
-pub const METRIC_CACHE_BLOB_SYNOPSIS_BYTES: &str = "cache_blob_synopsis_bytes";
-
-/// Default per-namespace Bloom synopsis sizing target. The filter is sized
-/// for ~10K entries at ~1% false-positive rate.
-pub const DEFAULT_BLOB_SYNOPSIS_CAPACITY: usize = 10_000;
-pub const DEFAULT_BLOB_SYNOPSIS_FPR: f64 = 0.01;
-
-/// Switch for L2 zstd compression (issue #192, lane 2/5).
-///
-/// `On` (default) routes every L2 spill through [`L2BlobCompressor`]; payloads
-/// that fail the shrinkage gate or hit a precompressed-media content type are
-/// still stored raw, but the L2 entry header carries the v2 framing. `Off`
-/// skips the compress call entirely (CPU-saving), still emitting v2 framing
-/// with `tag=0` so the on-disk format stays uniform across modes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum L2Compression {
-    Off,
-    On,
-}
-
-impl Default for L2Compression {
-    fn default() -> Self {
-        Self::On
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BlobCacheConfig {
-    l1_bytes_max: usize,
-    l2_bytes_max: u64,
-    l2_path: Option<PathBuf>,
-    max_namespaces: usize,
-    shard_count: usize,
-    content_metadata_keys_max: usize,
-    content_metadata_bytes_max: usize,
-    l2_compression: L2Compression,
-}
-
-impl Default for BlobCacheConfig {
-    fn default() -> Self {
-        Self {
-            l1_bytes_max: DEFAULT_BLOB_L1_BYTES_MAX,
-            l2_bytes_max: DEFAULT_BLOB_L2_BYTES_MAX,
-            l2_path: None,
-            max_namespaces: DEFAULT_BLOB_MAX_NAMESPACES,
-            shard_count: DEFAULT_BLOB_SHARDS,
-            content_metadata_keys_max: DEFAULT_CONTENT_METADATA_KEYS_MAX,
-            content_metadata_bytes_max: DEFAULT_CONTENT_METADATA_BYTES_MAX,
-            l2_compression: L2Compression::default(),
-        }
-    }
-}
-
-impl BlobCacheConfig {
-    /// Returns a fresh builder primed with the cache defaults.
-    ///
-    /// Prefer this over field literals — fields are private so future
-    /// additions (PRD stories #8–#10) do not break callers.
-    pub fn builder() -> BlobCacheConfigBuilder {
-        BlobCacheConfigBuilder::new()
-    }
-
-    pub fn with_l1_bytes_max(mut self, l1_bytes_max: usize) -> Self {
-        self.l1_bytes_max = l1_bytes_max;
-        self
-    }
-
-    pub fn with_l2_bytes_max(mut self, l2_bytes_max: u64) -> Self {
-        self.l2_bytes_max = l2_bytes_max;
-        self
-    }
-
-    pub fn with_l2_path(mut self, path: impl Into<PathBuf>) -> Self {
-        self.l2_path = Some(path.into());
-        self
-    }
-
-    pub fn with_max_namespaces(mut self, max_namespaces: usize) -> Self {
-        self.max_namespaces = max_namespaces;
-        self
-    }
-
-    pub fn with_shard_count(mut self, shard_count: usize) -> Self {
-        self.shard_count = shard_count.max(1);
-        self
-    }
-
-    pub fn with_content_metadata_limits(mut self, keys_max: usize, bytes_max: usize) -> Self {
-        self.content_metadata_keys_max = keys_max;
-        self.content_metadata_bytes_max = bytes_max;
-        self
-    }
-
-    pub fn with_l2_compression(mut self, compression: L2Compression) -> Self {
-        self.l2_compression = compression;
-        self
-    }
-
-    pub fn l1_bytes_max(&self) -> usize {
-        self.l1_bytes_max
-    }
-
-    pub fn l2_bytes_max(&self) -> u64 {
-        self.l2_bytes_max
-    }
-
-    pub fn l2_path(&self) -> Option<&Path> {
-        self.l2_path.as_deref()
-    }
-
-    pub fn max_namespaces(&self) -> usize {
-        self.max_namespaces
-    }
-
-    pub fn shard_count(&self) -> usize {
-        self.shard_count
-    }
-
-    pub fn content_metadata_keys_max(&self) -> usize {
-        self.content_metadata_keys_max
-    }
-
-    pub fn content_metadata_bytes_max(&self) -> usize {
-        self.content_metadata_bytes_max
-    }
-
-    pub fn l2_compression(&self) -> L2Compression {
-        self.l2_compression
-    }
-}
-
-/// Builder for [`BlobCacheConfig`].
-///
-/// Created via [`BlobCacheConfig::builder`]. Each setter validates its
-/// argument; invalid configurations are rejected at [`build`](Self::build).
-#[derive(Debug, Clone)]
-pub struct BlobCacheConfigBuilder {
-    inner: BlobCacheConfig,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BlobCacheConfigError {
-    /// `shard_count` must be at least 1.
-    ZeroShardCount,
-    /// `max_namespaces` must be at least 1.
-    ZeroMaxNamespaces,
-}
-
-impl BlobCacheConfigBuilder {
-    fn new() -> Self {
-        Self {
-            inner: BlobCacheConfig::default(),
-        }
-    }
-
-    pub fn l1_bytes_max(mut self, value: usize) -> Self {
-        self.inner.l1_bytes_max = value;
-        self
-    }
-
-    pub fn l2_bytes_max(mut self, value: u64) -> Self {
-        self.inner.l2_bytes_max = value;
-        self
-    }
-
-    pub fn l2_path(mut self, path: impl Into<PathBuf>) -> Self {
-        self.inner.l2_path = Some(path.into());
-        self
-    }
-
-    pub fn max_namespaces(mut self, value: usize) -> Self {
-        self.inner.max_namespaces = value;
-        self
-    }
-
-    pub fn shard_count(mut self, value: usize) -> Self {
-        self.inner.shard_count = value;
-        self
-    }
-
-    pub fn content_metadata_keys_max(mut self, value: usize) -> Self {
-        self.inner.content_metadata_keys_max = value;
-        self
-    }
-
-    pub fn content_metadata_bytes_max(mut self, value: usize) -> Self {
-        self.inner.content_metadata_bytes_max = value;
-        self
-    }
-
-    pub fn l2_compression(mut self, value: L2Compression) -> Self {
-        self.inner.l2_compression = value;
-        self
-    }
-
-    pub fn try_build(self) -> Result<BlobCacheConfig, BlobCacheConfigError> {
-        if self.inner.shard_count == 0 {
-            return Err(BlobCacheConfigError::ZeroShardCount);
-        }
-        if self.inner.max_namespaces == 0 {
-            return Err(BlobCacheConfigError::ZeroMaxNamespaces);
-        }
-        Ok(self.inner)
-    }
-
-    /// Convenience wrapper around [`try_build`](Self::try_build) that
-    /// panics on invalid input. Tests and bootstrap code should prefer this.
-    pub fn build(self) -> BlobCacheConfig {
-        self.try_build().expect("blob cache config")
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -751,8 +541,7 @@ impl BlobCacheStats {
         if self.l2_compression_stored_bytes == 0 {
             return 1.0;
         }
-        self.l2_compression_original_bytes as f64
-            / self.l2_compression_stored_bytes as f64
+        self.l2_compression_original_bytes as f64 / self.l2_compression_stored_bytes as f64
     }
 
     /// Number of L2 entries the compressor returned as `Raw` since boot —
@@ -781,121 +570,6 @@ impl BlobCacheStats {
     /// active extended policy.
     pub fn l1_idle_evicts_total(&self) -> u64 {
         self.l1_idle_evicts_total
-    }
-}
-
-#[derive(Debug)]
-struct Entry {
-    bytes: Arc<[u8]>,
-    content_metadata: BTreeMap<String, String>,
-    tags: BTreeSet<String>,
-    dependencies: BTreeSet<String>,
-    size: usize,
-    visited: bool,
-    expires_at_unix_ms: Option<u64>,
-    priority: u8,
-    version: Option<u64>,
-    namespace_generation: u64,
-    /// Wall-clock time of the most recent access (`put` or successful
-    /// `get`). Updated on hits to drive [`ExtendedTtlPolicy::idle_ttl_ms`].
-    /// L1-only — never propagated to the L2 record (cache is the source of
-    /// truth for access patterns).
-    last_access_unix_ms: u64,
-    /// Extended TTL knobs captured from the [`BlobCachePolicy`] at insert
-    /// time, including any jitter expansion that was already applied to
-    /// `expires_at_unix_ms`.
-    extended: ExtendedTtlPolicy,
-}
-
-impl Entry {
-    fn new(
-        bytes: Vec<u8>,
-        content_metadata: BTreeMap<String, String>,
-        tags: BTreeSet<String>,
-        dependencies: BTreeSet<String>,
-        policy: BlobCachePolicy,
-        namespace_generation: u64,
-        now_ms: u64,
-        namespace: &str,
-        key: &str,
-    ) -> Self {
-        let size = bytes.len();
-        Self {
-            bytes: Arc::<[u8]>::from(bytes),
-            content_metadata,
-            tags,
-            dependencies,
-            size,
-            visited: true,
-            expires_at_unix_ms: effective_expires_at_unix_ms(policy, now_ms, namespace, key),
-            priority: policy.priority_value(),
-            version: policy.version_value(),
-            namespace_generation,
-            last_access_unix_ms: now_ms,
-            extended: policy.extended_value(),
-        }
-    }
-
-    fn hit(&self) -> BlobCacheHit {
-        BlobCacheHit::new(
-            Arc::clone(&self.bytes),
-            self.content_metadata.clone(),
-            self.version,
-        )
-    }
-
-    fn hit_stale(&self, window_remaining_ms: u64) -> BlobCacheHit {
-        BlobCacheHit::new_stale(
-            Arc::clone(&self.bytes),
-            self.content_metadata.clone(),
-            self.version,
-            window_remaining_ms,
-        )
-    }
-
-    fn is_expired_at(&self, now_ms: u64) -> bool {
-        self.expires_at_unix_ms
-            .is_some_and(|expires_at| now_ms >= expires_at)
-    }
-}
-
-/// Stable seed for [`EffectiveExpiry::jittered_ttl_ms`] derived from the
-/// (namespace, key, now_ms) triple. The same triple always yields the
-/// same seed so jitter is deterministic per insert.
-fn jitter_seed(namespace: &str, key: &str, now_ms: u64) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    namespace.hash(&mut hasher);
-    key.hash(&mut hasher);
-    now_ms.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn effective_expires_at_unix_ms(
-    policy: BlobCachePolicy,
-    now_ms: u64,
-    namespace: &str,
-    key: &str,
-) -> Option<u64> {
-    let extended = policy.extended_value();
-    // Jitter only applies to the relative `ttl_ms` knob; an absolute
-    // `expires_at_unix_ms` is treated as a hard ceiling and is never
-    // pushed out by jitter.
-    let jittered_ttl = policy.ttl_ms_value().map(|base| {
-        if extended.jitter_pct > 0 {
-            EffectiveExpiry::jittered_ttl_ms(
-                base,
-                extended.jitter_pct,
-                jitter_seed(namespace, key, now_ms),
-            )
-        } else {
-            base
-        }
-    });
-    match (jittered_ttl, policy.expires_at_unix_ms_value()) {
-        (Some(ttl), Some(abs)) => Some(now_ms.saturating_add(ttl).min(abs)),
-        (Some(ttl), None) => Some(now_ms.saturating_add(ttl)),
-        (None, Some(abs)) => Some(abs),
-        (None, None) => None,
     }
 }
 
@@ -954,7 +628,9 @@ impl Shard {
                 entry.last_access_unix_ms = now_ms;
                 Lookup::Hit(entry.hit())
             }
-            ExpiryDecision::Stale { window_remaining_ms } => {
+            ExpiryDecision::Stale {
+                window_remaining_ms,
+            } => {
                 entry.visited = true;
                 entry.last_access_unix_ms = now_ms;
                 Lookup::Hit(entry.hit_stale(window_remaining_ms))
@@ -1158,233 +834,6 @@ impl AtomicStats {
     }
 }
 
-const L2_CONTROL_MAGIC: &[u8; 4] = b"RDB2";
-const L2_METADATA_MAGIC: &[u8; 4] = b"RDCM";
-const L2_BLOB_MAGIC: &[u8; 4] = b"RDCB";
-
-#[derive(Debug, Clone, Default)]
-struct L2Control {
-    metadata_root: u32,
-    bytes_in_use: u64,
-}
-
-impl L2Control {
-    fn read(path: &Path) -> Result<Self, CacheError> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let mut file = File::open(path).map_err(|err| CacheError::L2Io(err.to_string()))?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .map_err(|err| CacheError::L2Io(err.to_string()))?;
-        if bytes.len() < 16 || &bytes[0..4] != L2_CONTROL_MAGIC {
-            return Err(CacheError::L2Io(
-                "invalid blob-cache L2 control file".into(),
-            ));
-        }
-        Ok(Self {
-            metadata_root: u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
-            bytes_in_use: u64::from_le_bytes([
-                bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14],
-                bytes[15],
-            ]),
-        })
-    }
-
-    fn write(&self, path: &Path) -> Result<(), CacheError> {
-        let mut bytes = Vec::with_capacity(16);
-        bytes.extend_from_slice(L2_CONTROL_MAGIC);
-        bytes.extend_from_slice(&self.metadata_root.to_le_bytes());
-        bytes.extend_from_slice(&self.bytes_in_use.to_le_bytes());
-        let tmp = path.with_extension("ctl.tmp");
-        {
-            let mut file = File::create(&tmp).map_err(|err| CacheError::L2Io(err.to_string()))?;
-            file.write_all(&bytes)
-                .and_then(|_| file.sync_all())
-                .map_err(|err| CacheError::L2Io(err.to_string()))?;
-        }
-        std::fs::rename(&tmp, path).map_err(|err| CacheError::L2Io(err.to_string()))
-    }
-}
-
-/// On-disk format marker for the bytes the L2 blob-chain holds.
-///
-/// `V1Raw` (= 0) is the legacy format: the chain bytes are the original
-/// payload verbatim. `V2Framed` (= 1) is the post-#192 format: the chain
-/// bytes are the [`Compressed`] disk encoding (1-byte tag, optional 4-byte
-/// `original_len`, then the encoded payload).
-///
-/// New writes always emit `V2Framed`. Reads dispatch on this field so older
-/// `V1Raw` entries on disk still decode correctly until they age out.
-const L2_FORMAT_V1_RAW: u8 = 0;
-const L2_FORMAT_V2_FRAMED: u8 = 1;
-
-const L2_FRAME_TAG_RAW: u8 = 0;
-const L2_FRAME_TAG_ZSTD: u8 = 1;
-
-#[derive(Debug, Clone)]
-struct L2Record {
-    namespace: String,
-    key: String,
-    expires_at_unix_ms: Option<u64>,
-    namespace_generation: u64,
-    priority: u8,
-    version: Option<u64>,
-    root_page: u32,
-    page_count: u32,
-    byte_len: u64,
-    checksum: u32,
-    /// On-disk format tag for the blob chain. `0` means legacy raw bytes
-    /// (entries written before #192); `1` means the post-#192 framed
-    /// `Compressed` encoding. Forward-compat read: the field is parsed
-    /// optionally so records persisted before this byte was reserved
-    /// continue to deserialize as `V1Raw`.
-    format_version: u8,
-}
-
-impl L2Record {
-    fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(96 + self.namespace.len() + self.key.len());
-        out.extend_from_slice(L2_METADATA_MAGIC);
-        write_l2_string(&mut out, &self.namespace);
-        write_l2_string(&mut out, &self.key);
-        out.extend_from_slice(&self.expires_at_unix_ms.unwrap_or(0).to_le_bytes());
-        out.extend_from_slice(&self.namespace_generation.to_le_bytes());
-        out.push(self.priority);
-        out.extend_from_slice(&self.version.unwrap_or(0).to_le_bytes());
-        out.extend_from_slice(&self.root_page.to_le_bytes());
-        out.extend_from_slice(&self.page_count.to_le_bytes());
-        out.extend_from_slice(&self.byte_len.to_le_bytes());
-        out.extend_from_slice(&self.checksum.to_le_bytes());
-        out.push(self.format_version);
-        out
-    }
-
-    fn decode(mut bytes: &[u8]) -> Result<Self, CacheError> {
-        if bytes.len() < 4 || &bytes[0..4] != L2_METADATA_MAGIC {
-            return Err(CacheError::L2Io("invalid blob-cache L2 metadata".into()));
-        }
-        bytes = &bytes[4..];
-        let namespace = read_l2_string(&mut bytes)?;
-        let key = read_l2_string(&mut bytes)?;
-        if bytes.len() < 41 {
-            return Err(CacheError::L2Io("truncated blob-cache L2 metadata".into()));
-        }
-        let expires_at = u64::from_le_bytes(bytes[0..8].try_into().expect("len checked"));
-        let namespace_generation =
-            u64::from_le_bytes(bytes[8..16].try_into().expect("len checked"));
-        let priority = bytes[16];
-        let version = u64::from_le_bytes(bytes[17..25].try_into().expect("len checked"));
-        let root_page = u32::from_le_bytes(bytes[25..29].try_into().expect("len checked"));
-        let page_count = u32::from_le_bytes(bytes[29..33].try_into().expect("len checked"));
-        let byte_len = u64::from_le_bytes(bytes[33..41].try_into().expect("len checked"));
-        let checksum = if bytes.len() >= 45 {
-            u32::from_le_bytes(bytes[41..45].try_into().expect("len checked"))
-        } else {
-            0
-        };
-        // Optional `format_version` byte (added in #192 lane 2/5). Records
-        // written before this commit do not include it; they describe the
-        // legacy `V1Raw` chain layout.
-        let format_version = if bytes.len() >= 46 {
-            bytes[45]
-        } else {
-            L2_FORMAT_V1_RAW
-        };
-        Ok(Self {
-            namespace,
-            key,
-            expires_at_unix_ms: (expires_at != 0).then_some(expires_at),
-            namespace_generation,
-            priority,
-            version: (version != 0).then_some(version),
-            root_page,
-            page_count,
-            byte_len,
-            checksum,
-            format_version,
-        })
-    }
-
-    fn is_expired_at(&self, now_ms: u64) -> bool {
-        self.expires_at_unix_ms
-            .is_some_and(|expires_at| now_ms >= expires_at)
-    }
-}
-
-/// Encode a [`Compressed`] payload into the V2 chain layout: `[tag]` for
-/// `Raw`, or `[tag, original_len_le32, encoded_bytes...]` for `Zstd`.
-///
-/// The header overhead (1 byte for `Raw`, 5 bytes for `Zstd`) is intentional
-/// — it lets the read path recover the original payload length without
-/// trusting the [`L2Record::byte_len`] field, and lets `decode_v2_frame`
-/// fail loudly on corruption rather than silently mis-slicing.
-fn encode_v2_frame(c: &Compressed) -> Vec<u8> {
-    match c {
-        Compressed::Raw(bytes) => {
-            let mut out = Vec::with_capacity(1 + bytes.len());
-            out.push(L2_FRAME_TAG_RAW);
-            out.extend_from_slice(bytes);
-            out
-        }
-        Compressed::Zstd { bytes, original_len } => {
-            let mut out = Vec::with_capacity(5 + bytes.len());
-            out.push(L2_FRAME_TAG_ZSTD);
-            out.extend_from_slice(&original_len.to_le_bytes());
-            out.extend_from_slice(bytes);
-            out
-        }
-    }
-}
-
-/// Decode the V2 chain layout produced by [`encode_v2_frame`].
-fn decode_v2_frame(bytes: &[u8]) -> Result<Compressed, CacheError> {
-    if bytes.is_empty() {
-        return Err(CacheError::L2Io(
-            "empty blob-cache L2 v2 frame".into(),
-        ));
-    }
-    match bytes[0] {
-        L2_FRAME_TAG_RAW => Ok(Compressed::Raw(bytes[1..].to_vec())),
-        L2_FRAME_TAG_ZSTD => {
-            if bytes.len() < 5 {
-                return Err(CacheError::L2Io(
-                    "truncated blob-cache L2 zstd frame".into(),
-                ));
-            }
-            let original_len = u32::from_le_bytes(bytes[1..5].try_into().expect("len checked"));
-            Ok(Compressed::Zstd {
-                bytes: bytes[5..].to_vec(),
-                original_len,
-            })
-        }
-        other => Err(CacheError::L2Io(format!(
-            "unknown blob-cache L2 frame tag {other}"
-        ))),
-    }
-}
-
-fn write_l2_string(out: &mut Vec<u8>, value: &str) {
-    out.extend_from_slice(&(value.len() as u16).to_le_bytes());
-    out.extend_from_slice(value.as_bytes());
-}
-
-fn read_l2_string(bytes: &mut &[u8]) -> Result<String, CacheError> {
-    if bytes.len() < 2 {
-        return Err(CacheError::L2Io("truncated blob-cache L2 string".into()));
-    }
-    let len = u16::from_le_bytes([bytes[0], bytes[1]]) as usize;
-    *bytes = &bytes[2..];
-    if bytes.len() < len {
-        return Err(CacheError::L2Io("truncated blob-cache L2 string".into()));
-    }
-    let value = std::str::from_utf8(&bytes[..len])
-        .map_err(|err| CacheError::L2Io(err.to_string()))?
-        .to_string();
-    *bytes = &bytes[len..];
-    Ok(value)
-}
-
 /// Tiny in-tree Bloom filter for the L2 membership synopsis (#146).
 ///
 /// # Sizing
@@ -1451,8 +900,8 @@ mod synopsis_filter {
         pub(super) fn insert(&mut self, key: &str) {
             let (h1, h2) = double_hash(key);
             for i in 0..self.hash_count {
-                let bit = (h1.wrapping_add((i as u64).wrapping_mul(h2))
-                    % self.bit_count as u64) as usize;
+                let bit =
+                    (h1.wrapping_add((i as u64).wrapping_mul(h2)) % self.bit_count as u64) as usize;
                 self.bits[bit / 64] |= 1u64 << (bit % 64);
             }
         }
@@ -1460,8 +909,8 @@ mod synopsis_filter {
         pub(super) fn contains(&self, key: &str) -> bool {
             let (h1, h2) = double_hash(key);
             for i in 0..self.hash_count {
-                let bit = (h1.wrapping_add((i as u64).wrapping_mul(h2))
-                    % self.bit_count as u64) as usize;
+                let bit =
+                    (h1.wrapping_add((i as u64).wrapping_mul(h2)) % self.bit_count as u64) as usize;
                 if self.bits[bit / 64] & (1u64 << (bit % 64)) == 0 {
                     return false;
                 }
@@ -1591,8 +1040,7 @@ impl BlobCacheL2 {
                 // Bloom synopsis said MaybePresent but the authoritative
                 // metadata B+ tree disagrees: a false positive (or stale
                 // bit). Count it for FPR observability.
-                self.synopsis_metadata_reads
-                    .fetch_add(1, Ordering::Relaxed);
+                self.synopsis_metadata_reads.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
         };
@@ -1901,11 +1349,7 @@ impl BlobCacheL2 {
     /// metadata. Used to verify forward-compat reads of entries written
     /// before #192 lane 2/5 landed.
     #[cfg(test)]
-    fn inject_v1_entry(
-        &self,
-        key: &BlobCacheKey,
-        payload: &[u8],
-    ) -> Result<(), CacheError> {
+    fn inject_v1_entry(&self, key: &BlobCacheKey, payload: &[u8]) -> Result<(), CacheError> {
         let (root_page, page_count, checksum) = self.write_blob_chain(payload)?;
         let record = L2Record {
             namespace: key.namespace.clone(),
@@ -2011,24 +1455,7 @@ impl BlobCacheL2 {
     }
 }
 
-fn encode_l2_key(namespace: &str, key: &str) -> Vec<u8> {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    namespace.hash(&mut hasher);
-    let namespace_hash = hasher.finish();
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    key.hash(&mut hasher);
-    let key_hash = hasher.finish();
-    let mut out = Vec::with_capacity(20 + namespace.len() + key.len());
-    out.extend_from_slice(&namespace_hash.to_be_bytes());
-    out.extend_from_slice(&key_hash.to_be_bytes());
-    write_l2_string(&mut out, namespace);
-    write_l2_string(&mut out, key);
-    out
-}
-
-fn rebuild_l2_synopsis(
-    metadata: &crate::storage::engine::BTree,
-) -> HashMap<String, BloomFilter> {
+fn rebuild_l2_synopsis(metadata: &crate::storage::engine::BTree) -> HashMap<String, BloomFilter> {
     let mut synopsis: HashMap<String, BloomFilter> = HashMap::new();
     let Ok(mut cursor) = metadata.cursor_first() else {
         return synopsis;
@@ -2177,7 +1604,12 @@ impl BlobCache {
 
         let shard_idx = self.shard_index(&key);
         let mut shard = self.shards[shard_idx].write();
-        self.check_version(&shard, &key, input.policy.version_value(), namespace_generation)?;
+        self.check_version(
+            &shard,
+            &key,
+            input.policy.version_value(),
+            namespace_generation,
+        )?;
         let entry = Entry::new(
             input.bytes,
             input.content_metadata,
@@ -2634,7 +2066,11 @@ impl BlobCache {
             // shutdown drains them out gracefully.
             Err(losing_pool) => {
                 losing_pool.shutdown();
-                Arc::clone(self.promotion_pool.get().expect("OnceLock set+get inconsistency"))
+                Arc::clone(
+                    self.promotion_pool
+                        .get()
+                        .expect("OnceLock set+get inconsistency"),
+                )
             }
         }
     }
@@ -2705,7 +2141,9 @@ impl BlobCache {
     }
 
     fn validate_blob_size(&self, size: usize, policy: BlobCachePolicy) -> Result<(), CacheError> {
-        let max = policy.max_blob_bytes_value().unwrap_or(self.config.l1_bytes_max);
+        let max = policy
+            .max_blob_bytes_value()
+            .unwrap_or(self.config.l1_bytes_max);
         if size > max {
             Err(CacheError::BlobTooLarge { size, max })
         } else {
@@ -3802,10 +3240,7 @@ mod tests {
         // — but `exists` must surface that ambiguity as `MaybePresent`, not a
         // false `Present`. The authoritative `get` then returns None and
         // bumps the synopsis-false-positive counter.
-        assert_eq!(
-            cache.exists("n", "deleted"),
-            CachePresence::MaybePresent
-        );
+        assert_eq!(cache.exists("n", "deleted"), CachePresence::MaybePresent);
         assert!(cache.get("n", "deleted").is_none());
         let stats = cache.stats();
         assert_eq!(stats.l2_metadata_reads, 1);
@@ -3933,7 +3368,10 @@ mod tests {
             METRIC_CACHE_BLOB_SYNOPSIS_METADATA_READS_TOTAL,
             "cache_blob_synopsis_metadata_reads_total"
         );
-        assert_eq!(METRIC_CACHE_BLOB_SYNOPSIS_BYTES, "cache_blob_synopsis_bytes");
+        assert_eq!(
+            METRIC_CACHE_BLOB_SYNOPSIS_BYTES,
+            "cache_blob_synopsis_bytes"
+        );
     }
 
     // -- API review #151 follow-ups -----------------------------------------
@@ -4015,33 +3453,11 @@ mod tests {
     fn invalidate_tags_with_empty_slice_is_a_no_op() {
         let cache = small_cache(128);
         cache
-            .put(
-                "n",
-                "a",
-                BlobCachePut::new(b"a".to_vec()).with_tags(["x"]),
-            )
+            .put("n", "a", BlobCachePut::new(b"a".to_vec()).with_tags(["x"]))
             .unwrap();
         assert_eq!(cache.invalidate_tags("n", &[]), 0);
         assert_eq!(cache.invalidate_dependencies("n", &[]), 0);
         assert!(cache.get("n", "a").is_some());
-    }
-
-    #[test]
-    fn blob_cache_config_builder_rejects_zero_shard_count() {
-        let err = BlobCacheConfig::builder()
-            .shard_count(0)
-            .try_build()
-            .expect_err("zero shard count must be rejected");
-        assert_eq!(err, BlobCacheConfigError::ZeroShardCount);
-    }
-
-    #[test]
-    fn blob_cache_config_builder_rejects_zero_max_namespaces() {
-        let err = BlobCacheConfig::builder()
-            .max_namespaces(0)
-            .try_build()
-            .expect_err("zero max_namespaces must be rejected");
-        assert_eq!(err, BlobCacheConfigError::ZeroMaxNamespaces);
     }
 
     #[test]
@@ -4164,10 +3580,7 @@ mod tests {
 
     /// Tiny shared helper for the Bloom-filter property tests below.
     fn fpr_for(filter: &super::synopsis_filter::BloomFilter, negatives: &[String]) -> f64 {
-        let positives = negatives
-            .iter()
-            .filter(|key| filter.contains(key))
-            .count() as f64;
+        let positives = negatives.iter().filter(|key| filter.contains(key)).count() as f64;
         positives / negatives.len().max(1) as f64
     }
 
@@ -4337,8 +3750,9 @@ mod tests {
                     let _ = cache.put(
                         "n",
                         &key,
-                        BlobCachePut::new(b"v".to_vec())
-                            .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
+                        BlobCachePut::new(b"v".to_vec()).with_policy(
+                            BlobCachePolicy::default().l1_admission(L1Admission::Never),
+                        ),
                     );
                 }
                 1 => {
@@ -4403,8 +3817,9 @@ mod tests {
                     let _ = cache.put(
                         "n",
                         &key,
-                        BlobCachePut::new(b"x".to_vec())
-                            .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
+                        BlobCachePut::new(b"x".to_vec()).with_policy(
+                            BlobCachePolicy::default().l1_admission(L1Admission::Never),
+                        ),
                     );
                     i += 1;
                 }
@@ -4481,7 +3896,11 @@ mod tests {
         // Force L1 eviction of "k" by overflowing the byte cap with fillers.
         for i in 0..40 {
             cache
-                .put("ns", &format!("filler{i}"), BlobCachePut::new(vec![0u8; 16]))
+                .put(
+                    "ns",
+                    &format!("filler{i}"),
+                    BlobCachePut::new(vec![0u8; 16]),
+                )
                 .expect("filler");
         }
 
@@ -4527,7 +3946,11 @@ mod tests {
             .expect("put");
         for i in 0..40 {
             cache
-                .put("ns", &format!("filler{i}"), BlobCachePut::new(vec![0u8; 16]))
+                .put(
+                    "ns",
+                    &format!("filler{i}"),
+                    BlobCachePut::new(vec![0u8; 16]),
+                )
                 .expect("filler");
         }
         // Async NOT enabled — pool is None.
@@ -4564,7 +3987,11 @@ mod tests {
         // Evict L1.
         for i in 0..40 {
             cache
-                .put("ns", &format!("filler{i}"), BlobCachePut::new(vec![0u8; 16]))
+                .put(
+                    "ns",
+                    &format!("filler{i}"),
+                    BlobCachePut::new(vec![0u8; 16]),
+                )
                 .expect("filler");
         }
         // Tiny queue, sleep-forever-ish executor — first request blocks
@@ -4606,7 +4033,11 @@ mod tests {
         }
         for i in 0..40 {
             cache
-                .put("ns", &format!("filler{i}"), BlobCachePut::new(vec![0u8; 16]))
+                .put(
+                    "ns",
+                    &format!("filler{i}"),
+                    BlobCachePut::new(vec![0u8; 16]),
+                )
                 .expect("filler");
         }
         let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -4731,9 +4162,8 @@ mod tests {
             .put(
                 "n",
                 "doc",
-                BlobCachePut::new(payload.clone()).with_policy(
-                    BlobCachePolicy::default().l1_admission(L1Admission::Never),
-                ),
+                BlobCachePut::new(payload.clone())
+                    .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
             )
             .expect("put");
 
@@ -4767,9 +4197,8 @@ mod tests {
             .put(
                 "n",
                 "doc",
-                BlobCachePut::new(payload.clone()).with_policy(
-                    BlobCachePolicy::default().l1_admission(L1Admission::Never),
-                ),
+                BlobCachePut::new(payload.clone())
+                    .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
             )
             .expect("put");
 
@@ -4794,10 +4223,7 @@ mod tests {
         // 4 KB of zero bytes would otherwise compress superbly; the
         // content-type rule must short-circuit that.
         let payload = vec![0u8; 4096];
-        let metadata = BTreeMap::from([(
-            "content-type".to_string(),
-            "image/png".to_string(),
-        )]);
+        let metadata = BTreeMap::from([("content-type".to_string(), "image/png".to_string())]);
 
         cache
             .put(
@@ -4832,9 +4258,8 @@ mod tests {
             .put(
                 "n",
                 "noise",
-                BlobCachePut::new(payload.clone()).with_policy(
-                    BlobCachePolicy::default().l1_admission(L1Admission::Never),
-                ),
+                BlobCachePut::new(payload.clone())
+                    .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
             )
             .expect("put");
 
@@ -4894,9 +4319,8 @@ mod tests {
                 .put(
                     "n",
                     &format!("doc{i}"),
-                    BlobCachePut::new(payload.clone()).with_policy(
-                        BlobCachePolicy::default().l1_admission(L1Admission::Never),
-                    ),
+                    BlobCachePut::new(payload.clone())
+                        .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
                 )
                 .expect("put admitted under compressed budget");
         }
@@ -4927,9 +4351,8 @@ mod tests {
                 .put(
                     "n",
                     &format!("text{i}"),
-                    BlobCachePut::new(payload.clone()).with_policy(
-                        BlobCachePolicy::default().l1_admission(L1Admission::Never),
-                    ),
+                    BlobCachePut::new(payload.clone())
+                        .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
                 )
                 .expect("put");
         }
@@ -4941,9 +4364,8 @@ mod tests {
                 .put(
                     "n",
                     &format!("bin{i}"),
-                    BlobCachePut::new(bin).with_policy(
-                        BlobCachePolicy::default().l1_admission(L1Admission::Never),
-                    ),
+                    BlobCachePut::new(bin)
+                        .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
                 )
                 .expect("put");
         }
@@ -5228,9 +4650,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).ok();
         std::fs::write(&ctl, b"not-a-valid-control-file").unwrap();
 
-        let result = BlobCache::open_with_l2(
-            BlobCacheConfig::default().with_l2_path(&path),
-        );
+        let result = BlobCache::open_with_l2(BlobCacheConfig::default().with_l2_path(&path));
         match &result {
             Err(CacheError::L2Io(_)) => {}
             Err(other) => panic!("expected L2Io error, got: {other:?}"),
@@ -5253,9 +4673,7 @@ mod tests {
         // Create the pager path as a directory so opening it as a file fails.
         std::fs::create_dir_all(&path).unwrap();
 
-        let result = BlobCache::open_with_l2(
-            BlobCacheConfig::default().with_l2_path(&path),
-        );
+        let result = BlobCache::open_with_l2(BlobCacheConfig::default().with_l2_path(&path));
         assert!(
             result.is_err(),
             "expected Err when l2_path is a directory, got Ok",
