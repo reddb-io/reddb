@@ -400,6 +400,7 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         | QueryExpr::CreateTimeSeries(_)
         | QueryExpr::DropTimeSeries(_)
         | QueryExpr::CreateQueue(_)
+        | QueryExpr::AlterQueue(_)
         | QueryExpr::DropQueue(_)
         | QueryExpr::QueueCommand(_)
         | QueryExpr::CreateTree(_)
@@ -747,6 +748,7 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::CreateTimeSeries(_) => "create_timeseries",
         QueryExpr::DropTimeSeries(_) => "drop_timeseries",
         QueryExpr::CreateQueue(_) => "create_queue",
+        QueryExpr::AlterQueue(_) => "alter_queue",
         QueryExpr::DropQueue(_) => "drop_queue",
         QueryExpr::QueueCommand(_) => "queue_command",
         QueryExpr::CreateTree(_) => "create_tree",

@@ -16,6 +16,18 @@ RedDB includes a built-in message queue with FIFO/LIFO ordering, priority suppor
 -- Simple FIFO queue
 CREATE QUEUE tasks
 
+-- Fanout-mode queue flag (runtime behavior lands in a later slice)
+CREATE QUEUE notifications FANOUT
+
+-- Work-mode queue flag (also the default when omitted)
+CREATE QUEUE jobs WORK
+
+-- Default mode is WORK
+CREATE QUEUE tasks
+
+-- Change the catalog mode flag
+ALTER QUEUE notifications SET MODE FANOUT
+
 -- Bounded queue
 CREATE QUEUE tasks MAX_SIZE 10000
 

@@ -1,0 +1,4 @@
+input = "CREATE QUEUE tasks FANOUT"
+expected_kind = "CreateQueue"
+source = "docs/data-models/queues.md:20"
+kind = "positive"

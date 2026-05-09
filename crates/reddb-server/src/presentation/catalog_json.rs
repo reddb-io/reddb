@@ -559,6 +559,13 @@ pub(crate) fn collection_readiness_json(descriptor: &CollectionDescriptor) -> Js
         JsonValue::String(collection_model_str(descriptor.observed_model).to_string()),
     );
     object.insert(
+        "queue_mode".to_string(),
+        descriptor
+            .queue_mode
+            .map(|mode| JsonValue::String(mode.as_str().to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
         "declared_schema_mode".to_string(),
         descriptor
             .declared_schema_mode

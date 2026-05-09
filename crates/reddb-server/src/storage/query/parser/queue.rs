@@ -1,6 +1,9 @@
 //! Parser for QUEUE commands and CREATE/DROP QUEUE
 
-use super::super::ast::{CreateQueueQuery, DropQueueQuery, QueryExpr, QueueCommand, QueueSide};
+use super::super::ast::{
+    AlterQueueQuery, CreateQueueQuery, DropQueueQuery, QueryExpr, QueueCommand, QueueMode,
+    QueueSide,
+};
 use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
@@ -11,6 +14,7 @@ impl<'a> Parser<'a> {
         let if_not_exists = self.match_if_not_exists()?;
         let name = self.expect_ident()?;
 
+        let mut mode = QueueMode::Work;
         let mut priority = false;
         let mut max_size = None;
         let mut ttl_ms = None;
@@ -19,7 +23,9 @@ impl<'a> Parser<'a> {
 
         // Parse optional clauses in any order
         loop {
-            if self.consume(&Token::Priority)? {
+            if let Some(parsed_mode) = self.consume_queue_mode()? {
+                mode = parsed_mode;
+            } else if self.consume(&Token::Priority)? {
                 priority = true;
             } else if self.consume_ident_ci("MAX_SIZE")? || self.consume_ident_ci("MAXSIZE")? {
                 max_size = Some(self.parse_positive_integer("MAX_SIZE")? as usize);
@@ -42,6 +48,7 @@ impl<'a> Parser<'a> {
 
         Ok(QueryExpr::CreateQueue(CreateQueueQuery {
             name,
+            mode,
             priority,
             max_size,
             ttl_ms,
@@ -49,6 +56,27 @@ impl<'a> Parser<'a> {
             max_attempts,
             if_not_exists,
         }))
+    }
+
+    /// Parse ALTER QUEUE body (after ALTER QUEUE consumed)
+    pub fn parse_alter_queue_body(&mut self) -> Result<QueryExpr, ParseError> {
+        let name = self.expect_ident()?;
+        if !self.consume(&Token::Set)? && !self.consume_ident_ci("SET")? {
+            return Err(ParseError::expected(
+                vec!["SET"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        if !self.consume(&Token::Mode)? && !self.consume_ident_ci("MODE")? {
+            return Err(ParseError::expected(
+                vec!["MODE"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        let mode = self.parse_queue_mode()?;
+        Ok(QueryExpr::AlterQueue(AlterQueueQuery { name, mode }))
     }
 
     /// Parse DROP QUEUE body (after DROP QUEUE consumed)
@@ -255,6 +283,35 @@ impl<'a> Parser<'a> {
                     "PUSH", "POP", "PEEK", "LEN", "PURGE", "GROUP", "READ", "ACK", "NACK", "LPUSH",
                     "RPUSH", "LPOP", "RPOP", "PENDING", "CLAIM",
                 ],
+                self.peek(),
+                self.position(),
+            )),
+        }
+    }
+
+    fn consume_queue_mode(&mut self) -> Result<Option<QueueMode>, ParseError> {
+        match self.peek() {
+            Token::Work => {
+                self.advance()?;
+                Ok(Some(QueueMode::Work))
+            }
+            Token::Ident(name) => {
+                if let Some(mode) = QueueMode::parse(name) {
+                    self.advance()?;
+                    Ok(Some(mode))
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn parse_queue_mode(&mut self) -> Result<QueueMode, ParseError> {
+        match self.consume_queue_mode()? {
+            Some(mode) => Ok(mode),
+            None => Err(ParseError::expected(
+                vec!["FANOUT", "WORK"],
                 self.peek(),
                 self.position(),
             )),

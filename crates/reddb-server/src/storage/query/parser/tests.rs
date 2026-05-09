@@ -2877,6 +2877,7 @@ fn test_parse_create_queue() {
     let query = parse("CREATE QUEUE tasks MAX_SIZE 1000 PRIORITY").unwrap();
     if let QueryExpr::CreateQueue(q) = query {
         assert_eq!(q.name, "tasks");
+        assert_eq!(q.mode, crate::storage::queue::QueueMode::Work);
         assert_eq!(q.max_size, Some(1000));
         assert!(q.priority);
         assert_eq!(q.max_attempts, 3);
@@ -2884,6 +2885,29 @@ fn test_parse_create_queue() {
     } else {
         panic!("Expected CreateQueueQuery");
     }
+}
+
+#[test]
+fn test_parse_queue_mode_ddl() {
+    use crate::storage::queue::QueueMode;
+
+    let query = parse("CREATE QUEUE fanout_tasks FANOUT").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::CreateQueue(q) if q.name == "fanout_tasks" && q.mode == QueueMode::Fanout
+    ));
+
+    let query = parse("CREATE QUEUE work_tasks WORK").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::CreateQueue(q) if q.name == "work_tasks" && q.mode == QueueMode::Work
+    ));
+
+    let query = parse("ALTER QUEUE fanout_tasks SET MODE FANOUT").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::AlterQueue(q) if q.name == "fanout_tasks" && q.mode == QueueMode::Fanout
+    ));
 }
 
 #[test]

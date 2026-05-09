@@ -166,6 +166,7 @@ proptest! {
 // AST contract is observable from the consumer side.
 
 use reddb_server::storage::query::ast::{QueryExpr, QueueCommand, QueueSide};
+use reddb_server::storage::queue::QueueMode;
 
 fn parse_query(input: &str) -> QueryExpr {
     parser::parse(input)
@@ -179,12 +180,34 @@ fn create_queue_with_max_size_and_priority_parses() {
     match q {
         QueryExpr::CreateQueue(cq) => {
             assert_eq!(cq.name, "tasks");
+            assert_eq!(cq.mode, QueueMode::Work);
             assert_eq!(cq.max_size, Some(1000));
             assert!(cq.priority);
             assert_eq!(cq.max_attempts, 3);
             assert!(cq.dlq.is_none());
         }
         other => panic!("expected CreateQueue, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_and_alter_queue_mode_parse() {
+    let q = parse_query("CREATE QUEUE tasks FANOUT");
+    match q {
+        QueryExpr::CreateQueue(cq) => {
+            assert_eq!(cq.name, "tasks");
+            assert_eq!(cq.mode, QueueMode::Fanout);
+        }
+        other => panic!("expected CreateQueue, got {other:?}"),
+    }
+
+    let q = parse_query("ALTER QUEUE tasks SET MODE WORK");
+    match q {
+        QueryExpr::AlterQueue(aq) => {
+            assert_eq!(aq.name, "tasks");
+            assert_eq!(aq.mode, QueueMode::Work);
+        }
+        other => panic!("expected AlterQueue, got {other:?}"),
     }
 }
 

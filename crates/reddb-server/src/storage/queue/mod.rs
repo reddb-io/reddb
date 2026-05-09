@@ -9,6 +9,8 @@
 
 pub mod consumer_group;
 pub mod deque;
+pub mod mode;
 
 pub use consumer_group::{ConsumerGroup, PendingEntry};
 pub use deque::{QueueSide, QueueStore};
+pub use mode::QueueMode;

@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::storage::queue::QueueMode;
 use crate::storage::unified::entity::{QueueMessageData, RowData};
 use crate::storage::unified::{Metadata, MetadataValue, UnifiedStore};
 
@@ -13,6 +14,7 @@ const QUEUE_POSITION_CENTER: u64 = u64::MAX / 2;
 
 #[derive(Debug, Clone)]
 struct QueueRuntimeConfig {
+    mode: QueueMode,
     priority: bool,
     max_size: Option<usize>,
     ttl_ms: Option<u64>,
@@ -102,6 +104,7 @@ impl RedDBRuntime {
             store.as_ref(),
             &query.name,
             &QueueRuntimeConfig {
+                mode: query.mode,
                 priority: query.priority,
                 max_size: query.max_size,
                 ttl_ms: query.ttl_ms,
@@ -145,6 +148,7 @@ impl RedDBRuntime {
         );
 
         let mut msg = format!("queue '{}' created", query.name);
+        msg.push_str(&format!(" (mode={})", query.mode.as_str()));
         if query.priority {
             msg.push_str(" (priority)");
         }
@@ -165,6 +169,32 @@ impl RedDBRuntime {
             raw_query.to_string(),
             &msg,
             "create",
+        ))
+    }
+
+    pub fn execute_alter_queue(
+        &self,
+        raw_query: &str,
+        query: &AlterQueueQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        let store = self.inner.db.store();
+        ensure_queue_exists(store.as_ref(), &query.name)?;
+
+        let mut config = load_queue_config(store.as_ref(), &query.name);
+        config.mode = query.mode;
+        save_queue_config(store.as_ref(), &query.name, &config)?;
+
+        self.invalidate_result_cache();
+        self.inner
+            .db
+            .persist_metadata()
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+
+        Ok(RuntimeQueryResult::ok_message(
+            raw_query.to_string(),
+            &format!("queue '{}' mode set to {}", query.name, query.mode.as_str()),
+            "alter",
         ))
     }
 
@@ -801,6 +831,7 @@ fn ensure_queue_exists(store: &UnifiedStore, queue: &str) -> RedDBResult<()> {
 
 fn load_queue_config(store: &UnifiedStore, queue: &str) -> QueueRuntimeConfig {
     let default = QueueRuntimeConfig {
+        mode: QueueMode::Work,
         priority: false,
         max_size: None,
         ttl_ms: None,
@@ -822,6 +853,10 @@ fn load_queue_config(store: &UnifiedStore, queue: &str) -> QueueRuntimeConfig {
         .find_map(|entity| {
             let row = entity.data.as_row()?;
             Some(QueueRuntimeConfig {
+                mode: row_text(row, "mode")
+                    .as_deref()
+                    .and_then(QueueMode::parse)
+                    .unwrap_or_default(),
                 priority: row_bool(row, "priority").unwrap_or(false),
                 max_size: row_u64(row, "max_size").map(|value| value as usize),
                 ttl_ms: row_u64(row, "ttl_ms"),
@@ -847,6 +882,10 @@ fn save_queue_config(
     let mut fields = HashMap::new();
     fields.insert("kind".to_string(), Value::text("queue_config".to_string()));
     fields.insert("queue".to_string(), Value::text(queue.to_string()));
+    fields.insert(
+        "mode".to_string(),
+        Value::text(config.mode.as_str().to_string()),
+    );
     fields.insert("priority".to_string(), Value::Boolean(config.priority));
     fields.insert(
         "max_size".to_string(),
