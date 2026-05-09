@@ -834,6 +834,7 @@ pub(crate) mod ddl;
 mod expr_eval;
 mod graph_dsl;
 mod health_connection;
+mod impl_config;
 pub(crate) mod impl_core;
 mod impl_ddl;
 mod impl_dml;

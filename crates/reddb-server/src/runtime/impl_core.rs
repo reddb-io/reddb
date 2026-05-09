@@ -900,6 +900,19 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
                 | KvCommand::Cas { collection, .. } => cache_scope_insert(scopes, collection),
             }
         }
+        QueryExpr::ConfigCommand(cmd) => {
+            use crate::storage::query::ast::ConfigCommand;
+            match cmd {
+                ConfigCommand::Put { collection, .. }
+                | ConfigCommand::Get { collection, .. }
+                | ConfigCommand::Rotate { collection, .. }
+                | ConfigCommand::Delete { collection, .. }
+                | ConfigCommand::History { collection, .. }
+                | ConfigCommand::InvalidVolatileOperation { collection, .. } => {
+                    cache_scope_insert(scopes, collection)
+                }
+            }
+        }
     }
 }
 
@@ -4345,6 +4358,7 @@ impl RedDBRuntime {
             QueryExpr::DropQueue(ref q) => self.execute_drop_queue(query, q),
             QueryExpr::QueueCommand(ref cmd) => self.execute_queue_command(query, cmd),
             QueryExpr::KvCommand(ref cmd) => self.execute_kv_command(query, cmd),
+            QueryExpr::ConfigCommand(ref cmd) => self.execute_config_command(query, cmd),
             QueryExpr::CreateTree(ref tree) => self.execute_create_tree(query, tree),
             QueryExpr::DropTree(ref tree) => self.execute_drop_tree(query, tree),
             QueryExpr::TreeCommand(ref cmd) => self.execute_tree_command(query, cmd),
@@ -5436,6 +5450,10 @@ impl RedDBRuntime {
                     | KvCommand::Delete { collection, .. } => collection.as_str(),
                 };
                 Some((collection, CollectionModel::Kv))
+            }
+            QueryExpr::ConfigCommand(cmd) => {
+                self.validate_config_command_before_auth(cmd)?;
+                None
             }
             _ => None,
         };

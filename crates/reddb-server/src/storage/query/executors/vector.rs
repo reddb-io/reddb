@@ -594,6 +594,7 @@ fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::DropQueue(_) => "drop_queue",
         QueryExpr::QueueCommand(_) => "queue_command",
         QueryExpr::KvCommand(_) => "kv_command",
+        QueryExpr::ConfigCommand(_) => "config_command",
         QueryExpr::CreateTree(_) => "create_tree",
         QueryExpr::DropTree(_) => "drop_tree",
         QueryExpr::TreeCommand(_) => "tree_command",

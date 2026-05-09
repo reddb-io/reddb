@@ -1,7 +1,7 @@
 use crate::catalog::CollectionModel;
 use crate::storage::query::ast::{
     AlterQueueQuery, AlterTableQuery, AlterUserStmt, ApplyMigrationQuery, AskQuery, BinOp,
-    CompareOp, CopyFormat, CopyFromQuery, CreateForeignTableQuery, CreateIndexQuery,
+    CompareOp, ConfigCommand, CopyFormat, CopyFromQuery, CreateForeignTableQuery, CreateIndexQuery,
     CreateMigrationQuery, CreatePolicyQuery, CreateQueueQuery, CreateSchemaQuery,
     CreateSequenceQuery, CreateServerQuery, CreateTableQuery, CreateTimeSeriesQuery,
     CreateTreeQuery, CreateViewQuery, DeleteQuery, DropCollectionQuery, DropDocumentQuery,
@@ -46,6 +46,7 @@ pub enum FrontendStatement {
     TreeCommand(TreeCommand),
     ProbabilisticCommand(ProbabilisticCommand),
     KvCommand(KvCommand),
+    ConfigCommand(ConfigCommand),
 }
 
 #[derive(Debug, Clone)]
@@ -374,6 +375,7 @@ impl FrontendStatement {
                 QueryExpr::ProbabilisticCommand(command)
             }
             FrontendStatement::KvCommand(command) => QueryExpr::KvCommand(command),
+            FrontendStatement::ConfigCommand(command) => QueryExpr::ConfigCommand(command),
         }
     }
 }
@@ -621,7 +623,6 @@ impl<'a> Parser<'a> {
             | Token::From
             | Token::Insert
             | Token::Update
-            | Token::Delete
             | Token::Truncate
             | Token::Explain
             | Token::Create
@@ -715,6 +716,50 @@ impl<'a> Parser<'a> {
                     self.position(),
                 )),
             },
+            Token::Delete => {
+                if matches!(
+                    self.peek_next()?,
+                    Token::Ident(name) if name.eq_ignore_ascii_case("CONFIG")
+                ) {
+                    match self.parse_config_command()? {
+                        QueryExpr::ConfigCommand(command) => {
+                            Ok(FrontendStatement::ConfigCommand(command))
+                        }
+                        other => Err(ParseError::new(
+                            format!("internal: CONFIG produced unexpected query kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                } else {
+                    self.parse_sql_statement().map(FrontendStatement::Sql)
+                }
+            }
+            Token::Add => match self.parse_config_command()? {
+                QueryExpr::ConfigCommand(command) => Ok(FrontendStatement::ConfigCommand(command)),
+                other => Err(ParseError::new(
+                    format!("internal: CONFIG produced unexpected query kind {other:?}"),
+                    self.position(),
+                )),
+            },
+            Token::Ident(name)
+                if name.eq_ignore_ascii_case("PUT")
+                    || name.eq_ignore_ascii_case("GET")
+                    || name.eq_ignore_ascii_case("ROTATE")
+                    || name.eq_ignore_ascii_case("HISTORY")
+                    || name.eq_ignore_ascii_case("INCR")
+                    || name.eq_ignore_ascii_case("DECR")
+                    || name.eq_ignore_ascii_case("INVALIDATE") =>
+            {
+                match self.parse_config_command()? {
+                    QueryExpr::ConfigCommand(command) => {
+                        Ok(FrontendStatement::ConfigCommand(command))
+                    }
+                    other => Err(ParseError::new(
+                        format!("internal: CONFIG produced unexpected query kind {other:?}"),
+                        self.position(),
+                    )),
+                }
+            }
             Token::Tree => match self.parse_tree_command()? {
                 QueryExpr::TreeCommand(command) => Ok(FrontendStatement::TreeCommand(command)),
                 other => Err(ParseError::new(

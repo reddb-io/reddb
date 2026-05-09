@@ -36,10 +36,10 @@
 //! ```
 
 mod auth_ddl;
+mod config;
 mod cte;
 mod ddl;
 mod dml;
-mod kv;
 mod error;
 mod expr;
 mod filter;
@@ -48,6 +48,7 @@ mod graph_commands;
 mod hybrid;
 mod index_ddl;
 mod join;
+mod kv;
 pub mod limits;
 mod migration;
 mod path;
