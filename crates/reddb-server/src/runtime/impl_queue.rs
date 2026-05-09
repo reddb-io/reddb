@@ -11,6 +11,7 @@ use super::*;
 
 const QUEUE_META_COLLECTION: &str = "red_queue_meta";
 const QUEUE_POSITION_CENTER: u64 = u64::MAX / 2;
+const WORK_DEFAULT_GROUP: &str = "_work_default";
 
 #[derive(Debug, Clone)]
 struct QueueRuntimeConfig {
@@ -502,8 +503,8 @@ impl RedDBRuntime {
             } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
-                require_queue_group(store.as_ref(), queue, group)?;
                 let config = load_queue_config(store.as_ref(), queue);
+                let group = resolve_read_group(store.as_ref(), queue, group.as_deref(), &config)?;
                 let pending = load_pending_entries(store.as_ref(), queue, Some(group), None)?;
                 let pending_ids = pending
                     .iter()
@@ -932,6 +933,27 @@ fn require_queue_group(store: &UnifiedStore, queue: &str, group: &str) -> RedDBR
             "consumer group '{}' not found on queue '{}'",
             group, queue
         )))
+    }
+}
+
+fn resolve_read_group<'a>(
+    store: &UnifiedStore,
+    queue: &str,
+    group: Option<&'a str>,
+    config: &QueueRuntimeConfig,
+) -> RedDBResult<&'a str> {
+    if let Some(group) = group {
+        require_queue_group(store, queue, group)?;
+        return Ok(group);
+    }
+
+    match config.mode {
+        QueueMode::Work | QueueMode::Fanout => {
+            if !queue_group_exists(store, queue, WORK_DEFAULT_GROUP)? {
+                save_queue_group(store, queue, WORK_DEFAULT_GROUP)?;
+            }
+            Ok(WORK_DEFAULT_GROUP)
+        }
     }
 }
 
