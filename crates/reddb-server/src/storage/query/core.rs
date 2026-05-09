@@ -1,6 +1,7 @@
 use std::fmt;
 
 use super::builders::{GraphQueryBuilder, PathQueryBuilder, TableQueryBuilder};
+use crate::catalog::CollectionModel;
 pub use crate::storage::engine::distance::DistanceMetric;
 pub use crate::storage::engine::vector_metadata::MetadataFilter;
 use crate::storage::schema::{SqlTypeName, Value};
@@ -41,6 +42,8 @@ pub enum QueryExpr {
     DropKv(DropKvQuery),
     /// DROP COLLECTION name
     DropCollection(DropCollectionQuery),
+    /// TRUNCATE [model] name
+    Truncate(TruncateQuery),
     /// ALTER TABLE name ADD/DROP/RENAME COLUMN
     AlterTable(AlterTableQuery),
     /// GRAPH subcommand (NEIGHBORHOOD, SHORTEST_PATH, etc.)
@@ -1771,6 +1774,14 @@ pub struct DropKvQuery {
 #[derive(Debug, Clone)]
 pub struct DropCollectionQuery {
     pub name: String,
+    pub if_exists: bool,
+}
+
+/// TRUNCATE {TABLE|GRAPH|VECTOR|DOCUMENT|TIMESERIES|KV|QUEUE|COLLECTION} [IF EXISTS] name
+#[derive(Debug, Clone)]
+pub struct TruncateQuery {
+    pub name: String,
+    pub model: Option<CollectionModel>,
     pub if_exists: bool,
 }
 
