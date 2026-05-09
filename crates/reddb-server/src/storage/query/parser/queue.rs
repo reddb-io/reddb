@@ -28,7 +28,12 @@ impl<'a> Parser<'a> {
             {
                 max_attempts = self.parse_integer()?.max(1) as u32;
             } else if self.consume(&Token::With)? {
-                if self.consume_ident_ci("TTL")? {
+                if self.consume_ident_ci("EVENTS")? {
+                    return Err(ParseError::new(
+                        "queues cannot have event subscriptions".to_string(),
+                        self.position(),
+                    ));
+                } else if self.consume_ident_ci("TTL")? {
                     let value = self.parse_float()?;
                     let unit = self.parse_queue_duration_unit()?;
                     ttl_ms = Some((value * unit) as u64);

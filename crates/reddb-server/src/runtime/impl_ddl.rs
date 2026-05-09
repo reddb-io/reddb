@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::storage::query::{analyze_create_table, resolve_declared_data_type, CreateColumnDef};
+use std::collections::{HashMap, HashSet};
 
 impl RedDBRuntime {
     /// Execute CREATE TABLE
@@ -41,10 +42,14 @@ impl RedDBRuntime {
         // Build and validate the contract before mutating storage so invalid
         // SQL types / duplicate columns do not leave partial side effects.
         let contract = collection_contract_from_create_table(query)?;
+        validate_event_subscriptions(&self.inner.db, &query.name, &contract.subscriptions)?;
         // Create the collection.
         store
             .create_collection(&query.name)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        for subscription in &contract.subscriptions {
+            ensure_event_target_queue(self, &subscription.target_queue)?;
+        }
         if let Some(default_ttl_ms) = query.default_ttl_ms {
             self.inner
                 .db
@@ -338,6 +343,23 @@ impl RedDBRuntime {
                         if *on { "enabled" } else { "disabled" },
                         query.name
                     ));
+                }
+                AlterOperation::EnableEvents(subscription) => {
+                    let mut subscription = subscription.clone();
+                    subscription.source = query.name.clone();
+                    validate_event_subscriptions(
+                        &self.inner.db,
+                        &query.name,
+                        std::slice::from_ref(&subscription),
+                    )?;
+                    ensure_event_target_queue(self, &subscription.target_queue)?;
+                    messages.push(format!(
+                        "events enabled on '{}' to '{}'",
+                        query.name, subscription.target_queue
+                    ));
+                }
+                AlterOperation::DisableEvents => {
+                    messages.push(format!("events disabled on '{}'", query.name));
                 }
             }
         }
@@ -675,6 +697,7 @@ fn collection_contract_from_create_table(
         context_index_enabled: query.context_index_enabled
             || !query.context_index_fields.is_empty(),
         append_only: query.append_only,
+        subscriptions: query.subscriptions.clone(),
     })
 }
 
@@ -697,6 +720,7 @@ fn default_collection_contract_for_existing_table(
         timestamps_enabled: false,
         context_index_enabled: false,
         append_only: false,
+        subscriptions: Vec::new(),
     }
 }
 
@@ -857,7 +881,123 @@ fn apply_alter_operations_to_contract(
             // VCS opt-in is persisted to red_vcs_settings by the
             // executor, not the contract — nothing to do here.
             AlterOperation::SetVersioned(_) => {}
+            AlterOperation::EnableEvents(subscription) => {
+                let mut subscription = subscription.clone();
+                subscription.source = contract.name.clone();
+                subscription.enabled = true;
+                if let Some(existing) = contract
+                    .subscriptions
+                    .iter_mut()
+                    .find(|existing| existing.target_queue == subscription.target_queue)
+                {
+                    *existing = subscription;
+                } else {
+                    contract.subscriptions.push(subscription);
+                }
+            }
+            AlterOperation::DisableEvents => {
+                for subscription in &mut contract.subscriptions {
+                    subscription.enabled = false;
+                }
+            }
         }
+    }
+}
+
+fn validate_event_subscriptions(
+    db: &crate::storage::unified::devx::RedDB,
+    source: &str,
+    subscriptions: &[crate::catalog::SubscriptionDescriptor],
+) -> RedDBResult<()> {
+    for subscription in subscriptions.iter().filter(|subscription| subscription.enabled) {
+        if subscription.target_queue == source
+            || subscription_would_create_cycle(db, source, &subscription.target_queue)
+        {
+            return Err(RedDBError::Query(
+                "subscription would create cycle".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn subscription_would_create_cycle(
+    db: &crate::storage::unified::devx::RedDB,
+    source: &str,
+    target: &str,
+) -> bool {
+    let mut graph: HashMap<String, Vec<String>> = HashMap::new();
+    for contract in db.collection_contracts() {
+        for subscription in contract
+            .subscriptions
+            .into_iter()
+            .filter(|subscription| subscription.enabled)
+        {
+            graph
+                .entry(subscription.source)
+                .or_default()
+                .push(subscription.target_queue);
+        }
+    }
+    graph
+        .entry(source.to_string())
+        .or_default()
+        .push(target.to_string());
+
+    let mut stack = vec![target.to_string()];
+    let mut seen = HashSet::new();
+    while let Some(node) = stack.pop() {
+        if node == source {
+            return true;
+        }
+        if !seen.insert(node.clone()) {
+            continue;
+        }
+        if let Some(next) = graph.get(&node) {
+            stack.extend(next.iter().cloned());
+        }
+    }
+    false
+}
+
+fn ensure_event_target_queue(runtime: &RedDBRuntime, queue: &str) -> RedDBResult<()> {
+    let store = runtime.inner.db.store();
+    if store.get_collection(queue).is_some() {
+        return Ok(());
+    }
+    store
+        .create_collection(queue)
+        .map_err(|err| RedDBError::Internal(err.to_string()))?;
+    runtime
+        .inner
+        .db
+        .save_collection_contract(event_queue_collection_contract(queue))
+        .map_err(|err| RedDBError::Internal(err.to_string()))?;
+    store.set_config_tree(
+        &format!("queue.{queue}.mode"),
+        &crate::serde_json::Value::String("fanout".to_string()),
+    );
+    Ok(())
+}
+
+fn event_queue_collection_contract(queue: &str) -> crate::physical::CollectionContract {
+    let now = current_unix_ms();
+    crate::physical::CollectionContract {
+        name: queue.to_string(),
+        declared_model: crate::catalog::CollectionModel::Queue,
+        schema_mode: crate::catalog::SchemaMode::Dynamic,
+        origin: crate::physical::ContractOrigin::Implicit,
+        version: 1,
+        created_at_unix_ms: now,
+        updated_at_unix_ms: now,
+        default_ttl_ms: None,
+        context_index_fields: Vec::new(),
+        declared_columns: Vec::new(),
+        table_def: None,
+        timestamps_enabled: false,
+        context_index_enabled: false,
+        append_only: true,
+        subscriptions: Vec::new(),
     }
 }
 

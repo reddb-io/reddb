@@ -351,6 +351,16 @@ pub(super) fn collection_contract_to_json(contract: &CollectionContract) -> Json
         JsonValue::Bool(contract.append_only),
     );
     object.insert(
+        "subscriptions".to_string(),
+        JsonValue::Array(
+            contract
+                .subscriptions
+                .iter()
+                .map(subscription_descriptor_to_json)
+                .collect(),
+        ),
+    );
+    object.insert(
         "table_def".to_string(),
         contract
             .table_def
@@ -438,6 +448,116 @@ pub(super) fn collection_contract_from_json(value: &JsonValue) -> io::Result<Col
             .get("append_only")
             .and_then(JsonValue::as_bool)
             .unwrap_or(false),
+        subscriptions: object
+            .get("subscriptions")
+            .and_then(JsonValue::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .map(subscription_descriptor_from_json)
+                    .collect::<io::Result<Vec<_>>>()
+            })
+            .transpose()?
+            .unwrap_or_default(),
+    })
+}
+
+fn subscription_descriptor_to_json(
+    subscription: &crate::catalog::SubscriptionDescriptor,
+) -> JsonValue {
+    let mut object = Map::new();
+    object.insert(
+        "source".to_string(),
+        JsonValue::String(subscription.source.clone()),
+    );
+    object.insert(
+        "target_queue".to_string(),
+        JsonValue::String(subscription.target_queue.clone()),
+    );
+    object.insert(
+        "ops_filter".to_string(),
+        JsonValue::Array(
+            subscription
+                .ops_filter
+                .iter()
+                .map(|op| JsonValue::String(op.as_str().to_string()))
+                .collect(),
+        ),
+    );
+    object.insert(
+        "where_filter".to_string(),
+        subscription
+            .where_filter
+            .clone()
+            .map(JsonValue::String)
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
+        "redact_fields".to_string(),
+        JsonValue::Array(
+            subscription
+                .redact_fields
+                .iter()
+                .map(|field| JsonValue::String(field.clone()))
+                .collect(),
+        ),
+    );
+    object.insert("enabled".to_string(), JsonValue::Bool(subscription.enabled));
+    JsonValue::Object(object)
+}
+
+fn subscription_descriptor_from_json(
+    value: &JsonValue,
+) -> io::Result<crate::catalog::SubscriptionDescriptor> {
+    let object = expect_object(value, "subscription_descriptor")?;
+    let ops_filter = object
+        .get("ops_filter")
+        .and_then(JsonValue::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .map(|value| {
+                    let op = value.as_str().ok_or_else(|| {
+                        invalid_data("subscription_descriptor.ops_filter must contain strings")
+                    })?;
+                    crate::catalog::SubscriptionOperation::from_str(op).ok_or_else(|| {
+                        invalid_data(format!(
+                            "unsupported subscription operation in catalog: {op}"
+                        ))
+                    })
+                })
+                .collect::<io::Result<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let redact_fields = object
+        .get("redact_fields")
+        .and_then(JsonValue::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(|value| value.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(crate::catalog::SubscriptionDescriptor {
+        source: json_string_required(object, "source")?,
+        target_queue: json_string_required(object, "target_queue")?,
+        ops_filter,
+        where_filter: match object.get("where_filter") {
+            Some(JsonValue::String(value)) => Some(value.clone()),
+            Some(JsonValue::Null) | None => None,
+            Some(_) => {
+                return Err(invalid_data(
+                    "subscription_descriptor.where_filter must be a string or null".to_string(),
+                ))
+            }
+        },
+        redact_fields,
+        enabled: object
+            .get("enabled")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(true),
     })
 }
 

@@ -237,6 +237,9 @@ pub struct CollectionContract {
     /// approximation. Default `false` so legacy DDL keeps its
     /// mutable semantics.
     pub append_only: bool,
+    /// Declarative subscriptions created by `WITH EVENTS`. This is
+    /// metadata only in #291; event emission is wired by the outbox slice.
+    pub subscriptions: Vec<crate::catalog::SubscriptionDescriptor>,
 }
 
 /// Canonical artifact lifecycle states.

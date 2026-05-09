@@ -24,6 +24,7 @@
   - [Transactions & MVCC](/query/transactions.md)
   - [Views & Materialized Views](/query/views.md)
   - [Partitioning](/query/partitioning.md)
+  - [Event Subscriptions](/query/events.md)
   - [Maintenance & DDL Extras](/query/maintenance.md)
   - [Universal Query (FROM any)](/query/universal.md)
   - [Graph Commands](/query/graph-commands.md)
