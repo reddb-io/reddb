@@ -38,3 +38,17 @@ End-to-end:
 
 - #292
 - #300
+
+## Progress note - 2026-05-09
+
+Implemented the separable #303 slice that does not require #300:
+
+- Added runtime virtual table `red.subscriptions` with columns `name`, `collection`, `target_queue`, `mode`, `ops_filter`, `where_filter`, `redact_fields`, `enabled`, `outbox_lag_ms`, `dlq_count`, `created_at`.
+- Added parser desugar for `EVENTS STATUS [<collection>]` to `SELECT * FROM red.subscriptions [WHERE collection = '<name>']`.
+- Added parser conformance cases for `EVENTS STATUS`, `EVENTS STATUS users`, and `EVENTS STATUS users ORDER BY target_queue`.
+- Added runtime coverage for `SELECT ... FROM red.subscriptions`, `EVENTS STATUS users`, and outbox DLQ count reporting.
+- Updated `docs/query/events.md` and `docs/reference/red-schema.md`.
+
+Remaining blocked work:
+
+- `EVENTS BACKFILL STATUS <collection>` still depends on #300. This branch still has `issues/300-events-events-backfill-synthetic-flag.md` open and no durable backfill-progress runtime/source of truth to query. I did not create a second backfill implementation.

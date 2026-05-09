@@ -3,7 +3,7 @@
 //! The SQL parser does not currently accept schema-qualified table
 //! identifiers in `FROM`, so the runtime rewrites the small virtual
 //! surface it owns (`red.collections`, `red.columns`, `red.indices`,
-//! `red.policies`, `red.stats`) to internal identifiers before normal parsing.
+//! `red.policies`, `red.stats`, `red.subscriptions`) to internal identifiers before normal parsing.
 //! Execution then intercepts that identifier and materializes rows from the live catalog snapshot.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -28,6 +28,8 @@ pub(super) const POLICIES: &str = "red.policies";
 pub(super) const POLICIES_INTERNAL: &str = "__red_schema_policies";
 pub(super) const STATS: &str = "red.stats";
 pub(super) const STATS_INTERNAL: &str = "__red_schema_stats";
+pub(super) const SUBSCRIPTIONS: &str = "red.subscriptions";
+pub(super) const SUBSCRIPTIONS_INTERNAL: &str = "__red_schema_subscriptions";
 pub(super) const READ_ONLY_ERROR: &str = "system schema is read-only";
 
 const COLLECTION_COLUMNS: [&str; 11] = [
@@ -91,6 +93,20 @@ const STATS_COLUMNS: [&str; 10] = [
     "attention_score",
 ];
 
+const SUBSCRIPTION_COLUMNS: [&str; 11] = [
+    "name",
+    "collection",
+    "target_queue",
+    "mode",
+    "ops_filter",
+    "where_filter",
+    "redact_fields",
+    "enabled",
+    "outbox_lag_ms",
+    "dlq_count",
+    "created_at",
+];
+
 pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
     let mut rewritten = query.to_string();
     let mut changed = false;
@@ -101,6 +117,7 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
         (INDICES, INDICES_INTERNAL),
         (POLICIES, POLICIES_INTERNAL),
         (STATS, STATS_INTERNAL),
+        (SUBSCRIPTIONS, SUBSCRIPTIONS_INTERNAL),
     ] {
         if let Some(next) = replace_case_insensitive_outside_quotes(&rewritten, public, internal) {
             rewritten = next;
@@ -136,6 +153,8 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(POLICIES)
         || table.eq_ignore_ascii_case(STATS_INTERNAL)
         || table.eq_ignore_ascii_case(STATS)
+        || table.eq_ignore_ascii_case(SUBSCRIPTIONS_INTERNAL)
+        || table.eq_ignore_ascii_case(SUBSCRIPTIONS)
 }
 
 pub(super) fn red_query(
@@ -173,6 +192,7 @@ pub(super) fn red_query(
         VirtualTableKind::Indices => indices_snapshot(runtime, visible_collections),
         VirtualTableKind::Policies => policies_snapshot(runtime, tenant, visible_collections),
         VirtualTableKind::Stats => stats_snapshot(runtime, visible_collections),
+        VirtualTableKind::Subscriptions => subscriptions_snapshot(runtime, visible_collections),
     };
 
     let table_name = query.table.as_str();
@@ -265,6 +285,7 @@ enum VirtualTableKind {
     Indices,
     Policies,
     Stats,
+    Subscriptions,
 }
 
 impl VirtualTableKind {
@@ -275,6 +296,7 @@ impl VirtualTableKind {
             Self::Indices => &INDEX_COLUMNS,
             Self::Policies => &POLICY_COLUMNS,
             Self::Stats => &STATS_COLUMNS,
+            Self::Subscriptions => &SUBSCRIPTION_COLUMNS,
         }
     }
 
@@ -285,6 +307,7 @@ impl VirtualTableKind {
             Self::Indices => INDICES,
             Self::Policies => POLICIES,
             Self::Stats => STATS,
+            Self::Subscriptions => SUBSCRIPTIONS,
         }
     }
 }
@@ -305,9 +328,106 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
     if name.eq_ignore_ascii_case(STATS_INTERNAL) || name.eq_ignore_ascii_case(STATS) {
         return Ok(VirtualTableKind::Stats);
     }
+    if name.eq_ignore_ascii_case(SUBSCRIPTIONS_INTERNAL) || name.eq_ignore_ascii_case(SUBSCRIPTIONS)
+    {
+        return Ok(VirtualTableKind::Subscriptions);
+    }
     Err(RedDBError::Query(format!(
         "unknown system schema relation `{name}`"
     )))
+}
+
+fn subscriptions_snapshot(
+    runtime: &RedDBRuntime,
+    visible_collections: Option<&std::collections::HashSet<String>>,
+) -> Vec<UnifiedRecord> {
+    let snapshot = runtime.db().catalog_model_snapshot();
+    let schema = Arc::new(
+        SUBSCRIPTION_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let store = runtime.db().store();
+    let contracts = runtime.db().collection_contracts();
+    let created_at_by_collection: HashMap<&str, u128> = contracts
+        .iter()
+        .map(|contract| (contract.name.as_str(), contract.created_at_unix_ms))
+        .collect();
+    let mut records = Vec::new();
+
+    for collection in snapshot.collections {
+        if !collection_is_visible(&collection.name, visible_collections) {
+            continue;
+        }
+
+        let created_at = created_at_by_collection
+            .get(collection.name.as_str())
+            .copied()
+            .unwrap_or(0);
+        for subscription in collection.subscriptions {
+            let mode = subscription_queue_mode(store.as_ref(), &subscription.target_queue)
+                .to_ascii_uppercase();
+            let name = if subscription.name.is_empty() {
+                format!("{}_to_{}", subscription.source, subscription.target_queue)
+            } else {
+                subscription.name.clone()
+            };
+            records.push(UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(name),
+                    Value::text(subscription.source),
+                    Value::text(subscription.target_queue.clone()),
+                    Value::text(mode),
+                    Value::Array(
+                        subscription
+                            .ops_filter
+                            .iter()
+                            .map(|op| Value::text(op.as_str()))
+                            .collect(),
+                    ),
+                    subscription
+                        .where_filter
+                        .map(Value::text)
+                        .unwrap_or(Value::Null),
+                    Value::Array(
+                        subscription
+                            .redact_fields
+                            .into_iter()
+                            .map(Value::text)
+                            .collect(),
+                    ),
+                    Value::Boolean(subscription.enabled),
+                    Value::UnsignedInteger(0),
+                    Value::UnsignedInteger(outbox_dlq_count(
+                        store.as_ref(),
+                        &subscription.target_queue,
+                    )),
+                    Value::TimestampMs(created_at as i64),
+                ],
+            ));
+        }
+    }
+
+    records
+}
+
+fn outbox_dlq_count(store: &UnifiedStore, target_queue: &str) -> u64 {
+    let dlq = format!("{target_queue}_outbox_dlq");
+    let Some(manager) = store.get_collection(&dlq) else {
+        return 0;
+    };
+    manager
+        .query_all(|entity| matches!(&entity.kind, crate::storage::EntityKind::QueueMessage { queue, .. } if queue == &dlq))
+        .len() as u64
+}
+
+fn subscription_queue_mode(store: &UnifiedStore, queue: &str) -> String {
+    match store.get_config(&format!("queue.{queue}.mode")) {
+        Some(Value::Text(value)) => value.to_string(),
+        _ => super::impl_queue::queue_mode_str(store, queue).to_string(),
+    }
 }
 
 fn indices_snapshot(
@@ -1222,6 +1342,26 @@ mod tests {
     }
 
     #[test]
+    fn subscription_columns_match_status_contract() {
+        assert_eq!(
+            SUBSCRIPTION_COLUMNS,
+            [
+                "name",
+                "collection",
+                "target_queue",
+                "mode",
+                "ops_filter",
+                "where_filter",
+                "redact_fields",
+                "enabled",
+                "outbox_lag_ms",
+                "dlq_count",
+                "created_at",
+            ]
+        );
+    }
+
+    #[test]
     fn rewrite_skips_quoted_literals() {
         let rewritten =
             rewrite_virtual_names("SELECT 'red.collections' AS x FROM red.collections").unwrap();
@@ -1241,5 +1381,11 @@ mod tests {
             rewritten,
             "SELECT * FROM __red_schema_indices WHERE collection IN (SELECT name FROM __red_schema_collections)"
         );
+    }
+
+    #[test]
+    fn rewrite_handles_red_subscriptions() {
+        let rewritten = rewrite_virtual_names("SELECT * FROM red.subscriptions").unwrap();
+        assert_eq!(rewritten, "SELECT * FROM __red_schema_subscriptions");
     }
 }
