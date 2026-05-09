@@ -792,7 +792,10 @@ fn collections_snapshot(
                 &collection.name,
             );
             let queue_mode = if collection.model == CollectionModel::Queue {
-                Value::text(super::impl_queue::queue_mode_str(store.as_ref(), &collection.name))
+                Value::text(super::impl_queue::queue_mode_str(
+                    store.as_ref(),
+                    &collection.name,
+                ))
             } else {
                 Value::Null
             };
@@ -1117,6 +1120,8 @@ fn collection_model_name(model: CollectionModel) -> &'static str {
         CollectionModel::Graph => "graph",
         CollectionModel::Vector => "vector",
         CollectionModel::Kv => "kv",
+        CollectionModel::Config => "config",
+        CollectionModel::Vault => "vault",
         CollectionModel::Mixed => "mixed",
         CollectionModel::TimeSeries => "time_series",
         CollectionModel::Queue => "queue",

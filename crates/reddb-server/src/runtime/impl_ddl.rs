@@ -22,6 +22,9 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &CreateTableQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        if query.collection_model != CollectionModel::Table {
+            return self.execute_create_keyed_collection(raw_query, query);
+        }
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         let store = self.inner.db.store();
         analyze_create_table(query).map_err(|err| RedDBError::Query(err.to_string()))?;
@@ -145,6 +148,60 @@ impl RedDBRuntime {
         ))
     }
 
+    fn execute_create_keyed_collection(
+        &self,
+        raw_query: &str,
+        query: &CreateTableQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        if is_system_schema_name(&query.name) {
+            return Err(RedDBError::Query("system schema is read-only".to_string()));
+        }
+        let store = self.inner.db.store();
+        let label = polymorphic_resolver::model_name(query.collection_model);
+        if store.get_collection(&query.name).is_some() {
+            if query.if_not_exists {
+                return Ok(RuntimeQueryResult::ok_message(
+                    raw_query.to_string(),
+                    &format!("{label} '{}' already exists", query.name),
+                    "create",
+                ));
+            }
+            return Err(RedDBError::Query(format!(
+                "{label} '{}' already exists",
+                query.name
+            )));
+        }
+
+        store
+            .create_collection(&query.name)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.inner
+            .db
+            .save_collection_contract(keyed_collection_contract(
+                &query.name,
+                query.collection_model,
+            ))
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        if let Some(tenant_id) = crate::runtime::impl_core::current_tenant() {
+            store.set_config_tree(
+                &format!("red.collection_tenants.{}", query.name),
+                &crate::serde_json::Value::String(tenant_id),
+            );
+        }
+        self.inner
+            .db
+            .persist_metadata()
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.invalidate_result_cache();
+
+        Ok(RuntimeQueryResult::ok_message(
+            raw_query.to_string(),
+            &format!("{label} '{}' created", query.name),
+            "create",
+        ))
+    }
+
     /// Execute DROP TABLE
     ///
     /// Drops the collection and all its data from the store.
@@ -174,7 +231,8 @@ impl RedDBRuntime {
                 query.name
             )));
         }
-        let actual = polymorphic_resolver::resolve(&query.name, &self.inner.db.catalog_model_snapshot())?;
+        let actual =
+            polymorphic_resolver::resolve(&query.name, &self.inner.db.catalog_model_snapshot())?;
         polymorphic_resolver::ensure_model_match(CollectionModel::Table, actual)?;
 
         // Emit 1 collection_dropped event before storage is wiped.
@@ -286,12 +344,13 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &DropKvQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        let label = polymorphic_resolver::model_name(query.model);
         self.execute_drop_typed_collection(
             raw_query,
             &query.name,
             query.if_exists,
-            CollectionModel::Kv,
-            "kv",
+            query.model,
+            label,
         )
     }
 
@@ -367,6 +426,23 @@ impl RedDBRuntime {
                 &DropKvQuery {
                     name: query.name.clone(),
                     if_exists: query.if_exists,
+                    model: CollectionModel::Kv,
+                },
+            ),
+            CollectionModel::Config => self.execute_drop_kv(
+                raw_query,
+                &DropKvQuery {
+                    name: query.name.clone(),
+                    if_exists: query.if_exists,
+                    model: CollectionModel::Config,
+                },
+            ),
+            CollectionModel::Vault => self.execute_drop_kv(
+                raw_query,
+                &DropKvQuery {
+                    name: query.name.clone(),
+                    if_exists: query.if_exists,
+                    model: CollectionModel::Vault,
                 },
             ),
             CollectionModel::Mixed => self.execute_drop_typed_collection(
@@ -954,7 +1030,10 @@ impl RedDBRuntime {
 
         Ok(RuntimeQueryResult::ok_message(
             raw_query.to_string(),
-            &format!("{affected} entities truncated from {label} '{}'", query.name),
+            &format!(
+                "{affected} entities truncated from {label} '{}'",
+                query.name
+            ),
             "truncate",
         ))
     }
@@ -1051,14 +1130,17 @@ impl RedDBRuntime {
 }
 
 pub(crate) fn is_system_schema_name(name: &str) -> bool {
-    name == "red" || name.starts_with("red.")
+    name == "red" || name.starts_with("red.") || name.starts_with("__red_schema_")
 }
 
 fn entity_index_fields(data: &EntityData) -> Vec<(String, Value)> {
     match data {
         EntityData::Row(row) => {
             if let Some(ref named) = row.named {
-                named.iter().map(|(key, value)| (key.clone(), value.clone())).collect()
+                named
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
             } else if let Some(ref schema) = row.schema {
                 schema
                     .iter()
@@ -1154,6 +1236,30 @@ fn default_collection_contract_for_existing_table(
         context_index_fields: Vec::new(),
         declared_columns: Vec::new(),
         table_def: Some(crate::storage::schema::TableDef::new(name.to_string())),
+        timestamps_enabled: false,
+        context_index_enabled: false,
+        append_only: false,
+        subscriptions: Vec::new(),
+    }
+}
+
+fn keyed_collection_contract(
+    name: &str,
+    model: crate::catalog::CollectionModel,
+) -> crate::physical::CollectionContract {
+    let now = current_unix_ms();
+    crate::physical::CollectionContract {
+        name: name.to_string(),
+        declared_model: model,
+        schema_mode: crate::catalog::SchemaMode::Dynamic,
+        origin: crate::physical::ContractOrigin::Explicit,
+        version: 1,
+        created_at_unix_ms: now,
+        updated_at_unix_ms: now,
+        default_ttl_ms: None,
+        context_index_fields: Vec::new(),
+        declared_columns: Vec::new(),
+        table_def: None,
         timestamps_enabled: false,
         context_index_enabled: false,
         append_only: false,
@@ -1342,10 +1448,7 @@ fn apply_alter_operations_to_contract(
                 sub.name = name.clone();
                 sub.source = contract.name.clone();
                 sub.enabled = true;
-                if let Some(existing) = contract
-                    .subscriptions
-                    .iter_mut()
-                    .find(|s| s.name == *name)
+                if let Some(existing) = contract.subscriptions.iter_mut().find(|s| s.name == *name)
                 {
                     *existing = sub;
                 } else {
@@ -1364,7 +1467,10 @@ fn validate_event_subscriptions(
     source: &str,
     subscriptions: &[crate::catalog::SubscriptionDescriptor],
 ) -> RedDBResult<()> {
-    for subscription in subscriptions.iter().filter(|subscription| subscription.enabled) {
+    for subscription in subscriptions
+        .iter()
+        .filter(|subscription| subscription.enabled)
+    {
         if subscription.all_tenants && crate::runtime::impl_core::current_tenant().is_some() {
             return Err(RedDBError::Query(
                 "cross-tenant subscription requires cluster-admin capability (events:cluster_subscribe)".to_string(),
@@ -1420,7 +1526,10 @@ fn subscription_would_create_cycle(
     false
 }
 
-pub(crate) fn ensure_event_target_queue_pub(runtime: &RedDBRuntime, queue: &str) -> RedDBResult<()> {
+pub(crate) fn ensure_event_target_queue_pub(
+    runtime: &RedDBRuntime,
+    queue: &str,
+) -> RedDBResult<()> {
     ensure_event_target_queue(runtime, queue)
 }
 
@@ -1584,13 +1693,13 @@ fn current_unix_ms() -> u128 {
 
 #[cfg(test)]
 mod tests {
+    use crate::auth::policies::{ActionPattern, Effect, Policy, ResourcePattern, Statement};
+    use crate::auth::store::{AuthStore, PrincipalRef};
+    use crate::auth::UserId;
+    use crate::auth::{AuthConfig, Role};
+    use crate::runtime::impl_core::{clear_current_auth_identity, set_current_auth_identity};
     use crate::storage::schema::Value;
     use crate::{RedDBOptions, RedDBRuntime};
-    use crate::auth::{AuthConfig, Role};
-    use crate::auth::store::{AuthStore, PrincipalRef};
-    use crate::auth::policies::{Policy, Statement, Effect, ActionPattern, ResourcePattern};
-    use crate::auth::UserId;
-    use crate::runtime::impl_core::{set_current_auth_identity, clear_current_auth_identity};
     use std::sync::Arc;
 
     fn make_allow_policy(id: &str, action: &str, collection: &str) -> Policy {
@@ -1641,11 +1750,16 @@ mod tests {
         };
         store.put_policy_internal(select_only).unwrap();
         let alice = UserId::from_parts(None, "alice");
-        store.attach_policy(PrincipalRef::User(alice), "select-only").unwrap();
+        store
+            .attach_policy(PrincipalRef::User(alice), "select-only")
+            .unwrap();
         set_current_auth_identity("alice".to_string(), Role::Write);
         let err = rt.execute_query("DROP TABLE foo").unwrap_err();
         clear_current_auth_identity();
-        assert!(format!("{err}").contains("denied by IAM policy"), "got: {err}");
+        assert!(
+            format!("{err}").contains("denied by IAM policy"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -1656,7 +1770,9 @@ mod tests {
         let policy = make_allow_policy("allow-drop-bar", "drop", "bar");
         store.put_policy_internal(policy).unwrap();
         let bob = UserId::from_parts(None, "bob");
-        store.attach_policy(PrincipalRef::User(bob), "allow-drop-bar").unwrap();
+        store
+            .attach_policy(PrincipalRef::User(bob), "allow-drop-bar")
+            .unwrap();
         set_current_auth_identity("bob".to_string(), Role::Write);
         rt.execute_query("DROP TABLE bar").unwrap();
         clear_current_auth_identity();
@@ -1683,7 +1799,9 @@ mod tests {
         };
         store.put_policy_internal(policy).unwrap();
         let carl = UserId::from_parts(None, "carl");
-        store.attach_policy(PrincipalRef::User(carl), "allow-drop-all").unwrap();
+        store
+            .attach_policy(PrincipalRef::User(carl), "allow-drop-all")
+            .unwrap();
         set_current_auth_identity("carl".to_string(), Role::Write);
         rt.execute_query("DROP TABLE baz").unwrap();
         clear_current_auth_identity();
@@ -1711,11 +1829,16 @@ mod tests {
         };
         store.put_policy_internal(select_only).unwrap();
         let dana = UserId::from_parts(None, "dana");
-        store.attach_policy(PrincipalRef::User(dana), "select-only-2").unwrap();
+        store
+            .attach_policy(PrincipalRef::User(dana), "select-only-2")
+            .unwrap();
         set_current_auth_identity("dana".to_string(), Role::Write);
         let err = rt.execute_query("TRUNCATE TABLE qux").unwrap_err();
         clear_current_auth_identity();
-        assert!(format!("{err}").contains("denied by IAM policy"), "got: {err}");
+        assert!(
+            format!("{err}").contains("denied by IAM policy"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -1737,7 +1860,9 @@ mod tests {
 
         rt.execute_query("INSERT INTO users (id, name) VALUES (3, 'cy')")
             .unwrap();
-        let selected = rt.execute_query("SELECT name FROM users WHERE id = 3").unwrap();
+        let selected = rt
+            .execute_query("SELECT name FROM users WHERE id = 3")
+            .unwrap();
         let name = selected.result.records[0].get("name").unwrap();
         assert_eq!(name, &Value::text("cy"));
         assert!(rt.db().collection_contract("users").is_some());
@@ -1760,13 +1885,18 @@ mod tests {
 
         rt.execute_query("TRUNCATE COLLECTION tasks").unwrap();
         let len = rt.execute_query("QUEUE LEN tasks").unwrap();
-        assert_eq!(len.result.records[0].get("len"), Some(&Value::UnsignedInteger(0)));
+        assert_eq!(
+            len.result.records[0].get("len"),
+            Some(&Value::UnsignedInteger(0))
+        );
     }
 
     #[test]
     fn truncate_system_schema_is_read_only() {
         let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
-        let err = rt.execute_query("TRUNCATE COLLECTION red.collections").unwrap_err();
+        let err = rt
+            .execute_query("TRUNCATE COLLECTION red.collections")
+            .unwrap_err();
         assert!(format!("{err}").contains("system schema is read-only"));
     }
 
@@ -1780,10 +1910,12 @@ mod tests {
             .result
             .records
             .iter()
-            .map(|record| match record.get("payload").expect("payload column") {
-                Value::Json(bytes) => crate::json::from_slice(bytes).expect("json payload"),
-                other => panic!("expected JSON queue payload, got {other:?}"),
-            })
+            .map(
+                |record| match record.get("payload").expect("payload column") {
+                    Value::Json(bytes) => crate::json::from_slice(bytes).expect("json payload"),
+                    other => panic!("expected JSON queue payload, got {other:?}"),
+                },
+            )
             .collect()
     }
 
@@ -1792,10 +1924,8 @@ mod tests {
     #[test]
     fn truncate_event_enabled_table_emits_single_truncate_event() {
         let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
-        rt.execute_query(
-            "CREATE TABLE users (id INT, name TEXT) WITH EVENTS TO users_events",
-        )
-        .unwrap();
+        rt.execute_query("CREATE TABLE users (id INT, name TEXT) WITH EVENTS TO users_events")
+            .unwrap();
         rt.execute_query(
             "INSERT INTO users (id, name) VALUES (1, 'alice'), (2, 'bob'), (3, 'carol')",
         )
@@ -1808,7 +1938,12 @@ mod tests {
 
         let events = queue_payloads(&rt, "users_events");
         // Must be exactly 1 truncate event, not 3 delete events.
-        assert_eq!(events.len(), 1, "expected 1 truncate event, got {}", events.len());
+        assert_eq!(
+            events.len(),
+            1,
+            "expected 1 truncate event, got {}",
+            events.len()
+        );
         let ev = events[0].as_object().expect("event is object");
         assert_eq!(
             ev.get("op").and_then(crate::json::Value::as_str),
@@ -1819,20 +1954,26 @@ mod tests {
             Some("users")
         );
         assert_eq!(
-            ev.get("entities_count").and_then(crate::json::Value::as_u64),
+            ev.get("entities_count")
+                .and_then(crate::json::Value::as_u64),
             Some(3)
         );
         assert!(ev.get("ts").and_then(crate::json::Value::as_u64).is_some());
         assert!(ev.get("lsn").and_then(crate::json::Value::as_u64).is_some());
-        assert!(ev.get("event_id").and_then(crate::json::Value::as_str).is_some_and(|s| !s.is_empty()));
+        assert!(ev
+            .get("event_id")
+            .and_then(crate::json::Value::as_str)
+            .is_some_and(|s| !s.is_empty()));
     }
 
     /// `TRUNCATE users` on a collection without event subscription emits no events.
     #[test]
     fn truncate_no_events_collection_emits_nothing() {
         let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
-        rt.execute_query("CREATE TABLE plain (id INT, val TEXT)").unwrap();
-        rt.execute_query("INSERT INTO plain (id, val) VALUES (1, 'a'), (2, 'b')").unwrap();
+        rt.execute_query("CREATE TABLE plain (id INT, val TEXT)")
+            .unwrap();
+        rt.execute_query("INSERT INTO plain (id, val) VALUES (1, 'a'), (2, 'b')")
+            .unwrap();
         // No EVENTS subscription — truncate must work without touching any queue.
         rt.execute_query("TRUNCATE TABLE plain").unwrap();
         // No crash, no queue to check. Just verify truncation happened.
@@ -1846,14 +1987,10 @@ mod tests {
     #[test]
     fn drop_event_enabled_table_emits_single_collection_dropped_event() {
         let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
-        rt.execute_query(
-            "CREATE TABLE users (id INT, name TEXT) WITH EVENTS TO users_events",
-        )
-        .unwrap();
-        rt.execute_query(
-            "INSERT INTO users (id, name) VALUES (1, 'alice'), (2, 'bob')",
-        )
-        .unwrap();
+        rt.execute_query("CREATE TABLE users (id INT, name TEXT) WITH EVENTS TO users_events")
+            .unwrap();
+        rt.execute_query("INSERT INTO users (id, name) VALUES (1, 'alice'), (2, 'bob')")
+            .unwrap();
 
         // Drain insert events so we start clean.
         rt.execute_query("QUEUE POP users_events COUNT 10").unwrap();
@@ -1862,7 +1999,12 @@ mod tests {
 
         // Queue must still exist with 1 collection_dropped event.
         let events = queue_payloads(&rt, "users_events");
-        assert_eq!(events.len(), 1, "expected 1 collection_dropped event, got {}", events.len());
+        assert_eq!(
+            events.len(),
+            1,
+            "expected 1 collection_dropped event, got {}",
+            events.len()
+        );
         let ev = events[0].as_object().expect("event is object");
         assert_eq!(
             ev.get("op").and_then(crate::json::Value::as_str),
@@ -1873,16 +2015,23 @@ mod tests {
             Some("users")
         );
         assert_eq!(
-            ev.get("final_entities_count").and_then(crate::json::Value::as_u64),
+            ev.get("final_entities_count")
+                .and_then(crate::json::Value::as_u64),
             Some(2)
         );
         assert!(ev.get("ts").and_then(crate::json::Value::as_u64).is_some());
         assert!(ev.get("lsn").and_then(crate::json::Value::as_u64).is_some());
-        assert!(ev.get("event_id").and_then(crate::json::Value::as_str).is_some_and(|s| !s.is_empty()));
+        assert!(ev
+            .get("event_id")
+            .and_then(crate::json::Value::as_str)
+            .is_some_and(|s| !s.is_empty()));
 
         // Source collection is gone.
         let err = rt.execute_query("SELECT id FROM users").unwrap_err();
-        assert!(format!("{err}").contains("users"), "expected not-found error");
+        assert!(
+            format!("{err}").contains("users"),
+            "expected not-found error"
+        );
     }
 
     /// `DROP TABLE users` on a collection without event subscription works
@@ -1890,8 +2039,10 @@ mod tests {
     #[test]
     fn drop_no_events_collection_emits_nothing() {
         let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
-        rt.execute_query("CREATE TABLE plain (id INT, val TEXT)").unwrap();
-        rt.execute_query("INSERT INTO plain (id, val) VALUES (1, 'a')").unwrap();
+        rt.execute_query("CREATE TABLE plain (id INT, val TEXT)")
+            .unwrap();
+        rt.execute_query("INSERT INTO plain (id, val) VALUES (1, 'a')")
+            .unwrap();
         rt.execute_query("DROP TABLE plain").unwrap();
         // No crash and collection is gone.
         let err = rt.execute_query("SELECT id FROM plain").unwrap_err();
@@ -1908,15 +2059,26 @@ mod tests {
             "CREATE TABLE items (id INT, val TEXT) WITH EVENTS (INSERT) TO items_events",
         )
         .unwrap();
-        rt.execute_query("INSERT INTO items (id, val) VALUES (1, 'a')").unwrap();
-        rt.execute_query("UPDATE items SET val = 'b' WHERE id = 1").unwrap();
+        rt.execute_query("INSERT INTO items (id, val) VALUES (1, 'a')")
+            .unwrap();
+        rt.execute_query("UPDATE items SET val = 'b' WHERE id = 1")
+            .unwrap();
         rt.execute_query("DELETE FROM items WHERE id = 1").unwrap();
 
         let events = queue_payloads(&rt, "items_events");
         // Only the INSERT should have fired.
-        assert_eq!(events.len(), 1, "expected 1 insert event, got {}", events.len());
         assert_eq!(
-            events[0].as_object().unwrap().get("op").and_then(crate::json::Value::as_str),
+            events.len(),
+            1,
+            "expected 1 insert event, got {}",
+            events.len()
+        );
+        assert_eq!(
+            events[0]
+                .as_object()
+                .unwrap()
+                .get("op")
+                .and_then(crate::json::Value::as_str),
             Some("insert")
         );
     }
@@ -1931,16 +2093,29 @@ mod tests {
         .unwrap();
 
         // This row should generate an event.
-        rt.execute_query("INSERT INTO users (id, status) VALUES (1, 'active')").unwrap();
+        rt.execute_query("INSERT INTO users (id, status) VALUES (1, 'active')")
+            .unwrap();
         // This row should NOT generate an event.
-        rt.execute_query("INSERT INTO users (id, status) VALUES (2, 'inactive')").unwrap();
+        rt.execute_query("INSERT INTO users (id, status) VALUES (2, 'inactive')")
+            .unwrap();
 
         let events = queue_payloads(&rt, "users_events");
-        assert_eq!(events.len(), 1, "expected 1 event (only active), got {}", events.len());
+        assert_eq!(
+            events.len(),
+            1,
+            "expected 1 event (only active), got {}",
+            events.len()
+        );
         let ev = events[0].as_object().unwrap();
-        assert_eq!(ev.get("op").and_then(crate::json::Value::as_str), Some("insert"));
+        assert_eq!(
+            ev.get("op").and_then(crate::json::Value::as_str),
+            Some("insert")
+        );
         let after = ev.get("after").unwrap().as_object().unwrap();
-        assert_eq!(after.get("status").and_then(crate::json::Value::as_str), Some("active"));
+        assert_eq!(
+            after.get("status").and_then(crate::json::Value::as_str),
+            Some("active")
+        );
     }
 
     /// `WITH EVENTS (INSERT, UPDATE) WHERE status = 'active'` — combination functional.
@@ -1953,19 +2128,31 @@ mod tests {
         .unwrap();
 
         // INSERT active → event
-        rt.execute_query("INSERT INTO items (id, status) VALUES (1, 'active')").unwrap();
+        rt.execute_query("INSERT INTO items (id, status) VALUES (1, 'active')")
+            .unwrap();
         // INSERT inactive → no event
-        rt.execute_query("INSERT INTO items (id, status) VALUES (2, 'inactive')").unwrap();
+        rt.execute_query("INSERT INTO items (id, status) VALUES (2, 'inactive')")
+            .unwrap();
         // UPDATE row 1 to inactive → after = inactive, no event
-        rt.execute_query("UPDATE items SET status = 'inactive' WHERE id = 1").unwrap();
+        rt.execute_query("UPDATE items SET status = 'inactive' WHERE id = 1")
+            .unwrap();
         // DELETE → ops_filter excludes it
         rt.execute_query("DELETE FROM items WHERE id = 2").unwrap();
 
         let events = queue_payloads(&rt, "items_events");
         // Only the first INSERT (active) fires; UPDATE result is inactive so skipped; DELETE excluded by ops_filter.
-        assert_eq!(events.len(), 1, "expected 1 event, got {}: {events:?}", events.len());
         assert_eq!(
-            events[0].as_object().unwrap().get("op").and_then(crate::json::Value::as_str),
+            events.len(),
+            1,
+            "expected 1 event, got {}: {events:?}",
+            events.len()
+        );
+        assert_eq!(
+            events[0]
+                .as_object()
+                .unwrap()
+                .get("op")
+                .and_then(crate::json::Value::as_str),
             Some("insert")
         );
     }
@@ -1979,7 +2166,8 @@ mod tests {
         )
         .unwrap();
 
-        rt.execute_query("INSERT INTO users (id, status) VALUES (1, 'active'), (2, 'inactive')").unwrap();
+        rt.execute_query("INSERT INTO users (id, status) VALUES (1, 'active'), (2, 'inactive')")
+            .unwrap();
 
         // Delete active row → event (before-state was active)
         rt.execute_query("DELETE FROM users WHERE id = 1").unwrap();
@@ -1987,9 +2175,17 @@ mod tests {
         rt.execute_query("DELETE FROM users WHERE id = 2").unwrap();
 
         let events = queue_payloads(&rt, "users_events");
-        assert_eq!(events.len(), 1, "expected 1 delete event, got {}", events.len());
+        assert_eq!(
+            events.len(),
+            1,
+            "expected 1 delete event, got {}",
+            events.len()
+        );
         let ev = events[0].as_object().unwrap();
-        assert_eq!(ev.get("op").and_then(crate::json::Value::as_str), Some("delete"));
+        assert_eq!(
+            ev.get("op").and_then(crate::json::Value::as_str),
+            Some("delete")
+        );
     }
 
     // ── #301: schema evolution OperatorEvent on ALTER ───────────────────────
@@ -1998,12 +2194,11 @@ mod tests {
     #[test]
     fn alter_add_column_on_event_enabled_table_succeeds() {
         let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
-        rt.execute_query(
-            "CREATE TABLE users (id INT, name TEXT) WITH EVENTS TO users_events",
-        )
-        .unwrap();
+        rt.execute_query("CREATE TABLE users (id INT, name TEXT) WITH EVENTS TO users_events")
+            .unwrap();
         // Must not error — OperatorEvent emission is best-effort (no global sink in tests).
-        rt.execute_query("ALTER TABLE users ADD COLUMN phone TEXT").unwrap();
+        rt.execute_query("ALTER TABLE users ADD COLUMN phone TEXT")
+            .unwrap();
         // The column is now in the contract.
         let contract = rt.db().collection_contract("users").unwrap();
         assert!(
@@ -2027,14 +2222,16 @@ mod tests {
         )
         .unwrap();
         // DROP COLUMN — schema change event path exercises, must not error.
-        rt.execute_query("ALTER TABLE items DROP COLUMN secret").unwrap();
+        rt.execute_query("ALTER TABLE items DROP COLUMN secret")
+            .unwrap();
         let contract = rt.db().collection_contract("items").unwrap();
         assert!(
             !contract.declared_columns.iter().any(|c| c.name == "secret"),
             "secret column should be removed"
         );
         // ENABLE RLS — non-column op, no schema-change event (coverage).
-        rt.execute_query("ALTER TABLE items ENABLE ROW LEVEL SECURITY").unwrap();
+        rt.execute_query("ALTER TABLE items ENABLE ROW LEVEL SECURITY")
+            .unwrap();
         // Collection and subscription still intact.
         assert!(
             contract.subscriptions.iter().any(|s| s.enabled),

@@ -1041,6 +1041,8 @@ fn collection_model_str(model: CollectionModel) -> &'static str {
         CollectionModel::Graph => "graph",
         CollectionModel::Vector => "vector",
         CollectionModel::Kv => "kv",
+        CollectionModel::Config => "config",
+        CollectionModel::Vault => "vault",
         CollectionModel::Mixed => "mixed",
         CollectionModel::TimeSeries => "timeseries",
         CollectionModel::Queue => "queue",

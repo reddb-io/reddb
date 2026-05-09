@@ -30,6 +30,8 @@ pub(super) fn collection_model_name_shared(model: crate::catalog::CollectionMode
         crate::catalog::CollectionModel::Graph => "graph",
         crate::catalog::CollectionModel::Vector => "vector",
         crate::catalog::CollectionModel::Kv => "kv",
+        crate::catalog::CollectionModel::Config => "config",
+        crate::catalog::CollectionModel::Vault => "vault",
         crate::catalog::CollectionModel::Mixed => "mixed",
         crate::catalog::CollectionModel::TimeSeries => "timeseries",
         crate::catalog::CollectionModel::Queue => "queue",
@@ -55,7 +57,7 @@ pub(super) fn ensure_collection_model_read(
     if collection_model_allows_shared(contract.declared_model, requested_model) {
         return Ok(());
     }
-    Err(crate::RedDBError::Query(format!(
+    Err(crate::RedDBError::InvalidOperation(format!(
         "collection '{}' is declared as '{}' and does not allow '{}' reads",
         collection,
         collection_model_name_shared(contract.declared_model),

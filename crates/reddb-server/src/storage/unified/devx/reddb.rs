@@ -233,7 +233,9 @@ fn infer_collection_index_kind(model: CollectionModel, index_name: &str) -> Inde
             CollectionModel::Graph => IndexKind::GraphAdjacency,
             CollectionModel::Vector => IndexKind::VectorHnsw,
             CollectionModel::Document => IndexKind::DocumentPathValue,
-            CollectionModel::Kv => IndexKind::Hash,
+            CollectionModel::Kv | CollectionModel::Config | CollectionModel::Vault => {
+                IndexKind::Hash
+            }
             _ => IndexKind::BTree,
         },
     }
