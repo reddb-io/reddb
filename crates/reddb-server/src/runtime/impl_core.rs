@@ -6754,6 +6754,15 @@ impl RedDBRuntime {
                 ));
             }
 
+            if let QueryExpr::Table(table) = expr {
+                self.check_table_column_projection_privilege(
+                    &auth_store,
+                    &principal_id,
+                    &iam_ctx,
+                    table,
+                )?;
+            }
+
             if let QueryExpr::Update(update) = expr {
                 let columns = update_set_target_columns(update);
                 if !columns.is_empty() {
@@ -6783,6 +6792,49 @@ impl RedDBRuntime {
             auth_store
                 .check_grant(&ctx, action, &resource)
                 .map_err(|e| e.to_string())
+        }
+    }
+
+    fn check_table_column_projection_privilege(
+        &self,
+        auth_store: &Arc<crate::auth::store::AuthStore>,
+        principal: &crate::auth::UserId,
+        ctx: &crate::auth::policies::EvalContext,
+        table: &crate::storage::query::ast::TableQuery,
+    ) -> Result<(), String> {
+        use crate::auth::{ColumnAccessRequest, ColumnDecisionEffect};
+
+        let columns = requested_table_columns_for_policy(table);
+        if columns.is_empty() {
+            return Ok(());
+        }
+
+        let request = ColumnAccessRequest::select(table.table.clone(), columns);
+        let outcome = auth_store.check_column_projection_authz(principal, &request, ctx);
+        if outcome.allowed() {
+            return Ok(());
+        }
+
+        if !matches!(
+            outcome.table_decision,
+            crate::auth::policies::Decision::Allow { .. }
+                | crate::auth::policies::Decision::AdminBypass
+        ) {
+            return Err(format!(
+                "principal=`{}` action=`select` resource=`{}:{}` denied by IAM policy",
+                principal, outcome.table_resource.kind, outcome.table_resource.name
+            ));
+        }
+
+        let denied = outcome
+            .first_denied_column()
+            .filter(|decision| decision.effective == ColumnDecisionEffect::Denied);
+        match denied {
+            Some(decision) => Err(format!(
+                "principal=`{}` action=`select` resource=`{}:{}` denied by IAM policy",
+                principal, decision.resource.kind, decision.resource.name
+            )),
+            None => Ok(()),
         }
     }
 
@@ -7646,6 +7698,193 @@ fn column_access_request_for_table_update(
                 .with_schema(schema.to_string())
         }
         None => crate::auth::ColumnAccessRequest::update(table_name.to_string(), columns),
+    }
+}
+
+fn requested_table_columns_for_policy(
+    table: &crate::storage::query::ast::TableQuery,
+) -> Vec<String> {
+    use crate::storage::query::sql_lowering::{
+        effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
+        effective_table_projections,
+    };
+
+    let table_name = table.table.as_str();
+    let table_alias = table.alias.as_deref();
+    let mut columns = std::collections::BTreeSet::new();
+
+    for projection in effective_table_projections(table) {
+        collect_projection_columns(&projection, table_name, table_alias, &mut columns);
+    }
+    if let Some(filter) = effective_table_filter(table) {
+        collect_filter_columns(&filter, table_name, table_alias, &mut columns);
+    }
+    for expr in effective_table_group_by_exprs(table) {
+        collect_expr_columns(&expr, table_name, table_alias, &mut columns);
+    }
+    if let Some(filter) = effective_table_having_filter(table) {
+        collect_filter_columns(&filter, table_name, table_alias, &mut columns);
+    }
+    for order in &table.order_by {
+        if let Some(expr) = order.expr.as_ref() {
+            collect_expr_columns(expr, table_name, table_alias, &mut columns);
+        } else {
+            collect_field_ref_column(&order.field, table_name, table_alias, &mut columns);
+        }
+    }
+
+    columns.into_iter().collect()
+}
+
+fn collect_projection_columns(
+    projection: &crate::storage::query::ast::Projection,
+    table_name: &str,
+    table_alias: Option<&str>,
+    columns: &mut std::collections::BTreeSet<String>,
+) {
+    use crate::storage::query::ast::Projection;
+    match projection {
+        Projection::All => {
+            columns.insert("*".to_string());
+        }
+        Projection::Column(column) | Projection::Alias(column, _) => {
+            if column != "*" {
+                columns.insert(column.clone());
+            }
+        }
+        Projection::Function(_, args) => {
+            for arg in args {
+                collect_projection_columns(arg, table_name, table_alias, columns);
+            }
+        }
+        Projection::Expression(filter, _) => {
+            collect_filter_columns(filter, table_name, table_alias, columns);
+        }
+        Projection::Field(field, _) => {
+            collect_field_ref_column(field, table_name, table_alias, columns);
+        }
+    }
+}
+
+fn collect_filter_columns(
+    filter: &crate::storage::query::ast::Filter,
+    table_name: &str,
+    table_alias: Option<&str>,
+    columns: &mut std::collections::BTreeSet<String>,
+) {
+    use crate::storage::query::ast::Filter;
+    match filter {
+        Filter::Compare { field, .. }
+        | Filter::IsNull(field)
+        | Filter::IsNotNull(field)
+        | Filter::In { field, .. }
+        | Filter::Between { field, .. }
+        | Filter::Like { field, .. }
+        | Filter::StartsWith { field, .. }
+        | Filter::EndsWith { field, .. }
+        | Filter::Contains { field, .. } => {
+            collect_field_ref_column(field, table_name, table_alias, columns);
+        }
+        Filter::CompareFields { left, right, .. } => {
+            collect_field_ref_column(left, table_name, table_alias, columns);
+            collect_field_ref_column(right, table_name, table_alias, columns);
+        }
+        Filter::CompareExpr { lhs, rhs, .. } => {
+            collect_expr_columns(lhs, table_name, table_alias, columns);
+            collect_expr_columns(rhs, table_name, table_alias, columns);
+        }
+        Filter::And(left, right) | Filter::Or(left, right) => {
+            collect_filter_columns(left, table_name, table_alias, columns);
+            collect_filter_columns(right, table_name, table_alias, columns);
+        }
+        Filter::Not(inner) => collect_filter_columns(inner, table_name, table_alias, columns),
+    }
+}
+
+fn collect_expr_columns(
+    expr: &crate::storage::query::ast::Expr,
+    table_name: &str,
+    table_alias: Option<&str>,
+    columns: &mut std::collections::BTreeSet<String>,
+) {
+    use crate::storage::query::ast::Expr;
+    match expr {
+        Expr::Column { field, .. } => {
+            collect_field_ref_column(field, table_name, table_alias, columns);
+        }
+        Expr::Literal { .. } | Expr::Parameter { .. } => {}
+        Expr::UnaryOp { operand, .. } | Expr::Cast { inner: operand, .. } => {
+            collect_expr_columns(operand, table_name, table_alias, columns);
+        }
+        Expr::BinaryOp { lhs, rhs, .. } => {
+            collect_expr_columns(lhs, table_name, table_alias, columns);
+            collect_expr_columns(rhs, table_name, table_alias, columns);
+        }
+        Expr::FunctionCall { args, .. } => {
+            for arg in args {
+                collect_expr_columns(arg, table_name, table_alias, columns);
+            }
+        }
+        Expr::Case {
+            branches, else_, ..
+        } => {
+            for (condition, value) in branches {
+                collect_expr_columns(condition, table_name, table_alias, columns);
+                collect_expr_columns(value, table_name, table_alias, columns);
+            }
+            if let Some(value) = else_ {
+                collect_expr_columns(value, table_name, table_alias, columns);
+            }
+        }
+        Expr::IsNull { operand, .. } => {
+            collect_expr_columns(operand, table_name, table_alias, columns);
+        }
+        Expr::InList { target, values, .. } => {
+            collect_expr_columns(target, table_name, table_alias, columns);
+            for value in values {
+                collect_expr_columns(value, table_name, table_alias, columns);
+            }
+        }
+        Expr::Between {
+            target, low, high, ..
+        } => {
+            collect_expr_columns(target, table_name, table_alias, columns);
+            collect_expr_columns(low, table_name, table_alias, columns);
+            collect_expr_columns(high, table_name, table_alias, columns);
+        }
+    }
+}
+
+fn collect_field_ref_column(
+    field: &crate::storage::query::ast::FieldRef,
+    table_name: &str,
+    table_alias: Option<&str>,
+    columns: &mut std::collections::BTreeSet<String>,
+) {
+    if let Some(column) = policy_column_name_from_field_ref(field, table_name, table_alias) {
+        if column != "*" {
+            columns.insert(column);
+        }
+    }
+}
+
+fn policy_column_name_from_field_ref(
+    field: &crate::storage::query::ast::FieldRef,
+    table_name: &str,
+    table_alias: Option<&str>,
+) -> Option<String> {
+    match field {
+        crate::storage::query::ast::FieldRef::TableColumn { table, column } => {
+            if column == "*" {
+                return Some("*".to_string());
+            }
+            if table.is_empty() || table == table_name || Some(table.as_str()) == table_alias {
+                Some(column.clone())
+            } else {
+                Some(format!("{table}.{column}"))
+            }
+        }
+        _ => None,
     }
 }
 

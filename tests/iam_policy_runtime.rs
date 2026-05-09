@@ -50,6 +50,25 @@ fn attach_platform_policy(store: &AuthStore, policy_json: &str) {
         .unwrap();
 }
 
+fn attach_alice_policy(store: &AuthStore, id: &str, statements: &str) {
+    let policy = format!(
+        r#"{{
+        "id":"{id}",
+        "version":1,
+        "statements":{statements}
+    }}"#
+    );
+    store
+        .put_policy(reddb::auth::policies::Policy::from_json_str(&policy).unwrap())
+        .unwrap();
+    store
+        .attach_policy(
+            reddb::auth::store::PrincipalRef::User(reddb::auth::UserId::platform("alice")),
+            id,
+        )
+        .unwrap();
+}
+
 fn attach_tenant_policy(store: &AuthStore, tenant: &str, policy_json: &str) {
     let policy = reddb::auth::policies::Policy::from_json_str(policy_json).unwrap();
     let policy_id = policy.id.clone();
@@ -79,6 +98,13 @@ fn attach_policy(store: &AuthStore, user: reddb::auth::UserId, policy: &str) {
     store
         .attach_policy(reddb::auth::store::PrincipalRef::User(user), &id)
         .unwrap();
+}
+
+fn seed_document(rt: &RedDBRuntime) {
+    rt.execute_query(
+        r#"INSERT INTO docs DOCUMENT (body) VALUES ('{"public":"ok","secret":"no","nested":{"public":"yes","secret":"hidden"}}')"#,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -609,4 +635,102 @@ fn insert_column_allow_does_not_bypass_missing_table_allow() {
         err.to_string().contains("table:orders"),
         "expected missing table allow denial, got {err}"
     );
+}
+
+#[test]
+fn document_json_path_projection_allows_non_denied_path() {
+    let (rt, store) = runtime_with_auth();
+    seed_document(&rt);
+    attach_alice_policy(
+        &store,
+        "doc-path-public",
+        r#"[
+            {"effect":"allow","actions":["select"],"resources":["table:docs"]},
+            {"effect":"deny","actions":["select"],"resources":["column:docs.body.secret"]}
+        ]"#,
+    );
+
+    let read = as_user("alice", Role::Write, || {
+        rt.execute_query("SELECT body.public FROM docs")
+    });
+    assert!(read.is_ok(), "allowed path should read: {read:?}");
+}
+
+#[test]
+fn document_json_path_projection_denies_explicit_path() {
+    let (rt, store) = runtime_with_auth();
+    seed_document(&rt);
+    attach_alice_policy(
+        &store,
+        "doc-path-deny",
+        r#"[
+            {"effect":"allow","actions":["select"],"resources":["table:docs"]},
+            {"effect":"deny","actions":["select"],"resources":["column:docs.body.secret"]}
+        ]"#,
+    );
+
+    let denied = as_user("alice", Role::Write, || {
+        rt.execute_query("SELECT body.secret FROM docs")
+    });
+    assert!(denied.is_err(), "denied path should fail");
+}
+
+#[test]
+fn document_json_column_projection_denies_base_document_column() {
+    let (rt, store) = runtime_with_auth();
+    seed_document(&rt);
+    attach_alice_policy(
+        &store,
+        "doc-column-deny",
+        r#"[
+            {"effect":"allow","actions":["select"],"resources":["table:docs"]},
+            {"effect":"deny","actions":["select"],"resources":["column:docs.body"]}
+        ]"#,
+    );
+
+    let denied = as_user("alice", Role::Write, || {
+        rt.execute_query("SELECT body FROM docs")
+    });
+    assert!(denied.is_err(), "denied document column should fail");
+}
+
+#[test]
+fn document_json_wildcard_projection_checks_column_wildcard_policy() {
+    let (rt, store) = runtime_with_auth();
+    seed_document(&rt);
+    attach_alice_policy(
+        &store,
+        "doc-wildcard-deny",
+        r#"[
+            {"effect":"allow","actions":["select"],"resources":["table:docs"]},
+            {"effect":"deny","actions":["select"],"resources":["column:docs.*"]}
+        ]"#,
+    );
+
+    let denied = as_user("alice", Role::Write, || {
+        rt.execute_query("SELECT * FROM docs")
+    });
+    assert!(
+        denied.is_err(),
+        "wildcard projection should consult column:*"
+    );
+}
+
+#[test]
+fn document_json_table_allow_does_not_bypass_document_path_deny() {
+    let (rt, store) = runtime_with_auth();
+    seed_document(&rt);
+    attach_alice_policy(
+        &store,
+        "doc-no-table-bypass",
+        r#"[
+            {"effect":"allow","actions":["select"],"resources":["table:docs"]},
+            {"effect":"deny","actions":["select"],"resources":["column:docs.body.nested.secret"]}
+        ]"#,
+    );
+
+    let denied = as_user("alice", Role::Write, || {
+        rt.execute_query("SELECT body.nested.secret FROM docs")
+    });
+    assert!(denied.is_err(), "table allow must not bypass path deny");
 }
