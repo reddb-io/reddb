@@ -26,14 +26,14 @@ use crate::storage::engine::{
     StoredNode, StronglyConnectedComponents, WeaklyConnectedComponents, HITS,
 };
 use crate::storage::query::ast::{
-    AlterOperation, AlterQueueQuery, AlterTableQuery, CompareOp, CreateIndexQuery, CreateQueueQuery,
-    CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery, DeleteQuery, DropCollectionQuery,
-    DropDocumentQuery, DropGraphQuery, DropIndexQuery, DropKvQuery, DropQueueQuery, DropTableQuery,
-    DropTimeSeriesQuery, DropTreeQuery, DropVectorQuery, ExplainAlterQuery, ExplainFormat,
-    FieldRef, Filter, FusionStrategy, GraphCommand, HybridQuery, IndexMethod, InsertEntityType,
-    InsertQuery, JoinQuery, JoinType, OrderByClause, ProbabilisticCommand, Projection, QueryExpr,
-    QueueCommand, QueueSide, SearchCommand, TableQuery, TreeCommand, TruncateQuery, UpdateQuery,
-    VectorQuery, VectorSource,
+    AlterOperation, AlterQueueQuery, AlterTableQuery, CompareOp, CreateIndexQuery,
+    CreateQueueQuery, CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery, DeleteQuery,
+    DropCollectionQuery, DropDocumentQuery, DropGraphQuery, DropIndexQuery, DropKvQuery,
+    DropQueueQuery, DropTableQuery, DropTimeSeriesQuery, DropTreeQuery, DropVectorQuery,
+    EventsBackfillQuery, ExplainAlterQuery, ExplainFormat, FieldRef, Filter, FusionStrategy,
+    GraphCommand, HybridQuery, IndexMethod, InsertEntityType, InsertQuery, JoinQuery, JoinType,
+    OrderByClause, ProbabilisticCommand, Projection, QueryExpr, QueueCommand, QueueSide,
+    SearchCommand, TableQuery, TreeCommand, TruncateQuery, UpdateQuery, VectorQuery, VectorSource,
 };
 use crate::storage::query::is_universal_entity_source as is_universal_query_source;
 use crate::storage::query::modes::{detect_mode, parse_multi, QueryMode};
@@ -828,9 +828,9 @@ mod collection_contract;
 pub mod config_matrix;
 pub mod config_overlay;
 pub mod config_watcher;
+pub(crate) mod ddl;
 pub mod disk_space_monitor;
 mod dml_target_scan;
-pub(crate) mod ddl;
 mod expr_eval;
 mod graph_dsl;
 mod health_connection;
@@ -839,13 +839,14 @@ pub(crate) mod impl_core;
 mod impl_ddl;
 mod impl_dml;
 mod impl_ec;
+mod impl_events;
 mod impl_graph;
 mod impl_graph_commands;
+pub mod impl_kv;
 mod impl_migrations;
 mod impl_native;
 mod impl_physical;
 mod impl_probabilistic;
-pub mod impl_kv;
 pub mod impl_queue;
 mod impl_search;
 mod impl_timeseries;
@@ -862,8 +863,8 @@ pub(crate) mod mutation;
 mod probabilistic_store;
 pub(crate) mod query_exec;
 pub mod quota_bucket;
-mod red_schema;
 mod record_search;
+mod red_schema;
 pub mod resource_limits;
 pub(crate) mod scalar_evaluator;
 pub mod schema_diff;
@@ -874,10 +875,10 @@ pub mod within_clause;
 pub mod write_gate;
 
 pub use self::graph_dsl::*;
-pub use self::statement_frame::EffectiveScope;
 use self::join_filter::*;
 use self::query_exec::*;
 use self::record_search::*;
+pub use self::statement_frame::EffectiveScope;
 
 /// Re-exports for transports + tests that need per-connection
 /// isolation, tenant / auth thread-locals, and MVCC snapshot

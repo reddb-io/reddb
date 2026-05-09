@@ -20,6 +20,7 @@ reddb-grpc-proto = { version = "1.0", path = "../reddb-grpc-proto" }
 # dep — the client crate does not depend on the server.
 reddb-client-connector = { version = "1.0", path = "../reddb-client-connector" }
 aes-gcm = "0.10"
+blake3 = "1"
 hmac = "0.13"
 itoa = "1"
 zstd = { version = "0.13", default-features = false }
