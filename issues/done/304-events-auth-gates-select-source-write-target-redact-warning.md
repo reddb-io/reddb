@@ -38,3 +38,10 @@ End-to-end:
 
 - #294
 - #295
+
+## Completion notes
+
+- Added subscription DDL auth validation for `select` on the source table and `write` on the target queue.
+- Added non-blocking `subscription_redact_gap` warning/audit emission for denied IAM column policies not covered by `REDACT`.
+- Preserved existing cross-tenant subscription rejection/cluster-admin behavior.
+- Covered the four requested conformance cases in `tests/iam_policy_runtime.rs`.

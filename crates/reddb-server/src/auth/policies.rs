@@ -68,6 +68,7 @@ pub const MAX_POLICY_BYTES: usize = 32 * 1024;
 /// access.
 const ACTION_ALLOWLIST: &[&str] = &[
     "select",
+    "write",
     "insert",
     "update",
     "delete",
