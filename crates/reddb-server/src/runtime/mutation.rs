@@ -602,13 +602,69 @@ impl crate::RedDBRuntime {
 /// Per-tenant subscriptions are namespaced as `{tenant}__{target_queue}` when a
 /// tenant context is active; cluster-wide (`all_tenants`) subscriptions always
 /// use the bare queue name.
-fn effective_queue_name(subscription: &crate::catalog::SubscriptionDescriptor) -> String {
+pub(crate) fn effective_queue_name(
+    subscription: &crate::catalog::SubscriptionDescriptor,
+) -> String {
     if !subscription.all_tenants {
         if let Some(tenant) = crate::runtime::impl_core::current_tenant() {
             return format!("{tenant}__{}", subscription.target_queue);
         }
     }
     subscription.target_queue.clone()
+}
+
+pub(crate) fn backfill_event_id(collection: &str, id: &JsonValue, subscription_id: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(collection.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(json_id_for_hash(id).as_bytes());
+    hasher.update(&[0]);
+    hasher.update(b"backfill");
+    hasher.update(&[0]);
+    hasher.update(subscription_id.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+pub(crate) fn backfill_event_payload(
+    collection: &str,
+    raw_entity_id: u64,
+    after: &JsonValue,
+    subscription_id: &str,
+    redact_fields: &[String],
+) -> RedDBResult<(String, Vec<u8>)> {
+    let mut object = JsonMap::new();
+    let subject_id = after
+        .get("id")
+        .cloned()
+        .unwrap_or(JsonValue::Number(raw_entity_id as f64));
+    let event_id = backfill_event_id(collection, &subject_id, subscription_id);
+    object.insert("event_id".to_string(), JsonValue::String(event_id.clone()));
+    object.insert("op".to_string(), JsonValue::String("insert".to_string()));
+    object.insert(
+        "collection".to_string(),
+        JsonValue::String(collection.to_string()),
+    );
+    object.insert("id".to_string(), subject_id);
+    object.insert(
+        "ts".to_string(),
+        JsonValue::Number(current_unix_ms() as f64),
+    );
+    object.insert("lsn".to_string(), JsonValue::Number(0.0));
+    object.insert(
+        "tenant".to_string(),
+        crate::runtime::impl_core::current_tenant()
+            .map(JsonValue::String)
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert("synthetic".to_string(), JsonValue::Bool(true));
+    object.insert("before".to_string(), JsonValue::Null);
+    object.insert(
+        "after".to_string(),
+        redact_json_object(after.clone(), redact_fields),
+    );
+    let bytes = crate::json::to_vec(&JsonValue::Object(object))
+        .map_err(|err| RedDBError::Internal(format!("encode backfill event payload: {err}")))?;
+    Ok((event_id, bytes))
 }
 
 fn insert_event_payload(

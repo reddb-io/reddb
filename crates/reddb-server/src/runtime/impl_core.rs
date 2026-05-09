@@ -808,6 +808,10 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
             | QueueCommand::Ack { queue, .. }
             | QueueCommand::Nack { queue, .. } => cache_scope_insert(scopes, queue),
         },
+        QueryExpr::EventsBackfill(query) => {
+            cache_scope_insert(scopes, &query.collection);
+            cache_scope_insert(scopes, &query.target_queue);
+        }
         QueryExpr::CreateTree(query) => cache_scope_insert(scopes, &query.collection),
         QueryExpr::DropTree(query) => cache_scope_insert(scopes, &query.collection),
         QueryExpr::TreeCommand(query) => match query {
@@ -889,7 +893,8 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
         | QueryExpr::CreateMigration(_)
         | QueryExpr::ApplyMigration(_)
         | QueryExpr::RollbackMigration(_)
-        | QueryExpr::ExplainMigration(_) => {}
+        | QueryExpr::ExplainMigration(_)
+        | QueryExpr::EventsBackfillStatus { .. } => {}
         QueryExpr::KvCommand(cmd) => {
             use crate::storage::query::ast::KvCommand;
             match cmd {
@@ -4344,6 +4349,12 @@ impl RedDBRuntime {
             QueryExpr::AlterQueue(ref q) => self.execute_alter_queue(query, q),
             QueryExpr::DropQueue(ref q) => self.execute_drop_queue(query, q),
             QueryExpr::QueueCommand(ref cmd) => self.execute_queue_command(query, cmd),
+            QueryExpr::EventsBackfill(ref backfill) => {
+                self.execute_events_backfill(query, backfill)
+            }
+            QueryExpr::EventsBackfillStatus { ref collection } => Err(RedDBError::Query(format!(
+                "EVENTS BACKFILL STATUS for '{collection}' is not implemented in this slice"
+            ))),
             QueryExpr::KvCommand(ref cmd) => self.execute_kv_command(query, cmd),
             QueryExpr::CreateTree(ref tree) => self.execute_create_tree(query, tree),
             QueryExpr::DropTree(ref tree) => self.execute_drop_tree(query, tree),

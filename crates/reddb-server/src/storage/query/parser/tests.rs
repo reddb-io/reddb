@@ -1953,6 +1953,27 @@ fn test_parse_create_table_with_events_options() {
 }
 
 #[test]
+fn test_parse_events_backfill() {
+    let query = parse("EVENTS BACKFILL users WHERE status = 'active' TO audit LIMIT 10").unwrap();
+    let QueryExpr::EventsBackfill(backfill) = query else {
+        panic!("Expected EventsBackfill");
+    };
+    assert_eq!(backfill.collection, "users");
+    assert_eq!(backfill.where_filter.as_deref(), Some("status = 'active'"));
+    assert_eq!(backfill.target_queue, "audit");
+    assert_eq!(backfill.limit, Some(10));
+}
+
+#[test]
+fn test_parse_events_backfill_status_stub() {
+    let query = parse("EVENTS BACKFILL STATUS users").unwrap();
+    let QueryExpr::EventsBackfillStatus { collection } = query else {
+        panic!("Expected EventsBackfillStatus");
+    };
+    assert_eq!(collection, "users");
+}
+
+#[test]
 fn test_parse_drop_table() {
     let query = parse("DROP TABLE hosts").unwrap();
     if let QueryExpr::DropTable(dt) = query {

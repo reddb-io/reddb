@@ -7,12 +7,12 @@ use crate::storage::query::ast::{
     CreateTreeQuery, CreateViewQuery, DeleteQuery, DropCollectionQuery, DropDocumentQuery,
     DropForeignTableQuery, DropGraphQuery, DropIndexQuery, DropKvQuery, DropPolicyQuery,
     DropQueueQuery, DropSchemaQuery, DropSequenceQuery, DropServerQuery, DropTableQuery,
-    DropTimeSeriesQuery, DropTreeQuery, DropVectorQuery, DropViewQuery, ExplainAlterQuery,
-    ExplainMigrationQuery, Expr, FieldRef, Filter, ForeignColumnDef, GrantStmt, GraphCommand,
-    GraphQuery, HybridQuery, InsertQuery, JoinQuery, KvCommand, MaintenanceCommand, PathQuery,
-    PolicyAction, ProbabilisticCommand, QueryExpr, QueueCommand, RefreshMaterializedViewQuery,
-    RevokeStmt, RollbackMigrationQuery, SearchCommand, Span, TableQuery, TreeCommand,
-    TruncateQuery, TxnControl, UpdateQuery, VectorQuery,
+    DropTimeSeriesQuery, DropTreeQuery, DropVectorQuery, DropViewQuery, EventsBackfillQuery,
+    ExplainAlterQuery, ExplainMigrationQuery, Expr, FieldRef, Filter, ForeignColumnDef, GrantStmt,
+    GraphCommand, GraphQuery, HybridQuery, InsertQuery, JoinQuery, KvCommand, MaintenanceCommand,
+    PathQuery, PolicyAction, ProbabilisticCommand, QueryExpr, QueueCommand,
+    RefreshMaterializedViewQuery, RevokeStmt, RollbackMigrationQuery, SearchCommand, Span,
+    TableQuery, TreeCommand, TruncateQuery, TxnControl, UpdateQuery, VectorQuery,
 };
 use crate::storage::query::parser::{ParseError, Parser, SafeTokenDisplay};
 use crate::storage::query::sql_lowering::filter_to_expr;
@@ -43,6 +43,8 @@ pub enum FrontendStatement {
     Search(SearchCommand),
     Ask(AskQuery),
     QueueCommand(QueueCommand),
+    EventsBackfill(EventsBackfillQuery),
+    EventsBackfillStatus { collection: String },
     TreeCommand(TreeCommand),
     ProbabilisticCommand(ProbabilisticCommand),
     KvCommand(KvCommand),
@@ -369,6 +371,10 @@ impl FrontendStatement {
             FrontendStatement::Search(command) => QueryExpr::SearchCommand(command),
             FrontendStatement::Ask(query) => QueryExpr::Ask(query),
             FrontendStatement::QueueCommand(command) => QueryExpr::QueueCommand(command),
+            FrontendStatement::EventsBackfill(query) => QueryExpr::EventsBackfill(query),
+            FrontendStatement::EventsBackfillStatus { collection } => {
+                QueryExpr::EventsBackfillStatus { collection }
+            }
             FrontendStatement::TreeCommand(command) => QueryExpr::TreeCommand(command),
             FrontendStatement::ProbabilisticCommand(command) => {
                 QueryExpr::ProbabilisticCommand(command)
@@ -581,6 +587,56 @@ impl SqlCommand {
 }
 
 impl<'a> Parser<'a> {
+    fn parse_events_command(&mut self) -> Result<QueryExpr, ParseError> {
+        self.expect_ident()?; // EVENTS
+        if !self.consume_ident_ci("BACKFILL")? {
+            return Err(ParseError::expected(
+                vec!["BACKFILL"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+
+        if self.consume_ident_ci("STATUS")? {
+            let collection = self.expect_ident()?;
+            return Ok(QueryExpr::EventsBackfillStatus { collection });
+        }
+
+        let collection = self.expect_ident()?;
+        let where_filter = if self.consume(&Token::Where)? {
+            let mut parts = Vec::new();
+            while !self.check(&Token::Eof) && !self.check(&Token::To) {
+                parts.push(self.peek().to_string());
+                self.advance()?;
+            }
+            if parts.is_empty() {
+                return Err(ParseError::expected(
+                    vec!["predicate"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+            Some(parts.join(" "))
+        } else {
+            None
+        };
+
+        self.expect(Token::To)?;
+        let target_queue = self.expect_ident()?;
+        let limit = if self.consume(&Token::Limit)? {
+            Some(self.parse_positive_integer("LIMIT")? as u64)
+        } else {
+            None
+        };
+
+        Ok(QueryExpr::EventsBackfill(EventsBackfillQuery {
+            collection,
+            where_filter,
+            target_queue,
+            limit,
+        }))
+    }
+
     /// Parse an optional `OPTIONS (key 'value', key2 'value2', ...)` clause
     /// used by Phase 3.2 FDW DDL statements. Returns an empty vec when the
     /// clause is absent. Values are always single-quoted string literals —
@@ -708,6 +764,20 @@ impl<'a> Parser<'a> {
                     self.position(),
                 )),
             },
+            Token::Ident(name) if name.eq_ignore_ascii_case("EVENTS") => {
+                match self.parse_events_command()? {
+                    QueryExpr::EventsBackfill(query) => {
+                        Ok(FrontendStatement::EventsBackfill(query))
+                    }
+                    QueryExpr::EventsBackfillStatus { collection } => {
+                        Ok(FrontendStatement::EventsBackfillStatus { collection })
+                    }
+                    other => Err(ParseError::new(
+                        format!("internal: EVENTS produced unexpected query kind {other:?}"),
+                        self.position(),
+                    )),
+                }
+            }
             Token::Kv => match self.parse_kv_command()? {
                 QueryExpr::KvCommand(command) => Ok(FrontendStatement::KvCommand(command)),
                 other => Err(ParseError::new(
@@ -759,7 +829,7 @@ impl<'a> Parser<'a> {
                 vec![
                     "SELECT", "MATCH", "PATH", "FROM", "VECTOR", "HYBRID", "INSERT", "UPDATE",
                     "DELETE", "TRUNCATE", "CREATE", "DROP", "ALTER", "GRAPH", "SEARCH", "ASK",
-                    "QUEUE", "KV", "HLL", "TREE", "SKETCH", "FILTER", "SET", "SHOW",
+                    "QUEUE", "EVENTS", "KV", "HLL", "TREE", "SKETCH", "FILTER", "SET", "SHOW",
                 ],
                 other,
                 self.position(),
