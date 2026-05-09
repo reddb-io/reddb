@@ -39,6 +39,7 @@ mod auth_ddl;
 mod cte;
 mod ddl;
 mod dml;
+mod kv;
 mod error;
 mod expr;
 mod filter;

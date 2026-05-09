@@ -5,7 +5,8 @@ use crate::catalog::SubscriptionOperation;
 use crate::storage::engine::vector_metadata::MetadataValue;
 use crate::storage::query::ast::{
     CompareOp, DistanceMetric, EdgeDirection, FieldRef, Filter, FusionStrategy, JoinType,
-    MetadataFilter, Projection, QueueCommand, TableQuery, TreeCommand, TreePosition, VectorSource,
+    KvCommand, MetadataFilter, Projection, QueueCommand, TableQuery, TreeCommand, TreePosition,
+    VectorSource,
 };
 
 /// Test helper that returns the legacy `QueryExpr` shape. The
@@ -5060,4 +5061,214 @@ fn doc_form_timeseries_multi_row_insert_with_raw_json_tags() {
     )
     .unwrap();
     assert!(matches!(q, QueryExpr::Insert(_)));
+}
+
+// ============================================================================
+// KV DSL parser tests
+// ============================================================================
+
+#[test]
+fn test_parse_kv_put_bare_key() {
+    let q = parse("KV PUT name = 'alice'").unwrap();
+    if let QueryExpr::KvCommand(KvCommand::Put {
+        collection,
+        key,
+        value,
+        ttl_ms,
+        if_not_exists,
+    }) = q
+    {
+        assert_eq!(collection, "kv_default");
+        assert_eq!(key, "name");
+        assert_eq!(value, crate::storage::schema::Value::text("alice"));
+        assert_eq!(ttl_ms, None);
+        assert!(!if_not_exists);
+    } else {
+        panic!("expected KvCommand::Put");
+    }
+}
+
+#[test]
+fn test_parse_kv_put_dotted_key() {
+    let q = parse("KV PUT sessions.abc123 = 'data'").unwrap();
+    if let QueryExpr::KvCommand(KvCommand::Put {
+        collection, key, ..
+    }) = q
+    {
+        assert_eq!(collection, "sessions");
+        assert_eq!(key, "abc123");
+    } else {
+        panic!("expected KvCommand::Put");
+    }
+}
+
+#[test]
+fn test_parse_kv_put_with_expire() {
+    let q = parse("KV PUT token = 'jwt-xyz' EXPIRE 30 s").unwrap();
+    assert!(matches!(
+        q,
+        QueryExpr::KvCommand(KvCommand::Put { ttl_ms: Some(30_000), .. })
+    ));
+}
+
+#[test]
+fn test_parse_kv_put_expire_units() {
+    for (sql, expected_ms) in [
+        ("KV PUT mykey = 1 EXPIRE 100 ms", 100u64),
+        ("KV PUT mykey = 1 EXPIRE 2 s", 2_000),
+        ("KV PUT mykey = 1 EXPIRE 1 min", 60_000),
+        ("KV PUT mykey = 1 EXPIRE 1 hr", 3_600_000),
+        ("KV PUT mykey = 1 EXPIRE 1 day", 86_400_000),
+    ] {
+        let q = parse(sql).unwrap();
+        assert!(
+            matches!(q, QueryExpr::KvCommand(KvCommand::Put { ttl_ms: Some(ms), .. }) if ms == expected_ms),
+            "failed for {sql}: expected {expected_ms} ms"
+        );
+    }
+}
+
+#[test]
+fn test_parse_kv_put_if_not_exists() {
+    let q = parse("KV PUT lock.deploy = 'free' IF NOT EXISTS").unwrap();
+    assert!(matches!(
+        q,
+        QueryExpr::KvCommand(KvCommand::Put {
+            if_not_exists: true,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn test_parse_kv_get_bare_key() {
+    let q = parse("KV GET name").unwrap();
+    if let QueryExpr::KvCommand(KvCommand::Get { collection, key }) = q {
+        assert_eq!(collection, "kv_default");
+        assert_eq!(key, "name");
+    } else {
+        panic!("expected KvCommand::Get");
+    }
+}
+
+#[test]
+fn test_parse_kv_get_dotted_key() {
+    let q = parse("KV GET sessions.abc123").unwrap();
+    if let QueryExpr::KvCommand(KvCommand::Get { collection, key }) = q {
+        assert_eq!(collection, "sessions");
+        assert_eq!(key, "abc123");
+    } else {
+        panic!("expected KvCommand::Get");
+    }
+}
+
+#[test]
+fn test_parse_kv_delete_bare_key() {
+    let q = parse("KV DELETE name").unwrap();
+    if let QueryExpr::KvCommand(KvCommand::Delete { collection, key }) = q {
+        assert_eq!(collection, "kv_default");
+        assert_eq!(key, "name");
+    } else {
+        panic!("expected KvCommand::Delete");
+    }
+}
+
+#[test]
+fn test_parse_kv_delete_dotted_key() {
+    let q = parse("KV DELETE sessions.abc123").unwrap();
+    if let QueryExpr::KvCommand(KvCommand::Delete { collection, key }) = q {
+        assert_eq!(collection, "sessions");
+        assert_eq!(key, "abc123");
+    } else {
+        panic!("expected KvCommand::Delete");
+    }
+}
+
+#[test]
+fn test_parse_kv_put_expire_and_if_not_exists() {
+    let q = parse("KV PUT slot = 'v1' EXPIRE 5 s IF NOT EXISTS").unwrap();
+    assert!(matches!(
+        q,
+        QueryExpr::KvCommand(KvCommand::Put {
+            ttl_ms: Some(5_000),
+            if_not_exists: true,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn test_parse_kv_unknown_verb_errors() {
+    let err = parse("KV SCAN prefix").expect_err("should fail");
+    assert!(err.to_string().contains("PUT") || err.to_string().contains("GET"));
+}
+
+#[test]
+fn test_parse_kv_incr_bare_key_default_by() {
+    let q = parse("KV INCR hits").unwrap();
+    if let QueryExpr::KvCommand(KvCommand::Incr {
+        collection,
+        key,
+        by,
+        ttl_ms,
+    }) = q
+    {
+        assert_eq!(collection, "kv_default");
+        assert_eq!(key, "hits");
+        assert_eq!(by, 1);
+        assert_eq!(ttl_ms, None);
+    } else {
+        panic!("expected KvCommand::Incr");
+    }
+}
+
+#[test]
+fn test_parse_kv_incr_dotted_key_with_by() {
+    let q = parse("KV INCR counters.page_views BY 5").unwrap();
+    if let QueryExpr::KvCommand(KvCommand::Incr {
+        collection,
+        key,
+        by,
+        ..
+    }) = q
+    {
+        assert_eq!(collection, "counters");
+        assert_eq!(key, "page_views");
+        assert_eq!(by, 5);
+    } else {
+        panic!("expected KvCommand::Incr");
+    }
+}
+
+#[test]
+fn test_parse_kv_incr_with_expire() {
+    let q = parse("KV INCR counters.rate BY 1 EXPIRE 60 s").unwrap();
+    assert!(matches!(
+        q,
+        QueryExpr::KvCommand(KvCommand::Incr {
+            by: 1,
+            ttl_ms: Some(60_000),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn test_parse_kv_decr_bare_key() {
+    let q = parse("KV DECR stock").unwrap();
+    if let QueryExpr::KvCommand(KvCommand::Incr { by, .. }) = q {
+        assert_eq!(by, -1);
+    } else {
+        panic!("expected KvCommand::Incr (DECR sugar)");
+    }
+}
+
+#[test]
+fn test_parse_kv_decr_with_by() {
+    let q = parse("KV DECR inventory.item BY 3").unwrap();
+    if let QueryExpr::KvCommand(KvCommand::Incr { by, .. }) = q {
+        assert_eq!(by, -3);
+    } else {
+        panic!("expected KvCommand::Incr with by=-3");
+    }
 }

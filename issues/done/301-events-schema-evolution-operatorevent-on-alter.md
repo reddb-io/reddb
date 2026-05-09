@@ -28,20 +28,12 @@ End-to-end:
 
 ## Acceptance criteria
 
-- [x] `ALTER TABLE users ADD COLUMN x` em event-enabled users → OperatorEvent emitida.
-- [x] OperatorEvent contém collection, subscriptions afetadas, diff de fields.
-- [x] DROP COLUMN também emite.
-- [x] ALTER que não toca columns (ex: ENABLE RLS) não emite.
-- [x] Conformance: 2 casos.
+- [ ] `ALTER TABLE users ADD COLUMN x` em event-enabled users → OperatorEvent emitida.
+- [ ] OperatorEvent contém collection, subscriptions afetadas, diff de fields.
+- [ ] DROP COLUMN também emite.
+- [ ] ALTER que não toca columns (ex: ENABLE RLS) não emite.
+- [ ] Conformance: 2 casos.
 
 ## Blocked by
 
-- #292 (done)
-
-## Delivery notes
-
-- `OperatorEvent::SubscriptionSchemaChange` added to `telemetry/operator_event.rs`
-- Emitted via `emit_global()` in `execute_alter_table` (impl_ddl.rs) when ADD/DROP COLUMN ops run on a collection with enabled subscriptions
-- Non-column ops (ENABLE RLS, etc.) are silent
-- 2 conformance tests added: `alter_add_column_on_event_enabled_table_succeeds`, `alter_drop_column_and_rls_on_event_enabled_table_succeeds`
-- `cargo check` clean, both tests pass
+- #292

@@ -129,6 +129,38 @@ The `/collections/{name}/bulk/rows` endpoint uses a fast path with single-lock b
 
 For zero-overhead ingestion at the highest throughput (241K ops/sec), use the gRPC `BulkInsertBinary` RPC which sends protobuf native types with no JSON serialization. See the [gRPC API docs](grpc.md#binary-bulk-insert) for details.
 
+#### Bulk Insert with AUTO EMBED
+
+Add an `auto_embed` object to the request body to generate embeddings for all rows in **a single provider round-trip** before inserting. If the embedding provider fails after retries, no rows are inserted (502 is returned).
+
+```bash
+curl -X POST http://127.0.0.1:8080/collections/articles/bulk/rows \
+  -H 'content-type: application/json' \
+  -d '{
+    "items": [
+      {"fields": {"id": 1, "title": "hello world"}},
+      {"fields": {"id": 2, "title": "another document"}}
+    ],
+    "auto_embed": {
+      "provider": "openai",
+      "fields": ["title"],
+      "model": "text-embedding-3-small"
+    }
+  }'
+```
+
+Response includes embedding stats:
+
+```json
+{"ok": true, "created_count": 2, "embedded_count": 2, "provider_requests": 1}
+```
+
+- `created_count` — rows inserted
+- `embedded_count` — vectors created (rows with at least one non-empty embed field)
+- `provider_requests` — always 1 (entire batch in a single provider call)
+
+Omitting `auto_embed` preserves the legacy behavior (`{"ok": true, "count": N}`).
+
 ### Documents
 
 Create a document entity with an arbitrary JSON body:

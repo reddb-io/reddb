@@ -71,6 +71,8 @@ pub enum QueryExpr {
     DropQueue(DropQueueQuery),
     /// QUEUE subcommand (PUSH, POP, PEEK, LEN, PURGE, GROUP, READ, ACK, NACK)
     QueueCommand(QueueCommand),
+    /// KV subcommand (PUT, GET, DELETE)
+    KvCommand(KvCommand),
     /// CREATE TREE name IN collection ROOT ... MAX_CHILDREN n
     CreateTree(CreateTreeQuery),
     /// DROP TREE name IN collection
@@ -2418,6 +2420,50 @@ pub enum TreeCommand {
         collection: String,
         tree_name: String,
         dry_run: bool,
+    },
+}
+
+// ============================================================================
+// KV DSL Commands
+// ============================================================================
+
+/// KV verb commands: `KV PUT key = value [EXPIRE n] [IF NOT EXISTS]`, `KV GET key`, `KV DELETE key`
+#[derive(Debug, Clone)]
+pub enum KvCommand {
+    Put {
+        collection: String,
+        key: String,
+        value: Value,
+        /// TTL in milliseconds (from EXPIRE clause)
+        ttl_ms: Option<u64>,
+        if_not_exists: bool,
+    },
+    Get {
+        collection: String,
+        key: String,
+    },
+    Delete {
+        collection: String,
+        key: String,
+    },
+    /// `KV INCR key [BY n] [EXPIRE dur]` — atomic increment; negative `by` = decrement.
+    Incr {
+        collection: String,
+        key: String,
+        /// Step value; negative for DECR. Defaults to 1.
+        by: i64,
+        ttl_ms: Option<u64>,
+    },
+    /// `KV CAS key EXPECT <expected|NULL> SET <new> [EXPIRE dur]` — compare-and-set.
+    ///
+    /// `expected = None` means `EXPECT NULL` (key must be absent).
+    Cas {
+        collection: String,
+        key: String,
+        /// The value the caller expects to be current; `None` = key must be absent.
+        expected: Option<Value>,
+        new_value: Value,
+        ttl_ms: Option<u64>,
     },
 }
 
