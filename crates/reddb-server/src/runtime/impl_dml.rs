@@ -2451,10 +2451,125 @@ mod tests {
             .execute_query("UPDATE notes SET body = 'b' WHERE id = 1")
             .unwrap();
         assert_eq!(updated.affected_rows, 1);
-        let deleted = rt
-            .execute_query("DELETE FROM notes WHERE id = 1")
-            .unwrap();
+        let deleted = rt.execute_query("DELETE FROM notes WHERE id = 1").unwrap();
         assert_eq!(deleted.affected_rows, 1);
+    }
+
+    #[test]
+    fn insert_into_event_enabled_table_emits_event_to_configured_queue() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query(
+            "CREATE TABLE users (id INT, email TEXT) WITH EVENTS (INSERT) TO audit_log",
+        )
+        .unwrap();
+
+        let inserted = rt
+            .execute_query("INSERT INTO users (id, email) VALUES (7, 'a@example.com')")
+            .unwrap();
+        assert_eq!(inserted.affected_rows, 1);
+
+        let events = queue_payloads(&rt, "audit_log");
+        assert_eq!(events.len(), 1);
+        let event = events[0].as_object().expect("event payload object");
+        assert!(event
+            .get("event_id")
+            .and_then(crate::json::Value::as_str)
+            .is_some_and(|value| !value.is_empty()));
+        assert_eq!(
+            event.get("op").and_then(crate::json::Value::as_str),
+            Some("insert")
+        );
+        assert_eq!(
+            event.get("collection").and_then(crate::json::Value::as_str),
+            Some("users")
+        );
+        assert_eq!(
+            event.get("id").and_then(crate::json::Value::as_u64),
+            Some(7)
+        );
+        assert!(event
+            .get("ts")
+            .and_then(crate::json::Value::as_u64)
+            .is_some());
+        assert!(event
+            .get("lsn")
+            .and_then(crate::json::Value::as_u64)
+            .is_some());
+        assert!(event.get("tenant").is_some_and(crate::json::Value::is_null));
+        assert!(event.get("before").is_some_and(crate::json::Value::is_null));
+        let after = event
+            .get("after")
+            .and_then(crate::json::Value::as_object)
+            .expect("after object");
+        assert_eq!(
+            after.get("id").and_then(crate::json::Value::as_u64),
+            Some(7)
+        );
+        assert_eq!(
+            after.get("email").and_then(crate::json::Value::as_str),
+            Some("a@example.com")
+        );
+    }
+
+    #[test]
+    fn multi_row_insert_emits_one_insert_event_per_row_in_order() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE users (id INT, email TEXT) WITH EVENTS")
+            .unwrap();
+
+        rt.execute_query(
+            "INSERT INTO users (id, email) VALUES (1, 'a@example.com'), (2, 'b@example.com')",
+        )
+        .unwrap();
+
+        let events = queue_payloads(&rt, "users_events");
+        assert_eq!(events.len(), 2);
+        let mut previous_lsn = 0;
+        for (event, expected_id) in events.iter().zip([1_u64, 2]) {
+            let object = event.as_object().expect("event payload object");
+            assert_eq!(
+                object.get("op").and_then(crate::json::Value::as_str),
+                Some("insert")
+            );
+            assert_eq!(
+                object.get("id").and_then(crate::json::Value::as_u64),
+                Some(expected_id)
+            );
+            let lsn = object
+                .get("lsn")
+                .and_then(crate::json::Value::as_u64)
+                .expect("event lsn");
+            assert!(
+                lsn > previous_lsn,
+                "event LSNs should increase in row order"
+            );
+            previous_lsn = lsn;
+            let after = object
+                .get("after")
+                .and_then(crate::json::Value::as_object)
+                .expect("after object");
+            assert_eq!(
+                after.get("id").and_then(crate::json::Value::as_u64),
+                Some(expected_id)
+            );
+        }
+    }
+
+    fn queue_payloads(rt: &RedDBRuntime, queue: &str) -> Vec<crate::json::Value> {
+        let result = rt
+            .execute_query(&format!("QUEUE PEEK {queue} 10"))
+            .expect("peek queue");
+        result
+            .result
+            .records
+            .iter()
+            .map(
+                |record| match record.get("payload").expect("payload column") {
+                    Value::Json(bytes) => crate::json::from_slice(bytes).expect("json payload"),
+                    other => panic!("expected JSON queue payload, got {other:?}"),
+                },
+            )
+            .collect()
     }
 
     // ── #112: auto-index user `id` on first insert ─────────────────────
@@ -2512,7 +2627,11 @@ mod tests {
             let result = rt
                 .execute_query(&format!("SELECT score FROM bench_users WHERE id = {id}"))
                 .unwrap();
-            assert_eq!(result.result.records.len(), 1, "id={id} should match one row");
+            assert_eq!(
+                result.result.records.len(),
+                1,
+                "id={id} should match one row"
+            );
         }
 
         // Delete via the hash fast-path — exactly the bench scenario the
@@ -2535,10 +2654,8 @@ mod tests {
         rt.execute_query("CREATE TABLE bench_bulk (id INT, score INT)")
             .unwrap();
 
-        rt.execute_query(
-            "INSERT INTO bench_bulk (id, score) VALUES (1, 10), (2, 20), (3, 30)",
-        )
-        .unwrap();
+        rt.execute_query("INSERT INTO bench_bulk (id, score) VALUES (1, 10), (2, 20), (3, 30)")
+            .unwrap();
 
         let registered = rt
             .index_store_ref()
@@ -2566,16 +2683,14 @@ mod tests {
         rt.execute_query("INSERT INTO plain (uid, label) VALUES (1, 'a')")
             .unwrap();
 
-        assert!(
-            rt.index_store_ref()
-                .find_index_for_column("plain", "id")
-                .is_none()
-        );
-        assert!(
-            rt.index_store_ref()
-                .find_index_for_column("plain", "uid")
-                .is_none()
-        );
+        assert!(rt
+            .index_store_ref()
+            .find_index_for_column("plain", "id")
+            .is_none());
+        assert!(rt
+            .index_store_ref()
+            .find_index_for_column("plain", "uid")
+            .is_none());
     }
 
     /// Hook only fires once per collection. If an explicit

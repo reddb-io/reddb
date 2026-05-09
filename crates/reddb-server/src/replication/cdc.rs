@@ -287,19 +287,23 @@ impl CdcBuffer {
         collection: &str,
         entity_kind: &str,
         entity_ids: I,
-    ) where
+    ) -> Vec<u64>
+    where
         I: IntoIterator<Item = u64>,
         I::IntoIter: ExactSizeIterator,
     {
         let iter = entity_ids.into_iter();
         let count = iter.len();
         if count == 0 {
-            return;
+            return Vec::new();
         }
 
         let first_lsn = self.next_lsn.fetch_add(count as u64, Ordering::AcqRel) + 1;
+        let lsns = (0..count)
+            .map(|idx| first_lsn + idx as u64)
+            .collect::<Vec<_>>();
         if self.max_size == 0 {
-            return;
+            return lsns;
         }
 
         let timestamp = SystemTime::now()
@@ -331,6 +335,7 @@ impl CdcBuffer {
                 changed_columns: None,
             });
         }
+        lsns
     }
 
     /// Poll for events since a given LSN.
