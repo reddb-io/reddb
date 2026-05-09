@@ -1,8 +1,14 @@
 # SELECT Relational Column Policy Audit
 
-Issue: #265 Wire SELECT relacional
+Issue: #265 Wire SELECT relational
 Date: 2026-05-08
-Status: prep only; final `ColumnPolicyGate` wiring is blocked on #264.
+Status: historical prep audit; superseded by
+[Column Enforcement Coverage](column-enforcement-coverage.md) after #265-#269.
+
+> This note is retained as the pre-implementation path audit for relational
+> `SELECT`. The final runtime state covers explicit projections, `SELECT *`,
+> and joins. Use [Column Enforcement Coverage](column-enforcement-coverage.md)
+> for the current matrix.
 
 ## Scope
 
