@@ -179,7 +179,7 @@ fragment).
 2. Builds a Q&A prompt via `format!("{system_prompt}\n\nQuestion: {}", ...)`
    that includes the schema summary and search results as **context**
    for the LLM.
-3. Calls the LLM (`anthropic_prompt` / `openai_prompt`) and receives a
+3. Calls the LLM through the async provider prompt adapters and receives a
    text answer.
 4. Returns the text answer as `Value::text(answer)` in a fixed-shape
    result row (`answer`, `provider`, `model`, `prompt_tokens`,

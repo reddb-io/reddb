@@ -3,7 +3,8 @@ mod mock_ai_provider;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use mock_ai_provider::{MockAiProvider, MockAiProviderConfig};
-use reddb_server::ai::{openai_embeddings, OpenAiEmbeddingRequest};
+use reddb_server::ai::{openai_embeddings_async, OpenAiEmbeddingRequest};
+use reddb_server::runtime::ai::transport::{AiTransport, AiTransportConfig};
 use std::time::Instant;
 
 const ROWS_PER_INSERT: usize = 1_000;
@@ -25,17 +26,23 @@ fn ai_batch_foundation(c: &mut Criterion) {
                 ..MockAiProviderConfig::default()
             })
             .expect("mock AI provider should start");
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("bench runtime should start");
+            let transport = AiTransport::new(AiTransportConfig::default());
 
             let started = Instant::now();
             for _ in 0..iters {
                 for input in &inputs {
-                    let response = openai_embeddings(OpenAiEmbeddingRequest {
+                    let response = runtime
+                        .block_on(openai_embeddings_async(&transport, OpenAiEmbeddingRequest {
                         api_key: "bench-key".to_string(),
                         model: "mock-embed".to_string(),
                         inputs: vec![input.clone()],
                         dimensions: None,
                         api_base: provider.api_base(),
-                    })
+                        }))
                     .expect("mock embedding request should succeed");
                     black_box(response.embeddings);
                 }

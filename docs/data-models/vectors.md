@@ -241,6 +241,20 @@ curl -X POST http://127.0.0.1:8080/collections/docs/bulk/vectors \
   ]'
 ```
 
+## AUTO EMBED
+
+`WITH AUTO EMBED` lets row inserts create linked vectors without a separate embedding call:
+
+```sql
+INSERT INTO docs (id, title, body)
+VALUES
+  (1, 'Intro', 'Introduction to machine learning fundamentals'),
+  (2, 'Ops', 'Incident response checklist for Linux hosts')
+WITH AUTO EMBED (title, body) USING openai MODEL 'text-embedding-3-small'
+```
+
+For bulk inserts, RedDB batches all non-empty embedding texts through `AiBatchClient`, applies provider retry/timeout handling, and then stores one vector per embedded row. The SQL and HTTP request shape did not change; batching is transparent to clients.
+
 ## Distance Metrics
 
 | Metric | Description |

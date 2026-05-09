@@ -171,13 +171,20 @@ impl<'a, P: RuntimeQueryPort + crate::application::ports::RuntimeEntityPort + ?S
                 .or_else(|| std::env::var("REDDB_OPENAI_EMBEDDING_MODEL").ok())
                 .filter(|v| !v.trim().is_empty())
                 .unwrap_or_else(|| provider.default_embedding_model().to_string());
-                let response = crate::ai::openai_embeddings(crate::ai::OpenAiEmbeddingRequest {
+                let transport = crate::runtime::ai::transport::AiTransport::new(
+                    crate::runtime::ai::transport::AiTransportConfig::default(),
+                );
+                let request = crate::ai::OpenAiEmbeddingRequest {
                     api_key,
                     model,
                     inputs: vec![text],
                     dimensions: None,
                     api_base: provider.resolve_api_base(),
-                })?;
+                };
+                let response = crate::runtime::ai::block_on_ai(async move {
+                    crate::ai::openai_embeddings_async(&transport, request).await
+                })
+                .and_then(|result| result)?;
                 input.vector = response.embeddings.into_iter().next().ok_or_else(|| {
                     crate::RedDBError::Query("embedding API returned no vectors".to_string())
                 })?;

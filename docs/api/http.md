@@ -131,7 +131,7 @@ For zero-overhead ingestion at the highest throughput (241K ops/sec), use the gR
 
 #### Bulk Insert with AUTO EMBED
 
-Add an `auto_embed` object to the request body to generate embeddings for all rows in **a single provider round-trip** before inserting. If the embedding provider fails after retries, no rows are inserted (502 is returned).
+Add an `auto_embed` object to the request body to generate embeddings for all rows through the AI batching path before inserting. RedDB collects text across the request, sends provider-sized batches with retry/timeout handling, then links the returned vectors to the inserted rows. If the embedding provider fails after retries, no rows are inserted (502 is returned).
 
 ```bash
 curl -X POST http://127.0.0.1:8080/collections/articles/bulk/rows \
@@ -157,7 +157,7 @@ Response includes embedding stats:
 
 - `created_count` — rows inserted
 - `embedded_count` — vectors created (rows with at least one non-empty embed field)
-- `provider_requests` — always 1 (entire batch in a single provider call)
+- `provider_requests` — provider calls made for embeddings; normally 1, higher only when the batch exceeds the provider chunk size
 
 Omitting `auto_embed` preserves the legacy behavior (`{"ok": true, "count": N}`).
 
@@ -416,8 +416,8 @@ curl -X POST http://127.0.0.1:8080/query \
 
 | Method | Path | Description |
 |:-------|:-----|:------------|
-| `POST` | `/ai/embeddings` | Generate embeddings (single, batch, query-row, query-result) |
-| `POST` | `/ai/prompt` | Execute prompts (single, batch, query-row, query-result) |
+| `POST` | `/ai/embeddings` | Generate embeddings via the pooled AI transport (single, batch, query-row, query-result) |
+| `POST` | `/ai/prompt` | Execute prompts via the pooled AI transport (single, batch, query-row, query-result) |
 | `POST` | `/ai/ask` | One-shot question against the database using any provider |
 | `POST` | `/ai/credentials` | Store provider API keys by alias in KV (`red_config`) |
 
@@ -510,6 +510,8 @@ When a request includes a `credential` alias, RedDB resolves the API key using t
 - direct input: `input` or `inputs`
 - query row mode: `source_query` + `source_mode: "row"` + `source_field`
 - query result mode: `source_query` + `source_mode: "result"`
+
+All modes send one provider batch per request unless provider chunk limits require splitting. The deprecated synchronous Rust helpers are compatibility shims; server paths use `AiBatchClient` for AUTO EMBED and the pooled `AiTransport` path for direct embedding and prompt endpoints.
 
 Optional persistence:
 
