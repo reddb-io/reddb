@@ -1,0 +1,4 @@
+input = "DROP TABLE users"
+expected_kind = "DropTable"
+source = "docs/data-models/events.md:379"
+kind = "positive"

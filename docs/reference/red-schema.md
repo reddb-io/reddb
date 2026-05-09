@@ -14,6 +14,12 @@ Implemented relations:
 | `red.policies`    | `SHOW POLICIES`, `SHOW POLICIES ON <collection>` |
 | `red.stats`       | `SHOW STATS`, `SHOW STATS <collection>` |
 
+Planned relations:
+
+| Relation | Primary shortcut commands |
+|---|---|
+| `red.subscriptions` | `EVENTS STATUS`, `EVENTS STATUS <collection>` |
+
 The `red.*` relations are virtual runtime tables, not user collections. `SELECT`
 queries support ordinary projection, `WHERE`, `ORDER BY`, `LIMIT`, and `OFFSET`
 clauses after the virtual table has been materialized. `INSERT`, `UPDATE`, and
@@ -219,6 +225,38 @@ Current columns:
 | `compact_ops`     | Number of compaction operations reported by `ManagerStats`, or `0` when unavailable. |
 | `last_write_ms`   | Last write timestamp in Unix milliseconds. Currently `NULL` because collection-level write timestamps are not exposed by `ManagerStats` or the catalog snapshot APIs. |
 | `attention_score` | Catalog attention score for the collection. Larger numbers indicate more severe drift, rebuild, rematerialization, or rerun needs. |
+
+## `red.subscriptions` (planned)
+
+`red.subscriptions` is the planned introspection surface for event
+subscriptions. It is tracked by issue #303 and is not listed as an implemented
+relation until that slice lands.
+
+The intended shape is:
+
+| Column | Description |
+|---|---|
+| `name` | Subscription name, or the default subscription name for `WITH EVENTS`. |
+| `collection` | Source collection. |
+| `target_queue` | Queue receiving event payloads. |
+| `mode` | Target queue mode, `fanout` or `work`. |
+| `ops_filter` | Operation filter such as `insert,update`, or `*` for all mutation events. |
+| `where_filter` | Stored subscription predicate, or `NULL`. |
+| `redact_fields` | Comma-separated fields or JSON paths redacted at producer time. |
+| `enabled` | Whether the subscription currently emits events. |
+| `outbox_lag_ms` | Estimated lag between committed mutations and delivered event messages. |
+| `dlq_count` | Number of failed event payloads in the subscription's outbox DLQ. |
+| `created_at` | Subscription creation timestamp when catalog metadata exposes it. |
+
+`EVENTS STATUS users` will desugar to a filtered `red.subscriptions` query once
+implemented:
+
+```sql
+SELECT * FROM red.subscriptions WHERE collection = 'users';
+```
+
+See [Events](../data-models/events.md) for subscription semantics and the
+current #300/#303 blockers.
 
 ## `SHOW SAMPLE`
 

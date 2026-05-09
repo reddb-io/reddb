@@ -1,0 +1,4 @@
+input = "CREATE TABLE users (id INT, email TEXT) WITH EVENTS (DELETE) TO audit_log"
+expected_kind = "CreateTable"
+source = "docs/data-models/events.md:295"
+kind = "positive"

@@ -1,0 +1,4 @@
+input = "ALTER TABLE users ENABLE EVENTS TO global_audit ON ALL TENANTS REQUIRES CAPABILITY 'events:cluster_subscribe'"
+expected_kind = "AlterTable"
+source = "docs/data-models/events.md:355"
+kind = "positive"

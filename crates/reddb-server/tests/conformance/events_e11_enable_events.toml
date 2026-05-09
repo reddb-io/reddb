@@ -1,0 +1,4 @@
+input = "ALTER TABLE users ENABLE EVENTS TO audit_log"
+expected_kind = "AlterTable"
+source = "docs/data-models/events.md:323"
+kind = "positive"

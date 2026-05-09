@@ -1,0 +1,4 @@
+input = "ALTER TABLE orders ADD SUBSCRIPTION search TO search_sync WHERE status = 'paid'"
+expected_kind = "AlterTable"
+source = "docs/data-models/events.md:339"
+kind = "positive"

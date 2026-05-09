@@ -1,0 +1,4 @@
+input = "ALTER TABLE orders DROP SUBSCRIPTION search"
+expected_kind = "AlterTable"
+source = "docs/data-models/events.md:347"
+kind = "positive"

@@ -1,0 +1,4 @@
+input = "CREATE TABLE accounts (id INT, email TEXT, phone TEXT, ssn TEXT) WITH EVENTS REDACT (email, phone, ssn)"
+expected_kind = "CreateTable"
+source = "docs/data-models/events.md:303"
+kind = "positive"

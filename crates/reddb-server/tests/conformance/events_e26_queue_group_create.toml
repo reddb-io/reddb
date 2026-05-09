@@ -1,0 +1,4 @@
+input = "QUEUE GROUP CREATE users_events sync_workers"
+expected_kind = "QueueCommand"
+source = "docs/data-models/events.md:383"
+kind = "positive"

@@ -1,0 +1,4 @@
+input = "QUEUE READ users_events_outbox_dlq GROUP ops CONSUMER dlq_inspector COUNT 10"
+expected_kind = "QueueCommand"
+source = "docs/data-models/events.md:399"
+kind = "positive"
