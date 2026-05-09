@@ -31,6 +31,16 @@ pub enum QueryExpr {
     CreateTable(CreateTableQuery),
     /// DROP TABLE name
     DropTable(DropTableQuery),
+    /// DROP GRAPH name
+    DropGraph(DropGraphQuery),
+    /// DROP VECTOR name
+    DropVector(DropVectorQuery),
+    /// DROP DOCUMENT name
+    DropDocument(DropDocumentQuery),
+    /// DROP KV name
+    DropKv(DropKvQuery),
+    /// DROP COLLECTION name
+    DropCollection(DropCollectionQuery),
     /// ALTER TABLE name ADD/DROP/RENAME COLUMN
     AlterTable(AlterTableQuery),
     /// GRAPH subcommand (NEIGHBORHOOD, SHORTEST_PATH, etc.)
@@ -1726,6 +1736,41 @@ pub struct DropTableQuery {
     /// Table name
     pub name: String,
     /// IF EXISTS flag
+    pub if_exists: bool,
+}
+
+/// DROP GRAPH [IF EXISTS] name
+#[derive(Debug, Clone)]
+pub struct DropGraphQuery {
+    pub name: String,
+    pub if_exists: bool,
+}
+
+/// DROP VECTOR [IF EXISTS] name
+#[derive(Debug, Clone)]
+pub struct DropVectorQuery {
+    pub name: String,
+    pub if_exists: bool,
+}
+
+/// DROP DOCUMENT [IF EXISTS] name
+#[derive(Debug, Clone)]
+pub struct DropDocumentQuery {
+    pub name: String,
+    pub if_exists: bool,
+}
+
+/// DROP KV [IF EXISTS] name
+#[derive(Debug, Clone)]
+pub struct DropKvQuery {
+    pub name: String,
+    pub if_exists: bool,
+}
+
+/// DROP COLLECTION [IF EXISTS] name
+#[derive(Debug, Clone)]
+pub struct DropCollectionQuery {
+    pub name: String,
     pub if_exists: bool,
 }
 

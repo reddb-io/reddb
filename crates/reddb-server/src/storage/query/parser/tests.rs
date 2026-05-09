@@ -1665,6 +1665,48 @@ fn test_parse_drop_table_if_exists() {
 }
 
 #[test]
+fn test_parse_polymorphic_drop_models() {
+    let cases = [
+        ("DROP GRAPH identity", "identity", false, "graph"),
+        ("DROP VECTOR notes", "notes", false, "vector"),
+        ("DROP DOCUMENT logs", "logs", false, "document"),
+        ("DROP KV settings", "settings", false, "kv"),
+        (
+            "DROP COLLECTION IF EXISTS users",
+            "users",
+            true,
+            "collection",
+        ),
+    ];
+
+    for (sql, name, if_exists, kind) in cases {
+        match (parse(sql).unwrap(), kind) {
+            (QueryExpr::DropGraph(query), "graph") => {
+                assert_eq!(query.name, name);
+                assert_eq!(query.if_exists, if_exists);
+            }
+            (QueryExpr::DropVector(query), "vector") => {
+                assert_eq!(query.name, name);
+                assert_eq!(query.if_exists, if_exists);
+            }
+            (QueryExpr::DropDocument(query), "document") => {
+                assert_eq!(query.name, name);
+                assert_eq!(query.if_exists, if_exists);
+            }
+            (QueryExpr::DropKv(query), "kv") => {
+                assert_eq!(query.name, name);
+                assert_eq!(query.if_exists, if_exists);
+            }
+            (QueryExpr::DropCollection(query), "collection") => {
+                assert_eq!(query.name, name);
+                assert_eq!(query.if_exists, if_exists);
+            }
+            (other, _) => panic!("unexpected parse result for {sql}: {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn test_parse_alter_table_add_column() {
     let query = parse("ALTER TABLE hosts ADD COLUMN status TEXT NOT NULL").unwrap();
     if let QueryExpr::AlterTable(at) = query {

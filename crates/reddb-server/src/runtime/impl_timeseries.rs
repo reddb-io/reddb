@@ -129,6 +129,9 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         let store = self.inner.db.store();
+        if super::impl_ddl::is_system_schema_name(&query.name) {
+            return Err(RedDBError::Query("system schema is read-only".to_string()));
+        }
         if store.get_collection(&query.name).is_none() {
             if query.if_exists {
                 return Ok(RuntimeQueryResult::ok_message(
@@ -141,6 +144,18 @@ impl RedDBRuntime {
                 "timeseries '{}' not found",
                 query.name
             )));
+        }
+        let actual = crate::runtime::ddl::polymorphic_resolver::resolve(
+            &query.name,
+            &self.inner.db.catalog_model_snapshot(),
+        )?;
+        if actual != crate::catalog::CollectionModel::TimeSeries
+            && actual != crate::catalog::CollectionModel::Table
+        {
+            crate::runtime::ddl::polymorphic_resolver::ensure_model_match(
+                crate::catalog::CollectionModel::TimeSeries,
+                actual,
+            )?;
         }
         // Remove from the hypertable registry before dropping the
         // underlying collection — the registry lookup is cheap and

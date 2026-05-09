@@ -27,12 +27,13 @@ use crate::storage::engine::{
 };
 use crate::storage::query::ast::{
     AlterOperation, AlterTableQuery, CompareOp, CreateIndexQuery, CreateQueueQuery,
-    CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery, DeleteQuery, DropIndexQuery,
-    DropQueueQuery, DropTableQuery, DropTimeSeriesQuery, DropTreeQuery, ExplainAlterQuery,
-    ExplainFormat, FieldRef, Filter, FusionStrategy, GraphCommand, HybridQuery, IndexMethod,
-    InsertEntityType, InsertQuery, JoinQuery, JoinType, OrderByClause, ProbabilisticCommand,
-    Projection, QueryExpr, QueueCommand, QueueSide, SearchCommand, TableQuery, TreeCommand,
-    UpdateQuery, VectorQuery, VectorSource,
+    CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery, DeleteQuery, DropCollectionQuery,
+    DropDocumentQuery, DropGraphQuery, DropIndexQuery, DropKvQuery, DropQueueQuery, DropTableQuery,
+    DropTimeSeriesQuery, DropTreeQuery, DropVectorQuery, ExplainAlterQuery, ExplainFormat,
+    FieldRef, Filter, FusionStrategy, GraphCommand, HybridQuery, IndexMethod, InsertEntityType,
+    InsertQuery, JoinQuery, JoinType, OrderByClause, ProbabilisticCommand, Projection, QueryExpr,
+    QueueCommand, QueueSide, SearchCommand, TableQuery, TreeCommand, UpdateQuery, VectorQuery,
+    VectorSource,
 };
 use crate::storage::query::is_universal_entity_source as is_universal_query_source;
 use crate::storage::query::modes::{detect_mode, parse_multi, QueryMode};
@@ -829,6 +830,7 @@ pub mod config_overlay;
 pub mod config_watcher;
 pub mod disk_space_monitor;
 mod dml_target_scan;
+pub(crate) mod ddl;
 mod expr_eval;
 mod graph_dsl;
 mod health_connection;
