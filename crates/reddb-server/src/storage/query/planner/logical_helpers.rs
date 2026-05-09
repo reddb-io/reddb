@@ -383,13 +383,13 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         | QueryExpr::Delete(_)
         | QueryExpr::CreateTable(_)
         | QueryExpr::DropTable(_)
-            | QueryExpr::DropGraph(_)
-            | QueryExpr::DropVector(_)
-            | QueryExpr::DropDocument(_)
-            | QueryExpr::DropKv(_)
-            | QueryExpr::DropCollection(_)
-            | QueryExpr::Truncate(_)
-            | QueryExpr::AlterTable(_)
+        | QueryExpr::DropGraph(_)
+        | QueryExpr::DropVector(_)
+        | QueryExpr::DropDocument(_)
+        | QueryExpr::DropKv(_)
+        | QueryExpr::DropCollection(_)
+        | QueryExpr::Truncate(_)
+        | QueryExpr::AlterTable(_)
         | QueryExpr::GraphCommand(_)
         | QueryExpr::SearchCommand(_)
         | QueryExpr::CreateIndex(_)
@@ -443,7 +443,9 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         | QueryExpr::CreateMigration(_)
         | QueryExpr::ApplyMigration(_)
         | QueryExpr::RollbackMigration(_)
-        | QueryExpr::ExplainMigration(_) => false,
+        | QueryExpr::ExplainMigration(_)
+        | QueryExpr::EventsBackfill(_)
+        | QueryExpr::EventsBackfillStatus { .. } => false,
     }
 }
 
@@ -799,6 +801,8 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::ApplyMigration(_) => "apply_migration",
         QueryExpr::RollbackMigration(_) => "rollback_migration",
         QueryExpr::ExplainMigration(_) => "explain_migration",
+        QueryExpr::EventsBackfill(_) => "events_backfill",
+        QueryExpr::EventsBackfillStatus { .. } => "events_backfill_status",
     }
 }
 
