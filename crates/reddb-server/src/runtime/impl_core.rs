@@ -5442,14 +5442,24 @@ impl RedDBRuntime {
             QueryExpr::DropKv(q) => Some((q.name.as_str(), q.model)),
             QueryExpr::Truncate(q) => q.model.map(|model| (q.name.as_str(), model)),
             QueryExpr::KvCommand(cmd) => {
-                let collection = match cmd {
-                    KvCommand::Put { collection, .. }
-                    | KvCommand::Get { collection, .. }
-                    | KvCommand::Incr { collection, .. }
-                    | KvCommand::Cas { collection, .. }
-                    | KvCommand::Delete { collection, .. } => collection.as_str(),
+                let (collection, model) = match cmd {
+                    KvCommand::Put {
+                        collection, model, ..
+                    }
+                    | KvCommand::Get {
+                        collection, model, ..
+                    }
+                    | KvCommand::Incr {
+                        collection, model, ..
+                    }
+                    | KvCommand::Cas {
+                        collection, model, ..
+                    }
+                    | KvCommand::Delete {
+                        collection, model, ..
+                    } => (collection.as_str(), *model),
                 };
-                Some((collection, CollectionModel::Kv))
+                Some((collection, model))
             }
             QueryExpr::ConfigCommand(cmd) => {
                 self.validate_config_command_before_auth(cmd)?;

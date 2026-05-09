@@ -1704,6 +1704,9 @@ pub struct CreateTableQuery {
     /// Declarative event subscriptions for this table. #291 stores
     /// metadata only; event emission is intentionally out of scope.
     pub subscriptions: Vec<crate::catalog::SubscriptionDescriptor>,
+    /// `CREATE VAULT ... WITH OWN MASTER KEY`: provision per-vault
+    /// key material instead of using the cluster vault key.
+    pub vault_own_master_key: bool,
 }
 
 /// `PARTITION BY RANGE|LIST|HASH (column)` clause.
@@ -2436,6 +2439,7 @@ pub enum TreeCommand {
 #[derive(Debug, Clone)]
 pub enum KvCommand {
     Put {
+        model: CollectionModel,
         collection: String,
         key: String,
         value: Value,
@@ -2444,15 +2448,18 @@ pub enum KvCommand {
         if_not_exists: bool,
     },
     Get {
+        model: CollectionModel,
         collection: String,
         key: String,
     },
     Delete {
+        model: CollectionModel,
         collection: String,
         key: String,
     },
     /// `KV INCR key [BY n] [EXPIRE dur]` — atomic increment; negative `by` = decrement.
     Incr {
+        model: CollectionModel,
         collection: String,
         key: String,
         /// Step value; negative for DECR. Defaults to 1.
@@ -2463,6 +2470,7 @@ pub enum KvCommand {
     ///
     /// `expected = None` means `EXPECT NULL` (key must be absent).
     Cas {
+        model: CollectionModel,
         collection: String,
         key: String,
         /// The value the caller expects to be current; `None` = key must be absent.

@@ -81,6 +81,7 @@ impl<'a> Parser<'a> {
             tenant_by: None,
             append_only: false,
             subscriptions,
+            vault_own_master_key: false,
         }))
     }
 
@@ -257,6 +258,7 @@ impl<'a> Parser<'a> {
             tenant_by,
             append_only,
             subscriptions,
+            vault_own_master_key: false,
         }))
     }
 
@@ -340,6 +342,33 @@ impl<'a> Parser<'a> {
     ) -> Result<QueryExpr, ParseError> {
         let if_not_exists = self.match_if_not_exists()?;
         let name = self.parse_drop_collection_name()?;
+        let vault_own_master_key =
+            if model == CollectionModel::Vault && self.consume(&Token::With)? {
+                if !self.consume_ident_ci("OWN")? {
+                    return Err(ParseError::expected(
+                        vec!["OWN"],
+                        self.peek(),
+                        self.position(),
+                    ));
+                }
+                if !self.consume_ident_ci("MASTER")? {
+                    return Err(ParseError::expected(
+                        vec!["MASTER"],
+                        self.peek(),
+                        self.position(),
+                    ));
+                }
+                if !self.consume(&Token::Key)? && !self.consume_ident_ci("KEY")? {
+                    return Err(ParseError::expected(
+                        vec!["KEY"],
+                        self.peek(),
+                        self.position(),
+                    ));
+                }
+                true
+            } else {
+                false
+            };
         Ok(QueryExpr::CreateTable(CreateTableQuery {
             collection_model: model,
             name,
@@ -353,6 +382,7 @@ impl<'a> Parser<'a> {
             tenant_by: None,
             append_only: false,
             subscriptions: Vec::new(),
+            vault_own_master_key,
         }))
     }
 
