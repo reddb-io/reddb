@@ -332,6 +332,7 @@ impl RedDBRuntime {
             }
             None => query,
         };
+        self.check_insert_column_policy(query)?;
 
         let mut inserted_count: u64 = 0;
         let effective_rows =
@@ -658,6 +659,56 @@ impl RedDBRuntime {
             result.result = returning;
         }
         Ok(result)
+    }
+
+    fn check_insert_column_policy(&self, query: &InsertQuery) -> RedDBResult<()> {
+        let Some(auth_store) = self.inner.auth_store.read().clone() else {
+            return Ok(());
+        };
+        if !auth_store.iam_authorization_enabled() {
+            return Ok(());
+        }
+        let Some((username, role)) = crate::runtime::impl_core::current_auth_identity() else {
+            return Ok(());
+        };
+
+        let tenant = crate::runtime::impl_core::current_tenant();
+        let principal = crate::auth::UserId::from_parts(tenant.as_deref(), &username);
+        let request = crate::auth::ColumnAccessRequest {
+            action: "insert".to_string(),
+            schema: None,
+            table: query.table.clone(),
+            columns: query.columns.clone(),
+        };
+        let ctx = crate::auth::policies::EvalContext {
+            principal_tenant: tenant.clone(),
+            current_tenant: tenant,
+            peer_ip: None,
+            mfa_present: false,
+            now_ms: crate::auth::now_ms(),
+            principal_is_admin_role: role == crate::auth::Role::Admin,
+        };
+
+        let outcome = auth_store.check_column_projection_authz(&principal, &request, &ctx);
+        let table_allowed = matches!(
+            outcome.table_decision,
+            crate::auth::policies::Decision::Allow { .. }
+                | crate::auth::policies::Decision::AdminBypass
+        );
+        if !table_allowed {
+            return Err(RedDBError::Query(format!(
+                "principal=`{username}` action=`insert` resource=`{}:{}` denied by IAM policy",
+                outcome.table_resource.kind, outcome.table_resource.name
+            )));
+        }
+        if let Some(denied) = outcome.first_denied_column() {
+            return Err(RedDBError::Query(format!(
+                "principal=`{username}` action=`insert` resource=`{}:{}` denied by IAM policy",
+                denied.resource.kind, denied.resource.name
+            )));
+        }
+
+        Ok(())
     }
 
     pub(crate) fn insert_timeseries_point(

@@ -72,6 +72,15 @@ fn text_field(result: &reddb::runtime::RuntimeQueryResult, column: &str) -> Stri
     }
 }
 
+fn attach_policy(store: &AuthStore, user: reddb::auth::UserId, policy: &str) {
+    let policy = reddb::auth::policies::Policy::from_json_str(policy).expect("valid policy");
+    let id = policy.id.clone();
+    store.put_policy(policy).unwrap();
+    store
+        .attach_policy(reddb::auth::store::PrincipalRef::User(user), &id)
+        .unwrap();
+}
+
 #[test]
 fn runtime_uses_attached_iam_policy_for_dml() {
     let (rt, store) = runtime_with_auth();
@@ -432,4 +441,172 @@ fn revoke_removes_synthetic_grant_policy() {
         rt.execute_query("SELECT * FROM orders")
     });
     assert!(denied.is_err(), "revoke should remove the allow policy");
+}
+
+#[test]
+fn insert_column_policy_allows_named_columns_with_table_allow() {
+    let (rt, store) = runtime_with_auth();
+    rt.execute_query("CREATE TABLE orders (id INT, note TEXT)")
+        .unwrap();
+
+    attach_policy(
+        &store,
+        reddb::auth::UserId::platform("alice"),
+        r#"{
+            "id":"insert-orders",
+            "version":1,
+            "statements":[
+                {"effect":"allow","actions":["insert"],"resources":["table:orders"]}
+            ]
+        }"#,
+    );
+
+    let insert = as_user("alice", Role::Write, || {
+        rt.execute_query("INSERT INTO orders (id, note) VALUES (1, 'ok')")
+    });
+    assert!(
+        insert.is_ok(),
+        "table allow should allow insert: {insert:?}"
+    );
+}
+
+#[test]
+fn insert_column_policy_denies_explicit_denied_column() {
+    let (rt, store) = runtime_with_auth();
+    rt.execute_query("CREATE TABLE orders (id INT, public TEXT, secret TEXT)")
+        .unwrap();
+
+    attach_policy(
+        &store,
+        reddb::auth::UserId::platform("alice"),
+        r#"{
+            "id":"insert-orders-with-secret-deny",
+            "version":1,
+            "statements":[
+                {"effect":"allow","actions":["insert"],"resources":["table:orders"]},
+                {"effect":"deny","actions":["insert"],"resources":["column:orders.secret"]}
+            ]
+        }"#,
+    );
+
+    let denied = as_user("alice", Role::Write, || {
+        rt.execute_query("INSERT INTO orders (id, secret) VALUES (1, 'nope')")
+    });
+    let err = denied.expect_err("denied column should block insert");
+    assert!(
+        err.to_string().contains("column:orders.secret"),
+        "expected denied column in error, got {err}"
+    );
+}
+
+#[test]
+fn insert_column_policy_ignores_omitted_denied_columns() {
+    let (rt, store) = runtime_with_auth();
+    rt.execute_query("CREATE TABLE orders (id INT, public TEXT, secret TEXT)")
+        .unwrap();
+
+    attach_policy(
+        &store,
+        reddb::auth::UserId::platform("alice"),
+        r#"{
+            "id":"insert-orders-omit-secret",
+            "version":1,
+            "statements":[
+                {"effect":"allow","actions":["insert"],"resources":["table:orders"]},
+                {"effect":"deny","actions":["insert"],"resources":["column:orders.secret"]}
+            ]
+        }"#,
+    );
+
+    let insert = as_user("alice", Role::Write, || {
+        rt.execute_query("INSERT INTO orders (id, public) VALUES (1, 'ok')")
+    });
+    assert!(
+        insert.is_ok(),
+        "omitted denied column should not be treated as a write target: {insert:?}"
+    );
+}
+
+#[test]
+fn insert_column_policy_denies_tenant_auto_fill_target() {
+    let (rt, store) = runtime_with_auth();
+    rt.execute_query("CREATE TABLE events (id INT, tenant_id TEXT) TENANT BY (tenant_id)")
+        .unwrap();
+
+    attach_policy(
+        &store,
+        reddb::auth::UserId::from_parts(Some("acme"), "alice"),
+        r#"{
+            "id":"insert-events-deny-tenant-column",
+            "version":1,
+            "statements":[
+                {"effect":"allow","actions":["insert"],"resources":["table:tenant/acme/events"]},
+                {"effect":"deny","actions":["insert"],"resources":["column:tenant/acme/events.tenant_id"]}
+            ]
+        }"#,
+    );
+
+    set_current_tenant("acme".to_string());
+    let denied = as_user("alice", Role::Write, || {
+        rt.execute_query("INSERT INTO events (id) VALUES (1)")
+    });
+    clear_current_tenant();
+
+    let err = denied.expect_err("auto-filled tenant column should be policy checked");
+    assert!(
+        err.to_string().contains("column:events.tenant_id"),
+        "expected implicit tenant column in error, got {err}"
+    );
+}
+
+#[test]
+fn insert_column_policy_applies_to_multi_row_insert() {
+    let (rt, store) = runtime_with_auth();
+    rt.execute_query("CREATE TABLE orders (id INT, note TEXT)")
+        .unwrap();
+
+    attach_policy(
+        &store,
+        reddb::auth::UserId::platform("alice"),
+        r#"{
+            "id":"insert-orders-multi",
+            "version":1,
+            "statements":[
+                {"effect":"allow","actions":["insert"],"resources":["table:orders"]}
+            ]
+        }"#,
+    );
+
+    let insert = as_user("alice", Role::Write, || {
+        rt.execute_query("INSERT INTO orders (id, note) VALUES (1, 'a'), (2, 'b')")
+    })
+    .expect("multi-row insert should be allowed");
+    assert_eq!(insert.affected_rows, 2);
+}
+
+#[test]
+fn insert_column_allow_does_not_bypass_missing_table_allow() {
+    let (rt, store) = runtime_with_auth();
+    rt.execute_query("CREATE TABLE orders (id INT)").unwrap();
+
+    attach_policy(
+        &store,
+        reddb::auth::UserId::platform("alice"),
+        r#"{
+            "id":"insert-column-only",
+            "version":1,
+            "statements":[
+                {"effect":"allow","actions":["insert"],"resources":["column:orders.id"]}
+            ]
+        }"#,
+    );
+
+    let denied = as_user("alice", Role::Write, || {
+        rt.execute_query("INSERT INTO orders (id) VALUES (1)")
+    });
+    let err = denied.expect_err("column allow must not replace table allow");
+    assert!(
+        err.to_string().contains("table:orders"),
+        "expected missing table allow denial, got {err}"
+    );
 }
