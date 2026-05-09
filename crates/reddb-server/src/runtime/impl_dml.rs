@@ -2502,9 +2502,7 @@ mod tests {
             .execute_query("UPDATE notes SET body = 'b' WHERE id = 1")
             .unwrap();
         assert_eq!(updated.affected_rows, 1);
-        let deleted = rt
-            .execute_query("DELETE FROM notes WHERE id = 1")
-            .unwrap();
+        let deleted = rt.execute_query("DELETE FROM notes WHERE id = 1").unwrap();
         assert_eq!(deleted.affected_rows, 1);
     }
 
@@ -2563,7 +2561,11 @@ mod tests {
             let result = rt
                 .execute_query(&format!("SELECT score FROM bench_users WHERE id = {id}"))
                 .unwrap();
-            assert_eq!(result.result.records.len(), 1, "id={id} should match one row");
+            assert_eq!(
+                result.result.records.len(),
+                1,
+                "id={id} should match one row"
+            );
         }
 
         // Delete via the hash fast-path — exactly the bench scenario the
@@ -2586,10 +2588,8 @@ mod tests {
         rt.execute_query("CREATE TABLE bench_bulk (id INT, score INT)")
             .unwrap();
 
-        rt.execute_query(
-            "INSERT INTO bench_bulk (id, score) VALUES (1, 10), (2, 20), (3, 30)",
-        )
-        .unwrap();
+        rt.execute_query("INSERT INTO bench_bulk (id, score) VALUES (1, 10), (2, 20), (3, 30)")
+            .unwrap();
 
         let registered = rt
             .index_store_ref()
@@ -2617,16 +2617,14 @@ mod tests {
         rt.execute_query("INSERT INTO plain (uid, label) VALUES (1, 'a')")
             .unwrap();
 
-        assert!(
-            rt.index_store_ref()
-                .find_index_for_column("plain", "id")
-                .is_none()
-        );
-        assert!(
-            rt.index_store_ref()
-                .find_index_for_column("plain", "uid")
-                .is_none()
-        );
+        assert!(rt
+            .index_store_ref()
+            .find_index_for_column("plain", "id")
+            .is_none());
+        assert!(rt
+            .index_store_ref()
+            .find_index_for_column("plain", "uid")
+            .is_none());
     }
 
     /// Hook only fires once per collection. If an explicit
