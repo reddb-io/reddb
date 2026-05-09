@@ -1415,32 +1415,8 @@ impl RedDBServer {
             let _ = writeln!(body, "reddb_events_dlq_total {dlq_total}");
         }
 
-        // AI embedding metrics — issue #277
-        let dedup_hits = crate::runtime::ai::dedup_cache::DEDUP_HITS_TOTAL.load(
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        let dedup_misses = crate::runtime::ai::dedup_cache::DEDUP_MISSES_TOTAL.load(
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        let chunked_total = crate::runtime::ai::text_chunker::chunked_total();
-        let _ = writeln!(
-            body,
-            "# HELP reddb_ai_embedding_dedup_hits_total Embedding dedup cache hits."
-        );
-        let _ = writeln!(body, "# TYPE reddb_ai_embedding_dedup_hits_total counter");
-        let _ = writeln!(body, "reddb_ai_embedding_dedup_hits_total {}", dedup_hits);
-        let _ = writeln!(
-            body,
-            "# HELP reddb_ai_embedding_dedup_misses_total Embedding dedup cache misses."
-        );
-        let _ = writeln!(body, "# TYPE reddb_ai_embedding_dedup_misses_total counter");
-        let _ = writeln!(body, "reddb_ai_embedding_dedup_misses_total {}", dedup_misses);
-        let _ = writeln!(
-            body,
-            "# HELP reddb_ai_embedding_chunked_total Texts chunked before embedding."
-        );
-        let _ = writeln!(body, "# TYPE reddb_ai_embedding_chunked_total counter");
-        let _ = writeln!(body, "reddb_ai_embedding_chunked_total {}", chunked_total);
+        // AI provider and embedding metrics — issue #280.
+        crate::runtime::ai::metrics::render_ai_metrics(&mut body);
 
         HttpResponse {
             status: 200,

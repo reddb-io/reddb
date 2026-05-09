@@ -15,17 +15,36 @@ async fn ai_transport_retries_429_and_5xx_then_returns_success() {
     let transport = test_transport(3);
 
     let response = transport
-        .request(AiHttpRequest::post_json(
-            "mock",
-            format!("http://{}/v1/embeddings", stub.addr()),
-            r#"{"input":"hello"}"#.to_string(),
-        ))
+        .request(
+            AiHttpRequest::post_json(
+                "mock",
+                format!("http://{}/v1/embeddings", stub.addr()),
+                r#"{"input":"hello"}"#.to_string(),
+            )
+            .model("mock-embed"),
+        )
         .await
         .expect("request should succeed after retries");
 
     assert_eq!(response.status_code, 200);
     assert_eq!(response.body, r#"{"ok":true}"#);
+    assert_eq!(response.attempt_count, 3);
     assert_eq!(stub.request_count(), 3);
+
+    let mut body = String::new();
+    reddb_server::runtime::ai::metrics::render_ai_metrics(&mut body);
+    assert!(
+        body.contains("reddb_ai_provider_retries_total{provider=\"mock\",reason=\"http_5xx\"}")
+            || body
+                .contains("reddb_ai_provider_retries_total{provider=\"mock\",reason=\"http_429\"}"),
+        "{body}"
+    );
+    assert!(
+        body.contains(
+            "reddb_ai_provider_requests_total{provider=\"mock\",model=\"mock-embed\",status=\"ok\"}"
+        ),
+        "{body}"
+    );
 }
 
 #[tokio::test]
@@ -34,11 +53,14 @@ async fn ai_transport_error_includes_context_after_retry_exhaustion() {
     let transport = test_transport(2);
 
     let err = transport
-        .request(AiHttpRequest::post_json(
-            "openai",
-            format!("http://{}/v1/embeddings", stub.addr()),
-            "{}".to_string(),
-        ))
+        .request(
+            AiHttpRequest::post_json(
+                "openai",
+                format!("http://{}/v1/embeddings", stub.addr()),
+                "{}".to_string(),
+            )
+            .model("mock-error-model"),
+        )
         .await
         .expect_err("request should fail after retry exhaustion");
 
@@ -48,6 +70,15 @@ async fn ai_transport_error_includes_context_after_retry_exhaustion() {
     assert_eq!(err.total_wait_ms, 1);
     assert!(err.to_string().contains("provider=openai"));
     assert_eq!(stub.request_count(), 2);
+
+    let mut body = String::new();
+    reddb_server::runtime::ai::metrics::render_ai_metrics(&mut body);
+    assert!(
+        body.contains(
+            "reddb_ai_provider_requests_total{provider=\"openai\",model=\"mock-error-model\",status=\"http_5xx\"}"
+        ),
+        "{body}"
+    );
 }
 
 #[tokio::test]

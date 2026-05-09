@@ -20,7 +20,11 @@ struct Hist {
 
 impl Hist {
     fn new(n: usize) -> Self {
-        Self { counts: vec![0; n + 1], sum: 0, count: 0 }
+        Self {
+            counts: vec![0; n + 1],
+            sum: 0,
+            count: 0,
+        }
     }
 
     fn observe(&mut self, value: u64, bounds: &[u64]) {
@@ -111,13 +115,22 @@ pub fn render_ai_metrics(body: &mut String) {
     let dedup_misses = DEDUP_MISSES_TOTAL.load(Ordering::Relaxed);
     let chunked = chunked_total();
 
-    let _ = writeln!(body, "# HELP reddb_ai_embedding_dedup_hits_total Embedding dedup cache hits.");
+    let _ = writeln!(
+        body,
+        "# HELP reddb_ai_embedding_dedup_hits_total Embedding dedup cache hits."
+    );
     let _ = writeln!(body, "# TYPE reddb_ai_embedding_dedup_hits_total counter");
     let _ = writeln!(body, "reddb_ai_embedding_dedup_hits_total {dedup_hits}");
-    let _ = writeln!(body, "# HELP reddb_ai_embedding_dedup_misses_total Embedding dedup cache misses.");
+    let _ = writeln!(
+        body,
+        "# HELP reddb_ai_embedding_dedup_misses_total Embedding dedup cache misses."
+    );
     let _ = writeln!(body, "# TYPE reddb_ai_embedding_dedup_misses_total counter");
     let _ = writeln!(body, "reddb_ai_embedding_dedup_misses_total {dedup_misses}");
-    let _ = writeln!(body, "# HELP reddb_ai_embedding_chunked_total Texts chunked before embedding.");
+    let _ = writeln!(
+        body,
+        "# HELP reddb_ai_embedding_chunked_total Texts chunked before embedding."
+    );
     let _ = writeln!(body, "# TYPE reddb_ai_embedding_chunked_total counter");
     let _ = writeln!(body, "reddb_ai_embedding_chunked_total {chunked}");
 
@@ -128,11 +141,14 @@ pub fn render_ai_metrics(body: &mut String) {
             let _ = writeln!(body, "# HELP reddb_ai_provider_requests_total Total AI provider embedding requests by outcome.");
             let _ = writeln!(body, "# TYPE reddb_ai_provider_requests_total counter");
             let mut rows: Vec<_> = m.iter().collect();
-            rows.sort_by_key(|(k, _)| k);
+            rows.sort_by(|(left, _), (right, _)| left.cmp(right));
             for ((provider, model, status), count) in rows {
                 let _ = writeln!(
                     body,
-                    "reddb_ai_provider_requests_total{{provider=\"{provider}\",model=\"{model}\",status=\"{status}\"}} {count}"
+                    "reddb_ai_provider_requests_total{{provider=\"{}\",model=\"{}\",status=\"{}\"}} {count}",
+                    escape_label(provider),
+                    escape_label(model),
+                    escape_label(status)
                 );
             }
         }
@@ -143,7 +159,10 @@ pub fn render_ai_metrics(body: &mut String) {
         let m = provider_duration().lock();
         if !m.is_empty() {
             let _ = writeln!(body, "# HELP reddb_ai_provider_request_duration_ms AI provider request latency histogram (ms).");
-            let _ = writeln!(body, "# TYPE reddb_ai_provider_request_duration_ms histogram");
+            let _ = writeln!(
+                body,
+                "# TYPE reddb_ai_provider_request_duration_ms histogram"
+            );
             let mut keys: Vec<_> = m.keys().cloned().collect();
             keys.sort();
             for key in keys {
@@ -152,23 +171,31 @@ pub fn render_ai_metrics(body: &mut String) {
                 for (i, bound) in DURATION_BOUNDS_MS.iter().enumerate() {
                     let _ = writeln!(
                         body,
-                        "reddb_ai_provider_request_duration_ms_bucket{{provider=\"{provider}\",model=\"{model}\",le=\"{bound}\"}} {}",
+                        "reddb_ai_provider_request_duration_ms_bucket{{provider=\"{}\",model=\"{}\",le=\"{bound}\"}} {}",
+                        escape_label(provider),
+                        escape_label(model),
                         hist.counts[i]
                     );
                 }
                 let _ = writeln!(
                     body,
-                    "reddb_ai_provider_request_duration_ms_bucket{{provider=\"{provider}\",model=\"{model}\",le=\"+Inf\"}} {}",
+                    "reddb_ai_provider_request_duration_ms_bucket{{provider=\"{}\",model=\"{}\",le=\"+Inf\"}} {}",
+                    escape_label(provider),
+                    escape_label(model),
                     hist.counts[DURATION_BOUNDS_MS.len()]
                 );
                 let _ = writeln!(
                     body,
-                    "reddb_ai_provider_request_duration_ms_sum{{provider=\"{provider}\",model=\"{model}\"}} {}",
+                    "reddb_ai_provider_request_duration_ms_sum{{provider=\"{}\",model=\"{}\"}} {}",
+                    escape_label(provider),
+                    escape_label(model),
                     hist.sum
                 );
                 let _ = writeln!(
                     body,
-                    "reddb_ai_provider_request_duration_ms_count{{provider=\"{provider}\",model=\"{model}\"}} {}",
+                    "reddb_ai_provider_request_duration_ms_count{{provider=\"{}\",model=\"{}\"}} {}",
+                    escape_label(provider),
+                    escape_label(model),
                     hist.count
                 );
             }
@@ -179,14 +206,19 @@ pub fn render_ai_metrics(body: &mut String) {
     {
         let m = provider_retries().lock();
         if !m.is_empty() {
-            let _ = writeln!(body, "# HELP reddb_ai_provider_retries_total Total AI provider request retries.");
+            let _ = writeln!(
+                body,
+                "# HELP reddb_ai_provider_retries_total Total AI provider request retries."
+            );
             let _ = writeln!(body, "# TYPE reddb_ai_provider_retries_total counter");
             let mut rows: Vec<_> = m.iter().collect();
-            rows.sort_by_key(|(k, _)| k);
+            rows.sort_by(|(left, _), (right, _)| left.cmp(right));
             for ((provider, reason), count) in rows {
                 let _ = writeln!(
                     body,
-                    "reddb_ai_provider_retries_total{{provider=\"{provider}\",reason=\"{reason}\"}} {count}"
+                    "reddb_ai_provider_retries_total{{provider=\"{}\",reason=\"{}\"}} {count}",
+                    escape_label(provider),
+                    escape_label(reason)
                 );
             }
         }
@@ -196,7 +228,10 @@ pub fn render_ai_metrics(body: &mut String) {
     {
         let m = batch_size_hist().lock();
         if !m.is_empty() {
-            let _ = writeln!(body, "# HELP reddb_ai_embedding_batch_size Distribution of embedding sub-batch sizes.");
+            let _ = writeln!(
+                body,
+                "# HELP reddb_ai_embedding_batch_size Distribution of embedding sub-batch sizes."
+            );
             let _ = writeln!(body, "# TYPE reddb_ai_embedding_batch_size histogram");
             let mut keys: Vec<_> = m.keys().cloned().collect();
             keys.sort();
@@ -205,23 +240,27 @@ pub fn render_ai_metrics(body: &mut String) {
                 for (i, bound) in BATCH_SIZE_BOUNDS.iter().enumerate() {
                     let _ = writeln!(
                         body,
-                        "reddb_ai_embedding_batch_size_bucket{{provider=\"{provider}\",le=\"{bound}\"}} {}",
+                        "reddb_ai_embedding_batch_size_bucket{{provider=\"{}\",le=\"{bound}\"}} {}",
+                        escape_label(&provider),
                         hist.counts[i]
                     );
                 }
                 let _ = writeln!(
                     body,
-                    "reddb_ai_embedding_batch_size_bucket{{provider=\"{provider}\",le=\"+Inf\"}} {}",
+                    "reddb_ai_embedding_batch_size_bucket{{provider=\"{}\",le=\"+Inf\"}} {}",
+                    escape_label(&provider),
                     hist.counts[BATCH_SIZE_BOUNDS.len()]
                 );
                 let _ = writeln!(
                     body,
-                    "reddb_ai_embedding_batch_size_sum{{provider=\"{provider}\"}} {}",
+                    "reddb_ai_embedding_batch_size_sum{{provider=\"{}\"}} {}",
+                    escape_label(&provider),
                     hist.sum
                 );
                 let _ = writeln!(
                     body,
-                    "reddb_ai_embedding_batch_size_count{{provider=\"{provider}\"}} {}",
+                    "reddb_ai_embedding_batch_size_count{{provider=\"{}\"}} {}",
+                    escape_label(&provider),
                     hist.count
                 );
             }
@@ -235,15 +274,30 @@ pub fn render_ai_metrics(body: &mut String) {
             let _ = writeln!(body, "# HELP reddb_ai_text_tokens_total Total AI provider tokens consumed (best-effort from usage field).");
             let _ = writeln!(body, "# TYPE reddb_ai_text_tokens_total counter");
             let mut rows: Vec<_> = m.iter().collect();
-            rows.sort_by_key(|(k, _)| k);
+            rows.sort_by(|(left, _), (right, _)| left.cmp(right));
             for ((provider, model), count) in rows {
                 let _ = writeln!(
                     body,
-                    "reddb_ai_text_tokens_total{{provider=\"{provider}\",model=\"{model}\"}} {count}"
+                    "reddb_ai_text_tokens_total{{provider=\"{}\",model=\"{}\"}} {count}",
+                    escape_label(provider),
+                    escape_label(model)
                 );
             }
         }
     }
+}
+
+fn escape_label(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -254,8 +308,8 @@ mod tests {
     fn hist_observe_correct_buckets() {
         let bounds = &[100u64, 500, 1000];
         let mut h = Hist::new(bounds.len());
-        h.observe(50, bounds);   // le=100, le=500, le=1000, +Inf
-        h.observe(200, bounds);  // le=500, le=1000, +Inf
+        h.observe(50, bounds); // le=100, le=500, le=1000, +Inf
+        h.observe(200, bounds); // le=500, le=1000, +Inf
         h.observe(2000, bounds); // +Inf only
         assert_eq!(h.counts, vec![1, 2, 3, 3]); // cumulative
         assert_eq!(h.sum, 2250);
@@ -273,11 +327,26 @@ mod tests {
         let mut body = String::new();
         render_ai_metrics(&mut body);
 
-        assert!(body.contains("reddb_ai_provider_requests_total{provider=\"test_prov_rnd\""), "requests counter");
-        assert!(body.contains("reddb_ai_provider_retries_total{provider=\"test_prov_rnd\""), "retries counter");
-        assert!(body.contains("reddb_ai_embedding_batch_size_count{provider=\"test_prov_rnd\"}"), "batch size hist");
-        assert!(body.contains("reddb_ai_text_tokens_total{provider=\"test_prov_rnd\""), "tokens counter");
-        assert!(body.contains("reddb_ai_provider_request_duration_ms_count{provider=\"test_prov_rnd\""), "duration hist");
+        assert!(
+            body.contains("reddb_ai_provider_requests_total{provider=\"test_prov_rnd\""),
+            "requests counter"
+        );
+        assert!(
+            body.contains("reddb_ai_provider_retries_total{provider=\"test_prov_rnd\""),
+            "retries counter"
+        );
+        assert!(
+            body.contains("reddb_ai_embedding_batch_size_count{provider=\"test_prov_rnd\"}"),
+            "batch size hist"
+        );
+        assert!(
+            body.contains("reddb_ai_text_tokens_total{provider=\"test_prov_rnd\""),
+            "tokens counter"
+        );
+        assert!(
+            body.contains("reddb_ai_provider_request_duration_ms_count{provider=\"test_prov_rnd\""),
+            "duration hist"
+        );
     }
 
     #[test]

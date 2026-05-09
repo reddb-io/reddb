@@ -14,6 +14,7 @@
 
 pub mod batch_client;
 pub mod dedup_cache;
+pub mod metrics;
 pub mod ner;
 pub mod prompt_template;
 pub mod text_chunker;

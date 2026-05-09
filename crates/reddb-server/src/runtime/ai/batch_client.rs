@@ -9,13 +9,16 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::ai::AiProvider;
+use crate::json::{Map, Value as JsonValue};
 use crate::runtime::ai::dedup_cache::{
     EmbeddingDedupCache, DEFAULT_DEDUP_LRU_SIZE, DEFAULT_DEDUP_TTL_MS,
 };
 use crate::runtime::ai::text_chunker::{ChunkMode, DEFAULT_MAX_TOKENS};
 use crate::runtime::ai::transport::{AiHttpRequest, AiTransport, AiTransportError};
+use crate::runtime::audit_log::AuditLogger;
 
 pub const CONFIG_MAX_BATCH_SIZE: &str = "runtime.ai.embedding_max_batch_size";
 pub const DEFAULT_OPENAI_MAX_BATCH: usize = 2048;
@@ -30,12 +33,21 @@ pub struct SubBatchRequest {
     pub inputs: Vec<String>,
 }
 
+pub struct SubBatchResponse {
+    pub embeddings: Vec<Vec<f32>>,
+    pub model: String,
+    pub prompt_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub attempt_count: u32,
+    pub total_wait_ms: u64,
+}
+
 /// Backend abstraction. Production uses `AiTransportSender`; tests use mocks.
 pub trait SubBatchSender: Send + Sync {
     fn send(
         &self,
         request: SubBatchRequest,
-    ) -> impl Future<Output = Result<Vec<Vec<f32>>, AiTransportError>> + Send + '_;
+    ) -> impl Future<Output = Result<SubBatchResponse, AiTransportError>> + Send + '_;
 }
 
 /// Production backend: routes sub-batches through `AiTransport`.
@@ -47,24 +59,33 @@ impl SubBatchSender for AiTransportSender {
     fn send(
         &self,
         request: SubBatchRequest,
-    ) -> impl Future<Output = Result<Vec<Vec<f32>>, AiTransportError>> + Send + '_ {
+    ) -> impl Future<Output = Result<SubBatchResponse, AiTransportError>> + Send + '_ {
         async move {
             let payload = crate::ai::build_embedding_payload(&request.model, &request.inputs);
             let url = format!("{}/embeddings", request.api_base.trim_end_matches('/'));
-            let http_req =
-                AiHttpRequest::post_json(request.provider.as_str(), url, payload)
-                    .header("authorization", format!("Bearer {}", request.api_key));
+            let http_req = AiHttpRequest::post_json(request.provider.as_str(), url, payload)
+                .model(request.model.clone())
+                .header("authorization", format!("Bearer {}", request.api_key));
 
             let response = self.transport.request(http_req).await?;
 
-            crate::ai::parse_embedding_vectors(&response.body).map_err(|msg| {
+            let parsed = crate::ai::parse_embedding_response(&response.body).map_err(|msg| {
                 AiTransportError {
-                    provider: request.provider,
+                    provider: request.provider.clone(),
                     status_code: None,
                     attempt_count: 1,
                     total_wait_ms: 0,
                     message: msg,
                 }
+            })?;
+
+            Ok(SubBatchResponse {
+                embeddings: parsed.embeddings,
+                model: parsed.model,
+                prompt_tokens: parsed.prompt_tokens,
+                total_tokens: parsed.total_tokens,
+                attempt_count: response.attempt_count,
+                total_wait_ms: response.total_wait_ms,
             })
         }
     }
@@ -83,6 +104,7 @@ pub struct AiBatchClient<S = AiTransportSender> {
     chunk_mode: ChunkMode,
     /// Max tokens per chunk (approximate: 1 token ≈ 4 bytes).
     max_tokens: usize,
+    audit_log: Option<Arc<AuditLogger>>,
 }
 
 impl AiBatchClient<AiTransportSender> {
@@ -93,18 +115,22 @@ impl AiBatchClient<AiTransportSender> {
             dedup_cache: None,
             chunk_mode: ChunkMode::Single,
             max_tokens: DEFAULT_MAX_TOKENS,
+            audit_log: None,
         }
     }
 
     pub fn from_runtime(runtime: &crate::runtime::RedDBRuntime) -> Self {
-        use crate::runtime::ai::dedup_cache::{CONFIG_DEDUP_ENABLED, CONFIG_DEDUP_LRU_SIZE, CONFIG_DEDUP_TTL_MS};
+        use crate::runtime::ai::dedup_cache::{
+            CONFIG_DEDUP_ENABLED, CONFIG_DEDUP_LRU_SIZE, CONFIG_DEDUP_TTL_MS,
+        };
         use crate::runtime::ai::text_chunker::{CONFIG_CHUNK_MODE, CONFIG_MAX_TOKENS};
         use std::time::Duration;
 
         let transport = AiTransport::from_runtime(runtime);
         let dedup_enabled = runtime.config_bool(CONFIG_DEDUP_ENABLED, false);
         let dedup_cache = if dedup_enabled {
-            let lru_size = runtime.config_u64(CONFIG_DEDUP_LRU_SIZE, DEFAULT_DEDUP_LRU_SIZE as u64) as usize;
+            let lru_size =
+                runtime.config_u64(CONFIG_DEDUP_LRU_SIZE, DEFAULT_DEDUP_LRU_SIZE as u64) as usize;
             let ttl_ms = runtime.config_u64(CONFIG_DEDUP_TTL_MS, DEFAULT_DEDUP_TTL_MS);
             Some(Arc::new(EmbeddingDedupCache::new(
                 lru_size,
@@ -113,11 +139,8 @@ impl AiBatchClient<AiTransportSender> {
         } else {
             None
         };
-        let chunk_mode = ChunkMode::from_str(
-            &runtime.config_string(CONFIG_CHUNK_MODE, "single"),
-        );
-        let max_tokens =
-            runtime.config_u64(CONFIG_MAX_TOKENS, DEFAULT_MAX_TOKENS as u64) as usize;
+        let chunk_mode = ChunkMode::from_str(&runtime.config_string(CONFIG_CHUNK_MODE, "single"));
+        let max_tokens = runtime.config_u64(CONFIG_MAX_TOKENS, DEFAULT_MAX_TOKENS as u64) as usize;
 
         Self {
             sender: AiTransportSender { transport },
@@ -125,6 +148,7 @@ impl AiBatchClient<AiTransportSender> {
             dedup_cache,
             chunk_mode,
             max_tokens,
+            audit_log: Some(runtime.audit_log_arc()),
         }
     }
 }
@@ -138,6 +162,7 @@ impl<S: SubBatchSender> AiBatchClient<S> {
             dedup_cache: None,
             chunk_mode: ChunkMode::Single,
             max_tokens: DEFAULT_MAX_TOKENS,
+            audit_log: None,
         }
     }
 
@@ -162,6 +187,11 @@ impl<S: SubBatchSender> AiBatchClient<S> {
     /// Set max tokens per chunk.
     pub fn with_max_tokens(mut self, max: usize) -> Self {
         self.max_tokens = max.max(1);
+        self
+    }
+
+    pub fn with_audit_log(mut self, audit_log: Arc<AuditLogger>) -> Self {
+        self.audit_log = Some(audit_log);
         self
     }
 
@@ -191,17 +221,25 @@ impl<S: SubBatchSender> AiBatchClient<S> {
             .max_batch_size_override
             .unwrap_or_else(|| default_max_batch_size(provider));
         let api_base = provider.resolve_api_base();
+        let started = Instant::now();
+        let mut local_dedup_hits = 0u64;
+        let mut any_chunked = false;
+        let mut retries_total = 0u64;
+        let mut total_wait_ms = 0u64;
+        let mut prompt_tokens_total = 0u64;
+        let mut total_tokens_total = 0u64;
 
         // Step 1: apply chunking — each text → representative text to embed.
         // In Single mode this is the first (or only) chunk.
-        let chunked_texts: Vec<String> = texts
-            .iter()
-            .map(|t| {
-                let chunks = crate::runtime::ai::text_chunker::chunk(t, self.max_tokens);
-                let chosen = crate::runtime::ai::text_chunker::apply_mode(chunks, self.chunk_mode);
-                chosen.into_iter().next().unwrap_or_default()
-            })
-            .collect();
+        let mut chunked_texts: Vec<String> = Vec::with_capacity(texts.len());
+        for t in &texts {
+            let chunks = crate::runtime::ai::text_chunker::chunk(t, self.max_tokens);
+            if chunks.len() > 1 {
+                any_chunked = true;
+            }
+            let chosen = crate::runtime::ai::text_chunker::apply_mode(chunks, self.chunk_mode);
+            chunked_texts.push(chosen.into_iter().next().unwrap_or_default());
+        }
 
         // Step 2: check dedup cache and collect unique provider misses.
         // result[i] = Some(embedding) when resolved, None when pending.
@@ -226,6 +264,7 @@ impl<S: SubBatchSender> AiBatchClient<S> {
             // the provider returned).
             if let Some(cache) = &self.dedup_cache {
                 if let Some(cached) = cache.get(text) {
+                    local_dedup_hits = local_dedup_hits.saturating_add(1);
                     result[i] = Some(cached);
                     continue;
                 }
@@ -246,6 +285,7 @@ impl<S: SubBatchSender> AiBatchClient<S> {
         let mut unique_embeddings: Vec<Vec<f32>> = vec![vec![]; unique_texts_to_embed.len()];
 
         for chunk in unique_texts_to_embed.chunks(max_batch) {
+            crate::runtime::ai::metrics::record_batch_size(provider.token(), chunk.len());
             // Determine the start index of this chunk within unique_texts_to_embed.
             // (We need this to write results back into unique_embeddings.)
             let chunk_start = {
@@ -263,10 +303,35 @@ impl<S: SubBatchSender> AiBatchClient<S> {
                 inputs: chunk.to_vec(),
             };
 
-            let embeddings = self.sender.send(request).await?;
+            let response = match self.sender.send(request).await {
+                Ok(response) => response,
+                Err(err) => {
+                    self.record_error_audit(provider.token(), &err);
+                    return Err(err);
+                }
+            };
+            retries_total =
+                retries_total.saturating_add(u64::from(response.attempt_count.saturating_sub(1)));
+            total_wait_ms = total_wait_ms.saturating_add(response.total_wait_ms);
+            if let Some(tokens) = response.prompt_tokens {
+                prompt_tokens_total = prompt_tokens_total.saturating_add(tokens);
+            }
+            if let Some(tokens) = response.total_tokens {
+                total_tokens_total = total_tokens_total.saturating_add(tokens);
+            }
+            let token_metric = response
+                .prompt_tokens
+                .unwrap_or(0)
+                .saturating_add(response.total_tokens.unwrap_or(0));
+            crate::runtime::ai::metrics::record_tokens(
+                provider.token(),
+                &response.model,
+                token_metric,
+            );
+            let embeddings = response.embeddings;
 
             if embeddings.len() != chunk.len() {
-                return Err(AiTransportError {
+                let err = AiTransportError {
                     provider: provider.token().to_string(),
                     status_code: None,
                     attempt_count: 0,
@@ -276,7 +341,9 @@ impl<S: SubBatchSender> AiBatchClient<S> {
                         embeddings.len(),
                         chunk.len()
                     ),
-                });
+                };
+                self.record_error_audit(provider.token(), &err);
+                return Err(err);
             }
 
             for (j, embedding) in embeddings.into_iter().enumerate() {
@@ -296,8 +363,143 @@ impl<S: SubBatchSender> AiBatchClient<S> {
             }
         }
 
+        self.record_batch_audit(BatchAudit {
+            provider: provider.token(),
+            model,
+            batch_size: texts.len(),
+            total_tokens: total_tokens_total,
+            duration_ms: millis_u64(started.elapsed()),
+            retries: retries_total,
+            dedup_hits: local_dedup_hits,
+            chunked: any_chunked,
+            total_wait_ms,
+            prompt_tokens: prompt_tokens_total,
+        });
+
         Ok(result.into_iter().map(|v| v.unwrap_or_default()).collect())
     }
+
+    fn record_batch_audit(&self, audit: BatchAudit<'_>) {
+        tracing::info!(
+            target: "reddb::developer",
+            provider = audit.provider,
+            model = audit.model,
+            batch_size = audit.batch_size,
+            total_tokens = audit.total_tokens,
+            duration_ms = audit.duration_ms,
+            retries = audit.retries,
+            dedup_hits = audit.dedup_hits,
+            chunked = audit.chunked,
+            "ai embedding batch completed"
+        );
+
+        let Some(audit_log) = &self.audit_log else {
+            return;
+        };
+        let mut details = Map::new();
+        details.insert(
+            "provider".to_string(),
+            JsonValue::String(audit.provider.to_string()),
+        );
+        details.insert(
+            "model".to_string(),
+            JsonValue::String(audit.model.to_string()),
+        );
+        details.insert(
+            "batch_size".to_string(),
+            JsonValue::Number(audit.batch_size as f64),
+        );
+        details.insert(
+            "total_tokens".to_string(),
+            JsonValue::Number(audit.total_tokens as f64),
+        );
+        details.insert(
+            "duration_ms".to_string(),
+            JsonValue::Number(audit.duration_ms as f64),
+        );
+        details.insert(
+            "retries".to_string(),
+            JsonValue::Number(audit.retries as f64),
+        );
+        details.insert(
+            "dedup_hits".to_string(),
+            JsonValue::Number(audit.dedup_hits as f64),
+        );
+        details.insert("chunked".to_string(), JsonValue::Bool(audit.chunked));
+        details.insert(
+            "total_wait_ms".to_string(),
+            JsonValue::Number(audit.total_wait_ms as f64),
+        );
+        details.insert(
+            "prompt_tokens".to_string(),
+            JsonValue::Number(audit.prompt_tokens as f64),
+        );
+        audit_log.record(
+            "ai/embedding_batch",
+            "system",
+            audit.provider,
+            "ok",
+            JsonValue::Object(details),
+        );
+    }
+
+    fn record_error_audit(&self, provider: &str, err: &AiTransportError) {
+        tracing::warn!(
+            target: "reddb::developer",
+            provider = provider,
+            status_code = err.status_code.unwrap_or(0),
+            attempt_count = err.attempt_count,
+            total_wait_ms = err.total_wait_ms,
+            "ai embedding provider error"
+        );
+
+        let Some(audit_log) = &self.audit_log else {
+            return;
+        };
+        let mut details = Map::new();
+        details.insert(
+            "provider".to_string(),
+            JsonValue::String(provider.to_string()),
+        );
+        details.insert(
+            "status_code".to_string(),
+            err.status_code
+                .map(|status| JsonValue::Number(status as f64))
+                .unwrap_or(JsonValue::Null),
+        );
+        details.insert(
+            "attempt_count".to_string(),
+            JsonValue::Number(err.attempt_count as f64),
+        );
+        details.insert(
+            "total_wait_ms".to_string(),
+            JsonValue::Number(err.total_wait_ms as f64),
+        );
+        audit_log.record(
+            "ai/embedding_error",
+            "system",
+            provider,
+            "error",
+            JsonValue::Object(details),
+        );
+    }
+}
+
+struct BatchAudit<'a> {
+    provider: &'a str,
+    model: &'a str,
+    batch_size: usize,
+    total_tokens: u64,
+    duration_ms: u64,
+    retries: u64,
+    dedup_hits: u64,
+    chunked: bool,
+    total_wait_ms: u64,
+    prompt_tokens: u64,
+}
+
+fn millis_u64(duration: std::time::Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 fn default_max_batch_size(provider: &AiProvider) -> usize {
@@ -329,11 +531,20 @@ mod tests {
         fn send(
             &self,
             request: SubBatchRequest,
-        ) -> impl Future<Output = Result<Vec<Vec<f32>>, AiTransportError>> + Send + '_ {
+        ) -> impl Future<Output = Result<SubBatchResponse, AiTransportError>> + Send + '_ {
             let n = request.inputs.len();
             let dims = self.dims;
             self.call_count.fetch_add(1, Ordering::SeqCst);
-            async move { Ok((0..n).map(|_| vec![0.1f32; dims]).collect()) }
+            async move {
+                Ok(SubBatchResponse {
+                    embeddings: (0..n).map(|_| vec![0.1f32; dims]).collect(),
+                    model: request.model,
+                    prompt_tokens: Some(n as u64),
+                    total_tokens: Some(n as u64),
+                    attempt_count: 1,
+                    total_wait_ms: 0,
+                })
+            }
         }
     }
 
@@ -401,6 +612,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn embed_records_batch_size_and_token_metrics() {
+        let (client, _) = mock_client(2);
+        let provider = AiProvider::Custom("test_batch_metrics_provider".to_string());
+        let _ = client
+            .with_max_batch_size(2)
+            .embed_batch(
+                &provider,
+                "test-batch-metrics-model",
+                "key",
+                vec!["a".into(), "b".into(), "c".into()],
+            )
+            .await
+            .unwrap();
+
+        let mut body = String::new();
+        crate::runtime::ai::metrics::render_ai_metrics(&mut body);
+        assert!(
+            body.contains(
+                "reddb_ai_embedding_batch_size_count{provider=\"test_batch_metrics_provider\"} 2"
+            ),
+            "{body}"
+        );
+        assert!(
+            body.contains(
+                "reddb_ai_text_tokens_total{provider=\"test_batch_metrics_provider\",model=\"test-batch-metrics-model\"} 6"
+            ),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
     async fn embed_empty_strings_skipped_positions_preserved() {
         let (client, counter) = mock_client(2);
         let texts = vec![
@@ -430,7 +672,8 @@ mod tests {
             fn send(
                 &self,
                 request: SubBatchRequest,
-            ) -> impl Future<Output = Result<Vec<Vec<f32>>, AiTransportError>> + Send + '_ {
+            ) -> impl Future<Output = Result<SubBatchResponse, AiTransportError>> + Send + '_
+            {
                 async move {
                     Err(AiTransportError {
                         provider: request.provider,
@@ -458,6 +701,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn embed_writes_structured_audit_line_when_logger_attached() {
+        let (client, _) = mock_client(2);
+        let dir = tempfile::tempdir().unwrap();
+        let audit_path = dir.path().join(".audit.log");
+        let audit_log = Arc::new(AuditLogger::with_max_bytes(audit_path, 1024 * 1024));
+        let provider = AiProvider::Custom("test_audit_provider".to_string());
+
+        let _ = client
+            .with_audit_log(Arc::clone(&audit_log))
+            .embed_batch(
+                &provider,
+                "test-audit-model",
+                "key",
+                vec!["alpha".into(), "beta".into()],
+            )
+            .await
+            .unwrap();
+
+        assert!(audit_log.wait_idle(Duration::from_secs(2)));
+        let body = std::fs::read_to_string(audit_log.path()).unwrap();
+        assert!(body.contains("\"action\":\"ai/embedding_batch\""), "{body}");
+        assert!(
+            body.contains("\"provider\":\"test_audit_provider\""),
+            "{body}"
+        );
+        assert!(body.contains("\"model\":\"test-audit-model\""), "{body}");
+        assert!(body.contains("\"batch_size\":2"), "{body}");
+        assert!(body.contains("\"total_tokens\":2"), "{body}");
+        assert!(body.contains("\"duration_ms\""), "{body}");
+        assert!(body.contains("\"retries\":0"), "{body}");
+        assert!(body.contains("\"dedup_hits\":0"), "{body}");
+        assert!(body.contains("\"chunked\":false"), "{body}");
+    }
+
+    #[tokio::test]
     async fn embed_order_preserved_across_batches() {
         struct BatchNumberSender {
             call_count: Arc<AtomicUsize>,
@@ -467,20 +745,29 @@ mod tests {
             fn send(
                 &self,
                 request: SubBatchRequest,
-            ) -> impl Future<Output = Result<Vec<Vec<f32>>, AiTransportError>> + Send + '_ {
+            ) -> impl Future<Output = Result<SubBatchResponse, AiTransportError>> + Send + '_
+            {
                 let call = self.call_count.fetch_add(1, Ordering::SeqCst);
                 let n = request.inputs.len();
                 async move {
                     // encode batch number as first float for order verification
-                    Ok((0..n).map(|_| vec![call as f32]).collect())
+                    Ok(SubBatchResponse {
+                        embeddings: (0..n).map(|_| vec![call as f32]).collect(),
+                        model: request.model,
+                        prompt_tokens: Some(n as u64),
+                        total_tokens: Some(n as u64),
+                        attempt_count: 1,
+                        total_wait_ms: 0,
+                    })
                 }
             }
         }
 
         let counter = Arc::new(AtomicUsize::new(0));
-        let client =
-            AiBatchClient::with_sender(BatchNumberSender { call_count: Arc::clone(&counter) })
-                .with_max_batch_size(3);
+        let client = AiBatchClient::with_sender(BatchNumberSender {
+            call_count: Arc::clone(&counter),
+        })
+        .with_max_batch_size(3);
 
         // 5 texts → 2 batches (3 + 2)
         let texts: Vec<String> = (0..5).map(|i| format!("t{i}")).collect();
@@ -515,10 +802,7 @@ mod tests {
     #[tokio::test]
     async fn dedup_on_1000_inputs_10_unique_sends_10_to_provider() {
         let (base_client, counter) = mock_client(4);
-        let cache = Arc::new(EmbeddingDedupCache::new(
-            1024,
-            Duration::from_secs(60),
-        ));
+        let cache = Arc::new(EmbeddingDedupCache::new(1024, Duration::from_secs(60)));
         let client = base_client.with_dedup_cache(Arc::clone(&cache));
 
         let unique: Vec<String> = (0..10).map(|i| format!("unique text {i}")).collect();
@@ -546,7 +830,11 @@ mod tests {
             .unwrap();
         assert_eq!(result2.len(), 1000);
         // No new provider call — all served from cache
-        assert_eq!(counter.load(Ordering::SeqCst), 1, "still 1 provider request total");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "still 1 provider request total"
+        );
         assert_eq!(cache.hits(), 1000, "all 1000 hit cache on second call");
     }
 
