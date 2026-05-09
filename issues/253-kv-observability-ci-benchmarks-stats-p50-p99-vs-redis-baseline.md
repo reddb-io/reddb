@@ -20,6 +20,8 @@ Implement this issue as a focused vertical slice. Preserve behavior with tests/c
 
 Operational tail: surface per-verb stats counters from the runtime (`puts`, `gets`, `deletes`, `incrs`, `cas_success`, `cas_conflict`, `watch_streams_active`, `watch_events_emitted`, `watch_drops`) and pin a CI benchmark suite that compares RedDB to a Redis baseline on the same workload — `PUT / GET / INCR` p50 + p99, plus `WATCH` event-delivery lag. Regressions block merge.
 
+Scope guard: this issue benchmarks **normal KV only**. Config and Vault have different correctness and audit contracts and must not be benchmarked as Redis replacements.
+
 ## Acceptance criteria
 
 - [ ] `KvAtomicOps` increments per-verb counters atomically on every operation. `KvWatchStream` exports stream-count + drop-count gauges.

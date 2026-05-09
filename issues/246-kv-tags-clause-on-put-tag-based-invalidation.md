@@ -8,6 +8,8 @@
 
 Brings the Cache primitive's tag invalidation grammar to user KV collections. `PUT key = value TAGS [...]` attaches one or more tags at write time; `INVALIDATE TAGS [...] FROM <coll>` drops every entry tagged with any of the listed values in O(matching) time. Symmetry across primitives — operators learn the model once and apply it everywhere.
 
+Scope guard: this issue is **normal KV only**. Destructive tag invalidation must not apply to Config or Vault. Config/Vault tags are metadata for list/watch/rotate-style flows under #314 and #321.
+
 ## Acceptance criteria
 
 - [ ] Parser accepts `PUT <key> = <value> [EXPIRE …] [TAGS [t1, t2, …]]`.

@@ -20,6 +20,8 @@ Implement this issue as a focused vertical slice. Preserve behavior with tests/c
 
 Extends WATCH (#245) with the production-shape features. `WATCH prefix.*` subscribes to every change under a key prefix. Per-subscription buffers gain backpressure-aware drops with an exposed counter so slow consumers do not back-pressure writers. Disconnected subscribers can resume from a saved LSN to skip events they already saw. Idle subscriptions auto-expire after a configurable timeout to prevent orphan subscriptions accumulating after silent client disconnects.
 
+Scope guard: this issue is **normal KV only**. Prefix watch for Config/Vault requires the metadata-safety rules in #321.
+
 ## Acceptance criteria
 
 - [ ] Parser accepts `WATCH <prefix>.*`. Matching uses the same prefix index the engine already maintains for `SCAN <prefix>.*` queries.

@@ -64,6 +64,17 @@ Reusable vocabulary for code, docs, and architecture decisions. New terms join t
 - **`red.*` read access** — universally readable by any authenticated principal *within their `EffectiveScope`*. No capability check on read; tenant filtering is mandatory and enforced by the engine, not by user-defined policies. Write/update on `red.*` is gated by `cluster:admin`. See ADR 0011 §read access.
 - **Catalog snapshot freshness** — `red.*` columns split into two consistency tiers: hot fields (`name`, `model`, `entities`, `segments`, `attention`, `in_memory_bytes`) read directly from the live catalog snapshot every query (sub-ms). Cold fields requiring B-tree walks (`on_disk_bytes`) cache 30s per-collection. Read-after-write within the same node is strong; cross-node in clusters is eventually consistent.
 
+## Keyed Collection Models
+
+- **KV** — keyed Collection model for volatile or high-churn application data. Normal KV is the only keyed model that supports Redis-flavor operations such as TTL/EXPIRE, INCR/DECR, ADD/merge, destructive tag invalidation, and physical DELETE semantics.
+- **Config** — keyed Collection model for stable operational configuration. Config values are readable as plaintext, may be typed/schema-validated, keep versioned history for rollback, and never support TTL or counter-style mutation.
+- **Vault** — keyed Collection model for sealed secrets. Vault values are encrypted before WAL/page/snapshot persistence, `GET VAULT` returns redacted metadata only, and plaintext reads require explicit `UNSEAL` plus audit.
+- **SecretRef** — Config value that points at a Vault secret. `GET CONFIG` returns the reference, not plaintext; resolving it is an explicit operation that also requires Vault unseal permission.
+- **Unseal** — privileged plaintext read from Vault. Every unseal attempt is audited and is distinct from metadata reads.
+- **Rotate** — versioned replacement operation for Config and Vault. Used for safe rollout/rollback of stable settings and secrets.
+- **Purge** — privileged irreversible removal of Config/Vault history. Normal `DELETE` on Config/Vault creates a tombstone version instead.
+- **`red.config` / `red.vault`** — bootstrap-created system collections for engine-managed configuration and secrets. Legacy pseudo-paths such as `$config.*`, `$secret.*`, and `red.secret.*` normalize to these explicit system collections; they are not the canonical public model.
+
 ## Events & Subscriptions
 
 - **Event-enabled collection** — a Collection (table/document/vector/graph/timeseries/kv) declared with `WITH EVENTS [TO <queue>] [REDACT (...)] [WHERE ...]`. Mutations to it emit events to a queue. Queues themselves cannot emit events (loop prevention).

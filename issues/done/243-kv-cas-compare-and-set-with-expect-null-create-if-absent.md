@@ -6,6 +6,8 @@ GitHub: https://github.com/reddb-io/reddb/issues/243
 
 Implemented 2026-05-09.
 
+Scope guard: this issue is **normal KV only**. Config/Vault may reuse version/null CAS concepts later, but their safety contracts live under #314.
+
 ## What was built
 
 - `KvCommand::Cas { collection, key, expected, new_value, ttl_ms }` variant in `storage/query/core.rs`

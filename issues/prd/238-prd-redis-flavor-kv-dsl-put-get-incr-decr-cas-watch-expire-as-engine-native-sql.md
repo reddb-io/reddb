@@ -10,11 +10,17 @@ GitHub issue number: #238
 
 Parent/PRD/umbrella issue. Kept out of Ralph's top-level implementation queue.
 
+## Scope Clarification
+
+This PRD covers **normal KV only**: Redis-flavor keyed application data. It must not implement Config or Vault semantics.
+
+Config and Vault are separate keyed Collection models defined by #314. Normal KV is the only model in this PRD that supports TTL/EXPIRE, INCR/DECR, ADD/merge, and destructive tag invalidation.
+
 ## Original GitHub Body
 
 ## Problem Statement
 
-RedDB's marketing pitch positions us as a drop-in Redis replacement for application-tier caching and KV. Today the engine **does** ship a real KV story — `(key, value)` rows on a `KV` collection queryable with full SQL, plus engine config (`SET CONFIG <path>`) and vault (`$config.<path>` / `$secret.<path>`) surfaces — but it does NOT expose the Redis-flavor verbs developers reach for:
+RedDB's marketing pitch positions us as a drop-in Redis replacement for application-tier caching and normal KV. Today the engine **does** ship a real KV story — `(key, value)` rows on a `KV` collection queryable with full SQL — but it does NOT expose the Redis-flavor verbs developers reach for:
 
 - No `PUT key = value` / `GET key` / `DELETE key` shorthand. Today they have to write `INSERT INTO sessions (key, value) VALUES (...)` / `SELECT value FROM sessions WHERE key = '...'`.
 - No `INCR key BY n` / `DECR` / atomic counters. Application code has to wrap a transaction around `SELECT … FOR UPDATE → UPDATE`, which loses to one-call-Redis on every benchmark.
@@ -56,7 +62,7 @@ For multi-namespace deployments, a default `kv_default` collection auto-created 
 10. As a developer, I want `PUT key = value` on a default collection (no prefix) to just work out-of-the-box, so that my Redis-shaped code does not need a `CREATE TABLE … KV` migration before first use.
 11. As a developer, I want `PUT sessions.\${id} = …` to route to a named `sessions KV` collection when one exists, so that namespace per workload (sessions, idempotency, render fragments) stays a one-line declaration.
 12. As a security engineer, I want IAM-style policies to gate the new verbs the same way they gate SELECT / INSERT today, so that rolling out the DSL does not introduce a permission gap.
-13. As a security engineer, I want `red.secret.*` keys to remain sealed unless an authorised principal calls UNSEAL even when accessed via the new `GET red.secret.path` shape, so that vault semantics survive the new surface.
+13. As a security engineer, I want this PRD to stay scoped to normal KV only, so that Config and Vault can enforce their separate safety contracts in #314.
 14. As a developer, I want `PUT key = value IF NOT EXISTS EXPIRE 7d` for idempotency keys, so that webhook retry handling stays one round trip without an explicit CAS.
 15. As a developer, I want `INCR key BY n` to refuse non-numeric existing values with a typed error, so that buggy code surfaces at write time rather than corrupting a counter silently.
 16. As a developer, I want `WATCH prefix.*` to subscribe to every change under a prefix in addition to single-key watches, so that I can monitor a namespace without one subscription per key.
@@ -107,7 +113,7 @@ For multi-namespace deployments, a default `kv_default` collection auto-created 
 
 - **Default `kv_default` collection materialises on first use.** Avoids a chicken-and-egg migration step. Operators in production can disable the default by setting `red.config.kv.default_collection = false` and require explicit collections.
 
-- **`$config.<path>` and `$secret.<path>` references continue to work.** They are a different surface (engine config + vault). The new verbs touch user KV collections; vault and config retain their own write paths (`SET CONFIG`).
+- **Config and Vault are intentionally out of scope.** The new verbs touch normal KV collections only. Config and Vault retain separate DDL, APIs, policies, and persistence semantics under #314.
 
 - **TTL inherits the existing semantics.** `EXPIRE 60s` clause translates to the `WITH TTL <ms>` annotation already understood by the storage layer; no new eviction codepath.
 
@@ -155,6 +161,6 @@ Modules with priority test coverage:
 ## Further Notes
 
 - The `PUT / GET / INCR / CAS / WATCH` shape is the developer-facing competitive lever. Without it the engine is functionally a Redis replacement; with it we win on muscle memory.
-- This PRD pairs naturally with **Cache** (TTL eviction + tag invalidation) and **KV's existing `$config / $secret` references**. The three together let us frame KV as "Redis-compatible verbs on a durable, queryable, policy-gated, vault-aware substrate".
+- This PRD pairs naturally with **Cache** (TTL eviction + tag invalidation) and with the separate Config/Vault PRD #314, but it must not blur those domains. Normal KV is volatile/high-churn data; Config is stable settings; Vault is sealed secrets.
 - Marketing landing copy referencing these verbs is currently aspirational. Once this PRD ships, the landing pages at `/db/key-value` and `/db/cache` get a documentation refresh; until then, those pages call out the SQL-on-collections shape as the canonical way to use KV today.
 - A follow-up PRD will cover Redis-compat pub/sub channels (`SUBSCRIBE` / `PUBLISH`) once the WATCH primitive ships and we have user feedback on the shape.

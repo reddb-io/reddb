@@ -6,6 +6,8 @@ GitHub: https://github.com/reddb-io/reddb/issues/242
 
 Implemented 2026-05-09.
 
+Scope guard: this issue is **normal KV only**. INCR/DECR must not apply to Config or Vault. Config and Vault are separate keyed Collection models under #314.
+
 ## What was built
 
 - `KvCommand::Incr { collection, key, by, ttl_ms }` variant in `storage/query/core.rs`

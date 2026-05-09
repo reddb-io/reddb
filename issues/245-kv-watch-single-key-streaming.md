@@ -6,7 +6,9 @@
 
 ## What to build
 
-Adds push-stream subscriptions on a single KV key. `WATCH key` opens a server-streaming channel; every committed PUT / DELETE / INCR / CAS on that key emits an event with the previous value, the new value, the operation, and the LSN. Replaces polling for feature-flag fan-out, live config, presence-style patterns. Ships across gRPC server-streaming and HTTP Server-Sent Events.
+Adds push-stream subscriptions on a single normal KV key. `WATCH key` opens a server-streaming channel; every committed PUT / DELETE / INCR / CAS on that key emits an event with the previous value, the new value, the operation, and the LSN. Replaces polling for volatile/high-churn application state and feature-style KV fan-out. Ships across gRPC server-streaming and HTTP Server-Sent Events.
+
+Scope guard: this issue is **normal KV only**. Config and Vault watch semantics are separate because Vault watch is metadata-only and Config has stable-settings rules; see #314 and #321.
 
 ## Acceptance criteria
 
