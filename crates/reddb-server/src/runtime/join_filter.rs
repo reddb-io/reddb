@@ -1915,6 +1915,7 @@ pub(super) fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::DropDocument(_) => "drop_document",
         QueryExpr::DropKv(_) => "drop_kv",
         QueryExpr::DropCollection(_) => "drop_collection",
+        QueryExpr::Truncate(_) => "truncate",
         QueryExpr::AlterTable(_) => "alter_table",
         QueryExpr::GraphCommand(_) => "graph_command",
         QueryExpr::SearchCommand(_) => "search_command",

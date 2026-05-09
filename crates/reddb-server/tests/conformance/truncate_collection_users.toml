@@ -1,0 +1,4 @@
+input = "TRUNCATE COLLECTION IF EXISTS users"
+expected_kind = "Truncate"
+source = "issues/308-ddl-truncate-polymorphic-per-model-truncate-truncate-queue-alias.md:25"
+kind = "positive"

@@ -1981,6 +1981,38 @@ fn test_parse_polymorphic_drop_models() {
 }
 
 #[test]
+fn test_parse_polymorphic_truncate_models() {
+    use crate::catalog::CollectionModel;
+
+    let cases = [
+        ("TRUNCATE TABLE users", "users", false, Some(CollectionModel::Table)),
+        ("TRUNCATE GRAPH identity", "identity", false, Some(CollectionModel::Graph)),
+        ("TRUNCATE VECTOR notes", "notes", false, Some(CollectionModel::Vector)),
+        (
+            "TRUNCATE DOCUMENT IF EXISTS logs",
+            "logs",
+            true,
+            Some(CollectionModel::Document),
+        ),
+        ("TRUNCATE TIMESERIES metrics", "metrics", false, Some(CollectionModel::TimeSeries)),
+        ("TRUNCATE KV settings", "settings", false, Some(CollectionModel::Kv)),
+        ("TRUNCATE QUEUE tasks", "tasks", false, Some(CollectionModel::Queue)),
+        ("TRUNCATE COLLECTION IF EXISTS users", "users", true, None),
+    ];
+
+    for (sql, name, if_exists, model) in cases {
+        match parse(sql).unwrap() {
+            QueryExpr::Truncate(query) => {
+                assert_eq!(query.name, name);
+                assert_eq!(query.if_exists, if_exists);
+                assert_eq!(query.model, model);
+            }
+            other => panic!("unexpected parse result for {sql}: {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn test_parse_alter_table_add_column() {
     let query = parse("ALTER TABLE hosts ADD COLUMN status TEXT NOT NULL").unwrap();
     if let QueryExpr::AlterTable(at) = query {

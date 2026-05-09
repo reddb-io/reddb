@@ -388,7 +388,8 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
             | QueryExpr::DropDocument(_)
             | QueryExpr::DropKv(_)
             | QueryExpr::DropCollection(_)
-        | QueryExpr::AlterTable(_)
+            | QueryExpr::Truncate(_)
+            | QueryExpr::AlterTable(_)
         | QueryExpr::GraphCommand(_)
         | QueryExpr::SearchCommand(_)
         | QueryExpr::CreateIndex(_)
@@ -741,6 +742,7 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::DropDocument(_) => "drop_document",
         QueryExpr::DropKv(_) => "drop_kv",
         QueryExpr::DropCollection(_) => "drop_collection",
+        QueryExpr::Truncate(_) => "truncate",
         QueryExpr::AlterTable(_) => "alter_table",
         QueryExpr::GraphCommand(_) => "graph_command",
         QueryExpr::SearchCommand(_) => "search_command",

@@ -3,12 +3,12 @@
 use super::super::ast::{
     AlterOperation, AlterTableQuery, CreateColumnDef, CreateTableQuery, DropCollectionQuery,
     DropDocumentQuery, DropGraphQuery, DropKvQuery, DropTableQuery, DropVectorQuery,
-    ExplainAlterQuery, ExplainFormat, PartitionKind, PartitionSpec, QueryExpr,
+    ExplainAlterQuery, ExplainFormat, PartitionKind, PartitionSpec, QueryExpr, TruncateQuery,
 };
 use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
-use crate::catalog::{SubscriptionDescriptor, SubscriptionOperation};
+use crate::catalog::{CollectionModel, SubscriptionDescriptor, SubscriptionOperation};
 use crate::storage::schema::{SqlTypeName, TypeModifier, Value};
 
 impl<'a> Parser<'a> {
@@ -340,6 +340,19 @@ impl<'a> Parser<'a> {
         let name = self.parse_drop_collection_name()?;
         Ok(QueryExpr::DropCollection(DropCollectionQuery {
             name,
+            if_exists,
+        }))
+    }
+
+    pub fn parse_truncate_body(
+        &mut self,
+        model: Option<CollectionModel>,
+    ) -> Result<QueryExpr, ParseError> {
+        let if_exists = self.match_if_exists()?;
+        let name = self.parse_drop_collection_name()?;
+        Ok(QueryExpr::Truncate(TruncateQuery {
+            name,
+            model,
             if_exists,
         }))
     }
