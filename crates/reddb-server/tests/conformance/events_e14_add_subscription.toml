@@ -1,0 +1,4 @@
+input = "ALTER TABLE orders ADD SUBSCRIPTION audit TO audit_log"
+expected_kind = "AlterTable"
+source = "docs/data-models/events.md:335"
+kind = "positive"

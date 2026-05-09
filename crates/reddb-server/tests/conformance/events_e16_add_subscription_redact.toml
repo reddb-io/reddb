@@ -1,0 +1,4 @@
+input = "ALTER TABLE users ADD SUBSCRIPTION masked TO pii_events REDACT (email, phone)"
+expected_kind = "AlterTable"
+source = "docs/data-models/events.md:343"
+kind = "positive"

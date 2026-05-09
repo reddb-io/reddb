@@ -1,0 +1,4 @@
+input = "CREATE TABLE orders (id INT, status TEXT) WITH EVENTS WHERE status = 'paid'"
+expected_kind = "CreateTable"
+source = "docs/data-models/events.md:315"
+kind = "positive"

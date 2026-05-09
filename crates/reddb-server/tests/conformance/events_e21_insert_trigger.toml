@@ -1,0 +1,4 @@
+input = "INSERT INTO users (id, email, name) VALUES (1, 'ada@example.com', 'Ada')"
+expected_kind = "Insert"
+source = "docs/data-models/events.md:363"
+kind = "positive"

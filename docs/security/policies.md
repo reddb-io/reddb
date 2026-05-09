@@ -188,6 +188,10 @@ of characters within one segment of `spec`.
 | `column` JSON path | `column:table.json_column.path` | `column:docs.body.ssn` | Document JSON-path projection vocabulary. |
 | `schema` | `schema:name.*` | `schema:billing.*` | Implies access to every object in the schema. |
 | `function` | `function:name` | `function:hash_pwd` | For `execute` action. |
+| `queue` | `queue:name` | `queue:jobs` | Queue-level read, enqueue, ack/nack, purge, and admin actions. |
+| `message` | `message:queue/id` or `message:queue/*` | `message:jobs/*` | Message-level queue authorization vocabulary. |
+| `consumer-group` | `consumer-group:queue/group` | `consumer-group:jobs/workers` | Consumer-group reads and acknowledgments. |
+| `dlq` | `dlq:queue` | `dlq:jobs` | Dead-letter queue inspection and repair. |
 | Tenant-qualified resource | `<kind>:tenant/<tenant>/<name>` | `table:tenant/acme/public.*` | Explicit cross-tenant form; prefer unqualified resources plus `tenant_match` for ordinary tenant policies. |
 | `*` | (literal) | `*` | Every resource. Pair with `*` action only inside conditioned break-glass policies. |
 
@@ -936,6 +940,82 @@ flowchart LR
 Effective permissions are the union of all statements across all policies
 attached transitively (group + user). Group attachments are evaluated *first*
 within each policy attachment order.
+
+## Events and queue policies
+
+Event subscriptions cross two authorization surfaces:
+
+- The source collection controls whether the author may observe mutations.
+- The target queue controls whether the author may enqueue event payloads and
+  whether consumers may read, ack, or repair those payloads.
+
+For a normal tenant-scoped subscription, the author needs `select` on the
+source collection and `insert` on the target queue. Consumers need `select` and
+`update` on the queue/message resources they read and acknowledge.
+
+```json
+{
+  "version": 1,
+  "id": "events-audit-writer",
+  "statements": [
+    {
+      "sid": "observe-users",
+      "effect": "allow",
+      "actions": ["select"],
+      "resources": ["table:users"]
+    },
+    {
+      "sid": "write-audit-events",
+      "effect": "allow",
+      "actions": ["insert"],
+      "resources": ["queue:audit_log", "message:audit_log/*"]
+    }
+  ]
+}
+```
+
+Queue consumption remains independently gated:
+
+```json
+{
+  "version": 1,
+  "id": "events-audit-reader",
+  "statements": [
+    {
+      "sid": "consume-audit-events",
+      "effect": "allow",
+      "actions": ["select", "update"],
+      "resources": [
+        "queue:audit_log",
+        "message:audit_log/*",
+        "consumer-group:audit_log/compliance"
+      ]
+    },
+    {
+      "sid": "no-purge",
+      "effect": "deny",
+      "actions": ["delete"],
+      "resources": ["queue:audit_log", "message:audit_log/*", "dlq:audit_log"]
+    }
+  ]
+}
+```
+
+`REDACT` is producer-side protection, not a replacement for queue policy. If a
+policy denies `select` on a sensitive column such as `column:users.email`, a
+subscription that sends that column without `REDACT (email)` emits a warning at
+DDL time. Add explicit redaction for every field that downstream consumers do
+not need:
+
+```sql
+CREATE TABLE users (id INT, email TEXT, phone TEXT, name TEXT)
+  WITH EVENTS TO audit_log REDACT (email, phone);
+```
+
+Cross-tenant subscriptions, such as `ON ALL TENANTS`, require cluster-level
+authorization in addition to source and queue permissions. Ordinary tenant
+policies should prefer unqualified resources plus `tenant_match: true` so event
+payloads cannot bleed across tenants.
 
 ## FAQ
 

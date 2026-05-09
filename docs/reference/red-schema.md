@@ -255,6 +255,8 @@ Current columns:
 `EVENTS BACKFILL STATUS <collection>` is reserved for the backfill runtime
 slice and is not exposed by this relation yet.
 
+See [Events](../data-models/events.md) for subscription semantics.
+
 ## `SHOW SAMPLE`
 
 `SHOW SAMPLE <collection>` is syntax sugar for a limited collection scan:

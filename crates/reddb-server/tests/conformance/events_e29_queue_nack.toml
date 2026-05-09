@@ -1,0 +1,4 @@
+input = "QUEUE NACK users_events GROUP sync_workers 'msg-id-123'"
+expected_kind = "QueueCommand"
+source = "docs/data-models/events.md:395"
+kind = "positive"

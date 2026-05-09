@@ -1,0 +1,4 @@
+input = "ALTER TABLE users DISABLE EVENTS"
+expected_kind = "AlterTable"
+source = "docs/data-models/events.md:331"
+kind = "positive"

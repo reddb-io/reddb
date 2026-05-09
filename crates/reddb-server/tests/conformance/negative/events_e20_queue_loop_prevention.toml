@@ -1,0 +1,5 @@
+input = "CREATE QUEUE audit_log WITH EVENTS"
+expected_error_substring = "queues cannot have event subscriptions"
+expected_error_kind = "Syntax"
+source = "docs/data-models/events.md:359"
+kind = "negative"
