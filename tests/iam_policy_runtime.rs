@@ -107,6 +107,130 @@ fn seed_document(rt: &RedDBRuntime) {
     .unwrap();
 }
 
+fn setup_users_table(rt: &RedDBRuntime) {
+    rt.execute_query("CREATE TABLE users (id INT, name TEXT, email TEXT)")
+        .unwrap();
+    rt.execute_query("INSERT INTO users (id, name, email) VALUES (1, 'Ada', 'a@example.com')")
+        .unwrap();
+}
+
+fn err_string<T: std::fmt::Debug>(result: Result<T, reddb::RedDBError>) -> String {
+    format!("{:?}", result.unwrap_err())
+}
+
+#[test]
+fn select_column_policy_allows_safe_projection() {
+    let (rt, store) = runtime_with_auth();
+    setup_users_table(&rt);
+    attach_alice_policy(
+        &store,
+        "users-no-email",
+        r#"[
+            {"effect":"allow","actions":["select"],"resources":["table:users"]},
+            {"effect":"deny","actions":["select"],"resources":["column:users.email"]}
+        ]"#,
+    );
+
+    let read = as_user("alice", Role::Write, || {
+        rt.execute_query("SELECT id, name FROM users")
+    })
+    .unwrap();
+    assert_eq!(read.result.records.len(), 1);
+    assert_eq!(read.result.columns, vec!["id", "name"]);
+}
+
+#[test]
+fn select_column_policy_denies_explicit_column() {
+    let (rt, store) = runtime_with_auth();
+    setup_users_table(&rt);
+    attach_alice_policy(
+        &store,
+        "users-deny-email",
+        r#"[
+            {"effect":"allow","actions":["select"],"resources":["table:users"]},
+            {"effect":"deny","actions":["select"],"resources":["column:users.email"]}
+        ]"#,
+    );
+
+    let err = err_string(as_user("alice", Role::Write, || {
+        rt.execute_query("SELECT id, email FROM users")
+    }));
+    assert!(err.contains("users.email"), "got {err}");
+}
+
+#[test]
+fn select_column_policy_requires_table_allow_even_with_column_allow() {
+    let (rt, store) = runtime_with_auth();
+    setup_users_table(&rt);
+    attach_alice_policy(
+        &store,
+        "users-column-only",
+        r#"[
+            {"effect":"allow","actions":["select"],"resources":["column:users.id"]}
+        ]"#,
+    );
+
+    let err = err_string(as_user("alice", Role::Write, || {
+        rt.execute_query("SELECT id FROM users")
+    }));
+    assert!(err.contains("table:users"), "got {err}");
+}
+
+#[test]
+fn select_column_policy_denies_wildcard_when_any_declared_column_denied() {
+    let (rt, store) = runtime_with_auth();
+    setup_users_table(&rt);
+    attach_alice_policy(
+        &store,
+        "users-wildcard-deny-email",
+        r#"[
+            {"effect":"allow","actions":["select"],"resources":["table:users"]},
+            {"effect":"deny","actions":["select"],"resources":["column:users.email"]}
+        ]"#,
+    );
+
+    let err = err_string(as_user("alice", Role::Write, || {
+        rt.execute_query("SELECT * FROM users")
+    }));
+    assert!(err.contains("users.email"), "got {err}");
+}
+
+#[test]
+fn select_column_policy_resolves_aliases_across_table_joins() {
+    let (rt, store) = runtime_with_auth();
+    rt.execute_query("CREATE TABLE users (id INT, name TEXT, email TEXT)")
+        .unwrap();
+    rt.execute_query("CREATE TABLE orders (id INT, user_id INT, total INT)")
+        .unwrap();
+    rt.execute_query("INSERT INTO users (id, name, email) VALUES (1, 'Ada', 'a@example.com')")
+        .unwrap();
+    rt.execute_query("INSERT INTO orders (id, user_id, total) VALUES (10, 1, 42)")
+        .unwrap();
+    attach_alice_policy(
+        &store,
+        "join-users-orders",
+        r#"[
+            {"effect":"allow","actions":["select"],"resources":["database:*"]},
+            {"effect":"allow","actions":["select"],"resources":["table:users"]},
+            {"effect":"allow","actions":["select"],"resources":["table:orders"]},
+            {"effect":"deny","actions":["select"],"resources":["column:users.email"]}
+        ]"#,
+    );
+
+    let allowed = as_user("alice", Role::Write, || {
+        rt.execute_query("FROM users u JOIN orders o ON u.id = o.user_id RETURN u.name, o.total")
+    });
+    assert!(
+        allowed.is_ok(),
+        "join projection should be allowed: {allowed:?}"
+    );
+
+    let err = err_string(as_user("alice", Role::Write, || {
+        rt.execute_query("FROM users u JOIN orders o ON u.id = o.user_id RETURN u.email, o.total")
+    }));
+    assert!(err.contains("users.email"), "got {err}");
+}
+
 #[test]
 fn runtime_uses_attached_iam_policy_for_dml() {
     let (rt, store) = runtime_with_auth();

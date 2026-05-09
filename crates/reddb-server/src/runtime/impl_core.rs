@@ -1,7 +1,10 @@
 use super::*;
 use crate::application::entity::metadata_to_json;
+use crate::auth::column_policy_gate::ColumnAccessRequest;
+use crate::auth::UserId;
 use crate::replication::cdc::ChangeRecord;
 use crate::replication::logical::{ApplyMode, LogicalChangeApplier};
+use crate::storage::query::ast::TableSource;
 
 thread_local! {
     /// Current connection id for the executing statement. Set by the
@@ -4167,29 +4170,21 @@ impl RedDBRuntime {
                 // RLS enabled but no policy admits the caller's role —
                 // short-circuit with an empty result set instead of
                 // synthesising a contradiction filter.
-                let table_with_rls = if self.inner.rls_enabled_tables.read().contains(&table.table)
-                {
-                    match inject_rls_filters(
-                        self,
-                        &frame as &dyn super::statement_frame::ReadFrame,
-                        table,
-                    ) {
-                        Some(t) => t,
-                        None => {
-                            let empty = crate::storage::query::unified::UnifiedResult::empty();
-                            return Ok(RuntimeQueryResult {
-                                query: query.to_string(),
-                                mode,
-                                statement,
-                                engine: "runtime-table-rls",
-                                result: empty,
-                                affected_rows: 0,
-                                statement_type: "select",
-                            });
-                        }
-                    }
-                } else {
-                    table
+                let Some(table_with_rls) = self.authorize_relational_table_select(
+                    table,
+                    &frame as &dyn super::statement_frame::ReadFrame,
+                )?
+                else {
+                    let empty = crate::storage::query::unified::UnifiedResult::empty();
+                    return Ok(RuntimeQueryResult {
+                        query: query.to_string(),
+                        mode,
+                        statement,
+                        engine: "runtime-table-rls",
+                        result: empty,
+                        affected_rows: 0,
+                        statement_type: "select",
+                    });
                 };
                 Ok(RuntimeQueryResult {
                     query: query.to_string(),
@@ -4214,11 +4209,10 @@ impl RedDBRuntime {
                 // When any leaf has RLS enabled and zero matching policy,
                 // short-circuit to an empty join result instead of
                 // emitting a contradiction filter.
-                let join_with_rls = match inject_rls_into_join(
-                    self,
-                    &frame as &dyn super::statement_frame::ReadFrame,
+                let join_with_rls = match self.authorize_relational_join_select(
                     join,
-                ) {
+                    &frame as &dyn super::statement_frame::ReadFrame,
+                )? {
                     Some(j) => j,
                     None => {
                         return Ok(RuntimeQueryResult {
@@ -5449,6 +5443,226 @@ impl RedDBRuntime {
     /// Internal dispatch: route a `QueryExpr` to the appropriate executor.
     /// Shared by `execute_query` (after parse/cache) and `execute_query_expr`
     /// (direct call from prepared-statement handler).
+    fn authorize_relational_table_select(
+        &self,
+        mut table: TableQuery,
+        frame: &dyn super::statement_frame::ReadFrame,
+    ) -> RedDBResult<Option<TableQuery>> {
+        if let Some(TableSource::Subquery(inner)) = table.source.take() {
+            let authorized_inner = self.authorize_relational_select_expr(*inner, frame)?;
+            table.source = Some(TableSource::Subquery(Box::new(authorized_inner)));
+            return Ok(Some(table));
+        }
+
+        self.check_table_column_projection_authz(&table, frame)?;
+
+        if self.inner.rls_enabled_tables.read().contains(&table.table) {
+            return Ok(inject_rls_filters(self, frame, table));
+        }
+
+        Ok(Some(table))
+    }
+
+    fn authorize_relational_join_select(
+        &self,
+        mut join: JoinQuery,
+        frame: &dyn super::statement_frame::ReadFrame,
+    ) -> RedDBResult<Option<JoinQuery>> {
+        self.check_join_column_projection_authz(&join, frame)?;
+        join.left = Box::new(self.authorize_relational_join_child(*join.left, frame)?);
+        join.right = Box::new(self.authorize_relational_join_child(*join.right, frame)?);
+        Ok(inject_rls_into_join(self, frame, join))
+    }
+
+    fn authorize_relational_join_child(
+        &self,
+        expr: QueryExpr,
+        frame: &dyn super::statement_frame::ReadFrame,
+    ) -> RedDBResult<QueryExpr> {
+        match expr {
+            QueryExpr::Table(mut table) => {
+                if let Some(TableSource::Subquery(inner)) = table.source.take() {
+                    let authorized_inner = self.authorize_relational_select_expr(*inner, frame)?;
+                    table.source = Some(TableSource::Subquery(Box::new(authorized_inner)));
+                }
+                Ok(QueryExpr::Table(table))
+            }
+            QueryExpr::Join(join) => self
+                .authorize_relational_join_select(join, frame)?
+                .map(QueryExpr::Join)
+                .ok_or_else(|| {
+                    RedDBError::Query("permission denied: RLS denied relational subquery".into())
+                }),
+            other => Ok(other),
+        }
+    }
+
+    fn authorize_relational_select_expr(
+        &self,
+        expr: QueryExpr,
+        frame: &dyn super::statement_frame::ReadFrame,
+    ) -> RedDBResult<QueryExpr> {
+        match expr {
+            QueryExpr::Table(table) => self
+                .authorize_relational_table_select(table, frame)?
+                .map(QueryExpr::Table)
+                .ok_or_else(|| {
+                    RedDBError::Query("permission denied: RLS denied relational subquery".into())
+                }),
+            QueryExpr::Join(join) => self
+                .authorize_relational_join_select(join, frame)?
+                .map(QueryExpr::Join)
+                .ok_or_else(|| {
+                    RedDBError::Query("permission denied: RLS denied relational subquery".into())
+                }),
+            other => Ok(other),
+        }
+    }
+
+    fn check_table_column_projection_authz(
+        &self,
+        table: &TableQuery,
+        frame: &dyn super::statement_frame::ReadFrame,
+    ) -> RedDBResult<()> {
+        let Some((username, role)) = frame.identity() else {
+            return Ok(());
+        };
+        let Some(auth_store) = self.inner.auth_store.read().clone() else {
+            return Ok(());
+        };
+
+        let columns = self.resolved_table_projection_columns(table)?;
+        let request = ColumnAccessRequest::select(table.table.clone(), columns);
+        let principal = UserId::from_parts(frame.effective_scope(), username);
+        let ctx = runtime_iam_context(role, frame.effective_scope());
+        let outcome = auth_store.check_column_projection_authz(&principal, &request, &ctx);
+        if outcome.allowed() {
+            return Ok(());
+        }
+
+        if let Some(denied) = outcome.first_denied_column() {
+            return Err(RedDBError::Query(format!(
+                "permission denied: principal=`{username}` cannot select column `{}`",
+                denied.resource.name
+            )));
+        }
+        Err(RedDBError::Query(format!(
+            "permission denied: principal=`{username}` cannot select table `{}`",
+            table.table
+        )))
+    }
+
+    fn check_join_column_projection_authz(
+        &self,
+        join: &JoinQuery,
+        frame: &dyn super::statement_frame::ReadFrame,
+    ) -> RedDBResult<()> {
+        let mut by_table: HashMap<String, BTreeSet<String>> = HashMap::new();
+        let projections = crate::storage::query::sql_lowering::effective_join_projections(join);
+        self.collect_join_projection_columns(join, &projections, &mut by_table)?;
+
+        for (table, columns) in by_table {
+            let query = TableQuery {
+                table,
+                source: None,
+                alias: None,
+                select_items: Vec::new(),
+                columns: columns.into_iter().map(Projection::Column).collect(),
+                where_expr: None,
+                filter: None,
+                group_by_exprs: Vec::new(),
+                group_by: Vec::new(),
+                having_expr: None,
+                having: None,
+                order_by: Vec::new(),
+                limit: None,
+                offset: None,
+                expand: None,
+                as_of: None,
+            };
+            self.check_table_column_projection_authz(&query, frame)?;
+        }
+        Ok(())
+    }
+
+    fn collect_join_projection_columns(
+        &self,
+        join: &JoinQuery,
+        projections: &[Projection],
+        out: &mut HashMap<String, BTreeSet<String>>,
+    ) -> RedDBResult<()> {
+        let left = table_side_context(join.left.as_ref());
+        let right = table_side_context(join.right.as_ref());
+
+        if projections
+            .iter()
+            .any(|projection| matches!(projection, Projection::All))
+        {
+            for side in [left.as_ref(), right.as_ref()].into_iter().flatten() {
+                out.entry(side.table.clone())
+                    .or_default()
+                    .extend(self.table_all_projection_columns(&side.table)?);
+            }
+            return Ok(());
+        }
+
+        for projection in projections {
+            collect_projection_columns_for_join_side(
+                projection,
+                left.as_ref(),
+                right.as_ref(),
+                out,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn resolved_table_projection_columns(&self, table: &TableQuery) -> RedDBResult<Vec<String>> {
+        let projections = crate::storage::query::sql_lowering::effective_table_projections(table);
+        if projections
+            .iter()
+            .any(|projection| matches!(projection, Projection::All))
+        {
+            return self.table_all_projection_columns(&table.table);
+        }
+
+        let mut columns = BTreeSet::new();
+        for projection in &projections {
+            collect_projection_columns_for_table(
+                projection,
+                &table.table,
+                table.alias.as_deref(),
+                &mut columns,
+            );
+        }
+        Ok(columns.into_iter().collect())
+    }
+
+    fn table_all_projection_columns(&self, table: &str) -> RedDBResult<Vec<String>> {
+        if let Some(contract) = self.inner.db.collection_contract_arc(table) {
+            let columns: Vec<String> = contract
+                .declared_columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect();
+            if !columns.is_empty() {
+                return Ok(columns);
+            }
+        }
+
+        let records = scan_runtime_table_source_records_limited(&self.inner.db, table, Some(1))?;
+        Ok(records
+            .first()
+            .map(|record| {
+                record
+                    .column_names()
+                    .into_iter()
+                    .map(|column| column.to_string())
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
     fn dispatch_expr(
         &self,
         expr: QueryExpr,
@@ -5464,8 +5678,8 @@ impl RedDBRuntime {
                 ))
             }
             QueryExpr::Table(table) => {
+                let scope = self.ai_scope();
                 if super::red_schema::is_virtual_table(&table.table) {
-                    let scope = self.ai_scope();
                     return Ok(RuntimeQueryResult {
                         query: query_str.to_string(),
                         mode,
@@ -5481,6 +5695,21 @@ impl RedDBRuntime {
                         statement_type: "select",
                     });
                 }
+                let Some(table_with_rls) = self.authorize_relational_table_select(
+                    table,
+                    &scope as &dyn super::statement_frame::ReadFrame,
+                )?
+                else {
+                    return Ok(RuntimeQueryResult {
+                        query: query_str.to_string(),
+                        mode,
+                        statement,
+                        engine: "runtime-table-rls",
+                        result: crate::storage::query::unified::UnifiedResult::empty(),
+                        affected_rows: 0,
+                        statement_type: "select",
+                    });
+                };
                 Ok(RuntimeQueryResult {
                     query: query_str.to_string(),
                     mode,
@@ -5488,22 +5717,40 @@ impl RedDBRuntime {
                     engine: "runtime-table",
                     result: execute_runtime_table_query(
                         &self.inner.db,
-                        &table,
+                        &table_with_rls,
                         Some(&self.inner.index_store),
                     )?,
                     affected_rows: 0,
                     statement_type: "select",
                 })
             }
-            QueryExpr::Join(join) => Ok(RuntimeQueryResult {
-                query: query_str.to_string(),
-                mode,
-                statement,
-                engine: "runtime-join",
-                result: execute_runtime_join_query(&self.inner.db, &join)?,
-                affected_rows: 0,
-                statement_type: "select",
-            }),
+            QueryExpr::Join(join) => {
+                let scope = self.ai_scope();
+                let Some(join_with_rls) = self.authorize_relational_join_select(
+                    join,
+                    &scope as &dyn super::statement_frame::ReadFrame,
+                )?
+                else {
+                    return Ok(RuntimeQueryResult {
+                        query: query_str.to_string(),
+                        mode,
+                        statement,
+                        engine: "runtime-join-rls",
+                        result: crate::storage::query::unified::UnifiedResult::empty(),
+                        affected_rows: 0,
+                        statement_type: "select",
+                    });
+                };
+                Ok(RuntimeQueryResult {
+                    query: query_str.to_string(),
+                    mode,
+                    statement,
+                    engine: "runtime-join",
+                    result: execute_runtime_join_query(&self.inner.db, &join_with_rls)?,
+                    affected_rows: 0,
+                    statement_type: "select",
+                })
+            }
             QueryExpr::Vector(vector) => Ok(RuntimeQueryResult {
                 query: query_str.to_string(),
                 mode,
@@ -7992,6 +8239,176 @@ fn legacy_resource_to_iam(
         out = out.with_tenant(t.to_string());
     }
     out
+}
+
+#[derive(Debug)]
+struct JoinTableSide {
+    table: String,
+    alias: String,
+}
+
+fn table_side_context(expr: &QueryExpr) -> Option<JoinTableSide> {
+    match expr {
+        QueryExpr::Table(table) => Some(JoinTableSide {
+            table: table.table.clone(),
+            alias: table.alias.clone().unwrap_or_else(|| table.table.clone()),
+        }),
+        _ => None,
+    }
+}
+
+fn collect_projection_columns_for_table(
+    projection: &Projection,
+    table: &str,
+    alias: Option<&str>,
+    out: &mut BTreeSet<String>,
+) {
+    match projection {
+        Projection::Column(column) | Projection::Alias(column, _) => {
+            match split_qualified_column(column) {
+                Some((qualifier, column))
+                    if qualifier == table || alias.is_some_and(|alias| qualifier == alias) =>
+                {
+                    push_policy_column(column, out);
+                }
+                Some(_) => {}
+                None => push_policy_column(column, out),
+            }
+        }
+        Projection::Field(
+            FieldRef::TableColumn {
+                table: qualifier,
+                column,
+            },
+            _,
+        ) => {
+            if qualifier.is_empty()
+                || qualifier == table
+                || alias.is_some_and(|alias| qualifier == alias)
+            {
+                push_policy_column(column, out);
+            }
+        }
+        Projection::Field(
+            FieldRef::NodeProperty {
+                alias: qualifier,
+                property,
+            },
+            _,
+        )
+        | Projection::Field(
+            FieldRef::EdgeProperty {
+                alias: qualifier,
+                property,
+            },
+            _,
+        ) => {
+            if qualifier == table || alias.is_some_and(|alias| qualifier == alias) {
+                push_policy_column(property, out);
+            }
+        }
+        Projection::Function(_, args) => {
+            for arg in args {
+                collect_projection_columns_for_table(arg, table, alias, out);
+            }
+        }
+        Projection::Expression(_, _) | Projection::All | Projection::Field(_, _) => {}
+    }
+}
+
+fn collect_projection_columns_for_join_side(
+    projection: &Projection,
+    left: Option<&JoinTableSide>,
+    right: Option<&JoinTableSide>,
+    out: &mut HashMap<String, BTreeSet<String>>,
+) -> RedDBResult<()> {
+    match projection {
+        Projection::Column(column) | Projection::Alias(column, _) => {
+            if let Some((qualifier, column)) = split_qualified_column(column) {
+                push_qualified_join_column(qualifier, column, left, right, out);
+            } else {
+                push_unqualified_join_column(column, left, right, out);
+            }
+        }
+        Projection::Field(FieldRef::TableColumn { table, column }, _) => {
+            if table.is_empty() {
+                push_unqualified_join_column(column, left, right, out);
+            } else if let Some(side) = [left, right]
+                .into_iter()
+                .flatten()
+                .find(|side| table == side.table.as_str() || table == side.alias.as_str())
+            {
+                push_join_column(&side.table, column, out);
+            }
+        }
+        Projection::Field(FieldRef::NodeProperty { alias, property }, _)
+        | Projection::Field(FieldRef::EdgeProperty { alias, property }, _) => {
+            push_qualified_join_column(alias, property, left, right, out);
+        }
+        Projection::Function(_, args) => {
+            for arg in args {
+                collect_projection_columns_for_join_side(arg, left, right, out)?;
+            }
+        }
+        Projection::Expression(_, _) | Projection::All | Projection::Field(_, _) => {}
+    }
+    Ok(())
+}
+
+fn split_qualified_column(column: &str) -> Option<(&str, &str)> {
+    let (qualifier, column) = column.split_once('.')?;
+    if qualifier.is_empty() || column.is_empty() || column.contains('.') {
+        return None;
+    }
+    Some((qualifier, column))
+}
+
+fn push_qualified_join_column(
+    qualifier: &str,
+    column: &str,
+    left: Option<&JoinTableSide>,
+    right: Option<&JoinTableSide>,
+    out: &mut HashMap<String, BTreeSet<String>>,
+) {
+    if let Some(side) = [left, right]
+        .into_iter()
+        .flatten()
+        .find(|side| qualifier == side.table.as_str() || qualifier == side.alias.as_str())
+    {
+        push_join_column(&side.table, column, out);
+    }
+}
+
+fn push_unqualified_join_column(
+    column: &str,
+    left: Option<&JoinTableSide>,
+    right: Option<&JoinTableSide>,
+    out: &mut HashMap<String, BTreeSet<String>>,
+) {
+    for side in [left, right].into_iter().flatten() {
+        push_join_column(&side.table, column, out);
+    }
+}
+
+fn push_join_column(table: &str, column: &str, out: &mut HashMap<String, BTreeSet<String>>) {
+    if is_policy_column_name(column) {
+        out.entry(table.to_string())
+            .or_default()
+            .insert(column.to_string());
+    }
+}
+
+fn push_policy_column(column: &str, out: &mut BTreeSet<String>) {
+    if is_policy_column_name(column) {
+        out.insert(column.to_string());
+    }
+}
+
+fn is_policy_column_name(column: &str) -> bool {
+    !column.is_empty()
+        && column != "*"
+        && !column.starts_with("LIT:")
+        && !column.starts_with("TYPE:")
 }
 
 fn runtime_iam_context(
