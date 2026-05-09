@@ -143,6 +143,7 @@ pub const DUPLICATE_COLUMN: SqlState = SqlState::new("42701");
 pub const DUPLICATE_TABLE: SqlState = SqlState::new("42P07");
 pub const AMBIGUOUS_COLUMN: SqlState = SqlState::new("42702");
 pub const DATATYPE_MISMATCH: SqlState = SqlState::new("42804");
+pub const WRONG_OBJECT_TYPE: SqlState = SqlState::new("42809");
 
 // ────────────────────────────────────────────────────────────────
 // Class 53 — Insufficient Resources
@@ -181,6 +182,7 @@ pub fn sqlstate_for_reddb_error(err: &crate::api::RedDBError) -> SqlState {
         E::FeatureNotEnabled(_) => SYNTAX_ERROR_OR_ACCESS_RULE_VIOLATION,
         E::NotFound(_) => UNDEFINED_TABLE,
         E::ReadOnly(_) => READ_ONLY_SQL_TRANSACTION,
+        E::InvalidOperation(_) => WRONG_OBJECT_TYPE,
         E::Engine(_) => INTERNAL_ERROR,
         E::Catalog(_) => INTERNAL_ERROR,
         E::Query(_) => SYNTAX_ERROR,
