@@ -18,3 +18,41 @@ pub mod ner;
 pub mod prompt_template;
 pub mod text_chunker;
 pub mod transport;
+
+pub(crate) fn block_on_ai<F, T>(future: F) -> crate::RedDBResult<T>
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        if matches!(
+            handle.runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::MultiThread
+        ) {
+            return Ok(tokio::task::block_in_place(|| handle.block_on(future)));
+        }
+
+        return std::thread::Builder::new()
+            .name("reddb-ai-blocking".to_string())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|err| {
+                        crate::RedDBError::Query(format!("failed to start AI runtime: {err}"))
+                    })?;
+                Ok(runtime.block_on(future))
+            })
+            .map_err(|err| {
+                crate::RedDBError::Query(format!("failed to spawn AI runtime thread: {err}"))
+            })?
+            .join()
+            .map_err(|_| crate::RedDBError::Query("AI runtime thread panicked".to_string()))?;
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| crate::RedDBError::Query(format!("failed to start AI runtime: {err}")))?;
+    Ok(runtime.block_on(future))
+}

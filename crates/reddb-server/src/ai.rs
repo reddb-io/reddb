@@ -111,6 +111,10 @@ pub struct AiPromptResponse {
     pub stop_reason: Option<String>,
 }
 
+#[deprecated(
+    since = "1.0.0",
+    note = "use AiBatchClient::embed_batch for embeddings or openai_embeddings_async with AiTransport when token usage metadata is required"
+)]
 pub fn openai_embeddings(request: OpenAiEmbeddingRequest) -> RedDBResult<OpenAiEmbeddingResponse> {
     if request.model.trim().is_empty() {
         return Err(RedDBError::Query(
@@ -141,6 +145,7 @@ pub fn openai_embeddings(request: OpenAiEmbeddingRequest) -> RedDBResult<OpenAiE
     parse_openai_embedding_response(&body)
 }
 
+#[deprecated(since = "1.0.0", note = "use openai_prompt_async with AiTransport")]
 pub fn openai_prompt(request: OpenAiPromptRequest) -> RedDBResult<AiPromptResponse> {
     if request.model.trim().is_empty() {
         return Err(RedDBError::Query(
@@ -176,6 +181,7 @@ pub fn openai_prompt(request: OpenAiPromptRequest) -> RedDBResult<AiPromptRespon
     parse_openai_prompt_response(&body, &request.model)
 }
 
+#[deprecated(since = "1.0.0", note = "use anthropic_prompt_async with AiTransport")]
 pub fn anthropic_prompt(request: AnthropicPromptRequest) -> RedDBResult<AiPromptResponse> {
     if request.api_key.trim().is_empty() {
         return Err(RedDBError::Query(
@@ -221,10 +227,47 @@ pub fn anthropic_prompt(request: AnthropicPromptRequest) -> RedDBResult<AiPrompt
     parse_anthropic_prompt_response(&body, &request.model)
 }
 
+/// Async OpenAI-compatible embeddings via [`AiTransport`].
+///
+/// Uses the transport's connection pool and retry policy (429/5xx backoff)
+/// instead of the deprecated one-shot blocking path.
+pub async fn openai_embeddings_async(
+    transport: &crate::runtime::ai::transport::AiTransport,
+    request: OpenAiEmbeddingRequest,
+) -> RedDBResult<OpenAiEmbeddingResponse> {
+    if request.model.trim().is_empty() {
+        return Err(RedDBError::Query(
+            "OpenAI embedding model cannot be empty".to_string(),
+        ));
+    }
+    if request.inputs.is_empty() {
+        return Err(RedDBError::Query(
+            "at least one input is required for embeddings".to_string(),
+        ));
+    }
+
+    let url = format!("{}/embeddings", request.api_base.trim_end_matches('/'));
+    let payload =
+        build_openai_embedding_payload(&request.model, &request.inputs, request.dimensions);
+    let mut http_req =
+        crate::runtime::ai::transport::AiHttpRequest::post_json("openai-compatible", url, payload);
+    let trimmed_key = request.api_key.trim();
+    if !trimmed_key.is_empty() {
+        http_req = http_req.header("authorization", format!("Bearer {}", trimmed_key));
+    }
+
+    let response = transport
+        .request(http_req)
+        .await
+        .map_err(|e| RedDBError::Query(e.to_string()))?;
+
+    parse_openai_embedding_response(&response.body)
+}
+
 /// Async OpenAI chat-completion prompt via [`AiTransport`].
 ///
 /// Uses the transport's connection pool and retry policy (429/5xx backoff)
-/// instead of the one-shot blocking path in [`openai_prompt`].
+/// instead of the deprecated one-shot blocking path.
 pub async fn openai_prompt_async(
     transport: &crate::runtime::ai::transport::AiTransport,
     request: OpenAiPromptRequest,
@@ -248,9 +291,8 @@ pub async fn openai_prompt_async(
         request.temperature,
         request.max_output_tokens,
     );
-    let http_req =
-        crate::runtime::ai::transport::AiHttpRequest::post_json("openai", url, payload)
-            .header("authorization", format!("Bearer {}", request.api_key));
+    let http_req = crate::runtime::ai::transport::AiHttpRequest::post_json("openai", url, payload)
+        .header("authorization", format!("Bearer {}", request.api_key));
 
     let response = transport
         .request(http_req)
@@ -263,7 +305,7 @@ pub async fn openai_prompt_async(
 /// Async Anthropic messages-API prompt via [`AiTransport`].
 ///
 /// Uses the transport's connection pool and retry policy (429/5xx backoff)
-/// instead of the one-shot blocking path in [`anthropic_prompt`].
+/// instead of the deprecated one-shot blocking path.
 pub async fn anthropic_prompt_async(
     transport: &crate::runtime::ai::transport::AiTransport,
     request: AnthropicPromptRequest,
@@ -824,7 +866,9 @@ mod tests {
             api_base: "https://api.anthropic.com/v1".to_string(),
             anthropic_version: DEFAULT_ANTHROPIC_VERSION.to_string(),
         };
-        let err = anthropic_prompt_async(&transport, request).await.unwrap_err();
+        let err = anthropic_prompt_async(&transport, request)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("API key cannot be empty"));
     }
 }
@@ -1634,13 +1678,20 @@ pub fn grpc_embeddings(
         AiProvider::HuggingFace => {
             huggingface_embeddings(&api_key, &model, &inputs, &provider.resolve_api_base())?
         }
-        _ => openai_embeddings(OpenAiEmbeddingRequest {
-            api_key,
-            model,
-            inputs,
-            dimensions,
-            api_base: provider.resolve_api_base(),
-        })?,
+        _ => {
+            let transport = crate::runtime::ai::transport::AiTransport::from_runtime(runtime);
+            let request = OpenAiEmbeddingRequest {
+                api_key,
+                model,
+                inputs,
+                dimensions,
+                api_base: provider.resolve_api_base(),
+            };
+            crate::runtime::ai::block_on_ai(async move {
+                openai_embeddings_async(&transport, request).await
+            })
+            .and_then(|result| result)?
+        }
     };
 
     let embeddings_json: Vec<JsonValue> = response

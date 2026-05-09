@@ -30,6 +30,13 @@ npm org and lock at `1.0.0`.
 - BTree batch ingest path.
 - AggregateQueryPlanner for push-down aggregates.
 - IncrementalIndex maintenance.
+- AI batching final cleanup (#281): synchronous `openai_embeddings`,
+  `openai_prompt`, and `anthropic_prompt` Rust helpers are deprecated.
+  Internal server paths now use `AiBatchClient` or the pooled
+  `AiTransport` path. The mock-provider AUTO EMBED validation for 1000
+  rows drops provider fan-out from 1000 requests to 1 request when the
+  provider max batch is 2048, reducing the provider-wait component from
+  about 100s to about 0.1s at 100ms provider latency.
 
 ### Topology (#164)
 

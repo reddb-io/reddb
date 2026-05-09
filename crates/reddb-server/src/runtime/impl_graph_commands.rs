@@ -333,14 +333,18 @@ impl RedDBRuntime {
                     let model = std::env::var("REDDB_OPENAI_EMBEDDING_MODEL")
                         .ok()
                         .unwrap_or_else(|| provider.default_embedding_model().to_string());
-                    let response =
-                        crate::ai::openai_embeddings(crate::ai::OpenAiEmbeddingRequest {
-                            api_key,
-                            model,
-                            inputs: vec![query_text.clone()],
-                            dimensions: None,
-                            api_base: provider.resolve_api_base(),
-                        })?;
+                    let transport = crate::runtime::ai::transport::AiTransport::from_runtime(self);
+                    let request = crate::ai::OpenAiEmbeddingRequest {
+                        api_key,
+                        model,
+                        inputs: vec![query_text.clone()],
+                        dimensions: None,
+                        api_base: provider.resolve_api_base(),
+                    };
+                    let response = crate::runtime::ai::block_on_ai(async move {
+                        crate::ai::openai_embeddings_async(&transport, request).await
+                    })
+                    .and_then(|result| result)?;
                     response.embeddings.into_iter().next().ok_or_else(|| {
                         RedDBError::Query("embedding API returned no vectors".to_string())
                     })?
@@ -351,21 +355,20 @@ impl RedDBRuntime {
                 // candidate set is gated by `EffectiveScope.visible_collections`
                 // before any similarity score is computed.
                 let scope = self.ai_scope();
-                let results = if super::statement_frame::ReadFrame::visible_collections(&scope)
-                    .is_some()
-                {
-                    crate::runtime::authorized_search::AuthorizedSearch::execute_similar(
-                        self,
-                        &scope,
-                        collection,
-                        &search_vector,
-                        *limit,
-                        *min_score,
-                    )?
-                } else {
-                    // Embedded / no-auth caller: keep legacy behaviour.
-                    self.search_similar(collection, &search_vector, *limit, *min_score)?
-                };
+                let results =
+                    if super::statement_frame::ReadFrame::visible_collections(&scope).is_some() {
+                        crate::runtime::authorized_search::AuthorizedSearch::execute_similar(
+                            self,
+                            &scope,
+                            collection,
+                            &search_vector,
+                            *limit,
+                            *min_score,
+                        )?
+                    } else {
+                        // Embedded / no-auth caller: keep legacy behaviour.
+                        self.search_similar(collection, &search_vector, *limit, *min_score)?
+                    };
                 let mut result =
                     UnifiedResult::with_columns(vec!["entity_id".into(), "score".into()]);
                 for sr in &results {
@@ -393,31 +396,30 @@ impl RedDBRuntime {
                 let collections = collection.as_ref().map(|c| vec![c.clone()]);
                 // Issue #119: gate the candidate set by visible_collections.
                 let scope = self.ai_scope();
-                let res = if super::statement_frame::ReadFrame::visible_collections(&scope)
-                    .is_some()
-                {
-                    crate::runtime::authorized_search::AuthorizedSearch::execute_text(
-                        self,
-                        &scope,
-                        query.clone(),
-                        collections,
-                        None,
-                        None,
-                        None,
-                        Some(*limit),
-                        *fuzzy,
-                    )?
-                } else {
-                    self.search_text(
-                        query.clone(),
-                        collections,
-                        None,
-                        None,
-                        None,
-                        Some(*limit),
-                        *fuzzy,
-                    )?
-                };
+                let res =
+                    if super::statement_frame::ReadFrame::visible_collections(&scope).is_some() {
+                        crate::runtime::authorized_search::AuthorizedSearch::execute_text(
+                            self,
+                            &scope,
+                            query.clone(),
+                            collections,
+                            None,
+                            None,
+                            None,
+                            Some(*limit),
+                            *fuzzy,
+                        )?
+                    } else {
+                        self.search_text(
+                            query.clone(),
+                            collections,
+                            None,
+                            None,
+                            None,
+                            Some(*limit),
+                            *fuzzy,
+                        )?
+                    };
                 let mut result =
                     UnifiedResult::with_columns(vec!["entity_id".into(), "score".into()]);
                 for item in &res.matches {
@@ -561,15 +563,14 @@ impl RedDBRuntime {
                     min_score: None,
                 };
                 let scope = self.ai_scope();
-                let res = if super::statement_frame::ReadFrame::visible_collections(&scope)
-                    .is_some()
-                {
-                    crate::runtime::authorized_search::AuthorizedSearch::execute_context(
-                        self, &scope, input,
-                    )?
-                } else {
-                    self.search_context(input)?
-                };
+                let res =
+                    if super::statement_frame::ReadFrame::visible_collections(&scope).is_some() {
+                        crate::runtime::authorized_search::AuthorizedSearch::execute_context(
+                            self, &scope, input,
+                        )?
+                    } else {
+                        self.search_context(input)?
+                    };
                 let mut result = UnifiedResult::with_columns(vec![
                     "entity_id".into(),
                     "collection".into(),

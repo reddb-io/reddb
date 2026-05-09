@@ -657,7 +657,7 @@ pub(super) fn embed_text_public(
 fn embed_text(db: &RedDB, text: &str, provider_hint: Option<&str>) -> Option<Value> {
     // Resolve provider from explicit hint, then fall back to the
     // runtime-wide default captured in `red_config`. Ollama and other
-    // OpenAI-compatible endpoints share the `openai_embeddings` call;
+    // OpenAI-compatible endpoints share the same embeddings wire shape;
     // only the api_base and model differ.
     let kv_getter = |k: &str| -> Result<Option<String>, crate::RedDBError> {
         Ok(
@@ -690,6 +690,9 @@ fn embed_text(db: &RedDB, text: &str, provider_hint: Option<&str>) -> Option<Val
     let api_base = provider.resolve_api_base_with_kv("default", &kv_getter);
     let model = provider.default_embedding_model().to_string();
 
+    let transport = crate::runtime::ai::transport::AiTransport::new(
+        crate::runtime::ai::transport::AiTransportConfig::default(),
+    );
     let request = crate::ai::OpenAiEmbeddingRequest {
         api_key,
         model,
@@ -697,7 +700,11 @@ fn embed_text(db: &RedDB, text: &str, provider_hint: Option<&str>) -> Option<Val
         dimensions: None,
         api_base,
     };
-    match crate::ai::openai_embeddings(request) {
+    match crate::runtime::ai::block_on_ai(async move {
+        crate::ai::openai_embeddings_async(&transport, request).await
+    })
+    .and_then(|result| result)
+    {
         Ok(resp) => resp.embeddings.into_iter().next().map(Value::Vector),
         Err(_) => None,
     }
