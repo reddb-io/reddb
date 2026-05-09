@@ -1109,6 +1109,7 @@ fn collection_model_name(model: CollectionModel) -> &'static str {
         CollectionModel::Document => "document",
         CollectionModel::Graph => "graph",
         CollectionModel::Vector => "vector",
+        CollectionModel::Kv => "kv",
         CollectionModel::Mixed => "mixed",
         CollectionModel::TimeSeries => "time_series",
         CollectionModel::Queue => "queue",
