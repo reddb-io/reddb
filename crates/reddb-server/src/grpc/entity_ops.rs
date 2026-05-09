@@ -153,7 +153,11 @@ pub(crate) fn bulk_create_rows_fast(
 
     let outputs = runtime
         .entity_use_cases()
-        .create_rows_batch(crate::application::CreateRowsBatchInput { collection, rows, suppress_events: false })
+        .create_rows_batch(crate::application::CreateRowsBatchInput {
+            collection,
+            rows,
+            suppress_events: false,
+        })
         .map_err(entity_error_to_status)?;
 
     let items: Vec<_> = outputs
@@ -243,6 +247,7 @@ pub(crate) fn entity_error_to_status(err: crate::api::RedDBError) -> Status {
         crate::api::RedDBError::InvalidConfig(msg)
         | crate::api::RedDBError::FeatureNotEnabled(msg)
         | crate::api::RedDBError::ReadOnly(msg)
+        | crate::api::RedDBError::InvalidOperation(msg)
         | crate::api::RedDBError::Catalog(msg)
         | crate::api::RedDBError::Query(msg) => Status::invalid_argument(msg),
         other => Status::internal(other.to_string()),
@@ -307,7 +312,11 @@ pub(crate) fn bulk_insert_binary(
 
     let outputs = runtime
         .entity_use_cases()
-        .create_rows_batch(crate::application::CreateRowsBatchInput { collection, rows, suppress_events: false })
+        .create_rows_batch(crate::application::CreateRowsBatchInput {
+            collection,
+            rows,
+            suppress_events: false,
+        })
         .map_err(entity_error_to_status)?;
     let first_id = outputs.first().map(|output| output.id.raw()).unwrap_or(0);
 

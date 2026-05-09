@@ -90,7 +90,7 @@ fn ensure_collection_model_contract(
         if collection_model_allows(contract.declared_model, requested_model) {
             return Ok(());
         }
-        return Err(crate::RedDBError::Query(format!(
+        return Err(crate::RedDBError::InvalidOperation(format!(
             "collection '{}' is declared as '{}' and does not allow '{}' writes",
             collection,
             collection_model_name(contract.declared_model),
@@ -144,6 +144,8 @@ fn collection_model_name(model: crate::catalog::CollectionModel) -> &'static str
         crate::catalog::CollectionModel::Graph => "graph",
         crate::catalog::CollectionModel::Vector => "vector",
         crate::catalog::CollectionModel::Kv => "kv",
+        crate::catalog::CollectionModel::Config => "config",
+        crate::catalog::CollectionModel::Vault => "vault",
         crate::catalog::CollectionModel::Mixed => "mixed",
         crate::catalog::CollectionModel::TimeSeries => "timeseries",
         crate::catalog::CollectionModel::Queue => "queue",
@@ -2123,7 +2125,11 @@ impl RuntimeEntityPort for RedDBRuntime {
         // instead of N separate cdc_emit() calls (each acquires a write lock).
         let engine = {
             let e = self.mutation_engine();
-            if input.suppress_events { e.with_suppress_events() } else { e }
+            if input.suppress_events {
+                e.with_suppress_events()
+            } else {
+                e
+            }
         };
         let mutation_rows: Vec<crate::runtime::mutation::MutationRow> = prepared_rows
             .into_iter()

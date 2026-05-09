@@ -20,6 +20,8 @@ pub enum CollectionModel {
     Graph,
     Vector,
     Kv,
+    Config,
+    Vault,
     Mixed,
     TimeSeries,
     Queue,
@@ -522,9 +524,11 @@ fn infer_schema_mode(model: CollectionModel) -> SchemaMode {
     match model {
         CollectionModel::Table => SchemaMode::Strict,
         CollectionModel::Graph | CollectionModel::Vector => SchemaMode::SemiStructured,
-        CollectionModel::Document | CollectionModel::Kv | CollectionModel::Mixed => {
-            SchemaMode::Dynamic
-        }
+        CollectionModel::Document
+        | CollectionModel::Kv
+        | CollectionModel::Config
+        | CollectionModel::Vault
+        | CollectionModel::Mixed => SchemaMode::Dynamic,
         CollectionModel::TimeSeries => SchemaMode::SemiStructured,
         CollectionModel::Queue => SchemaMode::Dynamic,
     }
@@ -556,6 +560,8 @@ fn infer_indices(
                 | (CollectionModel::Document, IndexKind::FullText)
                 | (CollectionModel::Document, IndexKind::DocumentPathValue)
                 | (CollectionModel::Kv, IndexKind::Hash)
+                | (CollectionModel::Config, IndexKind::Hash)
+                | (CollectionModel::Vault, IndexKind::Hash)
                 | (CollectionModel::Mixed, _)
         );
 

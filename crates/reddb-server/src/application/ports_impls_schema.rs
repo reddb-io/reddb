@@ -59,6 +59,7 @@ impl RuntimeSchemaPort for RedDBRuntime {
         } = input;
         let raw_query = api_query("create_table", &name);
         let query = CreateTableQuery {
+            collection_model: crate::catalog::CollectionModel::Table,
             name,
             columns: columns.into_iter().map(to_create_column_def).collect(),
             if_not_exists,

@@ -1,20 +1,19 @@
+use crate::catalog::CollectionModel;
 use crate::storage::query::ast::{
     AlterQueueQuery, AlterTableQuery, AlterUserStmt, ApplyMigrationQuery, AskQuery, BinOp,
-    CompareOp, CopyFormat,
-    CopyFromQuery, CreateForeignTableQuery, CreateIndexQuery, CreateMigrationQuery,
-    CreatePolicyQuery, CreateQueueQuery, CreateSchemaQuery, CreateSequenceQuery, CreateServerQuery,
-    CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery, CreateViewQuery, DeleteQuery,
-    DropCollectionQuery, DropDocumentQuery, DropForeignTableQuery, DropGraphQuery, DropIndexQuery,
-    DropKvQuery, DropPolicyQuery, DropQueueQuery, DropSchemaQuery, DropSequenceQuery,
-    DropServerQuery, DropTableQuery, DropTimeSeriesQuery, DropTreeQuery, DropVectorQuery,
-    DropViewQuery, ExplainAlterQuery, ExplainMigrationQuery, Expr, FieldRef, Filter,
-    ForeignColumnDef, GrantStmt, GraphCommand, GraphQuery, HybridQuery, InsertQuery, JoinQuery,
-    KvCommand, MaintenanceCommand, PathQuery, PolicyAction, ProbabilisticCommand, QueryExpr,
-    QueueCommand,
-    RefreshMaterializedViewQuery, RevokeStmt, RollbackMigrationQuery, SearchCommand, Span,
-    TableQuery, TreeCommand, TruncateQuery, TxnControl, UpdateQuery, VectorQuery,
+    CompareOp, CopyFormat, CopyFromQuery, CreateForeignTableQuery, CreateIndexQuery,
+    CreateMigrationQuery, CreatePolicyQuery, CreateQueueQuery, CreateSchemaQuery,
+    CreateSequenceQuery, CreateServerQuery, CreateTableQuery, CreateTimeSeriesQuery,
+    CreateTreeQuery, CreateViewQuery, DeleteQuery, DropCollectionQuery, DropDocumentQuery,
+    DropForeignTableQuery, DropGraphQuery, DropIndexQuery, DropKvQuery, DropPolicyQuery,
+    DropQueueQuery, DropSchemaQuery, DropSequenceQuery, DropServerQuery, DropTableQuery,
+    DropTimeSeriesQuery, DropTreeQuery, DropVectorQuery, DropViewQuery, ExplainAlterQuery,
+    ExplainMigrationQuery, Expr, FieldRef, Filter, ForeignColumnDef, GrantStmt, GraphCommand,
+    GraphQuery, HybridQuery, InsertQuery, JoinQuery, KvCommand, MaintenanceCommand, PathQuery,
+    PolicyAction, ProbabilisticCommand, QueryExpr, QueueCommand, RefreshMaterializedViewQuery,
+    RevokeStmt, RollbackMigrationQuery, SearchCommand, Span, TableQuery, TreeCommand,
+    TruncateQuery, TxnControl, UpdateQuery, VectorQuery,
 };
-use crate::catalog::CollectionModel;
 use crate::storage::query::parser::{ParseError, Parser, SafeTokenDisplay};
 use crate::storage::query::sql_lowering::filter_to_expr;
 use crate::storage::query::Token;
@@ -966,6 +965,31 @@ impl<'a> Parser<'a> {
                             self.position(),
                         )),
                     }
+                } else if self.check(&Token::Kv) {
+                    self.advance()?;
+                    match self.parse_create_keyed_body(CollectionModel::Kv)? {
+                        QueryExpr::CreateTable(query) => Ok(SqlCommand::CreateTable(query)),
+                        other => Err(ParseError::new(
+                            format!("internal: CREATE KV produced unexpected kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                } else if self.consume_ident_ci("CONFIG")? {
+                    match self.parse_create_keyed_body(CollectionModel::Config)? {
+                        QueryExpr::CreateTable(query) => Ok(SqlCommand::CreateTable(query)),
+                        other => Err(ParseError::new(
+                            format!("internal: CREATE CONFIG produced unexpected kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                } else if self.consume_ident_ci("VAULT")? {
+                    match self.parse_create_keyed_body(CollectionModel::Vault)? {
+                        QueryExpr::CreateTable(query) => Ok(SqlCommand::CreateTable(query)),
+                        other => Err(ParseError::new(
+                            format!("internal: CREATE VAULT produced unexpected kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
                 } else if self.check(&Token::Timeseries) {
                     self.advance()?;
                     match self.parse_create_timeseries_body()? {
@@ -1334,14 +1358,28 @@ impl<'a> Parser<'a> {
                             self.position(),
                         )),
                     }
+                } else if self.consume_ident_ci("CONFIG")? {
+                    match self.parse_drop_keyed_body(CollectionModel::Config)? {
+                        QueryExpr::DropKv(query) => Ok(SqlCommand::DropKv(query)),
+                        other => Err(ParseError::new(
+                            format!("internal: DROP CONFIG produced unexpected kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                } else if self.consume_ident_ci("VAULT")? {
+                    match self.parse_drop_keyed_body(CollectionModel::Vault)? {
+                        QueryExpr::DropKv(query) => Ok(SqlCommand::DropKv(query)),
+                        other => Err(ParseError::new(
+                            format!("internal: DROP VAULT produced unexpected kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
                 } else if self.check(&Token::Collection) {
                     self.advance()?;
                     match self.parse_drop_collection_body()? {
                         QueryExpr::DropCollection(query) => Ok(SqlCommand::DropCollection(query)),
                         other => Err(ParseError::new(
-                            format!(
-                                "internal: DROP COLLECTION produced unexpected kind {other:?}"
-                            ),
+                            format!("internal: DROP COLLECTION produced unexpected kind {other:?}"),
                             self.position(),
                         )),
                     }
@@ -1667,7 +1705,18 @@ impl<'a> Parser<'a> {
                     Ok(SqlCommand::Select(parse_show_collections_by_model(
                         self, "graph",
                     )?))
-                } else if self.consume(&Token::Kv)? || self.consume_ident_ci("KV")? {
+                } else if self.consume_ident_ci("CONFIGS")? {
+                    Ok(SqlCommand::Select(parse_show_collections_by_model(
+                        self, "config",
+                    )?))
+                } else if self.consume_ident_ci("VAULTS")? {
+                    Ok(SqlCommand::Select(parse_show_collections_by_model(
+                        self, "vault",
+                    )?))
+                } else if self.consume(&Token::Kv)?
+                    || self.consume_ident_ci("KV")?
+                    || self.consume_ident_ci("KVS")?
+                {
                     Ok(SqlCommand::Select(parse_show_collections_by_model(
                         self, "kv",
                     )?))

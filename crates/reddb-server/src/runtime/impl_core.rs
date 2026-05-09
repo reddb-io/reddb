@@ -4112,6 +4112,7 @@ impl RedDBRuntime {
         // the same view resolution `execute_query_expr` already does.
         let expr = self.rewrite_view_refs(expr);
 
+        self.validate_model_operations_before_auth(&expr)?;
         frame.check_query_privilege(self, &expr)?;
 
         let statement = query_expr_name(&expr);
@@ -5380,6 +5381,7 @@ impl RedDBRuntime {
         // underlying query. Safe to call even when no views are registered.
         let expr = self.rewrite_view_refs(expr);
 
+        self.validate_model_operations_before_auth(&expr)?;
         // Granular RBAC privilege check. Runs before dispatch so a
         // denied caller never reaches storage. Fail-closed: any error
         // resolving the action / resource produces PermissionDenied.
@@ -5397,6 +5399,60 @@ impl RedDBRuntime {
             self.apply_secret_decryption(&mut r);
         }
         Ok(r)
+    }
+
+    fn validate_model_operations_before_auth(&self, expr: &QueryExpr) -> RedDBResult<()> {
+        use crate::catalog::CollectionModel;
+        use crate::runtime::ddl::polymorphic_resolver;
+        use crate::storage::query::ast::KvCommand;
+
+        let system_schema_target = match expr {
+            QueryExpr::DropTable(q) => Some(q.name.as_str()),
+            QueryExpr::DropGraph(q) => Some(q.name.as_str()),
+            QueryExpr::DropVector(q) => Some(q.name.as_str()),
+            QueryExpr::DropDocument(q) => Some(q.name.as_str()),
+            QueryExpr::DropKv(q) => Some(q.name.as_str()),
+            QueryExpr::DropCollection(q) => Some(q.name.as_str()),
+            QueryExpr::Truncate(q) => Some(q.name.as_str()),
+            _ => None,
+        };
+        if system_schema_target.is_some_and(crate::runtime::impl_ddl::is_system_schema_name) {
+            return Err(RedDBError::Query("system schema is read-only".to_string()));
+        }
+
+        let expected = match expr {
+            QueryExpr::DropTable(q) => Some((q.name.as_str(), CollectionModel::Table)),
+            QueryExpr::DropGraph(q) => Some((q.name.as_str(), CollectionModel::Graph)),
+            QueryExpr::DropVector(q) => Some((q.name.as_str(), CollectionModel::Vector)),
+            QueryExpr::DropDocument(q) => Some((q.name.as_str(), CollectionModel::Document)),
+            QueryExpr::DropKv(q) => Some((q.name.as_str(), q.model)),
+            QueryExpr::Truncate(q) => q.model.map(|model| (q.name.as_str(), model)),
+            QueryExpr::KvCommand(cmd) => {
+                let collection = match cmd {
+                    KvCommand::Put { collection, .. }
+                    | KvCommand::Get { collection, .. }
+                    | KvCommand::Incr { collection, .. }
+                    | KvCommand::Cas { collection, .. }
+                    | KvCommand::Delete { collection, .. } => collection.as_str(),
+                };
+                Some((collection, CollectionModel::Kv))
+            }
+            _ => None,
+        };
+
+        let Some((name, expected_model)) = expected else {
+            return Ok(());
+        };
+        let snapshot = self.inner.db.catalog_model_snapshot();
+        let Some(actual_model) = snapshot
+            .collections
+            .iter()
+            .find(|collection| collection.name == name)
+            .map(|collection| collection.declared_model.unwrap_or(collection.model))
+        else {
+            return Ok(());
+        };
+        polymorphic_resolver::ensure_model_match(expected_model, actual_model)
     }
 
     /// Walk a `QueryExpr` and replace `QueryExpr::Table(tq)` nodes whose
@@ -7007,44 +7063,79 @@ impl RedDBRuntime {
             // when IAM mode is active. Other DDL stays role-only for now.
             QueryExpr::DropTable(q) => {
                 return self.check_ddl_collection_privilege(
-                    &auth_store, &principal_id, role, tenant.as_deref(), &username,
-                    "drop", &q.name,
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "drop",
+                    &q.name,
                 );
             }
             QueryExpr::DropGraph(q) => {
                 return self.check_ddl_collection_privilege(
-                    &auth_store, &principal_id, role, tenant.as_deref(), &username,
-                    "drop", &q.name,
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "drop",
+                    &q.name,
                 );
             }
             QueryExpr::DropVector(q) => {
                 return self.check_ddl_collection_privilege(
-                    &auth_store, &principal_id, role, tenant.as_deref(), &username,
-                    "drop", &q.name,
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "drop",
+                    &q.name,
                 );
             }
             QueryExpr::DropDocument(q) => {
                 return self.check_ddl_collection_privilege(
-                    &auth_store, &principal_id, role, tenant.as_deref(), &username,
-                    "drop", &q.name,
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "drop",
+                    &q.name,
                 );
             }
             QueryExpr::DropKv(q) => {
                 return self.check_ddl_collection_privilege(
-                    &auth_store, &principal_id, role, tenant.as_deref(), &username,
-                    "drop", &q.name,
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "drop",
+                    &q.name,
                 );
             }
             QueryExpr::DropCollection(q) => {
                 return self.check_ddl_collection_privilege(
-                    &auth_store, &principal_id, role, tenant.as_deref(), &username,
-                    "drop", &q.name,
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "drop",
+                    &q.name,
                 );
             }
             QueryExpr::Truncate(q) => {
                 return self.check_ddl_collection_privilege(
-                    &auth_store, &principal_id, role, tenant.as_deref(), &username,
-                    "truncate", &q.name,
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    &username,
+                    "truncate",
+                    &q.name,
                 );
             }
             // Remaining DDL — gate on Write role. Fine-grained grants TBD.
