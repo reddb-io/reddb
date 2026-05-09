@@ -1128,13 +1128,20 @@ fn embed_runtime_vector_text(db: &RedDB, text: &str) -> RedDBResult<Vec<f32>> {
     let provider = crate::ai::resolve_default_provider(&kv_getter);
     let model = crate::ai::resolve_default_model(&provider, &kv_getter);
     let api_key = crate::ai::resolve_api_key(&provider, None, kv_getter)?;
-    let response = crate::ai::openai_embeddings(crate::ai::OpenAiEmbeddingRequest {
+    let transport = crate::runtime::ai::transport::AiTransport::new(
+        crate::runtime::ai::transport::AiTransportConfig::default(),
+    );
+    let request = crate::ai::OpenAiEmbeddingRequest {
         api_key,
         model,
         inputs: vec![text.to_string()],
         dimensions: None,
         api_base: provider.resolve_api_base(),
-    })?;
+    };
+    let response = crate::runtime::ai::block_on_ai(async move {
+        crate::ai::openai_embeddings_async(&transport, request).await
+    })
+    .and_then(|result| result)?;
 
     response
         .embeddings
@@ -1413,9 +1420,7 @@ pub(super) fn runtime_record_identity_key(record: &UnifiedRecord) -> String {
     }
 
     if let (Some(collection), Some(row_id)) = (
-        record
-            .get("red_collection")
-            .and_then(runtime_value_text),
+        record.get("red_collection").and_then(runtime_value_text),
         record.get("row_id").or_else(|| record.get("id")),
     ) {
         if let Some(fragment) = runtime_identity_fragment(row_id) {
@@ -1427,10 +1432,9 @@ pub(super) fn runtime_record_identity_key(record: &UnifiedRecord) -> String {
         return format!("node:{alias}:{}", node.id);
     }
 
-    if let Some(value) =
-        record
-            .iter_fields()
-            .find_map(|(key, value)| key.ends_with(".id").then_some(value))
+    if let Some(value) = record
+        .iter_fields()
+        .find_map(|(key, value)| key.ends_with(".id").then_some(value))
     {
         if let Some(fragment) = runtime_identity_fragment(value) {
             return format!("ref:{fragment}");
@@ -1735,10 +1739,7 @@ pub(super) fn merge_hybrid_records(
             let key_str: &str = &key;
             if let Some(existing) = merged.get(key_str) {
                 if existing != &value {
-                    merged.set_arc(
-                        std::sync::Arc::from(format!("vector.{key_str}")),
-                        value,
-                    );
+                    merged.set_arc(std::sync::Arc::from(format!("vector.{key_str}")), value);
                 }
             } else {
                 merged.set_arc(key, value);
@@ -1796,10 +1797,7 @@ pub(super) fn merge_join_records(
             let key_str: &str = &key;
             if merged.contains_column(key_str) {
                 if let Some(prefix) = right_prefix {
-                    merged.set_arc(
-                        std::sync::Arc::from(format!("{prefix}.{key_str}")),
-                        value,
-                    );
+                    merged.set_arc(std::sync::Arc::from(format!("{prefix}.{key_str}")), value);
                 }
             } else {
                 merged.set_arc(key, value);
