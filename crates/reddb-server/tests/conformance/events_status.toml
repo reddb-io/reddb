@@ -1,0 +1,4 @@
+input = "EVENTS STATUS"
+expected_kind = "Table"
+source = "docs/query/events.md:21"
+kind = "positive"

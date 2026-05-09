@@ -22,6 +22,14 @@ ALTER TABLE users ENABLE EVENTS TO audit_log;
 ALTER TABLE users DISABLE EVENTS;
 ```
 
+Inspect subscriptions with `EVENTS STATUS`:
+
+```sql
+EVENTS STATUS;
+EVENTS STATUS users;
+SELECT * FROM red.subscriptions;
+```
+
 Queues cannot subscribe to events themselves:
 
 ```sql

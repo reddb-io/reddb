@@ -1,0 +1,4 @@
+input = "EVENTS STATUS users ORDER BY target_queue"
+expected_kind = "Table"
+source = "docs/query/events.md:29"
+kind = "positive"
