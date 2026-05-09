@@ -315,6 +315,7 @@ impl JoinReorderingPass {
             | QueryExpr::DropQueue(_)
             | QueryExpr::QueueCommand(_)
             | QueryExpr::KvCommand(_)
+            | QueryExpr::ConfigCommand(_)
             | QueryExpr::CreateTree(_)
             | QueryExpr::DropTree(_)
             | QueryExpr::TreeCommand(_)

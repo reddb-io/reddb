@@ -4,9 +4,9 @@ use super::*;
 use crate::catalog::SubscriptionOperation;
 use crate::storage::engine::vector_metadata::MetadataValue;
 use crate::storage::query::ast::{
-    CompareOp, DistanceMetric, EdgeDirection, FieldRef, Filter, FusionStrategy, JoinType,
-    KvCommand, MetadataFilter, Projection, QueueCommand, TableQuery, TreeCommand, TreePosition,
-    VectorSource,
+    CompareOp, ConfigCommand, DistanceMetric, EdgeDirection, FieldRef, Filter, FusionStrategy,
+    JoinType, KvCommand, MetadataFilter, Projection, QueueCommand, TableQuery, TreeCommand,
+    TreePosition, VectorSource,
 };
 
 /// Test helper that returns the legacy `QueryExpr` shape. The
@@ -5351,5 +5351,75 @@ fn test_parse_kv_decr_with_by() {
         assert_eq!(by, -3);
     } else {
         panic!("expected KvCommand::Incr with by=-3");
+    }
+}
+
+#[test]
+fn test_parse_put_config() {
+    let q = parse("PUT CONFIG app feature_flag = true").unwrap();
+    if let QueryExpr::ConfigCommand(ConfigCommand::Put {
+        collection,
+        key,
+        value,
+    }) = q
+    {
+        assert_eq!(collection, "app");
+        assert_eq!(key, "feature_flag");
+        assert_eq!(value, Value::Boolean(true));
+    } else {
+        panic!("expected ConfigCommand::Put");
+    }
+}
+
+#[test]
+fn test_parse_rotate_config() {
+    let q = parse("ROTATE CONFIG app api_key = 'v2'").unwrap();
+    if let QueryExpr::ConfigCommand(ConfigCommand::Rotate {
+        collection,
+        key,
+        value,
+    }) = q
+    {
+        assert_eq!(collection, "app");
+        assert_eq!(key, "api_key");
+        assert_eq!(value, Value::text("v2"));
+    } else {
+        panic!("expected ConfigCommand::Rotate");
+    }
+}
+
+#[test]
+fn test_parse_get_delete_history_config() {
+    assert!(matches!(
+        parse("GET CONFIG app feature_flag").unwrap(),
+        QueryExpr::ConfigCommand(ConfigCommand::Get { .. })
+    ));
+    assert!(matches!(
+        parse("DELETE CONFIG app feature_flag").unwrap(),
+        QueryExpr::ConfigCommand(ConfigCommand::Delete { .. })
+    ));
+    assert!(matches!(
+        parse("HISTORY CONFIG app feature_flag").unwrap(),
+        QueryExpr::ConfigCommand(ConfigCommand::History { .. })
+    ));
+}
+
+#[test]
+fn test_parse_config_kv_only_operations_as_invalid_operation() {
+    for sql in [
+        "PUT CONFIG app ttl_key = 'v' EXPIRE 1 s",
+        "ROTATE CONFIG app ttl_key = 'v2' TTL 10",
+        "INCR CONFIG app counter",
+        "DECR CONFIG app counter",
+        "ADD CONFIG app member",
+        "INVALIDATE CONFIG app feature_flag",
+    ] {
+        assert!(
+            matches!(
+                parse(sql).unwrap(),
+                QueryExpr::ConfigCommand(ConfigCommand::InvalidVolatileOperation { .. })
+            ),
+            "{sql}"
+        );
     }
 }

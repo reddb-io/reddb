@@ -410,6 +410,7 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         | QueryExpr::DropQueue(_)
         | QueryExpr::QueueCommand(_)
         | QueryExpr::KvCommand(_)
+        | QueryExpr::ConfigCommand(_)
         | QueryExpr::CreateTree(_)
         | QueryExpr::DropTree(_)
         | QueryExpr::TreeCommand(_)
@@ -765,6 +766,7 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::DropQueue(_) => "drop_queue",
         QueryExpr::QueueCommand(_) => "queue_command",
         QueryExpr::KvCommand(_) => "kv_command",
+        QueryExpr::ConfigCommand(_) => "config_command",
         QueryExpr::CreateTree(_) => "create_tree",
         QueryExpr::DropTree(_) => "drop_tree",
         QueryExpr::TreeCommand(_) => "tree_command",

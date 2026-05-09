@@ -73,6 +73,8 @@ pub enum QueryExpr {
     QueueCommand(QueueCommand),
     /// KV subcommand (PUT, GET, DELETE)
     KvCommand(KvCommand),
+    /// CONFIG keyed command (PUT, GET, ROTATE, DELETE, HISTORY)
+    ConfigCommand(ConfigCommand),
     /// CREATE TREE name IN collection ROOT ... MAX_CHILDREN n
     CreateTree(CreateTreeQuery),
     /// DROP TREE name IN collection
@@ -2467,6 +2469,37 @@ pub enum KvCommand {
         expected: Option<Value>,
         new_value: Value,
         ttl_ms: Option<u64>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum ConfigCommand {
+    Put {
+        collection: String,
+        key: String,
+        value: Value,
+    },
+    Get {
+        collection: String,
+        key: String,
+    },
+    Rotate {
+        collection: String,
+        key: String,
+        value: Value,
+    },
+    Delete {
+        collection: String,
+        key: String,
+    },
+    History {
+        collection: String,
+        key: String,
+    },
+    InvalidVolatileOperation {
+        operation: String,
+        collection: String,
+        key: Option<String>,
     },
 }
 
