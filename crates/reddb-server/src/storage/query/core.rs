@@ -1646,9 +1646,11 @@ pub struct DeleteQuery {
     pub suppress_events: bool,
 }
 
-/// CREATE TABLE name (columns)
+/// CREATE TABLE name (columns) or CREATE {KV|CONFIG|VAULT} name
 #[derive(Debug, Clone)]
 pub struct CreateTableQuery {
+    /// Declared collection model. Defaults to Table for CREATE TABLE.
+    pub collection_model: CollectionModel,
     /// Table name
     pub name: String,
     /// Column definitions
@@ -1777,11 +1779,12 @@ pub struct DropDocumentQuery {
     pub if_exists: bool,
 }
 
-/// DROP KV [IF EXISTS] name
+/// DROP {KV|CONFIG|VAULT} [IF EXISTS] name
 #[derive(Debug, Clone)]
 pub struct DropKvQuery {
     pub name: String,
     pub if_exists: bool,
+    pub model: CollectionModel,
 }
 
 /// DROP COLLECTION [IF EXISTS] name

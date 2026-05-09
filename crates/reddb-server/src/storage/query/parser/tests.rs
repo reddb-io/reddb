@@ -1579,6 +1579,9 @@ fn test_parse_typed_show_desugars_to_red_collections_model_filter() {
         ("SHOW TIMESERIES", "timeseries"),
         ("SHOW GRAPHS", "graph"),
         ("SHOW KV", "kv"),
+        ("SHOW KVS", "kv"),
+        ("SHOW CONFIGS", "config"),
+        ("SHOW VAULTS", "vault"),
     ] {
         let query = parse(input).unwrap();
         if let QueryExpr::Table(tq) = query {
@@ -1798,6 +1801,7 @@ fn test_parse_dollar_config_reference_projection() {
 fn test_parse_create_table_simple() {
     let query = parse("CREATE TABLE hosts (ip TEXT, hostname TEXT, port INTEGER)").unwrap();
     if let QueryExpr::CreateTable(ct) = query {
+        assert_eq!(ct.collection_model, crate::catalog::CollectionModel::Table);
         assert_eq!(ct.name, "hosts");
         assert_eq!(ct.columns.len(), 3);
         assert!(!ct.if_not_exists);
@@ -1809,6 +1813,37 @@ fn test_parse_create_table_simple() {
         assert_eq!(ct.columns[2].data_type, "INTEGER");
     } else {
         panic!("Expected CreateTableQuery");
+    }
+}
+
+#[test]
+fn test_parse_create_keyed_models() {
+    use crate::catalog::CollectionModel;
+
+    for (sql, name, model, if_not_exists) in [
+        ("CREATE KV sessions", "sessions", CollectionModel::Kv, false),
+        (
+            "CREATE CONFIG IF NOT EXISTS app_settings",
+            "app_settings",
+            CollectionModel::Config,
+            true,
+        ),
+        (
+            "CREATE VAULT secrets",
+            "secrets",
+            CollectionModel::Vault,
+            false,
+        ),
+    ] {
+        match parse(sql).unwrap() {
+            QueryExpr::CreateTable(query) => {
+                assert_eq!(query.name, name);
+                assert_eq!(query.collection_model, model);
+                assert_eq!(query.if_not_exists, if_not_exists);
+                assert!(query.columns.is_empty());
+            }
+            other => panic!("unexpected parse result for {sql}: {other:?}"),
+        }
     }
 }
 
@@ -1908,13 +1943,13 @@ fn test_parse_create_table_with_events_options() {
     assert_eq!(subscription.target_queue, "audit_log");
     assert_eq!(
         subscription.ops_filter,
-        vec![
-            SubscriptionOperation::Insert,
-            SubscriptionOperation::Update
-        ]
+        vec![SubscriptionOperation::Insert, SubscriptionOperation::Update]
     );
     assert_eq!(subscription.redact_fields, vec!["email", "phone"]);
-    assert_eq!(subscription.where_filter.as_deref(), Some("status = 'active'"));
+    assert_eq!(
+        subscription.where_filter.as_deref(),
+        Some("status = 'active'")
+    );
 }
 
 #[test]
@@ -1946,6 +1981,8 @@ fn test_parse_polymorphic_drop_models() {
         ("DROP VECTOR notes", "notes", false, "vector"),
         ("DROP DOCUMENT logs", "logs", false, "document"),
         ("DROP KV settings", "settings", false, "kv"),
+        ("DROP CONFIG app_settings", "app_settings", false, "config"),
+        ("DROP VAULT secrets", "secrets", false, "vault"),
         (
             "DROP COLLECTION IF EXISTS users",
             "users",
@@ -1971,6 +2008,17 @@ fn test_parse_polymorphic_drop_models() {
             (QueryExpr::DropKv(query), "kv") => {
                 assert_eq!(query.name, name);
                 assert_eq!(query.if_exists, if_exists);
+                assert_eq!(query.model, crate::catalog::CollectionModel::Kv);
+            }
+            (QueryExpr::DropKv(query), "config") => {
+                assert_eq!(query.name, name);
+                assert_eq!(query.if_exists, if_exists);
+                assert_eq!(query.model, crate::catalog::CollectionModel::Config);
+            }
+            (QueryExpr::DropKv(query), "vault") => {
+                assert_eq!(query.name, name);
+                assert_eq!(query.if_exists, if_exists);
+                assert_eq!(query.model, crate::catalog::CollectionModel::Vault);
             }
             (QueryExpr::DropCollection(query), "collection") => {
                 assert_eq!(query.name, name);
@@ -1986,18 +2034,48 @@ fn test_parse_polymorphic_truncate_models() {
     use crate::catalog::CollectionModel;
 
     let cases = [
-        ("TRUNCATE TABLE users", "users", false, Some(CollectionModel::Table)),
-        ("TRUNCATE GRAPH identity", "identity", false, Some(CollectionModel::Graph)),
-        ("TRUNCATE VECTOR notes", "notes", false, Some(CollectionModel::Vector)),
+        (
+            "TRUNCATE TABLE users",
+            "users",
+            false,
+            Some(CollectionModel::Table),
+        ),
+        (
+            "TRUNCATE GRAPH identity",
+            "identity",
+            false,
+            Some(CollectionModel::Graph),
+        ),
+        (
+            "TRUNCATE VECTOR notes",
+            "notes",
+            false,
+            Some(CollectionModel::Vector),
+        ),
         (
             "TRUNCATE DOCUMENT IF EXISTS logs",
             "logs",
             true,
             Some(CollectionModel::Document),
         ),
-        ("TRUNCATE TIMESERIES metrics", "metrics", false, Some(CollectionModel::TimeSeries)),
-        ("TRUNCATE KV settings", "settings", false, Some(CollectionModel::Kv)),
-        ("TRUNCATE QUEUE tasks", "tasks", false, Some(CollectionModel::Queue)),
+        (
+            "TRUNCATE TIMESERIES metrics",
+            "metrics",
+            false,
+            Some(CollectionModel::TimeSeries),
+        ),
+        (
+            "TRUNCATE KV settings",
+            "settings",
+            false,
+            Some(CollectionModel::Kv),
+        ),
+        (
+            "TRUNCATE QUEUE tasks",
+            "tasks",
+            false,
+            Some(CollectionModel::Queue),
+        ),
         ("TRUNCATE COLLECTION IF EXISTS users", "users", true, None),
     ];
 
@@ -5107,7 +5185,10 @@ fn test_parse_kv_put_with_expire() {
     let q = parse("KV PUT token = 'jwt-xyz' EXPIRE 30 s").unwrap();
     assert!(matches!(
         q,
-        QueryExpr::KvCommand(KvCommand::Put { ttl_ms: Some(30_000), .. })
+        QueryExpr::KvCommand(KvCommand::Put {
+            ttl_ms: Some(30_000),
+            ..
+        })
     ));
 }
 

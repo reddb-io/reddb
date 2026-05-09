@@ -69,6 +69,7 @@ impl<'a> Parser<'a> {
         }
 
         Ok(QueryExpr::CreateTable(CreateTableQuery {
+            collection_model: CollectionModel::Table,
             name,
             columns,
             if_not_exists,
@@ -244,6 +245,7 @@ impl<'a> Parser<'a> {
         }
 
         Ok(QueryExpr::CreateTable(CreateTableQuery {
+            collection_model: CollectionModel::Table,
             name,
             columns,
             if_not_exists,
@@ -326,13 +328,49 @@ impl<'a> Parser<'a> {
     pub fn parse_drop_document_body(&mut self) -> Result<QueryExpr, ParseError> {
         let if_exists = self.match_if_exists()?;
         let name = self.parse_drop_collection_name()?;
-        Ok(QueryExpr::DropDocument(DropDocumentQuery { name, if_exists }))
+        Ok(QueryExpr::DropDocument(DropDocumentQuery {
+            name,
+            if_exists,
+        }))
+    }
+
+    pub fn parse_create_keyed_body(
+        &mut self,
+        model: CollectionModel,
+    ) -> Result<QueryExpr, ParseError> {
+        let if_not_exists = self.match_if_not_exists()?;
+        let name = self.parse_drop_collection_name()?;
+        Ok(QueryExpr::CreateTable(CreateTableQuery {
+            collection_model: model,
+            name,
+            columns: Vec::new(),
+            if_not_exists,
+            default_ttl_ms: None,
+            context_index_fields: Vec::new(),
+            context_index_enabled: false,
+            timestamps: false,
+            partition_by: None,
+            tenant_by: None,
+            append_only: false,
+            subscriptions: Vec::new(),
+        }))
+    }
+
+    pub fn parse_drop_keyed_body(
+        &mut self,
+        model: CollectionModel,
+    ) -> Result<QueryExpr, ParseError> {
+        let if_exists = self.match_if_exists()?;
+        let name = self.parse_drop_collection_name()?;
+        Ok(QueryExpr::DropKv(DropKvQuery {
+            name,
+            if_exists,
+            model,
+        }))
     }
 
     pub fn parse_drop_kv_body(&mut self) -> Result<QueryExpr, ParseError> {
-        let if_exists = self.match_if_exists()?;
-        let name = self.parse_drop_collection_name()?;
-        Ok(QueryExpr::DropKv(DropKvQuery { name, if_exists }))
+        self.parse_drop_keyed_body(CollectionModel::Kv)
     }
 
     pub fn parse_drop_collection_body(&mut self) -> Result<QueryExpr, ParseError> {
@@ -394,8 +432,7 @@ impl<'a> Parser<'a> {
             if self.consume_ident_ci("SUBSCRIPTION")? {
                 // ADD SUBSCRIPTION name TO queue [REDACT (...)] [WHERE ...]
                 let sub_name = self.expect_ident()?;
-                let descriptor =
-                    self.parse_subscription_descriptor(table_name.to_string())?;
+                let descriptor = self.parse_subscription_descriptor(table_name.to_string())?;
                 Ok(AlterOperation::AddSubscription {
                     name: sub_name,
                     descriptor,

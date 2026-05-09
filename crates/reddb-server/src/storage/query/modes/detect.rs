@@ -109,6 +109,8 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("show graphs")
         || lower.starts_with("kv ")
         || lower.starts_with("show kv")
+        || lower.starts_with("show configs")
+        || lower.starts_with("show vaults")
         || lower.starts_with("show schema")
         || lower.starts_with("show indices")
         || lower.starts_with("show sample ")
@@ -261,6 +263,9 @@ mod tests {
         assert_eq!(detect_mode("SHOW TIMESERIES"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW GRAPHS"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW KV"), QueryMode::Sql);
+        assert_eq!(detect_mode("SHOW KVS"), QueryMode::Sql);
+        assert_eq!(detect_mode("SHOW CONFIGS"), QueryMode::Sql);
+        assert_eq!(detect_mode("SHOW VAULTS"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW SCHEMA users"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW INDICES"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW STATS users"), QueryMode::Sql);

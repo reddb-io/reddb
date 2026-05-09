@@ -17,6 +17,8 @@ pub(crate) fn model_name(model: CollectionModel) -> &'static str {
         CollectionModel::Graph => "graph",
         CollectionModel::Vector => "vector",
         CollectionModel::Kv => "kv",
+        CollectionModel::Config => "config",
+        CollectionModel::Vault => "vault",
         CollectionModel::Mixed => "mixed",
         CollectionModel::TimeSeries => "timeseries",
         CollectionModel::Queue => "queue",
@@ -30,7 +32,7 @@ pub(crate) fn ensure_model_match(
     if actual == expected {
         return Ok(());
     }
-    Err(RedDBError::Query(format!(
+    Err(RedDBError::InvalidOperation(format!(
         "model mismatch: expected {}, got {}",
         model_name(expected),
         model_name(actual)
