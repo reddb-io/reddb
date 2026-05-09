@@ -86,11 +86,14 @@ curl -sX POST http://127.0.0.1:8080/admin/policies/simulate \
 ```
 
 Runtime note: table-level `select`/`insert`/`update`/`delete` policy checks
-are wired today. `column:*` is the canonical resource vocabulary for PII
-simulation and audit trails; use safe views, RLS, generated columns, or query
-boundary filtering until a specific SQL path has column-level enforcement
-wired. The model-by-model status lives in the
-[Permissioning Handbook](permissions.md#current-enforcement-map).
+are wired today. Column-level enforcement is complete for the documented SQL
+paths: relational `SELECT` projections including `SELECT *` and joins,
+`INSERT` target columns, `UPDATE SET` target columns, document JSON-path
+projections, `VECTOR SEARCH` result `content`, timeseries `SELECT` fields such
+as `tags`, and `MATCH ... RETURN n.property` through the global
+`column:graph.<property>` namespace. The model-by-model status lives in the
+[Permissioning Handbook](permissions.md#current-enforcement-map) and the
+[Column Enforcement Coverage](column-enforcement-coverage.md) matrix.
 
 For larger examples across tables, documents, KV, graphs, vectors,
 time-series, and queues, use the
@@ -181,7 +184,8 @@ of characters within one segment of `spec`.
 |---|---|---|---|
 | `table` | `table:[schema.]name` | `table:public.orders` | Schema defaults to `public` if omitted. |
 | `table` (glob) | `table:schema.*` | `table:billing.*` | All tables in the schema. |
-| `column` | `column:[schema.]table.column` | `column:users.email` | Canonical PII/audit vocabulary; verify the query path has column enforcement before relying on it alone. |
+| `column` | `column:[schema.]table.column` | `column:users.email` | Canonical PII/audit vocabulary. The `ColumnPolicyGate` enforces resolved table projections and write targets. |
+| `column` JSON path | `column:table.json_column.path` | `column:docs.body.ssn` | Document JSON-path projection vocabulary. |
 | `schema` | `schema:name.*` | `schema:billing.*` | Implies access to every object in the schema. |
 | `function` | `function:name` | `function:hash_pwd` | For `execute` action. |
 | Tenant-qualified resource | `<kind>:tenant/<tenant>/<name>` | `table:tenant/acme/public.*` | Explicit cross-tenant form; prefer unqualified resources plus `tenant_match` for ordinary tenant policies. |
@@ -532,7 +536,60 @@ How ten common scenarios look in Postgres `GRANT`, AWS IAM, and RedDB.
 |---|---|
 | **Postgres** | `REVOKE SELECT (email, phone) ON users FROM PUBLIC;` then column-level `GRANT` to others. |
 | **AWS IAM** | Not natively supported — needs an attribute-level Lake Formation policy. |
-| **RedDB** | Canonical policy vocabulary: `{"effect":"deny","actions":["select"],"resources":["column:users.email","column:users.phone"]}`. Until the target query path has column enforcement, prefer safe views/RLS/generated columns. |
+| **RedDB** | Canonical policy vocabulary: `{"effect":"deny","actions":["select"],"resources":["column:users.email","column:users.phone"]}`. The `ColumnPolicyGate` applies these denies to resolved projections, `SELECT *` expansion, joins, document JSON paths, and model-specific result columns covered in [Column Enforcement Coverage](column-enforcement-coverage.md). |
+
+## Canonical PII deny examples
+
+Use explicit deny statements for fields that must never be projected by a
+principal, even when a broader table or schema allow matches.
+
+```json
+{
+  "sid": "deny-common-pii",
+  "effect": "deny",
+  "actions": ["select"],
+  "resources": [
+    "column:*.email",
+    "column:*.phone",
+    "column:*.ssn",
+    "column:*.tax_id",
+    "column:*.date_of_birth",
+    "column:*.passport_number",
+    "column:*.password_hash",
+    "column:*.api_key"
+  ]
+}
+```
+
+For document collections, name the JSON path beneath the stored document
+column:
+
+```json
+{
+  "sid": "deny-document-pii",
+  "effect": "deny",
+  "actions": ["select"],
+  "resources": [
+    "column:profiles.body.email",
+    "column:profiles.body.ssn",
+    "column:profiles.body.payment.card_number"
+  ]
+}
+```
+
+For write paths, deny the target column on the matching write action:
+
+```json
+{
+  "sid": "deny-secret-writes",
+  "effect": "deny",
+  "actions": ["insert", "update"],
+  "resources": [
+    "column:users.ssn",
+    "column:accounts.password_hash"
+  ]
+}
+```
 
 ### 3. Expire access after a date
 
@@ -891,9 +948,18 @@ way is to *not attach* the policy to Bob, or to attach an additional
 a single policy — that's an AWS IAM antipattern that doesn't translate.
 
 **Q. Can I do column-level on JSON paths?**
-A. Not in v1. `column:users.profile.address` resolves to the column
-`profile`, not the JSON sub-path. Use a generated column or RLS for sub-path
-gating today.
+A. Yes for document JSON-path projections. Use
+`column:<table>.<json-column>.<path>`, for example
+`column:users.profile.address` or `column:docs.body.nested.secret`. A deny on
+the base JSON column, such as `column:docs.body`, blocks projecting the whole
+document value.
+
+**Q. How are column policies evaluated?**
+A. The gate checks table access first (`table:[schema.]table`). If the table
+decision allows, projected columns inherit that allow unless a matching
+`column:[schema.]table.column` statement explicitly denies them. Explicit
+column allows are recorded, but they do not bypass a missing or denied table
+allow.
 
 **Q. Can I version policies?**
 A. Yes — every `policy:put` returns an etag. The previous version is kept in

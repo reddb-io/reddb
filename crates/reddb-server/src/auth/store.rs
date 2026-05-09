@@ -13,6 +13,7 @@ use crate::crypto::sha256::sha256;
 use crate::storage::encryption::argon2id::{derive_key, Argon2Params};
 use crate::storage::engine::pager::Pager;
 
+use super::column_policy_gate::{ColumnAccessRequest, ColumnPolicyGate, ColumnPolicyOutcome};
 use super::policies::{self as iam_policies, EvalContext, Policy, ResourceRef, SimulationOutcome};
 use super::privileges::{
     check_grant, Action, AuthzContext, AuthzError, Grant, GrantPrincipal, GrantsView,
@@ -2049,6 +2050,20 @@ impl AuthStore {
             decision,
             iam_policies::Decision::Allow { .. } | iam_policies::Decision::AdminBypass
         )
+    }
+
+    /// Evaluate a resolved table projection through the column policy
+    /// gate. Query paths should pass already-resolved column names; this
+    /// helper intentionally does not parse SQL projection syntax.
+    pub fn check_column_projection_authz(
+        &self,
+        principal: &UserId,
+        request: &ColumnAccessRequest,
+        ctx: &EvalContext,
+    ) -> ColumnPolicyOutcome {
+        let pols = self.effective_policies(principal);
+        let refs: Vec<&Policy> = pols.iter().map(|p| p.as_ref()).collect();
+        ColumnPolicyGate::new(&refs).evaluate(request, ctx)
     }
 
     fn invalidate_iam_cache(&self, uid: Option<&UserId>) {

@@ -98,9 +98,7 @@ pub fn parse_duration_ns(s: &str) -> Option<u64> {
 
     // Try the long form first: a leading integer, optional whitespace,
     // then a word-style unit. If that splits cleanly we are done.
-    let split = s
-        .find(|c: char| !c.is_ascii_digit())
-        .map(|i| s.split_at(i));
+    let split = s.find(|c: char| !c.is_ascii_digit()).map(|i| s.split_at(i));
     if let Some((num_part, rest)) = split {
         if !num_part.is_empty() {
             let unit_word = rest.trim_start();

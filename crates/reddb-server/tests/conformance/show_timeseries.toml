@@ -1,0 +1,4 @@
+input = "SHOW TIMESERIES"
+expected_kind = "Table"
+source = "docs/reference/red-schema.md:28"
+kind = "positive"

@@ -66,21 +66,23 @@ Identical `SELECT` queries are transparently cached for 30 seconds (max 1000 ent
 | `GET` | `/catalog` | Full catalog snapshot with readiness |
 | `GET` | `/catalog/readiness` | Catalog readiness (query/write/repair) |
 | `GET` | `/catalog/attention` | Items needing attention |
-| `GET` | `/catalog/collections/readiness` | Per-collection readiness |
-| `GET` | `/catalog/collections/readiness/attention` | Collections needing attention |
+| `GET` | `/catalog/collections/readiness` | **DEPRECATED, sunset 2026-08-08.** Per-collection readiness |
+| `GET` | `/catalog/collections/readiness/attention` | **DEPRECATED, sunset 2026-08-08.** Collections needing attention |
 | `GET` | `/catalog/consistency` | Consistency report |
-| `GET` | `/catalog/indexes/declared` | Declared index definitions |
-| `GET` | `/catalog/indexes/operational` | Operational indexes |
-| `GET` | `/catalog/indexes/status` | Index artifact statuses |
-| `GET` | `/catalog/indexes/attention` | Indexes needing attention |
-| `GET` | `/catalog/graph/projections/declared` | Declared graph projections |
-| `GET` | `/catalog/graph/projections/operational` | Operational projections |
-| `GET` | `/catalog/graph/projections/status` | Projection statuses |
-| `GET` | `/catalog/graph/projections/attention` | Projections needing attention |
-| `GET` | `/catalog/analytics-jobs/declared` | Declared analytics jobs |
-| `GET` | `/catalog/analytics-jobs/operational` | Operational jobs |
-| `GET` | `/catalog/analytics-jobs/status` | Job statuses |
-| `GET` | `/catalog/analytics-jobs/attention` | Jobs needing attention |
+| `GET` | `/catalog/indexes/declared` | **DEPRECATED, sunset 2026-08-08.** Declared index definitions |
+| `GET` | `/catalog/indexes/operational` | **DEPRECATED, sunset 2026-08-08.** Operational indexes |
+| `GET` | `/catalog/indexes/status` | **DEPRECATED, sunset 2026-08-08.** Index artifact statuses |
+| `GET` | `/catalog/indexes/attention` | **DEPRECATED, sunset 2026-08-08.** Indexes needing attention |
+| `GET` | `/catalog/graph/projections/declared` | **DEPRECATED, sunset 2026-08-08.** Declared graph projections |
+| `GET` | `/catalog/graph/projections/operational` | **DEPRECATED, sunset 2026-08-08.** Operational projections |
+| `GET` | `/catalog/graph/projections/status` | **DEPRECATED, sunset 2026-08-08.** Projection statuses |
+| `GET` | `/catalog/graph/projections/attention` | **DEPRECATED, sunset 2026-08-08.** Projections needing attention |
+| `GET` | `/catalog/analytics-jobs/declared` | **DEPRECATED, sunset 2026-08-08.** Declared analytics jobs |
+| `GET` | `/catalog/analytics-jobs/operational` | **DEPRECATED, sunset 2026-08-08.** Operational jobs |
+| `GET` | `/catalog/analytics-jobs/status` | **DEPRECATED, sunset 2026-08-08.** Job statuses |
+| `GET` | `/catalog/analytics-jobs/attention` | **DEPRECATED, sunset 2026-08-08.** Jobs needing attention |
+
+Deprecated granular catalog endpoints return `Deprecation: 2026-08-08` and `Sunset: 2026-08-08`. Use `POST /query` with the corresponding `red.*` SQL relation; see [Deprecated Catalog Endpoints](deprecated-catalog-endpoints.md).
 
 ## Physical Layer
 

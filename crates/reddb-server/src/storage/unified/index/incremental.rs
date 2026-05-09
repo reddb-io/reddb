@@ -429,12 +429,8 @@ mod tests {
         let pre = rec_one("email", Value::text("a@x".to_string()));
         let post = rec_one("email", Value::text("b@x".to_string()));
         let h = handle_hash("idx_email", "users", "email");
-        let ops = IncrementalIndexMaintainer::delta(
-            Some(&pre),
-            Some(&post),
-            EntityId::new(1),
-            &[h],
-        );
+        let ops =
+            IncrementalIndexMaintainer::delta(Some(&pre), Some(&post), EntityId::new(1), &[h]);
         assert_eq!(ops.len(), 1);
         assert!(matches!(ops[0], IndexDeltaOp::Update { .. }));
     }
@@ -444,12 +440,8 @@ mod tests {
         let pre = rec_one("email", Value::text("a@x".to_string()));
         let post = rec_one("email", Value::text("a@x".to_string()));
         let h = handle_hash("idx_email", "users", "email");
-        let ops = IncrementalIndexMaintainer::delta(
-            Some(&pre),
-            Some(&post),
-            EntityId::new(1),
-            &[h],
-        );
+        let ops =
+            IncrementalIndexMaintainer::delta(Some(&pre), Some(&post), EntityId::new(1), &[h]);
         assert!(ops.is_empty());
     }
 
@@ -462,12 +454,8 @@ mod tests {
         post.set("email", Value::text("a@x".to_string()));
         post.set("name", Value::text("ALICE".to_string()));
         let h = handle_hash("idx_email", "users", "email");
-        let ops = IncrementalIndexMaintainer::delta(
-            Some(&pre),
-            Some(&post),
-            EntityId::new(1),
-            &[h],
-        );
+        let ops =
+            IncrementalIndexMaintainer::delta(Some(&pre), Some(&post), EntityId::new(1), &[h]);
         assert!(ops.is_empty());
     }
 
@@ -486,12 +474,8 @@ mod tests {
             IndexMethodKind::BTree,
             false,
         );
-        let ops = IncrementalIndexMaintainer::delta(
-            Some(&pre),
-            Some(&post),
-            EntityId::new(1),
-            &[h],
-        );
+        let ops =
+            IncrementalIndexMaintainer::delta(Some(&pre), Some(&post), EntityId::new(1), &[h]);
         assert_eq!(ops.len(), 1);
         assert!(matches!(ops[0], IndexDeltaOp::Update { .. }));
     }
@@ -502,12 +486,8 @@ mod tests {
         backend.register("users", "idx_email", false);
         let post = rec_one("email", Value::text("a@x".to_string()));
         let h = handle_hash("idx_email", "users", "email");
-        let ops = IncrementalIndexMaintainer::delta(
-            None,
-            Some(&post),
-            EntityId::new(7),
-            &[h.clone()],
-        );
+        let ops =
+            IncrementalIndexMaintainer::delta(None, Some(&post), EntityId::new(7), &[h.clone()]);
         IncrementalIndexMaintainer::apply(&backend, ops).unwrap();
         assert_eq!(
             backend.lookup("users", "idx_email", b"a@x"),
@@ -523,20 +503,12 @@ mod tests {
         let pre = rec_one("email", Value::text("a@x".to_string()));
         let post = rec_one("email", Value::text("b@x".to_string()));
 
-        let ops = IncrementalIndexMaintainer::delta(
-            None,
-            Some(&pre),
-            EntityId::new(3),
-            &[h.clone()],
-        );
+        let ops =
+            IncrementalIndexMaintainer::delta(None, Some(&pre), EntityId::new(3), &[h.clone()]);
         IncrementalIndexMaintainer::apply(&backend, ops).unwrap();
 
-        let ops = IncrementalIndexMaintainer::delta(
-            Some(&pre),
-            Some(&post),
-            EntityId::new(3),
-            &[h],
-        );
+        let ops =
+            IncrementalIndexMaintainer::delta(Some(&pre), Some(&post), EntityId::new(3), &[h]);
         IncrementalIndexMaintainer::apply(&backend, ops).unwrap();
 
         assert!(backend.lookup("users", "idx_email", b"a@x").is_empty());
@@ -553,20 +525,11 @@ mod tests {
         let h = handle_hash("idx_email", "users", "email");
         let post = rec_one("email", Value::text("a@x".to_string()));
 
-        let ops = IncrementalIndexMaintainer::delta(
-            None,
-            Some(&post),
-            EntityId::new(11),
-            &[h.clone()],
-        );
+        let ops =
+            IncrementalIndexMaintainer::delta(None, Some(&post), EntityId::new(11), &[h.clone()]);
         IncrementalIndexMaintainer::apply(&backend, ops).unwrap();
 
-        let ops = IncrementalIndexMaintainer::delta(
-            Some(&post),
-            None,
-            EntityId::new(11),
-            &[h],
-        );
+        let ops = IncrementalIndexMaintainer::delta(Some(&post), None, EntityId::new(11), &[h]);
         IncrementalIndexMaintainer::apply(&backend, ops).unwrap();
 
         assert!(backend.lookup("users", "idx_email", b"a@x").is_empty());
@@ -599,12 +562,7 @@ mod tests {
         backend.register("users", "idx_email", false);
         let h = handle_hash("idx_email", "users", "email");
         let pre = rec_one("email", Value::text("a@x".to_string()));
-        let ops = IncrementalIndexMaintainer::delta(
-            Some(&pre),
-            None,
-            EntityId::new(99),
-            &[h],
-        );
+        let ops = IncrementalIndexMaintainer::delta(Some(&pre), None, EntityId::new(99), &[h]);
         // Should not error.
         IncrementalIndexMaintainer::apply(&backend, ops).unwrap();
     }
@@ -743,12 +701,8 @@ mod tests {
         let h = handle_hash("idx_email", "users", "email");
 
         let post = rec_one("email", Value::text("a@x".to_string()));
-        let ops = IncrementalIndexMaintainer::delta(
-            None,
-            Some(&post),
-            EntityId::new(5),
-            &[h.clone()],
-        );
+        let ops =
+            IncrementalIndexMaintainer::delta(None, Some(&post), EntityId::new(5), &[h.clone()]);
 
         IncrementalIndexMaintainer::apply(&backend1, ops.clone()).unwrap();
         IncrementalIndexMaintainer::apply(&backend2, ops.clone()).unwrap();

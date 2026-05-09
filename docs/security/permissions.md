@@ -30,7 +30,7 @@ Those are intentionally separate:
 |---|---|
 | "Can Alice read orders at all?" | IAM-style policy statement on `table:orders` or `collection:orders` |
 | "Can Alice read only her tenant's orders?" | RLS predicate, usually `tenant_id = CURRENT_TENANT()` |
-| "Can Alice read orders but not PII fields?" | Column/resource deny where wired, or a view/RLS workaround |
+| "Can Alice read orders but not PII fields?" | Column/resource deny through `ColumnPolicyGate` |
 | "Can this worker enqueue jobs but not pop them?" | Queue resource policy once queue IAM hooks are wired; today role gate + service account separation |
 | "Can this service use only one IP range and expire next Friday?" | Policy `condition` block |
 
@@ -75,16 +75,18 @@ only checks policies on the surfaces that have been wired.
 
 | Surface | IAM policy checked today | RLS checked today | Fallback gate | Notes |
 |---|---:|---:|---|---|
-| SQL `SELECT table` | Yes, `select` on `table:<name>` | Yes | Legacy GRANT/RBAC until first policy | Main production path for table reads. |
-| SQL `INSERT table` | Yes, `insert` on `table:<name>` | Tenancy auto-fill and RLS where applicable | Legacy GRANT/RBAC until first policy | Also covers `INSERT ... DOCUMENT/KV/NODE/EDGE/VECTOR` because those parse as inserts into a collection. |
-| SQL `UPDATE table` | Yes, `update` on `table:<name>` | Yes | Legacy GRANT/RBAC until first policy | Use RLS for row ownership checks. |
+| SQL `SELECT table` | Yes, `select` on `table:<name>` plus `column:<table>.<column>` | Yes | Legacy GRANT/RBAC until first policy | Covers explicit projections and `SELECT *` expansion. |
+| SQL `INSERT table` | Yes, `insert` on `table:<name>` plus target `column:<table>.<column>` | Tenancy auto-fill and RLS where applicable | Legacy GRANT/RBAC until first policy | Also covers `INSERT ... DOCUMENT/KV/NODE/EDGE/VECTOR` because those parse as inserts into a collection. |
+| SQL `UPDATE table` | Yes, `update` on `table:<name>` plus `SET` target `column:<table>.<column>` | Yes | Legacy GRANT/RBAC until first policy | Any denied target column blocks the update. Use RLS for row ownership checks. |
 | SQL `DELETE table` | Yes, `delete` on `table:<name>` | Yes | Legacy GRANT/RBAC until first policy | Use RLS for row ownership checks. |
-| SQL joins | Yes, currently `select` on `database:*` | Per-table RLS during execution | Legacy GRANT/RBAC until first policy | Grant `database:*` or refactor to views until per-input join checks land. |
+| SQL joins | Yes, `select` on `database:*` plus source table and column projection checks | Per-table RLS during execution | Legacy GRANT/RBAC until first policy | Join aliases resolve back to source tables for column denies. |
 | Policy management DDL/API | Yes, `policy:*` actions on `policy:<id>` | No | Admin role before IAM is enabled | Includes create, drop, attach, detach, simulate. |
 | `GRANT/REVOKE` compatibility | Translates user/PUBLIC grants to synthetic IAM policies | No | Admin role | `GRANT TO GROUP` legacy syntax is still rejected; use policy groups. |
 | SQL DDL (`CREATE TABLE`, `CREATE QUEUE`, indexes, etc.) | Not yet | No | Role gate | Use service accounts and deployment controls for DDL today. |
-| SQL graph commands (`MATCH`, graph analytics) | Not yet as graph-specific IAM resources | RLS for graph entity policies where the query path applies them | Role gate | Use RLS on `NODES`/`EDGES` plus separate service accounts. |
-| SQL vector search | Not yet as vector-specific IAM resources | RLS on vector entities where the search path applies it | Role gate | Use RLS on `VECTORS OF <collection>` for tenant/metadata filtering. |
+| Document JSON-path `SELECT` | Yes, `select` on `table:<collection>` plus `column:<collection>.<json-column>.<path>` | Yes | Legacy GRANT/RBAC until first policy | Covers nested path, base JSON column, and wildcard document projections. |
+| SQL graph commands (`MATCH`, graph analytics) | `MATCH ... RETURN` property projection checks `table:graph` and `column:graph.<property>`; graph analytics remain role-gated | RLS for graph entity policies where the query path applies them | Role gate | Use RLS on `NODES`/`EDGES` plus separate service accounts. |
+| SQL vector search | `VECTOR SEARCH` result `content` checks `table:<collection>` and `column:<collection>.content`; vector-specific resource verbs are not yet direct IAM hooks | RLS on vector entities where the search path applies it | Role gate | Use RLS on `VECTORS OF <collection>` for tenant/metadata filtering. |
+| Timeseries `SELECT` | Yes, `select` on `table:<name>` plus projected fields such as `column:metrics.tags` | Yes | Legacy GRANT/RBAC until first policy | Column denies apply to timeseries result fields. |
 | SQL queue commands | Not yet as queue-specific IAM resources | RLS on messages where the command path applies it | Role gate | Use dedicated worker accounts. |
 | Direct HTTP collection endpoints | Not yet policy-aware | Not consistently | HTTP bearer role gate | GET/HEAD/OPTIONS require read; mutating methods require write. |
 | `/admin/*` and `/metrics` | Admin token first, then policy handlers where applicable | No | `RED_ADMIN_TOKEN` | If `RED_ADMIN_TOKEN` is set, it bypasses user auth for operator continuity. |
@@ -218,11 +220,14 @@ runtime hooks should use.
 | `<kind>:tenant/<tenant>/<name>` | Explicit tenant-qualified resource | `table:tenant/acme/orders` |
 | `column:<table>.<column>` | Column in a table | `column:users.email` |
 | `column:<schema>.<table>.<column>` | Schema-qualified column | `column:billing.invoices.total` |
+| `column:<table>.<json-column>.<path>` | Document JSON path | `column:docs.body.ssn` |
 
-Table resources are the primary enforcement path today. Column resources are
-valid for policy simulation and audit vocabulary. Where column enforcement is
-not yet wired in a query path, expose safe views or use RLS/generation
-patterns instead of relying on a column deny alone.
+Table resources are the coarse prerequisite for data access. Column resources
+are enforced by the `ColumnPolicyGate` for resolved projections and write
+targets: table allow is required, explicit column deny wins, and column
+default-deny inherits the table allow. See
+[Column Enforcement Coverage](column-enforcement-coverage.md) for the complete
+runtime matrix.
 
 ### Collection umbrella
 
@@ -996,7 +1001,7 @@ Avoid these unless you have a documented reason:
 | Put tenant ids only in collection names | Use `SET TENANT` and RLS too |
 | Rely on PUBLIC in production | Use a group with explicit membership |
 | Reuse one service account for read and write paths | Split `svc_ingest`, `svc_reader`, `svc_worker` |
-| Use column deny as the only PII guard before runtime hook exists | Use safe views, RLS, generated columns, or omit fields at query boundary |
+| Use column denies as row/entity predicates | Use RLS for row, document, node, edge, vector, point, or message filtering |
 | Give graph analytics to every graph reader | Use a separate analytics account |
 | Give queue producers `select/update` | Producers usually need only `insert` |
 

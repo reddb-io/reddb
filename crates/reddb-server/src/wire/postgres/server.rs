@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 
+use super::catalog_views::translate_pg_catalog_query;
 use super::protocol::{
     read_frame, read_startup, write_frame, write_raw_byte, BackendMessage, ColumnDescriptor,
     FrontendMessage, PgWireError, TransactionStatus,
@@ -243,7 +244,21 @@ where
         return Ok(());
     }
 
-    match runtime.execute_query(sql) {
+    let query_result = match translate_pg_catalog_query(runtime, sql) {
+        Ok(Some(result)) => Ok(crate::runtime::RuntimeQueryResult {
+            query: sql.to_string(),
+            mode: crate::storage::query::modes::QueryMode::Sql,
+            statement: "select",
+            engine: "pg-catalog",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+        }),
+        Ok(None) => runtime.execute_query(sql),
+        Err(err) => Err(err),
+    };
+
+    match query_result {
         Ok(result) => {
             if result.statement_type == "select" {
                 emit_result_rows(stream, &result.result).await?;

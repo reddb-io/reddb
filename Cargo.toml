@@ -79,6 +79,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tonic = { version = "0.14", features = ["transport"] }
 # Self-signed certificate generator for TLS smoke tests.
 rcgen = "0.14"
+# IAM policy property tests at the umbrella integration-test layer.
+proptest = "1"
 
 # ---------------------------------------------------------------------
 # Build profile tuning — trades runtime perf for build wall time

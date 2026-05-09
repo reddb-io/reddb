@@ -293,7 +293,10 @@ pub(super) fn encode_v2_frame(c: &Compressed) -> Vec<u8> {
             out.extend_from_slice(bytes);
             out
         }
-        Compressed::Zstd { bytes, original_len } => {
+        Compressed::Zstd {
+            bytes,
+            original_len,
+        } => {
             let mut out = Vec::with_capacity(5 + bytes.len());
             out.push(L2_FRAME_TAG_ZSTD);
             out.extend_from_slice(&original_len.to_le_bytes());
@@ -306,9 +309,7 @@ pub(super) fn encode_v2_frame(c: &Compressed) -> Vec<u8> {
 /// Decode the V2 chain layout produced by [`encode_v2_frame`].
 pub(super) fn decode_v2_frame(bytes: &[u8]) -> Result<Compressed, CacheError> {
     if bytes.is_empty() {
-        return Err(CacheError::L2Io(
-            "empty blob-cache L2 v2 frame".into(),
-        ));
+        return Err(CacheError::L2Io("empty blob-cache L2 v2 frame".into()));
     }
     match bytes[0] {
         L2_FRAME_TAG_RAW => Ok(Compressed::Raw(bytes[1..].to_vec())),

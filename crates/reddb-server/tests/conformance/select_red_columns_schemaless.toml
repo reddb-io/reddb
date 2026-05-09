@@ -1,0 +1,4 @@
+input = "SELECT * FROM red.columns WHERE collection = 'scratch'"
+expected_kind = "Table"
+source = "docs/reference/red-schema.md:61"
+kind = "positive"

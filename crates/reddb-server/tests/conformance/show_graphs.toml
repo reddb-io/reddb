@@ -1,0 +1,4 @@
+input = "SHOW GRAPHS"
+expected_kind = "Table"
+source = "docs/reference/red-schema.md:29"
+kind = "positive"

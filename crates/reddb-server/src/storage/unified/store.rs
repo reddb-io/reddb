@@ -28,11 +28,11 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use super::context_index::ContextIndex;
-use super::entity_cache::EntityCache;
 use super::entity::{
     CrossRef, EdgeData, EmbeddingSlot, EntityData, EntityId, EntityKind, GraphEdgeKind,
     GraphNodeKind, NodeData, RefType, RowData, TimeSeriesPointKind, UnifiedEntity, VectorData,
 };
+use super::entity_cache::EntityCache;
 use super::manager::{ManagerConfig, ManagerStats, SegmentManager};
 use super::metadata::{Metadata, MetadataFilter, MetadataValue};
 use super::segment::SegmentError;

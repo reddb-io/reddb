@@ -1,0 +1,4 @@
+input = "SHOW DOCUMENTS"
+expected_kind = "Table"
+source = "docs/reference/red-schema.md:27"
+kind = "positive"

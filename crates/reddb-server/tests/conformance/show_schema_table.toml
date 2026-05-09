@@ -1,0 +1,4 @@
+input = "SHOW SCHEMA users"
+expected_kind = "Table"
+source = "docs/reference/red-schema.md:41"
+kind = "positive"

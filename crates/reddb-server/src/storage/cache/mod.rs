@@ -40,18 +40,18 @@ pub mod strategy;
 pub mod sweeper;
 
 pub use aggregates::{AggCacheStats, AggValue, AggregationCache, CardinalityEstimate, NumericAgg};
+pub use blob::{
+    BlobCache, BlobCacheConfig, BlobCacheHit, BlobCachePolicy, BlobCachePut, BlobCacheStats,
+    CacheError, L1Admission, L2Compression, DEFAULT_BLOB_L1_BYTES_MAX, DEFAULT_BLOB_L2_BYTES_MAX,
+    DEFAULT_BLOB_MAX_NAMESPACES, METRIC_CACHE_BLOB_L1_BYTES_IN_USE,
+    METRIC_CACHE_BLOB_L2_BYTES_IN_USE, METRIC_CACHE_BLOB_L2_FULL_REJECTIONS_TOTAL,
+    METRIC_CACHE_VERSION_MISMATCH_TOTAL,
+};
 pub use compressor::{CompressError, CompressOpts, Compressed, L2BlobCompressor};
 pub use extended_ttl::{EffectiveExpiry, ExpiryDecision, ExtendedTtlPolicy};
 pub use promotion_pool::{
     AsyncPromotionPool, PoolOpts, PromotionExecutor, PromotionMetrics, PromotionRequest,
     ScheduleOutcome,
-};
-pub use blob::{
-    BlobCache, BlobCacheConfig, BlobCacheHit, BlobCachePolicy, BlobCachePut, BlobCacheStats,
-    CacheError, L1Admission, L2Compression, DEFAULT_BLOB_L1_BYTES_MAX,
-    DEFAULT_BLOB_L2_BYTES_MAX, DEFAULT_BLOB_MAX_NAMESPACES,
-    METRIC_CACHE_BLOB_L1_BYTES_IN_USE, METRIC_CACHE_BLOB_L2_BYTES_IN_USE,
-    METRIC_CACHE_BLOB_L2_FULL_REJECTIONS_TOTAL, METRIC_CACHE_VERSION_MISMATCH_TOTAL,
 };
 pub use result::{
     CacheKey, CachePolicy, MaterializedViewCache, MaterializedViewDef, RefreshPolicy, ResultCache,
@@ -207,14 +207,14 @@ mod backup_helpers_tests {
         let backend_root = scratch("pair-be");
         let prefix = format!("{}/blob_cache/", backend_root.display());
 
-        let uploaded = archive_blob_cache_l2(&LocalBackend, &l2_src, &prefix)
-            .expect("archive succeeds");
+        let uploaded =
+            archive_blob_cache_l2(&LocalBackend, &l2_src, &prefix).expect("archive succeeds");
         assert_eq!(uploaded, 2, "pager + control sidecar uploaded");
 
         let dst_dir = scratch("pair-dst");
         let l2_dst = dst_dir.join("cache.rdb");
-        let downloaded = restore_blob_cache_l2(&LocalBackend, &prefix, &l2_dst)
-            .expect("restore succeeds");
+        let downloaded =
+            restore_blob_cache_l2(&LocalBackend, &prefix, &l2_dst).expect("restore succeeds");
         assert_eq!(downloaded, 2);
 
         assert_eq!(std::fs::read(&l2_dst).unwrap(), b"pager-bytes-on-disk");
@@ -248,8 +248,8 @@ mod backup_helpers_tests {
         let prefix = format!("{}/blob_cache/", backend_root.display());
         let dst_dir = scratch("dst-empty");
         let l2_dst = dst_dir.join("cache.rdb");
-        let count = restore_blob_cache_l2(&LocalBackend, &prefix, &l2_dst)
-            .expect("empty restore is ok");
+        let count =
+            restore_blob_cache_l2(&LocalBackend, &prefix, &l2_dst).expect("empty restore is ok");
         assert_eq!(count, 0);
         let _ = std::fs::remove_dir_all(&backend_root);
         let _ = std::fs::remove_dir_all(&dst_dir);
@@ -294,20 +294,22 @@ mod backup_helpers_tests {
                 .put("ns-a", "k1", BlobCachePut::new(b"value-1".to_vec()))
                 .expect("put k1");
             cache
-                .put("ns-b", "k2", BlobCachePut::new(b"value-2-longer-payload".to_vec()))
+                .put(
+                    "ns-b",
+                    "k2",
+                    BlobCachePut::new(b"value-2-longer-payload".to_vec()),
+                )
                 .expect("put k2");
             // L2 path accessor must see the configured file path.
             assert_eq!(cache.l2_path(), Some(l2_src.as_path()));
         } // drop cache
 
         // 3: archive L2 (pager file + control sidecar).
-        let uploaded = archive_blob_cache_l2(&LocalBackend, &l2_src, &prefix)
-            .expect("archive l2");
+        let uploaded = archive_blob_cache_l2(&LocalBackend, &l2_src, &prefix).expect("archive l2");
         assert_eq!(uploaded, 2, "pager + control uploaded");
 
         // 4: restore into fresh path.
-        let restored = restore_blob_cache_l2(&LocalBackend, &prefix, &l2_dst)
-            .expect("restore l2");
+        let restored = restore_blob_cache_l2(&LocalBackend, &prefix, &l2_dst).expect("restore l2");
         assert_eq!(restored, 2, "pager + control downloaded");
 
         // 5: re-open against restored path and verify entries are
@@ -322,9 +324,13 @@ mod backup_helpers_tests {
                 .with_l2_path(&l2_dst),
         )
         .expect("open l2 dst");
-        let hit_a = restored_cache.get("ns-a", "k1").expect("k1 survives restore");
+        let hit_a = restored_cache
+            .get("ns-a", "k1")
+            .expect("k1 survives restore");
         assert_eq!(hit_a.value(), b"value-1");
-        let hit_b = restored_cache.get("ns-b", "k2").expect("k2 survives restore");
+        let hit_b = restored_cache
+            .get("ns-b", "k2")
+            .expect("k2 survives restore");
         assert_eq!(hit_b.value(), b"value-2-longer-payload");
 
         let _ = std::fs::remove_dir_all(&src_dir);
@@ -347,10 +353,8 @@ mod backup_helpers_tests {
         let l2_dst = dst_dir.join("blob-cache.rdb");
 
         {
-            let cache = BlobCache::open_with_l2(
-                BlobCacheConfig::default().with_l2_path(&l2_src),
-            )
-            .expect("open l2 src");
+            let cache = BlobCache::open_with_l2(BlobCacheConfig::default().with_l2_path(&l2_src))
+                .expect("open l2 src");
             cache
                 .put("ns", "k", BlobCachePut::new(b"value".to_vec()))
                 .expect("put k");
@@ -358,10 +362,8 @@ mod backup_helpers_tests {
 
         // Note: NO archive step. The fresh L2 path stays empty, mirroring
         // the default backup posture (include_blob_cache=false).
-        let cold_cache = BlobCache::open_with_l2(
-            BlobCacheConfig::default().with_l2_path(&l2_dst),
-        )
-        .expect("open l2 dst");
+        let cold_cache = BlobCache::open_with_l2(BlobCacheConfig::default().with_l2_path(&l2_dst))
+            .expect("open l2 dst");
         assert!(
             cold_cache.get("ns", "k").is_none(),
             "restore without include_blob_cache must yield a cold cache"

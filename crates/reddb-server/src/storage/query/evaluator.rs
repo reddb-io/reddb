@@ -252,12 +252,7 @@ fn eval_unary(op: UnaryOp, operand: &Expr, row: &dyn Row) -> Result<Value, EvalE
     }
 }
 
-fn eval_binary(
-    op: BinOp,
-    lhs: &Expr,
-    rhs: &Expr,
-    row: &dyn Row,
-) -> Result<Value, EvalError> {
+fn eval_binary(op: BinOp, lhs: &Expr, rhs: &Expr, row: &dyn Row) -> Result<Value, EvalError> {
     // Logical ops use SQL three-valued logic so we eval both sides
     // and short-circuit on Null *after* type-checking; arithmetic /
     // comparison / concat short-circuit before dispatch.
@@ -276,13 +271,12 @@ fn eval_binary(
 
     let lhs_dt = l.data_type();
     let rhs_dt = r.data_type();
-    let (entry, coercions) = coercion_spine::resolve_binop(op, lhs_dt, rhs_dt).ok_or(
-        EvalError::OperatorMismatch {
+    let (entry, coercions) =
+        coercion_spine::resolve_binop(op, lhs_dt, rhs_dt).ok_or(EvalError::OperatorMismatch {
             op,
             lhs: lhs_dt,
             rhs: rhs_dt,
-        },
-    )?;
+        })?;
 
     let l = match coercions.at(0) {
         Some(target) => apply_implicit_cast(&l, lhs_dt, target)?,
@@ -566,11 +560,7 @@ fn three_valued_or(l: &Value, r: &Value) -> Result<Value, EvalError> {
     }
 }
 
-fn apply_implicit_cast(
-    value: &Value,
-    src: DataType,
-    target: DataType,
-) -> Result<Value, EvalError> {
+fn apply_implicit_cast(value: &Value, src: DataType, target: DataType) -> Result<Value, EvalError> {
     if src == target {
         return Ok(value.clone());
     }
@@ -613,11 +603,10 @@ fn eval_function(name: &str, args: &[Expr], row: &dyn Row) -> Result<Value, Eval
         return Ok(Value::Null);
     }
 
-    let arg_values: Vec<Value> = args.iter().map(|a| evaluate(a, row)).collect::<Result<
-        Vec<_>,
-        _,
-    >>(
-    )?;
+    let arg_values: Vec<Value> = args
+        .iter()
+        .map(|a| evaluate(a, row))
+        .collect::<Result<Vec<_>, _>>()?;
     let arg_types: Vec<DataType> = arg_values.iter().map(|v| v.data_type()).collect();
 
     // Strict NULL propagation for built-in scalar functions: any
@@ -633,12 +622,13 @@ fn eval_function(name: &str, args: &[Expr], row: &dyn Row) -> Result<Value, Eval
         return Ok(Value::Null);
     }
 
-    let (entry, coercions) = coercion_spine::resolve_function(name, &arg_types).ok_or_else(
-        || EvalError::UnknownFunction {
-            name: name.to_string(),
-            args: arg_types.clone(),
-        },
-    )?;
+    let (entry, coercions) =
+        coercion_spine::resolve_function(name, &arg_types).ok_or_else(|| {
+            EvalError::UnknownFunction {
+                name: name.to_string(),
+                args: arg_types.clone(),
+            }
+        })?;
 
     // Apply per-arg implicit casts.
     let mut coerced: Vec<Value> = Vec::with_capacity(arg_values.len());
@@ -829,21 +819,33 @@ mod tests {
 
     #[test]
     fn integer_addition_overflow_surfaces_as_eval_error() {
-        let expr = binop(BinOp::Add, lit(Value::Integer(i64::MAX)), lit(Value::Integer(1)));
+        let expr = binop(
+            BinOp::Add,
+            lit(Value::Integer(i64::MAX)),
+            lit(Value::Integer(1)),
+        );
         let err = evaluate(&expr, &empty_row()).unwrap_err();
         assert_eq!(err, EvalError::ArithmeticOverflow { op: BinOp::Add });
     }
 
     #[test]
     fn integer_multiplication_overflow_surfaces_as_eval_error() {
-        let expr = binop(BinOp::Mul, lit(Value::Integer(i64::MAX)), lit(Value::Integer(2)));
+        let expr = binop(
+            BinOp::Mul,
+            lit(Value::Integer(i64::MAX)),
+            lit(Value::Integer(2)),
+        );
         let err = evaluate(&expr, &empty_row()).unwrap_err();
         assert_eq!(err, EvalError::ArithmeticOverflow { op: BinOp::Mul });
     }
 
     #[test]
     fn integer_subtraction_overflow_surfaces_as_eval_error() {
-        let expr = binop(BinOp::Sub, lit(Value::Integer(i64::MIN)), lit(Value::Integer(1)));
+        let expr = binop(
+            BinOp::Sub,
+            lit(Value::Integer(i64::MIN)),
+            lit(Value::Integer(1)),
+        );
         let err = evaluate(&expr, &empty_row()).unwrap_err();
         assert_eq!(err, EvalError::ArithmeticOverflow { op: BinOp::Sub });
     }
@@ -1122,16 +1124,17 @@ mod tests {
             negated: false,
             span: Span::synthetic(),
         };
-        assert_eq!(evaluate(&miss, &empty_row()).unwrap(), Value::Boolean(false));
+        assert_eq!(
+            evaluate(&miss, &empty_row()).unwrap(),
+            Value::Boolean(false)
+        );
     }
 
     #[test]
     fn column_lookup_walks_field_ref() {
         let row = |field: &FieldRef| -> Option<Value> {
             match field {
-                FieldRef::TableColumn { table, column }
-                    if table == "t" && column == "x" =>
-                {
+                FieldRef::TableColumn { table, column } if table == "t" && column == "x" => {
                     Some(Value::Integer(11))
                 }
                 _ => None,

@@ -24,6 +24,8 @@ pub mod protocol;
 pub mod server;
 pub mod types;
 
+mod catalog_views;
+
 pub use protocol::{BackendMessage, FrontendMessage, PgWireError};
 pub use server::{start_pg_wire_listener, PgWireConfig};
 pub use types::{value_to_pg_wire_bytes, PgOid};

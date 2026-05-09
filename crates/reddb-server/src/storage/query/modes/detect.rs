@@ -99,7 +99,19 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("set secret ")
         || lower.starts_with("set tenant")
         || lower.starts_with("show config")
+        || lower.starts_with("show collections")
+        || lower.starts_with("show tables")
+        || lower.starts_with("show queues")
+        || lower.starts_with("show vectors")
+        || lower.starts_with("show documents")
+        || lower.starts_with("show timeseries")
+        || lower.starts_with("show graphs")
+        || lower.starts_with("show kv")
+        || lower.starts_with("show schema")
+        || lower.starts_with("show indices")
+        || lower.starts_with("show sample ")
         || lower.starts_with("show secret")
+        || lower.starts_with("show stats")
         || lower.starts_with("show tenant")
         || lower.starts_with("show policies")
         || lower.starts_with("show effective ")
@@ -239,6 +251,17 @@ mod tests {
         );
         assert_eq!(detect_mode("SHOW SECRET red.secret"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW SECRETS"), QueryMode::Sql);
+        assert_eq!(detect_mode("SHOW SAMPLE users"), QueryMode::Sql);
+        assert_eq!(detect_mode("SHOW TABLES"), QueryMode::Sql);
+        assert_eq!(detect_mode("SHOW QUEUES"), QueryMode::Sql);
+        assert_eq!(detect_mode("SHOW VECTORS"), QueryMode::Sql);
+        assert_eq!(detect_mode("SHOW DOCUMENTS"), QueryMode::Sql);
+        assert_eq!(detect_mode("SHOW TIMESERIES"), QueryMode::Sql);
+        assert_eq!(detect_mode("SHOW GRAPHS"), QueryMode::Sql);
+        assert_eq!(detect_mode("SHOW KV"), QueryMode::Sql);
+        assert_eq!(detect_mode("SHOW SCHEMA users"), QueryMode::Sql);
+        assert_eq!(detect_mode("SHOW INDICES"), QueryMode::Sql);
+        assert_eq!(detect_mode("SHOW STATS users"), QueryMode::Sql);
     }
 
     #[test]

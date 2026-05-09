@@ -1,0 +1,4 @@
+input = "SHOW COLLECTIONS WHERE model = 'table'"
+expected_kind = "Table"
+source = "docs/reference/red-schema.md:18"
+kind = "positive"

@@ -766,6 +766,16 @@ impl UnifiedStore {
         self.pager.is_some()
     }
 
+    /// Current root page for a collection's primary B-tree, if one has
+    /// been materialized in this store.
+    pub(crate) fn collection_root_page(&self, collection: &str) -> Option<u32> {
+        self.btree_indices
+            .read()
+            .get(collection)
+            .map(|btree| btree.root_page_id())
+            .filter(|root| *root != 0)
+    }
+
     /// Get the database file path (if using paged mode)
     pub fn db_path(&self) -> Option<&Path> {
         self.db_path.as_deref()

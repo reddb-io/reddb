@@ -111,6 +111,7 @@
   - [Overview](/security/overview.md)
   - [Users, Groups, and Legacy Roles](/security/rbac.md)
   - [Permissioning Handbook](/security/permissions.md)
+  - [Column Enforcement Coverage](/security/column-enforcement-coverage.md)
   - [Permission Recipes](/guides/permissions-cookbook.md)
   - [Row Level Security](/security/rls.md)
   - [Multi-Tenancy](/security/multi-tenancy.md)

@@ -399,9 +399,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::storage::cache::blob::{
-        BlobCache, BlobCacheConfig, BlobCachePolicy, BlobCachePut,
-    };
+    use crate::storage::cache::blob::{BlobCache, BlobCacheConfig, BlobCachePolicy, BlobCachePut};
 
     fn cache() -> BlobCache {
         BlobCache::new(
@@ -681,10 +679,7 @@ mod tests {
                         millis: 5,
                     },
                 );
-                let _ = BlobCacheSweeper::reclaim_orphans(
-                    &sweeper_cache,
-                    SweepLimit::Millis(5),
-                );
+                let _ = BlobCacheSweeper::reclaim_orphans(&sweeper_cache, SweepLimit::Millis(5));
             }
         });
 

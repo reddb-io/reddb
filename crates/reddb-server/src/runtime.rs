@@ -858,6 +858,7 @@ pub(crate) mod mutation;
 mod probabilistic_store;
 pub(crate) mod query_exec;
 pub mod quota_bucket;
+mod red_schema;
 mod record_search;
 pub mod resource_limits;
 pub(crate) mod scalar_evaluator;

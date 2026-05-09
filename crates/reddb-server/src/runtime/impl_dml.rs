@@ -332,6 +332,7 @@ impl RedDBRuntime {
             }
             None => query,
         };
+        self.check_insert_column_policy(query)?;
 
         let mut inserted_count: u64 = 0;
         let effective_rows =
@@ -658,6 +659,56 @@ impl RedDBRuntime {
             result.result = returning;
         }
         Ok(result)
+    }
+
+    fn check_insert_column_policy(&self, query: &InsertQuery) -> RedDBResult<()> {
+        let Some(auth_store) = self.inner.auth_store.read().clone() else {
+            return Ok(());
+        };
+        if !auth_store.iam_authorization_enabled() {
+            return Ok(());
+        }
+        let Some((username, role)) = crate::runtime::impl_core::current_auth_identity() else {
+            return Ok(());
+        };
+
+        let tenant = crate::runtime::impl_core::current_tenant();
+        let principal = crate::auth::UserId::from_parts(tenant.as_deref(), &username);
+        let request = crate::auth::ColumnAccessRequest {
+            action: "insert".to_string(),
+            schema: None,
+            table: query.table.clone(),
+            columns: query.columns.clone(),
+        };
+        let ctx = crate::auth::policies::EvalContext {
+            principal_tenant: tenant.clone(),
+            current_tenant: tenant,
+            peer_ip: None,
+            mfa_present: false,
+            now_ms: crate::auth::now_ms(),
+            principal_is_admin_role: role == crate::auth::Role::Admin,
+        };
+
+        let outcome = auth_store.check_column_projection_authz(&principal, &request, &ctx);
+        let table_allowed = matches!(
+            outcome.table_decision,
+            crate::auth::policies::Decision::Allow { .. }
+                | crate::auth::policies::Decision::AdminBypass
+        );
+        if !table_allowed {
+            return Err(RedDBError::Query(format!(
+                "principal=`{username}` action=`insert` resource=`{}:{}` denied by IAM policy",
+                outcome.table_resource.kind, outcome.table_resource.name
+            )));
+        }
+        if let Some(denied) = outcome.first_denied_column() {
+            return Err(RedDBError::Query(format!(
+                "principal=`{username}` action=`insert` resource=`{}:{}` denied by IAM policy",
+                denied.resource.kind, denied.resource.name
+            )));
+        }
+
+        Ok(())
     }
 
     pub(crate) fn insert_timeseries_point(
@@ -2451,9 +2502,7 @@ mod tests {
             .execute_query("UPDATE notes SET body = 'b' WHERE id = 1")
             .unwrap();
         assert_eq!(updated.affected_rows, 1);
-        let deleted = rt
-            .execute_query("DELETE FROM notes WHERE id = 1")
-            .unwrap();
+        let deleted = rt.execute_query("DELETE FROM notes WHERE id = 1").unwrap();
         assert_eq!(deleted.affected_rows, 1);
     }
 
@@ -2512,7 +2561,11 @@ mod tests {
             let result = rt
                 .execute_query(&format!("SELECT score FROM bench_users WHERE id = {id}"))
                 .unwrap();
-            assert_eq!(result.result.records.len(), 1, "id={id} should match one row");
+            assert_eq!(
+                result.result.records.len(),
+                1,
+                "id={id} should match one row"
+            );
         }
 
         // Delete via the hash fast-path — exactly the bench scenario the
@@ -2535,10 +2588,8 @@ mod tests {
         rt.execute_query("CREATE TABLE bench_bulk (id INT, score INT)")
             .unwrap();
 
-        rt.execute_query(
-            "INSERT INTO bench_bulk (id, score) VALUES (1, 10), (2, 20), (3, 30)",
-        )
-        .unwrap();
+        rt.execute_query("INSERT INTO bench_bulk (id, score) VALUES (1, 10), (2, 20), (3, 30)")
+            .unwrap();
 
         let registered = rt
             .index_store_ref()
@@ -2566,16 +2617,14 @@ mod tests {
         rt.execute_query("INSERT INTO plain (uid, label) VALUES (1, 'a')")
             .unwrap();
 
-        assert!(
-            rt.index_store_ref()
-                .find_index_for_column("plain", "id")
-                .is_none()
-        );
-        assert!(
-            rt.index_store_ref()
-                .find_index_for_column("plain", "uid")
-                .is_none()
-        );
+        assert!(rt
+            .index_store_ref()
+            .find_index_for_column("plain", "id")
+            .is_none());
+        assert!(rt
+            .index_store_ref()
+            .find_index_for_column("plain", "uid")
+            .is_none());
     }
 
     /// Hook only fires once per collection. If an explicit

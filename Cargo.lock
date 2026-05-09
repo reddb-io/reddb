@@ -2160,6 +2160,7 @@ name = "reddb"
 version = "1.0.0"
 dependencies = [
  "jsonwebtoken",
+ "proptest",
  "rcgen",
  "reddb-client",
  "reddb-grpc-proto",

@@ -1,0 +1,4 @@
+input = "SHOW COLLECTIONS INCLUDING INTERNAL"
+expected_kind = "Table"
+source = "docs/reference/red-schema.md:16"
+kind = "positive"

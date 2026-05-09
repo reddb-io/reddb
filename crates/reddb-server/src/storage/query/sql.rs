@@ -1,17 +1,18 @@
 use crate::storage::query::ast::{
-    AlterTableQuery, AlterUserStmt, ApplyMigrationQuery, AskQuery, CopyFormat, CopyFromQuery,
-    CreateForeignTableQuery, CreateIndexQuery, CreateMigrationQuery, CreatePolicyQuery,
-    CreateQueueQuery, CreateSchemaQuery, CreateSequenceQuery, CreateServerQuery, CreateTableQuery,
-    CreateTimeSeriesQuery, CreateTreeQuery, CreateViewQuery, DeleteQuery, DropForeignTableQuery,
-    DropIndexQuery, DropPolicyQuery, DropQueueQuery, DropSchemaQuery, DropSequenceQuery,
-    DropServerQuery, DropTableQuery, DropTimeSeriesQuery, DropTreeQuery, DropViewQuery,
-    ExplainAlterQuery, ExplainMigrationQuery, ForeignColumnDef, GrantStmt, GraphCommand,
-    GraphQuery, HybridQuery, InsertQuery, JoinQuery, MaintenanceCommand, PathQuery, PolicyAction,
-    ProbabilisticCommand, QueryExpr, QueueCommand, RefreshMaterializedViewQuery, RevokeStmt,
-    RollbackMigrationQuery, SearchCommand, TableQuery, TreeCommand, TxnControl, UpdateQuery,
-    VectorQuery,
+    AlterTableQuery, AlterUserStmt, ApplyMigrationQuery, AskQuery, BinOp, CompareOp, CopyFormat,
+    CopyFromQuery, CreateForeignTableQuery, CreateIndexQuery, CreateMigrationQuery,
+    CreatePolicyQuery, CreateQueueQuery, CreateSchemaQuery, CreateSequenceQuery, CreateServerQuery,
+    CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery, CreateViewQuery, DeleteQuery,
+    DropForeignTableQuery, DropIndexQuery, DropPolicyQuery, DropQueueQuery, DropSchemaQuery,
+    DropSequenceQuery, DropServerQuery, DropTableQuery, DropTimeSeriesQuery, DropTreeQuery,
+    DropViewQuery, ExplainAlterQuery, ExplainMigrationQuery, Expr, FieldRef, Filter,
+    ForeignColumnDef, GrantStmt, GraphCommand, GraphQuery, HybridQuery, InsertQuery, JoinQuery,
+    MaintenanceCommand, PathQuery, PolicyAction, ProbabilisticCommand, QueryExpr, QueueCommand,
+    RefreshMaterializedViewQuery, RevokeStmt, RollbackMigrationQuery, SearchCommand, Span,
+    TableQuery, TreeCommand, TxnControl, UpdateQuery, VectorQuery,
 };
 use crate::storage::query::parser::{ParseError, Parser, SafeTokenDisplay};
+use crate::storage::query::sql_lowering::filter_to_expr;
 use crate::storage::query::Token;
 use crate::storage::schema::Value;
 
@@ -113,6 +114,33 @@ pub enum SqlCommand {
     ApplyMigration(ApplyMigrationQuery),
     RollbackMigration(RollbackMigrationQuery),
     ExplainMigration(ExplainMigrationQuery),
+}
+
+fn collection_model_filter(model: &str) -> Filter {
+    Filter::Compare {
+        field: FieldRef::column("", "model"),
+        op: CompareOp::Eq,
+        value: Value::Text(model.to_string().into()),
+    }
+}
+
+fn add_table_filter(query: &mut TableQuery, filter: Filter) {
+    let combined = match query.filter.take() {
+        Some(existing) => existing.and(filter),
+        None => filter,
+    };
+    query.where_expr = Some(filter_to_expr(&combined));
+    query.filter = Some(combined);
+}
+
+fn parse_show_collections_by_model(
+    parser: &mut Parser<'_>,
+    model: &str,
+) -> Result<TableQuery, ParseError> {
+    let mut query = TableQuery::new("red.collections");
+    parser.parse_table_clauses(&mut query)?;
+    add_table_filter(&mut query, collection_model_filter(model));
+    Ok(query)
 }
 
 #[derive(Debug, Clone)]
@@ -1411,6 +1439,161 @@ impl<'a> Parser<'a> {
                         None
                     };
                     Ok(SqlCommand::ShowConfig { prefix })
+                } else if self.consume_ident_ci("COLLECTIONS")? {
+                    let mut query = TableQuery::new("red.collections");
+                    let include_internal = if self.consume_ident_ci("INCLUDING")? {
+                        if !self.consume_ident_ci("INTERNAL")? {
+                            return Err(ParseError::expected(
+                                vec!["INTERNAL"],
+                                self.peek(),
+                                self.position(),
+                            ));
+                        }
+                        true
+                    } else {
+                        false
+                    };
+                    self.parse_table_clauses(&mut query)?;
+                    if !include_internal {
+                        let user_filter = query.filter.take();
+                        let hide_internal = crate::storage::query::ast::Filter::Compare {
+                            field: FieldRef::column("", "internal"),
+                            op: CompareOp::Eq,
+                            value: Value::Boolean(false),
+                        };
+                        query.filter = Some(match user_filter {
+                            Some(filter) => filter.and(hide_internal),
+                            None => hide_internal,
+                        });
+                    }
+                    Ok(SqlCommand::Select(query))
+                } else if self.consume_ident_ci("TABLES")? {
+                    Ok(SqlCommand::Select(parse_show_collections_by_model(
+                        self, "table",
+                    )?))
+                } else if self.consume_ident_ci("QUEUES")? {
+                    Ok(SqlCommand::Select(parse_show_collections_by_model(
+                        self, "queue",
+                    )?))
+                } else if self.consume(&Token::Vectors)? || self.consume_ident_ci("VECTORS")? {
+                    Ok(SqlCommand::Select(parse_show_collections_by_model(
+                        self, "vector",
+                    )?))
+                } else if self.consume_ident_ci("DOCUMENTS")? {
+                    Ok(SqlCommand::Select(parse_show_collections_by_model(
+                        self, "document",
+                    )?))
+                } else if self.consume(&Token::Timeseries)?
+                    || self.consume_ident_ci("TIMESERIES")?
+                {
+                    Ok(SqlCommand::Select(parse_show_collections_by_model(
+                        self,
+                        "timeseries",
+                    )?))
+                } else if self.consume_ident_ci("GRAPHS")? {
+                    Ok(SqlCommand::Select(parse_show_collections_by_model(
+                        self, "graph",
+                    )?))
+                } else if self.consume(&Token::Kv)? || self.consume_ident_ci("KV")? {
+                    Ok(SqlCommand::Select(parse_show_collections_by_model(
+                        self, "kv",
+                    )?))
+                } else if self.consume(&Token::Schema)? || self.consume_ident_ci("SCHEMA")? {
+                    let collection = self.parse_dotted_admin_path(false)?;
+                    let mut query = TableQuery::new("red.columns");
+                    query.filter = Some(Filter::compare(
+                        FieldRef::column("", "collection"),
+                        CompareOp::Eq,
+                        Value::text(collection),
+                    ));
+                    Ok(SqlCommand::Select(query))
+                } else if self.consume_ident_ci("INDICES")? {
+                    let mut query = TableQuery::new("red.indices");
+                    if self.consume(&Token::On)? {
+                        let collection = self.expect_ident_or_keyword()?;
+                        let filter = Filter::Compare {
+                            field: FieldRef::column("red.indices", "collection"),
+                            op: CompareOp::Eq,
+                            value: Value::text(collection),
+                        };
+                        query.where_expr = Some(filter_to_expr(&filter));
+                        query.filter = Some(filter);
+                    }
+                    self.parse_table_clauses(&mut query)?;
+                    Ok(SqlCommand::Select(query))
+                } else if self.consume_ident_ci("POLICIES")? {
+                    if self.consume(&Token::For)? || self.consume_ident_ci("FOR")? {
+                        let principal = self.parse_iam_principal_kind()?;
+                        return Ok(SqlCommand::IamPolicy(QueryExpr::ShowPolicies {
+                            filter: Some(principal),
+                        }));
+                    }
+                    let mut query = TableQuery::new("red.policies");
+                    let collection_filter =
+                        if self.consume(&Token::On)? || self.consume_ident_ci("ON")? {
+                            let collection = self.parse_dotted_admin_path(false)?;
+                            Some(Filter::Compare {
+                                field: FieldRef::TableColumn {
+                                    table: String::new(),
+                                    column: "collection".to_string(),
+                                },
+                                op: CompareOp::Eq,
+                                value: Value::text(collection),
+                            })
+                        } else {
+                            None
+                        };
+                    self.parse_table_clauses(&mut query)?;
+                    if let Some(collection_filter) = collection_filter {
+                        let combined = match query.filter.take() {
+                            Some(existing) => {
+                                Filter::And(Box::new(collection_filter), Box::new(existing))
+                            }
+                            None => collection_filter,
+                        };
+                        query.where_expr = Some(filter_to_expr(&combined));
+                        query.filter = Some(combined);
+                    }
+                    Ok(SqlCommand::Select(query))
+                } else if self.consume_ident_ci("STATS")? {
+                    let mut query = TableQuery::new("red.stats");
+                    let collection = match self.peek().clone() {
+                        Token::Ident(name) => {
+                            self.advance()?;
+                            Some(name)
+                        }
+                        Token::String(name) => {
+                            self.advance()?;
+                            Some(name)
+                        }
+                        _ => None,
+                    };
+                    self.parse_table_clauses(&mut query)?;
+                    if let Some(collection) = collection {
+                        let filter = Filter::compare(
+                            FieldRef::column("red.stats", "collection"),
+                            CompareOp::Eq,
+                            Value::text(collection),
+                        );
+                        let expr = filter_to_expr(&filter);
+                        query.where_expr = Some(match query.where_expr.take() {
+                            Some(existing) => Expr::binop(BinOp::And, existing, expr),
+                            None => expr,
+                        });
+                        query.filter = Some(match query.filter.take() {
+                            Some(existing) => existing.and(filter),
+                            None => filter,
+                        });
+                    }
+                    Ok(SqlCommand::Select(query))
+                } else if self.consume_ident_ci("SAMPLE")? {
+                    let mut query = TableQuery::new(&self.expect_ident()?);
+                    query.limit = if self.consume(&Token::Limit)? {
+                        Some(self.parse_integer()? as u64)
+                    } else {
+                        Some(10)
+                    };
+                    Ok(SqlCommand::Select(query))
                 } else if self.consume_ident_ci("SECRET")? || self.consume_ident_ci("SECRETS")? {
                     let prefix = if !self.check(&Token::Eof) {
                         Some(self.parse_dotted_admin_path(true)?)
@@ -1428,8 +1611,20 @@ impl<'a> Parser<'a> {
                             "CONFIG",
                             "SECRET",
                             "SECRETS",
-                            "TENANT",
+                            "COLLECTIONS",
+                            "TABLES",
+                            "QUEUES",
+                            "VECTORS",
+                            "DOCUMENTS",
+                            "TIMESERIES",
+                            "GRAPHS",
+                            "KV",
+                            "SCHEMA",
+                            "INDICES",
+                            "SAMPLE",
                             "POLICIES",
+                            "STATS",
+                            "TENANT",
                             "EFFECTIVE",
                         ],
                         self.peek(),

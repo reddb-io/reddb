@@ -1506,6 +1506,241 @@ fn test_parse_show_secrets_all() {
 }
 
 #[test]
+fn test_parse_show_collections_desugars_to_red_collections_select() {
+    let query = parse("SHOW COLLECTIONS").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.collections");
+        assert!(tq.columns.is_empty());
+        assert!(tq.select_items.is_empty());
+        assert!(matches!(
+            tq.filter,
+            Some(Filter::Compare {
+                field: FieldRef::TableColumn { ref column, .. },
+                op: CompareOp::Eq,
+                value: crate::storage::schema::Value::Boolean(false),
+            }) if column == "internal"
+        ));
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
+fn test_parse_show_collections_including_internal_desugars_without_filter() {
+    let query = parse("SHOW COLLECTIONS INCLUDING INTERNAL").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.collections");
+        assert!(tq.columns.is_empty());
+        assert!(tq.select_items.is_empty());
+        assert!(tq.filter.is_none());
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
+fn test_parse_show_collections_where_desugars_with_filter() {
+    let query = parse("SHOW COLLECTIONS WHERE model = 'table'").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.collections");
+        assert!(matches!(
+            tq.filter,
+            Some(Filter::And(ref left, ref right))
+                if matches!(
+                    left.as_ref(),
+                    Filter::Compare {
+                        field: FieldRef::TableColumn { column, .. },
+                        op: CompareOp::Eq,
+                        value: crate::storage::schema::Value::Text(value),
+                    } if column == "model" && value.as_ref() == "table"
+                ) && matches!(
+                    right.as_ref(),
+                    Filter::Compare {
+                        field: FieldRef::TableColumn { column, .. },
+                        op: CompareOp::Eq,
+                        value: crate::storage::schema::Value::Boolean(false),
+                    } if column == "internal"
+                )
+        ));
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
+fn test_parse_typed_show_desugars_to_red_collections_model_filter() {
+    for (input, model) in [
+        ("SHOW TABLES", "table"),
+        ("SHOW QUEUES", "queue"),
+        ("SHOW VECTORS", "vector"),
+        ("SHOW DOCUMENTS", "document"),
+        ("SHOW TIMESERIES", "timeseries"),
+        ("SHOW GRAPHS", "graph"),
+        ("SHOW KV", "kv"),
+    ] {
+        let query = parse(input).unwrap();
+        if let QueryExpr::Table(tq) = query {
+            assert_eq!(tq.table, "red.collections");
+            assert!(tq.columns.is_empty());
+            assert!(tq.select_items.is_empty());
+            assert!(matches!(
+                tq.filter,
+                Some(Filter::Compare {
+                    field: FieldRef::TableColumn { ref column, .. },
+                    op: CompareOp::Eq,
+                    value: crate::storage::schema::Value::Text(ref value),
+                }) if column == "model" && value.as_ref() == model
+            ));
+        } else {
+            panic!("Expected Table for {input}");
+        }
+    }
+}
+
+#[test]
+fn test_parse_show_schema_desugars_to_red_columns_select() {
+    let query = parse("SHOW SCHEMA users").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.columns");
+        assert!(matches!(
+            tq.filter,
+            Some(Filter::Compare {
+                field: FieldRef::TableColumn { ref column, .. },
+                op: CompareOp::Eq,
+                value: crate::storage::schema::Value::Text(ref value),
+            }) if column == "collection" && value.as_ref() == "users"
+        ));
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
+fn test_parse_show_indices_desugars_to_red_indices_select() {
+    let query = parse("SHOW INDICES").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.indices");
+        assert!(tq.columns.is_empty());
+        assert!(tq.select_items.is_empty());
+        assert!(tq.filter.is_none());
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
+fn test_parse_show_indices_on_desugars_with_collection_filter() {
+    let query = parse("SHOW INDICES ON users").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.indices");
+        assert!(matches!(
+            tq.filter,
+            Some(Filter::Compare {
+                field: FieldRef::TableColumn { ref column, .. },
+                op: CompareOp::Eq,
+                value: crate::storage::schema::Value::Text(ref value),
+            }) if column == "collection" && value.as_ref() == "users"
+        ));
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
+fn test_parse_show_policies_desugars_to_red_policies_select() {
+    let query = parse("SHOW POLICIES").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.policies");
+        assert!(tq.columns.is_empty());
+        assert!(tq.select_items.is_empty());
+        assert!(tq.filter.is_none());
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
+fn test_parse_show_policies_on_desugars_with_collection_filter() {
+    let query = parse("SHOW POLICIES ON users").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.policies");
+        assert!(matches!(
+            tq.filter,
+            Some(Filter::Compare {
+                field: FieldRef::TableColumn { ref column, .. },
+                op: CompareOp::Eq,
+                value: crate::storage::schema::Value::Text(ref value),
+            }) if column == "collection" && value.as_ref() == "users"
+        ));
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
+fn test_parse_show_stats_desugars_to_red_stats_select() {
+    let query = parse("SHOW STATS").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.stats");
+        assert!(tq.columns.is_empty());
+        assert!(tq.select_items.is_empty());
+        assert!(tq.filter.is_none());
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
+fn test_parse_show_stats_name_desugars_with_collection_filter() {
+    let query = parse("SHOW STATS users").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.stats");
+        assert!(matches!(
+            tq.filter,
+            Some(Filter::Compare {
+                field: FieldRef::TableColumn { ref column, .. },
+                op: CompareOp::Eq,
+                value: crate::storage::schema::Value::Text(ref value),
+            }) if column == "collection" && value.as_ref() == "users"
+        ));
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
+fn test_parse_show_sample_desugars_to_limited_select() {
+    let query = parse("SHOW SAMPLE users").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "users");
+        assert!(tq.columns.is_empty());
+        assert!(tq.select_items.is_empty());
+        assert_eq!(tq.limit, Some(10));
+        assert!(tq.filter.is_none());
+        assert!(tq.order_by.is_empty());
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
+fn test_parse_show_sample_accepts_explicit_limit() {
+    let query = parse("SHOW SAMPLE users LIMIT 5").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "users");
+        assert_eq!(tq.limit, Some(5));
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
+fn test_parse_show_sample_rejects_where_and_order_by() {
+    assert!(parse("SHOW SAMPLE users WHERE active = true").is_err());
+    assert!(parse("SHOW SAMPLE users ORDER BY id").is_err());
+}
+
+#[test]
 fn test_parse_dollar_secret_reference_projection() {
     let query = parse("SELECT $secret.mycompany.stripe.key AS secret_value FROM tokens").unwrap();
     if let QueryExpr::Table(tq) = query {
@@ -3474,7 +3709,7 @@ fn test_parse_iam_policy_forms() {
     ));
 
     let query = parse("SHOW POLICIES").unwrap();
-    assert!(matches!(query, QueryExpr::ShowPolicies { filter: None }));
+    assert!(matches!(query, QueryExpr::Table(ref tq) if tq.table == "red.policies"));
 
     let query = parse("SHOW POLICIES FOR USER alice").unwrap();
     assert!(matches!(

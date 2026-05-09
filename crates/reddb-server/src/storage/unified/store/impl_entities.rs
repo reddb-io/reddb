@@ -352,10 +352,9 @@ impl UnifiedStore {
 
         self.btree_indices.write().remove(name);
 
-        self.entity_cache
-            .retain(|entity_id, (collection, _)| {
-                collection != name && !entity_ids.iter().any(|id| id.raw() == entity_id)
-            });
+        self.entity_cache.retain(|entity_id, (collection, _)| {
+            collection != name && !entity_ids.iter().any(|id| id.raw() == entity_id)
+        });
 
         self.cross_refs.write().retain(|source_id, refs| {
             refs.retain(|(target_id, _, target_collection)| {
@@ -940,8 +939,7 @@ impl UnifiedStore {
         // only acquired when the shard actually carries one of these ids,
         // so the bench-typical zero-hit `delete_sequential` workload never
         // takes a write lock here at all.
-        self.entity_cache
-            .remove_many(ids.iter().map(|id| id.raw()));
+        self.entity_cache.remove_many(ids.iter().map(|id| id.raw()));
 
         let manager = self
             .get_collection(collection)

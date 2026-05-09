@@ -62,6 +62,9 @@ pub mod query;
 // Unified Storage Layer (Tables + Graphs + Vectors)
 pub(crate) mod unified;
 
+// Per-collection disk usage accounting for runtime catalog views.
+pub(crate) mod disk_accountant;
+
 // Public surface re-used by the rest of the codebase.
 pub use backend::{BackendError, LocalBackend, RemoteBackend};
 pub use keyring::{

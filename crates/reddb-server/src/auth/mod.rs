@@ -12,6 +12,7 @@
 //! - API key -> direct auth with assigned role
 
 pub mod cert;
+pub mod column_policy_gate;
 pub mod locks;
 pub mod middleware;
 pub mod oauth;
@@ -27,6 +28,10 @@ pub use scope_cache::{AuthCache, AuthCacheStats, ScopeKey, DEFAULT_TTL as DEFAUL
 pub use cert::{
     CertAuthConfig, CertAuthError, CertAuthenticator, CertIdentity, CertIdentityMode,
     ParsedClientCert,
+};
+pub use column_policy_gate::{
+    ColumnAccessRequest, ColumnDecision, ColumnDecisionEffect, ColumnPolicyGate,
+    ColumnPolicyOutcome, ColumnRef,
 };
 pub use oauth::{
     DecodedJwt, Jwk, JwtClaims, JwtHeader, OAuthConfig, OAuthError, OAuthIdentity,
