@@ -168,6 +168,29 @@ pub const MATRIX: &[ConfigDefault] = &[
         tier: Tier::Optional,
         default: || text("use_heuristic"),
     },
+    // runtime.ai.transport.* — shared outbound AI HTTP client foundation
+    // (issue #274). Provider rewiring can opt into these defaults
+    // incrementally.
+    ConfigDefault {
+        key: "runtime.ai.transport_pool_size",
+        tier: Tier::Optional,
+        default: || num(16.0),
+    },
+    ConfigDefault {
+        key: "runtime.ai.transport_timeout_ms",
+        tier: Tier::Optional,
+        default: || num(30000.0),
+    },
+    ConfigDefault {
+        key: "runtime.ai.transport_retry_max_attempts",
+        tier: Tier::Optional,
+        default: || num(3.0),
+    },
+    ConfigDefault {
+        key: "runtime.ai.transport_retry_base_ms",
+        tier: Tier::Optional,
+        default: || num(500.0),
+    },
     // cache.blob.policy.* — extended TTL hot-path opt-in (issue #189).
     ConfigDefault {
         key: "cache.blob.policy.extended",
