@@ -376,40 +376,10 @@ impl RedDBServer {
         );
         let full_prompt = format!("{system_prompt}\n\nQuestion: {question}");
 
-        let transport =
-            crate::runtime::ai::transport::AiTransport::from_runtime(&self.runtime);
-        let prompt_result = match tokio::runtime::Handle::try_current() {
-            Ok(handle) => match provider {
-                AiProvider::Anthropic => tokio::task::block_in_place(|| {
-                    handle.block_on(crate::ai::anthropic_prompt_async(
-                        &transport,
-                        crate::ai::AnthropicPromptRequest {
-                            api_key,
-                            model: model.clone(),
-                            prompt: full_prompt,
-                            temperature: Some(0.3),
-                            max_output_tokens: Some(2048),
-                            api_base,
-                            anthropic_version: crate::ai::DEFAULT_ANTHROPIC_VERSION.to_string(),
-                        },
-                    ))
-                }),
-                _ => tokio::task::block_in_place(|| {
-                    handle.block_on(crate::ai::openai_prompt_async(
-                        &transport,
-                        crate::ai::OpenAiPromptRequest {
-                            api_key,
-                            model: model.clone(),
-                            prompt: full_prompt,
-                            temperature: Some(0.3),
-                            max_output_tokens: Some(2048),
-                            api_base,
-                        },
-                    ))
-                }),
-            },
-            Err(_) => match provider {
-                AiProvider::Anthropic => crate::ai::anthropic_prompt(crate::ai::AnthropicPromptRequest {
+        let transport = crate::runtime::ai::transport::AiTransport::from_runtime(&self.runtime);
+        let prompt_result = match provider {
+            AiProvider::Anthropic => {
+                let request = crate::ai::AnthropicPromptRequest {
                     api_key,
                     model: model.clone(),
                     prompt: full_prompt,
@@ -417,16 +387,26 @@ impl RedDBServer {
                     max_output_tokens: Some(2048),
                     api_base,
                     anthropic_version: crate::ai::DEFAULT_ANTHROPIC_VERSION.to_string(),
-                }),
-                _ => crate::ai::openai_prompt(crate::ai::OpenAiPromptRequest {
+                };
+                crate::runtime::ai::block_on_ai(async move {
+                    crate::ai::anthropic_prompt_async(&transport, request).await
+                })
+                .and_then(|result| result)
+            }
+            _ => {
+                let request = crate::ai::OpenAiPromptRequest {
                     api_key,
                     model: model.clone(),
                     prompt: full_prompt,
                     temperature: Some(0.3),
                     max_output_tokens: Some(2048),
                     api_base,
-                }),
-            },
+                };
+                crate::runtime::ai::block_on_ai(async move {
+                    crate::ai::openai_prompt_async(&transport, request).await
+                })
+                .and_then(|result| result)
+            }
         };
         let (answer, prompt_tokens, completion_tokens) = match prompt_result {
             Ok(resp) => (
@@ -563,16 +543,25 @@ impl RedDBServer {
                     Err(err) => return json_error(400, err.to_string()),
                 }
             }
-            _ => match crate::ai::openai_embeddings(crate::ai::OpenAiEmbeddingRequest {
-                api_key,
-                model: model.clone(),
-                inputs: inputs.iter().map(|item| item.text.clone()).collect(),
-                dimensions,
-                api_base,
-            }) {
-                Ok(response) => response,
-                Err(err) => return json_error(400, err.to_string()),
-            },
+            _ => {
+                let transport =
+                    crate::runtime::ai::transport::AiTransport::from_runtime(&self.runtime);
+                let request = crate::ai::OpenAiEmbeddingRequest {
+                    api_key,
+                    model: model.clone(),
+                    inputs: inputs.iter().map(|item| item.text.clone()).collect(),
+                    dimensions,
+                    api_base,
+                };
+                match crate::runtime::ai::block_on_ai(async move {
+                    crate::ai::openai_embeddings_async(&transport, request).await
+                })
+                .and_then(|result| result)
+                {
+                    Ok(response) => response,
+                    Err(err) => return json_error(400, err.to_string()),
+                }
+            }
         };
 
         if response.embeddings.len() != inputs.len() {
@@ -751,9 +740,7 @@ impl RedDBServer {
         let anthropic_version = std::env::var("REDDB_ANTHROPIC_VERSION")
             .unwrap_or_else(|_| crate::ai::DEFAULT_ANTHROPIC_VERSION.to_string());
 
-        let transport =
-            crate::runtime::ai::transport::AiTransport::from_runtime(&self.runtime);
-        let tokio_handle = tokio::runtime::Handle::try_current().ok();
+        let transport = crate::runtime::ai::transport::AiTransport::from_runtime(&self.runtime);
 
         let mut outputs = Vec::with_capacity(prompts.len());
         let mut saved = Vec::new();
@@ -765,38 +752,10 @@ impl RedDBServer {
         let mut has_total_tokens = false;
 
         for (index, prompt) in prompts.iter().enumerate() {
-            let response = match &tokio_handle {
-                Some(handle) => match provider {
-                    AiProvider::Anthropic => tokio::task::block_in_place(|| {
-                        handle.block_on(crate::ai::anthropic_prompt_async(
-                            &transport,
-                            crate::ai::AnthropicPromptRequest {
-                                api_key: api_key.clone(),
-                                model: model.clone(),
-                                prompt: prompt.clone(),
-                                temperature,
-                                max_output_tokens,
-                                api_base: api_base.clone(),
-                                anthropic_version: anthropic_version.clone(),
-                            },
-                        ))
-                    }),
-                    _ => tokio::task::block_in_place(|| {
-                        handle.block_on(crate::ai::openai_prompt_async(
-                            &transport,
-                            crate::ai::OpenAiPromptRequest {
-                                api_key: api_key.clone(),
-                                model: model.clone(),
-                                prompt: prompt.clone(),
-                                temperature,
-                                max_output_tokens,
-                                api_base: api_base.clone(),
-                            },
-                        ))
-                    }),
-                },
-                None => match provider {
-                    AiProvider::Anthropic => crate::ai::anthropic_prompt(crate::ai::AnthropicPromptRequest {
+            let response = match provider {
+                AiProvider::Anthropic => {
+                    let transport = transport.clone();
+                    let request = crate::ai::AnthropicPromptRequest {
                         api_key: api_key.clone(),
                         model: model.clone(),
                         prompt: prompt.clone(),
@@ -804,16 +763,27 @@ impl RedDBServer {
                         max_output_tokens,
                         api_base: api_base.clone(),
                         anthropic_version: anthropic_version.clone(),
-                    }),
-                    _ => crate::ai::openai_prompt(crate::ai::OpenAiPromptRequest {
+                    };
+                    crate::runtime::ai::block_on_ai(async move {
+                        crate::ai::anthropic_prompt_async(&transport, request).await
+                    })
+                    .and_then(|result| result)
+                }
+                _ => {
+                    let transport = transport.clone();
+                    let request = crate::ai::OpenAiPromptRequest {
                         api_key: api_key.clone(),
                         model: model.clone(),
                         prompt: prompt.clone(),
                         temperature,
                         max_output_tokens,
                         api_base: api_base.clone(),
-                    }),
-                },
+                    };
+                    crate::runtime::ai::block_on_ai(async move {
+                        crate::ai::openai_prompt_async(&transport, request).await
+                    })
+                    .and_then(|result| result)
+                }
             };
             let response = match response {
                 Ok(value) => value,
