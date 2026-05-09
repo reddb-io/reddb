@@ -591,9 +591,42 @@ impl SqlCommand {
 impl<'a> Parser<'a> {
     fn parse_events_command(&mut self) -> Result<QueryExpr, ParseError> {
         self.expect_ident()?; // EVENTS
+        if self.consume_ident_ci("STATUS")? {
+            let mut query = TableQuery::new("red.subscriptions");
+            let collection = match self.peek().clone() {
+                Token::Ident(name) => {
+                    self.advance()?;
+                    Some(name)
+                }
+                Token::String(name) => {
+                    self.advance()?;
+                    Some(name)
+                }
+                _ => None,
+            };
+            self.parse_table_clauses(&mut query)?;
+            if let Some(collection) = collection {
+                let filter = Filter::compare(
+                    FieldRef::column("red.subscriptions", "collection"),
+                    CompareOp::Eq,
+                    Value::text(collection),
+                );
+                let expr = filter_to_expr(&filter);
+                query.where_expr = Some(match query.where_expr.take() {
+                    Some(existing) => Expr::binop(BinOp::And, existing, expr),
+                    None => expr,
+                });
+                query.filter = Some(match query.filter.take() {
+                    Some(existing) => existing.and(filter),
+                    None => filter,
+                });
+            }
+            return Ok(QueryExpr::Table(query));
+        }
+
         if !self.consume_ident_ci("BACKFILL")? {
             return Err(ParseError::expected(
-                vec!["BACKFILL"],
+                vec!["BACKFILL", "STATUS"],
                 self.peek(),
                 self.position(),
             ));
@@ -776,6 +809,9 @@ impl<'a> Parser<'a> {
             },
             Token::Ident(name) if name.eq_ignore_ascii_case("EVENTS") => {
                 match self.parse_events_command()? {
+                    QueryExpr::Table(query) => Ok(FrontendStatement::Sql(SqlStatement::Query(
+                        SqlQuery::Select(query),
+                    ))),
                     QueryExpr::EventsBackfill(query) => {
                         Ok(FrontendStatement::EventsBackfill(query))
                     }
