@@ -277,6 +277,7 @@ fn hypertable_collection_contract(
         // seals. Reject UPDATE / DELETE at parse time and give the
         // operator a clear message instead of silent coalescing.
         append_only: true,
+        subscriptions: Vec::new(),
     }
 }
 
@@ -302,6 +303,7 @@ fn timeseries_collection_contract(
         // storage model forbids in-place UPDATE already, so the flag
         // makes the catalog honest rather than changing semantics.
         append_only: true,
+        subscriptions: Vec::new(),
     }
 }
 

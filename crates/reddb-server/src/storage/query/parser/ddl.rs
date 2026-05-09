@@ -7,6 +7,7 @@ use super::super::ast::{
 use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
+use crate::catalog::{SubscriptionDescriptor, SubscriptionOperation};
 use crate::storage::schema::{SqlTypeName, TypeModifier, Value};
 
 impl<'a> Parser<'a> {
@@ -33,9 +34,12 @@ impl<'a> Parser<'a> {
         let mut context_index_fields = Vec::new();
         let mut context_index_enabled = false;
         let mut timestamps = false;
+        let mut subscriptions = Vec::new();
 
         while self.consume(&Token::With)? {
-            if self.consume_ident_ci("CONTEXT_INDEX")? {
+            if self.consume_ident_ci("EVENTS")? {
+                subscriptions.push(self.parse_subscription_descriptor(name.clone())?);
+            } else if self.consume_ident_ci("CONTEXT_INDEX")? {
                 context_index_enabled = self.parse_bool_assign()?;
             } else if self.consume_ident_ci("CONTEXT")? {
                 // Consume INDEX token (reserved keyword)
@@ -74,6 +78,7 @@ impl<'a> Parser<'a> {
             partition_by: None,
             tenant_by: None,
             append_only: false,
+            subscriptions,
         }))
     }
 
@@ -106,8 +111,13 @@ impl<'a> Parser<'a> {
         let mut timestamps = false;
         let mut tenant_by: Option<String> = None;
         let mut append_only = false;
+        let mut subscriptions = Vec::new();
 
         while self.consume(&Token::With)? {
+            if self.consume_ident_ci("EVENTS")? {
+                subscriptions.push(self.parse_subscription_descriptor(name.clone())?);
+                continue;
+            }
             // Accept both spellings:
             //   WITH key = value
             //   WITH (key = value, key = value)
@@ -243,6 +253,7 @@ impl<'a> Parser<'a> {
             partition_by,
             tenant_by,
             append_only,
+            subscriptions,
         }))
     }
 
@@ -307,7 +318,7 @@ impl<'a> Parser<'a> {
 
         let mut operations = Vec::new();
         loop {
-            let op = self.parse_alter_operation()?;
+            let op = self.parse_alter_operation(&name)?;
             operations.push(op);
             if !self.consume(&Token::Comma)? {
                 break;
@@ -318,7 +329,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse a single ALTER TABLE operation
-    fn parse_alter_operation(&mut self) -> Result<AlterOperation, ParseError> {
+    fn parse_alter_operation(&mut self, table_name: &str) -> Result<AlterOperation, ParseError> {
         if self.consume(&Token::Add)? {
             // ADD COLUMN definition
             let _ = self.consume(&Token::Column)?; // COLUMN keyword is optional
@@ -359,8 +370,12 @@ impl<'a> Parser<'a> {
             let child = self.expect_ident()?;
             Ok(AlterOperation::DetachPartition { child })
         } else if self.consume(&Token::Enable)? {
-            // ENABLE ROW LEVEL SECURITY  |  ENABLE TENANCY ON (col)
-            if self.consume_ident_ci("TENANCY")? {
+            // ENABLE EVENTS | ENABLE ROW LEVEL SECURITY | ENABLE TENANCY ON (col)
+            if self.consume_ident_ci("EVENTS")? {
+                Ok(AlterOperation::EnableEvents(
+                    self.parse_subscription_descriptor(table_name.to_string())?,
+                ))
+            } else if self.consume_ident_ci("TENANCY")? {
                 self.expect(Token::On)?;
                 self.expect(Token::LParen)?;
                 // Dotted paths allowed (`metadata.tenant`, `payload.org`).
@@ -378,8 +393,10 @@ impl<'a> Parser<'a> {
                 Ok(AlterOperation::EnableRowLevelSecurity)
             }
         } else if self.consume(&Token::Disable)? {
-            // DISABLE ROW LEVEL SECURITY  |  DISABLE TENANCY
-            if self.consume_ident_ci("TENANCY")? {
+            // DISABLE EVENTS | DISABLE ROW LEVEL SECURITY | DISABLE TENANCY
+            if self.consume_ident_ci("EVENTS")? {
+                Ok(AlterOperation::DisableEvents)
+            } else if self.consume_ident_ci("TENANCY")? {
                 Ok(AlterOperation::DisableTenancy)
             } else {
                 self.expect(Token::Row)?;
@@ -411,6 +428,84 @@ impl<'a> Parser<'a> {
                 self.position(),
             ))
         }
+    }
+
+    fn parse_subscription_descriptor(
+        &mut self,
+        source: String,
+    ) -> Result<SubscriptionDescriptor, ParseError> {
+        let mut ops_filter = Vec::new();
+        if self.consume(&Token::LParen)? {
+            loop {
+                let op = if self.consume(&Token::Insert)? {
+                    SubscriptionOperation::Insert
+                } else if self.consume(&Token::Update)? {
+                    SubscriptionOperation::Update
+                } else if self.consume(&Token::Delete)? {
+                    SubscriptionOperation::Delete
+                } else {
+                    return Err(ParseError::expected(
+                        vec!["INSERT", "UPDATE", "DELETE"],
+                        self.peek(),
+                        self.position(),
+                    ));
+                };
+                ops_filter.push(op);
+                if !self.consume(&Token::Comma)? {
+                    break;
+                }
+            }
+            self.expect(Token::RParen)?;
+        }
+
+        let target_queue = if self.consume(&Token::To)? {
+            self.expect_ident()?
+        } else {
+            format!("{source}_events")
+        };
+
+        let mut redact_fields = Vec::new();
+        if self.consume_ident_ci("REDACT")? {
+            self.expect(Token::LParen)?;
+            loop {
+                redact_fields.push(self.expect_ident_or_keyword()?);
+                if !self.consume(&Token::Comma)? {
+                    break;
+                }
+            }
+            self.expect(Token::RParen)?;
+        }
+
+        let where_filter = if self.consume(&Token::Where)? {
+            Some(self.collect_subscription_where_filter()?)
+        } else {
+            None
+        };
+
+        Ok(SubscriptionDescriptor {
+            source,
+            target_queue,
+            ops_filter,
+            where_filter,
+            redact_fields,
+            enabled: true,
+        })
+    }
+
+    fn collect_subscription_where_filter(&mut self) -> Result<String, ParseError> {
+        let mut parts = Vec::new();
+        while !self.check(&Token::Eof) && !self.check(&Token::Comma) {
+            parts.push(self.peek().to_string());
+            self.advance()?;
+        }
+        if parts.is_empty() {
+            return Err(ParseError::expected(
+                vec!["predicate"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        Ok(parts.join(" "))
     }
 
     /// Capture remaining tokens as a display-joined string.
