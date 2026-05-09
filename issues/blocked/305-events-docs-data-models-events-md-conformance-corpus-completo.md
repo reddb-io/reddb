@@ -71,15 +71,15 @@ Completed the docs/corpus slice that is available without touching runtime:
 - Added cross-references in `docs/reference/red-schema.md` and
   `docs/security/policies.md`, plus sidebar/overview/queues/query links.
 
-Partial blockers remain:
+Partial blockers after integration:
 
-- #300 is still open in this worktree. `EVENTS BACKFILL ...` and
-  `synthetic: true` are documented as planned, but not included as runnable
-  conformance syntax.
-- #303 is still open in this worktree. `red.subscriptions` and `EVENTS STATUS`
-  are documented as planned, not implemented.
-- Because #300/#303 are absent, the full quickstart/status fixture criterion is
-  not complete.
+- #300 is integrated: `EVENTS BACKFILL ...`, `synthetic: true`, deterministic
+  `event_id`, redaction, tenant scope, and WHERE/LIMIT are implemented.
+- The separable #303 work is integrated: `red.subscriptions` and `EVENTS STATUS`
+  are implemented.
+- The remaining gap is the full `EVENTS BACKFILL STATUS <collection>` progress
+  fixture. The runtime still lacks a durable progress source for rows processed
+  / ETA, so that command returns an explicit not-implemented error.
 
 Validation:
 

@@ -228,19 +228,19 @@ that every `after` object has the same set of keys forever.
 
 ## Backfill Pattern
 
-Backfill is the bootstrap/replay path for existing rows. Once issue #300 lands,
-the intended command is:
+Backfill is the bootstrap/replay path for existing rows:
 
 ```sql
 EVENTS BACKFILL users WHERE created_at >= '2026-01-01' TO audit_log LIMIT 10000;
 ```
 
-Backfill events will carry `synthetic: true`, use deterministic `event_id`
-values so reruns are idempotent, honor tenant scope, and apply the target
-subscription's redaction rules.
+Backfill events carry `synthetic: true`, use deterministic `event_id` values so
+reruns are idempotent, honor tenant scope, and apply the target subscription's
+redaction rules.
 
-Until #300 lands, bootstrap downstream systems with an explicit `SELECT` export
-followed by normal real-time event consumption from the queue.
+`EVENTS BACKFILL STATUS <collection>` is reserved for a later progress-tracking
+slice; the current runtime returns an explicit not-implemented error for that
+status command.
 
 ## Consumer Pattern
 
@@ -263,14 +263,14 @@ followed by normal real-time event consumption from the queue.
 | Backpressure handling | Outbox plus `<queue>_outbox_dlq` | Slot lag; storage grows until consumed | Resume token and oplog retention window | Kafka offsets and connector retries |
 | Query language integration | SQL/RQL DDL and queue commands | SQL plus replication protocol | Driver API | Kafka/connector API |
 | Loop prevention | Queues cannot emit events | Trigger loops are user-managed | Watch loops are app-managed | Topic feedback loops are user-managed |
-| Backfill bootstrap | Planned `EVENTS BACKFILL` (#300) | Snapshot/export plus replication slot | Initial query plus resume token | Snapshot mode in connector |
+| Backfill bootstrap | `EVENTS BACKFILL` synthetic events | Snapshot/export plus replication slot | Initial query plus resume token | Snapshot mode in connector |
 
 ## Related RedDB Surfaces
 
 - [Queues](queues.md) define `FANOUT`, `WORK`, consumer groups, ACK/NACK, and DLQ handling.
 - [Query event syntax](../query/events.md) is the compact SQL/RQL command reference.
 - [Policies](../security/policies.md#events-and-queue-policies) define source/target authorization and REDACT warnings.
-- [red.* schema](../reference/red-schema.md#redsubscriptions-planned) will expose subscriptions once issue #303 lands.
+- [red.* schema](../reference/red-schema.md#redsubscriptions) exposes subscription metadata through `red.subscriptions`.
 
 ## Conformance Corpus
 

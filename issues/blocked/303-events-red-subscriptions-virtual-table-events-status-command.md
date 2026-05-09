@@ -49,6 +49,10 @@ Implemented the separable #303 slice that does not require #300:
 - Added runtime coverage for `SELECT ... FROM red.subscriptions`, `EVENTS STATUS users`, and outbox DLQ count reporting.
 - Updated `docs/query/events.md` and `docs/reference/red-schema.md`.
 
-Remaining blocked work:
+Remaining blocked work after integration:
 
-- `EVENTS BACKFILL STATUS <collection>` still depends on #300. This branch still has `issues/300-events-events-backfill-synthetic-flag.md` open and no durable backfill-progress runtime/source of truth to query. I did not create a second backfill implementation.
+- #300 now provides `EVENTS BACKFILL`, synthetic events, and deterministic
+  idempotency, but there is still no durable backfill-progress runtime/source of
+  truth to query.
+- `EVENTS BACKFILL STATUS <collection>` therefore still returns an explicit
+  not-implemented error instead of rows processed / ETA.

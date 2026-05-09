@@ -1696,7 +1696,7 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 if self.consume_ident_ci("BACKFILL")? {
                     return Err(ParseError::new(
-                        "EVENTS BACKFILL STATUS is blocked until EVENTS BACKFILL runtime lands (#300)"
+                        "EVENTS BACKFILL STATUS is not implemented; EVENTS BACKFILL runtime is available but durable progress tracking is not"
                             .to_string(),
                         self.position(),
                     ));
