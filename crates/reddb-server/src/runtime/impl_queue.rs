@@ -1644,6 +1644,7 @@ fn queue_collection_contract(
         // paths never apply. Flag it as append_only so inadvertent
         // `UPDATE/DELETE FROM queue_name` statements fail loudly.
         append_only: true,
+        subscriptions: Vec::new(),
     }
 }
 

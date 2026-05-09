@@ -1,0 +1,4 @@
+input = "CREATE TABLE users (id INT, email TEXT, status TEXT) WITH EVENTS WHERE status = 'active'"
+expected_kind = "CreateTable"
+source = "docs/query/events.md:15"
+kind = "positive"

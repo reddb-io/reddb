@@ -1,6 +1,7 @@
 //! Parser tests
 
 use super::*;
+use crate::catalog::SubscriptionOperation;
 use crate::storage::engine::vector_metadata::MetadataValue;
 use crate::storage::query::ast::{
     CompareOp, DistanceMetric, EdgeDirection, FieldRef, Filter, FusionStrategy, JoinType,
@@ -1878,6 +1879,44 @@ fn test_parse_create_table_with_ttl_clause() {
 }
 
 #[test]
+fn test_parse_create_table_with_events_default_queue() {
+    let query = parse("CREATE TABLE users (id INT) WITH EVENTS").unwrap();
+    let QueryExpr::CreateTable(ct) = query else {
+        panic!("Expected CreateTableQuery");
+    };
+    assert_eq!(ct.subscriptions.len(), 1);
+    let subscription = &ct.subscriptions[0];
+    assert_eq!(subscription.source, "users");
+    assert_eq!(subscription.target_queue, "users_events");
+    assert!(subscription.ops_filter.is_empty());
+    assert!(subscription.redact_fields.is_empty());
+    assert_eq!(subscription.where_filter, None);
+    assert!(subscription.enabled);
+}
+
+#[test]
+fn test_parse_create_table_with_events_options() {
+    let query = parse(
+        "CREATE TABLE users (id INT, email TEXT, phone TEXT, status TEXT) WITH EVENTS (INSERT, UPDATE) TO audit_log REDACT (email, phone) WHERE status = 'active'",
+    )
+    .unwrap();
+    let QueryExpr::CreateTable(ct) = query else {
+        panic!("Expected CreateTableQuery");
+    };
+    let subscription = &ct.subscriptions[0];
+    assert_eq!(subscription.target_queue, "audit_log");
+    assert_eq!(
+        subscription.ops_filter,
+        vec![
+            SubscriptionOperation::Insert,
+            SubscriptionOperation::Update
+        ]
+    );
+    assert_eq!(subscription.redact_fields, vec!["email", "phone"]);
+    assert_eq!(subscription.where_filter.as_deref(), Some("status = 'active'"));
+}
+
+#[test]
 fn test_parse_drop_table() {
     let query = parse("DROP TABLE hosts").unwrap();
     if let QueryExpr::DropTable(dt) = query {
@@ -2052,6 +2091,26 @@ fn test_parse_ddl_table_options_types_and_alter_forms() {
         query,
         QueryExpr::AlterTable(alter)
             if matches!(alter.operations[0], AlterOperation::DisableTenancy)
+    ));
+
+    let query = parse("ALTER TABLE users ENABLE EVENTS (DELETE) TO audit_log").unwrap();
+    let QueryExpr::AlterTable(alter) = query else {
+        panic!("Expected AlterTableQuery");
+    };
+    match &alter.operations[0] {
+        AlterOperation::EnableEvents(subscription) => {
+            assert_eq!(subscription.source, "users");
+            assert_eq!(subscription.target_queue, "audit_log");
+            assert_eq!(subscription.ops_filter, vec![SubscriptionOperation::Delete]);
+        }
+        other => panic!("expected EnableEvents, got {other:?}"),
+    }
+
+    let query = parse("ALTER TABLE users DISABLE EVENTS").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::AlterTable(alter)
+            if matches!(alter.operations[0], AlterOperation::DisableEvents)
     ));
 
     let query = parse("ALTER TABLE users SET APPEND_ONLY = false").unwrap();
@@ -3155,6 +3214,16 @@ fn test_parse_create_queue_with_dlq_and_attempts() {
     } else {
         panic!("Expected CreateQueueQuery");
     }
+}
+
+#[test]
+fn test_parse_create_queue_with_events_rejected() {
+    let err = parse("CREATE QUEUE tasks WITH EVENTS").expect_err("queue events must fail");
+    assert!(
+        err.to_string()
+            .contains("queues cannot have event subscriptions"),
+        "{err}"
+    );
 }
 
 #[test]

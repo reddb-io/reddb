@@ -31,6 +31,42 @@ pub enum SchemaMode {
     Dynamic,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionOperation {
+    Insert,
+    Update,
+    Delete,
+}
+
+impl SubscriptionOperation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Insert => "INSERT",
+            Self::Update => "UPDATE",
+            Self::Delete => "DELETE",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value.to_ascii_uppercase().as_str() {
+            "INSERT" => Some(Self::Insert),
+            "UPDATE" => Some(Self::Update),
+            "DELETE" => Some(Self::Delete),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscriptionDescriptor {
+    pub source: String,
+    pub target_queue: String,
+    pub ops_filter: Vec<SubscriptionOperation>,
+    pub where_filter: Option<String>,
+    pub redact_fields: Vec<String>,
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct CollectionDescriptor {
     pub name: String,
@@ -58,6 +94,7 @@ pub struct CollectionDescriptor {
     pub graph_projections_requiring_rematerialization_count: usize,
     pub executable_analytics_job_count: usize,
     pub analytics_jobs_requiring_rerun_count: usize,
+    pub subscriptions: Vec<SubscriptionDescriptor>,
     pub resources_in_sync: bool,
     pub attention_required: bool,
     pub attention_score: usize,
@@ -329,6 +366,9 @@ pub fn snapshot_store_with_declarations(
             graph_projections_requiring_rematerialization_count,
             executable_analytics_job_count,
             analytics_jobs_requiring_rerun_count,
+            subscriptions: contract
+                .map(|contract| contract.subscriptions.clone())
+                .unwrap_or_default(),
             resources_in_sync,
             attention_required,
             attention_score,
