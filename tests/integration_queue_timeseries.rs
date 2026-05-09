@@ -3,9 +3,10 @@ mod support;
 use std::thread::sleep;
 use std::time::Duration;
 
-use reddb::application::{ExecuteQueryInput, QueryUseCases};
+use reddb::application::{CatalogUseCases, ExecuteQueryInput, QueryUseCases};
 use reddb::catalog::CollectionModel;
 use reddb::storage::query::UnifiedRecord;
+use reddb::storage::queue::QueueMode;
 use reddb::storage::schema::Value;
 use reddb::storage::{
     EntityData, EntityId, EntityKind, TimeSeriesData, TimeSeriesPointKind, UnifiedEntity,
@@ -293,6 +294,31 @@ fn test_queue_persistent_reopen_retains_messages_and_recovers_pending() {
         "QUEUE READ tasks GROUP workers CONSUMER worker2 COUNT 1",
     );
     assert_eq!(payloads(&recovered), vec!["job-1"]);
+}
+
+#[test]
+fn test_queue_mode_persists_and_defaults_to_work() {
+    let path = PersistentDbPath::new("queue_mode_catalog");
+    let rt = path.open_runtime();
+
+    exec(&rt, "CREATE QUEUE fanout_tasks FANOUT");
+    exec(&rt, "CREATE QUEUE work_tasks WORK");
+    exec(&rt, "CREATE QUEUE default_tasks");
+    exec(&rt, "ALTER QUEUE default_tasks SET MODE FANOUT");
+
+    let rt = checkpoint_and_reopen(&path, rt);
+    let catalog = CatalogUseCases::new(&rt).snapshot();
+
+    let mode = |name: &str| {
+        catalog
+            .collections
+            .iter()
+            .find(|collection| collection.name == name)
+            .and_then(|collection| collection.queue_mode)
+    };
+    assert_eq!(mode("fanout_tasks"), Some(QueueMode::Fanout));
+    assert_eq!(mode("work_tasks"), Some(QueueMode::Work));
+    assert_eq!(mode("default_tasks"), Some(QueueMode::Fanout));
 }
 
 #[test]

@@ -8,6 +8,8 @@ use crate::index::{IndexCatalog, IndexCatalogSnapshot, IndexKind};
 use crate::physical::{
     CollectionContract, PhysicalAnalyticsJob, PhysicalGraphProjection, PhysicalIndexState,
 };
+use crate::storage::queue::QueueMode;
+use crate::storage::schema::Value;
 use crate::storage::unified::UnifiedStore;
 use crate::storage::{EntityKind, UnifiedEntity};
 
@@ -38,6 +40,7 @@ pub struct CollectionDescriptor {
     pub contract_origin: Option<crate::physical::ContractOrigin>,
     pub declared_model: Option<CollectionModel>,
     pub observed_model: CollectionModel,
+    pub queue_mode: Option<QueueMode>,
     pub declared_schema_mode: Option<SchemaMode>,
     pub observed_schema_mode: SchemaMode,
     pub entities: usize,
@@ -203,6 +206,7 @@ pub fn snapshot_store_with_declarations(
     for (collection, entity) in store.query_all(|_| true) {
         grouped.entry(collection).or_default().push(entity);
     }
+    let queue_modes = queue_modes_from_grouped(&grouped);
 
     let mut stats_by_collection = BTreeMap::new();
     let mut collections = Vec::new();
@@ -298,6 +302,16 @@ pub fn snapshot_store_with_declarations(
             contract_origin: contract.map(|contract| contract.origin),
             declared_model: contract.map(|contract| contract.declared_model),
             observed_model: inferred_model,
+            queue_mode: if model == CollectionModel::Queue {
+                Some(
+                    queue_modes
+                        .get(&collection_name)
+                        .copied()
+                        .unwrap_or_default(),
+                )
+            } else {
+                None
+            },
             declared_schema_mode: contract.map(|contract| contract.schema_mode),
             observed_schema_mode: inferred_schema_mode,
             entities: entity_count,
@@ -386,6 +400,40 @@ pub fn snapshot_store_with_declarations(
         index_statuses,
         graph_projection_statuses,
         analytics_job_statuses,
+    }
+}
+
+fn queue_modes_from_grouped(
+    grouped: &HashMap<String, Vec<UnifiedEntity>>,
+) -> HashMap<String, QueueMode> {
+    let Some(meta) = grouped.get("red_queue_meta") else {
+        return HashMap::new();
+    };
+
+    let mut modes = HashMap::new();
+    for entity in meta {
+        let Some(row) = entity.data.as_row() else {
+            continue;
+        };
+        if row_text(row, "kind").as_deref() != Some("queue_config") {
+            continue;
+        }
+        let Some(queue) = row_text(row, "queue") else {
+            continue;
+        };
+        let mode = row_text(row, "mode")
+            .as_deref()
+            .and_then(QueueMode::parse)
+            .unwrap_or_default();
+        modes.insert(queue, mode);
+    }
+    modes
+}
+
+fn row_text(row: &crate::storage::unified::entity::RowData, key: &str) -> Option<String> {
+    match row.get_field(key) {
+        Some(Value::Text(value)) => Some(value.to_string()),
+        _ => None,
     }
 }
 

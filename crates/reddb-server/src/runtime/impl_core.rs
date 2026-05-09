@@ -787,6 +787,7 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
         QueryExpr::CreateTimeSeries(query) => cache_scope_insert(scopes, &query.name),
         QueryExpr::DropTimeSeries(query) => cache_scope_insert(scopes, &query.name),
         QueryExpr::CreateQueue(query) => cache_scope_insert(scopes, &query.name),
+        QueryExpr::AlterQueue(query) => cache_scope_insert(scopes, &query.name),
         QueryExpr::DropQueue(query) => cache_scope_insert(scopes, &query.name),
         QueryExpr::QueueCommand(query) => match query {
             QueueCommand::Push { queue, .. }
@@ -1452,6 +1453,7 @@ pub(super) fn intent_lock_modes_for(
         | QueryExpr::CreateTimeSeries(_)
         | QueryExpr::DropTimeSeries(_)
         | QueryExpr::CreateQueue(_)
+        | QueryExpr::AlterQueue(_)
         | QueryExpr::DropQueue(_)
         | QueryExpr::CreateTree(_)
         | QueryExpr::DropTree(_)
@@ -1513,6 +1515,7 @@ fn walk_collections(expr: &QueryExpr, out: &mut Vec<String>) {
         QueryExpr::CreateTimeSeries(q) => out.push(q.name.clone()),
         QueryExpr::DropTimeSeries(q) => out.push(q.name.clone()),
         QueryExpr::CreateQueue(q) => out.push(q.name.clone()),
+        QueryExpr::AlterQueue(q) => out.push(q.name.clone()),
         QueryExpr::DropQueue(q) => out.push(q.name.clone()),
         QueryExpr::CreatePolicy(q) => out.push(q.table.clone()),
         QueryExpr::CreateView(q) => out.push(q.name.clone()),
@@ -4294,6 +4297,7 @@ impl RedDBRuntime {
             QueryExpr::DropTimeSeries(ref ts) => self.execute_drop_timeseries(query, ts),
             // Queue DDL and commands
             QueryExpr::CreateQueue(ref q) => self.execute_create_queue(query, q),
+            QueryExpr::AlterQueue(ref q) => self.execute_alter_queue(query, q),
             QueryExpr::DropQueue(ref q) => self.execute_drop_queue(query, q),
             QueryExpr::QueueCommand(ref cmd) => self.execute_queue_command(query, cmd),
             QueryExpr::CreateTree(ref tree) => self.execute_create_tree(query, tree),
@@ -6979,6 +6983,7 @@ impl RedDBRuntime {
             | QueryExpr::CreateTimeSeries(_)
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
+            | QueryExpr::AlterQueue(_)
             | QueryExpr::DropQueue(_)
             | QueryExpr::CreateTree(_)
             | QueryExpr::DropTree(_) => {
