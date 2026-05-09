@@ -12,7 +12,7 @@ use reddb::storage::{
     EntityData, EntityId, EntityKind, TimeSeriesData, TimeSeriesPointKind, UnifiedEntity,
 };
 use reddb::RedDBRuntime;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use support::{checkpoint_and_reopen, PersistentDbPath};
 
@@ -319,6 +319,48 @@ fn test_queue_mode_persists_and_defaults_to_work() {
     assert_eq!(mode("fanout_tasks"), Some(QueueMode::Fanout));
     assert_eq!(mode("work_tasks"), Some(QueueMode::Work));
     assert_eq!(mode("default_tasks"), Some(QueueMode::Fanout));
+}
+
+#[test]
+fn test_work_queue_implicit_consumers_share_default_group() {
+    let rt = rt();
+
+    exec(&rt, "CREATE QUEUE work_tasks WORK");
+    for i in 0..100 {
+        exec(&rt, &format!("QUEUE PUSH work_tasks 'job-{i}'"));
+    }
+
+    let consumers = ["alice", "bob", "carol"];
+    let mut counts = HashMap::new();
+    let mut seen = HashSet::new();
+
+    for i in 0.. {
+        let consumer = consumers[i % consumers.len()];
+        let read = exec(
+            &rt,
+            &format!("QUEUE READ work_tasks CONSUMER {consumer} COUNT 1"),
+        );
+        if read.result.records.is_empty() {
+            break;
+        }
+
+        assert_eq!(read.result.records.len(), 1);
+        assert_eq!(text(&read.result.records[0], "consumer"), consumer);
+        let message_id = text(&read.result.records[0], "message_id");
+        assert!(
+            seen.insert(message_id),
+            "WORK implicit consumers must not overlap messages"
+        );
+        *counts.entry(consumer.to_string()).or_insert(0usize) += 1;
+    }
+
+    assert_eq!(seen.len(), 100);
+    assert_eq!(counts.get("alice"), Some(&34));
+    assert_eq!(counts.get("bob"), Some(&33));
+    assert_eq!(counts.get("carol"), Some(&33));
+
+    let pending = exec(&rt, "QUEUE PENDING work_tasks GROUP _work_default");
+    assert_eq!(pending.result.records.len(), 100);
 }
 
 #[test]

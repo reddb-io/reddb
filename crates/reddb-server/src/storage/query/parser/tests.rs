@@ -3227,10 +3227,21 @@ fn test_parse_queue_control_and_group_command_forms() {
         query,
         QueryExpr::QueueCommand(QueueCommand::GroupRead {
             queue,
-            group,
+            group: Some(group),
             consumer,
             count,
         }) if queue == "tasks" && group == "workers" && consumer == "worker1" && count == 10
+    ));
+
+    let query = parse("QUEUE READ tasks CONSUMER worker1 COUNT 10").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::QueueCommand(QueueCommand::GroupRead {
+            queue,
+            group: None,
+            consumer,
+            count,
+        }) if queue == "tasks" && consumer == "worker1" && count == 10
     ));
 
     let query = parse("QUEUE ACK tasks GROUP workers 'msg-1'").unwrap();
