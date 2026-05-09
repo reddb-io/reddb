@@ -18,6 +18,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::json::{Map as JsonMap, Value as JsonValue};
+use crate::presentation::entity_json::storage_value_to_json;
 use crate::storage::schema::Value;
 use crate::storage::unified::devx::refs::{NodeRef, VectorRef};
 use crate::storage::unified::{
@@ -147,12 +149,14 @@ impl<'rt> MutationEngine<'rt> {
             .map_err(RedDBError::Internal)?;
 
         // CDC + cache invalidation (once)
-        self.runtime.cdc_emit(
+        let lsn = self.runtime.cdc_emit(
             crate::replication::cdc::ChangeOperation::Insert,
             &collection,
             id.raw(),
             "table",
         );
+        self.runtime
+            .emit_insert_events_for_collection(&collection, &[id], &[lsn])?;
 
         Ok(MutationResult { ids: vec![id] })
     }
@@ -319,8 +323,11 @@ impl<'rt> MutationEngine<'rt> {
         // Previous code called cdc_emit() per row which triggered
         // invalidate_result_cache() N times — one write-lock acquisition per row.
         self.runtime.invalidate_result_cache();
+        let lsns =
+            self.runtime
+                .cdc_emit_insert_batch_no_cache_invalidate(&collection, &ids, "table");
         self.runtime
-            .cdc_emit_insert_batch_no_cache_invalidate(&collection, &ids, "table");
+            .emit_insert_events_for_collection(&collection, &ids, &lsns)?;
 
         Ok(MutationResult { ids })
     }
@@ -354,7 +361,10 @@ impl<'rt> MutationEngine<'rt> {
             return;
         }
         let index_store = self.runtime.index_store_ref();
-        if index_store.find_index_for_column(collection, "id").is_some() {
+        if index_store
+            .find_index_for_column(collection, "id")
+            .is_some()
+        {
             return;
         }
 
@@ -396,6 +406,169 @@ impl<'rt> MutationEngine<'rt> {
         // `CREATE INDEX` path in `impl_ddl::execute_create_index`.
         self.runtime.invalidate_plan_cache();
     }
+}
+
+impl crate::RedDBRuntime {
+    pub(crate) fn emit_insert_events_for_collection(
+        &self,
+        collection: &str,
+        ids: &[EntityId],
+        lsns: &[u64],
+    ) -> RedDBResult<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        if ids.len() != lsns.len() {
+            return Err(RedDBError::Internal(format!(
+                "insert event emission expected {} LSNs, got {}",
+                ids.len(),
+                lsns.len()
+            )));
+        }
+
+        let Some(contract) = self.db().collection_contract_arc(collection) else {
+            return Ok(());
+        };
+        let subscriptions = contract
+            .subscriptions
+            .iter()
+            .filter(|subscription| {
+                subscription.enabled
+                    && (subscription.ops_filter.is_empty()
+                        || subscription
+                            .ops_filter
+                            .contains(&crate::catalog::SubscriptionOperation::Insert))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if subscriptions.is_empty() {
+            return Ok(());
+        }
+
+        let store = self.db().store();
+        for (&id, &lsn) in ids.iter().zip(lsns) {
+            let Some(entity) = store.get(collection, id) else {
+                continue;
+            };
+            let after = table_row_after_json(&entity);
+            for subscription in &subscriptions {
+                let payload = insert_event_payload(
+                    collection,
+                    id.raw(),
+                    lsn,
+                    &after,
+                    subscription.redact_fields.as_slice(),
+                )?;
+                self.enqueue_event_payload(&subscription.target_queue, Value::Json(payload))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn insert_event_payload(
+    collection: &str,
+    id: u64,
+    lsn: u64,
+    after: &JsonValue,
+    redact_fields: &[String],
+) -> RedDBResult<Vec<u8>> {
+    let mut object = JsonMap::new();
+    let subject_id = after
+        .get("id")
+        .cloned()
+        .unwrap_or(JsonValue::Number(id as f64));
+    let subject_id_for_hash = json_id_for_hash(&subject_id);
+    object.insert(
+        "event_id".to_string(),
+        JsonValue::String(deterministic_event_id(
+            collection,
+            &subject_id_for_hash,
+            lsn,
+            "insert",
+        )),
+    );
+    object.insert("op".to_string(), JsonValue::String("insert".to_string()));
+    object.insert(
+        "collection".to_string(),
+        JsonValue::String(collection.to_string()),
+    );
+    object.insert("id".to_string(), subject_id);
+    object.insert(
+        "ts".to_string(),
+        JsonValue::Number(current_unix_ms() as f64),
+    );
+    object.insert("lsn".to_string(), JsonValue::Number(lsn as f64));
+    object.insert(
+        "tenant".to_string(),
+        crate::runtime::impl_core::current_tenant()
+            .map(JsonValue::String)
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert("before".to_string(), JsonValue::Null);
+    object.insert(
+        "after".to_string(),
+        redact_json_object(after.clone(), redact_fields),
+    );
+    crate::json::to_vec(&JsonValue::Object(object))
+        .map_err(|err| RedDBError::Internal(format!("encode insert event payload: {err}")))
+}
+
+fn deterministic_event_id(collection: &str, id: &str, lsn: u64, op: &str) -> String {
+    let mut hasher = crate::crypto::sha256::Sha256::new();
+    hasher.update(collection.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(id.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(&lsn.to_le_bytes());
+    hasher.update(op.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn json_id_for_hash(value: &JsonValue) -> String {
+    match value {
+        JsonValue::String(value) => value.clone(),
+        JsonValue::Number(value) => value.to_string(),
+        JsonValue::Bool(value) => value.to_string(),
+        JsonValue::Null => "null".to_string(),
+        JsonValue::Array(_) | JsonValue::Object(_) => {
+            crate::json::to_string(value).unwrap_or_else(|_| "structured".to_string())
+        }
+    }
+}
+
+fn table_row_after_json(entity: &UnifiedEntity) -> JsonValue {
+    let mut object = JsonMap::new();
+    if let EntityData::Row(row) = &entity.data {
+        if let Some(named) = &row.named {
+            for (key, value) in named {
+                object.insert(key.to_string(), storage_value_to_json(value));
+            }
+        } else if let Some(schema) = &row.schema {
+            for (idx, column) in schema.iter().enumerate() {
+                if let Some(value) = row.columns.get(idx) {
+                    object.insert(column.clone(), storage_value_to_json(value));
+                }
+            }
+        }
+    }
+    JsonValue::Object(object)
+}
+
+fn redact_json_object(mut value: JsonValue, redact_fields: &[String]) -> JsonValue {
+    if let JsonValue::Object(object) = &mut value {
+        for field in redact_fields {
+            object.insert(field.clone(), JsonValue::String("[REDACTED]".to_string()));
+        }
+    }
+    value
+}
+
+fn current_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 // ── Helper ────────────────────────────────────────────────────────────────
