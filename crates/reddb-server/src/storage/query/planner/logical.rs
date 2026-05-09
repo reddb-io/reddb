@@ -610,13 +610,13 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
         | QueryExpr::Delete(_)
         | QueryExpr::CreateTable(_)
         | QueryExpr::DropTable(_)
-            | QueryExpr::DropGraph(_)
-            | QueryExpr::DropVector(_)
-            | QueryExpr::DropDocument(_)
-            | QueryExpr::DropKv(_)
-            | QueryExpr::DropCollection(_)
-            | QueryExpr::Truncate(_)
-            | QueryExpr::AlterTable(_)
+        | QueryExpr::DropGraph(_)
+        | QueryExpr::DropVector(_)
+        | QueryExpr::DropDocument(_)
+        | QueryExpr::DropKv(_)
+        | QueryExpr::DropCollection(_)
+        | QueryExpr::Truncate(_)
+        | QueryExpr::AlterTable(_)
         | QueryExpr::GraphCommand(_)
         | QueryExpr::SearchCommand(_)
         | QueryExpr::CreateIndex(_)
@@ -671,7 +671,9 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
         | QueryExpr::CreateMigration(_)
         | QueryExpr::ApplyMigration(_)
         | QueryExpr::RollbackMigration(_)
-        | QueryExpr::ExplainMigration(_) => {
+        | QueryExpr::ExplainMigration(_)
+        | QueryExpr::EventsBackfill(_)
+        | QueryExpr::EventsBackfillStatus { .. } => {
             let mut details = BTreeMap::new();
             details.insert("type".to_string(), "dml_ddl".to_string());
             CanonicalLogicalNode {

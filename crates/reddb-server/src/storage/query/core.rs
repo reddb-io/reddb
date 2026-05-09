@@ -121,6 +121,10 @@ pub enum QueryExpr {
     RollbackMigration(RollbackMigrationQuery),
     /// EXPLAIN MIGRATION name
     ExplainMigration(ExplainMigrationQuery),
+    /// `EVENTS BACKFILL collection [WHERE pred] TO queue [LIMIT n]`.
+    EventsBackfill(EventsBackfillQuery),
+    /// `EVENTS BACKFILL STATUS collection` placeholder for the status slice.
+    EventsBackfillStatus { collection: String },
     /// Transaction control: BEGIN, COMMIT, ROLLBACK, SAVEPOINT, RELEASE, ROLLBACK TO.
     ///
     /// Phase 1.1 (PG parity): parser + dispatch are wired so clients (psql, JDBC, etc.)
@@ -1599,6 +1603,15 @@ pub struct AutoEmbedConfig {
     pub provider: String,
     /// Optional model override
     pub model: Option<String>,
+}
+
+/// EVENTS BACKFILL collection [WHERE pred] TO queue [LIMIT n]
+#[derive(Debug, Clone)]
+pub struct EventsBackfillQuery {
+    pub collection: String,
+    pub where_filter: Option<String>,
+    pub target_queue: String,
+    pub limit: Option<u64>,
 }
 
 /// UPDATE table SET col=val, ... WHERE filter [WITH TTL duration] [WITH METADATA (...)]

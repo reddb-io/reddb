@@ -93,6 +93,7 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("hybrid ")
         || lower.starts_with("graph ")
         || lower.starts_with("queue ")
+        || lower.starts_with("events ")
         || lower.starts_with("tree ")
         || lower.starts_with("vault ")
         || lower.starts_with("unseal vault ")
@@ -244,6 +245,10 @@ mod tests {
         );
         assert_eq!(
             detect_mode("QUEUE GROUP CREATE tasks workers"),
+            QueryMode::Sql
+        );
+        assert_eq!(
+            detect_mode("EVENTS BACKFILL users TO audit"),
             QueryMode::Sql
         );
         assert_eq!(detect_mode("TREE VALIDATE forest.org"), QueryMode::Sql);

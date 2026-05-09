@@ -264,12 +264,12 @@ pub(crate) fn runtime_join_table_context(
         | QueryExpr::Delete(_)
         | QueryExpr::CreateTable(_)
         | QueryExpr::DropTable(_)
-            | QueryExpr::DropGraph(_)
-            | QueryExpr::DropVector(_)
-            | QueryExpr::DropDocument(_)
-            | QueryExpr::DropKv(_)
-            | QueryExpr::DropCollection(_)
-            | QueryExpr::Truncate(_)
+        | QueryExpr::DropGraph(_)
+        | QueryExpr::DropVector(_)
+        | QueryExpr::DropDocument(_)
+        | QueryExpr::DropKv(_)
+        | QueryExpr::DropCollection(_)
+        | QueryExpr::Truncate(_)
         | QueryExpr::AlterTable(_)
         | QueryExpr::GraphCommand(_)
         | QueryExpr::SearchCommand(_)
@@ -325,7 +325,9 @@ pub(crate) fn runtime_join_table_context(
         | QueryExpr::CreateMigration(_)
         | QueryExpr::ApplyMigration(_)
         | QueryExpr::RollbackMigration(_)
-        | QueryExpr::ExplainMigration(_) => (None, None),
+        | QueryExpr::ExplainMigration(_)
+        | QueryExpr::EventsBackfill(_)
+        | QueryExpr::EventsBackfillStatus { .. } => (None, None),
     };
 
     (
