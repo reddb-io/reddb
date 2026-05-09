@@ -6,6 +6,8 @@
 //! rigid constraints.
 
 use super::*;
+use crate::catalog::CollectionModel;
+use crate::runtime::ddl::polymorphic_resolver;
 use crate::storage::query::{analyze_create_table, resolve_declared_data_type, CreateColumnDef};
 
 impl RedDBRuntime {
@@ -147,6 +149,10 @@ impl RedDBRuntime {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         let store = self.inner.db.store();
 
+        if is_system_schema_name(&query.name) {
+            return Err(RedDBError::Query("system schema is read-only".to_string()));
+        }
+
         let exists = store.get_collection(&query.name).is_some();
         if !exists {
             if query.if_exists {
@@ -161,6 +167,8 @@ impl RedDBRuntime {
                 query.name
             )));
         }
+        let actual = polymorphic_resolver::resolve(&query.name, &self.inner.db.catalog_model_snapshot())?;
+        polymorphic_resolver::ensure_model_match(CollectionModel::Table, actual)?;
 
         let orphaned_indices: Vec<String> = self
             .inner
@@ -210,6 +218,146 @@ impl RedDBRuntime {
             &format!("table '{}' dropped", query.name),
             "drop",
         ))
+    }
+
+    pub fn execute_drop_graph(
+        &self,
+        raw_query: &str,
+        query: &DropGraphQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        self.execute_drop_typed_collection(
+            raw_query,
+            &query.name,
+            query.if_exists,
+            CollectionModel::Graph,
+            "graph",
+        )
+    }
+
+    pub fn execute_drop_vector(
+        &self,
+        raw_query: &str,
+        query: &DropVectorQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        self.execute_drop_typed_collection(
+            raw_query,
+            &query.name,
+            query.if_exists,
+            CollectionModel::Vector,
+            "vector",
+        )
+    }
+
+    pub fn execute_drop_document(
+        &self,
+        raw_query: &str,
+        query: &DropDocumentQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        self.execute_drop_typed_collection(
+            raw_query,
+            &query.name,
+            query.if_exists,
+            CollectionModel::Document,
+            "document",
+        )
+    }
+
+    pub fn execute_drop_kv(
+        &self,
+        raw_query: &str,
+        query: &DropKvQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        self.execute_drop_typed_collection(
+            raw_query,
+            &query.name,
+            query.if_exists,
+            CollectionModel::Kv,
+            "kv",
+        )
+    }
+
+    pub fn execute_drop_collection(
+        &self,
+        raw_query: &str,
+        query: &DropCollectionQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        if is_system_schema_name(&query.name) {
+            return Err(RedDBError::Query("system schema is read-only".to_string()));
+        }
+        let store = self.inner.db.store();
+        if store.get_collection(&query.name).is_none() {
+            if query.if_exists {
+                return Ok(RuntimeQueryResult::ok_message(
+                    raw_query.to_string(),
+                    &format!("collection '{}' does not exist", query.name),
+                    "drop",
+                ));
+            }
+            return Err(RedDBError::NotFound(format!(
+                "collection '{}' not found",
+                query.name
+            )));
+        }
+
+        match polymorphic_resolver::resolve(&query.name, &self.inner.db.catalog_model_snapshot())? {
+            CollectionModel::Table => self.execute_drop_table(
+                raw_query,
+                &DropTableQuery {
+                    name: query.name.clone(),
+                    if_exists: query.if_exists,
+                },
+            ),
+            CollectionModel::TimeSeries => self.execute_drop_timeseries(
+                raw_query,
+                &DropTimeSeriesQuery {
+                    name: query.name.clone(),
+                    if_exists: query.if_exists,
+                },
+            ),
+            CollectionModel::Queue => self.execute_drop_queue(
+                raw_query,
+                &DropQueueQuery {
+                    name: query.name.clone(),
+                    if_exists: query.if_exists,
+                },
+            ),
+            CollectionModel::Graph => self.execute_drop_graph(
+                raw_query,
+                &DropGraphQuery {
+                    name: query.name.clone(),
+                    if_exists: query.if_exists,
+                },
+            ),
+            CollectionModel::Vector => self.execute_drop_vector(
+                raw_query,
+                &DropVectorQuery {
+                    name: query.name.clone(),
+                    if_exists: query.if_exists,
+                },
+            ),
+            CollectionModel::Document => self.execute_drop_document(
+                raw_query,
+                &DropDocumentQuery {
+                    name: query.name.clone(),
+                    if_exists: query.if_exists,
+                },
+            ),
+            CollectionModel::Kv => self.execute_drop_kv(
+                raw_query,
+                &DropKvQuery {
+                    name: query.name.clone(),
+                    if_exists: query.if_exists,
+                },
+            ),
+            CollectionModel::Mixed => self.execute_drop_typed_collection(
+                raw_query,
+                &query.name,
+                query.if_exists,
+                CollectionModel::Mixed,
+                "collection",
+            ),
+        }
     }
 
     /// Execute ALTER TABLE
@@ -617,6 +765,88 @@ impl RedDBRuntime {
             "drop",
         ))
     }
+
+    fn execute_drop_typed_collection(
+        &self,
+        raw_query: &str,
+        name: &str,
+        if_exists: bool,
+        expected_model: CollectionModel,
+        label: &str,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        if is_system_schema_name(name) {
+            return Err(RedDBError::Query("system schema is read-only".to_string()));
+        }
+        let store = self.inner.db.store();
+        if store.get_collection(name).is_none() {
+            if if_exists {
+                return Ok(RuntimeQueryResult::ok_message(
+                    raw_query.to_string(),
+                    &format!("{label} '{name}' does not exist"),
+                    "drop",
+                ));
+            }
+            return Err(RedDBError::NotFound(format!("{label} '{name}' not found")));
+        }
+
+        let actual = polymorphic_resolver::resolve(name, &self.inner.db.catalog_model_snapshot())?;
+        polymorphic_resolver::ensure_model_match(expected_model, actual)?;
+        self.drop_collection_storage(raw_query, name, label)
+    }
+
+    fn drop_collection_storage(
+        &self,
+        raw_query: &str,
+        name: &str,
+        label: &str,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let store = self.inner.db.store();
+        let orphaned_indices: Vec<String> = self
+            .inner
+            .index_store
+            .list_indices(name)
+            .into_iter()
+            .map(|index| index.name)
+            .collect();
+        for index_name in &orphaned_indices {
+            self.inner.index_store.drop_index(index_name, name);
+        }
+
+        store
+            .drop_collection(name)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.inner.db.invalidate_vector_index(name);
+        self.inner.db.clear_collection_default_ttl_ms(name);
+        self.inner
+            .db
+            .remove_collection_contract(name)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.clear_table_planner_stats(name);
+        self.invalidate_result_cache();
+        if let Some(store) = self.inner.auth_store.read().clone() {
+            store.invalidate_visible_collections_cache();
+        }
+        self.inner
+            .db
+            .persist_metadata()
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.schema_vocabulary_apply(
+            crate::runtime::schema_vocabulary::DdlEvent::DropCollection {
+                collection: name.to_string(),
+            },
+        );
+
+        Ok(RuntimeQueryResult::ok_message(
+            raw_query.to_string(),
+            &format!("{label} '{name}' dropped"),
+            "drop",
+        ))
+    }
+}
+
+pub(crate) fn is_system_schema_name(name: &str) -> bool {
+    name == "red" || name.starts_with("red.")
 }
 
 fn collection_contract_from_create_table(

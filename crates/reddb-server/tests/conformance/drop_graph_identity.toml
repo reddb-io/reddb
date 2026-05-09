@@ -1,0 +1,4 @@
+input = "DROP GRAPH identity"
+expected_kind = "DropGraph"
+source = "issues/307-ddl-foundation-drop-polymorphic-per-model-drop-graph-vector-document-kv-if-exist.md:24"
+kind = "positive"

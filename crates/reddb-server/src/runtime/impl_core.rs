@@ -778,6 +778,11 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
         QueryExpr::Delete(query) => cache_scope_insert(scopes, &query.table),
         QueryExpr::CreateTable(query) => cache_scope_insert(scopes, &query.name),
         QueryExpr::DropTable(query) => cache_scope_insert(scopes, &query.name),
+        QueryExpr::DropGraph(query) => cache_scope_insert(scopes, &query.name),
+        QueryExpr::DropVector(query) => cache_scope_insert(scopes, &query.name),
+        QueryExpr::DropDocument(query) => cache_scope_insert(scopes, &query.name),
+        QueryExpr::DropKv(query) => cache_scope_insert(scopes, &query.name),
+        QueryExpr::DropCollection(query) => cache_scope_insert(scopes, &query.name),
         QueryExpr::AlterTable(query) => cache_scope_insert(scopes, &query.name),
         QueryExpr::CreateIndex(query) => cache_scope_insert(scopes, &query.table),
         QueryExpr::DropIndex(query) => cache_scope_insert(scopes, &query.table),
@@ -1443,6 +1448,11 @@ pub(super) fn intent_lock_modes_for(
         // running (because Global stays IX, not X).
         QueryExpr::CreateTable(_)
         | QueryExpr::DropTable(_)
+        | QueryExpr::DropGraph(_)
+        | QueryExpr::DropVector(_)
+        | QueryExpr::DropDocument(_)
+        | QueryExpr::DropKv(_)
+        | QueryExpr::DropCollection(_)
         | QueryExpr::AlterTable(_)
         | QueryExpr::CreateIndex(_)
         | QueryExpr::DropIndex(_)
@@ -1504,6 +1514,11 @@ fn walk_collections(expr: &QueryExpr, out: &mut Vec<String>) {
         // because Global is still IX.
         QueryExpr::CreateTable(q) => out.push(q.name.clone()),
         QueryExpr::DropTable(q) => out.push(q.name.clone()),
+        QueryExpr::DropGraph(q) => out.push(q.name.clone()),
+        QueryExpr::DropVector(q) => out.push(q.name.clone()),
+        QueryExpr::DropDocument(q) => out.push(q.name.clone()),
+        QueryExpr::DropKv(q) => out.push(q.name.clone()),
+        QueryExpr::DropCollection(q) => out.push(q.name.clone()),
         QueryExpr::AlterTable(q) => out.push(q.name.clone()),
         QueryExpr::CreateIndex(q) => out.push(q.table.clone()),
         QueryExpr::DropIndex(q) => out.push(q.table.clone()),
@@ -4235,6 +4250,15 @@ impl RedDBRuntime {
             // DDL execution
             QueryExpr::CreateTable(ref create) => self.execute_create_table(query, create),
             QueryExpr::DropTable(ref drop_tbl) => self.execute_drop_table(query, drop_tbl),
+            QueryExpr::DropGraph(ref drop_graph) => self.execute_drop_graph(query, drop_graph),
+            QueryExpr::DropVector(ref drop_vector) => self.execute_drop_vector(query, drop_vector),
+            QueryExpr::DropDocument(ref drop_document) => {
+                self.execute_drop_document(query, drop_document)
+            }
+            QueryExpr::DropKv(ref drop_kv) => self.execute_drop_kv(query, drop_kv),
+            QueryExpr::DropCollection(ref drop_collection) => {
+                self.execute_drop_collection(query, drop_collection)
+            }
             QueryExpr::AlterTable(ref alter) => self.execute_alter_table(query, alter),
             QueryExpr::ExplainAlter(ref explain) => self.execute_explain_alter(query, explain),
             // Graph analytics commands
@@ -6620,6 +6644,11 @@ impl RedDBRuntime {
             // those statements stay Admin-only.
             QueryExpr::CreateTable(_)
             | QueryExpr::DropTable(_)
+            | QueryExpr::DropGraph(_)
+            | QueryExpr::DropVector(_)
+            | QueryExpr::DropDocument(_)
+            | QueryExpr::DropKv(_)
+            | QueryExpr::DropCollection(_)
             | QueryExpr::AlterTable(_)
             | QueryExpr::CreateIndex(_)
             | QueryExpr::DropIndex(_)
