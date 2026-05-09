@@ -7,7 +7,10 @@
 use std::sync::Arc;
 
 use reddb::auth::{AuthConfig, AuthStore, Role};
-use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
+use reddb::runtime::mvcc::{
+    clear_current_auth_identity, clear_current_tenant, set_current_auth_identity,
+    set_current_tenant,
+};
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn runtime_with_auth() -> (RedDBRuntime, Arc<AuthStore>) {
@@ -24,6 +27,49 @@ fn as_user<T>(name: &str, role: Role, f: impl FnOnce() -> T) -> T {
     let out = f();
     clear_current_auth_identity();
     out
+}
+
+fn as_tenant_user<T>(tenant: &str, name: &str, role: Role, f: impl FnOnce() -> T) -> T {
+    set_current_tenant(tenant.to_string());
+    set_current_auth_identity(name.to_string(), role);
+    let out = f();
+    clear_current_auth_identity();
+    clear_current_tenant();
+    out
+}
+
+fn attach_platform_policy(store: &AuthStore, policy_json: &str) {
+    let policy = reddb::auth::policies::Policy::from_json_str(policy_json).unwrap();
+    let policy_id = policy.id.clone();
+    store.put_policy(policy).unwrap();
+    store
+        .attach_policy(
+            reddb::auth::store::PrincipalRef::User(reddb::auth::UserId::platform("alice")),
+            &policy_id,
+        )
+        .unwrap();
+}
+
+fn attach_tenant_policy(store: &AuthStore, tenant: &str, policy_json: &str) {
+    let policy = reddb::auth::policies::Policy::from_json_str(policy_json).unwrap();
+    let policy_id = policy.id.clone();
+    store.put_policy(policy).unwrap();
+    store
+        .attach_policy(
+            reddb::auth::store::PrincipalRef::User(reddb::auth::UserId::from_parts(
+                Some(tenant),
+                "alice",
+            )),
+            &policy_id,
+        )
+        .unwrap();
+}
+
+fn text_field(result: &reddb::runtime::RuntimeQueryResult, column: &str) -> String {
+    match result.result.records[0].get(column).unwrap() {
+        reddb::storage::schema::Value::Text(value) => value.to_string(),
+        other => panic!("expected text field {column}, got {other:?}"),
+    }
 }
 
 #[test]
@@ -59,6 +105,190 @@ fn runtime_uses_attached_iam_policy_for_dml() {
         rt.execute_query("INSERT INTO orders (id) VALUES (2)")
     });
     assert!(write.is_err(), "write should be denied by default");
+}
+
+#[test]
+fn update_set_column_policy_allows_allowed_target() {
+    let (rt, store) = runtime_with_auth();
+    rt.execute_query("CREATE TABLE accounts (id INT, status TEXT, secret TEXT)")
+        .unwrap();
+    rt.execute_query("INSERT INTO accounts (id, status, secret) VALUES (1, 'old', 's1')")
+        .unwrap();
+
+    attach_platform_policy(
+        &store,
+        r#"{
+            "id":"accounts-update-status",
+            "version":1,
+            "statements":[
+                {"effect":"allow","actions":["select","update"],"resources":["table:accounts"]}
+            ]
+        }"#,
+    );
+
+    let updated = as_user("alice", Role::Write, || {
+        rt.execute_query("UPDATE accounts SET status = 'active' WHERE id = 1")
+    })
+    .expect("status update should be allowed");
+    assert_eq!(updated.affected_rows, 1);
+
+    let selected = as_user("alice", Role::Write, || {
+        rt.execute_query("SELECT status FROM accounts WHERE id = 1")
+    })
+    .unwrap();
+    assert_eq!(text_field(&selected, "status"), "active");
+}
+
+#[test]
+fn update_set_column_policy_blocks_denied_target_column() {
+    let (rt, store) = runtime_with_auth();
+    rt.execute_query("CREATE TABLE accounts (id INT, status TEXT, secret TEXT)")
+        .unwrap();
+    rt.execute_query("INSERT INTO accounts (id, status, secret) VALUES (1, 'old', 's1')")
+        .unwrap();
+
+    attach_platform_policy(
+        &store,
+        r#"{
+            "id":"accounts-deny-secret",
+            "version":1,
+            "statements":[
+                {"effect":"allow","actions":["select","update"],"resources":["table:accounts"]},
+                {"effect":"deny","actions":["update"],"resources":["column:accounts.secret"]}
+            ]
+        }"#,
+    );
+
+    let err = as_user("alice", Role::Write, || {
+        rt.execute_query("UPDATE accounts SET secret = 's2' WHERE id = 1")
+    })
+    .unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("column:accounts.secret") && msg.contains("denied by IAM column policy"),
+        "unexpected error: {msg}"
+    );
+
+    let selected = rt
+        .execute_query("SELECT secret FROM accounts WHERE id = 1")
+        .unwrap();
+    assert_eq!(text_field(&selected, "secret"), "s1");
+}
+
+#[test]
+fn update_set_column_policy_blocks_multi_column_update_when_one_target_is_denied() {
+    let (rt, store) = runtime_with_auth();
+    rt.execute_query("CREATE TABLE accounts (id INT, status TEXT, secret TEXT)")
+        .unwrap();
+    rt.execute_query("INSERT INTO accounts (id, status, secret) VALUES (1, 'old', 's1')")
+        .unwrap();
+
+    attach_platform_policy(
+        &store,
+        r#"{
+            "id":"accounts-deny-one-target",
+            "version":1,
+            "statements":[
+                {"effect":"allow","actions":["select","update"],"resources":["table:accounts"]},
+                {"effect":"deny","actions":["update"],"resources":["column:accounts.secret"]}
+            ]
+        }"#,
+    );
+
+    let err = as_user("alice", Role::Write, || {
+        rt.execute_query("UPDATE accounts SET status = 'active', secret = 's2' WHERE id = 1")
+    })
+    .unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("column:accounts.secret"),
+        "unexpected error: {msg}"
+    );
+
+    let selected = rt
+        .execute_query("SELECT status, secret FROM accounts WHERE id = 1")
+        .unwrap();
+    assert_eq!(text_field(&selected, "status"), "old");
+    assert_eq!(text_field(&selected, "secret"), "s1");
+}
+
+#[test]
+fn update_set_column_allow_does_not_bypass_missing_table_allow() {
+    let (rt, store) = runtime_with_auth();
+    rt.execute_query("CREATE TABLE accounts (id INT, status TEXT)")
+        .unwrap();
+    rt.execute_query("INSERT INTO accounts (id, status) VALUES (1, 'old')")
+        .unwrap();
+
+    attach_platform_policy(
+        &store,
+        r#"{
+            "id":"column-only-update-status",
+            "version":1,
+            "statements":[
+                {"effect":"allow","actions":["update"],"resources":["column:accounts.status"]}
+            ]
+        }"#,
+    );
+
+    let err = as_user("alice", Role::Write, || {
+        rt.execute_query("UPDATE accounts SET status = 'active' WHERE id = 1")
+    })
+    .unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("table:accounts") && msg.contains("denied by IAM policy"),
+        "unexpected error: {msg}"
+    );
+
+    let selected = rt
+        .execute_query("SELECT status FROM accounts WHERE id = 1")
+        .unwrap();
+    assert_eq!(text_field(&selected, "status"), "old");
+}
+
+#[test]
+fn update_set_column_policy_uses_tenant_context() {
+    let (rt, store) = runtime_with_auth();
+    rt.execute_query("CREATE TABLE accounts (id INT, status TEXT, secret TEXT)")
+        .unwrap();
+    rt.execute_query("INSERT INTO accounts (id, status, secret) VALUES (1, 'old', 's1')")
+        .unwrap();
+
+    attach_tenant_policy(
+        &store,
+        "acme",
+        r#"{
+            "id":"tenant-accounts-update",
+            "version":1,
+            "statements":[
+                {"effect":"allow","actions":["select","update"],"resources":["table:accounts"],"condition":{"tenant_match":true}},
+                {"effect":"deny","actions":["update"],"resources":["column:accounts.secret"],"condition":{"tenant_match":true}}
+            ]
+        }"#,
+    );
+
+    let updated = as_tenant_user("acme", "alice", Role::Write, || {
+        rt.execute_query("UPDATE accounts SET status = 'active' WHERE id = 1")
+    })
+    .expect("tenant-scoped status update should be allowed");
+    assert_eq!(updated.affected_rows, 1);
+
+    let err = as_tenant_user("acme", "alice", Role::Write, || {
+        rt.execute_query("UPDATE accounts SET secret = 's2' WHERE id = 1")
+    })
+    .unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("column:accounts.secret"),
+        "unexpected error: {msg}"
+    );
+
+    let selected = rt
+        .execute_query("SELECT status, secret FROM accounts WHERE id = 1")
+        .unwrap();
+    assert_eq!(text_field(&selected, "status"), "active");
+    assert_eq!(text_field(&selected, "secret"), "s1");
 }
 
 #[test]

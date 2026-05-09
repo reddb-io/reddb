@@ -96,6 +96,18 @@ impl ColumnAccessRequest {
         }
     }
 
+    pub fn update(
+        table: impl Into<String>,
+        columns: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            action: "update".to_string(),
+            schema: None,
+            table: table.into(),
+            columns: columns.into_iter().map(Into::into).collect(),
+        }
+    }
+
     pub fn with_schema(mut self, schema: impl Into<String>) -> Self {
         self.schema = Some(schema.into());
         self
