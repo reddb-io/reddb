@@ -1714,6 +1714,37 @@ fn test_parse_show_stats_name_desugars_with_collection_filter() {
 }
 
 #[test]
+fn test_parse_events_status_desugars_to_red_subscriptions_select() {
+    let query = parse("EVENTS STATUS").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.subscriptions");
+        assert!(tq.columns.is_empty());
+        assert!(tq.select_items.is_empty());
+        assert!(tq.filter.is_none());
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
+fn test_parse_events_status_name_desugars_with_collection_filter() {
+    let query = parse("EVENTS STATUS users").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.subscriptions");
+        assert!(matches!(
+            tq.filter,
+            Some(Filter::Compare {
+                field: FieldRef::TableColumn { ref column, .. },
+                op: CompareOp::Eq,
+                value: crate::storage::schema::Value::Text(ref value),
+            }) if column == "collection" && value.as_ref() == "users"
+        ));
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
 fn test_parse_show_sample_desugars_to_limited_select() {
     let query = parse("SHOW SAMPLE users").unwrap();
     if let QueryExpr::Table(tq) = query {

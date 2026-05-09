@@ -755,11 +755,15 @@ impl<'a> Parser<'a> {
                     )),
                 }
             }
+            Token::Ident(name) if name.eq_ignore_ascii_case("EVENTS") => self
+                .parse_sql_command()
+                .map(SqlCommand::into_statement)
+                .map(FrontendStatement::Sql),
             other => Err(ParseError::expected(
                 vec![
                     "SELECT", "MATCH", "PATH", "FROM", "VECTOR", "HYBRID", "INSERT", "UPDATE",
                     "DELETE", "TRUNCATE", "CREATE", "DROP", "ALTER", "GRAPH", "SEARCH", "ASK",
-                    "QUEUE", "KV", "HLL", "TREE", "SKETCH", "FILTER", "SET", "SHOW",
+                    "QUEUE", "KV", "HLL", "TREE", "SKETCH", "FILTER", "SET", "SHOW", "EVENTS",
                 ],
                 other,
                 self.position(),
@@ -1554,6 +1558,54 @@ impl<'a> Parser<'a> {
             Token::Ident(name) if name.eq_ignore_ascii_case("REVOKE") => {
                 let stmt = self.parse_revoke_statement()?;
                 Ok(SqlCommand::Revoke(stmt))
+            }
+            Token::Ident(name) if name.eq_ignore_ascii_case("EVENTS") => {
+                self.advance()?;
+                if self.consume_ident_ci("BACKFILL")? {
+                    return Err(ParseError::new(
+                        "EVENTS BACKFILL STATUS is blocked until EVENTS BACKFILL runtime lands (#300)"
+                            .to_string(),
+                        self.position(),
+                    ));
+                }
+                if !self.consume_ident_ci("STATUS")? {
+                    return Err(ParseError::expected(
+                        vec!["STATUS"],
+                        self.peek(),
+                        self.position(),
+                    ));
+                }
+
+                let mut query = TableQuery::new("red.subscriptions");
+                let collection = match self.peek().clone() {
+                    Token::Ident(name) => {
+                        self.advance()?;
+                        Some(name)
+                    }
+                    Token::String(name) => {
+                        self.advance()?;
+                        Some(name)
+                    }
+                    _ => None,
+                };
+                self.parse_table_clauses(&mut query)?;
+                if let Some(collection) = collection {
+                    let filter = Filter::compare(
+                        FieldRef::column("red.subscriptions", "collection"),
+                        CompareOp::Eq,
+                        Value::text(collection),
+                    );
+                    let expr = filter_to_expr(&filter);
+                    query.where_expr = Some(match query.where_expr.take() {
+                        Some(existing) => Expr::binop(BinOp::And, existing, expr),
+                        None => expr,
+                    });
+                    query.filter = Some(match query.filter.take() {
+                        Some(existing) => existing.and(filter),
+                        None => filter,
+                    });
+                }
+                Ok(SqlCommand::Select(query))
             }
             Token::Attach => {
                 let expr = self.parse_attach_policy()?;
