@@ -7,9 +7,10 @@
 
 use super::*;
 use crate::catalog::CollectionModel;
+use crate::runtime::audit_log::{AuditAuthSource, AuditEvent, AuditFieldEscaper, Outcome};
 use crate::runtime::ddl::polymorphic_resolver;
 use crate::storage::query::{analyze_create_table, resolve_declared_data_type, CreateColumnDef};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 impl RedDBRuntime {
     /// Execute CREATE TABLE
@@ -44,7 +45,7 @@ impl RedDBRuntime {
         // Build and validate the contract before mutating storage so invalid
         // SQL types / duplicate columns do not leave partial side effects.
         let contract = collection_contract_from_create_table(query)?;
-        validate_event_subscriptions(&self.inner.db, &query.name, &contract.subscriptions)?;
+        validate_event_subscriptions(self, &query.name, &contract.subscriptions)?;
         // Create the collection.
         store
             .create_collection(&query.name)
@@ -534,7 +535,7 @@ impl RedDBRuntime {
                     let mut subscription = subscription.clone();
                     subscription.source = query.name.clone();
                     validate_event_subscriptions(
-                        &self.inner.db,
+                        self,
                         &query.name,
                         std::slice::from_ref(&subscription),
                     )?;
@@ -552,7 +553,7 @@ impl RedDBRuntime {
                     sub.name = name.clone();
                     sub.source = query.name.clone();
                     validate_event_subscriptions(
-                        &self.inner.db,
+                        self,
                         &query.name,
                         std::slice::from_ref(&sub),
                     )?;
@@ -1360,7 +1361,7 @@ fn apply_alter_operations_to_contract(
 }
 
 fn validate_event_subscriptions(
-    db: &crate::storage::unified::devx::RedDB,
+    runtime: &RedDBRuntime,
     source: &str,
     subscriptions: &[crate::catalog::SubscriptionDescriptor],
 ) -> RedDBResult<()> {
@@ -1370,15 +1371,198 @@ fn validate_event_subscriptions(
                 "cross-tenant subscription requires cluster-admin capability (events:cluster_subscribe)".to_string(),
             ));
         }
+        validate_subscription_auth(runtime, source, subscription)?;
         if subscription.target_queue == source
-            || subscription_would_create_cycle(db, source, &subscription.target_queue)
+            || subscription_would_create_cycle(
+                &runtime.inner.db,
+                source,
+                &subscription.target_queue,
+            )
         {
             return Err(RedDBError::Query(
                 "subscription would create cycle".to_string(),
             ));
         }
+        audit_subscription_redact_gap(runtime, source, subscription);
     }
     Ok(())
+}
+
+fn validate_subscription_auth(
+    runtime: &RedDBRuntime,
+    source: &str,
+    subscription: &crate::catalog::SubscriptionDescriptor,
+) -> RedDBResult<()> {
+    let auth_store = match runtime.inner.auth_store.read().clone() {
+        Some(store) => store,
+        None => return Ok(()),
+    };
+    let (username, role) = match crate::runtime::impl_core::current_auth_identity() {
+        Some(identity) => identity,
+        None => return Ok(()),
+    };
+    let tenant = crate::runtime::impl_core::current_tenant();
+    let principal = crate::auth::UserId::from_parts(tenant.as_deref(), &username);
+
+    if auth_store.iam_authorization_enabled() {
+        let ctx = crate::auth::policies::EvalContext {
+            principal_tenant: tenant.clone(),
+            current_tenant: tenant.clone(),
+            peer_ip: None,
+            mfa_present: false,
+            now_ms: crate::auth::now_ms(),
+            principal_is_admin_role: role == crate::auth::Role::Admin,
+        };
+        let mut source_resource = crate::auth::policies::ResourceRef::new("table", source);
+        if let Some(t) = tenant.as_deref() {
+            source_resource = source_resource.with_tenant(t.to_string());
+        }
+        if !auth_store.check_policy_authz(&principal, "select", &source_resource, &ctx) {
+            return Err(RedDBError::Query(format!(
+                "permission denied: principal=`{}` action=`select` resource=`{}:{}` denied by IAM policy",
+                principal, source_resource.kind, source_resource.name
+            )));
+        }
+
+        let mut target_resource =
+            crate::auth::policies::ResourceRef::new("queue", subscription.target_queue.clone());
+        if let Some(t) = tenant.as_deref() {
+            target_resource = target_resource.with_tenant(t.to_string());
+        }
+        if !auth_store.check_policy_authz(&principal, "write", &target_resource, &ctx) {
+            return Err(RedDBError::Query(format!(
+                "permission denied: principal=`{}` action=`write` resource=`{}:{}` denied by IAM policy",
+                principal, target_resource.kind, target_resource.name
+            )));
+        }
+        return Ok(());
+    }
+
+    let ctx = crate::auth::privileges::AuthzContext {
+        principal: &username,
+        effective_role: role,
+        tenant: tenant.as_deref(),
+    };
+    auth_store
+        .check_grant(
+            &ctx,
+            crate::auth::privileges::Action::Select,
+            &crate::auth::privileges::Resource::table_from_name(source),
+        )
+        .map_err(|err| RedDBError::Query(format!("permission denied: {err}")))?;
+    auth_store
+        .check_grant(
+            &ctx,
+            crate::auth::privileges::Action::Insert,
+            &crate::auth::privileges::Resource::table_from_name(&subscription.target_queue),
+        )
+        .map_err(|err| RedDBError::Query(format!("permission denied: {err}")))?;
+    Ok(())
+}
+
+fn audit_subscription_redact_gap(
+    runtime: &RedDBRuntime,
+    source: &str,
+    subscription: &crate::catalog::SubscriptionDescriptor,
+) {
+    let auth_store = match runtime.inner.auth_store.read().clone() {
+        Some(store) if store.iam_authorization_enabled() => store,
+        _ => return,
+    };
+    let (username, role) = match crate::runtime::impl_core::current_auth_identity() {
+        Some(identity) => identity,
+        None => return,
+    };
+    let tenant = crate::runtime::impl_core::current_tenant();
+    let principal = crate::auth::UserId::from_parts(tenant.as_deref(), &username);
+    let missing = subscription_redact_gap_columns(&auth_store, &principal, source, subscription);
+    if missing.is_empty() {
+        return;
+    }
+
+    let columns = missing.into_iter().collect::<Vec<_>>().join(", ");
+    tracing::warn!(
+        target: "reddb::operator",
+        "subscription_redact_gap: source={} target_queue={} columns=[{}]",
+        source,
+        subscription.target_queue,
+        columns
+    );
+    let mut event = AuditEvent::builder("subscription_redact_gap")
+        .principal(username)
+        .source(AuditAuthSource::System)
+        .resource(format!("subscription:{}->{}", source, subscription.target_queue))
+        .outcome(Outcome::Success)
+        .field(AuditFieldEscaper::field("source", source))
+        .field(AuditFieldEscaper::field(
+            "target_queue",
+            subscription.target_queue.clone(),
+        ))
+        .field(AuditFieldEscaper::field(
+            "subscription",
+            subscription.name.clone(),
+        ))
+        .field(AuditFieldEscaper::field("columns", columns))
+        .field(AuditFieldEscaper::field("role", role.as_str()));
+    if let Some(t) = tenant {
+        event = event.tenant(t);
+    }
+    runtime.inner.audit_log.record_event(event.build());
+}
+
+fn subscription_redact_gap_columns(
+    auth_store: &crate::auth::store::AuthStore,
+    principal: &crate::auth::UserId,
+    source: &str,
+    subscription: &crate::catalog::SubscriptionDescriptor,
+) -> BTreeSet<String> {
+    let redacted: HashSet<String> = subscription
+        .redact_fields
+        .iter()
+        .map(|field| field.to_ascii_lowercase())
+        .collect();
+    auth_store
+        .effective_policies(principal)
+        .iter()
+        .flat_map(|policy| policy.statements.iter())
+        .filter(|statement| statement.effect == crate::auth::policies::Effect::Deny)
+        .filter(|statement| statement.actions.iter().any(action_pattern_matches_select))
+        .flat_map(|statement| statement.resources.iter())
+        .filter_map(|resource| denied_column_for_source(resource, source))
+        .filter(|column| !redact_covers_column(&redacted, source, column))
+        .collect()
+}
+
+fn action_pattern_matches_select(pattern: &crate::auth::policies::ActionPattern) -> bool {
+    match pattern {
+        crate::auth::policies::ActionPattern::Wildcard => true,
+        crate::auth::policies::ActionPattern::Exact(action) => action == "select",
+        crate::auth::policies::ActionPattern::Prefix(prefix) => {
+            "select".len() > prefix.len() + 1
+                && "select".starts_with(prefix)
+                && "select".as_bytes()[prefix.len()] == b':'
+        }
+    }
+}
+
+fn denied_column_for_source(
+    resource: &crate::auth::policies::ResourcePattern,
+    source: &str,
+) -> Option<String> {
+    let crate::auth::policies::ResourcePattern::Exact { kind, name } = resource else {
+        return None;
+    };
+    if kind != "column" {
+        return None;
+    }
+    let column = crate::auth::ColumnRef::parse_resource_name(name).ok()?;
+    (column.table_resource_name() == source).then_some(column.column)
+}
+
+fn redact_covers_column(redacted: &HashSet<String>, source: &str, column: &str) -> bool {
+    let column = column.to_ascii_lowercase();
+    let qualified = format!("{}.{}", source.to_ascii_lowercase(), column);
+    redacted.contains("*") || redacted.contains(&column) || redacted.contains(&qualified)
 }
 
 fn subscription_would_create_cycle(

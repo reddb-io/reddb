@@ -5,6 +5,7 @@
 //! GRANT table.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use reddb::auth::{AuthConfig, AuthStore, Role};
 use reddb::runtime::mvcc::{
@@ -14,7 +15,17 @@ use reddb::runtime::mvcc::{
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn runtime_with_auth() -> (RedDBRuntime, Arc<AuthStore>) {
-    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+    let now_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!(
+        "reddb-iam-policy-runtime-{}-{now_nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("tempdir");
+    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(dir.join("data.rdb")))
+        .expect("runtime");
     let store = Arc::new(AuthStore::new(AuthConfig::default()));
     store.create_user("admin", "p", Role::Admin).unwrap();
     store.create_user("alice", "p", Role::Write).unwrap();
@@ -118,6 +129,11 @@ fn err_string<T: std::fmt::Debug>(result: Result<T, reddb::RedDBError>) -> Strin
     format!("{:?}", result.unwrap_err())
 }
 
+fn audit_body(rt: &RedDBRuntime) -> String {
+    assert!(rt.audit_log().wait_idle(Duration::from_secs(2)));
+    std::fs::read_to_string(rt.audit_log().path()).unwrap_or_default()
+}
+
 #[test]
 fn select_column_policy_allows_safe_projection() {
     let (rt, store) = runtime_with_auth();
@@ -137,6 +153,113 @@ fn select_column_policy_allows_safe_projection() {
     .unwrap();
     assert_eq!(read.result.records.len(), 1);
     assert_eq!(read.result.columns, vec!["id", "name"]);
+}
+
+#[test]
+fn subscription_create_requires_select_on_source() {
+    let (rt, store) = runtime_with_auth();
+    attach_alice_policy(
+        &store,
+        "events-target-only",
+        r#"[
+            {"effect":"allow","actions":["write"],"resources":["queue:audit"]}
+        ]"#,
+    );
+
+    let err = err_string(as_user("alice", Role::Write, || {
+        rt.execute_query("CREATE TABLE users (id INT, email TEXT) WITH EVENTS TO audit")
+    }));
+    assert!(err.contains("action=`select`"), "got {err}");
+    assert!(err.contains("table:users"), "got {err}");
+    assert!(
+        rt.db().collection_contract("users").is_none(),
+        "denied DDL must not create source table"
+    );
+}
+
+#[test]
+fn subscription_alter_requires_write_on_target_queue() {
+    let (rt, store) = runtime_with_auth();
+    rt.execute_query("CREATE TABLE users (id INT, email TEXT)")
+        .unwrap();
+    attach_alice_policy(
+        &store,
+        "events-source-only",
+        r#"[
+            {"effect":"allow","actions":["select"],"resources":["table:users"]}
+        ]"#,
+    );
+
+    let err = err_string(as_user("alice", Role::Write, || {
+        rt.execute_query("ALTER TABLE users ADD SUBSCRIPTION audit_sub TO audit")
+    }));
+    assert!(err.contains("action=`write`"), "got {err}");
+    assert!(err.contains("queue:audit"), "got {err}");
+    assert!(
+        rt.db().collection_contract("audit").is_none(),
+        "denied DDL must not auto-create target queue"
+    );
+}
+
+#[test]
+fn subscription_redact_covers_column_policy_without_warning() {
+    let (rt, store) = runtime_with_auth();
+    rt.execute_query("CREATE TABLE users (id INT, email TEXT)")
+        .unwrap();
+    attach_alice_policy(
+        &store,
+        "events-redact-covered",
+        r#"[
+            {"effect":"allow","actions":["select"],"resources":["table:users"]},
+            {"effect":"allow","actions":["write"],"resources":["queue:audit"]},
+            {"effect":"deny","actions":["select"],"resources":["column:users.email"]}
+        ]"#,
+    );
+
+    as_user("alice", Role::Write, || {
+        rt.execute_query("ALTER TABLE users ADD SUBSCRIPTION audit_sub TO audit REDACT (email)")
+    })
+    .unwrap();
+    let body = audit_body(&rt);
+    assert!(
+        !body.contains("subscription_redact_gap"),
+        "covered REDACT should not emit warning audit: {body}"
+    );
+}
+
+#[test]
+fn subscription_redact_gap_warns_but_allows_ddl() {
+    let (rt, store) = runtime_with_auth();
+    rt.execute_query("CREATE TABLE users (id INT, email TEXT, name TEXT)")
+        .unwrap();
+    attach_alice_policy(
+        &store,
+        "events-redact-gap",
+        r#"[
+            {"effect":"allow","actions":["select"],"resources":["table:users"]},
+            {"effect":"allow","actions":["write"],"resources":["queue:audit"]},
+            {"effect":"deny","actions":["select"],"resources":["column:users.email"]}
+        ]"#,
+    );
+
+    as_user("alice", Role::Write, || {
+        rt.execute_query("ALTER TABLE users ADD SUBSCRIPTION audit_sub TO audit REDACT (name)")
+    })
+    .unwrap();
+    let contract = rt
+        .db()
+        .collection_contract("users")
+        .expect("users contract");
+    assert!(
+        contract.subscriptions.iter().any(|s| s.name == "audit_sub"),
+        "DDL should be allowed despite redact warning"
+    );
+    let body = audit_body(&rt);
+    assert!(
+        body.contains("subscription_redact_gap"),
+        "audit missing: {body}"
+    );
+    assert!(body.contains("email"), "gap column missing: {body}");
 }
 
 #[test]
