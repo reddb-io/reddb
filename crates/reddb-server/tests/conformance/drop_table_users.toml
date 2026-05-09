@@ -1,0 +1,4 @@
+input = "DROP TABLE users"
+expected_kind = "DropTable"
+source = "docs/query/ddl.md:155"
+kind = "positive"

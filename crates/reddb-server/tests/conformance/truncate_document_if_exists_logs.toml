@@ -1,0 +1,4 @@
+input = "TRUNCATE DOCUMENT IF EXISTS logs"
+expected_kind = "Truncate"
+source = "docs/query/ddl.md:169"
+kind = "positive"
