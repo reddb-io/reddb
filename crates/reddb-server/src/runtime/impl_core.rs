@@ -6747,14 +6747,38 @@ impl RedDBRuntime {
             let iam_action = legacy_action_to_iam(action);
             let iam_resource = legacy_resource_to_iam(&resource, tenant.as_deref());
             let iam_ctx = runtime_iam_context(role, tenant.as_deref());
-            if auth_store.check_policy_authz(&principal_id, iam_action, &iam_resource, &iam_ctx) {
-                Ok(())
-            } else {
-                Err(format!(
+            if !auth_store.check_policy_authz(&principal_id, iam_action, &iam_resource, &iam_ctx) {
+                return Err(format!(
                     "principal=`{}` action=`{}` resource=`{}:{}` denied by IAM policy",
                     username, iam_action, iam_resource.kind, iam_resource.name
-                ))
+                ));
             }
+
+            if let QueryExpr::Update(update) = expr {
+                let columns = update_set_target_columns(update);
+                if !columns.is_empty() {
+                    let request = column_access_request_for_table_update(&update.table, columns);
+                    let outcome =
+                        auth_store.check_column_projection_authz(&principal_id, &request, &iam_ctx);
+                    if let Some(denied) = outcome.first_denied_column() {
+                        return Err(format!(
+                            "principal=`{}` action=`{}` resource=`{}:{}` denied by IAM column policy",
+                            username, iam_action, denied.resource.kind, denied.resource.name
+                        ));
+                    }
+                    if !outcome.allowed() {
+                        return Err(format!(
+                            "principal=`{}` action=`{}` resource=`{}:{}` denied by IAM policy",
+                            username,
+                            iam_action,
+                            outcome.table_resource.kind,
+                            outcome.table_resource.name
+                        ));
+                    }
+                }
+            }
+
+            Ok(())
         } else {
             auth_store
                 .check_grant(&ctx, action, &resource)
@@ -7599,6 +7623,29 @@ fn legacy_action_to_iam(action: crate::auth::privileges::Action) -> &'static str
         Action::Execute => "execute",
         Action::Usage => "usage",
         Action::All => "*",
+    }
+}
+
+fn update_set_target_columns(query: &crate::storage::query::ast::UpdateQuery) -> Vec<String> {
+    let mut columns = Vec::new();
+    for (column, _) in &query.assignment_exprs {
+        if !columns.iter().any(|seen| seen == column) {
+            columns.push(column.clone());
+        }
+    }
+    columns
+}
+
+fn column_access_request_for_table_update(
+    table_name: &str,
+    columns: Vec<String>,
+) -> crate::auth::ColumnAccessRequest {
+    match table_name.split_once('.') {
+        Some((schema, table)) => {
+            crate::auth::ColumnAccessRequest::update(table.to_string(), columns)
+                .with_schema(schema.to_string())
+        }
+        None => crate::auth::ColumnAccessRequest::update(table_name.to_string(), columns),
     }
 }
 
