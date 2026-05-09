@@ -1,5 +1,6 @@
 use crate::storage::query::ast::{
-    AlterTableQuery, AlterUserStmt, ApplyMigrationQuery, AskQuery, BinOp, CompareOp, CopyFormat,
+    AlterQueueQuery, AlterTableQuery, AlterUserStmt, ApplyMigrationQuery, AskQuery, BinOp,
+    CompareOp, CopyFormat,
     CopyFromQuery, CreateForeignTableQuery, CreateIndexQuery, CreateMigrationQuery,
     CreatePolicyQuery, CreateQueueQuery, CreateSchemaQuery, CreateSequenceQuery, CreateServerQuery,
     CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery, CreateViewQuery, DeleteQuery,
@@ -60,6 +61,7 @@ pub enum SqlCommand {
     CreateTimeSeries(CreateTimeSeriesQuery),
     DropTimeSeries(DropTimeSeriesQuery),
     CreateQueue(CreateQueueQuery),
+    AlterQueue(AlterQueueQuery),
     DropQueue(DropQueueQuery),
     CreateTree(CreateTreeQuery),
     DropTree(DropTreeQuery),
@@ -168,6 +170,7 @@ pub enum SqlSchemaCommand {
     CreateTimeSeries(CreateTimeSeriesQuery),
     DropTimeSeries(DropTimeSeriesQuery),
     CreateQueue(CreateQueueQuery),
+    AlterQueue(AlterQueueQuery),
     DropQueue(DropQueueQuery),
     CreateTree(CreateTreeQuery),
     DropTree(DropTreeQuery),
@@ -244,6 +247,9 @@ impl SqlStatement {
             }
             SqlStatement::Schema(SqlSchemaCommand::CreateQueue(query)) => {
                 SqlCommand::CreateQueue(query)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::AlterQueue(query)) => {
+                SqlCommand::AlterQueue(query)
             }
             SqlStatement::Schema(SqlSchemaCommand::DropQueue(query)) => {
                 SqlCommand::DropQueue(query)
@@ -375,6 +381,7 @@ impl SqlCommand {
             SqlCommand::CreateTimeSeries(query) => QueryExpr::CreateTimeSeries(query),
             SqlCommand::DropTimeSeries(query) => QueryExpr::DropTimeSeries(query),
             SqlCommand::CreateQueue(query) => QueryExpr::CreateQueue(query),
+            SqlCommand::AlterQueue(query) => QueryExpr::AlterQueue(query),
             SqlCommand::DropQueue(query) => QueryExpr::DropQueue(query),
             SqlCommand::CreateTree(query) => QueryExpr::CreateTree(query),
             SqlCommand::DropTree(query) => QueryExpr::DropTree(query),
@@ -446,6 +453,9 @@ impl SqlCommand {
             }
             SqlCommand::CreateQueue(query) => {
                 SqlStatement::Schema(SqlSchemaCommand::CreateQueue(query))
+            }
+            SqlCommand::AlterQueue(query) => {
+                SqlStatement::Schema(SqlSchemaCommand::AlterQueue(query))
             }
             SqlCommand::DropQueue(query) => {
                 SqlStatement::Schema(SqlSchemaCommand::DropQueue(query))
@@ -1317,7 +1327,7 @@ impl<'a> Parser<'a> {
                 }
             }
             Token::Alter => {
-                // Disambiguate ALTER USER vs ALTER TABLE without
+                // Disambiguate ALTER USER / ALTER QUEUE / ALTER TABLE without
                 // committing to a path until we've seen the target.
                 // We peek the *next* token (without consuming) and
                 // dispatch accordingly.
@@ -1326,6 +1336,16 @@ impl<'a> Parser<'a> {
                     self.advance()?; // consume ALTER
                     let stmt = self.parse_alter_user_statement()?;
                     Ok(SqlCommand::AlterUser(stmt))
+                } else if matches!(next, Token::Queue) {
+                    self.advance()?; // consume ALTER
+                    self.advance()?; // consume QUEUE
+                    match self.parse_alter_queue_body()? {
+                        QueryExpr::AlterQueue(query) => Ok(SqlCommand::AlterQueue(query)),
+                        other => Err(ParseError::new(
+                            format!("internal: ALTER QUEUE produced unexpected kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
                 } else {
                     match self.parse_alter_table_query()? {
                         QueryExpr::AlterTable(query) => Ok(SqlCommand::AlterTable(query)),

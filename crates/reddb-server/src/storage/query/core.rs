@@ -3,6 +3,7 @@ use std::fmt;
 use super::builders::{GraphQueryBuilder, PathQueryBuilder, TableQueryBuilder};
 pub use crate::storage::engine::distance::DistanceMetric;
 pub use crate::storage::engine::vector_metadata::MetadataFilter;
+pub use crate::storage::queue::QueueMode;
 use crate::storage::schema::{SqlTypeName, Value};
 
 /// Root query expression
@@ -51,6 +52,8 @@ pub enum QueryExpr {
     DropTimeSeries(DropTimeSeriesQuery),
     /// CREATE QUEUE name [MAX_SIZE n] [PRIORITY] [WITH TTL duration]
     CreateQueue(CreateQueueQuery),
+    /// ALTER QUEUE name SET MODE [FANOUT|WORK]
+    AlterQueue(AlterQueueQuery),
     /// DROP QUEUE name
     DropQueue(DropQueueQuery),
     /// QUEUE subcommand (PUSH, POP, PEEK, LEN, PURGE, GROUP, READ, ACK, NACK)
@@ -2188,12 +2191,20 @@ pub struct DropTimeSeriesQuery {
 #[derive(Debug, Clone)]
 pub struct CreateQueueQuery {
     pub name: String,
+    pub mode: QueueMode,
     pub priority: bool,
     pub max_size: Option<usize>,
     pub ttl_ms: Option<u64>,
     pub dlq: Option<String>,
     pub max_attempts: u32,
     pub if_not_exists: bool,
+}
+
+/// ALTER QUEUE name SET MODE [FANOUT|WORK]
+#[derive(Debug, Clone)]
+pub struct AlterQueueQuery {
+    pub name: String,
+    pub mode: QueueMode,
 }
 
 /// DROP QUEUE [IF EXISTS] name

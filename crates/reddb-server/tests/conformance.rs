@@ -95,6 +95,7 @@ fn variant_name(q: &QueryExpr) -> &'static str {
         QueryExpr::CreateTimeSeries(_) => "CreateTimeSeries",
         QueryExpr::DropTimeSeries(_) => "DropTimeSeries",
         QueryExpr::CreateQueue(_) => "CreateQueue",
+        QueryExpr::AlterQueue(_) => "AlterQueue",
         QueryExpr::DropQueue(_) => "DropQueue",
         QueryExpr::QueueCommand(_) => "QueueCommand",
         QueryExpr::CreateTree(_) => "CreateTree",

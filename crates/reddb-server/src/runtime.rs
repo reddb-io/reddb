@@ -26,7 +26,7 @@ use crate::storage::engine::{
     StoredNode, StronglyConnectedComponents, WeaklyConnectedComponents, HITS,
 };
 use crate::storage::query::ast::{
-    AlterOperation, AlterTableQuery, CompareOp, CreateIndexQuery, CreateQueueQuery,
+    AlterOperation, AlterQueueQuery, AlterTableQuery, CompareOp, CreateIndexQuery, CreateQueueQuery,
     CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery, DeleteQuery, DropIndexQuery,
     DropQueueQuery, DropTableQuery, DropTimeSeriesQuery, DropTreeQuery, ExplainAlterQuery,
     ExplainFormat, FieldRef, Filter, FusionStrategy, GraphCommand, HybridQuery, IndexMethod,
