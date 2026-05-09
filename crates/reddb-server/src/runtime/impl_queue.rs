@@ -57,6 +57,45 @@ struct QueueMessageView {
 }
 
 impl RedDBRuntime {
+    pub(crate) fn enqueue_event_payload(
+        &self,
+        queue: &str,
+        payload: Value,
+    ) -> RedDBResult<EntityId> {
+        let store = self.inner.db.store();
+        ensure_queue_exists(store.as_ref(), queue)?;
+        let config = load_queue_config(store.as_ref(), queue);
+        let position = next_queue_position(store.as_ref(), queue, QueueSide::Right)?;
+        let mut entity = UnifiedEntity::new(
+            EntityId::new(0),
+            EntityKind::QueueMessage {
+                queue: queue.to_string(),
+                position,
+            },
+            EntityData::QueueMessage(QueueMessageData {
+                payload,
+                priority: None,
+                enqueued_at_ns: now_ns(),
+                attempts: 0,
+                max_attempts: config.max_attempts,
+                acked: false,
+            }),
+        );
+        if let Some(xid) = self.current_xid() {
+            entity.set_xmin(xid);
+        }
+        let id = store
+            .insert_auto(queue, entity)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        if let Some(ttl_ms) = config.ttl_ms {
+            store
+                .set_metadata(queue, id, queue_message_ttl_metadata(ttl_ms))
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        }
+        self.invalidate_result_cache_for_table(queue);
+        Ok(id)
+    }
+
     pub fn execute_create_queue(
         &self,
         raw_query: &str,
