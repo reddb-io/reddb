@@ -29,6 +29,7 @@ pub(super) fn collection_model_name_shared(model: crate::catalog::CollectionMode
         crate::catalog::CollectionModel::Document => "document",
         crate::catalog::CollectionModel::Graph => "graph",
         crate::catalog::CollectionModel::Vector => "vector",
+        crate::catalog::CollectionModel::Kv => "kv",
         crate::catalog::CollectionModel::Mixed => "mixed",
         crate::catalog::CollectionModel::TimeSeries => "timeseries",
         crate::catalog::CollectionModel::Queue => "queue",

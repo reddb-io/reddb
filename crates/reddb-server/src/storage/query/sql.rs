@@ -4,8 +4,9 @@ use crate::storage::query::ast::{
     CopyFromQuery, CreateForeignTableQuery, CreateIndexQuery, CreateMigrationQuery,
     CreatePolicyQuery, CreateQueueQuery, CreateSchemaQuery, CreateSequenceQuery, CreateServerQuery,
     CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery, CreateViewQuery, DeleteQuery,
-    DropForeignTableQuery, DropIndexQuery, DropPolicyQuery, DropQueueQuery, DropSchemaQuery,
-    DropSequenceQuery, DropServerQuery, DropTableQuery, DropTimeSeriesQuery, DropTreeQuery,
+    DropCollectionQuery, DropDocumentQuery, DropForeignTableQuery, DropGraphQuery, DropIndexQuery,
+    DropKvQuery, DropPolicyQuery, DropQueueQuery, DropSchemaQuery, DropSequenceQuery,
+    DropServerQuery, DropTableQuery, DropTimeSeriesQuery, DropTreeQuery, DropVectorQuery,
     DropViewQuery, ExplainAlterQuery, ExplainMigrationQuery, Expr, FieldRef, Filter,
     ForeignColumnDef, GrantStmt, GraphCommand, GraphQuery, HybridQuery, InsertQuery, JoinQuery,
     MaintenanceCommand, PathQuery, PolicyAction, ProbabilisticCommand, QueryExpr, QueueCommand,
@@ -55,6 +56,11 @@ pub enum SqlCommand {
     ExplainAlter(ExplainAlterQuery),
     CreateTable(CreateTableQuery),
     DropTable(DropTableQuery),
+    DropGraph(DropGraphQuery),
+    DropVector(DropVectorQuery),
+    DropDocument(DropDocumentQuery),
+    DropKv(DropKvQuery),
+    DropCollection(DropCollectionQuery),
     AlterTable(AlterTableQuery),
     CreateIndex(CreateIndexQuery),
     DropIndex(DropIndexQuery),
@@ -164,6 +170,11 @@ pub enum SqlSchemaCommand {
     ExplainAlter(ExplainAlterQuery),
     CreateTable(CreateTableQuery),
     DropTable(DropTableQuery),
+    DropGraph(DropGraphQuery),
+    DropVector(DropVectorQuery),
+    DropDocument(DropDocumentQuery),
+    DropKv(DropKvQuery),
+    DropCollection(DropCollectionQuery),
     AlterTable(AlterTableQuery),
     CreateIndex(CreateIndexQuery),
     DropIndex(DropIndexQuery),
@@ -229,6 +240,19 @@ impl SqlStatement {
             }
             SqlStatement::Schema(SqlSchemaCommand::DropTable(query)) => {
                 SqlCommand::DropTable(query)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::DropGraph(query)) => {
+                SqlCommand::DropGraph(query)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::DropVector(query)) => {
+                SqlCommand::DropVector(query)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::DropDocument(query)) => {
+                SqlCommand::DropDocument(query)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::DropKv(query)) => SqlCommand::DropKv(query),
+            SqlStatement::Schema(SqlSchemaCommand::DropCollection(query)) => {
+                SqlCommand::DropCollection(query)
             }
             SqlStatement::Schema(SqlSchemaCommand::AlterTable(query)) => {
                 SqlCommand::AlterTable(query)
@@ -375,6 +399,11 @@ impl SqlCommand {
             SqlCommand::ExplainAlter(query) => QueryExpr::ExplainAlter(query),
             SqlCommand::CreateTable(query) => QueryExpr::CreateTable(query),
             SqlCommand::DropTable(query) => QueryExpr::DropTable(query),
+            SqlCommand::DropGraph(query) => QueryExpr::DropGraph(query),
+            SqlCommand::DropVector(query) => QueryExpr::DropVector(query),
+            SqlCommand::DropDocument(query) => QueryExpr::DropDocument(query),
+            SqlCommand::DropKv(query) => QueryExpr::DropKv(query),
+            SqlCommand::DropCollection(query) => QueryExpr::DropCollection(query),
             SqlCommand::AlterTable(query) => QueryExpr::AlterTable(query),
             SqlCommand::CreateIndex(query) => QueryExpr::CreateIndex(query),
             SqlCommand::DropIndex(query) => QueryExpr::DropIndex(query),
@@ -435,6 +464,19 @@ impl SqlCommand {
             }
             SqlCommand::DropTable(query) => {
                 SqlStatement::Schema(SqlSchemaCommand::DropTable(query))
+            }
+            SqlCommand::DropGraph(query) => {
+                SqlStatement::Schema(SqlSchemaCommand::DropGraph(query))
+            }
+            SqlCommand::DropVector(query) => {
+                SqlStatement::Schema(SqlSchemaCommand::DropVector(query))
+            }
+            SqlCommand::DropDocument(query) => {
+                SqlStatement::Schema(SqlSchemaCommand::DropDocument(query))
+            }
+            SqlCommand::DropKv(query) => SqlStatement::Schema(SqlSchemaCommand::DropKv(query)),
+            SqlCommand::DropCollection(query) => {
+                SqlStatement::Schema(SqlSchemaCommand::DropCollection(query))
             }
             SqlCommand::AlterTable(query) => {
                 SqlStatement::Schema(SqlSchemaCommand::AlterTable(query))
@@ -1134,6 +1176,11 @@ impl<'a> Parser<'a> {
                     Err(ParseError::expected(
                         vec![
                             "TABLE",
+                            "GRAPH",
+                            "VECTOR",
+                            "DOCUMENT",
+                            "KV",
+                            "COLLECTION",
                             "INDEX",
                             "UNIQUE",
                             "TIMESERIES",
@@ -1189,6 +1236,53 @@ impl<'a> Parser<'a> {
                         QueryExpr::DropTable(query) => Ok(SqlCommand::DropTable(query)),
                         other => Err(ParseError::new(
                             format!("internal: DROP TABLE produced unexpected kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                } else if self.check(&Token::Graph) {
+                    self.advance()?;
+                    match self.parse_drop_graph_body()? {
+                        QueryExpr::DropGraph(query) => Ok(SqlCommand::DropGraph(query)),
+                        other => Err(ParseError::new(
+                            format!("internal: DROP GRAPH produced unexpected kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                } else if self.check(&Token::Vector) {
+                    self.advance()?;
+                    match self.parse_drop_vector_body()? {
+                        QueryExpr::DropVector(query) => Ok(SqlCommand::DropVector(query)),
+                        other => Err(ParseError::new(
+                            format!("internal: DROP VECTOR produced unexpected kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                } else if self.check(&Token::Document) {
+                    self.advance()?;
+                    match self.parse_drop_document_body()? {
+                        QueryExpr::DropDocument(query) => Ok(SqlCommand::DropDocument(query)),
+                        other => Err(ParseError::new(
+                            format!("internal: DROP DOCUMENT produced unexpected kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                } else if self.check(&Token::Kv) {
+                    self.advance()?;
+                    match self.parse_drop_kv_body()? {
+                        QueryExpr::DropKv(query) => Ok(SqlCommand::DropKv(query)),
+                        other => Err(ParseError::new(
+                            format!("internal: DROP KV produced unexpected kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                } else if self.check(&Token::Collection) {
+                    self.advance()?;
+                    match self.parse_drop_collection_body()? {
+                        QueryExpr::DropCollection(query) => Ok(SqlCommand::DropCollection(query)),
+                        other => Err(ParseError::new(
+                            format!(
+                                "internal: DROP COLLECTION produced unexpected kind {other:?}"
+                            ),
                             self.position(),
                         )),
                     }

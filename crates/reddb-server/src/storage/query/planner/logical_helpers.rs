@@ -383,6 +383,11 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         | QueryExpr::Delete(_)
         | QueryExpr::CreateTable(_)
         | QueryExpr::DropTable(_)
+            | QueryExpr::DropGraph(_)
+            | QueryExpr::DropVector(_)
+            | QueryExpr::DropDocument(_)
+            | QueryExpr::DropKv(_)
+            | QueryExpr::DropCollection(_)
         | QueryExpr::AlterTable(_)
         | QueryExpr::GraphCommand(_)
         | QueryExpr::SearchCommand(_)
@@ -731,6 +736,11 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::Delete(_) => "delete",
         QueryExpr::CreateTable(_) => "create_table",
         QueryExpr::DropTable(_) => "drop_table",
+        QueryExpr::DropGraph(_) => "drop_graph",
+        QueryExpr::DropVector(_) => "drop_vector",
+        QueryExpr::DropDocument(_) => "drop_document",
+        QueryExpr::DropKv(_) => "drop_kv",
+        QueryExpr::DropCollection(_) => "drop_collection",
         QueryExpr::AlterTable(_) => "alter_table",
         QueryExpr::GraphCommand(_) => "graph_command",
         QueryExpr::SearchCommand(_) => "search_command",

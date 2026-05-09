@@ -143,6 +143,7 @@ fn collection_model_name(model: crate::catalog::CollectionModel) -> &'static str
         crate::catalog::CollectionModel::Document => "document",
         crate::catalog::CollectionModel::Graph => "graph",
         crate::catalog::CollectionModel::Vector => "vector",
+        crate::catalog::CollectionModel::Kv => "kv",
         crate::catalog::CollectionModel::Mixed => "mixed",
         crate::catalog::CollectionModel::TimeSeries => "timeseries",
         crate::catalog::CollectionModel::Queue => "queue",
@@ -2505,6 +2506,9 @@ impl RuntimeEntityPort for RedDBRuntime {
     }
 
     fn create_kv(&self, input: CreateKvInput) -> RedDBResult<CreateEntityOutput> {
+        let db = self.db();
+        let contract = CollectionContractWriteEnforcer::new(&db, &input.collection);
+        contract.ensure_model(crate::catalog::CollectionModel::Kv)?;
         let fields = vec![
             (
                 "key".to_string(),
@@ -2585,7 +2589,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         key: &str,
     ) -> RedDBResult<Option<(crate::storage::schema::Value, crate::storage::EntityId)>> {
         let db = self.db();
-        ensure_collection_model_read(&db, collection, crate::catalog::CollectionModel::Table)?;
+        ensure_collection_model_read(&db, collection, crate::catalog::CollectionModel::Kv)?;
         let store = db.store();
         let Some(manager) = store.get_collection(collection) else {
             return Ok(None);

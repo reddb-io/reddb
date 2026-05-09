@@ -135,7 +135,7 @@ impl<'a> Parser<'a> {
     /// Parse DROP TIMESERIES body (after DROP TIMESERIES consumed)
     pub fn parse_drop_timeseries_body(&mut self) -> Result<QueryExpr, ParseError> {
         let if_exists = self.match_if_exists()?;
-        let name = self.expect_ident()?;
+        let name = self.parse_drop_collection_name()?;
         Ok(QueryExpr::DropTimeSeries(DropTimeSeriesQuery {
             name,
             if_exists,
