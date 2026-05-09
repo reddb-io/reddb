@@ -1,0 +1,4 @@
+input = "CREATE QUEUE tasks WORK"
+expected_kind = "CreateQueue"
+source = "docs/data-models/queues.md:23"
+kind = "positive"

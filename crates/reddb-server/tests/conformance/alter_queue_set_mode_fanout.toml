@@ -1,0 +1,4 @@
+input = "ALTER QUEUE tasks SET MODE FANOUT"
+expected_kind = "AlterQueue"
+source = "docs/data-models/queues.md:29"
+kind = "positive"
