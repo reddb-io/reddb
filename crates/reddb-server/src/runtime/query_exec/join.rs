@@ -269,6 +269,7 @@ pub(crate) fn runtime_join_table_context(
             | QueryExpr::DropDocument(_)
             | QueryExpr::DropKv(_)
             | QueryExpr::DropCollection(_)
+            | QueryExpr::Truncate(_)
         | QueryExpr::AlterTable(_)
         | QueryExpr::GraphCommand(_)
         | QueryExpr::SearchCommand(_)

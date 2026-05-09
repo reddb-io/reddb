@@ -90,6 +90,7 @@ fn variant_name(q: &QueryExpr) -> &'static str {
         QueryExpr::DropDocument(_) => "DropDocument",
         QueryExpr::DropKv(_) => "DropKv",
         QueryExpr::DropCollection(_) => "DropCollection",
+        QueryExpr::Truncate(_) => "Truncate",
         QueryExpr::AlterTable(_) => "AlterTable",
         QueryExpr::GraphCommand(_) => "GraphCommand",
         QueryExpr::SearchCommand(_) => "SearchCommand",

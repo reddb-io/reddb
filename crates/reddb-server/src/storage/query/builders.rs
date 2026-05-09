@@ -257,6 +257,7 @@ impl JoinQueryBuilder {
             | QueryExpr::DropDocument(_)
             | QueryExpr::DropKv(_)
             | QueryExpr::DropCollection(_)
+            | QueryExpr::Truncate(_)
             | QueryExpr::AlterTable(_)
             | QueryExpr::GraphCommand(_)
             | QueryExpr::SearchCommand(_)

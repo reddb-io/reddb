@@ -11,8 +11,9 @@ use crate::storage::query::ast::{
     ForeignColumnDef, GrantStmt, GraphCommand, GraphQuery, HybridQuery, InsertQuery, JoinQuery,
     MaintenanceCommand, PathQuery, PolicyAction, ProbabilisticCommand, QueryExpr, QueueCommand,
     RefreshMaterializedViewQuery, RevokeStmt, RollbackMigrationQuery, SearchCommand, Span,
-    TableQuery, TreeCommand, TxnControl, UpdateQuery, VectorQuery,
+    TableQuery, TreeCommand, TruncateQuery, TxnControl, UpdateQuery, VectorQuery,
 };
+use crate::catalog::CollectionModel;
 use crate::storage::query::parser::{ParseError, Parser, SafeTokenDisplay};
 use crate::storage::query::sql_lowering::filter_to_expr;
 use crate::storage::query::Token;
@@ -61,6 +62,7 @@ pub enum SqlCommand {
     DropDocument(DropDocumentQuery),
     DropKv(DropKvQuery),
     DropCollection(DropCollectionQuery),
+    Truncate(TruncateQuery),
     AlterTable(AlterTableQuery),
     CreateIndex(CreateIndexQuery),
     DropIndex(DropIndexQuery),
@@ -175,6 +177,7 @@ pub enum SqlSchemaCommand {
     DropDocument(DropDocumentQuery),
     DropKv(DropKvQuery),
     DropCollection(DropCollectionQuery),
+    Truncate(TruncateQuery),
     AlterTable(AlterTableQuery),
     CreateIndex(CreateIndexQuery),
     DropIndex(DropIndexQuery),
@@ -254,6 +257,7 @@ impl SqlStatement {
             SqlStatement::Schema(SqlSchemaCommand::DropCollection(query)) => {
                 SqlCommand::DropCollection(query)
             }
+            SqlStatement::Schema(SqlSchemaCommand::Truncate(query)) => SqlCommand::Truncate(query),
             SqlStatement::Schema(SqlSchemaCommand::AlterTable(query)) => {
                 SqlCommand::AlterTable(query)
             }
@@ -404,6 +408,7 @@ impl SqlCommand {
             SqlCommand::DropDocument(query) => QueryExpr::DropDocument(query),
             SqlCommand::DropKv(query) => QueryExpr::DropKv(query),
             SqlCommand::DropCollection(query) => QueryExpr::DropCollection(query),
+            SqlCommand::Truncate(query) => QueryExpr::Truncate(query),
             SqlCommand::AlterTable(query) => QueryExpr::AlterTable(query),
             SqlCommand::CreateIndex(query) => QueryExpr::CreateIndex(query),
             SqlCommand::DropIndex(query) => QueryExpr::DropIndex(query),
@@ -478,6 +483,7 @@ impl SqlCommand {
             SqlCommand::DropCollection(query) => {
                 SqlStatement::Schema(SqlSchemaCommand::DropCollection(query))
             }
+            SqlCommand::Truncate(query) => SqlStatement::Schema(SqlSchemaCommand::Truncate(query)),
             SqlCommand::AlterTable(query) => {
                 SqlStatement::Schema(SqlSchemaCommand::AlterTable(query))
             }
@@ -614,6 +620,7 @@ impl<'a> Parser<'a> {
             | Token::Insert
             | Token::Update
             | Token::Delete
+            | Token::Truncate
             | Token::Explain
             | Token::Create
             | Token::Drop
@@ -742,8 +749,8 @@ impl<'a> Parser<'a> {
             other => Err(ParseError::expected(
                 vec![
                     "SELECT", "MATCH", "PATH", "FROM", "VECTOR", "HYBRID", "INSERT", "UPDATE",
-                    "DELETE", "CREATE", "DROP", "ALTER", "GRAPH", "SEARCH", "ASK", "QUEUE", "HLL",
-                    "TREE", "SKETCH", "FILTER", "SET", "SHOW",
+                    "DELETE", "TRUNCATE", "CREATE", "DROP", "ALTER", "GRAPH", "SEARCH", "ASK",
+                    "QUEUE", "HLL", "TREE", "SKETCH", "FILTER", "SET", "SHOW",
                 ],
                 other,
                 self.position(),
@@ -816,6 +823,48 @@ impl<'a> Parser<'a> {
                             self.position(),
                         )),
                     }
+                }
+            }
+            Token::Truncate => {
+                self.advance()?;
+                let model = if self.consume(&Token::Table)? {
+                    Some(CollectionModel::Table)
+                } else if self.consume(&Token::Graph)? {
+                    Some(CollectionModel::Graph)
+                } else if self.consume(&Token::Vector)? {
+                    Some(CollectionModel::Vector)
+                } else if self.consume(&Token::Document)? {
+                    Some(CollectionModel::Document)
+                } else if self.consume(&Token::Timeseries)? {
+                    Some(CollectionModel::TimeSeries)
+                } else if self.consume(&Token::Kv)? {
+                    Some(CollectionModel::Kv)
+                } else if self.consume(&Token::Queue)? {
+                    Some(CollectionModel::Queue)
+                } else if self.consume(&Token::Collection)? {
+                    None
+                } else {
+                    return Err(ParseError::expected(
+                        vec![
+                            "TABLE",
+                            "GRAPH",
+                            "VECTOR",
+                            "DOCUMENT",
+                            "TIMESERIES",
+                            "KV",
+                            "QUEUE",
+                            "COLLECTION",
+                        ],
+                        self.peek(),
+                        self.position(),
+                    ));
+                };
+                match self.parse_truncate_body(model)? {
+                    QueryExpr::Truncate(query) => Ok(SqlCommand::Truncate(query)),
+                    other => Err(ParseError::new(
+                        format!("internal: TRUNCATE produced unexpected kind {other:?}"),
+                        self.position(),
+                    )),
                 }
             }
             Token::Explain => {

@@ -786,6 +786,7 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
         QueryExpr::DropDocument(query) => cache_scope_insert(scopes, &query.name),
         QueryExpr::DropKv(query) => cache_scope_insert(scopes, &query.name),
         QueryExpr::DropCollection(query) => cache_scope_insert(scopes, &query.name),
+        QueryExpr::Truncate(query) => cache_scope_insert(scopes, &query.name),
         QueryExpr::AlterTable(query) => cache_scope_insert(scopes, &query.name),
         QueryExpr::CreateIndex(query) => cache_scope_insert(scopes, &query.table),
         QueryExpr::DropIndex(query) => cache_scope_insert(scopes, &query.table),
@@ -1457,6 +1458,7 @@ pub(super) fn intent_lock_modes_for(
         | QueryExpr::DropDocument(_)
         | QueryExpr::DropKv(_)
         | QueryExpr::DropCollection(_)
+        | QueryExpr::Truncate(_)
         | QueryExpr::AlterTable(_)
         | QueryExpr::CreateIndex(_)
         | QueryExpr::DropIndex(_)
@@ -1524,6 +1526,7 @@ fn walk_collections(expr: &QueryExpr, out: &mut Vec<String>) {
         QueryExpr::DropDocument(q) => out.push(q.name.clone()),
         QueryExpr::DropKv(q) => out.push(q.name.clone()),
         QueryExpr::DropCollection(q) => out.push(q.name.clone()),
+        QueryExpr::Truncate(q) => out.push(q.name.clone()),
         QueryExpr::AlterTable(q) => out.push(q.name.clone()),
         QueryExpr::CreateIndex(q) => out.push(q.table.clone()),
         QueryExpr::DropIndex(q) => out.push(q.table.clone()),
@@ -4306,6 +4309,7 @@ impl RedDBRuntime {
             QueryExpr::DropCollection(ref drop_collection) => {
                 self.execute_drop_collection(query, drop_collection)
             }
+            QueryExpr::Truncate(ref truncate) => self.execute_truncate(query, truncate),
             QueryExpr::AlterTable(ref alter) => self.execute_alter_table(query, alter),
             QueryExpr::ExplainAlter(ref explain) => self.execute_explain_alter(query, explain),
             // Graph analytics commands
@@ -6996,6 +7000,7 @@ impl RedDBRuntime {
             | QueryExpr::DropDocument(_)
             | QueryExpr::DropKv(_)
             | QueryExpr::DropCollection(_)
+            | QueryExpr::Truncate(_)
             | QueryExpr::AlterTable(_)
             | QueryExpr::CreateIndex(_)
             | QueryExpr::DropIndex(_)
