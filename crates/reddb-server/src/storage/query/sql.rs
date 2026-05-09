@@ -715,6 +715,15 @@ impl<'a> Parser<'a> {
                     self.position(),
                 )),
             },
+            Token::Ident(name) if name.eq_ignore_ascii_case("VAULT") => {
+                match self.parse_vault_command()? {
+                    QueryExpr::KvCommand(command) => Ok(FrontendStatement::KvCommand(command)),
+                    other => Err(ParseError::new(
+                        format!("internal: VAULT produced unexpected query kind {other:?}"),
+                        self.position(),
+                    )),
+                }
+            }
             Token::Tree => match self.parse_tree_command()? {
                 QueryExpr::TreeCommand(command) => Ok(FrontendStatement::TreeCommand(command)),
                 other => Err(ParseError::new(

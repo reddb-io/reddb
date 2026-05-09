@@ -1848,6 +1848,21 @@ fn test_parse_create_keyed_models() {
 }
 
 #[test]
+fn test_parse_create_vault_with_own_master_key() {
+    match parse("CREATE VAULT secrets WITH OWN MASTER KEY").unwrap() {
+        QueryExpr::CreateTable(query) => {
+            assert_eq!(query.name, "secrets");
+            assert_eq!(
+                query.collection_model,
+                crate::catalog::CollectionModel::Vault
+            );
+            assert!(query.vault_own_master_key);
+        }
+        other => panic!("unexpected parse result: {other:?}"),
+    }
+}
+
+#[test]
 fn test_parse_create_table_full() {
     let query = parse(
         "CREATE TABLE IF NOT EXISTS users (\
@@ -5154,6 +5169,7 @@ fn test_parse_kv_put_bare_key() {
         value,
         ttl_ms,
         if_not_exists,
+        ..
     }) = q
     {
         assert_eq!(collection, "kv_default");
@@ -5224,7 +5240,10 @@ fn test_parse_kv_put_if_not_exists() {
 #[test]
 fn test_parse_kv_get_bare_key() {
     let q = parse("KV GET name").unwrap();
-    if let QueryExpr::KvCommand(KvCommand::Get { collection, key }) = q {
+    if let QueryExpr::KvCommand(KvCommand::Get {
+        collection, key, ..
+    }) = q
+    {
         assert_eq!(collection, "kv_default");
         assert_eq!(key, "name");
     } else {
@@ -5235,7 +5254,10 @@ fn test_parse_kv_get_bare_key() {
 #[test]
 fn test_parse_kv_get_dotted_key() {
     let q = parse("KV GET sessions.abc123").unwrap();
-    if let QueryExpr::KvCommand(KvCommand::Get { collection, key }) = q {
+    if let QueryExpr::KvCommand(KvCommand::Get {
+        collection, key, ..
+    }) = q
+    {
         assert_eq!(collection, "sessions");
         assert_eq!(key, "abc123");
     } else {
@@ -5246,7 +5268,10 @@ fn test_parse_kv_get_dotted_key() {
 #[test]
 fn test_parse_kv_delete_bare_key() {
     let q = parse("KV DELETE name").unwrap();
-    if let QueryExpr::KvCommand(KvCommand::Delete { collection, key }) = q {
+    if let QueryExpr::KvCommand(KvCommand::Delete {
+        collection, key, ..
+    }) = q
+    {
         assert_eq!(collection, "kv_default");
         assert_eq!(key, "name");
     } else {
@@ -5257,7 +5282,10 @@ fn test_parse_kv_delete_bare_key() {
 #[test]
 fn test_parse_kv_delete_dotted_key() {
     let q = parse("KV DELETE sessions.abc123").unwrap();
-    if let QueryExpr::KvCommand(KvCommand::Delete { collection, key }) = q {
+    if let QueryExpr::KvCommand(KvCommand::Delete {
+        collection, key, ..
+    }) = q
+    {
         assert_eq!(collection, "sessions");
         assert_eq!(key, "abc123");
     } else {
@@ -5292,6 +5320,7 @@ fn test_parse_kv_incr_bare_key_default_by() {
         key,
         by,
         ttl_ms,
+        ..
     }) = q
     {
         assert_eq!(collection, "kv_default");
@@ -5351,5 +5380,23 @@ fn test_parse_kv_decr_with_by() {
         assert_eq!(by, -3);
     } else {
         panic!("expected KvCommand::Incr with by=-3");
+    }
+}
+
+#[test]
+fn test_parse_vault_put_uses_vault_model() {
+    let q = parse("VAULT PUT secrets.api_key = 'sk-test'").unwrap();
+    if let QueryExpr::KvCommand(KvCommand::Put {
+        model,
+        collection,
+        key,
+        ..
+    }) = q
+    {
+        assert_eq!(model, crate::catalog::CollectionModel::Vault);
+        assert_eq!(collection, "secrets");
+        assert_eq!(key, "api_key");
+    } else {
+        panic!("expected Vault KvCommand::Put");
     }
 }

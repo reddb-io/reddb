@@ -2518,22 +2518,38 @@ impl RuntimeEntityPort for RedDBRuntime {
     fn create_kv(&self, input: CreateKvInput) -> RedDBResult<CreateEntityOutput> {
         let db = self.db();
         let contract = CollectionContractWriteEnforcer::new(&db, &input.collection);
-        contract.ensure_model(crate::catalog::CollectionModel::Kv)?;
+        let declared_model = db
+            .collection_contract(&input.collection)
+            .map(|contract| contract.declared_model);
+        let value = if declared_model == Some(crate::catalog::CollectionModel::Vault) {
+            contract.ensure_model(crate::catalog::CollectionModel::Vault)?;
+            self.seal_vault_value(&input.collection, input.value)?
+        } else {
+            contract.ensure_model(crate::catalog::CollectionModel::Kv)?;
+            input.value
+        };
         let fields = vec![
             (
                 "key".to_string(),
                 crate::storage::schema::Value::text(input.key),
             ),
-            ("value".to_string(), input.value),
+            ("value".to_string(), value),
         ];
-        let row_input = CreateRowInput {
-            collection: input.collection,
-            fields,
-            metadata: input.metadata,
-            node_links: Vec::new(),
-            vector_links: Vec::new(),
-        };
-        self.create_row(row_input)
+        let collection = input.collection;
+        let result = self.mutation_engine().apply(
+            collection.clone(),
+            vec![crate::runtime::mutation::MutationRow {
+                fields,
+                metadata: input.metadata,
+                node_links: Vec::new(),
+                vector_links: Vec::new(),
+            }],
+        )?;
+        let id = result.ids[0];
+        Ok(CreateEntityOutput {
+            id,
+            entity: db.store().get(&collection, id),
+        })
     }
 
     fn create_timeseries_point(

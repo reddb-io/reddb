@@ -12,6 +12,10 @@ use crate::runtime::ddl::polymorphic_resolver;
 use crate::storage::query::{analyze_create_table, resolve_declared_data_type, CreateColumnDef};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+fn vault_master_key_ref(collection: &str) -> String {
+    format!("red.vault.{collection}.master_key")
+}
+
 impl RedDBRuntime {
     /// Execute CREATE TABLE
     ///
@@ -177,6 +181,22 @@ impl RedDBRuntime {
         store
             .create_collection(&query.name)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        if query.collection_model == CollectionModel::Vault {
+            self.provision_vault_key_material(&query.name, query.vault_own_master_key)?;
+            let key_scope = if query.vault_own_master_key {
+                "own"
+            } else {
+                "cluster"
+            };
+            store.set_config_tree(
+                &format!("red.vault.{}.key_scope", query.name),
+                &crate::serde_json::Value::String(key_scope.to_string()),
+            );
+            store.set_config_tree(
+                &format!("red.vault.{}.status", query.name),
+                &crate::serde_json::Value::String("sealed".to_string()),
+            );
+        }
         self.inner
             .db
             .save_collection_contract(keyed_collection_contract(
@@ -201,6 +221,37 @@ impl RedDBRuntime {
             &format!("{label} '{}' created", query.name),
             "create",
         ))
+    }
+
+    fn provision_vault_key_material(
+        &self,
+        collection: &str,
+        own_master_key: bool,
+    ) -> RedDBResult<()> {
+        let auth_store = self.inner.auth_store.read().clone().ok_or_else(|| {
+            RedDBError::Query("CREATE VAULT requires an enabled, unsealed vault".to_string())
+        })?;
+        if !auth_store.is_vault_backed() {
+            return Err(RedDBError::Query(
+                "CREATE VAULT requires an enabled, unsealed vault".to_string(),
+            ));
+        }
+
+        if auth_store.vault_secret_key().is_none() {
+            let key = crate::auth::store::random_bytes(32);
+            auth_store
+                .vault_kv_try_set("red.secret.aes_key".to_string(), hex::encode(key))
+                .map_err(|err| RedDBError::Query(err.to_string()))?;
+        }
+
+        if own_master_key {
+            let key = crate::auth::store::random_bytes(32);
+            auth_store
+                .vault_kv_try_set(vault_master_key_ref(collection), hex::encode(key))
+                .map_err(|err| RedDBError::Query(err.to_string()))?;
+        }
+
+        Ok(())
     }
 
     /// Execute DROP TABLE
@@ -628,11 +679,7 @@ impl RedDBRuntime {
                     let mut sub = descriptor.clone();
                     sub.name = name.clone();
                     sub.source = query.name.clone();
-                    validate_event_subscriptions(
-                        self,
-                        &query.name,
-                        std::slice::from_ref(&sub),
-                    )?;
+                    validate_event_subscriptions(self, &query.name, std::slice::from_ref(&sub))?;
                     ensure_event_target_queue(self, &sub.target_queue)?;
                     messages.push(format!(
                         "subscription '{}' added on '{}' to '{}'",
@@ -1597,7 +1644,10 @@ fn audit_subscription_redact_gap(
     let mut event = AuditEvent::builder("subscription_redact_gap")
         .principal(username)
         .source(AuditAuthSource::System)
-        .resource(format!("subscription:{}->{}", source, subscription.target_queue))
+        .resource(format!(
+            "subscription:{}->{}",
+            source, subscription.target_queue
+        ))
         .outcome(Outcome::Success)
         .field(AuditFieldEscaper::field("source", source))
         .field(AuditFieldEscaper::field(

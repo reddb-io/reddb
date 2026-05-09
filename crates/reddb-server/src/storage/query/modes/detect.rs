@@ -94,6 +94,7 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("graph ")
         || lower.starts_with("queue ")
         || lower.starts_with("tree ")
+        || lower.starts_with("vault ")
         || lower.starts_with("search ")
         || lower.starts_with("ask ")
         || lower.starts_with("set config ")
@@ -255,6 +256,7 @@ mod tests {
         );
         assert_eq!(detect_mode("SHOW SECRET red.secret"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW SECRETS"), QueryMode::Sql);
+        assert_eq!(detect_mode("VAULT PUT secrets.api = 'x'"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW SAMPLE users"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW TABLES"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW QUEUES"), QueryMode::Sql);

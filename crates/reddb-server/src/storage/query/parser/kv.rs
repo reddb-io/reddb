@@ -20,6 +20,7 @@ use super::super::ast::{KvCommand, QueryExpr};
 use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
+use crate::catalog::CollectionModel;
 
 /// Default collection used when a bare (non-dotted) key is specified.
 pub const KV_DEFAULT_COLLECTION: &str = "kv_default";
@@ -28,38 +29,68 @@ impl<'a> Parser<'a> {
     /// Parse `KV <verb> …` (called after the leading `KV` token is consumed).
     pub fn parse_kv_command(&mut self) -> Result<QueryExpr, ParseError> {
         self.expect(Token::Kv)?;
+        self.parse_keyed_command_body(CollectionModel::Kv)
+    }
 
+    /// Parse `VAULT <verb> …` (called before consuming the leading identifier).
+    pub fn parse_vault_command(&mut self) -> Result<QueryExpr, ParseError> {
+        if !self.consume_ident_ci("VAULT")? {
+            return Err(ParseError::expected(
+                vec!["VAULT"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        self.parse_keyed_command_body(CollectionModel::Vault)
+    }
+
+    fn parse_keyed_command_body(
+        &mut self,
+        model: CollectionModel,
+    ) -> Result<QueryExpr, ParseError> {
         match self.peek().clone() {
             Token::Ident(ref name) if name.eq_ignore_ascii_case("PUT") => {
                 self.advance()?;
-                self.parse_kv_put()
+                self.parse_kv_put(model)
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("GET") => {
                 self.advance()?;
                 let (collection, key) = self.parse_kv_key()?;
-                Ok(QueryExpr::KvCommand(KvCommand::Get { collection, key }))
+                Ok(QueryExpr::KvCommand(KvCommand::Get {
+                    model,
+                    collection,
+                    key,
+                }))
             }
             Token::Delete => {
                 self.advance()?;
                 let (collection, key) = self.parse_kv_key()?;
-                Ok(QueryExpr::KvCommand(KvCommand::Delete { collection, key }))
+                Ok(QueryExpr::KvCommand(KvCommand::Delete {
+                    model,
+                    collection,
+                    key,
+                }))
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("DELETE") => {
                 self.advance()?;
                 let (collection, key) = self.parse_kv_key()?;
-                Ok(QueryExpr::KvCommand(KvCommand::Delete { collection, key }))
+                Ok(QueryExpr::KvCommand(KvCommand::Delete {
+                    model,
+                    collection,
+                    key,
+                }))
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("INCR") => {
                 self.advance()?;
-                self.parse_kv_incr(1)
+                self.parse_kv_incr(model, 1)
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("DECR") => {
                 self.advance()?;
-                self.parse_kv_incr(-1)
+                self.parse_kv_incr(model, -1)
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("CAS") => {
                 self.advance()?;
-                self.parse_kv_cas()
+                self.parse_kv_cas(model)
             }
             _ => Err(ParseError::expected(
                 vec!["PUT", "GET", "DELETE", "INCR", "DECR", "CAS"],
@@ -69,12 +100,16 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_kv_put(&mut self) -> Result<QueryExpr, ParseError> {
+    fn parse_kv_put(&mut self, model: CollectionModel) -> Result<QueryExpr, ParseError> {
         let (collection, key) = self.parse_kv_key()?;
 
         // Expect `=`
         if !self.consume(&Token::Eq)? {
-            return Err(ParseError::expected(vec!["="], self.peek(), self.position()));
+            return Err(ParseError::expected(
+                vec!["="],
+                self.peek(),
+                self.position(),
+            ));
         }
 
         let value = self.parse_value()?;
@@ -110,6 +145,7 @@ impl<'a> Parser<'a> {
         }
 
         Ok(QueryExpr::KvCommand(KvCommand::Put {
+            model,
             collection,
             key,
             value,
@@ -131,7 +167,11 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse `INCR/DECR key [BY n] [EXPIRE dur]`. `sign` is +1 or -1.
-    fn parse_kv_incr(&mut self, sign: i64) -> Result<QueryExpr, ParseError> {
+    fn parse_kv_incr(
+        &mut self,
+        model: CollectionModel,
+        sign: i64,
+    ) -> Result<QueryExpr, ParseError> {
         let (collection, key) = self.parse_kv_key()?;
         let mut by: i64 = sign;
         let mut ttl_ms: Option<u64> = None;
@@ -150,6 +190,7 @@ impl<'a> Parser<'a> {
         }
 
         Ok(QueryExpr::KvCommand(KvCommand::Incr {
+            model,
             collection,
             key,
             by,
@@ -158,12 +199,16 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse `KV CAS key EXPECT <val|NULL> SET <val> [EXPIRE dur]`.
-    fn parse_kv_cas(&mut self) -> Result<QueryExpr, ParseError> {
+    fn parse_kv_cas(&mut self, model: CollectionModel) -> Result<QueryExpr, ParseError> {
         let (collection, key) = self.parse_kv_key()?;
 
         // EXPECT <value | NULL>
         if !self.consume_ident_ci("EXPECT")? {
-            return Err(ParseError::expected(vec!["EXPECT"], self.peek(), self.position()));
+            return Err(ParseError::expected(
+                vec!["EXPECT"],
+                self.peek(),
+                self.position(),
+            ));
         }
         let expected = if matches!(self.peek(), Token::Null) {
             self.advance()?;
@@ -174,7 +219,11 @@ impl<'a> Parser<'a> {
 
         // SET <value>
         if !self.consume(&Token::Set)? && !self.consume_ident_ci("SET")? {
-            return Err(ParseError::expected(vec!["SET"], self.peek(), self.position()));
+            return Err(ParseError::expected(
+                vec!["SET"],
+                self.peek(),
+                self.position(),
+            ));
         }
         let new_value = self.parse_value()?;
 
@@ -187,6 +236,7 @@ impl<'a> Parser<'a> {
         }
 
         Ok(QueryExpr::KvCommand(KvCommand::Cas {
+            model,
             collection,
             key,
             expected,
