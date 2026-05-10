@@ -508,7 +508,7 @@ impl RedDBServer {
 
     pub(crate) fn handle_delete_kv(&self, collection: &str, key: &str) -> HttpResponse {
         let ops = crate::runtime::impl_kv::KvAtomicOps::new(&self.runtime);
-        match ops.delete(collection, key) {
+        match ops.delete(crate::catalog::CollectionModel::Kv, collection, key) {
             Ok(true) => {
                 let mut object = Map::new();
                 object.insert("ok".to_string(), JsonValue::Bool(true));

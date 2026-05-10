@@ -903,7 +903,6 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
                 | KvCommand::Get { collection, .. }
                 | KvCommand::Unseal { collection, .. }
                 | KvCommand::Watch { collection, .. }
-                | KvCommand::Unseal { collection, .. }
                 | KvCommand::Delete { collection, .. }
                 | KvCommand::Incr { collection, .. }
                 | KvCommand::Cas { collection, .. } => cache_scope_insert(scopes, collection),
