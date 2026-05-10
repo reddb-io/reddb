@@ -21,6 +21,7 @@ pub(super) struct Entry {
     pub(super) priority: u8,
     pub(super) version: Option<u64>,
     pub(super) namespace_generation: u64,
+    pub(super) slot_index: usize,
     /// Wall-clock time of the most recent access (`put` or successful
     /// `get`). Updated on hits to drive [`ExtendedTtlPolicy::idle_ttl_ms`].
     /// L1-only — never propagated to the L2 record (cache is the source of
@@ -56,6 +57,7 @@ impl Entry {
             priority: policy.priority_value(),
             version: policy.version_value(),
             namespace_generation,
+            slot_index: 0,
             last_access_unix_ms: now_ms,
             extended: policy.extended_value(),
         }
