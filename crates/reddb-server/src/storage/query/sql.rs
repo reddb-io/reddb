@@ -747,6 +747,16 @@ impl<'a> Parser<'a> {
                     key,
                 }))
             }
+            Token::Ident(name) if name.eq_ignore_ascii_case("INVALIDATE") => {
+                self.advance()?;
+                match self.parse_kv_invalidate_tags_after_invalidate()? {
+                    QueryExpr::KvCommand(command) => Ok(FrontendStatement::KvCommand(command)),
+                    other => Err(ParseError::new(
+                        format!("internal: INVALIDATE produced unexpected query kind {other:?}"),
+                        self.position(),
+                    )),
+                }
+            }
             Token::Attach | Token::Detach => self.parse_sql_statement().map(FrontendStatement::Sql),
             Token::Match => match self.parse_match_query()? {
                 QueryExpr::Graph(query) => Ok(FrontendStatement::Graph(query)),

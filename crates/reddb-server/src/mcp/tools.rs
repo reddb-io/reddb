@@ -139,6 +139,21 @@ fn number_array_field(description: &str) -> JsonValue {
     JsonValue::Object(f)
 }
 
+/// Array-of-strings field descriptor.
+fn string_array_field(description: &str) -> JsonValue {
+    let mut items = Map::new();
+    items.insert("type".to_string(), JsonValue::String("string".to_string()));
+
+    let mut f = Map::new();
+    f.insert("type".to_string(), JsonValue::String("array".to_string()));
+    f.insert("items".to_string(), JsonValue::Object(items));
+    f.insert(
+        "description".to_string(),
+        JsonValue::String(description.to_string()),
+    );
+    JsonValue::Object(f)
+}
+
 /// Return all tool definitions exposed by the RedDB MCP server.
 pub fn all_tools() -> Vec<ToolDef> {
     vec![
@@ -245,9 +260,21 @@ pub fn all_tools() -> Vec<ToolDef> {
                         f.insert("description".to_string(), JsonValue::String("Value to store (string, number, boolean, or null)".to_string()));
                         JsonValue::Object(f)
                     }),
+                    ("tags", string_array_field("Optional KV invalidation tags")),
                     ("metadata", object_field("Optional metadata key/value pairs")),
                 ],
                 vec!["collection", "key", "value"],
+            ),
+        },
+        ToolDef {
+            name: "reddb_kv_invalidate_tags",
+            description: "Delete every KV entry in a collection tagged with any listed tag.",
+            input_schema: schema_with_nested(
+                vec![
+                    ("collection", string_field("Collection name")),
+                    ("tags", string_array_field("Tags to invalidate")),
+                ],
+                vec!["collection", "tags"],
             ),
         },
         ToolDef {

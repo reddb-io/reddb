@@ -4,11 +4,11 @@
 //! Model Context Protocol JSON-RPC transport over stdio.
 
 use crate::application::{
-    CatalogUseCases, CreateDocumentInput, CreateEdgeInput, CreateKvInput, CreateNodeInput,
-    CreateRowInput, CreateVectorInput, DeleteEntityInput, EntityUseCases, ExecuteQueryInput,
-    GraphCentralityInput, GraphClusteringInput, GraphCommunitiesInput, GraphComponentsInput,
-    GraphCyclesInput, GraphShortestPathInput, GraphTraversalInput, GraphUseCases, QueryUseCases,
-    ScanCollectionInput, SearchSimilarInput, SearchTextInput,
+    CatalogUseCases, CreateDocumentInput, CreateEdgeInput, CreateNodeInput, CreateRowInput,
+    CreateVectorInput, DeleteEntityInput, EntityUseCases, ExecuteQueryInput, GraphCentralityInput,
+    GraphClusteringInput, GraphCommunitiesInput, GraphComponentsInput, GraphCyclesInput,
+    GraphShortestPathInput, GraphTraversalInput, GraphUseCases, QueryUseCases, ScanCollectionInput,
+    SearchSimilarInput, SearchTextInput,
 };
 use crate::auth::store::AuthStore;
 use crate::auth::{AuthConfig, Role};
@@ -213,6 +213,7 @@ impl McpServer {
             "reddb_insert_document" => self.tool_insert_document(args),
             "reddb_kv_get" => self.tool_kv_get(args),
             "reddb_kv_set" => self.tool_kv_set(args),
+            "reddb_kv_invalidate_tags" => self.tool_kv_invalidate_tags(args),
             "reddb_delete" => self.tool_delete(args),
             "reddb_search_vector" => self.tool_search_vector(args),
             "reddb_search_text" => self.tool_search_text(args),
@@ -537,18 +538,44 @@ impl McpServer {
 
         let metadata = parse_metadata_arg(args)?;
 
-        let uc = EntityUseCases::new(&self.runtime);
-        let output = uc
-            .create_kv(CreateKvInput {
-                collection: collection.to_string(),
-                key: key.to_string(),
-                value: sv,
-                metadata,
-            })
+        let tags = parse_string_array_arg(args, "tags")?;
+        let ops = crate::runtime::impl_kv::KvAtomicOps::new(&self.runtime);
+        let (_, id) = ops
+            .set_with_tags_and_metadata(collection, key, sv, None, &tags, false, metadata)
             .map_err(|e| format!("{}", e))?;
 
-        let json = created_entity_output_json(&output);
-        json_to_string(&json).map_err(|e| format!("serialization error: {}", e))
+        let mut obj = Map::new();
+        obj.insert("ok".to_string(), JsonValue::Bool(true));
+        obj.insert("entity_id".to_string(), JsonValue::Number(id.raw() as f64));
+        obj.insert(
+            "tags".to_string(),
+            JsonValue::Array(tags.into_iter().map(JsonValue::String).collect()),
+        );
+        json_to_string(&JsonValue::Object(obj)).map_err(|e| format!("serialization error: {}", e))
+    }
+
+    fn tool_kv_invalidate_tags(&self, args: &JsonValue) -> Result<String, String> {
+        let collection = args
+            .get("collection")
+            .and_then(|v| v.as_str())
+            .ok_or("missing required field 'collection'")?;
+        let tags = parse_string_array_arg(args, "tags")?;
+        if tags.is_empty() {
+            return Err("missing required field 'tags'".to_string());
+        }
+        let ops = crate::runtime::impl_kv::KvAtomicOps::new(&self.runtime);
+        let count = ops
+            .invalidate_tags(collection, &tags)
+            .map_err(|e| format!("{}", e))?;
+
+        let mut obj = Map::new();
+        obj.insert("ok".to_string(), JsonValue::Bool(true));
+        obj.insert("invalidated".to_string(), JsonValue::Number(count as f64));
+        obj.insert(
+            "tags".to_string(),
+            JsonValue::Array(tags.into_iter().map(JsonValue::String).collect()),
+        );
+        json_to_string(&JsonValue::Object(obj)).map_err(|e| format!("serialization error: {}", e))
     }
 
     fn tool_delete(&self, args: &JsonValue) -> Result<String, String> {
@@ -1085,6 +1112,22 @@ fn parse_metadata_arg(
             Ok(out)
         }
         None => Ok(vec![]),
+    }
+}
+
+fn parse_string_array_arg(args: &JsonValue, field: &str) -> Result<Vec<String>, String> {
+    match args.get(field) {
+        None | Some(JsonValue::Null) => Ok(Vec::new()),
+        Some(JsonValue::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| format!("field '{field}' must be an array of strings"))
+            })
+            .collect(),
+        _ => Err(format!("field '{field}' must be an array of strings")),
     }
 }
 

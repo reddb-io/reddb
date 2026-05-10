@@ -245,6 +245,44 @@ pub struct KvClient<'a> {
 }
 
 impl<'a> KvClient<'a> {
+    pub async fn put(&self, key: &str, value: JsonValue, tags: &[&str]) -> Result<QueryResult> {
+        let tag_clause = if tags.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " TAGS [{}]",
+                tags.iter()
+                    .map(|tag| kv_tag_literal(tag))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        self.db
+            .query(&format!(
+                "KV PUT {}.{} = {}{}",
+                kv_identifier(self.collection),
+                kv_identifier(key),
+                kv_value_literal(&value),
+                tag_clause
+            ))
+            .await
+    }
+
+    pub async fn invalidate_tags(&self, tags: &[&str]) -> Result<u64> {
+        let result = self
+            .db
+            .query(&format!(
+                "INVALIDATE TAGS [{}] FROM {}",
+                tags.iter()
+                    .map(|tag| kv_tag_literal(tag))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                kv_identifier(self.collection)
+            ))
+            .await?;
+        Ok(result.affected)
+    }
+
     pub async fn watch(&self, key: &str) -> Result<Vec<KvWatchEvent>> {
         #[cfg(not(feature = "http"))]
         {
@@ -261,6 +299,35 @@ impl<'a> KvClient<'a> {
             Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
         }
     }
+}
+
+fn kv_identifier(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn kv_value_literal(value: &JsonValue) -> String {
+    match value {
+        JsonValue::Null => "NULL".to_string(),
+        JsonValue::Bool(value) => value.to_string(),
+        JsonValue::Number(value) => value.to_string(),
+        JsonValue::String(value) => format!("'{}'", value.replace('\'', "''")),
+        JsonValue::Array(_) | JsonValue::Object(_) => {
+            format!("'{}'", value.to_json_string().replace('\'', "''"))
+        }
+    }
+}
+
+fn kv_tag_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 /// Crate version (matches the engine version when published in lockstep).

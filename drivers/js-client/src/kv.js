@@ -6,6 +6,25 @@ export class KvClient {
     this.collection = collection
   }
 
+  put(key, value, options = {}) {
+    const collection = options.collection ?? this.collection
+    const tags = Array.isArray(options.tags) && options.tags.length > 0
+      ? ` TAGS [${options.tags.map(kvTagLiteral).join(', ')}]`
+      : ''
+    const expire = options.expireMs != null ? ` EXPIRE ${Number(options.expireMs)} ms` : ''
+    return this.client.call('query', {
+      sql: `KV PUT ${kvPath(collection, key)} = ${kvValueLiteral(value)}${expire}${tags}`,
+    })
+  }
+
+  async invalidateTags(tags, options = {}) {
+    const collection = options.collection ?? this.collection
+    const result = await this.client.call('query', {
+      sql: `INVALIDATE TAGS [${tags.map(kvTagLiteral).join(', ')}] FROM ${kvIdentifier(collection)}`,
+    })
+    return result.affected ?? result.affected_rows ?? result.rows?.[0]?.invalidated ?? 0
+  }
+
   async *watch(key, options = {}) {
     if (!this.client.baseUrl) {
       throw new RedDBError('UNSUPPORTED_TRANSPORT', 'kv.watch requires the HTTP transport')
@@ -26,4 +45,22 @@ export class KvClient {
       if (line) yield JSON.parse(line.slice(6))
     }
   }
+}
+
+function kvPath(collection, key) {
+  return `${kvIdentifier(collection)}.${kvIdentifier(key)}`
+}
+
+function kvIdentifier(value) {
+  return String(value).replace(/[^A-Za-z0-9_]/g, '_')
+}
+
+function kvValueLiteral(value) {
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (value == null) return 'NULL'
+  return `'${String(value).replace(/'/g, "''")}'`
+}
+
+function kvTagLiteral(value) {
+  return `'${String(value).replace(/'/g, "''")}'`
 }

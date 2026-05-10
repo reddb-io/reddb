@@ -899,6 +899,7 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
             use crate::storage::query::ast::KvCommand;
             match cmd {
                 KvCommand::Put { collection, .. }
+                | KvCommand::InvalidateTags { collection, .. }
                 | KvCommand::Get { collection, .. }
                 | KvCommand::Unseal { collection, .. }
                 | KvCommand::Watch { collection, .. }
@@ -1754,6 +1755,7 @@ impl RedDBRuntime {
                     )
                 },
                 kv_stats: crate::runtime::KvStatsCounters::default(),
+                kv_tag_index: crate::runtime::KvTagIndex::default(),
             }),
         };
 
@@ -5556,6 +5558,9 @@ impl RedDBRuntime {
                     | KvCommand::Delete {
                         collection, model, ..
                     } => (collection.as_str(), *model),
+                    KvCommand::InvalidateTags { collection, .. } => {
+                        (collection.as_str(), CollectionModel::Kv)
+                    }
                     KvCommand::Watch { collection, .. } => {
                         (collection.as_str(), CollectionModel::Kv)
                     }

@@ -5290,6 +5290,35 @@ fn test_parse_kv_put_if_not_exists() {
 }
 
 #[test]
+fn test_parse_kv_put_with_tags() {
+    let q = parse("KV PUT sessions.blob = 'data' TAGS [user:42, org:7]").unwrap();
+    if let QueryExpr::KvCommand(KvCommand::Put {
+        collection,
+        key,
+        tags,
+        ..
+    }) = q
+    {
+        assert_eq!(collection, "sessions");
+        assert_eq!(key, "blob");
+        assert_eq!(tags, vec!["user:42".to_string(), "org:7".to_string()]);
+    } else {
+        panic!("expected KvCommand::Put");
+    }
+}
+
+#[test]
+fn test_parse_kv_invalidate_tags() {
+    let q = parse("INVALIDATE TAGS [user:42, org:7] FROM sessions").unwrap();
+    if let QueryExpr::KvCommand(KvCommand::InvalidateTags { collection, tags }) = q {
+        assert_eq!(collection, "sessions");
+        assert_eq!(tags, vec!["user:42".to_string(), "org:7".to_string()]);
+    } else {
+        panic!("expected KvCommand::InvalidateTags");
+    }
+}
+
+#[test]
 fn test_parse_kv_get_bare_key() {
     let q = parse("KV GET name").unwrap();
     if let QueryExpr::KvCommand(KvCommand::Get {

@@ -2458,7 +2458,12 @@ pub enum KvCommand {
         value: Value,
         /// TTL in milliseconds (from EXPIRE clause)
         ttl_ms: Option<u64>,
+        tags: Vec<String>,
         if_not_exists: bool,
+    },
+    InvalidateTags {
+        collection: String,
+        tags: Vec<String>,
     },
     Get {
         model: CollectionModel,

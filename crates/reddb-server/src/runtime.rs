@@ -208,6 +208,108 @@ pub(crate) struct KvStatsCounters {
     watch_drops: AtomicU64,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct KvTagIndex {
+    tag_to_entries: parking_lot::RwLock<HashMap<(String, String), HashMap<String, EntityId>>>,
+    key_to_tags: parking_lot::RwLock<HashMap<(String, String), BTreeSet<String>>>,
+}
+
+impl KvTagIndex {
+    pub(crate) fn replace(&self, collection: &str, key: &str, id: EntityId, tags: &[String]) {
+        let entry_key = (collection.to_string(), key.to_string());
+        let new_tags: BTreeSet<String> = tags
+            .iter()
+            .map(|tag| tag.trim())
+            .filter(|tag| !tag.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+
+        let old_tags = {
+            let mut key_to_tags = self.key_to_tags.write();
+            if new_tags.is_empty() {
+                key_to_tags.remove(&entry_key)
+            } else {
+                key_to_tags.insert(entry_key.clone(), new_tags.clone())
+            }
+        };
+
+        let mut tag_to_entries = self.tag_to_entries.write();
+        if let Some(old_tags) = old_tags {
+            for tag in old_tags {
+                let scoped = (collection.to_string(), tag);
+                let remove_scoped = if let Some(entries) = tag_to_entries.get_mut(&scoped) {
+                    entries.remove(key);
+                    entries.is_empty()
+                } else {
+                    false
+                };
+                if remove_scoped {
+                    tag_to_entries.remove(&scoped);
+                }
+            }
+        }
+
+        for tag in new_tags {
+            tag_to_entries
+                .entry((collection.to_string(), tag))
+                .or_default()
+                .insert(key.to_string(), id);
+        }
+    }
+
+    pub(crate) fn remove(&self, collection: &str, key: &str) {
+        let entry_key = (collection.to_string(), key.to_string());
+        let old_tags = self.key_to_tags.write().remove(&entry_key);
+        let Some(old_tags) = old_tags else {
+            return;
+        };
+
+        let mut tag_to_entries = self.tag_to_entries.write();
+        for tag in old_tags {
+            let scoped = (collection.to_string(), tag);
+            let remove_scoped = if let Some(entries) = tag_to_entries.get_mut(&scoped) {
+                entries.remove(key);
+                entries.is_empty()
+            } else {
+                false
+            };
+            if remove_scoped {
+                tag_to_entries.remove(&scoped);
+            }
+        }
+    }
+
+    pub(crate) fn entries_for_tags(
+        &self,
+        collection: &str,
+        tags: &[String],
+    ) -> Vec<(String, EntityId)> {
+        if tags.is_empty() {
+            return Vec::new();
+        }
+
+        let tag_to_entries = self.tag_to_entries.read();
+        let mut out: HashMap<String, EntityId> = HashMap::new();
+        for tag in tags {
+            let scoped = (collection.to_string(), tag.trim().to_string());
+            if let Some(entries) = tag_to_entries.get(&scoped) {
+                for (key, id) in entries {
+                    out.entry(key.clone()).or_insert(*id);
+                }
+            }
+        }
+        out.into_iter().collect()
+    }
+
+    pub(crate) fn tags_for_key(&self, collection: &str, key: &str) -> Vec<String> {
+        self.key_to_tags
+            .read()
+            .get(&(collection.to_string(), key.to_string()))
+            .map(|tags| tags.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
 impl KvStatsCounters {
     pub(crate) fn snapshot(&self) -> KvStats {
         KvStats {
@@ -899,6 +1001,8 @@ struct RuntimeInner {
     /// Process-local normal-KV operation counters. These are intentionally
     /// runtime-local; persistent accounting belongs in catalog stats.
     kv_stats: KvStatsCounters,
+    /// Process-local normal-KV tag index used by `INVALIDATE TAGS`.
+    kv_tag_index: KvTagIndex,
 }
 
 #[derive(Clone)]

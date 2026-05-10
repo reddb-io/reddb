@@ -454,15 +454,53 @@ impl RedDBServer {
             Some(JsonValue::Null) | None => Value::Null,
             Some(other) => Value::Json(crate::json::to_vec(other).unwrap_or_default()),
         };
+        let tags = match json_string_array_field(&payload, "tags") {
+            Ok(tags) => tags,
+            Err(message) => return json_error(400, message),
+        };
 
         let ops = crate::runtime::impl_kv::KvAtomicOps::new(&self.runtime);
-        match ops.set(collection, key, value, None, false) {
+        match ops.set_with_tags(collection, key, value, None, &tags, false) {
             Ok((created, id)) => {
                 let mut object = Map::new();
                 object.insert("ok".to_string(), JsonValue::Bool(true));
                 object.insert("id".to_string(), JsonValue::Number(id.raw() as f64));
                 object.insert("created".to_string(), JsonValue::Bool(created));
+                object.insert(
+                    "tags".to_string(),
+                    JsonValue::Array(tags.into_iter().map(JsonValue::String).collect()),
+                );
                 json_response(if created { 201 } else { 200 }, JsonValue::Object(object))
+            }
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
+    pub(crate) fn handle_invalidate_kv_tags(
+        &self,
+        collection: &str,
+        body: Vec<u8>,
+    ) -> HttpResponse {
+        let payload = match parse_json_body_allow_empty(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+        let tags = match json_string_array_field(&payload, "tags") {
+            Ok(tags) if !tags.is_empty() => tags,
+            Ok(_) => return json_error(400, "field 'tags' must contain at least one string"),
+            Err(message) => return json_error(400, message),
+        };
+        let ops = crate::runtime::impl_kv::KvAtomicOps::new(&self.runtime);
+        match ops.invalidate_tags(collection, &tags) {
+            Ok(count) => {
+                let mut object = Map::new();
+                object.insert("ok".to_string(), JsonValue::Bool(true));
+                object.insert("invalidated".to_string(), JsonValue::Number(count as f64));
+                object.insert(
+                    "tags".to_string(),
+                    JsonValue::Array(tags.into_iter().map(JsonValue::String).collect()),
+                );
+                json_response(200, JsonValue::Object(object))
             }
             Err(err) => json_error(400, err.to_string()),
         }
@@ -789,6 +827,22 @@ impl RedDBServer {
             Err(err @ RedDBError::NotFound(_)) => json_error(404, err.to_string()),
             Err(err) => json_error(400, err.to_string()),
         }
+    }
+}
+
+fn json_string_array_field(payload: &JsonValue, field: &str) -> Result<Vec<String>, String> {
+    match payload.get(field) {
+        None | Some(JsonValue::Null) => Ok(Vec::new()),
+        Some(JsonValue::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| format!("field '{field}' must be an array of strings"))
+            })
+            .collect(),
+        _ => Err(format!("field '{field}' must be an array of strings")),
     }
 }
 

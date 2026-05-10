@@ -1,6 +1,6 @@
 //! KV DSL command execution and KvAtomicOps module.
 //!
-//! Handles `KV PUT key = value [EXPIRE n] [IF NOT EXISTS]`,
+//! Handles `KV PUT key = value [EXPIRE n] [TAGS [...]] [IF NOT EXISTS]`,
 //! `KV GET key`, and `KV DELETE key`.
 
 use crate::application::ports::RuntimeEntityPort;
@@ -60,6 +60,84 @@ impl<'a> KvAtomicOps<'a> {
         ttl_ms: Option<u64>,
         if_not_exists: bool,
     ) -> RedDBResult<(bool, crate::storage::EntityId)> {
+        self.set_with_tags_for_model(model, collection, key, value, ttl_ms, &[], if_not_exists)
+    }
+
+    pub fn set_with_tags(
+        &self,
+        collection: &str,
+        key: &str,
+        value: crate::storage::schema::Value,
+        ttl_ms: Option<u64>,
+        tags: &[String],
+        if_not_exists: bool,
+    ) -> RedDBResult<(bool, crate::storage::EntityId)> {
+        self.set_with_tags_for_model(
+            crate::catalog::CollectionModel::Kv,
+            collection,
+            key,
+            value,
+            ttl_ms,
+            tags,
+            if_not_exists,
+        )
+    }
+
+    fn set_with_tags_for_model(
+        &self,
+        model: crate::catalog::CollectionModel,
+        collection: &str,
+        key: &str,
+        value: crate::storage::schema::Value,
+        ttl_ms: Option<u64>,
+        tags: &[String],
+        if_not_exists: bool,
+    ) -> RedDBResult<(bool, crate::storage::EntityId)> {
+        self.set_with_tags_and_metadata_for_model(
+            model,
+            collection,
+            key,
+            value,
+            ttl_ms,
+            tags,
+            if_not_exists,
+            Vec::new(),
+        )
+    }
+
+    pub fn set_with_tags_and_metadata(
+        &self,
+        collection: &str,
+        key: &str,
+        value: crate::storage::schema::Value,
+        ttl_ms: Option<u64>,
+        tags: &[String],
+        if_not_exists: bool,
+        metadata: Vec<(String, MetadataValue)>,
+    ) -> RedDBResult<(bool, crate::storage::EntityId)> {
+        self.set_with_tags_and_metadata_for_model(
+            crate::catalog::CollectionModel::Kv,
+            collection,
+            key,
+            value,
+            ttl_ms,
+            tags,
+            if_not_exists,
+            metadata,
+        )
+    }
+
+    fn set_with_tags_and_metadata_for_model(
+        &self,
+        model: crate::catalog::CollectionModel,
+        collection: &str,
+        key: &str,
+        value: crate::storage::schema::Value,
+        ttl_ms: Option<u64>,
+        tags: &[String],
+        if_not_exists: bool,
+        mut metadata: Vec<(String, MetadataValue)>,
+    ) -> RedDBResult<(bool, crate::storage::EntityId)> {
         self.ensure_keyed_collection(model, collection)?;
 
         let existing = self.get_entry(model, collection, key)?;
@@ -88,9 +166,12 @@ impl<'a> KvAtomicOps<'a> {
             self.delete(model, collection, key)?;
         }
 
-        let meta_vec: Vec<(String, MetadataValue)> = ttl_metadata(ttl_ms)
-            .map(|m| m.fields.into_iter().collect())
-            .unwrap_or_default();
+        if let Some(ttl_metadata) = ttl_metadata(ttl_ms) {
+            metadata.extend(ttl_metadata.fields);
+        }
+        if let Some(tags_metadata) = kv_tags_metadata(tags) {
+            metadata.push(tags_metadata);
+        }
 
         let output = self
             .runtime
@@ -98,13 +179,23 @@ impl<'a> KvAtomicOps<'a> {
                 collection: collection.to_string(),
                 key: key.to_string(),
                 value,
-                metadata: meta_vec,
+                metadata,
             })?;
+        if model == crate::catalog::CollectionModel::Kv {
+            self.runtime
+                .inner
+                .kv_tag_index
+                .replace(collection, key, output.id, tags);
+        }
 
-        self.runtime
-            .record_kv_watch_event(op, collection, key, output.id.raw(), before, after);
+        if model == crate::catalog::CollectionModel::Kv {
+            self.runtime
+                .record_kv_watch_event(op, collection, key, output.id.raw(), before, after);
+        }
 
-        self.runtime.inner.kv_stats.incr_puts();
+        if model == crate::catalog::CollectionModel::Kv {
+            self.runtime.inner.kv_stats.incr_puts();
+        }
         Ok((!was_present, output.id))
     }
 
@@ -139,6 +230,7 @@ impl<'a> KvAtomicOps<'a> {
             if deleted {
                 store.context_index().remove_entity(id);
                 if model == crate::catalog::CollectionModel::Kv {
+                    self.runtime.inner.kv_tag_index.remove(collection, key);
                     self.runtime.record_kv_watch_event(
                         crate::replication::cdc::ChangeOperation::Delete,
                         collection,
@@ -209,6 +301,10 @@ impl<'a> KvAtomicOps<'a> {
                 value: crate::storage::schema::Value::Integer(next),
                 metadata: meta_vec,
             })?;
+        self.runtime
+            .inner
+            .kv_tag_index
+            .replace(collection, key, output.id, &[]);
 
         self.runtime.record_kv_watch_event(
             if existing.is_some() {
@@ -284,6 +380,10 @@ impl<'a> KvAtomicOps<'a> {
                 value: new_value.clone(),
                 metadata: meta_vec,
             })?;
+        self.runtime
+            .inner
+            .kv_tag_index
+            .replace(collection, key, output.id, &[]);
 
         self.runtime.record_kv_watch_event(
             if current.is_some() {
@@ -304,6 +404,58 @@ impl<'a> KvAtomicOps<'a> {
 
         self.runtime.inner.kv_stats.incr_cas_success();
         Ok((true, current))
+    }
+
+    pub fn invalidate_tags(&self, collection: &str, tags: &[String]) -> RedDBResult<usize> {
+        self.runtime
+            .check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        self.runtime.check_kv_invalidate_policy(collection)?;
+        self.ensure_kv_collection(collection)?;
+        let entries = self
+            .runtime
+            .inner
+            .kv_tag_index
+            .entries_for_tags(collection, tags);
+        if entries.is_empty() {
+            return Ok(0);
+        }
+
+        let store = self.runtime.inner.db.store();
+        let mut removed = 0usize;
+        for (key, id) in entries {
+            let before = store
+                .get(collection, id)
+                .and_then(|entity| kv_value_from_entity(&entity));
+            let deleted = store
+                .delete(collection, id)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            if deleted {
+                store.context_index().remove_entity(id);
+                self.runtime.inner.kv_tag_index.remove(collection, &key);
+                self.runtime.record_kv_watch_event(
+                    crate::replication::cdc::ChangeOperation::Delete,
+                    collection,
+                    &key,
+                    id.raw(),
+                    before
+                        .as_ref()
+                        .map(crate::presentation::entity_json::storage_value_to_json),
+                    None,
+                );
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            self.runtime.inner.kv_stats.incr_deletes();
+        }
+        Ok(removed)
+    }
+
+    pub fn tags_for_key(&self, collection: &str, key: &str) -> Vec<String> {
+        self.runtime
+            .inner
+            .kv_tag_index
+            .tags_for_key(collection, key)
     }
 
     /// Auto-create a KV collection if it does not exist yet.
@@ -642,15 +794,17 @@ impl RedDBRuntime {
                 key,
                 value,
                 ttl_ms,
+                tags,
                 if_not_exists,
             } => {
                 self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
-                let (created, id) = ops.set(
+                let (created, id) = ops.set_with_tags_for_model(
                     *model,
                     collection,
                     key,
                     value.clone(),
                     *ttl_ms,
+                    tags,
                     *if_not_exists,
                 )?;
 
@@ -660,6 +814,7 @@ impl RedDBRuntime {
                     "key".into(),
                     "id".into(),
                     "created".into(),
+                    "tags".into(),
                 ]);
                 let mut record = UnifiedRecord::new();
                 record.set("ok", Value::Boolean(true));
@@ -667,6 +822,7 @@ impl RedDBRuntime {
                 record.set("key", Value::text(key.clone()));
                 record.set("id", Value::Integer(id.raw() as i64));
                 record.set("created", Value::Boolean(created));
+                record.set("tags", kv_tags_value(tags));
                 result.push(record);
 
                 Ok(RuntimeQueryResult {
@@ -685,6 +841,32 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 1,
                     statement_type: if created { "insert" } else { "update" },
+                })
+            }
+            KvCommand::InvalidateTags { collection, tags } => {
+                let invalidated = ops.invalidate_tags(collection, tags)?;
+
+                let mut result = UnifiedResult::with_columns(vec![
+                    "ok".into(),
+                    "collection".into(),
+                    "invalidated".into(),
+                    "tags".into(),
+                ]);
+                let mut record = UnifiedRecord::new();
+                record.set("ok", Value::Boolean(true));
+                record.set("collection", Value::text(collection.clone()));
+                record.set("invalidated", Value::Integer(invalidated as i64));
+                record.set("tags", kv_tags_value(tags));
+                result.push(record);
+
+                Ok(RuntimeQueryResult {
+                    query: raw_query.to_string(),
+                    mode: crate::storage::query::modes::QueryMode::Sql,
+                    statement: "kv_invalidate_tags",
+                    engine: "kv",
+                    result,
+                    affected_rows: invalidated as u64,
+                    statement_type: "delete",
                 })
             }
 
@@ -716,6 +898,7 @@ impl RedDBRuntime {
                     "collection".into(),
                     "key".into(),
                     "value".into(),
+                    "tags".into(),
                 ]);
                 let mut record = UnifiedRecord::new();
                 record.set("collection", Value::text(collection.clone()));
@@ -724,6 +907,7 @@ impl RedDBRuntime {
                     "value",
                     value.unwrap_or(crate::storage::schema::Value::Null),
                 );
+                record.set("tags", kv_tags_value(&ops.tags_for_key(collection, key)));
                 result.push(record);
 
                 Ok(RuntimeQueryResult {
@@ -949,6 +1133,48 @@ impl RedDBRuntime {
             }
         }
     }
+
+    fn check_kv_invalidate_policy(&self, collection: &str) -> RedDBResult<()> {
+        let auth_store = match self.inner.auth_store.read().clone() {
+            Some(store) => store,
+            None => return Ok(()),
+        };
+        let (username, role) = match crate::runtime::impl_core::current_auth_identity() {
+            Some(identity) => identity,
+            None => return Ok(()),
+        };
+        if role < crate::auth::Role::Write {
+            return Err(RedDBError::Query(format!(
+                "principal=`{username}` role=`{role:?}` cannot invalidate KV tags"
+            )));
+        }
+        if !auth_store.iam_authorization_enabled() {
+            return Ok(());
+        }
+
+        let tenant = crate::runtime::impl_core::current_tenant();
+        let principal = crate::auth::UserId::from_parts(tenant.as_deref(), &username);
+        let mut resource =
+            crate::auth::policies::ResourceRef::new("kv".to_string(), collection.to_string());
+        if let Some(tenant) = tenant.clone() {
+            resource = resource.with_tenant(tenant);
+        }
+        let ctx = crate::auth::policies::EvalContext {
+            principal_tenant: tenant.clone(),
+            current_tenant: tenant,
+            peer_ip: None,
+            mfa_present: false,
+            now_ms: current_unix_ms(),
+            principal_is_admin_role: role == crate::auth::Role::Admin,
+        };
+        if auth_store.check_policy_authz(&principal, "kv:invalidate", &resource, &ctx) {
+            Ok(())
+        } else {
+            Err(RedDBError::Query(format!(
+                "principal=`{username}` action=`kv:invalidate` resource=`kv:{collection}` denied by IAM policy"
+            )))
+        }
+    }
 }
 
 fn ttl_metadata(ttl_ms: Option<u64>) -> Option<Metadata> {
@@ -1052,6 +1278,35 @@ fn decode_vault_key(hex_key: &str) -> RedDBResult<[u8; 32]> {
     Ok(key)
 }
 
+fn kv_tags_metadata(tags: &[String]) -> Option<(String, MetadataValue)> {
+    if tags.is_empty() {
+        return None;
+    }
+    let values = tags
+        .iter()
+        .map(|tag| MetadataValue::String(tag.clone()))
+        .collect();
+    Some(("_kv_tags".to_string(), MetadataValue::Array(values)))
+}
+
+fn kv_tags_value(tags: &[String]) -> Value {
+    let json = crate::json::Value::Array(
+        tags.iter()
+            .map(|tag| crate::json::Value::String(tag.clone()))
+            .collect(),
+    );
+    Value::Json(crate::json::to_vec(&json).unwrap_or_default())
+}
+
+fn kv_value_from_entity(entity: &crate::storage::UnifiedEntity) -> Option<Value> {
+    if let crate::storage::EntityData::Row(ref row) = entity.data {
+        if let Some(ref named) = row.named {
+            return named.get("value").cloned();
+        }
+    }
+    None
+}
+
 fn kv_collection_contract(name: &str) -> crate::physical::CollectionContract {
     let now = current_unix_ms();
     crate::physical::CollectionContract {
@@ -1140,6 +1395,40 @@ mod tests {
         assert_eq!(stats.incrs, 1);
         assert_eq!(stats.cas_success, 1);
         assert_eq!(stats.cas_conflict, 1);
+    }
+
+    #[test]
+    fn kv_invalidate_tags_removes_matching_entries_only() {
+        let r = rt();
+
+        r.execute_query("KV PUT sessions.blob = 'payload' TAGS [user:42, org:7]")
+            .unwrap();
+
+        let miss = r
+            .execute_query("INVALIDATE TAGS [org:99] FROM sessions")
+            .unwrap();
+        assert_eq!(miss.affected_rows, 0);
+        assert!(matches!(
+            r.execute_query("KV GET sessions.blob")
+                .unwrap()
+                .result
+                .records[0]
+                .get("value"),
+            Some(crate::storage::schema::Value::Text(value)) if &**value == "payload"
+        ));
+
+        let hit = r
+            .execute_query("INVALIDATE TAGS [user:42] FROM sessions")
+            .unwrap();
+        assert_eq!(hit.affected_rows, 1);
+        assert!(matches!(
+            r.execute_query("KV GET sessions.blob")
+                .unwrap()
+                .result
+                .records[0]
+                .get("value"),
+            Some(crate::storage::schema::Value::Null)
+        ));
     }
 
     #[test]

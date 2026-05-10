@@ -5,8 +5,10 @@
 //! Syntax summary:
 //! ```text
 //! KV PUT  <key> = <value> [EXPIRE <n> [unit]] [IF NOT EXISTS]
+//! KV PUT  <key> = <value> [EXPIRE <n> [unit]] [TAGS [tag, ...]]
 //! KV GET  <key>
 //! KV DELETE <key>
+//! INVALIDATE TAGS [tag, ...] FROM <collection>
 //! KV INCR <key> [BY <n>] [EXPIRE <n> [unit]]
 //! KV DECR <key> [BY <n>] [EXPIRE <n> [unit]]   -- sugar for INCR BY -n
 //! KV CAS  <key> EXPECT <value|NULL> SET <value> [EXPIRE <n> [unit]]
@@ -109,11 +111,24 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 self.parse_kv_cas(model)
             }
+            Token::Ident(ref name) if name.eq_ignore_ascii_case("INVALIDATE") => {
+                self.advance()?;
+                self.parse_kv_invalidate_tags_after_invalidate()
+            }
             _ => Err(ParseError::expected(
                 if model == CollectionModel::Vault {
                     vec!["PUT", "GET", "UNSEAL", "DELETE", "INCR", "DECR", "CAS"]
                 } else {
-                    vec!["PUT", "GET", "WATCH", "DELETE", "INCR", "DECR", "CAS"]
+                    vec![
+                        "PUT",
+                        "GET",
+                        "WATCH",
+                        "DELETE",
+                        "INCR",
+                        "DECR",
+                        "CAS",
+                        "INVALIDATE",
+                    ]
                 },
                 self.peek(),
                 self.position(),
@@ -156,6 +171,7 @@ impl<'a> Parser<'a> {
         let value = self.parse_value()?;
 
         let mut ttl_ms: Option<u64> = None;
+        let mut tags: Vec<String> = Vec::new();
         let mut if_not_exists = false;
 
         loop {
@@ -163,6 +179,8 @@ impl<'a> Parser<'a> {
                 let n = self.parse_float()?;
                 let unit = self.parse_kv_duration_unit()?;
                 ttl_ms = Some((n * unit) as u64);
+            } else if self.consume_ident_ci("TAGS")? {
+                tags = self.parse_kv_tag_list()?;
             } else if self.consume(&Token::If)? {
                 // IF NOT EXISTS
                 if !self.consume(&Token::Not)? && !self.consume_ident_ci("NOT")? {
@@ -191,7 +209,34 @@ impl<'a> Parser<'a> {
             key,
             value,
             ttl_ms,
+            tags,
             if_not_exists,
+        }))
+    }
+
+    /// Parse `INVALIDATE TAGS [tag, ...] FROM collection`.
+    pub(crate) fn parse_kv_invalidate_tags_after_invalidate(
+        &mut self,
+    ) -> Result<QueryExpr, ParseError> {
+        if !self.consume_ident_ci("TAGS")? {
+            return Err(ParseError::expected(
+                vec!["TAGS"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        let tags = self.parse_kv_tag_list()?;
+        if !self.consume(&Token::From)? && !self.consume_ident_ci("FROM")? {
+            return Err(ParseError::expected(
+                vec!["FROM"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        let collection = self.expect_ident_or_keyword()?;
+        Ok(QueryExpr::KvCommand(KvCommand::InvalidateTags {
+            collection,
+            tags,
         }))
     }
 
@@ -237,6 +282,59 @@ impl<'a> Parser<'a> {
             by,
             ttl_ms,
         }))
+    }
+
+    fn parse_kv_tag_list(&mut self) -> Result<Vec<String>, ParseError> {
+        self.expect(Token::LBracket)?;
+        let mut tags = Vec::new();
+        while !self.check(&Token::RBracket) {
+            let tag = self.parse_kv_tag()?;
+            if !tag.is_empty() {
+                tags.push(tag);
+            }
+            if !self.consume(&Token::Comma)? {
+                break;
+            }
+        }
+        self.expect(Token::RBracket)?;
+        Ok(tags)
+    }
+
+    fn parse_kv_tag(&mut self) -> Result<String, ParseError> {
+        let mut tag = String::new();
+        loop {
+            match self.peek().clone() {
+                Token::Comma | Token::RBracket | Token::Eof => break,
+                Token::Ident(part) | Token::String(part) => {
+                    self.advance()?;
+                    tag.push_str(&part);
+                }
+                Token::Integer(n) => {
+                    self.advance()?;
+                    tag.push_str(&n.to_string());
+                }
+                Token::Float(n) => {
+                    self.advance()?;
+                    tag.push_str(&n.to_string());
+                }
+                Token::Colon => {
+                    self.advance()?;
+                    tag.push(':');
+                }
+                Token::Dot => {
+                    self.advance()?;
+                    tag.push('.');
+                }
+                Token::Dash => {
+                    self.advance()?;
+                    tag.push('-');
+                }
+                other => {
+                    return Err(ParseError::expected(vec!["tag"], &other, self.position()));
+                }
+            }
+        }
+        Ok(tag)
     }
 
     /// Parse `KV CAS key EXPECT <val|NULL> SET <val> [EXPIRE dur]`.

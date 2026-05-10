@@ -108,6 +108,7 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("decr config ")
         || lower.starts_with("add config ")
         || lower.starts_with("invalidate config ")
+        || lower.starts_with("invalidate tags ")
         || lower.starts_with("set config ")
         || lower.starts_with("set secret ")
         || lower.starts_with("set tenant")

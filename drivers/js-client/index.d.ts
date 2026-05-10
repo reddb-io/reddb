@@ -99,6 +99,12 @@ export interface KvWatchEvent {
 }
 
 export class KvClient {
+  put(
+    key: string,
+    value: unknown,
+    options?: { collection?: string; expireMs?: number; tags?: string[] },
+  ): Promise<QueryResult>
+  invalidateTags(tags: string[], options?: { collection?: string }): Promise<number>
   watch(
     key: string,
     options?: { collection?: string; sinceLsn?: number; limit?: number },

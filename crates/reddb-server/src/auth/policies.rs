@@ -86,6 +86,7 @@ const ACTION_ALLOWLIST: &[&str] = &[
     "policy:attach",
     "policy:detach",
     "policy:simulate",
+    "kv:invalidate",
     "admin:bootstrap",
     "admin:audit-read",
     "admin:reload",
@@ -95,6 +96,7 @@ const ACTION_ALLOWLIST: &[&str] = &[
     "*",
     "admin:*",
     "vault:*",
+    "kv:*",
     "policy:*",
 ];
 

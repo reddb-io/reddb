@@ -114,16 +114,35 @@ pub(crate) fn create_kv_reply(
         Some(crate::serde_json::Value::Bool(b)) => crate::storage::schema::Value::Boolean(*b),
         _ => crate::storage::schema::Value::Null,
     };
-
-    runtime
-        .entity_use_cases()
-        .create_kv(crate::application::CreateKvInput {
-            collection: request.collection,
-            key,
-            value,
-            metadata: Vec::new(),
+    let tags = payload
+        .get("tags")
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+                .collect::<Vec<String>>()
         })
-        .map(entity_reply_from_output)
+        .unwrap_or_default();
+
+    let ops = crate::runtime::impl_kv::KvAtomicOps::new(&runtime.runtime);
+    runtime
+        .runtime
+        .check_write(crate::runtime::write_gate::WriteKind::Dml)
+        .map_err(entity_error_to_status)?;
+    ops.set_with_tags(&request.collection, &key, value, None, &tags, false)
+        .map(|(_, id)| EntityReply {
+            ok: true,
+            id: id.raw(),
+            entity_json: runtime
+                .runtime
+                .db()
+                .store()
+                .get(&request.collection, id)
+                .as_ref()
+                .map(entity_json_string)
+                .unwrap_or_else(|| "{}".to_string()),
+        })
         .map_err(entity_error_to_status)
 }
 

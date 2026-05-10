@@ -667,6 +667,50 @@ fn timeseries_select_blocks_denied_tags_projection() {
 }
 
 #[test]
+fn kv_invalidate_tags_requires_iam_action() {
+    let (rt, store) = runtime_with_auth();
+    rt.execute_query("KV PUT sessions.blob = 'payload' TAGS [user:42]")
+        .unwrap();
+
+    attach_platform_policy(
+        &store,
+        r#"{
+            "id":"kv-put-only",
+            "version":1,
+            "statements":[
+                {"effect":"allow","actions":["insert"],"resources":["table:sessions"]}
+            ]
+        }"#,
+    );
+
+    let denied = as_user("alice", Role::Write, || {
+        rt.execute_query("INVALIDATE TAGS [user:42] FROM sessions")
+    });
+    let err = denied.expect_err("kv:invalidate should be required");
+    assert!(
+        err.to_string().contains("kv:invalidate"),
+        "unexpected error: {err:?}"
+    );
+
+    attach_platform_policy(
+        &store,
+        r#"{
+            "id":"kv-invalidate-sessions",
+            "version":1,
+            "statements":[
+                {"effect":"allow","actions":["kv:invalidate"],"resources":["kv:sessions"]}
+            ]
+        }"#,
+    );
+
+    let allowed = as_user("alice", Role::Write, || {
+        rt.execute_query("INVALIDATE TAGS [user:42] FROM sessions")
+    })
+    .unwrap();
+    assert_eq!(allowed.affected_rows, 1);
+}
+
+#[test]
 fn group_policy_applies_through_alter_user_membership() {
     let (rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE orders (id INT)").unwrap();

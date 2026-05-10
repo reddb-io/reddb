@@ -30,6 +30,52 @@ class KvClient:
             raise RedDBError("kv.watch requires the HTTP transport")
         return self._t.kv_watch(key, collection=collection, **opts)
 
+    async def put(self, key: str, value: Any, **opts: Any) -> dict[str, Any]:
+        collection = opts.pop("collection", self.collection)
+        tags = opts.pop("tags", None) or []
+        expire_ms = opts.pop("expire_ms", None)
+        expire = f" EXPIRE {int(expire_ms)} ms" if expire_ms is not None else ""
+        tag_clause = (
+            " TAGS [" + ", ".join(_kv_tag_literal(tag) for tag in tags) + "]" if tags else ""
+        )
+        sql = f"KV PUT {_kv_path(collection, key)} = {_kv_value_literal(value)}{expire}{tag_clause}"
+        return await self._t.query(sql)
+
+    async def invalidate_tags(self, tags: list[str], **opts: Any) -> int:
+        collection = opts.pop("collection", self.collection)
+        sql = (
+            "INVALIDATE TAGS ["
+            + ", ".join(_kv_tag_literal(tag) for tag in tags)
+            + f"] FROM {_kv_identifier(collection)}"
+        )
+        result = await self._t.query(sql)
+        rows = result.get("rows") if isinstance(result, dict) else None
+        if rows:
+            return int(rows[0].get("invalidated", 0))
+        return int(result.get("affected", 0)) if isinstance(result, dict) else 0
+
+
+def _kv_path(collection: str, key: str) -> str:
+    return f"{_kv_identifier(collection)}.{_kv_identifier(key)}"
+
+
+def _kv_identifier(value: Any) -> str:
+    return "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in str(value))
+
+
+def _kv_value_literal(value: Any) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _kv_tag_literal(value: Any) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
 
 async def connect(uri: str, **opts: Any) -> "Reddb":
     """Connect to a RedDB instance.
