@@ -313,6 +313,7 @@ impl JoinReorderingPass {
             | QueryExpr::CreateQueue(_)
             | QueryExpr::AlterQueue(_)
             | QueryExpr::DropQueue(_)
+            | QueryExpr::QueueSelect(_)
             | QueryExpr::QueueCommand(_)
             | QueryExpr::KvCommand(_)
             | QueryExpr::ConfigCommand(_)

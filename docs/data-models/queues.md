@@ -210,6 +210,29 @@ CREATE QUEUE jobs WITH DLQ failed_jobs MAX_ATTEMPTS 3
 
 In FANOUT mode, the DLQ threshold is tracked per consumer group. A message may be DLQ'd for one consumer while still live for another.
 
+### Inspect and replay DLQ messages
+
+Use `SELECT ... FROM QUEUE` for read-only queue inspection. It does not consume, lease, ACK, NACK, or mutate consumer-group state.
+
+```sql
+SELECT id, payload, attempts, last_error, enqueued_at
+FROM QUEUE failed_jobs
+WHERE attempts >= 3
+LIMIT 50
+```
+
+Queue projection columns are `id`, `payload`, `priority`, `attempts`, `last_error`, `enqueued_at`, `available_at`, `dlq`, and `tenant`.
+
+Use `QUEUE MOVE` to replay a bounded batch from one queue to another:
+
+```sql
+QUEUE MOVE FROM failed_jobs TO jobs
+WHERE attempts >= 3
+LIMIT 100
+```
+
+`QUEUE MOVE` snapshots eligible source messages, applies the optional predicate, then removes from the source and appends to the destination as one replay operation. If the destination cannot accept the selected batch, the source remains unchanged. A `WHERE` clause requires an explicit `LIMIT`; without `WHERE`, the default limit is one message. Each committed move emits a `queue/move` audit event with source, destination, selected count, and committed count.
+
 ## Delivery Guarantees
 
 - **At-least-once delivery**: unacknowledged messages reappear after crash recovery.

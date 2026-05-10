@@ -141,6 +141,35 @@ impl<'a> Parser<'a> {
                 let queue = self.expect_ident()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Len { queue }))
             }
+            Token::Ident(ref name) if name.eq_ignore_ascii_case("MOVE") => {
+                self.advance()?;
+                self.expect(Token::From)?;
+                let source = self.expect_ident()?;
+                self.expect(Token::To)?;
+                let destination = self.expect_ident()?;
+                let filter = if self.consume(&Token::Where)? {
+                    Some(self.parse_filter()?)
+                } else {
+                    None
+                };
+                let limit = if self.consume(&Token::Limit)? {
+                    self.parse_positive_integer("LIMIT")? as usize
+                } else if filter.is_some() {
+                    return Err(ParseError::expected(
+                        vec!["LIMIT"],
+                        self.peek(),
+                        self.position(),
+                    ));
+                } else {
+                    1
+                };
+                Ok(QueryExpr::QueueCommand(QueueCommand::Move {
+                    source,
+                    destination,
+                    filter,
+                    limit,
+                }))
+            }
             Token::Purge => {
                 self.advance()?;
                 let queue = self.expect_ident()?;
@@ -295,7 +324,7 @@ impl<'a> Parser<'a> {
             _ => Err(ParseError::expected(
                 vec![
                     "PUSH", "POP", "PEEK", "LEN", "PURGE", "GROUP", "READ", "ACK", "NACK", "LPUSH",
-                    "RPUSH", "LPOP", "RPOP", "PENDING", "CLAIM",
+                    "RPUSH", "LPOP", "RPOP", "PENDING", "CLAIM", "MOVE",
                 ],
                 self.peek(),
                 self.position(),

@@ -28,6 +28,15 @@ fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
         .unwrap_or_else(|err| panic!("query should succeed: {sql}\nerror: {err:?}"))
 }
 
+fn exec_err(rt: &RedDBRuntime, sql: &str) -> String {
+    QueryUseCases::new(rt)
+        .execute(ExecuteQueryInput {
+            query: sql.to_string(),
+        })
+        .expect_err("query should fail")
+        .to_string()
+}
+
 fn text(record: &UnifiedRecord, column: &str) -> String {
     match record.get(column) {
         Some(Value::Text(value)) => value.to_string(),
@@ -190,6 +199,130 @@ fn test_queue_nack_moves_message_to_dlq_after_max_attempts() {
     let dlq_peek = exec(&rt, "QUEUE PEEK failed_tasks");
     assert_eq!(dlq_peek.result.records.len(), 1);
     assert_eq!(text(&dlq_peek.result.records[0], "payload"), "job-dlq");
+}
+
+#[test]
+fn test_select_from_queue_projects_without_consuming_or_leasing() {
+    let rt = rt();
+
+    exec(&rt, "CREATE QUEUE failed_jobs");
+    exec(&rt, "QUEUE PUSH failed_jobs 'fresh'");
+    exec(&rt, "QUEUE PUSH failed_jobs 'retried'");
+
+    let read = exec(&rt, "QUEUE READ failed_jobs CONSUMER worker1 COUNT 1");
+    let leased_id = text(&read.result.records[0], "message_id");
+    exec(
+        &rt,
+        &format!("QUEUE NACK failed_jobs GROUP _work_default '{}'", leased_id),
+    );
+
+    let projection = exec(
+        &rt,
+        "SELECT id, payload, attempts, last_error, enqueued_at FROM QUEUE failed_jobs WHERE attempts >= 1 LIMIT 50",
+    );
+    assert_eq!(projection.result.records.len(), 1);
+    assert_eq!(text(&projection.result.records[0], "payload"), "fresh");
+    assert_eq!(uint(&projection.result.records[0], "attempts"), 1);
+    assert!(projection.result.records[0].contains_column("last_error"));
+    assert!(uint(&projection.result.records[0], "enqueued_at") > 0);
+
+    let pending = exec(&rt, "QUEUE PENDING failed_jobs GROUP _work_default");
+    assert!(
+        pending.result.records.is_empty(),
+        "read-only queue projection must not lease messages"
+    );
+
+    let len = exec(&rt, "QUEUE LEN failed_jobs");
+    assert_eq!(
+        uint(&len.result.records[0], "len"),
+        2,
+        "read-only queue projection must not consume messages"
+    );
+}
+
+#[test]
+fn test_queue_move_filters_limits_and_keeps_peek_compatible() {
+    let rt = rt();
+
+    exec(&rt, "CREATE QUEUE failed_jobs");
+    exec(&rt, "CREATE QUEUE jobs");
+    exec(&rt, "QUEUE PUSH failed_jobs 'first'");
+    exec(&rt, "QUEUE PUSH failed_jobs 'second'");
+    exec(&rt, "QUEUE PUSH failed_jobs 'third'");
+
+    let read_first = exec(&rt, "QUEUE READ failed_jobs CONSUMER worker1 COUNT 1");
+    let first_id = text(&read_first.result.records[0], "message_id");
+    exec(
+        &rt,
+        &format!("QUEUE NACK failed_jobs GROUP _work_default '{}'", first_id),
+    );
+    let read_second = exec(&rt, "QUEUE READ failed_jobs CONSUMER worker1 COUNT 1");
+    let second_id = text(&read_second.result.records[0], "message_id");
+    exec(
+        &rt,
+        &format!("QUEUE NACK failed_jobs GROUP _work_default '{}'", second_id),
+    );
+
+    let moved = exec(
+        &rt,
+        "QUEUE MOVE FROM failed_jobs TO jobs WHERE attempts >= 1 LIMIT 1",
+    );
+    assert_eq!(moved.affected_rows, 1);
+    assert_eq!(uint(&moved.result.records[0], "selected"), 1);
+    assert_eq!(uint(&moved.result.records[0], "committed"), 1);
+    assert!(rt.audit_log().wait_idle(Duration::from_secs(2)));
+    let audit_body = std::fs::read_to_string(rt.audit_log().path()).unwrap_or_default();
+    assert!(audit_body.contains("queue/move"));
+    assert!(audit_body.contains("\"source\":\"failed_jobs\""));
+    assert!(audit_body.contains("\"destination\":\"jobs\""));
+    assert!(audit_body.contains("\"selected\":1"));
+    assert!(audit_body.contains("\"committed\":1"));
+
+    let src = exec(&rt, "QUEUE PEEK failed_jobs 10");
+    assert_eq!(payloads(&src), vec!["second", "third"]);
+
+    let dst = exec(&rt, "QUEUE PEEK jobs 10");
+    assert_eq!(payloads(&dst), vec!["first"]);
+}
+
+#[test]
+fn test_queue_move_limit_rules_and_destination_append_atomicity() {
+    let rt = rt();
+
+    exec(&rt, "CREATE QUEUE failed_jobs");
+    exec(&rt, "CREATE QUEUE jobs MAX_SIZE 1");
+    exec(&rt, "QUEUE PUSH failed_jobs 'first'");
+    exec(&rt, "QUEUE PUSH failed_jobs 'second'");
+    exec(&rt, "QUEUE PUSH jobs 'already-full'");
+
+    let err = exec_err(
+        &rt,
+        "QUEUE MOVE FROM failed_jobs TO jobs WHERE attempts >= 0",
+    );
+    assert!(
+        err.contains("LIMIT"),
+        "WHERE move without LIMIT should fail, got {err}"
+    );
+
+    exec(&rt, "CREATE QUEUE failed_jobs_copy");
+    let default_one = exec(&rt, "QUEUE MOVE FROM failed_jobs TO failed_jobs_copy");
+    assert!(
+        default_one.query.contains("QUEUE MOVE"),
+        "default limit move should parse and execute"
+    );
+
+    exec(&rt, "QUEUE PUSH failed_jobs 'third'");
+
+    let err = exec_err(&rt, "QUEUE MOVE FROM failed_jobs TO jobs LIMIT 2");
+    assert!(
+        err.contains("full"),
+        "destination-full move should fail before source removal, got {err}"
+    );
+
+    let src = exec(&rt, "QUEUE PEEK failed_jobs 10");
+    assert_eq!(payloads(&src), vec!["second", "third"]);
+    let dst = exec(&rt, "QUEUE PEEK jobs 10");
+    assert_eq!(payloads(&dst), vec!["already-full"]);
 }
 
 #[test]

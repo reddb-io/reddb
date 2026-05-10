@@ -69,6 +69,8 @@ pub enum QueryExpr {
     AlterQueue(AlterQueueQuery),
     /// DROP QUEUE name
     DropQueue(DropQueueQuery),
+    /// Read-only queue projection: SELECT ... FROM QUEUE name
+    QueueSelect(QueueSelectQuery),
     /// QUEUE subcommand (PUSH, POP, PEEK, LEN, PURGE, GROUP, READ, ACK, NACK)
     QueueCommand(QueueCommand),
     /// KV subcommand (PUT, GET, DELETE)
@@ -2313,6 +2315,15 @@ pub struct DropQueueQuery {
     pub if_exists: bool,
 }
 
+/// SELECT <columns> FROM QUEUE name [WHERE filter] [LIMIT n]
+#[derive(Debug, Clone)]
+pub struct QueueSelectQuery {
+    pub queue: String,
+    pub columns: Vec<String>,
+    pub filter: Option<Filter>,
+    pub limit: Option<u64>,
+}
+
 /// Which end of the queue
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueSide {
@@ -2373,6 +2384,12 @@ pub enum QueueCommand {
         queue: String,
         group: String,
         message_id: String,
+    },
+    Move {
+        source: String,
+        destination: String,
+        filter: Option<Filter>,
+        limit: usize,
     },
 }
 

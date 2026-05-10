@@ -289,6 +289,7 @@ pub(crate) fn runtime_join_table_context(
         | QueryExpr::CreateQueue(_)
         | QueryExpr::AlterQueue(_)
         | QueryExpr::DropQueue(_)
+        | QueryExpr::QueueSelect(_)
         | QueryExpr::QueueCommand(_)
         | QueryExpr::KvCommand(_)
         | QueryExpr::ConfigCommand(_)

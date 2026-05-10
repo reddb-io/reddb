@@ -635,6 +635,7 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
         | QueryExpr::CreateQueue(_)
         | QueryExpr::AlterQueue(_)
         | QueryExpr::DropQueue(_)
+        | QueryExpr::QueueSelect(_)
         | QueryExpr::QueueCommand(_)
         | QueryExpr::KvCommand(_)
         | QueryExpr::ConfigCommand(_)

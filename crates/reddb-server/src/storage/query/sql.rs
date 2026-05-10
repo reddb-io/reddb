@@ -10,7 +10,7 @@ use crate::storage::query::ast::{
     DropTimeSeriesQuery, DropTreeQuery, DropVectorQuery, DropViewQuery, EventsBackfillQuery,
     ExplainAlterQuery, ExplainMigrationQuery, Expr, FieldRef, Filter, ForeignColumnDef, GrantStmt,
     GraphCommand, GraphQuery, HybridQuery, InsertQuery, JoinQuery, KvCommand, MaintenanceCommand,
-    PathQuery, PolicyAction, ProbabilisticCommand, QueryExpr, QueueCommand,
+    PathQuery, PolicyAction, ProbabilisticCommand, QueryExpr, QueueCommand, QueueSelectQuery,
     RefreshMaterializedViewQuery, RevokeStmt, RollbackMigrationQuery, SearchCommand, Span,
     TableQuery, TreeCommand, TruncateQuery, TxnControl, UpdateQuery, VectorQuery,
 };
@@ -42,6 +42,7 @@ pub enum FrontendStatement {
     Hybrid(HybridQuery),
     Search(SearchCommand),
     Ask(AskQuery),
+    QueueSelect(QueueSelectQuery),
     QueueCommand(QueueCommand),
     EventsBackfill(EventsBackfillQuery),
     EventsBackfillStatus { collection: String },
@@ -371,6 +372,7 @@ impl FrontendStatement {
             FrontendStatement::Hybrid(query) => QueryExpr::Hybrid(query),
             FrontendStatement::Search(command) => QueryExpr::SearchCommand(command),
             FrontendStatement::Ask(query) => QueryExpr::Ask(query),
+            FrontendStatement::QueueSelect(query) => QueryExpr::QueueSelect(query),
             FrontendStatement::QueueCommand(command) => QueryExpr::QueueCommand(command),
             FrontendStatement::EventsBackfill(query) => QueryExpr::EventsBackfill(query),
             FrontendStatement::EventsBackfillStatus { collection } => {
@@ -708,8 +710,17 @@ impl<'a> Parser<'a> {
     /// Parse any top-level frontend statement through a single shared surface.
     pub fn parse_frontend_statement(&mut self) -> Result<FrontendStatement, ParseError> {
         match self.peek() {
-            Token::Select
-            | Token::From
+            Token::Select => match self.parse_select_query()? {
+                QueryExpr::Table(query) => Ok(FrontendStatement::Sql(SqlStatement::Query(
+                    SqlQuery::Select(query),
+                ))),
+                QueryExpr::QueueSelect(query) => Ok(FrontendStatement::QueueSelect(query)),
+                other => Err(ParseError::new(
+                    format!("internal: SELECT produced unexpected query kind {other:?}"),
+                    self.position(),
+                )),
+            },
+            Token::From
             | Token::Insert
             | Token::Update
             | Token::Truncate

@@ -33,13 +33,13 @@ Implement the accepted DLQ replay and read-only queue projection design.
 
 ## Acceptance criteria
 
-- [ ] `QUEUE MOVE FROM failed_jobs TO jobs WHERE attempts >= 3 LIMIT 100` parses and executes.
-- [ ] `QUEUE MOVE` requires an explicit `LIMIT` when `WHERE` is present; without `WHERE`, default limit is 1.
-- [ ] Move is all-or-nothing for the selected batch: destination append failure leaves source unchanged.
-- [ ] `SELECT id, payload, attempts, last_error, enqueued_at FROM QUEUE failed_jobs WHERE attempts >= 3 LIMIT 50` returns read-only projection rows.
-- [ ] `SELECT FROM QUEUE` does not consume, lease, ACK, NACK, or modify consumer-group state.
-- [ ] `QUEUE PEEK` remains backward-compatible.
-- [ ] Tests cover parser, runtime move, read-only projection, and failure atomicity.
+- [x] `QUEUE MOVE FROM failed_jobs TO jobs WHERE attempts >= 3 LIMIT 100` parses and executes.
+- [x] `QUEUE MOVE` requires an explicit `LIMIT` when `WHERE` is present; without `WHERE`, default limit is 1.
+- [x] Move is all-or-nothing for the selected batch: destination append failure leaves source unchanged.
+- [x] `SELECT id, payload, attempts, last_error, enqueued_at FROM QUEUE failed_jobs WHERE attempts >= 3 LIMIT 50` returns read-only projection rows.
+- [x] `SELECT FROM QUEUE` does not consume, lease, ACK, NACK, or modify consumer-group state.
+- [x] `QUEUE PEEK` remains backward-compatible.
+- [x] Tests cover parser, runtime move, read-only projection, and failure atomicity.
 
 ## Blocked by
 

@@ -1,8 +1,8 @@
 //! Table query parsing (SELECT ... FROM ...)
 
 use super::super::ast::{
-    BinOp, CompareOp, Expr, FieldRef, Filter, OrderByClause, Projection, QueryExpr, SelectItem,
-    Span, TableQuery, UnaryOp,
+    BinOp, CompareOp, Expr, FieldRef, Filter, OrderByClause, Projection, QueryExpr,
+    QueueSelectQuery, SelectItem, Span, TableQuery, UnaryOp,
 };
 use super::super::lexer::Token;
 use super::error::ParseError;
@@ -128,7 +128,25 @@ impl<'a> Parser<'a> {
         // can return mixed entities (table, document, graph, and vector) by default.
         let has_from = self.consume(&Token::From)?;
         let table = if has_from {
-            if self.consume(&Token::Star)? {
+            if self.consume(&Token::Queue)? {
+                let queue = self.expect_ident()?;
+                let filter = if self.consume(&Token::Where)? {
+                    Some(self.parse_filter()?)
+                } else {
+                    None
+                };
+                let limit = if self.consume(&Token::Limit)? {
+                    Some(self.parse_integer()? as u64)
+                } else {
+                    None
+                };
+                return Ok(QueryExpr::QueueSelect(QueueSelectQuery {
+                    queue,
+                    columns: queue_projection_columns(&columns)?,
+                    filter,
+                    limit,
+                }));
+            } else if self.consume(&Token::Star)? {
                 "*".to_string()
             } else if self.consume(&Token::All)? {
                 "all".to_string()
@@ -312,6 +330,27 @@ fn attach_projection_alias(proj: Projection, alias: Option<String>) -> Projectio
         Projection::Column(column) => Projection::Alias(column, alias),
         other => other,
     }
+}
+
+fn queue_projection_columns(columns: &[Projection]) -> Result<Vec<String>, ParseError> {
+    let mut out = Vec::new();
+    for column in columns {
+        match column {
+            Projection::Column(name) => out.push(name.clone()),
+            Projection::Alias(name, _) => out.push(name.clone()),
+            Projection::Field(FieldRef::TableColumn { table, column }, _) if table.is_empty() => {
+                out.push(column.clone());
+            }
+            Projection::All => return Ok(Vec::new()),
+            other => {
+                return Err(ParseError::new(
+                    format!("unsupported SELECT FROM QUEUE projection {other:?}"),
+                    crate::storage::query::lexer::Position::default(),
+                ));
+            }
+        }
+    }
+    Ok(out)
 }
 
 impl<'a> Parser<'a> {

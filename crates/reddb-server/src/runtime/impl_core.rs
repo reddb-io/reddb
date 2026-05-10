@@ -865,6 +865,7 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
         QueryExpr::CreateQueue(query) => cache_scope_insert(scopes, &query.name),
         QueryExpr::AlterQueue(query) => cache_scope_insert(scopes, &query.name),
         QueryExpr::DropQueue(query) => cache_scope_insert(scopes, &query.name),
+        QueryExpr::QueueSelect(query) => cache_scope_insert(scopes, &query.queue),
         QueryExpr::QueueCommand(query) => match query {
             QueueCommand::Push { queue, .. }
             | QueueCommand::Pop { queue, .. }
@@ -877,6 +878,14 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
             | QueueCommand::Claim { queue, .. }
             | QueueCommand::Ack { queue, .. }
             | QueueCommand::Nack { queue, .. } => cache_scope_insert(scopes, queue),
+            QueueCommand::Move {
+                source,
+                destination,
+                ..
+            } => {
+                cache_scope_insert(scopes, source);
+                cache_scope_insert(scopes, destination);
+            }
         },
         QueryExpr::EventsBackfill(query) => {
             cache_scope_insert(scopes, &query.collection);
@@ -1543,7 +1552,7 @@ pub(super) fn intent_lock_modes_for(
         | QueryExpr::Ask(_)
         | QueryExpr::SearchCommand(_)
         | QueryExpr::GraphCommand(_)
-        | QueryExpr::QueueCommand(_) => Some((IntentShared, IntentShared)),
+        | QueryExpr::QueueSelect(_) => Some((IntentShared, IntentShared)),
 
         // Writes — IX / IX. Non-tabular mutations (vector insert,
         // graph node insert, queue push, timeseries point insert)
@@ -1552,9 +1561,13 @@ pub(super) fn intent_lock_modes_for(
         // read-side arm above. P1.T4 expands only the TableQuery-ish
         // writes; non-tabular kinds inherit when their DML variants
         // land in later phases.
-        QueryExpr::Insert(_) | QueryExpr::Update(_) | QueryExpr::Delete(_) => {
+        QueryExpr::Insert(_)
+        | QueryExpr::Update(_)
+        | QueryExpr::Delete(_)
+        | QueryExpr::QueueCommand(QueueCommand::Move { .. }) => {
             Some((IntentExclusive, IntentExclusive))
         }
+        QueryExpr::QueueCommand(_) => Some((IntentShared, IntentShared)),
 
         // DDL — IX / X. A DDL against collection `c` blocks all
         // other writers + readers on `c` but leaves other collections
@@ -1622,6 +1635,7 @@ fn walk_collections(expr: &QueryExpr, out: &mut Vec<String>) {
         QueryExpr::Insert(i) => out.push(i.table.clone()),
         QueryExpr::Update(u) => out.push(u.table.clone()),
         QueryExpr::Delete(d) => out.push(d.table.clone()),
+        QueryExpr::QueueSelect(q) => out.push(q.queue.clone()),
 
         // DDL — include the target collection so DDL takes
         // `(Collection, X)` and blocks concurrent readers / writers
@@ -1643,6 +1657,14 @@ fn walk_collections(expr: &QueryExpr, out: &mut Vec<String>) {
         QueryExpr::CreateQueue(q) => out.push(q.name.clone()),
         QueryExpr::AlterQueue(q) => out.push(q.name.clone()),
         QueryExpr::DropQueue(q) => out.push(q.name.clone()),
+        QueryExpr::QueueCommand(QueueCommand::Move {
+            source,
+            destination,
+            ..
+        }) => {
+            out.push(source.clone());
+            out.push(destination.clone());
+        }
         QueryExpr::CreatePolicy(q) => out.push(q.table.clone()),
         QueryExpr::CreateView(q) => out.push(q.name.clone()),
         QueryExpr::DropView(q) => out.push(q.name.clone()),
@@ -4592,6 +4614,7 @@ impl RedDBRuntime {
             QueryExpr::CreateQueue(ref q) => self.execute_create_queue(query, q),
             QueryExpr::AlterQueue(ref q) => self.execute_alter_queue(query, q),
             QueryExpr::DropQueue(ref q) => self.execute_drop_queue(query, q),
+            QueryExpr::QueueSelect(ref q) => self.execute_queue_select(query, q),
             QueryExpr::QueueCommand(ref cmd) => self.execute_queue_command(query, cmd),
             QueryExpr::EventsBackfill(ref backfill) => {
                 self.execute_events_backfill(query, backfill)
@@ -7262,6 +7285,7 @@ impl RedDBRuntime {
         // Map QueryExpr → (Action, Resource).
         let (action, resource) = match expr {
             QueryExpr::Table(t) => (Action::Select, Resource::table_from_name(&t.table)),
+            QueryExpr::QueueSelect(q) => (Action::Select, Resource::table_from_name(&q.queue)),
             QueryExpr::Graph(g) => {
                 if auth_store.iam_authorization_enabled() {
                     self.check_graph_property_projection_privilege(

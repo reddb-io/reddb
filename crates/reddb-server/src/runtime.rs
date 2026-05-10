@@ -33,8 +33,9 @@ use crate::storage::query::ast::{
     DropQueueQuery, DropTableQuery, DropTimeSeriesQuery, DropTreeQuery, DropVectorQuery,
     EventsBackfillQuery, ExplainAlterQuery, ExplainFormat, FieldRef, Filter, FusionStrategy,
     GraphCommand, HybridQuery, IndexMethod, InsertEntityType, InsertQuery, JoinQuery, JoinType,
-    OrderByClause, ProbabilisticCommand, Projection, QueryExpr, QueueCommand, QueueSide,
-    SearchCommand, TableQuery, TreeCommand, TruncateQuery, UpdateQuery, VectorQuery, VectorSource,
+    OrderByClause, ProbabilisticCommand, Projection, QueryExpr, QueueCommand, QueueSelectQuery,
+    QueueSide, SearchCommand, TableQuery, TreeCommand, TruncateQuery, UpdateQuery, VectorQuery,
+    VectorSource,
 };
 use crate::storage::query::is_universal_entity_source as is_universal_query_source;
 use crate::storage::query::modes::{detect_mode, parse_multi, QueryMode};

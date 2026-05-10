@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::runtime::audit_log::{AuditAuthSource, AuditEvent, AuditFieldEscaper, Outcome};
 use crate::storage::queue::QueueMode;
 use crate::storage::unified::entity::{QueueMessageData, RowData};
 use crate::storage::unified::{Metadata, MetadataValue, UnifiedStore};
@@ -79,6 +80,7 @@ struct QueueMessageView {
     payload: Value,
     attempts: u32,
     max_attempts: u32,
+    enqueued_at_ns: u64,
 }
 
 impl RedDBRuntime {
@@ -1025,7 +1027,189 @@ impl RedDBRuntime {
                     "update",
                 ))
             }
+            QueueCommand::Move {
+                source,
+                destination,
+                filter,
+                limit,
+            } => self.execute_queue_move(raw_query, source, destination, filter.as_ref(), *limit),
         }
+    }
+
+    pub fn execute_queue_select(
+        &self,
+        raw_query: &str,
+        query: &QueueSelectQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let store = self.inner.db.store();
+        ensure_queue_exists(store.as_ref(), &query.queue)?;
+        let config = load_queue_config(store.as_ref(), &query.queue);
+        let dlq = queue_is_dead_letter_target(store.as_ref(), &query.queue);
+        let columns = if query.columns.is_empty() {
+            queue_projection_default_columns()
+        } else {
+            query.columns.clone()
+        };
+
+        let mut messages =
+            load_queue_message_views_with_runtime(Some(self), store.as_ref(), &query.queue)?;
+        sort_queue_messages(&mut messages, &config, QueueSide::Left);
+
+        let mut result = UnifiedResult::with_columns(columns.clone());
+        for message in messages {
+            if query
+                .filter
+                .as_ref()
+                .is_some_and(|filter| !queue_message_matches_filter(&message, dlq, filter))
+            {
+                continue;
+            }
+            let record = queue_projection_record(&columns, &message, dlq)?;
+            result.push(record);
+            if query
+                .limit
+                .is_some_and(|limit| result.records.len() >= limit as usize)
+            {
+                break;
+            }
+        }
+
+        Ok(RuntimeQueryResult {
+            query: raw_query.to_string(),
+            mode: QueryMode::Sql,
+            statement: "queue_select",
+            engine: "runtime-queue",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+        })
+    }
+
+    fn execute_queue_move(
+        &self,
+        raw_query: &str,
+        source: &str,
+        destination: &str,
+        filter: Option<&Filter>,
+        limit: usize,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        if source == destination {
+            return Err(RedDBError::Query(
+                "QUEUE MOVE source and destination must be different".to_string(),
+            ));
+        }
+        let store = self.inner.db.store();
+        ensure_queue_exists(store.as_ref(), source)?;
+        ensure_queue_exists(store.as_ref(), destination)?;
+        let source_config = load_queue_config(store.as_ref(), source);
+        let destination_config = load_queue_config(store.as_ref(), destination);
+        let source_dlq = queue_is_dead_letter_target(store.as_ref(), source);
+
+        let mut messages =
+            load_queue_message_views_with_runtime(Some(self), store.as_ref(), source)?;
+        sort_queue_messages(&mut messages, &source_config, QueueSide::Left);
+        let selected = messages
+            .into_iter()
+            .filter(|message| {
+                filter
+                    .map(|f| queue_message_matches_filter(message, source_dlq, f))
+                    .unwrap_or(true)
+            })
+            .take(limit)
+            .collect::<Vec<_>>();
+
+        if let Some(max_size) = destination_config.max_size {
+            let current_len =
+                load_queue_message_views_with_runtime(Some(self), store.as_ref(), destination)?
+                    .len();
+            if current_len + selected.len() > max_size {
+                return Err(RedDBError::Query(format!(
+                    "queue '{}' is full (max_size={max_size})",
+                    destination
+                )));
+            }
+        }
+
+        for message in &selected {
+            let lock = queue_message_lock_handle(self, source, message.id);
+            let Some(_guard) = lock.try_lock() else {
+                return Err(RedDBError::Query(format!(
+                    "message '{}' is locked on queue '{}'",
+                    message.id.raw(),
+                    source
+                )));
+            };
+            if queue_message_view_by_id(store.as_ref(), source, message.id)?.is_none() {
+                return Err(RedDBError::Query(format!(
+                    "message '{}' is no longer available on queue '{}'",
+                    message.id.raw(),
+                    source
+                )));
+            }
+        }
+
+        let mut inserted = Vec::new();
+        for message in &selected {
+            match insert_moved_queue_message(
+                store.as_ref(),
+                destination,
+                &destination_config,
+                message,
+            ) {
+                Ok(id) => inserted.push(id),
+                Err(err) => {
+                    for id in inserted {
+                        let _ = store.delete(destination, id);
+                    }
+                    return Err(err);
+                }
+            }
+        }
+
+        for message in &selected {
+            delete_message_with_state(Some(self), store.as_ref(), source, message.id)?;
+        }
+        if !selected.is_empty() {
+            self.invalidate_result_cache();
+        }
+
+        let selected_count = selected.len() as u64;
+        self.audit_log().record_event(
+            AuditEvent::builder("queue/move")
+                .source(AuditAuthSource::System)
+                .outcome(Outcome::Success)
+                .resource(format!("queue:{source}->{destination}"))
+                .fields([
+                    AuditFieldEscaper::field("source", source),
+                    AuditFieldEscaper::field("destination", destination),
+                    AuditFieldEscaper::field("selected", selected_count),
+                    AuditFieldEscaper::field("committed", selected_count),
+                ])
+                .build(),
+        );
+
+        let mut result = UnifiedResult::with_columns(vec![
+            "source".into(),
+            "destination".into(),
+            "selected".into(),
+            "committed".into(),
+        ]);
+        let mut record = UnifiedRecord::new();
+        record.set("source", Value::text(source.to_string()));
+        record.set("destination", Value::text(destination.to_string()));
+        record.set("selected", Value::UnsignedInteger(selected_count));
+        record.set("committed", Value::UnsignedInteger(selected_count));
+        result.push(record);
+
+        Ok(RuntimeQueryResult {
+            query: raw_query.to_string(),
+            mode: QueryMode::Sql,
+            statement: "queue_move",
+            engine: "runtime-queue",
+            result,
+            affected_rows: selected_count,
+            statement_type: "update",
+        })
     }
 }
 
@@ -1466,7 +1650,282 @@ fn queue_message_view_from_entity(entity: UnifiedEntity) -> Option<QueueMessageV
         payload: data.payload,
         attempts: data.attempts,
         max_attempts: data.max_attempts,
+        enqueued_at_ns: data.enqueued_at_ns,
     })
+}
+
+fn insert_moved_queue_message(
+    store: &UnifiedStore,
+    queue: &str,
+    config: &QueueRuntimeConfig,
+    message: &QueueMessageView,
+) -> RedDBResult<EntityId> {
+    let position = next_queue_position(store, queue, QueueSide::Right)?;
+    let entity = UnifiedEntity::new(
+        EntityId::new(0),
+        EntityKind::QueueMessage {
+            queue: queue.to_string(),
+            position,
+        },
+        EntityData::QueueMessage(QueueMessageData {
+            payload: message.payload.clone(),
+            priority: if config.priority {
+                Some(message.priority)
+            } else {
+                None
+            },
+            enqueued_at_ns: message.enqueued_at_ns,
+            attempts: message.attempts,
+            max_attempts: message.max_attempts,
+            acked: false,
+        }),
+    );
+    let id = store
+        .insert_auto(queue, entity)
+        .map_err(|err| RedDBError::Internal(err.to_string()))?;
+    if let Some(ttl_ms) = config.ttl_ms {
+        store
+            .set_metadata(queue, id, queue_message_ttl_metadata(ttl_ms))
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+    }
+    Ok(id)
+}
+
+fn queue_projection_default_columns() -> Vec<String> {
+    [
+        "id",
+        "payload",
+        "priority",
+        "attempts",
+        "last_error",
+        "enqueued_at",
+        "available_at",
+        "dlq",
+        "tenant",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn queue_projection_record(
+    columns: &[String],
+    message: &QueueMessageView,
+    dlq: bool,
+) -> RedDBResult<UnifiedRecord> {
+    let mut record = UnifiedRecord::new();
+    for column in columns {
+        let value = queue_projection_value(message, dlq, column).ok_or_else(|| {
+            RedDBError::Query(format!("unknown queue projection column '{}'", column))
+        })?;
+        record.set(column, value);
+    }
+    Ok(record)
+}
+
+fn queue_projection_value(message: &QueueMessageView, dlq: bool, column: &str) -> Option<Value> {
+    match column {
+        "id" => Some(Value::text(message_id_string(message.id))),
+        "payload" => Some(message.payload.clone()),
+        "priority" => Some(Value::Integer(i64::from(message.priority))),
+        "attempts" => Some(Value::UnsignedInteger(u64::from(message.attempts))),
+        "last_error" => Some(Value::Null),
+        "enqueued_at" => Some(Value::UnsignedInteger(message.enqueued_at_ns)),
+        "available_at" => Some(Value::UnsignedInteger(message.enqueued_at_ns)),
+        "dlq" => Some(Value::Boolean(dlq)),
+        "tenant" => queue_message_tenant(&message.payload).or(Some(Value::Null)),
+        _ => None,
+    }
+}
+
+fn queue_message_tenant(payload: &Value) -> Option<Value> {
+    let Value::Json(bytes) = payload else {
+        return None;
+    };
+    let json: crate::json::Value = crate::json::from_slice(bytes).ok()?;
+    json.get("tenant")
+        .and_then(crate::json::Value::as_str)
+        .map(|tenant| Value::text(tenant.to_string()))
+}
+
+fn queue_is_dead_letter_target(store: &UnifiedStore, queue: &str) -> bool {
+    let Some(manager) = store.get_collection(QUEUE_META_COLLECTION) else {
+        return false;
+    };
+    manager
+        .query_all(|entity| {
+            entity.data.as_row().is_some_and(|row| {
+                row_text(row, "kind").as_deref() == Some("queue_config")
+                    && row_text(row, "dlq").as_deref() == Some(queue)
+            })
+        })
+        .is_empty()
+        == false
+}
+
+fn queue_message_matches_filter(message: &QueueMessageView, dlq: bool, filter: &Filter) -> bool {
+    match filter {
+        Filter::Compare { field, op, value } => queue_filter_field_value(message, dlq, field)
+            .is_some_and(|candidate| queue_compare_values(&candidate, value, *op)),
+        Filter::CompareFields { left, op, right } => {
+            match (
+                queue_filter_field_value(message, dlq, left),
+                queue_filter_field_value(message, dlq, right),
+            ) {
+                (Some(left), Some(right)) => queue_compare_values(&left, &right, *op),
+                _ => false,
+            }
+        }
+        Filter::And(left, right) => {
+            queue_message_matches_filter(message, dlq, left)
+                && queue_message_matches_filter(message, dlq, right)
+        }
+        Filter::Or(left, right) => {
+            queue_message_matches_filter(message, dlq, left)
+                || queue_message_matches_filter(message, dlq, right)
+        }
+        Filter::Not(inner) => !queue_message_matches_filter(message, dlq, inner),
+        Filter::IsNull(field) => queue_filter_field_value(message, dlq, field)
+            .is_none_or(|value| matches!(value, Value::Null)),
+        Filter::IsNotNull(field) => queue_filter_field_value(message, dlq, field)
+            .is_some_and(|value| !matches!(value, Value::Null)),
+        Filter::In { field, values } => {
+            queue_filter_field_value(message, dlq, field).is_some_and(|candidate| {
+                values
+                    .iter()
+                    .any(|value| queue_values_equal(&candidate, value))
+            })
+        }
+        Filter::Between { field, low, high } => queue_filter_field_value(message, dlq, field)
+            .is_some_and(|candidate| {
+                queue_compare_values(&candidate, low, CompareOp::Ge)
+                    && queue_compare_values(&candidate, high, CompareOp::Le)
+            }),
+        Filter::Like { field, pattern } => queue_filter_text(message, dlq, field)
+            .is_some_and(|value| queue_like_matches(&value, pattern)),
+        Filter::StartsWith { field, prefix } => {
+            queue_filter_text(message, dlq, field).is_some_and(|value| value.starts_with(prefix))
+        }
+        Filter::EndsWith { field, suffix } => {
+            queue_filter_text(message, dlq, field).is_some_and(|value| value.ends_with(suffix))
+        }
+        Filter::Contains { field, substring } => {
+            queue_filter_text(message, dlq, field).is_some_and(|value| value.contains(substring))
+        }
+        Filter::CompareExpr { .. } => false,
+    }
+}
+
+fn queue_filter_field_value(
+    message: &QueueMessageView,
+    dlq: bool,
+    field: &FieldRef,
+) -> Option<Value> {
+    match field {
+        FieldRef::TableColumn { table, column } if table.is_empty() => {
+            queue_projection_value(message, dlq, column)
+                .or_else(|| queue_payload_field_value(&message.payload, column))
+        }
+        FieldRef::TableColumn { column, .. } => queue_projection_value(message, dlq, column)
+            .or_else(|| queue_payload_field_value(&message.payload, column)),
+        _ => None,
+    }
+}
+
+fn queue_payload_field_value(payload: &Value, field: &str) -> Option<Value> {
+    let Value::Json(bytes) = payload else {
+        return None;
+    };
+    let json: crate::json::Value = crate::json::from_slice(bytes).ok()?;
+    let value = json.get(field)?;
+    json_value_to_schema_value(value)
+}
+
+fn json_value_to_schema_value(value: &crate::json::Value) -> Option<Value> {
+    if matches!(value, crate::json::Value::Null) {
+        Some(Value::Null)
+    } else if let Some(value) = value.as_bool() {
+        Some(Value::Boolean(value))
+    } else if let Some(value) = value.as_i64() {
+        Some(Value::Integer(value))
+    } else if let Some(value) = value.as_u64() {
+        Some(Value::UnsignedInteger(value))
+    } else if let Some(value) = value.as_f64() {
+        Some(Value::Float(value))
+    } else if let Some(value) = value.as_str() {
+        Some(Value::text(value.to_string()))
+    } else {
+        Some(Value::Json(value.to_string_compact().into_bytes()))
+    }
+}
+
+fn queue_filter_text(message: &QueueMessageView, dlq: bool, field: &FieldRef) -> Option<String> {
+    queue_filter_field_value(message, dlq, field).and_then(|value| match value {
+        Value::Text(value) => Some(value.to_string()),
+        Value::NodeRef(value) | Value::EdgeRef(value) | Value::TableRef(value) => Some(value),
+        Value::Integer(value) => Some(value.to_string()),
+        Value::UnsignedInteger(value) => Some(value.to_string()),
+        Value::Float(value) => Some(value.to_string()),
+        Value::Boolean(value) => Some(value.to_string()),
+        _ => None,
+    })
+}
+
+fn queue_compare_values(left: &Value, right: &Value, op: CompareOp) -> bool {
+    match op {
+        CompareOp::Eq => queue_values_equal(left, right),
+        CompareOp::Ne => !queue_values_equal(left, right),
+        CompareOp::Lt => queue_partial_cmp(left, right).is_some_and(|ord| ord.is_lt()),
+        CompareOp::Le => queue_partial_cmp(left, right).is_some_and(|ord| !ord.is_gt()),
+        CompareOp::Gt => queue_partial_cmp(left, right).is_some_and(|ord| ord.is_gt()),
+        CompareOp::Ge => queue_partial_cmp(left, right).is_some_and(|ord| !ord.is_lt()),
+    }
+}
+
+fn queue_values_equal(left: &Value, right: &Value) -> bool {
+    if let (Some(left), Some(right)) = (queue_value_number(left), queue_value_number(right)) {
+        return (left - right).abs() < f64::EPSILON;
+    }
+    match (left, right) {
+        (Value::Text(left), Value::Text(right)) => left == right,
+        (Value::Boolean(left), Value::Boolean(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+fn queue_partial_cmp(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+    if let (Some(left), Some(right)) = (queue_value_number(left), queue_value_number(right)) {
+        return left.partial_cmp(&right);
+    }
+    match (left, right) {
+        (Value::Text(left), Value::Text(right)) => Some(left.cmp(right)),
+        _ => None,
+    }
+}
+
+fn queue_value_number(value: &Value) -> Option<f64> {
+    match value {
+        Value::Integer(value) => Some(*value as f64),
+        Value::UnsignedInteger(value) => Some(*value as f64),
+        Value::Float(value) => Some(*value),
+        Value::Text(value) => value.parse().ok(),
+        _ => None,
+    }
+}
+
+fn queue_like_matches(value: &str, pattern: &str) -> bool {
+    if pattern == "%" {
+        return true;
+    }
+    let starts_wild = pattern.starts_with('%');
+    let ends_wild = pattern.ends_with('%');
+    let needle = pattern.trim_matches('%');
+    match (starts_wild, ends_wild) {
+        (true, true) => value.contains(needle),
+        (true, false) => value.ends_with(needle),
+        (false, true) => value.starts_with(needle),
+        (false, false) => value == needle,
+    }
 }
 
 fn queue_message_view_by_id(

@@ -3504,6 +3504,45 @@ fn test_parse_queue_control_and_group_command_forms() {
         QueryExpr::QueueCommand(QueueCommand::Purge { queue }) if queue == "tasks"
     ));
 
+    let query = parse("QUEUE MOVE FROM failed_jobs TO jobs WHERE attempts >= 3 LIMIT 100").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::QueueCommand(QueueCommand::Move {
+            source,
+            destination,
+            limit,
+            filter: Some(_),
+        }) if source == "failed_jobs" && destination == "jobs" && limit == 100
+    ));
+
+    let query = parse("QUEUE MOVE FROM failed_jobs TO jobs").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::QueueCommand(QueueCommand::Move {
+            source,
+            destination,
+            limit: 1,
+            filter: None,
+        }) if source == "failed_jobs" && destination == "jobs"
+    ));
+
+    let err = parse("QUEUE MOVE FROM failed_jobs TO jobs WHERE attempts >= 3")
+        .expect_err("filtered queue move requires a limit");
+    assert!(err.to_string().contains("LIMIT"), "{err}");
+
+    let query = parse(
+        "SELECT id, payload, attempts, last_error, enqueued_at FROM QUEUE failed_jobs WHERE attempts >= 3 LIMIT 50",
+    )
+    .unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::QueueSelect(q)
+            if q.queue == "failed_jobs"
+                && q.columns == vec!["id", "payload", "attempts", "last_error", "enqueued_at"]
+                && q.filter.is_some()
+                && q.limit == Some(50)
+    ));
+
     let query = parse("QUEUE GROUP CREATE tasks workers").unwrap();
     assert!(matches!(
         query,
