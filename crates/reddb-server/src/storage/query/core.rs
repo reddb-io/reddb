@@ -2477,6 +2477,8 @@ pub enum KvCommand {
     Watch {
         collection: String,
         key: String,
+        prefix: bool,
+        from_lsn: Option<u64>,
     },
     Delete {
         model: CollectionModel,

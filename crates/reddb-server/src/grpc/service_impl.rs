@@ -28,7 +28,11 @@ async fn kv_watch(
 
     let runtime = self.runtime.clone();
     let collection = req.collection;
-    let key = req.key;
+    let (key, prefix) = req
+        .key
+        .strip_suffix(".*")
+        .map(|prefix| (prefix.to_string(), true))
+        .unwrap_or((req.key, false));
     let mut cursor = if req.from_lsn == 0 {
         runtime.cdc_current_lsn()
     } else {
@@ -37,7 +41,11 @@ async fn kv_watch(
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     tokio::spawn(async move {
         loop {
-            let events = runtime.kv_watch_events_since(&collection, &key, cursor, 256);
+            let events = if prefix {
+                runtime.kv_watch_events_since_prefix(&collection, &key, cursor, 256)
+            } else {
+                runtime.kv_watch_events_since(&collection, &key, cursor, 256)
+            };
             let mut sent = false;
             for event in events {
                 cursor = event.lsn;
@@ -54,6 +62,7 @@ async fn kv_watch(
                     .unwrap_or_else(|_| "null".to_string()),
                     lsn: event.lsn,
                     committed_at: event.committed_at,
+                    dropped_event_count: event.dropped_event_count,
                 };
                 if tx.send(Ok(reply)).await.is_err() {
                     return;

@@ -538,11 +538,22 @@ impl RedDBServer {
             .max(1)
             .min(1000);
 
+        let (watch_key, prefix) = key
+            .strip_suffix(".*")
+            .or_else(|| key.strip_suffix(".%2A"))
+            .or_else(|| key.strip_suffix(".%2a"))
+            .map(|prefix| (prefix, true))
+            .unwrap_or((key, false));
+        let events = if prefix {
+            self.runtime
+                .kv_watch_events_since_prefix(collection, watch_key, since_lsn, limit)
+        } else {
+            self.runtime
+                .kv_watch_events_since(collection, watch_key, since_lsn, limit)
+        };
+
         let mut body = Vec::new();
-        for event in self
-            .runtime
-            .kv_watch_events_since(collection, key, since_lsn, limit)
-        {
+        for event in events {
             body.extend_from_slice(b"event: kv\n");
             body.extend_from_slice(b"data: ");
             body.extend_from_slice(

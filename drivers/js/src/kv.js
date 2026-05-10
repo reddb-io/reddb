@@ -45,6 +45,10 @@ export class KvClient {
       if (line) yield JSON.parse(line.slice(6))
     }
   }
+
+  watchPrefix(prefix, options = {}) {
+    return this.watch(`${prefix}.*`, options)
+  }
 }
 
 function kvPath(collection, key) {

@@ -78,8 +78,7 @@ impl<'a> Parser<'a> {
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("WATCH") => {
                 self.advance()?;
-                let (collection, key) = self.parse_kv_key()?;
-                Ok(QueryExpr::KvCommand(KvCommand::Watch { collection, key }))
+                self.parse_kv_watch()
             }
             Token::Delete => {
                 self.advance()?;
@@ -250,6 +249,45 @@ impl<'a> Parser<'a> {
         } else {
             Ok((KV_DEFAULT_COLLECTION.to_string(), first))
         }
+    }
+
+    pub(crate) fn parse_kv_watch(&mut self) -> Result<QueryExpr, ParseError> {
+        let first = self.expect_ident()?;
+        let (collection, key, prefix) = if self.consume(&Token::Dot)? {
+            if self.consume(&Token::Star)? {
+                (KV_DEFAULT_COLLECTION.to_string(), first, true)
+            } else {
+                let key = self.expect_ident_or_keyword()?;
+                if self.consume(&Token::Dot)? {
+                    self.expect(Token::Star)?;
+                    (first, key, true)
+                } else {
+                    (first, key, false)
+                }
+            }
+        } else {
+            (KV_DEFAULT_COLLECTION.to_string(), first, false)
+        };
+
+        let from_lsn = if self.consume(&Token::From)? || self.consume_ident_ci("FROM")? {
+            if !self.consume_ident_ci("LSN")? {
+                return Err(ParseError::expected(
+                    vec!["LSN"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+            Some(self.parse_float()?.round() as u64)
+        } else {
+            None
+        };
+
+        Ok(QueryExpr::KvCommand(KvCommand::Watch {
+            collection,
+            key,
+            prefix,
+            from_lsn,
+        }))
     }
 
     /// Parse `INCR/DECR key [BY n] [EXPIRE dur]`. `sign` is +1 or -1.

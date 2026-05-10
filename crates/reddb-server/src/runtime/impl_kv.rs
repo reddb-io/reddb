@@ -920,17 +920,41 @@ impl RedDBRuntime {
                     statement_type: "select",
                 })
             }
-            KvCommand::Watch { collection, key } => {
-                let endpoint = format!("/collections/{collection}/kv/{key}/watch");
+            KvCommand::Watch {
+                collection,
+                key,
+                prefix,
+                from_lsn,
+            } => {
+                let watch_key = if *prefix {
+                    format!("{key}.*")
+                } else {
+                    key.clone()
+                };
+                let endpoint = match from_lsn {
+                    Some(lsn) => {
+                        format!("/collections/{collection}/kv/{watch_key}/watch?since_lsn={lsn}")
+                    }
+                    None => format!("/collections/{collection}/kv/{watch_key}/watch"),
+                };
                 let mut result = UnifiedResult::with_columns(vec![
                     "collection".into(),
                     "key".into(),
+                    "prefix".into(),
+                    "from_lsn".into(),
                     "watch_url".into(),
                     "streaming".into(),
                 ]);
                 let mut record = UnifiedRecord::new();
                 record.set("collection", Value::text(collection.clone()));
-                record.set("key", Value::text(key.clone()));
+                record.set("key", Value::text(watch_key));
+                record.set("prefix", Value::Boolean(*prefix));
+                record.set(
+                    "from_lsn",
+                    from_lsn
+                        .map(Value::UnsignedInteger)
+                        .unwrap_or(crate::storage::schema::Value::Null),
+                );
                 record.set("watch_url", Value::text(endpoint));
                 record.set("streaming", Value::Boolean(true));
                 result.push(record);
@@ -1438,7 +1462,7 @@ mod tests {
         assert_eq!(r.stats().kv.watch_streams_active, 0);
 
         {
-            let mut stream = r.kv_watch_subscribe("kv_default", "watched");
+            let mut stream = r.kv_watch_subscribe("kv_default", "watched", None);
             assert_eq!(r.stats().kv.watch_streams_active, 1);
 
             ops.set(
@@ -1692,7 +1716,7 @@ mod tests {
     fn watch_stream_delivers_key_events_in_lsn_order() {
         let r = rt();
         let ops = super::KvAtomicOps::new(&r);
-        let mut stream = r.kv_watch_subscribe("kv_default", "seq");
+        let mut stream = r.kv_watch_subscribe("kv_default", "seq", None);
 
         ops.set(
             "kv_default",
@@ -1742,9 +1766,131 @@ mod tests {
     }
 
     #[test]
+    fn watch_prefix_stream_delivers_matching_events_only() {
+        let r = rt();
+        let ops = super::KvAtomicOps::new(&r);
+        let mut stream = r.kv_watch_subscribe_prefix("kv_default", "acct:", None);
+
+        ops.set(
+            "kv_default",
+            "acct:1",
+            crate::storage::schema::Value::Integer(1),
+            None,
+            false,
+        )
+        .unwrap();
+        ops.set(
+            "kv_default",
+            "session:1",
+            crate::storage::schema::Value::Integer(2),
+            None,
+            false,
+        )
+        .unwrap();
+        ops.set(
+            "kv_default",
+            "acct:2",
+            crate::storage::schema::Value::Integer(3),
+            None,
+            false,
+        )
+        .unwrap();
+
+        let first = stream.poll_next().expect("first prefix event");
+        let second = stream.poll_next().expect("second prefix event");
+        assert_eq!(first.key, "acct:1");
+        assert_eq!(second.key, "acct:2");
+        assert!(stream.poll_next().is_none());
+    }
+
+    #[test]
+    fn watch_stream_resume_from_lsn_delivers_missed_events_without_duplicates() {
+        let r = rt();
+        let ops = super::KvAtomicOps::new(&r);
+        let mut stream = r.kv_watch_subscribe("kv_default", "resume", None);
+
+        let mut last_seen_lsn = 0;
+        for value in 0..5 {
+            ops.set(
+                "kv_default",
+                "resume",
+                crate::storage::schema::Value::Integer(value),
+                None,
+                false,
+            )
+            .unwrap();
+            last_seen_lsn = stream.poll_next().expect("initial event").lsn;
+        }
+        drop(stream);
+
+        for value in 5..55 {
+            ops.set(
+                "kv_default",
+                "resume",
+                crate::storage::schema::Value::Integer(value),
+                None,
+                false,
+            )
+            .unwrap();
+        }
+
+        let mut resumed = r.kv_watch_subscribe("kv_default", "resume", Some(last_seen_lsn));
+        let mut lsns = Vec::new();
+        while let Some(event) = resumed.poll_next() {
+            lsns.push(event.lsn);
+            if lsns.len() == 50 {
+                break;
+            }
+        }
+
+        assert_eq!(lsns.len(), 50);
+        assert!(lsns.iter().all(|lsn| *lsn > last_seen_lsn));
+        assert!(lsns.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(resumed.poll_next().is_none());
+    }
+
+    #[test]
+    fn watch_stream_slow_consumer_drops_oldest_buffered_events() {
+        let r = rt();
+        let ops = super::KvAtomicOps::new(&r);
+        let mut stream = r.kv_watch_subscribe("kv_default", "slow", None);
+
+        for value in 0..10_000 {
+            ops.set(
+                "kv_default",
+                "slow",
+                crate::storage::schema::Value::Integer(value),
+                None,
+                false,
+            )
+            .unwrap();
+        }
+
+        let event = stream.poll_next().expect("tail event after drops");
+        assert!(event.lsn > 1);
+        assert!(event.dropped_event_count > 0);
+        assert_eq!(stream.dropped_event_count(), event.dropped_event_count);
+        assert_eq!(r.stats().kv.watch_drops, event.dropped_event_count);
+    }
+
+    #[test]
+    fn watch_stream_idle_timeout_closes_subscription() {
+        let r = rt();
+        r.execute_query("SET CONFIG red.config.kv.watch.idle_timeout_ms = 1")
+            .unwrap();
+
+        let mut stream = r.kv_watch_subscribe("kv_default", "idle", None);
+        assert_eq!(r.stats().kv.watch_streams_active, 1);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        assert!(stream.poll_next().is_none());
+        assert_eq!(r.stats().kv.watch_streams_active, 0);
+    }
+
+    #[test]
     fn watch_stream_does_not_emit_rolled_back_put() {
         let r = rt();
-        let mut stream = r.kv_watch_subscribe("kv_default", "rollback_key");
+        let mut stream = r.kv_watch_subscribe("kv_default", "rollback_key", None);
 
         r.execute_query("BEGIN").unwrap();
         r.execute_query("KV PUT rollback_key = 'dirty'").unwrap();

@@ -2858,6 +2858,7 @@ impl RedDBRuntime {
                 after,
                 lsn: 0,
                 committed_at: 0,
+                dropped_event_count: 0,
             };
             self.inner
                 .pending_kv_watch_events
@@ -3217,17 +3218,56 @@ impl RedDBRuntime {
             .collect()
     }
 
+    pub fn kv_watch_events_since_prefix(
+        &self,
+        collection: &str,
+        prefix: &str,
+        since_lsn: u64,
+        max_count: usize,
+    ) -> Vec<crate::replication::cdc::KvWatchEvent> {
+        self.inner
+            .cdc
+            .poll(since_lsn, max_count)
+            .into_iter()
+            .filter_map(|event| event.kv)
+            .filter(|event| event.collection == collection && event.key.starts_with(prefix))
+            .collect()
+    }
+
     pub(crate) fn kv_watch_subscribe<'a>(
         &'a self,
         collection: impl Into<String>,
         key: impl Into<String>,
+        from_lsn: Option<u64>,
     ) -> crate::runtime::kv_watch::KvWatchStream<'a> {
         crate::runtime::kv_watch::KvWatchStream::subscribe(
             &self.inner.cdc,
             &self.inner.kv_stats,
             collection,
             key,
+            from_lsn,
+            self.kv_watch_idle_timeout_ms(),
         )
+    }
+
+    pub(crate) fn kv_watch_subscribe_prefix<'a>(
+        &'a self,
+        collection: impl Into<String>,
+        prefix: impl Into<String>,
+        from_lsn: Option<u64>,
+    ) -> crate::runtime::kv_watch::KvWatchStream<'a> {
+        crate::runtime::kv_watch::KvWatchStream::subscribe_prefix(
+            &self.inner.cdc,
+            &self.inner.kv_stats,
+            collection,
+            prefix,
+            from_lsn,
+            self.kv_watch_idle_timeout_ms(),
+        )
+    }
+
+    pub(crate) fn kv_watch_idle_timeout_ms(&self) -> u64 {
+        self.config_u64("red.config.kv.watch.idle_timeout_ms", 60_000)
     }
 
     /// Get backup scheduler status.

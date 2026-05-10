@@ -284,20 +284,42 @@ impl<'a> KvClient<'a> {
     }
 
     pub async fn watch(&self, key: &str) -> Result<Vec<KvWatchEvent>> {
+        self.watch_from_lsn(key, None).await
+    }
+
+    pub async fn watch_from_lsn(
+        &self,
+        key: &str,
+        from_lsn: Option<u64>,
+    ) -> Result<Vec<KvWatchEvent>> {
         #[cfg(not(feature = "http"))]
         {
             let _ = key;
+            let _ = from_lsn;
             let _ = self.collection;
         }
         match self.db {
             #[cfg(feature = "http")]
-            Reddb::Http(c) => c.watch_kv(self.collection, key, None, None).await,
+            Reddb::Http(c) => c.watch_kv(self.collection, key, from_lsn, None).await,
             #[cfg(feature = "embedded")]
             Reddb::Embedded(_) => Err(ClientError::feature_disabled("kv.watch embedded")),
             #[cfg(feature = "grpc")]
             Reddb::Grpc(_) => Err(ClientError::feature_disabled("kv.watch grpc")),
             Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
         }
+    }
+
+    pub async fn watch_prefix(&self, prefix: &str) -> Result<Vec<KvWatchEvent>> {
+        self.watch_prefix_from_lsn(prefix, None).await
+    }
+
+    pub async fn watch_prefix_from_lsn(
+        &self,
+        prefix: &str,
+        from_lsn: Option<u64>,
+    ) -> Result<Vec<KvWatchEvent>> {
+        let key = format!("{prefix}.*");
+        self.watch_from_lsn(&key, from_lsn).await
     }
 }
 

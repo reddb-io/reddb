@@ -30,6 +30,12 @@ class KvClient:
             raise RedDBError("kv.watch requires the HTTP transport")
         return self._t.kv_watch(key, collection=collection, **opts)
 
+    def watch_prefix(self, prefix: str, **opts: Any):
+        collection = opts.pop("collection", self.collection)
+        if not hasattr(self._t, "kv_watch_prefix"):
+            raise RedDBError("kv.watch_prefix requires the HTTP transport")
+        return self._t.kv_watch_prefix(prefix, collection=collection, **opts)
+
     async def put(self, key: str, value: Any, **opts: Any) -> dict[str, Any]:
         collection = opts.pop("collection", self.collection)
         tags = opts.pop("tags", None) or []

@@ -5349,9 +5349,17 @@ fn test_parse_kv_get_dotted_key() {
 #[test]
 fn test_parse_watch_bare_key() {
     let q = parse("WATCH feature_flag").unwrap();
-    if let QueryExpr::KvCommand(KvCommand::Watch { collection, key }) = q {
+    if let QueryExpr::KvCommand(KvCommand::Watch {
+        collection,
+        key,
+        prefix,
+        from_lsn,
+    }) = q
+    {
         assert_eq!(collection, "kv_default");
         assert_eq!(key, "feature_flag");
+        assert!(!prefix);
+        assert_eq!(from_lsn, None);
     } else {
         panic!("expected KvCommand::Watch");
     }
@@ -5360,9 +5368,55 @@ fn test_parse_watch_bare_key() {
 #[test]
 fn test_parse_kv_watch_dotted_key() {
     let q = parse("KV WATCH sessions.abc123").unwrap();
-    if let QueryExpr::KvCommand(KvCommand::Watch { collection, key }) = q {
+    if let QueryExpr::KvCommand(KvCommand::Watch {
+        collection,
+        key,
+        prefix,
+        from_lsn,
+    }) = q
+    {
         assert_eq!(collection, "sessions");
         assert_eq!(key, "abc123");
+        assert!(!prefix);
+        assert_eq!(from_lsn, None);
+    } else {
+        panic!("expected KvCommand::Watch");
+    }
+}
+
+#[test]
+fn test_parse_kv_watch_prefix() {
+    let q = parse("WATCH account.*").unwrap();
+    if let QueryExpr::KvCommand(KvCommand::Watch {
+        collection,
+        key,
+        prefix,
+        from_lsn,
+    }) = q
+    {
+        assert_eq!(collection, "kv_default");
+        assert_eq!(key, "account");
+        assert!(prefix);
+        assert_eq!(from_lsn, None);
+    } else {
+        panic!("expected KvCommand::Watch");
+    }
+}
+
+#[test]
+fn test_parse_kv_watch_collection_prefix_from_lsn() {
+    let q = parse("KV WATCH sessions.account.* FROM LSN 42").unwrap();
+    if let QueryExpr::KvCommand(KvCommand::Watch {
+        collection,
+        key,
+        prefix,
+        from_lsn,
+    }) = q
+    {
+        assert_eq!(collection, "sessions");
+        assert_eq!(key, "account");
+        assert!(prefix);
+        assert_eq!(from_lsn, Some(42));
     } else {
         panic!("expected KvCommand::Watch");
     }
