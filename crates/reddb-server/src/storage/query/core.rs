@@ -2473,6 +2473,21 @@ pub enum KvCommand {
     Unseal {
         collection: String,
         key: String,
+        version: Option<i64>,
+    },
+    Rotate {
+        collection: String,
+        key: String,
+        value: Value,
+        tags: Vec<String>,
+    },
+    History {
+        collection: String,
+        key: String,
+    },
+    Purge {
+        collection: String,
+        key: String,
     },
     Watch {
         collection: String,

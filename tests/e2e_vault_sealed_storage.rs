@@ -102,6 +102,32 @@ fn attach_alice_policy(auth: &AuthStore, id: &str, statements: &str) {
     .unwrap();
 }
 
+fn field<'a>(row: &'a reddb::storage::query::unified::UnifiedRecord, name: &str) -> &'a Value {
+    row.get(name)
+        .unwrap_or_else(|| panic!("missing field {name}: {row:?}"))
+}
+
+fn text(row: &reddb::storage::query::unified::UnifiedRecord, name: &str) -> String {
+    match field(row, name) {
+        Value::Text(value) => value.to_string(),
+        other => panic!("expected text field {name}, got {other:?}"),
+    }
+}
+
+fn integer(row: &reddb::storage::query::unified::UnifiedRecord, name: &str) -> i64 {
+    match field(row, name) {
+        Value::Integer(value) => *value,
+        other => panic!("expected integer field {name}, got {other:?}"),
+    }
+}
+
+fn boolean(row: &reddb::storage::query::unified::UnifiedRecord, name: &str) -> bool {
+    match field(row, name) {
+        Value::Boolean(value) => *value,
+        other => panic!("expected boolean field {name}, got {other:?}"),
+    }
+}
+
 #[test]
 fn vault_put_seals_payload_before_persistence() {
     let path = temp_db_path("vault_sealed_storage");
@@ -301,6 +327,145 @@ fn vault_get_is_metadata_only_and_unseal_is_capability_gated_and_audited() {
         !audit_body.contains(&ciphertext_hex),
         "audit must not include ciphertext: {audit_body}"
     );
+
+    cleanup_related(&path);
+}
+
+#[test]
+fn vault_lifecycle_versions_history_purge_and_historical_unseal_are_audited() {
+    let path = temp_db_path("vault_lifecycle_325");
+    cleanup_related(&path);
+
+    let secret_v1 = "vault_plaintext_probe_325_v1";
+    let secret_v2 = "vault_plaintext_probe_325_v2";
+    let (rt, auth) = open_runtime_with_vault(&path, "vault-pass-325");
+    auth.create_user("alice", "p", Role::Write).unwrap();
+
+    rt.execute_query("CREATE VAULT secrets WITH OWN MASTER KEY")
+        .expect("create vault");
+    as_user("alice", Role::Write, || {
+        rt.execute_query(&format!("VAULT PUT secrets.api_key = '{secret_v1}'"))
+    })
+    .expect("vault put");
+    as_user("alice", Role::Write, || {
+        rt.execute_query(&format!("ROTATE VAULT secrets.api_key = '{secret_v2}'"))
+    })
+    .expect("vault rotate");
+
+    attach_alice_policy(
+        &auth,
+        "vault-lifecycle-current",
+        r#"[
+            {"effect":"allow","actions":["vault:read_metadata"],"resources":["vault:secrets.api_key"]},
+            {"effect":"allow","actions":["vault:unseal"],"resources":["vault:secrets.api_key"]}
+        ]"#,
+    );
+
+    let current = as_user("alice", Role::Write, || {
+        rt.execute_query("VAULT GET secrets.api_key")
+    })
+    .expect("vault metadata");
+    let row = &current.result.records[0];
+    assert_eq!(integer(row, "version"), 2);
+    assert_eq!(text(row, "status"), "sealed");
+    assert!(!boolean(row, "tombstone"));
+    assert_eq!(text(row, "op"), "rotate");
+
+    let unsealed_current = as_user("alice", Role::Write, || {
+        rt.execute_query("UNSEAL VAULT secrets.api_key")
+    })
+    .expect("current unseal");
+    assert_eq!(
+        unsealed_current.result.records[0].get("value"),
+        Some(&Value::text(secret_v2))
+    );
+
+    let history = as_user("alice", Role::Write, || {
+        rt.execute_query("HISTORY VAULT secrets.api_key")
+    })
+    .expect("vault history");
+    assert_eq!(history.result.records.len(), 2);
+    assert!(!history.result.columns.contains(&"value".to_string()));
+    assert_eq!(integer(&history.result.records[0], "version"), 1);
+    assert_eq!(text(&history.result.records[0], "op"), "put");
+    assert_eq!(integer(&history.result.records[1], "version"), 2);
+    assert_eq!(text(&history.result.records[1], "op"), "rotate");
+    let history_debug = format!("{:?}", history.result.records);
+    assert!(!history_debug.contains(secret_v1));
+    assert!(!history_debug.contains(secret_v2));
+    assert!(!history_debug.contains("Secret("));
+
+    let denied_old = as_user("alice", Role::Write, || {
+        rt.execute_query("UNSEAL VAULT secrets.api_key VERSION 1")
+    })
+    .expect_err("historical unseal needs stronger capability");
+    assert!(denied_old.to_string().contains("vault:unseal_history"));
+
+    attach_alice_policy(
+        &auth,
+        "vault-lifecycle-history",
+        r#"[
+            {"effect":"allow","actions":["vault:unseal_history"],"resources":["vault:secrets.api_key"]}
+        ]"#,
+    );
+    let old = as_user("alice", Role::Write, || {
+        rt.execute_query("UNSEAL VAULT secrets.api_key VERSION 1")
+    })
+    .expect("historical unseal");
+    assert_eq!(
+        old.result.records[0].get("value"),
+        Some(&Value::text(secret_v1))
+    );
+
+    as_user("alice", Role::Write, || {
+        rt.execute_query("DELETE VAULT secrets.api_key")
+    })
+    .expect("vault tombstone delete");
+    let deleted = as_user("alice", Role::Write, || {
+        rt.execute_query("VAULT GET secrets.api_key")
+    })
+    .expect("deleted metadata");
+    let row = &deleted.result.records[0];
+    assert_eq!(integer(row, "version"), 3);
+    assert_eq!(text(row, "status"), "deleted");
+    assert!(boolean(row, "tombstone"));
+    assert_eq!(text(row, "op"), "delete");
+
+    let denied_purge = as_user("alice", Role::Write, || {
+        rt.execute_query("PURGE VAULT secrets.api_key")
+    })
+    .expect_err("purge needs stronger capability");
+    let denied_purge = denied_purge.to_string();
+    assert!(denied_purge.contains("vault:purge"), "{denied_purge}");
+
+    attach_alice_policy(
+        &auth,
+        "vault-lifecycle-purge",
+        r#"[
+            {"effect":"allow","actions":["vault:purge"],"resources":["vault:secrets.api_key"]}
+        ]"#,
+    );
+    let purged = as_user("alice", Role::Write, || {
+        rt.execute_query("PURGE VAULT secrets.api_key")
+    })
+    .expect("vault purge");
+    assert_eq!(integer(&purged.result.records[0], "purged"), 3);
+
+    let history_after_purge = as_user("alice", Role::Write, || {
+        rt.execute_query("HISTORY VAULT secrets.api_key")
+    })
+    .expect("history after purge");
+    assert!(history_after_purge.result.records.is_empty());
+
+    assert!(rt.audit_log().wait_idle(std::time::Duration::from_secs(2)));
+    let audit_body = std::fs::read_to_string(rt.audit_log().path()).unwrap_or_default();
+    assert!(audit_body.contains("vault/rotate"));
+    assert!(audit_body.contains("vault/delete"));
+    assert!(audit_body.contains("vault/purge"));
+    assert!(audit_body.contains("\"outcome\":\"denied\""));
+    assert!(audit_body.contains("\"outcome\":\"success\""));
+    assert!(!audit_body.contains(secret_v1));
+    assert!(!audit_body.contains(secret_v2));
 
     cleanup_related(&path);
 }

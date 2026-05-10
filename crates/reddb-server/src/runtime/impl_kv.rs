@@ -33,6 +33,9 @@ struct VaultEntry {
     created_at: u64,
     updated_at: u64,
     sequence_id: u64,
+    version: i64,
+    tombstone: bool,
+    op: String,
 }
 
 /// Atomic KV operations interface — the seam that transports and drivers depend on.
@@ -139,6 +142,16 @@ impl<'a> KvAtomicOps<'a> {
         mut metadata: Vec<(String, MetadataValue)>,
     ) -> RedDBResult<(bool, crate::storage::EntityId)> {
         self.ensure_keyed_collection(model, collection)?;
+
+        if model == crate::catalog::CollectionModel::Vault {
+            let latest = self.get_vault_entry(collection, key)?;
+            let was_present = latest.as_ref().is_some_and(|entry| !entry.tombstone);
+            if if_not_exists && was_present {
+                return Ok((false, latest.expect("checked present").id));
+            }
+            let entry = self.append_vault_version(collection, key, value, "put", false, tags)?;
+            return Ok((!was_present, entry.id));
+        }
 
         let existing = self.get_entry(model, collection, key)?;
         let was_present = existing.is_some();
@@ -530,12 +543,32 @@ impl<'a> KvAtomicOps<'a> {
     }
 
     fn get_vault_entry(&self, collection: &str, key: &str) -> RedDBResult<Option<VaultEntry>> {
+        Ok(self
+            .vault_versions(collection, key)?
+            .into_iter()
+            .max_by_key(|entry| entry.version))
+    }
+
+    fn get_vault_entry_version(
+        &self,
+        collection: &str,
+        key: &str,
+        version: i64,
+    ) -> RedDBResult<Option<VaultEntry>> {
+        Ok(self
+            .vault_versions(collection, key)?
+            .into_iter()
+            .find(|entry| entry.version == version))
+    }
+
+    fn vault_versions(&self, collection: &str, key: &str) -> RedDBResult<Vec<VaultEntry>> {
         self.ensure_declared_model(crate::catalog::CollectionModel::Vault, collection)?;
         let store = self.runtime.inner.db.store();
         let Some(manager) = store.get_collection(collection) else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
         let entities = manager.query_all(|_| true);
+        let mut versions = Vec::new();
         for entity in entities {
             if let crate::storage::EntityData::Row(ref row) = entity.data {
                 if let Some(crate::storage::schema::Value::Text(ref k)) = row.get_field("key") {
@@ -545,19 +578,113 @@ impl<'a> KvAtomicOps<'a> {
                             .cloned()
                             .unwrap_or(crate::storage::schema::Value::Null);
                         let metadata = manager.get_metadata(entity.id).unwrap_or_default();
-                        return Ok(Some(VaultEntry {
+                        versions.push(VaultEntry {
                             id: entity.id,
                             value,
                             metadata,
                             created_at: entity.created_at,
                             updated_at: entity.updated_at,
                             sequence_id: entity.sequence_id,
-                        }));
+                            version: vault_i64(row.get_field("version"))
+                                .unwrap_or(entity.sequence_id as i64),
+                            tombstone: matches!(
+                                row.get_field("tombstone"),
+                                Some(crate::storage::schema::Value::Boolean(true))
+                            ),
+                            op: match row.get_field("op") {
+                                Some(crate::storage::schema::Value::Text(value)) => {
+                                    value.to_string()
+                                }
+                                _ => "put".to_string(),
+                            },
+                        });
                     }
                 }
             }
         }
-        Ok(None)
+        Ok(versions)
+    }
+
+    fn append_vault_version(
+        &self,
+        collection: &str,
+        key: &str,
+        value: crate::storage::schema::Value,
+        op: &str,
+        tombstone: bool,
+        _tags: &[String],
+    ) -> RedDBResult<VaultEntry> {
+        self.ensure_declared_model(crate::catalog::CollectionModel::Vault, collection)?;
+        let version = self
+            .get_vault_entry(collection, key)?
+            .map(|entry| entry.version)
+            .unwrap_or(0)
+            + 1;
+        let stored_value = if tombstone {
+            crate::storage::schema::Value::Null
+        } else {
+            self.runtime.seal_vault_value(collection, value)?
+        };
+        let now = current_unix_ms() as i64;
+        let fields = vec![
+            (
+                "key".to_string(),
+                crate::storage::schema::Value::text(key.to_string()),
+            ),
+            ("value".to_string(), stored_value),
+            (
+                "version".to_string(),
+                crate::storage::schema::Value::Integer(version),
+            ),
+            (
+                "tombstone".to_string(),
+                crate::storage::schema::Value::Boolean(tombstone),
+            ),
+            (
+                "op".to_string(),
+                crate::storage::schema::Value::text(op.to_string()),
+            ),
+            (
+                "created_at_ms".to_string(),
+                crate::storage::schema::Value::Integer(now),
+            ),
+        ];
+        let mut row = crate::storage::RowData::new(Vec::new());
+        row.named = Some(fields.into_iter().collect());
+        let entity = crate::storage::UnifiedEntity::new(
+            crate::storage::EntityId::new(0),
+            crate::storage::EntityKind::TableRow {
+                table: std::sync::Arc::from(collection),
+                row_id: 0,
+            },
+            crate::storage::EntityData::Row(row),
+        );
+        let id = self
+            .runtime
+            .inner
+            .db
+            .store()
+            .insert(collection, entity)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.get_vault_entry_version(collection, key, version)?
+            .ok_or_else(|| RedDBError::Internal(format!("vault version {id} was not readable")))
+    }
+
+    fn purge_vault_versions(&self, collection: &str, key: &str) -> RedDBResult<usize> {
+        self.ensure_declared_model(crate::catalog::CollectionModel::Vault, collection)?;
+        let versions = self.vault_versions(collection, key)?;
+        let store = self.runtime.inner.db.store();
+        let mut purged = 0usize;
+        for entry in versions {
+            if store
+                .delete(collection, entry.id)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?
+            {
+                store.context_index().remove_entity(entry.id);
+                purged += 1;
+            }
+        }
+        Ok(purged)
     }
 
     fn ensure_declared_model(
@@ -777,6 +904,59 @@ impl RedDBRuntime {
         self.audit_log().record_event(builder.build());
     }
 
+    fn audit_vault_lifecycle(
+        &self,
+        operation: &str,
+        collection: &str,
+        key: &str,
+        outcome: crate::runtime::audit_log::Outcome,
+        reason: &str,
+        entry: Option<&VaultEntry>,
+    ) {
+        let actor = Self::current_vault_actor();
+        let request_id = Self::vault_request_id();
+        let mut builder = crate::runtime::audit_log::AuditEvent::builder(format!(
+            "vault/{operation}"
+        ))
+        .principal(actor.clone())
+        .source(crate::runtime::audit_log::AuditAuthSource::Password)
+        .resource(format!(
+            "vault:{}",
+            Self::vault_target_resource(collection, key)
+        ))
+        .outcome(outcome)
+        .correlation_id(request_id.clone())
+        .fields([
+            crate::runtime::audit_log::AuditFieldEscaper::field("actor", actor),
+            crate::runtime::audit_log::AuditFieldEscaper::field("collection", collection),
+            crate::runtime::audit_log::AuditFieldEscaper::field("key", key),
+            crate::runtime::audit_log::AuditFieldEscaper::field(
+                "target",
+                Self::vault_target_resource(collection, key),
+            ),
+            crate::runtime::audit_log::AuditFieldEscaper::field("reason", reason),
+            crate::runtime::audit_log::AuditFieldEscaper::field("request_id", request_id),
+            crate::runtime::audit_log::AuditFieldEscaper::field(
+                "connection_id",
+                current_connection_id(),
+            ),
+        ]);
+        if let Some(tenant) = current_tenant() {
+            builder = builder.tenant(tenant);
+        }
+        if let Some(entry) = entry {
+            builder = builder.fields([
+                crate::runtime::audit_log::AuditFieldEscaper::field("entity_id", entry.id.raw()),
+                crate::runtime::audit_log::AuditFieldEscaper::field("version", entry.version),
+                crate::runtime::audit_log::AuditFieldEscaper::field(
+                    "sequence_id",
+                    entry.sequence_id,
+                ),
+            ]);
+        }
+        self.audit_log().record_event(builder.build());
+    }
+
     /// Dispatch a `KV PUT / GET / DELETE` command.
     pub fn execute_kv_command(
         &self,
@@ -866,6 +1046,103 @@ impl RedDBRuntime {
                     engine: "kv",
                     result,
                     affected_rows: invalidated as u64,
+                    statement_type: "delete",
+                })
+            }
+
+            KvCommand::Rotate {
+                collection,
+                key,
+                value,
+                tags,
+            } => {
+                self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+                let entry = ops.append_vault_version(
+                    collection,
+                    key,
+                    value.clone(),
+                    "rotate",
+                    false,
+                    tags,
+                )?;
+                self.audit_vault_lifecycle(
+                    "rotate",
+                    collection,
+                    key,
+                    crate::runtime::audit_log::Outcome::Success,
+                    "ok",
+                    Some(&entry),
+                );
+                Ok(vault_write_result(
+                    raw_query,
+                    "vault_rotate",
+                    "update",
+                    collection,
+                    key,
+                    &entry,
+                    1,
+                ))
+            }
+
+            KvCommand::History { collection, key } => {
+                self.check_vault_capability("vault:read_metadata", collection, key)
+                    .map_err(RedDBError::Query)?;
+                let mut versions = ops.vault_versions(collection, key)?;
+                versions.sort_by_key(|entry| entry.version);
+                let result = vault_history_result(collection, key, &versions);
+                Ok(RuntimeQueryResult {
+                    query: raw_query.to_string(),
+                    mode: crate::storage::query::modes::QueryMode::Sql,
+                    statement: "vault_history",
+                    engine: "vault",
+                    result,
+                    affected_rows: 0,
+                    statement_type: "select",
+                })
+            }
+
+            KvCommand::Purge { collection, key } => {
+                let entry = ops.get_vault_entry(collection, key)?;
+                if let Err(reason) = self.check_vault_capability("vault:purge", collection, key) {
+                    self.audit_vault_lifecycle(
+                        "purge",
+                        collection,
+                        key,
+                        crate::runtime::audit_log::Outcome::Denied,
+                        &reason,
+                        entry.as_ref(),
+                    );
+                    return Err(RedDBError::Query(reason));
+                }
+                self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+                let purged = ops.purge_vault_versions(collection, key)?;
+                self.audit_vault_lifecycle(
+                    "purge",
+                    collection,
+                    key,
+                    crate::runtime::audit_log::Outcome::Success,
+                    "ok",
+                    entry.as_ref(),
+                );
+                let mut result = UnifiedResult::with_columns(vec![
+                    "ok".into(),
+                    "collection".into(),
+                    "key".into(),
+                    "purged".into(),
+                ]);
+                let mut record = UnifiedRecord::new();
+                record.set("ok", Value::Boolean(true));
+                record.set("collection", Value::text(collection.clone()));
+                record.set("key", Value::text(key.clone()));
+                record.set("purged", Value::Integer(purged as i64));
+                result.push(record);
+                Ok(RuntimeQueryResult {
+                    query: raw_query.to_string(),
+                    mode: crate::storage::query::modes::QueryMode::Sql,
+                    statement: "vault_purge",
+                    engine: "vault",
+                    result,
+                    affected_rows: purged as u64,
                     statement_type: "delete",
                 })
             }
@@ -970,9 +1247,24 @@ impl RedDBRuntime {
                 })
             }
 
-            KvCommand::Unseal { collection, key } => {
-                let entry = ops.get_vault_entry(collection, key)?;
-                if let Err(reason) = self.check_vault_capability("vault:unseal", collection, key) {
+            KvCommand::Unseal {
+                collection,
+                key,
+                version,
+            } => {
+                let latest = ops.get_vault_entry(collection, key)?;
+                let entry = match version {
+                    Some(version) => ops.get_vault_entry_version(collection, key, *version)?,
+                    None => latest.clone(),
+                };
+                let action = match (version, latest.as_ref()) {
+                    (Some(requested), Some(latest)) if *requested == latest.version => {
+                        "vault:unseal"
+                    }
+                    (Some(_), _) => "vault:unseal_history",
+                    _ => "vault:unseal",
+                };
+                if let Err(reason) = self.check_vault_capability(action, collection, key) {
                     self.audit_vault_unseal(
                         collection,
                         key,
@@ -996,6 +1288,20 @@ impl RedDBRuntime {
                         collection, key
                     )));
                 };
+                if entry.tombstone {
+                    let reason = "deleted";
+                    self.audit_vault_unseal(
+                        collection,
+                        key,
+                        crate::runtime::audit_log::Outcome::Denied,
+                        reason,
+                        Some(&entry),
+                    );
+                    return Err(RedDBError::NotFound(format!(
+                        "vault secret '{}.{}' is deleted",
+                        collection, key
+                    )));
+                }
                 match self.unseal_vault_value(collection, &entry.value) {
                     Ok(value) => {
                         self.audit_vault_unseal(
@@ -1124,9 +1430,31 @@ impl RedDBRuntime {
                 key,
             } => {
                 if *model == crate::catalog::CollectionModel::Vault {
-                    return Err(RedDBError::InvalidOperation(
-                        "VAULT DELETE is not supported before rotate/history/purge lands"
-                            .to_string(),
+                    self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+                    let entry = ops.append_vault_version(
+                        collection,
+                        key,
+                        Value::Null,
+                        "delete",
+                        true,
+                        &[],
+                    )?;
+                    self.audit_vault_lifecycle(
+                        "delete",
+                        collection,
+                        key,
+                        crate::runtime::audit_log::Outcome::Success,
+                        "ok",
+                        Some(&entry),
+                    );
+                    return Ok(vault_write_result(
+                        raw_query,
+                        "vault_delete",
+                        "delete",
+                        collection,
+                        key,
+                        &entry,
+                        1,
                     ));
                 }
                 self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
@@ -1217,6 +1545,85 @@ fn ttl_metadata(ttl_ms: Option<u64>) -> Option<Metadata> {
     ))
 }
 
+fn vault_write_result(
+    raw_query: &str,
+    statement: &'static str,
+    statement_type: &'static str,
+    collection: &str,
+    key: &str,
+    entry: &VaultEntry,
+    affected_rows: u64,
+) -> RuntimeQueryResult {
+    let mut result = UnifiedResult::with_columns(vec![
+        "ok".into(),
+        "collection".into(),
+        "key".into(),
+        "version".into(),
+        "fingerprint".into(),
+        "tombstone".into(),
+        "op".into(),
+        "id".into(),
+    ]);
+    let mut record = UnifiedRecord::new();
+    record.set("ok", Value::Boolean(true));
+    record.set("collection", Value::text(collection.to_string()));
+    record.set("key", Value::text(key.to_string()));
+    record.set("version", Value::Integer(entry.version));
+    if entry.tombstone {
+        record.set("fingerprint", Value::Null);
+    } else {
+        record.set("fingerprint", Value::text(vault_fingerprint(&entry.value)));
+    }
+    record.set("tombstone", Value::Boolean(entry.tombstone));
+    record.set("op", Value::text(entry.op.clone()));
+    record.set("id", Value::Integer(entry.id.raw() as i64));
+    result.push(record);
+    RuntimeQueryResult {
+        query: raw_query.to_string(),
+        mode: crate::storage::query::modes::QueryMode::Sql,
+        statement,
+        engine: "vault",
+        result,
+        affected_rows,
+        statement_type,
+    }
+}
+
+fn vault_history_result(collection: &str, key: &str, versions: &[VaultEntry]) -> UnifiedResult {
+    let mut result = UnifiedResult::with_columns(vec![
+        "collection".into(),
+        "key".into(),
+        "version".into(),
+        "fingerprint".into(),
+        "tags".into(),
+        "created_at".into(),
+        "updated_at".into(),
+        "status".into(),
+        "tombstone".into(),
+        "op".into(),
+    ]);
+    for entry in versions {
+        let mut record = UnifiedRecord::new();
+        record.set("collection", Value::text(collection.to_string()));
+        record.set("key", Value::text(key.to_string()));
+        record.set("version", Value::Integer(entry.version));
+        if entry.tombstone {
+            record.set("fingerprint", Value::Null);
+            record.set("status", Value::text("deleted"));
+        } else {
+            record.set("fingerprint", Value::text(vault_fingerprint(&entry.value)));
+            record.set("status", Value::text("sealed"));
+        }
+        record.set("tags", vault_tags_value(&entry.metadata));
+        record.set("created_at", Value::TimestampMs(entry.created_at as i64));
+        record.set("updated_at", Value::TimestampMs(entry.updated_at as i64));
+        record.set("tombstone", Value::Boolean(entry.tombstone));
+        record.set("op", Value::text(entry.op.clone()));
+        result.push(record);
+    }
+    result
+}
+
 fn vault_metadata_result(
     collection: &str,
     key: &str,
@@ -1233,26 +1640,36 @@ fn vault_metadata_result(
         "updated_at".into(),
         "value".into(),
         "status".into(),
+        "tombstone".into(),
+        "op".into(),
     ]);
     let mut record = UnifiedRecord::new();
     record.set("collection", Value::text(collection.to_string()));
     record.set("key", Value::text(key.to_string()));
     match entry {
         Some(entry) => {
-            record.set("version", Value::Integer(entry.sequence_id as i64));
-            record.set("fingerprint", Value::text(vault_fingerprint(&entry.value)));
+            record.set("version", Value::Integer(entry.version));
+            if entry.tombstone {
+                record.set("fingerprint", Value::Null);
+            } else {
+                record.set("fingerprint", Value::text(vault_fingerprint(&entry.value)));
+            }
             record.set("tags", vault_tags_value(&entry.metadata));
             record.set("created_at", Value::TimestampMs(entry.created_at as i64));
             record.set("updated_at", Value::TimestampMs(entry.updated_at as i64));
             record.set("value", Value::text("***"));
             record.set(
                 "status",
-                Value::text(if key_available {
+                Value::text(if entry.tombstone {
+                    "deleted"
+                } else if key_available {
                     "sealed"
                 } else {
                     "sealed_unavailable"
                 }),
             );
+            record.set("tombstone", Value::Boolean(entry.tombstone));
+            record.set("op", Value::text(entry.op.clone()));
         }
         None => {
             record.set("version", Value::Null);
@@ -1262,6 +1679,8 @@ fn vault_metadata_result(
             record.set("updated_at", Value::Null);
             record.set("value", Value::text(""));
             record.set("status", Value::text("missing"));
+            record.set("tombstone", Value::Boolean(false));
+            record.set("op", Value::Null);
         }
     }
     result.push(record);
@@ -1331,6 +1750,16 @@ fn kv_value_from_entity(entity: &crate::storage::UnifiedEntity) -> Option<Value>
     None
 }
 
+fn vault_i64(value: Option<&Value>) -> Option<i64> {
+    match value {
+        Some(Value::Integer(value)) => Some(*value),
+        Some(Value::UnsignedInteger(value)) => i64::try_from(*value).ok(),
+        Some(Value::Timestamp(value)) => Some(*value),
+        Some(Value::Duration(value)) => Some(*value),
+        _ => None,
+    }
+}
+
 fn kv_collection_contract(name: &str) -> crate::physical::CollectionContract {
     let now = current_unix_ms();
     crate::physical::CollectionContract {
@@ -1385,6 +1814,7 @@ mod tests {
         let ops = super::KvAtomicOps::new(&r);
 
         ops.set(
+            CollectionModel::Kv,
             "kv_default",
             "profile",
             crate::storage::schema::Value::text("alice"),
@@ -1392,10 +1822,14 @@ mod tests {
             false,
         )
         .unwrap();
-        ops.get("kv_default", "profile").unwrap();
-        ops.delete("kv_default", "profile").unwrap();
-        ops.incr("kv_default", "hits", 1, None).unwrap();
+        ops.get(CollectionModel::Kv, "kv_default", "profile")
+            .unwrap();
+        ops.delete(CollectionModel::Kv, "kv_default", "profile")
+            .unwrap();
+        ops.incr(CollectionModel::Kv, "kv_default", "hits", 1, None)
+            .unwrap();
         ops.cas(
+            CollectionModel::Kv,
             "kv_default",
             "profile",
             None,
@@ -1404,6 +1838,7 @@ mod tests {
         )
         .unwrap();
         ops.cas(
+            CollectionModel::Kv,
             "kv_default",
             "profile",
             Some(&crate::storage::schema::Value::text("different")),
@@ -1466,6 +1901,7 @@ mod tests {
             assert_eq!(r.stats().kv.watch_streams_active, 1);
 
             ops.set(
+                CollectionModel::Kv,
                 "kv_default",
                 "watched",
                 crate::storage::schema::Value::Integer(1),
@@ -1719,6 +2155,7 @@ mod tests {
         let mut stream = r.kv_watch_subscribe("kv_default", "seq", None);
 
         ops.set(
+            CollectionModel::Kv,
             "kv_default",
             "seq",
             crate::storage::schema::Value::Integer(1),
@@ -1726,9 +2163,12 @@ mod tests {
             false,
         )
         .unwrap();
-        ops.incr("kv_default", "seq", 1, None).unwrap();
-        ops.delete("kv_default", "seq").unwrap();
+        ops.incr(CollectionModel::Kv, "kv_default", "seq", 1, None)
+            .unwrap();
+        ops.delete(CollectionModel::Kv, "kv_default", "seq")
+            .unwrap();
         ops.set(
+            CollectionModel::Kv,
             "kv_default",
             "seq",
             crate::storage::schema::Value::Integer(9),
@@ -1772,6 +2212,7 @@ mod tests {
         let mut stream = r.kv_watch_subscribe_prefix("kv_default", "acct:", None);
 
         ops.set(
+            CollectionModel::Kv,
             "kv_default",
             "acct:1",
             crate::storage::schema::Value::Integer(1),
@@ -1780,6 +2221,7 @@ mod tests {
         )
         .unwrap();
         ops.set(
+            CollectionModel::Kv,
             "kv_default",
             "session:1",
             crate::storage::schema::Value::Integer(2),
@@ -1788,6 +2230,7 @@ mod tests {
         )
         .unwrap();
         ops.set(
+            CollectionModel::Kv,
             "kv_default",
             "acct:2",
             crate::storage::schema::Value::Integer(3),
@@ -1812,6 +2255,7 @@ mod tests {
         let mut last_seen_lsn = 0;
         for value in 0..5 {
             ops.set(
+                CollectionModel::Kv,
                 "kv_default",
                 "resume",
                 crate::storage::schema::Value::Integer(value),
@@ -1825,6 +2269,7 @@ mod tests {
 
         for value in 5..55 {
             ops.set(
+                CollectionModel::Kv,
                 "kv_default",
                 "resume",
                 crate::storage::schema::Value::Integer(value),
@@ -1857,6 +2302,7 @@ mod tests {
 
         for value in 0..10_000 {
             ops.set(
+                CollectionModel::Kv,
                 "kv_default",
                 "slow",
                 crate::storage::schema::Value::Integer(value),

@@ -902,6 +902,9 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
                 | KvCommand::InvalidateTags { collection, .. }
                 | KvCommand::Get { collection, .. }
                 | KvCommand::Unseal { collection, .. }
+                | KvCommand::Rotate { collection, .. }
+                | KvCommand::History { collection, .. }
+                | KvCommand::Purge { collection, .. }
                 | KvCommand::Watch { collection, .. }
                 | KvCommand::Delete { collection, .. }
                 | KvCommand::Incr { collection, .. }
@@ -5597,6 +5600,11 @@ impl RedDBRuntime {
                     | KvCommand::Delete {
                         collection, model, ..
                     } => (collection.as_str(), *model),
+                    KvCommand::Rotate { collection, .. }
+                    | KvCommand::History { collection, .. }
+                    | KvCommand::Purge { collection, .. } => {
+                        (collection.as_str(), CollectionModel::Vault)
+                    }
                     KvCommand::InvalidateTags { collection, .. } => {
                         (collection.as_str(), CollectionModel::Kv)
                     }

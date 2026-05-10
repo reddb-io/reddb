@@ -93,6 +93,8 @@ const ACTION_ALLOWLIST: &[&str] = &[
     "admin:lease-promote",
     "vault:read_metadata",
     "vault:unseal",
+    "vault:unseal_history",
+    "vault:purge",
     "*",
     "admin:*",
     "vault:*",
