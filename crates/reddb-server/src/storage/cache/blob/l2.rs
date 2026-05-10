@@ -5,12 +5,12 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
+use super::cache::{BlobCacheKey, CacheError};
 use super::config::{DEFAULT_BLOB_SYNOPSIS_CAPACITY, DEFAULT_BLOB_SYNOPSIS_FPR};
 use super::entry::{
     decode_v2_frame, encode_l2_key, encode_v2_frame, Entry, L2Control, L2Record, L2_BLOB_MAGIC,
     L2_FORMAT_V1_RAW, L2_FORMAT_V2_FRAMED,
 };
-use super::{BlobCacheKey, CacheError};
 use crate::storage::cache::compressor::{Compressed, L2BlobCompressor};
 use crate::storage::cache::extended_ttl::ExtendedTtlPolicy;
 

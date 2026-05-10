@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use super::cache::{BlobCacheHit, BlobCacheKey};
 use super::entry::Entry;
-use super::{BlobCacheHit, BlobCacheKey};
 use crate::storage::cache::extended_ttl::{EffectiveExpiry, ExpiryDecision, ExtendedTtlPolicy};
 
 /// Blob Cache L1 shard.
@@ -58,7 +58,7 @@ impl Shard {
         // Extended path: route through `EffectiveExpiry::compute` for
         // idle / stale-while-revalidate decisions.
         #[cfg(test)]
-        super::EFFECTIVE_EXPIRY_COMPUTE_CALLS.with(|c| c.set(c.get() + 1));
+        super::cache::EFFECTIVE_EXPIRY_COMPUTE_CALLS.with(|c| c.set(c.get() + 1));
         let decision = EffectiveExpiry::compute(
             entry.expires_at_unix_ms,
             now_ms,

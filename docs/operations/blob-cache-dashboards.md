@@ -12,8 +12,8 @@ full Grafana export. Readers are expected to paste the queries into
 their own dashboards and tune thresholds against their own baselines.
 
 The metric source of truth is
-[`crates/reddb-server/src/storage/cache/blob.rs`](../../crates/reddb-server/src/storage/cache/blob.rs)
-(constants L25-29, `BlobCacheStats` struct L274-292). When this doc and
+[`crates/reddb-server/src/storage/cache/blob/cache.rs`](../../crates/reddb-server/src/storage/cache/blob/cache.rs)
+(`BlobCacheStats` and related metric constants re-exported from `blob/mod.rs`). When this doc and
 the source disagree, the source wins — file an issue and update this
 page.
 
@@ -31,18 +31,18 @@ only high-cardinality dimension and is bounded (see §5).
 
 | Metric | Type | Labels | Unit | Source |
 |---|---|---|---|---|
-| `cache_blob_l1_bytes_in_use` | gauge | `namespace` | bytes | `METRIC_CACHE_BLOB_L1_BYTES_IN_USE` (blob.rs:25) |
-| `cache_blob_l1_bytes_max` | gauge | — | bytes | `BlobCacheStats.l1_bytes_max` (blob.rs:284) |
-| `cache_blob_l1_hits_total` | counter | `namespace` | events | `BlobCacheStats.hits` (blob.rs:274) |
-| `cache_blob_l1_misses_total` | counter | `namespace` | events | `BlobCacheStats.misses` (blob.rs:275) |
-| `cache_blob_l1_evictions_total` | counter | `namespace` | events | `BlobCacheStats.evictions` (blob.rs:277) |
-| `cache_blob_l1_entries` | gauge | `namespace` | entries | `BlobCacheStats.entries` (blob.rs:282) |
-| `cache_blob_namespaces` | gauge | — | namespaces | `BlobCacheStats.namespaces` (blob.rs:290) |
-| `cache_blob_namespaces_max` | gauge | — | namespaces | `BlobCacheStats.max_namespaces` (blob.rs:291) |
-| `reddb_cache_blob_l2_bytes_in_use` | gauge | `namespace` | bytes | `METRIC_CACHE_BLOB_L2_BYTES_IN_USE` (blob.rs:27) |
-| `reddb_cache_blob_l2_bytes_max` | gauge | — | bytes | `BlobCacheStats.l2_bytes_max` (blob.rs:286) |
-| `reddb_cache_blob_l2_full_rejections_total` | counter | `namespace` | events | `METRIC_CACHE_BLOB_L2_FULL_REJECTIONS_TOTAL` (blob.rs:28) |
-| `cache_version_mismatch_total` | counter | `namespace` | events | `METRIC_CACHE_VERSION_MISMATCH_TOTAL` (blob.rs:26) |
+| `cache_blob_l1_bytes_in_use` | gauge | `namespace` | bytes | `METRIC_CACHE_BLOB_L1_BYTES_IN_USE` |
+| `cache_blob_l1_bytes_max` | gauge | — | bytes | `BlobCacheStats.l1_bytes_max` |
+| `cache_blob_l1_hits_total` | counter | `namespace` | events | `BlobCacheStats.hits` |
+| `cache_blob_l1_misses_total` | counter | `namespace` | events | `BlobCacheStats.misses` |
+| `cache_blob_l1_evictions_total` | counter | `namespace` | events | `BlobCacheStats.evictions` |
+| `cache_blob_l1_entries` | gauge | `namespace` | entries | `BlobCacheStats.entries` |
+| `cache_blob_namespaces` | gauge | — | namespaces | `BlobCacheStats.namespaces` |
+| `cache_blob_namespaces_max` | gauge | — | namespaces | `BlobCacheStats.max_namespaces` |
+| `reddb_cache_blob_l2_bytes_in_use` | gauge | `namespace` | bytes | `METRIC_CACHE_BLOB_L2_BYTES_IN_USE` |
+| `reddb_cache_blob_l2_bytes_max` | gauge | — | bytes | `BlobCacheStats.l2_bytes_max` |
+| `reddb_cache_blob_l2_full_rejections_total` | counter | `namespace` | events | `METRIC_CACHE_BLOB_L2_FULL_REJECTIONS_TOTAL` |
+| `cache_version_mismatch_total` | counter | `namespace` | events | `METRIC_CACHE_VERSION_MISMATCH_TOTAL` |
 
 The `cache_blob_l1_*` family carries the legacy (un-prefixed) names from
 the L1-only tracer; the `reddb_cache_blob_l2_*` family adopts the project
@@ -328,7 +328,7 @@ already maintains.
 ## 5. Cardinality budget
 
 Per the #144 deepening, namespace cardinality is bounded at **256** in
-MVP (`DEFAULT_BLOB_MAX_NAMESPACES`, blob.rs:21). Every per-namespace
+MVP (`DEFAULT_BLOB_MAX_NAMESPACES`). Every per-namespace
 metric in this doc multiplies series count by current namespace count,
 so the worst-case Blob Cache series budget today is roughly:
 
@@ -361,4 +361,4 @@ explosion.
 - ADR 0010 — Serialization boundary discipline: [`docs/adr/0010-serialization-boundary-discipline.md`](../adr/0010-serialization-boundary-discipline.md)
 - Cache comparison guide: [`docs/guides/cache-comparison.md`](../guides/cache-comparison.md)
 - Blob Cache backup/restore (Lane #187): [`docs/operations/blob-cache-backup-restore.md`](./blob-cache-backup-restore.md)
-- Metric source: [`crates/reddb-server/src/storage/cache/blob.rs`](../../crates/reddb-server/src/storage/cache/blob.rs)
+- Metric source: [`crates/reddb-server/src/storage/cache/blob/cache.rs`](../../crates/reddb-server/src/storage/cache/blob/cache.rs)

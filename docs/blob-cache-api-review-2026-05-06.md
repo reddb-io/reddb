@@ -3,7 +3,7 @@
 - **Status:** Review draft (HITL)
 - **Reviewer:** claude-opus-4-7 (per session)
 - **Tracking issue:** [#151](https://github.com/reddb-io/reddb/issues/151)
-- **Subject:** `crates/reddb-server/src/storage/cache/blob.rs` (re-exports in `cache/mod.rs`), with sweeper integration via `cache/sweeper.rs`
+- **Subject:** `crates/reddb-server/src/storage/cache/blob/cache.rs` (re-exports in `cache/mod.rs`), with sweeper integration via `cache/sweeper.rs`
 - **Reference docs:** PRD [#139](https://github.com/reddb-io/reddb/issues/139), ADR 0006 (tiered blob cache), ADR 0010 (serialization-boundary discipline), `docs/guides/cache-comparison.md`
 
 Evaluates whether the current public surface is the right shape to commit to before downstream callers (#143 result-cache adapter, #146 Bloom synopsis, future cluster invalidation) start depending on it. Read-only audit.

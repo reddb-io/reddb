@@ -281,7 +281,7 @@ reference Redis.
 
 These samples are illustrative. The Rust sample uses the real
 `BlobCache` Interface from
-`crates/reddb-server/src/storage/cache/blob.rs`. The JS/TS sample
+`crates/reddb-server/src/storage/cache/blob/cache.rs`. The JS/TS sample
 uses a forward-looking `@reddb-io/sdk` shape that mirrors the
 internal Interface; the public SDK surface is deferred until the
 internal Interface has soaked (ADR 0006 § "Rollout"), so treat the
