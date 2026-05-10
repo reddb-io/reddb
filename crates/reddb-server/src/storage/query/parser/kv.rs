@@ -128,9 +128,13 @@ impl<'a> Parser<'a> {
                 let (collection, key) = self.parse_kv_key(model)?;
                 Ok(QueryExpr::KvCommand(KvCommand::Purge { collection, key }))
             }
+            Token::Ident(ref name) if name.eq_ignore_ascii_case("LIST") => {
+                self.advance()?;
+                self.parse_keyed_list(model)
+            }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("WATCH") => {
                 self.advance()?;
-                self.parse_kv_watch()
+                self.parse_kv_watch(model)
             }
             Token::Delete => {
                 self.advance()?;
@@ -169,8 +173,8 @@ impl<'a> Parser<'a> {
             _ => Err(ParseError::expected(
                 if model == CollectionModel::Vault {
                     vec![
-                        "PUT", "GET", "UNSEAL", "ROTATE", "HISTORY", "DELETE", "PURGE",
-                        "INCR", "DECR", "CAS",
+                        "PUT", "GET", "UNSEAL", "ROTATE", "HISTORY", "LIST", "WATCH",
+                        "DELETE", "PURGE", "INCR", "DECR", "CAS",
                     ]
                 } else {
                     vec![
@@ -188,6 +192,28 @@ impl<'a> Parser<'a> {
                 self.position(),
             )),
         }
+    }
+
+    pub(crate) fn parse_vault_list_after_list(&mut self) -> Result<QueryExpr, ParseError> {
+        if !self.consume_ident_ci("VAULT")? {
+            return Err(ParseError::expected(
+                vec!["VAULT"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        self.parse_keyed_list(CollectionModel::Vault)
+    }
+
+    pub(crate) fn parse_vault_watch_after_watch(&mut self) -> Result<QueryExpr, ParseError> {
+        if !self.consume_ident_ci("VAULT")? {
+            return Err(ParseError::expected(
+                vec!["VAULT"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        self.parse_kv_watch(CollectionModel::Vault)
     }
 
     /// Parse `UNSEAL VAULT <collection.key>`.
@@ -357,7 +383,7 @@ impl<'a> Parser<'a> {
                 self.position(),
             ));
         }
-        let collection = self.expect_ident_or_keyword()?;
+        let collection = self.parse_keyed_collection_name()?;
         Ok(QueryExpr::KvCommand(KvCommand::InvalidateTags {
             collection,
             tags,
@@ -403,9 +429,45 @@ impl<'a> Parser<'a> {
         Ok((segments.remove(0), segments.join(".")))
     }
 
-    pub(crate) fn parse_kv_watch(&mut self) -> Result<QueryExpr, ParseError> {
+    fn parse_keyed_list(&mut self, model: CollectionModel) -> Result<QueryExpr, ParseError> {
+        let collection = self.expect_ident_or_keyword()?;
+        let mut prefix = None;
+        let mut limit = None;
+        let mut offset = 0usize;
+        loop {
+            if self.consume_ident_ci("PREFIX")? {
+                prefix = Some(self.expect_ident_or_keyword()?.to_string());
+            } else if self.consume(&Token::Limit)? || self.consume_ident_ci("LIMIT")? {
+                limit = Some(self.parse_float()?.round().max(0.0) as usize);
+            } else if self.consume(&Token::Offset)? || self.consume_ident_ci("OFFSET")? {
+                offset = self.parse_float()?.round().max(0.0) as usize;
+            } else {
+                break;
+            }
+        }
+        Ok(QueryExpr::KvCommand(KvCommand::List {
+            model,
+            collection,
+            prefix,
+            limit,
+            offset,
+        }))
+    }
+
+    pub(crate) fn parse_kv_watch(&mut self, model: CollectionModel) -> Result<QueryExpr, ParseError> {
         let first = self.expect_ident()?;
-        let (collection, key, prefix) = if self.consume(&Token::Dot)? {
+        let (collection, key, prefix) = if model != CollectionModel::Kv {
+            let mut collection = first;
+            if self.consume(&Token::Dot)? {
+                let next = self.expect_ident_or_keyword()?;
+                collection = format!("{collection}.{next}");
+            }
+            if self.consume_ident_ci("PREFIX")? {
+                (collection, self.expect_ident_or_keyword()?, true)
+            } else {
+                (collection, self.expect_ident_or_keyword()?, false)
+            }
+        } else if self.consume(&Token::Dot)? {
             if self.consume(&Token::Star)? {
                 (KV_DEFAULT_COLLECTION.to_string(), first, true)
             } else {
@@ -435,11 +497,21 @@ impl<'a> Parser<'a> {
         };
 
         Ok(QueryExpr::KvCommand(KvCommand::Watch {
+            model,
             collection,
             key,
             prefix,
             from_lsn,
         }))
+    }
+
+    fn parse_keyed_collection_name(&mut self) -> Result<String, ParseError> {
+        let mut collection = self.expect_ident_or_keyword()?;
+        if self.consume(&Token::Dot)? {
+            let next = self.expect_ident_or_keyword()?;
+            collection = format!("{collection}.{next}");
+        }
+        Ok(collection)
     }
 
     /// Parse `INCR/DECR key [BY n] [EXPIRE dur]`. `sign` is +1 or -1.
@@ -474,7 +546,7 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    fn parse_kv_tag_list(&mut self) -> Result<Vec<String>, ParseError> {
+    pub(crate) fn parse_kv_tag_list(&mut self) -> Result<Vec<String>, ParseError> {
         self.expect(Token::LBracket)?;
         let mut tags = Vec::new();
         while !self.check(&Token::RBracket) {

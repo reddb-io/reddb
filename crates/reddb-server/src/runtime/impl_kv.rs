@@ -28,6 +28,7 @@ fn keyed_model_name(model: crate::catalog::CollectionModel) -> &'static str {
 #[derive(Debug, Clone)]
 struct VaultEntry {
     id: crate::storage::EntityId,
+    key: String,
     value: crate::storage::schema::Value,
     metadata: Metadata,
     created_at: u64,
@@ -150,6 +151,18 @@ impl<'a> KvAtomicOps<'a> {
                 return Ok((false, latest.expect("checked present").id));
             }
             let entry = self.append_vault_version(collection, key, value, "put", false, tags)?;
+            self.runtime.record_kv_watch_event(
+                if latest.is_some() {
+                    crate::replication::cdc::ChangeOperation::Update
+                } else {
+                    crate::replication::cdc::ChangeOperation::Insert
+                },
+                collection,
+                key,
+                entry.id.raw(),
+                latest.as_ref().map(vault_entry_metadata_json),
+                Some(vault_entry_metadata_json(&entry)),
+            );
             return Ok((!was_present, entry.id));
         }
 
@@ -580,6 +593,7 @@ impl<'a> KvAtomicOps<'a> {
                         let metadata = manager.get_metadata(entity.id).unwrap_or_default();
                         versions.push(VaultEntry {
                             id: entity.id,
+                            key: k.to_string(),
                             value,
                             metadata,
                             created_at: entity.created_at,
@@ -605,6 +619,61 @@ impl<'a> KvAtomicOps<'a> {
         Ok(versions)
     }
 
+    fn latest_vault_entries(
+        &self,
+        collection: &str,
+        prefix: Option<&str>,
+    ) -> RedDBResult<Vec<VaultEntry>> {
+        self.ensure_declared_model(crate::catalog::CollectionModel::Vault, collection)?;
+        let store = self.runtime.inner.db.store();
+        let Some(manager) = store.get_collection(collection) else {
+            return Ok(Vec::new());
+        };
+        let mut by_key = std::collections::BTreeMap::<String, VaultEntry>::new();
+        for entity in manager.query_all(|_| true) {
+            let crate::storage::EntityData::Row(ref row) = entity.data else {
+                continue;
+            };
+            let Some(crate::storage::schema::Value::Text(ref key)) = row.get_field("key") else {
+                continue;
+            };
+            if prefix.is_some_and(|prefix| !key.starts_with(prefix)) {
+                continue;
+            }
+            let value = row
+                .get_field("value")
+                .cloned()
+                .unwrap_or(crate::storage::schema::Value::Null);
+            let metadata = manager.get_metadata(entity.id).unwrap_or_default();
+            let entry = VaultEntry {
+                id: entity.id,
+                key: key.to_string(),
+                value,
+                metadata,
+                created_at: entity.created_at,
+                updated_at: entity.updated_at,
+                sequence_id: entity.sequence_id,
+                version: vault_i64(row.get_field("version")).unwrap_or(entity.sequence_id as i64),
+                tombstone: matches!(
+                    row.get_field("tombstone"),
+                    Some(crate::storage::schema::Value::Boolean(true))
+                ),
+                op: match row.get_field("op") {
+                    Some(crate::storage::schema::Value::Text(value)) => value.to_string(),
+                    _ => "put".to_string(),
+                },
+            };
+            let replace = by_key
+                .get(key.as_ref())
+                .map(|existing| entry.version > existing.version)
+                .unwrap_or(true);
+            if replace {
+                by_key.insert(key.to_string(), entry);
+            }
+        }
+        Ok(by_key.into_values().collect())
+    }
+
     fn append_vault_version(
         &self,
         collection: &str,
@@ -612,7 +681,7 @@ impl<'a> KvAtomicOps<'a> {
         value: crate::storage::schema::Value,
         op: &str,
         tombstone: bool,
-        _tags: &[String],
+        tags: &[String],
     ) -> RedDBResult<VaultEntry> {
         self.ensure_declared_model(crate::catalog::CollectionModel::Vault, collection)?;
         let version = self
@@ -666,6 +735,15 @@ impl<'a> KvAtomicOps<'a> {
             .store()
             .insert(collection, entity)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        if !tags.is_empty() {
+            self.runtime
+                .inner
+                .db
+                .store()
+                .set_metadata(collection, id, Metadata::with_fields(vault_tags_metadata(tags)))
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            self.runtime.inner.kv_tag_index.replace(collection, key, id, tags);
+        }
         self.get_vault_entry_version(collection, key, version)?
             .ok_or_else(|| RedDBError::Internal(format!("vault version {id} was not readable")))
     }
@@ -1156,6 +1234,14 @@ impl RedDBRuntime {
                     false,
                     tags,
                 )?;
+                self.record_kv_watch_event(
+                    crate::replication::cdc::ChangeOperation::Update,
+                    collection,
+                    key,
+                    entry.id.raw(),
+                    None,
+                    Some(vault_entry_metadata_json(&entry)),
+                );
                 self.audit_vault_lifecycle(
                     "rotate",
                     collection,
@@ -1173,6 +1259,58 @@ impl RedDBRuntime {
                     &entry,
                     1,
                 ))
+            }
+
+            KvCommand::List {
+                model,
+                collection,
+                prefix,
+                limit,
+                offset,
+            } => {
+                if *model != crate::catalog::CollectionModel::Vault {
+                    return Err(RedDBError::InvalidOperation(
+                        "LIST is not supported through normal KV command execution".to_string(),
+                    ));
+                }
+                let mut entries = ops.latest_vault_entries(collection, prefix.as_deref())?;
+                entries.sort_by(|left, right| left.key.cmp(&right.key));
+                let mut result = UnifiedResult::with_columns(vec![
+                    "collection".into(),
+                    "key".into(),
+                    "version".into(),
+                    "fingerprint".into(),
+                    "tags".into(),
+                    "created_at".into(),
+                    "updated_at".into(),
+                    "status".into(),
+                    "tombstone".into(),
+                    "op".into(),
+                ]);
+                for entry in entries
+                    .into_iter()
+                    .filter(|entry| {
+                        self.check_vault_capability(
+                            "vault:read_metadata",
+                            collection,
+                            &entry.key,
+                        )
+                        .is_ok()
+                    })
+                    .skip(*offset)
+                    .take(limit.unwrap_or(usize::MAX))
+                {
+                    push_vault_metadata_record(&mut result, collection, &entry.key, &entry);
+                }
+                Ok(RuntimeQueryResult {
+                    query: raw_query.to_string(),
+                    mode: crate::storage::query::modes::QueryMode::Sql,
+                    statement: "vault_list",
+                    engine: "vault",
+                    result,
+                    affected_rows: 0,
+                    statement_type: "select",
+                })
             }
 
             KvCommand::History { collection, key } => {
@@ -1289,6 +1427,7 @@ impl RedDBRuntime {
                 })
             }
             KvCommand::Watch {
+                model,
                 collection,
                 key,
                 prefix,
@@ -1300,10 +1439,14 @@ impl RedDBRuntime {
                     key.clone()
                 };
                 let endpoint = match from_lsn {
-                    Some(lsn) => {
-                        format!("/collections/{collection}/kv/{watch_key}/watch?since_lsn={lsn}")
-                    }
-                    None => format!("/collections/{collection}/kv/{watch_key}/watch"),
+                    Some(lsn) => format!(
+                        "/collections/{collection}/{}/{watch_key}/watch?since_lsn={lsn}",
+                        keyed_model_name(*model)
+                    ),
+                    None => format!(
+                        "/collections/{collection}/{}/{watch_key}/watch",
+                        keyed_model_name(*model)
+                    ),
                 };
                 let mut result = UnifiedResult::with_columns(vec![
                     "collection".into(),
@@ -1331,7 +1474,7 @@ impl RedDBRuntime {
                     query: raw_query.to_string(),
                     mode: crate::storage::query::modes::QueryMode::Sql,
                     statement: "kv_watch",
-                    engine: "kv",
+                    engine: keyed_model_name(*model),
                     result,
                     affected_rows: 0,
                     statement_type: "stream",
@@ -1532,6 +1675,14 @@ impl RedDBRuntime {
                         true,
                         &[],
                     )?;
+                    self.record_kv_watch_event(
+                        crate::replication::cdc::ChangeOperation::Delete,
+                        collection,
+                        key,
+                        entry.id.raw(),
+                        None,
+                        Some(vault_entry_metadata_json(&entry)),
+                    );
                     self.audit_vault_lifecycle(
                         "delete",
                         collection,
@@ -1577,6 +1728,40 @@ impl RedDBRuntime {
                 })
             }
         }
+    }
+
+    pub fn vault_watch_events_since(
+        &self,
+        collection: &str,
+        key: &str,
+        since_lsn: u64,
+        max_count: usize,
+    ) -> Vec<crate::replication::cdc::KvWatchEvent> {
+        self.kv_watch_events_since(collection, key, since_lsn, max_count)
+            .into_iter()
+            .filter(|event| {
+                self.check_vault_capability("vault:read_metadata", &event.collection, &event.key)
+                    .is_ok()
+            })
+            .map(vault_filter_watch_event)
+            .collect()
+    }
+
+    pub fn vault_watch_events_since_prefix(
+        &self,
+        collection: &str,
+        prefix: &str,
+        since_lsn: u64,
+        max_count: usize,
+    ) -> Vec<crate::replication::cdc::KvWatchEvent> {
+        self.kv_watch_events_since_prefix(collection, prefix, since_lsn, max_count)
+            .into_iter()
+            .filter(|event| {
+                self.check_vault_capability("vault:read_metadata", &event.collection, &event.key)
+                    .is_ok()
+            })
+            .map(vault_filter_watch_event)
+            .collect()
     }
 
     fn check_kv_invalidate_policy(&self, collection: &str) -> RedDBResult<()> {
@@ -1696,25 +1881,34 @@ fn vault_history_result(collection: &str, key: &str, versions: &[VaultEntry]) ->
         "op".into(),
     ]);
     for entry in versions {
-        let mut record = UnifiedRecord::new();
-        record.set("collection", Value::text(collection.to_string()));
-        record.set("key", Value::text(key.to_string()));
-        record.set("version", Value::Integer(entry.version));
-        if entry.tombstone {
-            record.set("fingerprint", Value::Null);
-            record.set("status", Value::text("deleted"));
-        } else {
-            record.set("fingerprint", Value::text(vault_fingerprint(&entry.value)));
-            record.set("status", Value::text("sealed"));
-        }
-        record.set("tags", vault_tags_value(&entry.metadata));
-        record.set("created_at", Value::TimestampMs(entry.created_at as i64));
-        record.set("updated_at", Value::TimestampMs(entry.updated_at as i64));
-        record.set("tombstone", Value::Boolean(entry.tombstone));
-        record.set("op", Value::text(entry.op.clone()));
-        result.push(record);
+        push_vault_metadata_record(&mut result, collection, key, entry);
     }
     result
+}
+
+fn push_vault_metadata_record(
+    result: &mut UnifiedResult,
+    collection: &str,
+    key: &str,
+    entry: &VaultEntry,
+) {
+    let mut record = UnifiedRecord::new();
+    record.set("collection", Value::text(collection.to_string()));
+    record.set("key", Value::text(key.to_string()));
+    record.set("version", Value::Integer(entry.version));
+    if entry.tombstone {
+        record.set("fingerprint", Value::Null);
+        record.set("status", Value::text("deleted"));
+    } else {
+        record.set("fingerprint", Value::text(vault_fingerprint(&entry.value)));
+        record.set("status", Value::text("sealed"));
+    }
+    record.set("tags", vault_tags_value(&entry.metadata));
+    record.set("created_at", Value::TimestampMs(entry.created_at as i64));
+    record.set("updated_at", Value::TimestampMs(entry.updated_at as i64));
+    record.set("tombstone", Value::Boolean(entry.tombstone));
+    record.set("op", Value::text(entry.op.clone()));
+    result.push(record);
 }
 
 fn vault_metadata_result(
@@ -1785,6 +1979,97 @@ fn vault_fingerprint(value: &Value) -> String {
         Value::Secret(payload) => crate::utils::to_hex(&crate::crypto::sha256::sha256(payload)),
         other => crate::utils::to_hex(&crate::crypto::sha256::sha256(&other.to_bytes())),
     }
+}
+
+fn vault_entry_metadata_json(entry: &VaultEntry) -> crate::json::Value {
+    let mut object = crate::json::Map::new();
+    object.insert("key".to_string(), crate::json::Value::String(entry.key.clone()));
+    object.insert(
+        "version".to_string(),
+        crate::json::Value::Number(entry.version as f64),
+    );
+    object.insert(
+        "fingerprint".to_string(),
+        if entry.tombstone {
+            crate::json::Value::Null
+        } else {
+            crate::json::Value::String(vault_fingerprint(&entry.value))
+        },
+    );
+    object.insert("tags".to_string(), vault_tags_json(&entry.metadata));
+    object.insert(
+        "actor".to_string(),
+        crate::json::Value::String(RedDBRuntime::current_vault_actor()),
+    );
+    object.insert(
+        "sequence_id".to_string(),
+        crate::json::Value::Number(entry.sequence_id as f64),
+    );
+    object.insert(
+        "tombstone".to_string(),
+        crate::json::Value::Bool(entry.tombstone),
+    );
+    object.insert(
+        "op".to_string(),
+        crate::json::Value::String(entry.op.clone()),
+    );
+    crate::json::Value::Object(object)
+}
+
+fn vault_tags_json(metadata: &Metadata) -> crate::json::Value {
+    match vault_tags_value(metadata) {
+        Value::Array(values) => crate::json::Value::Array(
+            values
+                .into_iter()
+                .filter_map(|value| match value {
+                    Value::Text(tag) => Some(crate::json::Value::String(tag.to_string())),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        _ => crate::json::Value::Array(Vec::new()),
+    }
+}
+
+fn vault_tags_metadata(tags: &[String]) -> std::collections::HashMap<String, MetadataValue> {
+    [(
+        "tags".to_string(),
+        MetadataValue::Array(
+            tags.iter()
+                .map(|tag| MetadataValue::String(tag.clone()))
+                .collect(),
+        ),
+    )]
+    .into_iter()
+    .collect()
+}
+
+fn vault_filter_watch_event(
+    mut event: crate::replication::cdc::KvWatchEvent,
+) -> crate::replication::cdc::KvWatchEvent {
+    event.before = event.before.and_then(vault_metadata_json_only);
+    event.after = event.after.and_then(vault_metadata_json_only);
+    event
+}
+
+fn vault_metadata_json_only(value: crate::json::Value) -> Option<crate::json::Value> {
+    let object = value.as_object()?;
+    let mut out = crate::json::Map::new();
+    for field in [
+        "key",
+        "version",
+        "fingerprint",
+        "tags",
+        "actor",
+        "sequence_id",
+        "tombstone",
+        "op",
+    ] {
+        if let Some(value) = object.get(field) {
+            out.insert(field.to_string(), value.clone());
+        }
+    }
+    Some(crate::json::Value::Object(out))
 }
 
 fn vault_tags_value(metadata: &Metadata) -> Value {

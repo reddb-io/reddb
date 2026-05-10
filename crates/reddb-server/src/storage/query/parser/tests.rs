@@ -5354,6 +5354,7 @@ fn test_parse_watch_bare_key() {
         key,
         prefix,
         from_lsn,
+        ..
     }) = q
     {
         assert_eq!(collection, "kv_default");
@@ -5373,6 +5374,7 @@ fn test_parse_kv_watch_dotted_key() {
         key,
         prefix,
         from_lsn,
+        ..
     }) = q
     {
         assert_eq!(collection, "sessions");
@@ -5392,6 +5394,7 @@ fn test_parse_kv_watch_prefix() {
         key,
         prefix,
         from_lsn,
+        ..
     }) = q
     {
         assert_eq!(collection, "kv_default");
@@ -5411,6 +5414,7 @@ fn test_parse_kv_watch_collection_prefix_from_lsn() {
         key,
         prefix,
         from_lsn,
+        ..
     }) = q
     {
         assert_eq!(collection, "sessions");
@@ -5548,6 +5552,7 @@ fn test_parse_put_config() {
         key,
         value,
         value_type,
+        ..
     }) = q
     {
         assert_eq!(collection, "app");
@@ -5567,6 +5572,7 @@ fn test_parse_rotate_config() {
         key,
         value,
         value_type,
+        ..
     }) = q
     {
         assert_eq!(collection, "app");
@@ -5586,6 +5592,7 @@ fn test_parse_put_config_with_schema_type() {
         key,
         value,
         value_type,
+        ..
     }) = q
     {
         assert_eq!(collection, "app");
@@ -5616,6 +5623,34 @@ fn test_parse_config_secret_ref_and_resolve() {
     assert!(matches!(
         parse("RESOLVE CONFIG app api_key").unwrap(),
         QueryExpr::ConfigCommand(ConfigCommand::Resolve { .. })
+    ));
+}
+
+#[test]
+fn test_parse_config_list_watch_and_tags() {
+    assert!(matches!(
+        parse("LIST CONFIG app PREFIX feature LIMIT 10 OFFSET 2").unwrap(),
+        QueryExpr::ConfigCommand(ConfigCommand::List {
+            collection,
+            prefix: Some(prefix),
+            limit: Some(10),
+            offset: 2,
+        }) if collection == "app" && prefix == "feature"
+    ));
+    assert!(matches!(
+        parse("WATCH CONFIG app PREFIX feature FROM LSN 7").unwrap(),
+        QueryExpr::ConfigCommand(ConfigCommand::Watch {
+            collection,
+            key,
+            prefix: true,
+            from_lsn: Some(7),
+        }) if collection == "app" && key == "feature"
+    ));
+    let q = parse("PUT CONFIG app feature = 'on' TAGS [scope:prod]").unwrap();
+    assert!(matches!(
+        q,
+        QueryExpr::ConfigCommand(ConfigCommand::Put { tags, .. })
+            if tags == vec!["scope:prod".to_string()]
     ));
 }
 
@@ -5721,5 +5756,29 @@ fn test_parse_vault_lifecycle_commands() {
         parse("UNSEAL VAULT secrets.api_key VERSION 1").unwrap(),
         QueryExpr::KvCommand(KvCommand::Unseal { collection, key, version: Some(1) })
             if collection == "secrets" && key == "api_key"
+    ));
+}
+
+#[test]
+fn test_parse_vault_list_and_watch() {
+    assert!(matches!(
+        parse("LIST VAULT secrets PREFIX api LIMIT 10 OFFSET 2").unwrap(),
+        QueryExpr::KvCommand(KvCommand::List {
+            model: crate::catalog::CollectionModel::Vault,
+            collection,
+            prefix: Some(prefix),
+            limit: Some(10),
+            offset: 2,
+        }) if collection == "secrets" && prefix == "api"
+    ));
+    assert!(matches!(
+        parse("WATCH VAULT secrets PREFIX api FROM LSN 7").unwrap(),
+        QueryExpr::KvCommand(KvCommand::Watch {
+            model: crate::catalog::CollectionModel::Vault,
+            collection,
+            key,
+            prefix: true,
+            from_lsn: Some(7),
+        }) if collection == "secrets" && key == "api"
     ));
 }

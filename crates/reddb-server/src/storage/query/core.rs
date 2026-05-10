@@ -2485,11 +2485,19 @@ pub enum KvCommand {
         collection: String,
         key: String,
     },
+    List {
+        model: CollectionModel,
+        collection: String,
+        prefix: Option<String>,
+        limit: Option<usize>,
+        offset: usize,
+    },
     Purge {
         collection: String,
         key: String,
     },
     Watch {
+        model: CollectionModel,
         collection: String,
         key: String,
         prefix: bool,
@@ -2565,6 +2573,7 @@ pub enum ConfigCommand {
         key: String,
         value: Value,
         value_type: Option<ConfigValueType>,
+        tags: Vec<String>,
     },
     Get {
         collection: String,
@@ -2579,6 +2588,7 @@ pub enum ConfigCommand {
         key: String,
         value: Value,
         value_type: Option<ConfigValueType>,
+        tags: Vec<String>,
     },
     Delete {
         collection: String,
@@ -2587,6 +2597,18 @@ pub enum ConfigCommand {
     History {
         collection: String,
         key: String,
+    },
+    List {
+        collection: String,
+        prefix: Option<String>,
+        limit: Option<usize>,
+        offset: usize,
+    },
+    Watch {
+        collection: String,
+        key: String,
+        prefix: bool,
+        from_lsn: Option<u64>,
     },
     InvalidVolatileOperation {
         operation: String,
