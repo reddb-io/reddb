@@ -5318,6 +5318,28 @@ fn test_parse_kv_get_dotted_key() {
 }
 
 #[test]
+fn test_parse_watch_bare_key() {
+    let q = parse("WATCH feature_flag").unwrap();
+    if let QueryExpr::KvCommand(KvCommand::Watch { collection, key }) = q {
+        assert_eq!(collection, "kv_default");
+        assert_eq!(key, "feature_flag");
+    } else {
+        panic!("expected KvCommand::Watch");
+    }
+}
+
+#[test]
+fn test_parse_kv_watch_dotted_key() {
+    let q = parse("KV WATCH sessions.abc123").unwrap();
+    if let QueryExpr::KvCommand(KvCommand::Watch { collection, key }) = q {
+        assert_eq!(collection, "sessions");
+        assert_eq!(key, "abc123");
+    } else {
+        panic!("expected KvCommand::Watch");
+    }
+}
+
+#[test]
 fn test_parse_kv_delete_bare_key() {
     let q = parse("KV DELETE name").unwrap();
     if let QueryExpr::KvCommand(KvCommand::Delete {

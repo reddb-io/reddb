@@ -901,6 +901,8 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
                 KvCommand::Put { collection, .. }
                 | KvCommand::Get { collection, .. }
                 | KvCommand::Unseal { collection, .. }
+                | KvCommand::Watch { collection, .. }
+                | KvCommand::Unseal { collection, .. }
                 | KvCommand::Delete { collection, .. }
                 | KvCommand::Incr { collection, .. }
                 | KvCommand::Cas { collection, .. } => cache_scope_insert(scopes, collection),
@@ -1693,6 +1695,7 @@ impl RedDBRuntime {
                 rls_enabled_tables: parking_lot::RwLock::new(HashSet::new()),
                 foreign_tables: Arc::new(crate::storage::fdw::ForeignTableRegistry::with_builtins()),
                 pending_tombstones: parking_lot::RwLock::new(HashMap::new()),
+                pending_kv_watch_events: parking_lot::RwLock::new(HashMap::new()),
                 tenant_tables: parking_lot::RwLock::new(HashMap::new()),
                 ddl_epoch: std::sync::atomic::AtomicU64::new(0),
                 write_gate: Arc::new(crate::runtime::write_gate::WriteGate::from_options(
@@ -2815,6 +2818,55 @@ impl RedDBRuntime {
         lsn
     }
 
+    pub(crate) fn cdc_emit_kv(
+        &self,
+        operation: crate::replication::cdc::ChangeOperation,
+        collection: &str,
+        key: &str,
+        entity_id: u64,
+        before: Option<crate::json::Value>,
+        after: Option<crate::json::Value>,
+    ) -> u64 {
+        let lsn = self
+            .inner
+            .cdc
+            .emit_kv(operation, collection, key, entity_id, before, after);
+        self.invalidate_result_cache_for_table(collection);
+        lsn
+    }
+
+    pub(crate) fn record_kv_watch_event(
+        &self,
+        operation: crate::replication::cdc::ChangeOperation,
+        collection: &str,
+        key: &str,
+        entity_id: u64,
+        before: Option<crate::json::Value>,
+        after: Option<crate::json::Value>,
+    ) {
+        if self.current_xid().is_some() {
+            let conn_id = current_connection_id();
+            let event = crate::replication::cdc::KvWatchEvent {
+                collection: collection.to_string(),
+                key: key.to_string(),
+                op: operation,
+                before,
+                after,
+                lsn: 0,
+                committed_at: 0,
+            };
+            self.inner
+                .pending_kv_watch_events
+                .write()
+                .entry(conn_id)
+                .or_default()
+                .push(event);
+            return;
+        }
+
+        self.cdc_emit_kv(operation, collection, key, entity_id, before, after);
+    }
+
     pub(crate) fn cdc_emit_prebuilt(
         &self,
         operation: crate::replication::cdc::ChangeOperation,
@@ -3143,6 +3195,30 @@ impl RedDBRuntime {
     /// after a successful write to feed `enforce_commit_policy`.
     pub fn cdc_current_lsn(&self) -> u64 {
         self.inner.cdc.current_lsn()
+    }
+
+    pub fn kv_watch_events_since(
+        &self,
+        collection: &str,
+        key: &str,
+        since_lsn: u64,
+        max_count: usize,
+    ) -> Vec<crate::replication::cdc::KvWatchEvent> {
+        self.inner
+            .cdc
+            .poll(since_lsn, max_count)
+            .into_iter()
+            .filter_map(|event| event.kv)
+            .filter(|event| event.collection == collection && event.key == key)
+            .collect()
+    }
+
+    pub(crate) fn kv_watch_subscribe<'a>(
+        &'a self,
+        collection: impl Into<String>,
+        key: impl Into<String>,
+    ) -> crate::runtime::kv_watch::KvWatchStream<'a> {
+        crate::runtime::kv_watch::KvWatchStream::subscribe(&self.inner.cdc, collection, key)
     }
 
     /// Get backup scheduler status.
@@ -4648,6 +4724,7 @@ impl RedDBRuntime {
                                 // only had their xmax stamped — now the
                                 // deletion is durable.
                                 self.finalize_pending_tombstones(conn_id);
+                                self.finalize_pending_kv_watch_events(conn_id);
                                 ("commit", format!("COMMIT — xid={} committed", ctx.xid))
                             }
                             None => (
@@ -4674,6 +4751,7 @@ impl RedDBRuntime {
                                 // xmax-stamped become live again — wipe xmax
                                 // back to 0 so later snapshots see them.
                                 self.revive_pending_tombstones(conn_id);
+                                self.discard_pending_kv_watch_events(conn_id);
                                 ("rollback", format!("ROLLBACK — xid={} aborted", ctx.xid))
                             }
                             None => (
@@ -5470,6 +5548,9 @@ impl RedDBRuntime {
                     | KvCommand::Delete {
                         collection, model, ..
                     } => (collection.as_str(), *model),
+                    KvCommand::Watch { collection, .. } => {
+                        (collection.as_str(), CollectionModel::Kv)
+                    }
                     KvCommand::Unseal { collection, .. } => {
                         (collection.as_str(), CollectionModel::Vault)
                     }
@@ -6523,6 +6604,26 @@ impl RedDBRuntime {
                 let _ = manager.update(entity);
             }
         }
+    }
+
+    pub(crate) fn finalize_pending_kv_watch_events(&self, conn_id: u64) {
+        let Some(pending) = self.inner.pending_kv_watch_events.write().remove(&conn_id) else {
+            return;
+        };
+        for event in pending {
+            self.cdc_emit_kv(
+                event.op,
+                &event.collection,
+                &event.key,
+                0,
+                event.before,
+                event.after,
+            );
+        }
+    }
+
+    pub(crate) fn discard_pending_kv_watch_events(&self, conn_id: u64) {
+        self.inner.pending_kv_watch_events.write().remove(&conn_id);
     }
 
     /// Materialise the entire graph store while applying MVCC visibility

@@ -166,9 +166,7 @@ impl RedDBServer {
                 self.handle_admin_blob_cache_compare_and_set(body)
             }
             // Issue #198 — blob cache stats endpoint.
-            ("GET", "/admin/blob_cache/stats") => {
-                self.handle_admin_blob_cache_stats(&query)
-            }
+            ("GET", "/admin/blob_cache/stats") => self.handle_admin_blob_cache_stats(&query),
             // PLAN.md Phase 11.6 — manual replica → primary promotion.
             ("POST", "/admin/failover/promote") => self.handle_admin_failover_promote(body),
             // PLAN.md Phase 5.1 / 5.4 — observability endpoints.
@@ -1099,6 +1097,12 @@ impl RedDBServer {
                 }
 
                 // KV routes: /collections/{collection}/kvs/{key}
+                if let Some((collection, key)) = collection_kv_watch_path(&path) {
+                    return match method.as_str() {
+                        "GET" => self.handle_watch_kv(collection, key, &query),
+                        _ => json_error(405, "method not allowed for KV watch endpoint"),
+                    };
+                }
                 if let Some((collection, key)) = collection_kv_path(&path) {
                     return match method.as_str() {
                         "GET" => self.handle_get_kv(collection, key),
@@ -1771,6 +1775,22 @@ fn collection_kv_path(path: &str) -> Option<(&str, &str)> {
     let (collection, rest) = trimmed.split_once("/kvs/")?;
     let collection = collection.trim_matches('/');
     let key = rest.trim_matches('/');
+    if collection.is_empty() || key.is_empty() {
+        None
+    } else {
+        Some((collection, key))
+    }
+}
+
+/// Match `/collections/:name/kv/:key/watch` or `/collections/:name/kvs/:key/watch`.
+fn collection_kv_watch_path(path: &str) -> Option<(&str, &str)> {
+    let prefix = "/collections/";
+    let trimmed = path.strip_prefix(prefix)?;
+    let (collection, rest) = trimmed
+        .split_once("/kv/")
+        .or_else(|| trimmed.split_once("/kvs/"))?;
+    let key = rest.strip_suffix("/watch")?.trim_matches('/');
+    let collection = collection.trim_matches('/');
     if collection.is_empty() || key.is_empty() {
         None
     } else {

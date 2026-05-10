@@ -1,5 +1,7 @@
 #[tonic::async_trait]
 impl RedDb for GrpcRuntime {
+type KvWatchStream = Pin<Box<dyn tokio_stream::Stream<Item = Result<KvWatchEvent, Status>> + Send + 'static>>;
+
 async fn health(&self, _request: Request<Empty>) -> Result<Response<HealthReply>, Status> {
     let report = self.native_use_cases().health();
     Ok(Response::new(HealthReply {
@@ -12,6 +14,59 @@ async fn health(&self, _request: Request<Empty>) -> Result<Response<HealthReply>
         .to_string(),
         checked_at_unix_ms: report.checked_at_unix_ms as u64,
     }))
+}
+
+async fn kv_watch(
+    &self,
+    request: Request<KvWatchRequest>,
+) -> Result<Response<Self::KvWatchStream>, Status> {
+    self.authorize_read(request.metadata())?;
+    let req = request.into_inner();
+    if req.collection.trim().is_empty() || req.key.trim().is_empty() {
+        return Err(Status::invalid_argument("collection and key are required"));
+    }
+
+    let runtime = self.runtime.clone();
+    let collection = req.collection;
+    let key = req.key;
+    let mut cursor = if req.from_lsn == 0 {
+        runtime.cdc_current_lsn()
+    } else {
+        req.from_lsn
+    };
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(async move {
+        loop {
+            let events = runtime.kv_watch_events_since(&collection, &key, cursor, 256);
+            let mut sent = false;
+            for event in events {
+                cursor = event.lsn;
+                let reply = KvWatchEvent {
+                    key: event.key,
+                    op: event.op.as_str().to_string(),
+                    before_json: crate::json::to_string(
+                        &event.before.unwrap_or(crate::json::Value::Null),
+                    )
+                    .unwrap_or_else(|_| "null".to_string()),
+                    after_json: crate::json::to_string(
+                        &event.after.unwrap_or(crate::json::Value::Null),
+                    )
+                    .unwrap_or_else(|_| "null".to_string()),
+                    lsn: event.lsn,
+                    committed_at: event.committed_at,
+                };
+                if tx.send(Ok(reply)).await.is_err() {
+                    return;
+                }
+                sent = true;
+            }
+            if !sent {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    });
+
+    Ok(Response::new(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx))))
 }
 
 async fn ready(&self, _request: Request<Empty>) -> Result<Response<HealthReply>, Status> {

@@ -58,6 +58,46 @@ pub struct ChangeEvent {
     /// Downstream CDC consumers can use this to skip replaying
     /// updates that touched columns they don't care about.
     pub changed_columns: Option<Vec<String>>,
+    /// Optional KV-specific payload for WATCH subscribers. Existing CDC
+    /// consumers can ignore this field and continue using the generic shape.
+    pub kv: Option<KvWatchEvent>,
+}
+
+/// A committed single-key KV change surfaced by WATCH.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KvWatchEvent {
+    pub collection: String,
+    pub key: String,
+    pub op: ChangeOperation,
+    pub before: Option<JsonValue>,
+    pub after: Option<JsonValue>,
+    pub lsn: u64,
+    pub committed_at: u64,
+}
+
+impl KvWatchEvent {
+    pub fn to_json_value(&self) -> JsonValue {
+        let mut object = Map::new();
+        object.insert("key".to_string(), JsonValue::String(self.key.clone()));
+        object.insert(
+            "op".to_string(),
+            JsonValue::String(self.op.as_str().to_string()),
+        );
+        object.insert(
+            "before".to_string(),
+            self.before.clone().unwrap_or(JsonValue::Null),
+        );
+        object.insert(
+            "after".to_string(),
+            self.after.clone().unwrap_or(JsonValue::Null),
+        );
+        object.insert("lsn".to_string(), JsonValue::Number(self.lsn as f64));
+        object.insert(
+            "committed_at".to_string(),
+            JsonValue::Number(self.committed_at as f64),
+        );
+        JsonValue::Object(object)
+    }
 }
 
 /// Structured logical WAL record serialized into the replication buffer and
@@ -264,6 +304,7 @@ impl CdcBuffer {
             entity_id,
             entity_kind: entity_kind.to_string(),
             changed_columns,
+            kv: None,
         };
 
         // Short-hold ring push. Under heavy contention parking_lot
@@ -333,9 +374,54 @@ impl CdcBuffer {
                 entity_id,
                 entity_kind: entity_kind.clone(),
                 changed_columns: None,
+                kv: None,
             });
         }
         lsns
+    }
+
+    /// Emit a committed logical KV event into the same CDC ring used by
+    /// result-cache invalidation and `/changes` consumers.
+    pub fn emit_kv(
+        &self,
+        operation: ChangeOperation,
+        collection: &str,
+        key: &str,
+        entity_id: u64,
+        before: Option<JsonValue>,
+        after: Option<JsonValue>,
+    ) -> u64 {
+        let event_lsn = self.next_lsn.fetch_add(1, Ordering::AcqRel) + 1;
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let kv = KvWatchEvent {
+            collection: collection.to_string(),
+            key: key.to_string(),
+            op: operation,
+            before,
+            after,
+            lsn: event_lsn,
+            committed_at: timestamp,
+        };
+        let event = ChangeEvent {
+            lsn: event_lsn,
+            timestamp,
+            operation,
+            collection: collection.to_string(),
+            entity_id,
+            entity_kind: "kv".to_string(),
+            changed_columns: Some(vec!["value".to_string()]),
+            kv: Some(kv),
+        };
+
+        let mut events = self.events.lock();
+        if events.len() >= self.max_size {
+            events.pop_front();
+        }
+        events.push_back(event);
+        event_lsn
     }
 
     /// Poll for events since a given LSN.

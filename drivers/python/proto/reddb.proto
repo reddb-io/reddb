@@ -100,6 +100,7 @@ service RedDb {
   rpc CreateVector(JsonCreateRequest) returns (EntityReply);
   rpc CreateDocument(JsonCreateRequest) returns (EntityReply);
   rpc CreateKv(JsonCreateRequest) returns (EntityReply);
+  rpc KvWatch(KvWatchRequest) returns (stream KvWatchEvent);
   rpc BulkCreateRows(JsonBulkCreateRequest) returns (BulkEntityReply);
   // Binary bulk insert — zero JSON, zero parse. Like PostgreSQL COPY FROM.
   rpc BulkInsertBinary(BinaryBulkInsertRequest) returns (BulkInsertReply);
@@ -273,6 +274,21 @@ message EntityReply {
   bool ok = 1;
   uint64 id = 2;
   string entity_json = 3;
+}
+
+message KvWatchRequest {
+  string collection = 1;
+  string key = 2;
+  uint64 from_lsn = 3;
+}
+
+message KvWatchEvent {
+  string key = 1;
+  string op = 2;
+  string before_json = 3;
+  string after_json = 4;
+  uint64 lsn = 5;
+  uint64 committed_at = 6;
 }
 
 message BulkEntityReply {

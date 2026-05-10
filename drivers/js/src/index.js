@@ -43,9 +43,11 @@ import { HttpRpcClient } from './http.js'
 import { connectRedwire } from './redwire.js'
 import { parseUri, deriveLoginUrl } from './url.js'
 import { CacheClient } from './cache.js'
+import { KvClient } from './kv.js'
 
 export { RedDBError }
 export { CacheClient } from './cache.js'
+export { KvClient } from './kv.js'
 export { parseUri, deriveLoginUrl } from './url.js'
 
 /**
@@ -327,6 +329,7 @@ export class RedDB {
   constructor(client) {
     this.client = client
     this.cache = new CacheClient(client)
+    this.kv = new KvClient(client)
   }
 
   /** Execute a SQL query. Returns `{ statement, affected, columns, rows }`. */

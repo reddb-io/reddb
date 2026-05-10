@@ -455,48 +455,22 @@ impl RedDBServer {
             Some(other) => Value::Json(crate::json::to_vec(other).unwrap_or_default()),
         };
 
-        // Try to find existing KV to update, otherwise create
-        match self.entity_use_cases().get_kv(collection, key) {
-            Ok(Some((_, existing_id))) => {
-                // Update existing
-                match self.entity_use_cases().patch(PatchEntityInput {
-                    collection: collection.to_string(),
-                    id: existing_id,
-                    payload: payload.clone(),
-                    operations: vec![PatchEntityOperation {
-                        op: PatchEntityOperationType::Set,
-                        path: vec!["value".to_string()],
-                        value: payload.get("value").cloned(),
-                    }],
-                }) {
-                    Ok(output) => json_response(
-                        200,
-                        crate::presentation::entity_json::created_entity_output_json(&output),
-                    ),
-                    Err(err) => json_error(400, err.to_string()),
-                }
-            }
-            Ok(None) => {
-                // Create new
-                match self.entity_use_cases().create_kv(CreateKvInput {
-                    collection: collection.to_string(),
-                    key: key.to_string(),
-                    value,
-                    metadata: Vec::new(),
-                }) {
-                    Ok(output) => json_response(
-                        201,
-                        crate::presentation::entity_json::created_entity_output_json(&output),
-                    ),
-                    Err(err) => json_error(400, err.to_string()),
-                }
+        let ops = crate::runtime::impl_kv::KvAtomicOps::new(&self.runtime);
+        match ops.set(collection, key, value, None, false) {
+            Ok((created, id)) => {
+                let mut object = Map::new();
+                object.insert("ok".to_string(), JsonValue::Bool(true));
+                object.insert("id".to_string(), JsonValue::Number(id.raw() as f64));
+                object.insert("created".to_string(), JsonValue::Bool(created));
+                json_response(if created { 201 } else { 200 }, JsonValue::Object(object))
             }
             Err(err) => json_error(400, err.to_string()),
         }
     }
 
     pub(crate) fn handle_delete_kv(&self, collection: &str, key: &str) -> HttpResponse {
-        match self.entity_use_cases().delete_kv(collection, key) {
+        let ops = crate::runtime::impl_kv::KvAtomicOps::new(&self.runtime);
+        match ops.delete(collection, key) {
             Ok(true) => {
                 let mut object = Map::new();
                 object.insert("ok".to_string(), JsonValue::Bool(true));
@@ -506,6 +480,46 @@ impl RedDBServer {
             }
             Ok(false) => json_error(404, format!("key not found: {key}")),
             Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
+    pub(crate) fn handle_watch_kv(
+        &self,
+        collection: &str,
+        key: &str,
+        query: &BTreeMap<String, String>,
+    ) -> HttpResponse {
+        let since_lsn = query
+            .get("since_lsn")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or_else(|| self.runtime.cdc_current_lsn());
+        let limit = query
+            .get("limit")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(100)
+            .max(1)
+            .min(1000);
+
+        let mut body = Vec::new();
+        for event in self
+            .runtime
+            .kv_watch_events_since(collection, key, since_lsn, limit)
+        {
+            body.extend_from_slice(b"event: kv\n");
+            body.extend_from_slice(b"data: ");
+            body.extend_from_slice(
+                crate::json::to_string(&event.to_json_value())
+                    .unwrap_or_else(|_| "{}".to_string())
+                    .as_bytes(),
+            );
+            body.extend_from_slice(b"\n\n");
+        }
+
+        HttpResponse {
+            status: 200,
+            body,
+            content_type: "text/event-stream",
+            extra_headers: Vec::new(),
         }
     }
 

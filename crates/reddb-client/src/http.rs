@@ -21,7 +21,7 @@ use reqwest::{Client, ClientBuilder, Method, StatusCode};
 use serde_json::Value;
 
 use crate::error::{ClientError, ErrorCode, Result};
-use crate::types::{InsertResult, JsonValue, QueryResult};
+use crate::types::{InsertResult, JsonValue, KvWatchEvent, QueryResult};
 
 /// HTTP/HTTPS client. Talks the REST surface at the configured
 /// `base_url`. `Authorization: Bearer <token>` set when the user
@@ -179,6 +179,76 @@ impl HttpClient {
             .and_then(|o| o.get("affected"))
             .and_then(|v| v.as_u64())
             .unwrap_or(0))
+    }
+
+    pub async fn watch_kv(
+        &self,
+        collection: &str,
+        key: &str,
+        since_lsn: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<Vec<KvWatchEvent>> {
+        let mut path = format!(
+            "/collections/{}/kv/{}/watch",
+            urlencoded(collection),
+            urlencoded(key)
+        );
+        let mut parts = Vec::new();
+        if let Some(lsn) = since_lsn {
+            parts.push(format!("since_lsn={lsn}"));
+        }
+        if let Some(limit) = limit {
+            parts.push(format!("limit={limit}"));
+        }
+        if !parts.is_empty() {
+            path.push('?');
+            path.push_str(&parts.join("&"));
+        }
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .inner
+            .request(Method::GET, &url)
+            .headers(self.headers())
+            .send()
+            .await
+            .map_err(net_err)?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| ClientError::new(ErrorCode::Network, format!("read body: {e}")))?;
+        if !status.is_success() {
+            return Err(http_err(status, Some(Value::String(text))));
+        }
+        let mut out = Vec::new();
+        for block in text.split("\n\n") {
+            let Some(line) = block.lines().find(|line| line.starts_with("data: ")) else {
+                continue;
+            };
+            let value = serde_json::from_str::<Value>(&line[6..]).map_err(|e| {
+                ClientError::new(ErrorCode::Protocol, format!("decode kv watch event: {e}"))
+            })?;
+            out.push(KvWatchEvent {
+                key: value
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                op: value
+                    .get("op")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                before: value.get("before").cloned().unwrap_or(Value::Null),
+                after: value.get("after").cloned().unwrap_or(Value::Null),
+                lsn: value.get("lsn").and_then(Value::as_u64).unwrap_or(0),
+                committed_at: value
+                    .get("committed_at")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            });
+        }
+        Ok(out)
     }
 
     pub async fn close(&self) -> Result<()> {

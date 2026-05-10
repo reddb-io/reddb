@@ -109,6 +109,31 @@ class HttpClient:
         url = f"/collections/{quote(collection)}/{quote(str(doc_id))}"
         return await self._request("DELETE", url)
 
+    async def kv_watch(
+        self,
+        key: str,
+        *,
+        collection: str = "kv_default",
+        since_lsn: int | None = None,
+        limit: int | None = None,
+    ):
+        params: dict[str, Any] = {}
+        if since_lsn is not None:
+            params["since_lsn"] = since_lsn
+        if limit is not None:
+            params["limit"] = limit
+        text = await self._request_text(
+            "GET",
+            f"/collections/{quote(collection)}/kv/{quote(str(key))}/watch",
+            params=params or None,
+        )
+        import json
+
+        for block in text.split("\n\n"):
+            for line in block.splitlines():
+                if line.startswith("data: "):
+                    yield json.loads(line[6:])
+
     async def scan(self, collection: str, **params: Any) -> dict[str, Any]:
         url = f"/collections/{quote(collection)}/scan"
         return await self._request("GET", url, params=params or None)
@@ -146,6 +171,26 @@ class HttpClient:
         except httpx.HTTPError as exc:  # pragma: no cover - network
             raise HttpError(str(exc), status=0, body="") from exc
         return _parse_response(response)
+
+    async def _request_text(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> str:
+        try:
+            response = await self._client.request(
+                method,
+                path,
+                params=params,
+                headers=self._headers(),
+            )
+        except httpx.HTTPError as exc:  # pragma: no cover - network
+            raise HttpError(str(exc), status=0, body="") from exc
+        if response.is_error:
+            _parse_response(response)
+        return response.text
 
     async def _post_json(self, path: str, body: Any) -> Any:
         headers = {**self._headers(), "content-type": "application/json"}

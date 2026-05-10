@@ -166,8 +166,25 @@ export class CacheClient {
   flushNamespace(namespace: string): Promise<void>
 }
 
+export interface KvWatchEvent {
+  key: string
+  op: 'insert' | 'update' | 'delete'
+  before: unknown
+  after: unknown
+  lsn: number
+  committed_at: number
+}
+
+export class KvClient {
+  watch(
+    key: string,
+    options?: { collection?: string; sinceLsn?: number; limit?: number },
+  ): AsyncIterable<KvWatchEvent>
+}
+
 export class RedDB {
   readonly cache: CacheClient
+  readonly kv: KvClient
 
   query(sql: string): Promise<QueryResult>
   insert(collection: string, payload: Record<string, unknown>): Promise<InsertResult>

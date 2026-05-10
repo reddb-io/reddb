@@ -152,6 +152,16 @@ pub struct QueryResult {
     pub rows: Vec<Vec<(String, ValueOut)>>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct KvWatchEvent {
+    pub key: String,
+    pub op: String,
+    pub before: serde_json::Value,
+    pub after: serde_json::Value,
+    pub lsn: u64,
+    pub committed_at: u64,
+}
+
 #[cfg(any(feature = "redwire", feature = "http"))]
 impl QueryResult {
     /// Build a `QueryResult` from the JSON envelope the server
@@ -166,10 +176,7 @@ impl QueryResult {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let affected = obj
-            .get("affected")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let affected = obj.get("affected").and_then(|v| v.as_u64()).unwrap_or(0);
         Self {
             statement,
             affected,
