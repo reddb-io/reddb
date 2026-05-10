@@ -105,6 +105,7 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("ask ")
         || lower.starts_with("put config ")
         || lower.starts_with("get config ")
+        || lower.starts_with("resolve config ")
         || lower.starts_with("rotate config ")
         || lower.starts_with("history config ")
         || lower.starts_with("incr config ")

@@ -528,6 +528,22 @@ impl<'a> Parser<'a> {
                     _ => unreachable!(),
                 });
             }
+            if upper == "SECRET_REF" {
+                self.advance()?; // consume ident
+                self.expect(Token::LParen)?;
+                let store = self.expect_ident_or_keyword()?.to_ascii_lowercase();
+                if store != "vault" {
+                    return Err(ParseError::expected(
+                        vec!["vault"],
+                        self.peek(),
+                        self.position(),
+                    ));
+                }
+                self.expect(Token::Comma)?;
+                let (collection, key) = self.parse_kv_key()?;
+                self.expect(Token::RParen)?;
+                return Ok(secret_ref_value(&store, &collection, &key));
+            }
         }
 
         match self.peek().clone() {
@@ -692,4 +708,25 @@ impl<'a> Parser<'a> {
             )),
         }
     }
+}
+
+fn secret_ref_value(store: &str, collection: &str, key: &str) -> Value {
+    let mut map = crate::json::Map::new();
+    map.insert(
+        "type".to_string(),
+        crate::json::Value::String("secret_ref".to_string()),
+    );
+    map.insert(
+        "store".to_string(),
+        crate::json::Value::String(store.to_string()),
+    );
+    map.insert(
+        "collection".to_string(),
+        crate::json::Value::String(collection.to_string()),
+    );
+    map.insert(
+        "key".to_string(),
+        crate::json::Value::String(key.to_string()),
+    );
+    Value::Json(crate::json::to_vec(&crate::json::Value::Object(map)).unwrap_or_default())
 }

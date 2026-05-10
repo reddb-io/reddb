@@ -2570,6 +2570,10 @@ pub enum ConfigCommand {
         collection: String,
         key: String,
     },
+    Resolve {
+        collection: String,
+        key: String,
+    },
     Rotate {
         collection: String,
         key: String,

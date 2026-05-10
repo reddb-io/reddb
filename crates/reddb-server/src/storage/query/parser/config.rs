@@ -10,6 +10,7 @@ impl<'a> Parser<'a> {
         let operation = self.expect_ident_or_keyword()?.to_ascii_uppercase();
         if operation != "PUT"
             && operation != "GET"
+            && operation != "RESOLVE"
             && operation != "ROTATE"
             && operation != "DELETE"
             && operation != "HISTORY"
@@ -22,6 +23,7 @@ impl<'a> Parser<'a> {
                 vec![
                     "PUT",
                     "GET",
+                    "RESOLVE",
                     "ROTATE",
                     "DELETE",
                     "HISTORY",
@@ -76,6 +78,12 @@ impl<'a> Parser<'a> {
                 }))
             }
             "GET" => Ok(QueryExpr::ConfigCommand(ConfigCommand::Get {
+                collection,
+                key: key.ok_or_else(|| {
+                    ParseError::expected(vec!["config key"], self.peek(), self.position())
+                })?,
+            })),
+            "RESOLVE" => Ok(QueryExpr::ConfigCommand(ConfigCommand::Resolve {
                 collection,
                 key: key.ok_or_else(|| {
                     ParseError::expected(vec!["config key"], self.peek(), self.position())

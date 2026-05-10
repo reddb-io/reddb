@@ -91,6 +91,8 @@ const ACTION_ALLOWLIST: &[&str] = &[
     "admin:audit-read",
     "admin:reload",
     "admin:lease-promote",
+    "config:read",
+    "config:*",
     "vault:read_metadata",
     "vault:unseal",
     "vault:unseal_history",

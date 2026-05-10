@@ -957,6 +957,76 @@ impl RedDBRuntime {
         self.audit_log().record_event(builder.build());
     }
 
+    pub(crate) fn resolve_vault_secret_value(
+        &self,
+        collection: &str,
+        key: &str,
+    ) -> RedDBResult<Value> {
+        let ops = KvAtomicOps::new(self);
+        let entry = ops.get_vault_entry(collection, key)?;
+        if let Err(reason) = self.check_vault_capability("vault:unseal", collection, key) {
+            self.audit_vault_unseal(
+                collection,
+                key,
+                crate::runtime::audit_log::Outcome::Denied,
+                &reason,
+                entry.as_ref(),
+            );
+            return Err(RedDBError::Query(reason));
+        }
+        let Some(entry) = entry else {
+            let reason = "not_found";
+            self.audit_vault_unseal(
+                collection,
+                key,
+                crate::runtime::audit_log::Outcome::Denied,
+                reason,
+                None,
+            );
+            return Err(RedDBError::NotFound(format!(
+                "vault secret '{}.{}' not found",
+                collection, key
+            )));
+        };
+        if entry.tombstone {
+            let reason = "deleted";
+            self.audit_vault_unseal(
+                collection,
+                key,
+                crate::runtime::audit_log::Outcome::Denied,
+                reason,
+                Some(&entry),
+            );
+            return Err(RedDBError::NotFound(format!(
+                "vault secret '{}.{}' is deleted",
+                collection, key
+            )));
+        }
+        match self.unseal_vault_value(collection, &entry.value) {
+            Ok(value) => {
+                self.audit_vault_unseal(
+                    collection,
+                    key,
+                    crate::runtime::audit_log::Outcome::Success,
+                    "ok",
+                    Some(&entry),
+                );
+                Ok(value)
+            }
+            Err(err) => {
+                let reason = err.to_string();
+                self.audit_vault_unseal(
+                    collection,
+                    key,
+                    crate::runtime::audit_log::Outcome::Error,
+                    &reason,
+                    Some(&entry),
+                );
+                Err(err)
+            }
+        }
+    }
+
     /// Dispatch a `KV PUT / GET / DELETE` command.
     pub fn execute_kv_command(
         &self,
