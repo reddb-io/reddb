@@ -69,7 +69,7 @@
 //!    the sweeper needs read-only iterators on `BlobCache`. Today neither
 //!    surface exists, so `sweep_expired` and `reclaim_orphans` are bounded
 //!    scaffolding that report zero work until those accessors land. Required
-//!    additions (in `cache/blob.rs`):
+//!    additions (in `cache/blob/cache.rs`):
 //!
 //!    ```ignore
 //!    pub fn for_each_l1_entry<F>(&self, visit: F)

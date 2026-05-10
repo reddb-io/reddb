@@ -44,7 +44,7 @@ in the session header when the bench runs.
 - Toolchain: `rust-toolchain.toml` from this worktree.
 - Profile: `--release`.
 - Features: default workspace features. Blob cache surface is
-  `crates/reddb-server/src/storage/cache/blob.rs` with the constants
+  `crates/reddb-server/src/storage/cache/blob/cache.rs` with the constants
   `DEFAULT_BLOB_L1_BYTES_MAX = 256 MiB` and
   `DEFAULT_BLOB_L2_BYTES_MAX = 4 GiB` left at their defaults unless a
   scenario in [`scenarios.md`](../../bench/blob-cache/scenarios.md)

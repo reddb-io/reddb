@@ -68,7 +68,7 @@ control sidecar to the configured remote backend, under the
 `red.config.backup.blob_cache_prefix`). On restore, place those two
 files back at `cache.blob.l2_path` (and `<l2_path>.blob-cache.ctl`)
 **before** server start; the cold-start synopsis rebuild in
-`BlobCache::new` (see `cache/blob.rs::rebuild_l2_synopsis`) re-indexes
+`BlobCache::new` (see `cache/blob/l2.rs::BlobCacheL2::rebuild_l2_synopsis`) re-indexes
 the metadata automatically.
 
 The L2 archive step is best-effort: per-file upload failures are logged
@@ -188,7 +188,7 @@ Before bringing the server up against a restored L2 directory:
 
 Once the server starts and opens the L2 metadata B+ tree, the membership
 synopsis is **rebuilt automatically** by `rebuild_l2_synopsis` (see
-`crates/reddb-server/src/storage/cache/blob.rs` lines 1069–1085). The
+`crates/reddb-server/src/storage/cache/blob/l2.rs`). The
 function walks every record in the B+ tree and inserts `(namespace, key)`
 into the per-namespace synopsis set.
 

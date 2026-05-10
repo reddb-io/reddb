@@ -69,7 +69,7 @@ pub use strategy::BufferAccessStrategy;
 // `BlobCache` writes the L2 metadata B+ tree and blob chains into a
 // single pager file at `cache.blob.l2_path` plus a sidecar control file
 // at `<l2_path>.blob-cache.ctl` (see
-// `cache/blob.rs::BlobCacheL2::open`). Both files are required for a
+// `cache/blob/l2.rs::BlobCacheL2::open`). Both files are required for a
 // usable restore — the pager file holds the data, the control file
 // holds the root-page pointer + bytes-in-use.
 //
@@ -89,7 +89,7 @@ pub use strategy::BufferAccessStrategy;
 // Restore is the symmetric mirror: download both keys back into
 // `l2_path` (and its `.blob-cache.ctl` sibling). The cold-start
 // synopsis rebuild in `BlobCache::new` then re-indexes the metadata
-// B+ tree (per `cache/blob.rs::rebuild_l2_synopsis`).
+// B+ tree (per `cache/blob/l2.rs::BlobCacheL2::rebuild_l2_synopsis`).
 
 const L2_BACKUP_PAGER_SUFFIX: &str = "l2.pager";
 const L2_BACKUP_CONTROL_SUFFIX: &str = "l2.ctl";
@@ -181,7 +181,7 @@ mod backup_helpers_tests {
     /// The `tempfile` crate is not in dev-deps; we synthesize a
     /// collision-free path using the test name + a process-local
     /// monotonic counter, mirroring the convention already used by
-    /// `cache/blob.rs::tests::l2_path`.
+    /// `cache/blob/cache.rs::tests::l2_path`.
     static SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
     fn scratch(label: &str) -> std::path::PathBuf {
         let pid = std::process::id();
@@ -263,7 +263,7 @@ mod backup_helpers_tests {
     /// 4. Restore into a fresh L2 path.
     /// 5. Open a new `BlobCache` against the restored path and verify
     ///    `get` returns the original bytes — proves the cold-start
-    ///    synopsis rebuild (`blob.rs::rebuild_l2_synopsis`) re-indexes
+    ///    synopsis rebuild (`blob/l2.rs::BlobCacheL2::rebuild_l2_synopsis`) re-indexes
     ///    the restored tree end-to-end.
     ///
     /// This is the integration-test that ADR 0006 §"backup-restore"
@@ -314,8 +314,7 @@ mod backup_helpers_tests {
 
         // 5: re-open against restored path and verify entries are
         //    addressable. The synopsis rebuild fires automatically in
-        //    BlobCache::new (per blob.rs::rebuild_l2_synopsis at
-        //    blob.rs:1069-1085).
+        //    BlobCache::new (per blob/l2.rs::BlobCacheL2::rebuild_l2_synopsis).
         let restored_cache = BlobCache::open_with_l2(
             BlobCacheConfig::default()
                 .with_l1_bytes_max(64 * 1024)
