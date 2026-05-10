@@ -32,9 +32,10 @@ state defeats the simplicity that makes it fast.
 
 Decision #218: this invariant applies to the homogeneous `sieve.rs::PageCache`
 workload. The Blob Cache L1 shard is the documented exception: because it
-protects user-visible cached blobs across L1/L2 tiers, `blob::Shard` may use
-`BlobCachePolicy::priority` as a bounded eviction bias before falling back to
-the `visited` sweep. Do not copy that second signal back into `PageCache`.
+protects user-visible cached blobs across L1/L2 tiers, `blob/shard.rs::Shard`
+may use `BlobCachePolicy::priority` as a bounded eviction bias before falling
+back to the `visited` sweep. Do not copy that second signal back into
+`PageCache`.
 
 ### 2. The cache **never** writes to disk
 
