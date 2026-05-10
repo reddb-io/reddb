@@ -1083,6 +1083,11 @@ impl RedDBServer {
                         );
                     }
                 }
+                if let Some(response) =
+                    self.handle_v1_keyed_route(method.as_str(), &path, &query, &body)
+                {
+                    return response;
+                }
                 // Config key routes: /config/{key.path}
                 if let Some(config_key) = path.strip_prefix("/config/") {
                     let config_key = config_key.trim_matches('/');
@@ -1607,12 +1612,16 @@ mod tests {
     use super::*;
 
     fn request(path: &str) -> HttpRequest {
+        request_with("GET", path, Vec::new())
+    }
+
+    fn request_with(method: &str, path: &str, body: Vec<u8>) -> HttpRequest {
         HttpRequest {
-            method: "GET".to_string(),
+            method: method.to_string(),
             path: path.to_string(),
             query: BTreeMap::new(),
             headers: BTreeMap::new(),
-            body: Vec::new(),
+            body,
         }
     }
 
@@ -1644,6 +1653,56 @@ mod tests {
             .extra_headers
             .iter()
             .all(|(name, _)| *name != "Deprecation" && *name != "Sunset"));
+    }
+
+    #[test]
+    fn v1_keyed_routes_split_kv_config_and_vault_domains() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let server = RedDBServer::new(runtime);
+
+        let kv_put = server.route(request_with(
+            "PUT",
+            "/v1/kv/sessions/token",
+            br#"{"value":"abc","ttl_ms":1000}"#.to_vec(),
+        ));
+        assert_eq!(kv_put.status, 200, "{}", String::from_utf8_lossy(&kv_put.body));
+
+        let kv_get = server.route(request("/v1/kv/sessions/token"));
+        assert_eq!(kv_get.status, 200);
+        let body = String::from_utf8_lossy(&kv_get.body);
+        assert!(body.contains("\"collection\":\"sessions\""), "{body}");
+        assert!(body.contains("\"key\":\"token\""), "{body}");
+
+        let config_put = server.route(request_with(
+            "PUT",
+            "/v1/config/app/feature",
+            br#"{"value":"on"}"#.to_vec(),
+        ));
+        assert_eq!(
+            config_put.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&config_put.body)
+        );
+
+        let config_ttl = server.route(request_with(
+            "PUT",
+            "/v1/config/app/temporary",
+            br#"{"value":"on","ttl_ms":1000}"#.to_vec(),
+        ));
+        assert_eq!(config_ttl.status, 400);
+        assert!(
+            String::from_utf8_lossy(&config_ttl.body).contains("CONFIG does not support TTL"),
+            "{}",
+            String::from_utf8_lossy(&config_ttl.body)
+        );
+
+        let vault_counter = server.route(request_with(
+            "POST",
+            "/v1/vault/secrets/api_key/incr",
+            br#"{"by":1}"#.to_vec(),
+        ));
+        assert_eq!(vault_counter.status, 405);
     }
 }
 

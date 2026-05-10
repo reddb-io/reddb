@@ -236,6 +236,28 @@ impl Reddb {
             collection: "kv_default",
         }
     }
+
+    pub fn config(&self) -> ConfigClient<'_> {
+        self.config_collection("red.config")
+    }
+
+    pub fn vault(&self) -> VaultClient<'_> {
+        self.vault_collection("red.vault")
+    }
+
+    pub fn config_collection<'a>(&'a self, collection: &'a str) -> ConfigClient<'a> {
+        ConfigClient {
+            db: self,
+            collection,
+        }
+    }
+
+    pub fn vault_collection<'a>(&'a self, collection: &'a str) -> VaultClient<'a> {
+        VaultClient {
+            db: self,
+            collection,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -323,11 +345,122 @@ impl<'a> KvClient<'a> {
     }
 }
 
+#[derive(Debug)]
+pub struct ConfigClient<'a> {
+    db: &'a Reddb,
+    collection: &'a str,
+}
+
+impl<'a> ConfigClient<'a> {
+    pub async fn put(&self, key: &str, value: JsonValue, tags: &[&str]) -> Result<QueryResult> {
+        let mut sql = format!(
+            "PUT CONFIG {} {} = {}",
+            kv_identifier(self.collection),
+            kv_identifier(key),
+            kv_value_literal(&value)
+        );
+        append_tag_clause(&mut sql, tags);
+        self.db.query(&sql).await
+    }
+
+    pub async fn put_secret_ref(
+        &self,
+        key: &str,
+        vault_collection: &str,
+        vault_key: &str,
+        tags: &[&str],
+    ) -> Result<QueryResult> {
+        let mut sql = format!(
+            "PUT CONFIG {} {} = SECRET_REF(vault, {}.{})",
+            kv_identifier(self.collection),
+            kv_identifier(key),
+            kv_identifier(vault_collection),
+            kv_identifier(vault_key)
+        );
+        append_tag_clause(&mut sql, tags);
+        self.db.query(&sql).await
+    }
+
+    pub async fn get(&self, key: &str) -> Result<QueryResult> {
+        self.db
+            .query(&format!(
+                "GET CONFIG {} {}",
+                kv_identifier(self.collection),
+                kv_identifier(key)
+            ))
+            .await
+    }
+
+    pub async fn resolve(&self, key: &str) -> Result<QueryResult> {
+        self.db
+            .query(&format!(
+                "RESOLVE CONFIG {} {}",
+                kv_identifier(self.collection),
+                kv_identifier(key)
+            ))
+            .await
+    }
+}
+
+#[derive(Debug)]
+pub struct VaultClient<'a> {
+    db: &'a Reddb,
+    collection: &'a str,
+}
+
+impl<'a> VaultClient<'a> {
+    pub async fn put(&self, key: &str, value: JsonValue, tags: &[&str]) -> Result<QueryResult> {
+        let mut sql = format!(
+            "VAULT PUT {}.{} = {}",
+            kv_identifier(self.collection),
+            kv_identifier(key),
+            kv_value_literal(&value)
+        );
+        append_tag_clause(&mut sql, tags);
+        self.db.query(&sql).await
+    }
+
+    pub async fn get(&self, key: &str) -> Result<QueryResult> {
+        self.db
+            .query(&format!(
+                "VAULT GET {}.{}",
+                kv_identifier(self.collection),
+                kv_identifier(key)
+            ))
+            .await
+    }
+
+    pub async fn unseal(&self, key: &str) -> Result<QueryResult> {
+        self.db
+            .query(&format!(
+                "UNSEAL VAULT {}.{}",
+                kv_identifier(self.collection),
+                kv_identifier(key)
+            ))
+            .await
+    }
+}
+
+fn append_tag_clause(sql: &mut String, tags: &[&str]) {
+    if tags.is_empty() {
+        return;
+    }
+    sql.push_str(" TAGS [");
+    sql.push_str(
+        &tags
+            .iter()
+            .map(|tag| kv_tag_literal(tag))
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    sql.push(']');
+}
+
 fn kv_identifier(value: &str) -> String {
     value
         .chars()
         .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '_' {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
                 ch
             } else {
                 '_'

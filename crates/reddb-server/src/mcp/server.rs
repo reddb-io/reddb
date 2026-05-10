@@ -214,6 +214,12 @@ impl McpServer {
             "reddb_kv_get" => self.tool_kv_get(args),
             "reddb_kv_set" => self.tool_kv_set(args),
             "reddb_kv_invalidate_tags" => self.tool_kv_invalidate_tags(args),
+            "reddb_config_get" => self.tool_config_get(args),
+            "reddb_config_put" => self.tool_config_put(args),
+            "reddb_config_resolve" => self.tool_config_resolve(args),
+            "reddb_vault_get" => self.tool_vault_get(args),
+            "reddb_vault_put" => self.tool_vault_put(args),
+            "reddb_vault_unseal" => self.tool_vault_unseal(args),
             "reddb_delete" => self.tool_delete(args),
             "reddb_search_vector" => self.tool_search_vector(args),
             "reddb_search_text" => self.tool_search_text(args),
@@ -576,6 +582,78 @@ impl McpServer {
             JsonValue::Array(tags.into_iter().map(JsonValue::String).collect()),
         );
         json_to_string(&JsonValue::Object(obj)).map_err(|e| format!("serialization error: {}", e))
+    }
+
+    fn tool_config_get(&self, args: &JsonValue) -> Result<String, String> {
+        let collection = mcp_keyed_ident(get_str_field(args, "collection")?)?;
+        let key = mcp_keyed_ident(get_str_field(args, "key")?)?;
+        self.tool_keyed_query(format!("GET CONFIG {collection} {key}"))
+    }
+
+    fn tool_config_put(&self, args: &JsonValue) -> Result<String, String> {
+        reject_mcp_volatile_options(args, "CONFIG")?;
+        let collection = mcp_keyed_ident(get_str_field(args, "collection")?)?;
+        let key = mcp_keyed_ident(get_str_field(args, "key")?)?;
+        let tags = parse_string_array_arg(args, "tags")?;
+        let literal = if let Some(secret_ref) = args.get("secret_ref") {
+            let object = secret_ref
+                .as_object()
+                .ok_or("field 'secret_ref' must be an object")?;
+            let ref_collection = object
+                .get("collection")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "secret_ref.collection is required".to_string())
+                .and_then(mcp_keyed_ident)?;
+            let ref_key = object
+                .get("key")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "secret_ref.key is required".to_string())
+                .and_then(mcp_keyed_ident)?;
+            format!("SECRET_REF(vault, {ref_collection}.{ref_key})")
+        } else {
+            mcp_value_literal(args.get("value").ok_or("missing required field 'value'")?)?
+        };
+        let mut sql = format!("PUT CONFIG {collection} {key} = {literal}");
+        append_mcp_tags_clause(&mut sql, &tags);
+        self.tool_keyed_query(sql)
+    }
+
+    fn tool_config_resolve(&self, args: &JsonValue) -> Result<String, String> {
+        let collection = mcp_keyed_ident(get_str_field(args, "collection")?)?;
+        let key = mcp_keyed_ident(get_str_field(args, "key")?)?;
+        self.tool_keyed_query(format!("RESOLVE CONFIG {collection} {key}"))
+    }
+
+    fn tool_vault_get(&self, args: &JsonValue) -> Result<String, String> {
+        let collection = mcp_keyed_ident(get_str_field(args, "collection")?)?;
+        let key = mcp_keyed_ident(get_str_field(args, "key")?)?;
+        self.tool_keyed_query(format!("VAULT GET {collection}.{key}"))
+    }
+
+    fn tool_vault_put(&self, args: &JsonValue) -> Result<String, String> {
+        reject_mcp_volatile_options(args, "VAULT")?;
+        let collection = mcp_keyed_ident(get_str_field(args, "collection")?)?;
+        let key = mcp_keyed_ident(get_str_field(args, "key")?)?;
+        let value = mcp_value_literal(args.get("value").ok_or("missing required field 'value'")?)?;
+        let tags = parse_string_array_arg(args, "tags")?;
+        let mut sql = format!("VAULT PUT {collection}.{key} = {value}");
+        append_mcp_tags_clause(&mut sql, &tags);
+        self.tool_keyed_query(sql)
+    }
+
+    fn tool_vault_unseal(&self, args: &JsonValue) -> Result<String, String> {
+        let collection = mcp_keyed_ident(get_str_field(args, "collection")?)?;
+        let key = mcp_keyed_ident(get_str_field(args, "key")?)?;
+        self.tool_keyed_query(format!("UNSEAL VAULT {collection}.{key}"))
+    }
+
+    fn tool_keyed_query(&self, sql: String) -> Result<String, String> {
+        let uc = QueryUseCases::new(&self.runtime);
+        let result = uc
+            .execute(ExecuteQueryInput { query: sql })
+            .map_err(|e| format!("{}", e))?;
+        let json = runtime_query_json(&result, &None, &None);
+        json_to_string(&json).map_err(|e| format!("serialization error: {}", e))
     }
 
     fn tool_delete(&self, args: &JsonValue) -> Result<String, String> {
@@ -1129,6 +1207,55 @@ fn parse_string_array_arg(args: &JsonValue, field: &str) -> Result<Vec<String>, 
             .collect(),
         _ => Err(format!("field '{field}' must be an array of strings")),
     }
+}
+
+fn mcp_keyed_ident(value: &str) -> Result<String, String> {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
+    {
+        Ok(value.to_string())
+    } else {
+        Err("keyed collection and key names must use letters, numbers, underscores, or dots".to_string())
+    }
+}
+
+fn mcp_value_literal(value: &JsonValue) -> Result<String, String> {
+    match value {
+        JsonValue::String(value) => Ok(format!("'{}'", value.replace('\'', "''"))),
+        JsonValue::Number(value) => Ok(value.to_string()),
+        JsonValue::Bool(value) => Ok(value.to_string()),
+        JsonValue::Null => Ok("NULL".to_string()),
+        JsonValue::Array(_) | JsonValue::Object(_) => {
+            json_to_string(value).map_err(|err| format!("serialization error: {err}"))
+        }
+    }
+}
+
+fn append_mcp_tags_clause(sql: &mut String, tags: &[String]) {
+    if tags.is_empty() {
+        return;
+    }
+    sql.push_str(" TAGS [");
+    for (index, tag) in tags.iter().enumerate() {
+        if index > 0 {
+            sql.push_str(", ");
+        }
+        sql.push('\'');
+        sql.push_str(&tag.replace('\'', "''"));
+        sql.push('\'');
+    }
+    sql.push(']');
+}
+
+fn reject_mcp_volatile_options(args: &JsonValue, domain: &str) -> Result<(), String> {
+    for field in ["ttl", "ttl_ms", "expire", "expire_ms", "expires_at"] {
+        if args.get(field).is_some() {
+            return Err(format!("{domain} does not support TTL or expiration options"));
+        }
+    }
+    Ok(())
 }
 
 // Convert a storage Value to JSON (local helper to avoid visibility issues).

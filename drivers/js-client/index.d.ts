@@ -116,6 +116,30 @@ export class KvClient {
   ): AsyncIterable<KvWatchEvent>
 }
 
+export class ConfigClient {
+  put(
+    key: string,
+    value: unknown,
+    options?: {
+      collection?: string
+      tags?: string[]
+      secretRef?: { collection: string; key: string }
+    },
+  ): Promise<QueryResult>
+  get(key: string, options?: { collection?: string }): Promise<QueryResult>
+  resolve(key: string, options?: { collection?: string }): Promise<QueryResult>
+}
+
+export class VaultClient {
+  put(
+    key: string,
+    value: unknown,
+    options?: { collection?: string; tags?: string[] },
+  ): Promise<QueryResult>
+  get(key: string, options?: { collection?: string }): Promise<QueryResult>
+  unseal(key: string, options?: { collection?: string }): Promise<QueryResult>
+}
+
 /**
  * Specialised error thrown when an embedded URI is passed to the
  * thin client. Always has `code === 'EmbeddedNotSupported'`. Use
@@ -135,7 +159,9 @@ export function isEmbeddedUri(uri: string): boolean
 
 export class RedDB {
   readonly cache: CacheClient
-  readonly kv: KvClient
+  readonly kv: KvClient & ((collection?: string) => KvClient)
+  readonly config: (collection?: string) => ConfigClient
+  readonly vault: (collection?: string) => VaultClient
 
   query(sql: string): Promise<QueryResult>
   insert(collection: string, payload: Record<string, unknown>): Promise<InsertResult>

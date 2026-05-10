@@ -129,3 +129,66 @@ test('connect(http://) honours auth.token (Bearer header)', async () => {
     await stub.close()
   }
 })
+
+test('domain clients expose explicit kv config and vault surfaces', async () => {
+  const seen = []
+  const stub = await startMockServer({
+    'GET /health': () => ({ ok: true, version: 'mock-0.0.0' }),
+    'POST /query': (body) => {
+      seen.push(body.query)
+      return {
+        ok: true,
+        statement: 'KEYED',
+        affected: 1,
+        columns: [],
+        rows: [{ sql: body.query }],
+      }
+    },
+  })
+  try {
+    const db = await connect(stub.baseUrl)
+    assert.equal(typeof db.kv, 'function')
+    await db.kv('sessions').put('token', 'abc')
+    await db.config('app').put('api_key', null, {
+      secretRef: { collection: 'secrets', key: 'api_key' },
+    })
+    await db.config('app').resolve('api_key')
+    await db.vault('secrets').get('api_key')
+    await db.vault('secrets').unseal('api_key')
+
+    assert.equal(seen[0], "KV PUT sessions.token = 'abc'")
+    assert.equal(seen[1], 'PUT CONFIG app api_key = SECRET_REF(vault, secrets.api_key)')
+    assert.equal(seen[2], 'RESOLVE CONFIG app api_key')
+    assert.equal(seen[3], 'VAULT GET secrets.api_key')
+    assert.equal(seen[4], 'UNSEAL VAULT secrets.api_key')
+    await db.close()
+  } finally {
+    await stub.close()
+  }
+})
+
+test('config and vault clients reject volatile options before query dispatch', async () => {
+  const seen = []
+  const stub = await startMockServer({
+    'GET /health': () => ({ ok: true, version: 'mock-0.0.0' }),
+    'POST /query': (body) => {
+      seen.push(body.query)
+      return { ok: true, statement: 'KEYED', affected: 1, columns: [], rows: [] }
+    },
+  })
+  try {
+    const db = await connect(stub.baseUrl)
+    assert.throws(
+      () => db.config('app').put('temporary', 'x', { ttlMs: 1000 }),
+      /config does not support TTL/,
+    )
+    assert.throws(
+      () => db.vault('secrets').put('api_key', 'x', { expireMs: 1000 }),
+      /vault does not support TTL/,
+    )
+    assert.deepEqual(seen, [])
+    await db.close()
+  } finally {
+    await stub.close()
+  }
+})
