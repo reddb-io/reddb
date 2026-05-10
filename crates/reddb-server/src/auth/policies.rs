@@ -1426,6 +1426,36 @@ mod tests {
     }
 
     #[test]
+    fn validator_rejects_per_verb_kv_actions_except_invalidate() {
+        for action in [
+            "kv:get",
+            "kv:put",
+            "kv:delete",
+            "kv:incr",
+            "kv:cas",
+            "kv:watch",
+        ] {
+            let bad = format!(
+                r#"{{
+                    "id":"p","version":1,"statements":[
+                        {{"effect":"allow","actions":["{action}"],"resources":["kv:sessions"]}}
+                    ]}}"#
+            );
+            let err = Policy::from_json_str(&bad).unwrap_err();
+            assert!(
+                matches!(err, PolicyError::InvalidAction(ref invalid) if invalid == action),
+                "expected {action} to be rejected, got {err:?}"
+            );
+        }
+
+        let allowed = r#"{
+            "id":"p","version":1,"statements":[
+                {"effect":"allow","actions":["kv:invalidate"],"resources":["kv:sessions"]}
+            ]}"#;
+        Policy::from_json_str(allowed).expect("kv:invalidate is the only per-KV verb action");
+    }
+
+    #[test]
     fn validator_rejects_invalid_resource() {
         let bad = r#"{
             "id":"p","version":1,"statements":[
