@@ -865,6 +865,17 @@ impl<'a> Parser<'a> {
                             self.position(),
                         )),
                     }
+                } else if matches!(
+                    self.peek_next()?,
+                    Token::Ident(name) if name.eq_ignore_ascii_case("VAULT")
+                ) {
+                    match self.parse_vault_lifecycle_command()? {
+                        QueryExpr::KvCommand(command) => Ok(FrontendStatement::KvCommand(command)),
+                        other => Err(ParseError::new(
+                            format!("internal: VAULT produced unexpected query kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
                 } else {
                     self.parse_sql_statement().map(FrontendStatement::Sql)
                 }
@@ -876,23 +887,44 @@ impl<'a> Parser<'a> {
                     self.position(),
                 )),
             },
+            Token::Purge => match self.parse_vault_lifecycle_command()? {
+                QueryExpr::KvCommand(command) => Ok(FrontendStatement::KvCommand(command)),
+                other => Err(ParseError::new(
+                    format!("internal: VAULT produced unexpected query kind {other:?}"),
+                    self.position(),
+                )),
+            },
             Token::Ident(name)
                 if name.eq_ignore_ascii_case("PUT")
                     || name.eq_ignore_ascii_case("GET")
                     || name.eq_ignore_ascii_case("ROTATE")
                     || name.eq_ignore_ascii_case("HISTORY")
+                    || name.eq_ignore_ascii_case("PURGE")
                     || name.eq_ignore_ascii_case("INCR")
                     || name.eq_ignore_ascii_case("DECR")
                     || name.eq_ignore_ascii_case("INVALIDATE") =>
             {
-                match self.parse_config_command()? {
-                    QueryExpr::ConfigCommand(command) => {
-                        Ok(FrontendStatement::ConfigCommand(command))
+                if matches!(
+                    self.peek_next()?,
+                    Token::Ident(next) if next.eq_ignore_ascii_case("VAULT")
+                ) {
+                    match self.parse_vault_lifecycle_command()? {
+                        QueryExpr::KvCommand(command) => Ok(FrontendStatement::KvCommand(command)),
+                        other => Err(ParseError::new(
+                            format!("internal: VAULT produced unexpected query kind {other:?}"),
+                            self.position(),
+                        )),
                     }
-                    other => Err(ParseError::new(
-                        format!("internal: CONFIG produced unexpected query kind {other:?}"),
-                        self.position(),
-                    )),
+                } else {
+                    match self.parse_config_command()? {
+                        QueryExpr::ConfigCommand(command) => {
+                            Ok(FrontendStatement::ConfigCommand(command))
+                        }
+                        other => Err(ParseError::new(
+                            format!("internal: CONFIG produced unexpected query kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
                 }
             }
             Token::Ident(name) if name.eq_ignore_ascii_case("VAULT") => {

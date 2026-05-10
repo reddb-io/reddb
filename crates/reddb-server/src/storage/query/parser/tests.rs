@@ -5654,9 +5654,15 @@ fn test_parse_vault_put_uses_vault_model() {
 #[test]
 fn test_parse_unseal_vault_command() {
     let q = parse("UNSEAL VAULT secrets.api_key").unwrap();
-    if let QueryExpr::KvCommand(KvCommand::Unseal { collection, key }) = q {
+    if let QueryExpr::KvCommand(KvCommand::Unseal {
+        collection,
+        key,
+        version,
+    }) = q
+    {
         assert_eq!(collection, "secrets");
         assert_eq!(key, "api_key");
+        assert_eq!(version, None);
     } else {
         panic!("expected Vault KvCommand::Unseal");
     }
@@ -5667,7 +5673,31 @@ fn test_parse_vault_unseal_command() {
     let q = parse("VAULT UNSEAL secrets.api_key").unwrap();
     assert!(matches!(
         q,
-        QueryExpr::KvCommand(KvCommand::Unseal { collection, key })
+        QueryExpr::KvCommand(KvCommand::Unseal { collection, key, version })
+            if collection == "secrets" && key == "api_key" && version.is_none()
+    ));
+}
+
+#[test]
+fn test_parse_vault_lifecycle_commands() {
+    assert!(matches!(
+        parse("ROTATE VAULT secrets.api_key = 'v2'").unwrap(),
+        QueryExpr::KvCommand(KvCommand::Rotate { collection, key, .. })
+            if collection == "secrets" && key == "api_key"
+    ));
+    assert!(matches!(
+        parse("HISTORY VAULT secrets.api_key").unwrap(),
+        QueryExpr::KvCommand(KvCommand::History { collection, key })
+            if collection == "secrets" && key == "api_key"
+    ));
+    assert!(matches!(
+        parse("PURGE VAULT secrets.api_key").unwrap(),
+        QueryExpr::KvCommand(KvCommand::Purge { collection, key })
+            if collection == "secrets" && key == "api_key"
+    ));
+    assert!(matches!(
+        parse("UNSEAL VAULT secrets.api_key VERSION 1").unwrap(),
+        QueryExpr::KvCommand(KvCommand::Unseal { collection, key, version: Some(1) })
             if collection == "secrets" && key == "api_key"
     ));
 }
