@@ -246,6 +246,10 @@ impl HttpClient {
                     .get("committed_at")
                     .and_then(Value::as_u64)
                     .unwrap_or(0),
+                dropped_event_count: value
+                    .get("dropped_event_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
             });
         }
         Ok(out)

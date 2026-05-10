@@ -73,6 +73,7 @@ pub struct KvWatchEvent {
     pub after: Option<JsonValue>,
     pub lsn: u64,
     pub committed_at: u64,
+    pub dropped_event_count: u64,
 }
 
 impl KvWatchEvent {
@@ -95,6 +96,10 @@ impl KvWatchEvent {
         object.insert(
             "committed_at".to_string(),
             JsonValue::Number(self.committed_at as f64),
+        );
+        object.insert(
+            "dropped_event_count".to_string(),
+            JsonValue::Number(self.dropped_event_count as f64),
         );
         JsonValue::Object(object)
     }
@@ -404,6 +409,7 @@ impl CdcBuffer {
             after,
             lsn: event_lsn,
             committed_at: timestamp,
+            dropped_event_count: 0,
         };
         let event = ChangeEvent {
             lsn: event_lsn,

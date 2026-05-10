@@ -160,6 +160,7 @@ pub struct KvWatchEvent {
     pub after: serde_json::Value,
     pub lsn: u64,
     pub committed_at: u64,
+    pub dropped_event_count: u64,
 }
 
 #[cfg(any(feature = "redwire", feature = "http"))]

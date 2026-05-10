@@ -134,6 +134,19 @@ class HttpClient:
                 if line.startswith("data: "):
                     yield json.loads(line[6:])
 
+    async def kv_watch_prefix(
+        self,
+        prefix: str,
+        *,
+        collection: str = "kv_default",
+        since_lsn: int | None = None,
+        limit: int | None = None,
+    ):
+        async for event in self.kv_watch(
+            f"{prefix}.*", collection=collection, since_lsn=since_lsn, limit=limit
+        ):
+            yield event
+
     async def scan(self, collection: str, **params: Any) -> dict[str, Any]:
         url = f"/collections/{quote(collection)}/scan"
         return await self._request("GET", url, params=params or None)

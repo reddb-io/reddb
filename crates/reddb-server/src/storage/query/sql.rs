@@ -741,11 +741,13 @@ impl<'a> Parser<'a> {
             }
             Token::Ident(name) if name.eq_ignore_ascii_case("WATCH") => {
                 self.advance()?;
-                let (collection, key) = self.parse_kv_key()?;
-                Ok(FrontendStatement::KvCommand(KvCommand::Watch {
-                    collection,
-                    key,
-                }))
+                match self.parse_kv_watch()? {
+                    QueryExpr::KvCommand(command) => Ok(FrontendStatement::KvCommand(command)),
+                    other => Err(ParseError::new(
+                        format!("internal: WATCH produced unexpected query kind {other:?}"),
+                        self.position(),
+                    )),
+                }
             }
             Token::Ident(name) if name.eq_ignore_ascii_case("INVALIDATE") => {
                 self.advance()?;

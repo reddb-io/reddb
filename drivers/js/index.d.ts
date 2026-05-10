@@ -173,6 +173,7 @@ export interface KvWatchEvent {
   after: unknown
   lsn: number
   committed_at: number
+  dropped_event_count: number
 }
 
 export class KvClient {
@@ -184,6 +185,10 @@ export class KvClient {
   invalidateTags(tags: string[], options?: { collection?: string }): Promise<number>
   watch(
     key: string,
+    options?: { collection?: string; sinceLsn?: number; limit?: number },
+  ): AsyncIterable<KvWatchEvent>
+  watchPrefix(
+    prefix: string,
     options?: { collection?: string; sinceLsn?: number; limit?: number },
   ): AsyncIterable<KvWatchEvent>
 }

@@ -289,6 +289,7 @@ message KvWatchEvent {
   string after_json = 4;
   uint64 lsn = 5;
   uint64 committed_at = 6;
+  uint64 dropped_event_count = 7;
 }
 
 message BulkEntityReply {
