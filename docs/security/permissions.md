@@ -468,6 +468,13 @@ Do not create new verbs in policy JSON unless the validator knows them. Use
 resource kinds to express model detail, not custom actions like `kv:get` or
 `queue:ack`.
 
+KV action review (#252): normal KV verbs intentionally stay on the generic
+action vocabulary. `KV GET` is `select` on `table:<collection>`, `KV PUT` is
+`insert`/`update`, `KV DELETE` is `delete`, and counter/CAS mutations use
+`update`. The only KV-specific action in the live policy contract is
+`kv:invalidate`, because tag invalidation is a model-specific bulk operation
+that is neither a normal row delete nor a table-wide truncate.
+
 ## Recommended policy patterns
 
 ### 1. Read one table
