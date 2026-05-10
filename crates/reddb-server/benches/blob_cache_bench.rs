@@ -29,10 +29,14 @@ const NS: &str = "bench";
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 fn make_cache_l1_only(l1_bytes: usize) -> BlobCache {
+    make_cache_l1_only_with_shards(l1_bytes, 64)
+}
+
+fn make_cache_l1_only_with_shards(l1_bytes: usize, shard_count: usize) -> BlobCache {
     BlobCache::new(
         BlobCacheConfig::builder()
             .l1_bytes_max(l1_bytes)
-            .shard_count(64)
+            .shard_count(shard_count)
             .max_namespaces(16)
             .l2_compression(L2Compression::Off)
             .try_build()
@@ -504,6 +508,50 @@ fn w8_mixed_blob_admission(c: &mut Criterion) {
     }
 }
 
+// ── Workload 9 — shard insert/remove slot-index (#225) ──────────────────────
+//
+// Single-shard insert + exact-key invalidation isolates the Shard::insert /
+// Shard::remove path. Before #225, both operations removed keys from
+// Vec<BlobCacheKey> via order.iter().position(...); this workload is the
+// before/after comparison point for N=10K and N=100K.
+
+fn w9_shard_insert_remove_slot_index(c: &mut Criterion) {
+    let mut g = c.benchmark_group("w9-shard-insert-remove-slot-index");
+    g.sample_size(10);
+    g.measurement_time(Duration::from_secs(5));
+
+    for item_count in [10_000usize, 100_000usize] {
+        let keys: Vec<String> = (0..item_count).map(key).collect();
+        let p = payload(1);
+        let l1_bytes = item_count * 2;
+
+        g.throughput(Throughput::Elements((item_count * 2) as u64));
+        g.bench_with_input(
+            BenchmarkId::new("BlobCache-single-shard-put-invalidate", item_count),
+            &item_count,
+            |b, _| {
+                b.iter_custom(|iters| {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let cache = make_cache_l1_only_with_shards(l1_bytes, 1);
+                        let t = Instant::now();
+                        for key in &keys {
+                            cache.put(NS, key.clone(), BlobCachePut::new(p.clone())).unwrap();
+                        }
+                        for key in &keys {
+                            black_box(cache.invalidate_key(NS, key));
+                        }
+                        total += t.elapsed();
+                    }
+                    total
+                });
+            },
+        );
+    }
+
+    g.finish();
+}
+
 // ── Redis helpers (gated on REDIS_NO_PERSIST_ADDR / REDIS_AOF_ADDR env vars) ─
 // These stubs exist so the bench file compiles without the redis crate.
 // When Docker is available, run bench/blob-cache/redis-up.sh, then re-bench.
@@ -524,5 +572,6 @@ criterion_group!(
     w6_dependency_invalidation,
     w7_restart_warm_cache,
     w8_mixed_blob_admission,
+    w9_shard_insert_remove_slot_index,
 );
 criterion_main!(benches);

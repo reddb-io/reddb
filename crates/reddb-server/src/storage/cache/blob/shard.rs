@@ -12,7 +12,8 @@ use crate::storage::cache::extended_ttl::{EffectiveExpiry, ExpiryDecision, Exten
 #[derive(Debug)]
 pub(super) struct Shard {
     entries: HashMap<BlobCacheKey, Entry>,
-    order: Vec<BlobCacheKey>,
+    slots: Vec<Option<BlobCacheKey>>,
+    free_slots: Vec<usize>,
     hand: usize,
     pub(super) bytes: usize,
 }
@@ -21,7 +22,8 @@ impl Shard {
     pub(super) fn new() -> Self {
         Self {
             entries: HashMap::new(),
-            order: Vec::new(),
+            slots: Vec::new(),
+            free_slots: Vec::new(),
             hand: 0,
             bytes: 0,
         }
@@ -127,26 +129,24 @@ impl Shard {
         })
     }
 
-    pub(super) fn insert(&mut self, key: BlobCacheKey, entry: Entry) -> InsertOutcome {
+    pub(super) fn insert(&mut self, key: BlobCacheKey, mut entry: Entry) -> InsertOutcome {
         let old_entry = if let Some(old) = self.entries.remove(&key) {
+            let slot_index = old.slot_index;
             self.bytes = self.bytes.saturating_sub(old.size);
-            if let Some(pos) = self.order.iter().position(|k| k == &key) {
-                self.order.remove(pos);
-                if self.hand > pos {
-                    self.hand -= 1;
-                }
-                if self.hand > self.order.len() {
-                    self.hand = 0;
-                }
-            }
+            entry.slot_index = slot_index;
             Some(old)
         } else {
+            let slot_index = self.free_slots.pop().unwrap_or_else(|| {
+                self.slots.push(None);
+                self.slots.len() - 1
+            });
+            entry.slot_index = slot_index;
             None
         };
 
         self.bytes += entry.size;
+        self.slots[entry.slot_index] = Some(key.clone());
         self.entries.insert(key.clone(), entry);
-        self.order.push(key);
         InsertOutcome {
             old_entry,
             admitted: true,
@@ -154,43 +154,47 @@ impl Shard {
     }
 
     pub(super) fn evict_one(&mut self) -> Option<(BlobCacheKey, Entry)> {
-        if self.order.is_empty() {
+        if self.entries.is_empty() {
             self.hand = 0;
             return None;
         }
-        let max_sweeps = self.order.len().saturating_mul(2).max(1);
+        let max_sweeps = self.slots.len().saturating_mul(2).max(1);
         for _ in 0..max_sweeps {
-            if self.order.is_empty() {
+            if self.entries.is_empty() {
                 self.hand = 0;
                 return None;
             }
-            if self.hand >= self.order.len() {
+            if self.hand >= self.slots.len() {
                 self.hand = 0;
             }
-            let candidate = self.order[self.hand].clone();
+            let Some(candidate) = self.slots[self.hand].clone() else {
+                self.advance_hand();
+                continue;
+            };
             let Some(entry) = self.entries.get(&candidate) else {
-                self.order.remove(self.hand);
+                self.slots[self.hand] = None;
+                self.free_slots.push(self.hand);
+                self.advance_hand();
                 continue;
             };
             if entry.visited {
                 if let Some(entry) = self.entries.get_mut(&candidate) {
                     entry.visited = false;
                 }
-                self.hand = (self.hand + 1) % self.order.len();
+                self.advance_hand();
                 continue;
             }
 
             if self.has_lower_priority_unvisited(entry.priority) {
-                self.hand = (self.hand + 1) % self.order.len();
+                self.advance_hand();
                 continue;
             }
 
             let removed = self.entries.remove(&candidate).expect("candidate exists");
             self.bytes = self.bytes.saturating_sub(removed.size);
-            self.order.remove(self.hand);
-            if self.hand >= self.order.len() {
-                self.hand = 0;
-            }
+            self.slots[self.hand] = None;
+            self.free_slots.push(self.hand);
+            self.advance_hand();
             return Some((candidate, removed));
         }
         None
@@ -203,14 +207,12 @@ impl Shard {
     pub(super) fn remove(&mut self, key: &BlobCacheKey) -> Option<Entry> {
         let removed = self.entries.remove(key)?;
         self.bytes = self.bytes.saturating_sub(removed.size);
-        if let Some(pos) = self.order.iter().position(|k| k == key) {
-            self.order.remove(pos);
-            if self.hand > pos {
-                self.hand -= 1;
-            }
-            if self.hand >= self.order.len() {
-                self.hand = 0;
-            }
+        self.slots[removed.slot_index] = None;
+        self.free_slots.push(removed.slot_index);
+        if self.entries.is_empty() {
+            self.hand = 0;
+        } else if self.hand >= self.slots.len() {
+            self.hand = 0;
         }
         Some(removed)
     }
@@ -248,6 +250,14 @@ impl Shard {
         self.entries
             .values()
             .any(|entry| !entry.visited && entry.priority < priority)
+    }
+
+    fn advance_hand(&mut self) {
+        if self.slots.is_empty() {
+            self.hand = 0;
+        } else {
+            self.hand = (self.hand + 1) % self.slots.len();
+        }
     }
 }
 
@@ -305,6 +315,40 @@ mod tests {
         assert_eq!(shard.len(), 1);
         assert_eq!(shard.bytes, 2);
         assert!(matches!(shard.contains(&k, 1_000, 0), Lookup::Present));
+    }
+
+    #[test]
+    fn insert_replaces_existing_key_in_the_same_slot() {
+        let mut shard = Shard::new();
+        let k = key("same");
+
+        shard.insert(k.clone(), entry(b"abc", 128));
+        let first_slot = shard.entries.get(&k).expect("entry").slot_index;
+
+        shard.insert(k.clone(), entry(b"xy", 128));
+
+        let replaced = shard.entries.get(&k).expect("entry");
+        assert_eq!(replaced.slot_index, first_slot);
+        assert_eq!(shard.slots[first_slot].as_ref(), Some(&k));
+    }
+
+    #[test]
+    fn remove_empties_entry_slot_without_shifting_survivors() {
+        let mut shard = Shard::new();
+        let a = key("a");
+        let b = key("b");
+        let c = key("c");
+        shard.insert(a.clone(), entry(b"aa", 128));
+        shard.insert(b.clone(), entry(b"bb", 128));
+        shard.insert(c.clone(), entry(b"cc", 128));
+        let b_slot = shard.entries.get(&b).expect("b").slot_index;
+        let c_slot = shard.entries.get(&c).expect("c").slot_index;
+
+        shard.remove(&b).expect("removed");
+
+        assert!(shard.slots[b_slot].is_none());
+        assert_eq!(shard.entries.get(&c).expect("c").slot_index, c_slot);
+        assert_eq!(shard.slots[c_slot].as_ref(), Some(&c));
     }
 
     #[test]

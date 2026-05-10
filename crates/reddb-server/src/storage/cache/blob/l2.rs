@@ -241,6 +241,7 @@ impl BlobCacheL2 {
             priority: record.priority,
             version: record.version,
             namespace_generation: record.namespace_generation,
+            slot_index: 0,
             last_access_unix_ms: now_ms,
             extended: ExtendedTtlPolicy::off(),
         })
