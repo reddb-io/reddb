@@ -74,7 +74,7 @@ Prefer the `Makefile` wrappers:
 - `make fmt` and `make lint` for formatting and clippy.
 - `make run ARGS='--path ./data.db --bind 127.0.0.1:8080'` to run locally.
 
-Run `cargo check` after non-trivial edits. Add unit tests next to local behavior and use `tests/` for cross-module or persistence scenarios. If `graphify-out/` is present and code changed, update it before finishing.
+Run `cargo check` after non-trivial edits. Add unit tests next to local behavior and use `tests/` for cross-module or persistence scenarios.
 
 ## Style, Commits, and PRs
 

@@ -82,7 +82,7 @@ for target in "${TARGETS[@]}"; do
     # -L follows symlinks (workspace setups sometimes use them); skip
     # `target/` build artefacts and any vendored dep checkouts.
     find -L "$target" \
-      \( -name target -o -name node_modules -o -name graphify-out \) -prune \
+      \( -name target -o -name node_modules \) -prune \
       -o \( -type f \( -name '*.rs' -o -name '*.rs.fixture' \) -print \) \
       >>"$FILE_LIST"
   else

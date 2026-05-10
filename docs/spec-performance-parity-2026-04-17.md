@@ -85,10 +85,6 @@ additional win, measured separately, not gating.
 - **`src/storage/cache/bgwriter.rs`** — `BgWriter` + `DirtyPageFlusher`
   + `spawn()` entry point, documented as "post-MVP wiring". **Zero
   callers.** We wire, not design.
-- **`graphify-out/GRAPH_REPORT.md` Community 45** — "Lehman-Yao
-  right-link scheme (post-MVP)" already documented as planned BTree
-  extension.
-
 This shrinks the build-from-scratch effort substantially. The spec's
 phases reflect wiring existing infrastructure + writing HOT updates +
 multi-row insert + Lehman-Yao.

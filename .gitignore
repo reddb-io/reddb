@@ -7,9 +7,6 @@ fuzz/target/
 fuzz/artifacts/
 fuzz/corpus/
 fuzz/coverage/
-# graphify code-graph artifacts (regenerable via `graphify update .`)
-graphify-out/
-src/graphify-out/
 PLAN.md
 .cargo/config.toml
 drivers/python/.venv/
