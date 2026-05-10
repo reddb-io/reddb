@@ -5598,6 +5598,28 @@ fn test_parse_put_config_with_schema_type() {
 }
 
 #[test]
+fn test_parse_config_secret_ref_and_resolve() {
+    let q = parse("PUT CONFIG app api_key = SECRET_REF(vault, secrets.api_key)").unwrap();
+    if let QueryExpr::ConfigCommand(ConfigCommand::Put { value, .. }) = q {
+        let Value::Json(bytes) = value else {
+            panic!("expected secret ref to parse as structured JSON");
+        };
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["type"], "secret_ref");
+        assert_eq!(json["store"], "vault");
+        assert_eq!(json["collection"], "secrets");
+        assert_eq!(json["key"], "api_key");
+    } else {
+        panic!("expected ConfigCommand::Put");
+    }
+
+    assert!(matches!(
+        parse("RESOLVE CONFIG app api_key").unwrap(),
+        QueryExpr::ConfigCommand(ConfigCommand::Resolve { .. })
+    ));
+}
+
+#[test]
 fn test_parse_get_delete_history_config() {
     assert!(matches!(
         parse("GET CONFIG app feature_flag").unwrap(),

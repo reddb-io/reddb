@@ -7,6 +7,7 @@ use crate::physical::{CollectionContract, ContractOrigin};
 use crate::storage::query::ast::ConfigValueType;
 use crate::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 
+use super::impl_core::{current_auth_identity, current_connection_id, current_tenant};
 use super::*;
 
 const CONFIG_HISTORY_LIMIT: usize = 16;
@@ -21,6 +22,11 @@ struct ConfigVersion {
     op: String,
     value_type: Option<ConfigValueType>,
     schema_version: Option<i64>,
+}
+
+struct ConfigSecretRef {
+    collection: String,
+    key: String,
 }
 
 impl RedDBRuntime {
@@ -61,6 +67,9 @@ impl RedDBRuntime {
             ConfigCommand::Get { collection, key } => {
                 self.config_get_result(raw_query, collection, key)
             }
+            ConfigCommand::Resolve { collection, key } => {
+                self.config_resolve_result(raw_query, collection, key)
+            }
             ConfigCommand::Delete { collection, key } => {
                 self.config_delete_result(raw_query, collection, key)
             }
@@ -84,6 +93,7 @@ impl RedDBRuntime {
             }
             ConfigCommand::Put { collection, .. }
             | ConfigCommand::Get { collection, .. }
+            | ConfigCommand::Resolve { collection, .. }
             | ConfigCommand::Rotate { collection, .. }
             | ConfigCommand::Delete { collection, .. }
             | ConfigCommand::History { collection, .. } => {
@@ -100,6 +110,112 @@ impl RedDBRuntime {
                     CollectionModel::Config,
                     actual_model,
                 )
+            }
+        }
+    }
+
+    fn config_resolve_result(
+        &self,
+        raw_query: &str,
+        collection: &str,
+        key: &str,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let latest = self.latest_config_version(collection, key)?;
+        if let Err(reason) = self.check_config_capability("config:read", collection, key) {
+            self.audit_config_resolve(
+                collection,
+                key,
+                None,
+                crate::runtime::audit_log::Outcome::Denied,
+                &reason,
+            );
+            return Err(RedDBError::Query(reason));
+        }
+
+        let Some(version) = latest else {
+            let reason = "not_found";
+            self.audit_config_resolve(
+                collection,
+                key,
+                None,
+                crate::runtime::audit_log::Outcome::Denied,
+                reason,
+            );
+            return Err(RedDBError::NotFound(format!(
+                "config '{}.{}' not found",
+                collection, key
+            )));
+        };
+        if version.tombstone {
+            let reason = "deleted";
+            self.audit_config_resolve(
+                collection,
+                key,
+                None,
+                crate::runtime::audit_log::Outcome::Denied,
+                reason,
+            );
+            return Err(RedDBError::NotFound(format!(
+                "config '{}.{}' is deleted",
+                collection, key
+            )));
+        }
+
+        let secret_ref = parse_config_secret_ref(&version.value).map_err(|err| {
+            self.audit_config_resolve(
+                collection,
+                key,
+                None,
+                crate::runtime::audit_log::Outcome::Error,
+                &err.to_string(),
+            );
+            err
+        })?;
+
+        match self.resolve_vault_secret_value(&secret_ref.collection, &secret_ref.key) {
+            Ok(value) => {
+                self.audit_config_resolve(
+                    collection,
+                    key,
+                    Some(&secret_ref),
+                    crate::runtime::audit_log::Outcome::Success,
+                    "ok",
+                );
+                let mut result = UnifiedResult::with_columns(vec![
+                    "collection".into(),
+                    "key".into(),
+                    "value".into(),
+                    "resolved_store".into(),
+                    "resolved_collection".into(),
+                    "resolved_key".into(),
+                ]);
+                let mut record = UnifiedRecord::new();
+                record.set("collection", Value::text(collection.to_string()));
+                record.set("key", Value::text(key.to_string()));
+                record.set("value", value);
+                record.set("resolved_store", Value::text("vault"));
+                record.set("resolved_collection", Value::text(secret_ref.collection));
+                record.set("resolved_key", Value::text(secret_ref.key));
+                result.push(record);
+                Ok(RuntimeQueryResult {
+                    query: raw_query.to_string(),
+                    mode: crate::storage::query::modes::QueryMode::Sql,
+                    statement: "config_resolve",
+                    engine: "config",
+                    result,
+                    affected_rows: 0,
+                    statement_type: "select",
+                })
+            }
+            Err(err) => {
+                let reason = err.to_string();
+                let outcome = if reason.contains("denied") {
+                    crate::runtime::audit_log::Outcome::Denied
+                } else {
+                    crate::runtime::audit_log::Outcome::Error
+                };
+                self.audit_config_resolve(collection, key, Some(&secret_ref), outcome, &reason);
+                Err(err)
             }
         }
     }
@@ -431,6 +547,144 @@ impl RedDBRuntime {
         }
         Ok(())
     }
+
+    fn check_config_capability(
+        &self,
+        action: &str,
+        collection: &str,
+        key: &str,
+    ) -> Result<(), String> {
+        let Some(auth_store) = self.inner.auth_store.read().clone() else {
+            return Ok(());
+        };
+        if !auth_store.iam_authorization_enabled() {
+            return Ok(());
+        }
+        let Some((principal, role)) = current_auth_identity() else {
+            return Err(
+                "IAM authorization is enabled; config capability check requires an authenticated principal"
+                    .to_string(),
+            );
+        };
+        let tenant = current_tenant();
+        let principal_id = crate::auth::UserId::from_parts(tenant.as_deref(), &principal);
+        let mut resource =
+            crate::auth::policies::ResourceRef::new("config", format!("{collection}.{key}"));
+        if let Some(ref tenant) = tenant {
+            resource = resource.with_tenant(tenant.clone());
+        }
+        let ctx = crate::auth::policies::EvalContext {
+            principal_tenant: tenant.clone(),
+            current_tenant: tenant,
+            peer_ip: None,
+            mfa_present: false,
+            now_ms: crate::utils::now_unix_millis() as u128,
+            principal_is_admin_role: role == crate::auth::Role::Admin,
+        };
+        if auth_store.check_policy_authz(&principal_id, action, &resource, &ctx) {
+            Ok(())
+        } else {
+            Err(format!(
+                "principal=`{}` action=`{}` resource=`config:{}.{}` denied by IAM policy",
+                principal, action, collection, key
+            ))
+        }
+    }
+
+    fn audit_config_resolve(
+        &self,
+        collection: &str,
+        key: &str,
+        secret_ref: Option<&ConfigSecretRef>,
+        outcome: crate::runtime::audit_log::Outcome,
+        reason: &str,
+    ) {
+        let actor = current_auth_identity()
+            .map(|(principal, _)| principal)
+            .unwrap_or_else(|| "anonymous".to_string());
+        let request_id = match current_connection_id() {
+            0 => "embedded".to_string(),
+            id => format!("conn-{id}"),
+        };
+        let mut builder = crate::runtime::audit_log::AuditEvent::builder("config/resolve")
+            .principal(actor.clone())
+            .source(crate::runtime::audit_log::AuditAuthSource::Password)
+            .resource(format!("config:{collection}.{key}"))
+            .outcome(outcome)
+            .correlation_id(request_id.clone())
+            .fields([
+                crate::runtime::audit_log::AuditFieldEscaper::field("actor", actor),
+                crate::runtime::audit_log::AuditFieldEscaper::field("collection", collection),
+                crate::runtime::audit_log::AuditFieldEscaper::field("key", key),
+                crate::runtime::audit_log::AuditFieldEscaper::field(
+                    "target",
+                    format!("{collection}.{key}"),
+                ),
+                crate::runtime::audit_log::AuditFieldEscaper::field("reason", reason),
+                crate::runtime::audit_log::AuditFieldEscaper::field("request_id", request_id),
+                crate::runtime::audit_log::AuditFieldEscaper::field(
+                    "connection_id",
+                    current_connection_id(),
+                ),
+            ]);
+        if let Some(tenant) = current_tenant() {
+            builder = builder.tenant(tenant);
+        }
+        if let Some(secret_ref) = secret_ref {
+            builder = builder.fields([
+                crate::runtime::audit_log::AuditFieldEscaper::field("resolved_store", "vault"),
+                crate::runtime::audit_log::AuditFieldEscaper::field(
+                    "resolved_collection",
+                    secret_ref.collection.as_str(),
+                ),
+                crate::runtime::audit_log::AuditFieldEscaper::field(
+                    "resolved_key",
+                    secret_ref.key.as_str(),
+                ),
+                crate::runtime::audit_log::AuditFieldEscaper::field(
+                    "resolved_target",
+                    format!("{}.{}", secret_ref.collection, secret_ref.key),
+                ),
+            ]);
+        }
+        self.audit_log().record_event(builder.build());
+    }
+}
+
+fn parse_config_secret_ref(value: &Value) -> RedDBResult<ConfigSecretRef> {
+    let Value::Json(bytes) = value else {
+        return Err(RedDBError::InvalidConfig(
+            "CONFIG value is not a SecretRef".to_string(),
+        ));
+    };
+    let json = crate::json::from_slice::<crate::json::Value>(bytes).map_err(|err| {
+        RedDBError::InvalidConfig(format!("CONFIG SecretRef is malformed: {err}"))
+    })?;
+    let Some(object) = json.as_object() else {
+        return Err(RedDBError::InvalidConfig(
+            "CONFIG SecretRef must be an object".to_string(),
+        ));
+    };
+    let get_str = |field: &str| -> RedDBResult<&str> {
+        object
+            .get(field)
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| RedDBError::InvalidConfig(format!("CONFIG SecretRef missing {field}")))
+    };
+    if get_str("type")? != "secret_ref" {
+        return Err(RedDBError::InvalidConfig(
+            "CONFIG value is not a SecretRef".to_string(),
+        ));
+    }
+    if get_str("store")? != "vault" {
+        return Err(RedDBError::InvalidConfig(
+            "CONFIG SecretRef store is unsupported".to_string(),
+        ));
+    }
+    Ok(ConfigSecretRef {
+        collection: get_str("collection")?.to_string(),
+        key: get_str("key")?.to_string(),
+    })
 }
 
 fn config_write_output(

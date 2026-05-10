@@ -916,6 +916,7 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
             match cmd {
                 ConfigCommand::Put { collection, .. }
                 | ConfigCommand::Get { collection, .. }
+                | ConfigCommand::Resolve { collection, .. }
                 | ConfigCommand::Rotate { collection, .. }
                 | ConfigCommand::Delete { collection, .. }
                 | ConfigCommand::History { collection, .. }

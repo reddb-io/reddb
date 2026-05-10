@@ -897,6 +897,7 @@ impl<'a> Parser<'a> {
             Token::Ident(name)
                 if name.eq_ignore_ascii_case("PUT")
                     || name.eq_ignore_ascii_case("GET")
+                    || name.eq_ignore_ascii_case("RESOLVE")
                     || name.eq_ignore_ascii_case("ROTATE")
                     || name.eq_ignore_ascii_case("HISTORY")
                     || name.eq_ignore_ascii_case("PURGE")
