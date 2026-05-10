@@ -15,6 +15,7 @@ const CONFIG_HISTORY_LIMIT: usize = 16;
 #[derive(Clone)]
 struct ConfigVersion {
     id: EntityId,
+    key: String,
     version: i64,
     value: Value,
     tombstone: bool,
@@ -22,6 +23,7 @@ struct ConfigVersion {
     op: String,
     value_type: Option<ConfigValueType>,
     schema_version: Option<i64>,
+    tags: Vec<String>,
 }
 
 struct ConfigSecretRef {
@@ -43,12 +45,14 @@ impl RedDBRuntime {
                 key,
                 value,
                 value_type,
+                tags,
             } => self.config_write_result(
                 raw_query,
                 collection,
                 key,
                 value.clone(),
                 *value_type,
+                tags,
                 "put",
             ),
             ConfigCommand::Rotate {
@@ -56,12 +60,14 @@ impl RedDBRuntime {
                 key,
                 value,
                 value_type,
+                tags,
             } => self.config_write_result(
                 raw_query,
                 collection,
                 key,
                 value.clone(),
                 *value_type,
+                tags,
                 "rotate",
             ),
             ConfigCommand::Get { collection, key } => {
@@ -76,6 +82,18 @@ impl RedDBRuntime {
             ConfigCommand::History { collection, key } => {
                 self.config_history_result(raw_query, collection, key)
             }
+            ConfigCommand::List {
+                collection,
+                prefix,
+                limit,
+                offset,
+            } => self.config_list_result(raw_query, collection, prefix.as_deref(), *limit, *offset),
+            ConfigCommand::Watch {
+                collection,
+                key,
+                prefix,
+                from_lsn,
+            } => self.config_watch_result(raw_query, collection, key, *prefix, *from_lsn),
             ConfigCommand::InvalidVolatileOperation { operation, .. } => {
                 Err(invalid_config_volatility(operation))
             }
@@ -96,7 +114,9 @@ impl RedDBRuntime {
             | ConfigCommand::Resolve { collection, .. }
             | ConfigCommand::Rotate { collection, .. }
             | ConfigCommand::Delete { collection, .. }
-            | ConfigCommand::History { collection, .. } => {
+            | ConfigCommand::History { collection, .. }
+            | ConfigCommand::List { collection, .. }
+            | ConfigCommand::Watch { collection, .. } => {
                 let snapshot = self.inner.db.catalog_model_snapshot();
                 let Some(actual_model) = snapshot
                     .collections
@@ -227,6 +247,7 @@ impl RedDBRuntime {
         key: &str,
         value: Value,
         requested_type: Option<ConfigValueType>,
+        tags: &[String],
         op: &str,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_system_config_capability("config:write", collection, key)
@@ -239,6 +260,19 @@ impl RedDBRuntime {
         if let Some(value_type) = value_type {
             validate_config_value_type(&value, value_type)?;
         }
+        let before = latest.as_ref().and_then(|version| {
+            if version.tombstone {
+                None
+            } else {
+                Some(crate::presentation::entity_json::storage_value_to_json(&version.value))
+            }
+        });
+        let after = Some(crate::presentation::entity_json::storage_value_to_json(&value));
+        let change_op = if latest.is_some() {
+            crate::replication::cdc::ChangeOperation::Update
+        } else {
+            crate::replication::cdc::ChangeOperation::Insert
+        };
         let id = self.append_config_version(
             collection,
             key,
@@ -248,7 +282,9 @@ impl RedDBRuntime {
             op,
             value_type,
             schema_version,
+            tags,
         )?;
+        self.record_kv_watch_event(change_op, collection, key, id.raw(), before, after);
         self.prune_config_history(collection, key)?;
         self.invalidate_result_cache();
         Ok(config_write_output(
@@ -259,6 +295,7 @@ impl RedDBRuntime {
             id,
             value_type,
             schema_version,
+            tags,
             match op {
                 "rotate" => "config_rotate",
                 _ => "config_put",
@@ -290,7 +327,24 @@ impl RedDBRuntime {
             "delete",
             value_type,
             schema_version,
+            &[],
         )?;
+        if let Some(before) = latest.as_ref().and_then(|version| {
+            if version.tombstone {
+                None
+            } else {
+                Some(crate::presentation::entity_json::storage_value_to_json(&version.value))
+            }
+        }) {
+            self.record_kv_watch_event(
+                crate::replication::cdc::ChangeOperation::Delete,
+                collection,
+                key,
+                id.raw(),
+                Some(before),
+                None,
+            );
+        }
         self.prune_config_history(collection, key)?;
         self.invalidate_result_cache();
         Ok(config_write_output(
@@ -301,6 +355,7 @@ impl RedDBRuntime {
             id,
             value_type,
             schema_version,
+            &[],
             "delete",
             1,
         ))
@@ -339,7 +394,7 @@ impl RedDBRuntime {
                     .map(Value::Integer)
                     .unwrap_or(Value::Null),
             );
-            record.set("tags", Value::Null);
+            record.set("tags", config_tags_value(&version.tags));
             record.set("tombstone", Value::Boolean(version.tombstone));
         } else {
             record.set("value", Value::Null);
@@ -414,6 +469,118 @@ impl RedDBRuntime {
         })
     }
 
+    fn config_list_result(
+        &self,
+        raw_query: &str,
+        collection: &str,
+        prefix: Option<&str>,
+        limit: Option<usize>,
+        offset: usize,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let mut versions = self.latest_config_versions(collection, prefix)?;
+        versions.sort_by(|left, right| left.key.cmp(&right.key));
+        let mut result = UnifiedResult::with_columns(vec![
+            "collection".into(),
+            "key".into(),
+            "value".into(),
+            "version".into(),
+            "value_type".into(),
+            "schema_version".into(),
+            "tags".into(),
+            "tombstone".into(),
+            "op".into(),
+            "created_at_ms".into(),
+        ]);
+        for version in versions
+            .into_iter()
+            .filter(|version| {
+                self.check_config_capability("config:read", collection, &version.key)
+                    .is_ok()
+            })
+            .skip(offset)
+            .take(limit.unwrap_or(usize::MAX))
+        {
+            let mut record = UnifiedRecord::new();
+            record.set("collection", Value::text(collection.to_string()));
+            record.set("key", Value::text(version.key));
+            record.set("value", version.value);
+            record.set("version", Value::Integer(version.version));
+            record.set("value_type", config_value_type_value(version.value_type));
+            record.set(
+                "schema_version",
+                version
+                    .schema_version
+                    .map(Value::Integer)
+                    .unwrap_or(Value::Null),
+            );
+            record.set("tags", config_tags_value(&version.tags));
+            record.set("tombstone", Value::Boolean(version.tombstone));
+            record.set("op", Value::text(version.op));
+            record.set("created_at_ms", Value::Integer(version.created_at_ms));
+            result.push(record);
+        }
+        Ok(RuntimeQueryResult {
+            query: raw_query.to_string(),
+            mode: crate::storage::query::modes::QueryMode::Sql,
+            statement: "config_list",
+            engine: "config",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+        })
+    }
+
+    fn config_watch_result(
+        &self,
+        raw_query: &str,
+        collection: &str,
+        key: &str,
+        prefix: bool,
+        from_lsn: Option<u64>,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let watch_key = if prefix {
+            format!("{key}.*")
+        } else {
+            key.to_string()
+        };
+        let endpoint = match from_lsn {
+            Some(lsn) => {
+                format!("/collections/{collection}/config/{watch_key}/watch?since_lsn={lsn}")
+            }
+            None => format!("/collections/{collection}/config/{watch_key}/watch"),
+        };
+        let mut result = UnifiedResult::with_columns(vec![
+            "collection".into(),
+            "key".into(),
+            "prefix".into(),
+            "from_lsn".into(),
+            "watch_url".into(),
+            "streaming".into(),
+        ]);
+        let mut record = UnifiedRecord::new();
+        record.set("collection", Value::text(collection.to_string()));
+        record.set("key", Value::text(watch_key));
+        record.set("prefix", Value::Boolean(prefix));
+        record.set(
+            "from_lsn",
+            from_lsn
+                .map(Value::UnsignedInteger)
+                .unwrap_or(crate::storage::schema::Value::Null),
+        );
+        record.set("watch_url", Value::text(endpoint));
+        record.set("streaming", Value::Boolean(true));
+        result.push(record);
+        Ok(RuntimeQueryResult {
+            query: raw_query.to_string(),
+            mode: crate::storage::query::modes::QueryMode::Sql,
+            statement: "config_watch",
+            engine: "config",
+            result,
+            affected_rows: 0,
+            statement_type: "stream",
+        })
+    }
+
     fn ensure_config_collection(&self, collection: &str) -> RedDBResult<()> {
         let store = self.inner.db.store();
         if store.get_collection(collection).is_none() {
@@ -462,6 +629,7 @@ impl RedDBRuntime {
         op: &str,
         value_type: Option<ConfigValueType>,
         schema_version: Option<i64>,
+        tags: &[String],
     ) -> RedDBResult<EntityId> {
         let now = current_unix_ms() as i64;
         let fields = vec![
@@ -479,6 +647,7 @@ impl RedDBRuntime {
             ("tombstone".to_string(), Value::Boolean(tombstone)),
             ("op".to_string(), Value::text(op.to_string())),
             ("created_at_ms".to_string(), Value::Integer(now)),
+            ("tags".to_string(), config_tags_value(tags)),
         ];
         let mut row = RowData::new(Vec::new());
         row.named = Some(fields.into_iter().collect());
@@ -523,6 +692,7 @@ impl RedDBRuntime {
             }
             versions.push(ConfigVersion {
                 id: entity.id,
+                key: key.to_string(),
                 version: value_i64(row.get_field("version")).unwrap_or(0),
                 value: row.get_field("value").cloned().unwrap_or(Value::Null),
                 tombstone: matches!(row.get_field("tombstone"), Some(Value::Boolean(true))),
@@ -535,9 +705,58 @@ impl RedDBRuntime {
                     .get_field("value_type")
                     .and_then(config_value_type_from_value),
                 schema_version: value_i64(row.get_field("schema_version")),
+                tags: config_tags_from_value(row.get_field("tags")),
             });
         }
         Ok(versions)
+    }
+
+    fn latest_config_versions(
+        &self,
+        collection: &str,
+        prefix: Option<&str>,
+    ) -> RedDBResult<Vec<ConfigVersion>> {
+        let store = self.inner.db.store();
+        let Some(manager) = store.get_collection(collection) else {
+            return Ok(Vec::new());
+        };
+        let mut by_key = std::collections::BTreeMap::<String, ConfigVersion>::new();
+        for entity in manager.query_all(|_| true) {
+            let EntityData::Row(row) = &entity.data else {
+                continue;
+            };
+            let Some(Value::Text(key)) = row.get_field("key") else {
+                continue;
+            };
+            if prefix.is_some_and(|prefix| !key.starts_with(prefix)) {
+                continue;
+            }
+            let version = ConfigVersion {
+                id: entity.id,
+                key: key.to_string(),
+                version: value_i64(row.get_field("version")).unwrap_or(0),
+                value: row.get_field("value").cloned().unwrap_or(Value::Null),
+                tombstone: matches!(row.get_field("tombstone"), Some(Value::Boolean(true))),
+                created_at_ms: value_i64(row.get_field("created_at_ms")).unwrap_or(0),
+                op: match row.get_field("op") {
+                    Some(Value::Text(value)) => value.to_string(),
+                    _ => "put".to_string(),
+                },
+                value_type: row
+                    .get_field("value_type")
+                    .and_then(config_value_type_from_value),
+                schema_version: value_i64(row.get_field("schema_version")),
+                tags: config_tags_from_value(row.get_field("tags")),
+            };
+            let replace = by_key
+                .get(key.as_ref())
+                .map(|existing| version.version > existing.version)
+                .unwrap_or(true);
+            if replace {
+                by_key.insert(key.to_string(), version);
+            }
+        }
+        Ok(by_key.into_values().collect())
     }
 
     fn prune_config_history(&self, collection: &str, key: &str) -> RedDBResult<()> {
@@ -613,6 +832,46 @@ impl RedDBRuntime {
             return Ok(());
         }
         self.check_config_capability(action, collection, key)
+    }
+
+    pub fn config_watch_events_since(
+        &self,
+        collection: &str,
+        key: &str,
+        since_lsn: u64,
+        max_count: usize,
+    ) -> Vec<crate::replication::cdc::KvWatchEvent> {
+        self.kv_watch_events_since(collection, key, since_lsn, max_count)
+            .into_iter()
+            .map(|event| self.policy_filter_config_watch_event(event))
+            .collect()
+    }
+
+    pub fn config_watch_events_since_prefix(
+        &self,
+        collection: &str,
+        prefix: &str,
+        since_lsn: u64,
+        max_count: usize,
+    ) -> Vec<crate::replication::cdc::KvWatchEvent> {
+        self.kv_watch_events_since_prefix(collection, prefix, since_lsn, max_count)
+            .into_iter()
+            .map(|event| self.policy_filter_config_watch_event(event))
+            .collect()
+    }
+
+    fn policy_filter_config_watch_event(
+        &self,
+        mut event: crate::replication::cdc::KvWatchEvent,
+    ) -> crate::replication::cdc::KvWatchEvent {
+        if self
+            .check_config_capability("config:read", &event.collection, &event.key)
+            .is_err()
+        {
+            event.before = None;
+            event.after = None;
+        }
+        event
     }
 
     fn audit_config_resolve(
@@ -727,6 +986,7 @@ fn config_write_output(
     id: EntityId,
     value_type: Option<ConfigValueType>,
     schema_version: Option<i64>,
+    tags: &[String],
     statement: &'static str,
     affected_rows: u64,
 ) -> RuntimeQueryResult {
@@ -750,7 +1010,7 @@ fn config_write_output(
         "schema_version",
         schema_version.map(Value::Integer).unwrap_or(Value::Null),
     );
-    record.set("tags", Value::Null);
+    record.set("tags", config_tags_value(tags));
     record.set("id", Value::Integer(id.raw() as i64));
     result.push(record);
     RuntimeQueryResult {
@@ -865,6 +1125,36 @@ fn config_value_type_from_value(value: &Value) -> Option<ConfigValueType> {
     match value {
         Value::Text(value) => ConfigValueType::parse(value.as_ref()),
         _ => None,
+    }
+}
+
+fn config_tags_value(tags: &[String]) -> Value {
+    if tags.is_empty() {
+        return Value::Null;
+    }
+    Value::Array(tags.iter().map(|tag| Value::text(tag.clone())).collect())
+}
+
+fn config_tags_from_value(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(|value| match value {
+                Value::Text(tag) => Some(tag.to_string()),
+                _ => None,
+            })
+            .collect(),
+        Some(Value::Json(bytes)) => crate::json::from_slice::<crate::json::Value>(bytes)
+            .ok()
+            .and_then(|value| value.as_array().map(|values| values.to_vec()))
+            .map(|values| {
+                values
+                    .into_iter()
+                    .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
     }
 }
 

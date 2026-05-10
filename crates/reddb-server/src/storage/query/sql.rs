@@ -741,22 +741,131 @@ impl<'a> Parser<'a> {
             }
             Token::Ident(name) if name.eq_ignore_ascii_case("WATCH") => {
                 self.advance()?;
-                match self.parse_kv_watch()? {
-                    QueryExpr::KvCommand(command) => Ok(FrontendStatement::KvCommand(command)),
-                    other => Err(ParseError::new(
-                        format!("internal: WATCH produced unexpected query kind {other:?}"),
+                if matches!(
+                    self.peek(),
+                    Token::Ident(name) if name.eq_ignore_ascii_case("CONFIG")
+                ) {
+                    match self.parse_config_watch_after_watch()? {
+                        QueryExpr::ConfigCommand(command) => {
+                            Ok(FrontendStatement::ConfigCommand(command))
+                        }
+                        other => Err(ParseError::new(
+                            format!("internal: WATCH CONFIG produced unexpected query kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                } else if matches!(
+                    self.peek(),
+                    Token::Ident(name) if name.eq_ignore_ascii_case("VAULT")
+                ) {
+                    match self.parse_vault_watch_after_watch()? {
+                        QueryExpr::KvCommand(command) => Ok(FrontendStatement::KvCommand(command)),
+                        other => Err(ParseError::new(
+                            format!("internal: WATCH VAULT produced unexpected query kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                } else {
+                    match self.parse_kv_watch(crate::catalog::CollectionModel::Kv)? {
+                        QueryExpr::KvCommand(command) => Ok(FrontendStatement::KvCommand(command)),
+                        other => Err(ParseError::new(
+                            format!("internal: WATCH produced unexpected query kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                }
+            }
+            Token::List => {
+                self.advance()?;
+                if matches!(
+                    self.peek(),
+                    Token::Ident(name) if name.eq_ignore_ascii_case("CONFIG")
+                ) {
+                    match self.parse_config_list_after_list()? {
+                        QueryExpr::ConfigCommand(command) => {
+                            Ok(FrontendStatement::ConfigCommand(command))
+                        }
+                        other => Err(ParseError::new(
+                            format!("internal: LIST CONFIG produced unexpected query kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                } else if matches!(
+                    self.peek(),
+                    Token::Ident(name) if name.eq_ignore_ascii_case("VAULT")
+                ) {
+                    match self.parse_vault_list_after_list()? {
+                        QueryExpr::KvCommand(command) => Ok(FrontendStatement::KvCommand(command)),
+                        other => Err(ParseError::new(
+                            format!("internal: LIST VAULT produced unexpected query kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                } else {
+                    Err(ParseError::expected(
+                        vec!["CONFIG", "VAULT"],
+                        self.peek(),
                         self.position(),
-                    )),
+                    ))
+                }
+            }
+            Token::Ident(name) if name.eq_ignore_ascii_case("LIST") => {
+                self.advance()?;
+                if matches!(
+                    self.peek(),
+                    Token::Ident(name) if name.eq_ignore_ascii_case("CONFIG")
+                ) {
+                    match self.parse_config_list_after_list()? {
+                        QueryExpr::ConfigCommand(command) => {
+                            Ok(FrontendStatement::ConfigCommand(command))
+                        }
+                        other => Err(ParseError::new(
+                            format!("internal: LIST CONFIG produced unexpected query kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                } else if matches!(
+                    self.peek(),
+                    Token::Ident(name) if name.eq_ignore_ascii_case("VAULT")
+                ) {
+                    match self.parse_vault_list_after_list()? {
+                        QueryExpr::KvCommand(command) => Ok(FrontendStatement::KvCommand(command)),
+                        other => Err(ParseError::new(
+                            format!("internal: LIST VAULT produced unexpected query kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                } else {
+                    Err(ParseError::expected(
+                        vec!["CONFIG", "VAULT"],
+                        self.peek(),
+                        self.position(),
+                    ))
                 }
             }
             Token::Ident(name) if name.eq_ignore_ascii_case("INVALIDATE") => {
-                self.advance()?;
-                match self.parse_kv_invalidate_tags_after_invalidate()? {
-                    QueryExpr::KvCommand(command) => Ok(FrontendStatement::KvCommand(command)),
-                    other => Err(ParseError::new(
-                        format!("internal: INVALIDATE produced unexpected query kind {other:?}"),
-                        self.position(),
-                    )),
+                if matches!(
+                    self.peek_next()?,
+                    Token::Ident(next) if next.eq_ignore_ascii_case("CONFIG")
+                ) {
+                    match self.parse_config_command()? {
+                        QueryExpr::ConfigCommand(command) => {
+                            Ok(FrontendStatement::ConfigCommand(command))
+                        }
+                        other => Err(ParseError::new(
+                            format!("internal: CONFIG produced unexpected query kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                } else {
+                    self.advance()?;
+                    match self.parse_kv_invalidate_tags_after_invalidate()? {
+                        QueryExpr::KvCommand(command) => Ok(FrontendStatement::KvCommand(command)),
+                        other => Err(ParseError::new(
+                            format!("internal: INVALIDATE produced unexpected query kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
                 }
             }
             Token::Attach | Token::Detach => self.parse_sql_statement().map(FrontendStatement::Sql),

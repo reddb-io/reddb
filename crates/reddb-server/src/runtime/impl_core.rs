@@ -974,6 +974,7 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
                 | KvCommand::Unseal { collection, .. }
                 | KvCommand::Rotate { collection, .. }
                 | KvCommand::History { collection, .. }
+                | KvCommand::List { collection, .. }
                 | KvCommand::Purge { collection, .. }
                 | KvCommand::Watch { collection, .. }
                 | KvCommand::Delete { collection, .. }
@@ -990,6 +991,8 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
                 | ConfigCommand::Rotate { collection, .. }
                 | ConfigCommand::Delete { collection, .. }
                 | ConfigCommand::History { collection, .. }
+                | ConfigCommand::List { collection, .. }
+                | ConfigCommand::Watch { collection, .. }
                 | ConfigCommand::InvalidVolatileOperation { collection, .. } => {
                     cache_scope_insert(scopes, collection)
                 }
@@ -5701,15 +5704,16 @@ impl RedDBRuntime {
                     } => (collection.as_str(), *model),
                     KvCommand::Rotate { collection, .. }
                     | KvCommand::History { collection, .. }
+                    | KvCommand::List { collection, .. }
                     | KvCommand::Purge { collection, .. } => {
                         (collection.as_str(), CollectionModel::Vault)
                     }
                     KvCommand::InvalidateTags { collection, .. } => {
                         (collection.as_str(), CollectionModel::Kv)
                     }
-                    KvCommand::Watch { collection, .. } => {
-                        (collection.as_str(), CollectionModel::Kv)
-                    }
+                    KvCommand::Watch {
+                        collection, model, ..
+                    } => (collection.as_str(), *model),
                     KvCommand::Unseal { collection, .. } => {
                         (collection.as_str(), CollectionModel::Vault)
                     }
