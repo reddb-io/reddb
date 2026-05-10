@@ -67,6 +67,7 @@ impl<'a> KvAtomicOps<'a> {
 
         if if_not_exists && was_present {
             let (_, id) = existing.unwrap();
+            self.runtime.inner.kv_stats.incr_puts();
             return Ok((false, id));
         }
 
@@ -103,6 +104,7 @@ impl<'a> KvAtomicOps<'a> {
         self.runtime
             .record_kv_watch_event(op, collection, key, output.id.raw(), before, after);
 
+        self.runtime.inner.kv_stats.incr_puts();
         Ok((!was_present, output.id))
     }
 
@@ -114,6 +116,9 @@ impl<'a> KvAtomicOps<'a> {
         key: &str,
     ) -> RedDBResult<Option<crate::storage::schema::Value>> {
         let result = self.get_entry(model, collection, key)?;
+        if model == crate::catalog::CollectionModel::Kv {
+            self.runtime.inner.kv_stats.incr_gets();
+        }
         Ok(result.map(|(v, _)| v))
     }
 
@@ -142,6 +147,7 @@ impl<'a> KvAtomicOps<'a> {
                         Some(crate::presentation::entity_json::storage_value_to_json(&value)),
                         None,
                     );
+                    self.runtime.inner.kv_stats.incr_deletes();
                 }
             }
             Ok(deleted)
@@ -221,6 +227,7 @@ impl<'a> KvAtomicOps<'a> {
             )),
         );
 
+        self.runtime.inner.kv_stats.incr_incrs();
         Ok(next)
     }
 
@@ -256,6 +263,7 @@ impl<'a> KvAtomicOps<'a> {
         };
 
         if !matches {
+            self.runtime.inner.kv_stats.incr_cas_conflict();
             return Ok((false, current));
         }
 
@@ -294,6 +302,7 @@ impl<'a> KvAtomicOps<'a> {
             )),
         );
 
+        self.runtime.inner.kv_stats.incr_cas_success();
         Ok((true, current))
     }
 
@@ -1089,6 +1098,77 @@ mod tests {
             .incr(CollectionModel::Kv, "kv_default", "missing", 5, None)
             .unwrap();
         assert_eq!(v, 5);
+    }
+
+    #[test]
+    fn kv_runtime_stats_count_public_ops() {
+        let r = rt();
+        let ops = super::KvAtomicOps::new(&r);
+
+        ops.set(
+            "kv_default",
+            "profile",
+            crate::storage::schema::Value::text("alice"),
+            None,
+            false,
+        )
+        .unwrap();
+        ops.get("kv_default", "profile").unwrap();
+        ops.delete("kv_default", "profile").unwrap();
+        ops.incr("kv_default", "hits", 1, None).unwrap();
+        ops.cas(
+            "kv_default",
+            "profile",
+            None,
+            crate::storage::schema::Value::text("created"),
+            None,
+        )
+        .unwrap();
+        ops.cas(
+            "kv_default",
+            "profile",
+            Some(&crate::storage::schema::Value::text("different")),
+            crate::storage::schema::Value::text("ignored"),
+            None,
+        )
+        .unwrap();
+
+        let stats = r.stats().kv;
+        assert_eq!(stats.puts, 1);
+        assert_eq!(stats.gets, 1);
+        assert_eq!(stats.deletes, 1);
+        assert_eq!(stats.incrs, 1);
+        assert_eq!(stats.cas_success, 1);
+        assert_eq!(stats.cas_conflict, 1);
+    }
+
+    #[test]
+    fn kv_runtime_stats_count_watch_streams_and_events() {
+        let r = rt();
+        let ops = super::KvAtomicOps::new(&r);
+        assert_eq!(r.stats().kv.watch_streams_active, 0);
+
+        {
+            let mut stream = r.kv_watch_subscribe("kv_default", "watched");
+            assert_eq!(r.stats().kv.watch_streams_active, 1);
+
+            ops.set(
+                "kv_default",
+                "watched",
+                crate::storage::schema::Value::Integer(1),
+                None,
+                false,
+            )
+            .unwrap();
+            let event = stream.poll_next().expect("watch event");
+            assert_eq!(event.key, "watched");
+            assert_eq!(r.stats().kv.watch_events_emitted, 1);
+
+            stream.record_drop_count(3);
+            assert_eq!(r.stats().kv.watch_drops, 3);
+        }
+
+        assert_eq!(r.stats().kv.watch_streams_active, 0);
     }
 
     #[test]

@@ -1753,6 +1753,7 @@ impl RedDBRuntime {
                         },
                     )
                 },
+                kv_stats: crate::runtime::KvStatsCounters::default(),
             }),
         };
 
@@ -2831,6 +2832,7 @@ impl RedDBRuntime {
             .inner
             .cdc
             .emit_kv(operation, collection, key, entity_id, before, after);
+        self.inner.kv_stats.incr_watch_events_emitted();
         self.invalidate_result_cache_for_table(collection);
         lsn
     }
@@ -3218,7 +3220,12 @@ impl RedDBRuntime {
         collection: impl Into<String>,
         key: impl Into<String>,
     ) -> crate::runtime::kv_watch::KvWatchStream<'a> {
-        crate::runtime::kv_watch::KvWatchStream::subscribe(&self.inner.cdc, collection, key)
+        crate::runtime::kv_watch::KvWatchStream::subscribe(
+            &self.inner.cdc,
+            &self.inner.kv_stats,
+            collection,
+            key,
+        )
     }
 
     /// Get backup scheduler status.
@@ -3876,6 +3883,7 @@ impl RedDBRuntime {
             store: self.inner.db.stats(),
             system: SystemInfo::collect(),
             result_blob_cache: self.inner.result_blob_cache.stats(),
+            kv: self.inner.kv_stats.snapshot(),
         }
     }
 

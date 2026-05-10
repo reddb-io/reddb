@@ -1,22 +1,27 @@
 use crate::replication::cdc::{CdcBuffer, KvWatchEvent};
+use crate::runtime::KvStatsCounters;
 
 /// CDC-backed WATCH cursor for one normal KV key.
 pub struct KvWatchStream<'a> {
     cdc: &'a CdcBuffer,
+    stats: &'a KvStatsCounters,
     collection: String,
     key: String,
     cursor_lsn: u64,
 }
 
 impl<'a> KvWatchStream<'a> {
-    pub fn subscribe(
+    pub(crate) fn subscribe(
         cdc: &'a CdcBuffer,
+        stats: &'a KvStatsCounters,
         collection: impl Into<String>,
         key: impl Into<String>,
     ) -> Self {
+        stats.incr_watch_streams_active();
         Self {
             cursor_lsn: cdc.current_lsn(),
             cdc,
+            stats,
             collection: collection.into(),
             key: key.into(),
         }
@@ -33,5 +38,15 @@ impl<'a> KvWatchStream<'a> {
             }
         }
         None
+    }
+
+    pub fn record_drop_count(&self, count: u64) {
+        self.stats.add_watch_drops(count);
+    }
+}
+
+impl Drop for KvWatchStream<'_> {
+    fn drop(&mut self) {
+        self.stats.decr_watch_streams_active();
     }
 }

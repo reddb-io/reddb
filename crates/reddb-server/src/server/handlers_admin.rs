@@ -857,7 +857,9 @@ impl RedDBServer {
             .and_then(|p| std::fs::metadata(p).ok())
             .map(|m| m.len())
             .unwrap_or(0);
-        let result_blob_stats = self.runtime.stats().result_blob_cache;
+        let runtime_stats = self.runtime.stats();
+        let result_blob_stats = runtime_stats.result_blob_cache;
+        let kv_stats = runtime_stats.kv;
 
         let mut body = String::with_capacity(1024);
         let _ = writeln!(
@@ -1312,6 +1314,61 @@ impl RedDBServer {
             "reddb_cache_blob_version_mismatch_total{{namespace=\"{}\"}} {}",
             blob_ns, result_blob_stats.version_mismatches()
         );
+
+        let _ = writeln!(
+            body,
+            "# HELP reddb_kv_ops_total Normal-KV operations since process start."
+        );
+        let _ = writeln!(body, "# TYPE reddb_kv_ops_total counter");
+        for (verb, count) in [
+            ("put", kv_stats.puts),
+            ("get", kv_stats.gets),
+            ("delete", kv_stats.deletes),
+            ("incr", kv_stats.incrs),
+        ] {
+            let _ = writeln!(body, "reddb_kv_ops_total{{verb=\"{}\"}} {}", verb, count);
+        }
+        let _ = writeln!(
+            body,
+            "# HELP reddb_kv_cas_total Normal-KV CAS outcomes since process start."
+        );
+        let _ = writeln!(body, "# TYPE reddb_kv_cas_total counter");
+        let _ = writeln!(
+            body,
+            "reddb_kv_cas_total{{outcome=\"success\"}} {}",
+            kv_stats.cas_success
+        );
+        let _ = writeln!(
+            body,
+            "reddb_kv_cas_total{{outcome=\"conflict\"}} {}",
+            kv_stats.cas_conflict
+        );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_kv_watch_streams_active Active normal-KV WATCH streams."
+        );
+        let _ = writeln!(body, "# TYPE reddb_kv_watch_streams_active gauge");
+        let _ = writeln!(
+            body,
+            "reddb_kv_watch_streams_active {}",
+            kv_stats.watch_streams_active
+        );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_kv_watch_events_emitted_total Normal-KV WATCH events emitted since process start."
+        );
+        let _ = writeln!(body, "# TYPE reddb_kv_watch_events_emitted_total counter");
+        let _ = writeln!(
+            body,
+            "reddb_kv_watch_events_emitted_total {}",
+            kv_stats.watch_events_emitted
+        );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_kv_watch_drops_total Normal-KV WATCH events dropped by bounded subscriber buffers."
+        );
+        let _ = writeln!(body, "# TYPE reddb_kv_watch_drops_total counter");
+        let _ = writeln!(body, "reddb_kv_watch_drops_total {}", kv_stats.watch_drops);
 
         let _ = writeln!(
             body,
