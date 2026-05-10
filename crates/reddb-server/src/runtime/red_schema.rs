@@ -1023,6 +1023,7 @@ impl InternalCollectionRegistry {
 
     fn is_internal(&self, collection: &str) -> bool {
         collection.starts_with("red_")
+            || collection.starts_with("red.")
             || collection == "audit_log"
             || collection == "__tenant_iso"
             || collection.starts_with("__tenant_")

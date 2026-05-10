@@ -282,13 +282,15 @@ impl<'a> Parser<'a> {
             let path = self.parse_dollar_ref_path()?;
             let path_lc = path.to_ascii_lowercase();
             let (name, key) = if let Some(rest) = path_lc.strip_prefix("secret.") {
-                ("__SECRET_REF", rest.to_string())
+                ("__SECRET_REF", format!("red.vault/{rest}"))
             } else if path_lc.starts_with("red.secret.") {
-                ("__SECRET_REF", path_lc)
+                let rest = path_lc.trim_start_matches("red.secret.");
+                ("__SECRET_REF", format!("red.vault/{rest}"))
             } else if let Some(rest) = path_lc.strip_prefix("config.") {
-                ("CONFIG", rest.to_string())
+                ("CONFIG", format!("red.config/{rest}"))
             } else if path_lc.starts_with("red.config.") {
-                ("CONFIG", path_lc)
+                let rest = path_lc.trim_start_matches("red.config.");
+                ("CONFIG", format!("red.config/{rest}"))
             } else {
                 return Err(ParseError::new(
                     format!(

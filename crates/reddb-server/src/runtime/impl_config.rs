@@ -229,6 +229,8 @@ impl RedDBRuntime {
         requested_type: Option<ConfigValueType>,
         op: &str,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_system_config_capability("config:write", collection, key)
+            .map_err(RedDBError::Query)?;
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         self.ensure_config_collection(collection)?;
         let latest = self.latest_config_version(collection, key)?;
@@ -271,6 +273,8 @@ impl RedDBRuntime {
         collection: &str,
         key: &str,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_system_config_capability("config:write", collection, key)
+            .map_err(RedDBError::Query)?;
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         self.ensure_config_collection(collection)?;
         let latest = self.latest_config_version(collection, key)?;
@@ -308,6 +312,8 @@ impl RedDBRuntime {
         collection: &str,
         key: &str,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_system_config_capability("config:read", collection, key)
+            .map_err(RedDBError::Query)?;
         let latest = self.latest_config_version(collection, key)?;
         let mut result = UnifiedResult::with_columns(vec![
             "collection".into(),
@@ -361,6 +367,8 @@ impl RedDBRuntime {
         collection: &str,
         key: &str,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_system_config_capability("config:read", collection, key)
+            .map_err(RedDBError::Query)?;
         let mut versions = self.config_versions(collection, key)?;
         versions.sort_by_key(|v| v.version);
         let mut result = UnifiedResult::with_columns(vec![
@@ -568,8 +576,10 @@ impl RedDBRuntime {
         };
         let tenant = current_tenant();
         let principal_id = crate::auth::UserId::from_parts(tenant.as_deref(), &principal);
-        let mut resource =
-            crate::auth::policies::ResourceRef::new("config", format!("{collection}.{key}"));
+        let mut resource = crate::auth::policies::ResourceRef::new(
+            "config",
+            config_target_resource(collection, key),
+        );
         if let Some(ref tenant) = tenant {
             resource = resource.with_tenant(tenant.clone());
         }
@@ -585,10 +595,24 @@ impl RedDBRuntime {
             Ok(())
         } else {
             Err(format!(
-                "principal=`{}` action=`{}` resource=`config:{}.{}` denied by IAM policy",
-                principal, action, collection, key
+                "principal=`{}` action=`{}` resource=`config:{}` denied by IAM policy",
+                principal,
+                action,
+                config_target_resource(collection, key)
             ))
         }
+    }
+
+    fn check_system_config_capability(
+        &self,
+        action: &str,
+        collection: &str,
+        key: &str,
+    ) -> Result<(), String> {
+        if collection != "red.config" {
+            return Ok(());
+        }
+        self.check_config_capability(action, collection, key)
     }
 
     fn audit_config_resolve(
@@ -609,7 +633,7 @@ impl RedDBRuntime {
         let mut builder = crate::runtime::audit_log::AuditEvent::builder("config/resolve")
             .principal(actor.clone())
             .source(crate::runtime::audit_log::AuditAuthSource::Password)
-            .resource(format!("config:{collection}.{key}"))
+            .resource(format!("config:{}", config_target_resource(collection, key)))
             .outcome(outcome)
             .correlation_id(request_id.clone())
             .fields([
@@ -618,7 +642,7 @@ impl RedDBRuntime {
                 crate::runtime::audit_log::AuditFieldEscaper::field("key", key),
                 crate::runtime::audit_log::AuditFieldEscaper::field(
                     "target",
-                    format!("{collection}.{key}"),
+                    config_target_resource(collection, key),
                 ),
                 crate::runtime::audit_log::AuditFieldEscaper::field("reason", reason),
                 crate::runtime::audit_log::AuditFieldEscaper::field("request_id", request_id),
@@ -685,6 +709,14 @@ fn parse_config_secret_ref(value: &Value) -> RedDBResult<ConfigSecretRef> {
         collection: get_str("collection")?.to_string(),
         key: get_str("key")?.to_string(),
     })
+}
+
+fn config_target_resource(collection: &str, key: &str) -> String {
+    if collection == "red.config" {
+        format!("red.config/{}", key.to_ascii_lowercase())
+    } else {
+        format!("{collection}.{key}")
+    }
 }
 
 fn config_write_output(

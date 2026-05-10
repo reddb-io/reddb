@@ -45,9 +45,13 @@ impl<'a> Parser<'a> {
             ));
         }
 
-        let collection = self.expect_ident_or_keyword()?;
+        let mut collection = self.expect_ident_or_keyword()?.to_ascii_lowercase();
+        if self.consume(&Token::Dot)? {
+            let next = self.expect_ident_or_keyword()?.to_ascii_lowercase();
+            collection = format!("{collection}.{next}");
+        }
         let key = if !matches!(self.peek(), Token::Eof) {
-            Some(self.expect_ident_or_keyword()?)
+            Some(self.expect_ident_or_keyword()?.to_ascii_lowercase())
         } else {
             None
         };

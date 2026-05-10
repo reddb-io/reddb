@@ -57,7 +57,7 @@ impl<'a> Parser<'a> {
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("GET") => {
                 self.advance()?;
-                let (collection, key) = self.parse_kv_key()?;
+                let (collection, key) = self.parse_kv_key(model)?;
                 Ok(QueryExpr::KvCommand(KvCommand::Get {
                     model,
                     collection,
@@ -73,7 +73,7 @@ impl<'a> Parser<'a> {
                         self.position(),
                     ));
                 }
-                let (collection, key) = self.parse_kv_key()?;
+                let (collection, key) = self.parse_kv_key(model)?;
                 let version = self.parse_optional_vault_version()?;
                 Ok(QueryExpr::KvCommand(KvCommand::Unseal {
                     collection,
@@ -101,7 +101,7 @@ impl<'a> Parser<'a> {
                         self.position(),
                     ));
                 }
-                let (collection, key) = self.parse_kv_key()?;
+                let (collection, key) = self.parse_kv_key(model)?;
                 Ok(QueryExpr::KvCommand(KvCommand::History { collection, key }))
             }
             Token::Purge => {
@@ -113,7 +113,7 @@ impl<'a> Parser<'a> {
                         self.position(),
                     ));
                 }
-                let (collection, key) = self.parse_kv_key()?;
+                let (collection, key) = self.parse_kv_key(model)?;
                 Ok(QueryExpr::KvCommand(KvCommand::Purge { collection, key }))
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("PURGE") => {
@@ -125,7 +125,7 @@ impl<'a> Parser<'a> {
                         self.position(),
                     ));
                 }
-                let (collection, key) = self.parse_kv_key()?;
+                let (collection, key) = self.parse_kv_key(model)?;
                 Ok(QueryExpr::KvCommand(KvCommand::Purge { collection, key }))
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("WATCH") => {
@@ -134,7 +134,7 @@ impl<'a> Parser<'a> {
             }
             Token::Delete => {
                 self.advance()?;
-                let (collection, key) = self.parse_kv_key()?;
+                let (collection, key) = self.parse_kv_key(model)?;
                 Ok(QueryExpr::KvCommand(KvCommand::Delete {
                     model,
                     collection,
@@ -143,7 +143,7 @@ impl<'a> Parser<'a> {
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("DELETE") => {
                 self.advance()?;
-                let (collection, key) = self.parse_kv_key()?;
+                let (collection, key) = self.parse_kv_key(model)?;
                 Ok(QueryExpr::KvCommand(KvCommand::Delete {
                     model,
                     collection,
@@ -206,7 +206,7 @@ impl<'a> Parser<'a> {
                 self.position(),
             ));
         }
-        let (collection, key) = self.parse_kv_key()?;
+        let (collection, key) = self.parse_kv_key(CollectionModel::Vault)?;
         let version = self.parse_optional_vault_version()?;
         Ok(QueryExpr::KvCommand(KvCommand::Unseal {
             collection,
@@ -233,11 +233,11 @@ impl<'a> Parser<'a> {
         match operation.as_str() {
             "ROTATE" => self.parse_vault_rotate_body(),
             "HISTORY" => {
-                let (collection, key) = self.parse_kv_key()?;
+                let (collection, key) = self.parse_kv_key(CollectionModel::Vault)?;
                 Ok(QueryExpr::KvCommand(KvCommand::History { collection, key }))
             }
             "DELETE" => {
-                let (collection, key) = self.parse_kv_key()?;
+                let (collection, key) = self.parse_kv_key(CollectionModel::Vault)?;
                 Ok(QueryExpr::KvCommand(KvCommand::Delete {
                     model: CollectionModel::Vault,
                     collection,
@@ -245,7 +245,7 @@ impl<'a> Parser<'a> {
                 }))
             }
             "PURGE" => {
-                let (collection, key) = self.parse_kv_key()?;
+                let (collection, key) = self.parse_kv_key(CollectionModel::Vault)?;
                 Ok(QueryExpr::KvCommand(KvCommand::Purge { collection, key }))
             }
             _ => Err(ParseError::expected(
@@ -257,7 +257,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_vault_rotate_body(&mut self) -> Result<QueryExpr, ParseError> {
-        let (collection, key) = self.parse_kv_key()?;
+        let (collection, key) = self.parse_kv_key(CollectionModel::Vault)?;
         self.expect(Token::Eq)?;
         let value = self.parse_value()?;
         let tags = if self.consume_ident_ci("TAGS")? {
@@ -281,7 +281,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_kv_put(&mut self, model: CollectionModel) -> Result<QueryExpr, ParseError> {
-        let (collection, key) = self.parse_kv_key()?;
+        let (collection, key) = self.parse_kv_key(model)?;
 
         // Expect `=`
         if !self.consume(&Token::Eq)? {
@@ -366,14 +366,41 @@ impl<'a> Parser<'a> {
 
     /// Parse a key that may be bare (`name`) or dotted (`collection.key`).
     /// Returns `(collection, key)`.
-    pub(crate) fn parse_kv_key(&mut self) -> Result<(String, String), ParseError> {
+    pub(crate) fn parse_kv_key(
+        &mut self,
+        model: CollectionModel,
+    ) -> Result<(String, String), ParseError> {
         let first = self.expect_ident()?;
-        if self.consume(&Token::Dot)? {
-            let key = self.expect_ident_or_keyword()?;
-            Ok((first, key))
-        } else {
-            Ok((KV_DEFAULT_COLLECTION.to_string(), first))
+        if !self.consume(&Token::Dot)? {
+            return Ok((KV_DEFAULT_COLLECTION.to_string(), first));
         }
+
+        let mut segments = vec![first, self.expect_ident_or_keyword()?];
+        while self.consume(&Token::Dot)? {
+            segments.push(self.expect_ident_or_keyword()?);
+        }
+
+        if model == CollectionModel::Vault {
+            let lower_segments: Vec<String> =
+                segments.iter().map(|segment| segment.to_ascii_lowercase()).collect();
+            if lower_segments.len() >= 3
+                && lower_segments[0] == "red"
+                && lower_segments[1] == "vault"
+            {
+                return Ok(("red.vault".to_string(), lower_segments[2..].join(".")));
+            }
+            if lower_segments.len() >= 3
+                && lower_segments[0] == "red"
+                && lower_segments[1] == "secret"
+            {
+                return Ok(("red.vault".to_string(), lower_segments[2..].join(".")));
+            }
+            if lower_segments.len() >= 2 && lower_segments[0] == "secret" {
+                return Ok(("red.vault".to_string(), lower_segments[1..].join(".")));
+            }
+        }
+
+        Ok((segments.remove(0), segments.join(".")))
     }
 
     pub(crate) fn parse_kv_watch(&mut self) -> Result<QueryExpr, ParseError> {
@@ -421,7 +448,7 @@ impl<'a> Parser<'a> {
         model: CollectionModel,
         sign: i64,
     ) -> Result<QueryExpr, ParseError> {
-        let (collection, key) = self.parse_kv_key()?;
+        let (collection, key) = self.parse_kv_key(model)?;
         let mut by: i64 = sign;
         let mut ttl_ms: Option<u64> = None;
 
@@ -502,7 +529,7 @@ impl<'a> Parser<'a> {
 
     /// Parse `KV CAS key EXPECT <val|NULL> SET <val> [EXPIRE dur]`.
     fn parse_kv_cas(&mut self, model: CollectionModel) -> Result<QueryExpr, ParseError> {
-        let (collection, key) = self.parse_kv_key()?;
+        let (collection, key) = self.parse_kv_key(model)?;
 
         // EXPECT <value | NULL>
         if !self.consume_ident_ci("EXPECT")? {
