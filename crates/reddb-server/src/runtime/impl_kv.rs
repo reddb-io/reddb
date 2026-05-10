@@ -70,6 +70,18 @@ impl<'a> KvAtomicOps<'a> {
             return Ok((false, id));
         }
 
+        let before = existing
+            .as_ref()
+            .map(|(value, _)| crate::presentation::entity_json::storage_value_to_json(value));
+        let op = if was_present {
+            crate::replication::cdc::ChangeOperation::Update
+        } else {
+            crate::replication::cdc::ChangeOperation::Insert
+        };
+        let after = Some(crate::presentation::entity_json::storage_value_to_json(
+            &value,
+        ));
+
         // Delete old entry so we can create fresh (handles TTL refresh).
         if was_present {
             self.delete(model, collection, key)?;
@@ -87,6 +99,9 @@ impl<'a> KvAtomicOps<'a> {
                 value,
                 metadata: meta_vec,
             })?;
+
+        self.runtime
+            .record_kv_watch_event(op, collection, key, output.id.raw(), before, after);
 
         Ok((!was_present, output.id))
     }
@@ -111,13 +126,23 @@ impl<'a> KvAtomicOps<'a> {
     ) -> RedDBResult<bool> {
         self.ensure_declared_model(model, collection)?;
         let found = self.get_entry(model, collection, key)?;
-        if let Some((_, id)) = found {
+        if let Some((value, id)) = found {
             let store = self.runtime.inner.db.store();
             let deleted = store
                 .delete(collection, id)
                 .map_err(|err| RedDBError::Internal(err.to_string()))?;
             if deleted {
                 store.context_index().remove_entity(id);
+                if model == crate::catalog::CollectionModel::Kv {
+                    self.runtime.record_kv_watch_event(
+                        crate::replication::cdc::ChangeOperation::Delete,
+                        collection,
+                        key,
+                        id.raw(),
+                        Some(crate::presentation::entity_json::storage_value_to_json(&value)),
+                        None,
+                    );
+                }
             }
             Ok(deleted)
         } else {
@@ -144,10 +169,11 @@ impl<'a> KvAtomicOps<'a> {
         }
         self.ensure_kv_collection(collection)?;
 
-        let current: i64 = match self.runtime.get_kv(collection, key)? {
+        let existing = self.runtime.get_kv(collection, key)?;
+        let current: i64 = match existing.as_ref() {
             None => 0,
-            Some((crate::storage::schema::Value::Integer(n), _)) => n,
-            Some((crate::storage::schema::Value::Float(f), _)) => f as i64,
+            Some((crate::storage::schema::Value::Integer(n), _)) => *n,
+            Some((crate::storage::schema::Value::Float(f), _)) => *f as i64,
             Some((other, _)) => {
                 return Err(RedDBError::Internal(format!(
                     "INCR on non-integer value: {:?}",
@@ -161,7 +187,7 @@ impl<'a> KvAtomicOps<'a> {
             .ok_or_else(|| RedDBError::Internal(format!("INCR overflow: {current} + {by}")))?;
 
         // Delete then re-create so TTL is refreshed.
-        if self.runtime.get_kv(collection, key)?.is_some() {
+        if existing.is_some() {
             self.runtime.delete_kv(collection, key)?;
         }
 
@@ -169,13 +195,31 @@ impl<'a> KvAtomicOps<'a> {
             .map(|m| m.fields.into_iter().collect())
             .unwrap_or_default();
 
-        self.runtime
+        let output = self
+            .runtime
             .create_kv(crate::application::entity::CreateKvInput {
                 collection: collection.to_string(),
                 key: key.to_string(),
                 value: crate::storage::schema::Value::Integer(next),
                 metadata: meta_vec,
             })?;
+
+        self.runtime.record_kv_watch_event(
+            if existing.is_some() {
+                crate::replication::cdc::ChangeOperation::Update
+            } else {
+                crate::replication::cdc::ChangeOperation::Insert
+            },
+            collection,
+            key,
+            output.id.raw(),
+            existing
+                .as_ref()
+                .map(|(value, _)| crate::presentation::entity_json::storage_value_to_json(value)),
+            Some(crate::presentation::entity_json::storage_value_to_json(
+                &crate::storage::schema::Value::Integer(next),
+            )),
+        );
 
         Ok(next)
     }
@@ -224,13 +268,31 @@ impl<'a> KvAtomicOps<'a> {
             .map(|m| m.fields.into_iter().collect())
             .unwrap_or_default();
 
-        self.runtime
+        let output = self
+            .runtime
             .create_kv(crate::application::entity::CreateKvInput {
                 collection: collection.to_string(),
                 key: key.to_string(),
-                value: new_value,
+                value: new_value.clone(),
                 metadata: meta_vec,
             })?;
+
+        self.runtime.record_kv_watch_event(
+            if current.is_some() {
+                crate::replication::cdc::ChangeOperation::Update
+            } else {
+                crate::replication::cdc::ChangeOperation::Insert
+            },
+            collection,
+            key,
+            output.id.raw(),
+            current
+                .as_ref()
+                .map(crate::presentation::entity_json::storage_value_to_json),
+            Some(crate::presentation::entity_json::storage_value_to_json(
+                &new_value,
+            )),
+        );
 
         Ok((true, current))
     }
@@ -641,7 +703,6 @@ impl RedDBRuntime {
                 }
 
                 let value = ops.get(*model, collection, key)?;
-
                 let mut result = UnifiedResult::with_columns(vec![
                     "collection".into(),
                     "key".into(),
@@ -664,6 +725,31 @@ impl RedDBRuntime {
                     result,
                     affected_rows: 0,
                     statement_type: "select",
+                })
+            }
+            KvCommand::Watch { collection, key } => {
+                let endpoint = format!("/collections/{collection}/kv/{key}/watch");
+                let mut result = UnifiedResult::with_columns(vec![
+                    "collection".into(),
+                    "key".into(),
+                    "watch_url".into(),
+                    "streaming".into(),
+                ]);
+                let mut record = UnifiedRecord::new();
+                record.set("collection", Value::text(collection.clone()));
+                record.set("key", Value::text(key.clone()));
+                record.set("watch_url", Value::text(endpoint));
+                record.set("streaming", Value::Boolean(true));
+                result.push(record);
+
+                Ok(RuntimeQueryResult {
+                    query: raw_query.to_string(),
+                    mode: crate::storage::query::modes::QueryMode::Sql,
+                    statement: "kv_watch",
+                    engine: "kv",
+                    result,
+                    affected_rows: 0,
+                    statement_type: "stream",
                 })
             }
 
@@ -1231,5 +1317,70 @@ mod tests {
             row2.get("value"),
             Some(&crate::storage::schema::Value::Integer(5))
         );
+    }
+
+    #[test]
+    fn watch_stream_delivers_key_events_in_lsn_order() {
+        let r = rt();
+        let ops = super::KvAtomicOps::new(&r);
+        let mut stream = r.kv_watch_subscribe("kv_default", "seq");
+
+        ops.set(
+            "kv_default",
+            "seq",
+            crate::storage::schema::Value::Integer(1),
+            None,
+            false,
+        )
+        .unwrap();
+        ops.incr("kv_default", "seq", 1, None).unwrap();
+        ops.delete("kv_default", "seq").unwrap();
+        ops.set(
+            "kv_default",
+            "seq",
+            crate::storage::schema::Value::Integer(9),
+            None,
+            false,
+        )
+        .unwrap();
+
+        let mut events = Vec::new();
+        while let Some(event) = stream.poll_next() {
+            events.push(event);
+            if events.len() == 4 {
+                break;
+            }
+        }
+
+        assert_eq!(events.len(), 4);
+        assert_eq!(
+            events[0].op,
+            crate::replication::cdc::ChangeOperation::Insert
+        );
+        assert_eq!(
+            events[1].op,
+            crate::replication::cdc::ChangeOperation::Update
+        );
+        assert_eq!(
+            events[2].op,
+            crate::replication::cdc::ChangeOperation::Delete
+        );
+        assert_eq!(
+            events[3].op,
+            crate::replication::cdc::ChangeOperation::Insert
+        );
+        assert!(events.windows(2).all(|pair| pair[0].lsn < pair[1].lsn));
+    }
+
+    #[test]
+    fn watch_stream_does_not_emit_rolled_back_put() {
+        let r = rt();
+        let mut stream = r.kv_watch_subscribe("kv_default", "rollback_key");
+
+        r.execute_query("BEGIN").unwrap();
+        r.execute_query("KV PUT rollback_key = 'dirty'").unwrap();
+        r.execute_query("ROLLBACK").unwrap();
+
+        assert!(stream.poll_next().is_none());
     }
 }

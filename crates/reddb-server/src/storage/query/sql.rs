@@ -739,6 +739,14 @@ impl<'a> Parser<'a> {
             {
                 self.parse_sql_statement().map(FrontendStatement::Sql)
             }
+            Token::Ident(name) if name.eq_ignore_ascii_case("WATCH") => {
+                self.advance()?;
+                let (collection, key) = self.parse_kv_key()?;
+                Ok(FrontendStatement::KvCommand(KvCommand::Watch {
+                    collection,
+                    key,
+                }))
+            }
             Token::Attach | Token::Detach => self.parse_sql_statement().map(FrontendStatement::Sql),
             Token::Match => match self.parse_match_query()? {
                 QueryExpr::Graph(query) => Ok(FrontendStatement::Graph(query)),

@@ -12,6 +12,7 @@ pub(crate) use crate::application::{
     SearchSimilarInput, SearchTextInput,
 };
 use std::collections::BTreeMap;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -53,9 +54,10 @@ use proto::{
     BatchQueryReply, BatchQueryRequest, BulkEntityReply, CollectionRequest, CollectionsReply,
     DeleteEntityRequest, DeploymentProfileRequest, Empty, EntityReply, ExecutePreparedRequest,
     ExportRequest, GraphProjectionUpsertRequest, HealthReply, IndexNameRequest, IndexToggleRequest,
-    JsonBulkCreateRequest, JsonCreateRequest, JsonPayloadRequest, ManifestRequest, OperationReply,
-    PayloadReply, PrepareQueryReply, PrepareQueryRequest, QueryReply, QueryRequest, ScanEntity,
-    ScanReply, ScanRequest, StatsReply, TopologyReply, TopologyRequest, UpdateEntityRequest,
+    JsonBulkCreateRequest, JsonCreateRequest, JsonPayloadRequest, KvWatchEvent, KvWatchRequest,
+    ManifestRequest, OperationReply, PayloadReply, PrepareQueryReply, PrepareQueryRequest,
+    QueryReply, QueryRequest, ScanEntity, ScanReply, ScanRequest, StatsReply, TopologyReply,
+    TopologyRequest, UpdateEntityRequest,
 };
 
 mod control_support;

@@ -19,6 +19,18 @@ from .url import ParsedUri, parse_uri
 __all__ = ["connect", "Reddb"]
 
 
+class KvClient:
+    def __init__(self, transport: Any, collection: str = "kv_default") -> None:
+        self._t = transport
+        self.collection = collection
+
+    def watch(self, key: str, **opts: Any):
+        collection = opts.pop("collection", self.collection)
+        if not hasattr(self._t, "kv_watch"):
+            raise RedDBError("kv.watch requires the HTTP transport")
+        return self._t.kv_watch(key, collection=collection, **opts)
+
+
 async def connect(uri: str, **opts: Any) -> "Reddb":
     """Connect to a RedDB instance.
 
@@ -160,6 +172,7 @@ class Reddb:
 
     def __init__(self, transport: Any) -> None:
         self._t = transport
+        self.kv = KvClient(transport)
 
     async def __aenter__(self) -> "Reddb":
         return self

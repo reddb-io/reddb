@@ -741,6 +741,8 @@ struct RuntimeInner {
             )>,
         >,
     >,
+    pending_kv_watch_events:
+        parking_lot::RwLock<HashMap<u64, Vec<crate::replication::cdc::KvWatchEvent>>>,
     /// Table-scoped tenancy registry (Phase 2.5.4).
     ///
     /// Maps `table_name → tenant_column`. DML auto-fill looks here to
@@ -854,6 +856,7 @@ mod impl_tree;
 mod impl_vcs;
 mod index_store;
 mod join_filter;
+pub mod kv_watch;
 pub mod lease_lifecycle;
 pub mod lease_loop;
 pub mod lease_timer_wheel;

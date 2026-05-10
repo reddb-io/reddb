@@ -70,7 +70,7 @@ pub mod redwire;
 pub mod http;
 
 pub use error::{ClientError, ErrorCode, Result};
-pub use types::{InsertResult, JsonValue, QueryResult, ValueOut};
+pub use types::{InsertResult, JsonValue, KvWatchEvent, QueryResult, ValueOut};
 
 // Back-compat re-exports for the previous `reddb-client-internal`
 // crate. Workspace consumers (`reddb-server::rpc_stdio`, the `red`
@@ -227,6 +227,38 @@ impl Reddb {
             #[cfg(feature = "http")]
             Reddb::Http(c) => c.close().await,
             Reddb::Unavailable(_) => Ok(()),
+        }
+    }
+
+    pub fn kv(&self) -> KvClient<'_> {
+        KvClient {
+            db: self,
+            collection: "kv_default",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct KvClient<'a> {
+    db: &'a Reddb,
+    collection: &'static str,
+}
+
+impl<'a> KvClient<'a> {
+    pub async fn watch(&self, key: &str) -> Result<Vec<KvWatchEvent>> {
+        #[cfg(not(feature = "http"))]
+        {
+            let _ = key;
+            let _ = self.collection;
+        }
+        match self.db {
+            #[cfg(feature = "http")]
+            Reddb::Http(c) => c.watch_kv(self.collection, key, None, None).await,
+            #[cfg(feature = "embedded")]
+            Reddb::Embedded(_) => Err(ClientError::feature_disabled("kv.watch embedded")),
+            #[cfg(feature = "grpc")]
+            Reddb::Grpc(_) => Err(ClientError::feature_disabled("kv.watch grpc")),
+            Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
         }
     }
 }

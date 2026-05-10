@@ -2469,6 +2469,10 @@ pub enum KvCommand {
         collection: String,
         key: String,
     },
+    Watch {
+        collection: String,
+        key: String,
+    },
     Delete {
         model: CollectionModel,
         collection: String,

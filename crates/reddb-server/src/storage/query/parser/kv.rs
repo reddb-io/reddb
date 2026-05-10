@@ -74,6 +74,11 @@ impl<'a> Parser<'a> {
                 let (collection, key) = self.parse_kv_key()?;
                 Ok(QueryExpr::KvCommand(KvCommand::Unseal { collection, key }))
             }
+            Token::Ident(ref name) if name.eq_ignore_ascii_case("WATCH") => {
+                self.advance()?;
+                let (collection, key) = self.parse_kv_key()?;
+                Ok(QueryExpr::KvCommand(KvCommand::Watch { collection, key }))
+            }
             Token::Delete => {
                 self.advance()?;
                 let (collection, key) = self.parse_kv_key()?;
@@ -108,7 +113,7 @@ impl<'a> Parser<'a> {
                 if model == CollectionModel::Vault {
                     vec!["PUT", "GET", "UNSEAL", "DELETE", "INCR", "DECR", "CAS"]
                 } else {
-                    vec!["PUT", "GET", "DELETE", "INCR", "DECR", "CAS"]
+                    vec!["PUT", "GET", "WATCH", "DELETE", "INCR", "DECR", "CAS"]
                 },
                 self.peek(),
                 self.position(),
@@ -192,7 +197,7 @@ impl<'a> Parser<'a> {
 
     /// Parse a key that may be bare (`name`) or dotted (`collection.key`).
     /// Returns `(collection, key)`.
-    fn parse_kv_key(&mut self) -> Result<(String, String), ParseError> {
+    pub(crate) fn parse_kv_key(&mut self) -> Result<(String, String), ParseError> {
         let first = self.expect_ident()?;
         if self.consume(&Token::Dot)? {
             let key = self.expect_ident_or_keyword()?;
