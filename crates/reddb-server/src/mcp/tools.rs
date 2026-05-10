@@ -278,6 +278,85 @@ pub fn all_tools() -> Vec<ToolDef> {
             ),
         },
         ToolDef {
+            name: "reddb_config_get",
+            description: "Get a Config value without resolving SecretRef targets.",
+            input_schema: schema(
+                vec![
+                    ("collection", "string", "Config collection name"),
+                    ("key", "string", "Config key to retrieve"),
+                ],
+                vec!["collection", "key"],
+            ),
+        },
+        ToolDef {
+            name: "reddb_config_put",
+            description: "Set a Config value. TTL and counter operations are not supported for Config.",
+            input_schema: schema_with_nested(
+                vec![
+                    ("collection", string_field("Config collection name")),
+                    ("key", string_field("Config key to set")),
+                    ("value", {
+                        let mut f = Map::new();
+                        f.insert("description".to_string(), JsonValue::String("Value to store, or an object when paired with secret_ref".to_string()));
+                        JsonValue::Object(f)
+                    }),
+                    ("secret_ref", object_field("Optional { collection, key } Vault SecretRef")),
+                    ("tags", string_array_field("Optional Config tags")),
+                ],
+                vec!["collection", "key"],
+            ),
+        },
+        ToolDef {
+            name: "reddb_config_resolve",
+            description: "Explicitly resolve a Config SecretRef. Requires the corresponding Vault unseal permission.",
+            input_schema: schema(
+                vec![
+                    ("collection", "string", "Config collection name"),
+                    ("key", "string", "Config key to resolve"),
+                ],
+                vec!["collection", "key"],
+            ),
+        },
+        ToolDef {
+            name: "reddb_vault_get",
+            description: "Get Vault metadata for a secret. Does not return plaintext.",
+            input_schema: schema(
+                vec![
+                    ("collection", "string", "Vault collection name"),
+                    ("key", "string", "Vault key to retrieve metadata for"),
+                ],
+                vec!["collection", "key"],
+            ),
+        },
+        ToolDef {
+            name: "reddb_vault_put",
+            description: "Store a sealed Vault secret. TTL and counter operations are not supported for Vault.",
+            input_schema: schema_with_nested(
+                vec![
+                    ("collection", string_field("Vault collection name")),
+                    ("key", string_field("Vault key to set")),
+                    ("value", {
+                        let mut f = Map::new();
+                        f.insert("description".to_string(), JsonValue::String("Secret value to seal".to_string()));
+                        JsonValue::Object(f)
+                    }),
+                    ("tags", string_array_field("Optional Vault tags")),
+                ],
+                vec!["collection", "key", "value"],
+            ),
+        },
+        ToolDef {
+            name: "reddb_vault_unseal",
+            description: "Explicitly unseal a Vault secret and return plaintext to an authorized caller.",
+            input_schema: schema(
+                vec![
+                    ("collection", "string", "Vault collection name"),
+                    ("key", "string", "Vault key to unseal"),
+                ],
+                vec!["collection", "key"],
+            ),
+        },
+        ToolDef {
             name: "reddb_delete",
             description: "Delete an entity by ID from a collection.",
             input_schema: schema(
@@ -546,6 +625,12 @@ mod tests {
         assert!(names.contains(&"reddb_insert_document"));
         assert!(names.contains(&"reddb_kv_get"));
         assert!(names.contains(&"reddb_kv_set"));
+        assert!(names.contains(&"reddb_config_get"));
+        assert!(names.contains(&"reddb_config_put"));
+        assert!(names.contains(&"reddb_config_resolve"));
+        assert!(names.contains(&"reddb_vault_get"));
+        assert!(names.contains(&"reddb_vault_put"));
+        assert!(names.contains(&"reddb_vault_unseal"));
         assert!(names.contains(&"reddb_delete"));
         assert!(names.contains(&"reddb_search_vector"));
         assert!(names.contains(&"reddb_search_text"));

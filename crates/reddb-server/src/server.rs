@@ -59,6 +59,7 @@ mod handlers_auth;
 mod handlers_backup;
 mod handlers_ec;
 mod handlers_entity;
+mod handlers_keyed;
 mod handlers_geo;
 mod handlers_graph;
 mod handlers_log;
@@ -78,6 +79,7 @@ mod transport;
 
 use self::handlers_ai::*;
 use self::handlers_entity::*;
+use self::handlers_keyed::*;
 use self::handlers_graph::*;
 use self::handlers_ops::*;
 use self::handlers_query::*;

@@ -38,10 +38,14 @@ import {
 } from './embedded-rejection.js'
 import { CacheClient } from './cache.js'
 import { KvClient } from './kv.js'
+import { ConfigClient } from './config.js'
+import { VaultClient } from './vault.js'
 
 export { RedDBError, EmbeddedNotSupported, EMBEDDED_REJECTION_MESSAGE, isEmbeddedUri }
 export { CacheClient } from './cache.js'
 export { KvClient } from './kv.js'
+export { ConfigClient } from './config.js'
+export { VaultClient } from './vault.js'
 export { parseUri, deriveLoginUrl } from './url.js'
 
 /**
@@ -251,7 +255,15 @@ export class RedDB {
   constructor(client) {
     this.client = client
     this.cache = new CacheClient(client)
-    this.kv = new KvClient(client)
+    const defaultKv = new KvClient(client)
+    this.kv = Object.assign((collection = 'kv_default') => new KvClient(client, collection), {
+      put: defaultKv.put.bind(defaultKv),
+      invalidateTags: defaultKv.invalidateTags.bind(defaultKv),
+      watch: defaultKv.watch.bind(defaultKv),
+      watchPrefix: defaultKv.watchPrefix.bind(defaultKv),
+    })
+    this.config = (collection = 'red.config') => new ConfigClient(client, collection)
+    this.vault = (collection = 'red.vault') => new VaultClient(client, collection)
   }
 
   /** Execute a SQL query. Returns `{ statement, affected, columns, rows }`. */
