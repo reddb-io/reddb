@@ -88,6 +88,30 @@ fn secret_sql_value_to_string(value: &Value) -> RedDBResult<String> {
     }
 }
 
+fn system_keyed_collection_contract(
+    name: &str,
+    model: crate::catalog::CollectionModel,
+) -> crate::physical::CollectionContract {
+    let now = crate::utils::now_unix_millis() as u128;
+    crate::physical::CollectionContract {
+        name: name.to_string(),
+        declared_model: model,
+        schema_mode: crate::catalog::SchemaMode::Dynamic,
+        origin: crate::physical::ContractOrigin::Implicit,
+        version: 1,
+        created_at_unix_ms: now,
+        updated_at_unix_ms: now,
+        default_ttl_ms: None,
+        context_index_fields: Vec::new(),
+        declared_columns: Vec::new(),
+        table_def: None,
+        timestamps_enabled: false,
+        context_index_enabled: false,
+        append_only: false,
+        subscriptions: Vec::new(),
+    }
+}
+
 /// Snapshot + manager pair used for read-path visibility checks.
 ///
 /// The manager is needed in addition to the snapshot because `aborted`
@@ -352,10 +376,15 @@ pub(crate) fn current_secret_value(path: &str) -> Option<String> {
                 .as_ref()
                 .map(|store| store.vault_kv_snapshot());
         }
-        resolver
-            .values
-            .as_ref()
-            .and_then(|values| values.get(&key).cloned())
+        let values = resolver.values.as_ref()?;
+        values.get(&key).cloned().or_else(|| {
+            key.strip_prefix("red.vault/").and_then(|rest| {
+                values
+                    .get(rest)
+                    .cloned()
+                    .or_else(|| values.get(&format!("red.secret.{rest}")).cloned())
+            })
+        })
     })
 }
 
@@ -397,10 +426,11 @@ pub(crate) fn current_config_value(path: &str) -> Option<Value> {
         if resolver.values.is_none() {
             resolver.values = Some(latest_config_snapshot(&resolver.db));
         }
-        resolver
-            .values
-            .as_ref()
-            .and_then(|values| values.get(&key).cloned())
+        let values = resolver.values.as_ref()?;
+        values.get(&key).cloned().or_else(|| {
+            key.strip_prefix("red.config/")
+                .and_then(|rest| values.get(&format!("red.config.{rest}")).cloned())
+        })
     })
 }
 
@@ -435,32 +465,72 @@ fn update_current_secret_value(path: &str, value: Option<String>) {
 }
 
 fn latest_config_snapshot(db: &RedDB) -> HashMap<String, Value> {
-    let Some(manager) = db.store().get_collection("red_config") else {
-        return HashMap::new();
-    };
     let mut latest: HashMap<String, (u64, Value)> = HashMap::new();
-    manager.for_each_entity(|entity| {
-        let Some(row) = entity.data.as_row() else {
-            return true;
-        };
-        let Some(Value::Text(key)) = row.get_field("key") else {
-            return true;
-        };
-        let value = row.get_field("value").cloned().unwrap_or(Value::Null);
-        let id = entity.id.raw();
-        let key = key.to_ascii_lowercase();
-        match latest.get(&key) {
-            Some((prev_id, _)) if *prev_id > id => {}
-            _ => {
-                latest.insert(key, (id, value));
+
+    if let Some(manager) = db.store().get_collection("red_config") {
+        manager.for_each_entity(|entity| {
+            let Some(row) = entity.data.as_row() else {
+                return true;
+            };
+            let Some(Value::Text(key)) = row.get_field("key") else {
+                return true;
+            };
+            let value = row.get_field("value").cloned().unwrap_or(Value::Null);
+            let id = entity.id.raw();
+            let key = key.to_ascii_lowercase();
+            insert_latest_config_value(&mut latest, key.clone(), id, value.clone());
+            if let Some(rest) = key.strip_prefix("red.config.") {
+                insert_latest_config_value(
+                    &mut latest,
+                    format!("red.config/{rest}"),
+                    id,
+                    value,
+                );
             }
-        }
-        true
-    });
+            true
+        });
+    }
+
+    if let Some(manager) = db.store().get_collection("red.config") {
+        manager.for_each_entity(|entity| {
+            let Some(row) = entity.data.as_row() else {
+                return true;
+            };
+            if matches!(row.get_field("tombstone"), Some(Value::Boolean(true))) {
+                return true;
+            }
+            let Some(Value::Text(key)) = row.get_field("key") else {
+                return true;
+            };
+            let value = row.get_field("value").cloned().unwrap_or(Value::Null);
+            insert_latest_config_value(
+                &mut latest,
+                format!("red.config/{}", key.to_ascii_lowercase()),
+                entity.id.raw(),
+                value,
+            );
+            true
+        });
+    }
+
     latest
         .into_iter()
         .map(|(key, (_, value))| (key, value))
         .collect()
+}
+
+fn insert_latest_config_value(
+    latest: &mut HashMap<String, (u64, Value)>,
+    key: String,
+    id: u64,
+    value: Value,
+) {
+    match latest.get(&key) {
+        Some((prev_id, _)) if *prev_id > id => {}
+        _ => {
+            latest.insert(key, (id, value));
+        }
+    }
 }
 
 struct ConfigResolver {
@@ -1809,6 +1879,7 @@ impl RedDBRuntime {
             .unwrap_or(0)
             .max(runtime.config_u64("red.config.timeline.last_archived_lsn", 0));
         runtime.inner.cdc.set_current_lsn(restored_cdc_lsn);
+        runtime.bootstrap_system_keyed_collections()?;
 
         // Phase 2.5.4: replay `tenant_tables.{table}.column` markers so
         // tables declared via `TENANT BY (col)` survive restart. Each
@@ -2182,6 +2253,33 @@ impl RedDBRuntime {
         runtime.inner.lifecycle.mark_ready();
 
         Ok(runtime)
+    }
+
+    fn bootstrap_system_keyed_collections(&self) -> RedDBResult<()> {
+        let mut changed = false;
+        for (name, model) in [
+            ("red.config", crate::catalog::CollectionModel::Config),
+            ("red.vault", crate::catalog::CollectionModel::Vault),
+        ] {
+            if self.inner.db.store().get_collection(name).is_none() {
+                self.inner.db.store().get_or_create_collection(name);
+                changed = true;
+            }
+            if self.inner.db.collection_contract(name).is_none() {
+                self.inner
+                    .db
+                    .save_collection_contract(system_keyed_collection_contract(name, model))
+                    .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                changed = true;
+            }
+        }
+        if changed {
+            self.inner
+                .db
+                .persist_metadata()
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        }
+        Ok(())
     }
 
     pub fn db(&self) -> Arc<RedDB> {

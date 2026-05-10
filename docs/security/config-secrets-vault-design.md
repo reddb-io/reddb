@@ -23,6 +23,16 @@ Reserved RedDB namespaces:
 - `red.config.*` is reserved for RedDB-owned config.
 - `red.secret.*` is reserved for RedDB-owned secrets.
 
+Canonical system storage uses protected keyed collections:
+
+- `red.config` is the system Config collection.
+- `red.vault` is the system Vault collection.
+
+Legacy aliases such as `$config.*`, `$secret.*`, and `red.secret.*` are
+compatibility-only. Internally they normalize to explicit targets such as
+`config:red.config/<key>` and `vault:red.vault/<key>` for policy and audit.
+New APIs should use the explicit Config and Vault surfaces.
+
 User namespaces are free-form paths such as `mycompany.payments.stripe.key`.
 The command determines the target store:
 
@@ -228,10 +238,10 @@ operations.
 Suggested resources:
 
 ```text
-config:red.config.backup.enabled
+config:red.config/backup.enabled
 config:mycompany.flags.beta
-secret:red.secret.mtls.private_key
-secret:mycompany.payments.stripe.key
+vault:red.vault/mtls.private_key
+vault:mycompany.payments.stripe.key
 ```
 
 Suggested actions:

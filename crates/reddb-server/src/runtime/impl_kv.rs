@@ -790,6 +790,9 @@ impl RedDBRuntime {
     }
 
     fn vault_target_resource(collection: &str, key: &str) -> String {
+        if collection == "red.vault" {
+            return format!("red.vault/{}", key.to_ascii_lowercase());
+        }
         format!("{collection}.{key}")
     }
 
@@ -853,6 +856,18 @@ impl RedDBRuntime {
                 Self::vault_target_resource(collection, key)
             ))
         }
+    }
+
+    fn check_system_vault_capability(
+        &self,
+        action: &str,
+        collection: &str,
+        key: &str,
+    ) -> Result<(), String> {
+        if collection != "red.vault" {
+            return Ok(());
+        }
+        self.check_vault_capability(action, collection, key)
     }
 
     fn audit_vault_unseal(
@@ -1047,6 +1062,10 @@ impl RedDBRuntime {
                 tags,
                 if_not_exists,
             } => {
+                if *model == crate::catalog::CollectionModel::Vault {
+                    self.check_system_vault_capability("vault:write", collection, key)
+                        .map_err(RedDBError::Query)?;
+                }
                 self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
                 let (created, id) = ops.set_with_tags_for_model(
                     *model,
@@ -1126,6 +1145,8 @@ impl RedDBRuntime {
                 value,
                 tags,
             } => {
+                self.check_system_vault_capability("vault:write", collection, key)
+                    .map_err(RedDBError::Query)?;
                 self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
                 let entry = ops.append_vault_version(
                     collection,
@@ -1500,6 +1521,8 @@ impl RedDBRuntime {
                 key,
             } => {
                 if *model == crate::catalog::CollectionModel::Vault {
+                    self.check_system_vault_capability("vault:write", collection, key)
+                        .map_err(RedDBError::Query)?;
                     self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
                     let entry = ops.append_vault_version(
                         collection,

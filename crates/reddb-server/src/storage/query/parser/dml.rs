@@ -540,7 +540,8 @@ impl<'a> Parser<'a> {
                     ));
                 }
                 self.expect(Token::Comma)?;
-                let (collection, key) = self.parse_kv_key()?;
+                let (collection, key) =
+                    self.parse_kv_key(crate::catalog::CollectionModel::Vault)?;
                 self.expect(Token::RParen)?;
                 return Ok(secret_ref_value(&store, &collection, &key));
             }
