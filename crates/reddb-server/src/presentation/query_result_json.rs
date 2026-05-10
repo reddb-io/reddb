@@ -206,6 +206,34 @@ pub(crate) fn runtime_stats_json(stats: &RuntimeStats) -> JsonValue {
         JsonValue::Object(result_blob_cache),
     );
 
+    let kv = stats.kv;
+    let mut kv_object = Map::new();
+    kv_object.insert("puts".to_string(), JsonValue::Number(kv.puts as f64));
+    kv_object.insert("gets".to_string(), JsonValue::Number(kv.gets as f64));
+    kv_object.insert("deletes".to_string(), JsonValue::Number(kv.deletes as f64));
+    kv_object.insert("incrs".to_string(), JsonValue::Number(kv.incrs as f64));
+    kv_object.insert(
+        "cas_success".to_string(),
+        JsonValue::Number(kv.cas_success as f64),
+    );
+    kv_object.insert(
+        "cas_conflict".to_string(),
+        JsonValue::Number(kv.cas_conflict as f64),
+    );
+    kv_object.insert(
+        "watch_streams_active".to_string(),
+        JsonValue::Number(kv.watch_streams_active as f64),
+    );
+    kv_object.insert(
+        "watch_events_emitted".to_string(),
+        JsonValue::Number(kv.watch_events_emitted as f64),
+    );
+    kv_object.insert(
+        "watch_drops".to_string(),
+        JsonValue::Number(kv.watch_drops as f64),
+    );
+    object.insert("kv".to_string(), JsonValue::Object(kv_object));
+
     let mut system = Map::new();
     system.insert(
         "pid".to_string(),

@@ -1,0 +1,57 @@
+{
+  "config": {
+    "ops": 10000,
+    "redis": "127.0.0.1:6379",
+    "watch_events": 100000
+  },
+  "generated_at_unix_ms": 1778371200000,
+  "notes": "Initial issue #253 release baseline placeholder. Replace with release-run output from bench/kv/run.sh before publishing a performance claim.",
+  "reddb": {
+    "get": {
+      "ops": 10000,
+      "p50_us": 0.0,
+      "p99_us": 1000000000.0,
+      "throughput_ops_s": 0.0
+    },
+    "incr": {
+      "ops": 10000,
+      "p50_us": 0.0,
+      "p99_us": 1000000000.0,
+      "throughput_ops_s": 0.0
+    },
+    "put": {
+      "ops": 10000,
+      "p50_us": 0.0,
+      "p99_us": 1000000000.0,
+      "throughput_ops_s": 0.0
+    }
+  },
+  "redis": {
+    "get": {
+      "ops": 10000,
+      "p50_us": 0.0,
+      "p99_us": 0.0,
+      "throughput_ops_s": 0.0
+    },
+    "incr": {
+      "ops": 10000,
+      "p50_us": 0.0,
+      "p99_us": 0.0,
+      "throughput_ops_s": 0.0
+    },
+    "put": {
+      "ops": 10000,
+      "p50_us": 0.0,
+      "p99_us": 0.0,
+      "throughput_ops_s": 0.0
+    }
+  },
+  "schema": "reddb.kv-bench.v1",
+  "watch_delivery_lag": {
+    "drops": 0,
+    "events": 100000,
+    "p50_ms": 0.0,
+    "p99_ms": 0.0,
+    "received": 0
+  }
+}

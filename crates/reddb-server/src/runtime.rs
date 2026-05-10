@@ -2,6 +2,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -178,6 +179,92 @@ pub struct RuntimeStats {
     pub store: StoreStats,
     pub system: SystemInfo,
     pub result_blob_cache: crate::storage::cache::BlobCacheStats,
+    pub kv: KvStats,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KvStats {
+    pub puts: u64,
+    pub gets: u64,
+    pub deletes: u64,
+    pub incrs: u64,
+    pub cas_success: u64,
+    pub cas_conflict: u64,
+    pub watch_streams_active: u64,
+    pub watch_events_emitted: u64,
+    pub watch_drops: u64,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct KvStatsCounters {
+    puts: AtomicU64,
+    gets: AtomicU64,
+    deletes: AtomicU64,
+    incrs: AtomicU64,
+    cas_success: AtomicU64,
+    cas_conflict: AtomicU64,
+    watch_streams_active: AtomicU64,
+    watch_events_emitted: AtomicU64,
+    watch_drops: AtomicU64,
+}
+
+impl KvStatsCounters {
+    pub(crate) fn snapshot(&self) -> KvStats {
+        KvStats {
+            puts: self.puts.load(AtomicOrdering::Relaxed),
+            gets: self.gets.load(AtomicOrdering::Relaxed),
+            deletes: self.deletes.load(AtomicOrdering::Relaxed),
+            incrs: self.incrs.load(AtomicOrdering::Relaxed),
+            cas_success: self.cas_success.load(AtomicOrdering::Relaxed),
+            cas_conflict: self.cas_conflict.load(AtomicOrdering::Relaxed),
+            watch_streams_active: self.watch_streams_active.load(AtomicOrdering::Relaxed),
+            watch_events_emitted: self.watch_events_emitted.load(AtomicOrdering::Relaxed),
+            watch_drops: self.watch_drops.load(AtomicOrdering::Relaxed),
+        }
+    }
+
+    pub(crate) fn incr_puts(&self) {
+        self.puts.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    pub(crate) fn incr_gets(&self) {
+        self.gets.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    pub(crate) fn incr_deletes(&self) {
+        self.deletes.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    pub(crate) fn incr_incrs(&self) {
+        self.incrs.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    pub(crate) fn incr_cas_success(&self) {
+        self.cas_success.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    pub(crate) fn incr_cas_conflict(&self) {
+        self.cas_conflict.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    pub(crate) fn incr_watch_streams_active(&self) {
+        self.watch_streams_active
+            .fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    pub(crate) fn decr_watch_streams_active(&self) {
+        self.watch_streams_active
+            .fetch_sub(1, AtomicOrdering::Relaxed);
+    }
+
+    pub(crate) fn incr_watch_events_emitted(&self) {
+        self.watch_events_emitted
+            .fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    pub(crate) fn add_watch_drops(&self, count: u64) {
+        self.watch_drops.fetch_add(count, AtomicOrdering::Relaxed);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -809,6 +896,9 @@ struct RuntimeInner {
     /// `runtime.slow_query.threshold_ms` / `.sample_pct` (config matrix)
     /// at construction; live tuning via the config tree is a follow-up.
     slow_query_logger: Arc<crate::telemetry::slow_query_logger::SlowQueryLogger>,
+    /// Process-local normal-KV operation counters. These are intentionally
+    /// runtime-local; persistent accounting belongs in catalog stats.
+    kv_stats: KvStatsCounters,
 }
 
 #[derive(Clone)]

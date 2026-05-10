@@ -2800,13 +2800,9 @@ fn run_admin_collections_command(
             let if_exists = flag_bool(flags, "if-exists");
             let skip_confirm = flag_bool(flags, "yes");
             if !skip_confirm && !json_mode {
-                eprint!(
-                    "Drop collection '{name}'? This is irreversible. Type 'yes' to confirm: "
-                );
+                eprint!("Drop collection '{name}'? This is irreversible. Type 'yes' to confirm: ");
                 let mut answer = String::new();
-                std::io::stdin()
-                    .read_line(&mut answer)
-                    .unwrap_or_default();
+                std::io::stdin().read_line(&mut answer).unwrap_or_default();
                 if answer.trim() != "yes" {
                     eprintln!("Aborted.");
                     std::process::exit(1);
@@ -2817,7 +2813,15 @@ fn run_admin_collections_command(
             } else {
                 format!("DROP COLLECTION {name}")
             };
-            admin_execute_ddl_command("admin.collections.drop", bind, token, &sql, name, "dropped", json_mode);
+            admin_execute_ddl_command(
+                "admin.collections.drop",
+                bind,
+                token,
+                &sql,
+                name,
+                "dropped",
+                json_mode,
+            );
         }
         "truncate" => {
             let Some(name) = sub_args.first().copied().filter(|s| !s.is_empty()) else {
@@ -2834,7 +2838,15 @@ fn run_admin_collections_command(
             } else {
                 format!("TRUNCATE COLLECTION {name}")
             };
-            admin_execute_ddl_command("admin.collections.truncate", bind, token, &sql, name, "truncated", json_mode);
+            admin_execute_ddl_command(
+                "admin.collections.truncate",
+                bind,
+                token,
+                &sql,
+                name,
+                "truncated",
+                json_mode,
+            );
         }
         "help" | _ => {
             if json_mode {
@@ -3120,7 +3132,11 @@ fn admin_execute_ddl_command(
 fn parse_affected_rows_from_body(body: &str) -> u64 {
     reddb::json::from_str::<reddb::json::Value>(body)
         .ok()
-        .and_then(|v| v.get("affected_rows").and_then(|n| n.as_f64()).map(|f| f as u64))
+        .and_then(|v| {
+            v.get("affected_rows")
+                .and_then(|n| n.as_f64())
+                .map(|f| f as u64)
+        })
         .unwrap_or(0)
 }
 
@@ -3866,6 +3882,26 @@ fn parse_prom_metric(body: &str, metric_name: &str) -> Option<f64> {
     None
 }
 
+fn parse_prom_metric_with_label(
+    body: &str,
+    metric_name: &str,
+    label_key: &str,
+    label_value: &str,
+) -> Option<f64> {
+    let needle = format!("{label_key}=\"{label_value}\"");
+    for line in body.lines() {
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        let head = line.split_whitespace().next()?;
+        let name = head.split('{').next().unwrap_or(head);
+        if name == metric_name && head.contains(&needle) {
+            return line.split_whitespace().last().and_then(|v| v.parse().ok());
+        }
+    }
+    None
+}
+
 /// PLAN.md Phase 5.5 — `red doctor`: hit /admin/status + /metrics
 /// against a running server, evaluate operator thresholds, print a
 /// rollup, and exit 0/1/2. The check set covers the signals
@@ -4087,6 +4123,28 @@ fn run_doctor(result: &reddb::cli::schema::SchemaResult) -> i32 {
         }
     }
 
+    // 8) Normal-KV operation counters — exposed as an OK check so
+    // `red doctor` output carries the same operator snapshot as /stats.
+    if let Some(body) = &metrics {
+        let puts =
+            parse_prom_metric_with_label(body, "reddb_kv_ops_total", "verb", "put").unwrap_or(0.0);
+        let gets =
+            parse_prom_metric_with_label(body, "reddb_kv_ops_total", "verb", "get").unwrap_or(0.0);
+        let deletes = parse_prom_metric_with_label(body, "reddb_kv_ops_total", "verb", "delete")
+            .unwrap_or(0.0);
+        let incrs =
+            parse_prom_metric_with_label(body, "reddb_kv_ops_total", "verb", "incr").unwrap_or(0.0);
+        let watch_active = parse_prom_metric(body, "reddb_kv_watch_streams_active").unwrap_or(0.0);
+        let watch_drops = parse_prom_metric(body, "reddb_kv_watch_drops_total").unwrap_or(0.0);
+        checks.push(DoctorCheck {
+            name: "kv_stats",
+            severity: DoctorSeverity::Ok,
+            detail: format!(
+                "puts={puts:.0} gets={gets:.0} deletes={deletes:.0} incrs={incrs:.0} watch_active={watch_active:.0} watch_drops={watch_drops:.0}"
+            ),
+        });
+    }
+
     let worst = checks
         .iter()
         .map(|c| c.severity)
@@ -4149,6 +4207,17 @@ reddb_writer_lease_state{state=\"held\"} 1\n";
         assert_eq!(
             parse_prom_metric(body, "reddb_writer_lease_state"),
             Some(1.0)
+        );
+    }
+
+    #[test]
+    fn doctor_parses_metric_with_specific_label() {
+        let body = "\
+reddb_kv_ops_total{verb=\"put\"} 2\n\
+reddb_kv_ops_total{verb=\"get\"} 3\n";
+        assert_eq!(
+            parse_prom_metric_with_label(body, "reddb_kv_ops_total", "verb", "get"),
+            Some(3.0)
         );
     }
 

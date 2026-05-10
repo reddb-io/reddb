@@ -24,6 +24,12 @@ Ignored test-style benchmark harnesses:
 - useful for some algorithm and stress scenarios
 - these also do **not** use the `red` CLI binary directly
 
+External service benchmark suites:
+
+- live under `bench/`
+- run against a real RedDB server process and any required baseline service
+- are the right shape for Redis/Postgres-style comparisons and CI p99 gates
+
 If you pick the wrong path, the numbers can still "look valid" while measuring the wrong thing.
 
 ## 2. Benchmark targets in this repo
@@ -191,10 +197,29 @@ Use this rule of thumb:
 
 - "I want to benchmark engine internals": `cargo bench --bench ...`
 - "I want to benchmark the real server process": `make release` then `./target/release/red ...`
+- "I want the normal-KV Redis baseline and WATCH lag gate": `bench/kv/run.sh`
 - "I only want a quick optimized smoke run": `make build-fast` then `./target/release-fast/red ...`
 - "I want algorithm stress output already in tests": `cargo test --release ... -- --ignored --nocapture`
 
-## 8. Important caveats
+## 8. Normal KV Redis Baseline
+
+The normal-KV suite is pinned under `bench/kv/`. It compares RedDB and Redis on
+`PUT`, `GET`, and `INCR`, reports p50, p99, and throughput, and measures RedDB
+`WATCH` delivery lag plus drop count.
+
+```bash
+bench/kv/run.sh
+bench/kv/check-regression.py bench/results/kv-release-baseline.json bench/results/kv-latest.json
+```
+
+Config knobs:
+
+- `KV_BENCH_OPS` controls the PUT/GET/INCR sample count.
+- `KV_BENCH_WATCH_EVENTS` controls the WATCH writer event count; release runs use `100000`.
+- `KV_BENCH_P99_REGRESSION_THRESHOLD` defaults to `0.20`.
+- `KV_BENCH_WATCH_P99_TARGET_MS` defaults to `10`.
+
+## 9. Important caveats
 
 For trustworthy benchmark numbers:
 

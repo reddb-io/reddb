@@ -1,0 +1,85 @@
+name: KV Benchmark Gate
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - '.github/workflows/kv-bench.yml'
+      - 'bench/kv/**'
+      - 'bench/results/kv-release-baseline.json'
+      - 'crates/reddb-server/**'
+      - 'src/bin/red.rs'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  KV_BENCH_P99_REGRESSION_THRESHOLD: "0.20"
+  KV_BENCH_WATCH_P99_TARGET_MS: "10"
+
+jobs:
+  kv-bench:
+    name: KV p99 gate
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    services:
+      redis:
+        image: redis:7.4
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '28.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-kv-bench-rust-1.91.0
+          cache-on-failure: "true"
+      - name: Build benchmark binary
+        run: cargo build --profile release-fast --bin red
+      - name: Start RedDB
+        run: |
+          rm -f /tmp/reddb-kv-bench.rdb
+          target/release-fast/red server --path /tmp/reddb-kv-bench.rdb --http-bind 127.0.0.1:8080 > /tmp/reddb-kv-bench.log 2>&1 &
+          echo $! > /tmp/reddb-kv-bench.pid
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/health/ready >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/reddb-kv-bench.log
+          exit 1
+      - name: Run KV benchmark
+        env:
+          REDDB_URL: http://127.0.0.1:8080
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: "6379"
+          KV_BENCH_OPS: "1000"
+          KV_BENCH_WATCH_EVENTS: "1000"
+          KV_BENCH_OUT: bench/results/kv-latest.json
+        run: bench/kv/run.sh
+      - name: Gate p99 regression
+        run: bench/kv/check-regression.py bench/results/kv-release-baseline.json bench/results/kv-latest.json
+      - name: Upload benchmark result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kv-benchmark-result
+          path: |
+            bench/results/kv-latest.json
+            /tmp/reddb-kv-bench.log
+      - name: Stop RedDB
+        if: always()
+        run: |
+          if [ -f /tmp/reddb-kv-bench.pid ]; then
+            kill "$(cat /tmp/reddb-kv-bench.pid)" 2>/dev/null || true
+          fi
