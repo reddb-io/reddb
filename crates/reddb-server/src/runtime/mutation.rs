@@ -1189,9 +1189,9 @@ fn eval_filter_against_json(json: &JsonValue, filter: &crate::storage::query::As
         F::Or(a, b) => eval_filter_against_json(json, a) || eval_filter_against_json(json, b),
         F::Not(f) => !eval_filter_against_json(json, f),
         F::IsNull(field) => json_object_field(json, ast_field_col_name(field))
-            .map_or(true, |jv| matches!(jv, JsonValue::Null)),
+            .is_none_or(|jv| matches!(jv, JsonValue::Null)),
         F::IsNotNull(field) => json_object_field(json, ast_field_col_name(field))
-            .map_or(false, |jv| !matches!(jv, JsonValue::Null)),
+            .is_some_and(|jv| !matches!(jv, JsonValue::Null)),
         // CompareFields, CompareExpr, In, Between, Like, StartsWith, EndsWith,
         // Contains — permissive (let the row through).
         _ => true,

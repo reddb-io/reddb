@@ -210,7 +210,7 @@ impl RedDBRuntime {
             )));
         }
 
-        let secret_ref = parse_config_secret_ref(&version.value).map_err(|err| {
+        let secret_ref = parse_config_secret_ref(&version.value).inspect_err(|err| {
             self.audit_config_resolve(
                 collection,
                 key,
@@ -218,7 +218,6 @@ impl RedDBRuntime {
                 crate::runtime::audit_log::Outcome::Error,
                 &err.to_string(),
             );
-            err
         })?;
 
         match self.resolve_vault_secret_value(&secret_ref.collection, &secret_ref.key) {

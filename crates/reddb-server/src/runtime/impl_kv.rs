@@ -591,9 +591,8 @@ impl<'a> KvAtomicOps<'a> {
     }
 
     fn get_vault_entry(&self, collection: &str, key: &str) -> RedDBResult<Option<VaultEntry>> {
-        Ok(self
-            .vault_versions(collection, key)
-            .map(super::keyed_spine::latest_version)?)
+        self.vault_versions(collection, key)
+            .map(super::keyed_spine::latest_version)
     }
 
     fn get_vault_entry_version(

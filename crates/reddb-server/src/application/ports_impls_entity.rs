@@ -2319,7 +2319,7 @@ impl RuntimeEntityPort for RedDBRuntime {
             .map(|values| {
                 let mut fields: Vec<(String, crate::storage::schema::Value)> =
                     Vec::with_capacity(ncols);
-                for (name, value) in column_names.iter().zip(values.into_iter()) {
+                for (name, value) in column_names.iter().zip(values) {
                     fields.push((name.clone(), value));
                 }
                 CreateRowInput {

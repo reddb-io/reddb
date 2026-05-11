@@ -54,10 +54,9 @@ impl<'a> Parser<'a> {
             let next = self.expect_ident_or_keyword()?.to_ascii_lowercase();
             collection = format!("{collection}.{next}");
         }
-        let key = if operation == "LIST" {
-            None
-        } else if operation == "WATCH"
-            && matches!(self.peek(), Token::Ident(name) if name.eq_ignore_ascii_case("PREFIX"))
+        let key = if operation == "LIST"
+            || (operation == "WATCH"
+                && matches!(self.peek(), Token::Ident(name) if name.eq_ignore_ascii_case("PREFIX")))
         {
             None
         } else if !matches!(self.peek(), Token::Eof) {

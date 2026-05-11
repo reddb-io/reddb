@@ -2842,7 +2842,7 @@ fn run_admin_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
         "indices" => run_admin_indices_command(flags, &bind, token.as_deref(), json_mode, &args),
         "policies" => run_admin_policies_command(flags, &bind, token.as_deref(), json_mode, &args),
         "query" => run_admin_query_command(flags, &bind, token.as_deref(), json_mode, &args),
-        "help" | _ => {
+        _ => {
             if json_mode {
                 json_ok(
                     "admin",
@@ -2994,7 +2994,7 @@ fn run_admin_collections_command(
                 json_mode,
             );
         }
-        "help" | _ => {
+        _ => {
             if json_mode {
                 json_ok(
                     "admin.collections",
@@ -3037,7 +3037,7 @@ fn run_admin_indices_command(
             push_limit(&mut sql, flags);
             emit_admin_query_result("admin.indices.list", bind, token, &sql, format, use_color);
         }
-        "help" | _ => {
+        _ => {
             if json_mode {
                 json_ok("admin.indices", "{\"subcommands\":[\"list\"]}");
             } else {
@@ -3069,7 +3069,7 @@ fn run_admin_policies_command(
             push_limit(&mut sql, flags);
             emit_admin_query_result("admin.policies.list", bind, token, &sql, format, use_color);
         }
-        "help" | _ => {
+        _ => {
             if json_mode {
                 json_ok("admin.policies", "{\"subcommands\":[\"list\"]}");
             } else {
@@ -3730,7 +3730,7 @@ fn run_admin_cache_command(
             }
         }
 
-        "help" | _ => {
+        _ => {
             if json_mode {
                 json_ok(
                     "admin.cache",
@@ -3797,7 +3797,7 @@ fn print_cache_stats_pretty(body: &str) {
 
 fn bytes_to_base64(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     let mut buf: u32 = 0;
     let mut bits: u8 = 0;
     for &b in data {
@@ -3811,7 +3811,7 @@ fn bytes_to_base64(data: &[u8]) -> String {
     if bits > 0 {
         out.push(CHARS[((buf << (6 - bits)) & 0x3F) as usize] as char);
     }
-    while out.len() % 4 != 0 {
+    while !out.len().is_multiple_of(4) {
         out.push('=');
     }
     out

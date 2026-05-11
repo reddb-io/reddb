@@ -1,7 +1,7 @@
 services:
   server:
     build:
-      context: ..
+      context: ../..
       dockerfile: Dockerfile
     container_name: reddb-server-min
     ports:

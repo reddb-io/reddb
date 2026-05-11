@@ -1,6 +1,7 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum QueueMode {
     Fanout,
+    #[default]
     Work,
 }
 
@@ -18,11 +19,5 @@ impl QueueMode {
             "WORK" => Some(Self::Work),
             _ => None,
         }
-    }
-}
-
-impl Default for QueueMode {
-    fn default() -> Self {
-        Self::Work
     }
 }

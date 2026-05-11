@@ -147,15 +147,17 @@ jobs:
           else:
             table = "_No parser/lexer files found in coverage report._"
 
-          body = f"""<!-- parser-coverage-comment -->
-## Parser Coverage Report
-
-{table}
-
-> ℹ️ This comment is advisory — it does not block merge.
-> Blocking merge on threshold is a future PRD (see `crates/reddb-server/AGENTS.md`).
-> Run locally: `cargo llvm-cov --lib -p reddb-server -- storage::query`
-"""
+          body = "\n".join([
+            "<!-- parser-coverage-comment -->",
+            "## Parser Coverage Report",
+            "",
+            table,
+            "",
+            "> ℹ️ This comment is advisory — it does not block merge.",
+            "> Blocking merge on threshold is a future PRD (see `crates/reddb-server/AGENTS.md`).",
+            "> Run locally: `cargo llvm-cov --lib -p reddb-server -- storage::query`",
+            "",
+          ])
 
           with open("coverage-comment.md", "w") as f:
             f.write(body)

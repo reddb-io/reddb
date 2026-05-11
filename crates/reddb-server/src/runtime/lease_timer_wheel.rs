@@ -173,7 +173,7 @@ impl LeaseTimerWheel {
         let base = expiry.max(now);
         let nanos_from_now = (base - now).as_nanos() as u64;
         let gran_nanos = self.granularity.as_nanos() as u64;
-        let snapped = ((nanos_from_now + gran_nanos - 1) / gran_nanos) * gran_nanos;
+        let snapped = nanos_from_now.div_ceil(gran_nanos) * gran_nanos;
         now + Duration::from_nanos(snapped)
     }
 

@@ -537,8 +537,7 @@ impl RedDBServer {
             .get("limit")
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(100)
-            .max(1)
-            .min(1000);
+            .clamp(1, 1000);
 
         let (watch_key, prefix) = key
             .strip_suffix(".*")

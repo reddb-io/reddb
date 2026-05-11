@@ -202,6 +202,7 @@ impl OperatorEvent {
     /// 2. `tracing::warn!` breadcrumb — lands in `red.log` / stderr.
     /// 3. `eprintln!` fallback — fires only if the audit write fails,
     ///    ensuring the event is never silently lost.
+    ///
     /// Emit the event using the process-wide sink installed by the
     /// runtime at startup. When no sink is installed (early boot,
     /// tests without an audit logger), the tracing breadcrumb and

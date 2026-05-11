@@ -52,6 +52,24 @@ test("Docker release images publish from GitHub Actions under reddb-io GHCR only
   assert.doesNotMatch(releaseWorkflow, legacyPersonalNamespace);
 });
 
+test("release workflow uses runnable toolchain and pack commands", () => {
+  const releaseWorkflow = read(".github/workflows/release.yml");
+
+  assert.doesNotMatch(releaseWorkflow, /1\.100\.0/);
+  assert.doesNotMatch(releaseWorkflow, /pnpm pack --dry-run/);
+  assert.match(releaseWorkflow, /pnpm pack --pack-destination "\$RUNNER_TEMP"/);
+});
+
+test("main Docker image builds from files present in the repository", () => {
+  const dockerfile = read("Dockerfile");
+  const compose = read("testdata/compose/replica.yml");
+
+  assert.match(dockerfile, /COPY crates\/ crates\//);
+  assert.doesNotMatch(dockerfile, /COPY proto\//);
+  assert.doesNotMatch(dockerfile, /COPY benches\//);
+  assert.match(compose, /context: \.\.\/\.\./);
+});
+
 test("nightly DR drill workflow uses the current-shell runner and public make target", () => {
   const makefile = read("Makefile");
   const script = read("scripts/drill-nightly.sh");

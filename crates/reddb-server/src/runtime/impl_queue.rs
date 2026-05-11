@@ -1598,7 +1598,7 @@ fn queue_is_dead_letter_target(store: &UnifiedStore, queue: &str) -> bool {
     let Some(manager) = store.get_collection(QUEUE_META_COLLECTION) else {
         return false;
     };
-    manager
+    !manager
         .query_all(|entity| {
             entity.data.as_row().is_some_and(|row| {
                 row_text(row, "kind").as_deref() == Some("queue_config")
@@ -1606,7 +1606,6 @@ fn queue_is_dead_letter_target(store: &UnifiedStore, queue: &str) -> bool {
             })
         })
         .is_empty()
-        == false
 }
 
 fn queue_message_matches_filter(message: &QueueMessageView, dlq: bool, filter: &Filter) -> bool {

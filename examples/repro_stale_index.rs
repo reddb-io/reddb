@@ -33,6 +33,7 @@ fn main() {
         .create_rows_batch(CreateRowsBatchInput {
             collection: "t".into(),
             rows,
+            suppress_events: false,
         })
         .expect("a");
     let found_a = r.iter().filter(|o| o.entity.is_some()).count();
@@ -63,6 +64,7 @@ fn main() {
                     node_links: vec![],
                     vector_links: vec![],
                 }],
+                suppress_events: false,
             })
             .expect("b");
         println!(
@@ -90,6 +92,7 @@ fn main() {
         .create_rows_batch(CreateRowsBatchInput {
             collection: "t".into(),
             rows,
+            suppress_events: false,
         })
         .expect("c");
     for o in &r {

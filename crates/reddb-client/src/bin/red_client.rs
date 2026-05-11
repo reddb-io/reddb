@@ -10,9 +10,9 @@
 //!   - `reds://host[:port]`  → RedWire-over-TLS (same default port)
 //!   - `grpc://host[:port]`  → gRPC plain   default port 5055
 //!   - `grpcs://host[:port]` → gRPC + TLS
-//!   - `http://host[:port]`  → REST plain   (not yet wired through
-//!                              red_client; surfaces as a clear
-//!                              "transport not implemented" error)
+//!   - `http://host[:port]`  → REST plain
+//!     (not yet wired through red_client; surfaces as a clear
+//!     "transport not implemented" error)
 //!   - `https://host[:port]` → REST + TLS  (idem)
 //!
 //! Schemes rejected (point the user at `red`):

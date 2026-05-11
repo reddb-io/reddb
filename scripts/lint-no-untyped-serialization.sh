@@ -225,7 +225,7 @@ scan_tracing_format() {
         if (depth == 0) {
           # Look for an opening tracing macro. Match
           # tracing::info!( and bare info!(/warn!(/error!(/debug!(/trace!(.
-          if (match(rest, /(tracing::)?(info|warn|error|debug|trace)![[:space:]]*\(/)) {
+          if (match(rest, /(tracing::)?(info|warn|error|debug|trace)![[:space:]]*[(]/)) {
             depth = 1
             start_line = NR
             opener = substr(rest, RSTART, RLENGTH)
@@ -247,7 +247,7 @@ scan_tracing_format() {
         }
         # Look ahead for format!( or write!( starting at this position.
         ahead = substr(line_text, pos)
-        if (match(ahead, /^format![[:space:]]*\(/) || match(ahead, /^write![[:space:]]*\(/)) {
+        if (match(ahead, /^format![[:space:]]*[(]/) || match(ahead, /^write![[:space:]]*[(]/)) {
           print NR "\t" raw
         }
         pos += 1
@@ -274,7 +274,7 @@ while IFS=$'\t' read -r file ln body; do
     *header_escape_guard*) continue ;;
   esac
   emit_violation "header+format" "$file" "$ln" "$body"
-done < <(scan_pattern '\.header[[:space:]]*\([^,]+,[[:space:]]*&?format![[:space:]]*\(')
+done < <(scan_pattern '[.]header[[:space:]]*[(][^,]+,[[:space:]]*&?format![[:space:]]*[(]')
 
 # ----------------------------------------------------------------------
 # Category 3: audit emission with a format!()-built field. Audit
@@ -288,7 +288,7 @@ done < <(scan_pattern '\.header[[:space:]]*\([^,]+,[[:space:]]*&?format![[:space
 while IFS=$'\t' read -r file ln body; do
   [ -z "$file" ] && continue
   emit_violation "audit+format" "$file" "$ln" "$body"
-done < <(scan_pattern '(audit|audit_log|auditor)[a-z_]*\.(record|record_event|append|log|log_event|emit)[a-z_]*[[:space:]]*\([[:space:]]*format![[:space:]]*\(')
+done < <(scan_pattern '(audit|audit_log|auditor)[a-z_]*[.](record|record_event|append|log|log_event|emit)[a-z_]*[[:space:]]*[(][[:space:]]*format![[:space:]]*[(]')
 
 # ----------------------------------------------------------------------
 # Category 4: json!({ ..., "k": format!(...) }) — the json!() literal
@@ -300,7 +300,7 @@ done < <(scan_pattern '(audit|audit_log|auditor)[a-z_]*\.(record|record_event|ap
 while IFS=$'\t' read -r file ln body; do
   [ -z "$file" ] && continue
   emit_violation "json+format" "$file" "$ln" "$body"
-done < <(scan_pattern 'json![[:space:]]*\([^)]*format![[:space:]]*\(')
+done < <(scan_pattern 'json![[:space:]]*[(][^)]*format![[:space:]]*[(]')
 
 # ----------------------------------------------------------------------
 # Category 5a: `Tainted<...>` direct field projection (`.0`). The
@@ -316,7 +316,7 @@ while IFS=$'\t' read -r file ln body; do
     *reddb-wire/src/sanitizer.rs) continue ;;
   esac
   emit_violation "tainted-unwrap" "$file" "$ln" "$body"
-done < <(scan_pattern '(Tainted::0|\.expose_secret[[:space:]]*\([[:space:]]*\))')
+done < <(scan_pattern '(Tainted::0|[.]expose_secret[[:space:]]*[(][[:space:]]*[)])')
 
 # ----------------------------------------------------------------------
 # Category 5b (alias): `expose_secret` outside its allowlist.
@@ -338,7 +338,7 @@ while IFS=$'\t' read -r file ln body; do
     *header_escape_guard*) continue ;;
   esac
   emit_violation "header-from-str" "$file" "$ln" "$body"
-done < <(scan_pattern '(http::)?HeaderValue::from_str[[:space:]]*\(')
+done < <(scan_pattern '(http::)?HeaderValue::from_str[[:space:]]*[(]')
 
 # ----------------------------------------------------------------------
 # Report.

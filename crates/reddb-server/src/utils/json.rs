@@ -111,7 +111,7 @@ impl JsonValue {
     /// JSON encoder for serialization-boundary-sensitive paths
     /// (audit log, HelloAck, PayloadReply, anything reaching a
     /// downstream parser) is `crate::serde_json::Value::escape_string`
-    /// + `to_string_compact`. This local encoder is correct after
+    /// using `to_string_compact`. This local encoder is correct after
     /// the F-01 hotfix (#181) but is not the canonical owner; new
     /// audit / wire emission code should not call it. Existing MCP
     /// JSON-RPC callers may keep using it pending a follow-up

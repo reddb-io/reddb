@@ -344,7 +344,7 @@ fn result<const N: usize>(columns: [&str; N], records: Vec<UnifiedRecord>) -> Un
 
 fn record<const N: usize>(columns: &[&str; N], values: Vec<Value>) -> UnifiedRecord {
     let mut record = UnifiedRecord::new();
-    for (column, value) in columns.iter().zip(values.into_iter()) {
+    for (column, value) in columns.iter().zip(values) {
         record.set(column, value);
     }
     record

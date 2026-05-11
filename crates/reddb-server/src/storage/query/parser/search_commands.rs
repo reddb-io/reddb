@@ -343,7 +343,7 @@ impl<'a> Parser<'a> {
                 }
                 let r_pos = self.position();
                 let radius_km = self.parse_float()?;
-                if !(radius_km > 0.0) {
+                if radius_km.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
                     return Err(ParseError::value_out_of_range(
                         "radius",
                         "must be a positive number",

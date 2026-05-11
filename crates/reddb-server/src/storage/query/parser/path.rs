@@ -25,9 +25,7 @@ impl<'a> Parser<'a> {
 
         let mut max_length = 10;
         loop {
-            if self.consume(&Token::Algorithm)? {
-                let _ = self.expect_ident_or_keyword()?;
-            } else if self.consume(&Token::Direction)? {
+            if self.consume(&Token::Algorithm)? || self.consume(&Token::Direction)? {
                 let _ = self.expect_ident_or_keyword()?;
             } else if self.consume(&Token::Limit)? {
                 max_length = self.parse_integer()? as u32;

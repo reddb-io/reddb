@@ -7,14 +7,10 @@
 !Dockerfile
 !Dockerfile.client
 !README.md
-!proto/
-!proto/**
 !crates/
 !crates/**
 !src/
 !src/**
-!benches/
-!benches/**
 !docker/
 !docker/**
 !docs/
