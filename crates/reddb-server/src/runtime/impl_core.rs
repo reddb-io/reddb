@@ -1440,7 +1440,7 @@ fn strip_explain_prefix(sql: &str) -> Option<&str> {
 /// CTE-aware parse in `execute_query` without paying for a full
 /// lexer pass on every statement. Treats `WITHIN` as not-a-CTE so
 /// `WITHIN TENANT '...' SELECT ...` doesn't mis-route.
-fn has_with_prefix(sql: &str) -> bool {
+pub(super) fn has_with_prefix(sql: &str) -> bool {
     let trimmed = sql.trim_start();
     let head_end = trimmed
         .find(|c: char| c.is_whitespace() || c == '(')
@@ -4217,26 +4217,8 @@ impl RedDBRuntime {
         let _log_span = crate::telemetry::span::query_span(query).entered();
 
         // ── CTE prelude (#41) — `WITH x AS (...) SELECT ... FROM x` ──
-        //
-        // Detected via cheap prefix check so non-CTE queries skip the
-        // full parse here. CTE-bearing queries bypass the plan cache
-        // and result cache (rare workload — perf optimization is a
-        // follow-up). Inlining substitutes every CTE reference with
-        // its body as a subquery in FROM, after which the existing
-        // subquery-in-FROM machinery handles execution. Recursive
-        // CTEs are rejected explicitly until fixpoint execution wires
-        // through the runtime.
-        if has_with_prefix(execution_query) {
-            let parsed = crate::storage::query::parser::parse(execution_query)
-                .map_err(|e| RedDBError::Query(e.to_string()))?;
-            if parsed.with_clause.is_some() {
-                let rewritten = crate::storage::query::executors::inline_ctes(parsed)
-                    .map_err(|e| RedDBError::Query(e.to_string()))?;
-                return self.execute_query_expr(rewritten);
-            }
-            // No WITH after parse (the prefix matched something else
-            // like `WITHIN` that already routed elsewhere) — fall
-            // through to the normal path with the original query.
+        if let Some(rewritten) = frame.prepare_cte(execution_query)? {
+            return self.execute_query_expr(rewritten);
         }
 
         // ── TURBO: bypass SQL parse for SELECT * FROM x WHERE _entity_id = N ──
