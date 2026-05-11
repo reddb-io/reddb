@@ -21,12 +21,12 @@ Covers: remaining warm-restart acceptance from #147
 
 ## Acceptance criteria
 
-- [ ] Eligible result-cache entries can be served after runtime restart from Blob Cache L2, or the unsupported contract is documented as intentionally out of scope.
-- [ ] Tenant and auth identity isolation remain intact across restart.
-- [ ] Volatile and transaction-unsafe statements still do not persist into the result cache.
-- [ ] Table dependency invalidation remains correct before and after restart.
-- [ ] Expired result entries do not rehydrate.
-- [ ] Public runtime tests cover the implemented or explicitly rejected warm-restart contract.
+- [x] Eligible result-cache entries can be served after runtime restart from Blob Cache L2, or the unsupported contract is documented as intentionally out of scope.
+- [x] Tenant and auth identity isolation remain intact across restart.
+- [x] Volatile and transaction-unsafe statements still do not persist into the result cache.
+- [x] Table dependency invalidation remains correct before and after restart.
+- [x] Expired result entries do not rehydrate.
+- [x] Public runtime tests cover the implemented or explicitly rejected warm-restart contract.
 
 ## Blocked by
 
