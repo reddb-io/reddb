@@ -526,52 +526,27 @@ impl RedDBRuntime {
             QueueCommand::Pop { queue, side, count } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
-                let config = load_queue_config(store.as_ref(), queue);
-                let pending_ids = load_pending_entries(store.as_ref(), queue, None, None)?
-                    .into_iter()
-                    .map(|entry| entry.message_id)
-                    .collect::<HashSet<_>>();
-                let mut messages =
-                    load_queue_message_views_with_runtime(Some(self), store.as_ref(), queue)?
-                        .into_iter()
-                        .filter(|message| !pending_ids.contains(&message.id))
-                        .collect::<Vec<_>>();
-                sort_queue_messages(&mut messages, &config, *side);
+                let popped = super::queue_delivery::pop_messages(
+                    self,
+                    store.as_ref(),
+                    queue,
+                    *side,
+                    *count,
+                )?;
 
                 let mut result =
                     UnifiedResult::with_columns(vec!["message_id".into(), "payload".into()]);
-                let mut popped = 0u64;
-                for message in messages {
-                    if popped >= *count as u64 {
-                        break;
-                    }
-
-                    let message_lock = queue_message_lock_handle(self, queue, message.id);
-                    let Some(_guard) = message_lock.try_lock() else {
-                        continue;
-                    };
-                    if queue_message_pending_any(store.as_ref(), queue, message.id)? {
-                        continue;
-                    }
-                    let Some(current) =
-                        queue_message_view_by_id(store.as_ref(), queue, message.id)?
-                    else {
-                        continue;
-                    };
-
+                for message in &popped {
                     let mut record = UnifiedRecord::new();
-                    record.set("message_id", Value::text(message_id_string(current.id)));
-                    record.set("payload", current.payload.clone());
+                    record.set(
+                        "message_id",
+                        Value::text(message_id_string(message.message_id)),
+                    );
+                    record.set("payload", message.payload.clone());
                     result.push(record);
-                    super::queue_delivery::delete_message_with_state(
-                        Some(self),
-                        store.as_ref(),
-                        queue,
-                        current.id,
-                    )?;
-                    popped += 1;
                 }
-                if popped > 0 {
+                let popped_count = popped.len() as u64;
+                if popped_count > 0 {
                     self.invalidate_result_cache();
                 }
 
@@ -581,30 +556,24 @@ impl RedDBRuntime {
                     statement: "queue_pop",
                     engine: "runtime-queue",
                     result,
-                    affected_rows: popped,
+                    affected_rows: popped_count,
                     statement_type: "delete",
                 })
             }
             QueueCommand::Peek { queue, count } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
-                let config = load_queue_config(store.as_ref(), queue);
-                let pending_ids = load_pending_entries(store.as_ref(), queue, None, None)?
-                    .into_iter()
-                    .map(|entry| entry.message_id)
-                    .collect::<HashSet<_>>();
-                let mut messages =
-                    load_queue_message_views_with_runtime(Some(self), store.as_ref(), queue)?
-                        .into_iter()
-                        .filter(|message| !pending_ids.contains(&message.id))
-                        .collect::<Vec<_>>();
-                sort_queue_messages(&mut messages, &config, QueueSide::Left);
+                let messages =
+                    super::queue_delivery::peek_messages(self, store.as_ref(), queue, *count)?;
 
                 let mut result =
                     UnifiedResult::with_columns(vec!["message_id".into(), "payload".into()]);
-                for message in messages.into_iter().take(*count) {
+                for message in messages {
                     let mut record = UnifiedRecord::new();
-                    record.set("message_id", Value::text(message_id_string(message.id)));
+                    record.set(
+                        "message_id",
+                        Value::text(message_id_string(message.message_id)),
+                    );
                     record.set("payload", message.payload);
                     result.push(record);
                 }
@@ -1927,7 +1896,7 @@ pub(super) fn queue_message_payload(
     Ok(queue_message_data(store, queue, message_id)?.payload)
 }
 
-fn queue_message_pending_any(
+pub(super) fn queue_message_pending_any(
     store: &UnifiedStore,
     queue: &str,
     message_id: EntityId,

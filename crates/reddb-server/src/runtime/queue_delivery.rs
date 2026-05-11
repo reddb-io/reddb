@@ -17,10 +17,66 @@ pub(super) struct DeliveredMessage {
     pub(super) delivery_count: u32,
 }
 
+pub(super) struct QueuePayloadMessage {
+    pub(super) message_id: EntityId,
+    pub(super) payload: Value,
+}
+
 pub(super) enum NackOutcome {
     Requeued,
     MovedToDlq(String),
     Dropped,
+}
+
+pub(super) fn pop_messages(
+    runtime: &RedDBRuntime,
+    store: &UnifiedStore,
+    queue: &str,
+    side: QueueSide,
+    count: usize,
+) -> RedDBResult<Vec<QueuePayloadMessage>> {
+    let mut messages = available_messages(runtime, store, queue, side)?;
+    let mut popped = Vec::new();
+    for message in messages.drain(..) {
+        if popped.len() >= count {
+            break;
+        }
+
+        let message_lock = super::impl_queue::queue_message_lock_handle(runtime, queue, message.id);
+        let Some(_guard) = message_lock.try_lock() else {
+            continue;
+        };
+        if super::impl_queue::queue_message_pending_any(store, queue, message.id)? {
+            continue;
+        }
+        let Some(current) = super::impl_queue::queue_message_view_by_id(store, queue, message.id)?
+        else {
+            continue;
+        };
+
+        popped.push(QueuePayloadMessage {
+            message_id: current.id,
+            payload: current.payload.clone(),
+        });
+        delete_message_with_state(Some(runtime), store, queue, current.id)?;
+    }
+    Ok(popped)
+}
+
+pub(super) fn peek_messages(
+    runtime: &RedDBRuntime,
+    store: &UnifiedStore,
+    queue: &str,
+    count: usize,
+) -> RedDBResult<Vec<QueuePayloadMessage>> {
+    Ok(available_messages(runtime, store, queue, QueueSide::Left)?
+        .into_iter()
+        .take(count)
+        .map(|message| QueuePayloadMessage {
+            message_id: message.id,
+            payload: message.payload,
+        })
+        .collect())
 }
 
 pub(super) fn read_messages(
@@ -109,6 +165,26 @@ pub(super) fn read_messages(
     }
 
     Ok(delivered)
+}
+
+fn available_messages(
+    runtime: &RedDBRuntime,
+    store: &UnifiedStore,
+    queue: &str,
+    side: QueueSide,
+) -> RedDBResult<Vec<super::impl_queue::QueueMessageView>> {
+    let config = super::impl_queue::load_queue_config(store, queue);
+    let pending_ids = super::impl_queue::load_pending_entries(store, queue, None, None)?
+        .into_iter()
+        .map(|entry| entry.message_id)
+        .collect::<std::collections::HashSet<_>>();
+    let mut messages =
+        super::impl_queue::load_queue_message_views_with_runtime(Some(runtime), store, queue)?
+            .into_iter()
+            .filter(|message| !pending_ids.contains(&message.id))
+            .collect::<Vec<_>>();
+    super::impl_queue::sort_queue_messages(&mut messages, &config, side);
+    Ok(messages)
 }
 
 pub(super) fn claim_messages(
