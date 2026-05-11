@@ -36,12 +36,14 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  # Sentinel job — short-circuits everything else when the PR is a draft.
-  # Push events evaluate `false` so they always run.
+  # Sentinel job — short-circuits everything else when the PR is a draft or from
+  # Dependabot (Dependabot PRs run the dedicated dependabot.yml workflow instead).
   gate:
     name: gate
     runs-on: blacksmith-2vcpu-ubuntu-2404
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    if: |
+      github.actor != 'dependabot[bot]' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
     steps:
       - run: echo "ok"
 

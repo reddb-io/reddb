@@ -1,0 +1,74 @@
+name: Dependabot
+
+# Runs only on Dependabot PRs.
+# All other workflows skip Dependabot (gate/job-level if conditions).
+#
+# Checks that the dependency update compiles and passes unit tests,
+# then auto-approves patch and minor bumps so Dependabot can
+# auto-merge them without manual review.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: dependabot-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    name: Verify update compiles
+    if: github.actor == 'dependabot[bot]'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@1.91.0
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '28.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-dependabot-rust-1.91.0
+          cache-on-failure: "true"
+
+      - name: cargo check
+        run: cargo check --locked --all
+
+      - name: Unit tests
+        run: cargo test --locked --lib
+
+  auto-approve:
+    name: Auto-approve patch/minor bumps
+    needs: check
+    if: github.actor == 'dependabot[bot]'
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Approve patch and minor updates
+        if: |
+          steps.meta.outputs.update-type == 'version-update:semver-patch' ||
+          steps.meta.outputs.update-type == 'version-update:semver-minor'
+        run: gh pr review "$PR_URL" --approve --body "Auto-approved: ${{ steps.meta.outputs.update-type }} bump verified by CI."
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

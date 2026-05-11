@@ -20,6 +20,7 @@ env:
 jobs:
   kv-bench:
     name: KV p99 gate
+    if: github.actor != 'dependabot[bot]'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     services:
