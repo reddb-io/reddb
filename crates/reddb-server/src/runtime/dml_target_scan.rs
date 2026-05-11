@@ -22,10 +22,13 @@
 //! The Interface is intentionally tiny: a constructor plus
 //! `find_target_ids`. UPDATE (#52) will consume the same shape.
 
+use std::collections::HashMap;
+
 use super::{query_exec, RedDBRuntime};
 use crate::api::{RedDBError, RedDBResult};
 use crate::storage::query::ast::Filter;
-use crate::storage::EntityId;
+use crate::storage::schema::Value;
+use crate::storage::{EntityData, EntityId};
 
 pub(super) struct DmlTargetScan<'a> {
     runtime: &'a RedDBRuntime,
@@ -147,6 +150,42 @@ impl<'a> DmlTargetScan<'a> {
         Ok(ids)
     }
 
+    pub(super) fn row_snapshots(&self, entity_ids: &[EntityId]) -> Vec<Vec<(String, Value)>> {
+        if entity_ids.is_empty() {
+            return Vec::new();
+        }
+        let db = self.runtime.db();
+        let store = db.store();
+        let Some(manager) = store.get_collection(self.table) else {
+            return Vec::new();
+        };
+        manager
+            .get_many(entity_ids)
+            .into_iter()
+            .flatten()
+            .filter_map(|entity| entity_row_snapshot(&entity))
+            .collect()
+    }
+
+    pub(super) fn row_json_pre_images(
+        &self,
+        entity_ids: &[EntityId],
+    ) -> HashMap<u64, crate::json::Value> {
+        if entity_ids.is_empty() {
+            return HashMap::new();
+        }
+        let db = self.runtime.db();
+        let store = db.store();
+        entity_ids
+            .iter()
+            .filter_map(|&id| {
+                store
+                    .get(self.table, id)
+                    .map(|entity| (id.raw(), crate::runtime::mutation::entity_row_json(&entity)))
+            })
+            .collect()
+    }
+
     fn compiled_filter(&self) -> Option<query_exec::CompiledEntityFilter> {
         let filter = self.filter?;
         let db = self.runtime.db();
@@ -205,5 +244,24 @@ impl<'a> DmlTargetScan<'a> {
             ),
             (None, None) => true,
         }
+    }
+}
+
+fn entity_row_snapshot(entity: &crate::storage::UnifiedEntity) -> Option<Vec<(String, Value)>> {
+    match &entity.data {
+        EntityData::Row(row) => {
+            if let Some(named) = &row.named {
+                Some(named.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            } else {
+                row.schema.as_ref().map(|schema| {
+                    schema
+                        .iter()
+                        .cloned()
+                        .zip(row.columns.iter().cloned())
+                        .collect()
+                })
+            }
+        }
+        _ => None,
     }
 }
