@@ -1,0 +1,5 @@
+populated=128 payload_bytes=8192
+redis-aof restart timing
+open_ms=265.684
+first_hit_p50_us=1275.310
+entries_reachable=128/128

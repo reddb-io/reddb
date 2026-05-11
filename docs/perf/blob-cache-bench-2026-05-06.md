@@ -1,11 +1,9 @@
-# Blob Cache benchmark suite — scaffold report — 2026-05-06
+# Blob Cache benchmark suite — Redis baseline report — 2026-05-11
 
-Status: **scaffold only** (no benches executed yet). This file is the
-report skeleton with workload definitions, baseline configuration, the
-SIEVE → W-TinyLFU migration trigger, and placeholder result tables.
-The `TBD` cells are filled by re-running the harness described under
-"Reproducing" once the bench binaries land — see "What this scaffold
-intentionally leaves out" for the follow-up slice.
+Status: **Redis baseline complete for the shipped harness**. This file
+keeps the workload definitions, baseline configuration, the
+SIEVE → W-TinyLFU migration trigger, and the result tables produced by
+the session below.
 
 Tracking issue: #149 — *"Blob Cache: benchmark impact against result
 cache and Redis"*.
@@ -15,19 +13,23 @@ Parent issue: #139.
 ADR: [`0006-tiered-blob-cache.md`](../adr/0006-tiered-blob-cache.md).
 Spike doc: [`blob-cache-l2-spike.md`](blob-cache-l2-spike.md).
 
-Cited session id slot: `sess-2026-05-07-bench-1954` (real session id is
-written here once the bench actually runs against the canonical
-config; until then this string is the sentinel).
+Cited session id: `sess-2026-05-11-redis-baseline`.
 
-## TL;DR (first run 2026-05-07, RedDB-only — Redis cells deferred)
+Rollup:
+[`bench/blob-cache/results/sess-2026-05-11-redis-baseline.md`](../../bench/blob-cache/results/sess-2026-05-11-redis-baseline.md).
 
-- L1 hot hit p50 vs result-cache p50: **259 ns vs 233 ns** (BlobCache 11% slower on the hot fast path; within ADR 0006 §Rollout step 4 trigger of ±10%, marginal).
-- L1 hot hit p50 vs Redis (loopback, pipelined GET) p50: **deferred** — bench harness has Redis stubs only; comparison is a follow-up slice.
-- Cold-absent (synopsis-effective) p50 vs Redis MISS p50: **313 ns RedDB vs deferred Redis**. Synopsis short-circuit confirmed on RedDB side at 3.19 Melem/s.
+## TL;DR (session `sess-2026-05-11-redis-baseline`)
+
+- L1 hot hit central latency vs result-cache: **320 ns vs 300 ns** (BlobCache 7% slower on the hot fast path; within ADR 0006 §Rollout step 4 trigger of ±10%).
+- L1 hot hit vs Redis (loopback): **320 ns RedDB vs 143.80 µs Redis GET**. Redis pipelined `MGET-32` reaches **26.86 K elements/sec**.
+- Cold-absent (synopsis-effective): **0.378 µs RedDB vs 148.97 µs Redis MISS**. Synopsis short-circuit reported **100.0%** L2 skip-rate.
 - L2 hit (5 MiB blob) throughput vs Redis GET (5 MiB) throughput:
-  **246 MiB/s RedDB vs deferred Redis**.
+  **206.47 MiB/s RedDB vs 1.4752 GiB/s Redis no-persist** and
+  **1.1580 GiB/s Redis aof-everysec**.
 - SIEVE vs W-TinyLFU hit-rate gap on the mixed-blob workload:
-  **deferred** — criterion measures latency, not hit-rate. Hit-rate instrumentation is a follow-up. SIEVE latency at 2.0× L1 is 573 ns. Per ADR 0006 §"L1 memory", ship SIEVE pending hit-rate evidence.
+  **not computed** because W-TinyLFU is not implemented as a bench flag.
+  Shipped-policy SIEVE at `WS == 2.0 × L1` reports **54.2%** hit-rate,
+  **10,120** evictions, and **0.730 µs** central latency.
 
 ## Setup
 
@@ -82,7 +84,7 @@ The canonical methodology lock is `make duel-official` in
 `rdb-benchmark/` (issue #154). The Blob Cache suite is a sibling
 harness with the same session-id discipline:
 
-- Working dir: `bench/blob-cache/` (this scaffold).
+- Working dir: `bench/blob-cache/`.
 - Run discipline: see
   [`bench/blob-cache/README.md`](../../bench/blob-cache/README.md).
 - Per-scenario parameters: see
@@ -155,9 +157,9 @@ Reporting shape for the migration call:
 
 ```
 [mixed-blob admission, WS=2.0×L1, persistence=no-persist]
-SIEVE      hit-rate: TBD %   p50: TBD µs   p99: TBD µs
-W-TinyLFU  hit-rate: TBD %   p50: TBD µs   p99: TBD µs
-delta:     TBD pp     trigger fires at > 5 pp
+SIEVE      hit-rate: 54.2 %   central: 0.730 µs   upper CI: 0.747 µs
+W-TinyLFU  hit-rate: n/a      central: n/a        upper CI: n/a
+delta:     n/a        trigger fires at > 5 pp
 ```
 
 The W-TinyLFU column is filled only if the implementation lands as
@@ -166,79 +168,80 @@ and the SIEVE row stands alone as the shipped policy's measurement.
 
 ## Result tables
 
-All numbers `TBD` until the harness runs. Units are real; rows are
-real; the placeholder is only the cell value.
+Criterion reports confidence intervals rather than p50/p99 samples.
+The central latency column below is the Criterion-reported mean; the
+tail proxy is the upper confidence bound from the same run.
 
 ### Workload 1 — hot-l1-hit
 
-| backend | mode | ops/sec | p50 µs | p99 µs |
+| backend | mode | ops/sec | central µs | tail proxy µs |
 |---------|------|--------:|-------:|-------:|
-| RedDB BlobCache (L1) | single-shot | 3.86 M | 0.259 | ≈ 0.27 |
-| RedDB ResultCache | single-shot | 4.29 M | 0.233 | ≈ 0.24 |
-| Redis 7.4 (no-persist) | single-shot | deferred | deferred | deferred |
-| Redis 7.4 (no-persist) | pipelined | deferred | deferred | deferred |
-| Redis 7.4 (aof-everysec) | single-shot | deferred | deferred | deferred |
+| RedDB BlobCache (L1) | single-shot | 3.12 M | 0.320 | 0.321 |
+| RedDB ResultCache | single-shot | 3.33 M | 0.300 | 0.305 |
+| Redis 7.4 (no-persist) | single-shot | 6.95 K | 143.80 | 147.42 |
+| Redis 7.4 (no-persist) | pipelined `MGET-32` | 26.86 K elements/sec | 1191.6 per batch | 1206.9 per batch |
+| Redis 7.4 (aof-everysec) | single-shot | 6.22 K | 160.68 | 171.67 |
 
 ### Workload 2 — cold-l2-miss
 
-| backend | mode | ops/sec | p50 µs | p99 µs |
+| backend | mode | ops/sec | central µs | tail proxy µs |
 |---------|------|--------:|-------:|-------:|
-| RedDB BlobCache (L1 cold, L2 hit) | single-shot | 22.9 K | 43.7 | ≈ 45.5 |
-| Redis 7.4 (aof-everysec, AOF replay warm) | single-shot | deferred | deferred | deferred |
+| RedDB BlobCache (L1 cold, L2 hit) | single-shot | 19.82 K | 50.461 | 51.009 |
+| Redis 7.4 (aof-everysec, AOF replay warm) | single-shot | 5.34 K | 187.14 | 202.40 |
 
 ### Workload 3 — cold-absent (synopsis effectiveness)
 
-| backend | mode | ops/sec | p50 µs | p99 µs | l2-skip-rate |
+| backend | mode | ops/sec | central µs | tail proxy µs | l2-skip-rate |
 |---------|------|--------:|-------:|-------:|-------------:|
-| RedDB BlobCache (synopsis says absent) | single-shot | 3.19 M | 0.313 | ≈ 0.32 | deferred |
-| RedDB ResultCache | single-shot | 7.20 M | 0.138 | ≈ 0.14 | n/a |
-| Redis 7.4 (no-persist) | single-shot | deferred | deferred | deferred | n/a |
+| RedDB BlobCache (synopsis says absent) | single-shot | 2.65 M | 0.378 | 0.381 | 100.0% |
+| RedDB ResultCache | single-shot | 6.21 M | 0.161 | 0.164 | n/a |
+| Redis 7.4 (no-persist) | single-shot | 6.71 K | 148.97 | 152.59 | n/a |
 
 ### Workload 4 — large-blob-l2-hit (5 MiB)
 
-| backend | mode | MB/sec | p50 ms | p99 ms |
+| backend | mode | throughput | central ms | tail proxy ms |
 |---------|------|-------:|-------:|-------:|
-| RedDB BlobCache (L2 hit, 5 MiB) | single-shot | 246 | 20.3 | ≈ 21.1 |
-| Redis 7.4 (no-persist) | single-shot | deferred | deferred | deferred |
-| Redis 7.4 (aof-everysec) | single-shot | deferred | deferred | deferred |
+| RedDB BlobCache (L2 hit, 5 MiB) | single-shot | 206.47 MiB/s | 24.217 | 24.681 |
+| Redis 7.4 (no-persist) | single-shot | 1.4752 GiB/s | 3.3099 | 3.7685 |
+| Redis 7.4 (aof-everysec) | single-shot | 1.1580 GiB/s | 4.2166 | 5.4122 |
 
 ### Workload 5 — namespace-flush
 
-| backend | mode | flush-call p50 ms | flush-call p99 ms | reclaim-lag p50 ms |
+| backend | mode | flush-call central ms | flush-call tail proxy ms | reclaim-lag central ms |
 |---------|------|------------------:|------------------:|-------------------:|
-| RedDB BlobCache (generation bump) | foreground | 0.000120 | ≈ 0.0001 | deferred |
-| Redis 7.4 (`FLUSHDB`) | foreground | deferred | deferred | n/a |
-| Redis 7.4 (`SCAN`+`DEL` per prefix) | foreground | deferred | deferred | n/a |
+| RedDB BlobCache (generation bump) | foreground | 0.000177 | 0.000186 | n/a |
+| Redis 7.4 (`FLUSHDB`) | foreground | 1.0801 | 1.1148 | n/a |
+| Redis 7.4 (`SCAN`+`DEL` per prefix) | foreground | 117.50 | 119.24 | n/a |
 
 ### Workload 6 — dependency-invalidation
 
-| backend | mode | invalidated count | p50 ms | p99 ms |
+| backend | mode | invalidated count | central ms | tail proxy ms |
 |---------|------|------------------:|-------:|-------:|
-| RedDB BlobCache (dep-tag) | single-shot | deferred | 0.311 | ≈ 0.334 |
-| RedDB ResultCache (`invalidate_dependent_caches`) | single-shot | deferred | 0.0459 | ≈ 0.0461 |
-| Redis 7.4 (Lua tag-set sweep) | single-shot | deferred | deferred | deferred |
+| RedDB BlobCache (dep-tag) | single-shot | 250 | 0.2702 | 0.2724 |
+| RedDB ResultCache (`invalidate_dependent_caches`) | single-shot | 250 expected | 0.0593 | 0.0614 |
+| Redis 7.4 (Lua tag-set sweep) | single-shot | 250 expected | 0.5956 | 0.6184 |
 
 ### Workload 7 — restart-warm-cache
 
-| backend | persistence | open ms | first-hit p50 µs | post-restart entries reachable |
+| backend | persistence | open ms | first-hit central µs | post-restart entries reachable |
 |---------|-------------|--------:|-----------------:|-------------------------------:|
-| RedDB BlobCache (L2 on disk) | native blob-chain | 1.16 ms | reopen+first-hit combined | deferred |
-| Redis 7.4 | aof-everysec | deferred | deferred | deferred |
+| RedDB BlobCache (L2 on disk) | native blob-chain | reopen+first-hit combined | 1160.2 | 127/128 |
+| Redis 7.4 | aof-everysec | 265.684 | 1275.310 | 128/128 |
 
 ### Workload 8 — mixed-blob admission
 
-| backend / policy | WS / L1 | hit-rate | evictions | p50 µs | p99 µs |
+| backend / policy | WS / L1 | hit-rate | evictions | central µs | tail proxy µs |
 |------------------|--------:|---------:|----------:|-------:|-------:|
-| RedDB BlobCache, SIEVE | 0.5 | deferred | deferred | 0.382 | ≈ 0.386 |
-| RedDB BlobCache, SIEVE | 1.0 | deferred | deferred | 0.422 | ≈ 0.430 |
-| RedDB BlobCache, SIEVE | 2.0 | deferred | deferred | 0.574 | ≈ 0.601 |
-| RedDB BlobCache, W-TinyLFU (if flagged) | 2.0 | deferred | deferred | deferred | deferred |
-| Redis 7.4 (allkeys-lru) | 2.0 | deferred | deferred | deferred | deferred |
+| RedDB BlobCache, SIEVE | 0.5 | 100.0% | 0 | 0.455 | 0.465 |
+| RedDB BlobCache, SIEVE | 1.0 | 100.0% | 0 | 0.529 | 0.535 |
+| RedDB BlobCache, SIEVE | 2.0 | 54.2% | 10,120 | 0.730 | 0.747 |
+| RedDB BlobCache, W-TinyLFU (if flagged) | 2.0 | n/a | n/a | n/a | n/a |
+| Redis 7.4 (allkeys-lru) | 2.0 | 100.0% | 0 | 124.59 | 127.15 |
 
-## Interpretation (placeholders ready to fill)
+## Interpretation
 
-The interpretation section is laid out here so that, once the
-numbers land, the report can be filled in without restructuring.
+The interpretation below uses the cited session's central latency and
+throughput values.
 
 ### Where Blob Cache is expected to win
 
@@ -277,8 +280,9 @@ numbers land, the report can be filled in without restructuring.
 
 1. Does L1-hot performance justify routing the existing
    `ResultCache` callers through `BlobCache` per ADR 0006 §"Rollout"
-   step 4? Trigger: if RedDB BlobCache hot-l1-hit p50 is within
-   ±10 % of `ResultCache` hot-path p50, the rollout is safe.
+   step 4? Trigger: if RedDB BlobCache hot-l1-hit central latency is
+   within ±10 % of `ResultCache` hot-path central latency, the rollout
+   is safe.
 2. Does the cold-absent (synopsis) row beat the Redis miss row?
    If yes, the ADR's negative-filter design is validated. If no,
    reopen the synopsis structure choice (Bloom vs Cuckoo) before
@@ -296,46 +300,31 @@ The full repro recipe lives in
 The short form is:
 
 ```bash
-# 1. Bring up the pinned Redis baselines (both variants).
-cd bench/blob-cache
-./redis-up.sh         # follows redis-setup.md
+# 1. Bring up the pinned Redis baselines (both variants) from repo root.
+bench/blob-cache/redis-down.sh --wipe-aof
+bench/blob-cache/redis-up.sh
 
-# 2. Run the suite (all 8 scenarios, both Redis variants, RedDB).
-make blob-cache-bench OFFICIAL_RUNS=10
+# 2. Run the suite (all 8 reported scenarios, RedDB + Redis).
+mkdir -p bench/blob-cache/results
+REDIS_NO_PERSIST_ADDR=127.0.0.1:6379 \
+REDIS_AOF_ADDR=127.0.0.1:6380 \
+  cargo bench -p reddb-server --bench blob_cache_bench 'w[1-8]' -- --nocapture \
+  2>&1 | tee bench/blob-cache/results/sess-<date>-redis-baseline.raw.log
 
-# 3. Stats roll up into the same session-id discipline as #154.
-make blob-cache-stats
+# 3. Run workload-7 Redis AOF restart manually using redis-setup.md.
+docker exec reddb-bench-redis-aof-everysec redis-cli -p 6379 BGREWRITEAOF
+# Poll INFO persistence until aof_rewrite_in_progress is 0, restart the
+# container against the same reddb-bench-redis-aof volume, poll PING, then
+# issue GET for the known populated key set.
 ```
 
-The `Makefile` target name `blob-cache-bench` is the **proposed**
-name for the follow-up slice that wires the harness in. This
-scaffold does **not** add it to the existing top-level `Makefile`
-(see "Cargo.toml / Makefile additions needed" in the slice notes
-at the bottom of the doc).
+The rollup for the cited session is
+[`bench/blob-cache/results/sess-2026-05-11-redis-baseline.md`](../../bench/blob-cache/results/sess-2026-05-11-redis-baseline.md).
+The raw Criterion output from that run is in the adjacent `.raw.log`
+files.
 
-## What this scaffold intentionally leaves out
+## Remaining scope
 
-The slice that produced this file is **scaffold + setup docs only**.
-The follow-up slice that fills in the `TBD` cells must:
-
-1. Add a benchmark crate (or `criterion` / `divan` harness target)
-   that exercises `BlobCache` and `ResultCache` directly. Needs a
-   workspace `Cargo.toml` dev-dep edit to register it — flagged,
-   not applied here.
-2. Add a Redis client dependency (e.g. `redis = "0.27"` or current
-   stable) for the baseline harness. Same flagged-not-applied
-   constraint.
-3. Add a `Makefile` target `blob-cache-bench` that orchestrates
-   the Redis docker bring-up, the suite, and the rollup.
-4. Wire the session-id emission so the cited session line at the
-   top of this doc gets a real id instead of the
-   `sess-2026-05-07-bench-1954` sentinel.
-5. Run the suite and fill in every `TBD` cell.
-6. Publish the SIEVE vs W-TinyLFU delta and either close this
-   item or file the W-TinyLFU migration follow-up per the trigger
-   above.
-
-Until that happens, this document is the **interface** the bench
-output will fill in, and the scenarios in
-[`bench/blob-cache/scenarios.md`](../../bench/blob-cache/scenarios.md)
-are the **contract** the harness must satisfy.
+The W-TinyLFU row is intentionally `n/a` because the shipped harness has
+no W-TinyLFU admission-policy flag. If that implementation lands later,
+rerun workload 8 and compare against the 5 pp trigger above.

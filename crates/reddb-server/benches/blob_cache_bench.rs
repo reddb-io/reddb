@@ -14,6 +14,8 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use reddb_server::storage::cache::{
     BlobCache, BlobCacheConfig, BlobCachePut, CacheKey, CachePolicy, L2Compression, ResultCache,
 };
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
 // ── constants ────────────────────────────────────────────────────────────────
@@ -64,6 +66,218 @@ fn payload(size: usize) -> Vec<u8> {
     (0..size).map(|i| (i & 0xFF) as u8).collect()
 }
 
+enum Resp {
+    Simple,
+    Integer(i64),
+    Bulk(Option<Vec<u8>>),
+    Array(Vec<Resp>),
+}
+
+struct RedisBenchClient {
+    reader: BufReader<TcpStream>,
+    writer: TcpStream,
+}
+
+impl RedisBenchClient {
+    fn connect(addr: &str) -> io::Result<Self> {
+        let writer = TcpStream::connect(addr)?;
+        writer.set_nodelay(true)?;
+        let reader_stream = writer.try_clone()?;
+        Ok(Self {
+            reader: BufReader::new(reader_stream),
+            writer,
+        })
+    }
+
+    fn command(&mut self, parts: &[&[u8]]) -> io::Result<Resp> {
+        write!(self.writer, "*{}\r\n", parts.len())?;
+        for part in parts {
+            write!(self.writer, "${}\r\n", part.len())?;
+            self.writer.write_all(part)?;
+            self.writer.write_all(b"\r\n")?;
+        }
+        self.writer.flush()?;
+        self.read_resp()
+    }
+
+    fn ping(&mut self) -> io::Result<()> {
+        match self.command(&[b"PING"])? {
+            Resp::Simple => Ok(()),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected PING response",
+            )),
+        }
+    }
+
+    fn flushdb(&mut self) -> io::Result<()> {
+        match self.command(&[b"FLUSHDB"])? {
+            Resp::Simple => Ok(()),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected FLUSHDB response",
+            )),
+        }
+    }
+
+    fn set(&mut self, key: &str, value: &[u8]) -> io::Result<()> {
+        match self.command(&[b"SET", key.as_bytes(), value])? {
+            Resp::Simple => Ok(()),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected SET response",
+            )),
+        }
+    }
+
+    fn sadd(&mut self, key: &str, member: &str) -> io::Result<()> {
+        match self.command(&[b"SADD", key.as_bytes(), member.as_bytes()])? {
+            Resp::Integer(_) => Ok(()),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected SADD response",
+            )),
+        }
+    }
+
+    fn get(&mut self, key: &str) -> io::Result<Option<Vec<u8>>> {
+        match self.command(&[b"GET", key.as_bytes()])? {
+            Resp::Bulk(value) => Ok(value),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected GET response",
+            )),
+        }
+    }
+
+    fn mget(&mut self, keys: &[String]) -> io::Result<usize> {
+        let mut parts: Vec<&[u8]> = Vec::with_capacity(keys.len() + 1);
+        parts.push(b"MGET");
+        for key in keys {
+            parts.push(key.as_bytes());
+        }
+        match self.command(&parts)? {
+            Resp::Array(values) => Ok(values.len()),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected MGET response",
+            )),
+        }
+    }
+
+    fn dbsize(&mut self) -> io::Result<i64> {
+        match self.command(&[b"DBSIZE"])? {
+            Resp::Integer(value) => Ok(value),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected DBSIZE response",
+            )),
+        }
+    }
+
+    fn eval_delete_tag_set(&mut self, set_key: &str) -> io::Result<i64> {
+        let script = br#"
+local members = redis.call('SMEMBERS', KEYS[1])
+local count = 0
+for _, key in ipairs(members) do
+  count = count + redis.call('DEL', key)
+end
+redis.call('DEL', KEYS[1])
+return count
+"#;
+        match self.command(&[b"EVAL", script, b"1", set_key.as_bytes()])? {
+            Resp::Integer(value) => Ok(value),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected EVAL response",
+            )),
+        }
+    }
+
+    fn read_resp(&mut self) -> io::Result<Resp> {
+        let mut kind = [0u8; 1];
+        self.reader.read_exact(&mut kind)?;
+        match kind[0] {
+            b'+' => {
+                self.read_line()?;
+                Ok(Resp::Simple)
+            }
+            b'-' => {
+                let line = self.read_line()?;
+                Err(io::Error::new(io::ErrorKind::Other, line))
+            }
+            b':' => {
+                let line = self.read_line()?;
+                let value = line.parse().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid RESP integer")
+                })?;
+                Ok(Resp::Integer(value))
+            }
+            b'$' => {
+                let line = self.read_line()?;
+                let len: isize = line.parse().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid RESP bulk length")
+                })?;
+                if len < 0 {
+                    return Ok(Resp::Bulk(None));
+                }
+                let mut value = vec![0u8; len as usize];
+                self.reader.read_exact(&mut value)?;
+                self.expect_crlf()?;
+                Ok(Resp::Bulk(Some(value)))
+            }
+            b'*' => {
+                let line = self.read_line()?;
+                let len: isize = line.parse().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid RESP array length")
+                })?;
+                if len < 0 {
+                    return Ok(Resp::Array(Vec::new()));
+                }
+                let mut values = Vec::with_capacity(len as usize);
+                for _ in 0..len {
+                    values.push(self.read_resp()?);
+                }
+                Ok(Resp::Array(values))
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unknown RESP frame type",
+            )),
+        }
+    }
+
+    fn read_line(&mut self) -> io::Result<String> {
+        let mut line = Vec::new();
+        self.reader.read_until(b'\n', &mut line)?;
+        if line.ends_with(b"\r\n") {
+            line.truncate(line.len() - 2);
+        }
+        String::from_utf8(line)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-utf8 RESP line"))
+    }
+
+    fn expect_crlf(&mut self) -> io::Result<()> {
+        let mut crlf = [0u8; 2];
+        self.reader.read_exact(&mut crlf)?;
+        if crlf == *b"\r\n" {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "missing RESP CRLF",
+            ))
+        }
+    }
+}
+
+fn redis_client(env_var: &str) -> Option<RedisBenchClient> {
+    let addr = std::env::var(env_var).ok()?;
+    let mut client = RedisBenchClient::connect(&addr).ok()?;
+    client.ping().ok()?;
+    Some(client)
+}
+
 // ── Workload 1 — hot-l1-hit ──────────────────────────────────────────────────
 //
 // 32 × 1 KB keys, warm in L1. Drives Arc<[u8]> clone path.
@@ -103,6 +317,50 @@ fn w1_hot_l1_hit(c: &mut Criterion) {
         });
     });
 
+    if let Some(mut redis) = redis_client("REDIS_NO_PERSIST_ADDR") {
+        redis.flushdb().unwrap();
+        for i in 0..KEY_COUNT {
+            redis.set(&key(i), &p).unwrap();
+        }
+        g.throughput(Throughput::Elements(1));
+        g.bench_function("Redis-no-persist-GET", |b| {
+            let mut i = 0usize;
+            b.iter(|| {
+                black_box(redis.get(&key(i % KEY_COUNT)).unwrap());
+                i += 1;
+            });
+        });
+    }
+
+    if let Some(mut redis) = redis_client("REDIS_NO_PERSIST_ADDR") {
+        redis.flushdb().unwrap();
+        for i in 0..KEY_COUNT {
+            redis.set(&key(i), &p).unwrap();
+        }
+        let mget_keys: Vec<String> = (0..KEY_COUNT).map(key).collect();
+        g.throughput(Throughput::Elements(KEY_COUNT as u64));
+        g.bench_function("Redis-no-persist-MGET-32", |b| {
+            b.iter(|| {
+                black_box(redis.mget(&mget_keys).unwrap());
+            });
+        });
+    }
+
+    if let Some(mut redis) = redis_client("REDIS_AOF_ADDR") {
+        redis.flushdb().unwrap();
+        for i in 0..KEY_COUNT {
+            redis.set(&key(i), &p).unwrap();
+        }
+        g.throughput(Throughput::Elements(1));
+        g.bench_function("Redis-aof-everysec-GET", |b| {
+            let mut i = 0usize;
+            b.iter(|| {
+                black_box(redis.get(&key(i % KEY_COUNT)).unwrap());
+                i += 1;
+            });
+        });
+    }
+
     g.finish();
 }
 
@@ -140,6 +398,20 @@ fn w2_cold_l2_miss(c: &mut Criterion) {
             i += 1;
         });
     });
+
+    if let Some(mut redis) = redis_client("REDIS_AOF_ADDR") {
+        redis.flushdb().unwrap();
+        for i in 0..KEY_COUNT {
+            redis.set(&key(i), &p).unwrap();
+        }
+        g.bench_function("Redis-aof-everysec-GET", |b| {
+            let mut i = 0usize;
+            b.iter(|| {
+                black_box(redis.get(&key(i % KEY_COUNT)).unwrap());
+                i += 1;
+            });
+        });
+    }
 
     g.finish();
 }
@@ -179,6 +451,20 @@ fn w3_cold_absent(c: &mut Criterion) {
             i += 1;
         });
     });
+
+    if let Some(mut redis) = redis_client("REDIS_NO_PERSIST_ADDR") {
+        redis.flushdb().unwrap();
+        for i in 0..100usize {
+            redis.set(&key(i), &p).unwrap();
+        }
+        g.bench_function("Redis-no-persist-miss", |b| {
+            let mut i = 100usize;
+            b.iter(|| {
+                black_box(redis.get(&key(i)).unwrap());
+                i += 1;
+            });
+        });
+    }
 
     g.finish();
 
@@ -228,6 +514,34 @@ fn w4_large_blob_l2_hit(c: &mut Criterion) {
         });
     });
 
+    if let Some(mut redis) = redis_client("REDIS_NO_PERSIST_ADDR") {
+        redis.flushdb().unwrap();
+        for i in 0..KEY_COUNT {
+            redis.set(&key(i), &p).unwrap();
+        }
+        g.bench_function("Redis-no-persist-GET-5MiB", |b| {
+            let mut i = 0usize;
+            b.iter(|| {
+                black_box(redis.get(&key(i % KEY_COUNT)).unwrap());
+                i += 1;
+            });
+        });
+    }
+
+    if let Some(mut redis) = redis_client("REDIS_AOF_ADDR") {
+        redis.flushdb().unwrap();
+        for i in 0..KEY_COUNT {
+            redis.set(&key(i), &p).unwrap();
+        }
+        g.bench_function("Redis-aof-everysec-GET-5MiB", |b| {
+            let mut i = 0usize;
+            b.iter(|| {
+                black_box(redis.get(&key(i % KEY_COUNT)).unwrap());
+                i += 1;
+            });
+        });
+    }
+
     g.finish();
 }
 
@@ -260,6 +574,46 @@ fn w5_namespace_flush(c: &mut Criterion) {
             total
         });
     });
+
+    if let Some(mut redis) = redis_client("REDIS_NO_PERSIST_ADDR") {
+        g.bench_function("Redis-no-persist-FLUSHDB", |b| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    redis.flushdb().unwrap();
+                    for i in 0..KEY_COUNT {
+                        redis.set(&key(i), &p).unwrap();
+                    }
+                    let t = Instant::now();
+                    redis.flushdb().unwrap();
+                    total += t.elapsed();
+                }
+                total
+            });
+        });
+    }
+
+    if let Some(mut redis) = redis_client("REDIS_NO_PERSIST_ADDR") {
+        g.bench_function("Redis-no-persist-SCAN-DEL-prefix", |b| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    redis.flushdb().unwrap();
+                    for i in 0..KEY_COUNT {
+                        redis.set(&format!("{NS}:{}", key(i)), &p).unwrap();
+                    }
+                    let t = Instant::now();
+                    for i in 0..KEY_COUNT {
+                        redis
+                            .command(&[b"DEL", format!("{NS}:{}", key(i)).as_bytes()])
+                            .unwrap();
+                    }
+                    total += t.elapsed();
+                }
+                total
+            });
+        });
+    }
 
     g.finish();
 }
@@ -326,6 +680,28 @@ fn w6_dependency_invalidation(c: &mut Criterion) {
         });
     });
 
+    if let Some(mut redis) = redis_client("REDIS_NO_PERSIST_ADDR") {
+        g.bench_function("Redis-no-persist-Lua-tag-set-sweep", |b| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    redis.flushdb().unwrap();
+                    for i in 0..KEY_COUNT {
+                        let redis_key = format!("{NS}:{}", key(i));
+                        redis.set(&redis_key, &p).unwrap();
+                        if i % 4 == 0 {
+                            redis.sadd("dep:table:users", &redis_key).unwrap();
+                        }
+                    }
+                    let t = Instant::now();
+                    black_box(redis.eval_delete_tag_set("dep:table:users").unwrap());
+                    total += t.elapsed();
+                }
+                total
+            });
+        });
+    }
+
     g.finish();
 
     let invalidated = last_invalidated.load(std::sync::atomic::Ordering::Relaxed);
@@ -354,6 +730,16 @@ fn w7_restart_warm_cache(c: &mut Criterion) {
     } // drop flushes L2
 
     let l2_path = tmp.path().join("cache.rdb");
+    let check = make_cache_with_l2(L1, &l2_path);
+    let mut reachable = 0usize;
+    for i in 0..KEY_COUNT {
+        if check.get(NS, &key(i)).is_some() {
+            reachable += 1;
+        }
+    }
+    drop(check);
+    eprintln!("\n[w7 stats] entries reachable post-restart: {reachable}/{KEY_COUNT}");
+
     let mut g = c.benchmark_group("w7-restart-warm-cache");
     g.sample_size(20);
     g.measurement_time(Duration::from_secs(10));
@@ -372,14 +758,6 @@ fn w7_restart_warm_cache(c: &mut Criterion) {
     });
 
     g.finish();
-
-    // Entries reachable post-restart.
-    let check = make_cache_with_l2(L1, &l2_path);
-    let s = check.stats();
-    eprintln!(
-        "\n[w7 stats] entries reachable post-restart: {}",
-        s.entries()
-    );
 }
 
 // ── Workload 8 — mixed-blob admission ────────────────────────────────────────
@@ -452,6 +830,45 @@ fn w8_mixed_blob_admission(c: &mut Criterion) {
         );
     }
 
+    if let Some(mut redis) = redis_client("REDIS_NO_PERSIST_ADDR") {
+        let ws_bytes = L1 * 2;
+        let small_count = (ws_bytes * 70 / 100) / 1024;
+        let medium_count = (ws_bytes * 25 / 100) / (100 * 1024);
+        let large_count = (ws_bytes * 5 / 100) / (1024 * 1024);
+        let total_keys = (small_count + medium_count + large_count).max(1);
+
+        g.bench_function("Redis-no-persist-allkeys-lru-WS-2.0xL1", |b| {
+            let mut i = 0usize;
+            redis.flushdb().unwrap();
+            for key_idx in 0..total_keys {
+                let put = if key_idx < small_count {
+                    &small_payload
+                } else if key_idx < small_count + medium_count {
+                    &medium_payload
+                } else {
+                    &large_payload
+                };
+                redis.set(&key(key_idx), put).unwrap();
+            }
+            b.iter(|| {
+                if i % 5 == 0 {
+                    let idx = i % total_keys;
+                    let put = if idx < small_count {
+                        &small_payload
+                    } else if idx < small_count + medium_count {
+                        &medium_payload
+                    } else {
+                        &large_payload
+                    };
+                    redis.set(&key(idx), put).unwrap();
+                } else {
+                    black_box(redis.get(&key(i % total_keys)).unwrap());
+                }
+                i += 1;
+            });
+        });
+    }
+
     g.finish();
 
     // Hit-rate + eviction measurement (standalone, not folded into criterion timing).
@@ -505,6 +922,55 @@ fn w8_mixed_blob_admission(c: &mut Criterion) {
             s.evictions()
         );
     }
+
+    if let Some(mut redis) = redis_client("REDIS_NO_PERSIST_ADDR") {
+        let ws_bytes = L1 * 2;
+        let small_count = (ws_bytes * 70 / 100) / 1024;
+        let medium_count = (ws_bytes * 25 / 100) / (100 * 1024);
+        let large_count = (ws_bytes * 5 / 100) / (1024 * 1024);
+        let total_keys = (small_count + medium_count + large_count).max(1);
+        redis.flushdb().unwrap();
+        for i in 0..total_keys {
+            let put = if i < small_count {
+                &small_payload
+            } else if i < small_count + medium_count {
+                &medium_payload
+            } else {
+                &large_payload
+            };
+            redis.set(&key(i), put).unwrap();
+        }
+        let mut hits = 0usize;
+        let mut misses = 0usize;
+        for i in 0..50_000usize {
+            if i % 5 == 0 {
+                let idx = i % total_keys;
+                let put = if idx < small_count {
+                    &small_payload
+                } else if idx < small_count + medium_count {
+                    &medium_payload
+                } else {
+                    &large_payload
+                };
+                redis.set(&key(idx), put).unwrap();
+            } else if redis.get(&key(i % total_keys)).unwrap().is_some() {
+                hits += 1;
+            } else {
+                misses += 1;
+            }
+        }
+        let total_gets = hits + misses;
+        let hit_rate = if total_gets > 0 {
+            hits as f64 / total_gets as f64 * 100.0
+        } else {
+            0.0
+        };
+        let entries = redis.dbsize().unwrap_or_default();
+        let evictions = total_keys.saturating_sub(entries as usize);
+        eprintln!(
+            "  Redis allkeys-lru WS-2.0xL1: hit-rate={hit_rate:.1}% hits={hits} misses={misses} evictions={evictions}"
+        );
+    }
 }
 
 // ── Workload 9 — shard insert/remove slot-index (#225) ──────────────────────
@@ -551,14 +1017,6 @@ fn w9_shard_insert_remove_slot_index(c: &mut Criterion) {
     }
 
     g.finish();
-}
-
-// ── Redis helpers (gated on REDIS_NO_PERSIST_ADDR / REDIS_AOF_ADDR env vars) ─
-// These stubs exist so the bench file compiles without the redis crate.
-// When Docker is available, run bench/blob-cache/redis-up.sh, then re-bench.
-
-fn _redis_addr(env_var: &str) -> Option<String> {
-    std::env::var(env_var).ok()
 }
 
 // ── criterion wiring ─────────────────────────────────────────────────────────
