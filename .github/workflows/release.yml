@@ -133,9 +133,6 @@ jobs:
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
     runs-on: ${{ matrix.os }}
-    env:
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: sccache
     strategy:
       fail-fast: false
       matrix:
@@ -165,6 +162,7 @@ jobs:
           version: '28.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: mozilla-actions/sccache-action@v0.0.10
+        if: "!matrix.cross"
       - uses: rui314/setup-mold@v1
         if: matrix.target == 'x86_64-unknown-linux-gnu'
 
@@ -186,6 +184,8 @@ jobs:
         if: matrix.target != 'aarch64-unknown-linux-musl'
         shell: bash
         env:
+          SCCACHE_GHA_ENABLED: ${{ !matrix.cross && 'true' || '' }}
+          RUSTC_WRAPPER: ${{ !matrix.cross && 'sccache' || '' }}
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
@@ -195,7 +195,6 @@ jobs:
           CXX_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-g++
           AR_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-ar
         run: |
-          [[ "${{ matrix.cross }}" == "true" ]] && unset RUSTC_WRAPPER || true
           cargo build --locked --release --target ${{ matrix.target }} --bin red
           cargo build --locked --release --target ${{ matrix.target }} --bin red_client -p reddb-io-client --no-default-features
 
