@@ -290,3 +290,18 @@ test("queue semantics closure records final dispositions for issue 342 scope", (
   assert.match(issue289.final_disposition.reason, /in-flight WORK messages/);
   assert.match(issue289.final_disposition.reason, /tracing warning/);
 });
+
+test("events subscription closure records final disposition for issue 343 scope", () => {
+  assert.ok(fs.existsSync(issuesPath), `${issuesPath} must exist`);
+
+  const report = runReport();
+  const issue296 = issueByNumber(report, 296);
+
+  assert.equal(issue296.final_disposition.outcome, "confirmed");
+  assert.equal(issue296.final_disposition.placeholder, false);
+  assert.notEqual(issue296.resolution.status, "code_evidence_partial");
+  assert.notEqual(issue296.resolution.status, "code_evidence_partial_github_open");
+  assert.match(issue296.final_disposition.reason, /add_two_subscriptions_both_receive_insert_event/);
+  assert.match(issue296.final_disposition.reason, /drop_subscription_stops_events_to_that_queue/);
+  assert.match(issue296.final_disposition.reason, /redact_applied_per_subscription_independently/);
+});

@@ -1,6 +1,6 @@
 {
   "repository": "reddb-io/reddb",
-  "generated_at": "2026-05-11T01:59:52.403Z",
+  "generated_at": "2026-05-11T02:15:01.701Z",
   "source_state": {
     "github_issues": "/tmp/reddb_issues_raw.json",
     "current_workspace_files_indexed": 2667,
@@ -34,25 +34,25 @@
     "total": 311,
     "unique_issue_entries": 311,
     "github_open": 3,
-    "objective_reached_true": 303,
+    "objective_reached_true": 304,
     "objective_reached_false": 0,
-    "objective_reached_unknown": 8,
+    "objective_reached_unknown": 7,
     "by_status": {
-      "code_evidence_confirmed": 300,
-      "code_evidence_partial": 8,
+      "code_evidence_confirmed": 301,
+      "code_evidence_partial": 7,
       "code_evidence_confirmed_github_open": 3
     },
     "by_confidence": {
-      "high": 303,
-      "medium": 8
+      "high": 304,
+      "medium": 7
     },
     "by_final_disposition": {
-      "confirmed": 298,
+      "confirmed": 299,
       "split": 4,
       "superseded": 1,
-      "reopened": 8
+      "reopened": 7
     },
-    "placeholder_final_dispositions": 11
+    "placeholder_final_dispositions": 10
   },
   "issues": [
     {
@@ -724,10 +724,24 @@
         {
           "type": "current_code_match",
           "path": "tests/e2e_migrations_bootstrap.rs",
-          "line": 25,
+          "line": 51,
           "kind": "test",
           "matched_term": "SELECT * FROM red_migrations",
           "snippet": ".execute_query(\"SELECT * FROM red_migrations\")",
+          "term_score": 8,
+          "term_sources": [
+            "code_span",
+            "acceptance_code_span",
+            "objective_code_span"
+          ]
+        },
+        {
+          "type": "current_code_match",
+          "path": "docs/migrations/vcs-integration.md",
+          "line": 157,
+          "kind": "doc",
+          "matched_term": "SELECT * FROM red_migrations",
+          "snippet": "migration definition is still visible through `SELECT * FROM red_migrations`.",
           "term_score": 8,
           "term_sources": [
             "code_span",
@@ -5686,7 +5700,7 @@
         {
           "type": "current_code_match",
           "path": "tests/e2e_migrations_bootstrap.rs",
-          "line": 108,
+          "line": 184,
           "kind": "test",
           "matched_term": "MIGRATION APPLY",
           "snippet": ".expect(\"audit visible after independent migration apply\");",
@@ -5729,11 +5743,11 @@
         },
         {
           "type": "current_code_match",
-          "path": "docs/migrations/vcs-integration.md",
-          "line": 3,
+          "path": "docs/migrations/overview.md",
+          "line": 122,
           "kind": "doc",
           "matched_term": "MIGRATION CREATE",
-          "snippet": "Every applied migration creates a VCS commit. This is not a log entry or",
+          "snippet": "Every applied migration creates a VCS commit, but migration definitions are not",
           "term_score": 5,
           "term_sources": [
             "code_span",
@@ -118563,20 +118577,56 @@
       "children": [],
       "descendants": [],
       "resolution": {
-        "status": "code_evidence_partial",
-        "objective_reached": null,
-        "confidence": "medium",
-        "note": "Current workspace has limited specific code/test evidence; manual review needed for full acceptance coverage."
+        "status": "code_evidence_confirmed",
+        "objective_reached": true,
+        "confidence": "high",
+        "note": "Current workspace has direct specific code/test evidence."
       },
       "final_disposition": {
-        "outcome": "reopened",
-        "placeholder": true,
-        "reason": "Only partial current code/test evidence exists; a domain slice must confirm, supersede, or split the remaining acceptance criteria.",
+        "outcome": "confirmed",
+        "placeholder": false,
+        "reason": "Events multi-subscription behavior is evidenced by tests/e2e_events_foundation.rs: add_two_subscriptions_both_receive_insert_event proves one collection delivers the same insert to two target queues, drop_subscription_stops_events_to_that_queue proves DROP SUBSCRIPTION removes only the named target while preserving the remaining subscription, and redact_applied_per_subscription_independently proves each subscription applies its own redaction list.",
         "superseded_by": [],
         "reopened_as": [],
         "split_into": []
       },
       "current_code_evidence": [
+        {
+          "type": "manual_current_test_match",
+          "path": "tests/e2e_events_foundation.rs",
+          "line": 552,
+          "kind": "test",
+          "matched_term": "events drop subscription preserves remaining queue",
+          "snippet": "fn drop_subscription_stops_events_to_that_queue()",
+          "term_score": 9,
+          "term_sources": [
+            "issue_343_events_subscription_audit"
+          ]
+        },
+        {
+          "type": "manual_current_test_match",
+          "path": "tests/e2e_events_foundation.rs",
+          "line": 515,
+          "kind": "test",
+          "matched_term": "events per-subscription redaction independent",
+          "snippet": "fn redact_applied_per_subscription_independently()",
+          "term_score": 9,
+          "term_sources": [
+            "issue_343_events_subscription_audit"
+          ]
+        },
+        {
+          "type": "manual_current_test_match",
+          "path": "tests/e2e_events_foundation.rs",
+          "line": 467,
+          "kind": "test",
+          "matched_term": "events multi-subscription queues both receive insert",
+          "snippet": "fn add_two_subscriptions_both_receive_insert_event()",
+          "term_score": 9,
+          "term_sources": [
+            "issue_343_events_subscription_audit"
+          ]
+        },
         {
           "type": "current_code_match",
           "path": "crates/reddb-server/src/application/entity.rs",

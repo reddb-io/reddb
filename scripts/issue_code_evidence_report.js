@@ -1115,6 +1115,40 @@ function main() {
         },
       ];
     }
+    if (number === 296) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "tests/e2e_events_foundation.rs",
+          line: 467,
+          kind: "test",
+          matched_term: "events multi-subscription queues both receive insert",
+          snippet: "fn add_two_subscriptions_both_receive_insert_event()",
+          term_score: 9,
+          term_sources: ["issue_343_events_subscription_audit"],
+        },
+        {
+          type: "manual_current_test_match",
+          path: "tests/e2e_events_foundation.rs",
+          line: 515,
+          kind: "test",
+          matched_term: "events per-subscription redaction independent",
+          snippet: "fn redact_applied_per_subscription_independently()",
+          term_score: 9,
+          term_sources: ["issue_343_events_subscription_audit"],
+        },
+        {
+          type: "manual_current_test_match",
+          path: "tests/e2e_events_foundation.rs",
+          line: 552,
+          kind: "test",
+          matched_term: "events drop subscription preserves remaining queue",
+          snippet: "fn drop_subscription_stops_events_to_that_queue()",
+          term_score: 9,
+          term_sources: ["issue_343_events_subscription_audit"],
+        },
+      ];
+    }
     if (number === 320) {
       return [
         {
@@ -1426,6 +1460,17 @@ function main() {
         placeholder: false,
         reason:
           "ALTER QUEUE SET MODE transition behavior is evidenced by tests/integration_queue_timeseries.rs: in-flight WORK messages remain ackable through _work_default while new reads use FANOUT semantics, and crates/reddb-server/src/runtime/impl_queue.rs emits the active pending tracing warning with pending_count for operators.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 296) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "Events multi-subscription behavior is evidenced by tests/e2e_events_foundation.rs: add_two_subscriptions_both_receive_insert_event proves one collection delivers the same insert to two target queues, drop_subscription_stops_events_to_that_queue proves DROP SUBSCRIPTION removes only the named target while preserving the remaining subscription, and redact_applied_per_subscription_independently proves each subscription applies its own redaction list.",
         superseded_by: [],
         reopened_as: [],
         split_into: [],

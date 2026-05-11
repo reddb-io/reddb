@@ -484,6 +484,20 @@ fn add_two_subscriptions_both_receive_insert_event() {
     assert_eq!(contract.subscriptions.len(), 2);
     assert!(contract.subscriptions.iter().any(|s| s.name == "s1" && s.target_queue == "q1"));
     assert!(contract.subscriptions.iter().any(|s| s.name == "s2" && s.target_queue == "q2"));
+    assert!(
+        rt.db()
+            .store()
+            .get_config("queue.q1.mode")
+            .is_some_and(|value| format!("{value:?}").contains("fanout")),
+        "q1 should be a fanout event queue"
+    );
+    assert!(
+        rt.db()
+            .store()
+            .get_config("queue.q2.mode")
+            .is_some_and(|value| format!("{value:?}").contains("fanout")),
+        "q2 should be a fanout event queue"
+    );
 
     setup_event_queue_group(&rt, "q1");
     setup_event_queue_group(&rt, "q2");
