@@ -175,10 +175,6 @@ impl RedDBServer {
             // SOC 2 / HIPAA structured audit query — JSONL/JSON over
             // the active `.audit.log` plus rotated archives.
             ("GET", "/admin/audit") => self.handle_admin_audit_query(&query),
-            // PLAN.md Phase 10.3 — public OpenAPI spec served inline
-            // so external tools can fetch it from a running server.
-            ("GET", "/admin/openapi") => self.handle_admin_openapi(),
-            ("GET", "/admin/openapi.yaml") => self.handle_admin_openapi(),
 
             ("GET", "/health") => {
                 let report = self.native_use_cases().health();

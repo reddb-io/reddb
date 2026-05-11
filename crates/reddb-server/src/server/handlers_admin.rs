@@ -1948,21 +1948,6 @@ impl RedDBServer {
         }
     }
 
-    /// `GET /admin/openapi(.yaml)` — serve the public admin API
-    /// spec (PLAN.md Phase 10.3). The YAML file is embedded at
-    /// build time so the running binary always serves the spec
-    /// matching its own surface, even if the deploy target lacks
-    /// access to the source repo.
-    pub(crate) fn handle_admin_openapi(&self) -> HttpResponse {
-        const SPEC: &str = include_str!("../../../../docs/spec/admin-api.openapi.yaml");
-        HttpResponse {
-            status: 200,
-            content_type: "application/yaml",
-            body: SPEC.as_bytes().to_vec(),
-            extra_headers: Vec::new(),
-        }
-    }
-
     /// `GET /admin/audit` — structured audit log query for compliance
     /// (SOC 2 / HIPAA / ISO 27001). Reads the active `.audit.log`
     /// plus rotated `.audit.log.<ms>.zst` archives, applies the
