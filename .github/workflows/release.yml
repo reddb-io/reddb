@@ -19,6 +19,11 @@ on:
       version:
         description: Optional version for stable (e.g. 0.1.2)
         required: false
+      publish_cargo:
+        description: Publish crates to crates.io from GitHub Actions
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -42,6 +47,7 @@ jobs:
       release_tag: ${{ steps.plan.outputs.release_tag }}
       package_version: ${{ steps.plan.outputs.package_version }}
       github_prerelease: ${{ steps.plan.outputs.github_prerelease }}
+      publish_cargo: ${{ steps.plan.outputs.publish_cargo }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -56,11 +62,13 @@ jobs:
           REF="${{ github.ref }}"
           INPUT_CHANNEL="${{ github.event.inputs.channel || 'stable' }}"
           INPUT_VERSION="${{ github.event.inputs.version || '' }}"
+          INPUT_PUBLISH_CARGO="${{ github.event.inputs.publish_cargo || 'false' }}"
           SHOULD_SKIP=false
           RELEASE_CHANNEL=""
           RELEASE_TAG=""
           PACKAGE_VERSION=""
           IS_PRERELEASE=false
+          PUBLISH_CARGO=false
 
           normalize_version() { echo "${1#v}"; }
           next_version() { echo "${1}-next.${GITHUB_RUN_NUMBER}"; }
@@ -93,6 +101,9 @@ jobs:
               RELEASE_TAG="v${PACKAGE_VERSION}"
               IS_PRERELEASE=true
             fi
+            if [[ "$INPUT_PUBLISH_CARGO" == "true" ]]; then
+              PUBLISH_CARGO=true
+            fi
           else
             SHOULD_SKIP=true
           fi
@@ -102,6 +113,7 @@ jobs:
           echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
           echo "package_version=${PACKAGE_VERSION}" >> "$GITHUB_OUTPUT"
           echo "github_prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
+          echo "publish_cargo=${PUBLISH_CARGO}" >> "$GITHUB_OUTPUT"
 
       - name: Check workspace version consistency
         if: steps.plan.outputs.should_skip != 'true'
@@ -393,7 +405,8 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     if: |
       needs.plan.outputs.should_skip != 'true' &&
-      needs.plan.outputs.release_channel == 'stable'
+      needs.plan.outputs.release_channel == 'stable' &&
+      needs.plan.outputs.publish_cargo == 'true'
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.91.0
