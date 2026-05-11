@@ -59,27 +59,27 @@ struct QueueGroupEntry {
 pub(super) struct QueuePendingEntry {
     pub(super) entity_id: EntityId,
     group: String,
-    message_id: EntityId,
+    pub(super) message_id: EntityId,
     consumer: String,
-    delivered_at_ns: u64,
+    pub(super) delivered_at_ns: u64,
     pub(super) delivery_count: u32,
 }
 
 #[derive(Debug, Clone)]
-struct QueueAckEntry {
+pub(super) struct QueueAckEntry {
     entity_id: EntityId,
     group: String,
-    message_id: EntityId,
+    pub(super) message_id: EntityId,
 }
 
 #[derive(Debug, Clone)]
-struct QueueMessageView {
-    id: EntityId,
+pub(super) struct QueueMessageView {
+    pub(super) id: EntityId,
     position: u64,
     priority: i32,
-    payload: Value,
+    pub(super) payload: Value,
     attempts: u32,
-    max_attempts: u32,
+    pub(super) max_attempts: u32,
     enqueued_at_ns: u64,
 }
 
@@ -696,27 +696,14 @@ impl RedDBRuntime {
             } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
-                let config = load_queue_config(store.as_ref(), queue);
-                let group =
-                    resolve_read_group(store.as_ref(), queue, group.as_deref(), consumer, &config)?;
-                let group = group.as_str();
-                let pending = load_pending_entries(store.as_ref(), queue, Some(group), None)?;
-                let pending_ids = pending
-                    .iter()
-                    .map(|entry| entry.message_id)
-                    .collect::<HashSet<_>>();
-                let acked_ids = load_ack_entries(store.as_ref(), queue, Some(group), None)?
-                    .into_iter()
-                    .map(|entry| entry.message_id)
-                    .collect::<HashSet<_>>();
-                let mut messages =
-                    load_queue_message_views_with_runtime(Some(self), store.as_ref(), queue)?
-                        .into_iter()
-                        .filter(|message| {
-                            !pending_ids.contains(&message.id) && !acked_ids.contains(&message.id)
-                        })
-                        .collect::<Vec<_>>();
-                sort_queue_messages(&mut messages, &config, QueueSide::Left);
+                let delivered = super::queue_delivery::read_messages(
+                    self,
+                    store.as_ref(),
+                    queue,
+                    group.as_deref(),
+                    consumer,
+                    *count,
+                )?;
 
                 let mut result = UnifiedResult::with_columns(vec![
                     "message_id".into(),
@@ -726,68 +713,21 @@ impl RedDBRuntime {
                     "attempts".into(),
                 ]);
 
-                for message in messages {
-                    if result.records.len() >= *count {
-                        break;
-                    }
-
-                    let message_lock = queue_message_lock_handle(self, queue, message.id);
-                    let Some(_guard) = message_lock.try_lock() else {
-                        continue;
-                    };
-                    if queue_message_pending_for_group(store.as_ref(), queue, group, message.id)?
-                        || queue_message_acked_for_group(store.as_ref(), queue, group, message.id)?
-                    {
-                        continue;
-                    }
-                    let Some(current) =
-                        queue_message_view_by_id(store.as_ref(), queue, message.id)?
-                    else {
-                        continue;
-                    };
-
-                    // FANOUT: each consumer group has independent delivery count.
-                    // Incrementing global attempts would conflate all groups' reads.
-                    let delivery_count = if config.mode == QueueMode::Fanout {
-                        1u32
-                    } else {
-                        increment_queue_attempts(store.as_ref(), queue, current.id)?
-                    };
-                    if delivery_count > current.max_attempts {
-                        let _ = super::queue_delivery::move_message_to_dlq_or_drop(
-                            Some(self),
-                            store.as_ref(),
-                            queue,
-                            current.id,
-                            &config,
-                            Some(group),
-                            "max_attempts_exceeded",
-                        )?;
-                        continue;
-                    }
-
-                    let delivered_at_ns = now_ns();
-                    save_queue_pending(
-                        store.as_ref(),
-                        queue,
-                        group,
-                        current.id,
-                        consumer,
-                        delivered_at_ns,
-                        delivery_count,
-                    )?;
-
+                for message in delivered {
                     let mut record = UnifiedRecord::new();
-                    record.set("message_id", Value::text(message_id_string(current.id)));
-                    record.set("payload", current.payload);
-                    record.set("consumer", Value::text(consumer.clone()));
+                    record.set(
+                        "message_id",
+                        Value::text(message_id_string(message.message_id)),
+                    );
+                    record.set("payload", message.payload);
+                    record.set("consumer", Value::text(message.consumer));
                     record.set(
                         "delivery_count",
-                        Value::UnsignedInteger(u64::from(delivery_count)),
+                        Value::UnsignedInteger(u64::from(message.delivery_count)),
                     );
                     record.set(
                         "attempts",
-                        Value::UnsignedInteger(u64::from(delivery_count)),
+                        Value::UnsignedInteger(u64::from(message.delivery_count)),
                     );
                     result.push(record);
                 }
@@ -862,17 +802,14 @@ impl RedDBRuntime {
             } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
-                require_queue_group(store.as_ref(), queue, group)?;
-                let config = load_queue_config(store.as_ref(), queue);
-                let current_time_ns = now_ns();
-                let min_idle_ns = min_idle_ms.saturating_mul(1_000_000);
-                let mut pending = load_pending_entries(store.as_ref(), queue, Some(group), None)?
-                    .into_iter()
-                    .filter(|entry| {
-                        current_time_ns.saturating_sub(entry.delivered_at_ns) >= min_idle_ns
-                    })
-                    .collect::<Vec<_>>();
-                pending.sort_by_key(|entry| entry.delivered_at_ns);
+                let delivered = super::queue_delivery::claim_messages(
+                    self,
+                    store.as_ref(),
+                    queue,
+                    group,
+                    consumer,
+                    *min_idle_ms,
+                )?;
 
                 let mut result = UnifiedResult::with_columns(vec![
                     "message_id".into(),
@@ -881,69 +818,17 @@ impl RedDBRuntime {
                     "delivery_count".into(),
                 ]);
 
-                for entry in pending {
-                    let message_lock = queue_message_lock_handle(self, queue, entry.message_id);
-                    let Some(_guard) = message_lock.try_lock() else {
-                        continue;
-                    };
-                    let Some(current) = load_pending_entries(
-                        store.as_ref(),
-                        queue,
-                        Some(group),
-                        Some(entry.message_id),
-                    )?
-                    .into_iter()
-                    .next() else {
-                        continue;
-                    };
-                    if current_time_ns.saturating_sub(current.delivered_at_ns) < min_idle_ns {
-                        continue;
-                    }
-
-                    let payload = queue_message_payload(store.as_ref(), queue, current.message_id)?;
-                    let next_delivery_count = current.delivery_count.saturating_add(1);
-                    let max_attempts =
-                        queue_message_max_attempts(store.as_ref(), queue, current.message_id)?;
-                    // FANOUT: use per-group delivery count; skip global attempts increment.
-                    let attempts = if config.mode == QueueMode::Fanout {
-                        next_delivery_count
-                    } else {
-                        increment_queue_attempts(store.as_ref(), queue, current.message_id)?
-                    };
-                    if attempts > max_attempts {
-                        delete_meta_entity(store.as_ref(), current.entity_id);
-                        let _ = super::queue_delivery::move_message_to_dlq_or_drop(
-                            Some(self),
-                            store.as_ref(),
-                            queue,
-                            current.message_id,
-                            &config,
-                            Some(group),
-                            "claim_max_attempts_exceeded",
-                        )?;
-                        continue;
-                    }
-
-                    save_queue_pending(
-                        store.as_ref(),
-                        queue,
-                        group,
-                        current.message_id,
-                        consumer,
-                        current_time_ns,
-                        next_delivery_count,
-                    )?;
-
+                for message in delivered {
                     let mut record = UnifiedRecord::new();
                     record.set(
                         "message_id",
-                        Value::text(message_id_string(current.message_id)),
+                        Value::text(message_id_string(message.message_id)),
                     );
-                    record.set("payload", payload);
-                    record.set("consumer", Value::text(consumer.clone()));
+                    record.set("payload", message.payload);
+                    record.set("consumer", Value::text(message.consumer));
                     record.set(
                         "delivery_count",
-                        Value::UnsignedInteger(u64::from(next_delivery_count)),
+                        Value::UnsignedInteger(u64::from(message.delivery_count)),
                     );
                     result.push(record);
                 }
@@ -1320,7 +1205,11 @@ fn queue_group_exists(store: &UnifiedStore, queue: &str, group: &str) -> RedDBRe
         .any(|entry| entry.group == group))
 }
 
-fn require_queue_group(store: &UnifiedStore, queue: &str, group: &str) -> RedDBResult<()> {
+pub(super) fn require_queue_group(
+    store: &UnifiedStore,
+    queue: &str,
+    group: &str,
+) -> RedDBResult<()> {
     if queue_group_exists(store, queue, group)? {
         Ok(())
     } else {
@@ -1331,7 +1220,7 @@ fn require_queue_group(store: &UnifiedStore, queue: &str, group: &str) -> RedDBR
     }
 }
 
-fn resolve_read_group(
+pub(super) fn resolve_read_group(
     store: &UnifiedStore,
     queue: &str,
     group: Option<&str>,
@@ -1394,7 +1283,7 @@ fn save_queue_group(store: &UnifiedStore, queue: &str, group: &str) -> RedDBResu
     insert_meta_row(store, fields)
 }
 
-fn load_pending_entries(
+pub(super) fn load_pending_entries(
     store: &UnifiedStore,
     queue: &str,
     group: Option<&str>,
@@ -1433,7 +1322,7 @@ fn load_pending_entries(
         .collect())
 }
 
-fn save_queue_pending(
+pub(super) fn save_queue_pending(
     store: &UnifiedStore,
     queue: &str,
     group: &str,
@@ -1488,7 +1377,7 @@ pub(super) fn require_pending_entry(
         })
 }
 
-fn load_ack_entries(
+pub(super) fn load_ack_entries(
     store: &UnifiedStore,
     queue: &str,
     group: Option<&str>,
@@ -1581,7 +1470,7 @@ fn load_queue_message_views(
 /// autocommit / embedded paths that only have the raw store (e.g.
 /// purge loops) we skip RLS because there's no session identity
 /// to match against.
-fn load_queue_message_views_with_runtime(
+pub(super) fn load_queue_message_views_with_runtime(
     runtime: Option<&RedDBRuntime>,
     store: &UnifiedStore,
     queue: &str,
@@ -1928,7 +1817,7 @@ fn queue_like_matches(value: &str, pattern: &str) -> bool {
     }
 }
 
-fn queue_message_view_by_id(
+pub(super) fn queue_message_view_by_id(
     store: &UnifiedStore,
     queue: &str,
     message_id: EntityId,
@@ -1939,7 +1828,7 @@ fn queue_message_view_by_id(
         .and_then(queue_message_view_from_entity))
 }
 
-fn sort_queue_messages(
+pub(super) fn sort_queue_messages(
     messages: &mut [QueueMessageView],
     config: &QueueRuntimeConfig,
     side: QueueSide,
@@ -1989,7 +1878,7 @@ pub(super) fn next_queue_position(
     }
 }
 
-fn increment_queue_attempts(
+pub(super) fn increment_queue_attempts(
     store: &UnifiedStore,
     queue: &str,
     message_id: EntityId,
@@ -2030,7 +1919,7 @@ pub(super) fn queue_message_max_attempts(
     Ok(queue_message_data(store, queue, message_id)?.max_attempts)
 }
 
-fn queue_message_payload(
+pub(super) fn queue_message_payload(
     store: &UnifiedStore,
     queue: &str,
     message_id: EntityId,
@@ -2046,7 +1935,7 @@ fn queue_message_pending_any(
     Ok(!load_pending_entries(store, queue, None, Some(message_id))?.is_empty())
 }
 
-fn queue_message_pending_for_group(
+pub(super) fn queue_message_pending_for_group(
     store: &UnifiedStore,
     queue: &str,
     group: &str,
@@ -2055,7 +1944,7 @@ fn queue_message_pending_for_group(
     Ok(!load_pending_entries(store, queue, Some(group), Some(message_id))?.is_empty())
 }
 
-fn queue_message_acked_for_group(
+pub(super) fn queue_message_acked_for_group(
     store: &UnifiedStore,
     queue: &str,
     group: &str,
@@ -2239,7 +2128,7 @@ fn current_unix_ms() -> u128 {
         .as_millis()
 }
 
-fn now_ns() -> u64 {
+pub(super) fn now_ns() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
