@@ -270,3 +270,23 @@ test("SDK and Redis migration tooling closure records final dispositions for iss
   assert.match(issue199.final_disposition.reason, /red migrate-from-redis/);
   assert.match(issue199.final_disposition.reason, /docs\/guides\/migrate-redis-to-blob-cache\.md/);
 });
+
+test("queue semantics closure records final dispositions for issue 342 scope", () => {
+  assert.ok(fs.existsSync(issuesPath), `${issuesPath} must exist`);
+
+  const report = runReport();
+  const issue287 = issueByNumber(report, 287);
+  const issue289 = issueByNumber(report, 289);
+
+  for (const issue of [issue287, issue289]) {
+    assert.equal(issue.final_disposition.outcome, "confirmed");
+    assert.equal(issue.final_disposition.placeholder, false);
+    assert.notEqual(issue.resolution.status, "code_evidence_partial");
+    assert.notEqual(issue.resolution.status, "code_evidence_partial_github_open");
+  }
+
+  assert.match(issue287.final_disposition.reason, /FANOUT broadcast/);
+  assert.match(issue287.final_disposition.reason, /test_fanout_queue_broadcast_all_consumers_get_all_messages/);
+  assert.match(issue289.final_disposition.reason, /in-flight WORK messages/);
+  assert.match(issue289.final_disposition.reason, /tracing warning/);
+});

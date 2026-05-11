@@ -1057,6 +1057,64 @@ function main() {
         },
       ];
     }
+    if (number === 287) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "tests/integration_queue_timeseries.rs",
+          line: 560,
+          kind: "test",
+          matched_term: "FANOUT broadcast all consumers get all messages",
+          snippet: "fn test_fanout_queue_broadcast_all_consumers_get_all_messages()",
+          term_score: 9,
+          term_sources: ["issue_342_queue_semantics_audit"],
+        },
+        {
+          type: "manual_current_test_match",
+          path: "tests/integration_queue_timeseries.rs",
+          line: 605,
+          kind: "test",
+          matched_term: "FANOUT ack isolation per consumer",
+          snippet: "fn test_fanout_queue_ack_isolation()",
+          term_score: 9,
+          term_sources: ["issue_342_queue_semantics_audit"],
+        },
+        {
+          type: "manual_current_test_match",
+          path: "tests/integration_queue_timeseries.rs",
+          line: 632,
+          kind: "test",
+          matched_term: "FANOUT DLQ per consumer",
+          snippet: "fn test_fanout_queue_dlq_per_consumer()",
+          term_score: 9,
+          term_sources: ["issue_342_queue_semantics_audit"],
+        },
+      ];
+    }
+    if (number === 289) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "tests/integration_queue_timeseries.rs",
+          line: 461,
+          kind: "test",
+          matched_term: "ALTER QUEUE WORK to FANOUT in-flight drain",
+          snippet: "fn test_alter_queue_work_to_fanout_transition()",
+          term_score: 9,
+          term_sources: ["issue_342_queue_semantics_audit"],
+        },
+        {
+          type: "manual_current_code_match",
+          path: "crates/reddb-server/src/runtime/impl_queue.rs",
+          line: 345,
+          kind: "code",
+          matched_term: "ALTER QUEUE SET MODE active pending warning",
+          snippet: "tracing::warn!(pending_count = pending.len(), \"ALTER QUEUE SET MODE: {} in-flight messages will drain with old mode; new reads use {}\")",
+          term_score: 9,
+          term_sources: ["issue_342_queue_semantics_audit"],
+        },
+      ];
+    }
     if (number === 320) {
       return [
         {
@@ -1349,6 +1407,28 @@ function main() {
         superseded_by: [],
         reopened_as: [],
         split_into: [347],
+      };
+    }
+    if (number === 287) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "FANOUT broadcast semantics are evidenced by tests/integration_queue_timeseries.rs: test_fanout_queue_broadcast_all_consumers_get_all_messages proves alice, bob, and carol each receive all 100 messages through public QUEUE READ/ACK behavior, with additional ack and DLQ isolation tests proving per-consumer state.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 289) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "ALTER QUEUE SET MODE transition behavior is evidenced by tests/integration_queue_timeseries.rs: in-flight WORK messages remain ackable through _work_default while new reads use FANOUT semantics, and crates/reddb-server/src/runtime/impl_queue.rs emits the active pending tracing warning with pending_count for operators.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
       };
     }
     if (number === 263) {
