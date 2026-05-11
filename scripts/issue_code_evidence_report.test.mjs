@@ -165,3 +165,23 @@ test("statement execution evidence closure records final dispositions for issue 
   assert.match(issues[2].final_disposition.reason, /APPEND ONLY/);
   assert.match(issues[4].final_disposition.reason, /UPDATE and DELETE/);
 });
+
+test("red schema reference closure records final dispositions for issue 341 scope", () => {
+  assert.ok(fs.existsSync(issuesPath), `${issuesPath} must exist`);
+
+  const report = runReport();
+  const issue163 = issueByNumber(report, 163);
+  const issue263 = issueByNumber(report, 263);
+
+  for (const issue of [issue163, issue263]) {
+    assert.equal(issue.final_disposition.outcome, "confirmed");
+    assert.equal(issue.final_disposition.placeholder, false);
+    assert.notEqual(issue.resolution.status, "code_evidence_partial");
+    assert.notEqual(issue.resolution.status, "code_evidence_partial_github_open");
+  }
+
+  assert.match(issue163.final_disposition.reason, /docs\/perf\/wins\.md/);
+  assert.match(issue163.final_disposition.reason, /duel-official/);
+  assert.match(issue263.final_disposition.reason, /docs\/reference\/red-schema\.md/);
+  assert.match(issue263.final_disposition.reason, /tests\/e2e_red_schema\.rs/);
+});

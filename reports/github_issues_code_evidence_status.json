@@ -1,6 +1,6 @@
 {
   "repository": "reddb-io/reddb",
-  "generated_at": "2026-05-11T01:01:01.886Z",
+  "generated_at": "2026-05-11T01:10:53.918Z",
   "source_state": {
     "github_issues": "/tmp/reddb_issues_raw.json",
     "current_workspace_files_indexed": 4398,
@@ -34,25 +34,25 @@
     "total": 311,
     "unique_issue_entries": 311,
     "github_open": 3,
-    "objective_reached_true": 290,
+    "objective_reached_true": 291,
     "objective_reached_false": 0,
-    "objective_reached_unknown": 21,
+    "objective_reached_unknown": 20,
     "by_status": {
-      "code_evidence_confirmed": 287,
-      "code_evidence_partial": 21,
+      "code_evidence_confirmed": 288,
+      "code_evidence_partial": 20,
       "code_evidence_confirmed_github_open": 3
     },
     "by_confidence": {
-      "high": 290,
-      "medium": 21
+      "high": 291,
+      "medium": 20
     },
     "by_final_disposition": {
-      "confirmed": 288,
+      "confirmed": 289,
       "split": 1,
       "superseded": 1,
-      "reopened": 21
+      "reopened": 20
     },
-    "placeholder_final_dispositions": 24
+    "placeholder_final_dispositions": 23
   },
   "issues": [
     {
@@ -60843,12 +60843,36 @@
       "final_disposition": {
         "outcome": "confirmed",
         "placeholder": false,
-        "reason": "Current workspace evidence is strong enough for this generated ledger.",
+        "reason": "Performance wins are productized in docs/perf/wins.md with duel-official reproduction commands, cited benchmark session ids, README and JS/TS guide links, and scripts/red_schema_reference_contract.test.mjs coverage.",
         "superseded_by": [],
         "reopened_as": [],
         "split_into": []
       },
       "current_code_evidence": [
+        {
+          "type": "manual_current_test_match",
+          "path": "scripts/red_schema_reference_contract.test.mjs",
+          "line": 12,
+          "kind": "test",
+          "matched_term": "performance wins documentation benchmark evidence",
+          "snippet": "performance wins documentation is tied to reproducible benchmark evidence",
+          "term_score": 9,
+          "term_sources": [
+            "issue_341_red_schema_reference_audit"
+          ]
+        },
+        {
+          "type": "manual_current_doc_match",
+          "path": "docs/perf/wins.md",
+          "line": 1,
+          "kind": "doc",
+          "matched_term": "productized performance wins",
+          "snippet": "Where RedDB Wins cites typed_insert and disk_usage benchmark sessions plus duel-official reproduction commands.",
+          "term_score": 9,
+          "term_sources": [
+            "issue_341_red_schema_reference_audit"
+          ]
+        },
         {
           "type": "current_code_match",
           "path": "crates/reddb-server/src/application/ports_impls_entity.rs",
@@ -97780,7 +97804,7 @@
         {
           "type": "current_code_match",
           "path": "docs/reference/red-schema.md",
-          "line": 40,
+          "line": 46,
           "kind": "doc",
           "matched_term": "SHOW COLLECTIONS INCLUDING INTERNAL",
           "snippet": "SHOW COLLECTIONS INCLUDING INTERNAL;",
@@ -98254,7 +98278,7 @@
         {
           "type": "current_code_match",
           "path": "docs/reference/red-schema.md",
-          "line": 80,
+          "line": 86,
           "kind": "doc",
           "matched_term": "on_disk_bytes",
           "snippet": "| `on_disk_bytes`   | Approximate primary B-tree bytes currently reachable from the collection root. Cached for up to 30 seconds. |",
@@ -102202,7 +102226,7 @@
         {
           "type": "current_code_match",
           "path": "docs/reference/red-schema.md",
-          "line": 282,
+          "line": 298,
           "kind": "doc",
           "matched_term": "docs/api/deprecated-catalog-endpoints.md",
           "snippet": "[`docs/api/deprecated-catalog-endpoints.md`](../api/deprecated-catalog-endpoints.md)",
@@ -103791,20 +103815,56 @@
       "children": [],
       "descendants": [],
       "resolution": {
-        "status": "code_evidence_partial",
-        "objective_reached": null,
-        "confidence": "medium",
-        "note": "Current workspace has limited specific code/test evidence; manual review needed for full acceptance coverage."
+        "status": "code_evidence_confirmed",
+        "objective_reached": true,
+        "confidence": "high",
+        "note": "Current workspace has direct specific code/test evidence."
       },
       "final_disposition": {
-        "outcome": "reopened",
-        "placeholder": true,
-        "reason": "Only partial current code/test evidence exists; a domain slice must confirm, supersede, or split the remaining acceptance criteria.",
+        "outcome": "confirmed",
+        "placeholder": false,
+        "reason": "The canonical red.* schema reference is docs/reference/red-schema.md, linked from docs/README.md and tied to public runtime coverage in tests/e2e_red_schema.rs plus scripts/red_schema_reference_contract.test.mjs.",
         "superseded_by": [],
         "reopened_as": [],
         "split_into": []
       },
       "current_code_evidence": [
+        {
+          "type": "manual_current_test_match",
+          "path": "scripts/red_schema_reference_contract.test.mjs",
+          "line": 35,
+          "kind": "test",
+          "matched_term": "red schema reference aligned with public introspection",
+          "snippet": "red schema reference is aligned with public introspection coverage",
+          "term_score": 9,
+          "term_sources": [
+            "issue_341_red_schema_reference_audit"
+          ]
+        },
+        {
+          "type": "manual_current_test_match",
+          "path": "tests/e2e_red_schema.rs",
+          "line": 181,
+          "kind": "test",
+          "matched_term": "red schema stable introspection public SQL",
+          "snippet": "fn red_schema_introspection_is_stable_across_virtual_tables() {",
+          "term_score": 9,
+          "term_sources": [
+            "issue_341_red_schema_reference_audit"
+          ]
+        },
+        {
+          "type": "manual_current_doc_match",
+          "path": "docs/reference/red-schema.md",
+          "line": 1,
+          "kind": "doc",
+          "matched_term": "canonical red.* schema reference",
+          "snippet": "The red.* schema reference enumerates implemented virtual tables, shortcut commands, stability, and evolution policy.",
+          "term_score": 9,
+          "term_sources": [
+            "issue_341_red_schema_reference_audit"
+          ]
+        },
         {
           "type": "current_code_match",
           "path": "crates/reddb-client-connector/src/lib.rs",
