@@ -305,3 +305,29 @@ test("events subscription closure records final disposition for issue 343 scope"
   assert.match(issue296.final_disposition.reason, /drop_subscription_stops_events_to_that_queue/);
   assert.match(issue296.final_disposition.reason, /redact_applied_per_subscription_independently/);
 });
+
+test("Config/Vault evidence closure records final dispositions for issue 345 scope", () => {
+  assert.ok(fs.existsSync(issuesPath), `${issuesPath} must exist`);
+
+  const report = runReport();
+  const issue317 = issueByNumber(report, 317);
+  const issue318 = issueByNumber(report, 318);
+  const issue319 = issueByNumber(report, 319);
+  const issue321 = issueByNumber(report, 321);
+
+  for (const issue of [issue317, issue318, issue319, issue321]) {
+    assert.equal(issue.final_disposition.outcome, "confirmed");
+    assert.equal(issue.final_disposition.placeholder, false);
+    assert.notEqual(issue.resolution.status, "code_evidence_partial");
+    assert.notEqual(issue.resolution.status, "code_evidence_partial_github_open");
+  }
+
+  assert.match(issue317.final_disposition.reason, /vault_put_seals_payload_before_persistence/);
+  assert.match(issue317.final_disposition.reason, /sealed_unavailable/);
+  assert.match(issue318.final_disposition.reason, /vault_get_is_metadata_only/);
+  assert.match(issue318.final_disposition.reason, /audit/);
+  assert.match(issue319.final_disposition.reason, /bootstrap_creates_protected_system_config_and_vault_collections/);
+  assert.match(issue319.final_disposition.reason, /red\.collections/);
+  assert.match(issue321.final_disposition.reason, /list_and_watch_vault_are_metadata_only/);
+  assert.match(issue321.final_disposition.reason, /domain-separated API/);
+});

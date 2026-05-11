@@ -1,6 +1,6 @@
 {
   "repository": "reddb-io/reddb",
-  "generated_at": "2026-05-11T02:15:01.701Z",
+  "generated_at": "2026-05-11T02:22:04.681Z",
   "source_state": {
     "github_issues": "/tmp/reddb_issues_raw.json",
     "current_workspace_files_indexed": 2667,
@@ -34,25 +34,25 @@
     "total": 311,
     "unique_issue_entries": 311,
     "github_open": 3,
-    "objective_reached_true": 304,
+    "objective_reached_true": 307,
     "objective_reached_false": 0,
-    "objective_reached_unknown": 7,
+    "objective_reached_unknown": 4,
     "by_status": {
-      "code_evidence_confirmed": 301,
-      "code_evidence_partial": 7,
+      "code_evidence_confirmed": 304,
+      "code_evidence_partial": 4,
       "code_evidence_confirmed_github_open": 3
     },
     "by_confidence": {
-      "high": 304,
-      "medium": 7
+      "high": 307,
+      "medium": 4
     },
     "by_final_disposition": {
-      "confirmed": 299,
+      "confirmed": 302,
       "split": 4,
       "superseded": 1,
-      "reopened": 7
+      "reopened": 4
     },
-    "placeholder_final_dispositions": 10
+    "placeholder_final_dispositions": 7
   },
   "issues": [
     {
@@ -126954,20 +126954,44 @@
       "children": [],
       "descendants": [],
       "resolution": {
-        "status": "code_evidence_partial",
-        "objective_reached": null,
-        "confidence": "medium",
-        "note": "Current workspace has limited specific code/test evidence; manual review needed for full acceptance coverage."
+        "status": "code_evidence_confirmed",
+        "objective_reached": true,
+        "confidence": "high",
+        "note": "Current workspace has direct specific code/test evidence."
       },
       "final_disposition": {
-        "outcome": "reopened",
-        "placeholder": true,
-        "reason": "Only partial current code/test evidence exists; a domain slice must confirm, supersede, or split the remaining acceptance criteria.",
+        "outcome": "confirmed",
+        "placeholder": false,
+        "reason": "Vault sealed storage is evidenced by tests/e2e_vault_sealed_storage.rs: vault_put_seals_payload_before_persistence proves VAULT PUT persists Value::Secret without plaintext in database artifacts, VAULT GET returns redacted metadata, and reopen without a key provider returns sealed_unavailable instead of plaintext.",
         "superseded_by": [],
         "reopened_as": [],
         "split_into": []
       },
       "current_code_evidence": [
+        {
+          "type": "manual_current_test_match",
+          "path": "tests/e2e_vault_sealed_storage.rs",
+          "line": 206,
+          "kind": "test",
+          "matched_term": "VAULT GET sealed_unavailable metadata read without key material",
+          "snippet": "metadata read should not require key material and returns sealed_unavailable after reopen without a key provider.",
+          "term_score": 9,
+          "term_sources": [
+            "issue_345_config_vault_audit"
+          ]
+        },
+        {
+          "type": "manual_current_test_match",
+          "path": "tests/e2e_vault_sealed_storage.rs",
+          "line": 132,
+          "kind": "test",
+          "matched_term": "vault sealed storage persistence metadata unavailable key provider",
+          "snippet": "fn vault_put_seals_payload_before_persistence()",
+          "term_score": 9,
+          "term_sources": [
+            "issue_345_config_vault_audit"
+          ]
+        },
         {
           "type": "current_code_match",
           "path": "crates/reddb-client-connector/src/lib.rs",
@@ -127106,20 +127130,44 @@
       "children": [],
       "descendants": [],
       "resolution": {
-        "status": "code_evidence_partial",
-        "objective_reached": null,
-        "confidence": "medium",
-        "note": "Current workspace has limited specific code/test evidence; manual review needed for full acceptance coverage."
+        "status": "code_evidence_confirmed",
+        "objective_reached": true,
+        "confidence": "high",
+        "note": "Current workspace has direct specific code/test evidence."
       },
       "final_disposition": {
-        "outcome": "reopened",
-        "placeholder": true,
-        "reason": "Only partial current code/test evidence exists; a domain slice must confirm, supersede, or split the remaining acceptance criteria.",
+        "outcome": "confirmed",
+        "placeholder": false,
+        "reason": "Vault redaction, unseal, audit, and policy behavior is evidenced by tests/e2e_vault_sealed_storage.rs: vault_get_is_metadata_only_and_unseal_is_capability_gated_and_audited proves metadata-only GET, vault:unseal denial/allow, and redacted audit records; vault_lifecycle_versions_history_purge_and_historical_unseal_are_audited covers rotate, history, delete, purge, vault:unseal_history, and audit outcomes.",
         "superseded_by": [],
         "reopened_as": [],
         "split_into": []
       },
       "current_code_evidence": [
+        {
+          "type": "manual_current_test_match",
+          "path": "tests/e2e_vault_sealed_storage.rs",
+          "line": 335,
+          "kind": "test",
+          "matched_term": "vault lifecycle rotate history purge audit policy redaction",
+          "snippet": "fn vault_lifecycle_versions_history_purge_and_historical_unseal_are_audited()",
+          "term_score": 9,
+          "term_sources": [
+            "issue_345_config_vault_audit"
+          ]
+        },
+        {
+          "type": "manual_current_test_match",
+          "path": "tests/e2e_vault_sealed_storage.rs",
+          "line": 221,
+          "kind": "test",
+          "matched_term": "vault get metadata only unseal capability gated audited",
+          "snippet": "fn vault_get_is_metadata_only_and_unseal_is_capability_gated_and_audited()",
+          "term_score": 9,
+          "term_sources": [
+            "issue_345_config_vault_audit"
+          ]
+        },
         {
           "type": "current_code_match",
           "path": "crates/reddb-server/src/runtime/ai/prompt_template.rs",
@@ -127287,12 +127335,36 @@
       "final_disposition": {
         "outcome": "confirmed",
         "placeholder": false,
-        "reason": "Current workspace evidence is strong enough for this generated ledger.",
+        "reason": "System Config/Vault collections are evidenced by tests/e2e_system_config_vault.rs: bootstrap_creates_protected_system_config_and_vault_collections observes red.config and red.vault through red.collections, and system_config_and_vault_reject_public_create_drop_and_truncate proves public CREATE, DROP, and TRUNCATE paths are read-only.",
         "superseded_by": [],
         "reopened_as": [],
         "split_into": []
       },
       "current_code_evidence": [
+        {
+          "type": "manual_current_test_match",
+          "path": "tests/e2e_system_config_vault.rs",
+          "line": 106,
+          "kind": "test",
+          "matched_term": "system config vault reject create drop truncate read-only",
+          "snippet": "fn system_config_and_vault_reject_public_create_drop_and_truncate()",
+          "term_score": 9,
+          "term_sources": [
+            "issue_345_config_vault_audit"
+          ]
+        },
+        {
+          "type": "manual_current_test_match",
+          "path": "tests/e2e_system_config_vault.rs",
+          "line": 85,
+          "kind": "test",
+          "matched_term": "red.config red.vault system collections observable red.collections internal protected",
+          "snippet": "fn bootstrap_creates_protected_system_config_and_vault_collections()",
+          "term_score": 9,
+          "term_sources": [
+            "issue_345_config_vault_audit"
+          ]
+        },
         {
           "type": "current_code_match",
           "path": "crates/reddb-server/src/application/migration_inference.rs",
@@ -127634,20 +127706,44 @@
       "children": [],
       "descendants": [],
       "resolution": {
-        "status": "code_evidence_partial",
-        "objective_reached": null,
-        "confidence": "medium",
-        "note": "Current workspace has limited specific code/test evidence; manual review needed for full acceptance coverage."
+        "status": "code_evidence_confirmed",
+        "objective_reached": true,
+        "confidence": "high",
+        "note": "Current workspace has direct specific code/test evidence."
       },
       "final_disposition": {
-        "outcome": "reopened",
-        "placeholder": true,
-        "reason": "Only partial current code/test evidence exists; a domain slice must confirm, supersede, or split the remaining acceptance criteria.",
+        "outcome": "confirmed",
+        "placeholder": false,
+        "reason": "Config/Vault WATCH, LIST, TAGS, and domain-separated API behavior is evidenced by tests/e2e_config_vault_observation.rs: LIST CONFIG returns values and tags, config_watch_events_since redacts values without config:read, list_and_watch_vault_are_metadata_only proves Vault LIST/WATCH expose metadata and tags without plaintext, and newer issue #329 covers domain-separated API surfaces.",
         "superseded_by": [],
         "reopened_as": [],
         "split_into": []
       },
       "current_code_evidence": [
+        {
+          "type": "manual_current_test_match",
+          "path": "tests/e2e_config_vault_observation.rs",
+          "line": 204,
+          "kind": "test",
+          "matched_term": "LIST VAULT WATCH VAULT metadata only tags no plaintext",
+          "snippet": "fn list_and_watch_vault_are_metadata_only()",
+          "term_score": 9,
+          "term_sources": [
+            "issue_345_config_vault_audit"
+          ]
+        },
+        {
+          "type": "manual_current_test_match",
+          "path": "tests/e2e_config_vault_observation.rs",
+          "line": 109,
+          "kind": "test",
+          "matched_term": "LIST CONFIG prefix pagination values tags WATCH config read allowed",
+          "snippet": "Config observation tests cover LIST CONFIG with tags and watch value redaction based on config:read policy.",
+          "term_score": 9,
+          "term_sources": [
+            "issue_345_config_vault_audit"
+          ]
+        },
         {
           "type": "current_code_match",
           "path": "crates/reddb-client-connector/src/lib.rs",

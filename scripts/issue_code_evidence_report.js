@@ -1149,6 +1149,102 @@ function main() {
         },
       ];
     }
+    if (number === 317) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "tests/e2e_vault_sealed_storage.rs",
+          line: 132,
+          kind: "test",
+          matched_term: "vault sealed storage persistence metadata unavailable key provider",
+          snippet: "fn vault_put_seals_payload_before_persistence()",
+          term_score: 9,
+          term_sources: ["issue_345_config_vault_audit"],
+        },
+        {
+          type: "manual_current_test_match",
+          path: "tests/e2e_vault_sealed_storage.rs",
+          line: 206,
+          kind: "test",
+          matched_term: "VAULT GET sealed_unavailable metadata read without key material",
+          snippet: "metadata read should not require key material and returns sealed_unavailable after reopen without a key provider.",
+          term_score: 9,
+          term_sources: ["issue_345_config_vault_audit"],
+        },
+      ];
+    }
+    if (number === 318) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "tests/e2e_vault_sealed_storage.rs",
+          line: 221,
+          kind: "test",
+          matched_term: "vault get metadata only unseal capability gated audited",
+          snippet: "fn vault_get_is_metadata_only_and_unseal_is_capability_gated_and_audited()",
+          term_score: 9,
+          term_sources: ["issue_345_config_vault_audit"],
+        },
+        {
+          type: "manual_current_test_match",
+          path: "tests/e2e_vault_sealed_storage.rs",
+          line: 335,
+          kind: "test",
+          matched_term: "vault lifecycle rotate history purge audit policy redaction",
+          snippet: "fn vault_lifecycle_versions_history_purge_and_historical_unseal_are_audited()",
+          term_score: 9,
+          term_sources: ["issue_345_config_vault_audit"],
+        },
+      ];
+    }
+    if (number === 319) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "tests/e2e_system_config_vault.rs",
+          line: 85,
+          kind: "test",
+          matched_term: "red.config red.vault system collections observable red.collections internal protected",
+          snippet: "fn bootstrap_creates_protected_system_config_and_vault_collections()",
+          term_score: 9,
+          term_sources: ["issue_345_config_vault_audit"],
+        },
+        {
+          type: "manual_current_test_match",
+          path: "tests/e2e_system_config_vault.rs",
+          line: 106,
+          kind: "test",
+          matched_term: "system config vault reject create drop truncate read-only",
+          snippet: "fn system_config_and_vault_reject_public_create_drop_and_truncate()",
+          term_score: 9,
+          term_sources: ["issue_345_config_vault_audit"],
+        },
+      ];
+    }
+    if (number === 321) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "tests/e2e_config_vault_observation.rs",
+          line: 109,
+          kind: "test",
+          matched_term: "LIST CONFIG prefix pagination values tags WATCH config read allowed",
+          snippet: "Config observation tests cover LIST CONFIG with tags and watch value redaction based on config:read policy.",
+          term_score: 9,
+          term_sources: ["issue_345_config_vault_audit"],
+        },
+        {
+          type: "manual_current_test_match",
+          path: "tests/e2e_config_vault_observation.rs",
+          line: 204,
+          kind: "test",
+          matched_term: "LIST VAULT WATCH VAULT metadata only tags no plaintext",
+          snippet: "fn list_and_watch_vault_are_metadata_only()",
+          term_score: 9,
+          term_sources: ["issue_345_config_vault_audit"],
+        },
+      ];
+    }
     if (number === 320) {
       return [
         {
@@ -1471,6 +1567,50 @@ function main() {
         placeholder: false,
         reason:
           "Events multi-subscription behavior is evidenced by tests/e2e_events_foundation.rs: add_two_subscriptions_both_receive_insert_event proves one collection delivers the same insert to two target queues, drop_subscription_stops_events_to_that_queue proves DROP SUBSCRIPTION removes only the named target while preserving the remaining subscription, and redact_applied_per_subscription_independently proves each subscription applies its own redaction list.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 317) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "Vault sealed storage is evidenced by tests/e2e_vault_sealed_storage.rs: vault_put_seals_payload_before_persistence proves VAULT PUT persists Value::Secret without plaintext in database artifacts, VAULT GET returns redacted metadata, and reopen without a key provider returns sealed_unavailable instead of plaintext.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 318) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "Vault redaction, unseal, audit, and policy behavior is evidenced by tests/e2e_vault_sealed_storage.rs: vault_get_is_metadata_only_and_unseal_is_capability_gated_and_audited proves metadata-only GET, vault:unseal denial/allow, and redacted audit records; vault_lifecycle_versions_history_purge_and_historical_unseal_are_audited covers rotate, history, delete, purge, vault:unseal_history, and audit outcomes.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 319) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "System Config/Vault collections are evidenced by tests/e2e_system_config_vault.rs: bootstrap_creates_protected_system_config_and_vault_collections observes red.config and red.vault through red.collections, and system_config_and_vault_reject_public_create_drop_and_truncate proves public CREATE, DROP, and TRUNCATE paths are read-only.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 321) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "Config/Vault WATCH, LIST, TAGS, and domain-separated API behavior is evidenced by tests/e2e_config_vault_observation.rs: LIST CONFIG returns values and tags, config_watch_events_since redacts values without config:read, list_and_watch_vault_are_metadata_only proves Vault LIST/WATCH expose metadata and tags without plaintext, and newer issue #329 covers domain-separated API surfaces.",
         superseded_by: [],
         reopened_as: [],
         split_into: [],
