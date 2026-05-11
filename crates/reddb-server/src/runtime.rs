@@ -1051,6 +1051,7 @@ mod impl_tree;
 mod impl_vcs;
 mod index_store;
 mod join_filter;
+mod keyed_spine;
 pub mod kv_watch;
 pub mod lease_lifecycle;
 pub mod lease_loop;

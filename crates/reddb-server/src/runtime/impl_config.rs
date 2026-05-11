@@ -26,6 +26,16 @@ struct ConfigVersion {
     tags: Vec<String>,
 }
 
+impl super::keyed_spine::KeyedVersion for ConfigVersion {
+    fn key(&self) -> &str {
+        &self.key
+    }
+
+    fn version(&self) -> i64 {
+        self.version
+    }
+}
+
 struct ConfigSecretRef {
     collection: String,
     key: String,
@@ -677,10 +687,9 @@ impl RedDBRuntime {
         collection: &str,
         key: &str,
     ) -> RedDBResult<Option<ConfigVersion>> {
-        Ok(self
-            .config_versions(collection, key)?
-            .into_iter()
-            .max_by_key(|version| version.version))
+        Ok(super::keyed_spine::latest_version(
+            self.config_versions(collection, key)?,
+        ))
     }
 
     fn config_versions(&self, collection: &str, key: &str) -> RedDBResult<Vec<ConfigVersion>> {
@@ -726,7 +735,7 @@ impl RedDBRuntime {
         let Some(manager) = store.get_collection(collection) else {
             return Ok(Vec::new());
         };
-        let mut by_key = std::collections::BTreeMap::<String, ConfigVersion>::new();
+        let mut versions = Vec::new();
         for entity in manager.query_all(|_| true) {
             let EntityData::Row(row) = &entity.data else {
                 continue;
@@ -734,10 +743,7 @@ impl RedDBRuntime {
             let Some(Value::Text(key)) = row.get_field("key") else {
                 continue;
             };
-            if prefix.is_some_and(|prefix| !key.starts_with(prefix)) {
-                continue;
-            }
-            let version = ConfigVersion {
+            versions.push(ConfigVersion {
                 id: entity.id,
                 key: key.to_string(),
                 version: value_i64(row.get_field("version")).unwrap_or(0),
@@ -753,16 +759,9 @@ impl RedDBRuntime {
                     .and_then(config_value_type_from_value),
                 schema_version: value_i64(row.get_field("schema_version")),
                 tags: config_tags_from_value(row.get_field("tags")),
-            };
-            let replace = by_key
-                .get(key.as_ref())
-                .map(|existing| version.version > existing.version)
-                .unwrap_or(true);
-            if replace {
-                by_key.insert(key.to_string(), version);
-            }
+            });
         }
-        Ok(by_key.into_values().collect())
+        Ok(super::keyed_spine::latest_versions(versions, prefix))
     }
 
     fn prune_config_history(&self, collection: &str, key: &str) -> RedDBResult<()> {

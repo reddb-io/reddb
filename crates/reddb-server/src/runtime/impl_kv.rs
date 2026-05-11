@@ -39,6 +39,16 @@ struct VaultEntry {
     op: String,
 }
 
+impl super::keyed_spine::KeyedVersion for VaultEntry {
+    fn key(&self) -> &str {
+        &self.key
+    }
+
+    fn version(&self) -> i64 {
+        self.version
+    }
+}
+
 /// Atomic KV operations interface — the seam that transports and drivers depend on.
 ///
 /// All three verbs delegate to the runtime's existing `create_kv` / `get_kv` /
@@ -559,9 +569,8 @@ impl<'a> KvAtomicOps<'a> {
 
     fn get_vault_entry(&self, collection: &str, key: &str) -> RedDBResult<Option<VaultEntry>> {
         Ok(self
-            .vault_versions(collection, key)?
-            .into_iter()
-            .max_by_key(|entry| entry.version))
+            .vault_versions(collection, key)
+            .map(super::keyed_spine::latest_version)?)
     }
 
     fn get_vault_entry_version(
@@ -631,7 +640,7 @@ impl<'a> KvAtomicOps<'a> {
         let Some(manager) = store.get_collection(collection) else {
             return Ok(Vec::new());
         };
-        let mut by_key = std::collections::BTreeMap::<String, VaultEntry>::new();
+        let mut versions = Vec::new();
         for entity in manager.query_all(|_| true) {
             let crate::storage::EntityData::Row(ref row) = entity.data else {
                 continue;
@@ -639,9 +648,6 @@ impl<'a> KvAtomicOps<'a> {
             let Some(crate::storage::schema::Value::Text(ref key)) = row.get_field("key") else {
                 continue;
             };
-            if prefix.is_some_and(|prefix| !key.starts_with(prefix)) {
-                continue;
-            }
             let value = row
                 .get_field("value")
                 .cloned()
@@ -665,15 +671,9 @@ impl<'a> KvAtomicOps<'a> {
                     _ => "put".to_string(),
                 },
             };
-            let replace = by_key
-                .get(key.as_ref())
-                .map(|existing| entry.version > existing.version)
-                .unwrap_or(true);
-            if replace {
-                by_key.insert(key.to_string(), entry);
-            }
+            versions.push(entry);
         }
-        Ok(by_key.into_values().collect())
+        Ok(super::keyed_spine::latest_versions(versions, prefix))
     }
 
     fn append_vault_version(
