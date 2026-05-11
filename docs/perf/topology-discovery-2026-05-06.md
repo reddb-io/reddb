@@ -38,7 +38,7 @@ discovery).
 
 ## What ran
 
-Test: `cargo test -p reddb-client --features grpc --test topology_e2e`.
+Test: `cargo test -p reddb-io-client --features grpc --test topology_e2e`.
 Three integration tests:
 
 | name | what it pins |
@@ -50,7 +50,7 @@ Three integration tests:
 Plus an `#[ignore]`-gated latency capture
 (`topology_perf_capture`) drives 1 000 reads under each routing mode
 and prints p50 / p99. Runs via
-`cargo test -p reddb-client --features grpc --test topology_e2e -- --ignored --nocapture topology_perf_capture`.
+`cargo test -p reddb-io-client --features grpc --test topology_e2e -- --ignored --nocapture topology_perf_capture`.
 
 ### Headline counters
 
@@ -209,10 +209,10 @@ When any of those triggers, the cluster-mode run should:
 cd /home/cyber/Work/reddb.io/reddb/.claude/worktrees/agent-a84b4606331ae0701
 
 # Headline tests (300 reads + write-pinning + deregister + baseline).
-cargo test -p reddb-client --features grpc --test topology_e2e
+cargo test -p reddb-io-client --features grpc --test topology_e2e
 
 # Latency capture (1 000 reads under each routing mode).
-cargo test -p reddb-client --features grpc --test topology_e2e \
+cargo test -p reddb-io-client --features grpc --test topology_e2e \
     -- --ignored --nocapture topology_perf_capture
 
 # Workspace check.

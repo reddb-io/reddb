@@ -31,7 +31,7 @@ rustls-pemfile = "2"
 webpki-roots = "0.26"
 
 # Engine — only compiled in when the `embedded` feature is on.
-reddb = { version = "1.0", path = "../..", optional = true }
+reddb = { package = "reddb-io", version = "1.0", path = "../..", optional = true }
 
 [build-dependencies]
 tonic-build = "0.12"

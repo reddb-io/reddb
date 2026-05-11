@@ -166,14 +166,14 @@ if (failed > 0) {
 // dependency graph. `cargo generate-lockfile` can upgrade transitive crates;
 // release version bumps should not do that.
 syncCargoLock(path.join(root, 'Cargo.lock'), [
-  'reddb',
-  'reddb-wire',
-  'reddb-grpc-proto',
-  'reddb-server',
-  'reddb-client',
-  'reddb-client-connector',
+  'reddb-io',
+  'reddb-io-wire',
+  'reddb-io-grpc-proto',
+  'reddb-io-server',
+  'reddb-io-client',
+  'reddb-io-client-connector',
 ])
-syncCargoLock(path.join(root, 'drivers', 'python', 'Cargo.lock'), ['reddb', 'reddb-python'])
+syncCargoLock(path.join(root, 'drivers', 'python', 'Cargo.lock'), ['reddb-io', 'reddb-python'])
 
 // Stage every file that the version bump touches so pnpm's
 // version commit picks them up in one atomic commit.

@@ -13,7 +13,7 @@ scan `Vec<BlobCacheKey>` with `order.iter().position(...)`.
 Command:
 
 ```bash
-cargo bench -p reddb-server --bench blob_cache_bench w9-shard-insert-remove-slot-index
+cargo bench -p reddb-io-server --bench blob_cache_bench w9-shard-insert-remove-slot-index
 ```
 
 Host run: local development workstation, bench profile, 10 Criterion samples.

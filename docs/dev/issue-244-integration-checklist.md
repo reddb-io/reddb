@@ -53,11 +53,11 @@ Scope: final merge verification after the engine, parser/docs, and acceptance-te
 Run after merging engine + parser/docs + acceptance branches:
 
 ```bash
-cargo test -p reddb-server storage::query::parser::tests:: -- --nocapture
-cargo test -p reddb-server runtime -- --nocapture
+cargo test -p reddb-io-server storage::query::parser::tests:: -- --nocapture
+cargo test -p reddb-io-server runtime -- --nocapture
 cargo test --test redwire_smoke -- --nocapture
 cargo test --test integration_rpc_stdio -- --nocapture
-cargo test -p reddb-client --tests -- --nocapture
+cargo test -p reddb-io-client --tests -- --nocapture
 ```
 
 Focused manual smoke, if a `red` binary is available:

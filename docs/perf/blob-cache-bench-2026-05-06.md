@@ -308,7 +308,7 @@ bench/blob-cache/redis-up.sh
 mkdir -p bench/blob-cache/results
 REDIS_NO_PERSIST_ADDR=127.0.0.1:6379 \
 REDIS_AOF_ADDR=127.0.0.1:6380 \
-  cargo bench -p reddb-server --bench blob_cache_bench 'w[1-8]' -- --nocapture \
+  cargo bench -p reddb-io-server --bench blob_cache_bench 'w[1-8]' -- --nocapture \
   2>&1 | tee bench/blob-cache/results/sess-<date>-redis-baseline.raw.log
 
 # 3. Run workload-7 Redis AOF restart manually using redis-setup.md.

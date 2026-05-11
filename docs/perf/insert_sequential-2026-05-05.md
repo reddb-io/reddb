@@ -343,7 +343,7 @@ Each is bounded so a single PR can land it without sprawling.
   of "pre-committed" xids in the snapshot manager so `begin/commit`
   on the autocommit path is two atomic loads instead of two lock
   acquisitions.
-- **Acceptance.** `cargo bench -p reddb-server snapshot_manager`
+- **Acceptance.** `cargo bench -p reddb-io-server snapshot_manager`
   doesn't regress; `insert_sequential` reddb_wire ops/sec improves
   by ≥10%.
 

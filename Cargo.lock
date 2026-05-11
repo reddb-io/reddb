@@ -2205,16 +2205,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "reddb"
+name = "reddb-io"
 version = "1.0.0"
 dependencies = [
  "jsonwebtoken",
  "proptest",
  "rcgen",
- "reddb-client",
- "reddb-grpc-proto",
- "reddb-server",
- "reddb-wire",
+ "reddb-io-client",
+ "reddb-io-grpc-proto",
+ "reddb-io-server",
+ "reddb-io-wire",
  "rustls",
  "serde_json",
  "tokio",
@@ -2224,16 +2224,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "reddb-client"
+name = "reddb-io-client"
 version = "1.0.0"
 dependencies = [
  "async-trait",
  "jsonwebtoken",
  "proptest",
- "reddb-client-connector",
- "reddb-grpc-proto",
- "reddb-server",
- "reddb-wire",
+ "reddb-io-client-connector",
+ "reddb-io-grpc-proto",
+ "reddb-io-server",
+ "reddb-io-wire",
  "reqwest",
  "rustls",
  "rustls-pemfile",
@@ -2248,19 +2248,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "reddb-client-connector"
+name = "reddb-io-client-connector"
 version = "1.0.0"
 dependencies = [
- "reddb-grpc-proto",
+ "reddb-io-grpc-proto",
  "tonic",
 ]
 
 [[package]]
-name = "reddb-grpc-proto"
+name = "reddb-io-grpc-proto"
 version = "1.0.0"
 dependencies = [
  "prost",
- "reddb-wire",
+ "reddb-io-wire",
  "tonic",
  "tonic-build",
  "tonic-prost",
@@ -2268,7 +2268,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "reddb-server"
+name = "reddb-io-server"
 version = "1.0.0"
 dependencies = [
  "aes-gcm",
@@ -2290,9 +2290,9 @@ dependencies = [
  "prost",
  "rayon",
  "rcgen",
- "reddb-client-connector",
- "reddb-grpc-proto",
- "reddb-wire",
+ "reddb-io-client-connector",
+ "reddb-io-grpc-proto",
+ "reddb-io-wire",
  "regex",
  "reqwest",
  "roaring",
@@ -2319,7 +2319,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "reddb-wire"
+name = "reddb-io-wire"
 version = "1.0.0"
 dependencies = [
  "insta",

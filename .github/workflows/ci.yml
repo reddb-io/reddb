@@ -189,7 +189,7 @@ jobs:
             . -> target
             . -> target/persistent-tests
       - name: Build red_client (cross-binary smoke prereq)
-        run: cargo build --locked --bin red_client -p reddb-client --no-default-features
+        run: cargo build --locked --bin red_client -p reddb-io-client --no-default-features
       - name: red_client size budget
         run: ./scripts/check-red-client-size.sh
       - name: Run default test layer
@@ -228,11 +228,9 @@ jobs:
           shared-key: ubuntu-publish-dryrun-rust-1.91.0
           cache-on-failure: "true"
       - name: cargo package (workspace manifests)
-        # Full verify resolves workspace path dependencies through
-        # crates.io, which fails before a new crate/version has been
-        # published. Release verifies each crate in dependency order
-        # immediately before publishing.
-        run: cargo package --workspace --allow-dirty --no-verify
+        # Offline packaging verifies the workspace manifests against local
+        # path deps before the new reddb-io* crate names exist on crates.io.
+        run: cargo package --workspace --allow-dirty --no-verify --offline
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats
@@ -467,4 +465,4 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: Swatinem/rust-cache@v2
       - name: cargo package --workspace
-        run: cargo package --workspace --allow-dirty --no-verify
+        run: cargo package --workspace --allow-dirty --no-verify --offline

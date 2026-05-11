@@ -16,7 +16,7 @@ test("red_client size guard is wired to a documented local and CI budget check",
   const clientReadme = read("crates/reddb-client/README.md");
 
   assert.match(budget, /^[0-9]+$/);
-  assert.match(sizeScript, /cargo build --locked --release --bin "\$BIN_NAME" -p reddb-client --no-default-features/);
+  assert.match(sizeScript, /cargo build --locked --release --bin "\$BIN_NAME" -p reddb-io-client --no-default-features/);
   assert.match(sizeScript, /strip -s "\$stripped"/);
   assert.match(sizeScript, /size > budget/);
   assert.match(ciWorkflow, /red_client size budget[\s\S]*run: \.\/scripts\/check-red-client-size\.sh/);
@@ -28,7 +28,7 @@ test("red_client container release contract uses the thin client Dockerfile and 
   const releaseWorkflow = read(".github/workflows/release.yml");
   const adr = read("docs/adr/0004-red-client-container-image.md");
 
-  assert.match(dockerfile, /--bin red_client -p reddb-client\s+--no-default-features/);
+  assert.match(dockerfile, /--bin red_client -p reddb-io-client\s+--no-default-features/);
   assert.match(dockerfile, /FROM gcr\.io\/distroless\/static-debian12:nonroot AS runtime/);
   assert.match(dockerfile, /ENTRYPOINT \["\/red_client"\]/);
   assert.match(releaseWorkflow, /publish-client-image:/);

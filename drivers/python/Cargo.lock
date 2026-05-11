@@ -1508,7 +1508,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "reddb"
+name = "reddb-io"
 version = "1.0.0"
 dependencies = [
  "aes-gcm",
@@ -1547,7 +1547,7 @@ version = "1.0.0"
 dependencies = [
  "prost 0.13.5",
  "pyo3",
- "reddb",
+ "reddb-io",
  "rustls",
  "rustls-pemfile",
  "serde_json",

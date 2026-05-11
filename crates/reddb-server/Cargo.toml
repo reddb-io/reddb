@@ -1,5 +1,5 @@
 [package]
-name = "reddb-server"
+name = "reddb-io-server"
 version = "1.0.0"
 edition = "2021"
 authors = ["RedDB.io <hello@reddb.io>"]
@@ -7,18 +7,22 @@ description = "RedDB server-side engine: storage, runtime, replication, MCP, AI,
 license = "AGPL-3.0-only"
 homepage = "https://github.com/reddb-io/reddb"
 repository = "https://github.com/reddb-io/reddb"
-documentation = "https://docs.rs/reddb-server"
+documentation = "https://docs.rs/reddb-io-server"
 readme = "README.md"
 keywords = ["database", "vector-search", "graph", "document-store", "rust"]
 categories = ["database-implementations", "data-structures"]
 
+[lib]
+name = "reddb_server"
+path = "src/lib.rs"
+
 [dependencies]
-reddb-wire = { version = "1.0", path = "../reddb-wire" }
-reddb-grpc-proto = { version = "1.0", path = "../reddb-grpc-proto" }
+reddb-wire = { package = "reddb-io-wire", version = "1.0", path = "../reddb-wire" }
+reddb-grpc-proto = { package = "reddb-io-grpc-proto", version = "1.0", path = "../reddb-grpc-proto" }
 # rpc_stdio's Remote backend wraps the same gRPC client that the
 # `red` binary uses for the `red rpc` subcommand. Single-direction
 # dep — the client crate does not depend on the server.
-reddb-client-connector = { version = "1.0", path = "../reddb-client-connector" }
+reddb-client-connector = { package = "reddb-io-client-connector", version = "1.0", path = "../reddb-client-connector" }
 aes-gcm = "0.10"
 blake3 = "1"
 hmac = "0.13"

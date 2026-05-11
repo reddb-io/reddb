@@ -1,5 +1,5 @@
 [package]
-name = "reddb-grpc-proto"
+name = "reddb-io-grpc-proto"
 version = "1.0.0"
 edition = "2021"
 authors = ["RedDB.io <hello@reddb.io>"]
@@ -7,10 +7,14 @@ description = "Generated gRPC protobuf types and tonic client/server stubs for R
 license = "AGPL-3.0-only"
 homepage = "https://github.com/reddb-io/reddb"
 repository = "https://github.com/reddb-io/reddb"
-documentation = "https://docs.rs/reddb-grpc-proto"
+documentation = "https://docs.rs/reddb-io-grpc-proto"
 readme = "README.md"
 keywords = ["reddb", "grpc", "protobuf", "tonic"]
 categories = ["database", "network-programming"]
+
+[lib]
+name = "reddb_grpc_proto"
+path = "src/lib.rs"
 
 [dependencies]
 tonic = { version = "0.14", default-features = false, features = ["codegen", "router", "server", "channel"] }
@@ -21,7 +25,7 @@ prost = "0.14"
 # for one place to grab the shared schema rather than hand-rolling
 # their own. The transport carries the version-tagged byte string;
 # the type itself lives in reddb-wire::topology.
-reddb-wire = { path = "../reddb-wire", version = "1.0.0" }
+reddb-wire = { package = "reddb-io-wire", path = "../reddb-wire", version = "1.0.0" }
 
 [build-dependencies]
 tonic-build = "0.14"

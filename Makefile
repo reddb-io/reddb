@@ -99,7 +99,7 @@ check:
 	./scripts/cargo-fast.sh check --locked
 
 check-driver-rust:
-	./scripts/cargo-fast.sh check -p reddb-client --features grpc
+	./scripts/cargo-fast.sh check -p reddb-io-client --features grpc
 
 check-driver-python:
 	./scripts/cargo-fast.sh check --manifest-path drivers/python/Cargo.toml
@@ -192,15 +192,13 @@ publish:
 publish-dry-run:
 	@./scripts/publish.sh --dry-run
 
-# Local cargo package dry-run for engine + rust client. Mirrors
+# Local cargo package dry-run for workspace manifests. Mirrors
 # the publish-dry-run CI job — catches missing include paths,
 # stale path-only deps, and license mismatches without hitting
 # the registry.
 package-check:
-	@echo "==> cargo package (engine, with verify)"
-	@cargo package --allow-dirty
-	@echo "==> cargo package (rust client, no verify)"
-	@cargo package -p reddb-client --allow-dirty --no-verify
+	@echo "==> cargo package (workspace manifests, offline)"
+	@cargo package --workspace --allow-dirty --no-verify --offline
 
 # Capture a CPU flamegraph of `red` while the bench-runner drives
 # `insert_sequential`. Implements P5 from

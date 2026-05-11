@@ -65,7 +65,7 @@ jobs:
         run: |
           cargo llvm-cov \
             --lib \
-            -p reddb-server \
+            -p reddb-io-server \
             --lcov \
             --output-path lcov.info
 
@@ -156,7 +156,7 @@ jobs:
             "",
             "> ℹ️ This comment is advisory — it does not block merge.",
             "> Blocking merge on threshold is a future PRD (see `crates/reddb-server/AGENTS.md`).",
-            "> Run locally: `cargo llvm-cov --lib -p reddb-server -- storage::query`",
+            "> Run locally: `cargo llvm-cov --lib -p reddb-io-server -- storage::query`",
             "",
           ])
 

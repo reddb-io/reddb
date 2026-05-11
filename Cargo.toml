@@ -9,7 +9,7 @@ members = [
 resolver = "2"
 
 [package]
-name = "reddb"
+name = "reddb-io"
 version = "1.0.0"
 edition = "2021"
 authors = ["RedDB.io <hello@reddb.io>"]
@@ -17,7 +17,7 @@ description = "Unified multi-model database: tables, documents, graphs, vectors,
 license = "AGPL-3.0-only"
 homepage = "https://github.com/reddb-io/reddb"
 repository = "https://github.com/reddb-io/reddb"
-documentation = "https://docs.rs/reddb"
+documentation = "https://docs.rs/reddb-io"
 readme = "README.md"
 keywords = ["database", "vector-search", "graph", "document-store", "rust"]
 categories = ["database-implementations", "data-structures"]
@@ -33,11 +33,15 @@ include = [
 name = "red"
 path = "src/bin/red.rs"
 
+[lib]
+name = "reddb"
+path = "src/lib.rs"
+
 [dependencies]
-reddb-wire = { version = "1.0", path = "crates/reddb-wire" }
-reddb-grpc-proto = { version = "1.0", path = "crates/reddb-grpc-proto" }
-reddb-client = { version = "1.0", path = "crates/reddb-client" }
-reddb-server = { version = "1.0", path = "crates/reddb-server" }
+reddb-wire = { package = "reddb-io-wire", version = "1.0", path = "crates/reddb-wire" }
+reddb-grpc-proto = { package = "reddb-io-grpc-proto", version = "1.0", path = "crates/reddb-grpc-proto" }
+reddb-client = { package = "reddb-io-client", version = "1.0", path = "crates/reddb-client" }
+reddb-server = { package = "reddb-io-server", version = "1.0", path = "crates/reddb-server" }
 # `red` bin spins up its own multi-thread tokio runtime (server
 # subcommand needs explicit Builder configuration with custom
 # stack size). All other reddb modules pull tokio transitively
@@ -58,7 +62,7 @@ ai-ner-network = ["reddb-server/ai-ner-network"]
 # integration smoke). The crate-root dep keeps `default-features
 # = false`; the dev-only entry layers in the published features
 # the tests need.
-reddb-client = { version = "1.0", path = "crates/reddb-client", features = ["embedded", "redwire"] }
+reddb-client = { package = "reddb-io-client", version = "1.0", path = "crates/reddb-client", features = ["embedded", "redwire"] }
 # Used by `tests/compile_fail.rs` to assert that misuse of
 # `LeaseStore::new` (passing a non-CAS backend) fails to compile.
 trybuild = "1"

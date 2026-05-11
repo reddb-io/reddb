@@ -3,12 +3,12 @@ set -euo pipefail
 
 TEAM="${1:-github:reddb-io:crates-owners}"
 CRATES=(
-  reddb
-  reddb-client
-  reddb-client-connector
-  reddb-grpc-proto
-  reddb-server
-  reddb-wire
+  reddb-io
+  reddb-io-client
+  reddb-io-client-connector
+  reddb-io-grpc-proto
+  reddb-io-server
+  reddb-io-wire
 )
 
 cat <<EOF

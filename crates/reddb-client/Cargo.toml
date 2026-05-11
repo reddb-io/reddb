@@ -1,5 +1,5 @@
 [package]
-name = "reddb-client"
+name = "reddb-io-client"
 version = "1.0.0"
 edition = "2021"
 authors = ["RedDB.io <hello@reddb.io>"]
@@ -7,10 +7,14 @@ description = "Official Rust client for RedDB — embedded engine, gRPC, HTTP, a
 license = "AGPL-3.0-only"
 homepage = "https://github.com/reddb-io/reddb"
 repository = "https://github.com/reddb-io/reddb"
-documentation = "https://docs.rs/reddb-client"
+documentation = "https://docs.rs/reddb-io-client"
 readme = "README.md"
 keywords = ["reddb", "database", "client", "embedded"]
 categories = ["database", "api-bindings"]
+
+[lib]
+name = "reddb_client"
+path = "src/lib.rs"
 
 [features]
 # `embedded` pulls the entire RedDB engine in-process (fastest path).
@@ -40,12 +44,12 @@ redwire-tls = [
 # Always-on workspace deps. The connector + bin paths only need
 # tonic, ureq, and serde_json — no engine, no reqwest, no
 # rustls. Optional features layer the heavier transports on top.
-reddb-grpc-proto = { version = "1.0", path = "../reddb-grpc-proto" }
-reddb-wire = { version = "1.0", path = "../reddb-wire" }
+reddb-grpc-proto = { package = "reddb-io-grpc-proto", version = "1.0", path = "../reddb-grpc-proto" }
+reddb-wire = { package = "reddb-io-wire", version = "1.0", path = "../reddb-wire" }
 # The gRPC connector type lives in its own crate to break the
 # would-be circular path dependency between this crate (with
 # `embedded`) and `reddb-server`.
-reddb-client-connector = { version = "1.0", path = "../reddb-client-connector" }
+reddb-client-connector = { package = "reddb-io-client-connector", version = "1.0", path = "../reddb-client-connector" }
 tonic = { version = "0.14", default-features = false, features = ["channel", "codegen"] }
 # `red_client` binary spins up a current-thread tokio runtime via
 # `#[tokio::main]`. Library callers (the `red` bin) bring their
@@ -67,7 +71,7 @@ ureq = { version = "3.3", default-features = false, features = ["rustls"] }
 # circular dependency: the umbrella `reddb` depends on this
 # crate, so we skip a level and reach into the workspace
 # directly.
-reddb-server = { version = "1.0", path = "../reddb-server", optional = true }
+reddb-server = { package = "reddb-io-server", version = "1.0", path = "../reddb-server", optional = true }
 
 # Per-frame compression (Flags::COMPRESSED). Pulled in only by
 # the `redwire` feature so embedded-only callers don't pay it.
@@ -102,7 +106,7 @@ serde_json = "1"
 # features across [dependencies] and [dev-dependencies], so this
 # only widens tonic during tests.
 tonic = { version = "0.14", default-features = false, features = ["channel", "codegen", "server", "router"] }
-reddb-grpc-proto = { version = "1.0", path = "../reddb-grpc-proto" }
+reddb-grpc-proto = { package = "reddb-io-grpc-proto", version = "1.0", path = "../reddb-grpc-proto" }
 tokio-stream = { version = "0.1", features = ["net"] }
 async-trait = "0.1"
 # Proptest exercises HealthAwareRouter (issue #171): random RTT

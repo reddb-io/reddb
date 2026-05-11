@@ -53,7 +53,7 @@ RUN mkdir -p src/bin \
 RUN rm -f rust-toolchain.toml
 
 RUN cargo build --release --locked --target ${TARGET} \
-        --bin red_client -p reddb-client --no-default-features \
+        --bin red_client -p reddb-io-client --no-default-features \
     && strip target/${TARGET}/release/red_client \
     && cp target/${TARGET}/release/red_client /red_client
 

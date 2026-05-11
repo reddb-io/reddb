@@ -1,5 +1,5 @@
 [package]
-name = "reddb-client-connector"
+name = "reddb-io-client-connector"
 version = "1.0.0"
 edition = "2021"
 authors = ["RedDB.io <hello@reddb.io>"]
@@ -7,7 +7,7 @@ description = "Workspace-internal gRPC connector used by `reddb-server` (rpc_std
 license = "AGPL-3.0-only"
 homepage = "https://github.com/reddb-io/reddb"
 repository = "https://github.com/reddb-io/reddb"
-documentation = "https://docs.rs/reddb-client-connector"
+documentation = "https://docs.rs/reddb-io-client-connector"
 readme = "README.md"
 keywords = ["reddb", "database", "client", "grpc"]
 categories = ["database", "api-bindings"]
@@ -17,6 +17,10 @@ include = [
     "/Cargo.toml",
 ]
 
+[lib]
+name = "reddb_client_connector"
+path = "src/lib.rs"
+
 [dependencies]
-reddb-grpc-proto = { version = "1.0", path = "../reddb-grpc-proto" }
+reddb-grpc-proto = { package = "reddb-io-grpc-proto", version = "1.0", path = "../reddb-grpc-proto" }
 tonic = { version = "0.14", default-features = false, features = ["channel", "codegen"] }

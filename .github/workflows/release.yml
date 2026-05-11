@@ -198,7 +198,7 @@ jobs:
           AR_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-ar
         run: |
           cargo build --locked --release --target ${{ matrix.target }} --bin red
-          cargo build --locked --release --target ${{ matrix.target }} --bin red_client -p reddb-client --no-default-features
+          cargo build --locked --release --target ${{ matrix.target }} --bin red_client -p reddb-io-client --no-default-features
 
       - name: Build (musl)
         if: matrix.target == 'aarch64-unknown-linux-musl'
@@ -209,7 +209,7 @@ jobs:
               curl -sSL https://github.com/protocolbuffers/protobuf/releases/download/v28.3/protoc-28.3-linux-x86_64.zip -o /tmp/protoc.zip
               unzip -o /tmp/protoc.zip -d /usr/local >/dev/null
               cargo build --release --target aarch64-unknown-linux-musl --bin red
-              cargo build --release --target aarch64-unknown-linux-musl --bin red_client -p reddb-client --no-default-features
+              cargo build --release --target aarch64-unknown-linux-musl --bin red_client -p reddb-io-client --no-default-features
             '
           sudo chown -R "$(id -u):$(id -g)" target/aarch64-unknown-linux-musl
 
@@ -452,15 +452,15 @@ jobs:
             echo "warning: ${crate}@${VERSION} not visible after 150s; continuing"
           }
 
-          publish_one reddb-wire
-          publish_one reddb-grpc-proto
-          publish_one reddb-client-connector
-          publish_one reddb-server
-          publish_one reddb-client
-          echo "==> dry-run reddb@${VERSION}"
-          cargo publish --dry-run --locked -p reddb
-          echo "==> publish reddb@${VERSION}"
-          cargo publish --locked -p reddb --token "${CARGO_REGISTRY_TOKEN}"
+          publish_one reddb-io-wire
+          publish_one reddb-io-grpc-proto
+          publish_one reddb-io-client-connector
+          publish_one reddb-io-server
+          publish_one reddb-io-client
+          echo "==> dry-run reddb-io@${VERSION}"
+          cargo publish --dry-run --locked -p reddb-io
+          echo "==> publish reddb-io@${VERSION}"
+          cargo publish --locked -p reddb-io --token "${CARGO_REGISTRY_TOKEN}"
 
   publish-js-driver:
     name: Publish @reddb-io/sdk (npm)

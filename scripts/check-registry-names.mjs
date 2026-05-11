@@ -64,8 +64,8 @@ for (const relativePath of cargoPackages) {
   const name = cargoName(relativePath);
   assert.match(
     name,
-    /^reddb($|-)/,
-    `${relativePath} must use the reddb or reddb-* crates.io prefix`,
+    /^reddb-io($|-)/,
+    `${relativePath} must use the reddb-io or reddb-io-* crates.io prefix`,
   );
 }
 

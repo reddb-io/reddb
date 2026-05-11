@@ -40,7 +40,7 @@ Disable defaults to drop the engine: `default-features = false`.
 ## `red_client` binary
 
 The crate also hosts the `red_client` binary (built with
-`cargo build -p reddb-client --bin red_client --no-default-features`).
+`cargo build -p reddb-io-client --bin red_client --no-default-features`).
 It is the thin remote-only client used by ops tooling — no
 engine, no embedded backend, just transports:
 

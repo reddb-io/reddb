@@ -80,8 +80,8 @@ Crates that do not exist yet will be reported as pending. Add the same team
 immediately after their first publish:
 
 ```bash
-cargo owner --add github:reddb-io:crates-owners reddb-client
-cargo owner --add github:reddb-io:crates-owners reddb-wire
+cargo owner --add github:reddb-io:crates-owners reddb-io-client
+cargo owner --add github:reddb-io:crates-owners reddb-io-wire
 ```
 
 ### Containers

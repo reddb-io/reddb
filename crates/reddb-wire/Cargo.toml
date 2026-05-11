@@ -1,5 +1,5 @@
 [package]
-name = "reddb-wire"
+name = "reddb-io-wire"
 version = "1.0.0"
 edition = "2021"
 authors = ["RedDB.io <hello@reddb.io>"]
@@ -7,10 +7,14 @@ description = "RedDB wire protocol vocabulary: connection-string parser and (lat
 license = "AGPL-3.0-only"
 homepage = "https://github.com/reddb-io/reddb"
 repository = "https://github.com/reddb-io/reddb"
-documentation = "https://docs.rs/reddb-wire"
+documentation = "https://docs.rs/reddb-io-wire"
 readme = "README.md"
 keywords = ["reddb", "wire", "protocol", "connection-string"]
 categories = ["database", "network-programming"]
+
+[lib]
+name = "reddb_wire"
+path = "src/lib.rs"
 
 [dependencies]
 url = "2"
