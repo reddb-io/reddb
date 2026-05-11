@@ -347,6 +347,7 @@ jobs:
     name: Publish CLI npm package
     needs: [plan, publish-github]
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    continue-on-error: true
     if: |
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
@@ -433,6 +434,7 @@ jobs:
     name: Publish @reddb-io/sdk (npm)
     needs: [plan, publish-github]
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    continue-on-error: true
     if: |
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
@@ -472,6 +474,7 @@ jobs:
     name: Publish @reddb-io/client (npm)
     needs: [plan, publish-github]
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    continue-on-error: true
     if: needs.plan.outputs.should_skip != 'true'
     steps:
       - uses: actions/checkout@v6
@@ -510,6 +513,7 @@ jobs:
     name: Publish @reddb-io/client-bun (npm)
     needs: [plan, publish-github]
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    continue-on-error: true
     if: |
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
@@ -666,7 +670,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           provenance: false
           cache-from: type=gha,scope=client
-          cache-to: type=gha,mode=max,scope=client
 
   # ===========================================================================
   # publish-python — Build and upload reddb wheels to PyPI.
