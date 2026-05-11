@@ -208,11 +208,23 @@ do not advance past one until the criterion is met.
 
 ### Tool status
 
-`red migrate-from-redis` is not implemented. This guide is the current
-migration surface: applications own the dual-write helper, shadow-read
-comparison, cutover flag, and decommission steps. A CLI that automates
-the same phases is split to local follow-up #347 rather than implied by
-the guide.
+`red migrate-from-redis` is an explicit readiness-check CLI, not a
+cache-copy or dual-write engine. The supported command surface is:
+
+```sh
+red migrate-from-redis --dry-run --redis-url redis://127.0.0.1:6379/0 --path ./data/reddb.rdb --json
+```
+
+Dry-run validates Redis TCP reachability and opens the target RedDB
+database without writing Blob Cache entries. The JSON output records
+`entries_written: 0`, `mismatch_count: 0`, and an exit status suitable
+for automation.
+
+The dual-write shadow phase remains application-owned. Running
+`red migrate-from-redis --phase dual-write` returns an unsupported
+error that points back to this helper pattern instead of implying that
+the CLI can observe your application's cache keys, TTL policy,
+dependencies, tags, and cutover flag.
 
 ### Phase 1 — Dual-write
 

@@ -18,15 +18,15 @@ documented application-owned helpers.
 
 ## Acceptance criteria
 
-- [ ] The CLI status is explicit in docs and command help.
-- [ ] The command supports a dry-run mode that validates Redis and
+- [x] The CLI status is explicit in docs and command help.
+- [x] The command supports a dry-run mode that validates Redis and
       RedDB connectivity without writing cache entries.
-- [ ] The command can run the dual-write shadow phase or emits a clear
+- [x] The command can run the dual-write shadow phase or emits a clear
       unsupported error that points to the application-owned helper
       pattern.
-- [ ] Any supported execution path records mismatch counts and exit
+- [x] Any supported execution path records mismatch counts and exit
       status suitable for automation.
-- [ ] Public tests cover command help, dry-run behavior, and the
+- [x] Public tests cover command help, dry-run behavior, and the
       implemented or explicitly rejected dual-write mode.
 
 ## Blocked by
