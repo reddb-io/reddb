@@ -4,7 +4,7 @@
 /// appropriate command, and dispatches execution.
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -759,6 +759,10 @@ fn main() {
             }
         }
 
+        "migrate-from-redis" => {
+            std::process::exit(run_migrate_from_redis_command(&result.flags));
+        }
+
         "status" => {
             let json_mode = wants_json(&result.flags);
             let rt = open_local_runtime(&result.flags).unwrap_or_else(|err| {
@@ -1477,6 +1481,129 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+fn run_migrate_from_redis_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let dry_run = flag_bool(flags, "dry-run");
+    let phase = flag_string(flags, "phase")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "dry-run".to_string());
+    let namespace = flag_string(flags, "namespace")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "redis-migration".to_string());
+
+    if phase == "dual-write" {
+        let msg = "red migrate-from-redis does not own the dual-write shadow phase; use the documented application-owned helper pattern in docs/guides/migrate-redis-to-blob-cache.md";
+        if json_mode {
+            json_error("migrate-from-redis", msg);
+        }
+        eprintln!("migrate-from-redis: {msg}");
+        return 2;
+    }
+
+    if phase != "dry-run" {
+        let msg =
+            format!("unsupported migration phase '{phase}'; supported phases: dry-run, dual-write");
+        if json_mode {
+            json_error("migrate-from-redis", &msg);
+        }
+        eprintln!("migrate-from-redis: {msg}");
+        return 2;
+    }
+
+    if !dry_run {
+        let msg =
+            "only --dry-run is supported; dual-write must stay in the application-owned helper";
+        if json_mode {
+            json_error("migrate-from-redis", msg);
+        }
+        eprintln!("migrate-from-redis: {msg}");
+        return 2;
+    }
+
+    let redis_url = match flag_string(flags, "redis-url").filter(|value| !value.is_empty()) {
+        Some(value) => value,
+        None => {
+            let msg = "--redis-url is required for migrate-from-redis --dry-run";
+            if json_mode {
+                json_error("migrate-from-redis", msg);
+            }
+            eprintln!("migrate-from-redis: {msg}");
+            return 2;
+        }
+    };
+
+    if let Err(err) = validate_redis_tcp_connectivity(&redis_url) {
+        let msg = format!("Redis connectivity check failed: {err}");
+        if json_mode {
+            json_error("migrate-from-redis", &msg);
+        }
+        eprintln!("migrate-from-redis: {msg}");
+        return 1;
+    }
+
+    if let Err(err) = open_local_runtime(flags) {
+        let msg = format!("RedDB connectivity check failed: {err}");
+        if json_mode {
+            json_error("migrate-from-redis", &msg);
+        }
+        eprintln!("migrate-from-redis: {msg}");
+        return 1;
+    }
+
+    let data = format!(
+        "{{\"mode\":\"dry-run\",\"redis_reachable\":true,\"reddb_reachable\":true,\"namespace\":\"{}\",\"entries_scanned\":0,\"entries_written\":0,\"mismatch_count\":0}}",
+        json_escape(&namespace)
+    );
+    if json_mode {
+        json_ok("migrate-from-redis", &data);
+    } else {
+        println!("migrate-from-redis dry-run ok");
+        println!("redis_reachable: true");
+        println!("reddb_reachable: true");
+        println!("namespace: {}", namespace);
+        println!("entries_scanned: 0");
+        println!("entries_written: 0");
+        println!("mismatch_count: 0");
+    }
+    0
+}
+
+fn validate_redis_tcp_connectivity(redis_url: &str) -> Result<(), String> {
+    let addr = redis_socket_addr(redis_url)?;
+    let mut addrs = addr
+        .to_socket_addrs()
+        .map_err(|err| format!("resolve {addr}: {err}"))?;
+    let Some(sockaddr) = addrs.next() else {
+        return Err(format!("resolve {addr}: no addresses"));
+    };
+    TcpStream::connect_timeout(&sockaddr, Duration::from_secs(1))
+        .map(|_| ())
+        .map_err(|err| format!("connect {addr}: {err}"))
+}
+
+fn redis_socket_addr(redis_url: &str) -> Result<String, String> {
+    let without_scheme = if let Some(rest) = redis_url.strip_prefix("redis://") {
+        rest
+    } else if redis_url.contains("://") {
+        return Err("only redis:// URLs are supported for dry-run validation".to_string());
+    } else {
+        redis_url
+    };
+    let authority = without_scheme.split('/').next().unwrap_or_default();
+    let host_port = authority.rsplit('@').next().unwrap_or_default();
+    if host_port.is_empty() {
+        return Err("missing Redis host".to_string());
+    }
+    if !host_port
+        .rsplit(':')
+        .next()
+        .is_some_and(|port| !port.is_empty() && port.as_bytes().iter().all(|b| b.is_ascii_digit()))
+    {
+        return Err("Redis URL must include host:port".to_string());
+    }
+    Ok(host_port.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -2209,6 +2336,24 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_description("Validate operations without applying"),
             ]);
         }
+        Some("migrate-from-redis") => {
+            flags.extend(vec![
+                cli::types::FlagSchema::boolean("dry-run")
+                    .with_description("Validate Redis and RedDB connectivity without cache writes"),
+                cli::types::FlagSchema::new("redis-url").with_description(
+                    "Redis URL to validate, for example redis://127.0.0.1:6379/0",
+                ),
+                cli::types::FlagSchema::new("path")
+                    .with_short('d')
+                    .with_description("Local RedDB .rdb file to open for connectivity validation"),
+                cli::types::FlagSchema::new("phase")
+                    .with_description("Migration phase: dry-run | dual-write")
+                    .with_default("dry-run"),
+                cli::types::FlagSchema::new("namespace")
+                    .with_description("Blob Cache namespace recorded in dry-run output")
+                    .with_default("redis-migration"),
+            ]);
+        }
         Some("rpc") => {
             flags.extend(vec![
                 cli::types::FlagSchema::boolean("stdio")
@@ -2277,6 +2422,7 @@ fn build_completion_tree() -> Vec<(String, Vec<(String, Vec<String>)>)> {
         ("get".to_string(), vec![]),
         ("delete".to_string(), vec![]),
         ("tick".to_string(), vec![]),
+        ("migrate-from-redis".to_string(), vec![]),
         ("health".to_string(), vec![]),
         (
             "admin".to_string(),

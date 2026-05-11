@@ -117,6 +117,12 @@ pub fn all_commands() -> Vec<CommandDef> {
       flags: tick_flags(),
     },
     CommandDef {
+      name: "migrate-from-redis",
+      summary: "Validate Redis to Blob Cache migration readiness; dual-write uses the documented application-owned helper pattern",
+      usage: "red migrate-from-redis --dry-run --redis-url redis://127.0.0.1:6379/0 [--path ./data/reddb.rdb]",
+      flags: migrate_from_redis_flags(),
+    },
+    CommandDef {
       name: "replica",
       summary: "Start as a read replica connected to a primary",
       usage: "red replica --primary-addr http://primary:5555 [--grpc] [--http] [--grpc-bind 127.0.0.1:5555] [--http-bind 127.0.0.1:5055] [--path ./data/reddb.rdb]",
@@ -586,6 +592,24 @@ fn tick_flags() -> Vec<FlagSchema> {
     ]
 }
 
+fn migrate_from_redis_flags() -> Vec<FlagSchema> {
+    vec![
+        FlagSchema::boolean("dry-run")
+            .with_description("Validate Redis and RedDB connectivity without cache writes"),
+        FlagSchema::new("redis-url")
+            .with_description("Redis URL to validate, for example redis://127.0.0.1:6379/0"),
+        FlagSchema::new("path")
+            .with_short('d')
+            .with_description("Local RedDB .rdb file to open for connectivity validation"),
+        FlagSchema::new("phase")
+            .with_description("Migration phase: dry-run | dual-write")
+            .with_default("dry-run"),
+        FlagSchema::new("namespace")
+            .with_description("Blob Cache namespace recorded in dry-run output")
+            .with_default("redis-migration"),
+    ]
+}
+
 fn status_flags() -> Vec<FlagSchema> {
     vec![FlagSchema::new("bind")
         .with_short('b')
@@ -656,6 +680,7 @@ pub fn completion_domains() -> Vec<(String, Vec<String>)> {
         ("delete".to_string(), vec!["del".to_string()]),
         ("health".to_string(), vec![]),
         ("status".to_string(), vec![]),
+        ("migrate-from-redis".to_string(), vec![]),
         ("mcp".to_string(), vec![]),
         ("auth".to_string(), vec![]),
         ("connect".to_string(), vec![]),
@@ -690,6 +715,7 @@ mod tests {
         assert!(names.contains(&"delete"));
         assert!(names.contains(&"health"));
         assert!(names.contains(&"tick"));
+        assert!(names.contains(&"migrate-from-redis"));
         assert!(names.contains(&"status"));
         assert!(names.contains(&"connect"));
         assert!(names.contains(&"version"));
@@ -740,6 +766,15 @@ mod tests {
         let help = command_help_text("replica").unwrap();
         assert!(help.contains("red replica"));
         assert!(help.contains("--primary-addr"));
+    }
+
+    #[test]
+    fn test_migrate_from_redis_command_help() {
+        let help = command_help_text("migrate-from-redis").unwrap();
+        assert!(help.contains("red migrate-from-redis"));
+        assert!(help.contains("--dry-run"));
+        assert!(help.contains("--redis-url"));
+        assert!(help.contains("application-owned helper"));
     }
 
     #[test]
