@@ -4245,14 +4245,8 @@ impl RedDBRuntime {
         }
 
         // ── Result cache: return cached result if still fresh (30s TTL) ──
-        // Safety check goes through `ReadFrame::should_cache_result()` so
-        // the volatile-builtin / active-tx-with-uncommitted-writes
-        // decision is not re-derived from globals here.
-        let frame_iface: &dyn super::statement_frame::ReadFrame = &frame;
-        if frame_iface.should_cache_result() {
-            if let Some(result) = self.get_result_cache_entry(frame_iface.cache_key()) {
-                return Ok(result);
-            }
+        if let Some(result) = frame.read_result_cache(self) {
+            return Ok(result);
         }
 
         let prepared = frame.prepare_statement(self, execution_query)?;
@@ -4272,6 +4266,7 @@ impl RedDBRuntime {
         let result_cache_scopes = query_expr_result_cache_scopes(&expr);
 
         let _lock_guard = frame.acquire_intent_locks(self, &expr);
+        let frame_iface: &dyn super::statement_frame::ReadFrame = &frame;
 
         let query_result = match expr {
             QueryExpr::Graph(_) | QueryExpr::Path(_) => {
@@ -5511,21 +5506,7 @@ impl RedDBRuntime {
         // zero while the clone cost (100 records × ~16 fields each) is high.
         // Aggregations (1 row) and point lookups (1 row) still benefit.
         if let Ok(ref result) = query_result {
-            // Cache-safety gate goes through the `ReadFrame` Interface
-            // (volatile builtin / active-tx-with-writes); payload-shape
-            // gates (statement type, pre-serialized JSON, row count)
-            // are write-side heuristics handled by
-            // `should_write_result_cache`.
-            if frame_iface.should_cache_result() && frame.should_write_result_cache(result) {
-                self.put_result_cache_entry(
-                    frame_iface.cache_key(),
-                    RuntimeResultCacheEntry {
-                        result: result.clone(),
-                        cached_at: std::time::Instant::now(),
-                        scopes: result_cache_scopes,
-                    },
-                );
-            }
+            frame.write_result_cache(self, result, result_cache_scopes);
         }
 
         query_result
@@ -6164,7 +6145,7 @@ impl RedDBRuntime {
         }
     }
 
-    fn get_result_cache_entry(&self, key: &str) -> Option<RuntimeQueryResult> {
+    pub(super) fn get_result_cache_entry(&self, key: &str) -> Option<RuntimeQueryResult> {
         match self.result_cache_backend() {
             RuntimeResultCacheBackend::Legacy => self.get_legacy_result_cache_entry(key),
             RuntimeResultCacheBackend::BlobCache => self.get_blob_result_cache_entry(key),
@@ -6207,7 +6188,7 @@ impl RedDBRuntime {
         cache.0.get(key).map(|entry| entry.result.clone())
     }
 
-    fn put_result_cache_entry(&self, key: &str, entry: RuntimeResultCacheEntry) {
+    pub(super) fn put_result_cache_entry(&self, key: &str, entry: RuntimeResultCacheEntry) {
         match self.result_cache_backend() {
             RuntimeResultCacheBackend::Legacy => self.put_legacy_result_cache_entry(key, entry),
             RuntimeResultCacheBackend::BlobCache => self.put_blob_result_cache_entry(key, entry),
