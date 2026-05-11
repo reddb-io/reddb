@@ -347,7 +347,6 @@ jobs:
     name: Publish CLI npm package
     needs: [plan, publish-github]
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    continue-on-error: true
     if: |
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
@@ -369,6 +368,10 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          if [[ -z "${NODE_AUTH_TOKEN}" ]]; then
+            echo "::warning::NPM_TOKEN secret not set — skipping. Add an Automation token from npmjs.com as NPM_TOKEN in repo secrets."
+            exit 0
+          fi
           TAG=$([[ "${{ needs.plan.outputs.release_channel }}" == "next" ]] && echo "next" || echo "latest")
           pnpm publish --tag "${TAG}" --access public --no-git-checks
 
@@ -434,7 +437,6 @@ jobs:
     name: Publish @reddb-io/sdk (npm)
     needs: [plan, publish-github]
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    continue-on-error: true
     if: |
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
@@ -460,22 +462,20 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          if [[ -z "${NODE_AUTH_TOKEN}" ]]; then
+            echo "::warning::NPM_TOKEN secret not set — skipping. Add an Automation token from npmjs.com as NPM_TOKEN in repo secrets."
+            exit 0
+          fi
           TAG=$([[ "${{ needs.plan.outputs.release_channel }}" == "next" ]] && echo "next" || echo "latest")
-          # `--access public` is mandatory for first-publish of a scoped
-          # package — npm defaults scoped packages to private and rejects
-          # the publish with a 402/404 otherwise. The previous unscoped
-          # `reddb` name was squatted on the public registry, which is
-          # why every prior run silently 404'd.
-          # The postinstall script pulls the matching `red` binary from
-          # the GitHub Release that `publish-github` just created.
           pnpm publish --tag "${TAG}" --access public --no-git-checks
 
   publish-js-client:
     name: Publish @reddb-io/client (npm)
     needs: [plan, publish-github]
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    continue-on-error: true
-    if: needs.plan.outputs.should_skip != 'true'
+    if: |
+      needs.plan.outputs.should_skip != 'true' &&
+      needs.plan.outputs.release_channel == 'stable'
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -491,10 +491,6 @@ jobs:
           node scripts/sync-version.js
           bash scripts/check-versions.sh
       - name: Verify pack
-        # Preflight per #128 retro: `npm pack --dry-run` fails fast on
-        # regressions like the `reddb` 404 root cause (unscoped name
-        # squatted on the registry). Catches missing files, bad paths,
-        # or postinstall script issues before we hit the publish step.
         working-directory: drivers/js-client
         run: pnpm pack --pack-destination "$RUNNER_TEMP"
       - name: Publish
@@ -502,18 +498,17 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          if [[ -z "${NODE_AUTH_TOKEN}" ]]; then
+            echo "::warning::NPM_TOKEN secret not set — skipping. Add an Automation token from npmjs.com as NPM_TOKEN in repo secrets."
+            exit 0
+          fi
           TAG=$([[ "${{ needs.plan.outputs.release_channel }}" == "next" ]] && echo "next" || echo "latest")
-          # `--access public` is mandatory for first-publish of a scoped
-          # package — npm defaults scoped packages to private and rejects
-          # the publish with a 402/404 otherwise. See publish-js-driver
-          # for the full retro from #128.
           pnpm publish --tag "${TAG}" --access public --no-git-checks
 
   publish-bun-client:
     name: Publish @reddb-io/client-bun (npm)
     needs: [plan, publish-github]
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    continue-on-error: true
     if: |
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
@@ -539,6 +534,10 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          if [[ -z "${NODE_AUTH_TOKEN}" ]]; then
+            echo "::warning::NPM_TOKEN secret not set — skipping. Add an Automation token from npmjs.com as NPM_TOKEN in repo secrets."
+            exit 0
+          fi
           TAG=$([[ "${{ needs.plan.outputs.release_channel }}" == "next" ]] && echo "next" || echo "latest")
           pnpm publish --tag "${TAG}" --access public --no-git-checks
 
