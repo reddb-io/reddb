@@ -1,6 +1,6 @@
 # reddb-zig
 
-Native Zig driver for [RedDB](https://github.com/filipeforattini/reddb). Speaks
+Native Zig driver for [RedDB](https://github.com/reddb-io/reddb). Speaks
 the RedWire binary TCP protocol directly and ships an HTTP fallback that
 mirrors the JS driver's REST surface.
 

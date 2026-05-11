@@ -1,7 +1,7 @@
 name: reddb
 description: Pure-Dart driver for RedDB. Speaks RedWire (TCP/TLS) and HTTP. Flutter-compatible (no FFI).
 version: 0.1.0
-repository: https://github.com/filipeforattini/reddb
+repository: https://github.com/reddb-io/reddb
 
 environment:
   sdk: ">=3.3.0 <4.0.0"

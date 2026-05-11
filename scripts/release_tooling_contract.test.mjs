@@ -38,6 +38,20 @@ test("red_client container release contract uses the thin client Dockerfile and 
   assert.match(adr, /Target size: < 10 MB/);
 });
 
+test("Docker release images publish from GitHub Actions under reddb-io GHCR only", () => {
+  const releaseWorkflow = read(".github/workflows/release.yml");
+  const dockerHubHost = new RegExp(["docker", "io"].join("\\."));
+  const dockerHubSecretPrefix = new RegExp(["DOCKER", "HUB_"].join(""));
+  const legacyPersonalNamespace = new RegExp(["foratt", "ini"].join(""), "i");
+
+  assert.match(releaseWorkflow, /publish-docker:/);
+  assert.match(releaseWorkflow, /ghcr\.io\/\$\{\{ github\.repository \}\}/);
+  assert.match(releaseWorkflow, /ghcr\.io\/\$\{\{ github\.repository \}\}-client/);
+  assert.doesNotMatch(releaseWorkflow, dockerHubHost);
+  assert.doesNotMatch(releaseWorkflow, dockerHubSecretPrefix);
+  assert.doesNotMatch(releaseWorkflow, legacyPersonalNamespace);
+});
+
 test("nightly DR drill workflow uses the current-shell runner and public make target", () => {
   const makefile = read("Makefile");
   const script = read("scripts/drill-nightly.sh");

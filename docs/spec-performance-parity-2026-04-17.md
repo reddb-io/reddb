@@ -2,7 +2,7 @@
 
 Status: **APPROVED — Phase 1 (SPECIFY) complete**. Awaiting
 implementation kick-off on Phase 2 (PLANNING → tasks/plan.md).
-Owner: @filipeforattini · Approved: 2026-04-17
+Owner: @reddb-io · Approved: 2026-04-17
 
 ---
 
