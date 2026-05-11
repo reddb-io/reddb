@@ -117,8 +117,7 @@ fn explain_renders_cte_marker_node_per_named_cte() {
         .records
         .iter()
         .find(|rec| {
-            rec.values
-                .get("op")
+            rec.get("op")
                 .and_then(|v| v.as_text())
                 .map(|s| s == "CteScan")
                 .unwrap_or(false)
@@ -126,7 +125,6 @@ fn explain_renders_cte_marker_node_per_named_cte() {
         .expect("EXPLAIN output should contain a CteScan row");
 
     let source = cte_row
-        .values
         .get("source")
         .and_then(|v| v.as_text())
         .unwrap_or_default();

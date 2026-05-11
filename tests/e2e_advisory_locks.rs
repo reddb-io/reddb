@@ -26,8 +26,7 @@ fn eval_bool(rt: &RedDBRuntime, sql: &str) -> bool {
         .first()
         .unwrap_or_else(|| panic!("{sql}: no record"));
     let (_, v) = rec
-        .values
-        .iter()
+        .iter_fields()
         .next()
         .unwrap_or_else(|| panic!("{sql}: empty record"));
     match v {
@@ -100,7 +99,7 @@ fn unlock_all_drops_every_held_lock() {
     assert!(eval_bool(&rt, "SELECT pg_try_advisory_lock(30)"));
 
     let result = rt.execute_query("SELECT pg_advisory_unlock_all()").unwrap();
-    match result.result.records[0].values.values().next().unwrap() {
+    match result.result.records[0].iter_fields().next().unwrap().1 {
         Value::Integer(n) => assert_eq!(*n, 3, "released 3 locks"),
         other => panic!("expected integer count, got {other:?}"),
     }
@@ -134,10 +133,11 @@ fn blocking_advisory_lock_waits_for_release() {
         let owned = rt_c
             .execute_query("SELECT pg_advisory_unlock(99)")
             .expect("unlock after acquire");
-        match owned.result.records[0].values.values().next().unwrap() {
+        let worker_owned = match owned.result.records[0].iter_fields().next().unwrap().1 {
             Value::Boolean(b) => *b,
             other => panic!("expected bool, got {other:?}"),
-        }
+        };
+        worker_owned
     });
 
     // Give the worker some time to enter pg_advisory_lock.

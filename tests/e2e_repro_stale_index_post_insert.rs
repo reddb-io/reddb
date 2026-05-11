@@ -33,6 +33,7 @@ fn create_one_via_port(rt: &RedDBRuntime, id: u32, age: u32, city: &str) {
     rt.create_rows_batch(CreateRowsBatchInput {
         collection,
         rows: vec![row],
+        suppress_events: false,
     })
     .unwrap();
 }

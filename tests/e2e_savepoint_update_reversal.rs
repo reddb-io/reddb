@@ -42,11 +42,7 @@ fn rollback_to_savepoint_restores_pre_update_value() {
         .execute_query("SELECT label FROM sp_upd WHERE id = 1")
         .expect("select after rollback");
     let rec = &after.result.records[0];
-    let label = rec
-        .values
-        .get("label")
-        .expect("label column present")
-        .to_string();
+    let label = rec.get("label").expect("label column present").to_string();
     assert!(
         label.contains("before"),
         "label should be rolled back to 'before', got {label}"

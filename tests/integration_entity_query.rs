@@ -1973,11 +1973,7 @@ fn test_password_hash_and_verify() {
         .records
         .first()
         .expect("at least one row for matching candidate");
-    let ok = row
-        .values
-        .get("ok")
-        .cloned()
-        .unwrap_or(Value::Boolean(false));
+    let ok = row.get("ok").cloned().unwrap_or(Value::Boolean(false));
     assert_eq!(
         ok,
         Value::Boolean(true),
@@ -1994,11 +1990,7 @@ fn test_password_hash_and_verify() {
         .records
         .first()
         .expect("at least one row for wrong candidate");
-    let ok = row
-        .values
-        .get("ok")
-        .cloned()
-        .unwrap_or(Value::Boolean(true));
+    let ok = row.get("ok").cloned().unwrap_or(Value::Boolean(true));
     assert_eq!(
         ok,
         Value::Boolean(false),
@@ -2225,7 +2217,6 @@ fn test_fast_entity_id_lookup_persistent() {
         .records
         .first()
         .expect("at least one row")
-        .values
         .get("red_entity_id")
         .expect("_entity_id present")
     {
@@ -2596,20 +2587,12 @@ fn test_with_timestamps_auto_populates_on_insert_and_update() {
         .records
         .first()
         .expect("one row after patch");
-    let created_after = match rec_after
-        .values
-        .get("created_at")
-        .expect("created_at after patch")
-    {
+    let created_after = match rec_after.get("created_at").expect("created_at after patch") {
         Value::UnsignedInteger(n) => *n,
         Value::Integer(n) if *n >= 0 => *n as u64,
         other => panic!("created_at after: unexpected type {other:?}"),
     };
-    let updated_after = match rec_after
-        .values
-        .get("updated_at")
-        .expect("updated_at after patch")
-    {
+    let updated_after = match rec_after.get("updated_at").expect("updated_at after patch") {
         Value::UnsignedInteger(n) => *n,
         Value::Integer(n) if *n >= 0 => *n as u64,
         other => panic!("updated_at after: unexpected type {other:?}"),
@@ -3074,7 +3057,7 @@ fn test_update_accepts_config_assignment_and_kv_filter() {
 
     query
         .execute(ExecuteQueryInput {
-            query: "SET CONFIG red.users.default.tier = 'premium'".into(),
+            query: "SET CONFIG app.users.default.tier = 'premium'".into(),
         })
         .expect("SET CONFIG should succeed");
 
@@ -3096,7 +3079,7 @@ fn test_update_accepts_config_assignment_and_kv_filter() {
 
     query
         .execute(ExecuteQueryInput {
-            query: "UPDATE kv_update_users SET tier = CONFIG(red.users.default.tier, free) WHERE role = KV(cfg_update, default.role, guest)".into(),
+            query: "UPDATE kv_update_users SET tier = CONFIG(app.users.default.tier, free) WHERE role = KV(cfg_update, default.role, guest)".into(),
         })
         .expect("UPDATE with CONFIG()/KV() should succeed");
 

@@ -148,7 +148,8 @@ fn select_from_red_collections_materializes_catalog_rows() {
             "in_memory_bytes",
             "on_disk_bytes",
             "internal",
-            "tenant_id"
+            "tenant_id",
+            "queue_mode",
         ]
     );
     assert_eq!(result.result.records.len(), 1);
@@ -197,6 +198,7 @@ fn red_schema_introspection_is_stable_across_virtual_tables() {
                 "on_disk_bytes",
                 "internal",
                 "tenant_id",
+                "queue_mode",
             ],
         ),
         (
@@ -468,11 +470,11 @@ fn red_columns_infers_document_top_level_fields_as_nullable_schema() {
     let rt = runtime();
     exec(
         &rt,
-        r#"INSERT INTO logs DOCUMENT (body) VALUES ({"level":"warn","ip":"10.0.0.1"})"#,
+        r#"INSERT INTO logs DOCUMENT (body) VALUES ('{"level":"warn","ip":"10.0.0.1"}')"#,
     );
     exec(
         &rt,
-        r#"INSERT INTO logs DOCUMENT (body) VALUES ({"level":"info","msg":"login"})"#,
+        r#"INSERT INTO logs DOCUMENT (body) VALUES ('{"level":"info","msg":"login"}')"#,
     );
 
     let result = rt
@@ -569,9 +571,12 @@ fn show_stats_desugars_to_red_stats() {
         single.result.records[0].get("collection"),
         Some(&Value::text("users"))
     );
+    let expected = rt
+        .execute_query("SELECT attention_score FROM red.stats WHERE collection = 'users'")
+        .expect("red.stats users");
     assert_eq!(
         single.result.records[0].get("attention_score"),
-        Some(&Value::UnsignedInteger(0))
+        expected.result.records[0].get("attention_score")
     );
 
     let all = rt.execute_query("SHOW STATS").expect("show stats");

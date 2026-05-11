@@ -38,11 +38,29 @@ impl DiskSpaceMonitor {
         Self::new(path, 90)
     }
 
-    /// Spawn the monitor as a detached tokio task. The task runs until the
-    /// process exits; there is no explicit cancellation handle because the
-    /// monitor is expected to live for the full server lifetime.
-    pub fn spawn(self) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(run(self.path, self.critical_pct))
+    /// Spawn the monitor as detached background work. When the caller is inside
+    /// a Tokio runtime this uses that runtime; otherwise it creates a small
+    /// current-thread runtime for the monitor. The monitor is expected to live
+    /// for the full server lifetime, so no cancellation handle is exposed.
+    pub fn spawn(self) {
+        let path = self.path;
+        let critical_pct = self.critical_pct;
+
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(run(path, critical_pct));
+            return;
+        }
+
+        std::thread::Builder::new()
+            .name("reddb-disk-space-monitor".into())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                    .expect("disk space monitor runtime");
+                runtime.block_on(run(path, critical_pct));
+            })
+            .expect("disk space monitor thread spawn");
     }
 }
 
