@@ -11,6 +11,7 @@ use super::{RedDBRuntime, RuntimeQueryResult};
 use crate::api::{RedDBError, RedDBResult};
 use crate::auth::Role;
 use crate::storage::query::ast::QueryExpr;
+use crate::storage::query::modes::{detect_mode, parse_multi, QueryMode};
 use crate::storage::transaction::snapshot::{Snapshot, Xid};
 
 /// Coarse privilege classification for a statement, computed once at
@@ -266,6 +267,11 @@ pub(super) struct StatementFrameGuards {
     _snapshot_guard: CurrentSnapshotGuard,
 }
 
+pub(super) struct PreparedStatement {
+    pub(super) expr: QueryExpr,
+    pub(super) mode: QueryMode,
+}
+
 impl StatementExecutionFrame {
     pub(super) fn build(runtime: &RedDBRuntime, query: &str) -> RedDBResult<Self> {
         let conn_id = current_connection_id();
@@ -356,6 +362,129 @@ impl StatementExecutionFrame {
             && result.engine != "vault"
             && result.result.pre_serialized_json.is_none()
             && result.result.records.len() <= 5
+    }
+
+    pub(super) fn prepare_statement(
+        &self,
+        runtime: &RedDBRuntime,
+        query: &str,
+    ) -> RedDBResult<PreparedStatement> {
+        let mode = detect_mode(query);
+        if matches!(mode, QueryMode::Unknown) {
+            return Err(RedDBError::Query("unable to detect query mode".to_string()));
+        }
+
+        // ── Plan cache: reuse only exact-query ASTs ──
+        //
+        // DML statements (INSERT/UPDATE/DELETE) almost always have unique literal
+        // values, so caching them burns CPU on eviction bookkeeping (Vec::remove(0)
+        // shifts the entire LRU list) with zero hit rate. Skip the cache entirely
+        // Plan cache applies to statements whose shape can be
+        // normalised + rebound (`UPDATE t SET x=? WHERE _entity_id=?`
+        // reuses the same plan across thousands of varying literals).
+        // INSERT is still bypassed — its shape changes per column set
+        // and bulk paths don't go through here anyway.
+        let first_word = query
+            .trim()
+            .split_ascii_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        let is_insert = first_word == "INSERT";
+
+        // Fused normalize+extract: one byte-scan produces both the
+        // cache_key AND the literal bindings. Saves a second Lexer
+        // pass over the query text on every cache hit — dominant
+        // cost on tight UPDATE loops that hit the same shape
+        // thousands of times with varying literals.
+        let (cache_key, prescan_binds) = if is_insert {
+            (String::new(), Vec::new())
+        } else {
+            crate::storage::query::planner::cache_key::normalize_and_extract(query)
+        };
+
+        let expr = if is_insert {
+            // Bypass plan cache for INSERT — shape varies per query.
+            parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?
+        } else {
+            // ── Hot path: read lock only (no writer serialization on cache hits) ──
+            //
+            // peek() is a non-mutating probe: no LRU promotion, no touch().
+            // This lets concurrent readers proceed without blocking each other.
+            // On hit we bind literals if needed and return immediately.
+            // Only on miss do we drop to a write lock to parse + insert.
+            let hit = {
+                let plan_cache = runtime.inner.query_cache.read();
+                plan_cache.peek(&cache_key).map(|cached| {
+                    let parameter_count = cached.parameter_count;
+                    let optimized = cached.plan.optimized.clone();
+                    let exact_query = cached.exact_query.clone();
+                    (parameter_count, optimized, exact_query)
+                })
+            };
+
+            if let Some((parameter_count, optimized, exact_query)) = hit {
+                if parameter_count > 0 {
+                    // Shape hit: use the binds extracted during normalise.
+                    let shape_binds = prescan_binds.clone();
+                    if let Some(bound) =
+                        crate::storage::query::planner::shape::bind_parameterized_query(
+                            &optimized,
+                            &shape_binds,
+                            parameter_count,
+                        )
+                    {
+                        bound
+                    } else if exact_query.as_deref() == Some(query) {
+                        // Bind failed but exact query matches — use as-is.
+                        optimized
+                    } else {
+                        // Bind failed and literals differ: re-parse fresh.
+                        parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?
+                    }
+                } else {
+                    // No parameters means either there truly are no literals,
+                    // or this statement type does not participate in shape
+                    // parameterization (for example graph/queue commands).
+                    // Reusing a normalized-cache hit across a different exact
+                    // query can therefore leak stale literals into execution.
+                    if exact_query.as_deref() == Some(query) {
+                        optimized
+                    } else {
+                        parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?
+                    }
+                }
+            } else {
+                // Cache miss — parse, parameterize, store.
+                let parsed =
+                    parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?;
+                let (cached_expr, parameter_count) = if let Some(prepared) =
+                    crate::storage::query::planner::shape::parameterize_query_expr(&parsed)
+                {
+                    (prepared.shape, prepared.parameter_count)
+                } else {
+                    (parsed.clone(), 0)
+                };
+                {
+                    let mut pc = runtime.inner.query_cache.write();
+                    let plan = crate::storage::query::planner::QueryPlan::new(
+                        parsed.clone(),
+                        cached_expr,
+                        Default::default(),
+                    );
+                    pc.insert(
+                        cache_key.clone(),
+                        crate::storage::query::planner::CachedPlan::new(plan)
+                            .with_shape_key(cache_key.clone())
+                            .with_exact_query(query.to_string())
+                            .with_parameter_count(parameter_count),
+                    );
+                }
+                parsed
+            }
+        };
+
+        Ok(PreparedStatement { expr, mode })
     }
 
     pub(super) fn check_query_privilege(
