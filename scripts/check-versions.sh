@@ -25,15 +25,38 @@ check() {
   fi
 }
 
+lock_version() {
+  local lockfile=$1
+  local package=$2
+  awk -v package="$package" '
+    $0 == "[[package]]" { in_package=0 }
+    $0 == "name = \"" package "\"" { in_package=1 }
+    in_package && /^version = / {
+      gsub(/"/, "", $3)
+      print $3
+      exit
+    }
+  ' "$lockfile"
+}
+
 # Lock-step with engine: workspace member crates, drivers, npm package
 check "crates/reddb-wire"        "$(grep -m1 '^version' crates/reddb-wire/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 check "crates/reddb-grpc-proto"  "$(grep -m1 '^version' crates/reddb-grpc-proto/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 check "crates/reddb-server"      "$(grep -m1 '^version' crates/reddb-server/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 check "crates/reddb-client"            "$(grep -m1 '^version' crates/reddb-client/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 check "crates/reddb-client-connector"  "$(grep -m1 '^version' crates/reddb-client-connector/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+check "Cargo.lock reddb"         "$(lock_version Cargo.lock reddb)"
+check "Cargo.lock reddb-wire"    "$(lock_version Cargo.lock reddb-wire)"
+check "Cargo.lock reddb-grpc-proto" "$(lock_version Cargo.lock reddb-grpc-proto)"
+check "Cargo.lock reddb-server"  "$(lock_version Cargo.lock reddb-server)"
+check "Cargo.lock reddb-client"  "$(lock_version Cargo.lock reddb-client)"
+check "Cargo.lock reddb-client-connector" "$(lock_version Cargo.lock reddb-client-connector)"
 check "drivers/python"      "$(grep -m1 '^version'  drivers/python/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 check "drivers/python (py)" "$(grep -m1 '^version' drivers/python/pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+check "drivers/python/Cargo.lock reddb" "$(lock_version drivers/python/Cargo.lock reddb)"
+check "drivers/python/Cargo.lock reddb-python" "$(lock_version drivers/python/Cargo.lock reddb-python)"
 check "drivers/js (@reddb-io/sdk)"  "$(grep -m1 '"version"' drivers/js/package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"
+check "drivers/bun (@reddb-io/client-bun)"  "$(grep -m1 '"version"' drivers/bun/package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"
 check "packages/internal-asset-fetcher" "$(grep -m1 '"version"' packages/internal-asset-fetcher/package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"
 check "packages/internal-bin-resolver"  "$(grep -m1 '"version"' packages/internal-bin-resolver/package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"
 check "packages/internal-version-compare" "$(grep -m1 '"version"' packages/internal-version-compare/package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"
