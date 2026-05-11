@@ -8,6 +8,13 @@ on:
       - 'docs/**'
       - 'CHANGELOG**'
       - 'LICENSE**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '**/Cargo.toml'
+      - 'package.json'
+      - '**/package.json'
+      - 'pnpm-lock.yaml'
+      - 'drivers/python/pyproject.toml'
   pull_request:
     branches: [ main, develop ]
     paths-ignore:
