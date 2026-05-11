@@ -123,3 +123,26 @@ test("release tooling evidence closure records final dispositions for issue 337 
   assert.match(issue68.final_disposition.reason, /Dockerfile\.client/);
   assert.match(issue116.final_disposition.reason, /make drill-nightly/);
 });
+
+test("parser hardening evidence closure records final dispositions for issue 338 scope", () => {
+  assert.ok(fs.existsSync(issuesPath), `${issuesPath} must exist`);
+
+  const report = runReport();
+  const issue87 = issueByNumber(report, 87);
+  const issue97 = issueByNumber(report, 97);
+  const issue231 = issueByNumber(report, 231);
+  const issue233 = issueByNumber(report, 233);
+  const issue236 = issueByNumber(report, 236);
+
+  for (const issue of [issue87, issue97, issue231, issue233, issue236]) {
+    assert.equal(issue.final_disposition.outcome, "confirmed");
+    assert.equal(issue.final_disposition.placeholder, false);
+    assert.notEqual(issue.resolution.status, "code_evidence_partial");
+    assert.notEqual(issue.resolution.status, "code_evidence_partial_github_open");
+  }
+
+  assert.match(issue97.final_disposition.reason, /snapshot_redaction_lint\.rs/);
+  assert.match(issue97.final_disposition.reason, /secret_redactor\.rs/);
+  assert.match(issue231.final_disposition.reason, /tests\/conformance\.rs/);
+  assert.match(issue231.final_disposition.reason, /tests\/conformance/);
+});

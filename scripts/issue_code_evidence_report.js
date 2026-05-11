@@ -326,6 +326,30 @@ function main() {
   }
 
   function manualEvidence(number) {
+    if (number === 97) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "crates/reddb-server/tests/snapshot_redaction_lint.rs",
+          line: 1,
+          kind: "test",
+          matched_term: "secret-redaction audit of parser snapshots",
+          snippet: "Walks every committed `*.snap` file and fails on unmasked secret-shaped substrings.",
+          term_score: 9,
+          term_sources: ["issue_338_parser_hardening_audit"],
+        },
+        {
+          type: "manual_current_test_match",
+          path: "crates/reddb-server/tests/conformance.rs",
+          line: 439,
+          kind: "test",
+          matched_term: "conformance corpus contains no unmasked secret shapes",
+          snippet: "fn conformance_corpus_contains_no_unmasked_secret_shapes() {",
+          term_score: 9,
+          term_sources: ["issue_338_parser_hardening_audit"],
+        },
+      ];
+    }
     if (number === 62) {
       return [
         {
@@ -444,6 +468,40 @@ function main() {
         },
       ];
     }
+    if (number === 231) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "crates/reddb-server/tests/conformance.rs",
+          line: 276,
+          kind: "test",
+          matched_term: "parser conformance corpus runner",
+          snippet: "fn conformance_corpus() {",
+          term_score: 9,
+          term_sources: ["issue_338_parser_hardening_audit"],
+        },
+        {
+          type: "manual_current_test_match",
+          path: "crates/reddb-server/tests/conformance.rs",
+          line: 371,
+          kind: "test",
+          matched_term: "positive parser conformance corpus coverage",
+          snippet: "fn positive_conformance_corpus_covers_documented_parser_surface() {",
+          term_score: 9,
+          term_sources: ["issue_338_parser_hardening_audit"],
+        },
+        {
+          type: "manual_current_test_match",
+          path: "crates/reddb-server/tests/conformance",
+          line: 1,
+          kind: "test",
+          matched_term: "positive parser conformance corpus cases",
+          snippet: "142 positive parser conformance TOML cases with source references.",
+          term_score: 9,
+          term_sources: ["issue_338_parser_hardening_audit"],
+        },
+      ];
+    }
     if (number === 320) {
       return [
         {
@@ -485,6 +543,28 @@ function main() {
   }
 
   function manualFinalDisposition(number) {
+    if (number === 87) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "Parser hardening is evidenced by crates/reddb-server/tests/support/parser_hardening, parser snapshot/property tests, ParserLimits in crates/reddb-server/src/storage/query/parser/limits.rs, fuzz targets under fuzz/fuzz_targets, and parser fuzz/coverage CI workflows.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 97) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "Secret-redaction backfill is evidenced by crates/reddb-server/tests/snapshot_redaction_lint.rs, crates/reddb-wire/tests/snapshot_redaction_lint.rs, shared secret_redactor.rs filters, and the conformance corpus unmasked-secret lint in crates/reddb-server/tests/conformance.rs.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
     if (number === 62) {
       return {
         outcome: "confirmed",
@@ -513,6 +593,39 @@ function main() {
         placeholder: false,
         reason:
           "The 2026-05-06 nightly DR drill failure is tied to the current-shell scripts/drill-nightly.sh fix and the public make drill-nightly workflow command.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 231) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "The positive parser conformance corpus is evidenced by crates/reddb-server/tests/conformance/*.toml, the source-reference and parser runner in crates/reddb-server/tests/conformance.rs, and the positive surface coverage contract for issue #231.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 233) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "Parser fuzz scheduling is evidenced by fuzz/fuzz_targets/sql_parser.rs, fuzz/fuzz_targets/migration_parser.rs, fuzz/fuzz_targets/conn_string_parser.rs, .github/workflows/parser-fuzz-nightly.yml, and CI fuzz build wiring.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 236) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "Lexer/table parser coverage uplift is evidenced by parser coverage workflow LCOV parsing in .github/workflows/parser-coverage.yml plus lexer/table-targeted conformance cases and parser property tests.",
         superseded_by: [],
         reopened_as: [],
         split_into: [],

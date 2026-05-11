@@ -1,6 +1,6 @@
 {
   "repository": "reddb-io/reddb",
-  "generated_at": "2026-05-11T00:22:15.566Z",
+  "generated_at": "2026-05-11T00:40:13.676Z",
   "source_state": {
     "github_issues": "/tmp/reddb_issues_raw.json",
     "current_workspace_files_indexed": 4397,
@@ -34,25 +34,25 @@
     "total": 311,
     "unique_issue_entries": 311,
     "github_open": 3,
-    "objective_reached_true": 284,
+    "objective_reached_true": 286,
     "objective_reached_false": 0,
-    "objective_reached_unknown": 27,
+    "objective_reached_unknown": 25,
     "by_status": {
-      "code_evidence_confirmed": 281,
-      "code_evidence_partial": 27,
+      "code_evidence_confirmed": 283,
+      "code_evidence_partial": 25,
       "code_evidence_confirmed_github_open": 3
     },
     "by_confidence": {
-      "high": 284,
-      "medium": 27
+      "high": 286,
+      "medium": 25
     },
     "by_final_disposition": {
-      "confirmed": 282,
+      "confirmed": 284,
       "split": 1,
       "superseded": 1,
-      "reopened": 27
+      "reopened": 25
     },
-    "placeholder_final_dispositions": 30
+    "placeholder_final_dispositions": 28
   },
   "issues": [
     {
@@ -13916,7 +13916,7 @@
         {
           "type": "current_code_match",
           "path": "crates/reddb-server/tests/conformance.rs",
-          "line": 68,
+          "line": 73,
           "kind": "test",
           "matched_term": "parse_with_cte",
           "snippet": "parser.parse_with_cte()",
@@ -30497,7 +30497,7 @@
       "final_disposition": {
         "outcome": "confirmed",
         "placeholder": false,
-        "reason": "Current workspace evidence is strong enough for this generated ledger.",
+        "reason": "Parser hardening is evidenced by crates/reddb-server/tests/support/parser_hardening, parser snapshot/property tests, ParserLimits in crates/reddb-server/src/storage/query/parser/limits.rs, fuzz targets under fuzz/fuzz_targets, and parser fuzz/coverage CI workflows.",
         "superseded_by": [],
         "reopened_as": [],
         "split_into": []
@@ -32299,7 +32299,7 @@
         {
           "type": "current_code_match",
           "path": "crates/reddb-server/tests/conformance.rs",
-          "line": 235,
+          "line": 268,
           "kind": "test",
           "matched_term": "ParseErrorKind::DepthLimit",
           "snippet": "ParseErrorKind::DepthLimit { .. } => \"DepthLimit\",",
@@ -34408,11 +34408,11 @@
         },
         {
           "type": "current_code_match",
-          "path": "crates/reddb-server/tests/geo_parser_snapshots.rs",
-          "line": 23,
+          "path": "crates/reddb-server/tests/conformance.rs",
+          "line": 20,
           "kind": "test",
           "matched_term": "secret_redactor",
-          "snippet": "use support::parser_hardening::secret_redactor;",
+          "snippet": "use support::parser_hardening::secret_redactor::{find_unmasked_secrets, UnmaskedHit};",
           "term_score": 8,
           "term_sources": [
             "code_span",
@@ -34799,20 +34799,44 @@
       "children": [],
       "descendants": [],
       "resolution": {
-        "status": "code_evidence_partial",
-        "objective_reached": null,
-        "confidence": "medium",
-        "note": "Current workspace has limited specific code/test evidence; manual review needed for full acceptance coverage."
+        "status": "code_evidence_confirmed",
+        "objective_reached": true,
+        "confidence": "high",
+        "note": "Current workspace has direct specific code/test evidence."
       },
       "final_disposition": {
-        "outcome": "reopened",
-        "placeholder": true,
-        "reason": "Only partial current code/test evidence exists; a domain slice must confirm, supersede, or split the remaining acceptance criteria.",
+        "outcome": "confirmed",
+        "placeholder": false,
+        "reason": "Secret-redaction backfill is evidenced by crates/reddb-server/tests/snapshot_redaction_lint.rs, crates/reddb-wire/tests/snapshot_redaction_lint.rs, shared secret_redactor.rs filters, and the conformance corpus unmasked-secret lint in crates/reddb-server/tests/conformance.rs.",
         "superseded_by": [],
         "reopened_as": [],
         "split_into": []
       },
       "current_code_evidence": [
+        {
+          "type": "manual_current_test_match",
+          "path": "crates/reddb-server/tests/conformance.rs",
+          "line": 439,
+          "kind": "test",
+          "matched_term": "conformance corpus contains no unmasked secret shapes",
+          "snippet": "fn conformance_corpus_contains_no_unmasked_secret_shapes() {",
+          "term_score": 9,
+          "term_sources": [
+            "issue_338_parser_hardening_audit"
+          ]
+        },
+        {
+          "type": "manual_current_test_match",
+          "path": "crates/reddb-server/tests/snapshot_redaction_lint.rs",
+          "line": 1,
+          "kind": "test",
+          "matched_term": "secret-redaction audit of parser snapshots",
+          "snippet": "Walks every committed `*.snap` file and fails on unmasked secret-shaped substrings.",
+          "term_score": 9,
+          "term_sources": [
+            "issue_338_parser_hardening_audit"
+          ]
+        },
         {
           "type": "current_code_match",
           "path": "crates/reddb-server/src/runtime/ai/ner.rs",
@@ -39712,11 +39736,11 @@
         },
         {
           "type": "current_code_match",
-          "path": "crates/reddb-server/tests/geo_parser_snapshots.rs",
-          "line": 23,
+          "path": "crates/reddb-server/tests/conformance.rs",
+          "line": 20,
           "kind": "test",
           "matched_term": "secret_redactor",
-          "snippet": "use support::parser_hardening::secret_redactor;",
+          "snippet": "use support::parser_hardening::secret_redactor::{find_unmasked_secrets, UnmaskedHit};",
           "term_score": 8,
           "term_sources": [
             "code_span",
@@ -42512,11 +42536,11 @@
         },
         {
           "type": "current_code_match",
-          "path": "crates/reddb-server/tests/geo_parser_snapshots.rs",
-          "line": 23,
+          "path": "crates/reddb-server/tests/conformance.rs",
+          "line": 20,
           "kind": "test",
           "matched_term": "secret_redactor",
-          "snippet": "use support::parser_hardening::secret_redactor;",
+          "snippet": "use support::parser_hardening::secret_redactor::{find_unmasked_secrets, UnmaskedHit};",
           "term_score": 8,
           "term_sources": [
             "code_span",
@@ -44351,11 +44375,11 @@
         },
         {
           "type": "current_code_match",
-          "path": "crates/reddb-server/tests/geo_parser_snapshots.rs",
-          "line": 23,
+          "path": "crates/reddb-server/tests/conformance.rs",
+          "line": 20,
           "kind": "test",
           "matched_term": "secret_redactor",
-          "snippet": "use support::parser_hardening::secret_redactor;",
+          "snippet": "use support::parser_hardening::secret_redactor::{find_unmasked_secrets, UnmaskedHit};",
           "term_score": 8,
           "term_sources": [
             "code_span",
@@ -44799,11 +44823,11 @@
         },
         {
           "type": "current_code_match",
-          "path": "crates/reddb-server/tests/geo_parser_snapshots.rs",
-          "line": 23,
+          "path": "crates/reddb-server/tests/conformance.rs",
+          "line": 20,
           "kind": "test",
           "matched_term": "secret_redactor",
-          "snippet": "use support::parser_hardening::secret_redactor;",
+          "snippet": "use support::parser_hardening::secret_redactor::{find_unmasked_secrets, UnmaskedHit};",
           "term_score": 8,
           "term_sources": [
             "acceptance_keyword"
@@ -89229,20 +89253,56 @@
       "children": [],
       "descendants": [],
       "resolution": {
-        "status": "code_evidence_partial",
-        "objective_reached": null,
-        "confidence": "medium",
-        "note": "Current workspace has limited specific code/test evidence; manual review needed for full acceptance coverage."
+        "status": "code_evidence_confirmed",
+        "objective_reached": true,
+        "confidence": "high",
+        "note": "Current workspace has direct specific code/test evidence."
       },
       "final_disposition": {
-        "outcome": "reopened",
-        "placeholder": true,
-        "reason": "Only partial current code/test evidence exists; a domain slice must confirm, supersede, or split the remaining acceptance criteria.",
+        "outcome": "confirmed",
+        "placeholder": false,
+        "reason": "The positive parser conformance corpus is evidenced by crates/reddb-server/tests/conformance/*.toml, the source-reference and parser runner in crates/reddb-server/tests/conformance.rs, and the positive surface coverage contract for issue #231.",
         "superseded_by": [],
         "reopened_as": [],
         "split_into": []
       },
       "current_code_evidence": [
+        {
+          "type": "manual_current_test_match",
+          "path": "crates/reddb-server/tests/conformance",
+          "line": 1,
+          "kind": "test",
+          "matched_term": "positive parser conformance corpus cases",
+          "snippet": "142 positive parser conformance TOML cases with source references.",
+          "term_score": 9,
+          "term_sources": [
+            "issue_338_parser_hardening_audit"
+          ]
+        },
+        {
+          "type": "manual_current_test_match",
+          "path": "crates/reddb-server/tests/conformance.rs",
+          "line": 371,
+          "kind": "test",
+          "matched_term": "positive parser conformance corpus coverage",
+          "snippet": "fn positive_conformance_corpus_covers_documented_parser_surface() {",
+          "term_score": 9,
+          "term_sources": [
+            "issue_338_parser_hardening_audit"
+          ]
+        },
+        {
+          "type": "manual_current_test_match",
+          "path": "crates/reddb-server/tests/conformance.rs",
+          "line": 276,
+          "kind": "test",
+          "matched_term": "parser conformance corpus runner",
+          "snippet": "fn conformance_corpus() {",
+          "term_score": 9,
+          "term_sources": [
+            "issue_338_parser_hardening_audit"
+          ]
+        },
         {
           "type": "current_code_match",
           "path": "crates/reddb-client/src/connector/mod.rs",
@@ -90075,7 +90135,7 @@
       "final_disposition": {
         "outcome": "confirmed",
         "placeholder": false,
-        "reason": "Current workspace evidence is strong enough for this generated ledger.",
+        "reason": "Parser fuzz scheduling is evidenced by fuzz/fuzz_targets/sql_parser.rs, fuzz/fuzz_targets/migration_parser.rs, fuzz/fuzz_targets/conn_string_parser.rs, .github/workflows/parser-fuzz-nightly.yml, and CI fuzz build wiring.",
         "superseded_by": [],
         "reopened_as": [],
         "split_into": []
@@ -91286,7 +91346,7 @@
       "final_disposition": {
         "outcome": "confirmed",
         "placeholder": false,
-        "reason": "Current workspace evidence is strong enough for this generated ledger.",
+        "reason": "Lexer/table parser coverage uplift is evidenced by parser coverage workflow LCOV parsing in .github/workflows/parser-coverage.yml plus lexer/table-targeted conformance cases and parser property tests.",
         "superseded_by": [],
         "reopened_as": [],
         "split_into": []

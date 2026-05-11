@@ -6,6 +6,10 @@
 //! To add a case: copy any existing `.toml` file, edit `input` / `expected_kind`
 //! / `source`. No code changes required. See `tests/conformance/README.md`.
 
+mod support {
+    pub mod parser_hardening;
+}
+
 use std::path::{Path, PathBuf};
 
 use reddb_server::storage::query::{
@@ -13,6 +17,7 @@ use reddb_server::storage::query::{
     parser::{self, ParseError, ParseErrorKind, Parser, ParserLimits},
 };
 use serde::Deserialize;
+use support::parser_hardening::secret_redactor::{find_unmasked_secrets, UnmaskedHit};
 
 #[derive(Debug, Deserialize)]
 struct ConformanceCase {
@@ -200,6 +205,34 @@ fn conformance_cases() -> Vec<(PathBuf, ConformanceCase)> {
         .collect()
 }
 
+fn format_secret_violation(path: &Path, content: &str, hit: &UnmaskedHit) -> String {
+    let prefix = &content[..hit.offset.min(content.len())];
+    let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
+    let col = prefix.rsplit('\n').next().map(|s| s.len()).unwrap_or(0) + 1;
+    format!(
+        "  {}:{}:{} - pattern={} matched={:?}",
+        path.display(),
+        line,
+        col,
+        hit.pattern,
+        hit.matched
+    )
+}
+
+fn has_case<F>(cases: &[(PathBuf, ConformanceCase)], predicate: F) -> bool
+where
+    F: Fn(&str, &str) -> bool,
+{
+    cases.iter().any(|(_, case)| {
+        if case.kind != "positive" {
+            return false;
+        }
+        let input = case.expanded_input();
+        let upper = input.to_ascii_uppercase();
+        predicate(input.as_str(), upper.as_str())
+    })
+}
+
 fn validate_source_reference(root: &std::path::Path, source: &str) -> Result<(), String> {
     if source.starts_with("proptest-regression:") {
         return Ok(());
@@ -332,4 +365,97 @@ fn conformance_sources_exist() {
             failures.join("\n\n")
         );
     }
+}
+
+#[test]
+fn positive_conformance_corpus_covers_documented_parser_surface() {
+    let cases = conformance_cases();
+    let positive_count = cases
+        .iter()
+        .filter(|(_, case)| case.kind == "positive")
+        .count();
+
+    assert!(
+        positive_count >= 40,
+        "expected at least 40 positive conformance cases for issue #231, found {positive_count}"
+    );
+
+    let required: &[(&str, fn(&str, &str) -> bool)] = &[
+        ("SELECT", |_: &str, upper: &str| {
+            upper.starts_with("SELECT ")
+        }),
+        ("INSERT", |_: &str, upper: &str| {
+            upper.starts_with("INSERT ")
+        }),
+        ("CREATE TABLE", |_: &str, upper: &str| {
+            upper.starts_with("CREATE TABLE ")
+        }),
+        ("CREATE INDEX", |_: &str, upper: &str| {
+            upper.starts_with("CREATE INDEX ")
+        }),
+        ("CREATE QUEUE", |_: &str, upper: &str| {
+            upper.starts_with("CREATE QUEUE ")
+        }),
+        ("CREATE TIMESERIES", |_: &str, upper: &str| {
+            upper.starts_with("CREATE TIMESERIES ")
+        }),
+        ("CREATE VIEW", |_: &str, upper: &str| {
+            upper.starts_with("CREATE VIEW ")
+        }),
+        ("UPDATE", |_: &str, upper: &str| {
+            upper.starts_with("UPDATE ")
+        }),
+        ("DELETE", |_: &str, upper: &str| {
+            upper.starts_with("DELETE ")
+        }),
+        ("QUEUE command", |_: &str, upper: &str| {
+            upper.starts_with("QUEUE ")
+        }),
+        ("GRAPH", |_: &str, upper: &str| {
+            upper.starts_with("MATCH ") || upper.starts_with("PATH ")
+        }),
+        ("VECTOR SEARCH", |_: &str, upper: &str| {
+            upper.contains("VECTOR SEARCH") || upper.starts_with("SEARCH SIMILAR ")
+        }),
+        ("HYBRID", |_: &str, upper: &str| upper.contains("HYBRID")),
+        ("FROM ANY", |_: &str, upper: &str| {
+            upper.starts_with("FROM ANY ")
+        }),
+    ];
+
+    let missing: Vec<&str> = required
+        .iter()
+        .filter_map(|(label, predicate)| (!has_case(&cases, *predicate)).then_some(*label))
+        .collect();
+
+    assert!(
+        missing.is_empty(),
+        "positive conformance corpus is missing required parser surfaces: {}",
+        missing.join(", ")
+    );
+}
+
+#[test]
+fn conformance_corpus_contains_no_unmasked_secret_shapes() {
+    let cases = conformance_cases();
+    let mut violations = Vec::new();
+
+    for (path, case) in cases {
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+        for hit in find_unmasked_secrets(&raw) {
+            violations.push(format_secret_violation(&path, &raw, &hit));
+        }
+
+        let input = case.expanded_input();
+        for hit in find_unmasked_secrets(&input) {
+            violations.push(format_secret_violation(&path, &input, &hit));
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "conformance corpus contains unmasked secret-shaped substrings for issue #97:\n{}",
+        violations.join("\n")
+    );
 }

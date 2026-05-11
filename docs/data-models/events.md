@@ -396,6 +396,6 @@ QUEUE NACK users_events GROUP sync_workers 'msg-id-123';
 -- result: event becomes retryable according to queue policy
 
 -- [E-30] DLQ inspection
-QUEUE READ users_events_outbox_dlq GROUP ops CONSUMER dlq_inspector COUNT 10;
+QUEUE READ user_events_outbox_dlq GROUP ops CONSUMER dlq_inspector COUNT 10;
 -- result: operator can inspect failed outbox payloads
 ```
