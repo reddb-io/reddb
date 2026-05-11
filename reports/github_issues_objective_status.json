@@ -1,9 +1,9 @@
 {
   "repository": "reddb-io/reddb",
-  "generated_at": "2026-05-11T01:26:50.230Z",
+  "generated_at": "2026-05-11T01:42:27.992Z",
   "source_state": {
     "github_issues": "/tmp/reddb_issues_raw.json",
-    "current_workspace_files_indexed": 4398,
+    "current_workspace_files_indexed": 2667,
     "indexed_roots": [
       "src",
       "crates",
@@ -34,25 +34,25 @@
     "total": 311,
     "unique_issue_entries": 311,
     "github_open": 3,
-    "objective_reached_true": 292,
+    "objective_reached_true": 294,
     "objective_reached_false": 0,
-    "objective_reached_unknown": 19,
+    "objective_reached_unknown": 17,
     "by_status": {
-      "code_evidence_confirmed": 289,
-      "code_evidence_partial": 19,
+      "code_evidence_confirmed": 291,
+      "code_evidence_partial": 17,
       "code_evidence_confirmed_github_open": 3
     },
     "by_confidence": {
-      "high": 292,
-      "medium": 19
+      "high": 294,
+      "medium": 17
     },
     "by_final_disposition": {
-      "confirmed": 290,
-      "split": 1,
+      "confirmed": 291,
+      "split": 2,
       "superseded": 1,
-      "reopened": 19
+      "reopened": 17
     },
-    "placeholder_final_dispositions": 22
+    "placeholder_final_dispositions": 20
   },
   "issues": [
     {
@@ -74847,20 +74847,44 @@
       "children": [],
       "descendants": [],
       "resolution": {
-        "status": "code_evidence_partial",
-        "objective_reached": null,
-        "confidence": "medium",
-        "note": "Current workspace has limited specific code/test evidence; manual review needed for full acceptance coverage."
+        "status": "code_evidence_confirmed",
+        "objective_reached": true,
+        "confidence": "high",
+        "note": "Current workspace has direct specific code/test evidence."
       },
       "final_disposition": {
-        "outcome": "reopened",
-        "placeholder": true,
-        "reason": "Only partial current code/test evidence exists; a domain slice must confirm, supersede, or split the remaining acceptance criteria.",
+        "outcome": "confirmed",
+        "placeholder": false,
+        "reason": "Python SDK cache behavior is evidenced by drivers/python/src/high_level.rs exposing db.cache and by drivers/python/tests/test_cache.py covering cache.get, cache.put, and cache.invalidate through the public embedded driver API.",
         "superseded_by": [],
         "reopened_as": [],
         "split_into": []
       },
       "current_code_evidence": [
+        {
+          "type": "manual_current_test_match",
+          "path": "drivers/python/tests/test_cache.py",
+          "line": 29,
+          "kind": "test",
+          "matched_term": "Python cache get put invalidate behavior",
+          "snippet": "Public Python tests cover cache put/get round trip, miss, invalidate, prefix, tags, namespace isolation, and overwrite behavior.",
+          "term_score": 9,
+          "term_sources": [
+            "issue_340_sdk_redis_migration_audit"
+          ]
+        },
+        {
+          "type": "manual_current_code_match",
+          "path": "drivers/python/src/high_level.rs",
+          "line": 319,
+          "kind": "code",
+          "matched_term": "cache.get cache.put cache.invalidate Python SDK",
+          "snippet": "Cache client exposes cache.{get,put,exists,invalidate,invalidate_prefix,invalidate_tags,flush_namespace}.",
+          "term_score": 9,
+          "term_sources": [
+            "issue_340_sdk_redis_migration_audit"
+          ]
+        },
         {
           "type": "referenced_path_exists",
           "path": "drivers/python",
@@ -75675,20 +75699,58 @@
       "children": [],
       "descendants": [],
       "resolution": {
-        "status": "code_evidence_partial",
-        "objective_reached": null,
-        "confidence": "medium",
-        "note": "Current workspace has limited specific code/test evidence; manual review needed for full acceptance coverage."
+        "status": "code_evidence_confirmed",
+        "objective_reached": true,
+        "confidence": "high",
+        "note": "Current workspace has direct specific code/test evidence."
       },
       "final_disposition": {
-        "outcome": "reopened",
-        "placeholder": true,
-        "reason": "Only partial current code/test evidence exists; a domain slice must confirm, supersede, or split the remaining acceptance criteria.",
+        "outcome": "split",
+        "placeholder": false,
+        "reason": "`red migrate-from-redis` is not implemented; docs/guides/migrate-redis-to-blob-cache.md now states the guide is the current migration surface, and the missing CLI dual-write tool is split to local follow-up #347.",
         "superseded_by": [],
         "reopened_as": [],
-        "split_into": []
+        "split_into": [
+          347
+        ]
       },
       "current_code_evidence": [
+        {
+          "type": "manual_current_doc_match",
+          "path": "issues/347-red-migrate-from-redis-cli-tool.md",
+          "line": 1,
+          "kind": "doc",
+          "matched_term": "red migrate-from-redis CLI follow-up",
+          "snippet": "Local follow-up #347 records the missing red migrate-from-redis CLI contract and dual-write acceptance criteria.",
+          "term_score": 9,
+          "term_sources": [
+            "issue_340_sdk_redis_migration_audit"
+          ]
+        },
+        {
+          "type": "manual_current_test_match",
+          "path": "scripts/sdk_redis_migration_contract.test.mjs",
+          "line": 34,
+          "kind": "test",
+          "matched_term": "red migrate-from-redis local follow-up #347",
+          "snippet": "The contract test verifies the split follow-up records the missing red migrate-from-redis CLI and dual-write acceptance criteria.",
+          "term_score": 9,
+          "term_sources": [
+            "issue_340_sdk_redis_migration_audit"
+          ]
+        },
+        {
+          "type": "manual_current_test_match",
+          "path": "scripts/sdk_redis_migration_contract.test.mjs",
+          "line": 29,
+          "kind": "test",
+          "matched_term": "red migrate-from-redis split status",
+          "snippet": "Redis migration CLI status is explicit and split to a follow-up.",
+          "term_score": 9,
+          "term_sources": [
+            "issue_340_sdk_redis_migration_audit"
+          ]
+        },
         {
           "type": "current_code_match",
           "path": "crates/reddb-client/src/topology.rs",
@@ -82824,7 +82886,7 @@
         {
           "type": "current_code_match",
           "path": "docs/guides/migrate-redis-to-blob-cache.md",
-          "line": 403,
+          "line": 411,
           "kind": "doc",
           "matched_term": "docs/perf/blob-cache-bench-2026-05-06.md",
           "snippet": "- [`docs/perf/blob-cache-bench-2026-05-06.md`](../perf/blob-cache-bench-2026-05-06.md)",

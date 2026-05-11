@@ -8,7 +8,9 @@ import { test } from "node:test";
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const issuesPath = process.env.REDDB_ISSUES_RAW || "/tmp/reddb_issues_raw.json";
 
-function runReport() {
+let cachedReport = null;
+
+function runFreshReport() {
   const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "reddb-evidence-report-"));
   cp.execFileSync("node", ["scripts/issue_code_evidence_report.js", issuesPath, outDir], {
     cwd: repoRoot,
@@ -18,6 +20,11 @@ function runReport() {
 
   const reportPath = path.join(outDir, "github_issues_code_evidence_status.json");
   return JSON.parse(fs.readFileSync(reportPath, "utf8"));
+}
+
+function runReport() {
+  if (!cachedReport) cachedReport = runFreshReport();
+  return cachedReport;
 }
 
 function stableLedger(report) {
@@ -36,7 +43,7 @@ test("issue evidence report has reproducible final dispositions", () => {
   assert.ok(fs.existsSync(issuesPath), `${issuesPath} must exist`);
 
   const report = runReport();
-  const repeatReport = runReport();
+  const repeatReport = runFreshReport();
   const numbers = report.issues.map((issue) => issue.number);
   const uniqueNumbers = new Set(numbers);
 
@@ -199,4 +206,27 @@ test("DDL auth closure records final disposition for issue 344 scope", () => {
   assert.match(issue309.final_disposition.reason, /tests\/iam_policy_runtime\.rs/);
   assert.match(issue309.final_disposition.reason, /DROP and TRUNCATE/);
   assert.match(issue309.final_disposition.reason, /audit/);
+});
+
+test("SDK and Redis migration tooling closure records final dispositions for issue 340 scope", () => {
+  assert.ok(fs.existsSync(issuesPath), `${issuesPath} must exist`);
+
+  const report = runReport();
+  const issue197 = issueByNumber(report, 197);
+  const issue199 = issueByNumber(report, 199);
+
+  assert.equal(issue197.final_disposition.outcome, "confirmed");
+  assert.equal(issue197.final_disposition.placeholder, false);
+  assert.notEqual(issue197.resolution.status, "code_evidence_partial");
+  assert.notEqual(issue197.resolution.status, "code_evidence_partial_github_open");
+  assert.match(issue197.final_disposition.reason, /drivers\/python\/tests\/test_cache\.py/);
+  assert.match(issue197.final_disposition.reason, /cache\.get, cache\.put, and cache\.invalidate/);
+
+  assert.equal(issue199.final_disposition.outcome, "split");
+  assert.equal(issue199.final_disposition.placeholder, false);
+  assert.deepEqual(issue199.final_disposition.split_into, [347]);
+  assert.notEqual(issue199.resolution.status, "code_evidence_partial");
+  assert.notEqual(issue199.resolution.status, "code_evidence_partial_github_open");
+  assert.match(issue199.final_disposition.reason, /red migrate-from-redis/);
+  assert.match(issue199.final_disposition.reason, /docs\/guides\/migrate-redis-to-blob-cache\.md/);
 });

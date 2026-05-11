@@ -239,6 +239,7 @@ function main() {
     .split(/\r?\n/)
     .filter(Boolean)
     .filter((file) => !/(^|\/)target\//.test(file))
+    .filter((file) => !/(^|\/)(vendor|node_modules|\.venv)\//.test(file))
     .filter((file) => !/\.(png|jpg|jpeg|gif|webp|ico|lock|bin|db|wal)$/i.test(file))
     .sort();
 
@@ -731,6 +732,64 @@ function main() {
         },
       ];
     }
+    if (number === 197) {
+      return [
+        {
+          type: "manual_current_code_match",
+          path: "drivers/python/src/high_level.rs",
+          line: 319,
+          kind: "code",
+          matched_term: "cache.get cache.put cache.invalidate Python SDK",
+          snippet: "Cache client exposes cache.{get,put,exists,invalidate,invalidate_prefix,invalidate_tags,flush_namespace}.",
+          term_score: 9,
+          term_sources: ["issue_340_sdk_redis_migration_audit"],
+        },
+        {
+          type: "manual_current_test_match",
+          path: "drivers/python/tests/test_cache.py",
+          line: 29,
+          kind: "test",
+          matched_term: "Python cache get put invalidate behavior",
+          snippet: "Public Python tests cover cache put/get round trip, miss, invalidate, prefix, tags, namespace isolation, and overwrite behavior.",
+          term_score: 9,
+          term_sources: ["issue_340_sdk_redis_migration_audit"],
+        },
+      ];
+    }
+    if (number === 199) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "scripts/sdk_redis_migration_contract.test.mjs",
+          line: 29,
+          kind: "test",
+          matched_term: "red migrate-from-redis split status",
+          snippet: "Redis migration CLI status is explicit and split to a follow-up.",
+          term_score: 9,
+          term_sources: ["issue_340_sdk_redis_migration_audit"],
+        },
+        {
+          type: "manual_current_test_match",
+          path: "scripts/sdk_redis_migration_contract.test.mjs",
+          line: 34,
+          kind: "test",
+          matched_term: "red migrate-from-redis local follow-up #347",
+          snippet: "The contract test verifies the split follow-up records the missing red migrate-from-redis CLI and dual-write acceptance criteria.",
+          term_score: 9,
+          term_sources: ["issue_340_sdk_redis_migration_audit"],
+        },
+        {
+          type: "manual_current_doc_match",
+          path: "issues/347-red-migrate-from-redis-cli-tool.md",
+          line: 1,
+          kind: "doc",
+          matched_term: "red migrate-from-redis CLI follow-up",
+          snippet: "Local follow-up #347 records the missing red migrate-from-redis CLI contract and dual-write acceptance criteria.",
+          term_score: 9,
+          term_sources: ["issue_340_sdk_redis_migration_audit"],
+        },
+      ];
+    }
     if (number === 320) {
       return [
         {
@@ -902,6 +961,28 @@ function main() {
         superseded_by: [],
         reopened_as: [],
         split_into: [],
+      };
+    }
+    if (number === 197) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "Python SDK cache behavior is evidenced by drivers/python/src/high_level.rs exposing db.cache and by drivers/python/tests/test_cache.py covering cache.get, cache.put, and cache.invalidate through the public embedded driver API.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 199) {
+      return {
+        outcome: "split",
+        placeholder: false,
+        reason:
+          "`red migrate-from-redis` is not implemented; docs/guides/migrate-redis-to-blob-cache.md now states the guide is the current migration surface, and the missing CLI dual-write tool is split to local follow-up #347.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [347],
       };
     }
     if (number === 263) {

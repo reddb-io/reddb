@@ -206,6 +206,14 @@ a single-engine deployment, Blob Cache fits.
 The rollout is three phases. Each phase has a clear exit criterion;
 do not advance past one until the criterion is met.
 
+### Tool status
+
+`red migrate-from-redis` is not implemented. This guide is the current
+migration surface: applications own the dual-write helper, shadow-read
+comparison, cutover flag, and decommission steps. A CLI that automates
+the same phases is split to local follow-up #347 rather than implied by
+the guide.
+
 ### Phase 1 — Dual-write
 
 Writes go to both Redis **and** Blob Cache. Reads continue from
