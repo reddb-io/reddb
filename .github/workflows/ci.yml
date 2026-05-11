@@ -22,6 +22,7 @@ on:
       - 'docs/**'
       - 'CHANGELOG**'
       - 'LICENSE**'
+  workflow_dispatch:
 
 # Cost guard: a fresh push to a PR cancels the previous run. Devs
 # iterating on a branch don't double-pay 16 jobs per push.
