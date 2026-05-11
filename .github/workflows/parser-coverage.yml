@@ -12,11 +12,9 @@ on:
     branches: [main]
     paths:
       - 'crates/reddb-server/src/storage/query/**'
-      - 'Cargo.lock'
   pull_request:
     paths:
       - 'crates/reddb-server/src/storage/query/**'
-      - 'Cargo.lock'
 
 concurrency:
   group: parser-coverage-${{ github.workflow }}-${{ github.ref }}
