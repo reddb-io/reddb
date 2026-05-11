@@ -2294,6 +2294,7 @@ dependencies = [
  "reddb-grpc-proto",
  "reddb-wire",
  "regex",
+ "reqwest",
  "roaring",
  "rstar",
  "rustls",
