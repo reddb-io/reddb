@@ -25,7 +25,7 @@
  *   - drivers/js/package.json         (@reddb-io/sdk npm)
  *   - drivers/js-client/package.json  (@reddb-io/client npm — optional, Lane T #136)
  *   - drivers/bun/package.json        (@reddb-io/client-bun npm)
- *   - packages/internal-*.package.json (@reddb-io/internal-* npm support packages)
+ *   - packages/internal-*.package.json (private npm workspace support packages)
  *   - drivers/python/Cargo.toml       (reddb-python internal name)
  *   - drivers/python/Cargo.lock       (path package versions)
  *   - drivers/python/pyproject.toml   (reddb PyPI)

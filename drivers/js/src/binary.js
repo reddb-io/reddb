@@ -22,7 +22,7 @@ import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve, join } from 'node:path'
 
-import { resolveBin } from '@reddb-io/internal-bin-resolver'
+import { resolveBin } from './internal/bin-resolver/index.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PACKAGE_ROOT = resolve(HERE, '..')

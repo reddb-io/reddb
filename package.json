@@ -20,10 +20,6 @@
     "test": "node drivers/js/test/smoke.test.mjs",
     "version": "node scripts/sync-version.js"
   },
-  "dependencies": {
-    "@reddb-io/internal-asset-fetcher": "workspace:^",
-    "@reddb-io/internal-version-compare": "workspace:^"
-  },
   "keywords": [
     "database",
     "multi-model",

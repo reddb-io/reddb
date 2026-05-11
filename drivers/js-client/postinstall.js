@@ -4,7 +4,7 @@
  *
  * Behaviour:
  *   - Resolves `red_client-<platform>-<arch>` from process.platform +
- *     process.arch via @reddb-io/internal-asset-fetcher.
+ *     process.arch via the vendored asset fetcher.
  *   - Targets the GitHub release matching this package's version.
  *   - Drops the binary at `<package>/bin/red_client[.exe]` and chmods
  *     +x on Unix.
@@ -31,7 +31,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { existsSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs'
 
-import { fetchReleaseAsset } from '@reddb-io/internal-asset-fetcher'
+import { fetchReleaseAsset } from './src/internal/asset-fetcher/index.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const require = createRequire(import.meta.url)

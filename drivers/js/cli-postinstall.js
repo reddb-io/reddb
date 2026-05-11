@@ -25,8 +25,8 @@ import { dirname, join } from 'node:path'
 import { existsSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs'
 import { execSync } from 'node:child_process'
 
-import { fetchReleaseAsset } from '@reddb-io/internal-asset-fetcher'
-import { compareInstalled } from '@reddb-io/internal-version-compare'
+import { fetchReleaseAsset } from './src/internal/asset-fetcher/index.js'
+import { compareInstalled } from './src/internal/version-compare/index.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const require = createRequire(import.meta.url)
