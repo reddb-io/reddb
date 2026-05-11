@@ -564,6 +564,16 @@ impl StatementExecutionFrame {
             .map_err(|err| RedDBError::Query(format!("permission denied: {err}")))
     }
 
+    pub(super) fn prepare_dispatch(
+        &self,
+        runtime: &RedDBRuntime,
+        expr: &QueryExpr,
+    ) -> RedDBResult<Option<crate::runtime::locking::LockerGuard>> {
+        runtime.validate_model_operations_before_auth(expr)?;
+        self.check_query_privilege(runtime, expr)?;
+        Ok(self.acquire_intent_locks(runtime, expr))
+    }
+
     pub(super) fn acquire_intent_locks(
         &self,
         runtime: &RedDBRuntime,
