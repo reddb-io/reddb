@@ -61,7 +61,6 @@ fn append_only_table_rejects_update_with_clear_message() {
         })
         .unwrap();
     let v = sel.result.records[0]
-        .values
         .get("v")
         .expect("v present")
         .to_string();
@@ -113,11 +112,7 @@ fn non_append_only_table_keeps_mutable_semantics() {
             query: "SELECT name FROM users WHERE id = 1".into(),
         })
         .unwrap();
-    let name = sel.result.records[0]
-        .values
-        .get("name")
-        .unwrap()
-        .to_string();
+    let name = sel.result.records[0].get("name").unwrap().to_string();
     assert!(name.contains("bob"));
 }
 

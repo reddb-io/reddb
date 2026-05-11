@@ -4475,7 +4475,10 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
         ]);
         let flags = HashMap::new();
         let (grpc_bind, http_bind) = resolve_server_binds(&flags).unwrap();
-        assert_eq!(grpc_bind.as_deref(), Some("127.0.0.1:5055"));
+        assert_eq!(
+            grpc_bind.as_deref(),
+            Some(reddb::service_cli::ServerTransport::Grpc.default_bind_addr())
+        );
         assert_eq!(http_bind, None);
     }
 
@@ -4492,8 +4495,14 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             ("http".to_string(), bool_flag(true)),
         ]);
         let (grpc_bind, http_bind) = resolve_server_binds(&flags).unwrap();
-        assert_eq!(grpc_bind.as_deref(), Some("127.0.0.1:5055"));
-        assert_eq!(http_bind.as_deref(), Some("127.0.0.1:8080"));
+        assert_eq!(
+            grpc_bind.as_deref(),
+            Some(reddb::service_cli::ServerTransport::Grpc.default_bind_addr())
+        );
+        assert_eq!(
+            http_bind.as_deref(),
+            Some(reddb::service_cli::ServerTransport::Http.default_bind_addr())
+        );
     }
 
     #[test]

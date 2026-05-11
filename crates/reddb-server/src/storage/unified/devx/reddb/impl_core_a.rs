@@ -1,6 +1,21 @@
 use super::*;
 use crate::api::DurabilityMode;
 
+fn write_optional_snapshot_sidecar(
+    json: &crate::json::Value,
+    field: &str,
+    path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(value_hex) = json.get(field).and_then(crate::json::Value::as_str) else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, hex::decode(value_hex)?)?;
+    Ok(())
+}
+
 fn store_config_from_options(options: &RedDBOptions) -> UnifiedStoreConfig {
     let mut config = UnifiedStoreConfig::default()
         .with_durability_mode(options.durability_mode)
@@ -117,6 +132,30 @@ impl RedDB {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(local_path, bytes)?;
+
+        let metadata_binary_path =
+            crate::physical::PhysicalMetadataFile::metadata_binary_path_for(local_path);
+        write_optional_snapshot_sidecar(&json, "metadata_binary_hex", &metadata_binary_path)?;
+
+        let metadata_json_path =
+            crate::physical::PhysicalMetadataFile::metadata_path_for(local_path);
+        write_optional_snapshot_sidecar(&json, "metadata_json_hex", &metadata_json_path)?;
+
+        let mut header_shadow = local_path.to_path_buf().into_os_string();
+        header_shadow.push("-hdr");
+        write_optional_snapshot_sidecar(
+            &json,
+            "header_shadow_hex",
+            &std::path::PathBuf::from(header_shadow),
+        )?;
+
+        let mut metadata_shadow = local_path.to_path_buf().into_os_string();
+        metadata_shadow.push("-meta");
+        write_optional_snapshot_sidecar(
+            &json,
+            "metadata_shadow_hex",
+            &std::path::PathBuf::from(metadata_shadow),
+        )?;
         Ok(true)
     }
 

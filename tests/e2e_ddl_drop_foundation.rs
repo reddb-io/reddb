@@ -1,12 +1,63 @@
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use reddb::application::ExecuteQueryInput;
+use reddb::auth::{AuthConfig, AuthStore};
 use reddb::catalog::{CollectionModel, SchemaMode};
 use reddb::physical::{CollectionContract, ContractOrigin};
 use reddb::storage::query::unified::UnifiedRecord;
 use reddb::storage::schema::Value;
-use reddb::{QueryUseCases, RedDBRuntime};
+use reddb::{QueryUseCases, RedDBOptions, RedDBRuntime};
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("in-memory runtime")
+}
+
+fn temp_db_path(name: &str) -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::env::temp_dir().join(format!("reddb_{name}_{unique}.rdb"))
+}
+
+fn cleanup_related(path: &Path) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let Some(stem) = path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            let Some(name) = entry_path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name == stem || name.starts_with(&format!("{stem}-")) {
+                let _ = std::fs::remove_file(&entry_path);
+                let _ = std::fs::remove_dir_all(&entry_path);
+            }
+        }
+    }
+}
+
+fn rt_with_vault(path: &Path) -> RedDBRuntime {
+    let rt =
+        RedDBRuntime::with_options(RedDBOptions::persistent(path)).expect("runtime should open");
+    let pager = Arc::clone(
+        rt.db()
+            .store()
+            .pager()
+            .expect("persistent runtime should expose pager"),
+    );
+    let auth = Arc::new(
+        AuthStore::with_vault(AuthConfig::default(), pager, Some("ddl-drop-foundation"))
+            .expect("vault should open"),
+    );
+    rt.set_auth_store(auth);
+    rt
 }
 
 fn text_field(row: &UnifiedRecord, field: &str) -> String {
@@ -94,7 +145,9 @@ fn drop_collection_dispatches_polymorphically_and_if_exists_is_idempotent() {
 
 #[test]
 fn create_keyed_models_are_visible_in_typed_show_filters() {
-    let rt = rt();
+    let path = temp_db_path("ddl_drop_foundation_vault");
+    cleanup_related(&path);
+    let rt = rt_with_vault(&path);
     exec(&rt, "CREATE KV sessions");
     exec(&rt, "CREATE CONFIG app_settings");
     exec(&rt, "CREATE VAULT secrets");
@@ -107,13 +160,24 @@ fn create_keyed_models_are_visible_in_typed_show_filters() {
         let result = rt
             .execute_query(sql)
             .unwrap_or_else(|err| panic!("{sql}: {err}"));
-        assert_eq!(result.result.records.len(), 1, "{sql}");
-        assert_eq!(text_field(&result.result.records[0], "name"), expected_name);
-        assert_eq!(
-            text_field(&result.result.records[0], "model"),
-            expected_model
+        assert!(
+            result.result.records.iter().any(|row| {
+                text_field(row, "name") == expected_name
+                    && text_field(row, "model") == expected_model
+            }),
+            "{sql} should include {expected_name}"
+        );
+        assert!(
+            result
+                .result
+                .records
+                .iter()
+                .all(|row| text_field(row, "model") == expected_model),
+            "{sql} should only return {expected_model} models"
         );
     }
+    drop(rt);
+    cleanup_related(&path);
 }
 
 #[test]

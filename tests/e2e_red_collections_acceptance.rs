@@ -15,7 +15,7 @@ use reddb::storage::query::unified::UnifiedRecord;
 use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
 
-const COLLECTION_COLUMNS: [&str; 9] = [
+const COLLECTION_COLUMNS: [&str; 11] = [
     "name",
     "model",
     "schema_mode",
@@ -23,8 +23,10 @@ const COLLECTION_COLUMNS: [&str; 9] = [
     "segments",
     "indices",
     "in_memory_bytes",
+    "on_disk_bytes",
     "internal",
     "tenant_id",
+    "queue_mode",
 ];
 
 fn open_runtime() -> RedDBRuntime {
@@ -122,7 +124,13 @@ fn select_star_from_red_collections_returns_collection_inventory() {
         matches!(acme.get("schema_mode"), Some(Value::Text(_))),
         "schema_mode should be present: {acme:?}"
     );
-    for numeric in ["entities", "segments", "in_memory_bytes"] {
+    for numeric in [
+        "entities",
+        "segments",
+        "indices",
+        "in_memory_bytes",
+        "on_disk_bytes",
+    ] {
         assert!(
             matches!(
                 acme.get(numeric),
@@ -132,8 +140,11 @@ fn select_star_from_red_collections_returns_collection_inventory() {
         );
     }
     assert!(
-        matches!(acme.get("indices"), Some(Value::Array(_))),
-        "indices should be an array metric: {acme:?}"
+        matches!(
+            acme.get("queue_mode"),
+            Some(Value::Null) | Some(Value::Text(_))
+        ),
+        "queue_mode should be null for non-queues or text for queues: {acme:?}"
     );
     assert_eq!(bool_field(acme, "internal"), false);
 }

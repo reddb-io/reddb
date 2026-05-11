@@ -125,10 +125,7 @@ fn refresh_absorbs_rows_and_query_returns_aggregate() {
             query: format!("SELECT CA_REFRESH('avg_load', {now_ns}) AS absorbed"),
         })
         .expect("refresh ok");
-    let absorbed = r.result.records[0]
-        .values
-        .get("absorbed")
-        .expect("absorbed");
+    let absorbed = r.result.records[0].get("absorbed").expect("absorbed");
     assert!(
         matches!(absorbed, Value::Integer(n) if *n >= 2),
         "expected >= 2 rows absorbed, got {absorbed:?}"

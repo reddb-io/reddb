@@ -1,3 +1,15 @@
+fn insert_snapshot_sidecar(
+    map: &mut Map<String, JsonValue>,
+    field: &str,
+    path: &std::path::Path,
+) -> Result<(), Status> {
+    if path.exists() {
+        let bytes = std::fs::read(path).map_err(|e| Status::internal(e.to_string()))?;
+        map.insert(field.into(), JsonValue::String(hex::encode(bytes)));
+    }
+    Ok(())
+}
+
 #[tonic::async_trait]
 impl RedDb for GrpcRuntime {
 type KvWatchStream = Pin<Box<dyn tokio_stream::Stream<Item = Result<KvWatchEvent, Status>> + Send + 'static>>;
@@ -2692,6 +2704,33 @@ async fn replication_snapshot(
             "snapshot_path".into(),
             JsonValue::String(path.display().to_string()),
         );
+
+        insert_snapshot_sidecar(
+            &mut map,
+            "metadata_binary_hex",
+            &crate::physical::PhysicalMetadataFile::metadata_binary_path_for(path),
+        )?;
+        insert_snapshot_sidecar(
+            &mut map,
+            "metadata_json_hex",
+            &crate::physical::PhysicalMetadataFile::metadata_path_for(path),
+        )?;
+
+        let mut header_shadow = path.to_path_buf().into_os_string();
+        header_shadow.push("-hdr");
+        insert_snapshot_sidecar(
+            &mut map,
+            "header_shadow_hex",
+            &std::path::PathBuf::from(header_shadow),
+        )?;
+
+        let mut metadata_shadow = path.to_path_buf().into_os_string();
+        metadata_shadow.push("-meta");
+        insert_snapshot_sidecar(
+            &mut map,
+            "metadata_shadow_hex",
+            &std::path::PathBuf::from(metadata_shadow),
+        )?;
     }
     if let Some(ref repl) = db.replication {
         map.insert(

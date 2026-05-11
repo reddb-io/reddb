@@ -101,6 +101,7 @@ fn populate(rt: &RedDBRuntime, target_bytes: u64) {
         uc.create_rows_batch(CreateRowsBatchInput {
             collection: "bench_rows".into(),
             rows,
+            suppress_events: false,
         })
         .expect("populate batch");
         written += TARGET_BYTES_PER_ROW * ROWS_PER_BATCH as u64;
