@@ -17,15 +17,20 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::runtime::audit_log::{AuditAuthSource, AuditEvent, AuditLogger, Outcome};
 use super::operator_event::OperatorEvent;
+use crate::runtime::audit_log::{AuditAuthSource, AuditEvent, AuditLogger, Outcome};
 
 // ---------------------------------------------------------------------------
 // Validation helpers
 // ---------------------------------------------------------------------------
 
-const KNOWN_HANDLERS: &[&str] =
-    &["audit_log", "tracing", "stderr", "pagerduty", "generic_webhook"];
+const KNOWN_HANDLERS: &[&str] = &[
+    "audit_log",
+    "tracing",
+    "stderr",
+    "pagerduty",
+    "generic_webhook",
+];
 
 fn closest_match(input: &str, candidates: &[&str]) -> Option<String> {
     candidates
@@ -87,9 +92,17 @@ pub struct RouterConfig {
 
 #[derive(Debug)]
 pub enum ConfigError {
-    UnknownVariant { key: String, suggestion: Option<String> },
-    UnknownHandler { key: String },
-    MissingEnvVar { handler: String, var: String },
+    UnknownVariant {
+        key: String,
+        suggestion: Option<String>,
+    },
+    UnknownHandler {
+        key: String,
+    },
+    MissingEnvVar {
+        handler: String,
+        var: String,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -137,7 +150,12 @@ impl TokenBucket {
             cfg.requests as f64
         };
         let burst = rate.max(1.0);
-        Self { tokens: burst, rate, burst, last: Instant::now() }
+        Self {
+            tokens: burst,
+            rate,
+            burst,
+            last: Instant::now(),
+        }
     }
 
     fn try_consume(&mut self) -> bool {
@@ -222,7 +240,10 @@ impl WebhookPayload {
         use crate::serde_json::Value;
         let event_json = Value::String(self.action.clone()).to_string_compact();
         let summary_json = Value::String(self.summary.clone()).to_string_compact();
-        format!(r#"{{"event":{event_json},"summary":{summary_json},"ts":{}}}"#, self.ts_ms)
+        format!(
+            r#"{{"event":{event_json},"summary":{summary_json},"ts":{}}}"#,
+            self.ts_ms
+        )
     }
 }
 
@@ -366,7 +387,10 @@ impl OperatorEventRouter {
         for key in config.variant_routes.keys() {
             if !known_variants.contains(&key.as_str()) {
                 let suggestion = closest_match(key, known_variants);
-                return Err(ConfigError::UnknownVariant { key: key.clone(), suggestion });
+                return Err(ConfigError::UnknownVariant {
+                    key: key.clone(),
+                    suggestion,
+                });
             }
         }
 
@@ -386,16 +410,23 @@ impl OperatorEventRouter {
             .pagerduty
             .as_ref()
             .map(|cfg| -> Result<Arc<EffectiveHandler>, ConfigError> {
-                let token = std::env::var(&cfg.auth_env).map_err(|_| {
-                    ConfigError::MissingEnvVar {
+                let token =
+                    std::env::var(&cfg.auth_env).map_err(|_| ConfigError::MissingEnvVar {
                         handler: "pagerduty".into(),
                         var: cfg.auth_env.clone(),
-                    }
-                })?;
+                    })?;
                 let queue = WebhookQueue::new();
                 webhook_queues.insert("pagerduty".into(), Arc::clone(&queue));
-                workers.push(spawn_webhook_worker("pagerduty", cfg.url.clone(), token, Arc::clone(&queue)));
-                let rate_limiter = cfg.rate_limit.as_ref().map(|rl| Mutex::new(TokenBucket::new(rl)));
+                workers.push(spawn_webhook_worker(
+                    "pagerduty",
+                    cfg.url.clone(),
+                    token,
+                    Arc::clone(&queue),
+                ));
+                let rate_limiter = cfg
+                    .rate_limit
+                    .as_ref()
+                    .map(|rl| Mutex::new(TokenBucket::new(rl)));
                 Ok(Arc::new(EffectiveHandler::Webhook {
                     name: "pagerduty".into(),
                     queue,
@@ -408,16 +439,23 @@ impl OperatorEventRouter {
             .generic_webhook
             .as_ref()
             .map(|cfg| -> Result<Arc<EffectiveHandler>, ConfigError> {
-                let token = std::env::var(&cfg.auth_env).map_err(|_| {
-                    ConfigError::MissingEnvVar {
+                let token =
+                    std::env::var(&cfg.auth_env).map_err(|_| ConfigError::MissingEnvVar {
                         handler: "generic_webhook".into(),
                         var: cfg.auth_env.clone(),
-                    }
-                })?;
+                    })?;
                 let queue = WebhookQueue::new();
                 webhook_queues.insert("generic_webhook".into(), Arc::clone(&queue));
-                workers.push(spawn_webhook_worker("generic_webhook", cfg.url.clone(), token, Arc::clone(&queue)));
-                let rate_limiter = cfg.rate_limit.as_ref().map(|rl| Mutex::new(TokenBucket::new(rl)));
+                workers.push(spawn_webhook_worker(
+                    "generic_webhook",
+                    cfg.url.clone(),
+                    token,
+                    Arc::clone(&queue),
+                ));
+                let rate_limiter = cfg
+                    .rate_limit
+                    .as_ref()
+                    .map(|rl| Mutex::new(TokenBucket::new(rl)));
                 Ok(Arc::new(EffectiveHandler::Webhook {
                     name: "generic_webhook".into(),
                     queue,
@@ -447,12 +485,9 @@ impl OperatorEventRouter {
         let default_names = config.default_handlers.as_deref().unwrap_or(&code_default);
         let default_route = resolve(default_names);
 
-        let mut variant_routes: HashMap<&'static str, Vec<Arc<EffectiveHandler>>> =
-            HashMap::new();
+        let mut variant_routes: HashMap<&'static str, Vec<Arc<EffectiveHandler>>> = HashMap::new();
         for (key, names) in &config.variant_routes {
-            if let Some(static_key) =
-                known_variants.iter().copied().find(|v| *v == key.as_str())
-            {
+            if let Some(static_key) = known_variants.iter().copied().find(|v| *v == key.as_str()) {
                 variant_routes.insert(static_key, resolve(names));
             }
         }
@@ -498,7 +533,11 @@ impl OperatorEventRouter {
                 EffectiveHandler::Stderr => {
                     eprintln!("[reddb::operator] {summary}");
                 }
-                EffectiveHandler::Webhook { name, queue, rate_limiter } => {
+                EffectiveHandler::Webhook {
+                    name,
+                    queue,
+                    rate_limiter,
+                } => {
                     if let Some(rl) = rate_limiter {
                         let allowed = rl.lock().expect("rate limiter mutex").try_consume();
                         if !allowed {
@@ -529,7 +568,8 @@ impl OperatorEventRouter {
                 + q.dropped_rate_limit.load(Ordering::Relaxed)
                 + q.dropped_max_retries.load(Ordering::Relaxed);
             snap.dropped.push((name.clone(), dropped));
-            snap.sent.push((name.clone(), q.sent.load(Ordering::Relaxed)));
+            snap.sent
+                .push((name.clone(), q.sent.load(Ordering::Relaxed)));
         }
         snap
     }
@@ -572,7 +612,9 @@ mod tests {
         let body = std::fs::read_to_string(path).ok()?;
         let line = body.lines().last()?;
         let v: crate::serde_json::Value = crate::serde_json::from_str(line).ok()?;
-        v.get("action").and_then(|x| x.as_str()).map(|s| s.to_string())
+        v.get("action")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string())
     }
 
     // -----------------------------------------------------------------------
@@ -586,19 +628,60 @@ mod tests {
             .expect("router build");
 
         let variants: &[OperatorEvent] = &[
-            OperatorEvent::ReplicationBroken { peer: "p".into(), reason: "r".into() },
-            OperatorEvent::Divergence { peer: "p".into(), leader_lsn: 1, follower_lsn: 0 },
-            OperatorEvent::WalFsyncFailed { path: "/d".into(), error: "e".into() },
-            OperatorEvent::DiskSpaceCritical { path: "/d".into(), available_bytes: 1, threshold_bytes: 2 },
-            OperatorEvent::AuthBypass { principal: "a".into(), resource: "r".into(), detail: "d".into() },
-            OperatorEvent::AdminCapabilityGranted { granted_to: "a".into(), capability: "c".into(), granted_by: "b".into() },
-            OperatorEvent::SecretRotationFailed { secret_ref: "s".into(), error: "e".into() },
-            OperatorEvent::ConfigChanged { key: "k".into(), old_value: "o".into(), new_value: "n".into(), changed_by: "b".into() },
-            OperatorEvent::StartupFailed { phase: "p".into(), error: "e".into() },
+            OperatorEvent::ReplicationBroken {
+                peer: "p".into(),
+                reason: "r".into(),
+            },
+            OperatorEvent::Divergence {
+                peer: "p".into(),
+                leader_lsn: 1,
+                follower_lsn: 0,
+            },
+            OperatorEvent::WalFsyncFailed {
+                path: "/d".into(),
+                error: "e".into(),
+            },
+            OperatorEvent::DiskSpaceCritical {
+                path: "/d".into(),
+                available_bytes: 1,
+                threshold_bytes: 2,
+            },
+            OperatorEvent::AuthBypass {
+                principal: "a".into(),
+                resource: "r".into(),
+                detail: "d".into(),
+            },
+            OperatorEvent::AdminCapabilityGranted {
+                granted_to: "a".into(),
+                capability: "c".into(),
+                granted_by: "b".into(),
+            },
+            OperatorEvent::SecretRotationFailed {
+                secret_ref: "s".into(),
+                error: "e".into(),
+            },
+            OperatorEvent::ConfigChanged {
+                key: "k".into(),
+                old_value: "o".into(),
+                new_value: "n".into(),
+                changed_by: "b".into(),
+            },
+            OperatorEvent::StartupFailed {
+                phase: "p".into(),
+                error: "e".into(),
+            },
             OperatorEvent::ShutdownForced { reason: "r".into() },
-            OperatorEvent::SchemaCorruption { collection: "c".into(), detail: "d".into() },
-            OperatorEvent::CheckpointFailed { lsn: 1, error: "e".into() },
-            OperatorEvent::ConfigChangeRequiresRestart { fields_changed: "f".into() },
+            OperatorEvent::SchemaCorruption {
+                collection: "c".into(),
+                detail: "d".into(),
+            },
+            OperatorEvent::CheckpointFailed {
+                lsn: 1,
+                error: "e".into(),
+            },
+            OperatorEvent::ConfigChangeRequiresRestart {
+                fields_changed: "f".into(),
+            },
             OperatorEvent::SubscriptionSchemaChange {
                 collection: "c".into(),
                 subscription_names: "sub1".into(),
@@ -631,48 +714,94 @@ mod tests {
     // Clone helper for test variants that don't use crypto types.
     fn clone_event(e: &OperatorEvent) -> OperatorEvent {
         match e {
-            OperatorEvent::ReplicationBroken { peer, reason } => {
-                OperatorEvent::ReplicationBroken { peer: peer.clone(), reason: reason.clone() }
-            }
-            OperatorEvent::Divergence { peer, leader_lsn, follower_lsn } => {
-                OperatorEvent::Divergence { peer: peer.clone(), leader_lsn: *leader_lsn, follower_lsn: *follower_lsn }
-            }
-            OperatorEvent::WalFsyncFailed { path, error } => {
-                OperatorEvent::WalFsyncFailed { path: path.clone(), error: error.clone() }
-            }
-            OperatorEvent::DiskSpaceCritical { path, available_bytes, threshold_bytes } => {
-                OperatorEvent::DiskSpaceCritical { path: path.clone(), available_bytes: *available_bytes, threshold_bytes: *threshold_bytes }
-            }
-            OperatorEvent::AuthBypass { principal, resource, detail } => {
-                OperatorEvent::AuthBypass { principal: principal.clone(), resource: resource.clone(), detail: detail.clone() }
-            }
-            OperatorEvent::AdminCapabilityGranted { granted_to, capability, granted_by } => {
-                OperatorEvent::AdminCapabilityGranted { granted_to: granted_to.clone(), capability: capability.clone(), granted_by: granted_by.clone() }
-            }
+            OperatorEvent::ReplicationBroken { peer, reason } => OperatorEvent::ReplicationBroken {
+                peer: peer.clone(),
+                reason: reason.clone(),
+            },
+            OperatorEvent::Divergence {
+                peer,
+                leader_lsn,
+                follower_lsn,
+            } => OperatorEvent::Divergence {
+                peer: peer.clone(),
+                leader_lsn: *leader_lsn,
+                follower_lsn: *follower_lsn,
+            },
+            OperatorEvent::WalFsyncFailed { path, error } => OperatorEvent::WalFsyncFailed {
+                path: path.clone(),
+                error: error.clone(),
+            },
+            OperatorEvent::DiskSpaceCritical {
+                path,
+                available_bytes,
+                threshold_bytes,
+            } => OperatorEvent::DiskSpaceCritical {
+                path: path.clone(),
+                available_bytes: *available_bytes,
+                threshold_bytes: *threshold_bytes,
+            },
+            OperatorEvent::AuthBypass {
+                principal,
+                resource,
+                detail,
+            } => OperatorEvent::AuthBypass {
+                principal: principal.clone(),
+                resource: resource.clone(),
+                detail: detail.clone(),
+            },
+            OperatorEvent::AdminCapabilityGranted {
+                granted_to,
+                capability,
+                granted_by,
+            } => OperatorEvent::AdminCapabilityGranted {
+                granted_to: granted_to.clone(),
+                capability: capability.clone(),
+                granted_by: granted_by.clone(),
+            },
             OperatorEvent::SecretRotationFailed { secret_ref, error } => {
-                OperatorEvent::SecretRotationFailed { secret_ref: secret_ref.clone(), error: error.clone() }
+                OperatorEvent::SecretRotationFailed {
+                    secret_ref: secret_ref.clone(),
+                    error: error.clone(),
+                }
             }
-            OperatorEvent::ConfigChanged { key, old_value, new_value, changed_by } => {
-                OperatorEvent::ConfigChanged { key: key.clone(), old_value: old_value.clone(), new_value: new_value.clone(), changed_by: changed_by.clone() }
-            }
-            OperatorEvent::StartupFailed { phase, error } => {
-                OperatorEvent::StartupFailed { phase: phase.clone(), error: error.clone() }
-            }
-            OperatorEvent::ShutdownForced { reason } => {
-                OperatorEvent::ShutdownForced { reason: reason.clone() }
-            }
+            OperatorEvent::ConfigChanged {
+                key,
+                old_value,
+                new_value,
+                changed_by,
+            } => OperatorEvent::ConfigChanged {
+                key: key.clone(),
+                old_value: old_value.clone(),
+                new_value: new_value.clone(),
+                changed_by: changed_by.clone(),
+            },
+            OperatorEvent::StartupFailed { phase, error } => OperatorEvent::StartupFailed {
+                phase: phase.clone(),
+                error: error.clone(),
+            },
+            OperatorEvent::ShutdownForced { reason } => OperatorEvent::ShutdownForced {
+                reason: reason.clone(),
+            },
             OperatorEvent::SchemaCorruption { collection, detail } => {
-                OperatorEvent::SchemaCorruption { collection: collection.clone(), detail: detail.clone() }
+                OperatorEvent::SchemaCorruption {
+                    collection: collection.clone(),
+                    detail: detail.clone(),
+                }
             }
-            OperatorEvent::CheckpointFailed { lsn, error } => {
-                OperatorEvent::CheckpointFailed { lsn: *lsn, error: error.clone() }
-            }
+            OperatorEvent::CheckpointFailed { lsn, error } => OperatorEvent::CheckpointFailed {
+                lsn: *lsn,
+                error: error.clone(),
+            },
             OperatorEvent::ConfigChangeRequiresRestart { fields_changed } => {
-                OperatorEvent::ConfigChangeRequiresRestart { fields_changed: fields_changed.clone() }
+                OperatorEvent::ConfigChangeRequiresRestart {
+                    fields_changed: fields_changed.clone(),
+                }
             }
             OperatorEvent::DanglingAdminIntent { .. } => {
                 // Not cloneable without crypto type impls; skip.
-                OperatorEvent::ShutdownForced { reason: "clone_placeholder".into() }
+                OperatorEvent::ShutdownForced {
+                    reason: "clone_placeholder".into(),
+                }
             }
             OperatorEvent::SubscriptionSchemaChange {
                 collection,
@@ -705,10 +834,9 @@ mod tests {
     fn unknown_variant_gives_suggestion() {
         let mut config = RouterConfig::default();
         // "AuthBypas" is one edit away from "AuthBypass" (missing 's').
-        config.variant_routes.insert(
-            "AuthBypas".into(),
-            vec!["audit_log".into()],
-        );
+        config
+            .variant_routes
+            .insert("AuthBypas".into(), vec!["audit_log".into()]);
         let err = OperatorEventRouter::new(config, None).unwrap_err();
         match err {
             ConfigError::UnknownVariant { key, suggestion } => {
@@ -740,10 +868,9 @@ mod tests {
         let (audit, path) = make_audit_logger();
         let mut config = RouterConfig::default();
         // Route AuthBypass to stderr-only (no audit log for this test variant).
-        config.variant_routes.insert(
-            "AuthBypass".into(),
-            vec!["stderr".into()],
-        );
+        config
+            .variant_routes
+            .insert("AuthBypass".into(), vec!["stderr".into()]);
         let router = OperatorEventRouter::new(config, Some(Arc::clone(&audit))).unwrap();
 
         // Emit AuthBypass — should NOT go to audit (only stderr per config).
@@ -761,7 +888,9 @@ mod tests {
         );
 
         // Emit a different variant — should still go to default (audit+tracing).
-        router.route(OperatorEvent::ShutdownForced { reason: "test".into() });
+        router.route(OperatorEvent::ShutdownForced {
+            reason: "test".into(),
+        });
         drain(&audit);
         let action = last_audit_action(&path).expect("shutdown_forced in audit");
         assert_eq!(action, "operator/shutdown_forced");
@@ -773,7 +902,10 @@ mod tests {
 
     #[test]
     fn token_bucket_throttles_after_burst() {
-        let mut bucket = TokenBucket::new(&RateLimitConfig { requests: 3, window_sec: 60 });
+        let mut bucket = TokenBucket::new(&RateLimitConfig {
+            requests: 3,
+            window_sec: 60,
+        });
         // rate = 3/60 = 0.05 t/s, burst = max(0.05, 1.0) = 1.0
         // First consume should succeed.
         assert!(bucket.try_consume(), "first consume should succeed");
@@ -783,7 +915,10 @@ mod tests {
 
     #[test]
     fn token_bucket_refills_over_time() {
-        let mut bucket = TokenBucket::new(&RateLimitConfig { requests: 100, window_sec: 1 });
+        let mut bucket = TokenBucket::new(&RateLimitConfig {
+            requests: 100,
+            window_sec: 1,
+        });
         // rate = 100/s, burst = 100
         for _ in 0..100 {
             assert!(bucket.try_consume());
@@ -861,7 +996,9 @@ mod tests {
         };
 
         let router = OperatorEventRouter::new(config, None).unwrap();
-        router.route(OperatorEvent::ShutdownForced { reason: "integration-test".into() });
+        router.route(OperatorEvent::ShutdownForced {
+            reason: "integration-test".into(),
+        });
 
         let raw = server_thread.join().expect("server thread");
         // The request should contain our auth header and JSON body.
@@ -875,15 +1012,15 @@ mod tests {
 
     #[test]
     fn concurrent_route_calls_safe() {
-        let router = Arc::new(
-            OperatorEventRouter::new(RouterConfig::default(), None).unwrap(),
-        );
+        let router = Arc::new(OperatorEventRouter::new(RouterConfig::default(), None).unwrap());
         let handles: Vec<_> = (0..16)
             .map(|_| {
                 let r = Arc::clone(&router);
                 thread::spawn(move || {
                     for _ in 0..50 {
-                        r.route(OperatorEvent::ShutdownForced { reason: "stress".into() });
+                        r.route(OperatorEvent::ShutdownForced {
+                            reason: "stress".into(),
+                        });
                     }
                 })
             })

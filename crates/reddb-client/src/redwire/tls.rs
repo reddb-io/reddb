@@ -42,10 +42,7 @@ impl TlsConfig {
         client_cert: Option<&Path>,
         client_key: Option<&Path>,
     ) -> Result<Self> {
-        let ca_pem = ca
-            .map(std::fs::read)
-            .transpose()
-            .map_err(io_io_err)?;
+        let ca_pem = ca.map(std::fs::read).transpose().map_err(io_io_err)?;
         let cert_pem = client_cert
             .map(std::fs::read)
             .transpose()
@@ -105,9 +102,7 @@ pub(super) async fn wrap_client(
             let key = load_private_key(key_pem)?;
             builder
                 .with_client_auth_cert(certs, key)
-                .map_err(|e| {
-                    ClientError::new(ErrorCode::Protocol, format!("client cert: {e}"))
-                })?
+                .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("client cert: {e}")))?
         }
         (Some(_), None) | (None, Some(_)) => {
             return Err(ClientError::new(

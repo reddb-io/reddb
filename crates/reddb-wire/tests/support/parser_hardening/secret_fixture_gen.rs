@@ -6,8 +6,7 @@
 
 #![allow(dead_code)]
 
-const ALNUM: &[u8] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
 /// Deterministic alphanumeric body of length `len`.
 pub fn body(seed: u64, len: usize) -> String {

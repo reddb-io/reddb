@@ -67,10 +67,7 @@ snap_redacted!(
     subq_in_basic_subquery,
     "SELECT * FROM t WHERE id IN (SELECT id FROM u)"
 );
-snap_redacted!(
-    subq_in_eof_after_lparen,
-    "SELECT * FROM t WHERE id IN ("
-);
+snap_redacted!(subq_in_eof_after_lparen, "SELECT * FROM t WHERE id IN (");
 snap_redacted!(
     subq_in_unterminated_inner,
     "SELECT * FROM t WHERE id IN (SELECT id FROM u"
@@ -203,9 +200,7 @@ fn happy_from_aliased_subquery_basic() {
 
 #[test]
 fn happy_from_aliased_subquery_with_inner_where() {
-    let q = parse_query(
-        "FROM (SELECT id FROM users WHERE active = TRUE) AS active_users",
-    );
+    let q = parse_query("FROM (SELECT id FROM users WHERE active = TRUE) AS active_users");
     match q {
         QueryExpr::Table(t) => {
             assert!(t.source.is_some());

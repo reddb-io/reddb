@@ -40,9 +40,12 @@ impl AggregateQueryPlanner {
 
         while let Some(row) = scan.next_row() {
             let key = canonical_group_key(&row.group_key);
-            let entry = groups
-                .entry(key)
-                .or_insert_with(|| (row.group_key.clone(), GroupAccumulator::new(&ast.aggregates)));
+            let entry = groups.entry(key).or_insert_with(|| {
+                (
+                    row.group_key.clone(),
+                    GroupAccumulator::new(&ast.aggregates),
+                )
+            });
             entry.1.accumulate(&ast.aggregates, &row.agg_inputs);
         }
 

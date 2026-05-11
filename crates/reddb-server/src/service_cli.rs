@@ -927,9 +927,7 @@ fn handle_sighup_reload(runtime: &RedDBRuntime) {
     // every emission goes through the typed-field guard. The
     // arguments here are static, but using the typed entry point
     // keeps the discipline uniform across call sites.
-    use crate::runtime::audit_log::{
-        AuditAuthSource, AuditEvent, AuditFieldEscaper, Outcome,
-    };
+    use crate::runtime::audit_log::{AuditAuthSource, AuditEvent, AuditFieldEscaper, Outcome};
     runtime.audit_log().record_event(
         AuditEvent::builder("config/sighup_reload")
             .source(AuditAuthSource::System)

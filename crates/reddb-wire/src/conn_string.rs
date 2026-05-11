@@ -134,11 +134,7 @@ pub enum ConnectionTarget {
     /// RedWire binary frame protocol per ADR 0001. The connector
     /// speaks framed binary directly; it does NOT route through
     /// tonic.
-    RedWire {
-        host: String,
-        port: u16,
-        tls: bool,
-    },
+    RedWire { host: String, port: u16, tls: bool },
 }
 
 /// Parse a connection URI into a [`ConnectionTarget`] under the

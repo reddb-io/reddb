@@ -176,10 +176,7 @@ fn create_migration_with_multiple_dependencies_parses() {
     match q {
         QueryExpr::CreateMigration(cm) => {
             assert_eq!(cm.name, "m1");
-            assert_eq!(
-                cm.depends_on,
-                vec!["m0".to_string(), "m_alpha".to_string()]
-            );
+            assert_eq!(cm.depends_on, vec!["m0".to_string(), "m_alpha".to_string()]);
         }
         other => panic!("expected CreateMigration, got {other:?}"),
     }

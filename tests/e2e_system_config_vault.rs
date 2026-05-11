@@ -155,7 +155,10 @@ fn system_config_reads_and_writes_require_normalized_system_capabilities() {
         rt.execute_query("GET CONFIG red.config mode")
     })
     .expect("normalized system config read capability should allow read");
-    assert_eq!(get.result.records[0].get("value"), Some(&Value::text("dark")));
+    assert_eq!(
+        get.result.records[0].get("value"),
+        Some(&Value::text("dark"))
+    );
 
     let denied = as_user("alice", Role::Write, || {
         rt.execute_query("PUT CONFIG red.config mode = 'light'")

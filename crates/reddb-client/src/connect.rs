@@ -175,7 +175,10 @@ mod tests {
                 force_primary,
             } => {
                 assert_eq!(primary, "http://primary:5055");
-                assert_eq!(replicas, vec!["http://replica1:5055", "http://replica2:5055"]);
+                assert_eq!(
+                    replicas,
+                    vec!["http://replica1:5055", "http://replica2:5055"]
+                );
                 assert!(!force_primary);
             }
             other => panic!("expected GrpcCluster, got {other:?}"),

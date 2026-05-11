@@ -70,7 +70,11 @@ pub fn create_index_stmt() -> impl Strategy<Value = String> {
         proptest::collection::vec(ident(), 1..3),
     )
         .prop_map(|(unique, idx, table, cols)| {
-            let kw = if unique { "CREATE UNIQUE INDEX" } else { "CREATE INDEX" };
+            let kw = if unique {
+                "CREATE UNIQUE INDEX"
+            } else {
+                "CREATE INDEX"
+            };
             format!("{} {} ON {} ({})", kw, idx, table, cols.join(", "))
         })
 }

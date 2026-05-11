@@ -40,13 +40,13 @@ const WORK_DEFAULT_GROUP: &str = "_work_default";
 const FANOUT_GROUP_PREFIX: &str = "_fanout_";
 
 #[derive(Debug, Clone)]
-struct QueueRuntimeConfig {
-    mode: QueueMode,
-    priority: bool,
-    max_size: Option<usize>,
-    ttl_ms: Option<u64>,
-    dlq: Option<String>,
-    max_attempts: u32,
+pub(super) struct QueueRuntimeConfig {
+    pub(super) mode: QueueMode,
+    pub(super) priority: bool,
+    pub(super) max_size: Option<usize>,
+    pub(super) ttl_ms: Option<u64>,
+    pub(super) dlq: Option<String>,
+    pub(super) max_attempts: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -56,13 +56,13 @@ struct QueueGroupEntry {
 }
 
 #[derive(Debug, Clone)]
-struct QueuePendingEntry {
-    entity_id: EntityId,
+pub(super) struct QueuePendingEntry {
+    pub(super) entity_id: EntityId,
     group: String,
     message_id: EntityId,
     consumer: String,
     delivered_at_ns: u64,
-    delivery_count: u32,
+    pub(super) delivery_count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -125,8 +125,9 @@ impl RedDBRuntime {
 
         // If the target queue has a max_size and is full, route to DLQ.
         if let Some(max_size) = config.max_size {
-            let current_len =
-                load_queue_message_views(store.as_ref(), queue).unwrap_or_default().len();
+            let current_len = load_queue_message_views(store.as_ref(), queue)
+                .unwrap_or_default()
+                .len();
             if current_len >= max_size {
                 OUTBOX_APPROX_BYTES.fetch_sub(payload_bytes, Ordering::Relaxed);
                 EVENTS_DRAIN_RETRIES_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -339,8 +340,8 @@ impl RedDBRuntime {
         let store = self.inner.db.store();
         ensure_queue_exists(store.as_ref(), &query.name)?;
 
-        let pending = load_pending_entries(store.as_ref(), &query.name, None, None)
-            .unwrap_or_default();
+        let pending =
+            load_pending_entries(store.as_ref(), &query.name, None, None).unwrap_or_default();
         if !pending.is_empty() {
             tracing::warn!(
                 queue = %query.name,
@@ -562,7 +563,12 @@ impl RedDBRuntime {
                     record.set("message_id", Value::text(message_id_string(current.id)));
                     record.set("payload", current.payload.clone());
                     result.push(record);
-                    delete_message_with_state(Some(self), store.as_ref(), queue, current.id)?;
+                    super::queue_delivery::delete_message_with_state(
+                        Some(self),
+                        store.as_ref(),
+                        queue,
+                        current.id,
+                    )?;
                     popped += 1;
                 }
                 if popped > 0 {
@@ -643,7 +649,12 @@ impl RedDBRuntime {
                 for message in messages {
                     let message_lock = queue_message_lock_handle(self, queue, message.id);
                     let _guard = message_lock.lock();
-                    delete_message_with_state(Some(self), store.as_ref(), queue, message.id)?;
+                    super::queue_delivery::delete_message_with_state(
+                        Some(self),
+                        store.as_ref(),
+                        queue,
+                        message.id,
+                    )?;
                 }
                 if count > 0 {
                     self.invalidate_result_cache();
@@ -743,7 +754,7 @@ impl RedDBRuntime {
                         increment_queue_attempts(store.as_ref(), queue, current.id)?
                     };
                     if delivery_count > current.max_attempts {
-                        let _ = move_message_to_dlq_or_drop(
+                        let _ = super::queue_delivery::move_message_to_dlq_or_drop(
                             Some(self),
                             store.as_ref(),
                             queue,
@@ -774,7 +785,10 @@ impl RedDBRuntime {
                         "delivery_count",
                         Value::UnsignedInteger(u64::from(delivery_count)),
                     );
-                    record.set("attempts", Value::UnsignedInteger(u64::from(delivery_count)));
+                    record.set(
+                        "attempts",
+                        Value::UnsignedInteger(u64::from(delivery_count)),
+                    );
                     result.push(record);
                 }
                 if !result.records.is_empty() {
@@ -898,7 +912,7 @@ impl RedDBRuntime {
                     };
                     if attempts > max_attempts {
                         delete_meta_entity(store.as_ref(), current.entity_id);
-                        let _ = move_message_to_dlq_or_drop(
+                        let _ = super::queue_delivery::move_message_to_dlq_or_drop(
                             Some(self),
                             store.as_ref(),
                             queue,
@@ -956,22 +970,16 @@ impl RedDBRuntime {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
                 require_queue_group(store.as_ref(), queue, group)?;
-                let config = load_queue_config(store.as_ref(), queue);
                 let message_id = parse_message_id(message_id)?;
-                let message_lock = queue_message_lock_handle(self, queue, message_id);
-                let _guard = message_lock.lock();
-                let pending = require_pending_entry(store.as_ref(), queue, group, message_id)?;
-                delete_meta_entity(store.as_ref(), pending.entity_id);
-                save_queue_ack(store.as_ref(), queue, group, message_id)?;
-
-                // FANOUT: each consumer group independently tracks its ack state.
-                // Messages stay alive until TTL/PURGE — deleting on ack would
-                // remove the message before late-joining consumers can read it.
-                if config.mode != QueueMode::Fanout
-                    && queue_message_completed_for_all_groups(store.as_ref(), queue, message_id)?
-                {
-                    delete_message_with_state(Some(self), store.as_ref(), queue, message_id)?;
-                }
+                let config = load_queue_config(store.as_ref(), queue);
+                super::queue_delivery::ack_message(
+                    self,
+                    store.as_ref(),
+                    queue,
+                    group,
+                    message_id,
+                    &config,
+                )?;
                 self.invalidate_result_cache();
 
                 Ok(RuntimeQueryResult::ok_message(
@@ -988,36 +996,23 @@ impl RedDBRuntime {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
                 require_queue_group(store.as_ref(), queue, group)?;
-                let config = load_queue_config(store.as_ref(), queue);
                 let message_id = parse_message_id(message_id)?;
-                let message_lock = queue_message_lock_handle(self, queue, message_id);
-                let _guard = message_lock.lock();
-                let pending = require_pending_entry(store.as_ref(), queue, group, message_id)?;
-                delete_meta_entity(store.as_ref(), pending.entity_id);
-
-                // FANOUT: use per-group delivery_count for max_attempts check.
-                let attempts = if config.mode == QueueMode::Fanout {
-                    pending.delivery_count
-                } else {
-                    queue_message_attempts(store.as_ref(), queue, message_id)?
-                };
-                let max_attempts = queue_message_max_attempts(store.as_ref(), queue, message_id)?;
-                let message = if attempts >= max_attempts {
-                    let target = move_message_to_dlq_or_drop(
-                        Some(self),
-                        store.as_ref(),
-                        queue,
-                        message_id,
-                        &config,
-                        Some(group),
-                        "nack_max_attempts_exceeded",
-                    )?;
-                    match target {
-                        Some(dlq) => format!("message moved to dead-letter queue '{}'", dlq),
-                        None => "message dropped after max attempts".to_string(),
+                let config = load_queue_config(store.as_ref(), queue);
+                let message = match super::queue_delivery::nack_message(
+                    self,
+                    store.as_ref(),
+                    queue,
+                    group,
+                    message_id,
+                    &config,
+                )? {
+                    super::queue_delivery::NackOutcome::Requeued => "message requeued".to_string(),
+                    super::queue_delivery::NackOutcome::MovedToDlq(dlq) => {
+                        format!("message moved to dead-letter queue '{}'", dlq)
                     }
-                } else {
-                    "message requeued".to_string()
+                    super::queue_delivery::NackOutcome::Dropped => {
+                        "message dropped after max attempts".to_string()
+                    }
                 };
                 self.invalidate_result_cache();
 
@@ -1167,7 +1162,12 @@ impl RedDBRuntime {
         }
 
         for message in &selected {
-            delete_message_with_state(Some(self), store.as_ref(), source, message.id)?;
+            super::queue_delivery::delete_message_with_state(
+                Some(self),
+                store.as_ref(),
+                source,
+                message.id,
+            )?;
         }
         if !selected.is_empty() {
             self.invalidate_result_cache();
@@ -1221,7 +1221,7 @@ fn ensure_queue_exists(store: &UnifiedStore, queue: &str) -> RedDBResult<()> {
     }
 }
 
-fn load_queue_config(store: &UnifiedStore, queue: &str) -> QueueRuntimeConfig {
+pub(super) fn load_queue_config(store: &UnifiedStore, queue: &str) -> QueueRuntimeConfig {
     let default = QueueRuntimeConfig {
         mode: QueueMode::Work,
         priority: false,
@@ -1469,7 +1469,7 @@ fn save_queue_pending(
     insert_meta_row(store, fields)
 }
 
-fn require_pending_entry(
+pub(super) fn require_pending_entry(
     store: &UnifiedStore,
     queue: &str,
     group: &str,
@@ -1522,7 +1522,7 @@ fn load_ack_entries(
         .collect())
 }
 
-fn save_queue_ack(
+pub(super) fn save_queue_ack(
     store: &UnifiedStore,
     queue: &str,
     group: &str,
@@ -1545,7 +1545,7 @@ fn save_queue_ack(
     insert_meta_row(store, fields)
 }
 
-fn queue_message_completed_for_all_groups(
+pub(super) fn queue_message_completed_for_all_groups(
     store: &UnifiedStore,
     queue: &str,
     message_id: EntityId,
@@ -1964,7 +1964,11 @@ fn sort_queue_messages(
     });
 }
 
-fn next_queue_position(store: &UnifiedStore, queue: &str, side: QueueSide) -> RedDBResult<u64> {
+pub(super) fn next_queue_position(
+    store: &UnifiedStore,
+    queue: &str,
+    side: QueueSide,
+) -> RedDBResult<u64> {
     let messages = load_queue_message_views(store, queue)?;
     if messages.is_empty() {
         return Ok(QUEUE_POSITION_CENTER);
@@ -2010,7 +2014,7 @@ fn increment_queue_attempts(
     }
 }
 
-fn queue_message_attempts(
+pub(super) fn queue_message_attempts(
     store: &UnifiedStore,
     queue: &str,
     message_id: EntityId,
@@ -2018,7 +2022,7 @@ fn queue_message_attempts(
     Ok(queue_message_data(store, queue, message_id)?.attempts)
 }
 
-fn queue_message_max_attempts(
+pub(super) fn queue_message_max_attempts(
     store: &UnifiedStore,
     queue: &str,
     message_id: EntityId,
@@ -2060,131 +2064,6 @@ fn queue_message_acked_for_group(
     Ok(!load_ack_entries(store, queue, Some(group), Some(message_id))?.is_empty())
 }
 
-fn delete_message_with_state(
-    runtime: Option<&RedDBRuntime>,
-    store: &UnifiedStore,
-    queue: &str,
-    message_id: EntityId,
-) -> RedDBResult<()> {
-    // Phase 1.3 MVCC universal: when inside an open transaction,
-    // turn the ACK/DLQ-move into a tombstone instead of a physical
-    // delete. Other consumers keep seeing the message until COMMIT;
-    // ROLLBACK revives it. Autocommit ACK stays physical — same
-    // semantics as before.
-    if let Some(runtime) = runtime {
-        if let Some(xid) = runtime.current_xid() {
-            if let Some(manager) = store.get_collection(queue) {
-                if let Some(mut entity) = manager.get(message_id) {
-                    if entity.xmax == 0 {
-                        entity.set_xmax(xid);
-                        if manager.update(entity).is_ok() {
-                            let conn_id = crate::runtime::impl_core::current_connection_id();
-                            runtime.record_pending_tombstone(conn_id, queue, message_id, xid);
-                            // Meta-row cleanup + lock release happen at
-                            // COMMIT via the tombstone drain pipeline;
-                            // here we only mark the message invisible.
-                            forget_queue_message_lock(runtime, queue, message_id);
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    remove_message_state(store, queue, message_id);
-    store
-        .delete(queue, message_id)
-        .map_err(|err| RedDBError::Internal(err.to_string()))?;
-    if let Some(runtime) = runtime {
-        forget_queue_message_lock(runtime, queue, message_id);
-    }
-    Ok(())
-}
-
-fn remove_message_state(store: &UnifiedStore, queue: &str, message_id: EntityId) {
-    remove_meta_rows(store, |row| {
-        row_text(row, "queue").as_deref() == Some(queue)
-            && row_u64(row, "message_id") == Some(message_id.raw())
-    });
-}
-
-fn move_message_to_dlq_or_drop(
-    runtime: Option<&RedDBRuntime>,
-    store: &UnifiedStore,
-    queue: &str,
-    message_id: EntityId,
-    config: &QueueRuntimeConfig,
-    // For FANOUT: the consumer group that exhausted attempts. Only that
-    // group's copy is retired; the message stays alive until all groups finish.
-    group: Option<&str>,
-    _reason: &str,
-) -> RedDBResult<Option<String>> {
-    let data = queue_message_data(store, queue, message_id)?;
-
-    if let Some(dlq) = &config.dlq {
-        if store.get_collection(dlq).is_none() {
-            store
-                .create_collection(dlq)
-                .map_err(|err| RedDBError::Internal(err.to_string()))?;
-        }
-        let position = next_queue_position(store, dlq, QueueSide::Right)?;
-        let dlq_entity = UnifiedEntity::new(
-            EntityId::new(0),
-            EntityKind::QueueMessage {
-                queue: dlq.clone(),
-                position,
-            },
-            EntityData::QueueMessage(QueueMessageData {
-                payload: data.payload,
-                priority: data.priority,
-                enqueued_at_ns: data.enqueued_at_ns,
-                attempts: data.attempts,
-                max_attempts: data.max_attempts,
-                acked: false,
-            }),
-        );
-        let inserted_id = store
-            .insert_auto(dlq, dlq_entity)
-            .map_err(|err| RedDBError::Internal(err.to_string()))?;
-        let dlq_config = load_queue_config(store, dlq);
-        if let Some(ttl_ms) = dlq_config.ttl_ms {
-            store
-                .set_metadata(dlq, inserted_id, queue_message_ttl_metadata(ttl_ms))
-                .map_err(|err| RedDBError::Internal(err.to_string()))?;
-        }
-        retire_message_for_group(runtime, store, queue, message_id, group, config)?;
-        Ok(Some(dlq.clone()))
-    } else {
-        retire_message_for_group(runtime, store, queue, message_id, group, config)?;
-        Ok(None)
-    }
-}
-
-/// Retire a message for a specific group (FANOUT) or globally (WORK/no group).
-/// In FANOUT mode the message is group-acked but NOT physically deleted —
-/// other consumer groups must still be able to read it. Cleanup happens via TTL/PURGE.
-fn retire_message_for_group(
-    runtime: Option<&RedDBRuntime>,
-    store: &UnifiedStore,
-    queue: &str,
-    message_id: EntityId,
-    group: Option<&str>,
-    config: &QueueRuntimeConfig,
-) -> RedDBResult<()> {
-    if let Some(g) = group {
-        save_queue_ack(store, queue, g, message_id)?;
-        if config.mode != QueueMode::Fanout
-            && queue_message_completed_for_all_groups(store, queue, message_id)?
-        {
-            delete_message_with_state(runtime, store, queue, message_id)?;
-        }
-    } else {
-        delete_message_with_state(runtime, store, queue, message_id)?;
-    }
-    Ok(())
-}
-
 fn queue_manager(
     store: &UnifiedStore,
     queue: &str,
@@ -2194,7 +2073,7 @@ fn queue_manager(
         .ok_or_else(|| RedDBError::NotFound(format!("queue '{}' not found", queue)))
 }
 
-fn queue_message_data(
+pub(super) fn queue_message_data(
     store: &UnifiedStore,
     queue: &str,
     message_id: EntityId,
@@ -2234,7 +2113,7 @@ fn insert_meta_row(store: &UnifiedStore, fields: HashMap<String, Value>) -> RedD
     Ok(())
 }
 
-fn remove_meta_rows(store: &UnifiedStore, predicate: impl Fn(&RowData) -> bool + Sync) {
+pub(super) fn remove_meta_rows(store: &UnifiedStore, predicate: impl Fn(&RowData) -> bool + Sync) {
     let Some(manager) = store.get_collection(QUEUE_META_COLLECTION) else {
         return;
     };
@@ -2244,7 +2123,7 @@ fn remove_meta_rows(store: &UnifiedStore, predicate: impl Fn(&RowData) -> bool +
     }
 }
 
-fn delete_meta_entity(store: &UnifiedStore, entity_id: EntityId) {
+pub(super) fn delete_meta_entity(store: &UnifiedStore, entity_id: EntityId) {
     let _ = store.delete(QUEUE_META_COLLECTION, entity_id);
 }
 
@@ -2252,7 +2131,7 @@ fn queue_message_lock_key(queue: &str, message_id: EntityId) -> String {
     format!("{queue}:{}", message_id.raw())
 }
 
-fn queue_message_lock_handle(
+pub(super) fn queue_message_lock_handle(
     runtime: &RedDBRuntime,
     queue: &str,
     message_id: EntityId,
@@ -2269,7 +2148,7 @@ fn queue_message_lock_handle(
         .clone()
 }
 
-fn forget_queue_message_lock(runtime: &RedDBRuntime, queue: &str, message_id: EntityId) {
+pub(super) fn forget_queue_message_lock(runtime: &RedDBRuntime, queue: &str, message_id: EntityId) {
     runtime
         .inner
         .queue_message_locks
@@ -2288,7 +2167,7 @@ fn message_id_string(message_id: EntityId) -> String {
     message_id.raw().to_string()
 }
 
-fn row_text(row: &RowData, field: &str) -> Option<String> {
+pub(super) fn row_text(row: &RowData, field: &str) -> Option<String> {
     match row.get_field(field)?.clone() {
         Value::Text(value) => Some(value.to_string()),
         Value::NodeRef(value) => Some(value),
@@ -2298,7 +2177,7 @@ fn row_text(row: &RowData, field: &str) -> Option<String> {
     }
 }
 
-fn row_u64(row: &RowData, field: &str) -> Option<u64> {
+pub(super) fn row_u64(row: &RowData, field: &str) -> Option<u64> {
     match row.get_field(field)?.clone() {
         Value::UnsignedInteger(value) => Some(value),
         Value::Integer(value) if value >= 0 => Some(value as u64),
@@ -2367,7 +2246,7 @@ fn now_ns() -> u64 {
         .as_nanos() as u64
 }
 
-fn queue_message_ttl_metadata(ttl_ms: u64) -> Metadata {
+pub(super) fn queue_message_ttl_metadata(ttl_ms: u64) -> Metadata {
     Metadata::with_fields(
         [(
             "_ttl_ms".to_string(),

@@ -529,8 +529,7 @@ mod tests {
         // run our decoder if present), and checking the absence
         // path resolves to "no topology, fall back to URI-only".
         let json = br#"{"version":1,"auth":"bearer","features":3,"server":"reddb/0.2.9"}"#;
-        let v: serde_json_check::Value =
-            serde_json_check::from_slice(json).expect("valid JSON");
+        let v: serde_json_check::Value = serde_json_check::from_slice(json).expect("valid JSON");
         let topo_field = v.find_string("topology");
         let topology = match topo_field {
             None => None,

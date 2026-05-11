@@ -927,7 +927,10 @@ fn test_queue_mode_visible_in_red_collections() {
         .map(|r| (text(r, "name"), text(r, "queue_mode")))
         .collect();
 
-    assert_eq!(queue_modes.get("notifications").map(String::as_str), Some("fanout"));
+    assert_eq!(
+        queue_modes.get("notifications").map(String::as_str),
+        Some("fanout")
+    );
     assert_eq!(queue_modes.get("tasks").map(String::as_str), Some("work"));
 }
 
@@ -935,7 +938,10 @@ fn test_queue_mode_visible_in_red_collections() {
 fn test_non_queue_collections_have_null_queue_mode() {
     let rt = rt();
 
-    exec(&rt, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
+    exec(
+        &rt,
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)",
+    );
 
     let result = exec(
         &rt,
@@ -943,5 +949,8 @@ fn test_non_queue_collections_have_null_queue_mode() {
     );
 
     assert_eq!(result.result.records.len(), 1);
-    assert_eq!(result.result.records[0].get("queue_mode"), Some(&Value::Null));
+    assert_eq!(
+        result.result.records[0].get("queue_mode"),
+        Some(&Value::Null)
+    );
 }

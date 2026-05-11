@@ -8,14 +8,20 @@ use super::frame::{Flags, Frame, MessageKind, FRAME_HEADER_SIZE, MAX_FRAME_SIZE}
 pub enum FrameError {
     Truncated,
     InvalidLength(u32),
-    PayloadTruncated { expected: u32, available: u32 },
+    PayloadTruncated {
+        expected: u32,
+        available: u32,
+    },
     UnknownKind(u8),
     UnknownFlags(u8),
     /// Catalog cross-check failed: the flag bits set on the frame are
     /// not in `MessageKind::allowed_flags()` for this kind. The wire
     /// catalog is the single source of truth for which bits a kind
     /// may carry — see `frame.rs::MessageKind::allowed_flags`.
-    FlagsNotAllowedForKind { kind: u8, flags: u8 },
+    FlagsNotAllowedForKind {
+        kind: u8,
+        flags: u8,
+    },
 }
 
 impl std::fmt::Display for FrameError {

@@ -62,7 +62,10 @@ macro_rules! snap {
 
 snap!(ask_eof_after_keyword, "ASK");
 snap!(ask_missing_question, "ASK USING openai");
-snap!(ask_unterminated_string, "ASK 'open question without closing quote");
+snap!(
+    ask_unterminated_string,
+    "ASK 'open question without closing quote"
+);
 snap!(ask_using_no_provider, "ASK 'q' USING");
 snap!(ask_model_no_string, "ASK 'q' MODEL");
 // `MODEL` slot is a string literal — `MODEL gpt4` (bare ident)
@@ -80,7 +83,10 @@ snap!(search_context_eof, "SEARCH CONTEXT");
 snap!(search_context_missing_string, "SEARCH CONTEXT FIELD x");
 snap!(search_context_unterminated_string, "SEARCH CONTEXT 'open");
 snap!(search_context_field_no_ident, "SEARCH CONTEXT 'q' FIELD");
-snap!(search_context_collection_no_ident, "SEARCH CONTEXT 'q' COLLECTION");
+snap!(
+    search_context_collection_no_ident,
+    "SEARCH CONTEXT 'q' COLLECTION"
+);
 
 // ----- DoS limits surface as structured errors -------------------
 
@@ -91,7 +97,8 @@ fn ask_dos_input_too_large_message_is_pinned() {
         max_input_bytes: 16,
         ..parser::ParserLimits::default()
     };
-    let result = parser::Parser::with_limits("ASK 'this is too long for the limit' USING openai", limits);
+    let result =
+        parser::Parser::with_limits("ASK 'this is too long for the limit' USING openai", limits);
     let formatted = match result {
         Ok(_) => "UNEXPECTED OK".to_string(),
         Err(e) => format!("kind:  {:?}\nerror: {}\n", e.kind, e),
@@ -108,11 +115,8 @@ fn ask_dos_identifier_too_long_message_is_pinned() {
     };
     // `provider_name_long_long_long` is the user-supplied identifier
     // that exceeds the cap; ASK and USING are keywords.
-    let result = parser::Parser::with_limits(
-        "ASK 'q' USING provider_name_long_long_long",
-        limits,
-    )
-    .and_then(|mut p| p.parse());
+    let result = parser::Parser::with_limits("ASK 'q' USING provider_name_long_long_long", limits)
+        .and_then(|mut p| p.parse());
     let formatted = match result {
         Ok(_) => "UNEXPECTED OK".to_string(),
         Err(e) => format!("kind:  {:?}\nerror: {}\n", e.kind, e),

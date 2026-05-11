@@ -262,7 +262,9 @@ impl<'a> KvAtomicOps<'a> {
                         collection,
                         key,
                         id.raw(),
-                        Some(crate::presentation::entity_json::storage_value_to_json(&value)),
+                        Some(crate::presentation::entity_json::storage_value_to_json(
+                            &value,
+                        )),
                         None,
                     );
                     self.runtime.inner.kv_stats.incr_deletes();
@@ -740,9 +742,16 @@ impl<'a> KvAtomicOps<'a> {
                 .inner
                 .db
                 .store()
-                .set_metadata(collection, id, Metadata::with_fields(vault_tags_metadata(tags)))
+                .set_metadata(
+                    collection,
+                    id,
+                    Metadata::with_fields(vault_tags_metadata(tags)),
+                )
                 .map_err(|err| RedDBError::Internal(err.to_string()))?;
-            self.runtime.inner.kv_tag_index.replace(collection, key, id, tags);
+            self.runtime
+                .inner
+                .kv_tag_index
+                .replace(collection, key, id, tags);
         }
         self.get_vault_entry_version(collection, key, version)?
             .ok_or_else(|| RedDBError::Internal(format!("vault version {id} was not readable")))
@@ -1008,32 +1017,31 @@ impl RedDBRuntime {
     ) {
         let actor = Self::current_vault_actor();
         let request_id = Self::vault_request_id();
-        let mut builder = crate::runtime::audit_log::AuditEvent::builder(format!(
-            "vault/{operation}"
-        ))
-        .principal(actor.clone())
-        .source(crate::runtime::audit_log::AuditAuthSource::Password)
-        .resource(format!(
-            "vault:{}",
-            Self::vault_target_resource(collection, key)
-        ))
-        .outcome(outcome)
-        .correlation_id(request_id.clone())
-        .fields([
-            crate::runtime::audit_log::AuditFieldEscaper::field("actor", actor),
-            crate::runtime::audit_log::AuditFieldEscaper::field("collection", collection),
-            crate::runtime::audit_log::AuditFieldEscaper::field("key", key),
-            crate::runtime::audit_log::AuditFieldEscaper::field(
-                "target",
-                Self::vault_target_resource(collection, key),
-            ),
-            crate::runtime::audit_log::AuditFieldEscaper::field("reason", reason),
-            crate::runtime::audit_log::AuditFieldEscaper::field("request_id", request_id),
-            crate::runtime::audit_log::AuditFieldEscaper::field(
-                "connection_id",
-                current_connection_id(),
-            ),
-        ]);
+        let mut builder =
+            crate::runtime::audit_log::AuditEvent::builder(format!("vault/{operation}"))
+                .principal(actor.clone())
+                .source(crate::runtime::audit_log::AuditAuthSource::Password)
+                .resource(format!(
+                    "vault:{}",
+                    Self::vault_target_resource(collection, key)
+                ))
+                .outcome(outcome)
+                .correlation_id(request_id.clone())
+                .fields([
+                    crate::runtime::audit_log::AuditFieldEscaper::field("actor", actor),
+                    crate::runtime::audit_log::AuditFieldEscaper::field("collection", collection),
+                    crate::runtime::audit_log::AuditFieldEscaper::field("key", key),
+                    crate::runtime::audit_log::AuditFieldEscaper::field(
+                        "target",
+                        Self::vault_target_resource(collection, key),
+                    ),
+                    crate::runtime::audit_log::AuditFieldEscaper::field("reason", reason),
+                    crate::runtime::audit_log::AuditFieldEscaper::field("request_id", request_id),
+                    crate::runtime::audit_log::AuditFieldEscaper::field(
+                        "connection_id",
+                        current_connection_id(),
+                    ),
+                ]);
         if let Some(tenant) = current_tenant() {
             builder = builder.tenant(tenant);
         }
@@ -1290,12 +1298,8 @@ impl RedDBRuntime {
                 for entry in entries
                     .into_iter()
                     .filter(|entry| {
-                        self.check_vault_capability(
-                            "vault:read_metadata",
-                            collection,
-                            &entry.key,
-                        )
-                        .is_ok()
+                        self.check_vault_capability("vault:read_metadata", collection, &entry.key)
+                            .is_ok()
                     })
                     .skip(*offset)
                     .take(limit.unwrap_or(usize::MAX))
@@ -1983,7 +1987,10 @@ fn vault_fingerprint(value: &Value) -> String {
 
 fn vault_entry_metadata_json(entry: &VaultEntry) -> crate::json::Value {
     let mut object = crate::json::Map::new();
-    object.insert("key".to_string(), crate::json::Value::String(entry.key.clone()));
+    object.insert(
+        "key".to_string(),
+        crate::json::Value::String(entry.key.clone()),
+    );
     object.insert(
         "version".to_string(),
         crate::json::Value::Number(entry.version as f64),

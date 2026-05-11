@@ -36,10 +36,9 @@ fn extract_where_expr(tq: &TableQuery) -> Expr {
 fn prepared_bound_string_is_treated_as_literal_not_sql() {
     // Parse a parameterisable SELECT shape. The literal `'placeholder'`
     // gets lifted to a `Parameter` slot during shape extraction.
-    let parsed = parse_multi("SELECT * FROM users WHERE name = 'placeholder'")
-        .expect("parse base query");
-    let parameterised =
-        parameterize_query_expr(&parsed).expect("query is parameterisable");
+    let parsed =
+        parse_multi("SELECT * FROM users WHERE name = 'placeholder'").expect("parse base query");
+    let parameterised = parameterize_query_expr(&parsed).expect("query is parameterisable");
     assert_eq!(
         parameterised.parameter_count, 1,
         "exactly one literal should have been parameterised"
@@ -123,8 +122,7 @@ fn identifier_with_sql_metacharacters_is_rejected_at_parse() {
 fn rls_policy_body_with_comment_metacharacters_parses_as_literal() {
     // The body matches `tenant = '; -- '` — the inner string-literal
     // is the SQL-escape of `'; -- ` (single-quote escaped via `''`).
-    let sql =
-        "CREATE POLICY p ON users FOR SELECT TO reader USING (tenant = '''; -- ')";
+    let sql = "CREATE POLICY p ON users FOR SELECT TO reader USING (tenant = '''; -- ')";
     let parsed = parse_multi(sql).expect("parse CREATE POLICY");
     let policy: CreatePolicyQuery = match parsed {
         QueryExpr::CreatePolicy(p) => p,

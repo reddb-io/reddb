@@ -94,18 +94,9 @@ impl Claims {
         obj.insert("iss".into(), serde_json::Value::String(self.iss.clone()));
         obj.insert("sub".into(), serde_json::Value::String(self.sub.clone()));
         obj.insert("aud".into(), serde_json::Value::String(self.aud.clone()));
-        obj.insert(
-            "exp".into(),
-            serde_json::Value::Number(self.exp.into()),
-        );
-        obj.insert(
-            "nbf".into(),
-            serde_json::Value::Number(self.nbf.into()),
-        );
-        obj.insert(
-            "iat".into(),
-            serde_json::Value::Number(self.iat.into()),
-        );
+        obj.insert("exp".into(), serde_json::Value::Number(self.exp.into()));
+        obj.insert("nbf".into(), serde_json::Value::Number(self.nbf.into()));
+        obj.insert("iat".into(), serde_json::Value::Number(self.iat.into()));
         if let Some(role) = &self.role {
             obj.insert("role".into(), serde_json::Value::String(role.clone()));
         }
@@ -283,7 +274,9 @@ async fn start_fixture() -> Fixture {
         key_bytes: Vec::new(),
     }]);
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind redwire");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind redwire");
     let addr = listener.local_addr().expect("local_addr");
     drop(listener);
 

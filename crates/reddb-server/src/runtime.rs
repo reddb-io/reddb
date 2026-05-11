@@ -1060,6 +1060,7 @@ pub mod locking;
 pub(crate) mod mutation;
 mod probabilistic_store;
 pub(crate) mod query_exec;
+mod queue_delivery;
 pub mod quota_bucket;
 mod record_search;
 mod red_schema;

@@ -1665,7 +1665,12 @@ mod tests {
             "/v1/kv/sessions/token",
             br#"{"value":"abc","ttl_ms":1000}"#.to_vec(),
         ));
-        assert_eq!(kv_put.status, 200, "{}", String::from_utf8_lossy(&kv_put.body));
+        assert_eq!(
+            kv_put.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&kv_put.body)
+        );
 
         let kv_get = server.route(request("/v1/kv/sessions/token"));
         assert_eq!(kv_get.status, 200);

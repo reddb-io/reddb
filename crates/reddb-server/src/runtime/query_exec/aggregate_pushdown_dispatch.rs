@@ -22,9 +22,7 @@
 use super::aggregate_planner::{
     AggregateExpr, AggregateOp, AggregateQueryAst, AggregateQueryPlanner, ScanIterator, ScanRow,
 };
-use super::filter_compiled::{
-    classify_field, resolve_kind, CompiledEntityFilter, EntityFieldKind,
-};
+use super::filter_compiled::{classify_field, resolve_kind, CompiledEntityFilter, EntityFieldKind};
 use crate::api::{RedDBError, RedDBResult};
 use crate::storage::query::ast::{Expr, FieldRef, Projection};
 use crate::storage::query::sql_lowering::{

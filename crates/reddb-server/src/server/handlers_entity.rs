@@ -231,9 +231,7 @@ impl RedDBServer {
             Some(p) => p,
             None => return json_error(400, "auto_embed.provider is required"),
         };
-        let fields: Vec<String> = match auto_embed_json
-            .get("fields")
-            .and_then(JsonValue::as_array)
+        let fields: Vec<String> = match auto_embed_json.get("fields").and_then(JsonValue::as_array)
         {
             Some(arr) => arr
                 .iter()
@@ -258,11 +256,11 @@ impl RedDBServer {
             Ok(p) => p,
             Err(e) => return json_error(400, e.to_string()),
         };
-        let api_key =
-            match crate::ai::resolve_api_key_from_runtime(&provider, None, &self.runtime) {
-                Ok(k) => k,
-                Err(e) => return json_error(400, e.to_string()),
-            };
+        let api_key = match crate::ai::resolve_api_key_from_runtime(&provider, None, &self.runtime)
+        {
+            Ok(k) => k,
+            Err(e) => return json_error(400, e.to_string()),
+        };
 
         // Collect one text per row by joining the requested fields.
         let texts: Vec<String> = rows
@@ -271,12 +269,13 @@ impl RedDBServer {
                 let parts: Vec<String> = fields
                     .iter()
                     .filter_map(|field| {
-                        row.fields.iter().find(|(k, _)| k == field).and_then(
-                            |(_, v)| match v {
+                        row.fields
+                            .iter()
+                            .find(|(k, _)| k == field)
+                            .and_then(|(_, v)| match v {
                                 Value::Text(t) if !t.is_empty() => Some(t.to_string()),
                                 _ => None,
-                            },
-                        )
+                            })
                     })
                     .collect();
                 parts.join(" ")
@@ -288,11 +287,14 @@ impl RedDBServer {
             crate::runtime::ai::batch_client::AiBatchClient::from_runtime(&self.runtime);
         let embeddings = match tokio::runtime::Handle::try_current() {
             Ok(handle) => tokio::task::block_in_place(|| {
-                handle.block_on(batch_client.embed_batch(&provider, &model, &api_key, texts.clone()))
+                handle.block_on(batch_client.embed_batch(
+                    &provider,
+                    &model,
+                    &api_key,
+                    texts.clone(),
+                ))
             }),
-            Err(_) => {
-                return json_error(500, "AUTO EMBED requires a Tokio runtime context")
-            }
+            Err(_) => return json_error(500, "AUTO EMBED requires a Tokio runtime context"),
         };
         let embeddings = match embeddings {
             Ok(e) => e,
@@ -988,11 +990,15 @@ mod tests {
         let ddl = r#"{"query": "CREATE TABLE docs (body TEXT)"}"#;
         server.handle_query(ddl.as_bytes().to_vec());
 
-        let body = r#"{"items": [{"fields": {"body": "hello"}}], "auto_embed": {"fields": ["body"]}}"#;
+        let body =
+            r#"{"items": [{"fields": {"body": "hello"}}], "auto_embed": {"fields": ["body"]}}"#;
         let r = post_bulk_rows(&server, "docs", body);
         assert_eq!(r.status, 400);
         let text = String::from_utf8_lossy(&r.body);
-        assert!(text.contains("provider"), "expected provider error, got: {text}");
+        assert!(
+            text.contains("provider"),
+            "expected provider error, got: {text}"
+        );
     }
 
     #[test]
@@ -1001,11 +1007,15 @@ mod tests {
         let ddl = r#"{"query": "CREATE TABLE docs (body TEXT)"}"#;
         server.handle_query(ddl.as_bytes().to_vec());
 
-        let body = r#"{"items": [{"fields": {"body": "hello"}}], "auto_embed": {"provider": "openai"}}"#;
+        let body =
+            r#"{"items": [{"fields": {"body": "hello"}}], "auto_embed": {"provider": "openai"}}"#;
         let r = post_bulk_rows(&server, "docs", body);
         assert_eq!(r.status, 400);
         let text = String::from_utf8_lossy(&r.body);
-        assert!(text.contains("fields"), "expected fields error, got: {text}");
+        assert!(
+            text.contains("fields"),
+            "expected fields error, got: {text}"
+        );
     }
 
     #[test]
@@ -1018,7 +1028,10 @@ mod tests {
         let r = post_bulk_rows(&server, "docs", body);
         assert_eq!(r.status, 400);
         let text = String::from_utf8_lossy(&r.body);
-        assert!(text.contains("fields"), "expected fields error, got: {text}");
+        assert!(
+            text.contains("fields"),
+            "expected fields error, got: {text}"
+        );
     }
 
     #[test]

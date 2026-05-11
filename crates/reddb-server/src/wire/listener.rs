@@ -206,7 +206,11 @@ pub(crate) fn handle_bulk_insert(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<
         rows.push(input);
     }
 
-    match runtime.create_rows_batch(crate::application::CreateRowsBatchInput { collection, rows, suppress_events: false }) {
+    match runtime.create_rows_batch(crate::application::CreateRowsBatchInput {
+        collection,
+        rows,
+        suppress_events: false,
+    }) {
         Ok(outputs) => {
             let count = outputs.len() as u64;
             let mut resp = Vec::with_capacity(13);
@@ -1851,15 +1855,7 @@ mod tests {
         collection: &str,
         rows: &[(u64, &str, &str, i64, &str, f64, &str)],
     ) -> Vec<u8> {
-        const USER_COLS: &[&str] = &[
-            "id",
-            "name",
-            "email",
-            "age",
-            "city",
-            "score",
-            "created_at",
-        ];
+        const USER_COLS: &[&str] = &["id", "name", "email", "age", "city", "score", "created_at"];
 
         let mut buf = Vec::new();
         buf.extend_from_slice(&(collection.len() as u16).to_le_bytes());

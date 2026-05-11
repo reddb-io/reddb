@@ -486,7 +486,9 @@ mod tests {
     #[test]
     fn grpc_metadata_matches_http_header_contract() {
         let payload = "alice\r\nx-trace-id: forged";
-        let h = Tainted::from(payload).escape_for(Boundary::HttpHeader).unwrap();
+        let h = Tainted::from(payload)
+            .escape_for(Boundary::HttpHeader)
+            .unwrap();
         let g = Tainted::from(payload)
             .escape_for(Boundary::GrpcMetadata)
             .unwrap();

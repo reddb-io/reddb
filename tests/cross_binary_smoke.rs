@@ -136,9 +136,7 @@ fn boot_red_grpc(port: u16) -> Result<ServerHandle, String> {
     ])
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("spawn red server: {e}"))?;
+    let child = cmd.spawn().map_err(|e| format!("spawn red server: {e}"))?;
     Ok(ServerHandle { child })
 }
 
@@ -160,9 +158,7 @@ fn boot_red_http(port: u16) -> Result<ServerHandle, String> {
     ])
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("spawn red server: {e}"))?;
+    let child = cmd.spawn().map_err(|e| format!("spawn red server: {e}"))?;
     Ok(ServerHandle { child })
 }
 
@@ -186,9 +182,7 @@ fn boot_red_wire(port: u16) -> Result<ServerHandle, String> {
     ])
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("spawn red server: {e}"))?;
+    let child = cmd.spawn().map_err(|e| format!("spawn red server: {e}"))?;
     Ok(ServerHandle { child })
 }
 
@@ -222,9 +216,7 @@ fn red_client_round_trips_against_red_over_grpc() {
 
     if !wait_for_listener("127.0.0.1", port, Duration::from_secs(15)) {
         let (out, err) = drain_output(&mut server.child);
-        panic!(
-            "`red server` did not listen on {port} within 15s\nstdout:\n{out}\nstderr:\n{err}"
-        );
+        panic!("`red server` did not listen on {port} within 15s\nstdout:\n{out}\nstderr:\n{err}");
     }
 
     let uri = format!("grpc://127.0.0.1:{port}");
@@ -379,9 +371,7 @@ fn red_client_red_scheme_routes_to_default_port() {
 
     if !wait_for_listener("127.0.0.1", port, Duration::from_secs(15)) {
         let (out, err) = drain_output(&mut server.child);
-        panic!(
-            "`red server` did not listen on {port} within 15s\nstdout:\n{out}\nstderr:\n{err}"
-        );
+        panic!("`red server` did not listen on {port} within 15s\nstdout:\n{out}\nstderr:\n{err}");
     }
 
     let out = Command::new(&red_client)

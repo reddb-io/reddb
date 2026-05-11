@@ -111,8 +111,14 @@ fn red_subscriptions_lists_event_subscription_status() {
 fn events_status_filters_subscriptions_by_collection() {
     let rt = rt();
 
-    exec(&rt, "CREATE TABLE users (id INT) WITH EVENTS TO users_audit");
-    exec(&rt, "CREATE TABLE orders (id INT) WITH EVENTS TO orders_audit");
+    exec(
+        &rt,
+        "CREATE TABLE users (id INT) WITH EVENTS TO users_audit",
+    );
+    exec(
+        &rt,
+        "CREATE TABLE orders (id INT) WITH EVENTS TO orders_audit",
+    );
 
     let result = exec(&rt, "EVENTS STATUS users");
 
@@ -129,7 +135,10 @@ fn events_status_reports_outbox_dlq_count() {
     let rt = rt();
 
     exec(&rt, "CREATE QUEUE audit_events FANOUT MAX_SIZE 1");
-    exec(&rt, "CREATE TABLE users (id INT) WITH EVENTS TO audit_events");
+    exec(
+        &rt,
+        "CREATE TABLE users (id INT) WITH EVENTS TO audit_events",
+    );
     exec(&rt, "INSERT INTO users (id) VALUES (1)");
     exec(&rt, "INSERT INTO users (id) VALUES (2)");
 
@@ -158,13 +167,13 @@ fn create_table_with_events_persists_subscription_and_auto_queue() {
     assert_eq!(subscription.target_queue, "users_events");
     assert_eq!(
         subscription.ops_filter,
-        vec![
-            SubscriptionOperation::Insert,
-            SubscriptionOperation::Update
-        ]
+        vec![SubscriptionOperation::Insert, SubscriptionOperation::Update]
     );
     assert_eq!(subscription.redact_fields, vec!["email", "phone"]);
-    assert_eq!(subscription.where_filter.as_deref(), Some("status = 'active'"));
+    assert_eq!(
+        subscription.where_filter.as_deref(),
+        Some("status = 'active'")
+    );
 
     let queue = rt
         .db()
@@ -366,11 +375,10 @@ fn redact_applied_to_before_in_delete_event() {
 
     exec(&rt, "DELETE FROM profiles WHERE id = 42");
     let payload = read_event_payload(&rt, "profiles_events");
-    assert_eq!(
-        payload.get("op").and_then(|v| v.as_str()),
-        Some("delete")
-    );
-    let before = payload.get("before").expect("before field present in delete event");
+    assert_eq!(payload.get("op").and_then(|v| v.as_str()), Some("delete"));
+    let before = payload
+        .get("before")
+        .expect("before field present in delete event");
     assert_eq!(
         before.get("email").and_then(|v| v.as_str()),
         Some("[REDACTED]"),
@@ -404,10 +412,7 @@ fn tenant_insert_routes_to_tenant_scoped_queue() {
         Some("acme"),
         "event payload must carry acme tenant"
     );
-    assert_eq!(
-        payload.get("op").and_then(|v| v.as_str()),
-        Some("insert")
-    );
+    assert_eq!(payload.get("op").and_then(|v| v.as_str()), Some("insert"));
 
     // globex__users_events must not exist (no event was inserted under globex)
     let globex_queue = rt.db().collection_contract("globex__users_events");
@@ -458,7 +463,10 @@ fn cross_tenant_subscription_allowed_for_cluster_admin() {
         .iter()
         .find(|s| s.target_queue == "global_audit")
         .expect("global_audit subscription should exist");
-    assert!(all_tenants_sub.all_tenants, "subscription must be all_tenants");
+    assert!(
+        all_tenants_sub.all_tenants,
+        "subscription must be all_tenants"
+    );
 }
 
 // ── Issue #296: multi-subscription per collection ──────────────────────────
@@ -471,19 +479,19 @@ fn add_two_subscriptions_both_receive_insert_event() {
         &rt,
         "CREATE TABLE orders (id INT, customer TEXT, amount INT)",
     );
-    exec(
-        &rt,
-        "ALTER TABLE orders ADD SUBSCRIPTION s1 TO q1",
-    );
-    exec(
-        &rt,
-        "ALTER TABLE orders ADD SUBSCRIPTION s2 TO q2",
-    );
+    exec(&rt, "ALTER TABLE orders ADD SUBSCRIPTION s1 TO q1");
+    exec(&rt, "ALTER TABLE orders ADD SUBSCRIPTION s2 TO q2");
 
     let contract = rt.db().collection_contract("orders").unwrap();
     assert_eq!(contract.subscriptions.len(), 2);
-    assert!(contract.subscriptions.iter().any(|s| s.name == "s1" && s.target_queue == "q1"));
-    assert!(contract.subscriptions.iter().any(|s| s.name == "s2" && s.target_queue == "q2"));
+    assert!(contract
+        .subscriptions
+        .iter()
+        .any(|s| s.name == "s1" && s.target_queue == "q1"));
+    assert!(contract
+        .subscriptions
+        .iter()
+        .any(|s| s.name == "s2" && s.target_queue == "q2"));
     assert!(
         rt.db()
             .store()
@@ -501,7 +509,10 @@ fn add_two_subscriptions_both_receive_insert_event() {
 
     setup_event_queue_group(&rt, "q1");
     setup_event_queue_group(&rt, "q2");
-    exec(&rt, "INSERT INTO orders (id, customer, amount) VALUES (1, 'alice', 100)");
+    exec(
+        &rt,
+        "INSERT INTO orders (id, customer, amount) VALUES (1, 'alice', 100)",
+    );
 
     let e1 = read_event_payload(&rt, "q1");
     let e2 = read_event_payload(&rt, "q2");
@@ -515,10 +526,7 @@ fn add_two_subscriptions_both_receive_insert_event() {
 fn redact_applied_per_subscription_independently() {
     let rt = rt();
 
-    exec(
-        &rt,
-        "CREATE TABLE users2 (id INT, email TEXT, phone TEXT)",
-    );
+    exec(&rt, "CREATE TABLE users2 (id INT, email TEXT, phone TEXT)");
     exec(
         &rt,
         "ALTER TABLE users2 ADD SUBSCRIPTION masked TO q_masked REDACT (email)",
@@ -552,10 +560,7 @@ fn redact_applied_per_subscription_independently() {
 fn drop_subscription_stops_events_to_that_queue() {
     let rt = rt();
 
-    exec(
-        &rt,
-        "CREATE TABLE events3 (id INT, val TEXT)",
-    );
+    exec(&rt, "CREATE TABLE events3 (id INT, val TEXT)");
     exec(&rt, "ALTER TABLE events3 ADD SUBSCRIPTION s1 TO e3_q1");
     exec(&rt, "ALTER TABLE events3 ADD SUBSCRIPTION s2 TO e3_q2");
     exec(&rt, "ALTER TABLE events3 DROP SUBSCRIPTION s1");

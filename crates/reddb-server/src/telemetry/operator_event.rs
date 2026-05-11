@@ -21,7 +21,9 @@
 
 use std::sync::{Arc, OnceLock};
 
-use crate::runtime::audit_log::{AuditAuthSource, AuditEvent, AuditField, AuditFieldEscaper, AuditLogger, Outcome};
+use crate::runtime::audit_log::{
+    AuditAuthSource, AuditEvent, AuditField, AuditFieldEscaper, AuditLogger, Outcome,
+};
 
 // ---------------------------------------------------------------------------
 // Process-wide sink
@@ -65,10 +67,7 @@ pub fn install_global_audit_sink(logger: Arc<AuditLogger>) {
 #[derive(Debug)]
 pub enum OperatorEvent {
     /// A replication stream to a follower/replica broke unexpectedly.
-    ReplicationBroken {
-        peer: String,
-        reason: String,
-    },
+    ReplicationBroken { peer: String, reason: String },
     /// Replication state diverged: the follower's committed LSN or
     /// checksum disagrees with the leader.
     Divergence {
@@ -77,10 +76,7 @@ pub enum OperatorEvent {
         follower_lsn: u64,
     },
     /// The WAL fsync call failed. Data may be at risk on the current host.
-    WalFsyncFailed {
-        path: String,
-        error: String,
-    },
+    WalFsyncFailed { path: String, error: String },
     /// Available disk space fell below the configured critical threshold.
     DiskSpaceCritical {
         path: String,
@@ -101,10 +97,7 @@ pub enum OperatorEvent {
         granted_by: String,
     },
     /// Secret rotation failed; the current secret may be stale.
-    SecretRotationFailed {
-        secret_ref: String,
-        error: String,
-    },
+    SecretRotationFailed { secret_ref: String, error: String },
     /// A runtime configuration change was applied to a live instance.
     ConfigChanged {
         key: String,
@@ -113,25 +106,14 @@ pub enum OperatorEvent {
         changed_by: String,
     },
     /// The server process failed to start cleanly.
-    StartupFailed {
-        phase: String,
-        error: String,
-    },
+    StartupFailed { phase: String, error: String },
     /// The server process was forced to shut down (e.g. OOM killer,
     /// SIGKILL, unrecoverable error).
-    ShutdownForced {
-        reason: String,
-    },
+    ShutdownForced { reason: String },
     /// On-disk schema metadata is corrupt or inconsistent.
-    SchemaCorruption {
-        collection: String,
-        detail: String,
-    },
+    SchemaCorruption { collection: String, detail: String },
     /// A scheduled or triggered checkpoint failed to complete.
-    CheckpointFailed {
-        lsn: u64,
-        error: String,
-    },
+    CheckpointFailed { lsn: u64, error: String },
     /// An admin intent that was started but never reached a terminal phase
     /// (completed or aborted). Emitted by [`super::admin_intent_log::AdminIntentLog::scan_and_report`]
     /// at startup so operators can investigate interrupted operations.
@@ -145,9 +127,7 @@ pub enum OperatorEvent {
     /// A config-file change was detected but one or more changed fields
     /// require a full server restart to take effect. The change was NOT
     /// applied; the operator must restart to pick it up.
-    ConfigChangeRequiresRestart {
-        fields_changed: String,
-    },
+    ConfigChangeRequiresRestart { fields_changed: String },
     /// An ALTER TABLE on a collection with active event subscriptions
     /// added or removed columns. Downstream consumers may see a different
     /// payload shape starting at `lsn`.
@@ -277,7 +257,11 @@ impl OperatorEvent {
                 ];
                 ("operator/replication_broken", fields, summary)
             }
-            Self::Divergence { peer, leader_lsn, follower_lsn } => {
+            Self::Divergence {
+                peer,
+                leader_lsn,
+                follower_lsn,
+            } => {
                 let summary = format!(
                     "replication divergence: peer={peer} leader_lsn={leader_lsn} follower_lsn={follower_lsn}"
                 );
@@ -296,7 +280,11 @@ impl OperatorEvent {
                 ];
                 ("operator/wal_fsync_failed", fields, summary)
             }
-            Self::DiskSpaceCritical { path, available_bytes, threshold_bytes } => {
+            Self::DiskSpaceCritical {
+                path,
+                available_bytes,
+                threshold_bytes,
+            } => {
                 let summary = format!(
                     "disk space critical: path={path} available={available_bytes} threshold={threshold_bytes}"
                 );
@@ -307,7 +295,11 @@ impl OperatorEvent {
                 ];
                 ("operator/disk_space_critical", fields, summary)
             }
-            Self::AuthBypass { principal, resource, detail } => {
+            Self::AuthBypass {
+                principal,
+                resource,
+                detail,
+            } => {
                 let summary =
                     format!("auth bypass detected: principal={principal} resource={resource}");
                 let fields = vec![
@@ -317,7 +309,11 @@ impl OperatorEvent {
                 ];
                 ("operator/auth_bypass", fields, summary)
             }
-            Self::AdminCapabilityGranted { granted_to, capability, granted_by } => {
+            Self::AdminCapabilityGranted {
+                granted_to,
+                capability,
+                granted_by,
+            } => {
                 let summary = format!(
                     "admin capability granted: to={granted_to} capability={capability} by={granted_by}"
                 );
@@ -329,15 +325,19 @@ impl OperatorEvent {
                 ("operator/admin_capability_granted", fields, summary)
             }
             Self::SecretRotationFailed { secret_ref, error } => {
-                let summary =
-                    format!("secret rotation failed: ref={secret_ref} error={error}");
+                let summary = format!("secret rotation failed: ref={secret_ref} error={error}");
                 let fields = vec![
                     AuditFieldEscaper::field("secret_ref", secret_ref),
                     AuditFieldEscaper::field("error", error),
                 ];
                 ("operator/secret_rotation_failed", fields, summary)
             }
-            Self::ConfigChanged { key, old_value, new_value, changed_by } => {
+            Self::ConfigChanged {
+                key,
+                old_value,
+                new_value,
+                changed_by,
+            } => {
                 let summary = format!(
                     "config changed: key={key} old={old_value} new={new_value} by={changed_by}"
                 );
@@ -363,8 +363,7 @@ impl OperatorEvent {
                 ("operator/shutdown_forced", fields, summary)
             }
             Self::SchemaCorruption { collection, detail } => {
-                let summary =
-                    format!("schema corruption: collection={collection} detail={detail}");
+                let summary = format!("schema corruption: collection={collection} detail={detail}");
                 let fields = vec![
                     AuditFieldEscaper::field("collection", collection),
                     AuditFieldEscaper::field("detail", detail),
@@ -379,7 +378,12 @@ impl OperatorEvent {
                 ];
                 ("operator/checkpoint_failed", fields, summary)
             }
-            Self::DanglingAdminIntent { id, op, started_at_ms, last_phase } => {
+            Self::DanglingAdminIntent {
+                id,
+                op,
+                started_at_ms,
+                last_phase,
+            } => {
                 let summary = format!(
                     "dangling admin intent: id={id} op={op} started_at_ms={started_at_ms} last_phase={last_phase}"
                 );
@@ -392,9 +396,7 @@ impl OperatorEvent {
                 ("operator/dangling_admin_intent", fields, summary)
             }
             Self::ConfigChangeRequiresRestart { fields_changed } => {
-                let summary = format!(
-                    "config change requires restart: fields={fields_changed}"
-                );
+                let summary = format!("config change requires restart: fields={fields_changed}");
                 let fields = vec![AuditFieldEscaper::field("fields_changed", fields_changed)];
                 ("operator/config_change_requires_restart", fields, summary)
             }
@@ -418,9 +420,8 @@ impl OperatorEvent {
                 ("operator/subscription_schema_change", fields, summary)
             }
             Self::OutboxDlqActivated { queue, dlq, reason } => {
-                let summary = format!(
-                    "outbox DLQ activated: queue={queue} dlq={dlq} reason={reason}"
-                );
+                let summary =
+                    format!("outbox DLQ activated: queue={queue} dlq={dlq} reason={reason}");
                 let fields = vec![
                     AuditFieldEscaper::field("queue", queue),
                     AuditFieldEscaper::field("dlq", dlq),
@@ -483,8 +484,14 @@ mod tests {
         .emit(&logger);
         drain(&logger);
         let v = read_last_line(&path);
-        assert_eq!(v.get("action").and_then(|x| x.as_str()), Some("operator/replication_broken"));
-        let peer = v.get("detail").and_then(|d| d.get("peer")).and_then(|x| x.as_str());
+        assert_eq!(
+            v.get("action").and_then(|x| x.as_str()),
+            Some("operator/replication_broken")
+        );
+        let peer = v
+            .get("detail")
+            .and_then(|d| d.get("peer"))
+            .and_then(|x| x.as_str());
         assert_eq!(peer, Some("replica-1"));
     }
 
@@ -499,8 +506,14 @@ mod tests {
         .emit(&logger);
         drain(&logger);
         let v = read_last_line(&path);
-        assert_eq!(v.get("action").and_then(|x| x.as_str()), Some("operator/divergence"));
-        let lsn = v.get("detail").and_then(|d| d.get("leader_lsn")).and_then(|x| x.as_i64());
+        assert_eq!(
+            v.get("action").and_then(|x| x.as_str()),
+            Some("operator/divergence")
+        );
+        let lsn = v
+            .get("detail")
+            .and_then(|d| d.get("leader_lsn"))
+            .and_then(|x| x.as_i64());
         assert_eq!(lsn, Some(1000));
     }
 
@@ -514,8 +527,14 @@ mod tests {
         .emit(&logger);
         drain(&logger);
         let v = read_last_line(&path);
-        assert_eq!(v.get("action").and_then(|x| x.as_str()), Some("operator/wal_fsync_failed"));
-        let err = v.get("detail").and_then(|d| d.get("error")).and_then(|x| x.as_str());
+        assert_eq!(
+            v.get("action").and_then(|x| x.as_str()),
+            Some("operator/wal_fsync_failed")
+        );
+        let err = v
+            .get("detail")
+            .and_then(|d| d.get("error"))
+            .and_then(|x| x.as_str());
         assert_eq!(err, Some("EIO"));
     }
 
@@ -530,7 +549,10 @@ mod tests {
         .emit(&logger);
         drain(&logger);
         let v = read_last_line(&path);
-        assert_eq!(v.get("action").and_then(|x| x.as_str()), Some("operator/disk_space_critical"));
+        assert_eq!(
+            v.get("action").and_then(|x| x.as_str()),
+            Some("operator/disk_space_critical")
+        );
         let avail = v
             .get("detail")
             .and_then(|d| d.get("available_bytes"))
@@ -549,8 +571,14 @@ mod tests {
         .emit(&logger);
         drain(&logger);
         let v = read_last_line(&path);
-        assert_eq!(v.get("action").and_then(|x| x.as_str()), Some("operator/auth_bypass"));
-        let res = v.get("detail").and_then(|d| d.get("resource")).and_then(|x| x.as_str());
+        assert_eq!(
+            v.get("action").and_then(|x| x.as_str()),
+            Some("operator/auth_bypass")
+        );
+        let res = v
+            .get("detail")
+            .and_then(|d| d.get("resource"))
+            .and_then(|x| x.as_str());
         assert_eq!(res, Some("/admin/drop"));
     }
 
@@ -569,7 +597,10 @@ mod tests {
             v.get("action").and_then(|x| x.as_str()),
             Some("operator/admin_capability_granted")
         );
-        let cap = v.get("detail").and_then(|d| d.get("capability")).and_then(|x| x.as_str());
+        let cap = v
+            .get("detail")
+            .and_then(|d| d.get("capability"))
+            .and_then(|x| x.as_str());
         assert_eq!(cap, Some("ADMIN_WRITE"));
     }
 
@@ -587,7 +618,10 @@ mod tests {
             v.get("action").and_then(|x| x.as_str()),
             Some("operator/secret_rotation_failed")
         );
-        let r = v.get("detail").and_then(|d| d.get("secret_ref")).and_then(|x| x.as_str());
+        let r = v
+            .get("detail")
+            .and_then(|d| d.get("secret_ref"))
+            .and_then(|x| x.as_str());
         assert_eq!(r, Some("jwt-signing-key"));
     }
 
@@ -603,8 +637,14 @@ mod tests {
         .emit(&logger);
         drain(&logger);
         let v = read_last_line(&path);
-        assert_eq!(v.get("action").and_then(|x| x.as_str()), Some("operator/config_changed"));
-        let nv = v.get("detail").and_then(|d| d.get("new_value")).and_then(|x| x.as_str());
+        assert_eq!(
+            v.get("action").and_then(|x| x.as_str()),
+            Some("operator/config_changed")
+        );
+        let nv = v
+            .get("detail")
+            .and_then(|d| d.get("new_value"))
+            .and_then(|x| x.as_str());
         assert_eq!(nv, Some("200"));
     }
 
@@ -618,8 +658,14 @@ mod tests {
         .emit(&logger);
         drain(&logger);
         let v = read_last_line(&path);
-        assert_eq!(v.get("action").and_then(|x| x.as_str()), Some("operator/startup_failed"));
-        let phase = v.get("detail").and_then(|d| d.get("phase")).and_then(|x| x.as_str());
+        assert_eq!(
+            v.get("action").and_then(|x| x.as_str()),
+            Some("operator/startup_failed")
+        );
+        let phase = v
+            .get("detail")
+            .and_then(|d| d.get("phase"))
+            .and_then(|x| x.as_str());
         assert_eq!(phase, Some("wal_recovery"));
     }
 
@@ -632,8 +678,14 @@ mod tests {
         .emit(&logger);
         drain(&logger);
         let v = read_last_line(&path);
-        assert_eq!(v.get("action").and_then(|x| x.as_str()), Some("operator/shutdown_forced"));
-        let r = v.get("detail").and_then(|d| d.get("reason")).and_then(|x| x.as_str());
+        assert_eq!(
+            v.get("action").and_then(|x| x.as_str()),
+            Some("operator/shutdown_forced")
+        );
+        let r = v
+            .get("detail")
+            .and_then(|d| d.get("reason"))
+            .and_then(|x| x.as_str());
         assert_eq!(r, Some("OOM"));
     }
 
@@ -647,8 +699,14 @@ mod tests {
         .emit(&logger);
         drain(&logger);
         let v = read_last_line(&path);
-        assert_eq!(v.get("action").and_then(|x| x.as_str()), Some("operator/schema_corruption"));
-        let coll = v.get("detail").and_then(|d| d.get("collection")).and_then(|x| x.as_str());
+        assert_eq!(
+            v.get("action").and_then(|x| x.as_str()),
+            Some("operator/schema_corruption")
+        );
+        let coll = v
+            .get("detail")
+            .and_then(|d| d.get("collection"))
+            .and_then(|x| x.as_str());
         assert_eq!(coll, Some("users"));
     }
 
@@ -662,8 +720,14 @@ mod tests {
         .emit(&logger);
         drain(&logger);
         let v = read_last_line(&path);
-        assert_eq!(v.get("action").and_then(|x| x.as_str()), Some("operator/checkpoint_failed"));
-        let lsn = v.get("detail").and_then(|d| d.get("lsn")).and_then(|x| x.as_i64());
+        assert_eq!(
+            v.get("action").and_then(|x| x.as_str()),
+            Some("operator/checkpoint_failed")
+        );
+        let lsn = v
+            .get("detail")
+            .and_then(|d| d.get("lsn"))
+            .and_then(|x| x.as_i64());
         assert_eq!(lsn, Some(42_000));
     }
 
@@ -701,19 +765,14 @@ mod tests {
                 "{label}: embedded newline in JSONL row"
             );
 
-            let v: crate::json::Value =
-                crate::json::from_str(line).unwrap_or_else(|e| {
-                    panic!("{label}: audit line not valid JSON: {e}\n{line:?}")
-                });
+            let v: crate::json::Value = crate::json::from_str(line)
+                .unwrap_or_else(|e| panic!("{label}: audit line not valid JSON: {e}\n{line:?}"));
             let recovered = v
                 .get("detail")
                 .and_then(|d| d.get("collection"))
                 .and_then(|x| x.as_str())
                 .unwrap_or("");
-            assert_eq!(
-                recovered, *payload,
-                "{label}: round-trip mismatch"
-            );
+            assert_eq!(recovered, *payload, "{label}: round-trip mismatch");
         }
     }
 
@@ -724,7 +783,10 @@ mod tests {
     #[test]
     fn emit_sets_outcome_error_and_source_system() {
         let (logger, path) = make_logger();
-        OperatorEvent::ShutdownForced { reason: "test".into() }.emit(&logger);
+        OperatorEvent::ShutdownForced {
+            reason: "test".into(),
+        }
+        .emit(&logger);
         drain(&logger);
         let v = read_last_line(&path);
         assert_eq!(v.get("outcome").and_then(|x| x.as_str()), Some("error"));

@@ -56,7 +56,9 @@ impl<'a> Parser<'a> {
         }
         let key = if operation == "LIST" {
             None
-        } else if operation == "WATCH" && matches!(self.peek(), Token::Ident(name) if name.eq_ignore_ascii_case("PREFIX")) {
+        } else if operation == "WATCH"
+            && matches!(self.peek(), Token::Ident(name) if name.eq_ignore_ascii_case("PREFIX"))
+        {
             None
         } else if !matches!(self.peek(), Token::Eof) {
             Some(self.expect_ident_or_keyword()?.to_ascii_lowercase())

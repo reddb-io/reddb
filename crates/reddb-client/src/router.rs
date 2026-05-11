@@ -508,8 +508,7 @@ mod tests {
 
     #[test]
     fn force_primary_short_circuits() {
-        let router =
-            HealthAwareRouter::with_force_primary(membership("p", &["r1", "r2"]), true);
+        let router = HealthAwareRouter::with_force_primary(membership("p", &["r1", "r2"]), true);
         for _ in 0..50 {
             assert_eq!(router.pick_read_index(), 0);
         }

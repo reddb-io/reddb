@@ -762,10 +762,7 @@ mod tests {
         assert!(!s.should_refresh_now());
         // Connection-level error: force a refresh on the next call.
         s.force_now();
-        assert!(
-            s.should_refresh_now(),
-            "force_now must override the timer"
-        );
+        assert!(s.should_refresh_now(), "force_now must override the timer");
         // Force flag is single-shot: the next call goes back to the
         // timer (which has not elapsed).
         s.mark_refreshed();

@@ -50,18 +50,13 @@ pub fn literal() -> impl Strategy<Value = String> {
 /// wider projection but sticks with single-column for shrinking
 /// economy.
 pub fn inner_select() -> impl Strategy<Value = String> {
-    (
-        ident(),
-        ident(),
-        proptest::option::of((ident(), literal())),
-    )
-        .prop_map(|(col, table, wh)| {
-            let mut s = format!("SELECT {} FROM {}", col, table);
-            if let Some((wcol, wval)) = wh {
-                s.push_str(&format!(" WHERE {} = {}", wcol, wval));
-            }
-            s
-        })
+    (ident(), ident(), proptest::option::of((ident(), literal()))).prop_map(|(col, table, wh)| {
+        let mut s = format!("SELECT {} FROM {}", col, table);
+        if let Some((wcol, wval)) = wh {
+            s.push_str(&format!(" WHERE {} = {}", wcol, wval));
+        }
+        s
+    })
 }
 
 // ============================================================
@@ -77,12 +72,10 @@ pub fn inner_select() -> impl Strategy<Value = String> {
 /// subquery branch lands, the property test can flip from "no-panic"
 /// to `parse(...).is_ok()` with no string changes.
 pub fn where_in_subquery_stmt() -> impl Strategy<Value = String> {
-    (ident(), ident(), any::<bool>(), inner_select()).prop_map(
-        |(outer, col, negated, inner)| {
-            let kw = if negated { "NOT IN" } else { "IN" };
-            format!("SELECT * FROM {} WHERE {} {} ({})", outer, col, kw, inner)
-        },
-    )
+    (ident(), ident(), any::<bool>(), inner_select()).prop_map(|(outer, col, negated, inner)| {
+        let kw = if negated { "NOT IN" } else { "IN" };
+        format!("SELECT * FROM {} WHERE {} {} ({})", outer, col, kw, inner)
+    })
 }
 
 // ============================================================
@@ -149,9 +142,7 @@ pub fn scalar_subquery_stmt() -> impl Strategy<Value = String> {
 /// path that join.rs also accepts) so the strategy stays robust to
 /// future tightenings of the alias-keyword exclusion list.
 pub fn from_aliased_subquery_stmt() -> impl Strategy<Value = String> {
-    (inner_select(), ident()).prop_map(|(inner, alias)| {
-        format!("FROM ({}) AS {}", inner, alias)
-    })
+    (inner_select(), ident()).prop_map(|(inner, alias)| format!("FROM ({}) AS {}", inner, alias))
 }
 
 // ============================================================

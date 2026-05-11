@@ -17,7 +17,10 @@ impl std::fmt::Display for FrameError {
         match self {
             Self::Truncated => write!(f, "frame header truncated"),
             Self::InvalidLength(n) => write!(f, "frame length invalid: {n}"),
-            Self::PayloadTruncated { expected, available } => {
+            Self::PayloadTruncated {
+                expected,
+                available,
+            } => {
                 write!(f, "payload truncated: {expected} expected, {available} got")
             }
             Self::UnknownKind(b) => write!(f, "unknown message kind 0x{b:02x}"),

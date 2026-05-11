@@ -218,7 +218,7 @@ mod tests {
     fn paragraph_split_preference() {
         let text = "First paragraph with some content.\n\nSecond paragraph with more text.";
         let chunks = chunk(text, 8); // 8 tokens = 32 bytes — small to force split
-        // Both paragraphs have ~35-40 bytes, so they split
+                                     // Both paragraphs have ~35-40 bytes, so they split
         assert!(chunks.len() >= 1);
         // Each chunk fits within 32 bytes
         for c in &chunks {

@@ -87,10 +87,12 @@ fn count_star_per_group() {
     let stream = AggregateQueryPlanner::plan(&plan, VecScan::new(rows)).unwrap();
     let mut got: Vec<(String, i64)> = stream
         .into_iter()
-        .map(|r| match (r.group_key, r.aggregate_values.into_iter().next()) {
-            (Value::Text(k), Some(Value::Integer(n))) => (k.to_string(), n),
-            other => panic!("unexpected row shape: {other:?}"),
-        })
+        .map(
+            |r| match (r.group_key, r.aggregate_values.into_iter().next()) {
+                (Value::Text(k), Some(Value::Integer(n))) => (k.to_string(), n),
+                other => panic!("unexpected row shape: {other:?}"),
+            },
+        )
         .collect();
     got.sort();
     assert_eq!(got, vec![("eng".to_string(), 2), ("ops".to_string(), 1)]);
@@ -156,10 +158,7 @@ fn sum_avg_min_max_basic() {
 fn all_null_group_returns_null_for_sum_avg() {
     let plan = ast(
         "k",
-        vec![
-            agg(AggregateOp::Sum, 0, "s"),
-            agg(AggregateOp::Avg, 0, "a"),
-        ],
+        vec![agg(AggregateOp::Sum, 0, "s"), agg(AggregateOp::Avg, 0, "a")],
     );
     let rows = vec![
         ScanRow {

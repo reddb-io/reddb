@@ -172,7 +172,10 @@ pub(crate) fn runtime_stats_json(stats: &RuntimeStats) -> JsonValue {
     let blob = stats.result_blob_cache;
     let mut result_blob_cache = Map::new();
     result_blob_cache.insert("hits".to_string(), JsonValue::Number(blob.hits() as f64));
-    result_blob_cache.insert("misses".to_string(), JsonValue::Number(blob.misses() as f64));
+    result_blob_cache.insert(
+        "misses".to_string(),
+        JsonValue::Number(blob.misses() as f64),
+    );
     result_blob_cache.insert(
         "expirations".to_string(),
         JsonValue::Number(blob.expirations() as f64),

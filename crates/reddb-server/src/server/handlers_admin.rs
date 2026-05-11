@@ -108,10 +108,7 @@ fn b64_decode(input: &str) -> Result<Vec<u8>, String> {
 
     let bytes: Vec<u8> = input.bytes().collect();
     for chunk in bytes.chunks(4) {
-        let v: Vec<u32> = chunk
-            .iter()
-            .map(|&b| lookup(b))
-            .collect::<Result<_, _>>()?;
+        let v: Vec<u32> = chunk.iter().map(|&b| lookup(b)).collect::<Result<_, _>>()?;
         match v.len() {
             4 => {
                 let n = (v[0] << 18) | (v[1] << 12) | (v[2] << 6) | v[3];
@@ -388,12 +385,14 @@ impl RedDBServer {
         } else {
             match crate::serde_json::from_slice::<crate::serde_json::Value>(&body) {
                 Ok(v) => {
-                    let entries = v.get("limit_entries").and_then(|n| n.as_u64()).map(|n| {
-                        usize::try_from(n).unwrap_or(usize::MAX)
-                    });
-                    let millis = v.get("limit_millis").and_then(|n| n.as_u64()).map(|n| {
-                        u32::try_from(n).unwrap_or(u32::MAX)
-                    });
+                    let entries = v
+                        .get("limit_entries")
+                        .and_then(|n| n.as_u64())
+                        .map(|n| usize::try_from(n).unwrap_or(usize::MAX));
+                    let millis = v
+                        .get("limit_millis")
+                        .and_then(|n| n.as_u64())
+                        .map(|n| u32::try_from(n).unwrap_or(u32::MAX));
                     (entries, millis)
                 }
                 Err(err) => return json_error(400, format!("invalid JSON body: {err}")),
@@ -493,11 +492,10 @@ impl RedDBServer {
         if body.is_empty() {
             return json_error(400, "missing JSON body with required `namespace` field");
         }
-        let parsed: crate::serde_json::Value =
-            match crate::serde_json::from_slice(&body) {
-                Ok(v) => v,
-                Err(err) => return json_error(400, format!("invalid JSON body: {err}")),
-            };
+        let parsed: crate::serde_json::Value = match crate::serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(err) => return json_error(400, format!("invalid JSON body: {err}")),
+        };
         let namespace = match parsed.get("namespace").and_then(|v| v.as_str()) {
             Some(n) => n.to_string(),
             None => return json_error(400, "field `namespace` is required and must be a string"),
@@ -527,7 +525,8 @@ impl RedDBServer {
             }
         }
 
-        let report = BlobCacheSweeper::flush_namespace(self.runtime.result_blob_cache(), &namespace);
+        let report =
+            BlobCacheSweeper::flush_namespace(self.runtime.result_blob_cache(), &namespace);
 
         let mut object = Map::new();
         object.insert("ok".to_string(), JsonValue::Bool(true));
@@ -598,7 +597,7 @@ impl RedDBServer {
     /// - 400 malformed body / CRLF/NUL injection / bad base64
     /// - 401 missing or wrong admin bearer token
     pub(crate) fn handle_admin_blob_cache_compare_and_set(&self, body: Vec<u8>) -> HttpResponse {
-        use crate::storage::cache::blob::{BlobCachePut, BlobCachePolicy, CacheError};
+        use crate::storage::cache::blob::{BlobCachePolicy, BlobCachePut, CacheError};
 
         if body.is_empty() {
             return json_error(400, "missing JSON body");
@@ -621,7 +620,10 @@ impl RedDBServer {
         let new_value_b64 = match parsed.get("new_value_b64").and_then(|v| v.as_str()) {
             Some(v) => v.to_string(),
             None => {
-                return json_error(400, "field `new_value_b64` is required and must be a string")
+                return json_error(
+                    400,
+                    "field `new_value_b64` is required and must be a string",
+                )
             }
         };
         let new_version = match parsed.get("new_version").and_then(|v| v.as_u64()) {
@@ -730,31 +732,103 @@ impl RedDBServer {
         obj.insert("ok".to_string(), JsonValue::Bool(true));
         obj.insert("hits".to_string(), JsonValue::Number(s.hits() as f64));
         obj.insert("misses".to_string(), JsonValue::Number(s.misses() as f64));
-        obj.insert("insertions".to_string(), JsonValue::Number(s.insertions() as f64));
-        obj.insert("evictions".to_string(), JsonValue::Number(s.evictions() as f64));
-        obj.insert("expirations".to_string(), JsonValue::Number(s.expirations() as f64));
-        obj.insert("invalidations".to_string(), JsonValue::Number(s.invalidations() as f64));
-        obj.insert("namespace_flushes".to_string(), JsonValue::Number(s.namespace_flushes() as f64));
-        obj.insert("version_mismatches".to_string(), JsonValue::Number(s.version_mismatches() as f64));
+        obj.insert(
+            "insertions".to_string(),
+            JsonValue::Number(s.insertions() as f64),
+        );
+        obj.insert(
+            "evictions".to_string(),
+            JsonValue::Number(s.evictions() as f64),
+        );
+        obj.insert(
+            "expirations".to_string(),
+            JsonValue::Number(s.expirations() as f64),
+        );
+        obj.insert(
+            "invalidations".to_string(),
+            JsonValue::Number(s.invalidations() as f64),
+        );
+        obj.insert(
+            "namespace_flushes".to_string(),
+            JsonValue::Number(s.namespace_flushes() as f64),
+        );
+        obj.insert(
+            "version_mismatches".to_string(),
+            JsonValue::Number(s.version_mismatches() as f64),
+        );
         obj.insert("entries".to_string(), JsonValue::Number(s.entries() as f64));
-        obj.insert("bytes_in_use".to_string(), JsonValue::Number(s.bytes_in_use() as f64));
-        obj.insert("l1_bytes_max".to_string(), JsonValue::Number(s.l1_bytes_max() as f64));
-        obj.insert("l2_bytes_in_use".to_string(), JsonValue::Number(s.l2_bytes_in_use() as f64));
-        obj.insert("l2_bytes_max".to_string(), JsonValue::Number(s.l2_bytes_max() as f64));
-        obj.insert("l2_full_rejections".to_string(), JsonValue::Number(s.l2_full_rejections() as f64));
-        obj.insert("l2_metadata_reads".to_string(), JsonValue::Number(s.l2_metadata_reads() as f64));
-        obj.insert("l2_negative_skips".to_string(), JsonValue::Number(s.l2_negative_skips() as f64));
-        obj.insert("synopsis_metadata_reads".to_string(), JsonValue::Number(s.synopsis_metadata_reads() as f64));
-        obj.insert("synopsis_bytes".to_string(), JsonValue::Number(s.synopsis_bytes() as f64));
-        obj.insert("namespaces".to_string(), JsonValue::Number(s.namespaces() as f64));
-        obj.insert("max_namespaces".to_string(), JsonValue::Number(s.max_namespaces() as f64));
-        obj.insert("promotion_queued".to_string(), JsonValue::Number(s.promotion_queued() as f64));
-        obj.insert("promotion_dropped".to_string(), JsonValue::Number(s.promotion_dropped() as f64));
-        obj.insert("promotion_completed".to_string(), JsonValue::Number(s.promotion_completed() as f64));
-        obj.insert("promotion_queue_depth".to_string(), JsonValue::Number(s.promotion_queue_depth() as f64));
-        obj.insert("l2_compression_ratio_observed".to_string(), JsonValue::Number(s.l2_compression_ratio_observed()));
-        obj.insert("l2_compression_skipped_total".to_string(), JsonValue::Number(s.l2_compression_skipped_total() as f64));
-        obj.insert("l2_bytes_saved_total".to_string(), JsonValue::Number(s.l2_bytes_saved_total() as f64));
+        obj.insert(
+            "bytes_in_use".to_string(),
+            JsonValue::Number(s.bytes_in_use() as f64),
+        );
+        obj.insert(
+            "l1_bytes_max".to_string(),
+            JsonValue::Number(s.l1_bytes_max() as f64),
+        );
+        obj.insert(
+            "l2_bytes_in_use".to_string(),
+            JsonValue::Number(s.l2_bytes_in_use() as f64),
+        );
+        obj.insert(
+            "l2_bytes_max".to_string(),
+            JsonValue::Number(s.l2_bytes_max() as f64),
+        );
+        obj.insert(
+            "l2_full_rejections".to_string(),
+            JsonValue::Number(s.l2_full_rejections() as f64),
+        );
+        obj.insert(
+            "l2_metadata_reads".to_string(),
+            JsonValue::Number(s.l2_metadata_reads() as f64),
+        );
+        obj.insert(
+            "l2_negative_skips".to_string(),
+            JsonValue::Number(s.l2_negative_skips() as f64),
+        );
+        obj.insert(
+            "synopsis_metadata_reads".to_string(),
+            JsonValue::Number(s.synopsis_metadata_reads() as f64),
+        );
+        obj.insert(
+            "synopsis_bytes".to_string(),
+            JsonValue::Number(s.synopsis_bytes() as f64),
+        );
+        obj.insert(
+            "namespaces".to_string(),
+            JsonValue::Number(s.namespaces() as f64),
+        );
+        obj.insert(
+            "max_namespaces".to_string(),
+            JsonValue::Number(s.max_namespaces() as f64),
+        );
+        obj.insert(
+            "promotion_queued".to_string(),
+            JsonValue::Number(s.promotion_queued() as f64),
+        );
+        obj.insert(
+            "promotion_dropped".to_string(),
+            JsonValue::Number(s.promotion_dropped() as f64),
+        );
+        obj.insert(
+            "promotion_completed".to_string(),
+            JsonValue::Number(s.promotion_completed() as f64),
+        );
+        obj.insert(
+            "promotion_queue_depth".to_string(),
+            JsonValue::Number(s.promotion_queue_depth() as f64),
+        );
+        obj.insert(
+            "l2_compression_ratio_observed".to_string(),
+            JsonValue::Number(s.l2_compression_ratio_observed()),
+        );
+        obj.insert(
+            "l2_compression_skipped_total".to_string(),
+            JsonValue::Number(s.l2_compression_skipped_total() as f64),
+        );
+        obj.insert(
+            "l2_bytes_saved_total".to_string(),
+            JsonValue::Number(s.l2_bytes_saved_total() as f64),
+        );
         json_response(200, JsonValue::Object(obj))
     }
 
@@ -1187,7 +1261,8 @@ impl RedDBServer {
         let _ = writeln!(
             body,
             "reddb_cache_blob_get_total{{namespace=\"{}\",result=\"hit_l1\"}} {}",
-            blob_ns, result_blob_stats.hits()
+            blob_ns,
+            result_blob_stats.hits()
         );
         let _ = writeln!(
             body,
@@ -1197,7 +1272,8 @@ impl RedDBServer {
         let _ = writeln!(
             body,
             "reddb_cache_blob_get_total{{namespace=\"{}\",result=\"miss\"}} {}",
-            blob_ns, result_blob_stats.misses()
+            blob_ns,
+            result_blob_stats.misses()
         );
         let _ = writeln!(
             body,
@@ -1207,12 +1283,14 @@ impl RedDBServer {
         let _ = writeln!(
             body,
             "reddb_cache_blob_put_total{{namespace=\"{}\",outcome=\"ok\"}} {}",
-            blob_ns, result_blob_stats.insertions()
+            blob_ns,
+            result_blob_stats.insertions()
         );
         let _ = writeln!(
             body,
             "reddb_cache_blob_put_total{{namespace=\"{}\",outcome=\"version_mismatch\"}} {}",
-            blob_ns, result_blob_stats.version_mismatches()
+            blob_ns,
+            result_blob_stats.version_mismatches()
         );
         let _ = writeln!(
             body,
@@ -1266,7 +1344,8 @@ impl RedDBServer {
         let _ = writeln!(
             body,
             "reddb_cache_blob_l1_bytes_in_use{{namespace=\"{}\"}} {}",
-            blob_ns, result_blob_stats.bytes_in_use()
+            blob_ns,
+            result_blob_stats.bytes_in_use()
         );
         let _ = writeln!(
             body,
@@ -1276,7 +1355,8 @@ impl RedDBServer {
         let _ = writeln!(
             body,
             "reddb_cache_blob_l1_entries{{namespace=\"{}\"}} {}",
-            blob_ns, result_blob_stats.entries()
+            blob_ns,
+            result_blob_stats.entries()
         );
         let _ = writeln!(
             body,
@@ -1286,7 +1366,8 @@ impl RedDBServer {
         let _ = writeln!(
             body,
             "reddb_cache_blob_l2_bytes_in_use{{namespace=\"{}\"}} {}",
-            blob_ns, result_blob_stats.l2_bytes_in_use()
+            blob_ns,
+            result_blob_stats.l2_bytes_in_use()
         );
         let _ = writeln!(
             body,
@@ -1299,7 +1380,8 @@ impl RedDBServer {
         let _ = writeln!(
             body,
             "reddb_cache_blob_l2_full_rejections_total{{namespace=\"{}\"}} {}",
-            blob_ns, result_blob_stats.l2_full_rejections()
+            blob_ns,
+            result_blob_stats.l2_full_rejections()
         );
         let _ = writeln!(
             body,
@@ -1312,7 +1394,8 @@ impl RedDBServer {
         let _ = writeln!(
             body,
             "reddb_cache_blob_version_mismatch_total{{namespace=\"{}\"}} {}",
-            blob_ns, result_blob_stats.version_mismatches()
+            blob_ns,
+            result_blob_stats.version_mismatches()
         );
 
         let _ = writeln!(
@@ -1440,11 +1523,11 @@ impl RedDBServer {
 
         // Events outbox metrics — issue #299
         {
-            use crate::runtime::impl_queue::{EVENTS_DLQ_TOTAL, EVENTS_DRAIN_RETRIES_TOTAL, EVENTS_ENQUEUED_TOTAL};
-            let enqueued =
-                EVENTS_ENQUEUED_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
-            let retries =
-                EVENTS_DRAIN_RETRIES_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+            use crate::runtime::impl_queue::{
+                EVENTS_DLQ_TOTAL, EVENTS_DRAIN_RETRIES_TOTAL, EVENTS_ENQUEUED_TOTAL,
+            };
+            let enqueued = EVENTS_ENQUEUED_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+            let retries = EVENTS_DRAIN_RETRIES_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
             let dlq_total = EVENTS_DLQ_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
 
             let _ = writeln!(
@@ -2695,7 +2778,6 @@ mod tests {
         assert!(msg.contains("NUL"), "unexpected error: {msg}");
     }
 
-
     #[test]
     fn admin_blob_cache_flush_namespace_response_round_trips_unicode() {
         let server = test_server();
@@ -2717,15 +2799,24 @@ mod tests {
         let b64 = {
             let mut s = String::new();
             for chunk in new_value.chunks(3) {
-                const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                const CHARS: &[u8] =
+                    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
                 let b0 = chunk[0] as u32;
                 let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
                 let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
                 let n = (b0 << 16) | (b1 << 8) | b2;
                 s.push(CHARS[((n >> 18) & 63) as usize] as char);
                 s.push(CHARS[((n >> 12) & 63) as usize] as char);
-                s.push(if chunk.len() > 1 { CHARS[((n >> 6) & 63) as usize] as char } else { '=' });
-                s.push(if chunk.len() > 2 { CHARS[(n & 63) as usize] as char } else { '=' });
+                s.push(if chunk.len() > 1 {
+                    CHARS[((n >> 6) & 63) as usize] as char
+                } else {
+                    '='
+                });
+                s.push(if chunk.len() > 2 {
+                    CHARS[(n & 63) as usize] as char
+                } else {
+                    '='
+                });
             }
             s
         };
@@ -2742,8 +2833,14 @@ mod tests {
         let resp = server.handle_admin_blob_cache_compare_and_set(body);
         assert_eq!(resp.status, 200);
         let parsed = parse_body(&resp);
-        assert_eq!(parsed.get("committed").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(parsed.get("current_version").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(
+            parsed.get("committed").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            parsed.get("current_version").and_then(|v| v.as_u64()),
+            Some(1)
+        );
     }
 
     #[test]
@@ -2755,8 +2852,14 @@ mod tests {
         let resp = server.handle_admin_blob_cache_compare_and_set(cas_body("ns2", "k2", b"v2", 2));
         assert_eq!(resp.status, 200);
         let parsed = parse_body(&resp);
-        assert_eq!(parsed.get("committed").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(parsed.get("current_version").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(
+            parsed.get("committed").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            parsed.get("current_version").and_then(|v| v.as_u64()),
+            Some(2)
+        );
     }
 
     #[test]
@@ -2768,7 +2871,10 @@ mod tests {
         let resp = server.handle_admin_blob_cache_compare_and_set(cas_body("ns3", "k3", b"v2", 5));
         assert_eq!(resp.status, 409);
         let parsed = parse_body(&resp);
-        assert_eq!(parsed.get("committed").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(
+            parsed.get("committed").and_then(|v| v.as_bool()),
+            Some(false)
+        );
         assert_eq!(
             parsed.get("reason").and_then(|v| v.as_str()),
             Some("VersionMismatch")
@@ -2831,7 +2937,9 @@ mod tests {
         let _g = GUARD.lock().unwrap_or_else(|e| e.into_inner());
 
         let prev = std::env::var("RED_ADMIN_TOKEN").ok();
-        unsafe { std::env::set_var("RED_ADMIN_TOKEN", "test-token-195"); }
+        unsafe {
+            std::env::set_var("RED_ADMIN_TOKEN", "test-token-195");
+        }
 
         let server = test_server();
         let req = crate::server::transport::HttpRequest {
@@ -2859,11 +2967,16 @@ mod tests {
         let _g = GUARD.lock().unwrap_or_else(|e| e.into_inner());
 
         let prev = std::env::var("RED_ADMIN_TOKEN").ok();
-        unsafe { std::env::set_var("RED_ADMIN_TOKEN", "correct-token"); }
+        unsafe {
+            std::env::set_var("RED_ADMIN_TOKEN", "correct-token");
+        }
 
         let server = test_server();
         let mut headers = std::collections::BTreeMap::new();
-        headers.insert("authorization".to_string(), "Bearer wrong-token".to_string());
+        headers.insert(
+            "authorization".to_string(),
+            "Bearer wrong-token".to_string(),
+        );
         let req = crate::server::transport::HttpRequest {
             method: "POST".to_string(),
             path: "/admin/cache/compare-and-set".to_string(),

@@ -110,4 +110,3 @@ macro_rules! snapshot_parse_error {
         insta::assert_snapshot!($name, formatted);
     }};
 }
-

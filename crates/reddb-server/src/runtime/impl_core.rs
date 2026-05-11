@@ -480,12 +480,7 @@ fn latest_config_snapshot(db: &RedDB) -> HashMap<String, Value> {
             let key = key.to_ascii_lowercase();
             insert_latest_config_value(&mut latest, key.clone(), id, value.clone());
             if let Some(rest) = key.strip_prefix("red.config.") {
-                insert_latest_config_value(
-                    &mut latest,
-                    format!("red.config/{rest}"),
-                    id,
-                    value,
-                );
+                insert_latest_config_value(&mut latest, format!("red.config/{rest}"), id, value);
             }
             true
         });

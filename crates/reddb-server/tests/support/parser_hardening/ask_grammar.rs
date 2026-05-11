@@ -116,8 +116,7 @@ pub fn ask_stmt() -> impl Strategy<Value = String> {
 /// the parser is fixed in a follow-up issue. See
 /// `proptest_ask_using_provider_no_panic` in `ask_parser.rs`.
 pub fn ask_using_provider_stmt() -> impl Strategy<Value = String> {
-    (str_lit(), provider_name())
-        .prop_map(|(q, p)| format!("ASK {} USING {}", q, p))
+    (str_lit(), provider_name()).prop_map(|(q, p)| format!("ASK {} USING {}", q, p))
 }
 
 /// `ASK 'question' MODEL '...'` — pins the string-literal slot for
@@ -125,8 +124,7 @@ pub fn ask_using_provider_stmt() -> impl Strategy<Value = String> {
 /// would not parse as bare `Token::Ident`, so the parser requires
 /// quoting; this strategy enforces that contract.
 pub fn ask_model_ident_stmt() -> impl Strategy<Value = String> {
-    (str_lit(), model_name())
-        .prop_map(|(q, m)| format!("ASK {} MODEL {}", q, m))
+    (str_lit(), model_name()).prop_map(|(q, m)| format!("ASK {} MODEL {}", q, m))
 }
 
 /// `SEARCH CONTEXT '<query>' [FIELD field] [COLLECTION col]

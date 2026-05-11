@@ -22,8 +22,8 @@
 //! plane.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use super::Role;

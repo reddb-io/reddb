@@ -173,8 +173,8 @@ impl<'a> Parser<'a> {
             _ => Err(ParseError::expected(
                 if model == CollectionModel::Vault {
                     vec![
-                        "PUT", "GET", "UNSEAL", "ROTATE", "HISTORY", "LIST", "WATCH",
-                        "DELETE", "PURGE", "INCR", "DECR", "CAS",
+                        "PUT", "GET", "UNSEAL", "ROTATE", "HISTORY", "LIST", "WATCH", "DELETE",
+                        "PURGE", "INCR", "DECR", "CAS",
                     ]
                 } else {
                     vec![
@@ -407,8 +407,10 @@ impl<'a> Parser<'a> {
         }
 
         if model == CollectionModel::Vault {
-            let lower_segments: Vec<String> =
-                segments.iter().map(|segment| segment.to_ascii_lowercase()).collect();
+            let lower_segments: Vec<String> = segments
+                .iter()
+                .map(|segment| segment.to_ascii_lowercase())
+                .collect();
             if lower_segments.len() >= 3
                 && lower_segments[0] == "red"
                 && lower_segments[1] == "vault"
@@ -454,7 +456,10 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    pub(crate) fn parse_kv_watch(&mut self, model: CollectionModel) -> Result<QueryExpr, ParseError> {
+    pub(crate) fn parse_kv_watch(
+        &mut self,
+        model: CollectionModel,
+    ) -> Result<QueryExpr, ParseError> {
         let first = self.expect_ident()?;
         let (collection, key, prefix) = if model != CollectionModel::Kv {
             let mut collection = first;

@@ -165,7 +165,10 @@ fn watch_config_events_include_values_only_when_read_is_allowed() {
     );
     assert_eq!(anonymous[1].op, ChangeOperation::Update);
     assert_eq!(
-        anonymous[1].before.as_ref().and_then(|value| value.as_str()),
+        anonymous[1]
+            .before
+            .as_ref()
+            .and_then(|value| value.as_str()),
         Some("off")
     );
     assert_eq!(
@@ -236,9 +239,18 @@ fn list_and_watch_vault_are_metadata_only() {
     let events = rt.vault_watch_events_since("secrets", "api_key", start, 10);
     assert_eq!(events.len(), 2);
     let debug = format!("{events:?}");
-    assert!(!debug.contains(secret), "vault watch exposed plaintext: {debug}");
-    assert!(!debug.contains("next_secret"), "vault watch exposed plaintext: {debug}");
-    assert!(debug.contains("fingerprint"), "vault watch lacks metadata: {debug}");
+    assert!(
+        !debug.contains(secret),
+        "vault watch exposed plaintext: {debug}"
+    );
+    assert!(
+        !debug.contains("next_secret"),
+        "vault watch exposed plaintext: {debug}"
+    );
+    assert!(
+        debug.contains("fingerprint"),
+        "vault watch lacks metadata: {debug}"
+    );
 
     cleanup_related(&path);
 }

@@ -105,8 +105,7 @@ fn ml_predict_proba_returns_normalised_probabilities() {
             query: "SELECT ML_PREDICT_PROBA('xor_toy2', [3.0, 0.1]) AS probs".into(),
         })
         .expect("ML_PREDICT_PROBA should run");
-    let probs = r.result.records[0].get("probs")
-        .expect("probs present");
+    let probs = r.result.records[0].get("probs").expect("probs present");
     let arr = match probs {
         Value::Array(v) => v,
         other => panic!("expected Array, got {other:?}"),
@@ -160,8 +159,7 @@ fn semantic_cache_roundtrip_via_sql() {
             query: "SELECT SEMANTIC_CACHE_GET('qa', [0.1, 0.2, 0.3, 0.4]) AS cached".into(),
         })
         .expect("cache get ok");
-    let cached = r.result.records[0].get("cached")
-        .expect("cached present");
+    let cached = r.result.records[0].get("cached").expect("cached present");
     assert!(
         matches!(cached, Value::Text(s) if s.as_ref() == "AI-first multi-model db"),
         "expected cached hit, got {cached:?}"
@@ -275,8 +273,7 @@ fn semantic_cache_miss_returns_null() {
             query: "SELECT SEMANTIC_CACHE_GET('qa', [0.99, 0.0, 0.0, 0.0]) AS cached".into(),
         })
         .expect("cache get ok");
-    let cached = r.result.records[0].get("cached")
-        .expect("cached present");
+    let cached = r.result.records[0].get("cached").expect("cached present");
     assert!(
         matches!(cached, Value::Null),
         "expected Null, got {cached:?}"

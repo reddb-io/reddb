@@ -113,7 +113,11 @@ impl LeaseTimerWheel {
                 let sleep_for = match state.schedule.keys().next().copied() {
                     Some(t) => {
                         let now = Instant::now();
-                        if t <= now { Duration::ZERO } else { t - now }
+                        if t <= now {
+                            Duration::ZERO
+                        } else {
+                            t - now
+                        }
                     }
                     // Nothing scheduled: park up to 1 h; condvar unparks on
                     // schedule() or shutdown().
