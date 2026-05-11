@@ -4,10 +4,18 @@
 //! engine startup and that querying them returns zero rows on a fresh
 //! in-memory instance.
 
+use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime")
+}
+
+fn text(value: Option<&Value>) -> &str {
+    match value {
+        Some(Value::Text(s)) => s.as_ref(),
+        other => panic!("expected text value, got {other:?}"),
+    }
 }
 
 #[test]
@@ -34,4 +42,69 @@ fn red_migration_deps_exists_and_is_empty() {
         0,
         "red_migration_deps should be empty on a fresh instance"
     );
+}
+
+#[test]
+fn apply_migration_all_applies_pending_migrations_in_dependency_order() {
+    let rt = rt();
+
+    rt.execute_query(
+        "CREATE MIGRATION create_accounts AS \
+         CREATE TABLE mig_accounts (id BIGINT, name TEXT)",
+    )
+    .expect("create_accounts migration");
+    rt.execute_query(
+        "CREATE MIGRATION seed_accounts \
+         DEPENDS ON create_accounts AS \
+         INSERT INTO mig_accounts (id, name) VALUES (1, 'Ada')",
+    )
+    .expect("seed_accounts migration");
+    rt.execute_query(
+        "CREATE MIGRATION create_audit AS \
+         CREATE TABLE mig_audit (id BIGINT, event TEXT)",
+    )
+    .expect("create_audit migration");
+    rt.execute_query(
+        "CREATE MIGRATION seed_audit \
+         DEPENDS ON create_audit AS \
+         INSERT INTO mig_audit (id, event) VALUES (1, 'created')",
+    )
+    .expect("seed_audit migration");
+    rt.execute_query(
+        "CREATE MIGRATION seed_accounts_second \
+         DEPENDS ON seed_accounts AS \
+         INSERT INTO mig_accounts (id, name) VALUES (2, 'Grace')",
+    )
+    .expect("seed_accounts_second migration");
+
+    let applied = rt
+        .execute_query("APPLY MIGRATION *")
+        .expect("bulk apply migrations");
+    let message = text(applied.result.records[0].get("message"));
+    assert!(
+        message.contains("applied 5 migration(s)"),
+        "unexpected bulk apply message: {message}"
+    );
+
+    let migrations = rt
+        .execute_query("SELECT name, status, vcs_commit_hash FROM red_migrations")
+        .expect("list migrations");
+    assert_eq!(migrations.result.records.len(), 5);
+    for record in &migrations.result.records {
+        assert_eq!(text(record.get("status")), "applied");
+        assert!(
+            !text(record.get("vcs_commit_hash")).is_empty(),
+            "applied migration should have a VCS commit hash: {record:?}"
+        );
+    }
+
+    let accounts = rt
+        .execute_query("SELECT * FROM mig_accounts")
+        .expect("accounts visible after dependency-ordered apply");
+    assert_eq!(accounts.result.records.len(), 2);
+
+    let audit = rt
+        .execute_query("SELECT * FROM mig_audit")
+        .expect("audit visible after independent migration apply");
+    assert_eq!(audit.result.records.len(), 1);
 }

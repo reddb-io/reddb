@@ -326,6 +326,30 @@ function main() {
   }
 
   function manualEvidence(number) {
+    if (number === 24) {
+      return [
+        {
+          type: "manual_current_code_match",
+          path: "crates/reddb-server/src/runtime/impl_migrations.rs",
+          line: 1,
+          kind: "code",
+          matched_term: "impl_migrations",
+          snippet: "//! Native migration execution: CREATE / APPLY / ROLLBACK / EXPLAIN MIGRATION",
+          term_score: 8,
+          term_sources: ["manual_audit"],
+        },
+        {
+          type: "manual_current_test_match",
+          path: "tests/e2e_migrations_bootstrap.rs",
+          line: 48,
+          kind: "test",
+          matched_term: "APPLY MIGRATION *",
+          snippet: "fn apply_migration_all_applies_pending_migrations_in_dependency_order() {",
+          term_score: 7,
+          term_sources: ["manual_audit"],
+        },
+      ];
+    }
     if (number === 116) {
       return [
         {
@@ -399,6 +423,32 @@ function main() {
       ];
     }
     return [];
+  }
+
+  function manualFinalDisposition(number) {
+    if (number === 21) {
+      return {
+        outcome: "split",
+        placeholder: false,
+        reason:
+          "Current workspace has migration dependency/runtime evidence, but branch-scoped MigrationConflict merge behavior is not implemented; split to local follow-up #346.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [346],
+      };
+    }
+    if (number === 24) {
+      return {
+        outcome: "superseded",
+        placeholder: false,
+        reason:
+          "The historical lint item referenced src/runtime/impl_migrations.rs; the current module is crates/reddb-server/src/runtime/impl_migrations.rs and is covered by current migration runtime tests.",
+        superseded_by: ["crates/reddb-server/src/runtime/impl_migrations.rs"],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    return null;
   }
 
   const direct = new Map();
@@ -530,7 +580,7 @@ function main() {
       else directEvidence.evidence.unshift(match);
     }
     const resolution = classify(issue, directEvidence, inherited);
-    const disposition = finalDisposition(resolution.status);
+    const disposition = manualFinalDisposition(issue.number) || finalDisposition(resolution.status);
     reportIssues.push({
       number: issue.number,
       title: issue.title,

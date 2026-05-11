@@ -28,6 +28,10 @@ function stableLedger(report) {
   }));
 }
 
+function issueByNumber(report, number) {
+  return report.issues.find((issue) => issue.number === number);
+}
+
 test("issue evidence report has reproducible final dispositions", () => {
   assert.ok(fs.existsSync(issuesPath), `${issuesPath} must exist`);
 
@@ -73,4 +77,29 @@ test("issue evidence report has reproducible final dispositions", () => {
       .sort((a, b) => a - b),
     [238, 252, 282],
   );
+});
+
+test("migration evidence closure records final dispositions for issue 335 scope", () => {
+  assert.ok(fs.existsSync(issuesPath), `${issuesPath} must exist`);
+
+  const report = runReport();
+  const issue16 = issueByNumber(report, 16);
+  const issue21 = issueByNumber(report, 21);
+  const issue24 = issueByNumber(report, 24);
+
+  assert.equal(issue16.final_disposition.outcome, "confirmed");
+  assert.equal(issue16.final_disposition.placeholder, false);
+
+  assert.equal(issue21.final_disposition.outcome, "split");
+  assert.equal(issue21.final_disposition.placeholder, false);
+  assert.deepEqual(issue21.final_disposition.split_into, [346]);
+
+  assert.equal(issue24.final_disposition.outcome, "superseded");
+  assert.equal(issue24.final_disposition.placeholder, false);
+  assert.match(issue24.final_disposition.reason, /crates\/reddb-server\/src\/runtime\/impl_migrations\.rs/);
+
+  for (const issue of [issue16, issue21, issue24]) {
+    assert.notEqual(issue.resolution.status, "code_evidence_partial");
+    assert.notEqual(issue.resolution.status, "code_evidence_partial_github_open");
+  }
 });
