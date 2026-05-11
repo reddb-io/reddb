@@ -17,7 +17,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use reddb_io_server::storage::query::parser;
+use reddb_server::storage::query::parser;
 
 fuzz_target!(|data: &[u8]| {
     // The parser only accepts UTF-8 strings. Anything else is

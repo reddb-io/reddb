@@ -23,7 +23,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use reddb_io_server::storage::query::parser;
+use reddb_server::storage::query::parser;
 
 const PREFIXES: &[&str] = &[
     "CREATE MIGRATION ",
