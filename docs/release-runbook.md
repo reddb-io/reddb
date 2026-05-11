@@ -26,6 +26,7 @@ RedDB publishes under two registry conventions:
 - npm packages use the `@reddb-io/*` organization scope.
 - crates.io packages use the `reddb` / `reddb-*` prefix because crates.io
   does not support npm-style organization scopes.
+- container images publish to GHCR under the `reddb-io` GitHub organization.
 
 Run this local invariant before changing release or driver manifests:
 
@@ -82,6 +83,19 @@ immediately after their first publish:
 cargo owner --add github:reddb-io:crates-owners reddb-client
 cargo owner --add github:reddb-io:crates-owners reddb-wire
 ```
+
+### Containers
+
+GitHub Actions publishes container images with the repository `GITHUB_TOKEN`.
+No Docker Hub credentials are required by the release workflow.
+
+Canonical images:
+
+- `ghcr.io/reddb-io/reddb`
+- `ghcr.io/reddb-io/reddb-client`
+
+Docker Hub mirroring is intentionally disabled until a `reddb-io` Docker Hub
+namespace exists and the project explicitly chooses to mirror there.
 
 ## Deprecating legacy npm packages
 

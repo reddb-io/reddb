@@ -632,4 +632,4 @@ RedDB from another Rust project.
 
 ---
 
-**AGPL-3.0 License** -- Built by [Filipe Forattini](https://github.com/reddb-io)
+**AGPL-3.0 License** -- Built by [RedDB.io](https://github.com/reddb-io)
