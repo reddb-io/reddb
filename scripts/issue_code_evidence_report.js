@@ -612,6 +612,66 @@ function main() {
         },
       ];
     }
+    if (number === 163) {
+      return [
+        {
+          type: "manual_current_doc_match",
+          path: "docs/perf/wins.md",
+          line: 1,
+          kind: "doc",
+          matched_term: "productized performance wins",
+          snippet:
+            "Where RedDB Wins cites typed_insert and disk_usage benchmark sessions plus duel-official reproduction commands.",
+          term_score: 9,
+          term_sources: ["issue_341_red_schema_reference_audit"],
+        },
+        {
+          type: "manual_current_test_match",
+          path: "scripts/red_schema_reference_contract.test.mjs",
+          line: 12,
+          kind: "test",
+          matched_term: "performance wins documentation benchmark evidence",
+          snippet: "performance wins documentation is tied to reproducible benchmark evidence",
+          term_score: 9,
+          term_sources: ["issue_341_red_schema_reference_audit"],
+        },
+      ];
+    }
+    if (number === 263) {
+      return [
+        {
+          type: "manual_current_doc_match",
+          path: "docs/reference/red-schema.md",
+          line: 1,
+          kind: "doc",
+          matched_term: "canonical red.* schema reference",
+          snippet:
+            "The red.* schema reference enumerates implemented virtual tables, shortcut commands, stability, and evolution policy.",
+          term_score: 9,
+          term_sources: ["issue_341_red_schema_reference_audit"],
+        },
+        {
+          type: "manual_current_test_match",
+          path: "tests/e2e_red_schema.rs",
+          line: 181,
+          kind: "test",
+          matched_term: "red schema stable introspection public SQL",
+          snippet: "fn red_schema_introspection_is_stable_across_virtual_tables() {",
+          term_score: 9,
+          term_sources: ["issue_341_red_schema_reference_audit"],
+        },
+        {
+          type: "manual_current_test_match",
+          path: "scripts/red_schema_reference_contract.test.mjs",
+          line: 35,
+          kind: "test",
+          matched_term: "red schema reference aligned with public introspection",
+          snippet: "red schema reference is aligned with public introspection coverage",
+          term_score: 9,
+          term_sources: ["issue_341_red_schema_reference_audit"],
+        },
+      ];
+    }
     if (number === 231) {
       return [
         {
@@ -803,6 +863,28 @@ function main() {
         placeholder: false,
         reason:
           "The 2026-05-06 nightly DR drill failure is tied to the current-shell scripts/drill-nightly.sh fix and the public make drill-nightly workflow command.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 163) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "Performance wins are productized in docs/perf/wins.md with duel-official reproduction commands, cited benchmark session ids, README and JS/TS guide links, and scripts/red_schema_reference_contract.test.mjs coverage.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 263) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "The canonical red.* schema reference is docs/reference/red-schema.md, linked from docs/README.md and tied to public runtime coverage in tests/e2e_red_schema.rs plus scripts/red_schema_reference_contract.test.mjs.",
         superseded_by: [],
         reopened_as: [],
         split_into: [],

@@ -315,3 +315,8 @@ red connect 127.0.0.1:5555
     <p>Configure OpenAI, Groq, Anthropic, Ollama, and more.</p>
   </a>
 </div>
+
+## Reference
+
+- [`red.*` schema reference](reference/red-schema.md) — canonical virtual
+  introspection tables and shortcut commands.
