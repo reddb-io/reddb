@@ -117,13 +117,16 @@ AS
 > load-bearing pieces; the SIGKILL drill stays open as future work tied to the
 > broader chaos infra.
 
-### Branch-scoped application
+### VCS application scope
 
-Migrations applied on a VCS branch live in that branch's commit history. When
-you merge the branch, RedDB's conflict detection checks whether the same
-collection was modified by migrations on both sides of the merge. You get a
-conflict marker — not silent data corruption — when two branches diverge on the
-same schema.
+Every applied migration creates a VCS commit, but migration definitions are not
+branch-local today. Branch-scoped migration visibility is not implemented:
+`red_migrations` is a global system collection, so a migration registered on a
+feature branch is visible after checking out another branch.
+
+Because migration definitions are global, RedDB does not currently block
+`red vcs merge` with a migration-specific schema conflict. Coordinate branch
+ordering with explicit `DEPENDS ON` edges after both migration definitions exist.
 
 ### Multi-tenant fanout
 
@@ -151,7 +154,7 @@ doing nothing or applying a broken compensating migration.
 | **Rollback mechanism** | VCS revert (exact) | compensating SQL | compensating SQL | manual | manual |
 | **Irreversible migration guard** | yes (`NO ROLLBACK`) | no | no | no | no |
 | **VCS commit per migration** | yes | no | no | no | no |
-| **Branch-scoped application** | yes | no | no | no | no |
+| **Branch-scoped application** | no, definitions are global | no | no | no | no |
 | **Multi-tenant fanout** | yes (`FOR TENANT *`) | no | no | no | no |
 | **Stored in database** | yes (`red_migrations`) | separate table | separate table | separate table | separate table |
 | **Inspect via SQL** | yes | limited | limited | no | no |
@@ -197,6 +200,6 @@ directly with `SELECT`.
 - [Walkthrough](./walkthrough.md) — end-to-end tutorial from scratch
 - [Data Migrations](./data-migrations.md) — `BATCH N ROWS`, checkpoint resume, `NO ROLLBACK`
 - [Dependency Graph](./dependency-graph.md) — DAG management, auto-inference, cycle detection
-- [VCS Integration](./vcs-integration.md) — commits, rollback via revert, branch scoping
+- [VCS Integration](./vcs-integration.md) — commits, rollback via revert, current VCS scope
 - [Multi-Tenancy](./multi-tenancy.md) — `FOR TENANT`, RLS context, fanout patterns
 - [Cookbook](./cookbook.md) — recipes for common real-world migration patterns

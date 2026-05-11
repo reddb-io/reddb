@@ -4,6 +4,10 @@
 //! engine startup and that querying them returns zero rows on a fresh
 //! in-memory instance.
 
+use reddb::application::vcs::{
+    Author, CheckoutInput, CheckoutTarget, CreateBranchInput, CreateCommitInput,
+};
+use reddb::application::VcsUseCases;
 use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
 
@@ -16,6 +20,28 @@ fn text(value: Option<&Value>) -> &str {
         Some(Value::Text(s)) => s.as_ref(),
         other => panic!("expected text value, got {other:?}"),
     }
+}
+
+fn author() -> Author {
+    Author {
+        name: "test".to_string(),
+        email: "test@reddb.io".to_string(),
+    }
+}
+
+fn commit_input(conn: u64, msg: &str) -> CreateCommitInput {
+    CreateCommitInput {
+        connection_id: conn,
+        message: msg.to_string(),
+        author: author(),
+        committer: None,
+        amend: false,
+        allow_empty: true,
+    }
+}
+
+fn vcs(rt: &RedDBRuntime) -> VcsUseCases<'_, RedDBRuntime> {
+    VcsUseCases::new(rt)
 }
 
 #[test]
@@ -41,6 +67,56 @@ fn red_migration_deps_exists_and_is_empty() {
         result.result.records.len(),
         0,
         "red_migration_deps should be empty on a fresh instance"
+    );
+}
+
+#[test]
+fn migration_registration_is_global_across_vcs_branches() {
+    let rt = rt();
+    vcs(&rt)
+        .commit(commit_input(1, "root"))
+        .expect("root commit");
+    vcs(&rt)
+        .branch_create(CreateBranchInput {
+            name: "feature-migration".to_string(),
+            from: None,
+            connection_id: 1,
+        })
+        .expect("create feature branch");
+    vcs(&rt)
+        .checkout(CheckoutInput {
+            connection_id: 1,
+            target: CheckoutTarget::Branch("feature-migration".to_string()),
+            force: false,
+        })
+        .expect("checkout feature branch");
+
+    rt.execute_query(
+        "CREATE MIGRATION branch_visible AS \
+         CREATE TABLE branch_visible_accounts (id BIGINT)",
+    )
+    .expect("register migration on feature branch");
+
+    vcs(&rt)
+        .checkout(CheckoutInput {
+            connection_id: 1,
+            target: CheckoutTarget::Branch("main".to_string()),
+            force: false,
+        })
+        .expect("checkout main");
+
+    let migrations = rt
+        .execute_query("SELECT name FROM red_migrations")
+        .expect("list migrations from main");
+    let names: Vec<&str> = migrations
+        .result
+        .records
+        .iter()
+        .map(|record| text(record.get("name")))
+        .collect();
+    assert!(
+        names.contains(&"branch_visible"),
+        "migration definitions are currently global across branches: {names:?}"
     );
 }
 

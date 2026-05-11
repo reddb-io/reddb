@@ -149,11 +149,12 @@ SELECT count(*) FROM users AS OF TAG 'v2.3.0';
 
 ---
 
-## Branch-scoped migrations
+## Current VCS scope
 
-Migrations are applied on the current VCS branch. If you are on a feature
-branch, migration commits land on that branch's history. The `main` branch
-is unaffected until you merge.
+Applied migrations create normal VCS commits, but migration definitions are not
+branch-scoped today. `red_migrations` is a global system collection: if you
+register a migration on a feature branch and then check out `main`, that
+migration definition is still visible through `SELECT * FROM red_migrations`.
 
 ### Workflow
 
@@ -176,10 +177,11 @@ AS
 APPLY MIGRATION add_score_column;
 ```
 
-The commit `migration: apply add_score_column` exists only on
-`feature/add-scores`. If you query `main`, the `score` column does not exist.
+The migration definition is global immediately. The apply step still creates a
+`migration: add_score_column` commit through the VCS layer, but schema state and
+data reconciliation are not isolated behind a branch-local migration registry.
 
-### Merge and conflict detection
+### Merge and conflict detection status
 
 When you merge the feature branch into `main`:
 
@@ -187,35 +189,23 @@ When you merge the feature branch into `main`:
 red vcs merge feature/add-scores
 ```
 
-RedDB checks whether any migration applied on the feature branch conflicts
-with migrations applied on `main` since the divergence point. A conflict
-exists if:
+`MigrationConflict` is not emitted by `red vcs merge` today. Merge conflict
+materialization covers VCS-opted user collections; it does not derive
+schema-aware conflicts from migration bodies or block the merge because two
+migrations touched the same collection.
 
-- Both branches applied migrations that modify the same collection's schema
-  (e.g., both added a column named `score`).
-- The topological ordering of migrations from both branches would create an
-  inconsistency.
-
-On conflict, the merge is blocked and a conflict set is returned:
-
-```
-MERGE CONFLICT: migration 'add_score_column' on feature/add-scores conflicts
-with 'add_score_field' on main (both modify collection 'users').
-
-Resolve with:
-  GET /repo/merges/<msid>/conflicts
-  POST /repo/merges/<msid>/conflicts/<cid>/resolve
-```
-
-You resolve the conflict by choosing which migration wins, or by creating
-a new migration that reconciles both changes, then completing the merge.
+Use explicit `DEPENDS ON` edges after both migration definitions exist. If one
+branch references a migration that has not been registered yet,
+`CREATE MIGRATION ... DEPENDS ON ...` fails with an unknown migration error, so
+register the prerequisite first or add the dependent migration after both
+definitions are available.
 
 ### Why this matters
 
-Without branch-scoped migrations, two engineers merging on the same day can
-silently corrupt the migration ordering. With branch scoping, the conflict
-is detected before data is affected and you choose the resolution
-intentionally.
+The current contract makes migration ordering explicit instead of pretending
+branch-local schema merge blocking exists. Until branch-scoped migration
+metadata lands, review migrations that touch the same collection and encode the
+chosen order with `DEPENDS ON`.
 
 ---
 
