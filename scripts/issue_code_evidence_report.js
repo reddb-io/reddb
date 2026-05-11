@@ -732,6 +732,273 @@ function main() {
         },
       ];
     }
+    if (number === 140) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "crates/reddb-server/src/storage/cache/blob/cache/tests.rs",
+          line: 40,
+          kind: "test",
+          matched_term: "Blob Cache L1 put get exists miss stats eviction namespace isolation",
+          snippet:
+            "Blob Cache tests cover put/get/exists, clean miss stats, byte-capacity SIEVE eviction, namespace isolation, and stats fields.",
+          term_score: 9,
+          term_sources: ["issue_339_blob_cache_audit"],
+        },
+        {
+          type: "manual_current_code_match",
+          path: "crates/reddb-server/src/storage/cache/blob/cache.rs",
+          line: 646,
+          kind: "code",
+          matched_term: "BlobCache in-memory tracer sharded byte bounded L1",
+          snippet:
+            "BlobCache exposes the internal namespaced exact-key L1 interface with byte bounds, shards, hits, misses, evictions, and namespace stats.",
+          term_score: 9,
+          term_sources: ["issue_339_blob_cache_audit"],
+        },
+      ];
+    }
+    if (number === 141) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "crates/reddb-server/src/storage/cache/blob/cache/tests.rs",
+          line: 190,
+          kind: "test",
+          matched_term: "Blob Cache TTL admission stale jitter priority max blob size",
+          snippet:
+            "Blob Cache tests cover hard TTL, absolute expiry, idle TTL, stale-serve windows, jitter bounds, priority, size rejection, and L1 admission.",
+          term_score: 9,
+          term_sources: ["issue_339_blob_cache_audit"],
+        },
+        {
+          type: "manual_current_code_match",
+          path: "crates/reddb-server/src/storage/cache/blob/cache.rs",
+          line: 260,
+          kind: "code",
+          matched_term: "BlobCachePolicy ttl expires admission priority version extended",
+          snippet:
+            "BlobCachePolicy carries ttl_ms, expires_at_unix_ms, max_blob_bytes, L1 admission, priority, version, and extended TTL policy.",
+          term_score: 9,
+          term_sources: ["issue_339_blob_cache_audit"],
+        },
+      ];
+    }
+    if (number === 142) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "crates/reddb-server/src/storage/cache/blob/cache/tests.rs",
+          line: 374,
+          kind: "test",
+          matched_term: "Blob Cache invalidation key prefix tag dependency namespace flush",
+          snippet:
+            "Blob Cache tests cover key, prefix, tag, dependency, namespace flush, repeated invalidation, cold no-op, and stats updates.",
+          term_score: 9,
+          term_sources: ["issue_339_blob_cache_audit"],
+        },
+        {
+          type: "manual_current_code_match",
+          path: "crates/reddb-server/src/storage/cache/blob/cache.rs",
+          line: 925,
+          kind: "code",
+          matched_term: "invalidate_key invalidate_prefix invalidate_tags invalidate_dependencies invalidate_namespace",
+          snippet:
+            "BlobCache exposes explicit invalidation by key, prefix, tags, dependencies, and namespace generation flush.",
+          term_score: 9,
+          term_sources: ["issue_339_blob_cache_audit"],
+        },
+      ];
+    }
+    if (number === 143) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "crates/reddb-server/src/runtime/statement_frame.rs",
+          line: 892,
+          kind: "test",
+          matched_term: "Blob Cache result cache backend SELECT volatile shadow adapter",
+          snippet:
+            "Runtime tests cover blob_cache backend population, volatile SELECT exclusion, and shadow dual-write parity.",
+          term_score: 9,
+          term_sources: ["issue_339_blob_cache_audit"],
+        },
+        {
+          type: "manual_current_code_match",
+          path: "crates/reddb-server/src/runtime/impl_core.rs",
+          line: 6274,
+          kind: "code",
+          matched_term: "runtime.result_cache.backend blob_cache put_blob_result_cache_entry dependency invalidation",
+          snippet:
+            "Runtime dispatch selects the blob_cache result backend, writes BlobCache entries with dependency labels, and invalidates by table dependency.",
+          term_score: 9,
+          term_sources: ["issue_339_blob_cache_audit"],
+        },
+      ];
+    }
+    if (number === 145) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "crates/reddb-server/src/storage/cache/blob/cache/tests.rs",
+          line: 618,
+          kind: "test",
+          matched_term: "Blob Cache durable L2 reopen expired invalidated partial write metadata last",
+          snippet:
+            "Blob Cache L2 tests cover reopen rehydration, expired reopen, invalidated reopen, L2 byte cap, and metadata-last partial-write visibility.",
+          term_score: 9,
+          term_sources: ["issue_339_blob_cache_audit"],
+        },
+        {
+          type: "manual_current_code_match",
+          path: "crates/reddb-server/src/storage/cache/blob/l2.rs",
+          line: 161,
+          kind: "code",
+          matched_term: "BlobCacheL2 open metadata BTree blob-chain native durable store",
+          snippet:
+            "BlobCacheL2 opens native pager/B+ tree metadata and blob-chain storage instead of storing blobs as normal JSON rows.",
+          term_score: 9,
+          term_sources: ["issue_339_blob_cache_audit"],
+        },
+      ];
+    }
+    if (number === 146) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "crates/reddb-server/src/storage/cache/blob/cache/tests.rs",
+          line: 706,
+          kind: "test",
+          matched_term: "Blob Cache L2 membership synopsis negative skip maybe present stale bits startup rebuild",
+          snippet:
+            "Synopsis tests cover negative skip, maybe-present metadata verification, stale bits after delete/expiry, and startup rebuild from L2 metadata.",
+          term_score: 9,
+          term_sources: ["issue_339_blob_cache_audit"],
+        },
+        {
+          type: "manual_current_code_match",
+          path: "crates/reddb-server/src/storage/cache/blob/l2.rs",
+          line: 17,
+          kind: "code",
+          matched_term: "Bloom filter L2 membership synopsis no false negatives authoritative metadata",
+          snippet:
+            "The L2 Bloom synopsis guarantees absent answers skip metadata reads while maybe-present answers verify authoritative metadata.",
+          term_score: 9,
+          term_sources: ["issue_339_blob_cache_audit"],
+        },
+      ];
+    }
+    if (number === 147) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "scripts/blob_cache_evidence_contract.test.mjs",
+          line: 41,
+          kind: "test",
+          matched_term: "result cache warm restart split current adapter fingerprint sidecar",
+          snippet:
+            "The Blob Cache evidence contract proves the adapter path exists and records warm restart as split because durable L2 stores only a fingerprint plus an in-memory sidecar.",
+          term_score: 9,
+          term_sources: ["issue_339_blob_cache_audit"],
+        },
+        {
+          type: "manual_current_doc_match",
+          path: "issues/348-result-cache-l2-warm-restart-contract.md",
+          line: 1,
+          kind: "doc",
+          matched_term: "result-cache L2 warm restart follow-up",
+          snippet:
+            "Local follow-up #348 records the missing result-cache L2 warm-restart contract and public runtime acceptance criteria.",
+          term_score: 9,
+          term_sources: ["issue_339_blob_cache_audit"],
+        },
+        {
+          type: "manual_current_code_match",
+          path: "crates/reddb-server/src/runtime/impl_core.rs",
+          line: 6320,
+          kind: "code",
+          matched_term: "get_blob_result_cache_entry result_blob_entries in-memory sidecar",
+          snippet:
+            "Current blob result-cache reads require the BlobCache marker and the in-memory result_blob_entries sidecar, proving durable warm restart is not yet implemented.",
+          term_score: 9,
+          term_sources: ["issue_339_blob_cache_audit"],
+        },
+      ];
+    }
+    if (number === 149) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "crates/reddb-server/benches/blob_cache_bench.rs",
+          line: 72,
+          kind: "test",
+          matched_term: "Blob Cache benchmark workloads result cache Redis restart warm cache",
+          snippet:
+            "Criterion benchmark harness contains the eight Blob Cache workloads, result-cache comparison, Redis-gated baseline hooks, and restart-warm-cache workload.",
+          term_score: 9,
+          term_sources: ["issue_339_blob_cache_audit"],
+        },
+        {
+          type: "manual_current_doc_match",
+          path: "issues/349-blob-cache-redis-baseline-completion.md",
+          line: 1,
+          kind: "doc",
+          matched_term: "Blob Cache Redis baseline completion follow-up",
+          snippet:
+            "Local follow-up #349 records the remaining Redis and hit-rate benchmark cells after the repeatable harness and RedDB session evidence.",
+          term_score: 9,
+          term_sources: ["issue_339_blob_cache_audit"],
+        },
+        {
+          type: "manual_current_code_match",
+          path: "bench/blob-cache/redis-up.sh",
+          line: 1,
+          kind: "code",
+          matched_term: "Blob Cache Redis baseline pinned setup",
+          snippet:
+            "Redis baseline scripts provide the pinned Redis setup that the remaining benchmark completion follow-up must run.",
+          term_score: 9,
+          term_sources: ["issue_339_blob_cache_audit"],
+        },
+      ];
+    }
+    if (number === 151) {
+      return [
+        {
+          type: "manual_current_doc_match",
+          path: "docs/blob-cache-api-review-2026-05-06.md",
+          line: 1,
+          kind: "doc",
+          matched_term: "Blob Cache public API review internal-only deferred HTTP SQL",
+          snippet:
+            "Public API review compares embedded, HTTP, SQL, and internal-only options and records deferred HTTP/SQL exposure with internal surface follow-ups.",
+          term_score: 9,
+          term_sources: ["issue_339_blob_cache_audit"],
+        },
+        {
+          type: "manual_current_test_match",
+          path: "crates/reddb-server/src/storage/cache/blob/cache/tests.rs",
+          line: 909,
+          kind: "test",
+          matched_term: "Blob Cache API review CachePresence batched invalidation builders getters",
+          snippet:
+            "API review follow-up tests cover CachePresence, batched invalidation, config builder, stats getters, hit getters, policy getters, and Send/Sync.",
+          term_score: 9,
+          term_sources: ["issue_339_blob_cache_audit"],
+        },
+        {
+          type: "manual_current_code_match",
+          path: "crates/reddb-server/src/storage/cache/blob/cache.rs",
+          line: 130,
+          kind: "code",
+          matched_term: "Blob Cache public API accessors CachePresence batched invalidation",
+          snippet:
+            "Blob Cache exposes CachePresence, accessors, builders, and batched invalidation methods that resolve the internal API-review blockers.",
+          term_score: 9,
+          term_sources: ["issue_339_blob_cache_audit"],
+        },
+      ];
+    }
     if (number === 197) {
       return [
         {
@@ -958,6 +1225,105 @@ function main() {
         placeholder: false,
         reason:
           "Performance wins are productized in docs/perf/wins.md with duel-official reproduction commands, cited benchmark session ids, README and JS/TS guide links, and scripts/red_schema_reference_contract.test.mjs coverage.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 140) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "The internal Blob Cache L1 tracer is evidenced by crates/reddb-server/src/storage/cache/blob/cache/tests.rs: put/get/exists, miss stats, byte-capacity eviction, namespace isolation, and stats are covered against the public BlobCache interface.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 141) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "Rich TTL and admission policy behavior is evidenced by Blob Cache tests covering hard TTL, absolute expiry, idle TTL, stale-serve windows, jitter bounds, priority, max blob size, and L1 admission.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 142) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "Explicit invalidation is evidenced by Blob Cache tests and implementation paths for key, prefix, tag, dependency, namespace generation flush, repeated invalidation, cold no-op, and stats updates.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 143) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "The SQL result-cache L1 adapter is evidenced by runtime tests in crates/reddb-server/src/runtime/statement_frame.rs and dispatch in impl_core.rs: blob_cache backend writes BlobCache entries, volatile SELECTs are excluded, shadow mode dual-writes, and table dependency invalidation targets Blob Cache labels.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 145) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "Durable Blob Cache L2 is evidenced by reopen, expired reopen, invalidated reopen, byte-cap, and metadata-last fault tests plus BlobCacheL2 native pager/B+ tree metadata and blob-chain storage.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 146) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "The L2 membership synopsis is evidenced by tests for negative skips, maybe-present metadata verification, stale bits after delete/expiry, and startup rebuild, backed by the BlobCacheL2 Bloom filter contract.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 147) {
+      return {
+        outcome: "split",
+        placeholder: false,
+        reason:
+          "The current result-cache adapter exercises Blob Cache, but durable warm restart is not implemented because L2 stores only a fingerprint while RuntimeQueryResult remains in an in-memory sidecar; split to local follow-up #348.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [348],
+      };
+    }
+    if (number === 149) {
+      return {
+        outcome: "split",
+        placeholder: false,
+        reason:
+          "The Blob Cache benchmark harness and RedDB session evidence are present, but Redis and hit-rate cells remain deferred in docs/perf/blob-cache-bench-2026-05-06.md; split final baseline completion to local follow-up #349.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [349],
+      };
+    }
+    if (number === 151) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "The public API shape review is recorded in docs/blob-cache-api-review-2026-05-06.md: it compares embedded/internal, HTTP, and SQL surfaces, keeps HTTP/SQL exposure deferred, and current tests cover the internal API hygiene follow-ups.",
         superseded_by: [],
         reopened_as: [],
         split_into: [],

@@ -193,6 +193,46 @@ test("red schema reference closure records final dispositions for issue 341 scop
   assert.match(issue263.final_disposition.reason, /tests\/e2e_red_schema\.rs/);
 });
 
+test("Blob Cache evidence closure records final dispositions for issue 339 scope", () => {
+  assert.ok(fs.existsSync(issuesPath), `${issuesPath} must exist`);
+
+  const report = runReport();
+  const confirmed = [140, 141, 142, 143, 145, 146, 151].map((number) =>
+    issueByNumber(report, number),
+  );
+  const issue147 = issueByNumber(report, 147);
+  const issue149 = issueByNumber(report, 149);
+
+  for (const issue of confirmed) {
+    assert.equal(issue.final_disposition.outcome, "confirmed");
+    assert.equal(issue.final_disposition.placeholder, false);
+    assert.notEqual(issue.resolution.status, "code_evidence_partial");
+    assert.notEqual(issue.resolution.status, "code_evidence_partial_github_open");
+  }
+
+  assert.match(confirmed[0].final_disposition.reason, /put\/get\/exists/);
+  assert.match(confirmed[1].final_disposition.reason, /hard TTL/);
+  assert.match(confirmed[2].final_disposition.reason, /invalidation/);
+  assert.match(confirmed[3].final_disposition.reason, /runtime\/statement_frame\.rs/);
+  assert.match(confirmed[4].final_disposition.reason, /Durable Blob Cache L2/);
+  assert.match(confirmed[5].final_disposition.reason, /membership synopsis/);
+  assert.match(confirmed[6].final_disposition.reason, /public API shape review/);
+
+  assert.equal(issue147.final_disposition.outcome, "split");
+  assert.equal(issue147.final_disposition.placeholder, false);
+  assert.deepEqual(issue147.final_disposition.split_into, [348]);
+  assert.notEqual(issue147.resolution.status, "code_evidence_partial");
+  assert.notEqual(issue147.resolution.status, "code_evidence_partial_github_open");
+  assert.match(issue147.final_disposition.reason, /RuntimeQueryResult remains in an in-memory sidecar/);
+
+  assert.equal(issue149.final_disposition.outcome, "split");
+  assert.equal(issue149.final_disposition.placeholder, false);
+  assert.deepEqual(issue149.final_disposition.split_into, [349]);
+  assert.notEqual(issue149.resolution.status, "code_evidence_partial");
+  assert.notEqual(issue149.resolution.status, "code_evidence_partial_github_open");
+  assert.match(issue149.final_disposition.reason, /Redis and hit-rate cells remain deferred/);
+});
+
 test("DDL auth closure records final disposition for issue 344 scope", () => {
   assert.ok(fs.existsSync(issuesPath), `${issuesPath} must exist`);
 
