@@ -103,3 +103,23 @@ test("migration evidence closure records final dispositions for issue 335 scope"
     assert.notEqual(issue.resolution.status, "code_evidence_partial_github_open");
   }
 });
+
+test("release tooling evidence closure records final dispositions for issue 337 scope", () => {
+  assert.ok(fs.existsSync(issuesPath), `${issuesPath} must exist`);
+
+  const report = runReport();
+  const issue62 = issueByNumber(report, 62);
+  const issue68 = issueByNumber(report, 68);
+  const issue116 = issueByNumber(report, 116);
+
+  for (const issue of [issue62, issue68, issue116]) {
+    assert.equal(issue.final_disposition.outcome, "confirmed");
+    assert.equal(issue.final_disposition.placeholder, false);
+    assert.notEqual(issue.resolution.status, "code_evidence_partial");
+    assert.notEqual(issue.resolution.status, "code_evidence_partial_github_open");
+  }
+
+  assert.match(issue62.final_disposition.reason, /scripts\/check-red-client-size\.sh/);
+  assert.match(issue68.final_disposition.reason, /Dockerfile\.client/);
+  assert.match(issue116.final_disposition.reason, /make drill-nightly/);
+});
