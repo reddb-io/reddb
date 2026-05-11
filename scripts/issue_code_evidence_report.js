@@ -326,6 +326,55 @@ function main() {
   }
 
   function manualEvidence(number) {
+    if (number === 62) {
+      return [
+        {
+          type: "manual_current_code_match",
+          path: "scripts/check-red-client-size.sh",
+          line: 17,
+          kind: "code",
+          matched_term: "red_client size budget",
+          snippet:
+            "Builds red_client without default engine features, strips a copy, and fails when the measured size exceeds crates/reddb-client/SIZE_BUDGET.",
+          term_score: 9,
+          term_sources: ["issue_337_release_tooling_audit"],
+        },
+        {
+          type: "manual_current_test_match",
+          path: "scripts/release_tooling_contract.test.mjs",
+          line: 10,
+          kind: "test",
+          matched_term: "red_client size guard",
+          snippet: "red_client size guard is wired to a documented local and CI budget check",
+          term_score: 9,
+          term_sources: ["issue_337_release_tooling_audit"],
+        },
+      ];
+    }
+    if (number === 68) {
+      return [
+        {
+          type: "manual_current_code_match",
+          path: "Dockerfile.client",
+          line: 60,
+          kind: "code",
+          matched_term: "red_client thin client image",
+          snippet: "cargo build --release --locked --target ${TARGET} --bin red_client -p reddb-client --no-default-features",
+          term_score: 9,
+          term_sources: ["issue_337_release_tooling_audit"],
+        },
+        {
+          type: "manual_current_test_match",
+          path: "scripts/release_tooling_contract.test.mjs",
+          line: 26,
+          kind: "test",
+          matched_term: "red_client container release contract",
+          snippet: "red_client container release contract uses the thin client Dockerfile and package",
+          term_score: 9,
+          term_sources: ["issue_337_release_tooling_audit"],
+        },
+      ];
+    }
     if (number === 24) {
       return [
         {
@@ -383,6 +432,16 @@ function main() {
           term_score: 8,
           term_sources: ["github_issue_body", "manual_audit"],
         },
+        {
+          type: "manual_current_test_match",
+          path: "scripts/release_tooling_contract.test.mjs",
+          line: 39,
+          kind: "test",
+          matched_term: "nightly DR drill workflow",
+          snippet: "nightly DR drill workflow uses the current-shell runner and public make target",
+          term_score: 9,
+          term_sources: ["issue_337_release_tooling_audit"],
+        },
       ];
     }
     if (number === 320) {
@@ -426,6 +485,39 @@ function main() {
   }
 
   function manualFinalDisposition(number) {
+    if (number === 62) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "red_client binary-size protection is wired through scripts/check-red-client-size.sh, crates/reddb-client/SIZE_BUDGET, the CI red_client size budget step, and release tooling contract tests.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 68) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "red_client container distribution is recorded in ADR 0004 and wired through Dockerfile.client plus the release.yml publish-client-image job using the ghcr.io/reddb-io/reddb-client tag scheme.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 116) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "The 2026-05-06 nightly DR drill failure is tied to the current-shell scripts/drill-nightly.sh fix and the public make drill-nightly workflow command.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
     if (number === 21) {
       return {
         outcome: "split",

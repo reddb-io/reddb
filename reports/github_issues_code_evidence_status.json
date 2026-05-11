@@ -1,6 +1,6 @@
 {
   "repository": "reddb-io/reddb",
-  "generated_at": "2026-05-11T00:06:31.511Z",
+  "generated_at": "2026-05-11T00:22:15.566Z",
   "source_state": {
     "github_issues": "/tmp/reddb_issues_raw.json",
     "current_workspace_files_indexed": 4397,
@@ -34,25 +34,25 @@
     "total": 311,
     "unique_issue_entries": 311,
     "github_open": 3,
-    "objective_reached_true": 281,
+    "objective_reached_true": 284,
     "objective_reached_false": 0,
-    "objective_reached_unknown": 30,
+    "objective_reached_unknown": 27,
     "by_status": {
-      "code_evidence_confirmed": 278,
-      "code_evidence_partial": 30,
+      "code_evidence_confirmed": 281,
+      "code_evidence_partial": 27,
       "code_evidence_confirmed_github_open": 3
     },
     "by_confidence": {
-      "high": 281,
-      "medium": 30
+      "high": 284,
+      "medium": 27
     },
     "by_final_disposition": {
-      "confirmed": 279,
+      "confirmed": 282,
       "split": 1,
       "superseded": 1,
-      "reopened": 30
+      "reopened": 27
     },
-    "placeholder_final_dispositions": 33
+    "placeholder_final_dispositions": 30
   },
   "issues": [
     {
@@ -23217,20 +23217,44 @@
       "children": [],
       "descendants": [],
       "resolution": {
-        "status": "code_evidence_partial",
-        "objective_reached": null,
-        "confidence": "medium",
-        "note": "Current workspace has limited specific code/test evidence; manual review needed for full acceptance coverage."
+        "status": "code_evidence_confirmed",
+        "objective_reached": true,
+        "confidence": "high",
+        "note": "Current workspace has direct specific code/test evidence."
       },
       "final_disposition": {
-        "outcome": "reopened",
-        "placeholder": true,
-        "reason": "Only partial current code/test evidence exists; a domain slice must confirm, supersede, or split the remaining acceptance criteria.",
+        "outcome": "confirmed",
+        "placeholder": false,
+        "reason": "red_client binary-size protection is wired through scripts/check-red-client-size.sh, crates/reddb-client/SIZE_BUDGET, the CI red_client size budget step, and release tooling contract tests.",
         "superseded_by": [],
         "reopened_as": [],
         "split_into": []
       },
       "current_code_evidence": [
+        {
+          "type": "manual_current_test_match",
+          "path": "scripts/release_tooling_contract.test.mjs",
+          "line": 10,
+          "kind": "test",
+          "matched_term": "red_client size guard",
+          "snippet": "red_client size guard is wired to a documented local and CI budget check",
+          "term_score": 9,
+          "term_sources": [
+            "issue_337_release_tooling_audit"
+          ]
+        },
+        {
+          "type": "manual_current_code_match",
+          "path": "scripts/check-red-client-size.sh",
+          "line": 17,
+          "kind": "code",
+          "matched_term": "red_client size budget",
+          "snippet": "Builds red_client without default engine features, strips a copy, and fails when the measured size exceeds crates/reddb-client/SIZE_BUDGET.",
+          "term_score": 9,
+          "term_sources": [
+            "issue_337_release_tooling_audit"
+          ]
+        },
         {
           "type": "current_code_match",
           "path": "crates/reddb-client/src/bin/red_client.rs",
@@ -25729,20 +25753,44 @@
       "children": [],
       "descendants": [],
       "resolution": {
-        "status": "code_evidence_partial",
-        "objective_reached": null,
-        "confidence": "medium",
-        "note": "Current workspace has limited specific code/test evidence; manual review needed for full acceptance coverage."
+        "status": "code_evidence_confirmed",
+        "objective_reached": true,
+        "confidence": "high",
+        "note": "Current workspace has direct specific code/test evidence."
       },
       "final_disposition": {
-        "outcome": "reopened",
-        "placeholder": true,
-        "reason": "Only partial current code/test evidence exists; a domain slice must confirm, supersede, or split the remaining acceptance criteria.",
+        "outcome": "confirmed",
+        "placeholder": false,
+        "reason": "red_client container distribution is recorded in ADR 0004 and wired through Dockerfile.client plus the release.yml publish-client-image job using the ghcr.io/reddb-io/reddb-client tag scheme.",
         "superseded_by": [],
         "reopened_as": [],
         "split_into": []
       },
       "current_code_evidence": [
+        {
+          "type": "manual_current_test_match",
+          "path": "scripts/release_tooling_contract.test.mjs",
+          "line": 26,
+          "kind": "test",
+          "matched_term": "red_client container release contract",
+          "snippet": "red_client container release contract uses the thin client Dockerfile and package",
+          "term_score": 9,
+          "term_sources": [
+            "issue_337_release_tooling_audit"
+          ]
+        },
+        {
+          "type": "manual_current_code_match",
+          "path": "Dockerfile.client",
+          "line": 60,
+          "kind": "code",
+          "matched_term": "red_client thin client image",
+          "snippet": "cargo build --release --locked --target ${TARGET} --bin red_client -p reddb-client --no-default-features",
+          "term_score": 9,
+          "term_sources": [
+            "issue_337_release_tooling_audit"
+          ]
+        },
         {
           "type": "current_code_match",
           "path": "crates/reddb-client/src/bin/red_client.rs",
@@ -42178,20 +42226,32 @@
       "children": [],
       "descendants": [],
       "resolution": {
-        "status": "code_evidence_partial",
-        "objective_reached": null,
-        "confidence": "medium",
-        "note": "Current workspace has limited specific code/test evidence; manual review needed for full acceptance coverage."
+        "status": "code_evidence_confirmed",
+        "objective_reached": true,
+        "confidence": "high",
+        "note": "Current workspace has direct specific code/test evidence."
       },
       "final_disposition": {
-        "outcome": "reopened",
-        "placeholder": true,
-        "reason": "Only partial current code/test evidence exists; a domain slice must confirm, supersede, or split the remaining acceptance criteria.",
+        "outcome": "confirmed",
+        "placeholder": false,
+        "reason": "The 2026-05-06 nightly DR drill failure is tied to the current-shell scripts/drill-nightly.sh fix and the public make drill-nightly workflow command.",
         "superseded_by": [],
         "reopened_as": [],
         "split_into": []
       },
       "current_code_evidence": [
+        {
+          "type": "manual_current_test_match",
+          "path": "scripts/release_tooling_contract.test.mjs",
+          "line": 39,
+          "kind": "test",
+          "matched_term": "nightly DR drill workflow",
+          "snippet": "nightly DR drill workflow uses the current-shell runner and public make target",
+          "term_score": 9,
+          "term_sources": [
+            "issue_337_release_tooling_audit"
+          ]
+        },
         {
           "type": "manual_current_code_match",
           "path": "Makefile",
