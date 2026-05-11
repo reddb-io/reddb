@@ -1,6 +1,6 @@
 {
   "repository": "reddb-io/reddb",
-  "generated_at": "2026-05-11T01:10:53.918Z",
+  "generated_at": "2026-05-11T01:26:50.230Z",
   "source_state": {
     "github_issues": "/tmp/reddb_issues_raw.json",
     "current_workspace_files_indexed": 4398,
@@ -34,25 +34,25 @@
     "total": 311,
     "unique_issue_entries": 311,
     "github_open": 3,
-    "objective_reached_true": 291,
+    "objective_reached_true": 292,
     "objective_reached_false": 0,
-    "objective_reached_unknown": 20,
+    "objective_reached_unknown": 19,
     "by_status": {
-      "code_evidence_confirmed": 288,
-      "code_evidence_partial": 20,
+      "code_evidence_confirmed": 289,
+      "code_evidence_partial": 19,
       "code_evidence_confirmed_github_open": 3
     },
     "by_confidence": {
-      "high": 291,
-      "medium": 20
+      "high": 292,
+      "medium": 19
     },
     "by_final_disposition": {
-      "confirmed": 289,
+      "confirmed": 290,
       "split": 1,
       "superseded": 1,
-      "reopened": 20
+      "reopened": 19
     },
-    "placeholder_final_dispositions": 23
+    "placeholder_final_dispositions": 22
   },
   "issues": [
     {
@@ -106547,7 +106547,7 @@
         {
           "type": "current_code_match",
           "path": "tests/iam_policy_runtime.rs",
-          "line": 1068,
+          "line": 1161,
           "kind": "test",
           "matched_term": "column-deny",
           "snippet": "\"doc-column-deny\",",
@@ -123686,20 +123686,44 @@
       "children": [],
       "descendants": [],
       "resolution": {
-        "status": "code_evidence_partial",
-        "objective_reached": null,
-        "confidence": "medium",
-        "note": "Current workspace has limited specific code/test evidence; manual review needed for full acceptance coverage."
+        "status": "code_evidence_confirmed",
+        "objective_reached": true,
+        "confidence": "high",
+        "note": "Current workspace has direct specific code/test evidence."
       },
       "final_disposition": {
-        "outcome": "reopened",
-        "placeholder": true,
-        "reason": "Only partial current code/test evidence exists; a domain slice must confirm, supersede, or split the remaining acceptance criteria.",
+        "outcome": "confirmed",
+        "placeholder": false,
+        "reason": "Destructive DDL authorization is evidenced by tests/iam_policy_runtime.rs: public SQL/API DROP and TRUNCATE denials require the correct collection policy before mutation, allowed principals execute successfully, polymorphic DROP COLLECTION is covered, and audit entries record allow/deny outcomes.",
         "superseded_by": [],
         "reopened_as": [],
         "split_into": []
       },
       "current_code_evidence": [
+        {
+          "type": "manual_current_code_match",
+          "path": "crates/reddb-server/src/runtime/impl_core.rs",
+          "line": 7744,
+          "kind": "code",
+          "matched_term": "check_ddl_collection_privilege drop truncate collection IAM policy audit",
+          "snippet": "IAM privilege check for DROP / TRUNCATE on a named collection records audit log entries for allow and deny outcomes.",
+          "term_score": 9,
+          "term_sources": [
+            "issue_344_ddl_auth_audit"
+          ]
+        },
+        {
+          "type": "manual_current_test_match",
+          "path": "tests/iam_policy_runtime.rs",
+          "line": 714,
+          "kind": "test",
+          "matched_term": "destructive DDL DROP TRUNCATE requires IAM policy before mutation",
+          "snippet": "fn destructive_ddl_requires_drop_or_truncate_policy_before_mutation() {",
+          "term_score": 9,
+          "term_sources": [
+            "issue_344_ddl_auth_audit"
+          ]
+        },
         {
           "type": "current_code_match",
           "path": "crates/reddb-client/src/error.rs",

@@ -672,6 +672,31 @@ function main() {
         },
       ];
     }
+    if (number === 309) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "tests/iam_policy_runtime.rs",
+          line: 714,
+          kind: "test",
+          matched_term: "destructive DDL DROP TRUNCATE requires IAM policy before mutation",
+          snippet: "fn destructive_ddl_requires_drop_or_truncate_policy_before_mutation() {",
+          term_score: 9,
+          term_sources: ["issue_344_ddl_auth_audit"],
+        },
+        {
+          type: "manual_current_code_match",
+          path: "crates/reddb-server/src/runtime/impl_core.rs",
+          line: 7744,
+          kind: "code",
+          matched_term: "check_ddl_collection_privilege drop truncate collection IAM policy audit",
+          snippet:
+            "IAM privilege check for DROP / TRUNCATE on a named collection records audit log entries for allow and deny outcomes.",
+          term_score: 9,
+          term_sources: ["issue_344_ddl_auth_audit"],
+        },
+      ];
+    }
     if (number === 231) {
       return [
         {
@@ -885,6 +910,17 @@ function main() {
         placeholder: false,
         reason:
           "The canonical red.* schema reference is docs/reference/red-schema.md, linked from docs/README.md and tied to public runtime coverage in tests/e2e_red_schema.rs plus scripts/red_schema_reference_contract.test.mjs.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 309) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "Destructive DDL authorization is evidenced by tests/iam_policy_runtime.rs: public SQL/API DROP and TRUNCATE denials require the correct collection policy before mutation, allowed principals execute successfully, polymorphic DROP COLLECTION is covered, and audit entries record allow/deny outcomes.",
         superseded_by: [],
         reopened_as: [],
         split_into: [],
