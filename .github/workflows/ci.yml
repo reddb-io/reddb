@@ -150,9 +150,6 @@ jobs:
             args: --no-default-features --features backend-d1
           - label: all-features
             args: --all-features
-    env:
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.91.0
@@ -160,17 +157,12 @@ jobs:
         with:
           version: '28.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: rui314/setup-mold@v1
-      - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ubuntu-features-rust-1.91.0-${{ matrix.features.label }}
           cache-on-failure: "true"
       - name: cargo check
         run: cargo check --locked ${{ matrix.features.args }}
-      - name: Show sccache stats
-        if: always()
-        run: sccache --show-stats
 
   tests:
     name: Test Suite
@@ -473,4 +465,4 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: Swatinem/rust-cache@v2
       - name: cargo package --workspace
-        run: cargo package --workspace --allow-dirty --no-verify --offline
+        run: cargo package --workspace --allow-dirty --no-verify

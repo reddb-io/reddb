@@ -9,8 +9,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-reddb-server = { path = "../crates/reddb-server" }
-reddb-wire = { path = "../crates/reddb-wire" }
+reddb-io-server = { path = "../crates/reddb-server" }
+reddb-io-wire = { path = "../crates/reddb-wire" }
 
 [[bin]]
 name = "sql_parser"
