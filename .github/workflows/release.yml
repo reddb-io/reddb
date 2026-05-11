@@ -197,6 +197,7 @@ jobs:
           CXX_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-g++
           AR_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-ar
         run: |
+          [[ "${{ matrix.cross }}" == "true" ]] && unset RUSTC_WRAPPER || true
           cargo build --locked --release --target ${{ matrix.target }} --bin red
           cargo build --locked --release --target ${{ matrix.target }} --bin red_client -p reddb-io-client --no-default-features
 

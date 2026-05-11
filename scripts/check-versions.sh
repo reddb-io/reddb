@@ -8,7 +8,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-ENGINE=$(grep -m1 '^version' Cargo.toml | sed -E 's/version\s*=\s*"([^"]+)".*/\1/')
+ENGINE=$(grep -m1 '^version' Cargo.toml | sed -E 's/version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')
 echo "engine: $ENGINE"
 
 fail=0
