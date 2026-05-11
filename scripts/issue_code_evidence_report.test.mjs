@@ -146,3 +146,22 @@ test("parser hardening evidence closure records final dispositions for issue 338
   assert.match(issue231.final_disposition.reason, /tests\/conformance\.rs/);
   assert.match(issue231.final_disposition.reason, /tests\/conformance/);
 });
+
+test("statement execution evidence closure records final dispositions for issue 336 scope", () => {
+  assert.ok(fs.existsSync(issuesPath), `${issuesPath} must exist`);
+
+  const report = runReport();
+  const issues = [46, 48, 49, 50, 51, 52].map((number) => issueByNumber(report, number));
+
+  for (const issue of issues) {
+    assert.equal(issue.final_disposition.outcome, "confirmed");
+    assert.equal(issue.final_disposition.placeholder, false);
+    assert.notEqual(issue.resolution.status, "code_evidence_partial");
+    assert.notEqual(issue.resolution.status, "code_evidence_partial_github_open");
+  }
+
+  assert.match(issues[0].final_disposition.reason, /e2e_statement_execution_contract\.rs/);
+  assert.match(issues[1].final_disposition.reason, /permission denied/);
+  assert.match(issues[2].final_disposition.reason, /APPEND ONLY/);
+  assert.match(issues[4].final_disposition.reason, /UPDATE and DELETE/);
+});

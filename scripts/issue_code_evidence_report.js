@@ -326,6 +326,150 @@ function main() {
   }
 
   function manualEvidence(number) {
+    if (number === 46) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "tests/e2e_statement_execution_contract.rs",
+          line: 103,
+          kind: "test",
+          matched_term: "statement execution context public read path",
+          snippet: "fn read_statement_context_observes_tenant_config_auth_and_policy_state() {",
+          term_score: 9,
+          term_sources: ["issue_336_statement_execution_audit"],
+        },
+        {
+          type: "manual_current_test_match",
+          path: "tests/e2e_statement_execution_contract.rs",
+          line: 130,
+          kind: "test",
+          matched_term: "SHOW CONFIG read path observes config state",
+          snippet: "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
+          term_score: 9,
+          term_sources: ["issue_336_statement_execution_audit"],
+        },
+      ];
+    }
+    if (number === 48) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "tests/e2e_statement_execution_contract.rs",
+          line: 139,
+          kind: "test",
+          matched_term: "Role::Read SELECT allowed INSERT permission denied Write",
+          snippet: "Role::Read should execute SELECT and must not execute INSERT.",
+          term_score: 9,
+          term_sources: ["issue_336_statement_execution_audit"],
+        },
+        {
+          type: "manual_current_code_match",
+          path: "crates/reddb-server/src/runtime/impl_core.rs",
+          line: 4388,
+          kind: "code",
+          matched_term: "frame.check_query_privilege acquire_intent_locks",
+          snippet: "frame.check_query_privilege(self, &expr)?; ... frame.acquire_intent_locks(self, &expr);",
+          term_score: 9,
+          term_sources: ["issue_336_statement_execution_audit"],
+        },
+      ];
+    }
+    if (number === 49) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "tests/e2e_statement_execution_contract.rs",
+          line: 151,
+          kind: "test",
+          matched_term: "CollectionContract INSERT APPEND ONLY application API",
+          snippet: "fn collection_contract_enforces_insert_and_mutation_paths_through_application_api() {",
+          term_score: 9,
+          term_sources: ["issue_336_statement_execution_audit"],
+        },
+        {
+          type: "manual_current_test_match",
+          path: "tests/e2e_append_only.rs",
+          line: 31,
+          kind: "test",
+          matched_term: "append only table accepts inserts",
+          snippet: "fn append_only_table_accepts_inserts() {",
+          term_score: 9,
+          term_sources: ["issue_336_statement_execution_audit"],
+        },
+      ];
+    }
+    if (number === 50) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "tests/e2e_statement_execution_contract.rs",
+          line: 167,
+          kind: "test",
+          matched_term: "APPEND ONLY rejects UPDATE and DELETE",
+          snippet: "APPEND ONLY should reject UPDATE ... APPEND ONLY should reject DELETE",
+          term_score: 9,
+          term_sources: ["issue_336_statement_execution_audit"],
+        },
+        {
+          type: "manual_current_test_match",
+          path: "tests/e2e_append_only.rs",
+          line: 44,
+          kind: "test",
+          matched_term: "append only rejects mutation paths",
+          snippet: "fn append_only_table_rejects_update_with_clear_message() {",
+          term_score: 9,
+          term_sources: ["issue_336_statement_execution_audit"],
+        },
+      ];
+    }
+    if (number === 51) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "tests/e2e_statement_execution_contract.rs",
+          line: 188,
+          kind: "test",
+          matched_term: "UPDATE and DELETE share observable target scan semantics",
+          snippet: "fn update_and_delete_share_observable_target_scan_semantics() {",
+          term_score: 9,
+          term_sources: ["issue_336_statement_execution_audit"],
+        },
+        {
+          type: "manual_current_code_match",
+          path: "crates/reddb-server/src/runtime/dml_target_scan.rs",
+          line: 1,
+          kind: "code",
+          matched_term: "DML target scan locate entity ids",
+          snippet: "//! DML target scan: locate the entity ids a DML statement should mutate.",
+          term_score: 9,
+          term_sources: ["issue_336_statement_execution_audit"],
+        },
+      ];
+    }
+    if (number === 52) {
+      return [
+        {
+          type: "manual_current_test_match",
+          path: "tests/e2e_statement_execution_contract.rs",
+          line: 72,
+          kind: "test",
+          matched_term: "assert UPDATE and DELETE target same rows",
+          snippet: "fn assert_update_and_delete_target_same_rows(predicate: &str, expected_ids: &[i64]) {",
+          term_score: 9,
+          term_sources: ["issue_336_statement_execution_audit"],
+        },
+        {
+          type: "manual_current_code_match",
+          path: "crates/reddb-server/src/runtime/impl_dml.rs",
+          line: 1263,
+          kind: "code",
+          matched_term: "UPDATE reuses DmlTargetScan",
+          snippet: "rows loop lives in DmlTargetScan so UPDATE (#52) can reuse",
+          term_score: 9,
+          term_sources: ["issue_336_statement_execution_audit"],
+        },
+      ];
+    }
     if (number === 97) {
       return [
         {
@@ -543,6 +687,72 @@ function main() {
   }
 
   function manualFinalDisposition(number) {
+    if (number === 46) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "Statement execution read context is evidenced by tests/e2e_statement_execution_contract.rs using public execute_query outcomes for RLS policy state, tenant scope, SHOW CONFIG, and authenticated read behavior.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 48) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "Privilege and lock intent derivation is evidenced by tests/e2e_statement_execution_contract.rs public read/write outcomes: Role::Read can SELECT, INSERT is permission denied with Write, and dispatch consults frame privilege plus intent locks.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 49) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "CollectionContract INSERT behavior is evidenced by tests/e2e_statement_execution_contract.rs and tests/e2e_append_only.rs: APPEND ONLY tables accept public INSERT paths while retaining the contract.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 50) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "CollectionContract mutation behavior is evidenced by tests/e2e_statement_execution_contract.rs and tests/e2e_append_only.rs: APPEND ONLY rejects UPDATE and DELETE without mutating stored rows.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 51) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "DELETE target scan behavior is evidenced by tests/e2e_statement_execution_contract.rs, where UPDATE and DELETE select the same target ids for indexed equality and unindexed range predicates through public SQL.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
+    if (number === 52) {
+      return {
+        outcome: "confirmed",
+        placeholder: false,
+        reason:
+          "UPDATE target scan reuse is evidenced by tests/e2e_statement_execution_contract.rs and crates/reddb-server/src/runtime/impl_dml.rs: UPDATE and DELETE share observable target selection for the same predicates.",
+        superseded_by: [],
+        reopened_as: [],
+        split_into: [],
+      };
+    }
     if (number === 87) {
       return {
         outcome: "confirmed",
