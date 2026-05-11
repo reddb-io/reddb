@@ -7,7 +7,7 @@ use super::impl_core::{
     ConfigSnapshotGuard, CurrentSnapshotGuard, SecretStoreGuard, SnapshotContext,
     TxLocalTenantGuard,
 };
-use super::{RedDBRuntime, RuntimeQueryResult};
+use super::{RedDBRuntime, RuntimeQueryResult, RuntimeResultCacheEntry};
 use crate::api::{RedDBError, RedDBResult};
 use crate::auth::Role;
 use crate::storage::query::ast::QueryExpr;
@@ -362,6 +362,32 @@ impl StatementExecutionFrame {
             && result.engine != "vault"
             && result.result.pre_serialized_json.is_none()
             && result.result.records.len() <= 5
+    }
+
+    pub(super) fn read_result_cache(&self, runtime: &RedDBRuntime) -> Option<RuntimeQueryResult> {
+        if self.can_read_result_cache() {
+            runtime.get_result_cache_entry(self.cache_key())
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn write_result_cache(
+        &self,
+        runtime: &RedDBRuntime,
+        result: &RuntimeQueryResult,
+        scopes: HashSet<String>,
+    ) {
+        if self.should_write_result_cache(result) {
+            runtime.put_result_cache_entry(
+                self.cache_key(),
+                RuntimeResultCacheEntry {
+                    result: result.clone(),
+                    cached_at: std::time::Instant::now(),
+                    scopes,
+                },
+            );
+        }
     }
 
     pub(super) fn prepare_statement(
