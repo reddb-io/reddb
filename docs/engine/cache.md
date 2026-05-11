@@ -59,7 +59,9 @@ Query Engine --> SIEVE Cache --> Pager --> Disk
 
 ## Result Cache
 
-On top of the page cache, RedDB maintains a **query result cache** that stores full `RuntimeQueryResult` objects keyed by the raw SQL string.
+On top of the page cache, RedDB maintains a **query result cache** for
+small `SELECT` results. Keys include the SQL text plus the current
+tenant and auth identity, so scoped callers do not share cached rows.
 
 | Property | Value |
 |:---------|:------|
@@ -67,13 +69,24 @@ On top of the page cache, RedDB maintains a **query result cache** that stores f
 | Max entries | 1 000 |
 | Eviction | Oldest entry removed when full |
 | Scope | SELECT queries only |
+| Blob backend L2 | `<data-path>.result-cache.l2` plus `<data-path>.result-cache.blob-cache.ctl` |
 
 ### How It Works
 
 1. Before parsing a query, the runtime checks the result cache
 2. On cache hit with a valid TTL, the cached result is returned immediately (no parse, no plan, no scan)
 3. On cache miss, the query executes normally and the result is stored
-4. **All write operations** (INSERT, UPDATE, DELETE, retention sweep) automatically invalidate the entire cache via `cdc_emit()`
+4. Writes invalidate affected result-cache entries. The Blob Cache
+   backend uses a conservative namespace flush for table writes so
+   unrehydrated L2 entries from a previous process cannot become stale.
+
+When `runtime.result_cache.backend = 'blob_cache'`, cacheable results
+are written as Blob Cache payloads, not only in-memory sidecars. A clean
+runtime restart can rehydrate eligible entries from L2 until their
+30-second TTL expires. Statements rejected by the normal safety gate
+still do not persist: volatile builtins, active-transaction reads,
+oversized result sets, vault results, and pre-serialized fast paths are
+recomputed instead.
 
 ```
 SELECT * FROM users WHERE active = true
@@ -84,13 +97,16 @@ SELECT * FROM users WHERE active = true
 
 ### Invalidation
 
-The cache is cleared on **every** write path:
+The legacy backend is cleared or narrowed by dependency on write paths:
 - SQL DML: `INSERT`, `UPDATE`, `DELETE`
 - REST API: entity create, patch, delete
 - Retention policy sweep
-- Any operation that calls `cdc_emit()`
+- Any operation that calls the runtime cache invalidation hooks
 
-This is a conservative strategy (full clear, not per-collection) that guarantees correctness at the cost of occasional cache misses after unrelated writes.
+The Blob Cache backend deliberately chooses a broader namespace
+invalidation on table writes. That costs occasional misses after
+unrelated writes, but preserves correctness for durable entries that
+exist only in L2 after restart.
 
 ---
 

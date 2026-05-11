@@ -58,6 +58,10 @@ statement shape and scope, invalidated through table dependencies. With
 ADR 0006 in flight it becomes an adapter over Blob Cache when
 `runtime.result_cache.backend = blob_cache`. The Interface that
 application SQL callers see does not change; the storage underneath does.
+Eligible Blob-backed entries also survive a clean runtime restart via
+the per-database L2 files until their 30-second TTL expires. Tenant and
+auth identity stay part of the key, and table writes conservatively
+flush the result-cache namespace so stale L2 entries are not served.
 
 Page Cache and Entity Cache are internal acceleration structures.
 They are listed here only so readers stop trying to use them as

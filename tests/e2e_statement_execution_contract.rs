@@ -6,12 +6,28 @@ use reddb::application::ExecuteQueryInput;
 use reddb::auth::Role;
 use reddb::runtime::mvcc::{
     clear_current_auth_identity, clear_current_tenant, set_current_auth_identity,
+    set_current_tenant,
 };
 use reddb::storage::schema::Value;
 use reddb::{QueryUseCases, RedDBOptions, RedDBRuntime};
+use std::path::PathBuf;
 
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime")
+}
+
+fn persistent_runtime(path: &PathBuf) -> RedDBRuntime {
+    RedDBRuntime::with_options(RedDBOptions::persistent(path)).expect("persistent runtime")
+}
+
+fn temp_db_path(label: &str) -> PathBuf {
+    let mut path = std::env::temp_dir();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    path.push(format!("reddb-{label}-{}-{nanos}.rdb", std::process::id()));
+    path
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) {
@@ -48,11 +64,45 @@ fn selected_ids(rt: &RedDBRuntime, sql: &str) -> Vec<i64> {
         .result
         .records
         .iter()
-        .map(|record| match record.get("id") {
-            Some(Value::Integer(id)) => *id,
-            other => panic!("expected integer id, got {other:?}"),
+        .map(|record| {
+            match record
+                .get("id")
+                .or_else(|| record.get("docs.id"))
+                .or_else(|| record.get("items.id"))
+                .or_else(|| record.get("c0"))
+            {
+                Some(Value::Integer(id)) => *id,
+                other => panic!("expected integer id, got {other:?} in record {record:?}"),
+            }
         })
         .collect()
+}
+
+fn selected_text(rt: &RedDBRuntime, sql: &str) -> String {
+    let result = rt
+        .execute_query(sql)
+        .unwrap_or_else(|err| panic!("{sql}: {err:?}"));
+    let record = result
+        .result
+        .records
+        .first()
+        .unwrap_or_else(|| panic!("{sql}: expected one row"));
+    match record
+        .get("c0")
+        .or_else(|| record.get("tenant"))
+        .or_else(|| record.get("CURRENT_TENANT"))
+        .or_else(|| record.get("CURRENT_USER"))
+    {
+        Some(Value::Text(text)) => text.to_string(),
+        other => panic!("expected text scalar, got {other:?} in record {record:?}"),
+    }
+}
+
+fn cleanup_persistent_path(path: &PathBuf) {
+    let _ = std::fs::remove_file(path);
+    let l2 = path.with_extension("result-cache.l2");
+    let _ = std::fs::remove_file(&l2);
+    let _ = std::fs::remove_file(l2.with_extension("blob-cache.ctl"));
 }
 
 fn seed_target_scan_fixture(rt: &RedDBRuntime) {
@@ -146,6 +196,101 @@ fn read_statement_context_observes_tenant_config_auth_and_policy_state() {
         "expected write privilege denial, got {err:?}"
     );
     clear_current_auth_identity();
+}
+
+#[test]
+fn blob_result_cache_rehydrates_after_restart_with_tenant_and_auth_isolation() {
+    clear_current_tenant();
+    clear_current_auth_identity();
+    let path = temp_db_path("result-cache-warm-restart");
+
+    {
+        let rt = persistent_runtime(&path);
+        exec(
+            &rt,
+            "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
+        );
+        set_current_auth_identity("alice".to_string(), Role::Read);
+        set_current_tenant("acme".to_string());
+        assert_eq!(selected_text(&rt, "SELECT CURRENT_TENANT()"), "acme");
+        set_current_tenant("globex".to_string());
+        assert_eq!(selected_text(&rt, "SELECT CURRENT_TENANT()"), "globex");
+        clear_current_tenant();
+        assert_eq!(selected_text(&rt, "SELECT CURRENT_USER()"), "alice");
+        clear_current_tenant();
+        clear_current_auth_identity();
+        rt.checkpoint().expect("checkpoint before restart");
+    }
+
+    {
+        let rt = persistent_runtime(&path);
+
+        set_current_auth_identity("alice".to_string(), Role::Read);
+        set_current_tenant("acme".to_string());
+        assert_eq!(selected_text(&rt, "SELECT CURRENT_TENANT()"), "acme");
+        set_current_tenant("globex".to_string());
+        assert_eq!(selected_text(&rt, "SELECT CURRENT_TENANT()"), "globex");
+        clear_current_tenant();
+        set_current_auth_identity("bob".to_string(), Role::Read);
+        assert_eq!(selected_text(&rt, "SELECT CURRENT_USER()"), "bob");
+        set_current_auth_identity("alice".to_string(), Role::Read);
+        assert_eq!(selected_text(&rt, "SELECT CURRENT_USER()"), "alice");
+
+        let stats = rt.stats().result_blob_cache;
+        assert_eq!(
+            stats.hits(),
+            3,
+            "alice/acme, alice/globex, and alice's user scalar should be served from durable L2"
+        );
+        assert_eq!(
+            stats.misses(),
+            1,
+            "bob must not reuse alice's result-cache entry"
+        );
+    }
+
+    clear_current_tenant();
+    clear_current_auth_identity();
+    cleanup_persistent_path(&path);
+}
+
+#[test]
+fn blob_result_cache_write_after_restart_invalidates_unrehydrated_l2_entries() {
+    clear_current_tenant();
+    clear_current_auth_identity();
+    let path = temp_db_path("result-cache-restart-invalidation");
+
+    {
+        let rt = persistent_runtime(&path);
+        exec(
+            &rt,
+            "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
+        );
+        exec(&rt, "CREATE TABLE items (id INT)");
+        exec(&rt, "INSERT INTO items (id) VALUES (1)");
+        assert_eq!(
+            selected_ids(&rt, "SELECT id FROM items ORDER BY id"),
+            vec![1]
+        );
+        rt.checkpoint().expect("checkpoint before restart");
+    }
+
+    {
+        let rt = persistent_runtime(&path);
+        exec(&rt, "INSERT INTO items (id) VALUES (2)");
+        assert_eq!(
+            selected_ids(&rt, "SELECT id FROM items ORDER BY id"),
+            vec![1, 2],
+            "a table write after restart must not leave stale result-cache L2 visible"
+        );
+        assert_eq!(
+            rt.stats().result_blob_cache.hits(),
+            0,
+            "the stale pre-restart result should have been invalidated before rehydrate"
+        );
+    }
+
+    cleanup_persistent_path(&path);
 }
 
 #[test]
