@@ -887,19 +887,13 @@ impl RedDBRuntime {
             let (mut response, touched_ids) =
                 self.execute_update_inner_tracked(raw_query, &inner_query)?;
 
-            let store = self.inner.db.store();
-            let snapshots: Vec<Vec<(String, Value)>> = if touched_ids.is_empty() {
-                Vec::new()
-            } else if let Some(manager) = store.get_collection(&effective_query.table) {
-                manager
-                    .get_many(&touched_ids)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|entity| entity_row_snapshot(&entity))
-                    .collect()
-            } else {
-                Vec::new()
-            };
+            let snapshots = super::dml_target_scan::DmlTargetScan::new(
+                self,
+                &effective_query.table,
+                None,
+                None,
+            )
+            .row_snapshots(&touched_ids);
 
             response.result = build_returning_result(&items, &snapshots, None);
             response.engine = "runtime-dml-returning";
@@ -1278,15 +1272,7 @@ impl RedDBRuntime {
         let needs_delete_events =
             !query.suppress_events && self.collection_has_delete_subscriptions(&query.table);
         let mut pre_images: HashMap<u64, crate::json::Value> = if needs_delete_events {
-            let store = self.db().store();
-            ids_to_delete
-                .iter()
-                .filter_map(|&id| {
-                    store
-                        .get(&query.table, id)
-                        .map(|e| (id.raw(), crate::runtime::mutation::entity_row_json(&e)))
-                })
-                .collect()
+            scan.row_json_pre_images(&ids_to_delete)
         } else {
             HashMap::new()
         };
@@ -1378,29 +1364,6 @@ fn build_patch_operations_from_materialized_assignments(
 /// the table name and the RETURNING clause, so WHERE / ORDER BY /
 /// LIMIT survive untouched. The RETURNING tail — if present — is
 /// truncated at the first top-level `RETURNING` token.
-/// Snapshot a row entity into ordered (column, value) pairs for
-/// `RETURNING` projection. Non-row entities (documents, edges,
-/// timeseries etc.) currently return `None` — RETURNING on those
-/// paths is not yet wired.
-fn entity_row_snapshot(entity: &crate::storage::UnifiedEntity) -> Option<Vec<(String, Value)>> {
-    match &entity.data {
-        EntityData::Row(row) => {
-            if let Some(named) = &row.named {
-                Some(named.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-            } else {
-                row.schema.as_ref().map(|schema| {
-                    schema
-                        .iter()
-                        .cloned()
-                        .zip(row.columns.iter().cloned())
-                        .collect()
-                })
-            }
-        }
-        _ => None,
-    }
-}
-
 fn delete_to_select_sql(sql: &str) -> Option<String> {
     let trimmed = sql.trim_start();
     let lowered = trimmed.to_ascii_lowercase();
