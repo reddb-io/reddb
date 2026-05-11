@@ -711,6 +711,99 @@ fn kv_invalidate_tags_requires_iam_action() {
 }
 
 #[test]
+fn destructive_ddl_requires_drop_or_truncate_policy_before_mutation() {
+    let (rt, store) = runtime_with_auth();
+    rt.execute_query("CREATE TABLE ddl_drop_guard (id INT)")
+        .unwrap();
+    rt.execute_query("INSERT INTO ddl_drop_guard (id) VALUES (1)")
+        .unwrap();
+    rt.execute_query("CREATE TABLE ddl_truncate_guard (id INT)")
+        .unwrap();
+    rt.execute_query("INSERT INTO ddl_truncate_guard (id) VALUES (1)")
+        .unwrap();
+
+    attach_alice_policy(
+        &store,
+        "ddl-wrong-actions",
+        r#"[
+            {"effect":"allow","actions":["truncate"],"resources":["collection:ddl_drop_guard"]},
+            {"effect":"allow","actions":["drop"],"resources":["collection:ddl_truncate_guard"]}
+        ]"#,
+    );
+
+    let denied_drop = err_string(as_user("alice", Role::Write, || {
+        rt.execute_query("DROP TABLE ddl_drop_guard")
+    }));
+    assert!(denied_drop.contains("action=`drop`"), "got {denied_drop}");
+    assert!(
+        denied_drop.contains("collection:ddl_drop_guard"),
+        "got {denied_drop}"
+    );
+    assert!(
+        rt.db().collection_contract("ddl_drop_guard").is_some(),
+        "denied DROP must leave the table contract intact"
+    );
+
+    let denied_truncate = err_string(as_user("alice", Role::Write, || {
+        rt.execute_query("TRUNCATE TABLE ddl_truncate_guard")
+    }));
+    assert!(
+        denied_truncate.contains("action=`truncate`"),
+        "got {denied_truncate}"
+    );
+    assert!(
+        denied_truncate.contains("collection:ddl_truncate_guard"),
+        "got {denied_truncate}"
+    );
+    let rows_after_denied_truncate = rt
+        .execute_query("SELECT id FROM ddl_truncate_guard")
+        .unwrap();
+    assert_eq!(
+        rows_after_denied_truncate.result.records.len(),
+        1,
+        "denied TRUNCATE must leave rows intact"
+    );
+
+    attach_alice_policy(
+        &store,
+        "ddl-destructive-actions",
+        r#"[
+            {"effect":"allow","actions":["drop"],"resources":["collection:ddl_drop_guard"]},
+            {"effect":"allow","actions":["truncate"],"resources":["collection:ddl_truncate_guard"]}
+        ]"#,
+    );
+
+    as_user("alice", Role::Write, || {
+        rt.execute_query("TRUNCATE TABLE ddl_truncate_guard")
+    })
+    .unwrap();
+    let rows_after_allowed_truncate = rt
+        .execute_query("SELECT id FROM ddl_truncate_guard")
+        .unwrap();
+    assert!(rows_after_allowed_truncate.result.records.is_empty());
+    assert!(
+        rt.db().collection_contract("ddl_truncate_guard").is_some(),
+        "allowed TRUNCATE must preserve the table contract"
+    );
+
+    as_user("alice", Role::Write, || {
+        rt.execute_query("DROP COLLECTION ddl_drop_guard")
+    })
+    .unwrap();
+    assert!(
+        rt.db().collection_contract("ddl_drop_guard").is_none(),
+        "allowed polymorphic DROP COLLECTION must remove the table contract"
+    );
+
+    let audit = audit_body(&rt);
+    assert!(audit.contains("\"principal\":\"alice\""), "audit: {audit}");
+    assert!(audit.contains("\"action\":\"drop\""), "audit: {audit}");
+    assert!(audit.contains("\"action\":\"truncate\""), "audit: {audit}");
+    assert!(audit.contains("\"outcome\":\"denied\""), "audit: {audit}");
+    assert!(audit.contains("\"outcome\":\"success\""), "audit: {audit}");
+}
+
+#[test]
 fn group_policy_applies_through_alter_user_membership() {
     let (rt, store) = runtime_with_auth();
     rt.execute_query("CREATE TABLE orders (id INT)").unwrap();

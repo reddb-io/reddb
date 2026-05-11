@@ -185,3 +185,18 @@ test("red schema reference closure records final dispositions for issue 341 scop
   assert.match(issue263.final_disposition.reason, /docs\/reference\/red-schema\.md/);
   assert.match(issue263.final_disposition.reason, /tests\/e2e_red_schema\.rs/);
 });
+
+test("DDL auth closure records final disposition for issue 344 scope", () => {
+  assert.ok(fs.existsSync(issuesPath), `${issuesPath} must exist`);
+
+  const report = runReport();
+  const issue309 = issueByNumber(report, 309);
+
+  assert.equal(issue309.final_disposition.outcome, "confirmed");
+  assert.equal(issue309.final_disposition.placeholder, false);
+  assert.notEqual(issue309.resolution.status, "code_evidence_partial");
+  assert.notEqual(issue309.resolution.status, "code_evidence_partial_github_open");
+  assert.match(issue309.final_disposition.reason, /tests\/iam_policy_runtime\.rs/);
+  assert.match(issue309.final_disposition.reason, /DROP and TRUNCATE/);
+  assert.match(issue309.final_disposition.reason, /audit/);
+});
