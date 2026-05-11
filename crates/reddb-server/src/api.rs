@@ -320,14 +320,19 @@ impl RedDBOptions {
     /// execution mode. Prefer [`RedDBOptions::persistent`] when the data should
     /// outlive the process.
     pub fn in_memory() -> Self {
+        static NEXT_EPHEMERAL_ID: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+
         let now_nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or(0);
+        let unique = NEXT_EPHEMERAL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "reddb-ephemeral-{}-{}.rdb",
+            "reddb-ephemeral-{}-{}-{}.rdb",
             std::process::id(),
-            now_nanos
+            now_nanos,
+            unique
         ));
         let _ = std::fs::remove_file(&path);
         Self {
