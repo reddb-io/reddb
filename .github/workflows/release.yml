@@ -48,6 +48,8 @@ jobs:
           fetch-depth: 0
       - name: Decide release target
         id: plan
+        env:
+          HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           set -euo pipefail
           EVENT_NAME="${{ github.event_name }}"
@@ -68,7 +70,7 @@ jobs:
             RELEASE_TAG="${REF#refs/tags/}"
             PACKAGE_VERSION="$(normalize_version "$RELEASE_TAG")"
           elif [[ "$EVENT_NAME" == "push" && "$REF" == "refs/heads/main" ]]; then
-            COMMIT_MSG="${{ github.event.head_commit.message }}"
+            COMMIT_MSG="${HEAD_COMMIT_MESSAGE}"
             if [[ "$COMMIT_MSG" =~ ^chore:\ release ]] || [[ "$COMMIT_MSG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
               SHOULD_SKIP=true
             else
@@ -136,7 +138,7 @@ jobs:
           echo "Cargo.toml: $(grep '^version' Cargo.toml)"
           echo "package.json: $(grep '\"version\"' package.json)"
 
-      - uses: dtolnay/rust-toolchain@1.100.0
+      - uses: dtolnay/rust-toolchain@1.91.0
         with:
           targets: ${{ matrix.target }}
       - uses: arduino/setup-protoc@v3
@@ -230,7 +232,7 @@ jobs:
             red_client-${{ matrix.asset_name }}*
       - name: Show sccache stats
         if: always()
-        run: sccache --show-stats
+        run: sccache --show-stats || true
 
   artifact-sizes:
     # PLAN.md B2 — gate release on measured static binary and image size.
@@ -364,7 +366,7 @@ jobs:
       - name: Verify packs
         run: |
           for dir in packages/internal-asset-fetcher packages/internal-bin-resolver packages/internal-version-compare; do
-            (cd "$dir" && pnpm pack --dry-run)
+            (cd "$dir" && pnpm pack --pack-destination "$RUNNER_TEMP")
           done
       - name: Publish support packages
         env:
@@ -376,7 +378,7 @@ jobs:
           done
 
   publish-cargo:
-    name: Publish to crates.io
+    name: Publish crates to crates.io
     needs: [plan, publish-github]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     if: |
@@ -389,91 +391,53 @@ jobs:
         with:
           version: '28.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Install cargo-edit
-        run: cargo install cargo-edit --locked --no-default-features --features set-version
       - name: Sync Cargo.toml + Cargo.lock version
         run: |
           VERSION="${{ needs.plan.outputs.package_version }}"
-          # `cargo set-version` updates Cargo.toml + Cargo.lock atomically;
-          # commit so the tree is clean for `--locked`.
-          cargo set-version "${VERSION}"
-          git config user.email "actions@github.com"
-          git config user.name "github-actions[bot]"
-          git add Cargo.toml Cargo.lock
-          git commit -m "chore(release): bump to ${VERSION}" || true
-          echo "Publishing reddb@${VERSION} to crates.io"
-      - name: Dry-run package
-        run: cargo publish --dry-run --locked
-      - name: Publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --locked --token "${CARGO_REGISTRY_TOKEN}"
-
-  publish-rust-client:
-    name: Publish reddb-client to crates.io
-    needs: [plan, publish-cargo]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    if: |
-      needs.plan.outputs.should_skip != 'true' &&
-      needs.plan.outputs.release_channel == 'stable'
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.91.0
-      - uses: arduino/setup-protoc@v3
-        with:
-          version: '28.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Sync versions
-        run: |
-          VERSION="${{ needs.plan.outputs.package_version }}"
-          # The published reddb-client now lives at crates/reddb-client/
-          # and pulls reddb-client-connector as a sibling crate. Both
-          # need their version line refreshed before publish.
-          for member in reddb-client reddb-client-connector; do
-            sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" "crates/${member}/Cargo.toml"
+          for manifest in \
+            Cargo.toml \
+            crates/reddb-wire/Cargo.toml \
+            crates/reddb-grpc-proto/Cargo.toml \
+            crates/reddb-client-connector/Cargo.toml \
+            crates/reddb-server/Cargo.toml \
+            crates/reddb-client/Cargo.toml
+          do
+            sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" "$manifest"
           done
           cargo generate-lockfile
-          git config user.email "actions@github.com"
-          git config user.name "github-actions[bot]"
-          git add Cargo.toml Cargo.lock crates/reddb-client/Cargo.toml crates/reddb-client-connector/Cargo.toml 2>/dev/null || true
-          git commit -m "chore(release): bump driver to ${VERSION}" || true
-          echo "Publishing reddb-client@${VERSION} to crates.io"
-      - name: Wait for reddb index propagation
-        run: |
-          # Give the crates.io sparse index a moment to pick up the engine
-          # version that publish-cargo just pushed. Without this, the client
-          # publish can fail with "no matching package named `reddb` found".
-          for i in 1 2 3 4 5; do
-            if cargo search reddb --limit 1 | grep -q "^reddb = \"${{ needs.plan.outputs.package_version }}\""; then
-              echo "reddb@${{ needs.plan.outputs.package_version }} visible on crates.io"
-              exit 0
-            fi
-            echo "not yet visible, sleeping 30s ($i/5)"
-            sleep 30
-          done
-          echo "warning: reddb not visible after 150s — attempting publish anyway"
-      - name: Dry-run package (connector)
-        run: cargo publish --dry-run --locked -p reddb-client-connector
-      - name: Publish reddb-client-connector
+      - name: Publish workspace crates
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --locked -p reddb-client-connector --token "${CARGO_REGISTRY_TOKEN}"
-      - name: Wait for connector index propagation
         run: |
-          for i in 1 2 3 4 5; do
-            if cargo search reddb-client-connector --limit 1 | grep -q "^reddb-client-connector = \"${{ needs.plan.outputs.package_version }}\""; then
-              echo "reddb-client-connector@${{ needs.plan.outputs.package_version }} visible on crates.io"
-              break
-            fi
-            echo "not yet visible, sleeping 30s ($i/5)"
-            sleep 30
-          done
-      - name: Dry-run package (driver)
-        run: cargo publish --dry-run --locked -p reddb-client
-      - name: Publish reddb-client
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --locked -p reddb-client --token "${CARGO_REGISTRY_TOKEN}"
+          set -euo pipefail
+          VERSION="${{ needs.plan.outputs.package_version }}"
+          publish_one() {
+            local crate="$1"
+            echo "==> dry-run ${crate}@${VERSION}"
+            cargo publish --dry-run --locked -p "$crate"
+            echo "==> publish ${crate}@${VERSION}"
+            cargo publish --locked -p "$crate" --token "${CARGO_REGISTRY_TOKEN}"
+            echo "==> wait for ${crate}@${VERSION} in crates.io index"
+            for i in 1 2 3 4 5; do
+              if cargo search "$crate" --limit 5 | grep -q "^${crate} = \"${VERSION}\""; then
+                echo "${crate}@${VERSION} visible on crates.io"
+                return 0
+              fi
+              echo "not yet visible, sleeping 30s ($i/5)"
+              sleep 30
+            done
+            echo "warning: ${crate}@${VERSION} not visible after 150s; continuing"
+          }
+
+          publish_one reddb-wire
+          publish_one reddb-grpc-proto
+          publish_one reddb-client-connector
+          publish_one reddb-server
+          publish_one reddb-client
+          echo "==> dry-run reddb@${VERSION}"
+          cargo publish --dry-run --locked -p reddb
+          echo "==> publish reddb@${VERSION}"
+          cargo publish --locked -p reddb --token "${CARGO_REGISTRY_TOKEN}"
 
   publish-js-driver:
     name: Publish @reddb-io/sdk (npm)
@@ -499,7 +463,7 @@ jobs:
           cat package.json | grep '"version"'
       - name: Verify pack
         working-directory: drivers/js
-        run: pnpm pack --dry-run
+        run: pnpm pack --pack-destination "$RUNNER_TEMP"
       - name: Publish
         working-directory: drivers/js
         env:
@@ -543,7 +507,7 @@ jobs:
         # squatted on the registry). Catches missing files, bad paths,
         # or postinstall script issues before we hit the publish step.
         working-directory: drivers/js-client
-        run: pnpm pack --dry-run
+        run: pnpm pack --pack-destination "$RUNNER_TEMP"
       - name: Publish
         working-directory: drivers/js-client
         env:

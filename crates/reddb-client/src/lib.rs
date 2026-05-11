@@ -108,33 +108,33 @@ impl Reddb {
             Target::Memory => {
                 #[cfg(feature = "embedded")]
                 {
-                    return embedded::EmbeddedClient::in_memory().map(Reddb::Embedded);
+                    embedded::EmbeddedClient::in_memory().map(Reddb::Embedded)
                 }
                 #[cfg(not(feature = "embedded"))]
                 {
-                    return Err(ClientError::feature_disabled("embedded"));
+                    Err(ClientError::feature_disabled("embedded"))
                 }
             }
             Target::File { path } => {
                 #[cfg(feature = "embedded")]
                 {
-                    return embedded::EmbeddedClient::open(path).map(Reddb::Embedded);
+                    embedded::EmbeddedClient::open(path).map(Reddb::Embedded)
                 }
                 #[cfg(not(feature = "embedded"))]
                 {
                     let _ = path;
-                    return Err(ClientError::feature_disabled("embedded"));
+                    Err(ClientError::feature_disabled("embedded"))
                 }
             }
             Target::Grpc { endpoint } => {
                 #[cfg(feature = "grpc")]
                 {
-                    return grpc::GrpcClient::connect(endpoint).await.map(Reddb::Grpc);
+                    grpc::GrpcClient::connect(endpoint).await.map(Reddb::Grpc)
                 }
                 #[cfg(not(feature = "grpc"))]
                 {
                     let _ = endpoint;
-                    return Err(ClientError::feature_disabled("grpc"));
+                    Err(ClientError::feature_disabled("grpc"))
                 }
             }
             Target::GrpcCluster {
@@ -144,27 +144,27 @@ impl Reddb {
             } => {
                 #[cfg(feature = "grpc")]
                 {
-                    return grpc::GrpcClient::connect_cluster(primary, replicas, force_primary)
+                    grpc::GrpcClient::connect_cluster(primary, replicas, force_primary)
                         .await
-                        .map(Reddb::Grpc);
+                        .map(Reddb::Grpc)
                 }
                 #[cfg(not(feature = "grpc"))]
                 {
                     let _ = (primary, replicas, force_primary);
-                    return Err(ClientError::feature_disabled("grpc"));
+                    Err(ClientError::feature_disabled("grpc"))
                 }
             }
             Target::Http { base_url } => {
                 #[cfg(feature = "http")]
                 {
-                    return http::HttpClient::connect(http::HttpOptions::new(base_url))
+                    http::HttpClient::connect(http::HttpOptions::new(base_url))
                         .await
-                        .map(Reddb::Http);
+                        .map(Reddb::Http)
                 }
                 #[cfg(not(feature = "http"))]
                 {
                     let _ = base_url;
-                    return Err(ClientError::feature_disabled("http"));
+                    Err(ClientError::feature_disabled("http"))
                 }
             }
         }

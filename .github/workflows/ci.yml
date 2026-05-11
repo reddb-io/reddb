@@ -227,15 +227,12 @@ jobs:
         with:
           shared-key: ubuntu-publish-dryrun-rust-1.91.0
           cache-on-failure: "true"
-      - name: cargo package (engine)
-        run: cargo package --allow-dirty
-      - name: cargo package (rust client driver, no verify)
-        # Verify mode would resolve `reddb = "0.2"` against crates.io,
-        # but the version we just packaged isn't published yet — so
-        # skip verify here and rely on `publish-rust-client` in
-        # release.yml to do the real verify against the freshly-
-        # published engine version.
-        run: cargo package -p reddb-client --allow-dirty --no-verify
+      - name: cargo package (workspace manifests)
+        # Full verify resolves workspace path dependencies through
+        # crates.io, which fails before a new crate/version has been
+        # published. Release verifies each crate in dependency order
+        # immediately before publishing.
+        run: cargo package --workspace --allow-dirty --no-verify
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats
@@ -248,7 +245,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Build and start primary + replica
-        run: docker compose --project-directory . -f testdata/compose/replica.yml up -d --build
+        run: docker compose -f testdata/compose/replica.yml up -d --build
       - name: Wait for HTTP health endpoints
         run: |
           for i in $(seq 1 60); do
@@ -257,26 +254,26 @@ jobs:
             fi
             sleep 2
           done
-          docker compose --project-directory . -f testdata/compose/replica.yml ps
-          docker compose --project-directory . -f testdata/compose/replica.yml logs
+          docker compose -f testdata/compose/replica.yml ps
+          docker compose -f testdata/compose/replica.yml logs
           exit 1
       - name: Verify gRPC listeners inside containers
         run: |
-          docker compose --project-directory . -f testdata/compose/replica.yml exec -T primary /usr/local/bin/red health --grpc --bind 127.0.0.1:50051
-          docker compose --project-directory . -f testdata/compose/replica.yml exec -T replica /usr/local/bin/red health --grpc --bind 127.0.0.1:50051
+          docker compose -f testdata/compose/replica.yml exec -T primary /usr/local/bin/red health --grpc --bind 127.0.0.1:50051
+          docker compose -f testdata/compose/replica.yml exec -T replica /usr/local/bin/red health --grpc --bind 127.0.0.1:50051
       - name: Verify primary and replica respond over HTTP
         run: |
           curl -fsS http://127.0.0.1:8080/health
           curl -fsS http://127.0.0.1:8081/health
       - name: Show container status
         if: always()
-        run: docker compose --project-directory . -f testdata/compose/replica.yml ps
+        run: docker compose -f testdata/compose/replica.yml ps
       - name: Dump container logs
         if: failure()
-        run: docker compose --project-directory . -f testdata/compose/replica.yml logs
+        run: docker compose -f testdata/compose/replica.yml logs
       - name: Tear down stack
         if: always()
-        run: docker compose --project-directory . -f testdata/compose/replica.yml down -v
+        run: docker compose -f testdata/compose/replica.yml down -v
 
   chaos:
     # PLAN.md Phase 8.4 — chaos & crash hardening matrix.
@@ -433,19 +430,19 @@ jobs:
         run: cargo install cargo-fuzz --locked
       - name: Build fuzz targets
         run: |
-          cargo fuzz build sql_parser
-          cargo fuzz build migration_parser
-          cargo fuzz build conn_string_parser
+          cargo +nightly fuzz build sql_parser
+          cargo +nightly fuzz build migration_parser
+          cargo +nightly fuzz build conn_string_parser
       - name: Run sql_parser fuzz target (5 min)
-        run: cargo fuzz run sql_parser -- -max_total_time=300
+        run: cargo +nightly fuzz run sql_parser -- -max_total_time=300
       - name: Run migration_parser fuzz target (5 min)
-        run: cargo fuzz run migration_parser -- -max_total_time=300
+        run: cargo +nightly fuzz run migration_parser -- -max_total_time=300
       - name: Run conn_string_parser fuzz target (5 min)
         # Issue #90 — pre-auth parser, panic-resistance is the only
         # invariant; conn-string sees attacker-controlled bytes
         # before any handshake completes, so we bake it into the
         # same per-PR window as the SQL fuzzer.
-        run: cargo fuzz run conn_string_parser -- -max_total_time=300
+        run: cargo +nightly fuzz run conn_string_parser -- -max_total_time=300
       - name: Upload fuzz crash artifacts
         if: failure()
         uses: actions/upload-artifact@v7
@@ -457,7 +454,7 @@ jobs:
           retention-days: 14
 
   package:
-    name: cargo publish dry-run
+    name: cargo package dry-run
     needs: gate
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
@@ -469,5 +466,5 @@ jobs:
           version: '28.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: Swatinem/rust-cache@v2
-      - name: cargo publish --dry-run
-        run: cargo publish --dry-run --locked
+      - name: cargo package --workspace
+        run: cargo package --workspace --allow-dirty --no-verify

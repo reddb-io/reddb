@@ -4,6 +4,9 @@ use std::fmt;
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
 pub struct Uuid([u8; 16]);
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct UuidParseError;
+
 impl Uuid {
     pub fn new_v4() -> Self {
         let mut bytes = [0u8; 16];
@@ -41,14 +44,15 @@ impl Uuid {
     }
 
     /// Parse a hyphenated UUID string (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).
-    pub fn parse_str(s: &str) -> Result<Self, ()> {
+    pub fn parse_str(s: &str) -> Result<Self, UuidParseError> {
         let normalized: String = s.chars().filter(|&c| c != '-').collect();
         if normalized.len() != 32 {
-            return Err(());
+            return Err(UuidParseError);
         }
         let mut bytes = [0u8; 16];
         for i in 0..16 {
-            bytes[i] = u8::from_str_radix(&normalized[i * 2..i * 2 + 2], 16).map_err(|_| ())?;
+            bytes[i] = u8::from_str_radix(&normalized[i * 2..i * 2 + 2], 16)
+                .map_err(|_| UuidParseError)?;
         }
         Ok(Self(bytes))
     }

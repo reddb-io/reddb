@@ -74,7 +74,7 @@ fn check(path: &Path, critical_pct: u8, last_emit: &mut Option<Instant>) -> bool
     let used = total.saturating_sub(free);
     let used_pct = used as f64 / total as f64 * 100.0;
     if used_pct >= critical_pct as f64 {
-        let should_emit = last_emit.map_or(true, |t| t.elapsed() >= DEBOUNCE);
+        let should_emit = last_emit.is_none_or(|t| t.elapsed() >= DEBOUNCE);
         if should_emit {
             let threshold_bytes = (total as f64 * ((100 - critical_pct) as f64 / 100.0)) as u64;
             OperatorEvent::DiskSpaceCritical {
@@ -147,7 +147,7 @@ impl FanotifyWatcher {
             libc::fanotify_mark(
                 fd,
                 libc::FAN_MARK_ADD | libc::FAN_MARK_MOUNT,
-                libc::FAN_CLOSE_WRITE as u64,
+                libc::FAN_CLOSE_WRITE,
                 libc::AT_FDCWD,
                 path_cstr.as_ptr(),
             )

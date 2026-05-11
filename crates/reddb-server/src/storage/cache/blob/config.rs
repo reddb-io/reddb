@@ -27,16 +27,11 @@ pub const DEFAULT_BLOB_SYNOPSIS_FPR: f64 = 0.01;
 /// still stored raw, but the L2 entry header carries the v2 framing. `Off`
 /// skips the compress call entirely (CPU-saving), still emitting v2 framing
 /// with `tag=0` so the on-disk format stays uniform across modes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum L2Compression {
     Off,
+    #[default]
     On,
-}
-
-impl Default for L2Compression {
-    fn default() -> Self {
-        Self::On
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

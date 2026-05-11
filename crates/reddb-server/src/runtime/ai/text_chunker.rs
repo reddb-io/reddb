@@ -22,18 +22,13 @@ pub fn chunked_total() -> u64 {
     CHUNKED_TOTAL.load(Ordering::Relaxed)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ChunkMode {
     /// Return only the first chunk — preserves 1:1 input→embedding mapping.
+    #[default]
     Single,
     /// Return all chunks — downstream decides how to merge embeddings.
     Multi,
-}
-
-impl Default for ChunkMode {
-    fn default() -> Self {
-        Self::Single
-    }
 }
 
 impl ChunkMode {

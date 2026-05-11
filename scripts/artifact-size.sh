@@ -26,6 +26,11 @@ for unit in ["B", "KB", "MB", "GB"]:
 PY
 }
 
+cargo_target_dir() {
+  cargo metadata --locked --no-deps --format-version 1 \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])'
+}
+
 write_header() {
   {
     echo "# Artifact Sizes"
@@ -53,9 +58,11 @@ append_row() {
 measure_binary() {
   echo "[artifact-size] building release-static red binary"
   cargo build --locked --profile release-static --bin red >/dev/null
-  local bin="target/release-static/red"
+  local target_dir
+  target_dir=$(cargo_target_dir)
+  local bin="$target_dir/release-static/red"
   if [[ ! -f "$bin" ]]; then
-    bin="target/release-static/red.exe"
+    bin="$target_dir/release-static/red.exe"
   fi
   [[ -f "$bin" ]] || { echo "missing release-static binary"; exit 1; }
   local bytes

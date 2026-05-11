@@ -118,7 +118,7 @@ impl ProviderTier {
             ProviderTier::OpenAiCompat => 16 * 1024,
             ProviderTier::AnthropicNative => 200 * 1024,
             ProviderTier::LocalSelfHosted => 8 * 1024,
-            ProviderTier::Stub => 1 * 1024,
+            ProviderTier::Stub => 1024,
         }
     }
 
@@ -579,11 +579,11 @@ fn redact_jwt(input: &str, report: &mut RedactionReport) -> String {
     // segment is ≥ 4 chars. Hand-rolled to keep this module
     // dependency-free.
     let bytes = input.as_bytes();
-    let marker = ['e' as u8, 'y' as u8, 'J' as u8];
+    let marker = [b'e', b'y', b'J'];
     let mut out = String::with_capacity(input.len());
     let mut i = 0;
     while i < bytes.len() {
-        if i + 3 <= bytes.len() && &bytes[i..i + 3] == &marker {
+        if i + 3 <= bytes.len() && bytes[i..i + 3] == marker {
             // Try to parse three alnum segments separated by `.`.
             let mut cursor = i + 3;
             let h_end = scan_jwt_segment(&bytes[cursor..]);

@@ -7,6 +7,7 @@
 //! / `source`. No code changes required. See `tests/conformance/README.md`.
 
 mod support {
+    #[path = "../support/parser_hardening/mod.rs"]
     pub mod parser_hardening;
 }
 

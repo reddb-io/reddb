@@ -209,9 +209,7 @@ impl Shard {
         self.bytes = self.bytes.saturating_sub(removed.size);
         self.slots[removed.slot_index] = None;
         self.free_slots.push(removed.slot_index);
-        if self.entries.is_empty() {
-            self.hand = 0;
-        } else if self.hand >= self.slots.len() {
+        if self.entries.is_empty() || self.hand >= self.slots.len() {
             self.hand = 0;
         }
         Some(removed)

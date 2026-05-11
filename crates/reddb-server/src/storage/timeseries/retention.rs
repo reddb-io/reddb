@@ -108,7 +108,7 @@ pub fn parse_duration_ns(s: &str) -> Option<u64> {
             if rest.starts_with(|c: char| c.is_ascii_whitespace()) {
                 if let Some(mult) = long_form_multiplier(unit_word) {
                     let num: u64 = num_part.parse().ok()?;
-                    return Some(num.checked_mul(mult)?);
+                    return num.checked_mul(mult);
                 }
                 return None;
             }

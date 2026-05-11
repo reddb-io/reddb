@@ -141,7 +141,7 @@ pub fn render_ai_metrics(body: &mut String) {
             let _ = writeln!(body, "# HELP reddb_ai_provider_requests_total Total AI provider embedding requests by outcome.");
             let _ = writeln!(body, "# TYPE reddb_ai_provider_requests_total counter");
             let mut rows: Vec<_> = m.iter().collect();
-            rows.sort_by(|(left, _), (right, _)| left.cmp(right));
+            rows.sort_by_key(|(key, _)| (*key).clone());
             for ((provider, model, status), count) in rows {
                 let _ = writeln!(
                     body,
@@ -212,7 +212,7 @@ pub fn render_ai_metrics(body: &mut String) {
             );
             let _ = writeln!(body, "# TYPE reddb_ai_provider_retries_total counter");
             let mut rows: Vec<_> = m.iter().collect();
-            rows.sort_by(|(left, _), (right, _)| left.cmp(right));
+            rows.sort_by_key(|(key, _)| (*key).clone());
             for ((provider, reason), count) in rows {
                 let _ = writeln!(
                     body,
@@ -274,7 +274,7 @@ pub fn render_ai_metrics(body: &mut String) {
             let _ = writeln!(body, "# HELP reddb_ai_text_tokens_total Total AI provider tokens consumed (best-effort from usage field).");
             let _ = writeln!(body, "# TYPE reddb_ai_text_tokens_total counter");
             let mut rows: Vec<_> = m.iter().collect();
-            rows.sort_by(|(left, _), (right, _)| left.cmp(right));
+            rows.sort_by_key(|(key, _)| (*key).clone());
             for ((provider, model), count) in rows {
                 let _ = writeln!(
                     body,

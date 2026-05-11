@@ -3198,7 +3198,7 @@ fn resolve_geo_arg(arg: &Projection, source: &UnifiedRecord) -> Option<(f64, f64
                         let lon =
                             lon_keys
                                 .iter()
-                                .find_map(|k| source.get(*k))
+                                .find_map(|k| source.get(k))
                                 .and_then(|v| match v {
                                     Value::Float(f) => Some(*f),
                                     Value::Integer(n) => Some(*n as f64),

@@ -755,7 +755,7 @@ impl RedDBRuntime {
         };
         EffectiveScope {
             tenant,
-            identity: identity.map(|(u, r)| (u, r)),
+            identity,
             snapshot,
             visible_collections,
         }

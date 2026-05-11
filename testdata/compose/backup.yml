@@ -31,7 +31,7 @@ services:
 
   server:
     build:
-      context: ..
+      context: ../..
       dockerfile: Dockerfile
       args:
         REDDB_CARGO_FEATURES: backend-s3

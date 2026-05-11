@@ -189,7 +189,7 @@ pub(super) fn try_execute_pushdown_aggregate(
         if group_label != group_col_name {
             record.set(&group_col_name, row.group_key);
         }
-        for (agg, value) in ast.aggregates.iter().zip(row.aggregate_values.into_iter()) {
+        for (agg, value) in ast.aggregates.iter().zip(row.aggregate_values) {
             record.set(&agg.output_name, value);
         }
         records.push(record);
@@ -255,13 +255,15 @@ fn lower_projections(
                 saw_group_column = true;
             }
             Projection::Field(field, alias) => {
-                if let FieldRef::TableColumn { column, .. } = field {
-                    if column == group_col_name {
-                        if alias.as_deref().map_or(true, |a| a == group_label) {
-                            saw_group_column = true;
-                            continue;
-                        }
+                match field {
+                    FieldRef::TableColumn { column, .. }
+                        if column == group_col_name
+                            && alias.as_deref().is_none_or(|a| a == group_label) =>
+                    {
+                        saw_group_column = true;
+                        continue;
                     }
+                    _ => {}
                 }
                 return None;
             }
@@ -319,9 +321,7 @@ fn lower_aggregate_function(name: &str, args: &[Projection]) -> Option<LoweredPi
     };
     if matches!(op, AggregateOp::CountColumn) {
         // CountColumn also needs a simple column.
-        if input_column.is_none() {
-            return None;
-        }
+        input_column.as_ref()?;
     }
 
     let output_name = render_aggregate_label(&upper, args);
@@ -367,10 +367,10 @@ fn render_aggregate_label(name: &str, args: &[Projection]) -> String {
 /// column name; aliased GROUP BYs fall through to the legacy path.
 fn simple_column_group_by(expr: &Expr) -> Option<(String, String)> {
     match expr {
-        Expr::Column { field, .. } => match field {
-            FieldRef::TableColumn { column, .. } => Some((column.clone(), column.clone())),
-            _ => None,
-        },
+        Expr::Column {
+            field: FieldRef::TableColumn { column, .. },
+            ..
+        } => Some((column.clone(), column.clone())),
         _ => None,
     }
 }

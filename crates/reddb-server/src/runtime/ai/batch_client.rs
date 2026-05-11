@@ -56,6 +56,7 @@ pub struct AiTransportSender {
 }
 
 impl SubBatchSender for AiTransportSender {
+    #[allow(clippy::manual_async_fn)]
     fn send(
         &self,
         request: SubBatchRequest,
