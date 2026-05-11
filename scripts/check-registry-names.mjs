@@ -11,7 +11,7 @@ const npmPublicPackages = [
   "drivers/bun/package.json",
 ];
 
-const npmSupportPackages = [
+const npmPrivateWorkspacePackages = [
   "packages/internal-asset-fetcher/package.json",
   "packages/internal-bin-resolver/package.json",
   "packages/internal-version-compare/package.json",
@@ -50,13 +50,13 @@ for (const relativePath of npmPublicPackages) {
   );
 }
 
-for (const relativePath of npmSupportPackages) {
+for (const relativePath of npmPrivateWorkspacePackages) {
   const pkg = readJson(relativePath);
-  assert.notEqual(pkg.private, true, `${relativePath} must be publishable`);
+  assert.equal(pkg.private, true, `${relativePath} must stay private`);
   assert.match(
     pkg.name,
     /^@reddb-io\/internal-/,
-    `${relativePath} must publish under @reddb-io/internal-*`,
+    `${relativePath} must use @reddb-io/internal-*`,
   );
 }
 

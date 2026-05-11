@@ -3,7 +3,7 @@
  *
  * Behavior:
  *   - Resolves `red-<platform>-<arch>` from `process.platform` + `process.arch`
- *     via @reddb-io/internal-asset-fetcher.
+ *     via the vendored asset fetcher.
  *   - Targets the GitHub release matching this package's version.
  *   - Drops the binary at `<package>/bin/red[.exe]` and chmods +x on Unix.
  *   - On any failure, prints a warning to stderr but exits 0 — `npm install`
@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { existsSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs'
 
-import { fetchReleaseAsset } from '@reddb-io/internal-asset-fetcher'
+import { fetchReleaseAsset } from './src/internal/asset-fetcher/index.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const require = createRequire(import.meta.url)
