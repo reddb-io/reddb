@@ -36,6 +36,25 @@ impl super::keyed_spine::KeyedVersion for ConfigVersion {
     }
 }
 
+impl ConfigVersion {
+    fn from_keyed_row(version: super::keyed_spine::KeyedRowVersion, row: &RowData) -> Self {
+        Self {
+            id: version.id,
+            key: version.key,
+            version: version.version,
+            value: version.value,
+            tombstone: version.tombstone,
+            created_at_ms: version.created_at_ms,
+            op: version.op,
+            value_type: row
+                .get_field("value_type")
+                .and_then(config_value_type_from_value),
+            schema_version: super::keyed_spine::value_i64(row.get_field("schema_version")),
+            tags: config_tags_from_value(row.get_field("tags")),
+        }
+    }
+}
+
 struct ConfigSecretRef {
     collection: String,
     key: String,
@@ -440,8 +459,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_system_config_capability("config:read", collection, key)
             .map_err(RedDBError::Query)?;
-        let mut versions = self.config_versions(collection, key)?;
-        versions.sort_by_key(|v| v.version);
+        let versions = super::keyed_spine::history_versions(self.config_versions(collection, key)?);
         let mut result = UnifiedResult::with_columns(vec![
             "collection".into(),
             "key".into(),
@@ -702,26 +720,13 @@ impl RedDBRuntime {
             let EntityData::Row(row) = &entity.data else {
                 continue;
             };
-            if !matches!(row.get_field("key"), Some(Value::Text(value)) if value.as_ref() == key) {
+            let Some(version) = super::keyed_spine::row_version(entity.id, row, 0) else {
+                continue;
+            };
+            if version.key != key {
                 continue;
             }
-            versions.push(ConfigVersion {
-                id: entity.id,
-                key: key.to_string(),
-                version: value_i64(row.get_field("version")).unwrap_or(0),
-                value: row.get_field("value").cloned().unwrap_or(Value::Null),
-                tombstone: matches!(row.get_field("tombstone"), Some(Value::Boolean(true))),
-                created_at_ms: value_i64(row.get_field("created_at_ms")).unwrap_or(0),
-                op: match row.get_field("op") {
-                    Some(Value::Text(value)) => value.to_string(),
-                    _ => "put".to_string(),
-                },
-                value_type: row
-                    .get_field("value_type")
-                    .and_then(config_value_type_from_value),
-                schema_version: value_i64(row.get_field("schema_version")),
-                tags: config_tags_from_value(row.get_field("tags")),
-            });
+            versions.push(ConfigVersion::from_keyed_row(version, row));
         }
         Ok(versions)
     }
@@ -740,26 +745,10 @@ impl RedDBRuntime {
             let EntityData::Row(row) = &entity.data else {
                 continue;
             };
-            let Some(Value::Text(key)) = row.get_field("key") else {
+            let Some(version) = super::keyed_spine::row_version(entity.id, row, 0) else {
                 continue;
             };
-            versions.push(ConfigVersion {
-                id: entity.id,
-                key: key.to_string(),
-                version: value_i64(row.get_field("version")).unwrap_or(0),
-                value: row.get_field("value").cloned().unwrap_or(Value::Null),
-                tombstone: matches!(row.get_field("tombstone"), Some(Value::Boolean(true))),
-                created_at_ms: value_i64(row.get_field("created_at_ms")).unwrap_or(0),
-                op: match row.get_field("op") {
-                    Some(Value::Text(value)) => value.to_string(),
-                    _ => "put".to_string(),
-                },
-                value_type: row
-                    .get_field("value_type")
-                    .and_then(config_value_type_from_value),
-                schema_version: value_i64(row.get_field("schema_version")),
-                tags: config_tags_from_value(row.get_field("tags")),
-            });
+            versions.push(ConfigVersion::from_keyed_row(version, row));
         }
         Ok(super::keyed_spine::latest_versions(versions, prefix))
     }
@@ -769,7 +758,7 @@ impl RedDBRuntime {
         if versions.len() <= CONFIG_HISTORY_LIMIT {
             return Ok(());
         }
-        versions.sort_by_key(|version| version.version);
+        versions = super::keyed_spine::history_versions(versions);
         let drop_count = versions.len() - CONFIG_HISTORY_LIMIT;
         let store = self.inner.db.store();
         for version in versions.into_iter().take(drop_count) {
@@ -1163,16 +1152,6 @@ fn config_tags_from_value(value: Option<&Value>) -> Vec<String> {
             })
             .unwrap_or_default(),
         _ => Vec::new(),
-    }
-}
-
-fn value_i64(value: Option<&Value>) -> Option<i64> {
-    match value {
-        Some(Value::Integer(value)) => Some(*value),
-        Some(Value::UnsignedInteger(value)) => i64::try_from(*value).ok(),
-        Some(Value::Timestamp(value)) => Some(*value),
-        Some(Value::Duration(value)) => Some(*value),
-        _ => None,
     }
 }
 

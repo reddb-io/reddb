@@ -49,6 +49,29 @@ impl super::keyed_spine::KeyedVersion for VaultEntry {
     }
 }
 
+impl VaultEntry {
+    fn from_keyed_row(
+        version: super::keyed_spine::KeyedRowVersion,
+        metadata: Metadata,
+        created_at: u64,
+        updated_at: u64,
+        sequence_id: u64,
+    ) -> Self {
+        Self {
+            id: version.id,
+            key: version.key,
+            value: version.value,
+            metadata,
+            created_at,
+            updated_at,
+            sequence_id,
+            version: version.version,
+            tombstone: version.tombstone,
+            op: version.op,
+        }
+    }
+}
+
 /// Atomic KV operations interface — the seam that transports and drivers depend on.
 ///
 /// All three verbs delegate to the runtime's existing `create_kv` / `get_kv` /
@@ -594,38 +617,25 @@ impl<'a> KvAtomicOps<'a> {
         let entities = manager.query_all(|_| true);
         let mut versions = Vec::new();
         for entity in entities {
-            if let crate::storage::EntityData::Row(ref row) = entity.data {
-                if let Some(crate::storage::schema::Value::Text(ref k)) = row.get_field("key") {
-                    if &**k == key {
-                        let value = row
-                            .get_field("value")
-                            .cloned()
-                            .unwrap_or(crate::storage::schema::Value::Null);
-                        let metadata = manager.get_metadata(entity.id).unwrap_or_default();
-                        versions.push(VaultEntry {
-                            id: entity.id,
-                            key: k.to_string(),
-                            value,
-                            metadata,
-                            created_at: entity.created_at,
-                            updated_at: entity.updated_at,
-                            sequence_id: entity.sequence_id,
-                            version: vault_i64(row.get_field("version"))
-                                .unwrap_or(entity.sequence_id as i64),
-                            tombstone: matches!(
-                                row.get_field("tombstone"),
-                                Some(crate::storage::schema::Value::Boolean(true))
-                            ),
-                            op: match row.get_field("op") {
-                                Some(crate::storage::schema::Value::Text(value)) => {
-                                    value.to_string()
-                                }
-                                _ => "put".to_string(),
-                            },
-                        });
-                    }
-                }
+            let crate::storage::EntityData::Row(ref row) = entity.data else {
+                continue;
+            };
+            let Some(version) =
+                super::keyed_spine::row_version(entity.id, row, entity.sequence_id as i64)
+            else {
+                continue;
+            };
+            if version.key != key {
+                continue;
             }
+            let metadata = manager.get_metadata(entity.id).unwrap_or_default();
+            versions.push(VaultEntry::from_keyed_row(
+                version,
+                metadata,
+                entity.created_at,
+                entity.updated_at,
+                entity.sequence_id,
+            ));
         }
         Ok(versions)
     }
@@ -645,32 +655,19 @@ impl<'a> KvAtomicOps<'a> {
             let crate::storage::EntityData::Row(ref row) = entity.data else {
                 continue;
             };
-            let Some(crate::storage::schema::Value::Text(ref key)) = row.get_field("key") else {
+            let Some(version) =
+                super::keyed_spine::row_version(entity.id, row, entity.sequence_id as i64)
+            else {
                 continue;
             };
-            let value = row
-                .get_field("value")
-                .cloned()
-                .unwrap_or(crate::storage::schema::Value::Null);
             let metadata = manager.get_metadata(entity.id).unwrap_or_default();
-            let entry = VaultEntry {
-                id: entity.id,
-                key: key.to_string(),
-                value,
+            let entry = VaultEntry::from_keyed_row(
+                version,
                 metadata,
-                created_at: entity.created_at,
-                updated_at: entity.updated_at,
-                sequence_id: entity.sequence_id,
-                version: vault_i64(row.get_field("version")).unwrap_or(entity.sequence_id as i64),
-                tombstone: matches!(
-                    row.get_field("tombstone"),
-                    Some(crate::storage::schema::Value::Boolean(true))
-                ),
-                op: match row.get_field("op") {
-                    Some(crate::storage::schema::Value::Text(value)) => value.to_string(),
-                    _ => "put".to_string(),
-                },
-            };
+                entity.created_at,
+                entity.updated_at,
+                entity.sequence_id,
+            );
             versions.push(entry);
         }
         Ok(super::keyed_spine::latest_versions(versions, prefix))
@@ -1320,8 +1317,8 @@ impl RedDBRuntime {
             KvCommand::History { collection, key } => {
                 self.check_vault_capability("vault:read_metadata", collection, key)
                     .map_err(RedDBError::Query)?;
-                let mut versions = ops.vault_versions(collection, key)?;
-                versions.sort_by_key(|entry| entry.version);
+                let versions =
+                    super::keyed_spine::history_versions(ops.vault_versions(collection, key)?);
                 let result = vault_history_result(collection, key, &versions);
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
@@ -2133,16 +2130,6 @@ fn kv_value_from_entity(entity: &crate::storage::UnifiedEntity) -> Option<Value>
         }
     }
     None
-}
-
-fn vault_i64(value: Option<&Value>) -> Option<i64> {
-    match value {
-        Some(Value::Integer(value)) => Some(*value),
-        Some(Value::UnsignedInteger(value)) => i64::try_from(*value).ok(),
-        Some(Value::Timestamp(value)) => Some(*value),
-        Some(Value::Duration(value)) => Some(*value),
-        _ => None,
-    }
 }
 
 fn kv_collection_contract(name: &str) -> crate::physical::CollectionContract {
