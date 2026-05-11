@@ -79,6 +79,22 @@ pub(super) fn peek_messages(
         .collect())
 }
 
+pub(super) fn purge_messages(
+    runtime: &RedDBRuntime,
+    store: &UnifiedStore,
+    queue: &str,
+) -> RedDBResult<usize> {
+    let messages =
+        super::impl_queue::load_queue_message_views_with_runtime(Some(runtime), store, queue)?;
+    let count = messages.len();
+    for message in messages {
+        let message_lock = super::impl_queue::queue_message_lock_handle(runtime, queue, message.id);
+        let _guard = message_lock.lock();
+        delete_message_with_state(Some(runtime), store, queue, message.id)?;
+    }
+    Ok(count)
+}
+
 pub(super) fn read_messages(
     runtime: &RedDBRuntime,
     store: &UnifiedStore,

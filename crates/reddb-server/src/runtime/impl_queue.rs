@@ -612,19 +612,7 @@ impl RedDBRuntime {
             QueueCommand::Purge { queue } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
-                let messages =
-                    load_queue_message_views_with_runtime(Some(self), store.as_ref(), queue)?;
-                let count = messages.len();
-                for message in messages {
-                    let message_lock = queue_message_lock_handle(self, queue, message.id);
-                    let _guard = message_lock.lock();
-                    super::queue_delivery::delete_message_with_state(
-                        Some(self),
-                        store.as_ref(),
-                        queue,
-                        message.id,
-                    )?;
-                }
+                let count = super::queue_delivery::purge_messages(self, store.as_ref(), queue)?;
                 if count > 0 {
                     self.invalidate_result_cache();
                 }
