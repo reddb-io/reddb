@@ -8,11 +8,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use reddb_server::RuntimeEntityPort;
 use reddb_server::api::RedDBOptions;
 use reddb_server::runtime::RedDBRuntime;
 use reddb_server::storage::query::unified::UnifiedRecord;
 use reddb_server::storage::schema::Value as SchemaValue;
+use reddb_server::RuntimeEntityPort;
 
 use crate::error::{ClientError, ErrorCode, Result};
 use crate::types::{InsertResult, JsonValue, QueryResult, ValueOut};
@@ -70,15 +70,13 @@ impl EmbeddedClient {
             )
         })?;
         let column_names: Vec<String> = object.iter().map(|(k, _)| k.clone()).collect();
-        let row: Vec<SchemaValue> =
-            object.iter().map(|(_, v)| json_value_to_schema_value(v)).collect();
+        let row: Vec<SchemaValue> = object
+            .iter()
+            .map(|(_, v)| json_value_to_schema_value(v))
+            .collect();
         let count = self
             .runtime
-            .create_rows_batch_columnar(
-                collection.to_string(),
-                Arc::new(column_names),
-                vec![row],
-            )
+            .create_rows_batch_columnar(collection.to_string(), Arc::new(column_names), vec![row])
             .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
         Ok(InsertResult {
             affected: count as u64,
@@ -120,8 +118,7 @@ impl EmbeddedClient {
         // per-row SQL build / lex / parse cost. When it doesn't we fall back
         // to the per-row loop so heterogeneous workloads stay correct.
         if uniform_schema(&objects) {
-            let column_names: Vec<String> =
-                objects[0].iter().map(|(k, _)| k.clone()).collect();
+            let column_names: Vec<String> = objects[0].iter().map(|(k, _)| k.clone()).collect();
             let ncols = column_names.len();
             let mut rows: Vec<Vec<SchemaValue>> = Vec::with_capacity(objects.len());
             for obj in &objects {
@@ -133,11 +130,7 @@ impl EmbeddedClient {
             }
             let count = self
                 .runtime
-                .create_rows_batch_columnar(
-                    collection.to_string(),
-                    Arc::new(column_names),
-                    rows,
-                )
+                .create_rows_batch_columnar(collection.to_string(), Arc::new(column_names), rows)
                 .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
             return Ok(count as u64);
         }
@@ -211,8 +204,7 @@ fn json_value_to_schema_value(v: &JsonValue) -> SchemaValue {
         JsonValue::Null => SchemaValue::Null,
         JsonValue::Bool(b) => SchemaValue::Boolean(*b),
         JsonValue::Number(n) => {
-            if n.is_finite() && n.fract() == 0.0 && *n >= i64::MIN as f64 && *n <= i64::MAX as f64
-            {
+            if n.is_finite() && n.fract() == 0.0 && *n >= i64::MIN as f64 && *n <= i64::MAX as f64 {
                 SchemaValue::Integer(*n as i64)
             } else {
                 SchemaValue::Float(*n)
@@ -269,12 +261,8 @@ fn map_query_result(qr: &reddb_server::runtime::RuntimeQueryResult) -> QueryResu
         })
         .unwrap_or_default();
 
-    let rows: Vec<Vec<(String, ValueOut)>> = qr
-        .result
-        .records
-        .iter()
-        .map(record_to_pairs)
-        .collect();
+    let rows: Vec<Vec<(String, ValueOut)>> =
+        qr.result.records.iter().map(record_to_pairs).collect();
 
     QueryResult {
         statement: qr.statement_type.to_string(),
@@ -285,10 +273,8 @@ fn map_query_result(qr: &reddb_server::runtime::RuntimeQueryResult) -> QueryResu
 }
 
 fn record_to_pairs(record: &UnifiedRecord) -> Vec<(String, ValueOut)> {
-    let mut entries: Vec<(&str, &SchemaValue)> = record
-        .iter_fields()
-        .map(|(k, v)| (k.as_ref(), v))
-        .collect();
+    let mut entries: Vec<(&str, &SchemaValue)> =
+        record.iter_fields().map(|(k, v)| (k.as_ref(), v)).collect();
     entries.sort_by(|a, b| a.0.cmp(b.0));
     entries
         .into_iter()

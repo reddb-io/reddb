@@ -47,11 +47,7 @@ fn fixture() -> SchemaVocabulary {
     let mut vocab = SchemaVocabulary::new();
     vocab.on_ddl(DdlEvent::CreateCollection {
         collection: "users".to_string(),
-        columns: vec![
-            "id".to_string(),
-            "email".to_string(),
-            "country".to_string(),
-        ],
+        columns: vec!["id".to_string(), "email".to_string(), "country".to_string()],
         type_tags: Vec::new(),
         description: None,
     });
@@ -113,10 +109,7 @@ fn lookup_id_resolves_every_collection() {
     let _guard = secret_redactor::install_redactions();
     let vocab = fixture();
     let hits = vocab.lookup("id");
-    insta::assert_snapshot!(
-        "lookup_id_resolves_every_collection",
-        fmt_hits("id", &hits)
-    );
+    insta::assert_snapshot!("lookup_id_resolves_every_collection", fmt_hits("id", &hits));
 }
 
 #[test]

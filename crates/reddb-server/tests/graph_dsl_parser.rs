@@ -192,9 +192,7 @@ proptest! {
 // surface as a test failure (with the exact AST shape printed),
 // not a runtime regression three layers deep.
 
-use reddb_server::storage::query::ast::{
-    EdgeDirection, GraphCommand, NodeSelector, QueryExpr,
-};
+use reddb_server::storage::query::ast::{EdgeDirection, GraphCommand, NodeSelector, QueryExpr};
 
 fn parse_query(input: &str) -> QueryExpr {
     parser::parse(input)
@@ -255,7 +253,10 @@ fn match_with_where_clause_parses() {
     match q {
         QueryExpr::Graph(g) => {
             assert!(g.filter.is_some(), "WHERE filter must be present");
-            assert_eq!(g.pattern.edges[0].edge_label.as_deref(), Some("collaborates"));
+            assert_eq!(
+                g.pattern.edges[0].edge_label.as_deref(),
+                Some("collaborates")
+            );
         }
         other => panic!("expected Graph, got {other:?}"),
     }
@@ -290,7 +291,9 @@ fn graph_neighborhood_command_parses() {
     let q = parse_query("GRAPH NEIGHBORHOOD 'alice' DEPTH 2 DIRECTION outgoing");
     match q {
         QueryExpr::GraphCommand(GraphCommand::Neighborhood {
-            source, depth, direction,
+            source,
+            depth,
+            direction,
         }) => {
             assert_eq!(source, "alice");
             assert_eq!(depth, 2);
@@ -305,7 +308,10 @@ fn graph_shortest_path_command_parses() {
     let q = parse_query("GRAPH SHORTEST_PATH 'alice' TO 'bob' ALGORITHM dijkstra");
     match q {
         QueryExpr::GraphCommand(GraphCommand::ShortestPath {
-            source, target, algorithm, ..
+            source,
+            target,
+            algorithm,
+            ..
         }) => {
             assert_eq!(source, "alice");
             assert_eq!(target, "bob");
@@ -320,7 +326,10 @@ fn graph_traverse_command_parses() {
     let q = parse_query("GRAPH TRAVERSE 'alice' STRATEGY bfs DEPTH 3");
     match q {
         QueryExpr::GraphCommand(GraphCommand::Traverse {
-            source, strategy, depth, ..
+            source,
+            strategy,
+            depth,
+            ..
         }) => {
             assert_eq!(source, "alice");
             assert_eq!(strategy, "bfs");

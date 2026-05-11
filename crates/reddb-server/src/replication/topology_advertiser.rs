@@ -177,7 +177,10 @@ fn replica_to_info(state: &ReplicaState, primary_lsn: u64, lag: &LagConfig) -> R
         // registration time. Keeping the same field lets the consumer
         // dial the replica directly without a second lookup table.
         addr: state.id.clone(),
-        region: state.region.clone().unwrap_or_else(|| "unknown".to_string()),
+        region: state
+            .region
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
         healthy,
         lag_ms,
         last_applied_lsn: state.last_acked_lsn,
@@ -315,7 +318,9 @@ mod tests {
     #[test]
     fn topology_advertiser_gate_blocks_anonymous_and_denied() {
         assert!(!TopologyAuthGate::allows(&anonymous()));
-        assert!(!TopologyAuthGate::allows(&AuthResult::Denied("nope".into())));
+        assert!(!TopologyAuthGate::allows(&AuthResult::Denied(
+            "nope".into()
+        )));
     }
 
     // -----------------------------------------------------------

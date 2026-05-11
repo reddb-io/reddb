@@ -275,11 +275,7 @@ mod tests {
             "sk_ not masked: {}",
             red_sk
         );
-        assert!(
-            !red_sk.contains(sk_body),
-            "sk_ body leaked: {}",
-            red_sk
-        );
+        assert!(!red_sk.contains(sk_body), "sk_ body leaked: {}", red_sk);
 
         let rs_token = gen::api_key_token(&["rs"], 22, 0x2002);
         let input_rs = format!("issued {} for tenant", rs_token);

@@ -103,7 +103,10 @@ impl LeaseLifecycle {
                         .source(AuditAuthSource::System)
                         .resource(self.database_key.clone())
                         .outcome(Outcome::Success)
-                        .field(AuditFieldEscaper::field("generation", lease.generation as i64))
+                        .field(AuditFieldEscaper::field(
+                            "generation",
+                            lease.generation as i64,
+                        ))
                         .field(AuditFieldEscaper::field("ttl_ms", self.ttl_ms))
                         .build(),
                 );
@@ -245,8 +248,14 @@ pub fn admin_promote_lease(
                     .source(AuditAuthSource::System)
                     .resource(database_key.to_string())
                     .outcome(Outcome::Success)
-                    .field(AuditFieldEscaper::field("holder_id", lease.holder_id.clone()))
-                    .field(AuditFieldEscaper::field("generation", lease.generation as i64))
+                    .field(AuditFieldEscaper::field(
+                        "holder_id",
+                        lease.holder_id.clone(),
+                    ))
+                    .field(AuditFieldEscaper::field(
+                        "generation",
+                        lease.generation as i64,
+                    ))
                     .field(AuditFieldEscaper::field("ttl_ms", ttl_ms))
                     .build(),
             );

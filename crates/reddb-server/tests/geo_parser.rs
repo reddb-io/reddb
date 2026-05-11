@@ -163,9 +163,7 @@ proptest! {
 // surfaces as a precise failure rather than a fuzzy proptest
 // shrink.
 
-use reddb_server::storage::query::ast::{
-    IndexMethod, QueryExpr, SearchCommand,
-};
+use reddb_server::storage::query::ast::{IndexMethod, QueryExpr, SearchCommand};
 
 fn parse_query(input: &str) -> QueryExpr {
     parser::parse(input)
@@ -200,9 +198,7 @@ fn happy_radius_paris_10km_parses() {
 
 #[test]
 fn happy_radius_default_limit_is_one_hundred() {
-    let q = parse_query(
-        "SEARCH SPATIAL RADIUS 0.0 0.0 1.5 COLLECTION sites COLUMN location",
-    );
+    let q = parse_query("SEARCH SPATIAL RADIUS 0.0 0.0 1.5 COLLECTION sites COLUMN location");
     match q {
         QueryExpr::SearchCommand(SearchCommand::SpatialRadius { limit, .. }) => {
             assert_eq!(limit, 100, "default limit pinned at 100");
@@ -240,9 +236,8 @@ fn happy_bbox_unit_square_parses() {
 
 #[test]
 fn happy_nearest_k_5_parses() {
-    let q = parse_query(
-        "SEARCH SPATIAL NEAREST 40.7128 74.0060 K 5 COLLECTION sites COLUMN location",
-    );
+    let q =
+        parse_query("SEARCH SPATIAL NEAREST 40.7128 74.0060 K 5 COLLECTION sites COLUMN location");
     match q {
         QueryExpr::SearchCommand(SearchCommand::SpatialNearest {
             lat,
@@ -295,9 +290,7 @@ fn happy_vincenty_in_projection_parses() {
 
 #[test]
 fn happy_radius_at_equator_parses() {
-    parse_query(
-        "SEARCH SPATIAL RADIUS 0.0 0.0 6371.0 COLLECTION sites COLUMN location",
-    );
+    parse_query("SEARCH SPATIAL RADIUS 0.0 0.0 6371.0 COLLECTION sites COLUMN location");
 }
 
 #[test]
@@ -330,9 +323,7 @@ fn negative_latitude_parses() {
 /// (`> 180` or `< -180`) with a `ValueOutOfRange` error.
 #[test]
 fn lat_out_of_range_rejected() {
-    let r = parser::parse(
-        "SEARCH SPATIAL RADIUS 91.0 0.0 10.0 COLLECTION sites COLUMN location",
-    );
+    let r = parser::parse("SEARCH SPATIAL RADIUS 91.0 0.0 10.0 COLLECTION sites COLUMN location");
     assert!(r.is_err(), "lat=91 should be rejected as out-of-range");
 }
 
@@ -340,9 +331,7 @@ fn lat_out_of_range_rejected() {
 /// rejected at parse time with a `ValueOutOfRange` error.
 #[test]
 fn nearest_k_zero_rejected() {
-    let r = parser::parse(
-        "SEARCH SPATIAL NEAREST 0.0 0.0 K 0 COLLECTION sites COLUMN location",
-    );
+    let r = parser::parse("SEARCH SPATIAL NEAREST 0.0 0.0 K 0 COLLECTION sites COLUMN location");
     assert!(r.is_err(), "K=0 should be rejected as degenerate");
 }
 
@@ -351,8 +340,6 @@ fn nearest_k_zero_rejected() {
 /// error.
 #[test]
 fn radius_zero_rejected() {
-    let r = parser::parse(
-        "SEARCH SPATIAL RADIUS 0.0 0.0 0.0 COLLECTION sites COLUMN location",
-    );
+    let r = parser::parse("SEARCH SPATIAL RADIUS 0.0 0.0 0.0 COLLECTION sites COLUMN location");
     assert!(r.is_err(), "radius=0 should be rejected as degenerate");
 }

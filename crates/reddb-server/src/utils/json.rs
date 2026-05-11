@@ -371,7 +371,7 @@ impl<'a> JsonParser<'a> {
                                     || self.input[self.pos + 1] != b'u'
                                 {
                                     return Err(
-                                        "expected low surrogate after high surrogate".to_string(),
+                                        "expected low surrogate after high surrogate".to_string()
                                     );
                                 }
                                 self.pos += 2;
@@ -379,8 +379,7 @@ impl<'a> JsonParser<'a> {
                                 if !(0xDC00..=0xDFFF).contains(&low) {
                                     return Err("invalid low surrogate".to_string());
                                 }
-                                let scalar =
-                                    0x10000 + (((code - 0xD800) << 10) | (low - 0xDC00));
+                                let scalar = 0x10000 + (((code - 0xD800) << 10) | (low - 0xDC00));
                                 if let Some(chr) = char::from_u32(scalar) {
                                     result.push(chr);
                                 } else {

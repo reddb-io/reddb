@@ -54,10 +54,7 @@ snap!(prob_create_unknown_kind, "CREATE BLOOM b1");
 
 // ----- CREATE FILTER capacity errors -----------------------------
 
-snap!(
-    prob_filter_capacity_no_value,
-    "CREATE FILTER f1 CAPACITY"
-);
+snap!(prob_filter_capacity_no_value, "CREATE FILTER f1 CAPACITY");
 snap!(
     prob_filter_capacity_negative,
     "CREATE FILTER f1 CAPACITY -1"
@@ -85,10 +82,7 @@ snap!(
 snap!(prob_hll_eof_after_keyword, "HLL");
 snap!(prob_hll_unknown_subcmd, "HLL FROBNICATE x");
 snap!(prob_hll_add_no_name, "HLL ADD");
-snap!(
-    prob_hll_add_unterminated_string,
-    "HLL ADD visitors 'open"
-);
+snap!(prob_hll_add_unterminated_string, "HLL ADD visitors 'open");
 
 // ----- SKETCH operational errors ---------------------------------
 

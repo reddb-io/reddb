@@ -20,9 +20,7 @@ use reddb_server::storage::schema::Value;
 /// other prefix is rejected before it reaches the engine.
 #[test]
 fn unknown_dollar_reference_fails_at_parse() {
-    let result = parser::parse(
-        "SELECT * FROM users WHERE foo = bar OR $my.special.key = '123x'",
-    );
+    let result = parser::parse("SELECT * FROM users WHERE foo = bar OR $my.special.key = '123x'");
     let err = result.expect_err("unknown $-reference must be rejected");
     let msg = err.to_string().to_lowercase();
     assert!(
@@ -43,10 +41,9 @@ fn dollar_secret_payload_lands_as_typed_function_call() {
     // execution time; here we assert the AST shape stays a function
     // call over a path literal — the secret content never enters the
     // parser.
-    let parsed = parser::parse(
-        "SELECT id FROM users WHERE token = $secret.mycompany.injection.payload",
-    )
-    .expect("typed $secret reference must parse");
+    let parsed =
+        parser::parse("SELECT id FROM users WHERE token = $secret.mycompany.injection.payload")
+            .expect("typed $secret reference must parse");
     let table = match parsed.query {
         QueryExpr::Table(t) => t,
         other => panic!("expected Table, got {other:?}"),
@@ -92,10 +89,8 @@ fn dollar_secret_payload_lands_as_typed_function_call() {
 /// `CONFIG`; the path rides as a `Value::Text` literal.
 #[test]
 fn dollar_config_reference_is_typed_function_call() {
-    let parsed = parser::parse(
-        "SELECT id FROM users WHERE flag = $config.mycompany.flags.beta",
-    )
-    .expect("typed $config reference must parse");
+    let parsed = parser::parse("SELECT id FROM users WHERE flag = $config.mycompany.flags.beta")
+        .expect("typed $config reference must parse");
     let table = match parsed.query {
         QueryExpr::Table(t) => t,
         other => panic!("expected Table, got {other:?}"),
@@ -168,8 +163,8 @@ fn set_secret_value_position_rejects_expression() {
 /// `$secret.*` / `$config.*`.
 #[test]
 fn kv_function_args_are_typed_path_literals() {
-    let parsed = parser::parse("SELECT KV('config', 'app.mode') FROM users")
-        .expect("KV() must parse");
+    let parsed =
+        parser::parse("SELECT KV('config', 'app.mode') FROM users").expect("KV() must parse");
     let table = match parsed.query {
         QueryExpr::Table(t) => t,
         other => panic!("expected Table, got {other:?}"),
@@ -279,10 +274,8 @@ fn set_config_attacker_value_does_not_alter_predicate_at_parse() {
     // operand of `=`. We assert the AST shape: comparison whose RHS
     // is a function-call expression over a Value::Text path, NOT a
     // Value::Text expression of the *content*.
-    let parsed = parser::parse(
-        "SELECT 1 FROM users WHERE 'normal_id' = $config.my.attack",
-    )
-    .expect("$config substitution in WHERE must parse");
+    let parsed = parser::parse("SELECT 1 FROM users WHERE 'normal_id' = $config.my.attack")
+        .expect("$config substitution in WHERE must parse");
 
     let where_filter = match parsed.query {
         QueryExpr::Table(table) => table

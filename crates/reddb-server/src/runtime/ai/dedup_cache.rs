@@ -38,8 +38,7 @@ pub struct EmbeddingDedupCache {
 
 impl EmbeddingDedupCache {
     pub fn new(max_size: usize, ttl: Duration) -> Self {
-        let capacity = std::num::NonZeroUsize::new(max_size.max(1))
-            .expect("max_size >= 1");
+        let capacity = std::num::NonZeroUsize::new(max_size.max(1)).expect("max_size >= 1");
         Self {
             inner: Mutex::new(LruCache::new(capacity)),
             ttl,
@@ -76,7 +75,13 @@ impl EmbeddingDedupCache {
     /// Insert `embedding` for `text`.
     pub fn insert(&self, text: &str, embedding: Vec<f32>) {
         let key = hash(text);
-        self.inner.lock().put(key, Entry { embedding, inserted_at: Instant::now() });
+        self.inner.lock().put(
+            key,
+            Entry {
+                embedding,
+                inserted_at: Instant::now(),
+            },
+        );
     }
 
     pub fn hits(&self) -> u64 {

@@ -39,8 +39,8 @@
 //! closed before the instance is allowed to write. This keeps
 //! serverless fencing out of "last writer wins" territory.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use crate::serde_json::{self, Value as JsonValue};
 use crate::storage::backend::{

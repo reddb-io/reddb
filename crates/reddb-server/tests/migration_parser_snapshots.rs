@@ -33,7 +33,10 @@ macro_rules! snap {
 // ----- CREATE MIGRATION error scenarios --------------------------
 
 snap!(create_migration_eof_after_keyword, "CREATE MIGRATION");
-snap!(create_migration_missing_name, "CREATE MIGRATION DEPENDS ON x");
+snap!(
+    create_migration_missing_name,
+    "CREATE MIGRATION DEPENDS ON x"
+);
 snap!(
     create_migration_eof_after_depends_on,
     "CREATE MIGRATION m1 DEPENDS ON"
@@ -84,10 +87,7 @@ snap!(rollback_migration_garbage_name, "ROLLBACK MIGRATION @#$%");
 // ----- EXPLAIN MIGRATION error scenarios -------------------------
 
 snap!(explain_migration_eof, "EXPLAIN MIGRATION");
-snap!(
-    explain_migration_missing_keyword,
-    "EXPLAIN MIGRATION 12345"
-);
+snap!(explain_migration_missing_keyword, "EXPLAIN MIGRATION 12345");
 
 // ----- DoS limits surface as structured errors -------------------
 
@@ -97,10 +97,8 @@ fn migration_dos_input_too_large_message_is_pinned() {
         max_input_bytes: 16,
         ..parser::ParserLimits::default()
     };
-    let result = parser::Parser::with_limits(
-        "CREATE MIGRATION m1 AS CREATE TABLE t (id INTEGER)",
-        limits,
-    );
+    let result =
+        parser::Parser::with_limits("CREATE MIGRATION m1 AS CREATE TABLE t (id INTEGER)", limits);
     let formatted = match result {
         Ok(_) => "UNEXPECTED OK".to_string(),
         Err(e) => format!("kind:  {:?}\nerror: {}\n", e.kind, e),
@@ -132,11 +130,9 @@ fn migration_dos_depth_limit_message_is_pinned() {
         max_depth: 4,
         ..parser::ParserLimits::default()
     };
-    let mut p = parser::Parser::with_limits(
-        "CREATE MIGRATION m1 AS SELECT (((((1))))) FROM t",
-        limits,
-    )
-    .expect("ctor ok");
+    let mut p =
+        parser::Parser::with_limits("CREATE MIGRATION m1 AS SELECT (((((1))))) FROM t", limits)
+            .expect("ctor ok");
     let formatted = match p.parse() {
         Ok(_) => "UNEXPECTED OK".to_string(),
         Err(e) => format!("kind:  {:?}\nerror: {}\n", e.kind, e),

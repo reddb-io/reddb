@@ -95,9 +95,7 @@ where
         if frame.kind.direction() == MessageDirection::ServerToClient {
             let err_frame = FrameBuilder::reply_to(frame.correlation_id)
                 .kind(MessageKind::Error)
-                .payload(
-                    format!("redwire: {:?} is server-only", frame.kind).into_bytes(),
-                )
+                .payload(format!("redwire: {:?} is server-only", frame.kind).into_bytes())
                 .build()
                 .map_err(|e| io::Error::other(format!("build Error frame: {e}")))?;
             stream.write_all(&encode_frame(&err_frame)).await?;
@@ -106,13 +104,20 @@ where
 
         match frame.kind {
             MessageKind::Bye => {
-                let bye = encode_frame(&build_reply(frame.correlation_id, MessageKind::Bye, vec![])?);
+                let bye = encode_frame(&build_reply(
+                    frame.correlation_id,
+                    MessageKind::Bye,
+                    vec![],
+                )?);
                 let _ = stream.write_all(&bye).await;
                 return Ok(());
             }
             MessageKind::Ping => {
-                let pong =
-                    encode_frame(&build_reply(frame.correlation_id, MessageKind::Pong, vec![])?);
+                let pong = encode_frame(&build_reply(
+                    frame.correlation_id,
+                    MessageKind::Pong,
+                    vec![],
+                )?);
                 stream.write_all(&pong).await?;
             }
             MessageKind::Query => {
@@ -741,9 +746,7 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
 /// running with replication enabled. Old clients that don't
 /// understand the `topology` JSON key ignore it cleanly (ADR §4),
 /// so the absent-vs-present distinction is benign.
-fn build_topology_for_hello_ack(
-    runtime: &RedDBRuntime,
-) -> Option<reddb_wire::topology::Topology> {
+fn build_topology_for_hello_ack(runtime: &RedDBRuntime) -> Option<reddb_wire::topology::Topology> {
     use crate::auth::middleware::AuthResult;
     use crate::replication::{LagConfig, TopologyAdvertiser};
     use reddb_wire::topology::Endpoint;
@@ -1083,7 +1086,11 @@ mod tests {
         let hello_payload =
             br#"{"versions":[1],"auth_methods":["anonymous"],"features":0}"#.to_vec();
         client
-            .write_all(&encode_frame(&Frame::new(MessageKind::Hello, 1, hello_payload)))
+            .write_all(&encode_frame(&Frame::new(
+                MessageKind::Hello,
+                1,
+                hello_payload,
+            )))
             .await
             .unwrap();
         let _ack = read_one_frame(&mut client).await;

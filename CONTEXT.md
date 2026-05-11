@@ -90,6 +90,9 @@ Reusable vocabulary for code, docs, and architecture decisions. New terms join t
 
 - **`FANOUT` queue** — every consumer (or consumer group) receives every message. Equivalent to publishing across multiple Kafka consumer groups or RabbitMQ fanout exchange. Default mode for auto-event queues.
 - **`WORK` queue** — consumers compete for messages; each message delivered to one consumer in the group. Equivalent to RabbitMQ work queue or Pulsar Shared subscription. Default for `CREATE QUEUE` without explicit mode.
+- **Queue delivery** — the lifecycle step that selects an available queue message for a consumer group, records it as pending, and updates attempt counters according to the queue mode.
+- **Pending delivery** — a queue message copy that has been delivered to one consumer group but has not yet been ACKed, NACKed, claimed by another consumer, or retired.
+- **Queue retirement** — the lifecycle step that ends a pending delivery by acknowledging it for one group, moving it to a DLQ, dropping it, or physically deleting it when queue mode semantics allow.
 
 ## Performance gate
 

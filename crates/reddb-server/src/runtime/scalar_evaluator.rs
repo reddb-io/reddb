@@ -93,7 +93,10 @@ impl std::fmt::Display for CompileError {
                 }
             }
             CompileError::UnaryUnresolved { op, operand } => {
-                write!(f, "scalar compile: unary `{op:?}` has no overload for `{operand:?}`")
+                write!(
+                    f,
+                    "scalar compile: unary `{op:?}` has no overload for `{operand:?}`"
+                )
             }
             CompileError::BinaryUnresolved { op, lhs, rhs } => {
                 write!(
@@ -105,7 +108,10 @@ impl std::fmt::Display for CompileError {
                 write!(f, "scalar compile: no cast from `{src:?}` to `{target:?}`")
             }
             CompileError::FunctionUnresolved { name, args } => {
-                write!(f, "scalar compile: function `{name}` has no catalog entry for `{args:?}`")
+                write!(
+                    f,
+                    "scalar compile: function `{name}` has no catalog entry for `{args:?}`"
+                )
             }
             CompileError::Unsupported(reason) => {
                 write!(f, "scalar compile: unsupported shape ({reason})")
@@ -126,10 +132,7 @@ pub enum CompiledScalar {
     /// Column read against the row view. The compile step already
     /// flattened `FieldRef` to a path string so the row lookup is a
     /// single map probe — no per-row qualification re-walk.
-    Column {
-        field: FieldRef,
-        ty: DataType,
-    },
+    Column { field: FieldRef, ty: DataType },
     /// Pre-resolved unary operator. `op_entry.return_type` is the
     /// node's static type.
     Unary {
@@ -366,8 +369,7 @@ fn compile_expr(expr: &Expr, scope: &dyn Scope) -> Result<CompiledScalar, Compil
             for a in args {
                 compiled_args.push(compile_expr(a, scope)?);
             }
-            let arg_types: Vec<DataType> =
-                compiled_args.iter().map(|c| c.data_type()).collect();
+            let arg_types: Vec<DataType> = compiled_args.iter().map(|c| c.data_type()).collect();
             // Functions resolve through the static catalog. When
             // there's no match we keep `entry = None` and let the
             // eval path fall back to the legacy dispatcher — that
@@ -377,9 +379,7 @@ fn compile_expr(expr: &Expr, scope: &dyn Scope) -> Result<CompiledScalar, Compil
             // `FunctionUnresolved` themselves.
             let upper = name.to_ascii_uppercase();
             let entry = function_catalog::resolve(&upper, &arg_types);
-            let ty = entry
-                .map(|e| e.return_type)
-                .unwrap_or(DataType::Nullable);
+            let ty = entry.map(|e| e.return_type).unwrap_or(DataType::Nullable);
             Ok(CompiledScalar::Call {
                 name: upper,
                 entry,
@@ -550,9 +550,8 @@ fn eval_compiled(
         CompiledScalar::Call { name, args, .. } => {
             let mut arg_values = Vec::with_capacity(args.len());
             for a in args {
-                arg_values.push(
-                    eval_compiled(a, row, table_name, table_alias).unwrap_or(Value::Null),
-                );
+                arg_values
+                    .push(eval_compiled(a, row, table_name, table_alias).unwrap_or(Value::Null));
             }
             // Route through the legacy builtin dispatcher. The
             // catalog `entry` is informational on the hot path —
@@ -583,12 +582,36 @@ fn apply_binop(op: BinOp, a: Value, b: Value) -> Option<Value> {
             a.display_string(),
             b.display_string()
         ))),
-        BinOp::Eq => Some(Value::Boolean(compare_runtime_values(&a, &b, CompareOp::Eq))),
-        BinOp::Ne => Some(Value::Boolean(compare_runtime_values(&a, &b, CompareOp::Ne))),
-        BinOp::Lt => Some(Value::Boolean(compare_runtime_values(&a, &b, CompareOp::Lt))),
-        BinOp::Le => Some(Value::Boolean(compare_runtime_values(&a, &b, CompareOp::Le))),
-        BinOp::Gt => Some(Value::Boolean(compare_runtime_values(&a, &b, CompareOp::Gt))),
-        BinOp::Ge => Some(Value::Boolean(compare_runtime_values(&a, &b, CompareOp::Ge))),
+        BinOp::Eq => Some(Value::Boolean(compare_runtime_values(
+            &a,
+            &b,
+            CompareOp::Eq,
+        ))),
+        BinOp::Ne => Some(Value::Boolean(compare_runtime_values(
+            &a,
+            &b,
+            CompareOp::Ne,
+        ))),
+        BinOp::Lt => Some(Value::Boolean(compare_runtime_values(
+            &a,
+            &b,
+            CompareOp::Lt,
+        ))),
+        BinOp::Le => Some(Value::Boolean(compare_runtime_values(
+            &a,
+            &b,
+            CompareOp::Le,
+        ))),
+        BinOp::Gt => Some(Value::Boolean(compare_runtime_values(
+            &a,
+            &b,
+            CompareOp::Gt,
+        ))),
+        BinOp::Ge => Some(Value::Boolean(compare_runtime_values(
+            &a,
+            &b,
+            CompareOp::Ge,
+        ))),
         BinOp::And | BinOp::Or => None, // short-circuited above
     }
 }
@@ -652,8 +675,9 @@ fn apply_cast(src: &Value, target: DataType) -> Value {
         (Value::Float(f), DT::UnsignedInteger) if *f >= 0.0 => Value::UnsignedInteger(*f as u64),
         (Value::Boolean(b), DT::Integer) => Value::Integer(if *b { 1 } else { 0 }),
         (Value::Integer(n), DT::Boolean) => Value::Boolean(*n != 0),
-        (Value::Text(s), t) => crate::storage::schema::coerce::coerce(s, t, None)
-            .unwrap_or(Value::Null),
+        (Value::Text(s), t) => {
+            crate::storage::schema::coerce::coerce(s, t, None).unwrap_or(Value::Null)
+        }
         (v, t) => crate::storage::schema::coerce::coerce(&v.display_string(), t, None)
             .unwrap_or(Value::Null),
     }
@@ -701,10 +725,7 @@ pub fn compile_filter(filter: &Filter, scope: &dyn Scope) -> CompiledFilter {
     match filter {
         Filter::CompareExpr { lhs, op, rhs } => {
             let evaluator = DefaultScalarEvaluator;
-            match (
-                evaluator.compile(lhs, scope),
-                evaluator.compile(rhs, scope),
-            ) {
+            match (evaluator.compile(lhs, scope), evaluator.compile(rhs, scope)) {
                 (Ok(l), Ok(r)) => CompiledFilter::CompareExpr {
                     lhs: l,
                     op: *op,
@@ -794,13 +815,11 @@ mod tests {
     /// Build a `CompareExpr`-style WHERE predicate `lhs op rhs` and
     /// evaluate it against the given record. Returns `Some(true)` /
     /// `Some(false)` for booleans, mirroring the runtime contract.
-    fn compile_and_eval(
-        expr: &Expr,
-        scope: &dyn Scope,
-        record: &UnifiedRecord,
-    ) -> Option<Value> {
+    fn compile_and_eval(expr: &Expr, scope: &dyn Scope, record: &UnifiedRecord) -> Option<Value> {
         let evaluator = DefaultScalarEvaluator;
-        let compiled = evaluator.compile(expr, scope).expect("compile must succeed");
+        let compiled = evaluator
+            .compile(expr, scope)
+            .expect("compile must succeed");
         evaluator.eval(&compiled, record, None, None)
     }
 
@@ -815,11 +834,7 @@ mod tests {
     fn typed_scope<'a>(types: &'a [(&'static str, DataType)]) -> impl Scope + 'a {
         let map: Vec<(String, DataType)> =
             types.iter().map(|(n, t)| ((*n).to_string(), *t)).collect();
-        move |_table: &str, column: &str| {
-            map.iter()
-                .find(|(n, _)| n == column)
-                .map(|(_, t)| *t)
-        }
+        move |_table: &str, column: &str| map.iter().find(|(n, _)| n == column).map(|(_, t)| *t)
     }
 
     /// `a = 1` — the smallest WHERE predicate. Confirms compile
@@ -867,10 +882,7 @@ mod tests {
     /// promoted result type.
     #[test]
     fn compile_eval_arith_then_compare() {
-        let scope = typed_scope(&[
-            ("a", DataType::Integer),
-            ("b", DataType::Integer),
-        ]);
+        let scope = typed_scope(&[("a", DataType::Integer), ("b", DataType::Integer)]);
         let mut record = UnifiedRecord::new();
         record.set("a", Value::Integer(7));
         record.set("b", Value::Integer(5));
@@ -938,10 +950,7 @@ mod tests {
     /// "filter" stage at `runtime/query_exec/table.rs`.
     #[test]
     fn compile_filter_compares_expr_branch_runs_through_evaluator() {
-        let scope = typed_scope(&[
-            ("a", DataType::Integer),
-            ("b", DataType::Integer),
-        ]);
+        let scope = typed_scope(&[("a", DataType::Integer), ("b", DataType::Integer)]);
 
         // WHERE a + b > 10
         let filter = Filter::CompareExpr {
@@ -993,7 +1002,9 @@ mod tests {
 
         let mut record = UnifiedRecord::new();
         record.set("a", Value::Integer(1));
-        assert!(evaluate_compiled_filter(None, &compiled, &record, None, None));
+        assert!(evaluate_compiled_filter(
+            None, &compiled, &record, None, None
+        ));
     }
 
     /// Compile error surface: unknown column propagates a structured

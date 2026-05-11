@@ -241,10 +241,7 @@ fn constrain_collections(
     match requested {
         None => None,
         Some(list) => {
-            let filtered: Vec<String> = list
-                .into_iter()
-                .filter(|c| visible.contains(c))
-                .collect();
+            let filtered: Vec<String> = list.into_iter().filter(|c| visible.contains(c)).collect();
             Some(filtered)
         }
     }
@@ -371,10 +368,8 @@ mod tests {
     }
 
     fn build_result(rows: &[(u64, &str)]) -> ContextSearchResult {
-        let entities: Vec<ContextEntity> = rows
-            .iter()
-            .map(|(id, c)| fake_ctx_entity(*id, c))
-            .collect();
+        let entities: Vec<ContextEntity> =
+            rows.iter().map(|(id, c)| fake_ctx_entity(*id, c)).collect();
         ContextSearchResult {
             query: "x".into(),
             tables: entities.clone(),

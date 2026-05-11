@@ -200,14 +200,8 @@ fn test_row_patch_unset() {
     );
 
     // name and email should still exist
-    assert!(
-        record.contains_column("name"),
-        "name should still exist"
-    );
-    assert!(
-        record.contains_column("email"),
-        "email should still exist"
-    );
+    assert!(record.contains_column("name"), "name should still exist");
+    assert!(record.contains_column("email"), "email should still exist");
 }
 
 #[test]

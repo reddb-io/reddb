@@ -49,7 +49,8 @@ impl RedDBServer {
                         Err(response) => return response,
                     };
                     let mut sql = format!("KV INCR {path} BY {by}");
-                    if let Some(expire_ms) = json_u64_field_any(&payload, &["expire_ms", "ttl_ms"]) {
+                    if let Some(expire_ms) = json_u64_field_any(&payload, &["expire_ms", "ttl_ms"])
+                    {
                         sql.push_str(&format!(" EXPIRE {expire_ms} ms"));
                     }
                     self.execute_keyed_sql(sql)
@@ -281,7 +282,10 @@ impl RedDBServer {
     }
 
     fn execute_keyed_sql(&self, sql: String) -> HttpResponse {
-        match self.query_use_cases().execute(ExecuteQueryInput { query: sql }) {
+        match self
+            .query_use_cases()
+            .execute(ExecuteQueryInput { query: sql })
+        {
             Ok(result) => json_response(
                 200,
                 crate::presentation::query_result_json::runtime_query_json(&result, &None, &None),
@@ -305,7 +309,10 @@ fn keyed_path(collection: &str, key: &str) -> Result<String, HttpResponse> {
 
 fn keyed_target(collection: &str, key: &str) -> Result<(String, String), HttpResponse> {
     if !valid_keyed_ident(collection) {
-        return Err(json_error(400, "collection contains unsupported characters"));
+        return Err(json_error(
+            400,
+            "collection contains unsupported characters",
+        ));
     }
     if !valid_keyed_ident(key) {
         return Err(json_error(400, "key contains unsupported characters"));
@@ -327,13 +334,22 @@ fn list_sql(domain: &str, collection: &str, query: &BTreeMap<String, String>) ->
         "_invalid_".to_string()
     };
     let mut sql = format!("LIST {domain} {collection}");
-    if let Some(prefix) = query.get("prefix").filter(|prefix| valid_keyed_ident(prefix)) {
+    if let Some(prefix) = query
+        .get("prefix")
+        .filter(|prefix| valid_keyed_ident(prefix))
+    {
         sql.push_str(&format!(" PREFIX {prefix}"));
     }
-    if let Some(limit) = query.get("limit").and_then(|value| value.parse::<usize>().ok()) {
+    if let Some(limit) = query
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+    {
         sql.push_str(&format!(" LIMIT {limit}"));
     }
-    if let Some(offset) = query.get("offset").and_then(|value| value.parse::<usize>().ok()) {
+    if let Some(offset) = query
+        .get("offset")
+        .and_then(|value| value.parse::<usize>().ok())
+    {
         sql.push_str(&format!(" OFFSET {offset}"));
     }
     sql
@@ -350,7 +366,10 @@ fn keyed_value_literal(value: &JsonValue) -> Result<String, HttpResponse> {
     }
 }
 
-fn config_value_literal(value: &JsonValue, explicit_secret_ref: bool) -> Result<String, HttpResponse> {
+fn config_value_literal(
+    value: &JsonValue,
+    explicit_secret_ref: bool,
+) -> Result<String, HttpResponse> {
     if explicit_secret_ref {
         let Some(object) = value.as_object() else {
             return Err(json_error(400, "field 'secret_ref' must be an object"));

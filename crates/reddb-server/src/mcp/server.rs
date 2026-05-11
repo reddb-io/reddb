@@ -1217,7 +1217,10 @@ fn mcp_keyed_ident(value: &str) -> Result<String, String> {
     {
         Ok(value.to_string())
     } else {
-        Err("keyed collection and key names must use letters, numbers, underscores, or dots".to_string())
+        Err(
+            "keyed collection and key names must use letters, numbers, underscores, or dots"
+                .to_string(),
+        )
     }
 }
 
@@ -1252,7 +1255,9 @@ fn append_mcp_tags_clause(sql: &mut String, tags: &[String]) {
 fn reject_mcp_volatile_options(args: &JsonValue, domain: &str) -> Result<(), String> {
     for field in ["ttl", "ttl_ms", "expire", "expire_ms", "expires_at"] {
         if args.get(field).is_some() {
-            return Err(format!("{domain} does not support TTL or expiration options"));
+            return Err(format!(
+                "{domain} does not support TTL or expiration options"
+            ));
         }
     }
     Ok(())

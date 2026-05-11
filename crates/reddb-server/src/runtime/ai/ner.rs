@@ -482,9 +482,11 @@ fn parse_and_sanitize(raw: &str, max_tokens: usize) -> Result<TokenSet, NerError
     let parsed: JsonValue = crate_json::from_str(raw).map_err(|e| NerError::ResponseMalformed {
         reason: format!("json parse: {e}"),
     })?;
-    let obj = parsed.as_object().ok_or_else(|| NerError::ResponseMalformed {
-        reason: "expected JSON object at root".into(),
-    })?;
+    let obj = parsed
+        .as_object()
+        .ok_or_else(|| NerError::ResponseMalformed {
+            reason: "expected JSON object at root".into(),
+        })?;
 
     let keywords = collect_string_array(obj.get("keywords"), "keywords")?;
     let literals = collect_string_array(obj.get("literals"), "literals")?;
@@ -684,14 +686,23 @@ mod tests {
 
     #[tokio::test]
     async fn stub_empty_returns_empty_token_set() {
-        let ner = LlmNer::new(NerProvider::Stub(StubBehavior::Empty), HeuristicFallback::Propagate);
-        let out = ner.extract("anything", &make_scope(), &allow()).await.unwrap();
+        let ner = LlmNer::new(
+            NerProvider::Stub(StubBehavior::Empty),
+            HeuristicFallback::Propagate,
+        );
+        let out = ner
+            .extract("anything", &make_scope(), &allow())
+            .await
+            .unwrap();
         assert!(out.is_empty());
     }
 
     #[tokio::test]
     async fn stub_echo_returns_lowercased_keyword() {
-        let ner = LlmNer::new(NerProvider::Stub(StubBehavior::Echo), HeuristicFallback::Propagate);
+        let ner = LlmNer::new(
+            NerProvider::Stub(StubBehavior::Echo),
+            HeuristicFallback::Propagate,
+        );
         let out = ner
             .extract("  Hello WORLD  ", &make_scope(), &allow())
             .await
@@ -702,7 +713,10 @@ mod tests {
 
     #[tokio::test]
     async fn stub_echo_empty_question_yields_empty_set() {
-        let ner = LlmNer::new(NerProvider::Stub(StubBehavior::Echo), HeuristicFallback::Propagate);
+        let ner = LlmNer::new(
+            NerProvider::Stub(StubBehavior::Echo),
+            HeuristicFallback::Propagate,
+        );
         let out = ner.extract("   ", &make_scope(), &allow()).await.unwrap();
         assert!(out.is_empty());
     }
@@ -740,7 +754,10 @@ mod tests {
             HeuristicFallback::Propagate,
         );
         ner.timeout_ms = 50;
-        let err = ner.extract("q?", &make_scope(), &allow()).await.unwrap_err();
+        let err = ner
+            .extract("q?", &make_scope(), &allow())
+            .await
+            .unwrap_err();
         assert_eq!(err, NerError::NetworkTimeout);
     }
 
@@ -752,7 +769,10 @@ mod tests {
             NerProvider::Stub(StubBehavior::RawJson("not-json".into())),
             HeuristicFallback::Propagate,
         );
-        let err = ner.extract("q?", &make_scope(), &allow()).await.unwrap_err();
+        let err = ner
+            .extract("q?", &make_scope(), &allow())
+            .await
+            .unwrap_err();
         assert!(matches!(err, NerError::ResponseMalformed { .. }));
     }
 
@@ -762,7 +782,10 @@ mod tests {
             NerProvider::Stub(StubBehavior::RawJson("[1,2,3]".into())),
             HeuristicFallback::Propagate,
         );
-        let err = ner.extract("q?", &make_scope(), &allow()).await.unwrap_err();
+        let err = ner
+            .extract("q?", &make_scope(), &allow())
+            .await
+            .unwrap_err();
         assert!(matches!(err, NerError::ResponseMalformed { .. }));
     }
 
@@ -772,7 +795,10 @@ mod tests {
             NerProvider::Stub(StubBehavior::RawJson(r#"{"keywords":"oops"}"#.into())),
             HeuristicFallback::Propagate,
         );
-        let err = ner.extract("q?", &make_scope(), &allow()).await.unwrap_err();
+        let err = ner
+            .extract("q?", &make_scope(), &allow())
+            .await
+            .unwrap_err();
         assert!(matches!(err, NerError::ResponseMalformed { .. }));
     }
 
@@ -791,15 +817,27 @@ mod tests {
         let conn = "postgres://user:pwd@host:5432/db".to_string();
 
         vec![
-            ("crlf_in_keyword", "{\"keywords\":[\"foo\\r\\nbar\"]}".into()),
-            ("nul_in_literal", "{\"literals\":[\"foo\\u0000bar\"]}".into()),
+            (
+                "crlf_in_keyword",
+                "{\"keywords\":[\"foo\\r\\nbar\"]}".into(),
+            ),
+            (
+                "nul_in_literal",
+                "{\"literals\":[\"foo\\u0000bar\"]}".into(),
+            ),
             ("dquote_injection", "{\"keywords\":[\"foo\\\"bar\"]}".into()),
             ("squote_injection", "{\"keywords\":[\"foo'bar\"]}".into()),
             ("backtick_injection", "{\"keywords\":[\"foo`bar\"]}".into()),
-            ("control_byte_low", "{\"keywords\":[\"foo\\u0007bar\"]}".into()),
+            (
+                "control_byte_low",
+                "{\"keywords\":[\"foo\\u0007bar\"]}".into(),
+            ),
             ("sk_live", format!(r#"{{"keywords":["{sk_prefix}"]}}"#)),
             ("rs_test", format!(r#"{{"keywords":["{rs_prefix}"]}}"#)),
-            ("reddb_internal", format!(r#"{{"literals":["{reddb_prefix}"]}}"#)),
+            (
+                "reddb_internal",
+                format!(r#"{{"literals":["{reddb_prefix}"]}}"#),
+            ),
             ("bearer_token", format!(r#"{{"keywords":["{bearer}"]}}"#)),
             ("jwt_shape", format!(r#"{{"literals":["{jwt}"]}}"#)),
             ("conn_string", format!(r#"{{"keywords":["{conn}"]}}"#)),
@@ -836,7 +874,11 @@ mod tests {
             NerProvider::Stub(StubBehavior::RawJson(raw)),
             HeuristicFallback::Propagate,
         );
-        match ner.extract("q?", &make_scope(), &allow()).await.unwrap_err() {
+        match ner
+            .extract("q?", &make_scope(), &allow())
+            .await
+            .unwrap_err()
+        {
             NerError::SecretInResponse { pattern } => assert_eq!(pattern, "sk_prefix"),
             other => panic!("expected SecretInResponse, got {other:?}"),
         }
@@ -853,7 +895,10 @@ mod tests {
             NerProvider::Stub(StubBehavior::RawJson(raw)),
             HeuristicFallback::Propagate,
         );
-        let err = ner.extract("q?", &make_scope(), &allow()).await.unwrap_err();
+        let err = ner
+            .extract("q?", &make_scope(), &allow())
+            .await
+            .unwrap_err();
         match err {
             NerError::ResponseExceedsTokenLimit { count, max } => {
                 assert_eq!(count, 33);
@@ -895,7 +940,10 @@ mod tests {
             NerProvider::Stub(StubBehavior::Empty),
             HeuristicFallback::UseHeuristic,
         );
-        let err = ner.extract("FDD-1", &make_scope(), &deny()).await.unwrap_err();
+        let err = ner
+            .extract("FDD-1", &make_scope(), &deny())
+            .await
+            .unwrap_err();
         assert_eq!(err, NerError::AuthDenied);
     }
 

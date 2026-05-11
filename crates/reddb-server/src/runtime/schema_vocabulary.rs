@@ -131,10 +131,7 @@ impl SchemaVocabulary {
             Some(k) => k,
             None => return &[],
         };
-        self.inverted
-            .get(&key)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.inverted.get(&key).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     /// Apply a DDL event to the index.
@@ -586,8 +583,7 @@ mod tests {
         vocab.on_ddl(create_event("users", &["id", "email"]));
         vocab.on_ddl(create_event("orders", &["id", "user_id"]));
         let id_hits = vocab.lookup("id");
-        let collections: HashSet<_> =
-            id_hits.iter().map(|h| h.collection.as_str()).collect();
+        let collections: HashSet<_> = id_hits.iter().map(|h| h.collection.as_str()).collect();
         assert!(collections.contains("users"));
         assert!(collections.contains("orders"));
         assert!(id_hits.iter().all(|h| h.column.as_deref() == Some("id")));
@@ -725,10 +721,7 @@ mod tests {
 
     fn schema_strategy() -> impl Strategy<Value = Vec<(String, Vec<String>)>> {
         prop::collection::vec(
-            (
-                ascii_ident(),
-                prop::collection::vec(ascii_ident(), 0..6),
-            ),
+            (ascii_ident(), prop::collection::vec(ascii_ident(), 0..6)),
             1..6,
         )
     }

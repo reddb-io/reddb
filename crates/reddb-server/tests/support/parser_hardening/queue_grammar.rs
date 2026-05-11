@@ -80,13 +80,7 @@ pub fn max_attempts_clause() -> impl Strategy<Value = String> {
 /// `WITH TTL value unit` clause covering the documented duration
 /// units (`ms`, `s`, `m`, `h`, `d`).
 pub fn ttl_clause() -> impl Strategy<Value = String> {
-    let unit = prop_oneof![
-        Just("ms"),
-        Just("s"),
-        Just("m"),
-        Just("h"),
-        Just("d"),
-    ];
+    let unit = prop_oneof![Just("ms"), Just("s"), Just("m"), Just("h"), Just("d"),];
     (1u64..1000, unit).prop_map(|(v, u)| format!("WITH TTL {} {}", v, u))
 }
 
@@ -106,7 +100,7 @@ pub fn create_queue_stmt() -> impl Strategy<Value = String> {
     (
         any::<bool>(), // IF NOT EXISTS
         ident(),
-        any::<bool>(),                        // PRIORITY
+        any::<bool>(), // PRIORITY
         proptest::option::of(max_size_clause()),
         proptest::option::of(max_attempts_clause()),
         proptest::option::of(ttl_clause()),
@@ -204,17 +198,12 @@ pub fn priority_modifier_stmt() -> impl Strategy<Value = String> {
         // CREATE QUEUE name PRIORITY
         ident().prop_map(|n| format!("CREATE QUEUE {} PRIORITY", n)),
         // CREATE QUEUE name MAX_SIZE k PRIORITY
-        (ident(), 1u64..10_000).prop_map(|(n, k)| {
-            format!("CREATE QUEUE {} MAX_SIZE {} PRIORITY", n, k)
-        }),
+        (ident(), 1u64..10_000)
+            .prop_map(|(n, k)| { format!("CREATE QUEUE {} MAX_SIZE {} PRIORITY", n, k) }),
         // QUEUE PUSH name 'x' PRIORITY n
-        (ident(), 0i32..100).prop_map(|(n, p)| {
-            format!("QUEUE PUSH {} 'x' PRIORITY {}", n, p)
-        }),
+        (ident(), 0i32..100).prop_map(|(n, p)| { format!("QUEUE PUSH {} 'x' PRIORITY {}", n, p) }),
         // QUEUE RPUSH name 'x' PRIORITY n
-        (ident(), 0i32..100).prop_map(|(n, p)| {
-            format!("QUEUE RPUSH {} 'x' PRIORITY {}", n, p)
-        }),
+        (ident(), 0i32..100).prop_map(|(n, p)| { format!("QUEUE RPUSH {} 'x' PRIORITY {}", n, p) }),
     ]
 }
 
@@ -228,15 +217,13 @@ pub fn consumer_group_stmt() -> impl Strategy<Value = String> {
         // GROUP CREATE
         (ident(), ident()).prop_map(|(q, g)| format!("QUEUE GROUP CREATE {} {}", q, g)),
         // READ ... GROUP g CONSUMER c [COUNT n]
-        (ident(), ident(), ident(), proptest::option::of(1u32..50)).prop_map(
-            |(q, g, c, n)| {
-                let mut s = format!("QUEUE READ {} GROUP {} CONSUMER {}", q, g, c);
-                if let Some(cnt) = n {
-                    s.push_str(&format!(" COUNT {}", cnt));
-                }
-                s
-            },
-        ),
+        (ident(), ident(), ident(), proptest::option::of(1u32..50)).prop_map(|(q, g, c, n)| {
+            let mut s = format!("QUEUE READ {} GROUP {} CONSUMER {}", q, g, c);
+            if let Some(cnt) = n {
+                s.push_str(&format!(" COUNT {}", cnt));
+            }
+            s
+        },),
         // PENDING
         (ident(), ident()).prop_map(|(q, g)| format!("QUEUE PENDING {} GROUP {}", q, g)),
         // CLAIM ... CONSUMER c MIN_IDLE n

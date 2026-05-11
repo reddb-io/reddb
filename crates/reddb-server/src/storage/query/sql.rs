@@ -761,7 +761,9 @@ impl<'a> Parser<'a> {
                             Ok(FrontendStatement::ConfigCommand(command))
                         }
                         other => Err(ParseError::new(
-                            format!("internal: WATCH CONFIG produced unexpected query kind {other:?}"),
+                            format!(
+                                "internal: WATCH CONFIG produced unexpected query kind {other:?}"
+                            ),
                             self.position(),
                         )),
                     }
@@ -772,7 +774,9 @@ impl<'a> Parser<'a> {
                     match self.parse_vault_watch_after_watch()? {
                         QueryExpr::KvCommand(command) => Ok(FrontendStatement::KvCommand(command)),
                         other => Err(ParseError::new(
-                            format!("internal: WATCH VAULT produced unexpected query kind {other:?}"),
+                            format!(
+                                "internal: WATCH VAULT produced unexpected query kind {other:?}"
+                            ),
                             self.position(),
                         )),
                     }
@@ -797,7 +801,9 @@ impl<'a> Parser<'a> {
                             Ok(FrontendStatement::ConfigCommand(command))
                         }
                         other => Err(ParseError::new(
-                            format!("internal: LIST CONFIG produced unexpected query kind {other:?}"),
+                            format!(
+                                "internal: LIST CONFIG produced unexpected query kind {other:?}"
+                            ),
                             self.position(),
                         )),
                     }
@@ -808,7 +814,9 @@ impl<'a> Parser<'a> {
                     match self.parse_vault_list_after_list()? {
                         QueryExpr::KvCommand(command) => Ok(FrontendStatement::KvCommand(command)),
                         other => Err(ParseError::new(
-                            format!("internal: LIST VAULT produced unexpected query kind {other:?}"),
+                            format!(
+                                "internal: LIST VAULT produced unexpected query kind {other:?}"
+                            ),
                             self.position(),
                         )),
                     }
@@ -831,7 +839,9 @@ impl<'a> Parser<'a> {
                             Ok(FrontendStatement::ConfigCommand(command))
                         }
                         other => Err(ParseError::new(
-                            format!("internal: LIST CONFIG produced unexpected query kind {other:?}"),
+                            format!(
+                                "internal: LIST CONFIG produced unexpected query kind {other:?}"
+                            ),
                             self.position(),
                         )),
                     }
@@ -842,7 +852,9 @@ impl<'a> Parser<'a> {
                     match self.parse_vault_list_after_list()? {
                         QueryExpr::KvCommand(command) => Ok(FrontendStatement::KvCommand(command)),
                         other => Err(ParseError::new(
-                            format!("internal: LIST VAULT produced unexpected query kind {other:?}"),
+                            format!(
+                                "internal: LIST VAULT produced unexpected query kind {other:?}"
+                            ),
                             self.position(),
                         )),
                     }
@@ -873,7 +885,9 @@ impl<'a> Parser<'a> {
                     match self.parse_kv_invalidate_tags_after_invalidate()? {
                         QueryExpr::KvCommand(command) => Ok(FrontendStatement::KvCommand(command)),
                         other => Err(ParseError::new(
-                            format!("internal: INVALIDATE produced unexpected query kind {other:?}"),
+                            format!(
+                                "internal: INVALIDATE produced unexpected query kind {other:?}"
+                            ),
                             self.position(),
                         )),
                     }

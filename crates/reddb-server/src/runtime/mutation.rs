@@ -62,7 +62,11 @@ pub(crate) struct MutationEngine<'rt> {
 impl<'rt> MutationEngine<'rt> {
     pub(crate) fn new(runtime: &'rt crate::RedDBRuntime) -> Self {
         let store = runtime.db().store();
-        Self { runtime, store, suppress_events: false }
+        Self {
+            runtime,
+            store,
+            suppress_events: false,
+        }
     }
 
     pub(crate) fn with_suppress_events(mut self) -> Self {
@@ -472,7 +476,10 @@ impl crate::RedDBRuntime {
                     &after,
                     subscription.redact_fields.as_slice(),
                 )?;
-                self.enqueue_event_payload(&effective_queue_name(subscription), Value::Json(payload))?;
+                self.enqueue_event_payload(
+                    &effective_queue_name(subscription),
+                    Value::Json(payload),
+                )?;
             }
         }
         Ok(())
@@ -538,7 +545,10 @@ impl crate::RedDBRuntime {
                     &after,
                     subscription.redact_fields.as_slice(),
                 )?;
-                self.enqueue_event_payload(&effective_queue_name(subscription), Value::Json(payload))?;
+                self.enqueue_event_payload(
+                    &effective_queue_name(subscription),
+                    Value::Json(payload),
+                )?;
             }
         }
         Ok(())
@@ -591,7 +601,10 @@ impl crate::RedDBRuntime {
                     &before,
                     subscription.redact_fields.as_slice(),
                 )?;
-                self.enqueue_event_payload(&effective_queue_name(subscription), Value::Json(payload))?;
+                self.enqueue_event_payload(
+                    &effective_queue_name(subscription),
+                    Value::Json(payload),
+                )?;
             }
         }
         Ok(())
@@ -880,8 +893,11 @@ fn build_update_before_json(
     if mutation.modified_columns.is_empty() {
         return JsonValue::Object(JsonMap::new());
     }
-    let changed: std::collections::HashSet<&str> =
-        mutation.modified_columns.iter().map(String::as_str).collect();
+    let changed: std::collections::HashSet<&str> = mutation
+        .modified_columns
+        .iter()
+        .map(String::as_str)
+        .collect();
     let mut object = JsonMap::new();
     for (key, value) in &mutation.pre_mutation_fields {
         if changed.contains(key.as_str()) {
@@ -899,8 +915,11 @@ fn build_update_after_json(
     if mutation.modified_columns.is_empty() {
         return JsonValue::Object(JsonMap::new());
     }
-    let changed: std::collections::HashSet<&str> =
-        mutation.modified_columns.iter().map(String::as_str).collect();
+    let changed: std::collections::HashSet<&str> = mutation
+        .modified_columns
+        .iter()
+        .map(String::as_str)
+        .collect();
     let mut object = JsonMap::new();
     if let EntityData::Row(row) = &mutation.entity.data {
         if let Some(named) = &row.named {
@@ -1041,15 +1060,13 @@ pub(crate) fn emit_collection_dropped_event_for_collection(
     Ok(())
 }
 
-fn truncate_event_payload(
-    collection: &str,
-    lsn: u64,
-    entities_count: u64,
-) -> RedDBResult<Vec<u8>> {
+fn truncate_event_payload(collection: &str, lsn: u64, entities_count: u64) -> RedDBResult<Vec<u8>> {
     let mut object = JsonMap::new();
     object.insert(
         "event_id".to_string(),
-        JsonValue::String(deterministic_event_id(collection, "truncate", lsn, "truncate")),
+        JsonValue::String(deterministic_event_id(
+            collection, "truncate", lsn, "truncate",
+        )),
     );
     object.insert("op".to_string(), JsonValue::String("truncate".to_string()));
     object.insert(
@@ -1113,8 +1130,9 @@ fn collection_dropped_event_payload(
         "final_entities_count".to_string(),
         JsonValue::Number(final_entities_count as f64),
     );
-    crate::json::to_vec(&JsonValue::Object(object))
-        .map_err(|err| RedDBError::Internal(format!("encode collection_dropped event payload: {err}")))
+    crate::json::to_vec(&JsonValue::Object(object)).map_err(|err| {
+        RedDBError::Internal(format!("encode collection_dropped event payload: {err}"))
+    })
 }
 
 // ── #297: WHERE filter evaluation ────────────────────────────────────────────
@@ -1134,8 +1152,12 @@ fn entity_passes_where_filter(
     entity: &crate::storage::unified::entity::UnifiedEntity,
     collection: &str,
 ) -> bool {
-    let Some(sql) = &sub.where_filter else { return true };
-    let Some(filter) = parse_where_filter(sql) else { return true };
+    let Some(sql) = &sub.where_filter else {
+        return true;
+    };
+    let Some(filter) = parse_where_filter(sql) else {
+        return true;
+    };
     crate::runtime::query_exec::evaluate_entity_filter(entity, &filter, collection, collection)
 }
 
@@ -1146,15 +1168,16 @@ fn json_passes_where_filter(
     sub: &crate::catalog::SubscriptionDescriptor,
     json: &JsonValue,
 ) -> bool {
-    let Some(sql) = &sub.where_filter else { return true };
-    let Some(filter) = parse_where_filter(sql) else { return true };
+    let Some(sql) = &sub.where_filter else {
+        return true;
+    };
+    let Some(filter) = parse_where_filter(sql) else {
+        return true;
+    };
     eval_filter_against_json(json, &filter)
 }
 
-fn eval_filter_against_json(
-    json: &JsonValue,
-    filter: &crate::storage::query::AstFilter,
-) -> bool {
+fn eval_filter_against_json(json: &JsonValue, filter: &crate::storage::query::AstFilter) -> bool {
     use crate::storage::query::AstFilter as F;
     match filter {
         F::Compare { field, op, value } => {
@@ -1165,14 +1188,10 @@ fn eval_filter_against_json(
         F::And(a, b) => eval_filter_against_json(json, a) && eval_filter_against_json(json, b),
         F::Or(a, b) => eval_filter_against_json(json, a) || eval_filter_against_json(json, b),
         F::Not(f) => !eval_filter_against_json(json, f),
-        F::IsNull(field) => {
-            json_object_field(json, ast_field_col_name(field))
-                .map_or(true, |jv| matches!(jv, JsonValue::Null))
-        }
-        F::IsNotNull(field) => {
-            json_object_field(json, ast_field_col_name(field))
-                .map_or(false, |jv| !matches!(jv, JsonValue::Null))
-        }
+        F::IsNull(field) => json_object_field(json, ast_field_col_name(field))
+            .map_or(true, |jv| matches!(jv, JsonValue::Null)),
+        F::IsNotNull(field) => json_object_field(json, ast_field_col_name(field))
+            .map_or(false, |jv| !matches!(jv, JsonValue::Null)),
         // CompareFields, CompareExpr, In, Between, Like, StartsWith, EndsWith,
         // Contains — permissive (let the row through).
         _ => true,
@@ -1234,8 +1253,12 @@ fn compare_json_to_store_value(
                     _ => None,
                 }
             }
-            let Some(lf) = val_to_f64(&lhs) else { return false };
-            let Some(rf) = val_to_f64(rhs) else { return false };
+            let Some(lf) = val_to_f64(&lhs) else {
+                return false;
+            };
+            let Some(rf) = val_to_f64(rhs) else {
+                return false;
+            };
             let ord = lf.partial_cmp(&rf).unwrap_or(Ordering::Equal);
             match op {
                 CompareOp::Lt => ord == Ordering::Less,

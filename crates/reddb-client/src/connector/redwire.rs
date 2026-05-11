@@ -223,8 +223,8 @@ async fn read_frame(stream: &mut TcpStream) -> Result<Frame> {
             .await
             .map_err(|e| RedWireError::Network(e.to_string()))?;
     }
-    let (frame, _) = decode_frame(&buf)
-        .map_err(|e| RedWireError::Protocol(format!("decode: {e}")))?;
+    let (frame, _) =
+        decode_frame(&buf).map_err(|e| RedWireError::Protocol(format!("decode: {e}")))?;
     Ok(frame)
 }
 

@@ -184,9 +184,8 @@ fn create_timeseries_with_retention_days_parses() {
 
 #[test]
 fn create_timeseries_with_downsample_policies_parses() {
-    let q = parse_query(
-        "CREATE TIMESERIES cpu_metrics RETENTION 90 d DOWNSAMPLE 1h:5m:avg, 1d:1h:max",
-    );
+    let q =
+        parse_query("CREATE TIMESERIES cpu_metrics RETENTION 90 d DOWNSAMPLE 1h:5m:avg, 1d:1h:max");
     match q {
         QueryExpr::CreateTimeSeries(ts) => {
             assert_eq!(
@@ -276,9 +275,8 @@ fn drop_timeseries_with_if_exists_parses() {
 fn create_materialized_view_for_continuous_aggregate_parses() {
     // The continuous-aggregate surface today rides through the
     // materialized-view envelope; pin the shape end-to-end.
-    let q = parse_query(
-        "CREATE MATERIALIZED VIEW IF NOT EXISTS cpu_5m AS SELECT id FROM cpu_metrics",
-    );
+    let q =
+        parse_query("CREATE MATERIALIZED VIEW IF NOT EXISTS cpu_5m AS SELECT id FROM cpu_metrics");
     match q {
         QueryExpr::CreateView(_) => {}
         other => panic!("expected CreateView, got {other:?}"),

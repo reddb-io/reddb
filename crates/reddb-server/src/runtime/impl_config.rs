@@ -264,10 +264,14 @@ impl RedDBRuntime {
             if version.tombstone {
                 None
             } else {
-                Some(crate::presentation::entity_json::storage_value_to_json(&version.value))
+                Some(crate::presentation::entity_json::storage_value_to_json(
+                    &version.value,
+                ))
             }
         });
-        let after = Some(crate::presentation::entity_json::storage_value_to_json(&value));
+        let after = Some(crate::presentation::entity_json::storage_value_to_json(
+            &value,
+        ));
         let change_op = if latest.is_some() {
             crate::replication::cdc::ChangeOperation::Update
         } else {
@@ -333,7 +337,9 @@ impl RedDBRuntime {
             if version.tombstone {
                 None
             } else {
-                Some(crate::presentation::entity_json::storage_value_to_json(&version.value))
+                Some(crate::presentation::entity_json::storage_value_to_json(
+                    &version.value,
+                ))
             }
         }) {
             self.record_kv_watch_event(
@@ -892,7 +898,10 @@ impl RedDBRuntime {
         let mut builder = crate::runtime::audit_log::AuditEvent::builder("config/resolve")
             .principal(actor.clone())
             .source(crate::runtime::audit_log::AuditAuthSource::Password)
-            .resource(format!("config:{}", config_target_resource(collection, key)))
+            .resource(format!(
+                "config:{}",
+                config_target_resource(collection, key)
+            ))
             .outcome(outcome)
             .correlation_id(request_id.clone())
             .fields([

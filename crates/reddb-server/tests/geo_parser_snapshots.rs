@@ -77,10 +77,7 @@ snap!(
     geo_nearest_missing_k_keyword,
     "SEARCH SPATIAL NEAREST 0.0 0.0 5 COLLECTION sites COLUMN location"
 );
-snap!(
-    geo_nearest_eof_after_k,
-    "SEARCH SPATIAL NEAREST 0.0 0.0 K"
-);
+snap!(geo_nearest_eof_after_k, "SEARCH SPATIAL NEAREST 0.0 0.0 K");
 snap!(
     geo_nearest_negative_k_no_unary_minus,
     "SEARCH SPATIAL NEAREST 0.0 0.0 K -1 COLLECTION sites COLUMN location"
@@ -89,10 +86,7 @@ snap!(
 // ----- SEARCH SPATIAL BBOX error scenarios -----------------------
 
 snap!(geo_bbox_eof_after_keyword, "SEARCH SPATIAL BBOX");
-snap!(
-    geo_bbox_eof_mid_corners,
-    "SEARCH SPATIAL BBOX 0.0 0.0"
-);
+snap!(geo_bbox_eof_mid_corners, "SEARCH SPATIAL BBOX 0.0 0.0");
 
 // ----- SEARCH SPATIAL dispatcher errors --------------------------
 

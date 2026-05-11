@@ -57,8 +57,14 @@ snap!(graph_match_eof_after_keyword, "MATCH");
 snap!(graph_match_eof_after_open_paren, "MATCH (");
 snap!(graph_match_eof_after_alias, "MATCH (a");
 snap!(graph_match_missing_return, "MATCH (a)-[r]->(b)");
-snap!(graph_match_unbalanced_bracket, "MATCH (a)-[r:KNOWS->(b) RETURN a");
-snap!(graph_match_unbalanced_brace, "MATCH (a {name: 'x') RETURN a");
+snap!(
+    graph_match_unbalanced_bracket,
+    "MATCH (a)-[r:KNOWS->(b) RETURN a"
+);
+snap!(
+    graph_match_unbalanced_brace,
+    "MATCH (a {name: 'x') RETURN a"
+);
 snap!(
     graph_match_dangling_props_comma,
     "MATCH (a:person {name: 'x',}) RETURN a"
@@ -72,10 +78,7 @@ snap!(
     graph_match_var_length_no_min,
     "MATCH (a)-[r*..3]->(b) RETURN a"
 );
-snap!(
-    graph_match_garbage_after_match,
-    "MATCH @#$%"
-);
+snap!(graph_match_garbage_after_match, "MATCH @#$%");
 // ----- PATH error scenarios --------------------------------------
 
 snap!(graph_path_eof_after_keyword, "PATH");
@@ -104,7 +107,4 @@ snap!(
     graph_create_node_attempt,
     "CREATE NODE (a:person {name: 'alice'})"
 );
-snap!(
-    graph_create_edge_attempt,
-    "CREATE EDGE (a)-[:KNOWS]->(b)"
-);
+snap!(graph_create_edge_attempt, "CREATE EDGE (a)-[:KNOWS]->(b)");

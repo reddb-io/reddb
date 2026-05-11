@@ -651,9 +651,12 @@ impl RedDBRuntime {
 
                 let embeddings = match tokio::runtime::Handle::try_current() {
                     Ok(handle) => tokio::task::block_in_place(|| {
-                        handle.block_on(
-                            batch_client.embed_batch(&provider, &model, &api_key, batch_texts),
-                        )
+                        handle.block_on(batch_client.embed_batch(
+                            &provider,
+                            &model,
+                            &api_key,
+                            batch_texts,
+                        ))
                     }),
                     Err(_) => {
                         return Err(RedDBError::Query(
@@ -1272,8 +1275,8 @@ impl RedDBRuntime {
 
         // For event-enabled collections, snapshot the pre-delete state
         // before rows are physically removed.
-        let needs_delete_events = !query.suppress_events
-            && self.collection_has_delete_subscriptions(&query.table);
+        let needs_delete_events =
+            !query.suppress_events && self.collection_has_delete_subscriptions(&query.table);
         let mut pre_images: HashMap<u64, crate::json::Value> = if needs_delete_events {
             let store = self.db().store();
             ids_to_delete
@@ -2958,11 +2961,23 @@ mod tests {
         let events = queue_payloads(&rt, "evts");
         assert_eq!(events.len(), 1);
         let event = events[0].as_object().unwrap();
-        let before = event.get("before").and_then(crate::json::Value::as_object).unwrap();
-        let after = event.get("after").and_then(crate::json::Value::as_object).unwrap();
+        let before = event
+            .get("before")
+            .and_then(crate::json::Value::as_object)
+            .unwrap();
+        let after = event
+            .get("after")
+            .and_then(crate::json::Value::as_object)
+            .unwrap();
         // Only changed field included.
-        assert!(before.contains_key("name"), "before must include changed field");
-        assert!(after.contains_key("name"), "after must include changed field");
+        assert!(
+            before.contains_key("name"),
+            "before must include changed field"
+        );
+        assert!(
+            after.contains_key("name"),
+            "after must include changed field"
+        );
         // Unchanged fields must not appear.
         assert!(
             !before.contains_key("email"),
@@ -3001,15 +3016,12 @@ mod tests {
     #[test]
     fn delete_single_row_emits_delete_event() {
         let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
-        rt.execute_query(
-            "CREATE TABLE users (id INT, name TEXT) WITH EVENTS (DELETE) TO del_log",
-        )
-        .unwrap();
+        rt.execute_query("CREATE TABLE users (id INT, name TEXT) WITH EVENTS (DELETE) TO del_log")
+            .unwrap();
         rt.execute_query("INSERT INTO users (id, name) VALUES (42, 'Alice')")
             .unwrap();
 
-        rt.execute_query("DELETE FROM users WHERE id = 42")
-            .unwrap();
+        rt.execute_query("DELETE FROM users WHERE id = 42").unwrap();
 
         let events = queue_payloads(&rt, "del_log");
         assert_eq!(events.len(), 1);
@@ -3038,19 +3050,14 @@ mod tests {
             before.get("name").and_then(crate::json::Value::as_str),
             Some("Alice")
         );
-        assert!(matches!(
-            event.get("after"),
-            Some(crate::json::Value::Null)
-        ));
+        assert!(matches!(event.get("after"), Some(crate::json::Value::Null)));
     }
 
     #[test]
     fn multi_row_delete_emits_one_event_per_row() {
         let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
-        rt.execute_query(
-            "CREATE TABLE items (id INT, val INT) WITH EVENTS (DELETE) TO del_log",
-        )
-        .unwrap();
+        rt.execute_query("CREATE TABLE items (id INT, val INT) WITH EVENTS (DELETE) TO del_log")
+            .unwrap();
         rt.execute_query("INSERT INTO items (id, val) VALUES (1, 10), (2, 20), (3, 30)")
             .unwrap();
 
@@ -3071,15 +3078,12 @@ mod tests {
     #[test]
     fn ops_filter_update_does_not_emit_on_insert_or_delete() {
         let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
-        rt.execute_query(
-            "CREATE TABLE users (id INT, name TEXT) WITH EVENTS (UPDATE) TO evts",
-        )
-        .unwrap();
+        rt.execute_query("CREATE TABLE users (id INT, name TEXT) WITH EVENTS (UPDATE) TO evts")
+            .unwrap();
 
         rt.execute_query("INSERT INTO users (id, name) VALUES (1, 'Alice')")
             .unwrap();
-        rt.execute_query("DELETE FROM users WHERE id = 1")
-            .unwrap();
+        rt.execute_query("DELETE FROM users WHERE id = 1").unwrap();
 
         let events = queue_payloads(&rt, "evts");
         assert!(
@@ -3160,7 +3164,11 @@ mod tests {
             .unwrap();
 
         let events = queue_payloads(&rt, "evts");
-        assert_eq!(events.len(), 1, "only the non-suppressed INSERT should emit");
+        assert_eq!(
+            events.len(),
+            1,
+            "only the non-suppressed INSERT should emit"
+        );
         assert_eq!(
             events[0].get("id").and_then(crate::json::Value::as_u64),
             Some(2)

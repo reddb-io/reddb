@@ -64,8 +64,8 @@ impl HttpOptions {
 
 impl HttpClient {
     pub async fn connect(opts: HttpOptions) -> Result<Self> {
-        let mut builder = ClientBuilder::new()
-            .user_agent(format!("reddb-rs/{}", env!("CARGO_PKG_VERSION")));
+        let mut builder =
+            ClientBuilder::new().user_agent(format!("reddb-rs/{}", env!("CARGO_PKG_VERSION")));
         if opts.dangerous_accept_invalid_certs {
             builder = builder.danger_accept_invalid_certs(true);
         }
@@ -99,7 +99,11 @@ impl HttpClient {
             .await
             .map_err(net_err)?;
         let value = decode_envelope(response).await?;
-        if let Some(token) = value.as_object().and_then(|o| o.get("token")).and_then(|v| v.as_str()) {
+        if let Some(token) = value
+            .as_object()
+            .and_then(|o| o.get("token"))
+            .and_then(|v| v.as_str())
+        {
             self.token = Some(token.to_string());
         }
         Ok(value)
@@ -107,12 +111,7 @@ impl HttpClient {
 
     pub async fn health(&self) -> Result<Value> {
         let url = format!("{}/health", self.base_url);
-        let resp = self
-            .inner
-            .get(&url)
-            .send()
-            .await
-            .map_err(net_err)?;
+        let resp = self.inner.get(&url).send().await.map_err(net_err)?;
         decode_envelope(resp).await
     }
 
@@ -123,10 +122,7 @@ impl HttpClient {
     }
 
     pub async fn insert(&self, collection: &str, payload: &JsonValue) -> Result<InsertResult> {
-        let url_path = format!(
-            "/collections/{}/rows",
-            urlencoded(collection),
-        );
+        let url_path = format!("/collections/{}/rows", urlencoded(collection),);
         let value = self
             .send_json(Method::POST, &url_path, &json_value_to_serde(payload))
             .await?;
@@ -144,10 +140,7 @@ impl HttpClient {
     }
 
     pub async fn bulk_insert(&self, collection: &str, payloads: &[JsonValue]) -> Result<u64> {
-        let url_path = format!(
-            "/collections/{}/bulk/rows",
-            urlencoded(collection),
-        );
+        let url_path = format!("/collections/{}/bulk/rows", urlencoded(collection),);
         let body = serde_json::json!({
             "rows": payloads.iter().map(json_value_to_serde).collect::<Vec<_>>(),
         });
@@ -160,11 +153,7 @@ impl HttpClient {
     }
 
     pub async fn delete(&self, collection: &str, id: &str) -> Result<u64> {
-        let url_path = format!(
-            "/collections/{}/{}",
-            urlencoded(collection),
-            urlencoded(id),
-        );
+        let url_path = format!("/collections/{}/{}", urlencoded(collection), urlencoded(id),);
         let url = format!("{}{}", self.base_url, url_path);
         let resp = self
             .inner

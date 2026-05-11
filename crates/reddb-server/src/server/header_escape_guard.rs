@@ -99,19 +99,18 @@ pub enum EscapeError {
 impl fmt::Display for EscapeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ContainsCrlf => f.write_str(
-                "header value contains CR or LF (would smuggle a second header line)",
-            ),
+            Self::ContainsCrlf => {
+                f.write_str("header value contains CR or LF (would smuggle a second header line)")
+            }
             Self::ContainsNull => f.write_str(
                 "header value contains NUL (proxies and intermediaries truncate on NUL)",
             ),
             Self::ContainsTab => f.write_str(
                 "header value contains TAB (downstream log pipelines split on whitespace)",
             ),
-            Self::ContainsNonPrintable(b) => write!(
-                f,
-                "header value contains non-printable byte 0x{b:02X}"
-            ),
+            Self::ContainsNonPrintable(b) => {
+                write!(f, "header value contains non-printable byte 0x{b:02X}")
+            }
             Self::OversizeForBoundary(n) => write!(
                 f,
                 "header value length {n} exceeds the {MAX_HEADER_VALUE_BYTES}-byte boundary limit"
@@ -201,8 +200,7 @@ mod tests {
 
     #[test]
     fn accepts_value_with_spaces_and_punctuation() {
-        let v =
-            HeaderEscapeGuard::header_value("text/html; charset=utf-8, q=0.9").unwrap();
+        let v = HeaderEscapeGuard::header_value("text/html; charset=utf-8, q=0.9").unwrap();
         assert_eq!(v.as_bytes(), b"text/html; charset=utf-8, q=0.9");
     }
 
@@ -378,22 +376,22 @@ mod tests {
             ("\"abc-123\"", Ok(b"\"abc-123\"")),
             ("evil\r\nLocation: /pwned", Err(EscapeError::ContainsCrlf)),
             ("set-cookie\nset-cookie", Err(EscapeError::ContainsCrlf)),
-            ("bell\x07alarm", Err(EscapeError::ContainsNonPrintable(0x07))),
+            (
+                "bell\x07alarm",
+                Err(EscapeError::ContainsNonPrintable(0x07)),
+            ),
             ("trunc\0ate", Err(EscapeError::ContainsNull)),
             ("split\there", Err(EscapeError::ContainsTab)),
         ];
         for (input, expected) in cases {
             let got = HeaderEscapeGuard::header_value(input);
             match (expected, &got) {
-                (Ok(bytes), Ok(v)) => assert_eq!(
-                    v.as_bytes(),
-                    *bytes,
-                    "input {input:?} produced wrong bytes"
-                ),
-                (Err(want), Err(got_err)) => assert_eq!(
-                    want, got_err,
-                    "input {input:?} produced wrong error"
-                ),
+                (Ok(bytes), Ok(v)) => {
+                    assert_eq!(v.as_bytes(), *bytes, "input {input:?} produced wrong bytes")
+                }
+                (Err(want), Err(got_err)) => {
+                    assert_eq!(want, got_err, "input {input:?} produced wrong error")
+                }
                 (Ok(_), Err(e)) => panic!("input {input:?} unexpectedly rejected: {e:?}"),
                 (Err(want), Ok(v)) => panic!(
                     "input {input:?} unexpectedly accepted (bytes={:?}); wanted {want:?}",

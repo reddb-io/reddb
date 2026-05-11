@@ -75,9 +75,8 @@ pub fn finite_float_lit() -> impl Strategy<Value = String> {
 /// constrained at the call site so each strategy gets a specific
 /// dimensional sweep (e.g. small-dim, mid-dim, dim-1).
 pub fn vector_literal(dim_range: std::ops::RangeInclusive<usize>) -> impl Strategy<Value = String> {
-    proptest::collection::vec(finite_float_lit(), dim_range).prop_map(|floats| {
-        format!("[{}]", floats.join(", "))
-    })
+    proptest::collection::vec(finite_float_lit(), dim_range)
+        .prop_map(|floats| format!("[{}]", floats.join(", ")))
 }
 
 /// Quoted text query body. Escaping is sidestepped by restricting to
@@ -215,10 +214,7 @@ pub fn vector_search_stmt() -> impl Strategy<Value = String> {
     (
         collection_name(),
         // VectorSource: literal vec or text query
-        prop_oneof![
-            vector_literal(1..=16).prop_map(|v| v),
-            text_query_lit(),
-        ],
+        prop_oneof![vector_literal(1..=16).prop_map(|v| v), text_query_lit(),],
         proptest::option::of(metric_kw()),
         proptest::option::of(finite_float_lit()),
         proptest::option::of(1u32..1000),

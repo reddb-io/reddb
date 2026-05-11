@@ -54,7 +54,10 @@ macro_rules! snap {
 // ----- CREATE TIMESERIES error scenarios -------------------------
 
 snap!(create_timeseries_eof_after_keyword, "CREATE TIMESERIES");
-snap!(create_timeseries_missing_name, "CREATE TIMESERIES RETENTION 90 d");
+snap!(
+    create_timeseries_missing_name,
+    "CREATE TIMESERIES RETENTION 90 d"
+);
 snap!(
     create_timeseries_retention_no_value,
     "CREATE TIMESERIES m1 RETENTION"
@@ -133,7 +136,10 @@ snap!(drop_timeseries_eof, "DROP TIMESERIES");
 
 // ----- Continuous-aggregate envelope -----------------------------
 
-snap!(continuous_aggregate_eof_after_view, "CREATE MATERIALIZED VIEW");
+snap!(
+    continuous_aggregate_eof_after_view,
+    "CREATE MATERIALIZED VIEW"
+);
 snap!(
     continuous_aggregate_missing_as,
     "CREATE MATERIALIZED VIEW mv SELECT 1 FROM t"

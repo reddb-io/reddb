@@ -10,9 +10,7 @@
 /// See bench/blob-cache/redis-up.sh to start them.
 ///
 /// Without those env vars the Redis cells are silently skipped.
-use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use reddb_server::storage::cache::{
     BlobCache, BlobCacheConfig, BlobCachePut, CacheKey, CachePolicy, L2Compression, ResultCache,
 };
@@ -104,7 +102,6 @@ fn w1_hot_l1_hit(c: &mut Criterion) {
             i += 1;
         });
     });
-
 
     g.finish();
 }
@@ -294,8 +291,7 @@ fn w6_dependency_invalidation(c: &mut Criterion) {
                 // Repopulate with 25% tagged
                 for i in 0..KEY_COUNT {
                     let put = if i % 4 == 0 {
-                        BlobCachePut::new(p.clone())
-                            .with_dependencies(["table:users"])
+                        BlobCachePut::new(p.clone()).with_dependencies(["table:users"])
                     } else {
                         BlobCachePut::new(p.clone())
                     };
@@ -380,7 +376,10 @@ fn w7_restart_warm_cache(c: &mut Criterion) {
     // Entries reachable post-restart.
     let check = make_cache_with_l2(L1, &l2_path);
     let s = check.stats();
-    eprintln!("\n[w7 stats] entries reachable post-restart: {}", s.entries());
+    eprintln!(
+        "\n[w7 stats] entries reachable post-restart: {}",
+        s.entries()
+    );
 }
 
 // ── Workload 8 — mixed-blob admission ────────────────────────────────────────
@@ -536,7 +535,9 @@ fn w9_shard_insert_remove_slot_index(c: &mut Criterion) {
                         let cache = make_cache_l1_only_with_shards(l1_bytes, 1);
                         let t = Instant::now();
                         for key in &keys {
-                            cache.put(NS, key.clone(), BlobCachePut::new(p.clone())).unwrap();
+                            cache
+                                .put(NS, key.clone(), BlobCachePut::new(p.clone()))
+                                .unwrap();
                         }
                         for key in &keys {
                             black_box(cache.invalidate_key(NS, key));
