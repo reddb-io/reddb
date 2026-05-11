@@ -1,8 +1,8 @@
-# Result-cache L2 warm restart contract
+# Result-cache L2 warm restart contract [AFK]
 
 GitHub: local follow-up from reddb-io/reddb#339 / #147
 
-Labels: needs-triage
+Labels: enhancement, ready-for-agent
 
 GitHub issue number: #348
 

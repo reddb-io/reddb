@@ -1,8 +1,8 @@
-# Blob Cache Redis baseline completion
+# Blob Cache Redis baseline completion [AFK]
 
 GitHub: local follow-up from reddb-io/reddb#339 / #149
 
-Labels: needs-triage
+Labels: enhancement, ready-for-agent
 
 GitHub issue number: #349
 

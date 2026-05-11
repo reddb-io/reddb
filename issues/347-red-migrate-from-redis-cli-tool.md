@@ -1,8 +1,8 @@
-# red migrate-from-redis CLI tool
+# red migrate-from-redis CLI tool [AFK]
 
 GitHub: local follow-up from reddb-io/reddb#340
 
-Labels: needs-triage
+Labels: enhancement, ready-for-agent
 
 GitHub issue number: #347
 
