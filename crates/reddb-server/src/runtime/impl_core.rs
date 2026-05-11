@@ -4253,13 +4253,10 @@ impl RedDBRuntime {
         let mode = prepared.mode;
         let expr = prepared.expr;
 
-        self.validate_model_operations_before_auth(&expr)?;
-        frame.check_query_privilege(self, &expr)?;
-
         let statement = query_expr_name(&expr);
         let result_cache_scopes = query_expr_result_cache_scopes(&expr);
 
-        let _lock_guard = frame.acquire_intent_locks(self, &expr);
+        let _lock_guard = frame.prepare_dispatch(self, &expr)?;
         let frame_iface: &dyn super::statement_frame::ReadFrame = &frame;
 
         let query_result = match expr {
@@ -5549,7 +5546,10 @@ impl RedDBRuntime {
         Ok(r)
     }
 
-    fn validate_model_operations_before_auth(&self, expr: &QueryExpr) -> RedDBResult<()> {
+    pub(super) fn validate_model_operations_before_auth(
+        &self,
+        expr: &QueryExpr,
+    ) -> RedDBResult<()> {
         use crate::catalog::CollectionModel;
         use crate::runtime::ddl::polymorphic_resolver;
         use crate::storage::query::ast::KvCommand;
