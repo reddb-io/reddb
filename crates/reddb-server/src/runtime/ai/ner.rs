@@ -301,13 +301,9 @@ impl LlmNer {
     // ship it, parse + sanitize the JSON body. Any provider-specific
     // shaping lives in `build_prompt` / `extract_payload`.
     //
-    // NB: `reqwest` is in the workspace via `reddb-client` but NOT yet
-    // a direct dep of `reddb-server`. Adding it is one of the flagged
-    // orchestrator-batch edits; until then these paths fail to compile
-    // when the network code is reached. To keep the file
-    // self-contained and reviewable today, the network bodies are
-    // gated behind `cfg(feature = "ai-ner-network")` — a feature that
-    // will be wired by the same orchestrator batch that adds the dep.
+    // Network bodies stay behind `ai-ner-network` so the default
+    // server build does not pull an HTTP client unless explicitly
+    // requested.
 
     #[cfg(feature = "ai-ner-network")]
     async fn run_openai_compat(
@@ -317,12 +313,12 @@ impl LlmNer {
         question: &str,
         scope: &EffectiveScope,
     ) -> Result<TokenSet, NerError> {
-        let body = crate_json::json!({
+        let body = crate::json!({
             "model": model,
-            "response_format": { "type": "json_object" },
-            "messages": [
-                { "role": "system", "content": NER_SYSTEM_PROMPT },
-                { "role": "user", "content": build_prompt(question, scope) },
+            "response_format": crate::json!({ "type": "json_object" }),
+            "messages": vec![
+                crate::json!({ "role": "system", "content": NER_SYSTEM_PROMPT }),
+                crate::json!({ "role": "user", "content": build_prompt(question, scope) }),
             ],
         });
         let raw = http_post_json(endpoint, &body, self.timeout_ms).await?;
@@ -338,8 +334,7 @@ impl LlmNer {
         _question: &str,
         _scope: &EffectiveScope,
     ) -> Result<TokenSet, NerError> {
-        // Until the orchestrator wires the `ai-ner-network` feature
-        // (and the `reqwest` dep), report a NetworkTimeout so the
+        // Without the network feature, report a NetworkTimeout so the
         // fallback policy still exercises end-to-end.
         Err(NerError::NetworkTimeout)
     }
@@ -352,12 +347,12 @@ impl LlmNer {
         question: &str,
         scope: &EffectiveScope,
     ) -> Result<TokenSet, NerError> {
-        let body = crate_json::json!({
+        let body = crate::json!({
             "model": model,
             "max_tokens": 1024,
             "system": NER_SYSTEM_PROMPT,
-            "messages": [
-                { "role": "user", "content": build_prompt(question, scope) },
+            "messages": vec![
+                crate::json!({ "role": "user", "content": build_prompt(question, scope) }),
             ],
         });
         let raw = http_post_json(endpoint, &body, self.timeout_ms).await?;
@@ -415,15 +410,21 @@ async fn http_post_json(
         .map_err(|e| NerError::ResponseMalformed {
             reason: format!("client build: {e}"),
         })?;
-    let resp = client.post(endpoint).json(body).send().await.map_err(|e| {
-        if e.is_timeout() {
-            NerError::NetworkTimeout
-        } else {
-            NerError::ResponseMalformed {
-                reason: format!("transport: {e}"),
+    let resp = client
+        .post(endpoint)
+        .header("content-type", "application/json")
+        .body(body.to_string_compact())
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                NerError::NetworkTimeout
+            } else {
+                NerError::ResponseMalformed {
+                    reason: format!("transport: {e}"),
+                }
             }
-        }
-    })?;
+        })?;
     let status = resp.status().as_u16();
     let text = resp.text().await.map_err(|e| NerError::ResponseMalformed {
         reason: format!("body read: {e}"),
@@ -442,8 +443,10 @@ fn extract_openai_payload(raw: &str) -> Result<String, NerError> {
     let v: JsonValue = crate_json::from_str(raw).map_err(|e| NerError::ResponseMalformed {
         reason: format!("outer json: {e}"),
     })?;
-    v["choices"][0]["message"]["content"]
-        .as_str()
+    v["choices"]
+        .as_array()
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice["message"]["content"].as_str())
         .map(str::to_owned)
         .ok_or_else(|| NerError::ResponseMalformed {
             reason: "missing choices[0].message.content".into(),
@@ -455,8 +458,10 @@ fn extract_anthropic_payload(raw: &str) -> Result<String, NerError> {
     let v: JsonValue = crate_json::from_str(raw).map_err(|e| NerError::ResponseMalformed {
         reason: format!("outer json: {e}"),
     })?;
-    v["content"][0]["text"]
-        .as_str()
+    v["content"]
+        .as_array()
+        .and_then(|content| content.first())
+        .and_then(|item| item["text"].as_str())
         .map(str::to_owned)
         .ok_or_else(|| NerError::ResponseMalformed {
             reason: "missing content[0].text".into(),

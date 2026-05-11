@@ -46,6 +46,8 @@ crates/reddb-server/src/utils/json.rs:to_json_string
 # tracked. (issue #179, follow-up #176)
 # ---------------------------------------------------------------------
 crates/reddb-server/src/ai.rs:\.header\("Authorization"
+crates/reddb-server/src/ai.rs:\.header\("authorization" # outbound AI Authorization header, lowercase form (issue #179, follow-up #176)
+crates/reddb-server/src/runtime/ai/batch_client.rs:\.header\("authorization" # outbound AI batch Authorization header (issue #179, follow-up #176)
 crates/reddb-client/src/connector/http.rs:\.header\("authorization"
 crates/reddb-client/src/http.rs:HeaderValue::from_str
 
