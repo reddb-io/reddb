@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use super::impl_core::{
     collections_referenced, current_auth_identity, current_connection_id, current_tenant,
-    intent_lock_modes_for, peek_top_level_as_of_with_table, query_has_volatile_builtin,
-    ConfigSnapshotGuard, CurrentSnapshotGuard, SecretStoreGuard, SnapshotContext,
-    TxLocalTenantGuard,
+    has_with_prefix, intent_lock_modes_for, peek_top_level_as_of_with_table,
+    query_has_volatile_builtin, ConfigSnapshotGuard, CurrentSnapshotGuard, SecretStoreGuard,
+    SnapshotContext, TxLocalTenantGuard,
 };
 use super::{RedDBRuntime, RuntimeQueryResult, RuntimeResultCacheEntry};
 use crate::api::{RedDBError, RedDBResult};
@@ -388,6 +388,31 @@ impl StatementExecutionFrame {
                 },
             );
         }
+    }
+
+    pub(super) fn prepare_cte(&self, query: &str) -> RedDBResult<Option<QueryExpr>> {
+        // Detected via cheap prefix check so non-CTE queries skip the
+        // full parse here. CTE-bearing queries bypass the plan cache
+        // and result cache (rare workload — perf optimization is a
+        // follow-up). Inlining substitutes every CTE reference with
+        // its body as a subquery in FROM, after which the existing
+        // subquery-in-FROM machinery handles execution. Recursive
+        // CTEs are rejected explicitly until fixpoint execution wires
+        // through the runtime.
+        if !has_with_prefix(query) {
+            return Ok(None);
+        }
+        let parsed = crate::storage::query::parser::parse(query)
+            .map_err(|err| RedDBError::Query(err.to_string()))?;
+        if parsed.with_clause.is_some() {
+            let rewritten = crate::storage::query::executors::inline_ctes(parsed)
+                .map_err(|err| RedDBError::Query(err.to_string()))?;
+            return Ok(Some(rewritten));
+        }
+        // No WITH after parse (the prefix matched something else like
+        // `WITHIN` that already routed elsewhere) — fall through to
+        // the normal path with the original query.
+        Ok(None)
     }
 
     pub(super) fn prepare_statement(
