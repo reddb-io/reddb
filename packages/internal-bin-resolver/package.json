@@ -1,7 +1,7 @@
 {
   "name": "@reddb-io/internal-bin-resolver",
-  "version": "0.0.0",
-  "private": true,
+  "version": "1.0.0",
+  "private": false,
   "description": "Workspace-only deep module: locate a pinned binary inside a node_modules package, env override > local. PATH is never consulted.",
   "type": "module",
   "main": "src/index.js",

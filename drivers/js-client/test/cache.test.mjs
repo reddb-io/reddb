@@ -32,7 +32,7 @@ async function startMockServer(handlers) {
       try {
         const parsed = body ? JSON.parse(body) : {}
         const out = await handler(parsed, req)
-        res.statusCode = out?.status ?? 200
+        res.statusCode = out?.statusCode ?? 200
         res.setHeader('content-type', 'application/json')
         res.end(JSON.stringify(out?.body ?? out))
       } catch (err) {

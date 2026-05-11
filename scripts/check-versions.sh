@@ -34,6 +34,9 @@ check "crates/reddb-client-connector"  "$(grep -m1 '^version' crates/reddb-clien
 check "drivers/python"      "$(grep -m1 '^version'  drivers/python/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 check "drivers/python (py)" "$(grep -m1 '^version' drivers/python/pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 check "drivers/js (@reddb-io/sdk)"  "$(grep -m1 '"version"' drivers/js/package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"
+check "packages/internal-asset-fetcher" "$(grep -m1 '"version"' packages/internal-asset-fetcher/package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"
+check "packages/internal-bin-resolver"  "$(grep -m1 '"version"' packages/internal-bin-resolver/package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"
+check "packages/internal-version-compare" "$(grep -m1 '"version"' packages/internal-version-compare/package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"
 # drivers/js-client is being introduced by Lane T (#136) in parallel.
 # Skip gracefully if the manifest isn't on this branch yet — the line
 # becomes load-bearing once both lanes merge.
@@ -43,6 +46,8 @@ else
   echo "  · drivers/js-client (@reddb-io/client) — not present yet, skipping (Lane T #136)"
 fi
 check "@reddb-io/cli"               "$(grep -m1 '"version"' package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"
+
+node scripts/check-registry-names.mjs
 
 # Independent versions (informational only)
 echo

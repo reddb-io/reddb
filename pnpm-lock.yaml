@@ -9,22 +9,25 @@ importers:
   .:
     dependencies:
       '@reddb-io/internal-asset-fetcher':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:packages/internal-asset-fetcher
       '@reddb-io/internal-version-compare':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:packages/internal-version-compare
 
   drivers/js:
     dependencies:
       '@reddb-io/internal-asset-fetcher':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../packages/internal-asset-fetcher
+      '@reddb-io/internal-bin-resolver':
+        specifier: workspace:^
+        version: link:../../packages/internal-bin-resolver
 
   drivers/js-client:
     dependencies:
       '@reddb-io/internal-asset-fetcher':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../packages/internal-asset-fetcher
 
   packages/internal-asset-fetcher: {}

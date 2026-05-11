@@ -19,6 +19,70 @@ sit outside `.github/workflows/release.yml`.
    `.github/workflows/release.yml`, which runs the `publish-js-cli`,
    `publish-js-driver`, `publish-js-client`, and crates.io publish jobs.
 
+## Registry ownership and package names
+
+RedDB publishes under two registry conventions:
+
+- npm packages use the `@reddb-io/*` organization scope.
+- crates.io packages use the `reddb` / `reddb-*` prefix because crates.io
+  does not support npm-style organization scopes.
+
+Run this local invariant before changing release or driver manifests:
+
+```bash
+node scripts/check-registry-names.mjs
+```
+
+### npm
+
+The canonical public npm packages are:
+
+- `@reddb-io/cli`
+- `@reddb-io/sdk`
+- `@reddb-io/client`
+- `@reddb-io/client-bun`
+
+Support helper packages publish under `@reddb-io/internal-*`. They are
+not user-facing APIs, but they must be public because the CLI/SDK/client
+packages depend on them at install time.
+
+Publishing requires an npm token that can publish to the `reddb-io` org.
+If local checks return `E401`, refresh the token with:
+
+```bash
+npm login
+npm whoami
+npm org ls reddb-io
+```
+
+### crates.io
+
+crates.io organization ownership is represented through a GitHub team owner,
+not through a registry namespace. The canonical team owner is:
+
+```text
+github:reddb-io:crates-owners
+```
+
+The GitHub team must exist in the `reddb-io` org, and crates.io must be
+allowed to read GitHub org membership. The operator account needs to
+reauthenticate on crates.io with GitHub `read:org` when team-owner commands
+fail with an org/team permission error.
+
+Apply the team owner to all existing crates:
+
+```bash
+bash scripts/configure-crates-owners.sh
+```
+
+Crates that do not exist yet will be reported as pending. Add the same team
+immediately after their first publish:
+
+```bash
+cargo owner --add github:reddb-io:crates-owners reddb-client
+cargo owner --add github:reddb-io:crates-owners reddb-wire
+```
+
 ## Deprecating legacy npm packages
 
 Some packages were published under names that pre-date the `@reddb-io/*`

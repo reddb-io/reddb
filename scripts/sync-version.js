@@ -24,6 +24,7 @@
  *   - crates/reddb-client-connector/Cargo.toml (workspace internal)
  *   - drivers/js/package.json         (@reddb-io/sdk npm)
  *   - drivers/js-client/package.json  (@reddb-io/client npm — optional, Lane T #136)
+ *   - packages/internal-*.package.json (@reddb-io/internal-* npm support packages)
  *   - drivers/python/Cargo.toml       (reddb-python internal name)
  *   - drivers/python/Cargo.lock       (regenerated)
  *   - drivers/python/pyproject.toml   (reddb PyPI)
@@ -88,6 +89,21 @@ const targets = [
   {
     label: 'drivers/js/package.json',
     file: path.join(root, 'drivers', 'js', 'package.json'),
+    type: 'package-json',
+  },
+  {
+    label: 'packages/internal-asset-fetcher/package.json',
+    file: path.join(root, 'packages', 'internal-asset-fetcher', 'package.json'),
+    type: 'package-json',
+  },
+  {
+    label: 'packages/internal-bin-resolver/package.json',
+    file: path.join(root, 'packages', 'internal-bin-resolver', 'package.json'),
+    type: 'package-json',
+  },
+  {
+    label: 'packages/internal-version-compare/package.json',
+    file: path.join(root, 'packages', 'internal-version-compare', 'package.json'),
     type: 'package-json',
   },
   {
@@ -174,6 +190,9 @@ const stageList = [
   'crates/reddb-client/Cargo.toml',
   'crates/reddb-client-connector/Cargo.toml',
   'drivers/js/package.json',
+  'packages/internal-asset-fetcher/package.json',
+  'packages/internal-bin-resolver/package.json',
+  'packages/internal-version-compare/package.json',
   // drivers/js-client/package.json comes from Lane T (#136); the
   // .filter() below drops it from the stage list when absent.
   'drivers/js-client/package.json',
@@ -217,6 +236,12 @@ function apply(target) {
     const json = JSON.parse(original)
     before = json.version ?? null
     json.version = version
+    for (const field of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
+      if (!json[field]) continue
+      for (const name of Object.keys(json[field])) {
+        if (name.startsWith('@reddb-io/internal-')) json[field][name] = 'workspace:^'
+      }
+    }
     updated = JSON.stringify(json, null, 2) + '\n'
   } else if (target.type === 'pyproject-toml') {
     const match = original.match(/^version = "(.+?)"/m)

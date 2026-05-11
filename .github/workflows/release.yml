@@ -283,7 +283,8 @@ jobs:
             **npm / pnpm:**
             ```bash
             pnpm add @reddb-io/cli    # CLI launcher (`red` binary wrapper)
-            pnpm add reddb        # Node/TS driver package (native protocol + spawn)
+            pnpm add @reddb-io/sdk    # Node/TS driver package (native protocol + spawn)
+            pnpm add @reddb-io/client # Thin remote-only client
             ```
 
             **Binaries (Linux x86_64):**
@@ -309,7 +310,7 @@ jobs:
 
   publish-npm:
     name: Publish CLI npm package
-    needs: [plan, publish-github]
+    needs: [plan, publish-github, publish-js-internals]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     if: needs.plan.outputs.should_skip != 'true'
     steps:
@@ -318,6 +319,8 @@ jobs:
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
+      - name: Enable pnpm
+        run: corepack enable
       - name: Set version
         run: |
           node -e "
@@ -330,7 +333,47 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           TAG=$([[ "${{ needs.plan.outputs.release_channel }}" == "next" ]] && echo "next" || echo "latest")
-          npm publish --tag "${TAG}" --access public
+          pnpm publish --tag "${TAG}" --access public --no-git-checks
+
+  publish-js-internals:
+    name: Publish @reddb-io/internal-* support packages (npm)
+    needs: [plan]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: needs.plan.outputs.should_skip != 'true'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Sync versions
+        run: |
+          VERSION="${{ needs.plan.outputs.package_version }}"
+          for dir in packages/internal-asset-fetcher packages/internal-bin-resolver packages/internal-version-compare; do
+            node -e "
+              const fs = require('fs');
+              const file = '${dir}/package.json';
+              const pkg = JSON.parse(fs.readFileSync(file, 'utf8'));
+              pkg.version = '${VERSION}';
+              pkg.private = false;
+              fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + '\n');
+            "
+          done
+      - name: Verify packs
+        run: |
+          for dir in packages/internal-asset-fetcher packages/internal-bin-resolver packages/internal-version-compare; do
+            (cd "$dir" && pnpm pack --dry-run)
+          done
+      - name: Publish support packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          TAG=$([[ "${{ needs.plan.outputs.release_channel }}" == "next" ]] && echo "next" || echo "latest")
+          for dir in packages/internal-asset-fetcher packages/internal-bin-resolver packages/internal-version-compare; do
+            (cd "$dir" && pnpm publish --tag "${TAG}" --access public --no-git-checks)
+          done
 
   publish-cargo:
     name: Publish to crates.io
@@ -434,7 +477,7 @@ jobs:
 
   publish-js-driver:
     name: Publish @reddb-io/sdk (npm)
-    needs: [plan, publish-github]
+    needs: [plan, publish-github, publish-js-internals]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     if: needs.plan.outputs.should_skip != 'true'
     steps:
@@ -443,6 +486,8 @@ jobs:
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
+      - name: Enable pnpm
+        run: corepack enable
       - name: Sync version
         working-directory: drivers/js
         run: |
@@ -454,7 +499,7 @@ jobs:
           cat package.json | grep '"version"'
       - name: Verify pack
         working-directory: drivers/js
-        run: npm pack --dry-run
+        run: pnpm pack --dry-run
       - name: Publish
         working-directory: drivers/js
         env:
@@ -468,11 +513,11 @@ jobs:
           # why every prior run silently 404'd.
           # The postinstall script pulls the matching `red` binary from
           # the GitHub Release that `publish-github` just created.
-          npm publish --tag "${TAG}" --access public
+          pnpm publish --tag "${TAG}" --access public --no-git-checks
 
   publish-js-client:
     name: Publish @reddb-io/client (npm)
-    needs: [plan, publish-github]
+    needs: [plan, publish-github, publish-js-internals]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     if: needs.plan.outputs.should_skip != 'true'
     steps:
@@ -481,6 +526,8 @@ jobs:
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
+      - name: Enable pnpm
+        run: corepack enable
       - name: Sync version
         working-directory: drivers/js-client
         run: |
@@ -496,7 +543,7 @@ jobs:
         # squatted on the registry). Catches missing files, bad paths,
         # or postinstall script issues before we hit the publish step.
         working-directory: drivers/js-client
-        run: npm pack --dry-run
+        run: pnpm pack --dry-run
       - name: Publish
         working-directory: drivers/js-client
         env:
@@ -507,7 +554,7 @@ jobs:
           # package — npm defaults scoped packages to private and rejects
           # the publish with a 402/404 otherwise. See publish-js-driver
           # for the full retro from #128.
-          npm publish --tag "${TAG}" --access public
+          pnpm publish --tag "${TAG}" --access public --no-git-checks
 
   publish-docker:
     name: Docker image (GHCR + Docker Hub)

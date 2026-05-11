@@ -26,7 +26,8 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@reddb-io/internal-asset-fetcher": "workspace:*"
+    "@reddb-io/internal-asset-fetcher": "workspace:^",
+    "@reddb-io/internal-bin-resolver": "workspace:^"
   },
   "keywords": [
     "reddb",

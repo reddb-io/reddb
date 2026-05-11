@@ -1,7 +1,7 @@
 {
   "name": "@reddb-io/internal-asset-fetcher",
-  "version": "0.0.0",
-  "private": true,
+  "version": "1.0.0",
+  "private": false,
   "description": "Workspace-only deep module: download a `red`/`red_client` binary from a GitHub release with platform/arch resolution, redirect handling, and optional sha256 verification.",
   "type": "module",
   "main": "src/index.js",
