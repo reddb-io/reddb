@@ -1,0 +1,324 @@
+   Compiling tokio-stream v0.1.18
+   Compiling reddb-grpc-proto v1.0.0 (/home/cyber/Work/reddb.io/reddb/crates/reddb-grpc-proto)
+   Compiling reddb-wire v1.0.0 (/home/cyber/Work/reddb.io/reddb/crates/reddb-wire)
+   Compiling blake3 v1.8.5
+   Compiling arrayvec v0.7.6
+   Compiling constant_time_eq v0.4.2
+   Compiling arrayref v0.3.9
+   Compiling tonic v0.14.5
+   Compiling tonic-prost v0.14.5
+   Compiling reddb-client-connector v1.0.0 (/home/cyber/Work/reddb.io/reddb/crates/reddb-client-connector)
+   Compiling reddb-server v1.0.0 (/home/cyber/Work/reddb.io/reddb/crates/reddb-server)
+warning: unexpected `cfg` condition value: `ai-ner-network`
+   --> crates/reddb-server/src/runtime/ai/ner.rs:406:7
+    |
+406 | #[cfg(feature = "ai-ner-network")]
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `backend-d1`, `backend-s3`, `backend-turso`, `default`, and `otel`
+    = help: consider adding `ai-ner-network` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+    = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unexpected `cfg` condition value: `ai-ner-network`
+   --> crates/reddb-server/src/runtime/ai/ner.rs:440:7
+    |
+440 | #[cfg(feature = "ai-ner-network")]
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `backend-d1`, `backend-s3`, `backend-turso`, `default`, and `otel`
+    = help: consider adding `ai-ner-network` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `ai-ner-network`
+   --> crates/reddb-server/src/runtime/ai/ner.rs:453:7
+    |
+453 | #[cfg(feature = "ai-ner-network")]
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `backend-d1`, `backend-s3`, `backend-turso`, `default`, and `otel`
+    = help: consider adding `ai-ner-network` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `ai-ner-network`
+   --> crates/reddb-server/src/runtime/ai/ner.rs:312:11
+    |
+312 |     #[cfg(feature = "ai-ner-network")]
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `backend-d1`, `backend-s3`, `backend-turso`, `default`, and `otel`
+    = help: consider adding `ai-ner-network` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `ai-ner-network`
+   --> crates/reddb-server/src/runtime/ai/ner.rs:333:15
+    |
+333 |     #[cfg(not(feature = "ai-ner-network"))]
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `backend-d1`, `backend-s3`, `backend-turso`, `default`, and `otel`
+    = help: consider adding `ai-ner-network` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `ai-ner-network`
+   --> crates/reddb-server/src/runtime/ai/ner.rs:347:11
+    |
+347 |     #[cfg(feature = "ai-ner-network")]
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `backend-d1`, `backend-s3`, `backend-turso`, `default`, and `otel`
+    = help: consider adding `ai-ner-network` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `ai-ner-network`
+   --> crates/reddb-server/src/runtime/ai/ner.rs:368:15
+    |
+368 |     #[cfg(not(feature = "ai-ner-network"))]
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `backend-d1`, `backend-s3`, `backend-turso`, `default`, and `otel`
+    = help: consider adding `ai-ner-network` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: `reddb-server` (lib) generated 7 warnings
+    Finished `bench` profile [optimized] target(s) in 4m 52s
+     Running benches/blob_cache_bench.rs (/home/cyber/.cache/cargo-target/release/deps/blob_cache_bench-98d83be2052ab60c)
+Gnuplot not found, using plotters backend
+Benchmarking w1-hot-l1-hit/BlobCache-L1
+Benchmarking w1-hot-l1-hit/BlobCache-L1: Warming up for 3.0000 s
+Benchmarking w1-hot-l1-hit/BlobCache-L1: Collecting 100 samples in estimated 5.0003 s (15M iterations)
+Benchmarking w1-hot-l1-hit/BlobCache-L1: Analyzing
+w1-hot-l1-hit/BlobCache-L1
+                        time:   [319.41 ns 320.27 ns 321.21 ns]
+                        thrpt:  [3.1132 Melem/s 3.1224 Melem/s 3.1307 Melem/s]
+Found 4 outliers among 100 measurements (4.00%)
+  3 (3.00%) high mild
+  1 (1.00%) high severe
+Benchmarking w1-hot-l1-hit/ResultCache
+Benchmarking w1-hot-l1-hit/ResultCache: Warming up for 3.0000 s
+Benchmarking w1-hot-l1-hit/ResultCache: Collecting 100 samples in estimated 5.0002 s (16M iterations)
+Benchmarking w1-hot-l1-hit/ResultCache: Analyzing
+w1-hot-l1-hit/ResultCache
+                        time:   [295.21 ns 299.86 ns 304.84 ns]
+                        thrpt:  [3.2804 Melem/s 3.3349 Melem/s 3.3874 Melem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  5 (5.00%) high mild
+  3 (3.00%) high severe
+Benchmarking w1-hot-l1-hit/Redis-no-persist-GET
+Benchmarking w1-hot-l1-hit/Redis-no-persist-GET: Warming up for 3.0000 s
+Benchmarking w1-hot-l1-hit/Redis-no-persist-GET: Collecting 100 samples in estimated 5.9411 s (30k iterations)
+Benchmarking w1-hot-l1-hit/Redis-no-persist-GET: Analyzing
+w1-hot-l1-hit/Redis-no-persist-GET
+                        time:   [141.12 µs 143.80 µs 147.42 µs]
+                        thrpt:  [6.7834 Kelem/s 6.9543 Kelem/s 7.0860 Kelem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Benchmarking w1-hot-l1-hit/Redis-no-persist-MGET-32
+Benchmarking w1-hot-l1-hit/Redis-no-persist-MGET-32: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.4s, enable flat sampling, or reduce sample count to 60.
+Benchmarking w1-hot-l1-hit/Redis-no-persist-MGET-32: Collecting 100 samples in estimated 6.4053 s (5050 iterations)
+Benchmarking w1-hot-l1-hit/Redis-no-persist-MGET-32: Analyzing
+w1-hot-l1-hit/Redis-no-persist-MGET-32
+                        time:   [1.1762 ms 1.1916 ms 1.2069 ms]
+                        thrpt:  [26.514 Kelem/s 26.855 Kelem/s 27.207 Kelem/s]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking w1-hot-l1-hit/Redis-aof-everysec-GET
+Benchmarking w1-hot-l1-hit/Redis-aof-everysec-GET: Warming up for 3.0000 s
+Benchmarking w1-hot-l1-hit/Redis-aof-everysec-GET: Collecting 100 samples in estimated 5.0502 s (30k iterations)
+Benchmarking w1-hot-l1-hit/Redis-aof-everysec-GET: Analyzing
+w1-hot-l1-hit/Redis-aof-everysec-GET
+                        time:   [152.58 µs 160.68 µs 171.67 µs]
+                        thrpt:  [5.8251 Kelem/s 6.2236 Kelem/s 6.5538 Kelem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  5 (5.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking w2-cold-l2-miss/BlobCache-L2-hit
+Benchmarking w2-cold-l2-miss/BlobCache-L2-hit: Warming up for 3.0000 s
+Benchmarking w2-cold-l2-miss/BlobCache-L2-hit: Collecting 50 samples in estimated 5.0084 s (98k iterations)
+Benchmarking w2-cold-l2-miss/BlobCache-L2-hit: Analyzing
+w2-cold-l2-miss/BlobCache-L2-hit
+                        time:   [50.033 µs 50.461 µs 51.009 µs]
+                        thrpt:  [19.604 Kelem/s 19.817 Kelem/s 19.987 Kelem/s]
+Found 2 outliers among 50 measurements (4.00%)
+  2 (4.00%) high mild
+Benchmarking w2-cold-l2-miss/Redis-aof-everysec-GET
+Benchmarking w2-cold-l2-miss/Redis-aof-everysec-GET: Warming up for 3.0000 s
+Benchmarking w2-cold-l2-miss/Redis-aof-everysec-GET: Collecting 50 samples in estimated 5.0995 s (22k iterations)
+Benchmarking w2-cold-l2-miss/Redis-aof-everysec-GET: Analyzing
+w2-cold-l2-miss/Redis-aof-everysec-GET
+                        time:   [172.47 µs 187.14 µs 202.40 µs]
+                        thrpt:  [4.9408 Kelem/s 5.3435 Kelem/s 5.7980 Kelem/s]
+
+Benchmarking w3-cold-absent/BlobCache-synopsis-miss
+Benchmarking w3-cold-absent/BlobCache-synopsis-miss: Warming up for 3.0000 s
+Benchmarking w3-cold-absent/BlobCache-synopsis-miss: Collecting 100 samples in estimated 5.0007 s (12M iterations)
+Benchmarking w3-cold-absent/BlobCache-synopsis-miss: Analyzing
+w3-cold-absent/BlobCache-synopsis-miss
+                        time:   [374.88 ns 377.52 ns 380.77 ns]
+                        thrpt:  [2.6263 Melem/s 2.6489 Melem/s 2.6675 Melem/s]
+Found 13 outliers among 100 measurements (13.00%)
+  1 (1.00%) low mild
+  6 (6.00%) high mild
+  6 (6.00%) high severe
+Benchmarking w3-cold-absent/ResultCache-miss
+Benchmarking w3-cold-absent/ResultCache-miss: Warming up for 3.0000 s
+Benchmarking w3-cold-absent/ResultCache-miss: Collecting 100 samples in estimated 5.0008 s (27M iterations)
+Benchmarking w3-cold-absent/ResultCache-miss: Analyzing
+w3-cold-absent/ResultCache-miss
+                        time:   [159.00 ns 161.15 ns 163.79 ns]
+                        thrpt:  [6.1056 Melem/s 6.2053 Melem/s 6.2894 Melem/s]
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild
+Benchmarking w3-cold-absent/Redis-no-persist-miss
+Benchmarking w3-cold-absent/Redis-no-persist-miss: Warming up for 3.0000 s
+Benchmarking w3-cold-absent/Redis-no-persist-miss: Collecting 100 samples in estimated 5.0829 s (25k iterations)
+Benchmarking w3-cold-absent/Redis-no-persist-miss: Analyzing
+w3-cold-absent/Redis-no-persist-miss
+                        time:   [146.08 µs 148.97 µs 152.59 µs]
+                        thrpt:  [6.5533 Kelem/s 6.7129 Kelem/s 6.8454 Kelem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  7 (7.00%) high mild
+  1 (1.00%) high severe
+
+
+[w3 stats] synopsis skip-rate: 100.0% (l2_negative_skips=20377307, total_misses=20377307)
+Benchmarking w4-large-blob-l2-hit/BlobCache-L2-hit-5MiB
+Benchmarking w4-large-blob-l2-hit/BlobCache-L2-hit-5MiB: Warming up for 3.0000 s
+Benchmarking w4-large-blob-l2-hit/BlobCache-L2-hit-5MiB: Collecting 20 samples in estimated 10.626 s (420 iterations)
+Benchmarking w4-large-blob-l2-hit/BlobCache-L2-hit-5MiB: Analyzing
+w4-large-blob-l2-hit/BlobCache-L2-hit-5MiB
+                        time:   [23.906 ms 24.217 ms 24.681 ms]
+                        thrpt:  [202.59 MiB/s 206.47 MiB/s 209.15 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking w4-large-blob-l2-hit/Redis-no-persist-GET-5MiB
+Benchmarking w4-large-blob-l2-hit/Redis-no-persist-GET-5MiB: Warming up for 3.0000 s
+Benchmarking w4-large-blob-l2-hit/Redis-no-persist-GET-5MiB: Collecting 20 samples in estimated 10.149 s (2310 iterations)
+Benchmarking w4-large-blob-l2-hit/Redis-no-persist-GET-5MiB: Analyzing
+w4-large-blob-l2-hit/Redis-no-persist-GET-5MiB
+                        time:   [3.0352 ms 3.3099 ms 3.7685 ms]
+                        thrpt:  [1.2957 GiB/s 1.4752 GiB/s 1.6087 GiB/s]
+Benchmarking w4-large-blob-l2-hit/Redis-aof-everysec-GET-5MiB
+Benchmarking w4-large-blob-l2-hit/Redis-aof-everysec-GET-5MiB: Warming up for 3.0000 s
+Benchmarking w4-large-blob-l2-hit/Redis-aof-everysec-GET-5MiB: Collecting 20 samples in estimated 10.308 s (2940 iterations)
+Benchmarking w4-large-blob-l2-hit/Redis-aof-everysec-GET-5MiB: Analyzing
+w4-large-blob-l2-hit/Redis-aof-everysec-GET-5MiB
+                        time:   [3.4462 ms 4.2166 ms 5.4122 ms]
+                        thrpt:  [923.84 MiB/s 1.1580 GiB/s 1.4169 GiB/s]
+
+Benchmarking w5-namespace-flush/BlobCache-generation-bump
+Benchmarking w5-namespace-flush/BlobCache-generation-bump: Warming up for 3.0000 s
+Benchmarking w5-namespace-flush/BlobCache-generation-bump: Collecting 50 samples in estimated 5.3321 s (5100 iterations)
+Benchmarking w5-namespace-flush/BlobCache-generation-bump: Analyzing
+w5-namespace-flush/BlobCache-generation-bump
+                        time:   [170.95 ns 177.10 ns 186.40 ns]
+Found 6 outliers among 50 measurements (12.00%)
+  5 (10.00%) high mild
+  1 (2.00%) high severe
+Benchmarking w5-namespace-flush/Redis-no-persist-FLUSHDB
+Benchmarking w5-namespace-flush/Redis-no-persist-FLUSHDB: Warming up for 3.0000 s
+
+Warning: Unable to complete 50 samples in 5.0s. You may wish to increase target time to 8.1s, or reduce sample count to 30.
+Benchmarking w5-namespace-flush/Redis-no-persist-FLUSHDB: Collecting 50 samples in estimated 8.1384 s (50 iterations)
+Benchmarking w5-namespace-flush/Redis-no-persist-FLUSHDB: Analyzing
+w5-namespace-flush/Redis-no-persist-FLUSHDB
+                        time:   [1.0485 ms 1.0801 ms 1.1148 ms]
+Found 3 outliers among 50 measurements (6.00%)
+  2 (4.00%) high mild
+  1 (2.00%) high severe
+Benchmarking w5-namespace-flush/Redis-no-persist-SCAN-DEL-prefix
+Benchmarking w5-namespace-flush/Redis-no-persist-SCAN-DEL-prefix: Warming up for 3.0000 s
+
+Warning: Unable to complete 50 samples in 5.0s. You may wish to increase target time to 14.4s, or reduce sample count to 10.
+Benchmarking w5-namespace-flush/Redis-no-persist-SCAN-DEL-prefix: Collecting 50 samples in estimated 14.394 s (50 iterations)
+Benchmarking w5-namespace-flush/Redis-no-persist-SCAN-DEL-prefix: Analyzing
+w5-namespace-flush/Redis-no-persist-SCAN-DEL-prefix
+                        time:   [115.77 ms 117.50 ms 119.24 ms]
+
+Benchmarking w6-dependency-invalidation/BlobCache-dep-tag
+Benchmarking w6-dependency-invalidation/BlobCache-dep-tag: Warming up for 3.0000 s
+Benchmarking w6-dependency-invalidation/BlobCache-dep-tag: Collecting 30 samples in estimated 5.2689 s (3255 iterations)
+Benchmarking w6-dependency-invalidation/BlobCache-dep-tag: Analyzing
+w6-dependency-invalidation/BlobCache-dep-tag
+                        time:   [267.46 µs 270.20 µs 272.42 µs]
+Benchmarking w6-dependency-invalidation/ResultCache-invalidate-deps
+Benchmarking w6-dependency-invalidation/ResultCache-invalidate-deps: Warming up for 3.0000 s
+Benchmarking w6-dependency-invalidation/ResultCache-invalidate-deps: Collecting 30 samples in estimated 5.0125 s (4650 iterations)
+Benchmarking w6-dependency-invalidation/ResultCache-invalidate-deps: Analyzing
+w6-dependency-invalidation/ResultCache-invalidate-deps
+                        time:   [57.186 µs 59.288 µs 61.360 µs]
+Found 4 outliers among 30 measurements (13.33%)
+  2 (6.67%) high mild
+  2 (6.67%) high severe
+Benchmarking w6-dependency-invalidation/Redis-no-persist-Lua-tag-set-sweep
+Benchmarking w6-dependency-invalidation/Redis-no-persist-Lua-tag-set-sweep: Warming up for 3.0000 s
+
+Warning: Unable to complete 30 samples in 5.0s. You may wish to increase target time to 6.4s, or reduce sample count to 20.
+Benchmarking w6-dependency-invalidation/Redis-no-persist-Lua-tag-set-sweep: Collecting 30 samples in estimated 6.3565 s (30 iterations)
+Benchmarking w6-dependency-invalidation/Redis-no-persist-Lua-tag-set-sweep: Analyzing
+w6-dependency-invalidation/Redis-no-persist-Lua-tag-set-sweep
+                        time:   [576.65 µs 595.60 µs 618.44 µs]
+Found 2 outliers among 30 measurements (6.67%)
+  1 (3.33%) high mild
+  1 (3.33%) high severe
+
+
+[w6 stats] BlobCache invalidated_count (last iter, 25% of 1000): 250
+Benchmarking w7-restart-warm-cache/BlobCache-reopen-first-hit
+Benchmarking w7-restart-warm-cache/BlobCache-reopen-first-hit: Warming up for 3.0000 s
+Benchmarking w7-restart-warm-cache/BlobCache-reopen-first-hit: Collecting 20 samples in estimated 10.041 s (8820 iterations)
+Benchmarking w7-restart-warm-cache/BlobCache-reopen-first-hit: Analyzing
+w7-restart-warm-cache/BlobCache-reopen-first-hit
+                        time:   [1.1170 ms 1.1240 ms 1.1308 ms]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+
+
+[w7 stats] entries reachable post-restart: 0
+Benchmarking w8-mixed-blob-admission/BlobCache-SIEVE-put-get/WS-0.5xL1
+Benchmarking w8-mixed-blob-admission/BlobCache-SIEVE-put-get/WS-0.5xL1: Warming up for 3.0000 s
+Benchmarking w8-mixed-blob-admission/BlobCache-SIEVE-put-get/WS-0.5xL1: Collecting 20 samples in estimated 5.0000 s (11M iterations)
+Benchmarking w8-mixed-blob-admission/BlobCache-SIEVE-put-get/WS-0.5xL1: Analyzing
+w8-mixed-blob-admission/BlobCache-SIEVE-put-get/WS-0.5xL1
+                        time:   [445.11 ns 455.46 ns 464.71 ns]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking w8-mixed-blob-admission/BlobCache-SIEVE-put-get/WS-1.0xL1
+Benchmarking w8-mixed-blob-admission/BlobCache-SIEVE-put-get/WS-1.0xL1: Warming up for 3.0000 s
+Benchmarking w8-mixed-blob-admission/BlobCache-SIEVE-put-get/WS-1.0xL1: Collecting 20 samples in estimated 5.0001 s (9.3M iterations)
+Benchmarking w8-mixed-blob-admission/BlobCache-SIEVE-put-get/WS-1.0xL1: Analyzing
+w8-mixed-blob-admission/BlobCache-SIEVE-put-get/WS-1.0xL1
+                        time:   [524.70 ns 528.98 ns 535.05 ns]
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking w8-mixed-blob-admission/BlobCache-SIEVE-put-get/WS-2.0xL1
+Benchmarking w8-mixed-blob-admission/BlobCache-SIEVE-put-get/WS-2.0xL1: Warming up for 3.0000 s
+Benchmarking w8-mixed-blob-admission/BlobCache-SIEVE-put-get/WS-2.0xL1: Collecting 20 samples in estimated 5.0001 s (7.0M iterations)
+Benchmarking w8-mixed-blob-admission/BlobCache-SIEVE-put-get/WS-2.0xL1: Analyzing
+w8-mixed-blob-admission/BlobCache-SIEVE-put-get/WS-2.0xL1
+                        time:   [719.54 ns 729.78 ns 746.85 ns]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking w8-mixed-blob-admission/Redis-no-persist-allkeys-lru-WS-2.0xL1
+Benchmarking w8-mixed-blob-admission/Redis-no-persist-allkeys-lru-WS-2.0xL1: Warming up for 3.0000 s
+Benchmarking w8-mixed-blob-admission/Redis-no-persist-allkeys-lru-WS-2.0xL1: Collecting 20 samples in estimated 5.0006 s (41k iterations)
+Benchmarking w8-mixed-blob-admission/Redis-no-persist-allkeys-lru-WS-2.0xL1: Analyzing
+w8-mixed-blob-admission/Redis-no-persist-allkeys-lru-WS-2.0xL1
+                        time:   [122.22 µs 124.59 µs 127.15 µs]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+
+
+[w8 hit-rate stats]
+  SIEVE WS-0.5xL1: hit-rate=100.0% hits=40000 misses=0 evictions=0
+  SIEVE WS-1.0xL1: hit-rate=100.0% hits=40000 misses=0 evictions=0
+  SIEVE WS-2.0xL1: hit-rate=54.2% hits=21669 misses=18331 evictions=10120
+  Redis allkeys-lru WS-2.0xL1: hit-rate=100.0% hits=40000 misses=0 evictions=0

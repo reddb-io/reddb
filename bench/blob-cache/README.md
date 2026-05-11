@@ -15,7 +15,7 @@ against:
 The goal — per issue #149 — is to validate whether Blob Cache
 produces real impact before any public API design lands.
 
-The bench report skeleton lives at
+The bench report lives at
 [`docs/perf/blob-cache-bench-2026-05-06.md`](../../docs/perf/blob-cache-bench-2026-05-06.md).
 The eight scenarios (with full per-scenario parameters) are
 formalised in [`scenarios.md`](scenarios.md). The exact Redis
@@ -23,11 +23,10 @@ docker invocation lives in [`redis-setup.md`](redis-setup.md).
 
 ## Status
 
-**Scaffold only.** This README, the scenarios doc, and the Redis
-setup doc are the contract the bench harness must satisfy. The
-harness itself (Rust crate / criterion targets / make targets)
-is the next slice — see "Follow-up slice" at the bottom of this
-file.
+**Runnable harness.** The Criterion bench target lives at
+`crates/reddb-server/benches/blob_cache_bench.rs`. Redis baseline rows
+run when `REDIS_NO_PERSIST_ADDR` and `REDIS_AOF_ADDR` point at the
+pinned containers from `redis-up.sh`.
 
 ## Layout
 
@@ -35,16 +34,10 @@ file.
 bench/blob-cache/
   README.md         # this file
   scenarios.md      # 8 workloads with parameters
-  redis-setup.md    # pinned redis docker invocation
-```
-
-The follow-up slice will add (proposed names; not yet present):
-
-```
-bench/blob-cache/
-  redis-up.sh       # wraps the docker invocation in redis-setup.md
-  redis-down.sh     # tears down both persistence variants
-  results/          # per-session rollups (session-id discipline)
+  redis-setup.md    # pinned Redis docker invocation
+  redis-up.sh       # starts both Redis variants
+  redis-down.sh     # stops both Redis variants
+  results/          # per-session rollups and raw logs
 ```
 
 ## Methodology — same lock as `make duel-official`
@@ -62,31 +55,31 @@ The Blob Cache suite reuses the methodology lock from issue #154
 - `--release` builds, default workspace features, no fsync tricks
   on the RedDB side beyond what the scenario explicitly pins.
 
-## Running the suite (proposed shape)
-
-> **Note.** Commands below describe the **proposed** harness shape
-> for the follow-up slice. Today, only the scenario specs and the
-> Redis baseline pin are present. Running them now requires
-> implementing the harness first.
+## Running the suite
 
 ```bash
 # 0. From repo root.
-cd bench/blob-cache
+chmod +x bench/blob-cache/redis-up.sh bench/blob-cache/redis-down.sh
 
 # 1. Bring up both pinned Redis baselines.
-./redis-up.sh                 # see redis-setup.md for what this runs
+bench/blob-cache/redis-down.sh --wipe-aof
+bench/blob-cache/redis-up.sh   # see redis-setup.md for what this runs
 
 # 2. Run the full suite.
-make blob-cache-bench         # proposed top-level make target
+mkdir -p bench/blob-cache/results
+REDIS_NO_PERSIST_ADDR=127.0.0.1:6379 \
+REDIS_AOF_ADDR=127.0.0.1:6380 \
+  cargo bench -p reddb-server --bench blob_cache_bench 'w[1-8]' -- --nocapture \
+  2>&1 | tee bench/blob-cache/results/sess-<date>-redis-baseline.raw.log
 
 # 3. Run a single scenario (mirrors `make mini-duel`).
-make blob-cache-bench SCENARIOS=hot-l1-hit RUNS=3
+cargo bench -p reddb-server --bench blob_cache_bench w1-hot-l1-hit -- --nocapture
 
-# 4. Roll up results into the report's TBD cells.
-make blob-cache-stats SESSION=sess-<timestamp>-<pid>
+# 4. Write the rollup next to the raw log and cite it from the report.
+$EDITOR bench/blob-cache/results/sess-<date>-redis-baseline.md
 
 # 5. Tear down the Redis baselines.
-./redis-down.sh
+bench/blob-cache/redis-down.sh
 ```
 
 ## Per-scenario gotchas
@@ -94,12 +87,11 @@ make blob-cache-stats SESSION=sess-<timestamp>-<pid>
 Each scenario has parameters (payload size, op count, working-set
 size relative to L1, prefetch on/off, etc) that are pinned in
 [`scenarios.md`](scenarios.md). When running a single scenario,
-override its params with `make`-style flags rather than editing
-the scenarios doc:
+filter the Criterion target rather than editing the scenarios doc:
 
 ```bash
 # Override op count for a quick smoke run of the large-blob scenario.
-make blob-cache-bench SCENARIOS=large-blob-l2-hit OPS=200 RUNS=3
+cargo bench -p reddb-server --bench blob_cache_bench w4-large-blob-l2-hit -- --nocapture
 ```
 
 Editing `scenarios.md` re-pins the contract for everyone — only
@@ -139,19 +131,9 @@ purpose — when both reports cite the same host and the same
 session-id format, cross-referencing across the two suites stays
 trivial.
 
-## Follow-up slice
+## Current cited session
 
-The implementation slice that finishes this work needs to:
-
-- Add a benchmark crate (or criterion / divan target) that
-  exercises `BlobCache` and `ResultCache`. **Requires editing
-  `Cargo.toml` to register the dev-dep + bench target** —
-  intentionally not done in this scaffold slice.
-- Add the Redis client dep for the baseline harness. **Same
-  Cargo.toml constraint.**
-- Add `redis-up.sh` / `redis-down.sh` matching
-  [`redis-setup.md`](redis-setup.md).
-- Add the `blob-cache-bench` and `blob-cache-stats` targets to
-  the top-level `Makefile`. **Requires editing the existing
-  `Makefile`** — intentionally not done in this scaffold slice.
-- Run the suite and fill in the `TBD` cells in the report.
+The report currently cites
+[`results/sess-2026-05-11-redis-baseline.md`](results/sess-2026-05-11-redis-baseline.md).
+That rollup records the exact command sequence, Redis image digest,
+host metadata, and raw log paths for the filled result tables.

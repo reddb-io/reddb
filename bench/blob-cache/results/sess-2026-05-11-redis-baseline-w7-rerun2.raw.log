@@ -1,0 +1,97 @@
+warning: unexpected `cfg` condition value: `ai-ner-network`
+   --> crates/reddb-server/src/runtime/ai/ner.rs:406:7
+    |
+406 | #[cfg(feature = "ai-ner-network")]
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `backend-d1`, `backend-s3`, `backend-turso`, `default`, and `otel`
+    = help: consider adding `ai-ner-network` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+    = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unexpected `cfg` condition value: `ai-ner-network`
+   --> crates/reddb-server/src/runtime/ai/ner.rs:440:7
+    |
+440 | #[cfg(feature = "ai-ner-network")]
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `backend-d1`, `backend-s3`, `backend-turso`, `default`, and `otel`
+    = help: consider adding `ai-ner-network` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `ai-ner-network`
+   --> crates/reddb-server/src/runtime/ai/ner.rs:453:7
+    |
+453 | #[cfg(feature = "ai-ner-network")]
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `backend-d1`, `backend-s3`, `backend-turso`, `default`, and `otel`
+    = help: consider adding `ai-ner-network` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `ai-ner-network`
+   --> crates/reddb-server/src/runtime/ai/ner.rs:312:11
+    |
+312 |     #[cfg(feature = "ai-ner-network")]
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `backend-d1`, `backend-s3`, `backend-turso`, `default`, and `otel`
+    = help: consider adding `ai-ner-network` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `ai-ner-network`
+   --> crates/reddb-server/src/runtime/ai/ner.rs:333:15
+    |
+333 |     #[cfg(not(feature = "ai-ner-network"))]
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `backend-d1`, `backend-s3`, `backend-turso`, `default`, and `otel`
+    = help: consider adding `ai-ner-network` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `ai-ner-network`
+   --> crates/reddb-server/src/runtime/ai/ner.rs:347:11
+    |
+347 |     #[cfg(feature = "ai-ner-network")]
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `backend-d1`, `backend-s3`, `backend-turso`, `default`, and `otel`
+    = help: consider adding `ai-ner-network` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `ai-ner-network`
+   --> crates/reddb-server/src/runtime/ai/ner.rs:368:15
+    |
+368 |     #[cfg(not(feature = "ai-ner-network"))]
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `backend-d1`, `backend-s3`, `backend-turso`, `default`, and `otel`
+    = help: consider adding `ai-ner-network` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: `reddb-server` (lib) generated 7 warnings
+   Compiling reddb-server v1.0.0 (/home/cyber/Work/reddb.io/reddb/crates/reddb-server)
+    Finished `bench` profile [optimized] target(s) in 2.96s
+     Running benches/blob_cache_bench.rs (/home/cyber/.cache/cargo-target/release/deps/blob_cache_bench-98d83be2052ab60c)
+Gnuplot not found, using plotters backend
+
+[w3 stats] synopsis skip-rate: 0.0% (l2_negative_skips=0, total_misses=0)
+
+[w6 stats] BlobCache invalidated_count (last iter, 25% of 1000): 0
+
+[w7 stats] entries reachable post-restart: 127/128
+Benchmarking w7-restart-warm-cache/BlobCache-reopen-first-hit
+Benchmarking w7-restart-warm-cache/BlobCache-reopen-first-hit: Warming up for 3.0000 s
+Benchmarking w7-restart-warm-cache/BlobCache-reopen-first-hit: Collecting 20 samples in estimated 10.162 s (8820 iterations)
+Benchmarking w7-restart-warm-cache/BlobCache-reopen-first-hit: Analyzing
+w7-restart-warm-cache/BlobCache-reopen-first-hit
+                        time:   [1.1504 ms 1.1602 ms 1.1687 ms]
+                        change: [+2.6606% +4.3593% +6.1499%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+
+[w8 hit-rate stats]
+  SIEVE WS-0.5xL1: hit-rate=100.0% hits=40000 misses=0 evictions=0
+  SIEVE WS-1.0xL1: hit-rate=100.0% hits=40000 misses=0 evictions=0
+  SIEVE WS-2.0xL1: hit-rate=54.2% hits=21669 misses=18331 evictions=10120
+  Redis allkeys-lru WS-2.0xL1: hit-rate=100.0% hits=40000 misses=0 evictions=0

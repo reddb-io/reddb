@@ -41,7 +41,7 @@ test("Blob Cache runtime evidence covers L1, TTL, invalidation, L2, and synopsis
 test("Blob Cache result-cache adapter evidence is separated from missing warm-restart contract", () => {
   const frameTests = read("crates/reddb-server/src/runtime/statement_frame.rs");
   const runtime = read("crates/reddb-server/src/runtime/impl_core.rs");
-  const followUp = read("issues/348-result-cache-l2-warm-restart-contract.md");
+  const followUp = read("issues/done/348-result-cache-l2-warm-restart-contract.md");
 
   assert.match(frameTests, /fn blob_cache_backend_populates_blob_path_without_legacy_write\(\)/);
   assert.match(frameTests, /fn blob_cache_backend_keeps_volatile_select_out_of_blob_path\(\)/);
@@ -50,7 +50,7 @@ test("Blob Cache result-cache adapter evidence is separated from missing warm-re
   assert.match(runtime, /result_cache_fingerprint\(&entry\.result\)\.into_bytes\(\)/);
   assert.match(runtime, /result_blob_entries\.read\(\)/);
 
-  assert.match(followUp, /Current adapter stores only a Blob Cache fingerprint/);
+  assert.match(followUp, /`RuntimeQueryResult` sidecar/);
   assert.match(followUp, /Eligible result-cache entries can be served after runtime restart from Blob Cache L2/);
 });
 
@@ -58,7 +58,7 @@ test("Blob Cache benchmark and API review status is repeatable or explicitly spl
   const bench = read("crates/reddb-server/benches/blob_cache_bench.rs");
   const benchDoc = read("docs/perf/blob-cache-bench-2026-05-06.md");
   const apiReview = read("docs/blob-cache-api-review-2026-05-06.md");
-  const followUp = read("issues/349-blob-cache-redis-baseline-completion.md");
+  const rollup = read("bench/blob-cache/results/sess-2026-05-11-redis-baseline.md");
 
   for (const workload of [
     "w1_hot_l1_hit",
@@ -72,10 +72,17 @@ test("Blob Cache benchmark and API review status is repeatable or explicitly spl
   ]) {
     assert.match(bench, new RegExp(`fn ${workload}\\(`));
   }
-  assert.match(benchDoc, /Cited session id slot: `sess-2026-05-07-bench-1954`/);
+  assert.match(bench, /RedisBenchClient/);
+  assert.match(bench, /REDIS_NO_PERSIST_ADDR/);
+  assert.match(bench, /REDIS_AOF_ADDR/);
+  assert.match(benchDoc, /Cited session id: `sess-2026-05-11-redis-baseline`/);
   assert.match(benchDoc, /Redis 7\.4/);
-  assert.match(benchDoc, /deferred/);
-  assert.match(followUp, /Fill the remaining Redis and hit-rate cells/);
+  assert.doesNotMatch(benchDoc, /\bTBD\b|\bdeferred\b/);
+  assert.match(benchDoc, /SIEVE\s+hit-rate: 54\.2 %/);
+  assert.match(rollup, /Session id: `sess-2026-05-11-redis-baseline`/);
+  assert.match(rollup, /Redis image id:/);
+  assert.match(rollup, /REDIS_NO_PERSIST_ADDR=127\.0\.0\.1:6379/);
+  assert.match(rollup, /REDIS_AOF_ADDR=127\.0\.0\.1:6380/);
 
   assert.match(apiReview, /Public HTTP\/SQL exposure stays deferred/);
   assert.match(apiReview, /internal-only surface/);
