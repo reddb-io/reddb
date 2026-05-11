@@ -510,6 +510,12 @@ impl StatementExecutionFrame {
             }
         };
 
+        // Phase 5 PG parity: substitute any registered view name that
+        // appears in the expression with its stored body. Runs after
+        // parse and before dispatch so the SQL entrypoint gets the
+        // same view resolution `execute_query_expr` already does.
+        let expr = runtime.rewrite_view_refs(expr);
+
         Ok(PreparedStatement { expr, mode })
     }
 

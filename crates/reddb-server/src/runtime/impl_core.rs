@@ -4253,12 +4253,6 @@ impl RedDBRuntime {
         let mode = prepared.mode;
         let expr = prepared.expr;
 
-        // Phase 5 PG parity: substitute any registered view name that
-        // appears in the expression with its stored body. Runs here
-        // (after parse, before dispatch) so the SQL entrypoint gets
-        // the same view resolution `execute_query_expr` already does.
-        let expr = self.rewrite_view_refs(expr);
-
         self.validate_model_operations_before_auth(&expr)?;
         frame.check_query_privilege(self, &expr)?;
 
@@ -4649,7 +4643,7 @@ impl RedDBRuntime {
                     .get_collection("red_config")
                     .ok_or_else(|| RedDBError::NotFound("red_config".to_string()))?;
                 let entities = manager.query_all(|_| true);
-                let mut result = UnifiedResult::with_columns(vec!["key".into(), "value".into()]);
+                let mut latest = std::collections::BTreeMap::<String, (u64, Value, Value)>::new();
                 for entity in entities {
                     if let EntityData::Row(ref row) = entity.data {
                         if let Some(ref named) = row.named {
@@ -4664,12 +4658,22 @@ impl RedDBRuntime {
                                     continue;
                                 }
                             }
-                            let mut record = UnifiedRecord::new();
-                            record.set("key", key_val);
-                            record.set("value", val);
-                            result.push(record);
+                            let entity_id = entity.id.raw();
+                            match latest.get(key_str) {
+                                Some((prev_id, _, _)) if *prev_id > entity_id => {}
+                                _ => {
+                                    latest.insert(key_str.to_string(), (entity_id, key_val, val));
+                                }
+                            }
                         }
                     }
+                }
+                let mut result = UnifiedResult::with_columns(vec!["key".into(), "value".into()]);
+                for (_, key_val, val) in latest.into_values() {
+                    let mut record = UnifiedRecord::new();
+                    record.set("key", key_val);
+                    record.set("value", val);
+                    result.push(record);
                 }
                 Ok(RuntimeQueryResult {
                     query: query.to_string(),
@@ -5632,7 +5636,7 @@ impl RedDBRuntime {
     /// `tq.table` matches a registered view name with the view's stored
     /// body. Recurses through joins so `SELECT ... FROM t JOIN myview ...`
     /// resolves correctly. Pure operation — no side effects.
-    fn rewrite_view_refs(&self, expr: QueryExpr) -> QueryExpr {
+    pub(super) fn rewrite_view_refs(&self, expr: QueryExpr) -> QueryExpr {
         // Fast path: no views registered → return original expression.
         if self.inner.views.read().is_empty() {
             return expr;
