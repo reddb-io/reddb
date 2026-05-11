@@ -20,13 +20,14 @@
  * Files updated:
  *   - package.json                    (@reddb-io/cli npm — source of truth)
  *   - Cargo.toml                      (engine crate)
- *   - Cargo.lock                      (regenerated)
+ *   - Cargo.lock                      (workspace package versions)
  *   - crates/reddb-client-connector/Cargo.toml (workspace internal)
  *   - drivers/js/package.json         (@reddb-io/sdk npm)
  *   - drivers/js-client/package.json  (@reddb-io/client npm — optional, Lane T #136)
+ *   - drivers/bun/package.json        (@reddb-io/client-bun npm)
  *   - packages/internal-*.package.json (@reddb-io/internal-* npm support packages)
  *   - drivers/python/Cargo.toml       (reddb-python internal name)
- *   - drivers/python/Cargo.lock       (regenerated)
+ *   - drivers/python/Cargo.lock       (path package versions)
  *   - drivers/python/pyproject.toml   (reddb PyPI)
  *
  * Source of truth: the root npm manifest's `version` field.
@@ -117,6 +118,11 @@ const targets = [
     optional: true,
   },
   {
+    label: 'drivers/bun/package.json',
+    file: path.join(root, 'drivers', 'bun', 'package.json'),
+    type: 'package-json',
+  },
+  {
     label: 'drivers/python/Cargo.toml',
     file: path.join(root, 'drivers', 'python', 'Cargo.toml'),
     type: 'cargo-toml',
@@ -156,27 +162,18 @@ if (failed > 0) {
   process.exit(1)
 }
 
-// Regenerate every Cargo.lock so `cargo build --locked` (used by
-// CI + crates.io publish) doesn't bail on a version mismatch.
-// Best-effort — if cargo is missing or fails for unrelated
-// reasons, we still proceed and let the release workflow do
-// the authoritative verify.
-const lockManifests = [
-  path.join(root, 'Cargo.toml'),
-  path.join(root, 'drivers', 'python', 'Cargo.toml'),
-]
-
-for (const manifest of lockManifests) {
-  if (!fs.existsSync(manifest)) continue
-  try {
-    execSync(`cargo generate-lockfile --manifest-path "${manifest}"`, {
-      stdio: 'pipe',
-      timeout: 120_000,
-    })
-  } catch (err) {
-    console.warn(`  WARN regenerate-lockfile ${manifest}: ${err.message.split('\n')[0]}`)
-  }
-}
+// Keep path package versions in Cargo.lock aligned without refreshing the
+// dependency graph. `cargo generate-lockfile` can upgrade transitive crates;
+// release version bumps should not do that.
+syncCargoLock(path.join(root, 'Cargo.lock'), [
+  'reddb',
+  'reddb-wire',
+  'reddb-grpc-proto',
+  'reddb-server',
+  'reddb-client',
+  'reddb-client-connector',
+])
+syncCargoLock(path.join(root, 'drivers', 'python', 'Cargo.lock'), ['reddb', 'reddb-python'])
 
 // Stage every file that the version bump touches so pnpm's
 // version commit picks them up in one atomic commit.
@@ -196,6 +193,7 @@ const stageList = [
   // drivers/js-client/package.json comes from Lane T (#136); the
   // .filter() below drops it from the stage list when absent.
   'drivers/js-client/package.json',
+  'drivers/bun/package.json',
   'drivers/python/Cargo.toml',
   'drivers/python/Cargo.lock',
   'drivers/python/pyproject.toml',
@@ -256,4 +254,24 @@ function apply(target) {
     fs.writeFileSync(target.file, updated)
   }
   return before
+}
+
+function syncCargoLock(file, packageNames) {
+  if (!fs.existsSync(file)) return
+  let content = fs.readFileSync(file, 'utf8')
+  let updated = content
+
+  for (const name of packageNames) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const pattern = new RegExp(`(\\[\\[package\\]\\]\\nname = "${escaped}"\\nversion = ")([^"]+)(")`, 'm')
+    if (!pattern.test(updated)) {
+      console.warn(`  WARN ${path.relative(root, file)}: package ${name} not found`)
+      continue
+    }
+    updated = updated.replace(pattern, `$1${version}$3`)
+  }
+
+  if (updated !== content) {
+    fs.writeFileSync(file, updated)
+  }
 }

@@ -108,6 +108,15 @@ jobs:
             SHOULD_SKIP=true
           fi
 
+          if [[ "$SHOULD_SKIP" != "true" && "$EVENT_NAME" == "push" && "$REF" == refs/tags/v* ]]; then
+            MANIFEST_VERSION="$(node -p "require('./package.json').version")"
+            if [[ "$MANIFEST_VERSION" != "$PACKAGE_VERSION" ]]; then
+              echo "Tag ${RELEASE_TAG} resolves to ${PACKAGE_VERSION}, but package.json is ${MANIFEST_VERSION}."
+              echo "Run pnpm version patch/minor/major, then git push --follow-tags."
+              exit 1
+            fi
+          fi
+
           echo "should_skip=${SHOULD_SKIP}" >> "$GITHUB_OUTPUT"
           echo "release_channel=${RELEASE_CHANNEL}" >> "$GITHUB_OUTPUT"
           echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
@@ -142,15 +151,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Sync version across Cargo.toml + package.json
+      - name: Sync release version
         shell: bash
         run: |
           VERSION="${{ needs.plan.outputs.package_version }}"
-          echo "Setting version to ${VERSION} in Cargo.toml and package.json"
-          sed -i.bak "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml && rm -f Cargo.toml.bak
-          node -e "const p=require('./package.json');p.version='${VERSION}';require('fs').writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
-          echo "Cargo.toml: $(grep '^version' Cargo.toml)"
-          echo "package.json: $(grep '\"version\"' package.json)"
+          node -e "const fs=require('fs');const p=require('./package.json');p.version='${VERSION}';fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')"
+          node scripts/sync-version.js
+          bash scripts/check-versions.sh
 
       - uses: dtolnay/rust-toolchain@1.91.0
         with:
@@ -258,6 +265,12 @@ jobs:
       needs.plan.outputs.release_channel == 'stable'
     steps:
       - uses: actions/checkout@v6
+      - name: Sync release version
+        run: |
+          VERSION="${{ needs.plan.outputs.package_version }}"
+          node -e "const fs=require('fs');const p=require('./package.json');p.version='${VERSION}';fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')"
+          node scripts/sync-version.js
+          bash scripts/check-versions.sh
       - uses: dtolnay/rust-toolchain@1.91.0
       - uses: arduino/setup-protoc@v3
         with:
@@ -343,13 +356,12 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
       - name: Enable pnpm
         run: corepack enable
-      - name: Set version
+      - name: Sync release version
         run: |
-          node -e "
-            const pkg = require('./package.json');
-            pkg.version = '${{ needs.plan.outputs.package_version }}';
-            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
+          VERSION="${{ needs.plan.outputs.package_version }}"
+          node -e "const fs=require('fs');const p=require('./package.json');p.version='${VERSION}';fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')"
+          node scripts/sync-version.js
+          bash scripts/check-versions.sh
       - name: Publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -372,19 +384,12 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
       - name: Enable pnpm
         run: corepack enable
-      - name: Sync versions
+      - name: Sync release version
         run: |
           VERSION="${{ needs.plan.outputs.package_version }}"
-          for dir in packages/internal-asset-fetcher packages/internal-bin-resolver packages/internal-version-compare; do
-            node -e "
-              const fs = require('fs');
-              const file = '${dir}/package.json';
-              const pkg = JSON.parse(fs.readFileSync(file, 'utf8'));
-              pkg.version = '${VERSION}';
-              pkg.private = false;
-              fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + '\n');
-            "
-          done
+          node -e "const fs=require('fs');const p=require('./package.json');p.version='${VERSION}';fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')"
+          node scripts/sync-version.js
+          bash scripts/check-versions.sh
       - name: Verify packs
         run: |
           for dir in packages/internal-asset-fetcher packages/internal-bin-resolver packages/internal-version-compare; do
@@ -414,20 +419,15 @@ jobs:
         with:
           version: '28.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Sync Cargo.toml + Cargo.lock version
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Sync release version
         run: |
           VERSION="${{ needs.plan.outputs.package_version }}"
-          for manifest in \
-            Cargo.toml \
-            crates/reddb-wire/Cargo.toml \
-            crates/reddb-grpc-proto/Cargo.toml \
-            crates/reddb-client-connector/Cargo.toml \
-            crates/reddb-server/Cargo.toml \
-            crates/reddb-client/Cargo.toml
-          do
-            sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" "$manifest"
-          done
-          cargo generate-lockfile
+          node -e "const fs=require('fs');const p=require('./package.json');p.version='${VERSION}';fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')"
+          node scripts/sync-version.js
+          bash scripts/check-versions.sh
       - name: Publish workspace crates
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -477,15 +477,12 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
       - name: Enable pnpm
         run: corepack enable
-      - name: Sync version
-        working-directory: drivers/js
+      - name: Sync release version
         run: |
-          node -e "
-            const pkg = require('./package.json');
-            pkg.version = '${{ needs.plan.outputs.package_version }}';
-            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
-          cat package.json | grep '"version"'
+          VERSION="${{ needs.plan.outputs.package_version }}"
+          node -e "const fs=require('fs');const p=require('./package.json');p.version='${VERSION}';fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')"
+          node scripts/sync-version.js
+          bash scripts/check-versions.sh
       - name: Verify pack
         working-directory: drivers/js
         run: pnpm pack --pack-destination "$RUNNER_TEMP"
@@ -517,15 +514,12 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
       - name: Enable pnpm
         run: corepack enable
-      - name: Sync version
-        working-directory: drivers/js-client
+      - name: Sync release version
         run: |
-          node -e "
-            const pkg = require('./package.json');
-            pkg.version = '${{ needs.plan.outputs.package_version }}';
-            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
-          cat package.json | grep '"version"'
+          VERSION="${{ needs.plan.outputs.package_version }}"
+          node -e "const fs=require('fs');const p=require('./package.json');p.version='${VERSION}';fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')"
+          node scripts/sync-version.js
+          bash scripts/check-versions.sh
       - name: Verify pack
         # Preflight per #128 retro: `npm pack --dry-run` fails fast on
         # regressions like the `reddb` 404 root cause (unscoped name
@@ -545,6 +539,38 @@ jobs:
           # for the full retro from #128.
           pnpm publish --tag "${TAG}" --access public --no-git-checks
 
+  publish-bun-client:
+    name: Publish @reddb-io/client-bun (npm)
+    needs: [plan, publish-github]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: |
+      needs.plan.outputs.should_skip != 'true' &&
+      needs.plan.outputs.release_channel == 'stable'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Sync release version
+        run: |
+          VERSION="${{ needs.plan.outputs.package_version }}"
+          node -e "const fs=require('fs');const p=require('./package.json');p.version='${VERSION}';fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')"
+          node scripts/sync-version.js
+          bash scripts/check-versions.sh
+      - name: Verify pack
+        working-directory: drivers/bun
+        run: pnpm pack --pack-destination "$RUNNER_TEMP"
+      - name: Publish
+        working-directory: drivers/bun
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          TAG=$([[ "${{ needs.plan.outputs.release_channel }}" == "next" ]] && echo "next" || echo "latest")
+          pnpm publish --tag "${TAG}" --access public --no-git-checks
+
   publish-docker:
     name: Docker image (GHCR)
     needs: [plan, build]
@@ -555,6 +581,15 @@ jobs:
     if: needs.plan.outputs.should_skip != 'true'
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Sync release version
+        run: |
+          VERSION="${{ needs.plan.outputs.package_version }}"
+          node -e "const fs=require('fs');const p=require('./package.json');p.version='${VERSION}';fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')"
+          node scripts/sync-version.js
+          bash scripts/check-versions.sh
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -577,6 +612,7 @@ jobs:
             ghcr.io/${{ github.repository }}
           tags: |
             type=raw,value=${{ needs.plan.outputs.release_tag }}
+            type=raw,value=${{ needs.plan.outputs.package_version }}
             type=raw,value=latest,enable=${{ needs.plan.outputs.release_channel == 'stable' }}
             type=raw,value=next,enable=${{ needs.plan.outputs.release_channel == 'next' }}
           labels: |
@@ -609,6 +645,15 @@ jobs:
     if: needs.plan.outputs.should_skip != 'true'
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Sync release version
+        run: |
+          VERSION="${{ needs.plan.outputs.package_version }}"
+          node -e "const fs=require('fs');const p=require('./package.json');p.version='${VERSION}';fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')"
+          node scripts/sync-version.js
+          bash scripts/check-versions.sh
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -631,6 +676,7 @@ jobs:
             ghcr.io/${{ github.repository }}-client
           tags: |
             type=raw,value=${{ needs.plan.outputs.release_tag }}
+            type=raw,value=${{ needs.plan.outputs.package_version }}
             type=raw,value=latest,enable=${{ needs.plan.outputs.release_channel == 'stable' }}
             type=raw,value=next,enable=${{ needs.plan.outputs.release_channel == 'next' }}
           labels: |
@@ -687,13 +733,13 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.x'
-      - name: Sync version
+      - name: Sync release version
         shell: bash
         run: |
           VERSION="${{ needs.plan.outputs.package_version }}"
-          # drivers/python/pyproject.toml + Cargo.toml share the same version.
-          sed -i.bak "s/^version = \".*\"/version = \"${VERSION}\"/" drivers/python/Cargo.toml drivers/python/pyproject.toml
-          rm -f drivers/python/Cargo.toml.bak drivers/python/pyproject.toml.bak
+          node -e "const fs=require('fs');const p=require('./package.json');p.version='${VERSION}';fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')"
+          node scripts/sync-version.js
+          bash scripts/check-versions.sh
       - uses: PyO3/maturin-action@v1
         with:
           working-directory: drivers/python
