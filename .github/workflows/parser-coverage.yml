@@ -15,6 +15,7 @@ on:
   pull_request:
     paths:
       - 'crates/reddb-server/src/storage/query/**'
+  workflow_dispatch:
 
 concurrency:
   group: parser-coverage-${{ github.workflow }}-${{ github.ref }}
