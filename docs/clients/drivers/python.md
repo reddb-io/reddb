@@ -64,6 +64,61 @@ db.close()
 
 `payload` field values must be `None | bool | int | float | str`. Wrap nested structures in a JSON string for now.
 
+## Safe parameter binding
+
+`db.query` accepts positional `$N` bind values either as variadic args or via
+the `params=` keyword. Use it for any user-supplied value — concatenation is a
+SQL-injection footgun:
+
+```python
+# Scalar params: int / text / null
+rows = db.query(
+    "SELECT id, name FROM users WHERE id = $1 AND tenant = $2 AND deleted_at IS $3",
+    42, "acme", None,
+)["rows"]
+
+# Vector param (HNSW / IVF similarity search):
+rows = db.query(
+    "SEARCH SIMILAR $1 IN embeddings K 5",
+    [0.1, 0.2, 0.3],
+)["rows"]
+
+# `params=` kwarg form is byte-equivalent — useful when composing dynamic
+# bind lists:
+binds = [42, "acme", None]
+rows = db.query(
+    "SELECT id FROM users WHERE id = $1 AND tenant = $2 AND deleted_at IS $3",
+    params=binds,
+)["rows"]
+```
+
+Native Python → engine type mapping (see `py_to_param_value` in
+`drivers/python/src/high_level.rs`):
+
+| Python                                | Engine            |
+|---------------------------------------|-------------------|
+| `None`                                | Null              |
+| `bool`                                | Bool              |
+| `int`                                 | Int (i64; u64 above `i64::MAX`) |
+| `float`                               | Float (f64)       |
+| `str`                                 | Text              |
+| `bytes`, `bytearray`                  | Bytes             |
+| `list[int \| float]`                  | Vector (f32)      |
+| `datetime.datetime`                   | Timestamp (secs)  |
+| `uuid.UUID`                           | Uuid              |
+| `dict[str, ...]`                      | Json (canonical)  |
+
+Mixed-type lists (e.g. `[1, "two"]`) raise `INVALID_PARAMS` — vectors must be
+all-numeric. `bool` is checked before `int` (since `bool` is an `int` subclass
+in Python) so `True` ships as Bool, not `1`.
+
+Embedded backends (`memory://`, `file://`) route params through the engine's
+`query_with_params` entry point. The gRPC backend currently raises
+`PARAMS_UNSUPPORTED` — the gRPC server has not yet advertised `FEATURE_PARAMS`
+(tracked by #359); use `memory://` or `file://` until that lands.
+`db.query(sql)` with no params stays on the legacy single-arg path — byte-
+identical to pre-params releases.
+
 ## Errors
 
 Raised as `ValueError("[CODE] message")`. Stable codes:
@@ -77,6 +132,7 @@ Raised as `ValueError("[CODE] message")`. Stable codes:
 | `IO_ERROR`           | Disk / file backend failure                     |
 | `FEATURE_DISABLED`   | Path gated behind a Cargo feature              |
 | `CLIENT_CLOSED`      | Method called after `close()`                   |
+| `PARAMS_UNSUPPORTED` | Bind values sent to a backend that lacks `FEATURE_PARAMS` (e.g. gRPC today) |
 
 ## Build from source
 
