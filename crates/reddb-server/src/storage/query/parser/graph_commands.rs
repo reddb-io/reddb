@@ -115,16 +115,26 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parse: GRAPH CENTRALITY [ALGORITHM degree|closeness|betweenness|eigenvector|pagerank]
+    /// Parse: GRAPH CENTRALITY [ALGORITHM degree|closeness|betweenness|eigenvector|pagerank] [LIMIT n]
     fn parse_graph_centrality(&mut self) -> Result<QueryExpr, ParseError> {
         self.advance()?; // consume CENTRALITY
-        let algorithm = if self.consume(&Token::Algorithm)? {
-            self.expect_ident_or_keyword()?
-        } else {
-            "degree".to_string()
-        };
+        let mut algorithm: Option<String> = None;
+        let mut limit: Option<u32> = None;
+        loop {
+            if algorithm.is_none() && self.consume(&Token::Algorithm)? {
+                algorithm = Some(self.expect_ident_or_keyword()?);
+            } else if limit.is_none() && self.consume(&Token::Limit)? {
+                // `parse_integer` already rejects a leading `-` at the
+                // integer slot, so the value is always non-negative here.
+                let n = self.parse_integer()?;
+                limit = Some(n as u32);
+            } else {
+                break;
+            }
+        }
         Ok(QueryExpr::GraphCommand(GraphCommand::Centrality {
-            algorithm,
+            algorithm: algorithm.unwrap_or_else(|| "degree".to_string()),
+            limit,
         }))
     }
 
