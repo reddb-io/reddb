@@ -253,6 +253,26 @@ pub(super) fn ensure_graph_node(graph: &GraphStore, id: &str) -> RedDBResult<()>
     }
 }
 
+/// Resolve a user-supplied graph node reference to its canonical entity id.
+///
+/// Accepts either a numeric entity id (e.g. `"177"`) — returned as-is when the
+/// node exists — or a node label (e.g. `"cinderella"`) resolved via the label
+/// secondary index. Errors when the label resolves to more than one node, so
+/// callers can fall back to the numeric id form.
+pub(super) fn resolve_graph_node_id(graph: &GraphStore, input: &str) -> RedDBResult<String> {
+    if graph.has_node(input) {
+        return Ok(input.to_string());
+    }
+    let matches = graph.nodes_by_label(input);
+    match matches.len() {
+        0 => Err(RedDBError::NotFound(input.to_string())),
+        1 => Ok(matches.into_iter().next().unwrap().id),
+        n => Err(RedDBError::Query(format!(
+            "ambiguous graph node reference '{input}': matches {n} nodes by label; use the numeric id"
+        ))),
+    }
+}
+
 pub(super) fn stored_node_to_runtime(node: StoredNode) -> RuntimeGraphNode {
     RuntimeGraphNode {
         id: node.id,

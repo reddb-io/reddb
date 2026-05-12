@@ -280,3 +280,99 @@ fn aggregate_over_graph_collection_still_works() {
     };
     assert!(n >= 1, "aggregate must still see graph entities (got {n})");
 }
+
+// ── Issue #416: GRAPH algorithms must resolve labels to ids ─────────────────
+
+#[test]
+fn graph_traverse_resolves_label_to_node_id() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('cinderella', 'Cinderella')")
+        .expect("insert");
+
+    let by_label = rt
+        .execute_query("GRAPH TRAVERSE 'cinderella'")
+        .expect("traverse by label");
+    assert!(
+        !by_label.result.records.is_empty(),
+        "GRAPH TRAVERSE must resolve a label to its node id"
+    );
+    let label0 = by_label
+        .result
+        .records
+        .iter()
+        .find_map(|r| match r.get("label") {
+            Some(Value::Text(s)) => Some(s.as_ref().to_string()),
+            _ => None,
+        })
+        .expect("label column present");
+    assert_eq!(label0, "cinderella");
+}
+
+#[test]
+fn graph_neighborhood_resolves_label_to_node_id() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('cinderella', 'Cinderella')")
+        .expect("insert");
+
+    let res = rt
+        .execute_query("GRAPH NEIGHBORHOOD 'cinderella'")
+        .expect("neighborhood by label");
+    assert!(
+        !res.result.records.is_empty(),
+        "GRAPH NEIGHBORHOOD must resolve a label to its node id"
+    );
+}
+
+#[test]
+fn graph_traverse_ambiguous_label_errors() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('hero', 'A')")
+        .expect("insert a");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('hero', 'B')")
+        .expect("insert b");
+
+    let err = rt
+        .execute_query("GRAPH TRAVERSE 'hero'")
+        .expect_err("ambiguous label must error");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("ambiguous"),
+        "error should mention ambiguity, got: {msg}"
+    );
+}
+
+#[test]
+fn graph_traverse_unknown_reference_errors() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('cinderella', 'Cinderella')")
+        .expect("insert");
+
+    rt.execute_query("GRAPH TRAVERSE 'does_not_exist'")
+        .expect_err("unknown reference must error");
+}
+
+#[test]
+fn graph_shortest_path_resolves_labels_for_both_endpoints() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('alice', 'Alice')")
+        .expect("insert a");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('bob', 'Bob')")
+        .expect("insert b");
+
+    let res = rt
+        .execute_query("GRAPH SHORTEST_PATH 'alice' TO 'bob'")
+        .expect("shortest path by labels");
+    assert_eq!(
+        res.result.records.len(),
+        1,
+        "SHORTEST_PATH always returns a single summary row"
+    );
+    let rec = &res.result.records[0];
+    match rec.get("source") {
+        Some(Value::Text(s)) => {
+            assert_ne!(s.as_ref(), "alice", "source must be resolved to numeric id");
+            assert!(s.as_ref().parse::<u64>().is_ok(), "source must be numeric");
+        }
+        other => panic!("expected text source, got {other:?}"),
+    }
+}
