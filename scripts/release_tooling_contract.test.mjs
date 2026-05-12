@@ -70,6 +70,42 @@ test("main Docker image builds from files present in the repository", () => {
   assert.match(compose, /context: \.\.\/\.\./);
 });
 
+test("verify-release-assets gates every npm publish on the binary contract (#418)", () => {
+  const script = read("scripts/verify-release-assets.sh");
+  const workflow = read(".github/workflows/release.yml");
+  const runbook = read("docs/release-runbook.md");
+  const assetName = read("drivers/js/src/internal/asset-fetcher/asset-name.js");
+
+  for (const suffix of [
+    "linux-x86_64",
+    "linux-aarch64",
+    "linux-armv7",
+    "macos-x86_64",
+    "macos-aarch64",
+    "windows-x86_64.exe",
+  ]) {
+    assert.ok(script.includes(suffix), `verify script lists ${suffix}`);
+    assert.ok(assetName.includes(suffix), `asset-name.js still maps to ${suffix}`);
+  }
+  assert.match(script, /BINS=\(red red_client\)/);
+  assert.match(script, /gh release view "\$TAG" --repo "\$REPO" --json assets/);
+
+  assert.match(workflow, /verify-release-assets:/);
+  assert.match(workflow, /bash scripts\/verify-release-assets\.sh "\$RELEASE_TAG"/);
+  for (const job of [
+    "publish-npm",
+    "publish-js-driver",
+    "publish-js-client",
+    "publish-bun-client",
+  ]) {
+    const re = new RegExp(`${job}:[\\s\\S]*?needs: \\[plan, publish-github, verify-release-assets\\]`);
+    assert.match(workflow, re, `${job} must depend on verify-release-assets`);
+  }
+
+  assert.match(runbook, /Release asset contract/);
+  assert.match(runbook, /verify-release-assets\.sh/);
+});
+
 test("nightly DR drill workflow uses the current-shell runner and public make target", () => {
   const makefile = read("Makefile");
   const script = read("scripts/drill-nightly.sh");
