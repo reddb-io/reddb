@@ -1193,13 +1193,21 @@ impl RedDBRuntime {
         let model = ask.model.clone().unwrap_or(default_model);
         let api_base = provider.resolve_api_base();
 
-        let transport = crate::runtime::ai::transport::AiTransport::from_runtime(self);
-        let strict_mode = if ask.strict {
+        let requested_mode = if ask.strict {
             crate::runtime::ai::strict_validator::Mode::Strict
         } else {
             crate::runtime::ai::strict_validator::Mode::Lenient
         };
+        let provider_token = provider.token().to_string();
+        let mode_outcome = self
+            .ask_provider_capability_registry(&provider_token)
+            .evaluate_mode(&provider_token, requested_mode);
+        let effective_mode = mode_outcome.effective();
+        let mode_warning = mode_outcome.warning().cloned();
+
+        let transport = crate::runtime::ai::transport::AiTransport::from_runtime(self);
         let mut attempt = crate::runtime::ai::strict_validator::Attempt::First;
+        let mut retry_count = 0_u32;
         let mut prompt_for_call = full_prompt.clone();
         let (answer, prompt_tokens, completion_tokens, citation_result) = loop {
             let provider_started = std::time::Instant::now();
@@ -1238,7 +1246,7 @@ impl RedDBRuntime {
                 crate::runtime::ai::citation_parser::parse_citations(&answer, sources_count);
             match crate::runtime::ai::strict_validator::validate(
                 &citation_result,
-                strict_mode,
+                effective_mode,
                 attempt,
             ) {
                 crate::runtime::ai::strict_validator::Decision::Ok => {
@@ -1251,10 +1259,16 @@ impl RedDBRuntime {
                 }
                 crate::runtime::ai::strict_validator::Decision::Retry { prompt } => {
                     attempt = crate::runtime::ai::strict_validator::Attempt::Retry;
+                    retry_count = 1;
                     prompt_for_call = format!("{prompt}\n\n{full_prompt}");
                 }
                 crate::runtime::ai::strict_validator::Decision::GiveUp { errors } => {
-                    let validation = validation_to_json(&citation_result.warnings, &errors, false);
+                    let validation = validation_to_json_with_mode_warning(
+                        &citation_result.warnings,
+                        &errors,
+                        false,
+                        mode_warning.as_ref(),
+                    );
                     return Err(RedDBError::Validation {
                         message: "ASK citation validation failed after retry".to_string(),
                         validation,
@@ -1264,7 +1278,12 @@ impl RedDBRuntime {
         };
 
         let citations_json = citations_to_json(&citation_result.citations, &source_urns);
-        let validation_json = validation_to_json(&citation_result.warnings, &[], true);
+        let validation_json = validation_to_json_with_mode_warning(
+            &citation_result.warnings,
+            &[],
+            true,
+            mode_warning.as_ref(),
+        );
         let citations_bytes =
             crate::json::to_vec(&citations_json).unwrap_or_else(|_| b"[]".to_vec());
         let validation_bytes =
@@ -1275,6 +1294,8 @@ impl RedDBRuntime {
             "answer".into(),
             "provider".into(),
             "model".into(),
+            "mode".into(),
+            "retry_count".into(),
             "prompt_tokens".into(),
             "completion_tokens".into(),
             "sources_count".into(),
@@ -1284,8 +1305,10 @@ impl RedDBRuntime {
         ]);
         let mut record = UnifiedRecord::new();
         record.set("answer", Value::text(answer));
-        record.set("provider", Value::text(provider.token().to_string()));
+        record.set("provider", Value::text(provider_token));
         record.set("model", Value::text(model));
+        record.set("mode", Value::text(strict_mode_label(effective_mode)));
+        record.set("retry_count", Value::Integer(retry_count as i64));
         record.set("prompt_tokens", Value::Integer(prompt_tokens as i64));
         record.set(
             "completion_tokens",
@@ -1326,10 +1349,142 @@ impl RedDBRuntime {
             daily_cost_cap_usd: daily_cap.is_finite().then_some(daily_cap),
         }
     }
+
+    fn ask_provider_capability_registry(
+        &self,
+        provider_token: &str,
+    ) -> crate::runtime::ai::provider_capabilities::Registry {
+        let registry = crate::runtime::ai::provider_capabilities::Registry::new();
+        match self.ask_provider_capability_override(provider_token) {
+            Some(caps) => registry.with_override(provider_token, caps),
+            None => registry,
+        }
+    }
+
+    fn ask_provider_capability_override(
+        &self,
+        provider_token: &str,
+    ) -> Option<crate::runtime::ai::provider_capabilities::Capabilities> {
+        let token = provider_token.to_ascii_lowercase();
+        let prefix = format!("ask.providers.capabilities.{token}");
+        let mut caps =
+            crate::runtime::ai::provider_capabilities::Capabilities::for_provider(&token);
+        let mut seen = false;
+
+        if let Some(value) = latest_config_value(self, &prefix) {
+            if let Some(map) = provider_capability_object(&value) {
+                seen |= apply_capability_json_field(
+                    &mut caps.supports_citations,
+                    map.get("supports_citations"),
+                );
+                seen |=
+                    apply_capability_json_field(&mut caps.supports_seed, map.get("supports_seed"));
+                seen |= apply_capability_json_field(
+                    &mut caps.supports_temperature_zero,
+                    map.get("supports_temperature_zero"),
+                );
+                seen |= apply_capability_json_field(
+                    &mut caps.supports_streaming,
+                    map.get("supports_streaming"),
+                );
+            }
+        }
+
+        if let Some(value) = config_bool_if_present(self, &format!("{prefix}.supports_citations")) {
+            caps.supports_citations = value;
+            seen = true;
+        }
+        if let Some(value) = config_bool_if_present(self, &format!("{prefix}.supports_seed")) {
+            caps.supports_seed = value;
+            seen = true;
+        }
+        if let Some(value) =
+            config_bool_if_present(self, &format!("{prefix}.supports_temperature_zero"))
+        {
+            caps.supports_temperature_zero = value;
+            seen = true;
+        }
+        if let Some(value) = config_bool_if_present(self, &format!("{prefix}.supports_streaming")) {
+            caps.supports_streaming = value;
+            seen = true;
+        }
+
+        seen.then_some(caps)
+    }
 }
 
 fn config_u32(value: u64) -> u32 {
     value.min(u32::MAX as u64) as u32
+}
+
+fn strict_mode_label(mode: crate::runtime::ai::strict_validator::Mode) -> &'static str {
+    match mode {
+        crate::runtime::ai::strict_validator::Mode::Strict => "strict",
+        crate::runtime::ai::strict_validator::Mode::Lenient => "lenient",
+    }
+}
+
+fn latest_config_value(runtime: &RedDBRuntime, key: &str) -> Option<crate::storage::schema::Value> {
+    use crate::application::ports::RuntimeEntityPort;
+
+    runtime
+        .get_kv("red_config", key)
+        .ok()
+        .flatten()
+        .map(|(value, _)| value)
+}
+
+fn config_bool_if_present(runtime: &RedDBRuntime, key: &str) -> Option<bool> {
+    storage_value_bool(&latest_config_value(runtime, key)?)
+}
+
+fn storage_value_bool(value: &crate::storage::schema::Value) -> Option<bool> {
+    match value {
+        crate::storage::schema::Value::Boolean(b) => Some(*b),
+        crate::storage::schema::Value::Integer(n) => Some(*n != 0),
+        crate::storage::schema::Value::UnsignedInteger(n) => Some(*n != 0),
+        crate::storage::schema::Value::Text(s) => text_bool(s.as_ref()),
+        _ => None,
+    }
+}
+
+fn text_bool(value: &str) -> Option<bool> {
+    match value.trim() {
+        "true" | "TRUE" | "True" | "1" => Some(true),
+        "false" | "FALSE" | "False" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+fn provider_capability_object(
+    value: &crate::storage::schema::Value,
+) -> Option<crate::json::Map<String, crate::json::Value>> {
+    let parsed = match value {
+        crate::storage::schema::Value::Json(bytes) => crate::json::from_slice(bytes).ok()?,
+        crate::storage::schema::Value::Text(s) => crate::json::from_str(s.as_ref()).ok()?,
+        _ => return None,
+    };
+    match parsed {
+        crate::json::Value::Object(map) => Some(map),
+        _ => None,
+    }
+}
+
+fn apply_capability_json_field(target: &mut bool, value: Option<&crate::json::Value>) -> bool {
+    let Some(value) = value.and_then(json_value_bool) else {
+        return false;
+    };
+    *target = value;
+    true
+}
+
+fn json_value_bool(value: &crate::json::Value) -> Option<bool> {
+    match value {
+        crate::json::Value::Bool(b) => Some(*b),
+        crate::json::Value::Number(n) => Some(*n != 0.0),
+        crate::json::Value::String(s) => text_bool(s),
+        _ => None,
+    }
 }
 
 fn saturating_u32(value: usize) -> u32 {
@@ -1721,9 +1876,20 @@ fn validation_to_json(
     errors: &[crate::runtime::ai::strict_validator::ValidationError],
     ok: bool,
 ) -> crate::json::Value {
+    validation_to_json_with_mode_warning(warnings, errors, ok, None)
+}
+
+fn validation_to_json_with_mode_warning(
+    warnings: &[crate::runtime::ai::citation_parser::CitationWarning],
+    errors: &[crate::runtime::ai::strict_validator::ValidationError],
+    ok: bool,
+    mode_warning: Option<&crate::runtime::ai::provider_capabilities::ModeWarning>,
+) -> crate::json::Value {
     use crate::runtime::ai::citation_parser::CitationWarningKind;
+    use crate::runtime::ai::provider_capabilities::ModeWarningKind;
     use crate::runtime::ai::strict_validator::ValidationErrorKind;
-    let mut warnings_json: Vec<crate::json::Value> = Vec::with_capacity(warnings.len());
+    let mut warnings_json: Vec<crate::json::Value> =
+        Vec::with_capacity(warnings.len() + usize::from(mode_warning.is_some()));
     for w in warnings {
         let mut obj: crate::json::Map<String, crate::json::Value> = Default::default();
         let kind = match w.kind {
@@ -1739,6 +1905,21 @@ fn validation_to_json(
             crate::json::Value::Number(w.span.end as f64),
         ]);
         obj.insert("span".to_string(), span);
+        obj.insert(
+            "detail".to_string(),
+            crate::json::Value::String(w.detail.clone()),
+        );
+        warnings_json.push(crate::json::Value::Object(obj));
+    }
+    if let Some(w) = mode_warning {
+        let mut obj: crate::json::Map<String, crate::json::Value> = Default::default();
+        let kind = match w.kind {
+            ModeWarningKind::ModeFallback => "mode_fallback",
+        };
+        obj.insert(
+            "kind".to_string(),
+            crate::json::Value::String(kind.to_string()),
+        );
         obj.insert(
             "detail".to_string(),
             crate::json::Value::String(w.detail.clone()),
