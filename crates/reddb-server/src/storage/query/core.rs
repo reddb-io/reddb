@@ -2189,6 +2189,10 @@ pub enum SearchCommand {
         /// binder substitutes the user-supplied float into `min_score`
         /// and clears this back to `None`.
         min_score_param: Option<usize>,
+        /// `$N` placeholder for `SEARCH SIMILAR TEXT $N` (issue #361).
+        /// Binder substitutes the user-supplied text into `text` and
+        /// clears this back to `None`.
+        text_param: Option<usize>,
     },
     /// SEARCH TEXT 'query' [COLLECTION col] [LIMIT n] [FUZZY]
     Text {

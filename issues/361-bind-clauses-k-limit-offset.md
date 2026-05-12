@@ -259,3 +259,32 @@ helper.
 Remaining work in #361: SELECT LIMIT / OFFSET (TableQuery shape;
 multiple AST sites), SIMILAR TEXT $N (text embedding pipeline),
 and PROBES $N (IVF).
+
+## Progress (2026-05-12, slice 10)
+
+Tenth slice landed: `SEARCH SIMILAR TEXT $N`.
+
+- `SearchCommand::Similar` gained `text_param: Option<usize>` (AST in
+  `storage/query/core.rs`), shaped like the existing `vector_param`
+  but typed for `Value::Text`.
+- Parser routes `$N` (and `?`, mode permitting) after the `TEXT`
+  keyword via `parse_param_slot`. Literal path keeps `parse_string()`.
+- `user_params::collect_non_expr_indices` picks up `text_param` on
+  the Similar arm.
+- `user_params::bind` extends the Similar branch: when `text_param`
+  is set, the supplied parameter must be `Value::Text` (typed error
+  otherwise). Result is stored in `text` and the param slot is
+  cleared. Downstream embedding-pipeline reads `text` exactly as it
+  did for the literal path.
+- `runtime/impl_graph_commands.rs` guards `text_param.is_some()`
+  pre-execution, matching the prior LIMIT/MIN_SCORE/vector guards.
+- Exhaustive destructures in `tests/vector_search_snapshots.rs` and
+  `parser/tests.rs` switched to `..` so future slots on Similar
+  don't churn unrelated tests.
+- Tests in `user_params` (3 new): TEXT $1 happy path with collection
+  + LIMIT + USING; rejects non-text (Integer); TEXT $1 + LIMIT $2
+  together to prove no cross-talk between non-Expr param slots.
+
+Remaining work in #361: SELECT LIMIT / OFFSET (TableQuery shape;
+multiple AST sites) and PROBES $N (IVF — slot not yet plumbed
+through the parser).
