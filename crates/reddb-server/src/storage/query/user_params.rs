@@ -214,22 +214,29 @@ pub fn collect_indices(expr: &QueryExpr) -> Vec<usize> {
 /// Parameter slots that live on AST nodes outside the `Expr` tree
 /// (e.g. `SearchCommand::Similar { vector_param }`).
 fn collect_non_expr_indices(expr: &QueryExpr, out: &mut Vec<usize>) {
-    if let QueryExpr::SearchCommand(SearchCommand::Similar {
-        vector_param,
-        limit_param,
-        min_score_param,
-        ..
-    }) = expr
-    {
-        if let Some(idx) = vector_param {
-            out.push(*idx);
+    match expr {
+        QueryExpr::SearchCommand(SearchCommand::Similar {
+            vector_param,
+            limit_param,
+            min_score_param,
+            ..
+        }) => {
+            if let Some(idx) = vector_param {
+                out.push(*idx);
+            }
+            if let Some(idx) = limit_param {
+                out.push(*idx);
+            }
+            if let Some(idx) = min_score_param {
+                out.push(*idx);
+            }
         }
-        if let Some(idx) = limit_param {
-            out.push(*idx);
+        QueryExpr::SearchCommand(SearchCommand::Hybrid { limit_param, .. }) => {
+            if let Some(idx) = limit_param {
+                out.push(*idx);
+            }
         }
-        if let Some(idx) = min_score_param {
-            out.push(*idx);
-        }
+        _ => {}
     }
 }
 
@@ -365,6 +372,48 @@ pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamEr
             vector_param: None,
             limit_param: None,
             min_score_param: None,
+        }));
+    }
+
+    if let QueryExpr::SearchCommand(SearchCommand::Hybrid {
+        vector,
+        query,
+        collection,
+        limit,
+        limit_param,
+    }) = expr
+    {
+        let bound_limit = if let Some(idx) = limit_param {
+            let value = params.get(*idx).ok_or(UserParamError::Arity {
+                expected: idx + 1,
+                got: params.len(),
+            })?;
+            match value {
+                Value::Integer(n) if *n > 0 => *n as usize,
+                Value::UnsignedInteger(n) if *n > 0 => *n as usize,
+                Value::BigInt(n) if *n > 0 => *n as usize,
+                Value::Integer(_) | Value::UnsignedInteger(_) | Value::BigInt(_) => {
+                    return Err(UserParamError::TypeMismatch {
+                        slot: "SEARCH HYBRID LIMIT parameter (must be > 0)",
+                        got: value_variant_name(value),
+                    });
+                }
+                other => {
+                    return Err(UserParamError::TypeMismatch {
+                        slot: "SEARCH HYBRID LIMIT parameter",
+                        got: value_variant_name(other),
+                    });
+                }
+            }
+        } else {
+            *limit
+        };
+        return Ok(QueryExpr::SearchCommand(SearchCommand::Hybrid {
+            vector: vector.clone(),
+            query: query.clone(),
+            collection: collection.clone(),
+            limit: bound_limit,
+            limit_param: None,
         }));
     }
 
@@ -763,6 +812,71 @@ mod tests {
             panic!("expected SearchCommand::Similar");
         };
         assert!(vector.is_empty());
+    }
+
+    #[test]
+    fn bind_search_hybrid_limit_param() {
+        // Issue #361: `SEARCH HYBRID ... LIMIT $N` binds integer parameter.
+        let q = parse(
+            "SEARCH HYBRID SIMILAR [0.1, 0.2] TEXT 'q' COLLECTION svc LIMIT $1",
+        );
+        let bound = bind(&q, &[Value::Integer(30)]).unwrap();
+        let QueryExpr::SearchCommand(SearchCommand::Hybrid {
+            limit,
+            limit_param,
+            ..
+        }) = bound
+        else {
+            panic!("expected SearchCommand::Hybrid");
+        };
+        assert_eq!(limit, 30);
+        assert_eq!(limit_param, None, "limit_param must be cleared post-bind");
+    }
+
+    #[test]
+    fn bind_search_hybrid_k_param() {
+        // `K $N` is an alias for LIMIT in HYBRID.
+        let q = parse("SEARCH HYBRID TEXT 'q' COLLECTION svc K $1");
+        let bound = bind(&q, &[Value::Integer(7)]).unwrap();
+        let QueryExpr::SearchCommand(SearchCommand::Hybrid {
+            limit,
+            limit_param,
+            ..
+        }) = bound
+        else {
+            panic!("expected SearchCommand::Hybrid");
+        };
+        assert_eq!(limit, 7);
+        assert_eq!(limit_param, None);
+    }
+
+    #[test]
+    fn bind_search_hybrid_limit_rejects_non_integer() {
+        let q = parse("SEARCH HYBRID TEXT 'q' COLLECTION svc LIMIT $1");
+        let err = bind(&q, &[Value::text("five")]).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                UserParamError::TypeMismatch {
+                    slot: "SEARCH HYBRID LIMIT parameter",
+                    got: "text"
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn bind_search_hybrid_limit_rejects_zero() {
+        let q = parse("SEARCH HYBRID TEXT 'q' COLLECTION svc LIMIT $1");
+        let err = bind(&q, &[Value::Integer(0)]).unwrap_err();
+        assert!(matches!(
+            err,
+            UserParamError::TypeMismatch {
+                slot: "SEARCH HYBRID LIMIT parameter (must be > 0)",
+                ..
+            }
+        ));
     }
 
     #[test]
