@@ -32,7 +32,14 @@ High. Forces callers to maintain a label→id map in application code, defeating
 
 ## Acceptance criteria
 
-- [ ] `GRAPH TRAVERSE '<label>'` resolves when a node with that label exists in the queried collection.
-- [ ] `GRAPH SHORTEST_PATH '<label_a>' TO '<label_b>'` resolves identically to the numeric-id form.
-- [ ] The same label lookup is used by `GRAPH NEIGHBORHOOD` and `GRAPH TRAVERSE` (single source of truth).
-- [ ] Regression tests covering label resolution across all `GRAPH` algorithm commands.
+- [x] `GRAPH TRAVERSE '<label>'` resolves when a node with that label exists in the queried collection.
+- [x] `GRAPH SHORTEST_PATH '<label_a>' TO '<label_b>'` resolves identically to the numeric-id form.
+- [x] The same label lookup is used by `GRAPH NEIGHBORHOOD` and `GRAPH TRAVERSE` (single source of truth).
+- [x] Regression tests covering label resolution across all `GRAPH` algorithm commands with node references.
+
+## Completion note
+
+The runtime already routes `GRAPH NEIGHBORHOOD`, `GRAPH TRAVERSE`, and
+`GRAPH SHORTEST_PATH` through `resolve_graph_node_id`. Tightened the
+regression tests so label-form and numeric-id-form commands agree for all
+three node-reference graph command surfaces.

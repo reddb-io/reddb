@@ -306,6 +306,13 @@ fn graph_traverse_resolves_label_to_node_id() {
         })
         .expect("label column present");
     assert_eq!(label0, "cinderella");
+    let node_id = text_at(&by_label, 0, "node_id").to_string();
+
+    let by_id = rt
+        .execute_query(&format!("GRAPH TRAVERSE '{node_id}'"))
+        .expect("traverse by numeric id");
+    assert_eq!(text_at(&by_id, 0, "node_id"), node_id);
+    assert_eq!(text_at(&by_id, 0, "label"), "cinderella");
 }
 
 #[test]
@@ -321,6 +328,13 @@ fn graph_neighborhood_resolves_label_to_node_id() {
         !res.result.records.is_empty(),
         "GRAPH NEIGHBORHOOD must resolve a label to its node id"
     );
+    let node_id = text_at(&res, 0, "node_id").to_string();
+
+    let by_id = rt
+        .execute_query(&format!("GRAPH NEIGHBORHOOD '{node_id}'"))
+        .expect("neighborhood by numeric id");
+    assert_eq!(text_at(&by_id, 0, "node_id"), node_id);
+    assert_eq!(text_at(&by_id, 0, "label"), "cinderella");
 }
 
 #[test]
@@ -375,6 +389,16 @@ fn graph_shortest_path_resolves_labels_for_both_endpoints() {
         }
         other => panic!("expected text source, got {other:?}"),
     }
+    let source_id = text_at(&res, 0, "source").to_string();
+    let target_id = text_at(&res, 0, "target").to_string();
+
+    let by_id = rt
+        .execute_query(&format!(
+            "GRAPH SHORTEST_PATH '{source_id}' TO '{target_id}'"
+        ))
+        .expect("shortest path by numeric ids");
+    assert_eq!(text_at(&by_id, 0, "source"), source_id);
+    assert_eq!(text_at(&by_id, 0, "target"), target_id);
 }
 
 // ── Issue #420: EDGE insert accepts node labels in from/to ─────────────────
