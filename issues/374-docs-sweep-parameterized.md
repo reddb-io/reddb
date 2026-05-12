@@ -155,3 +155,30 @@ Verification (this slice):
 - `pnpm test` ran and skipped because `target/debug/red` is not built.
 - `pnpm typecheck` exited nonzero; raw pnpm reports
   `Command "typecheck" not found`. No TypeScript files changed.
+
+Slice 6 (this commit): `docs/clients/drivers/cpp.md` now shows the
+parameterized form first.
+
+- C++ hub overview now says C++20, matching the driver API's `std::span`
+  requirement from `drivers/cpp/README.md`.
+- C++ hub quickstart now uses `conn->query(sql, params)` with
+  `std::array<reddb::Value, N>` instead of the bare `SELECT 1` example.
+- Added a "Safe parameter binding" section with scalar params, a vector
+  `SEARCH SIMILAR $1` example, and the native C++ → engine value table.
+- Documented the legacy no-param path, RedWire `FEATURE_PARAMS` requirement,
+  `ErrorCode::ParamsUnsupported` / `PARAMS_UNSUPPORTED`, and HTTP `/query`
+  typed params behavior.
+- Added the temporary ADR #352 GitHub cross-link because no local
+  `docs/adr/00XX-parameterized-queries.md` exists yet.
+
+Verification (this slice):
+- TDD red check first failed because `docs/clients/drivers/cpp.md` was
+  missing `## Safe parameter binding`, `SEARCH SIMILAR $1`, `FEATURE_PARAMS`,
+  `PARAMS_UNSUPPORTED`, and the ADR #352 cross-link.
+- Green check: the C++ hub page contains `## Safe parameter binding`,
+  `SEARCH SIMILAR $1`, `FEATURE_PARAMS`, `PARAMS_UNSUPPORTED`, and the ADR
+  #352 cross-link.
+- `git diff --check` clean.
+- `pnpm test` ran and skipped because `target/debug/red` is not built.
+- `pnpm typecheck` exited nonzero; `rtk proxy pnpm typecheck` confirms
+  `Command "typecheck" not found`. No TypeScript files changed.
