@@ -49,14 +49,42 @@ if (typeof process.env.REDDB_BIN === 'string' && process.env.REDDB_BIN !== '') {
 }
 
 main().catch((err) => {
-  process.stderr.write(
-    `reddb-cli: postinstall could not download the binary (${err.message}).\n` +
-      `          The package will still install. To use the CLI you can:\n` +
-      `            - set REDDB_BIN=/path/to/red\n` +
-      `            - or install the binary manually from https://github.com/${DEFAULT_REPO}/releases\n`,
-  )
+  process.stderr.write(formatFailure(err))
   process.exit(0)
 })
+
+function formatFailure(err) {
+  const repo = process.env.REDDB_POSTINSTALL_REPO || DEFAULT_REPO
+  if (err && err.code === 'UNSUPPORTED_PLATFORM') {
+    return (
+      `reddb-cli: no prebuilt red binary for ${process.platform}/${process.arch}.\n` +
+      `          Options:\n` +
+      `            - build from source: https://github.com/${repo}#build-from-source\n` +
+      `            - or set REDDB_BIN=/path/to/red.\n`
+    )
+  }
+  if (err && err.code === 'ASSET_NOT_FOUND') {
+    return (
+      `reddb-cli: release asset not found at ${err.url}\n` +
+      `          The GitHub Release for this CLI version likely has not been\n` +
+      `          published yet. To unblock:\n` +
+      `            1. Use the installer (latest stable red on PATH):\n` +
+      `                 curl -fsSL https://raw.githubusercontent.com/${repo}/main/install.sh | bash\n` +
+      `            2. Or pull a specific tag and rebuild:\n` +
+      `                 REDDB_POSTINSTALL_VERSION=v1.0.5 npm rebuild @reddb-io/cli\n` +
+      `            3. Or point the launcher at an existing binary:\n` +
+      `                 export REDDB_BIN=/path/to/red\n` +
+      `          Releases: https://github.com/${repo}/releases\n`
+    )
+  }
+  return (
+    `reddb-cli: postinstall could not download the binary (${err && err.message}).\n` +
+    `          The package itself still installs. To use the CLI:\n` +
+    `            - run the installer: curl -fsSL https://raw.githubusercontent.com/${repo}/main/install.sh | bash\n` +
+    `            - or download manually from https://github.com/${repo}/releases\n` +
+    `            - or set REDDB_BIN=/path/to/red.\n`
+  )
+}
 
 async function main() {
   const verdict = compareInstalled({

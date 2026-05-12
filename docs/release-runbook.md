@@ -130,3 +130,130 @@ npm deprecate reddb-cli@"<all-versions>" ""
   package. We can not deprecate it.
 - `drivers/python-asyncio` and `charts/reddb` follow independent version
   policies and are not touched by the lock-step bump or this runbook.
+
+## Publish state across registries
+
+The docs in `docs/clients/drivers/*.md` advertise install commands for
+every supported language. Several of those registry coordinates are
+**not yet published** — the package name is reserved but no version has
+shipped. Track each registry below; until a row turns green, the
+corresponding docs page should be paired with a "build from source"
+fallback.
+
+Probe the current state at any time:
+
+```bash
+bash scripts/check-registry-names.mjs   # local invariants
+node -e "fetch('https://crates.io/api/v1/crates/reddb-io').then(r=>r.json()).then(j=>console.log(j.crate&&j.crate.max_version||'NONE'))"
+curl -fsSL https://pypi.org/pypi/reddb/json | jq -r .info.version
+curl -fsSL https://pypi.org/pypi/reddb-asyncio/json | jq -r .info.version
+curl -fsSL https://repo.packagist.org/p2/reddb-io/reddb.json | jq -r '.packages["reddb-io/reddb"][0].version'
+curl -fsSL https://pub.dev/api/packages/reddb | jq -r .latest.version
+curl -fsSL https://proxy.golang.org/github.com/reddb-io/reddb-go/@latest
+```
+
+| Registry      | Coordinate                                | Driver doc                                | Status today        |
+|---------------|-------------------------------------------|-------------------------------------------|---------------------|
+| npm           | `@reddb-io/{cli,sdk,client,client-bun}`   | [JS/TS][jsguide], [Bun][bun]              | Published           |
+| crates.io     | `reddb-io`, `reddb-io-client`, `reddb-io-server`, `reddb-io-wire`, `reddb-io-grpc-proto`, `reddb-io-client-connector` | [Rust][rust], [Embedded][emb] | Pending first publish |
+| PyPI          | `reddb`                                   | [Python (PyO3)][py]                       | Pending first publish |
+| PyPI          | `reddb-asyncio`                           | [Python asyncio][pyasy]                   | Pending first publish |
+| Packagist     | `reddb-io/reddb`                          | [PHP][php]                                | Pending first publish |
+| pub.dev       | `reddb`                                   | [Dart][dart]                              | Pending first publish |
+| Go proxy      | `github.com/reddb-io/reddb-go`            | [Go][go]                                  | Pending module tag  |
+| GHCR          | `ghcr.io/reddb-io/{reddb,reddb-client}`   | [Docker][docker]                          | Published           |
+
+[jsguide]: /guides/javascript-typescript-driver.md
+[bun]: /clients/drivers/bun.md
+[rust]: /clients/drivers/rust.md
+[emb]: /api/embedded.md
+[py]: /clients/drivers/python.md
+[pyasy]: /clients/drivers/python-asyncio.md
+[php]: /clients/drivers/php.md
+[dart]: /clients/drivers/dart.md
+[go]: /clients/drivers/go.md
+[docker]: /getting-started/docker.md
+
+### First-time publish steps per registry
+
+These are run **once per registry** by a maintainer with credentials.
+After the first publish, every release pushes a new version on top
+through `.github/workflows/release.yml`.
+
+**crates.io.** All six workspace crates need to land in dependency
+order on the first publish; subsequent publishes are handled by the
+release workflow. From a clean checkout at the release tag:
+
+```bash
+cargo login                                              # one-time
+cargo publish -p reddb-io-grpc-proto
+cargo publish -p reddb-io-wire
+cargo publish -p reddb-io-client-connector
+cargo publish -p reddb-io-server
+cargo publish -p reddb-io-client
+cargo publish -p reddb-io
+bash scripts/configure-crates-owners.sh                  # set team owner
+```
+
+**PyPI (`reddb`).** Built by the existing PyPI wheel job in
+`release.yml` (matrix at line ~688). The `maturin` action needs a
+`PYPI_API_TOKEN` repo secret. First publish:
+
+```bash
+gh secret set PYPI_API_TOKEN --body "$(pass show pypi/reddb-token)"
+gh workflow run release.yml -f tag=$(cat package.json | jq -r .version)
+```
+
+**PyPI (`reddb-asyncio`).** Independent versioning (per the section
+above). Publishes from `drivers/python-asyncio/` via its own
+`pyproject.toml`:
+
+```bash
+cd drivers/python-asyncio
+python -m build
+twine upload dist/*
+```
+
+**Packagist (`reddb-io/reddb`).** Register the GitHub repo path with
+Packagist once (web UI: <https://packagist.org/packages/submit>),
+pointing at `https://github.com/reddb-io/reddb` with a
+`composer.json` discovery hint of `drivers/php/composer.json`.
+Subsequent versions tag automatically when the GitHub webhook fires.
+
+**pub.dev (`reddb`).** First publish from `drivers/dart/`:
+
+```bash
+cd drivers/dart
+dart pub login
+dart pub publish --dry-run
+dart pub publish
+```
+
+**Go module (`github.com/reddb-io/reddb-go`).** The Go ecosystem
+discovers modules by tag on the canonical repo path. Either:
+
+- promote `drivers/go/` to its own repo at `reddb-io/reddb-go` and
+  tag `v1.x.y` there, **or**
+- use `module github.com/reddb-io/reddb/drivers/go` and tag the
+  monorepo with `drivers/go/v1.x.y` (Go's monorepo convention).
+
+ADR pending — see the open driver-distribution discussion before
+flipping the switch.
+
+**GHCR.** Already published; no first-time step.
+
+> When a registry flips from "pending" to "published", come back to
+> this table and mark the row, and remove any "build from source"
+> caveats from the corresponding `docs/clients/drivers/<lang>.md`.
+
+## macOS x86_64 binary
+
+Before issue #404 (this runbook entry), `red-macos-x86_64` and
+`red_client-macos-x86_64` were **not produced** — only Apple Silicon
+(`macos-aarch64`) shipped. The build matrix in
+`.github/workflows/release.yml` now includes a `macos-13` job for the
+`x86_64-apple-darwin` target; from `v1.0.6` onward both Intel and
+Apple Silicon assets ship side-by-side.
+
+Older releases (`v1.0.5` and earlier): Intel Mac users must either run
+the aarch64 binary under Rosetta 2 or build from source.
