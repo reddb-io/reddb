@@ -70,8 +70,13 @@ pub fn small_uint() -> impl Strategy<Value = u32> {
     1u32..200
 }
 
+/// Small normalized score for MIN_SCORE clauses.
+pub fn small_score() -> impl Strategy<Value = String> {
+    (0u32..=100).prop_map(|n| format!("{}.{:02}", n / 100, n % 100))
+}
+
 /// `ASK 'question' [MODEL 'model'] [DEPTH n] [LIMIT n]
-/// [COLLECTION col]`.
+/// [MIN_SCORE x] [COLLECTION col]`.
 ///
 /// All optional clauses are independently generated. The order
 /// follows the documented RAG syntax. **`USING` is intentionally
@@ -87,9 +92,10 @@ pub fn ask_stmt() -> impl Strategy<Value = String> {
         proptest::option::of(model_name()),
         proptest::option::of(small_uint()),
         proptest::option::of(small_uint()),
+        proptest::option::of(small_score()),
         proptest::option::of(ident()),
     )
-        .prop_map(|(question, model, depth, limit, collection)| {
+        .prop_map(|(question, model, depth, limit, min_score, collection)| {
             let mut s = format!("ASK {}", question);
             if let Some(m) = model {
                 s.push_str(&format!(" MODEL {}", m));
@@ -99,6 +105,9 @@ pub fn ask_stmt() -> impl Strategy<Value = String> {
             }
             if let Some(l) = limit {
                 s.push_str(&format!(" LIMIT {}", l));
+            }
+            if let Some(score) = min_score {
+                s.push_str(&format!(" MIN_SCORE {}", score));
             }
             if let Some(c) = collection {
                 s.push_str(&format!(" COLLECTION {}", c));
