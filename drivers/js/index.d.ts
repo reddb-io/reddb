@@ -52,6 +52,42 @@ export interface QueryResult {
   rows: Array<Record<string, unknown>>
 }
 
+export interface AskSource {
+  urn: string
+  payload: string
+}
+
+export interface AskCitation {
+  marker: number
+  urn: string
+}
+
+export interface AskValidationItem {
+  kind: string
+  detail: string
+}
+
+export interface AskValidation {
+  ok: boolean
+  warnings: AskValidationItem[]
+  errors: AskValidationItem[]
+}
+
+export interface AskQueryResult {
+  answer: string
+  cache_hit: boolean
+  citations: AskCitation[]
+  completion_tokens: number
+  cost_usd: number
+  mode: 'strict' | 'lenient'
+  model: string
+  prompt_tokens: number
+  provider: string
+  retry_count: number
+  sources_flat: AskSource[]
+  validation: AskValidation
+}
+
 export interface InsertResult {
   affected: number
   /** Present when the underlying engine surfaces the inserted entity id. */
@@ -223,6 +259,7 @@ export class RedDB {
   readonly config: (collection?: string) => ConfigClient
   readonly vault: (collection?: string) => VaultClient
 
+  query(sql: `ASK ${string}`): Promise<AskQueryResult>
   query(sql: string): Promise<QueryResult>
   query(sql: string, params: Array<number | string | null>): Promise<QueryResult>
   insert(collection: string, payload: Record<string, unknown>): Promise<InsertResult>
