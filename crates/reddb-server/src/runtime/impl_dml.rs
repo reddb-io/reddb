@@ -523,8 +523,20 @@ impl RedDBRuntime {
                         let (columns, values) = pairwise_columns_values(&edge_values);
                         let label = find_column_value_string(&columns, &values, "label")?;
                         ensure_non_tree_structural_edge_label(&label)?;
-                        let from_id = find_column_value_u64(&columns, &values, "from")?;
-                        let to_id = find_column_value_u64(&columns, &values, "to")?;
+                        let from_id = resolve_edge_endpoint(
+                            self.inner.db.store().as_ref(),
+                            &query.table,
+                            &columns,
+                            &values,
+                            "from",
+                        )?;
+                        let to_id = resolve_edge_endpoint(
+                            self.inner.db.store().as_ref(),
+                            &query.table,
+                            &columns,
+                            &values,
+                            "to",
+                        )?;
                         let weight = find_column_value_f32_opt(&columns, &values, "weight");
                         let properties = extract_remaining_properties(
                             &columns,
@@ -1839,6 +1851,44 @@ fn find_column_value_opt_string(
         }
     }
     None
+}
+
+/// Resolve an EDGE endpoint (`from`/`to`) to a numeric entity id.
+///
+/// Accepts integer literals, decimal strings, and node labels resolved via
+/// the per-collection graph label index (same source of truth that
+/// `GRAPH NEIGHBORHOOD` / `GRAPH TRAVERSE` use at query time). Ambiguous
+/// labels error so callers can fall back to the numeric id form.
+fn resolve_edge_endpoint(
+    store: &crate::storage::unified::UnifiedStore,
+    collection: &str,
+    columns: &[String],
+    values: &[Value],
+    name: &str,
+) -> RedDBResult<u64> {
+    let val = find_column_value(columns, values, name)?;
+    match val {
+        Value::Integer(n) => Ok(n as u64),
+        Value::UnsignedInteger(n) => Ok(n),
+        Value::Text(s) => {
+            if let Ok(n) = s.parse::<u64>() {
+                return Ok(n);
+            }
+            let matches = store.lookup_graph_nodes_by_label_in(collection, &s);
+            match matches.len() {
+                0 => Err(RedDBError::Query(format!(
+                    "column '{name}': no graph node with label '{s}' in collection '{collection}'"
+                ))),
+                1 => Ok(matches[0].raw()),
+                n => Err(RedDBError::Query(format!(
+                    "column '{name}': ambiguous label '{s}' matches {n} nodes in collection '{collection}'; use the numeric id"
+                ))),
+            }
+        }
+        other => Err(RedDBError::Query(format!(
+            "column '{name}' expected integer or node label, got {other:?}"
+        ))),
+    }
 }
 
 /// Find a required column value and coerce to u64.

@@ -377,6 +377,120 @@ fn graph_shortest_path_resolves_labels_for_both_endpoints() {
     }
 }
 
+// ── Issue #420: EDGE insert accepts node labels in from/to ─────────────────
+
+fn first_text(rec_field: Option<&Value>) -> String {
+    match rec_field {
+        Some(Value::Text(s)) => s.as_ref().to_string(),
+        other => panic!("expected text, got {other:?}"),
+    }
+}
+
+#[test]
+fn edge_insert_resolves_labels_in_from_to() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('alice', 'Alice')")
+        .expect("insert alice");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('bob', 'Bob')")
+        .expect("insert bob");
+
+    rt.execute_query("INSERT INTO tales EDGE (label, from, to) VALUES ('KNOWS', 'alice', 'bob')")
+        .expect("edge by label must succeed");
+
+    // Verify edge is reachable via TRAVERSE
+    let res = rt
+        .execute_query("GRAPH TRAVERSE 'alice'")
+        .expect("traverse from alice");
+    let labels: Vec<String> = res
+        .result
+        .records
+        .iter()
+        .map(|r| first_text(r.get("label")))
+        .collect();
+    assert!(
+        labels.iter().any(|l| l == "bob"),
+        "edge alice→bob should make 'bob' reachable; got {labels:?}"
+    );
+}
+
+#[test]
+fn edge_insert_still_accepts_numeric_ids() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('alice', 'Alice')")
+        .expect("alice");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('bob', 'Bob')")
+        .expect("bob");
+    // First user entity id is 102 (#421). Use TRAVERSE to discover ids.
+    let res = rt.execute_query("GRAPH TRAVERSE 'alice'").expect("traverse");
+    let aid: u64 = match res.result.records[0].get("node_id") {
+        Some(Value::Text(s)) => s.as_ref().parse().expect("numeric id"),
+        other => panic!("unexpected node_id: {other:?}"),
+    };
+    let res = rt.execute_query("GRAPH TRAVERSE 'bob'").expect("traverse");
+    let bid: u64 = match res.result.records[0].get("node_id") {
+        Some(Value::Text(s)) => s.as_ref().parse().expect("numeric id"),
+        other => panic!("unexpected node_id: {other:?}"),
+    };
+    rt.execute_query(&format!(
+        "INSERT INTO tales EDGE (label, from, to) VALUES ('KNOWS', {aid}, {bid})"
+    ))
+    .expect("numeric edge");
+}
+
+#[test]
+fn edge_insert_mixed_label_and_id() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('alice', 'Alice')")
+        .expect("alice");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('bob', 'Bob')")
+        .expect("bob");
+    let res = rt.execute_query("GRAPH TRAVERSE 'bob'").expect("traverse");
+    let bid: u64 = match res.result.records[0].get("node_id") {
+        Some(Value::Text(s)) => s.as_ref().parse().expect("numeric"),
+        other => panic!("{other:?}"),
+    };
+    // label for `from`, numeric for `to`
+    rt.execute_query(&format!(
+        "INSERT INTO tales EDGE (label, from, to) VALUES ('KNOWS', 'alice', {bid})"
+    ))
+    .expect("mixed label+id");
+}
+
+#[test]
+fn edge_insert_ambiguous_label_errors() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('hero', 'A')")
+        .expect("hero a");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('hero', 'B')")
+        .expect("hero b");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('villain', 'V')")
+        .expect("villain");
+
+    let err = rt
+        .execute_query("INSERT INTO tales EDGE (label, from, to) VALUES ('FIGHTS', 'hero', 'villain')")
+        .expect_err("ambiguous label must error");
+    assert!(
+        format!("{err}").contains("ambiguous"),
+        "error should mention ambiguity, got: {err}"
+    );
+}
+
+#[test]
+fn edge_insert_unknown_label_errors() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('alice', 'Alice')")
+        .expect("alice");
+
+    let err = rt
+        .execute_query("INSERT INTO tales EDGE (label, from, to) VALUES ('KNOWS', 'alice', 'nope')")
+        .expect_err("unknown label must error");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("no graph node") && msg.contains("nope"),
+        "error should name missing label, got: {msg}"
+    );
+}
+
 // ── Issue #415: MATCH WHERE / RETURN n.foo on single-node patterns ──────────
 
 #[test]
