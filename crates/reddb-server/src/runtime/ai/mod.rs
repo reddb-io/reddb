@@ -19,6 +19,7 @@ pub mod citation_parser;
 pub mod cost_guard;
 pub mod dedup_cache;
 pub mod determinism_decider;
+pub mod explain_plan_builder;
 pub mod metrics;
 pub mod ner;
 pub mod prompt_assembler;
