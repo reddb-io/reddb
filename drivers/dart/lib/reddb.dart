@@ -10,6 +10,7 @@ export 'src/errors.dart';
 export 'src/options.dart';
 export 'src/reddb_base.dart' show Reddb, connect;
 export 'src/url.dart' show ParsedUri, parseUri, defaultPortFor, deriveLoginUrl;
+export 'src/value.dart' show Value;
 export 'src/redwire/codec.dart' show ZstdCodec;
 export 'src/redwire/frame.dart'
     show
@@ -23,4 +24,5 @@ export 'src/redwire/frame.dart'
         MAX_FRAME_SIZE,
         KNOWN_FLAGS,
         MAGIC,
-        SUPPORTED_VERSION;
+        SUPPORTED_VERSION,
+        FEATURE_PARAMS;

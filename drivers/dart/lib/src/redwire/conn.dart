@@ -8,6 +8,7 @@ import '../errors.dart';
 import '../options.dart';
 import 'codec.dart';
 import 'frame.dart';
+import 'value_codec.dart';
 
 /// Subset of `dart:io` Socket APIs that both Socket and SecureSocket
 /// implement. Lets us write a single client over either transport.
@@ -40,6 +41,7 @@ class RedwireConn implements Conn {
   bool _eof = false;
   bool _closed = false;
   int _nextCorr = 1;
+  int _serverFeatures = 0;
 
   /// Open a RedWire connection: TCP (or TLS), magic preamble, Hello /
   /// HelloAck / AuthResponse / AuthOk.
@@ -132,6 +134,7 @@ class RedwireConn implements Conn {
     if (chosen is! String) {
       throw ProtocolError('HelloAck missing `auth` field');
     }
+    final helloFeatures = _featuresOf(ackParsed);
 
     Uint8List respPayload;
     if (chosen == 'anonymous') {
@@ -161,18 +164,30 @@ class RedwireConn implements Conn {
         'expected AuthOk, got ${MessageKind.name(fin.kind)}',
       );
     }
+    _serverFeatures = helloFeatures | _featuresOf(_jsonOf(fin.payload));
   }
 
   // ---------------------------------------------------------------------
   // Public Conn surface
   // ---------------------------------------------------------------------
 
+  bool get supportsParams =>
+      (_serverFeatures & FEATURE_PARAMS) == FEATURE_PARAMS;
+
   @override
-  Future<Uint8List> query(String sql) async {
-    final resp = await _request(
-      MessageKind.query,
-      Uint8List.fromList(utf8.encode(sql)),
-    );
+  Future<Uint8List> query(String sql, [List<Object?>? params]) async {
+    final queryParams = params ?? const <Object?>[];
+    final hasParams = queryParams.isNotEmpty;
+    if (hasParams && !supportsParams) {
+      throw ParamsUnsupported(
+        'server did not advertise FEATURE_PARAMS; upgrade the server to use parameterized queries',
+      );
+    }
+    final kind = hasParams ? MessageKind.queryWithParams : MessageKind.query;
+    final payload = hasParams
+        ? ValueCodec.encodeQueryWithParams(sql, queryParams)
+        : Uint8List.fromList(utf8.encode(sql));
+    final resp = await _request(kind, payload);
     return _expectResultOrError(resp);
   }
 
@@ -383,6 +398,15 @@ class RedwireConn implements Conn {
     } catch (_) {
       return null;
     }
+  }
+
+  static int _featuresOf(Object? value) {
+    if (value is! Map) return 0;
+    final raw = value['features'];
+    if (raw is int) return raw;
+    if (raw is double) return raw.toInt();
+    if (raw is String) return int.tryParse(raw) ?? 0;
+    return 0;
   }
 
   static String? _jsonReason(Uint8List bytes) {

@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:reddb/reddb.dart';
 import 'package:reddb/src/redwire/conn.dart';
 import 'package:reddb/src/redwire/frame.dart' as f;
+import 'package:reddb/src/redwire/value_codec.dart';
 import 'package:test/test.dart';
 
 /// Minimal fake server. Spawns a `ServerSocket` on `127.0.0.1:0` and
@@ -241,6 +242,166 @@ void main() {
         final decoded = jsonDecode(utf8.decode(raw)) as Map<String, dynamic>;
         expect(decoded['echo'], 'SELECT 1');
         await conn.ping();
+        await conn.close();
+      } finally {
+        await server.close();
+      }
+    });
+
+    test('query with params uses QueryWithParams frame', () async {
+      final server = await _FakeServer.start((sock, reader) async {
+        await reader.readPreamble();
+        final hello = await reader.readFrame();
+        await _writeFrameOnSocket(
+          sock,
+          MessageKind.helloAck,
+          hello.correlationId,
+          Uint8List.fromList(
+            utf8.encode(jsonEncode({
+              'auth': 'anonymous',
+              'features': FEATURE_PARAMS,
+            })),
+          ),
+        );
+
+        final authResp = await reader.readFrame();
+        await _writeFrameOnSocket(
+          sock,
+          MessageKind.authOk,
+          authResp.correlationId,
+          Uint8List.fromList(
+            utf8.encode(jsonEncode({
+              'session_id': 'sess-params',
+              'features': FEATURE_PARAMS,
+            })),
+          ),
+        );
+
+        final req = await reader.readFrame();
+        expect(req.kind, MessageKind.queryWithParams);
+        final payload = req.payload;
+        final sqlLen = ByteData.sublistView(
+          payload,
+          0,
+        ).getUint32(0, Endian.little);
+        expect(
+          utf8.decode(Uint8List.sublistView(payload, 4, 4 + sqlLen)),
+          r'SELECT $1, $2, $3, $4',
+        );
+        final paramCount = ByteData.sublistView(
+          payload,
+          4 + sqlLen,
+        ).getUint32(0, Endian.little);
+        expect(paramCount, 4);
+        var offset = 4 + sqlLen + 4;
+        expect(payload[offset], ValueCodec.tagInt);
+        offset += 9;
+        expect(payload[offset], ValueCodec.tagText);
+        offset += 5 + 5; // tag + u32 len + "alice"
+        expect(payload[offset], ValueCodec.tagNull);
+        offset += 1;
+        expect(payload[offset], ValueCodec.tagVector);
+
+        await _writeFrameOnSocket(
+          sock,
+          MessageKind.result,
+          req.correlationId,
+          Uint8List.fromList(utf8.encode(jsonEncode({'records': <Object?>[]}))),
+        );
+      });
+
+      try {
+        final conn = await RedwireConn.connect(host: server.host, port: server.port);
+        expect(conn.supportsParams, isTrue);
+        final raw = await conn.query(r'SELECT $1, $2, $3, $4', [
+          42,
+          'alice',
+          null,
+          Float32List.fromList([1.0, 2.0, 3.0]),
+        ]);
+        final decoded = jsonDecode(utf8.decode(raw)) as Map<String, dynamic>;
+        expect(decoded['records'], isEmpty);
+        await conn.close();
+      } finally {
+        await server.close();
+      }
+    });
+
+    test('query with params requires FeatureParams', () async {
+      final server = await _FakeServer.start((sock, reader) async {
+        await reader.readPreamble();
+        final hello = await reader.readFrame();
+        await _writeFrameOnSocket(
+          sock,
+          MessageKind.helloAck,
+          hello.correlationId,
+          Uint8List.fromList(utf8.encode(jsonEncode({'auth': 'anonymous'}))),
+        );
+
+        final authResp = await reader.readFrame();
+        await _writeFrameOnSocket(
+          sock,
+          MessageKind.authOk,
+          authResp.correlationId,
+          Uint8List.fromList(
+            utf8.encode(jsonEncode({'session_id': 'sess-no-params'})),
+          ),
+        );
+      });
+
+      try {
+        final conn = await RedwireConn.connect(host: server.host, port: server.port);
+        expect(conn.supportsParams, isFalse);
+        await expectLater(
+          conn.query(r'SELECT $1', [1]),
+          throwsA(isA<ParamsUnsupported>()),
+        );
+        await conn.close();
+      } finally {
+        await server.close();
+      }
+    });
+
+    test('empty params keep emitting legacy Query frame', () async {
+      final server = await _FakeServer.start((sock, reader) async {
+        await reader.readPreamble();
+        final hello = await reader.readFrame();
+        await _writeFrameOnSocket(
+          sock,
+          MessageKind.helloAck,
+          hello.correlationId,
+          Uint8List.fromList(
+            utf8.encode(jsonEncode({
+              'auth': 'anonymous',
+              'features': FEATURE_PARAMS,
+            })),
+          ),
+        );
+
+        final authResp = await reader.readFrame();
+        await _writeFrameOnSocket(
+          sock,
+          MessageKind.authOk,
+          authResp.correlationId,
+          Uint8List.fromList(
+            utf8.encode(jsonEncode({'session_id': 'sess-legacy'})),
+          ),
+        );
+
+        final req = await reader.readFrame();
+        expect(req.kind, MessageKind.query);
+        expect(utf8.decode(req.payload), 'SELECT 1');
+        await _writeFrameOnSocket(
+          sock,
+          MessageKind.result,
+          req.correlationId,
+          Uint8List.fromList(utf8.encode('{}')),
+        );
+      });
+
+      try {
+        final conn = await RedwireConn.connect(host: server.host, port: server.port);
+        await conn.query('SELECT 1', const []);
         await conn.close();
       } finally {
         await server.close();
