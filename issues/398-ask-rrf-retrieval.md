@@ -34,3 +34,35 @@ Per-bucket top-K retrieval (BM25 over text, vector similarity, graph traversal a
 ## Blocked by
 
 - #394
+
+## Progress
+
+Slice 1: `RrfFuser` deep module landed at
+`crates/reddb-server/src/runtime/ai/rrf_fuser.rs` with 17 unit tests
+covering RRF reference values (1/(60+rank)), multi-list contribution
+sum, k constant override, total_k cap, per-bucket `min_score` filter
+(including rank-promotion after drop and independent floors per
+bucket), deterministic id-ascending tie-break, bucket-order
+independence, edge cases (empty buckets, duplicate id within bucket,
+generic id types).
+
+The module is pure — no I/O, no transport, no clock — and exposes:
+
+- `Candidate<Id> { id, score }` — per-bucket entry
+- `Bucket<Id> { candidates, min_score }` — one ranker's ranked list
+- `FusedItem<Id> { id, rrf_score }` — output row
+- `fuse(buckets, k, total_k) -> Vec<FusedItem>`
+- `RRF_K_DEFAULT = 60`
+
+Deferred to follow-up slices (each independently shippable):
+
+- Wire `fuse()` into `AskPipeline` retrieval — currently bucket
+  retrieval is dispatched per-bucket and concatenated; this needs
+  redirecting through the fuser with the per-bucket `min_score`
+  threaded from `ASK '...' MIN_SCORE`.
+- Parse `ASK '...' LIMIT N` (default 20) and `ASK '...' DEPTH N` in
+  the SQL parser and thread into the pipeline.
+- Integration test verifying a known-good question retrieves the
+  expected ranked URNs (depends on the wiring above).
+
+Issue stays open with this progress note.
