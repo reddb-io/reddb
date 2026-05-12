@@ -1136,10 +1136,7 @@ impl RedDBRuntime {
         raw_query: &str,
         ask: &crate::storage::query::ast::AskQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
-        use crate::ai::{
-            parse_provider, resolve_api_key_from_runtime, AiProvider, AnthropicPromptRequest,
-            OpenAiPromptRequest,
-        };
+        use crate::ai::{parse_provider, resolve_api_key_from_runtime, AiProvider};
 
         // Stage 1-4: AskPipeline narrows the candidate set BEFORE any
         // LLM call. Issue #119 / #120 / #121: scope-pre-filter +
@@ -1197,74 +1194,77 @@ impl RedDBRuntime {
         let api_base = provider.resolve_api_base();
 
         let transport = crate::runtime::ai::transport::AiTransport::from_runtime(self);
-        let provider_started = std::time::Instant::now();
-        let prompt_response = match provider {
-            AiProvider::Anthropic => {
-                let request = AnthropicPromptRequest {
-                    api_key,
-                    model: model.clone(),
-                    prompt: full_prompt,
-                    temperature: Some(0.3),
-                    max_output_tokens: Some(settings.max_completion_tokens as usize),
-                    api_base,
-                    anthropic_version: crate::ai::DEFAULT_ANTHROPIC_VERSION.to_string(),
-                };
-                crate::runtime::ai::block_on_ai(async move {
-                    crate::ai::anthropic_prompt_async(&transport, request).await
-                })
-                .and_then(|result| result)?
+        let strict_mode = if ask.strict {
+            crate::runtime::ai::strict_validator::Mode::Strict
+        } else {
+            crate::runtime::ai::strict_validator::Mode::Lenient
+        };
+        let mut attempt = crate::runtime::ai::strict_validator::Attempt::First;
+        let mut prompt_for_call = full_prompt.clone();
+        let (answer, prompt_tokens, completion_tokens, citation_result) = loop {
+            let provider_started = std::time::Instant::now();
+            let prompt_response = call_ask_llm(
+                &provider,
+                transport.clone(),
+                api_key.clone(),
+                model.clone(),
+                prompt_for_call.clone(),
+                api_base.clone(),
+                settings.max_completion_tokens as usize,
+            )?;
+            let elapsed_ms = duration_millis_u32(provider_started.elapsed());
+            let completion_tokens = prompt_response.completion_tokens.unwrap_or(0);
+            let usage = crate::runtime::ai::cost_guard::Usage {
+                prompt_tokens: estimate_prompt_tokens(&prompt_for_call),
+                sources_bytes: usage.sources_bytes,
+                completion_tokens: u64_to_u32_saturating(completion_tokens),
+                elapsed_ms,
+                ..Default::default()
+            };
+            match crate::runtime::ai::cost_guard::evaluate(
+                &usage,
+                &crate::runtime::ai::cost_guard::DailyState::default(),
+                &settings,
+                ask_cost_guard_now(),
+            ) {
+                crate::runtime::ai::cost_guard::Decision::Allow => {}
+                crate::runtime::ai::cost_guard::Decision::Reject { limit, detail, .. } => {
+                    return Err(cost_guard_rejection_to_error(limit, detail));
+                }
             }
-            _ => {
-                let request = OpenAiPromptRequest {
-                    api_key,
-                    model: model.clone(),
-                    prompt: full_prompt,
-                    temperature: Some(0.3),
-                    max_output_tokens: Some(settings.max_completion_tokens as usize),
-                    api_base,
-                };
-                crate::runtime::ai::block_on_ai(async move {
-                    crate::ai::openai_prompt_async(&transport, request).await
-                })
-                .and_then(|result| result)?
+
+            let answer = prompt_response.output_text;
+            let citation_result =
+                crate::runtime::ai::citation_parser::parse_citations(&answer, sources_count);
+            match crate::runtime::ai::strict_validator::validate(
+                &citation_result,
+                strict_mode,
+                attempt,
+            ) {
+                crate::runtime::ai::strict_validator::Decision::Ok => {
+                    break (
+                        answer,
+                        prompt_response.prompt_tokens.unwrap_or(0),
+                        completion_tokens,
+                        citation_result,
+                    );
+                }
+                crate::runtime::ai::strict_validator::Decision::Retry { prompt } => {
+                    attempt = crate::runtime::ai::strict_validator::Attempt::Retry;
+                    prompt_for_call = format!("{prompt}\n\n{full_prompt}");
+                }
+                crate::runtime::ai::strict_validator::Decision::GiveUp { errors } => {
+                    let validation = validation_to_json(&citation_result.warnings, &errors, false);
+                    return Err(RedDBError::Validation {
+                        message: "ASK citation validation failed after retry".to_string(),
+                        validation,
+                    });
+                }
             }
         };
-        let elapsed_ms = duration_millis_u32(provider_started.elapsed());
-        let completion_tokens = prompt_response.completion_tokens.unwrap_or(0);
-        let usage = crate::runtime::ai::cost_guard::Usage {
-            prompt_tokens: usage.prompt_tokens,
-            sources_bytes: usage.sources_bytes,
-            completion_tokens: u64_to_u32_saturating(completion_tokens),
-            elapsed_ms,
-            ..Default::default()
-        };
-        match crate::runtime::ai::cost_guard::evaluate(
-            &usage,
-            &crate::runtime::ai::cost_guard::DailyState::default(),
-            &settings,
-            ask_cost_guard_now(),
-        ) {
-            crate::runtime::ai::cost_guard::Decision::Allow => {}
-            crate::runtime::ai::cost_guard::Decision::Reject { limit, detail, .. } => {
-                return Err(cost_guard_rejection_to_error(limit, detail));
-            }
-        }
-        let response = (
-            prompt_response.output_text,
-            prompt_response.prompt_tokens.unwrap_or(0),
-            completion_tokens,
-        );
 
-        let (answer, prompt_tokens, completion_tokens) = response;
-
-        // Issue #393: parse inline `[^N]` citation markers out of the
-        // LLM answer. The parser is pure and bounds-checked against the
-        // flat source count we passed; out-of-range markers come back
-        // as `validation.warnings` (no retry yet — that lands in #395).
-        let citation_result =
-            crate::runtime::ai::citation_parser::parse_citations(&answer, sources_count);
         let citations_json = citations_to_json(&citation_result.citations, &source_urns);
-        let validation_json = validation_to_json(&citation_result.warnings);
+        let validation_json = validation_to_json(&citation_result.warnings, &[], true);
         let citations_bytes =
             crate::json::to_vec(&citations_json).unwrap_or_else(|_| b"[]".to_vec());
         let validation_bytes =
@@ -1370,6 +1370,48 @@ fn cost_guard_rejection_to_error(
         "quota_exceeded:{bucket}:{}:{detail}",
         limit.field_name()
     ))
+}
+
+fn call_ask_llm(
+    provider: &crate::ai::AiProvider,
+    transport: crate::runtime::ai::transport::AiTransport,
+    api_key: String,
+    model: String,
+    prompt: String,
+    api_base: String,
+    max_output_tokens: usize,
+) -> RedDBResult<crate::ai::AiPromptResponse> {
+    match provider {
+        crate::ai::AiProvider::Anthropic => {
+            let request = crate::ai::AnthropicPromptRequest {
+                api_key,
+                model,
+                prompt,
+                temperature: Some(0.3),
+                max_output_tokens: Some(max_output_tokens),
+                api_base,
+                anthropic_version: crate::ai::DEFAULT_ANTHROPIC_VERSION.to_string(),
+            };
+            crate::runtime::ai::block_on_ai(async move {
+                crate::ai::anthropic_prompt_async(&transport, request).await
+            })
+            .and_then(|result| result)
+        }
+        _ => {
+            let request = crate::ai::OpenAiPromptRequest {
+                api_key,
+                model,
+                prompt,
+                temperature: Some(0.3),
+                max_output_tokens: Some(max_output_tokens),
+                api_base,
+            };
+            crate::runtime::ai::block_on_ai(async move {
+                crate::ai::openai_prompt_async(&transport, request).await
+            })
+            .and_then(|result| result)
+        }
+    }
 }
 
 /// Build the full prompt string sent to the synthesis LLM by routing
@@ -1669,16 +1711,19 @@ fn build_sources_flat(
     (crate::json::Value::Array(arr), urns)
 }
 
-/// Issue #393: serialize structural warnings as `{ ok, warnings: [...] }`.
+/// Issue #393/#395: serialize structural citation validation as
+/// `{ ok, warnings: [...], errors: [...] }`.
 ///
-/// `ok` is true when no warnings fired. Each warning carries
-/// `{ kind, span: [start, end], detail }`. Retry-on-malformed lands in
-/// #395 — this slice only surfaces the diagnostic.
+/// Warnings carry `{ kind, span: [start, end], detail }`; retry
+/// exhaustion errors carry `{ kind, detail }`.
 fn validation_to_json(
     warnings: &[crate::runtime::ai::citation_parser::CitationWarning],
+    errors: &[crate::runtime::ai::strict_validator::ValidationError],
+    ok: bool,
 ) -> crate::json::Value {
     use crate::runtime::ai::citation_parser::CitationWarningKind;
-    let mut arr: Vec<crate::json::Value> = Vec::with_capacity(warnings.len());
+    use crate::runtime::ai::strict_validator::ValidationErrorKind;
+    let mut warnings_json: Vec<crate::json::Value> = Vec::with_capacity(warnings.len());
     for w in warnings {
         let mut obj: crate::json::Map<String, crate::json::Value> = Default::default();
         let kind = match w.kind {
@@ -1698,14 +1743,34 @@ fn validation_to_json(
             "detail".to_string(),
             crate::json::Value::String(w.detail.clone()),
         );
-        arr.push(crate::json::Value::Object(obj));
+        warnings_json.push(crate::json::Value::Object(obj));
     }
+
+    let mut errors_json: Vec<crate::json::Value> = Vec::with_capacity(errors.len());
+    for err in errors {
+        let mut obj: crate::json::Map<String, crate::json::Value> = Default::default();
+        let kind = match err.kind {
+            ValidationErrorKind::Malformed => "malformed",
+            ValidationErrorKind::OutOfRange => "out_of_range",
+        };
+        obj.insert(
+            "kind".to_string(),
+            crate::json::Value::String(kind.to_string()),
+        );
+        obj.insert(
+            "detail".to_string(),
+            crate::json::Value::String(err.detail.clone()),
+        );
+        errors_json.push(crate::json::Value::Object(obj));
+    }
+
     let mut root: crate::json::Map<String, crate::json::Value> = Default::default();
+    root.insert("ok".to_string(), crate::json::Value::Bool(ok));
     root.insert(
-        "ok".to_string(),
-        crate::json::Value::Bool(warnings.is_empty()),
+        "warnings".to_string(),
+        crate::json::Value::Array(warnings_json),
     );
-    root.insert("warnings".to_string(), crate::json::Value::Array(arr));
+    root.insert("errors".to_string(), crate::json::Value::Array(errors_json));
     crate::json::Value::Object(root)
 }
 
@@ -1879,7 +1944,7 @@ mod citation_wedge_tests {
             "reddb:incidents/2".to_string(),
         ];
         let cit = citations_to_json(&r.citations, &urns);
-        let val = validation_to_json(&r.warnings);
+        let val = validation_to_json(&r.warnings, &[], r.warnings.is_empty());
 
         let cit_bytes = crate::json::to_vec(&cit).unwrap();
         let val_bytes = crate::json::to_vec(&val).unwrap();
@@ -1930,7 +1995,7 @@ mod citation_wedge_tests {
         // and DOES NOT retry (retry lands in #395).
         let answer = "Result is X[^5].";
         let r = parse_citations(answer, 1);
-        let val = validation_to_json(&r.warnings);
+        let val = validation_to_json(&r.warnings, &[], r.warnings.is_empty());
         let bytes = crate::json::to_vec(&val).unwrap();
         let parsed = parse_json(&bytes);
 
@@ -1947,7 +2012,7 @@ mod citation_wedge_tests {
         let answer = "no citations here";
         let r = parse_citations(answer, 3);
         let cit = citations_to_json(&r.citations, &[]);
-        let val = validation_to_json(&r.warnings);
+        let val = validation_to_json(&r.warnings, &[], r.warnings.is_empty());
         let bytes = crate::json::to_vec(&cit).unwrap();
         assert_eq!(bytes, b"[]", "empty array literal");
         let val_bytes = crate::json::to_vec(&val).unwrap();
@@ -1964,7 +2029,7 @@ mod citation_wedge_tests {
         let answer = "broken[^abc] here";
         let r = parse_citations(answer, 5);
         let cit = citations_to_json(&r.citations, &[]);
-        let val = validation_to_json(&r.warnings);
+        let val = validation_to_json(&r.warnings, &[], r.warnings.is_empty());
         let cit_bytes = crate::json::to_vec(&cit).unwrap();
         assert_eq!(cit_bytes, b"[]");
         let val_bytes = crate::json::to_vec(&val).unwrap();

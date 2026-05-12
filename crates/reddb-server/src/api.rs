@@ -574,6 +574,10 @@ pub enum RedDBError {
     Engine(String),
     Catalog(String),
     Query(String),
+    Validation {
+        message: String,
+        validation: crate::json::Value,
+    },
     Io(io::Error),
     VersionUnavailable,
     /// Operator-pinned cap exceeded (PLAN.md Phase 4.1). The string
@@ -602,6 +606,7 @@ impl fmt::Display for RedDBError {
             Self::Engine(msg) => write!(f, "engine error: {msg}"),
             Self::Catalog(msg) => write!(f, "catalog error: {msg}"),
             Self::Query(msg) => write!(f, "query error: {msg}"),
+            Self::Validation { message, .. } => write!(f, "validation error: {message}"),
             Self::Io(err) => write!(f, "io error: {err}"),
             Self::VersionUnavailable => write!(f, "version information unavailable"),
             Self::QuotaExceeded(msg) => write!(f, "quota exceeded: {msg}"),

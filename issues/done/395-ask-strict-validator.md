@@ -29,12 +29,12 @@ Introduces `StrictValidator` deep module — pure function `(answer, sources_cou
 
 ## Acceptance criteria
 
-- [ ] `StrictValidator` deep module: unit tests for every branch (ok, retry needed, retry exhausted, lenient warn-only).
-- [ ] One retry budget enforced; never two retries.
-- [ ] HTTP 422 returned on retry exhaustion with clear `validation.errors`.
-- [ ] `ASK '...' STRICT OFF` works and surfaces warnings instead of erroring.
-- [ ] Integration test with fake LLM that emits invalid `[^N]` on first call, valid on retry.
-- [ ] Integration test where retry also fails → 422.
+- [x] `StrictValidator` deep module: unit tests for every branch (ok, retry needed, retry exhausted, lenient warn-only).
+- [x] One retry budget enforced; never two retries.
+- [x] HTTP 422 returned on retry exhaustion with clear `validation.errors`.
+- [x] `ASK '...' STRICT OFF` works and surfaces warnings instead of erroring.
+- [x] Integration test with fake LLM that emits invalid `[^N]` on first call, valid on retry.
+- [x] Integration test where retry also fails → 422.
 
 ## Blocked by
 
@@ -69,3 +69,19 @@ Deferred to follow-up slices:
 The deep module is the load-bearing piece; the remaining slices are
 mechanical wiring and can land independently. Issue stays open with
 this progress note.
+
+Slice 2 (this commit): wired strict citation validation into the HTTP
+ASK path. `ASK '...' STRICT ON|OFF` now parses into `AskQuery`, strict
+mode validates parsed citations after the first LLM answer, issues one
+retry with the validator correction prompt, and returns HTTP 422 with
+`validation.ok = false` plus `validation.errors` when the retry still
+fails. `STRICT OFF` uses lenient mode, returns 200, and keeps structural
+diagnostics in `validation.warnings`.
+
+Verification:
+
+- `cargo test -p reddb-io-server strict_validator --lib`
+- `cargo test -p reddb-io-server http_query_ask --lib`
+- `cargo check`
+- `pnpm test` (skipped: `target/debug/red` missing)
+- `pnpm typecheck` (reported `TypeScript: No errors found` but exited 1)
