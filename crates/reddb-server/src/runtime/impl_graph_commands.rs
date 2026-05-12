@@ -669,7 +669,14 @@ impl RedDBRuntime {
                 collection,
                 column,
                 limit,
+                limit_param,
             } => {
+                if limit_param.is_some() {
+                    return Err(RedDBError::Query(
+                        "SEARCH SPATIAL RADIUS LIMIT $N parameter was not bound before execution"
+                            .to_string(),
+                    ));
+                }
                 use crate::storage::unified::spatial_index::haversine_km;
                 let _ = column; // Column indicates which field holds geo data
                 let store = self.inner.db.store();

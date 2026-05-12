@@ -434,8 +434,14 @@ impl<'a> Parser<'a> {
                 let _ = self.consume(&Token::Column)? || self.consume_search_ident("COLUMN")?;
                 let column = self.expect_ident()?;
 
+                let mut limit_param: Option<usize> = None;
                 let limit = if self.consume(&Token::Limit)? {
-                    self.parse_integer()? as usize
+                    if matches!(self.peek(), Token::Dollar | Token::Question) {
+                        limit_param = Some(self.parse_param_slot("LIMIT")?);
+                        0
+                    } else {
+                        self.parse_integer()? as usize
+                    }
                 } else {
                     100
                 };
@@ -447,6 +453,7 @@ impl<'a> Parser<'a> {
                     collection,
                     column,
                     limit,
+                    limit_param,
                 }))
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("BBOX") => {

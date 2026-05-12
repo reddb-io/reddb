@@ -184,6 +184,7 @@ fn happy_radius_paris_10km_parses() {
             collection,
             column,
             limit,
+            ..
         }) => {
             assert!((center_lat - 48.8566).abs() < 1e-9);
             assert!((center_lon - 2.3522).abs() < 1e-9);

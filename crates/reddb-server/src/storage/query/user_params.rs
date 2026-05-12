@@ -241,6 +241,11 @@ fn collect_non_expr_indices(expr: &QueryExpr, out: &mut Vec<usize>) {
                 out.push(*idx);
             }
         }
+        QueryExpr::SearchCommand(SearchCommand::SpatialRadius { limit_param, .. }) => {
+            if let Some(idx) = limit_param {
+                out.push(*idx);
+            }
+        }
         QueryExpr::SearchCommand(SearchCommand::Text { limit_param, .. }) => {
             if let Some(idx) = limit_param {
                 out.push(*idx);
@@ -483,6 +488,52 @@ pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamEr
             collection: collection.clone(),
             column: column.clone(),
             k_param: None,
+        }));
+    }
+
+    if let QueryExpr::SearchCommand(SearchCommand::SpatialRadius {
+        center_lat,
+        center_lon,
+        radius_km,
+        collection,
+        column,
+        limit,
+        limit_param,
+    }) = expr
+    {
+        let bound_limit = if let Some(idx) = limit_param {
+            let value = params.get(*idx).ok_or(UserParamError::Arity {
+                expected: idx + 1,
+                got: params.len(),
+            })?;
+            match value {
+                Value::Integer(n) if *n > 0 => *n as usize,
+                Value::UnsignedInteger(n) if *n > 0 => *n as usize,
+                Value::BigInt(n) if *n > 0 => *n as usize,
+                Value::Integer(_) | Value::UnsignedInteger(_) | Value::BigInt(_) => {
+                    return Err(UserParamError::TypeMismatch {
+                        slot: "SEARCH SPATIAL RADIUS LIMIT parameter (must be > 0)",
+                        got: value_variant_name(value),
+                    });
+                }
+                other => {
+                    return Err(UserParamError::TypeMismatch {
+                        slot: "SEARCH SPATIAL RADIUS LIMIT parameter",
+                        got: value_variant_name(other),
+                    });
+                }
+            }
+        } else {
+            *limit
+        };
+        return Ok(QueryExpr::SearchCommand(SearchCommand::SpatialRadius {
+            center_lat: *center_lat,
+            center_lon: *center_lon,
+            radius_km: *radius_km,
+            collection: collection.clone(),
+            column: column.clone(),
+            limit: bound_limit,
+            limit_param: None,
         }));
     }
 
@@ -1332,6 +1383,55 @@ mod tests {
             err,
             UserParamError::TypeMismatch {
                 slot: "SEARCH CONTEXT LIMIT parameter",
+                got: "text"
+            }
+        ));
+    }
+
+    #[test]
+    fn bind_search_spatial_radius_limit_param() {
+        // Issue #361: `SEARCH SPATIAL RADIUS ... LIMIT $N` binds an integer.
+        let q = parse(
+            "SEARCH SPATIAL RADIUS 48.8566 2.3522 10.0 COLLECTION sites COLUMN location LIMIT $1",
+        );
+        let bound = bind(&q, &[Value::Integer(50)]).unwrap();
+        let QueryExpr::SearchCommand(SearchCommand::SpatialRadius {
+            limit,
+            limit_param,
+            ..
+        }) = bound
+        else {
+            panic!("expected SearchCommand::SpatialRadius");
+        };
+        assert_eq!(limit, 50);
+        assert_eq!(limit_param, None, "limit_param must be cleared post-bind");
+    }
+
+    #[test]
+    fn bind_search_spatial_radius_limit_rejects_zero() {
+        let q = parse(
+            "SEARCH SPATIAL RADIUS 48.8566 2.3522 10.0 COLLECTION sites COLUMN location LIMIT $1",
+        );
+        let err = bind(&q, &[Value::Integer(0)]).unwrap_err();
+        assert!(matches!(
+            err,
+            UserParamError::TypeMismatch {
+                slot: "SEARCH SPATIAL RADIUS LIMIT parameter (must be > 0)",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn bind_search_spatial_radius_limit_rejects_non_integer() {
+        let q = parse(
+            "SEARCH SPATIAL RADIUS 48.8566 2.3522 10.0 COLLECTION sites COLUMN location LIMIT $1",
+        );
+        let err = bind(&q, &[Value::text("five")]).unwrap_err();
+        assert!(matches!(
+            err,
+            UserParamError::TypeMismatch {
+                slot: "SEARCH SPATIAL RADIUS LIMIT parameter",
                 got: "text"
             }
         ));
