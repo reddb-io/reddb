@@ -24,11 +24,11 @@ The registry covers all 11 currently-supported providers (OpenAI, Anthropic, Gro
 
 ## Acceptance criteria
 
-- [ ] `ProviderCapabilityRegistry` deep module with exhaustive unit tests per provider.
-- [ ] Strict + non-supporting provider → lenient + warning, not error.
-- [ ] Setting `ask.providers.capabilities.<name>` can override built-in flags.
-- [ ] Unknown provider returns conservative defaults (no citation support, no seed).
-- [ ] Integration test covering fallback path with a stub provider marked as non-supporting.
+- [x] `ProviderCapabilityRegistry` deep module with exhaustive unit tests per provider.
+- [x] Strict + non-supporting provider → lenient + warning, not error.
+- [x] Setting `ask.providers.capabilities.<name>` can override built-in flags.
+- [x] Unknown provider returns conservative defaults (no citation support, no seed).
+- [x] Integration test covering fallback path with a stub provider marked as non-supporting.
 
 ## Blocked by
 
@@ -89,3 +89,32 @@ Deferred to follow-up slices:
 Deep module is the load-bearing piece; remaining slices are mechanical
 wiring and can land independently. Issue stays open with this progress
 note (mirrors slice 1 pattern of #395 and #401).
+
+Slice 2: ASK runtime wiring landed and completes this issue's acceptance
+criteria.
+
+- `execute_ask` now evaluates the selected provider through
+  `ProviderCapabilityRegistry` before strict validation. Strict requests
+  against non-citing providers run with effective lenient mode, surface a
+  `mode_fallback` warning in `validation.warnings`, and avoid the strict
+  retry/error path.
+- ASK result rows now include effective `mode` and `retry_count`, so callers
+  can observe the mode actually used.
+- Runtime settings under
+  `ask.providers.capabilities.<provider>.<flag>` override built-in flags.
+  The exact provider key also accepts a JSON object/string for config-file
+  style overlays; dotted leaf settings win when both exist.
+- Added HTTP integration coverage with local OpenAI-compatible stubs:
+  `USING ollama` proves built-in non-citing fallback, and
+  `ask.providers.capabilities.openai.supports_citations = false` proves a
+  deployment override can downgrade a normally strict-capable provider.
+
+Verification:
+
+- `cargo test -p reddb-io-server http_query_ask_strict_falls_back_for_non_citing_provider -- --nocapture`
+- `cargo test -p reddb-io-server http_query_ask_capability_setting_can_downgrade_provider -- --nocapture`
+- `cargo test -p reddb-io-server http_query_ask --lib -- --nocapture`
+- `cargo test -p reddb-io-server provider_capabilities --lib`
+- `cargo check -p reddb-io-server`
+- `pnpm test` exited 0 and skipped because `target/debug/red` is missing.
+- `pnpm typecheck` printed `TypeScript: No errors found` and exited 1.
