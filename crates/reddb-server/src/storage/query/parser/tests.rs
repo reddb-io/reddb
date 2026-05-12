@@ -1350,6 +1350,20 @@ fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
     assert_eq!(ask.temperature, Some(0.0_f32));
     assert_eq!(ask.seed, Some(7_u64));
 
+    // Issue #395: strict citation validation is on by default and can
+    // be disabled per ASK.
+    let query = parse("ASK 'q' STRICT OFF").unwrap();
+    let QueryExpr::Ask(ask) = query else {
+        panic!("Expected AskQuery");
+    };
+    assert!(!ask.strict);
+
+    let query = parse("ASK 'q' STRICT ON").unwrap();
+    let QueryExpr::Ask(ask) = query else {
+        panic!("Expected AskQuery");
+    };
+    assert!(ask.strict);
+
     for sql in [
         "INSERT INTO docs (body) VALUES ('x') WITH UNKNOWN",
         "INSERT INTO docs (body) VALUES ('x') WITH TTL 1 parsec",
@@ -1364,6 +1378,8 @@ fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
         "ASK 'q' COLLECTION",
         "ASK 'q' TEMPERATURE",
         "ASK 'q' SEED",
+        "ASK 'q' STRICT",
+        "ASK 'q' STRICT MAYBE",
     ] {
         assert!(parse(sql).is_err(), "{sql}");
     }
@@ -2658,8 +2674,7 @@ fn test_parse_graph_traverse_docs_form() {
 #[test]
 fn test_parse_graph_shortest_path_docs_form() {
     // Pin `GRAPH SHORTEST_PATH FROM '...' TO '...' ALGORITHM ...` (docs). Regression for #417.
-    let query =
-        parse("GRAPH SHORTEST_PATH FROM 'alice' TO 'charlie' ALGORITHM dijkstra").unwrap();
+    let query = parse("GRAPH SHORTEST_PATH FROM 'alice' TO 'charlie' ALGORITHM dijkstra").unwrap();
     if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::ShortestPath {
         source,
         target,
