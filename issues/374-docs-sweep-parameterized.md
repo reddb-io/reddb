@@ -258,6 +258,39 @@ Verification (this slice):
 - Green marker check passed for both pages.
 - `cargo test -p reddb-io-server --lib bind_search_similar` passed 12 tests
   with 3980 filtered out.
+
+Slice 10 (this commit): the query reference pages now lead with
+parameterized examples, and DML binding was tightened so those examples are
+real rather than aspirational.
+
+- `docs/query/select.md`, `insert.md`, `update.md`, `delete.md`,
+  `search-commands.md`, and `universal.md` now show `db.query(sql, params)`
+  near the top and link to the temporary ADR #352 GitHub issue.
+- `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `SEARCH SIMILAR`, and `FROM ANY`
+  examples now use `$N` placeholders for runtime values where the parser and
+  binder support them.
+- `SEARCH TEXT`, `SEARCH HYBRID`, `SEARCH MULTIMODAL`, `SEARCH INDEX`, and
+  `SEARCH CONTEXT` examples bind result limits only; their query text/value
+  positions remain literal because those parser paths do not yet accept
+  value placeholders.
+- `crates/reddb-server/src/storage/query/user_params.rs` now binds
+  `UPDATE` assignment / WHERE params and `DELETE` WHERE params so the query
+  docs can truthfully show parameterized DML.
+
+Verification (this slice):
+- TDD red check first failed with `Arity { expected: 0, got: 3 }` for
+  `UPDATE users SET age = $1, active = $2 WHERE name = $3`.
+- Green checks:
+  `cargo test -p reddb-io-server --lib bind_update_assignments_and_where_params`,
+  `cargo test -p reddb-io-server --lib bind_delete_where_param`, and
+  `cargo test -p reddb-io-server --lib user_params`.
+- Query docs marker check passed for `ADR #352` and `db.query(sql, params)` on
+  all six pages.
+- `cargo check` passed.
+- `git diff --check` passed.
+- `pnpm test` ran and skipped because `target/debug/red` is not built.
+- `pnpm typecheck` exited nonzero; `rtk proxy pnpm typecheck` confirms
+  `Command "typecheck" not found`. No TypeScript files changed.
 - `git diff --check` clean.
 - `pnpm test` ran and skipped because `target/debug/red` is not built.
 - `pnpm typecheck` exited nonzero after reporting `TypeScript: No errors
