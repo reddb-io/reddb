@@ -20,7 +20,7 @@
   ],
   "scripts": {
     "postinstall": "node postinstall.js",
-    "test": "node --test test/ask.test.mjs test/cache.test.mjs test/params.test.mjs test/redwire.params.test.mjs && node test/smoke.test.mjs"
+    "test": "node --test test/ask.test.mjs test/cache.test.mjs test/params.test.mjs test/postinstall.test.mjs test/redwire.params.test.mjs && node test/smoke.test.mjs"
   },
   "engines": {
     "node": ">=18"
