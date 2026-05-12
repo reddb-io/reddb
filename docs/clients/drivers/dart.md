@@ -23,13 +23,57 @@ import 'package:reddb/reddb.dart';
 Future<void> main() async {
   final db = await connect('red://localhost:5050');
   try {
-    final res = await db.query('SELECT 1');
+    final res = await db.query(
+      r'SELECT * FROM users WHERE age > $1 AND name = $2',
+      [18, 'alice'],
+    );
     print(res);
   } finally {
     await db.close();
   }
 }
 ```
+
+## Safe parameter binding
+
+`query` accepts positional `$N` bind values as an optional second argument. Use
+that form for user input and vector values instead of interpolating values into
+SQL strings. The parameterized-query design is tracked in
+[ADR #352](https://github.com/reddb-io/reddb/issues/352).
+
+```dart
+import 'dart:typed_data';
+
+final rows = await db.query(
+  r'SELECT * FROM users WHERE age > $1 AND name = $2 AND nick IS $3',
+  [18, 'alice', null],
+);
+
+final embedding = Float32List.fromList([0.12, -0.45, 0.88]);
+final hits = await db.query(
+  r'SEARCH SIMILAR $1 IN embeddings K 5',
+  [embedding],
+);
+```
+
+Native Dart type mapping:
+
+| Dart type | Engine value |
+| --- | --- |
+| `null` | `Null` |
+| `bool` | `Bool` |
+| `int` | `Int` (i64) |
+| `double` | `Float` (f64) |
+| `String` | `Text` |
+| `Uint8List` | `Bytes` |
+| `Float32List`, `List<double>` | `Vector` (f32 on wire) |
+| `Map`, `List`, `Value.json(...)` | `Json` (canonical) |
+| `DateTime` | `Timestamp` (Unix seconds) |
+| `Value.uuid(...)` | `Uuid` |
+
+`db.query(sql)` with no params stays on the legacy single-query path. RedWire
+parameterized queries require the server to advertise `FEATURE_PARAMS`; older
+servers raise `ParamsUnsupported`. HTTP sends typed params through `/query`.
 
 ## Connection URIs
 
