@@ -75,6 +75,10 @@ jobs:
             RELEASE_CHANNEL="stable"
             RELEASE_TAG="${REF#refs/tags/}"
             PACKAGE_VERSION="$(normalize_version "$RELEASE_TAG")"
+            # Tag-driven stable releases always publish to crates.io. The
+            # `workflow_dispatch` toggle below stays as the escape hatch for
+            # re-running publish-cargo independently of a tag bump.
+            PUBLISH_CARGO=true
           elif [[ "$EVENT_NAME" == "push" && "$REF" == "refs/heads/main" ]]; then
             COMMIT_MSG="${HEAD_COMMIT_MESSAGE}"
             if [[ "$COMMIT_MSG" =~ ^chore:\ release ]] || [[ "$COMMIT_MSG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -137,16 +141,28 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,      asset_name: linux-x86_64,        cross: false }
-          - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu,     asset_name: linux-aarch64,       cross: true  }
-          - { os: ubuntu-latest,  target: armv7-unknown-linux-gnueabihf, asset_name: linux-armv7,         cross: true  }
-          - { os: ubuntu-latest,  target: aarch64-unknown-linux-musl,    asset_name: linux-aarch64-static, cross: true }
+          # Linux x86_64 / armv7: native compile on a Blacksmith 8-vCPU
+          # x86_64 runner. The armv7 target still needs the cross-gcc
+          # toolchain, but the underlying CPU is 2x faster than ubuntu-latest.
+          - { os: blacksmith-8vcpu-ubuntu-2404, target: x86_64-unknown-linux-gnu,      asset_name: linux-x86_64,        cross: false }
+          - { os: blacksmith-8vcpu-ubuntu-2404, target: armv7-unknown-linux-gnueabihf, asset_name: linux-armv7,         cross: true  }
+          # Linux aarch64: build natively on a Blacksmith ARM runner instead
+          # of cross-compiling from x86_64. Removes the gcc-aarch64-linux-gnu
+          # cross toolchain install + linker env vars + the QEMU smoke test
+          # for this target.
+          - { os: blacksmith-arm64-2404, target: aarch64-unknown-linux-gnu, asset_name: linux-aarch64, cross: false }
+          # aarch64-musl keeps the Docker cross-compile path (musl
+          # toolchain inside messense/rust-musl-cross) — still on a
+          # Blacksmith x86_64 runner so the docker spawn is unchanged.
+          - { os: blacksmith-8vcpu-ubuntu-2404, target: aarch64-unknown-linux-musl, asset_name: linux-aarch64-static, cross: true }
           - { os: macos-14,       target: aarch64-apple-darwin,          asset_name: macos-aarch64,       cross: false }
-          # macos-13 (x86_64-apple-darwin) temporarily disabled: GH-hosted
-          # macos-13 pool was unreachable during v1.0.7 release attempts
-          # (jobs queued > 1h without picking up a runner). Intel Mac users
-          # can run the aarch64 binary under Rosetta 2 until this is restored.
-          # - { os: macos-13,       target: x86_64-apple-darwin,           asset_name: macos-x86_64,        cross: false }
+          # Intel macOS re-enabled. If the macos-13 pool stays saturated
+          # the matrix entry will queue without blocking the rest of the
+          # release — every other publish job runs after the build matrix
+          # finishes, but is not on the macos-13 critical path. If we hit
+          # the same > 1h queue we saw on v1.0.7, fall back to commenting
+          # this line out and ship without an Intel Mac asset.
+          - { os: macos-13,       target: x86_64-apple-darwin,           asset_name: macos-x86_64,        cross: false }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, asset_name: windows-x86_64, cross: false }
     steps:
       - uses: actions/checkout@v6
@@ -183,10 +199,12 @@ jobs:
         run: rustup target add ${{ matrix.target }}
 
       - name: Cross-compile tools
-        if: matrix.cross && matrix.target != 'aarch64-unknown-linux-musl'
+        # Only `armv7` and the musl-via-docker target need apt-installed
+        # cross toolchains now. aarch64 builds natively on blacksmith-arm64.
+        if: matrix.target == 'armv7-unknown-linux-gnueabihf'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+          sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
 
       - name: Build
         if: matrix.target != 'aarch64-unknown-linux-musl'
@@ -194,14 +212,15 @@ jobs:
         env:
           SCCACHE_GHA_ENABLED: ${{ !matrix.cross && 'true' || '' }}
           RUSTC_WRAPPER: ${{ !matrix.cross && 'sccache' || '' }}
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
-          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
-          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
-          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
-          CC_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-gcc
-          CXX_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-g++
-          AR_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-ar
+          # Cross-compile linker/CC overrides only apply when matrix.cross
+          # is true. aarch64-unknown-linux-gnu now builds natively on
+          # blacksmith-arm64, so the host gcc is the right answer for
+          # that target — setting `aarch64-linux-gnu-gcc` here would point
+          # cargo at a binary that isn't installed on the arm64 runner.
+          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: ${{ matrix.target == 'armv7-unknown-linux-gnueabihf' && 'arm-linux-gnueabihf-gcc' || '' }}
+          CC_armv7_unknown_linux_gnueabihf: ${{ matrix.target == 'armv7-unknown-linux-gnueabihf' && 'arm-linux-gnueabihf-gcc' || '' }}
+          CXX_armv7_unknown_linux_gnueabihf: ${{ matrix.target == 'armv7-unknown-linux-gnueabihf' && 'arm-linux-gnueabihf-g++' || '' }}
+          AR_armv7_unknown_linux_gnueabihf: ${{ matrix.target == 'armv7-unknown-linux-gnueabihf' && 'arm-linux-gnueabihf-ar' || '' }}
         run: |
           cargo build --locked --release --target ${{ matrix.target }} --bin red
           cargo build --locked --release --target ${{ matrix.target }} --bin red_client -p reddb-io-client --no-default-features
@@ -380,7 +399,11 @@ jobs:
 
   publish-cargo:
     name: Publish crates to crates.io
-    needs: [plan, publish-github]
+    # Only depends on `plan`. Source publishing doesn't need binaries from
+    # the `build` matrix, so let it run in parallel with everything else.
+    # Previously gated behind `publish-github` which forced a ~15-20 min
+    # serial wait on the build matrix.
+    needs: [plan]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     if: |
       needs.plan.outputs.should_skip != 'true' &&
@@ -403,26 +426,24 @@ jobs:
           bash scripts/check-versions.sh
       - name: Publish workspace crates
         env:
+          # cargo reads CARGO_REGISTRY_TOKEN from the environment directly,
+          # no need for the deprecated `--token` flag.
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
           VERSION="${{ needs.plan.outputs.package_version }}"
+          # Cargo's own publish flow handles the "wait for dependency
+          # to appear in the index" dance. The hand-rolled `cargo search`
+          # poll loop we used to run before each `cargo publish` consumed
+          # ~150s per crate and always timed out (crates.io search index
+          # is lazy). Removed — the 5-10s of `cargo publish` itself is
+          # usually enough; if a downstream crate publish fails because
+          # its parent isn't in the index yet, the step exits non-zero
+          # and CI shows that signal clearly instead of marching on.
           publish_one() {
             local crate="$1"
-            echo "==> dry-run ${crate}@${VERSION}"
-            cargo publish --dry-run --locked -p "$crate"
             echo "==> publish ${crate}@${VERSION}"
-            cargo publish --locked -p "$crate" --token "${CARGO_REGISTRY_TOKEN}"
-            echo "==> wait for ${crate}@${VERSION} in crates.io index"
-            for i in 1 2 3 4 5; do
-              if cargo search "$crate" --limit 5 | grep -q "^${crate} = \"${VERSION}\""; then
-                echo "${crate}@${VERSION} visible on crates.io"
-                return 0
-              fi
-              echo "not yet visible, sleeping 30s ($i/5)"
-              sleep 30
-            done
-            echo "warning: ${crate}@${VERSION} not visible after 150s; continuing"
+            cargo publish --locked -p "$crate"
           }
 
           publish_one reddb-io-wire
@@ -430,10 +451,7 @@ jobs:
           publish_one reddb-io-client-connector
           publish_one reddb-io-server
           publish_one reddb-io-client
-          echo "==> dry-run reddb-io@${VERSION}"
-          cargo publish --dry-run --locked -p reddb-io
-          echo "==> publish reddb-io@${VERSION}"
-          cargo publish --locked -p reddb-io --token "${CARGO_REGISTRY_TOKEN}"
+          publish_one reddb-io
 
   publish-js-driver:
     name: Publish @reddb-io/sdk (npm)
