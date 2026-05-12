@@ -41,8 +41,20 @@ final class SmokeTest extends TestCase
             try {
                 $conn->ping();
                 $conn->insert('smoke_users', ['name' => 'alice', 'age' => 30]);
-                $body = $conn->query("SELECT * FROM smoke_users WHERE name = 'alice'");
+                $body = $conn->query(
+                    'SELECT * FROM smoke_users WHERE age = $1 AND name = $2 AND $3 IS NULL',
+                    [30, 'alice', null],
+                );
                 $this->assertStringContainsString('alice', $body, "expected alice in: {$body}");
+                $conn->query(
+                    'INSERT INTO smoke_embeddings VECTOR (dense, content) VALUES ($1, $2)',
+                    [[0.7, 0.7], 'parameterized doc'],
+                );
+                $vectorBody = $conn->query(
+                    'SEARCH SIMILAR $1 COLLECTION smoke_embeddings LIMIT 1',
+                    [[0.7, 0.7]],
+                );
+                $this->assertStringContainsString('parameterized doc', $vectorBody, "expected vector match in: {$vectorBody}");
                 $conn->delete('smoke_users', 'alice');
             } finally {
                 $conn->close();

@@ -58,6 +58,10 @@ final class Frame
     public const KIND_GET = 0x19;
     public const KIND_DELETE = 0x1A;
     public const KIND_DELETE_OK = 0x1B;
+    public const KIND_QUERY_WITH_PARAMS = 0x28;
+
+    /** Server feature bitmask: QueryWithParams frame support. */
+    public const FEATURE_PARAMS = 0x0000_0001;
 
     // --- Flag bits ---
     public const FLAG_COMPRESSED = 0b0000_0001;
@@ -204,6 +208,7 @@ final class Frame
             self::KIND_GET => 'Get',
             self::KIND_DELETE => 'Delete',
             self::KIND_DELETE_OK => 'DeleteOk',
+            self::KIND_QUERY_WITH_PARAMS => 'QueryWithParams',
             default => sprintf('0x%02x', $kind & 0xff),
         };
     }
