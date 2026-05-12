@@ -1071,6 +1071,10 @@ pub(crate) fn value_to_sql_literal(v: &Value) -> String {
 }
 
 fn query_result_to_json(qr: &RuntimeQueryResult) -> Value {
+    if let Some(ask) = ask_query_result_to_json(qr) {
+        return ask;
+    }
+
     let mut envelope = json::Map::new();
     envelope.insert(
         "statement".to_string(),
@@ -1102,6 +1106,177 @@ fn query_result_to_json(qr: &RuntimeQueryResult) -> Value {
     envelope.insert("rows".to_string(), Value::Array(rows));
 
     Value::Object(envelope)
+}
+
+fn ask_query_result_to_json(qr: &RuntimeQueryResult) -> Option<Value> {
+    if qr.statement != "ask" {
+        return None;
+    }
+    let row = qr.result.records.first()?;
+    let answer = text_field(row, "answer")?;
+    let provider = text_field(row, "provider").unwrap_or_default();
+    let model = text_field(row, "model").unwrap_or_default();
+    let sources_flat_json = json_field(row, "sources_flat").unwrap_or(Value::Array(Vec::new()));
+    let citations_json = json_field(row, "citations").unwrap_or(Value::Array(Vec::new()));
+    let validation_json = json_field(row, "validation").unwrap_or(Value::Object(json::Map::new()));
+
+    let effective_mode = match text_field(row, "mode").as_deref() {
+        Some("lenient") => crate::runtime::ai::ask_response_envelope::Mode::Lenient,
+        _ => crate::runtime::ai::ask_response_envelope::Mode::Strict,
+    };
+
+    let result = crate::runtime::ai::ask_response_envelope::AskResult {
+        answer,
+        sources_flat: envelope_sources_flat(&sources_flat_json),
+        citations: envelope_citations(&citations_json),
+        validation: envelope_validation(&validation_json),
+        cache_hit: bool_field(row, "cache_hit").unwrap_or(false),
+        provider,
+        model,
+        prompt_tokens: u32_field(row, "prompt_tokens").unwrap_or(0),
+        completion_tokens: u32_field(row, "completion_tokens").unwrap_or(0),
+        cost_usd: f64_field(row, "cost_usd").unwrap_or(0.0),
+        effective_mode,
+        retry_count: u32_field(row, "retry_count").unwrap_or(0),
+    };
+    Some(crate::runtime::ai::ask_response_envelope::build(&result))
+}
+
+fn record_field<'a>(record: &'a UnifiedRecord, name: &str) -> Option<&'a SchemaValue> {
+    record
+        .iter_fields()
+        .find_map(|(key, value)| (key.as_ref() == name).then_some(value))
+}
+
+fn text_field(record: &UnifiedRecord, name: &str) -> Option<String> {
+    match record_field(record, name)? {
+        SchemaValue::Text(s) => Some(s.to_string()),
+        SchemaValue::Email(s)
+        | SchemaValue::Url(s)
+        | SchemaValue::NodeRef(s)
+        | SchemaValue::EdgeRef(s) => Some(s.clone()),
+        other => Some(format!("{other}")),
+    }
+}
+
+fn u32_field(record: &UnifiedRecord, name: &str) -> Option<u32> {
+    match record_field(record, name)? {
+        SchemaValue::Integer(n) => (*n >= 0).then_some((*n).min(u32::MAX as i64) as u32),
+        SchemaValue::UnsignedInteger(n) => Some((*n).min(u32::MAX as u64) as u32),
+        SchemaValue::BigInt(n)
+        | SchemaValue::TimestampMs(n)
+        | SchemaValue::Timestamp(n)
+        | SchemaValue::Duration(n)
+        | SchemaValue::Decimal(n) => (*n >= 0).then_some((*n).min(u32::MAX as i64) as u32),
+        SchemaValue::Float(n) => (*n >= 0.0).then_some((*n).min(u32::MAX as f64) as u32),
+        _ => None,
+    }
+}
+
+fn f64_field(record: &UnifiedRecord, name: &str) -> Option<f64> {
+    match record_field(record, name)? {
+        SchemaValue::Integer(n) => Some(*n as f64),
+        SchemaValue::UnsignedInteger(n) => Some(*n as f64),
+        SchemaValue::BigInt(n)
+        | SchemaValue::TimestampMs(n)
+        | SchemaValue::Timestamp(n)
+        | SchemaValue::Duration(n)
+        | SchemaValue::Decimal(n) => Some(*n as f64),
+        SchemaValue::Float(n) => Some(*n),
+        _ => None,
+    }
+}
+
+fn bool_field(record: &UnifiedRecord, name: &str) -> Option<bool> {
+    match record_field(record, name)? {
+        SchemaValue::Boolean(value) => Some(*value),
+        _ => None,
+    }
+}
+
+fn json_field(record: &UnifiedRecord, name: &str) -> Option<Value> {
+    match record_field(record, name)? {
+        SchemaValue::Json(bytes) => json::from_slice(bytes).ok(),
+        SchemaValue::Text(text) => json::from_str(text).ok(),
+        _ => None,
+    }
+}
+
+fn envelope_sources_flat(
+    value: &Value,
+) -> Vec<crate::runtime::ai::ask_response_envelope::SourceRow> {
+    value
+        .as_array()
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|source| {
+            let urn = source.get("urn").and_then(Value::as_str)?.to_string();
+            let payload = source
+                .get("payload")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| source.to_string_compact());
+            Some(crate::runtime::ai::ask_response_envelope::SourceRow { urn, payload })
+        })
+        .collect()
+}
+
+fn envelope_citations(value: &Value) -> Vec<crate::runtime::ai::ask_response_envelope::Citation> {
+    value
+        .as_array()
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|citation| {
+            let marker = citation.get("marker").and_then(Value::as_u64)?;
+            let urn = citation.get("urn").and_then(Value::as_str)?.to_string();
+            Some(crate::runtime::ai::ask_response_envelope::Citation {
+                marker: marker.min(u32::MAX as u64) as u32,
+                urn,
+            })
+        })
+        .collect()
+}
+
+fn envelope_validation(value: &Value) -> crate::runtime::ai::ask_response_envelope::Validation {
+    crate::runtime::ai::ask_response_envelope::Validation {
+        ok: value.get("ok").and_then(Value::as_bool).unwrap_or(true),
+        warnings: validation_items(value, "warnings")
+            .into_iter()
+            .map(
+                |(kind, detail)| crate::runtime::ai::ask_response_envelope::ValidationWarning {
+                    kind,
+                    detail,
+                },
+            )
+            .collect(),
+        errors: validation_items(value, "errors")
+            .into_iter()
+            .map(
+                |(kind, detail)| crate::runtime::ai::ask_response_envelope::ValidationError {
+                    kind,
+                    detail,
+                },
+            )
+            .collect(),
+    }
+}
+
+fn validation_items(value: &Value, key: &str) -> Vec<(String, String)> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|item| {
+            Some((
+                item.get("kind").and_then(Value::as_str)?.to_string(),
+                item.get("detail")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            ))
+        })
+        .collect()
 }
 
 pub(crate) fn insert_result_to_json(qr: &RuntimeQueryResult) -> Value {
@@ -1555,6 +1730,86 @@ mod tests {
         );
         assert!(resp.contains("\"result\""));
         assert!(!resp.contains("\"error\""));
+    }
+
+    #[test]
+    fn ask_query_result_uses_canonical_envelope() {
+        use crate::storage::query::unified::UnifiedResult;
+
+        let mut result = UnifiedResult::with_columns(vec![
+            "answer".into(),
+            "provider".into(),
+            "model".into(),
+            "prompt_tokens".into(),
+            "completion_tokens".into(),
+            "sources_count".into(),
+            "sources_flat".into(),
+            "citations".into(),
+            "validation".into(),
+        ]);
+        let mut record = UnifiedRecord::new();
+        record.set("answer", SchemaValue::text("Deploy failed [^1]."));
+        record.set("provider", SchemaValue::text("openai"));
+        record.set("model", SchemaValue::text("gpt-4o-mini"));
+        record.set("prompt_tokens", SchemaValue::Integer(11));
+        record.set("completion_tokens", SchemaValue::Integer(7));
+        record.set(
+            "sources_flat",
+            SchemaValue::Json(
+                br#"[{"urn":"urn:reddb:row:deployments:1","kind":"row","collection":"deployments","id":"1"}]"#.to_vec(),
+            ),
+        );
+        record.set(
+            "citations",
+            SchemaValue::Json(br#"[{"marker":1,"urn":"urn:reddb:row:deployments:1"}]"#.to_vec()),
+        );
+        record.set(
+            "validation",
+            SchemaValue::Json(br#"{"ok":true,"warnings":[],"errors":[]}"#.to_vec()),
+        );
+        result.push(record);
+
+        let json = query_result_to_json(&RuntimeQueryResult {
+            query: "ASK 'why did deploy fail?'".to_string(),
+            mode: crate::storage::query::modes::QueryMode::Sql,
+            statement: "ask",
+            engine: "runtime-ai",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+        });
+
+        assert_eq!(
+            json.get("answer").and_then(Value::as_str),
+            Some("Deploy failed [^1].")
+        );
+        assert_eq!(json.get("cache_hit").and_then(Value::as_bool), Some(false));
+        assert_eq!(json.get("cost_usd").and_then(Value::as_f64), Some(0.0));
+        assert_eq!(json.get("mode").and_then(Value::as_str), Some("strict"));
+        assert_eq!(json.get("retry_count").and_then(Value::as_u64), Some(0));
+        assert!(
+            json.get("rows").is_none(),
+            "ASK envelope must not be row-wrapped: {json}"
+        );
+        assert!(
+            json.get("sources_flat")
+                .and_then(Value::as_array)
+                .is_some_and(|sources| sources.len() == 1
+                    && sources[0].get("payload").and_then(Value::as_str).is_some()),
+            "sources_flat must be a parsed array: {json}"
+        );
+        assert!(
+            json.get("citations")
+                .and_then(Value::as_array)
+                .is_some_and(|citations| citations.len() == 1),
+            "citations must be a parsed array: {json}"
+        );
+        assert_eq!(
+            json.get("validation")
+                .and_then(|v| v.get("ok"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
     }
 
     // -----------------------------------------------------------------

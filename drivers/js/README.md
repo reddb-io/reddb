@@ -104,6 +104,23 @@ const custom = await connect('memory://', { binary: '/usr/local/bin/red' })
 
 ### `db.query(sql) → Promise<{ statement, affected, columns, rows }>`
 
+`ASK '...'` returns the ASK envelope directly:
+
+```js
+const answer = await db.query("ASK 'why did deploy fail?'")
+answer.answer
+answer.citations
+answer.sources_flat
+answer.validation
+answer.cache_hit
+answer.cost_usd
+```
+
+`ASK '...' STREAM` notifications are not wired over the JS stdio JSON-RPC
+client yet. Use the HTTP streaming API for incremental ASK frames; stdio
+currently supports materialised cursor batching through `query.open` /
+`query.next`, which is separate from ASK token streaming.
+
 ### `db.insert(collection, payload) → Promise<{ affected, id? }>`
 
 ### `db.bulkInsert(collection, payloads) → Promise<{ affected }>`
