@@ -23,10 +23,12 @@ pub(crate) fn extract_query_request(body: &[u8]) -> Result<ParsedQueryRequest, H
                 let (entity_types, capabilities) =
                     crate::application::query_payload::parse_json_search_selection(&json)
                         .map_err(|err| json_error(400, err.to_string()))?;
+                let params = parse_params_field(&json)?;
                 return Ok(ParsedQueryRequest {
                     query: query.to_string(),
                     entity_types,
                     capabilities,
+                    params,
                 });
             }
             return Err(json_error(
@@ -40,7 +42,24 @@ pub(crate) fn extract_query_request(body: &[u8]) -> Result<ParsedQueryRequest, H
         query: trimmed.to_string(),
         entity_types: None,
         capabilities: None,
+        params: None,
     })
+}
+
+/// Parse the optional `params` JSON array on a query request body.
+/// Reuses the same JSON→`Value` mapping as the embedded stdio binder
+/// so HTTP and stdio share one type-coercion contract.
+fn parse_params_field(json: &JsonValue) -> Result<Option<Vec<Value>>, HttpResponse> {
+    match json.get("params") {
+        None => Ok(None),
+        Some(JsonValue::Array(items)) => Ok(Some(
+            items
+                .iter()
+                .map(crate::rpc_stdio::json_value_to_schema_value)
+                .collect(),
+        )),
+        Some(_) => Err(json_error(400, "'params' must be a JSON array")),
+    }
 }
 
 pub(crate) fn parse_json_body(body: &[u8]) -> Result<JsonValue, HttpResponse> {

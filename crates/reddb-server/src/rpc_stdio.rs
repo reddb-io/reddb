@@ -1165,7 +1165,7 @@ fn schema_value_to_json(v: &SchemaValue) -> Value {
 /// in a prepared statement. Mirrors PostgreSQL's implicit type coercion:
 /// JSON numbers become `Float`, strings become `Text`, booleans map to
 /// `Boolean`, and `null` becomes `Null`.
-fn json_value_to_schema_value(v: &Value) -> SchemaValue {
+pub(crate) fn json_value_to_schema_value(v: &Value) -> SchemaValue {
     match v {
         Value::Null => SchemaValue::Null,
         Value::Bool(b) => SchemaValue::Boolean(*b),
