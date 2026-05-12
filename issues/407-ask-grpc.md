@@ -33,3 +33,76 @@ Go driver and any other gRPC-based clients should round-trip the schema correctl
 ## Blocked by
 
 - #393
+
+## Progress
+
+- 2026-05-12: Slice 1 — `GrpcAskMessage` deep module landed at
+  `crates/reddb-server/src/runtime/ai/grpc_ask_message.rs`. Pure
+  builder + typed shape mirroring the canonical
+  `AskResponseEnvelope` (#406). No I/O, no codegen dependency, no
+  wiring. 17 unit tests cover:
+  - every top-level field present (parity with the JSON envelope —
+    `field_set_matches_json_envelope` enforces 1:1 keys);
+  - `mode` serialises as `"strict"` / `"lenient"` (effective mode
+    after provider-capability fallback #396, audit-row parity #402);
+  - citations sorted by marker ascending with stable order on ties
+    (same guarantee #406 already pins);
+  - `sources_flat` order preserved verbatim (post-RRF rank order is
+    load-bearing for `[^N]` indexing);
+  - empty sources serialise as `"[]"` not `"null"`;
+  - JSON string escaping for quotes, backslashes, control chars
+    (round-tripped via `serde_json::from_str`);
+  - `sources_flat_json` key order alphabetised (`payload` before
+    `urn`) to match the envelope's `BTreeMap`-backed encoder;
+  - cache-hit rows still emit zeros (no missing-field surprise);
+  - determinism: byte-equal input → byte-equal output;
+  - seed and temperature are NOT in the reply (destructuring pin
+    matches #406's `does_not_expose_seed_or_temperature`).
+
+  `proto_tags` module pins the proto3 field numbers as constants
+  (`AskReply` 1..12, `Citation` 1..2, `Validation` 1..3,
+  `ValidationItem` 1..2). Editing any of them is a wire-breaking
+  change and `ask_reply_proto_tags_pinned` /
+  `ask_reply_proto_tags_are_unique_and_contiguous` /
+  `nested_message_proto_tags_pinned` will fail.
+
+  `sources_flat` is carried as a single JSON string
+  (`sources_flat_json`) rather than a `repeated SourceRow` to keep
+  parity with the envelope shape and avoid forcing per-row payload
+  re-encoding. The bytes already flow on JSON-RPC (#406), MCP (#409),
+  and PG-wire (#408) — clients that want structured rows parse the
+  same JSON.
+
+  Deferred to follow-up slices (each independently shippable):
+
+  - Edit `crates/reddb-grpc-proto/proto/reddb.proto`:
+    - Add `AskReply`, `AskRequest`, `Citation`, `Validation`,
+      `ValidationItem` messages with the field numbers pinned above.
+    - Replace `rpc Ask(JsonPayloadRequest) returns (PayloadReply)`
+      with `rpc Ask(AskRequest) returns (AskReply)`. Tonic
+      regenerates from `build.rs`; service impl signature changes.
+  - Wire `GrpcAskMessage::build` into `service_impl::ask`: parse
+    `AskRequest`, call `execute_ask`, lift the `AskResult` from the
+    runtime, hand to `build`, return typed `AskReply`. Drop the
+    legacy `payload_json` mapping currently at `service_impl.rs:2320`.
+  - Add an `AskStream` server-streaming RPC for the SSE-equivalent
+    path (#405 frame encoder); proto: `rpc AskStream(AskRequest)
+    returns (stream AskStreamEvent);` and the deep module from #405
+    already pins the frame shape.
+  - Update Go driver (`drivers/go/`) to round-trip the typed message.
+  - Integration test from the Go driver harness — depends on the
+    wiring slice + the stubbable LLM transport refactor already noted
+    by #395/#396/#398/#406.
+
+  Deep module is the load-bearing piece; remaining slices are
+  mechanical wiring and can land independently. Issue stays open
+  with this progress note (mirrors slice 1 pattern of #395, #396,
+  #398, #400, #401, #402, #403, #405, #406, #409, #411).
+
+  Verification: `cargo check`/`cargo test` runs blocked by the
+  sandbox in this AFK iteration. Module is a pure addition modeled
+  closely on the sibling `ask_response_envelope.rs`,
+  `explain_plan_builder.rs`, and `mcp_ask_tool.rs` deep modules;
+  next iteration should run
+  `cargo test -p reddb-io-server --lib runtime::ai::grpc_ask_message`
+  to confirm before the wiring slice.
