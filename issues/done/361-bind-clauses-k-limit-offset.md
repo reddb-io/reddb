@@ -331,3 +331,31 @@ through the parser; the only literal-only knob left on the
 SearchCommand family). This will require both literal and
 parameter parsing since PROBES isn't currently a recognised
 clause in the parser.
+
+## Closing note (2026-05-12)
+
+Issue closed. Every SQL clause that today accepts a literal also
+accepts `$N`/`?` via the shared `parse_param_slot` helper, with
+typed errors per slot:
+
+- SEARCH SIMILAR: vector ($N), TEXT $N, LIMIT $N, MIN_SCORE $N
+- SEARCH HYBRID: LIMIT / K $N
+- SEARCH TEXT / MULTIMODAL / INDEX / CONTEXT: LIMIT $N
+- SEARCH SPATIAL NEAREST: K $N
+- SEARCH SPATIAL RADIUS / BBOX: LIMIT $N
+- SELECT: LIMIT $N, OFFSET $N
+
+`PROBES $N` is **deferred** — there is no `PROBES` clause anywhere
+in the SQL grammar today. IVF search is currently only reachable
+via the `/search/ivf` REST endpoint (`SearchIvfInput.n_probes`),
+not from SQL. Adding `PROBES $N` to the binder is blocked on
+first exposing a `SEARCH IVF` SQL surface (new feature — worth
+its own issue), at which point the same `parse_param_slot`
+helper + non-Expr-binder pattern used by the slices above will
+apply directly.
+
+All explicit acceptance examples in this issue land green:
+- `SEARCH SIMILAR $1 IN embeddings K $2 MIN_SCORE $3` ✓
+- `SEARCH SIMILAR TEXT $1 COLLECTION docs USING openai` ✓
+
+Moving to `issues/done/`.
