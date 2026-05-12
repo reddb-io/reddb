@@ -225,6 +225,25 @@ Then encoded as unsigned varint. Small absolute values use fewer bytes regardles
 
 Entities are the fundamental data units stored in B-tree leaf cells and in binary store files. All multi-byte integers are little-endian unless using varint encoding.
 
+### Entity ID Allocation
+
+Entity IDs are issued from a single monotonic counter (`UnifiedStore::next_entity_id`,
+seeded at `1`). The engine consumes the first 101 ids on startup to materialise
+internal collection-descriptor entities (column descriptors, projection metadata,
+and bootstrap markers) before any user mutation runs. As a result:
+
+> **The first user-inserted entity is assigned `_entity_id = 102`** on a fresh
+> database, identical for both `memory://` and `file://` backends. The
+> assignment is stable: re-opening a file does not re-issue ids 1..101 to
+> user entities. Application code that needs the id should read it back via
+> `INSERT ... RETURNING *` (the `red_entity_id` column) rather than guessing.
+
+This offset is part of the persisted file-format contract — changing it
+requires a `.rdb` format version bump and a migration. The behaviour is
+regression-pinned by `first_user_entity_id_is_one_hundred_and_two` in
+`crates/reddb-server/tests/runtime_query_behavior.rs`, and cross-referenced
+from [docs/data-models/graphs.md](../data-models/graphs.md).
+
 ### Entity Layout
 
 ```

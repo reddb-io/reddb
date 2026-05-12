@@ -27,6 +27,25 @@ GRAPH CENTRALITY ALGORITHM pagerank
 PATH FROM 'web-01' TO 'db-01' ALGORITHM bfs DIRECTION both
 ```
 
+## Entity IDs
+
+Every graph node and edge is assigned a unique, monotonically increasing
+`_entity_id` (also surfaced as `red_entity_id` in `RETURNING *` row output).
+
+> **First user-inserted entity gets `_entity_id = 102`.** The first 101 ids
+> in every new database are reserved for internal collection-descriptor
+> records that the engine writes during bootstrap. Stable across in-memory
+> and on-disk databases — do not hardcode lower ids, and do not assume `1`
+> in tests or migrations. If you need the assigned id for application use,
+> read it back from `INSERT ... RETURNING *` (issue #419) rather than
+> guessing.
+>
+> This offset is regression-pinned by
+> `first_user_entity_id_is_one_hundred_and_two` in
+> `crates/reddb-server/tests/runtime_query_behavior.rs` — see
+> [docs/engine/file-format.md](../engine/file-format.md) for the
+> descriptor-allocation rationale.
+
 ## Creating Nodes
 
 <!-- tabs:start -->
