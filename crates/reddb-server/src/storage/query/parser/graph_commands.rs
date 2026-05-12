@@ -181,9 +181,14 @@ impl<'a> Parser<'a> {
         Ok(QueryExpr::GraphCommand(GraphCommand::TopologicalSort))
     }
 
-    /// Parse: GRAPH PROPERTIES
+    /// Parse: GRAPH PROPERTIES ['<id-or-label>']
     fn parse_graph_properties(&mut self) -> Result<QueryExpr, ParseError> {
         self.advance()?; // consume PROPERTIES
-        Ok(QueryExpr::GraphCommand(GraphCommand::Properties))
+        let source = if matches!(self.peek(), Token::String(_)) {
+            Some(self.parse_string()?)
+        } else {
+            None
+        };
+        Ok(QueryExpr::GraphCommand(GraphCommand::Properties { source }))
     }
 }

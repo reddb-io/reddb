@@ -2181,8 +2181,12 @@ pub enum GraphCommand {
     Clustering,
     /// GRAPH TOPOLOGICAL_SORT
     TopologicalSort,
-    /// GRAPH PROPERTIES
-    Properties,
+    /// GRAPH PROPERTIES ['<id-or-label>']
+    ///
+    /// `source = None` returns graph-wide stats. `source = Some("...")` returns
+    /// the full property bag of a specific node, resolved via the same label
+    /// index as `GRAPH NEIGHBORHOOD` / `GRAPH TRAVERSE` (issue #416).
+    Properties { source: Option<String> },
 }
 
 // ============================================================================

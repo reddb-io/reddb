@@ -91,7 +91,56 @@ impl RedDBRuntime {
                     statement_type: "select",
                 })
             }
-            GraphCommand::Properties => {
+            GraphCommand::Properties { source } => {
+                if let Some(node_ref) = source {
+                    // Per-node property lookup (#423). Uses the same label
+                    // resolution as NEIGHBORHOOD/TRAVERSE so '<label>' and
+                    // '<numeric id>' both work.
+                    let graph = materialize_graph_with_projection(
+                        self.inner.db.store().as_ref(),
+                        None,
+                    )?;
+                    let resolved = resolve_graph_node_id(&graph, node_ref)?;
+                    let stored = graph.get_node(&resolved).ok_or_else(|| {
+                        RedDBError::NotFound(node_ref.to_string())
+                    })?;
+                    let all_props = materialize_graph_node_properties(
+                        self.inner.db.store().as_ref(),
+                    )?;
+                    let props = all_props.get(&resolved).cloned().unwrap_or_default();
+
+                    // Fixed columns first, then property keys in sorted order so
+                    // the schema is stable across snapshots / wire renders.
+                    let mut prop_keys: Vec<&String> = props.keys().collect();
+                    prop_keys.sort();
+                    let mut columns: Vec<String> = Vec::with_capacity(3 + prop_keys.len());
+                    columns.push("node_id".into());
+                    columns.push("label".into());
+                    columns.push("node_type".into());
+                    for k in &prop_keys {
+                        columns.push((*k).clone());
+                    }
+                    let mut result = UnifiedResult::with_columns(columns);
+                    let mut record = UnifiedRecord::new();
+                    record.set("node_id", Value::text(stored.id.clone()));
+                    record.set("label", Value::text(stored.label.clone()));
+                    record.set("node_type", Value::text(stored.node_type.clone()));
+                    for k in &prop_keys {
+                        if let Some(v) = props.get(*k) {
+                            record.set(k.as_str(), v.clone());
+                        }
+                    }
+                    result.push(record);
+                    return Ok(RuntimeQueryResult {
+                        query: raw_query.to_string(),
+                        mode: QueryMode::Sql,
+                        statement: "graph_properties",
+                        engine: "runtime-graph",
+                        result,
+                        affected_rows: 0,
+                        statement_type: "select",
+                    });
+                }
                 let res = self.graph_properties(None)?;
                 let mut result = UnifiedResult::with_columns(vec![
                     "node_count".into(),

@@ -657,3 +657,88 @@ fn first_user_entity_id_is_one_hundred_and_two() {
          docs/engine/file-format.md."
     );
 }
+
+// ── Issue #423: GRAPH PROPERTIES '<id-or-label>' per-node lookup ────────────
+
+#[test]
+fn graph_properties_no_arg_returns_graph_wide_stats() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('cinderella', 'Cinderella')")
+        .expect("insert");
+    let res = rt
+        .execute_query("GRAPH PROPERTIES")
+        .expect("no-arg form still works");
+    assert_eq!(res.result.records.len(), 1);
+    assert!(res.result.records[0].get("node_count").is_some());
+}
+
+#[test]
+fn graph_properties_by_label_returns_property_bag() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('cinderella', 'Cinderella')")
+        .expect("insert");
+    let res = rt
+        .execute_query("GRAPH PROPERTIES 'cinderella'")
+        .expect("by label resolves");
+    assert_eq!(res.result.records.len(), 1);
+    let rec = &res.result.records[0];
+    match rec.get("label") {
+        Some(Value::Text(s)) => assert_eq!(s.as_ref(), "cinderella"),
+        other => panic!("expected label text, got {other:?}"),
+    }
+    match rec.get("name") {
+        Some(Value::Text(s)) => assert_eq!(s.as_ref(), "Cinderella"),
+        other => panic!("expected property 'name' surfaced as column, got {other:?}"),
+    }
+}
+
+#[test]
+fn graph_properties_by_numeric_id_returns_property_bag() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    let ins = rt
+        .execute_query(
+            "INSERT INTO tales NODE (label, name) VALUES ('cinderella', 'Cinderella') RETURNING *",
+        )
+        .expect("insert");
+    let id = u64_at(&ins, 0, "red_entity_id");
+    let res = rt
+        .execute_query(&format!("GRAPH PROPERTIES '{id}'"))
+        .expect("by numeric id resolves");
+    assert_eq!(res.result.records.len(), 1);
+    let rec = &res.result.records[0];
+    match rec.get("node_id") {
+        Some(Value::Text(s)) => assert_eq!(s.as_ref(), &id.to_string()),
+        other => panic!("expected node_id={id}, got {other:?}"),
+    }
+}
+
+#[test]
+fn graph_properties_missing_label_errors() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('cinderella', 'Cinderella')")
+        .expect("insert");
+    let err = rt
+        .execute_query("GRAPH PROPERTIES 'does_not_exist'")
+        .expect_err("missing must error");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("does_not_exist") || msg.to_lowercase().contains("not found"),
+        "error must surface missing reference, got: {msg}"
+    );
+}
+
+#[test]
+fn graph_properties_ambiguous_label_errors() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('hero', 'A')")
+        .expect("hero a");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('hero', 'B')")
+        .expect("hero b");
+    let err = rt
+        .execute_query("GRAPH PROPERTIES 'hero'")
+        .expect_err("ambiguous must error");
+    assert!(
+        format!("{err}").contains("ambiguous"),
+        "error must mention ambiguity, got: {err}"
+    );
+}
