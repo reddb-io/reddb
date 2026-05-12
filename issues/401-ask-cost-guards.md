@@ -82,3 +82,41 @@ Deferred to follow-up slices:
 Deep module is the load-bearing piece; remaining slices are
 mechanical wiring and can land independently. Issue stays open with
 this progress note (mirrors slice 1 pattern of #395).
+
+Slice 2: pre-call ASK prompt/source guard wiring landed.
+
+- Surfaced `ask.max_prompt_tokens`, `ask.max_completion_tokens`,
+  `ask.max_sources_bytes`, `ask.timeout_ms`, and
+  `ask.daily_cost_cap_usd` in the runtime config matrix as optional
+  deployment knobs.
+- Added a runtime `config_f64` reader for the daily USD setting.
+- Wired `CostGuardEvaluator::evaluate()` into `execute_ask` immediately
+  after prompt/source assembly and before provider credential lookup.
+  This slice enforces prompt-token and source-byte caps at the pre-call
+  checkpoint.
+- Mapped cost guard rejections to `RedDBError::QuotaExceeded` with the
+  limit field name in the payload. `/query` now uses the shared
+  runtime error mapper so `payload` quota breaches return HTTP 413.
+- Added HTTP handler coverage:
+  `ask.max_prompt_tokens = 1` plus `ASK 'why did login fail?'` returns
+  413 and includes `max_prompt_tokens` in the error body.
+- Fixed a pre-existing test-only borrow in
+  `runtime/ai/pg_wire_ask_row_encoder.rs` so the targeted server test
+  suite can compile.
+
+Verification:
+
+- `cargo check -p reddb-io-server`
+- `cargo test -p reddb-io-server runtime::ai::cost_guard`
+- `cargo test -p reddb-io-server runtime::config_matrix`
+- `cargo test -p reddb-io-server server::handlers_query::tests::http_query_ask_prompt_token_guard_returns_413_with_limit_name`
+- `rustfmt --edition 2021 --check` on touched Rust files except
+  `pg_wire_ask_row_encoder.rs`
+
+Deferred to follow-up slices:
+
+- Enforce `max_completion_tokens` and `timeout_ms` around the provider
+  call / streamed chunks.
+- Add per-tenant daily spend state and UTC reset bookkeeping for
+  `daily_cost_cap_usd`.
+- Add the provider timeout integration test returning HTTP 504.

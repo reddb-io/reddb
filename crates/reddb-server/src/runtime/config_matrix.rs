@@ -51,6 +51,32 @@ pub enum Tier {
 
 /// The full matrix. Keep sorted by namespace for readability.
 pub const MATRIX: &[ConfigDefault] = &[
+    // ask.*
+    ConfigDefault {
+        key: "ask.max_prompt_tokens",
+        tier: Tier::Optional,
+        default: || num(8192.0),
+    },
+    ConfigDefault {
+        key: "ask.max_completion_tokens",
+        tier: Tier::Optional,
+        default: || num(1024.0),
+    },
+    ConfigDefault {
+        key: "ask.max_sources_bytes",
+        tier: Tier::Optional,
+        default: || num(262_144.0),
+    },
+    ConfigDefault {
+        key: "ask.timeout_ms",
+        tier: Tier::Optional,
+        default: || num(30_000.0),
+    },
+    ConfigDefault {
+        key: "ask.daily_cost_cap_usd",
+        tier: Tier::Optional,
+        default: || text(""),
+    },
     // cache.blob.*
     ConfigDefault {
         key: "cache.blob.l1_bytes_max",

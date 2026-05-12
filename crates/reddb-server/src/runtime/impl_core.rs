@@ -2712,6 +2712,45 @@ impl RedDBRuntime {
         result
     }
 
+    pub(crate) fn config_f64(&self, key: &str, default: f64) -> f64 {
+        if let Some(raw) = self.inner.env_config_overrides.get(key) {
+            if let Ok(n) = raw.parse::<f64>() {
+                return n;
+            }
+        }
+        let store = self.inner.db.store();
+        let Some(manager) = store.get_collection("red_config") else {
+            return default;
+        };
+        let mut result = default;
+        let mut latest_id: u64 = 0;
+        manager.for_each_entity(|entity| {
+            if let Some(row) = entity.data.as_row() {
+                let entry_key = row.get_field("key").and_then(|v| match v {
+                    crate::storage::schema::Value::Text(s) => Some(s.as_ref()),
+                    _ => None,
+                });
+                if entry_key == Some(key) {
+                    let id = entity.id.raw();
+                    if id >= latest_id {
+                        latest_id = id;
+                        result = match row.get_field("value") {
+                            Some(crate::storage::schema::Value::Float(n)) => *n,
+                            Some(crate::storage::schema::Value::Integer(n)) => *n as f64,
+                            Some(crate::storage::schema::Value::UnsignedInteger(n)) => *n as f64,
+                            Some(crate::storage::schema::Value::Text(s)) => {
+                                s.parse::<f64>().unwrap_or(default)
+                            }
+                            _ => default,
+                        };
+                    }
+                }
+            }
+            true
+        });
+        result
+    }
+
     pub(crate) fn config_string(&self, key: &str, default: &str) -> String {
         if let Some(raw) = self.inner.env_config_overrides.get(key) {
             return raw.clone();

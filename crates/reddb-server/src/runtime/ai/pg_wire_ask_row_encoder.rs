@@ -455,7 +455,8 @@ mod tests {
                 detail: "marker 5 > sources_count 2".into(),
             }],
         };
-        let s = cell_str(&encode(&r), 11);
+        let encoded = encode(&r);
+        let s = cell_str(&encoded, 11);
         assert!(s.contains("\"ok\":false"), "got {s}");
         assert!(s.contains("\"kind\":\"out_of_range\""), "got {s}");
         assert!(s.contains("marker 5 > sources_count 2"), "got {s}");
@@ -472,7 +473,8 @@ mod tests {
             }],
             errors: vec![],
         };
-        let s = cell_str(&encode(&r), 11);
+        let encoded = encode(&r);
+        let s = cell_str(&encoded, 11);
         assert!(s.contains("\"ok\":true"), "got {s}");
         assert!(s.contains("\"kind\":\"mode_fallback\""), "got {s}");
     }

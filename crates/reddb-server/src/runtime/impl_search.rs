@@ -1162,7 +1162,27 @@ impl RedDBRuntime {
         // order (filtered_rows first, then vector_hits) so `[^N]` markers
         // the LLM emits index correctly into this flat array.
         let (sources_flat_json, source_urns) = build_sources_flat(&ask_context);
+        let sources_flat_bytes =
+            crate::json::to_vec(&sources_flat_json).unwrap_or_else(|_| b"[]".to_vec());
         let sources_count = source_urns.len();
+
+        let settings = self.ask_cost_guard_settings();
+        let usage = crate::runtime::ai::cost_guard::Usage {
+            prompt_tokens: estimate_prompt_tokens(&full_prompt),
+            sources_bytes: saturating_u32(sources_flat_bytes.len()),
+            ..Default::default()
+        };
+        match crate::runtime::ai::cost_guard::evaluate(
+            &usage,
+            &crate::runtime::ai::cost_guard::DailyState::default(),
+            &settings,
+            ask_cost_guard_now(),
+        ) {
+            crate::runtime::ai::cost_guard::Decision::Allow => {}
+            crate::runtime::ai::cost_guard::Decision::Reject { limit, detail, .. } => {
+                return Err(cost_guard_rejection_to_error(limit, detail));
+            }
+        }
 
         // Step 3: Call LLM — use configured defaults if no provider/model specified
         let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self);
@@ -1226,8 +1246,6 @@ impl RedDBRuntime {
             crate::json::to_vec(&citations_json).unwrap_or_else(|_| b"[]".to_vec());
         let validation_bytes =
             crate::json::to_vec(&validation_json).unwrap_or_else(|_| b"{}".to_vec());
-        let sources_flat_bytes =
-            crate::json::to_vec(&sources_flat_json).unwrap_or_else(|_| b"[]".to_vec());
 
         // Step 4: Build result
         let mut result = UnifiedResult::with_columns(vec![
@@ -1266,6 +1284,61 @@ impl RedDBRuntime {
             statement_type: "select",
         })
     }
+
+    fn ask_cost_guard_settings(&self) -> crate::runtime::ai::cost_guard::Settings {
+        let defaults = crate::runtime::ai::cost_guard::Settings::default();
+        let daily_cap = self.config_f64("ask.daily_cost_cap_usd", f64::NAN);
+        crate::runtime::ai::cost_guard::Settings {
+            max_prompt_tokens: config_u32(
+                self.config_u64("ask.max_prompt_tokens", defaults.max_prompt_tokens as u64),
+            ),
+            max_completion_tokens: config_u32(self.config_u64(
+                "ask.max_completion_tokens",
+                defaults.max_completion_tokens as u64,
+            )),
+            max_sources_bytes: config_u32(
+                self.config_u64("ask.max_sources_bytes", defaults.max_sources_bytes as u64),
+            ),
+            timeout_ms: config_u32(self.config_u64("ask.timeout_ms", defaults.timeout_ms as u64)),
+            daily_cost_cap_usd: daily_cap.is_finite().then_some(daily_cap),
+        }
+    }
+}
+
+fn config_u32(value: u64) -> u32 {
+    value.min(u32::MAX as u64) as u32
+}
+
+fn saturating_u32(value: usize) -> u32 {
+    value.min(u32::MAX as usize) as u32
+}
+
+fn estimate_prompt_tokens(prompt: &str) -> u32 {
+    let bytes = prompt.len().saturating_add(3) / 4;
+    saturating_u32(bytes).max(1)
+}
+
+fn ask_cost_guard_now() -> crate::runtime::ai::cost_guard::Now {
+    let epoch_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default();
+    crate::runtime::ai::cost_guard::Now { epoch_secs }
+}
+
+fn cost_guard_rejection_to_error(
+    limit: crate::runtime::ai::cost_guard::LimitKind,
+    detail: String,
+) -> RedDBError {
+    let bucket = match limit.http_status() {
+        504 => "duration",
+        413 => "payload",
+        _ => "rate",
+    };
+    RedDBError::QuotaExceeded(format!(
+        "quota_exceeded:{bucket}:{}:{detail}",
+        limit.field_name()
+    ))
 }
 
 /// Build the full prompt string sent to the synthesis LLM by routing

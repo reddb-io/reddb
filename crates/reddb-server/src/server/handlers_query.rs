@@ -62,7 +62,10 @@ impl RedDBServer {
                     ),
                 )
             }
-            Err(err) => json_error(400, err.to_string()),
+            Err(err) => {
+                let (status, msg) = map_runtime_error(&err);
+                json_error(status, msg)
+            }
         }
     }
 
@@ -435,5 +438,23 @@ mod tests {
         assert_eq!(server.handle_query(ddl.to_vec()).status, 200);
         let r = server.handle_query(br#"{"query": "SELECT * FROM legacy"}"#.to_vec());
         assert_eq!(r.status, 200, "{}", body_str(&r));
+    }
+
+    #[test]
+    fn http_query_ask_prompt_token_guard_returns_413_with_limit_name() {
+        let server = make_server();
+        server
+            .runtime
+            .execute_query("SET CONFIG ask.max_prompt_tokens = 1")
+            .expect("set prompt guard");
+
+        let r = server.handle_query(br#"{"query": "ASK 'why did login fail?'"}"#.to_vec());
+
+        assert_eq!(r.status, 413, "{}", body_str(&r));
+        let text = body_str(&r);
+        assert!(
+            text.contains("max_prompt_tokens"),
+            "missing limit name: {text}"
+        );
     }
 }
