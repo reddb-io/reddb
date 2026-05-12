@@ -7,16 +7,15 @@
       "@reddb-io/cli",
       "@reddb-io/sdk",
       "@reddb-io/client",
-      "@reddb-io/client-bun"
+      "@reddb-io/client-bun",
+      "@reddb-io/internal-asset-fetcher",
+      "@reddb-io/internal-bin-resolver",
+      "@reddb-io/internal-version-compare"
     ]
   ],
   "linked": [],
   "access": "public",
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
-  "ignore": [
-    "@reddb-io/internal-asset-fetcher",
-    "@reddb-io/internal-bin-resolver",
-    "@reddb-io/internal-version-compare"
-  ]
+  "ignore": []
 }
