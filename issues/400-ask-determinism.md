@@ -74,22 +74,45 @@ Policy pinned by tests:
   given the same inputs (`decide_is_deterministic_across_calls`,
   `derive_seed_is_deterministic_across_calls`).
 
+Slice 2 (this commit): SQL surface for the overrides.
+
+- Added `temperature: Option<f32>` and `seed: Option<u64>` to
+  `AskQuery` (`crates/reddb-server/src/storage/query/core.rs`).
+- Parser now accepts `TEMPERATURE <num>` and `SEED <int>` clauses
+  alongside `USING / MODEL / DEPTH / LIMIT / COLLECTION`, in any
+  order, each at most once (loop bound 5 → 7).
+- gRPC ASK JSON payload binder forwards optional `temperature` /
+  `seed` so MCP and gRPC drivers can pass them through without a
+  second parser.
+- Parser tests pin happy-path values (`0.7`, `42`), order-
+  independence with `SEED 7 USING openai TEMPERATURE 0`, and
+  negative cases (`ASK 'q' TEMPERATURE`, `ASK 'q' SEED`).
+- `Some(0.0)` and `Some(0)` overrides preserved by the parser (no
+  `unwrap_or(0)` collapse on the wire).
+
 Deferred to follow-up slices (each independently shippable):
 
-- Parse `ASK '...' TEMPERATURE x SEED n` in the SQL parser and thread
-  `Overrides` into `AskQuery`.
 - Surface `ask.default_temperature` in runtime config (TOML/KV
-  plumbing identical to #401 settings).
-- Compute `sources_fingerprint` in the retrieval layer (likely
-  `sha256` over the URN+content-version tuples post-fusion in #398)
-  and pass it into `decide`.
-- Wire `decide()` into `execute_ask`, set `temperature`/`seed` on the
-  provider request, and record `Applied` in the audit row (#402).
-- Integration test against OpenAI/Groq stubs verifying same question
-  + same data → byte-equal answer (depends on the stubbable LLM
-  transport refactor already deferred by #395/#396).
+  plumbing identical to #401 settings) and feed it into
+  `determinism_decider::Settings`.
+- Compute `sources_fingerprint` in the retrieval layer (suggested:
+  lowercase hex sha256 over the canonical sorted list of
+  `(urn, content_version_u64_be)` tuples post-fusion in #398) and
+  pass it into `decide`. Same fingerprint should flow into the
+  future answer-cache key (#403) so the two stay aligned.
+- Wire `decide()` into `execute_ask`: replace the hard-coded
+  `temperature: Some(0.3)` Anthropic branch, drop the literal seed
+  off OpenAi-style branches, and pull both from `Applied`. Record
+  `Applied` (not requested) in the audit row (#402).
+- Integration test against OpenAI/Groq stubs verifying same
+  question + same data → byte-equal answer (depends on the
+  stubbable LLM transport refactor already deferred by #395/#396).
 
-Deep module is the load-bearing piece; remaining slices are
-mechanical wiring and can land independently. Issue stays open with
-this progress note (mirrors slice 1 pattern of #395, #396, #398,
-#401).
+Verification (this slice):
+- `cargo check -p reddb-io-server` clean.
+- `cargo test -p reddb-io-server --lib storage::query::parser::tests::test_parse_dml`
+  → 2 passed (existing cases plus the new TEMPERATURE/SEED block).
+
+Deep module + SQL surface together unblock the wiring slice — at
+that point a follow-up can land `decide()` into `execute_ask` in
+one focused PR without re-touching the parser or the AST.

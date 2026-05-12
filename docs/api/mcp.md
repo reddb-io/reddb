@@ -84,6 +84,38 @@ The MCP server communicates over stdio using the MCP protocol, compatible with C
 }
 ```
 
+#### Parameterized Queries (recommended for user input)
+
+Always pass user-provided values via `params` with `$1`, `$2`, … placeholders
+instead of interpolating them into the SQL string. Interpolation is unsafe
+and brittle; the parameterized form is type-checked and immune to injection.
+
+```json
+{
+  "tool": "reddb_query",
+  "arguments": {
+    "sql": "SELECT * FROM users WHERE id = $1 AND name = $2",
+    "params": [42, "Alice"]
+  }
+}
+```
+
+Vector binding for similarity search:
+
+```json
+{
+  "tool": "reddb_query",
+  "arguments": {
+    "sql": "SEARCH SIMILAR $1 COLLECTION embeddings LIMIT 5",
+    "params": [[0.12, 0.34, 0.56]]
+  }
+}
+```
+
+`params` accepts a JSON array of `null`, booleans, numbers, strings, and
+number arrays (which bind as vectors). Indices are 1-based in SQL (`$1`)
+and 0-based in the array. Arity and gap errors surface as MCP tool errors.
+
 ### Insert a Row
 
 ```json

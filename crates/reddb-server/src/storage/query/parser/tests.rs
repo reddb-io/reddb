@@ -1328,7 +1328,26 @@ fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
                 && ask.depth == Some(3)
                 && ask.limit == Some(25)
                 && ask.collection.as_deref() == Some("events")
+                && ask.temperature.is_none()
+                && ask.seed.is_none()
     ));
+
+    // Issue #400: TEMPERATURE / SEED per-query overrides.
+    let query = parse("ASK 'q' TEMPERATURE 0.7 SEED 42").unwrap();
+    let QueryExpr::Ask(ask) = query else {
+        panic!("Expected AskQuery");
+    };
+    assert_eq!(ask.temperature, Some(0.7_f32));
+    assert_eq!(ask.seed, Some(42_u64));
+
+    // Order-independent with the other clauses.
+    let query = parse("ASK 'q' SEED 7 USING openai TEMPERATURE 0").unwrap();
+    let QueryExpr::Ask(ask) = query else {
+        panic!("Expected AskQuery");
+    };
+    assert_eq!(ask.provider.as_deref(), Some("openai"));
+    assert_eq!(ask.temperature, Some(0.0_f32));
+    assert_eq!(ask.seed, Some(7_u64));
 
     for sql in [
         "INSERT INTO docs (body) VALUES ('x') WITH UNKNOWN",
@@ -1342,6 +1361,8 @@ fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
         "ASK 'q' MODEL gpt4",
         "ASK 'q' DEPTH",
         "ASK 'q' COLLECTION",
+        "ASK 'q' TEMPERATURE",
+        "ASK 'q' SEED",
     ] {
         assert!(parse(sql).is_err(), "{sql}");
     }

@@ -159,9 +159,26 @@ pub fn all_tools() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "reddb_query",
-            description: "Execute a SQL or universal query against RedDB. Supports SELECT, INSERT, UPDATE, DELETE, and graph queries (Gremlin, Cypher, SPARQL).",
-            input_schema: schema(
-                vec![("sql", "string", "SQL or universal query to execute")],
+            description: "Execute a SQL or universal query against RedDB. Supports SELECT, INSERT, UPDATE, DELETE, and graph queries (Gremlin, Cypher, SPARQL).\n\nALWAYS pass user-provided values via the `params` array using `$1`, `$2`, ... placeholders rather than interpolating them into the SQL string. Example: `{\"sql\": \"SELECT * FROM users WHERE id = $1\", \"params\": [42]}`. Interpolating user input directly is unsafe and brittle; the parameterized form is type-checked and immune to injection.",
+            input_schema: schema_with_nested(
+                vec![
+                    ("sql", string_field("SQL or universal query to execute. Use `$1`, `$2`, ... placeholders for any value that came from the user.")),
+                    ("params", {
+                        let mut items = Map::new();
+                        items.insert("description".to_string(), JsonValue::String("Bind value for the matching $N placeholder. Accepts null, boolean, number, string, or a number array (vector).".to_string()));
+                        let mut f = Map::new();
+                        f.insert("type".to_string(), JsonValue::String("array".to_string()));
+                        f.insert("items".to_string(), JsonValue::Object(items));
+                        f.insert(
+                            "description".to_string(),
+                            JsonValue::String(
+                                "Positional bind values for `$1`, `$2`, ... in `sql`. Index 0 binds `$1`."
+                                    .to_string(),
+                            ),
+                        );
+                        JsonValue::Object(f)
+                    }),
+                ],
                 vec!["sql"],
             ),
         },

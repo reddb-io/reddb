@@ -282,6 +282,30 @@ impl McpServer {
             .and_then(|v| v.as_str())
             .ok_or("missing required field 'sql'")?;
 
+        // Optional positional `$N` bind parameters. Decoded via the same
+        // helper the JSON-RPC stdio path uses (#358), so MCP, embedded
+        // stdio, and HTTP all bind via one codec.
+        if let Some(raw_params) = args.get("params") {
+            let arr = raw_params
+                .as_array()
+                .ok_or_else(|| "'params' must be an array".to_string())?;
+            let binds: Vec<Value> = arr
+                .iter()
+                .map(crate::rpc_stdio::json_value_to_schema_value)
+                .collect();
+
+            use crate::storage::query::modes::parse_multi;
+            use crate::storage::query::user_params;
+            let parsed = parse_multi(sql).map_err(|e| format!("{}", e))?;
+            let bound = user_params::bind(&parsed, &binds).map_err(|e| format!("{}", e))?;
+            let result = self
+                .runtime
+                .execute_query_expr(bound)
+                .map_err(|e| format!("{}", e))?;
+            let json = runtime_query_json(&result, &None, &None);
+            return json_to_string(&json).map_err(|e| format!("serialization error: {}", e));
+        }
+
         let uc = QueryUseCases::new(&self.runtime);
         let result = uc
             .execute(ExecuteQueryInput {
@@ -1387,5 +1411,99 @@ impl McpServer {
             })
             .collect();
         json_to_string(&JsonValue::Array(arr))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_server() -> McpServer {
+        let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
+        McpServer::new(rt)
+    }
+
+    fn parse_json(s: &str) -> JsonValue {
+        json_from_str(s).expect("valid json")
+    }
+
+    #[test]
+    fn tool_query_without_params_keeps_legacy_path() {
+        let srv = make_server();
+        let args = parse_json(r#"{"sql":"SELECT 1 AS one"}"#);
+        let out = srv.tool_query(&args).expect("query ok");
+        assert!(out.contains("\"one\""), "expected 'one' column in {out}");
+    }
+
+    #[test]
+    fn tool_query_binds_int_and_text_params() {
+        let srv = make_server();
+        srv.tool_query(&parse_json(
+            r#"{"sql":"CREATE TABLE mcpp (id INTEGER, name TEXT)"}"#,
+        ))
+        .expect("ddl ok");
+        srv.tool_query(&parse_json(
+            r#"{"sql":"INSERT INTO mcpp (id, name) VALUES (1, 'Alice')"}"#,
+        ))
+        .expect("insert 1");
+        srv.tool_query(&parse_json(
+            r#"{"sql":"INSERT INTO mcpp (id, name) VALUES (2, 'Bob')"}"#,
+        ))
+        .expect("insert 2");
+
+        let out = srv
+            .tool_query(&parse_json(
+                r#"{"sql":"SELECT * FROM mcpp WHERE id = $1 AND name = $2","params":[1,"Alice"]}"#,
+            ))
+            .expect("query with params ok");
+        assert!(out.contains("Alice"), "expected Alice in {out}");
+        assert!(!out.contains("Bob"), "Bob must not match: {out}");
+    }
+
+    #[test]
+    fn tool_query_params_must_be_array() {
+        let srv = make_server();
+        let err = srv
+            .tool_query(&parse_json(
+                r#"{"sql":"SELECT 1","params":{"not":"array"}}"#,
+            ))
+            .expect_err("must reject non-array params");
+        assert!(err.contains("array"), "got {err}");
+    }
+
+    #[test]
+    fn tool_query_param_arity_mismatch_surfaces_error() {
+        let srv = make_server();
+        srv.tool_query(&parse_json(
+            r#"{"sql":"CREATE TABLE mcpa (id INTEGER)"}"#,
+        ))
+        .expect("ddl ok");
+        let err = srv
+            .tool_query(&parse_json(
+                r#"{"sql":"SELECT * FROM mcpa WHERE id = $1","params":[1,2]}"#,
+            ))
+            .expect_err("arity mismatch");
+        assert!(
+            err.contains("number of parameters") || err.contains("expects"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn tool_query_vector_param_binds_into_search_similar() {
+        let srv = make_server();
+        let out = srv
+            .tool_query(&parse_json(
+                r#"{"sql":"SEARCH SIMILAR $1 COLLECTION mcpv LIMIT 5","params":[[0.1,0.2,0.3]]}"#,
+            ));
+        // The collection doesn't exist; we only need to confirm the
+        // param-bind path runs (i.e. the error reflects runtime semantics,
+        // not a `$N` placeholder being unresolved).
+        if let Err(e) = out {
+            assert!(
+                !e.contains("placeholder") && !e.contains("Parameter"),
+                "param did not bind: {e}"
+            );
+        }
     }
 }
