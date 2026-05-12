@@ -24,6 +24,7 @@ pub mod explain_plan_builder;
 pub mod mcp_ask_tool;
 pub mod metrics;
 pub mod ner;
+pub mod pg_wire_ask_row_encoder;
 pub mod prompt_assembler;
 pub mod prompt_template;
 pub mod provider_capabilities;
