@@ -258,6 +258,7 @@ pub enum Token {
     Colon,    // :
     Semi,     // ;
     Dollar,   // $
+    Question, // ?
 
     // Graph syntax
     Arrow,      // ->
@@ -473,6 +474,7 @@ impl fmt::Display for Token {
             Token::Colon => write!(f, ":"),
             Token::Semi => write!(f, ";"),
             Token::Dollar => write!(f, "$"),
+            Token::Question => write!(f, "?"),
             Token::Arrow => write!(f, "->"),
             Token::ArrowLeft => write!(f, "<-"),
             Token::Dash => write!(f, "-"),
@@ -842,6 +844,10 @@ impl<'a> Lexer<'a> {
             '$' => {
                 self.advance();
                 Token::Dollar
+            }
+            '?' => {
+                self.advance();
+                Token::Question
             }
             '|' => {
                 self.advance();

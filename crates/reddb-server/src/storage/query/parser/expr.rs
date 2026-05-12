@@ -48,6 +48,7 @@ use super::super::ast::{BinOp, Expr, FieldRef, Span, UnaryOp};
 use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
+use super::PlaceholderMode;
 use crate::storage::schema::{DataType, Value};
 
 fn is_duration_unit(unit: &str) -> bool {
@@ -278,6 +279,26 @@ impl<'a> Parser<'a> {
             });
         }
 
+        // `?` positional placeholder — auto-numbered left-to-right
+        // starting at 1. Mixing with `$N` in one statement is rejected.
+        if self.consume(&Token::Question)? {
+            match self.placeholder_mode {
+                PlaceholderMode::Dollar => {
+                    return Err(ParseError::new(
+                        "cannot mix `?` and `$N` placeholders in one statement".to_string(),
+                        self.position(),
+                    ));
+                }
+                _ => self.placeholder_mode = PlaceholderMode::Question,
+            }
+            self.question_count += 1;
+            let index = self.question_count - 1;
+            return Ok(Expr::Parameter {
+                index,
+                span: Span::new(start, self.position()),
+            });
+        }
+
         if self.consume(&Token::Dollar)? {
             // `$N` positional parameter placeholder (1-based in source,
             // 0-based in the AST so it matches `Vec<Value>` indexing).
@@ -290,6 +311,13 @@ impl<'a> Parser<'a> {
                         self.position(),
                     ));
                 }
+                if self.placeholder_mode == PlaceholderMode::Question {
+                    return Err(ParseError::new(
+                        "cannot mix `?` and `$N` placeholders in one statement".to_string(),
+                        self.position(),
+                    ));
+                }
+                self.placeholder_mode = PlaceholderMode::Dollar;
                 self.advance()?;
                 return Ok(Expr::Parameter {
                     index: (n - 1) as usize,
@@ -1169,6 +1197,89 @@ mod tests {
         let mut parser = Parser::new("$0").expect("lexer");
         let err = parser.parse_expr().unwrap_err();
         assert!(err.to_string().contains("placeholder"));
+    }
+
+    #[test]
+    fn placeholder_question_single() {
+        // Lone `?` numbered as parameter 1 (index 0).
+        let e = parse("?");
+        match e {
+            Expr::Parameter { index: 0, .. } => {}
+            other => panic!("expected Parameter(0), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn placeholder_question_left_to_right() {
+        // `id = ? AND name = ?` → params 0 and 1
+        let e = parse("id = ? AND name = ?");
+        let Expr::BinaryOp {
+            op: BinOp::And,
+            lhs,
+            rhs,
+            ..
+        } = e
+        else {
+            panic!("root must be And");
+        };
+        let Expr::BinaryOp {
+            op: BinOp::Eq, rhs: r1, ..
+        } = *lhs
+        else {
+            panic!("lhs must be Eq");
+        };
+        assert!(matches!(*r1, Expr::Parameter { index: 0, .. }));
+        let Expr::BinaryOp {
+            op: BinOp::Eq, rhs: r2, ..
+        } = *rhs
+        else {
+            panic!("rhs must be Eq");
+        };
+        assert!(matches!(*r2, Expr::Parameter { index: 1, .. }));
+    }
+
+    #[test]
+    fn placeholder_question_in_string_literal_is_text() {
+        let e = parse("'?'");
+        match e {
+            Expr::Literal {
+                value: Value::Text(s),
+                ..
+            } if s.as_ref() == "?" => {}
+            other => panic!("expected text literal '?', got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn placeholder_mixing_question_then_dollar_rejected() {
+        let mut parser = Parser::new("id = ? AND x = $2").expect("lexer");
+        let err = parser.parse_expr().err().expect("should fail");
+        assert!(
+            err.to_string().contains("mix"),
+            "expected mixing error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn placeholder_mixing_dollar_then_question_rejected() {
+        let mut parser = Parser::new("id = $1 AND x = ?").expect("lexer");
+        let err = parser.parse_expr().err().expect("should fail");
+        assert!(
+            err.to_string().contains("mix"),
+            "expected mixing error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn placeholder_question_in_comment_ignored() {
+        // `?` inside an SQL line comment must not bump the counter.
+        // The expression after the comment is the only param.
+        let mut parser = Parser::new("-- ? ignored\n  ?").expect("lexer");
+        let e = parser.parse_expr().expect("parse_expr");
+        match e {
+            Expr::Parameter { index: 0, .. } => {}
+            other => panic!("expected Parameter(0), got {other:?}"),
+        }
     }
 
     #[test]

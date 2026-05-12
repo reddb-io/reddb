@@ -84,6 +84,21 @@ pub struct Parser<'a> {
     /// descent point should bracket itself with [`enter_depth`] /
     /// [`exit_depth`] (see `parse_expr_prec`).
     pub(crate) depth: DepthCounter,
+    /// Tracks placeholder style used so far in this statement.
+    /// Mixing `$N` and `?` in one statement is a parse error
+    /// (PRD #351 / issue #354).
+    pub(crate) placeholder_mode: PlaceholderMode,
+    /// Counter for `?` positional placeholders, numbered 1-based
+    /// in source. Unused when mode is `Dollar` or `None`.
+    pub(crate) question_count: usize,
+}
+
+/// Placeholder style locked in by the first placeholder seen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlaceholderMode {
+    None,
+    Dollar,
+    Question,
 }
 
 impl<'a> Parser<'a> {
@@ -111,6 +126,8 @@ impl<'a> Parser<'a> {
             lexer,
             current,
             depth: DepthCounter::new(limits.max_depth),
+            placeholder_mode: PlaceholderMode::None,
+            question_count: 0,
         })
     }
 
