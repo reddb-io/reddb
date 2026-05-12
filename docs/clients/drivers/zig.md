@@ -33,13 +33,70 @@ pub fn main() !void {
         a.destroy(conn);
     }
 
-    const result = try conn.query("SELECT 1");
+    const params = [_]reddb.Value{
+        .{ .int = 18 },
+        .{ .text = "alice" },
+    };
+    const result = try conn.queryWithParams(
+        "SELECT * FROM users WHERE age > $1 AND name = $2",
+        &params,
+    );
     defer a.free(result);
     std.debug.print("server said: {s}\n", .{result});
 }
 ```
 
 Every operation that returns `[]const u8` allocates through the supplied allocator. Free with the **same** allocator after you're done.
+
+## Safe parameter binding
+
+`queryWithParams(sql, params)` binds positional `$N` placeholders. Use it for
+user input and vector values instead of interpolating values into SQL strings.
+The parameterized-query design is tracked in
+[ADR #352](https://github.com/reddb-io/reddb/issues/352).
+
+```zig
+const scalar_params = [_]reddb.Value{
+    .{ .int = 42 },
+    .{ .text = "acme" },
+    .{ .@"null" = {} },
+};
+const rows = try conn.queryWithParams(
+    "SELECT id, name FROM users WHERE id = $1 AND tenant = $2 AND deleted_at IS $3",
+    &scalar_params,
+);
+defer a.free(rows);
+
+const embedding = [_]f32{ 0.1, 0.2, 0.3 };
+const vector_params = [_]reddb.Value{.{ .vector = &embedding }};
+const hits = try conn.queryWithParams(
+    "SEARCH SIMILAR $1 IN embeddings K 5",
+    &vector_params,
+);
+defer a.free(hits);
+```
+
+Native Zig parameter mapping:
+
+| Zig value | Engine value |
+|-----------|--------------|
+| `.{ .@"null" = {} }` | Null |
+| `.{ .@"bool" = bool }` | Bool |
+| `.{ .int = i64 }` | Int |
+| `.{ .float = f64 }` | Float |
+| `.{ .text = []const u8 }` | Text |
+| `.{ .bytes = []const u8 }` | Bytes |
+| `.{ .vector = []const f32 }` | Vector |
+| `.{ .json = []const u8 }` | Json |
+| `.{ .timestamp = i64 }` | Timestamp seconds |
+| `.{ .uuid = [16]u8 }` / `Value.uuidFromString(...)` | Uuid |
+
+`query(sql)` with no params stays on the legacy single-query path. RedWire
+parameterized queries require the server to advertise `FEATURE_PARAMS`; older
+servers raise `ParamsUnsupported` instead of silently dropping params. HTTP
+sends typed params through `/query` for non-empty param slices. Parameter slices
+and nested text, bytes, vector, and JSON slices are borrowed for the duration of
+the call.
 
 ## Connection URIs
 
