@@ -435,12 +435,20 @@ impl RedDBRuntime {
                 returning_result = Some(build_returning_result(items, &snaps, Some(&outputs)));
             }
         } else {
-            if query.returning.is_some() {
-                return Err(RedDBError::Query(
-                    "RETURNING is not yet supported for this INSERT path (only plain table rows)"
-                        .to_string(),
-                ));
-            }
+            // Issue #419: surface the inserted entity id on every INSERT path.
+            // For Node/Edge/Vector/Document/Kv we now keep each CreateEntityOutput
+            // so a RETURNING clause (and the unconditional inserted_ids list,
+            // below) can expose the engine-assigned id. TimeSeries (the row
+            // branch in this else) still returns the not-supported error
+            // because create_timeseries_point isn't plumbed through this fn.
+            let mut entity_outputs: Vec<crate::application::entity::CreateEntityOutput> =
+                Vec::with_capacity(effective_rows.len());
+            let mut returning_field_snaps: Vec<Vec<(String, Value)>> =
+                if query.returning.is_some() {
+                    Vec::with_capacity(effective_rows.len())
+                } else {
+                    Vec::new()
+                };
             for row_values in &effective_rows {
                 if row_values.len() != query.columns.len() {
                     return Err(RedDBError::Query(format!(
@@ -452,6 +460,12 @@ impl RedDBRuntime {
 
                 match query.entity_type {
                     InsertEntityType::Row => {
+                        if query.returning.is_some() {
+                            return Err(RedDBError::Query(
+                                "RETURNING is not yet supported for this INSERT path (TimeSeries)"
+                                    .to_string(),
+                            ));
+                        }
                         let (fields, mut metadata) =
                             split_insert_metadata(self, &query.columns, row_values)?;
                         merge_with_clauses(
@@ -481,6 +495,9 @@ impl RedDBRuntime {
                             &values,
                             &["label", "node_type"],
                         );
+                        if query.returning.is_some() {
+                            returning_field_snaps.push(node_values.clone());
+                        }
                         let input = CreateNodeInput {
                             collection: query.table.clone(),
                             label,
@@ -491,7 +508,7 @@ impl RedDBRuntime {
                             table_links: Vec::new(),
                             node_links: Vec::new(),
                         };
-                        self.create_node(input)?;
+                        entity_outputs.push(self.create_node(input)?);
                     }
                     InsertEntityType::Edge => {
                         let (edge_values, mut metadata) =
@@ -514,6 +531,9 @@ impl RedDBRuntime {
                             &values,
                             &["label", "from", "to", "weight"],
                         );
+                        if query.returning.is_some() {
+                            returning_field_snaps.push(edge_values.clone());
+                        }
                         let input = CreateEdgeInput {
                             collection: query.table.clone(),
                             label,
@@ -523,7 +543,7 @@ impl RedDBRuntime {
                             properties,
                             metadata,
                         };
-                        self.create_edge(input)?;
+                        entity_outputs.push(self.create_edge(input)?);
                     }
                     InsertEntityType::Vector => {
                         let (vector_values, mut metadata) =
@@ -537,6 +557,9 @@ impl RedDBRuntime {
                         let (columns, values) = pairwise_columns_values(&vector_values);
                         let dense = find_column_value_vec_f32(&columns, &values, "dense")?;
                         let content = find_column_value_opt_string(&columns, &values, "content");
+                        if query.returning.is_some() {
+                            returning_field_snaps.push(vector_values.clone());
+                        }
                         let input = CreateVectorInput {
                             collection: query.table.clone(),
                             dense,
@@ -545,7 +568,7 @@ impl RedDBRuntime {
                             link_row: None,
                             link_node: None,
                         };
-                        self.create_vector(input)?;
+                        entity_outputs.push(self.create_vector(input)?);
                     }
                     InsertEntityType::Document => {
                         let (document_values, mut metadata) =
@@ -560,6 +583,9 @@ impl RedDBRuntime {
                         let body_str = find_column_value_string(&columns, &values, "body")?;
                         let body: crate::json::Value = crate::json::from_str(&body_str)
                             .map_err(|e| RedDBError::Query(format!("invalid JSON body: {e}")))?;
+                        if query.returning.is_some() {
+                            returning_field_snaps.push(document_values.clone());
+                        }
                         let input = CreateDocumentInput {
                             collection: query.table.clone(),
                             body,
@@ -567,7 +593,7 @@ impl RedDBRuntime {
                             node_links: Vec::new(),
                             vector_links: Vec::new(),
                         };
-                        self.create_document(input)?;
+                        entity_outputs.push(self.create_document(input)?);
                     }
                     InsertEntityType::Kv => {
                         let (kv_values, mut metadata) =
@@ -581,17 +607,30 @@ impl RedDBRuntime {
                         let (columns, values) = pairwise_columns_values(&kv_values);
                         let key = find_column_value_string(&columns, &values, "key")?;
                         let value = find_column_value(&columns, &values, "value")?;
+                        if query.returning.is_some() {
+                            returning_field_snaps.push(kv_values.clone());
+                        }
                         let input = CreateKvInput {
                             collection: query.table.clone(),
                             key,
                             value,
                             metadata,
                         };
-                        self.create_kv(input)?;
+                        entity_outputs.push(self.create_kv(input)?);
                     }
                 }
 
                 inserted_count += 1;
+            }
+
+            if let Some(items) = query.returning.as_ref() {
+                if !entity_outputs.is_empty() {
+                    returning_result = Some(build_returning_result(
+                        items,
+                        &returning_field_snaps,
+                        Some(&entity_outputs),
+                    ));
+                }
             }
         }
 

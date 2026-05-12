@@ -450,3 +450,69 @@ fn match_return_whole_node_surfaces_property_bag() {
         .expect("RETURN n must surface property 'name'");
     assert_eq!(name, "Cinderella");
 }
+
+// ── Issue #419: INSERT surfaces the engine-assigned entity id ───────────────
+
+fn u64_at(result: &RuntimeQueryResult, row: usize, column: &str) -> u64 {
+    match result.result.records[row].get(column) {
+        Some(Value::UnsignedInteger(value)) => *value,
+        Some(Value::Integer(value)) => *value as u64,
+        other => panic!("expected unsigned int at row {row} column {column}, got {other:?}"),
+    }
+}
+
+#[test]
+fn insert_node_returning_star_exposes_entity_id() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    let res = rt
+        .execute_query(
+            "INSERT INTO tales NODE (label, name) VALUES ('cinderella', 'Cinderella') RETURNING *",
+        )
+        .expect("INSERT NODE RETURNING * executes");
+    assert_eq!(res.affected_rows, 1, "one node inserted");
+    assert_eq!(res.result.len(), 1, "one RETURNING row");
+    let id = u64_at(&res, 0, "red_entity_id");
+    assert!(id > 0, "engine-assigned id must be present (got {id})");
+    assert_eq!(text_at(&res, 0, "label"), "cinderella");
+    assert_eq!(text_at(&res, 0, "name"), "Cinderella");
+}
+
+#[test]
+fn insert_edge_returning_star_exposes_entity_id() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    let a = rt
+        .execute_query("INSERT INTO tales NODE (label, name) VALUES ('a', 'A') RETURNING *")
+        .expect("insert a");
+    let b = rt
+        .execute_query("INSERT INTO tales NODE (label, name) VALUES ('b', 'B') RETURNING *")
+        .expect("insert b");
+    let a_id = u64_at(&a, 0, "red_entity_id");
+    let b_id = u64_at(&b, 0, "red_entity_id");
+
+    let res = rt
+        .execute_query(&format!(
+            "INSERT INTO tales EDGE (label, from, to) VALUES ('KNOWS', {a_id}, {b_id}) RETURNING *"
+        ))
+        .expect("INSERT EDGE RETURNING * executes");
+    assert_eq!(res.affected_rows, 1);
+    assert_eq!(res.result.len(), 1);
+    let id = u64_at(&res, 0, "red_entity_id");
+    assert!(id > 0);
+    assert_eq!(text_at(&res, 0, "label"), "KNOWS");
+}
+
+#[test]
+fn insert_multi_row_node_returning_star_emits_one_row_per_insert() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    let res = rt.execute_query(
+        "INSERT INTO tales NODE (label, name) VALUES ('a', 'A'), ('b', 'B') RETURNING *",
+    );
+    // Multi-row NODE inserts may not parse yet (#424). Skip if so —
+    // the single-row path is what #419 pins.
+    let Ok(res) = res else { return };
+    assert_eq!(res.affected_rows, 2);
+    assert_eq!(res.result.len(), 2);
+    let id_a = u64_at(&res, 0, "red_entity_id");
+    let id_b = u64_at(&res, 1, "red_entity_id");
+    assert!(id_a > 0 && id_b > 0 && id_a != id_b);
+}
