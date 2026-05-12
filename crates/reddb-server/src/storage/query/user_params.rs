@@ -8,7 +8,7 @@
 
 use crate::storage::query::ast::{Expr, QueryExpr, SearchCommand};
 use crate::storage::query::planner::shape::bind_user_param_query;
-use crate::storage::query::sql_lowering::fold_expr_to_value;
+use crate::storage::query::sql_lowering::{expr_to_filter, fold_expr_to_value};
 use crate::storage::schema::Value;
 
 /// Recursively check whether `expr` contains any `Expr::Parameter` node.
@@ -829,6 +829,45 @@ pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamEr
         return Ok(QueryExpr::Insert(bound));
     }
 
+    if let QueryExpr::Update(update) = expr {
+        let mut bound = update.clone();
+        let assignment_exprs = bound
+            .assignment_exprs
+            .into_iter()
+            .map(|(column, expr)| Ok((column, substitute_params_in_expr(expr, params)?)))
+            .collect::<Result<Vec<_>, UserParamError>>()?;
+        let assignments = assignment_exprs
+            .iter()
+            .filter_map(|(column, expr)| {
+                fold_expr_to_value(expr.clone())
+                    .ok()
+                    .map(|value| (column.clone(), value))
+            })
+            .collect();
+        let where_expr = bound
+            .where_expr
+            .map(|expr| substitute_params_in_expr(expr, params))
+            .transpose()?;
+        let filter = where_expr.as_ref().map(expr_to_filter);
+        bound.assignment_exprs = assignment_exprs;
+        bound.assignments = assignments;
+        bound.where_expr = where_expr;
+        bound.filter = filter;
+        return Ok(QueryExpr::Update(bound));
+    }
+
+    if let QueryExpr::Delete(delete) = expr {
+        let mut bound = delete.clone();
+        let where_expr = bound
+            .where_expr
+            .map(|expr| substitute_params_in_expr(expr, params))
+            .transpose()?;
+        let filter = where_expr.as_ref().map(expr_to_filter);
+        bound.where_expr = where_expr;
+        bound.filter = filter;
+        return Ok(QueryExpr::Delete(bound));
+    }
+
     // SELECT LIMIT / OFFSET $N — the planner's Expr-tree binder doesn't
     // see these slots (they live on TableQuery, not inside any Expr).
     // Run the Expr-tree bind first, then substitute the non-Expr slots
@@ -952,6 +991,19 @@ fn visit_query_expr<F: FnMut(&Expr)>(expr: &QueryExpr, visit: &mut F) {
                 for e in row {
                     visit_expr(e, visit);
                 }
+            }
+        }
+        QueryExpr::Update(q) => {
+            for (_, e) in &q.assignment_exprs {
+                visit_expr(e, visit);
+            }
+            if let Some(e) = &q.where_expr {
+                visit_expr(e, visit);
+            }
+        }
+        QueryExpr::Delete(q) => {
+            if let Some(e) = &q.where_expr {
+                visit_expr(e, visit);
             }
         }
         // Vector / Graph / Path: parameter slots in #355 / later issues.
@@ -1724,6 +1776,39 @@ mod tests {
                 got: 1
             }
         ));
+    }
+
+    #[test]
+    fn bind_update_assignments_and_where_params() {
+        let q = parse("UPDATE users SET age = $1, active = $2 WHERE name = $3");
+        let bound = bind(
+            &q,
+            &[
+                Value::Integer(31),
+                Value::Boolean(true),
+                Value::text("Alice"),
+            ],
+        )
+        .unwrap();
+        let QueryExpr::Update(update) = bound else {
+            panic!("expected Update");
+        };
+        assert_eq!(update.assignments.len(), 2);
+        assert!(matches!(update.assignments[0].1, Value::Integer(31)));
+        assert!(matches!(update.assignments[1].1, Value::Boolean(true)));
+        assert!(update.where_expr.is_some());
+        assert!(update.filter.is_some());
+    }
+
+    #[test]
+    fn bind_delete_where_param() {
+        let q = parse("DELETE FROM users WHERE active = $1");
+        let bound = bind(&q, &[Value::Boolean(false)]).unwrap();
+        let QueryExpr::Delete(delete) = bound else {
+            panic!("expected Delete");
+        };
+        assert!(delete.where_expr.is_some());
+        assert!(delete.filter.is_some());
     }
 
     #[test]
