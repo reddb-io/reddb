@@ -228,6 +228,28 @@ message QueryRequest {
   string query = 1;
   repeated string entity_types = 2;
   repeated string capabilities = 3;
+  repeated QueryValue params = 4;
+}
+
+message QueryValue {
+  oneof kind {
+    QueryNull null_value = 1;
+    bool bool_value = 2;
+    int64 int_value = 3;
+    double float_value = 4;
+    string text_value = 5;
+    bytes bytes_value = 6;
+    QueryVector vector_value = 7;
+    string json_value = 8;
+    int64 timestamp_value = 9;
+    bytes uuid_value = 10;
+  }
+}
+
+message QueryNull {}
+
+message QueryVector {
+  repeated float values = 1;
 }
 
 message JsonPayloadRequest {

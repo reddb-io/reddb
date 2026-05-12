@@ -19,6 +19,7 @@ use std::time::Instant;
 use crate::connector::RedDBClient;
 
 use crate::error::{ClientError, ErrorCode, Result};
+use crate::params::Value as ParamValue;
 use crate::router::{ClusterMembership, HealthAwareRouter, Outcome};
 use crate::types::{InsertResult, JsonValue, QueryResult, ValueOut};
 
@@ -352,6 +353,26 @@ impl GrpcClient {
         parse_query_json(&reply.result_json)
     }
 
+    pub async fn query_with(&self, sql: &str, params: &[ParamValue]) -> Result<QueryResult> {
+        if params.is_empty() {
+            return self.query(sql).await;
+        }
+        let grpc_params = params_to_grpc_values(params);
+        let (mut client, idx) = self.read_endpoint();
+        let started = Instant::now();
+        let reply = match client.query_reply_with_params(sql, grpc_params).await {
+            Ok(r) => {
+                self.observe(idx, Outcome::Rtt(started.elapsed()));
+                r
+            }
+            Err(e) => {
+                self.observe(idx, Outcome::Timeout);
+                return Err(ClientError::new(ErrorCode::QueryError, e.to_string()));
+            }
+        };
+        parse_query_json(&reply.result_json)
+    }
+
     pub async fn insert(&self, collection: &str, payload: &JsonValue) -> Result<InsertResult> {
         if payload.as_object().is_none() {
             return Err(ClientError::new(
@@ -509,6 +530,31 @@ fn parse_scalar(value: &serde_json::Value) -> ValueOut {
     }
 }
 
+fn params_to_grpc_values(params: &[ParamValue]) -> Vec<reddb_grpc_proto::QueryValue> {
+    use reddb_grpc_proto::query_value::Kind;
+    use reddb_grpc_proto::{QueryNull, QueryValue, QueryVector};
+
+    params
+        .iter()
+        .cloned()
+        .map(|value| {
+            let kind = match value {
+                ParamValue::Null => Kind::NullValue(QueryNull {}),
+                ParamValue::Bool(value) => Kind::BoolValue(value),
+                ParamValue::Int(value) => Kind::IntValue(value),
+                ParamValue::Float(value) => Kind::FloatValue(value),
+                ParamValue::Text(value) => Kind::TextValue(value),
+                ParamValue::Bytes(value) => Kind::BytesValue(value),
+                ParamValue::Vector(values) => Kind::VectorValue(QueryVector { values }),
+                ParamValue::Json(value) => Kind::JsonValue(value.to_json_string()),
+                ParamValue::Timestamp(value) => Kind::TimestampValue(value),
+                ParamValue::Uuid(value) => Kind::UuidValue(value.to_vec()),
+            };
+            QueryValue { kind: Some(kind) }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,5 +587,47 @@ mod tests {
         let qr = parse_query_json("{}").unwrap();
         assert_eq!(qr.affected, 0);
         assert!(qr.rows.is_empty());
+    }
+
+    #[test]
+    fn grpc_params_preserve_wire_value_variants() {
+        use reddb_grpc_proto::query_value::Kind;
+
+        let uuid = [0x11; 16];
+        let params = vec![
+            crate::params::Value::Null,
+            crate::params::Value::Bool(true),
+            crate::params::Value::Int(42),
+            crate::params::Value::Float(1.5),
+            crate::params::Value::Text("alice".into()),
+            crate::params::Value::Bytes(vec![0, 1, 2]),
+            crate::params::Value::Vector(vec![0.25, 0.5]),
+            crate::params::Value::Json(crate::types::JsonValue::object([(
+                "role",
+                crate::types::JsonValue::string("admin"),
+            )])),
+            crate::params::Value::Timestamp(1_779_999_000),
+            crate::params::Value::Uuid(uuid),
+        ];
+
+        let encoded = params_to_grpc_values(&params);
+        assert_eq!(encoded.len(), 10);
+        assert!(matches!(encoded[0].kind, Some(Kind::NullValue(_))));
+        assert!(matches!(encoded[1].kind, Some(Kind::BoolValue(true))));
+        assert!(matches!(encoded[2].kind, Some(Kind::IntValue(42))));
+        assert!(matches!(encoded[3].kind, Some(Kind::FloatValue(1.5))));
+        assert!(matches!(&encoded[4].kind, Some(Kind::TextValue(v)) if v == "alice"));
+        assert!(matches!(&encoded[5].kind, Some(Kind::BytesValue(v)) if v == &[0, 1, 2]));
+        assert!(
+            matches!(&encoded[6].kind, Some(Kind::VectorValue(v)) if v.values == vec![0.25, 0.5])
+        );
+        assert!(
+            matches!(&encoded[7].kind, Some(Kind::JsonValue(v)) if v == "{\"role\":\"admin\"}")
+        );
+        assert!(matches!(
+            encoded[8].kind,
+            Some(Kind::TimestampValue(1_779_999_000))
+        ));
+        assert!(matches!(&encoded[9].kind, Some(Kind::UuidValue(v)) if v == &uuid));
     }
 }

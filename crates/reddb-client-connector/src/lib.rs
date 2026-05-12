@@ -115,10 +115,19 @@ impl RedDBClient {
         &mut self,
         sql: &str,
     ) -> Result<QueryResponse, Box<dyn std::error::Error>> {
+        self.query_reply_with_params(sql, Vec::new()).await
+    }
+
+    pub async fn query_reply_with_params(
+        &mut self,
+        sql: &str,
+        params: Vec<QueryValue>,
+    ) -> Result<QueryResponse, Box<dyn std::error::Error>> {
         let req = self.auth_request(QueryRequest {
             query: sql.to_string(),
             entity_types: vec![],
             capabilities: vec![],
+            params,
         });
         let resp = self.inner.query(req).await?;
         let reply = resp.into_inner();
@@ -226,6 +235,7 @@ impl RedDBClient {
             query: sql.to_string(),
             entity_types: vec![],
             capabilities: vec![],
+            params: vec![],
         });
         let resp = self.inner.explain_query(req).await?;
         Ok(resp.into_inner().payload)

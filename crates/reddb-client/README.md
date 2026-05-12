@@ -74,9 +74,9 @@ Native Rust → engine `Value` mapping:
 | `Value::Timestamp(s)` | `Timestamp` (seconds)   |
 | `Value::Uuid(b)`      | `Uuid` (16 raw bytes)   |
 
-Today the `embedded` and `http` transports carry parameters
-end-to-end. `grpc` returns a `FEATURE_DISABLED` error — the gRPC
-params frame is tracked in [#359](https://github.com/reddb-io/reddb/issues/359).
+Today the `embedded`, `http`, and Rust `grpc` transports carry parameters
+end-to-end. RedWire support is separate from this crate's gRPC path and still
+depends on the server advertising `FEATURE_PARAMS`.
 
 ## Cargo features
 

@@ -56,8 +56,8 @@ use proto::{
     ExportRequest, GraphProjectionUpsertRequest, HealthReply, IndexNameRequest, IndexToggleRequest,
     JsonBulkCreateRequest, JsonCreateRequest, JsonPayloadRequest, KvWatchEvent, KvWatchRequest,
     ManifestRequest, OperationReply, PayloadReply, PrepareQueryReply, PrepareQueryRequest,
-    QueryReply, QueryRequest, ScanEntity, ScanReply, ScanRequest, StatsReply, TopologyReply,
-    TopologyRequest, UpdateEntityRequest,
+    QueryReply, QueryRequest, QueryValue, ScanEntity, ScanReply, ScanRequest, StatsReply,
+    TopologyReply, TopologyRequest, UpdateEntityRequest,
 };
 
 mod control_support;
@@ -371,6 +371,150 @@ impl GrpcRuntime {
 
     fn native_use_cases(&self) -> NativeUseCases<'_, RedDBRuntime> {
         NativeUseCases::new(&self.runtime)
+    }
+}
+
+fn grpc_query_value_to_schema_value(value: QueryValue) -> Result<Value, Status> {
+    use proto::query_value::Kind;
+
+    match value
+        .kind
+        .ok_or_else(|| Status::invalid_argument("missing query param value"))?
+    {
+        Kind::NullValue(_) => Ok(Value::Null),
+        Kind::BoolValue(value) => Ok(Value::Boolean(value)),
+        Kind::IntValue(value) => Ok(Value::Integer(value)),
+        Kind::FloatValue(value) => Ok(Value::Float(value)),
+        Kind::TextValue(value) => Ok(Value::Text(std::sync::Arc::from(value))),
+        Kind::BytesValue(value) => Ok(Value::Blob(value)),
+        Kind::VectorValue(value) => Ok(Value::Vector(value.values)),
+        Kind::JsonValue(value) => {
+            let parsed = json_from_str::<JsonValue>(&value)
+                .map_err(|e| Status::invalid_argument(format!("json param parse error: {e}")))?;
+            let encoded = json_to_string(&parsed)
+                .map_err(|e| Status::invalid_argument(format!("json param encode error: {e}")))?;
+            Ok(Value::Json(encoded.into_bytes()))
+        }
+        Kind::TimestampValue(value) => Ok(Value::Timestamp(value)),
+        Kind::UuidValue(value) => {
+            let bytes: [u8; 16] = value.try_into().map_err(|value: Vec<u8>| {
+                Status::invalid_argument(format!(
+                    "uuid param must be 16 bytes, got {}",
+                    value.len()
+                ))
+            })?;
+            Ok(Value::Uuid(bytes))
+        }
+    }
+}
+
+fn execute_grpc_query_with_optional_params(
+    runtime: &RedDBRuntime,
+    query: String,
+    params: Vec<QueryValue>,
+) -> Result<RuntimeQueryResult, Status> {
+    if params.is_empty() {
+        return runtime.execute_query(&query).map_err(to_status);
+    }
+
+    let binds = params
+        .into_iter()
+        .map(grpc_query_value_to_schema_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    let parsed = crate::storage::query::modes::parse_multi(&query)
+        .map_err(|e| Status::invalid_argument(format!("parse error: {e}")))?;
+    let bound = crate::storage::query::user_params::bind(&parsed, &binds)
+        .map_err(|e| Status::invalid_argument(format!("bind error: {e}")))?;
+    runtime.execute_query_expr(bound).map_err(to_status)
+}
+
+#[cfg(test)]
+mod grpc_query_value_tests {
+    use super::*;
+    use proto::query_value::Kind;
+
+    #[test]
+    fn grpc_query_value_maps_to_schema_value_variants() {
+        let cases = vec![
+            (
+                QueryValue {
+                    kind: Some(Kind::NullValue(proto::QueryNull {})),
+                },
+                Value::Null,
+            ),
+            (
+                QueryValue {
+                    kind: Some(Kind::BoolValue(true)),
+                },
+                Value::Boolean(true),
+            ),
+            (
+                QueryValue {
+                    kind: Some(Kind::IntValue(42)),
+                },
+                Value::Integer(42),
+            ),
+            (
+                QueryValue {
+                    kind: Some(Kind::FloatValue(1.5)),
+                },
+                Value::Float(1.5),
+            ),
+            (
+                QueryValue {
+                    kind: Some(Kind::BytesValue(vec![0, 1, 2])),
+                },
+                Value::Blob(vec![0, 1, 2]),
+            ),
+            (
+                QueryValue {
+                    kind: Some(Kind::VectorValue(proto::QueryVector {
+                        values: vec![0.25, 0.5],
+                    })),
+                },
+                Value::Vector(vec![0.25, 0.5]),
+            ),
+            (
+                QueryValue {
+                    kind: Some(Kind::TimestampValue(1_779_999_000)),
+                },
+                Value::Timestamp(1_779_999_000),
+            ),
+            (
+                QueryValue {
+                    kind: Some(Kind::UuidValue(vec![0x11; 16])),
+                },
+                Value::Uuid([0x11; 16]),
+            ),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(grpc_query_value_to_schema_value(input).unwrap(), expected);
+        }
+
+        assert_eq!(
+            grpc_query_value_to_schema_value(QueryValue {
+                kind: Some(Kind::TextValue("alice".into())),
+            })
+            .unwrap(),
+            Value::Text(std::sync::Arc::from("alice"))
+        );
+        assert_eq!(
+            grpc_query_value_to_schema_value(QueryValue {
+                kind: Some(Kind::JsonValue("{\"role\":\"admin\"}".into())),
+            })
+            .unwrap(),
+            Value::Json(b"{\"role\":\"admin\"}".to_vec())
+        );
+    }
+
+    #[test]
+    fn grpc_query_value_rejects_missing_kind_and_bad_uuid() {
+        assert!(grpc_query_value_to_schema_value(QueryValue { kind: None }).is_err());
+        assert!(grpc_query_value_to_schema_value(QueryValue {
+            kind: Some(Kind::UuidValue(vec![0; 15])),
+        })
+        .is_err());
     }
 }
 

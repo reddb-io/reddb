@@ -202,10 +202,8 @@ impl Reddb {
     /// | [`Value::Timestamp`]    | `Timestamp` (seconds)  |
     /// | [`Value::Uuid`]         | `Uuid` (16 raw bytes)  |
     ///
-    /// Today the [`Reddb::Embedded`] and [`Reddb::Http`] transports carry
-    /// parameters end-to-end. [`Reddb::Grpc`] surfaces a
-    /// `FEATURE_DISABLED` error — the gRPC params frame is tracked in
-    /// issue #359.
+    /// Today the [`Reddb::Embedded`], [`Reddb::Grpc`], and [`Reddb::Http`]
+    /// transports carry parameters end-to-end.
     pub async fn query_with<V: IntoValue + Clone>(
         &self,
         sql: &str,
@@ -216,12 +214,7 @@ impl Reddb {
             #[cfg(feature = "embedded")]
             Reddb::Embedded(c) => c.query_with(sql, &values),
             #[cfg(feature = "grpc")]
-            Reddb::Grpc(_) => {
-                let _ = values;
-                Err(ClientError::feature_disabled(
-                    "grpc parameterized query (#359)",
-                ))
-            }
+            Reddb::Grpc(c) => c.query_with(sql, &values).await,
             #[cfg(feature = "http")]
             Reddb::Http(c) => c.query_with(sql, &values).await,
             Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
