@@ -2047,6 +2047,94 @@ impl RedDBRuntime {
     }
 }
 
+fn create_rows_batch_prevalidated_columnar_with_outputs(
+    runtime: &RedDBRuntime,
+    collection: String,
+    column_names: std::sync::Arc<Vec<String>>,
+    rows: Vec<Vec<crate::storage::schema::Value>>,
+) -> RedDBResult<Vec<CreateEntityOutput>> {
+    use crate::storage::{
+        unified::{EntityData, EntityKind, RowData},
+        EntityId, UnifiedEntity,
+    };
+    use std::sync::Arc;
+
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    runtime.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+    runtime.check_batch_size(rows.len())?;
+    runtime.check_db_size()?;
+
+    let db = runtime.db();
+    let contract = CollectionContractWriteEnforcer::new(&db, &collection);
+    contract.ensure_model(crate::catalog::CollectionModel::Table)?;
+
+    let store = db.store();
+    let table_arc: Arc<str> = Arc::from(collection.as_str());
+
+    let indexed_cols = runtime
+        .index_store_ref()
+        .indexed_columns_set(collection.as_str());
+    let has_secondary_indexes = !indexed_cols.is_empty();
+    let mut field_snapshots: Vec<Vec<(String, crate::storage::schema::Value)>> =
+        if has_secondary_indexes {
+            Vec::with_capacity(rows.len())
+        } else {
+            Vec::new()
+        };
+
+    let entities: Vec<UnifiedEntity> = rows
+        .into_iter()
+        .map(|values| {
+            if has_secondary_indexes {
+                let mut snap: Vec<(String, crate::storage::schema::Value)> =
+                    Vec::with_capacity(indexed_cols.len());
+                for (name, val) in column_names.iter().zip(values.iter()) {
+                    if indexed_cols.contains(name) {
+                        snap.push((name.clone(), val.clone()));
+                    }
+                }
+                field_snapshots.push(snap);
+            }
+            let mut row = RowData::new(values);
+            row.schema = Some(Arc::clone(&column_names));
+            UnifiedEntity::new(
+                EntityId::new(0),
+                EntityKind::TableRow {
+                    table: Arc::clone(&table_arc),
+                    row_id: 0,
+                },
+                EntityData::Row(row),
+            )
+        })
+        .collect();
+
+    let ids = store
+        .bulk_insert(&collection, entities)
+        .map_err(|e| crate::RedDBError::Internal(format!("{e:?}")))?;
+
+    if has_secondary_indexes {
+        let index_rows: Vec<(EntityId, Vec<(String, crate::storage::schema::Value)>)> = ids
+            .iter()
+            .zip(field_snapshots)
+            .map(|(id, fields)| (*id, fields))
+            .collect();
+        runtime
+            .index_store_ref()
+            .index_entity_insert_batch(&collection, &index_rows)
+            .map_err(crate::RedDBError::Internal)?;
+    }
+
+    runtime.invalidate_result_cache();
+    runtime.cdc_emit_insert_batch_no_cache_invalidate(&collection, &ids, "table");
+
+    Ok(ids
+        .into_iter()
+        .map(|id| CreateEntityOutput { id, entity: None })
+        .collect())
+}
+
 impl RuntimeEntityPort for RedDBRuntime {
     fn create_row(&self, input: CreateRowInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
@@ -2164,107 +2252,8 @@ impl RuntimeEntityPort for RedDBRuntime {
         column_names: std::sync::Arc<Vec<String>>,
         rows: Vec<Vec<crate::storage::schema::Value>>,
     ) -> RedDBResult<usize> {
-        use crate::storage::{
-            unified::{EntityData, EntityKind, RowData},
-            EntityId, UnifiedEntity,
-        };
-        use std::sync::Arc;
-
-        if rows.is_empty() {
-            return Ok(0);
-        }
-        self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
-        self.check_batch_size(rows.len())?;
-        self.check_db_size()?;
-
-        let db = self.db();
-        let contract = CollectionContractWriteEnforcer::new(&db, &collection);
-        contract.ensure_model(crate::catalog::CollectionModel::Table)?;
-
-        let store = db.store();
-        let ncols = column_names.len();
-        let table_arc: Arc<str> = Arc::from(collection.as_str());
-
-        // If the collection has any registered secondary index, snapshot
-        // each row's (column, value) pairs *before* the values move into
-        // entities. We need them for `index_entity_insert_batch` after
-        // `bulk_insert` returns the assigned IDs. When no indexes are
-        // registered the snapshot is pure waste — gate it. Mirrors the
-        // `has_secondary_indexes` short-circuit in MutationEngine.
-        let indexed_cols = self
-            .index_store_ref()
-            .indexed_columns_set(collection.as_str());
-        let has_secondary_indexes = !indexed_cols.is_empty();
-        let mut field_snapshots: Vec<Vec<(String, crate::storage::schema::Value)>> =
-            if has_secondary_indexes {
-                Vec::with_capacity(rows.len())
-            } else {
-                Vec::new()
-            };
-
-        // Build `UnifiedEntity`s directly in columnar form — no
-        // HashMap<String, Value> per row, no (String, Value) tuples,
-        // no named→columnar conversion pass inside the manager. Every
-        // entity shares the same `Arc<Vec<String>>` schema; the row
-        // payload is exactly the `Vec<Value>` the wire handed us.
-        let entities: Vec<UnifiedEntity> = rows
-            .into_iter()
-            .map(|values| {
-                if values.len() != ncols {
-                    // Row width mismatch — shouldn't happen after wire
-                    // decode, but guard against it. Fall back to zero
-                    // so the caller sees the error.
-                }
-                if has_secondary_indexes {
-                    // Only snapshot indexed columns to keep alloc cost
-                    // proportional to index count, not row width.
-                    let mut snap: Vec<(String, crate::storage::schema::Value)> =
-                        Vec::with_capacity(indexed_cols.len());
-                    for (name, val) in column_names.iter().zip(values.iter()) {
-                        if indexed_cols.contains(name) {
-                            snap.push((name.clone(), val.clone()));
-                        }
-                    }
-                    field_snapshots.push(snap);
-                }
-                let mut row = RowData::new(values);
-                row.schema = Some(Arc::clone(&column_names));
-                UnifiedEntity::new(
-                    EntityId::new(0),
-                    EntityKind::TableRow {
-                        table: Arc::clone(&table_arc),
-                        row_id: 0,
-                    },
-                    EntityData::Row(row),
-                )
-            })
-            .collect();
-
-        let ids = store
-            .bulk_insert(&collection, entities)
-            .map_err(|e| crate::RedDBError::Internal(format!("{e:?}")))?;
-
-        // Secondary-index maintenance — required for post-CREATE-INDEX
-        // inserts to stay visible to indexed queries. Without this, the
-        // mini-duel `mixed_workload_indexed` scenario sees ~half its
-        // post-seed inserts disappear from `select_filtered`.
-        if has_secondary_indexes {
-            let index_rows: Vec<(EntityId, Vec<(String, crate::storage::schema::Value)>)> = ids
-                .iter()
-                .zip(field_snapshots)
-                .map(|(id, fields)| (*id, fields))
-                .collect();
-            self.index_store_ref()
-                .index_entity_insert_batch(&collection, &index_rows)
-                .map_err(crate::RedDBError::Internal)?;
-        }
-
-        // CDC + cache invalidation — one call, not N (same pattern
-        // as MutationEngine::append_batch).
-        self.invalidate_result_cache();
-        self.cdc_emit_insert_batch_no_cache_invalidate(&collection, &ids, "table");
-
-        Ok(ids.len())
+        create_rows_batch_prevalidated_columnar_with_outputs(self, collection, column_names, rows)
+            .map(|outputs| outputs.len())
     }
 
     fn create_rows_batch_columnar(
@@ -2273,8 +2262,18 @@ impl RuntimeEntityPort for RedDBRuntime {
         column_names: std::sync::Arc<Vec<String>>,
         rows: Vec<Vec<crate::storage::schema::Value>>,
     ) -> RedDBResult<usize> {
+        self.create_rows_batch_columnar_with_outputs(collection, column_names, rows)
+            .map(|outputs| outputs.len())
+    }
+
+    fn create_rows_batch_columnar_with_outputs(
+        &self,
+        collection: String,
+        column_names: std::sync::Arc<Vec<String>>,
+        rows: Vec<Vec<crate::storage::schema::Value>>,
+    ) -> RedDBResult<Vec<CreateEntityOutput>> {
         if rows.is_empty() {
-            return Ok(0);
+            return Ok(Vec::new());
         }
         self.check_batch_size(rows.len())?;
         self.check_db_size()?;
@@ -2304,7 +2303,12 @@ impl RuntimeEntityPort for RedDBRuntime {
             None => false,
         };
         if !needs_normalisation {
-            return self.create_rows_batch_prevalidated_columnar(collection, column_names, rows);
+            return create_rows_batch_prevalidated_columnar_with_outputs(
+                self,
+                collection,
+                column_names,
+                rows,
+            );
         }
 
         // Slow path: contract requires per-row normalisation /
@@ -2336,7 +2340,6 @@ impl RuntimeEntityPort for RedDBRuntime {
             rows: tuple_rows,
             suppress_events: false,
         })
-        .map(|out| out.len())
     }
 
     fn create_rows_batch_prevalidated(&self, input: CreateRowsBatchInput) -> RedDBResult<usize> {

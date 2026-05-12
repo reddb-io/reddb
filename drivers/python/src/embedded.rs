@@ -11,6 +11,7 @@ use reddb::storage::query::modes::parse_multi;
 use reddb::storage::query::unified::UnifiedRecord;
 use reddb::storage::query::user_params;
 use reddb::storage::schema::Value as SchemaValue;
+use reddb::RuntimeEntityPort;
 
 pub use reddb::storage::schema::Value as ParamValue;
 
@@ -25,6 +26,11 @@ pub struct QueryRows {
     /// Each row: list of (column, value-as-Python-friendly-string-or-number).
     /// Real Python objects are built later by `high_level.rs` from these.
     pub rows: Vec<Vec<(String, ScalarOut)>>,
+}
+
+pub struct InsertObjectResult {
+    pub affected: u64,
+    pub id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -77,10 +83,23 @@ impl EmbeddedRuntime {
         &self,
         collection: &str,
         fields: &[(String, ScalarOut)],
-    ) -> Result<u64, String> {
-        let sql = build_insert_sql(collection, fields);
-        let qr = self.runtime.execute_query(&sql).map_err(|e| e.to_string())?;
-        Ok(qr.affected_rows)
+    ) -> Result<InsertObjectResult, String> {
+        let column_names: Vec<String> = fields.iter().map(|(name, _)| name.clone()).collect();
+        let row: Vec<SchemaValue> = fields
+            .iter()
+            .map(|(_, value)| scalar_to_schema_value(value))
+            .collect();
+        let outputs = RuntimeEntityPort::create_rows_batch_columnar_with_outputs(
+            self.runtime.as_ref(),
+            collection.to_string(),
+            Arc::new(column_names),
+            vec![row],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(InsertObjectResult {
+            affected: outputs.len() as u64,
+            id: outputs.first().map(|output| output.id.raw().to_string()),
+        })
     }
 
     pub fn delete(&self, collection: &str, id: &str) -> Result<u64, String> {
@@ -98,33 +117,13 @@ impl EmbeddedRuntime {
     }
 }
 
-fn build_insert_sql(collection: &str, fields: &[(String, ScalarOut)]) -> String {
-    let mut cols = Vec::new();
-    let mut vals = Vec::new();
-    for (k, v) in fields {
-        cols.push(k.clone());
-        vals.push(scalar_to_sql_literal(v));
-    }
-    format!(
-        "INSERT INTO {collection} ({}) VALUES ({})",
-        cols.join(", "),
-        vals.join(", "),
-    )
-}
-
-fn scalar_to_sql_literal(v: &ScalarOut) -> String {
+fn scalar_to_schema_value(v: &ScalarOut) -> SchemaValue {
     match v {
-        ScalarOut::Null => "NULL".to_string(),
-        ScalarOut::Bool(b) => b.to_string(),
-        ScalarOut::Int(n) => n.to_string(),
-        ScalarOut::Float(n) => {
-            if n.fract() == 0.0 && n.is_finite() {
-                format!("{}", *n as i64)
-            } else {
-                n.to_string()
-            }
-        }
-        ScalarOut::Text(s) => format!("'{}'", s.replace('\'', "''")),
+        ScalarOut::Null => SchemaValue::Null,
+        ScalarOut::Bool(b) => SchemaValue::Boolean(*b),
+        ScalarOut::Int(n) => SchemaValue::Integer(*n),
+        ScalarOut::Float(n) => SchemaValue::Float(*n),
+        ScalarOut::Text(s) => SchemaValue::Text(Arc::from(s.as_str())),
     }
 }
 

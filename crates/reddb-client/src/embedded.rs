@@ -99,13 +99,16 @@ impl EmbeddedClient {
             .iter()
             .map(|(_, v)| json_value_to_schema_value(v))
             .collect();
-        let count = self
-            .runtime
-            .create_rows_batch_columnar(collection.to_string(), Arc::new(column_names), vec![row])
-            .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
+        let outputs = reddb_server::RuntimeEntityPort::create_rows_batch_columnar_with_outputs(
+            self.runtime.as_ref(),
+            collection.to_string(),
+            Arc::new(column_names),
+            vec![row],
+        )
+        .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
         Ok(InsertResult {
-            affected: count as u64,
-            id: None,
+            affected: outputs.len() as u64,
+            id: outputs.first().map(|output| output.id.raw().to_string()),
         })
     }
 

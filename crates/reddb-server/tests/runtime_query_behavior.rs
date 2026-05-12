@@ -655,6 +655,25 @@ fn insert_node_returning_star_exposes_entity_id() {
 }
 
 #[test]
+fn insert_returning_star_exposes_entity_id_for_non_graph_entities() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    let cases = [
+        "INSERT INTO users (name) VALUES ('Alice') RETURNING *",
+        "INSERT INTO docs DOCUMENT (body) VALUES ('{\"title\":\"one\"}') RETURNING *",
+        "INSERT INTO settings KV (key, value) VALUES ('max_retries', 5) RETURNING *",
+        "INSERT INTO embeddings VECTOR (dense, content) VALUES ([1.0, 0.0], 'axis') RETURNING *",
+    ];
+
+    for sql in cases {
+        let res = rt.execute_query(sql).expect("INSERT RETURNING * executes");
+        assert_eq!(res.affected_rows, 1, "{sql}");
+        assert_eq!(res.result.len(), 1, "{sql}");
+        let id = u64_at(&res, 0, "red_entity_id");
+        assert!(id > 0, "{sql} must expose red_entity_id");
+    }
+}
+
+#[test]
 fn insert_edge_returning_star_exposes_entity_id() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
     let a = rt
