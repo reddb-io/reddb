@@ -2763,8 +2763,30 @@ fn test_parse_graph_properties() {
     let query = parse("GRAPH PROPERTIES").unwrap();
     assert!(matches!(
         query,
-        QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Properties)
+        QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Properties {
+            source: None
+        })
     ));
+}
+
+#[test]
+fn test_parse_graph_properties_with_source() {
+    // #423: GRAPH PROPERTIES '<id-or-label>' resolves per-node property bag.
+    let query = parse("GRAPH PROPERTIES 'cinderella'").unwrap();
+    match query {
+        QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Properties {
+            source: Some(s),
+        }) => assert_eq!(s, "cinderella"),
+        other => panic!("expected Properties {{ source: Some(\"cinderella\") }}, got {other:?}"),
+    }
+
+    let numeric = parse("GRAPH PROPERTIES '177'").unwrap();
+    match numeric {
+        QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Properties {
+            source: Some(s),
+        }) => assert_eq!(s, "177"),
+        other => panic!("expected numeric source, got {other:?}"),
+    }
 }
 
 // ========================================================================
