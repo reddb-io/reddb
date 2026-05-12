@@ -19,6 +19,7 @@ pub mod metrics;
 pub mod ner;
 pub mod prompt_assembler;
 pub mod prompt_template;
+pub mod strict_validator;
 pub mod text_chunker;
 pub mod transport;
 pub mod urn_codec;
