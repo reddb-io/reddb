@@ -131,3 +131,27 @@ Verification (this slice):
 - `pnpm test` ran and skipped because `target/debug/red` is not built.
 - `pnpm typecheck` exited 1; `pnpm run typecheck` confirms the repo has no
   `typecheck` script. No TypeScript files changed.
+
+Slice 5 (this commit): `docs/clients/drivers/dart.md` now shows the
+parameterized form first.
+
+- Dart hub quickstart now uses `db.query(sql, params)` instead of the bare
+  `SELECT 1` example.
+- Added a "Safe parameter binding" section with scalar and vector examples,
+  including `Float32List` with `SEARCH SIMILAR $1`.
+- Added the native Dart → engine value table from `drivers/dart/README.md`.
+- Documented the legacy no-param query path, RedWire `FEATURE_PARAMS`
+  requirement, `ParamsUnsupported`, and HTTP `/query` typed params behavior.
+- Added a temporary ADR #352 GitHub cross-link because no local
+  `docs/adr/00XX-parameterized-queries.md` exists yet.
+
+Verification (this slice):
+- TDD red check first failed because `docs/clients/drivers/dart.md` was
+  missing `## Safe parameter binding` and `SEARCH SIMILAR $1`.
+- Green check: the Dart hub page contains `## Safe parameter binding`,
+  `SEARCH SIMILAR $1`, `FEATURE_PARAMS`, `ParamsUnsupported`, and the ADR #352
+  cross-link.
+- `git diff --check` clean.
+- `pnpm test` ran and skipped because `target/debug/red` is not built.
+- `pnpm typecheck` exited nonzero; raw pnpm reports
+  `Command "typecheck" not found`. No TypeScript files changed.
