@@ -751,6 +751,11 @@ pub struct DropIndexQuery {
 }
 
 /// ASK 'question' [USING provider] [MODEL 'model'] [DEPTH n] [LIMIT n] [COLLECTION col]
+///                [TEMPERATURE x] [SEED n]
+///
+/// `temperature` and `seed` are per-query overrides resolved by the
+/// `DeterminismDecider` (issue #400). The parser merely surfaces the
+/// requested values; capability-based dropping happens at decide time.
 #[derive(Debug, Clone)]
 pub struct AskQuery {
     pub question: String,
@@ -759,6 +764,12 @@ pub struct AskQuery {
     pub depth: Option<usize>,
     pub limit: Option<usize>,
     pub collection: Option<String>,
+    /// Per-query temperature override (`ASK '...' TEMPERATURE 0.7`).
+    /// `None` means fall back to `ask.default_temperature`.
+    pub temperature: Option<f32>,
+    /// Per-query seed override (`ASK '...' SEED 42`). `None` means the
+    /// decider derives one from `hash(question + sources_fingerprint)`.
+    pub seed: Option<u64>,
 }
 
 impl QueryExpr {

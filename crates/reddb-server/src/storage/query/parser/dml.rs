@@ -448,9 +448,12 @@ impl<'a> Parser<'a> {
         let mut depth = None;
         let mut limit = None;
         let mut collection = None;
+        let mut temperature = None;
+        let mut seed = None;
 
-        // Parse optional clauses in any order
-        for _ in 0..5 {
+        // Parse optional clauses in any order. Loop bound = number of
+        // clause kinds, so each can appear at most once.
+        for _ in 0..7 {
             if self.consume(&Token::Using)? {
                 provider = Some(self.expect_ident()?);
             } else if self.consume_ident_ci("MODEL")? {
@@ -461,6 +464,10 @@ impl<'a> Parser<'a> {
                 limit = Some(self.parse_integer()? as usize);
             } else if self.consume(&Token::Collection)? {
                 collection = Some(self.expect_ident()?);
+            } else if self.consume_ident_ci("TEMPERATURE")? {
+                temperature = Some(self.parse_float()? as f32);
+            } else if self.consume_ident_ci("SEED")? {
+                seed = Some(self.parse_integer()? as u64);
             } else {
                 break;
             }
@@ -473,6 +480,8 @@ impl<'a> Parser<'a> {
             depth,
             limit,
             collection,
+            temperature,
+            seed,
         }))
     }
 
