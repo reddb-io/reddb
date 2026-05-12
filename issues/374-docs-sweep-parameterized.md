@@ -239,3 +239,26 @@ Verification (this slice):
 - `pnpm test` ran and skipped because `target/debug/red` is not built.
 - `pnpm typecheck` exited nonzero after reporting `TypeScript: No errors
   found`. No TypeScript files changed.
+
+Slice 9 (this commit): `docs/vectors/hnsw.md` and `docs/vectors/ivf.md`
+now lead with parameterized SQL client examples.
+
+- HNSW usage now shows `db.query(sql, params)` with `SEARCH SIMILAR $1` and a
+  bound `Float32Array` before the HTTP JSON endpoint.
+- IVF usage now shows the supported parameterized `SEARCH SIMILAR $1` form as
+  the SQL default and keeps the explicit IVF HTTP endpoint for `n_probes`
+  tuning, avoiding unsupported `SEARCH IVF $1` syntax.
+- Both pages got the temporary ADR #352 GitHub cross-link because no local
+  `docs/adr/00XX-parameterized-queries.md` exists yet.
+
+Verification (this slice):
+- TDD red check first failed because `docs/vectors/hnsw.md` and
+  `docs/vectors/ivf.md` were missing `SEARCH SIMILAR $1`, `db.query(sql,
+  params)`, and the ADR #352 cross-link.
+- Green marker check passed for both pages.
+- `cargo test -p reddb-io-server --lib bind_search_similar` passed 12 tests
+  with 3980 filtered out.
+- `git diff --check` clean.
+- `pnpm test` ran and skipped because `target/debug/red` is not built.
+- `pnpm typecheck` exited nonzero after reporting `TypeScript: No errors
+  found`. No TypeScript files changed.

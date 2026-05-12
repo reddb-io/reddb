@@ -41,6 +41,23 @@ flowchart TB
 
 ## Usage
 
+For SQL clients, use the same parameterized similarity form and let the engine
+choose the available vector index:
+
+```ts
+const rows = await db.query(
+  "SEARCH SIMILAR $1 COLLECTION large_embeddings LIMIT $2",
+  [new Float32Array([0.12, 0.91, 0.44, 0.33, 0.67]), 10],
+);
+```
+
+Bind vectors and user-selected limits through `db.query(sql, params)` rather
+than building SQL strings. The parameterized query design is tracked in
+[ADR #352](https://github.com/reddb-io/reddb/issues/352) until the local ADR
+lands.
+
+Use the typed HTTP endpoint when you need explicit IVF probe tuning:
+
 ```bash
 curl -X POST http://127.0.0.1:8080/collections/large_embeddings/ivf/search \
   -H 'content-type: application/json' \
