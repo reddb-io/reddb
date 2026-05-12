@@ -221,6 +221,12 @@ pub fn collect_indices(expr: &QueryExpr) -> Vec<usize> {
 
 /// Parameter slots that live on AST nodes outside the `Expr` tree
 /// (e.g. `SearchCommand::Similar { vector_param }`).
+//
+// `clippy::collapsible_match` would have us fold each `if let Some(idx) =
+// limit_param` into the outer pattern. With 10+ near-identical SearchCommand
+// variants, the collapsed form doubles the match arm count and obscures the
+// shared shape. Keep the two-level form for symmetry.
+#[allow(clippy::collapsible_match)]
 fn collect_non_expr_indices(expr: &QueryExpr, out: &mut Vec<usize>) {
     match expr {
         QueryExpr::SearchCommand(SearchCommand::Similar {

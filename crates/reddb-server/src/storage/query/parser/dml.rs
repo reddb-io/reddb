@@ -102,7 +102,6 @@ impl<'a> Parser<'a> {
             // Issue #355.
             let row_values = row_exprs
                 .iter()
-                .cloned()
                 .map(|expr| match fold_expr_to_value(expr.clone()) {
                     Ok(value) => Ok(value),
                     Err(msg) => {

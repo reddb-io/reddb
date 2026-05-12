@@ -234,7 +234,7 @@ fn pct_decode(input: &str) -> Result<String, UrnError> {
 }
 
 fn needs_pct(b: u8) -> bool {
-    b == b'%' || b == b'/' || b == b'#' || b == b' ' || b < 0x20 || b >= 0x7F
+    b == b'%' || b == b'/' || b == b'#' || b == b' ' || !(0x20..0x7F).contains(&b)
 }
 
 fn hex_high(b: u8) -> char {
