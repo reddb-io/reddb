@@ -1195,6 +1195,7 @@ impl RedDBRuntime {
         let api_base = provider.resolve_api_base();
 
         let transport = crate::runtime::ai::transport::AiTransport::from_runtime(self);
+        let provider_started = std::time::Instant::now();
         let prompt_response = match provider {
             AiProvider::Anthropic => {
                 let request = AnthropicPromptRequest {
@@ -1202,7 +1203,7 @@ impl RedDBRuntime {
                     model: model.clone(),
                     prompt: full_prompt,
                     temperature: Some(0.3),
-                    max_output_tokens: Some(1024),
+                    max_output_tokens: Some(settings.max_completion_tokens as usize),
                     api_base,
                     anthropic_version: crate::ai::DEFAULT_ANTHROPIC_VERSION.to_string(),
                 };
@@ -1217,7 +1218,7 @@ impl RedDBRuntime {
                     model: model.clone(),
                     prompt: full_prompt,
                     temperature: Some(0.3),
-                    max_output_tokens: Some(1024),
+                    max_output_tokens: Some(settings.max_completion_tokens as usize),
                     api_base,
                 };
                 crate::runtime::ai::block_on_ai(async move {
@@ -1226,10 +1227,30 @@ impl RedDBRuntime {
                 .and_then(|result| result)?
             }
         };
+        let elapsed_ms = duration_millis_u32(provider_started.elapsed());
+        let completion_tokens = prompt_response.completion_tokens.unwrap_or(0);
+        let usage = crate::runtime::ai::cost_guard::Usage {
+            prompt_tokens: usage.prompt_tokens,
+            sources_bytes: usage.sources_bytes,
+            completion_tokens: u64_to_u32_saturating(completion_tokens),
+            elapsed_ms,
+            ..Default::default()
+        };
+        match crate::runtime::ai::cost_guard::evaluate(
+            &usage,
+            &crate::runtime::ai::cost_guard::DailyState::default(),
+            &settings,
+            ask_cost_guard_now(),
+        ) {
+            crate::runtime::ai::cost_guard::Decision::Allow => {}
+            crate::runtime::ai::cost_guard::Decision::Reject { limit, detail, .. } => {
+                return Err(cost_guard_rejection_to_error(limit, detail));
+            }
+        }
         let response = (
             prompt_response.output_text,
             prompt_response.prompt_tokens.unwrap_or(0),
-            prompt_response.completion_tokens.unwrap_or(0),
+            completion_tokens,
         );
 
         let (answer, prompt_tokens, completion_tokens) = response;
@@ -1311,6 +1332,14 @@ fn config_u32(value: u64) -> u32 {
 
 fn saturating_u32(value: usize) -> u32 {
     value.min(u32::MAX as usize) as u32
+}
+
+fn u64_to_u32_saturating(value: u64) -> u32 {
+    value.min(u32::MAX as u64) as u32
+}
+
+fn duration_millis_u32(duration: std::time::Duration) -> u32 {
+    duration.as_millis().min(u128::from(u32::MAX)) as u32
 }
 
 fn estimate_prompt_tokens(prompt: &str) -> u32 {

@@ -120,3 +120,27 @@ Deferred to follow-up slices:
 - Add per-tenant daily spend state and UTC reset bookkeeping for
   `daily_cost_cap_usd`.
 - Add the provider timeout integration test returning HTTP 504.
+
+Slice 3: post-provider completion and timeout guard wiring landed.
+
+- Provider requests now use `ask.max_completion_tokens` instead of the
+  previous hard-coded 1024 cap.
+- `execute_ask` measures provider-call elapsed time and re-runs
+  `CostGuardEvaluator` after the provider returns with actual
+  `completion_tokens` and `elapsed_ms`.
+- Completion-token breaches map to HTTP 413 with
+  `max_completion_tokens` in the error body.
+- Provider elapsed-time breaches map to HTTP 504 with `timeout_ms` in
+  the error body.
+- Added HTTP handler tests backed by a local OpenAI-compatible TCP stub
+  so timeout and completion-token behavior are verified without a real
+  provider call.
+
+Verification:
+
+- `cargo test -p reddb-io-server http_query_ask_ -- --nocapture`
+
+Still deferred:
+
+- Per-tenant daily spend state and UTC reset bookkeeping for
+  `daily_cost_cap_usd`.
