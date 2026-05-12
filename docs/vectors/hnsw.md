@@ -57,6 +57,20 @@ flowchart TB
 
 HNSW is the default index for vector similarity search:
 
+```ts
+const rows = await db.query(
+  "SEARCH SIMILAR $1 COLLECTION embeddings LIMIT $2",
+  [new Float32Array([0.12, 0.91, 0.44]), 10],
+);
+```
+
+Bind vectors and user-selected limits through `db.query(sql, params)` rather
+than building SQL strings. The parameterized query design is tracked in
+[ADR #352](https://github.com/reddb-io/reddb/issues/352) until the local ADR
+lands.
+
+HTTP clients can use the typed JSON endpoint instead of SQL text:
+
 ```bash
 curl -X POST http://127.0.0.1:8080/collections/embeddings/similar \
   -H 'content-type: application/json' \
