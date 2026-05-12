@@ -233,31 +233,66 @@ fn dlq_is_auto_created_on_first_overflow() {
 // ── Issue #414: SELECT row-projection must surface graph entities ────────────
 
 #[test]
-fn select_star_returns_graph_nodes_inserted_into_collection() {
+fn select_star_returns_graph_entities_inserted_into_collection() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('cinderella', 'Cinderella')")
+        .expect("insert node");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('prince', 'Prince Charming')")
+        .expect("insert second node");
     rt.execute_query(
-        "INSERT INTO tales NODE (label, name) VALUES ('cinderella', 'Cinderella')",
+        "INSERT INTO tales EDGE (label, from, to) VALUES ('rescues', 'prince', 'cinderella')",
     )
-    .expect("insert node");
-    rt.execute_query(
-        "INSERT INTO tales NODE (label, name) VALUES ('prince', 'Prince Charming')",
-    )
-    .expect("insert second node");
+    .expect("insert edge");
 
     let all = rt
         .execute_query("SELECT * FROM tales")
         .expect("SELECT * executes");
     assert_eq!(
         all.result.len(),
-        2,
-        "graph nodes must surface in SELECT * (got {} rows)",
+        3,
+        "graph nodes and edges must surface in SELECT * (got {} rows)",
         all.result.len()
     );
+    let mut entity_types: Vec<String> = all
+        .result
+        .records
+        .iter()
+        .map(|record| match record.get("red_entity_type") {
+            Some(Value::Text(value)) => value.as_ref().to_string(),
+            other => panic!("expected red_entity_type text, got {other:?}"),
+        })
+        .collect();
+    entity_types.sort();
+    assert_eq!(
+        entity_types,
+        vec![
+            "graph_edge".to_string(),
+            "graph_node".to_string(),
+            "graph_node".to_string(),
+        ]
+    );
+
+    let edge = all
+        .result
+        .records
+        .iter()
+        .find(|record| matches!(record.get("red_entity_type"), Some(Value::Text(t)) if t.as_ref() == "graph_edge"))
+        .expect("edge row is present");
+    match edge.get("label") {
+        Some(Value::Text(value)) => assert_eq!(value.as_ref(), "rescues"),
+        other => panic!("expected edge label text, got {other:?}"),
+    }
+    assert!(matches!(edge.get("from"), Some(Value::NodeRef(_))));
+    assert!(matches!(edge.get("to"), Some(Value::NodeRef(_))));
 
     let filtered = rt
         .execute_query("SELECT label, name FROM tales WHERE label = 'cinderella'")
         .expect("SELECT with WHERE executes");
-    assert_eq!(filtered.result.len(), 1, "WHERE label='cinderella' matches one node");
+    assert_eq!(
+        filtered.result.len(),
+        1,
+        "WHERE label='cinderella' matches one node"
+    );
     assert_eq!(text_at(&filtered, 0, "label"), "cinderella");
     assert_eq!(text_at(&filtered, 0, "name"), "Cinderella");
 }
@@ -421,7 +456,9 @@ fn edge_insert_still_accepts_numeric_ids() {
     rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('bob', 'Bob')")
         .expect("bob");
     // First user entity id is 102 (#421). Use TRAVERSE to discover ids.
-    let res = rt.execute_query("GRAPH TRAVERSE 'alice'").expect("traverse");
+    let res = rt
+        .execute_query("GRAPH TRAVERSE 'alice'")
+        .expect("traverse");
     let aid: u64 = match res.result.records[0].get("node_id") {
         Some(Value::Text(s)) => s.as_ref().parse().expect("numeric id"),
         other => panic!("unexpected node_id: {other:?}"),
@@ -467,7 +504,9 @@ fn edge_insert_ambiguous_label_errors() {
         .expect("villain");
 
     let err = rt
-        .execute_query("INSERT INTO tales EDGE (label, from, to) VALUES ('FIGHTS', 'hero', 'villain')")
+        .execute_query(
+            "INSERT INTO tales EDGE (label, from, to) VALUES ('FIGHTS', 'hero', 'villain')",
+        )
         .expect_err("ambiguous label must error");
     assert!(
         format!("{err}").contains("ambiguous"),
@@ -768,11 +807,7 @@ fn graph_centrality_limit_caps_returned_rows() {
     let res = rt
         .execute_query("GRAPH CENTRALITY LIMIT 3")
         .expect("limit 3 parses+executes");
-    assert_eq!(
-        res.result.records.len(),
-        3,
-        "LIMIT 3 must cap output rows"
-    );
+    assert_eq!(res.result.records.len(), 3, "LIMIT 3 must cap output rows");
 }
 
 #[test]
