@@ -1330,6 +1330,7 @@ fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
                 && ask.collection.as_deref() == Some("events")
                 && ask.temperature.is_none()
                 && ask.seed.is_none()
+                && ask.strict.is_none()
     ));
 
     // Issue #400: TEMPERATURE / SEED per-query overrides.
@@ -1349,6 +1350,21 @@ fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
     assert_eq!(ask.temperature, Some(0.0_f32));
     assert_eq!(ask.seed, Some(7_u64));
 
+    // Issue #395: STRICT ON/OFF requested citation-validation mode.
+    let query = parse("ASK 'q' STRICT OFF").unwrap();
+    let QueryExpr::Ask(ask) = query else {
+        panic!("Expected AskQuery");
+    };
+    assert_eq!(ask.strict, Some(false));
+
+    let query = parse("ASK 'q' LIMIT 5 STRICT ON USING openai").unwrap();
+    let QueryExpr::Ask(ask) = query else {
+        panic!("Expected AskQuery");
+    };
+    assert_eq!(ask.limit, Some(5));
+    assert_eq!(ask.strict, Some(true));
+    assert_eq!(ask.provider.as_deref(), Some("openai"));
+
     for sql in [
         "INSERT INTO docs (body) VALUES ('x') WITH UNKNOWN",
         "INSERT INTO docs (body) VALUES ('x') WITH TTL 1 parsec",
@@ -1363,6 +1379,8 @@ fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
         "ASK 'q' COLLECTION",
         "ASK 'q' TEMPERATURE",
         "ASK 'q' SEED",
+        "ASK 'q' STRICT",
+        "ASK 'q' STRICT MAYBE",
     ] {
         assert!(parse(sql).is_err(), "{sql}");
     }

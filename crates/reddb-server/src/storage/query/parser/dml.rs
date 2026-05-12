@@ -450,10 +450,11 @@ impl<'a> Parser<'a> {
         let mut collection = None;
         let mut temperature = None;
         let mut seed = None;
+        let mut strict = None;
 
         // Parse optional clauses in any order. Loop bound = number of
         // clause kinds, so each can appear at most once.
-        for _ in 0..7 {
+        for _ in 0..8 {
             if self.consume(&Token::Using)? {
                 provider = Some(self.expect_ident()?);
             } else if self.consume_ident_ci("MODEL")? {
@@ -468,6 +469,8 @@ impl<'a> Parser<'a> {
                 temperature = Some(self.parse_float()? as f32);
             } else if self.consume_ident_ci("SEED")? {
                 seed = Some(self.parse_integer()? as u64);
+            } else if self.consume_ident_ci("STRICT")? {
+                strict = Some(self.parse_ask_strict_mode()?);
             } else {
                 break;
             }
@@ -482,7 +485,22 @@ impl<'a> Parser<'a> {
             collection,
             temperature,
             seed,
+            strict,
         }))
+    }
+
+    fn parse_ask_strict_mode(&mut self) -> Result<bool, ParseError> {
+        if self.consume(&Token::On)? {
+            return Ok(true);
+        }
+        if self.consume_ident_ci("OFF")? {
+            return Ok(false);
+        }
+        Err(ParseError::expected(
+            vec!["ON", "OFF"],
+            self.peek(),
+            self.position(),
+        ))
     }
 
     /// Parse comma-separated identifiers (accepts keywords as column names in DML context)

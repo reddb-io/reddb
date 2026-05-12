@@ -61,11 +61,52 @@ Deferred to follow-up slices:
   hard boundary).
 - Map `Decision::GiveUp` to HTTP 422 with `validation.errors` in the
   response body.
-- Parse `ASK '...' STRICT ON|OFF` in the SQL parser and thread `Mode`
-  into `AskQuery`.
+- Thread `AskQuery.strict` into `execute_ask` and map it to
+  `strict_validator::Mode`.
 - Integration tests with a fake LLM provider (depends on transport
   refactor).
 
 The deep module is the load-bearing piece; the remaining slices are
 mechanical wiring and can land independently. Issue stays open with
 this progress note.
+
+Slice 2 (this commit): SQL/gRPC request surface for strict mode.
+
+- Added `strict: Option<bool>` to `AskQuery`; `None` preserves the
+  default strict policy, `Some(false)` represents `STRICT OFF`, and
+  `Some(true)` represents explicit `STRICT ON`.
+- Parser now accepts `ASK '...' STRICT OFF` and `STRICT ON` in the
+  same optional-clause loop as `USING`, `LIMIT`, `TEMPERATURE`, and
+  `SEED`.
+- Parser tests pin `STRICT OFF`, order-independent `STRICT ON`, default
+  `None`, and syntax errors for missing/unknown strict mode values.
+- gRPC's legacy JSON ASK payload binder forwards optional `"strict":
+  bool` into `AskQuery` so non-SQL callers can request the same mode.
+- Fixed two PG-wire ASK encoder unit-test temporary borrows that blocked
+  the server test harness from compiling.
+- Changed the workspace-internal gRPC connector's `QueryRequest`
+  construction to start from `Default`; this avoids stale generated
+  proto artifacts disagreeing on optional trailing fields during local
+  test/check runs.
+
+Deferred to follow-up slices:
+
+- Thread `AskQuery.strict` into `execute_ask` and map it to
+  `strict_validator::Mode`.
+- Wire `validate()` into `execute_ask` and issue the single retry LLM
+  call.
+- Map retry exhaustion to HTTP 422 with `validation.errors`.
+- Integration tests with a fake LLM provider still depend on the
+  stubbable transport refactor.
+
+Verification:
+
+- `cargo test -p reddb-io-server --lib storage::query::parser::tests::test_parse_dml -- --nocapture`
+  → 2 passed, 3982 filtered out.
+- `cargo test -p reddb-io-server --lib runtime::ai::pg_wire_ask_row_encoder -- --nocapture`
+  → 25 passed, 3959 filtered out.
+- `cargo check -p reddb-io-server` → clean.
+- `pnpm test` → command ran; JS smoke test skipped because
+  `target/debug/red` is not built.
+- `pnpm typecheck` → unavailable; root `package.json` has no
+  `typecheck` script.

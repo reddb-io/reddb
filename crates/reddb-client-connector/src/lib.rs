@@ -115,11 +115,9 @@ impl RedDBClient {
         &mut self,
         sql: &str,
     ) -> Result<QueryResponse, Box<dyn std::error::Error>> {
-        let req = self.auth_request(QueryRequest {
-            query: sql.to_string(),
-            entity_types: vec![],
-            capabilities: vec![],
-        });
+        let mut query = QueryRequest::default();
+        query.query = sql.to_string();
+        let req = self.auth_request(query);
         let resp = self.inner.query(req).await?;
         let reply = resp.into_inner();
         Ok(QueryResponse {
@@ -222,11 +220,9 @@ impl RedDBClient {
     }
 
     pub async fn explain(&mut self, sql: &str) -> Result<String, Box<dyn std::error::Error>> {
-        let req = self.auth_request(QueryRequest {
-            query: sql.to_string(),
-            entity_types: vec![],
-            capabilities: vec![],
-        });
+        let mut query = QueryRequest::default();
+        query.query = sql.to_string();
+        let req = self.auth_request(query);
         let resp = self.inner.explain_query(req).await?;
         Ok(resp.into_inner().payload)
     }

@@ -751,7 +751,7 @@ pub struct DropIndexQuery {
 }
 
 /// ASK 'question' [USING provider] [MODEL 'model'] [DEPTH n] [LIMIT n] [COLLECTION col]
-///                [TEMPERATURE x] [SEED n]
+///                [TEMPERATURE x] [SEED n] [STRICT ON|OFF]
 ///
 /// `temperature` and `seed` are per-query overrides resolved by the
 /// `DeterminismDecider` (issue #400). The parser merely surfaces the
@@ -770,6 +770,9 @@ pub struct AskQuery {
     /// Per-query seed override (`ASK '...' SEED 42`). `None` means the
     /// decider derives one from `hash(question + sources_fingerprint)`.
     pub seed: Option<u64>,
+    /// Per-query citation-validation mode (`ASK '...' STRICT OFF`).
+    /// `None` means use the default strict policy.
+    pub strict: Option<bool>,
 }
 
 impl QueryExpr {

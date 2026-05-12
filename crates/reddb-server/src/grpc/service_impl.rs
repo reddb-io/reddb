@@ -2314,6 +2314,7 @@ async fn ask(
         collection: payload.get("collection").and_then(|v| v.as_str()).map(String::from),
         temperature: payload.get("temperature").and_then(|v| v.as_f64()).map(|v| v as f32),
         seed: payload.get("seed").and_then(|v| v.as_u64()),
+        strict: payload.get("strict").and_then(|v| v.as_bool()),
     };
 
     let result = self.runtime.execute_ask("ASK via gRPC", &ask_query).map_err(to_status)?;
