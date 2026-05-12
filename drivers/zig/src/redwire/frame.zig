@@ -7,6 +7,7 @@ const std = @import("std");
 pub const FRAME_HEADER_SIZE: usize = 16;
 pub const MAX_FRAME_SIZE: u32 = 16 * 1024 * 1024;
 pub const KNOWN_FLAGS: u8 = 0b0000_0011;
+pub const FEATURE_PARAMS: u32 = 0x0000_0001;
 
 pub const Flags = struct {
     pub const COMPRESSED: u8 = 0b0000_0001;
@@ -34,11 +35,13 @@ pub const MessageKind = enum(u8) {
     get = 0x19,
     delete = 0x1A,
     delete_ok = 0x1B,
+    query_with_params = 0x28,
 
     pub fn fromByte(b: u8) ?MessageKind {
         return switch (b) {
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 => @enumFromInt(b),
             0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B => @enumFromInt(b),
+            0x28 => @enumFromInt(b),
             else => null,
         };
     }

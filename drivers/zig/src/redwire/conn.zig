@@ -9,6 +9,7 @@ const Allocator = std.mem.Allocator;
 const codec = @import("codec.zig");
 const frame = @import("frame.zig");
 const scram = @import("scram.zig");
+const value_codec = @import("value_codec.zig");
 
 pub const MAGIC: u8 = 0xFE;
 pub const SUPPORTED_VERSION: u8 = 0x01;
@@ -178,6 +179,42 @@ pub const Conn = struct {
         }
     }
 
+    pub fn supportsParams(self: *const Conn) bool {
+        return (self.server_features & frame.FEATURE_PARAMS) == frame.FEATURE_PARAMS;
+    }
+
+    /// Run a SQL query with positional params. Empty param slices
+    /// preserve the legacy Query frame path.
+    pub fn queryWithParams(
+        self: *Conn,
+        sql: []const u8,
+        params: []const value_codec.Value,
+    ) ![]const u8 {
+        if (params.len == 0) return self.query(sql);
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (!self.supportsParams()) return error.ParamsUnsupported;
+
+        const payload = try value_codec.encodeQueryWithParams(self.allocator, sql, params);
+        defer self.allocator.free(payload);
+
+        const corr = self.nextCorr();
+        try self.sendFrame(frame.Frame.init(.query_with_params, corr, payload));
+        var resp = try self.recvFrame();
+        errdefer resp.deinit(self.allocator);
+        switch (resp.frame.kind) {
+            .result => return takeOwned(self.allocator, &resp),
+            .err => {
+                resp.deinit(self.allocator);
+                return error.ProtocolError;
+            },
+            else => {
+                resp.deinit(self.allocator);
+                return error.UnexpectedFrame;
+            },
+        }
+    }
+
     pub fn ping(self: *Conn) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -275,6 +312,9 @@ fn runHandshake(conn: *Conn, opts: ConnectOptions) !void {
     if (ack.frame.kind != .hello_ack) return error.UnexpectedFrame;
     const chosen = try parseHelloAckAuth(conn.allocator, ack.frame.payload);
     defer conn.allocator.free(chosen);
+    if (parseU32Field(ack.frame.payload, "features")) |features| {
+        conn.server_features = features;
+    }
 
     // 3. Drive the chosen auth method.
     if (std.mem.eql(u8, chosen, "anonymous")) {
@@ -300,6 +340,9 @@ fn runHandshake(conn: *Conn, opts: ConnectOptions) !void {
         .auth_ok => {
             const sid = try parseAuthOkSession(conn.allocator, final.frame.payload);
             conn.session_id = sid;
+            if (parseU32Field(final.frame.payload, "features")) |features| {
+                conn.server_features = features;
+            }
         },
         .auth_fail => return error.AuthRefused,
         else => return error.UnexpectedFrame,
@@ -419,6 +462,27 @@ fn parseHelloAckAuth(allocator: Allocator, payload: []const u8) ![]u8 {
 fn parseAuthOkSession(allocator: Allocator, payload: []const u8) ![]u8 {
     const found = try parseStringField(allocator, payload, "session_id");
     return found orelse allocator.dupe(u8, "");
+}
+
+fn parseU32Field(payload: []const u8, name: []const u8) ?u32 {
+    var key_buf: [64]u8 = undefined;
+    if (name.len + 2 > key_buf.len) return null;
+    key_buf[0] = '"';
+    @memcpy(key_buf[1 .. 1 + name.len], name);
+    key_buf[1 + name.len] = '"';
+    const key = key_buf[0 .. 2 + name.len];
+
+    const start = std.mem.indexOf(u8, payload, key) orelse return null;
+    var i = start + key.len;
+    while (i < payload.len and (payload[i] == ' ' or payload[i] == '\t' or payload[i] == '\n' or payload[i] == ':')) : (i += 1) {}
+    var value: u64 = 0;
+    var any = false;
+    while (i < payload.len and payload[i] >= '0' and payload[i] <= '9') : (i += 1) {
+        value = value * 10 + (payload[i] - '0');
+        if (value > std.math.maxInt(u32)) return null;
+        any = true;
+    }
+    return if (any) @as(u32, @intCast(value)) else null;
 }
 
 /// Find `"name":"value"` in a flat JSON object and return a duped

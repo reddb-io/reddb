@@ -21,10 +21,12 @@ pub const build_options = @import("build_options");
 pub const redwire = struct {
     pub const frame = @import("redwire/frame.zig");
     pub const codec = @import("redwire/codec.zig");
+    pub const value_codec = @import("redwire/value_codec.zig");
     pub const scram = @import("redwire/scram.zig");
     pub const conn = @import("redwire/conn.zig");
 
     pub const Conn = conn.Conn;
+    pub const Value = value_codec.Value;
     pub const ConnectOptions = conn.ConnectOptions;
     pub const Auth = conn.Auth;
     pub const AuthKind = conn.AuthKind;
@@ -38,6 +40,7 @@ pub const http = struct {
 };
 
 pub const Conn = redwire.Conn;
+pub const Value = redwire.Value;
 
 /// Top-level connect helper. Parses the URI, picks the transport,
 /// runs the handshake, and returns an owning pointer to the

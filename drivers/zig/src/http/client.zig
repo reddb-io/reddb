@@ -6,6 +6,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const value_codec = @import("../redwire/value_codec.zig");
+
 pub const HttpClient = struct {
     allocator: Allocator,
     base_url: []const u8,
@@ -57,11 +59,18 @@ pub const HttpClient = struct {
     }
 
     pub fn query(self: *HttpClient, sql: []const u8) ![]u8 {
-        const body = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"query\":\"{s}\"}}",
-            .{sql},
-        );
+        const body = try value_codec.toHttpQueryBody(self.allocator, sql, &.{});
+        defer self.allocator.free(body);
+        return self.request(.POST, "/query", body);
+    }
+
+    pub fn queryWithParams(
+        self: *HttpClient,
+        sql: []const u8,
+        params: []const value_codec.Value,
+    ) ![]u8 {
+        if (params.len == 0) return self.query(sql);
+        const body = try value_codec.toHttpQueryBody(self.allocator, sql, params);
         defer self.allocator.free(body);
         return self.request(.POST, "/query", body);
     }
