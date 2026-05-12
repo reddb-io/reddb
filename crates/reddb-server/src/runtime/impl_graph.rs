@@ -11,7 +11,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeGraphNeighborhoodResult> {
         let graph =
             materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
-        ensure_graph_node(&graph, node)?;
+        let node = resolve_graph_node_id(&graph, node)?;
         let edge_filters = merge_edge_filters(edge_labels, projection.as_ref());
 
         let mut visited: HashMap<String, usize> = HashMap::new();
@@ -20,8 +20,8 @@ impl RedDBRuntime {
         let mut edges = Vec::new();
         let mut seen_edges = HashSet::new();
 
-        visited.insert(node.to_string(), 0);
-        queue.push_back((node.to_string(), 0usize));
+        visited.insert(node.clone(), 0);
+        queue.push_back((node.clone(), 0usize));
 
         while let Some((current, depth)) = queue.pop_front() {
             if let Some(stored) = graph.get_node(&current) {
@@ -49,7 +49,7 @@ impl RedDBRuntime {
         }
 
         Ok(RuntimeGraphNeighborhoodResult {
-            source: node.to_string(),
+            source: node,
             direction,
             max_depth,
             nodes,
@@ -68,7 +68,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeGraphTraversalResult> {
         let graph =
             materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
-        ensure_graph_node(&graph, source)?;
+        let source = resolve_graph_node_id(&graph, source)?;
         let edge_filters = merge_edge_filters(edge_labels, projection.as_ref());
 
         let mut visits = Vec::new();
@@ -79,8 +79,8 @@ impl RedDBRuntime {
         match strategy {
             RuntimeGraphTraversalStrategy::Bfs => {
                 let mut queue = VecDeque::new();
-                queue.push_back((source.to_string(), 0usize));
-                seen_nodes.insert(source.to_string());
+                queue.push_back((source.clone(), 0usize));
+                seen_nodes.insert(source.clone());
 
                 while let Some((current, depth)) = queue.pop_front() {
                     if let Some(stored) = graph.get_node(&current) {
@@ -106,7 +106,7 @@ impl RedDBRuntime {
                 }
             }
             RuntimeGraphTraversalStrategy::Dfs => {
-                let mut stack = vec![(source.to_string(), 0usize)];
+                let mut stack = vec![(source.clone(), 0usize)];
                 while let Some((current, depth)) = stack.pop() {
                     if !seen_nodes.insert(current.clone()) {
                         continue;
@@ -137,7 +137,7 @@ impl RedDBRuntime {
         }
 
         Ok(RuntimeGraphTraversalResult {
-            source: source.to_string(),
+            source,
             direction,
             strategy,
             max_depth,
@@ -157,8 +157,10 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeGraphPathResult> {
         let graph =
             materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
-        ensure_graph_node(&graph, source)?;
-        ensure_graph_node(&graph, target)?;
+        let source_owned = resolve_graph_node_id(&graph, source)?;
+        let target_owned = resolve_graph_node_id(&graph, target)?;
+        let source = source_owned.as_str();
+        let target = target_owned.as_str();
 
         let merged_edge_filters = merge_edge_filters(edge_labels, projection.as_ref());
         let path = match (direction, merged_edge_filters.as_ref()) {
