@@ -1734,6 +1734,18 @@ pub(super) fn peek_top_level_as_of_with_table(
 }
 
 pub(super) fn query_has_volatile_builtin(sql: &str) -> bool {
+    let trimmed = sql.trim_start();
+    if trimmed.len() >= 3
+        && trimmed[..3].eq_ignore_ascii_case("ask")
+        && trimmed[3..]
+            .chars()
+            .next()
+            .map(|ch| ch.is_whitespace() || ch == '\'')
+            .unwrap_or(true)
+    {
+        return true;
+    }
+
     // Lowercase the bytes up to the first null/newline into a small
     // stack buffer for cheap contains() checks. Most SQL fits in the
     // buffer; longer queries fall back to owned lowercase.

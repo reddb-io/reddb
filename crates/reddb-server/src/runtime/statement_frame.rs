@@ -1085,6 +1085,21 @@ mod tests {
     }
 
     #[test]
+    fn ask_statements_do_not_read_or_write_result_cache() {
+        reset_thread_locals();
+        let rt = fresh_runtime();
+
+        let frame = StatementExecutionFrame::build(&rt, "ASK 'notes FDD-12313'").expect("frame");
+        let f: &dyn ReadFrame = &frame;
+        assert!(
+            !f.should_cache_result(),
+            "ASK has audit side effects and must not use the result cache"
+        );
+
+        reset_thread_locals();
+    }
+
+    #[test]
     fn blob_cache_backend_populates_blob_path_without_legacy_write() {
         reset_thread_locals();
         let rt = fresh_runtime();

@@ -1,5 +1,8 @@
 use super::*;
+use crate::application::entity::{CreateRowInput, CreateRowsBatchInput};
+use crate::application::ports::RuntimeEntityPort;
 use crate::application::SearchContextInput;
+use crate::runtime::ai::strict_validator::{Mode, ValidationError, ValidationErrorKind};
 use crate::storage::unified::context_index::{entity_tokens_for_search, tokenize_query};
 
 impl RedDBRuntime {
@@ -1222,6 +1225,16 @@ impl RedDBRuntime {
             crate::runtime::ai::citation_parser::parse_citations(&answer, sources_count);
         let citations_json = citations_to_json(&citation_result.citations, &source_urns);
         let validation_json = validation_to_json(&citation_result.warnings);
+        self.write_ask_audit_row(
+            &ask.question,
+            &source_urns,
+            provider.token(),
+            &model,
+            prompt_tokens as i64,
+            completion_tokens as i64,
+            &answer,
+            &citation_result,
+        )?;
         let citations_bytes =
             crate::json::to_vec(&citations_json).unwrap_or_else(|_| b"[]".to_vec());
         let validation_bytes =
@@ -1266,6 +1279,123 @@ impl RedDBRuntime {
             statement_type: "select",
         })
     }
+
+    fn write_ask_audit_row(
+        &self,
+        question: &str,
+        source_urns: &[String],
+        provider: &str,
+        model: &str,
+        prompt_tokens: i64,
+        completion_tokens: i64,
+        answer: &str,
+        citation_result: &crate::runtime::ai::citation_parser::CitationParseResult,
+    ) -> RedDBResult<()> {
+        let tenant = crate::runtime::impl_core::current_tenant().unwrap_or_default();
+        let (user, role) = crate::runtime::impl_core::current_auth_identity()
+            .map(|(user, role)| (user, role.as_str().to_string()))
+            .unwrap_or_else(|| (String::new(), String::new()));
+        let ts_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .min(i64::MAX as u128) as i64;
+        let citation_markers: Vec<u32> = citation_result
+            .citations
+            .iter()
+            .map(|citation| citation.marker)
+            .collect();
+        let validation_errors = citation_warnings_to_validation_errors(&citation_result.warnings);
+        let state = crate::runtime::ai::audit_record_builder::CallState {
+            ts_nanos,
+            tenant: &tenant,
+            user: &user,
+            role: &role,
+            question,
+            sources_urns: source_urns,
+            provider,
+            model,
+            prompt_tokens,
+            completion_tokens,
+            cost_usd: 0.0,
+            answer,
+            citations: &citation_markers,
+            cache_hit: false,
+            effective_mode: Mode::Strict,
+            validation_ok: validation_errors.is_empty(),
+            retry_count: 0,
+            errors: &validation_errors,
+        };
+        let settings = crate::runtime::ai::audit_record_builder::Settings {
+            include_answer: self.config_bool("ask.audit.include_answer", false),
+        };
+        let row = crate::runtime::ai::audit_record_builder::build(&state, settings);
+        let fields = row
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), audit_json_to_storage_value(&value)))
+            .collect();
+
+        self.inner
+            .db
+            .store()
+            .get_or_create_collection("red_ask_audit");
+        self.create_rows_batch(CreateRowsBatchInput {
+            collection: "red_ask_audit".to_string(),
+            rows: vec![CreateRowInput {
+                collection: "red_ask_audit".to_string(),
+                fields,
+                metadata: Vec::new(),
+                node_links: Vec::new(),
+                vector_links: Vec::new(),
+            }],
+            suppress_events: true,
+        })?;
+        Ok(())
+    }
+}
+
+fn audit_json_to_storage_value(value: &crate::serde_json::Value) -> Value {
+    match value {
+        crate::serde_json::Value::Null => Value::Null,
+        crate::serde_json::Value::Bool(value) => Value::Boolean(*value),
+        crate::serde_json::Value::Number(value) => {
+            if value.is_finite()
+                && value.fract() == 0.0
+                && *value >= i64::MIN as f64
+                && *value <= i64::MAX as f64
+            {
+                Value::Integer(*value as i64)
+            } else {
+                Value::Float(*value)
+            }
+        }
+        crate::serde_json::Value::String(value) => Value::text(value.clone()),
+        crate::serde_json::Value::Array(_) | crate::serde_json::Value::Object(_) => {
+            Value::Json(crate::json::to_vec(value).unwrap_or_else(|_| b"null".to_vec()))
+        }
+    }
+}
+
+fn citation_warnings_to_validation_errors(
+    warnings: &[crate::runtime::ai::citation_parser::CitationWarning],
+) -> Vec<ValidationError> {
+    warnings
+        .iter()
+        .map(|warning| {
+            let kind = match warning.kind {
+                crate::runtime::ai::citation_parser::CitationWarningKind::Malformed => {
+                    ValidationErrorKind::Malformed
+                }
+                crate::runtime::ai::citation_parser::CitationWarningKind::OutOfRange => {
+                    ValidationErrorKind::OutOfRange
+                }
+            };
+            ValidationError {
+                kind,
+                detail: warning.detail.clone(),
+            }
+        })
+        .collect()
 }
 
 /// Build the full prompt string sent to the synthesis LLM by routing
