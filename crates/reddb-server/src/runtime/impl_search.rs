@@ -1136,7 +1136,7 @@ impl RedDBRuntime {
         raw_query: &str,
         ask: &crate::storage::query::ast::AskQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
-        use crate::ai::{parse_provider, resolve_api_key_from_runtime, AiProvider};
+        use crate::ai::{parse_provider, resolve_api_key_from_runtime};
 
         // Stage 1-4: AskPipeline narrows the candidate set BEFORE any
         // LLM call. Issue #119 / #120 / #121: scope-pre-filter +
@@ -1185,104 +1185,146 @@ impl RedDBRuntime {
 
         // Step 3: Call LLM — use configured defaults if no provider/model specified
         let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self);
-        let provider = match &ask.provider {
-            Some(p) => parse_provider(p)?,
-            None => default_provider,
-        };
-        let api_key = resolve_api_key_from_runtime(&provider, None, self)?;
-        let model = ask.model.clone().unwrap_or(default_model);
-        let api_base = provider.resolve_api_base();
-
-        let requested_mode = if ask.strict {
-            crate::runtime::ai::strict_validator::Mode::Strict
-        } else {
-            crate::runtime::ai::strict_validator::Mode::Lenient
-        };
-        let provider_token = provider.token().to_string();
-        let mode_outcome = self
-            .ask_provider_capability_registry(&provider_token)
-            .evaluate_mode(&provider_token, requested_mode);
-        let effective_mode = mode_outcome.effective();
-        let mode_warning = mode_outcome.warning().cloned();
-
+        let provider_names =
+            self.ask_provider_failover_names(ask.provider.as_deref(), &default_provider)?;
+        let provider_refs: Vec<&str> = provider_names.iter().map(String::as_str).collect();
         let transport = crate::runtime::ai::transport::AiTransport::from_runtime(self);
-        let mut attempt = crate::runtime::ai::strict_validator::Attempt::First;
-        let mut retry_count = 0_u32;
-        let mut prompt_for_call = full_prompt.clone();
-        let (answer, prompt_tokens, completion_tokens, citation_result) = loop {
-            let provider_started = std::time::Instant::now();
-            let prompt_response = call_ask_llm(
-                &provider,
-                transport.clone(),
-                api_key.clone(),
-                model.clone(),
-                prompt_for_call.clone(),
-                api_base.clone(),
-                settings.max_completion_tokens as usize,
-            )?;
-            let elapsed_ms = duration_millis_u32(provider_started.elapsed());
-            let completion_tokens = prompt_response.completion_tokens.unwrap_or(0);
-            let usage = crate::runtime::ai::cost_guard::Usage {
-                prompt_tokens: estimate_prompt_tokens(&prompt_for_call),
-                sources_bytes: usage.sources_bytes,
-                completion_tokens: u64_to_u32_saturating(completion_tokens),
-                elapsed_ms,
-                ..Default::default()
-            };
-            match crate::runtime::ai::cost_guard::evaluate(
-                &usage,
-                &crate::runtime::ai::cost_guard::DailyState::default(),
-                &settings,
-                ask_cost_guard_now(),
-            ) {
-                crate::runtime::ai::cost_guard::Decision::Allow => {}
-                crate::runtime::ai::cost_guard::Decision::Reject { limit, detail, .. } => {
-                    return Err(cost_guard_rejection_to_error(limit, detail));
-                }
-            }
 
-            let answer = prompt_response.output_text;
-            let citation_result =
-                crate::runtime::ai::citation_parser::parse_citations(&answer, sources_count);
-            match crate::runtime::ai::strict_validator::validate(
-                &citation_result,
+        let attempt_provider = |provider_name: &str| -> RedDBResult<AskLlmAttempt> {
+            let provider = parse_provider(provider_name)?;
+            let api_key = resolve_api_key_from_runtime(&provider, None, self)?;
+            let model = ask.model.clone().unwrap_or_else(|| default_model.clone());
+            let api_base = provider.resolve_api_base();
+
+            let requested_mode = if ask.strict {
+                crate::runtime::ai::strict_validator::Mode::Strict
+            } else {
+                crate::runtime::ai::strict_validator::Mode::Lenient
+            };
+            let provider_token = provider.token().to_string();
+            let mode_outcome = self
+                .ask_provider_capability_registry(&provider_token)
+                .evaluate_mode(&provider_token, requested_mode);
+            let effective_mode = mode_outcome.effective();
+            let mode_warning = mode_outcome.warning().cloned();
+
+            let mut attempt = crate::runtime::ai::strict_validator::Attempt::First;
+            let mut retry_count = 0_u32;
+            let mut prompt_for_call = full_prompt.clone();
+            let (answer, prompt_tokens, completion_tokens, citation_result) = loop {
+                let provider_started = std::time::Instant::now();
+                let prompt_response = call_ask_llm(
+                    &provider,
+                    transport.clone(),
+                    api_key.clone(),
+                    model.clone(),
+                    prompt_for_call.clone(),
+                    api_base.clone(),
+                    settings.max_completion_tokens as usize,
+                )?;
+                let elapsed_ms = duration_millis_u32(provider_started.elapsed());
+                let completion_tokens = prompt_response.completion_tokens.unwrap_or(0);
+                let usage = crate::runtime::ai::cost_guard::Usage {
+                    prompt_tokens: estimate_prompt_tokens(&prompt_for_call),
+                    sources_bytes: usage.sources_bytes,
+                    completion_tokens: u64_to_u32_saturating(completion_tokens),
+                    elapsed_ms,
+                    ..Default::default()
+                };
+                match crate::runtime::ai::cost_guard::evaluate(
+                    &usage,
+                    &crate::runtime::ai::cost_guard::DailyState::default(),
+                    &settings,
+                    ask_cost_guard_now(),
+                ) {
+                    crate::runtime::ai::cost_guard::Decision::Allow => {}
+                    crate::runtime::ai::cost_guard::Decision::Reject { limit, detail, .. } => {
+                        return Err(cost_guard_rejection_to_error(limit, detail));
+                    }
+                }
+
+                let answer = prompt_response.output_text;
+                let citation_result =
+                    crate::runtime::ai::citation_parser::parse_citations(&answer, sources_count);
+                match crate::runtime::ai::strict_validator::validate(
+                    &citation_result,
+                    effective_mode,
+                    attempt,
+                ) {
+                    crate::runtime::ai::strict_validator::Decision::Ok => {
+                        break (
+                            answer,
+                            prompt_response.prompt_tokens.unwrap_or(0),
+                            completion_tokens,
+                            citation_result,
+                        );
+                    }
+                    crate::runtime::ai::strict_validator::Decision::Retry { prompt } => {
+                        attempt = crate::runtime::ai::strict_validator::Attempt::Retry;
+                        retry_count = 1;
+                        prompt_for_call = format!("{prompt}\n\n{full_prompt}");
+                    }
+                    crate::runtime::ai::strict_validator::Decision::GiveUp { errors } => {
+                        let validation = validation_to_json_with_mode_warning(
+                            &citation_result.warnings,
+                            &errors,
+                            false,
+                            mode_warning.as_ref(),
+                        );
+                        return Err(RedDBError::Validation {
+                            message: "ASK citation validation failed after retry".to_string(),
+                            validation,
+                        });
+                    }
+                }
+            };
+
+            Ok(AskLlmAttempt {
+                answer,
+                provider_token,
+                model,
                 effective_mode,
-                attempt,
-            ) {
-                crate::runtime::ai::strict_validator::Decision::Ok => {
-                    break (
-                        answer,
-                        prompt_response.prompt_tokens.unwrap_or(0),
-                        completion_tokens,
-                        citation_result,
-                    );
-                }
-                crate::runtime::ai::strict_validator::Decision::Retry { prompt } => {
-                    attempt = crate::runtime::ai::strict_validator::Attempt::Retry;
-                    retry_count = 1;
-                    prompt_for_call = format!("{prompt}\n\n{full_prompt}");
-                }
-                crate::runtime::ai::strict_validator::Decision::GiveUp { errors } => {
-                    let validation = validation_to_json_with_mode_warning(
-                        &citation_result.warnings,
-                        &errors,
-                        false,
-                        mode_warning.as_ref(),
-                    );
-                    return Err(RedDBError::Validation {
-                        message: "ASK citation validation failed after retry".to_string(),
-                        validation,
-                    });
-                }
-            }
+                mode_warning,
+                retry_count,
+                prompt_tokens,
+                completion_tokens,
+                citation_result,
+            })
         };
 
-        let citations_json = citations_to_json(&citation_result.citations, &source_urns);
+        let mut failed_attempts = Vec::new();
+        let mut ask_attempt = None;
+        for provider_name in &provider_refs {
+            match attempt_provider(provider_name) {
+                Ok(attempt) => {
+                    ask_attempt = Some(attempt);
+                    break;
+                }
+                Err(err) => {
+                    let attempt_err = ask_attempt_error_from_reddb(&err);
+                    if attempt_err.is_retryable() {
+                        failed_attempts.push(((*provider_name).to_string(), attempt_err));
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        let ask_attempt = ask_attempt.ok_or_else(|| {
+            ask_failover_exhausted_to_error(
+                crate::runtime::ai::provider_failover::FailoverExhausted {
+                    attempts: failed_attempts,
+                },
+            )
+        })?;
+
+        let citations_json =
+            citations_to_json(&ask_attempt.citation_result.citations, &source_urns);
         let validation_json = validation_to_json_with_mode_warning(
-            &citation_result.warnings,
+            &ask_attempt.citation_result.warnings,
             &[],
             true,
-            mode_warning.as_ref(),
+            ask_attempt.mode_warning.as_ref(),
         );
         let citations_bytes =
             crate::json::to_vec(&citations_json).unwrap_or_else(|_| b"[]".to_vec());
@@ -1304,15 +1346,24 @@ impl RedDBRuntime {
             "validation".into(),
         ]);
         let mut record = UnifiedRecord::new();
-        record.set("answer", Value::text(answer));
-        record.set("provider", Value::text(provider_token));
-        record.set("model", Value::text(model));
-        record.set("mode", Value::text(strict_mode_label(effective_mode)));
-        record.set("retry_count", Value::Integer(retry_count as i64));
-        record.set("prompt_tokens", Value::Integer(prompt_tokens as i64));
+        record.set("answer", Value::text(ask_attempt.answer));
+        record.set("provider", Value::text(ask_attempt.provider_token));
+        record.set("model", Value::text(ask_attempt.model));
+        record.set(
+            "mode",
+            Value::text(strict_mode_label(ask_attempt.effective_mode)),
+        );
+        record.set(
+            "retry_count",
+            Value::Integer(ask_attempt.retry_count as i64),
+        );
+        record.set(
+            "prompt_tokens",
+            Value::Integer(ask_attempt.prompt_tokens as i64),
+        );
         record.set(
             "completion_tokens",
-            Value::Integer(completion_tokens as i64),
+            Value::Integer(ask_attempt.completion_tokens as i64),
         );
         record.set("sources_count", Value::Integer(sources_count as i64));
         record.set("sources_flat", Value::Json(sources_flat_bytes));
@@ -1411,6 +1462,154 @@ impl RedDBRuntime {
 
         seen.then_some(caps)
     }
+
+    fn ask_provider_failover_names(
+        &self,
+        query_override: Option<&str>,
+        default_provider: &crate::ai::AiProvider,
+    ) -> RedDBResult<Vec<String>> {
+        if let Some(raw) = query_override {
+            if let Some(names) = parse_provider_list_text(raw) {
+                return Ok(names);
+            }
+        }
+
+        if let Some(value) = latest_config_value(self, "ask.providers.fallback") {
+            if let Some(names) = provider_list_from_storage_value(&value) {
+                return Ok(names);
+            }
+        }
+
+        Ok(vec![default_provider.token().to_string()])
+    }
+}
+
+struct AskLlmAttempt {
+    answer: String,
+    provider_token: String,
+    model: String,
+    effective_mode: crate::runtime::ai::strict_validator::Mode,
+    mode_warning: Option<crate::runtime::ai::provider_capabilities::ModeWarning>,
+    retry_count: u32,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    citation_result: crate::runtime::ai::citation_parser::CitationParseResult,
+}
+
+fn provider_list_from_storage_value(value: &crate::storage::schema::Value) -> Option<Vec<String>> {
+    match value {
+        crate::storage::schema::Value::Text(text) => parse_provider_list_text(text.as_ref()),
+        crate::storage::schema::Value::Json(bytes) => {
+            let parsed: crate::json::Value = crate::json::from_slice(bytes).ok()?;
+            provider_list_from_json_value(&parsed)
+        }
+        _ => None,
+    }
+}
+
+fn provider_list_from_json_value(value: &crate::json::Value) -> Option<Vec<String>> {
+    match value {
+        crate::json::Value::Array(items) => {
+            let mut out = Vec::new();
+            for item in items {
+                let Some(name) = item.as_str() else {
+                    continue;
+                };
+                push_provider_name(&mut out, name);
+            }
+            if out.is_empty() {
+                None
+            } else {
+                Some(out)
+            }
+        }
+        crate::json::Value::String(text) => parse_provider_list_text(text),
+        _ => None,
+    }
+}
+
+fn parse_provider_list_text(raw: &str) -> Option<Vec<String>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(parsed) = crate::json::from_str::<crate::json::Value>(trimmed) {
+        if let Some(names) = provider_list_from_json_value(&parsed) {
+            return Some(names);
+        }
+    }
+
+    let inner = trimmed
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    let mut out = Vec::new();
+    for segment in inner.split(',') {
+        push_provider_name(&mut out, segment);
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn push_provider_name(out: &mut Vec<String>, raw: &str) {
+    let name = raw.trim().trim_matches(|c| c == '\'' || c == '"').trim();
+    if !name.is_empty() && !out.iter().any(|existing| existing == name) {
+        out.push(name.to_string());
+    }
+}
+
+fn ask_attempt_error_from_reddb(
+    err: &RedDBError,
+) -> crate::runtime::ai::provider_failover::AttemptError {
+    use crate::runtime::ai::provider_failover::AttemptError;
+
+    match err {
+        RedDBError::Query(message) if message.contains("AI transport error") => {
+            if let Some(code) = transport_status_code(&message) {
+                if (500..=599).contains(&code) {
+                    return AttemptError::Status5xx {
+                        code,
+                        body: message.clone(),
+                    };
+                }
+                return AttemptError::NonRetryable(message.clone());
+            }
+            let lower = message.to_ascii_lowercase();
+            if lower.contains("timeout") || lower.contains("timed out") {
+                AttemptError::Timeout(std::time::Duration::ZERO)
+            } else {
+                AttemptError::Transport(message.clone())
+            }
+        }
+        other => AttemptError::NonRetryable(other.to_string()),
+    }
+}
+
+fn transport_status_code(message: &str) -> Option<u16> {
+    let rest = message.split("status_code=").nth(1)?;
+    let digits: String = rest.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+fn ask_failover_exhausted_to_error(
+    exhausted: crate::runtime::ai::provider_failover::FailoverExhausted,
+) -> RedDBError {
+    use crate::runtime::ai::provider_failover::AttemptError;
+
+    if let Some((provider, AttemptError::NonRetryable(message))) = exhausted.attempts.last() {
+        return RedDBError::Query(format!("ASK provider {provider} failed: {message}"));
+    }
+
+    let attempts = exhausted
+        .attempts
+        .iter()
+        .map(|(provider, err)| format!("{provider}: {err}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    RedDBError::Query(format!("ask_provider_failover_exhausted: {attempts}"))
 }
 
 fn config_u32(value: u64) -> u32 {
