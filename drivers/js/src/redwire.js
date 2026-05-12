@@ -45,6 +45,14 @@ export const MessageKind = Object.freeze({
   BulkInsertBinary: 0x06,
   QueryBinary: 0x07,
   BulkInsertPrevalidated: 0x08,
+  QueryWithParams: 0x28,
+})
+
+export const Features = Object.freeze({ PARAMS: 0x0000_0001 })
+
+export const ValueTag = Object.freeze({
+  Null: 0x00, Bool: 0x01, Int: 0x02, Float: 0x03, Text: 0x04,
+  Bytes: 0x05, Vector: 0x06, Json: 0x07, Timestamp: 0x08, Uuid: 0x09,
 })
 
 /**
@@ -201,8 +209,13 @@ export async function connectRedwire(opts) {
     )
   }
   const session = jsonOf(final.payload) ?? {}
+  const features = numberOr(session.features, numberOr(ackParsed?.features, 0))
 
-  return new RedWireClient(socket, reader, session)
+  return new RedWireClient(socket, reader, session, features)
+}
+
+function numberOr(v, fallback) {
+  return typeof v === 'number' && Number.isFinite(v) ? v : fallback
 }
 
 /**
@@ -211,16 +224,27 @@ export async function connectRedwire(opts) {
  * transports so the surface above this is uniform.
  */
 export class RedWireClient {
-  constructor(socket, reader, session) {
+  constructor(socket, reader, session, serverFeatures = 0) {
     this.socket = socket
     this.reader = reader
     this.session = session
+    this.serverFeatures = serverFeatures >>> 0
     this.nextCorr = 1n
     this.closed = false
   }
 
+  /** Raw advertised server feature bitmask. */
+  features() {
+    return this.serverFeatures
+  }
+
+  /** True when server advertised `FEATURE_PARAMS` (#357). */
+  supportsParams() {
+    return (this.serverFeatures & Features.PARAMS) === Features.PARAMS
+  }
+
   async call(method, params = {}) {
-    if (method === 'query') return this.#query(params.sql ?? '')
+    if (method === 'query') return this.#query(params.sql ?? '', params.params)
     if (method === 'insert') return this.#insert({ collection: params.collection, payload: params.payload })
     if (method === 'bulk_insert') return this.#insert({ collection: params.collection, payloads: params.payloads })
     if (method === 'bulk_insert_binary') {
@@ -308,10 +332,26 @@ export class RedWireClient {
     )
   }
 
-  async #query(sql) {
+  async #query(sql, params) {
     const corr = this.#corr()
-    const payload = new TextEncoder().encode(sql)
-    await writeFrame(this.socket, MessageKind.Query, corr, payload)
+    const hasParams = Array.isArray(params) && params.length > 0
+    let kind
+    let payload
+    if (hasParams) {
+      if (!this.supportsParams()) {
+        throw new RedDBError(
+          'PARAMS_UNSUPPORTED',
+          'server did not advertise FEATURE_PARAMS — upgrade the server '
+            + 'to one that supports parameterized queries.',
+        )
+      }
+      kind = MessageKind.QueryWithParams
+      payload = encodeQueryWithParams(sql, params)
+    } else {
+      kind = MessageKind.Query
+      payload = new TextEncoder().encode(sql)
+    }
+    await writeFrame(this.socket, kind, corr, payload)
     const resp = await this.reader.next()
     if (resp.kind === MessageKind.Result) {
       return jsonOf(resp.payload) ?? {}
@@ -712,6 +752,177 @@ function writeBinaryCell(buf, view, pos, cell, enc) {
     default:
       throw new RedDBError('UNKNOWN_BINARY_TAG', `tag=${tag}`)
   }
+}
+
+// ---------------------------------------------------------------------------
+// QueryWithParams payload codec — mirrors `reddb_wire::query_with_params`
+// ---------------------------------------------------------------------------
+
+const MAX_VALUE_PAYLOAD_LEN = MAX_FRAME_SIZE
+const MAX_PARAM_COUNT = 65_536
+
+/**
+ * Encode the `QueryWithParams` payload body.
+ * Layout: `[u32 sql_len LE][utf-8 sql][u32 param_count LE][N encoded values]`
+ */
+export function encodeQueryWithParams(sql, params) {
+  if (typeof sql !== 'string') throw new TypeError('encodeQueryWithParams: sql must be a string')
+  if (!Array.isArray(params)) throw new TypeError('encodeQueryWithParams: params must be an array')
+  if (params.length > MAX_PARAM_COUNT) {
+    throw new RedDBError('PARAM_COUNT_OVER_LIMIT', `param_count ${params.length} > ${MAX_PARAM_COUNT}`)
+  }
+  const sqlBytes = new TextEncoder().encode(sql)
+  if (sqlBytes.length > MAX_VALUE_PAYLOAD_LEN) {
+    throw new RedDBError('PAYLOAD_TOO_LARGE', `sql_len ${sqlBytes.length} > ${MAX_VALUE_PAYLOAD_LEN}`)
+  }
+  const valueBlobs = params.map(encodeValue)
+  let total = 4 + sqlBytes.length + 4
+  for (const vb of valueBlobs) total += vb.length
+  const buf = new Uint8Array(total)
+  const view = new DataView(buf.buffer)
+  let pos = 0
+  view.setUint32(pos, sqlBytes.length, true); pos += 4
+  buf.set(sqlBytes, pos); pos += sqlBytes.length
+  view.setUint32(pos, valueBlobs.length, true); pos += 4
+  for (const vb of valueBlobs) { buf.set(vb, pos); pos += vb.length }
+  return buf
+}
+
+/**
+ * Encode a single wire `Value`. Mirrors `reddb_wire::value::encode`.
+ *
+ * Accepts native JS values + the JSON envelopes produced by
+ * `serializeParam` so the SDK can pass through a single shape:
+ *   - `null` / `undefined`               → Null
+ *   - `boolean`                          → Bool
+ *   - `bigint`                           → Int (i64)
+ *   - `number` integer (safe range)      → Int; otherwise → Float
+ *   - `string`                           → Text
+ *   - `Uint8Array` / `Buffer`            → Bytes
+ *   - `Float32Array` / `Array<number>`   → Vector (f32)
+ *   - `{ $bytes: <base64> }`             → Bytes
+ *   - `{ $ts: <unix-seconds> }`          → Timestamp
+ *   - `{ $uuid: <hyphenated> }`          → Uuid
+ *   - other plain object/array           → Json (canonical bytes)
+ */
+export function encodeValue(v) {
+  if (v === null || v === undefined) return Uint8Array.of(ValueTag.Null)
+  if (typeof v === 'boolean') return Uint8Array.of(ValueTag.Bool, v ? 1 : 0)
+  if (typeof v === 'bigint') {
+    const out = new Uint8Array(1 + 8)
+    out[0] = ValueTag.Int
+    new DataView(out.buffer).setBigInt64(1, v, true)
+    return out
+  }
+  if (typeof v === 'number') {
+    if (Number.isInteger(v) && v >= -(2 ** 53) && v <= 2 ** 53) {
+      const out = new Uint8Array(1 + 8)
+      out[0] = ValueTag.Int
+      new DataView(out.buffer).setBigInt64(1, BigInt(v), true)
+      return out
+    }
+    const out = new Uint8Array(1 + 8)
+    out[0] = ValueTag.Float
+    new DataView(out.buffer).setFloat64(1, v, true)
+    return out
+  }
+  if (typeof v === 'string') return encodeLenPrefixed(ValueTag.Text, new TextEncoder().encode(v))
+  if (v instanceof Uint8Array) return encodeLenPrefixed(ValueTag.Bytes, v)
+  if (typeof Buffer !== 'undefined' && v instanceof Buffer) {
+    return encodeLenPrefixed(ValueTag.Bytes, new Uint8Array(v.buffer, v.byteOffset, v.byteLength))
+  }
+  if (v instanceof Float32Array) return encodeVector(v)
+  if (v instanceof Float64Array) return encodeVector(Float32Array.from(v))
+  if (Array.isArray(v) && v.every((x) => typeof x === 'number')) {
+    return encodeVector(Float32Array.from(v))
+  }
+  if (typeof v === 'object') {
+    const keys = Object.keys(v)
+    if (keys.length === 1) {
+      const k = keys[0]
+      if (k === '$bytes' && typeof v.$bytes === 'string') {
+        return encodeLenPrefixed(ValueTag.Bytes, base64ToBytes(v.$bytes))
+      }
+      if (k === '$ts' && typeof v.$ts === 'number' && Number.isFinite(v.$ts)) {
+        const out = new Uint8Array(1 + 8)
+        out[0] = ValueTag.Timestamp
+        new DataView(out.buffer).setBigInt64(1, BigInt(Math.trunc(v.$ts)), true)
+        return out
+      }
+      if (k === '$uuid' && typeof v.$uuid === 'string') {
+        const bytes = parseUuidHyphenated(v.$uuid)
+        const out = new Uint8Array(1 + 16)
+        out[0] = ValueTag.Uuid
+        out.set(bytes, 1)
+        return out
+      }
+    }
+    return encodeLenPrefixed(ValueTag.Json, new TextEncoder().encode(canonicalJson(v)))
+  }
+  throw new RedDBError('UNSUPPORTED_PARAM', `cannot encode param of type ${typeof v}`)
+}
+
+function encodeLenPrefixed(tag, bytes) {
+  if (bytes.length > MAX_VALUE_PAYLOAD_LEN) {
+    throw new RedDBError('PAYLOAD_TOO_LARGE', `value len ${bytes.length} > ${MAX_VALUE_PAYLOAD_LEN}`)
+  }
+  const out = new Uint8Array(1 + 4 + bytes.length)
+  out[0] = tag
+  new DataView(out.buffer).setUint32(1, bytes.length, true)
+  out.set(bytes, 5)
+  return out
+}
+
+function encodeVector(f32) {
+  if (f32.length * 4 > MAX_VALUE_PAYLOAD_LEN) {
+    throw new RedDBError('PAYLOAD_TOO_LARGE', `vector bytes ${f32.length * 4} > ${MAX_VALUE_PAYLOAD_LEN}`)
+  }
+  const out = new Uint8Array(1 + 4 + f32.length * 4)
+  out[0] = ValueTag.Vector
+  const view = new DataView(out.buffer)
+  view.setUint32(1, f32.length, true)
+  for (let i = 0; i < f32.length; i++) {
+    view.setFloat32(5 + i * 4, f32[i], true)
+  }
+  return out
+}
+
+function base64ToBytes(s) {
+  if (typeof Buffer !== 'undefined') {
+    const b = Buffer.from(s, 'base64')
+    return new Uint8Array(b.buffer, b.byteOffset, b.byteLength)
+  }
+  // eslint-disable-next-line no-undef
+  const bin = atob(s)
+  const out = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+  return out
+}
+
+function parseUuidHyphenated(s) {
+  const hex = s.replace(/-/g, '')
+  if (hex.length !== 32 || /[^0-9a-fA-F]/.test(hex)) {
+    throw new RedDBError('UUID_INVALID', `bad uuid: ${s}`)
+  }
+  const out = new Uint8Array(16)
+  for (let i = 0; i < 16; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16)
+  return out
+}
+
+/** Stable JSON serialization with sorted keys — matches the server's
+ * canonical `crate::json` output so round-tripped Json values compare
+ * byte-equal. */
+function canonicalJson(v) {
+  if (v === null) return 'null'
+  if (typeof v === 'number') return Number.isFinite(v) ? String(v) : 'null'
+  if (typeof v === 'string') return JSON.stringify(v)
+  if (typeof v === 'boolean') return v ? 'true' : 'false'
+  if (Array.isArray(v)) return '[' + v.map(canonicalJson).join(',') + ']'
+  if (typeof v === 'object') {
+    const keys = Object.keys(v).sort()
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalJson(v[k])).join(',') + '}'
+  }
+  return 'null'
 }
 
 function jsonReason(bytes) {
