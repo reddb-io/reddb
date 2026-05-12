@@ -721,6 +721,35 @@ fn first_user_entity_id_is_one_hundred_and_two() {
     );
 }
 
+#[test]
+fn first_file_backed_user_entity_id_is_one_hundred_and_two() {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "reddb-first-user-entity-id-{}-{}.rdb",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&path);
+
+    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("runtime boots");
+    let res = rt
+        .execute_query(
+            "INSERT INTO tales NODE (label, name) VALUES ('cinderella', 'Cinderella') RETURNING *",
+        )
+        .expect("first persistent user insert");
+    let id = u64_at(&res, 0, "red_entity_id");
+    drop(rt);
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(
+        id, 102,
+        "first file-backed user-inserted entity id must match the documented 102 offset"
+    );
+}
+
 // ── Issue #423: GRAPH PROPERTIES '<id-or-label>' per-node lookup ────────────
 
 #[test]
