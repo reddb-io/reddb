@@ -39,3 +39,33 @@ Introduces `StrictValidator` deep module — pure function `(answer, sources_cou
 ## Blocked by
 
 - #393
+
+## Progress
+
+Slice 1 (this commit): `StrictValidator` deep module landed at
+`crates/reddb-server/src/runtime/ai/strict_validator.rs` with 17 unit
+tests covering every branch (strict ok/retry/giveup, lenient warn-only,
+mixed warnings, determinism, retry-prompt contract, empty input). The
+module is pure — no transport, no I/O — and exposes:
+
+- `Mode::{Strict, Lenient}`
+- `Attempt::{First, Retry}` — the type IS the retry budget
+- `Decision::{Ok, Retry{prompt}, GiveUp{errors}}`
+- `validate(parsed, mode, attempt) -> Decision`
+
+Deferred to follow-up slices:
+
+- Wire `validate()` into `execute_ask` and actually issue the retry LLM
+  call (needs a stubbable LLM transport so the "fake LLM" integration
+  test in the AC is writable — today `AiTransport::from_runtime` is the
+  hard boundary).
+- Map `Decision::GiveUp` to HTTP 422 with `validation.errors` in the
+  response body.
+- Parse `ASK '...' STRICT ON|OFF` in the SQL parser and thread `Mode`
+  into `AskQuery`.
+- Integration tests with a fake LLM provider (depends on transport
+  refactor).
+
+The deep module is the load-bearing piece; the remaining slices are
+mechanical wiring and can land independently. Issue stays open with
+this progress note.
