@@ -229,3 +229,54 @@ fn dlq_is_auto_created_on_first_overflow() {
     };
     assert_eq!(dlq_len, 1, "one event in auto-created DLQ");
 }
+
+// ── Issue #414: SELECT row-projection must surface graph entities ────────────
+
+#[test]
+fn select_star_returns_graph_nodes_inserted_into_collection() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query(
+        "INSERT INTO tales NODE (label, name) VALUES ('cinderella', 'Cinderella')",
+    )
+    .expect("insert node");
+    rt.execute_query(
+        "INSERT INTO tales NODE (label, name) VALUES ('prince', 'Prince Charming')",
+    )
+    .expect("insert second node");
+
+    let all = rt
+        .execute_query("SELECT * FROM tales")
+        .expect("SELECT * executes");
+    assert_eq!(
+        all.result.len(),
+        2,
+        "graph nodes must surface in SELECT * (got {} rows)",
+        all.result.len()
+    );
+
+    let filtered = rt
+        .execute_query("SELECT label, name FROM tales WHERE label = 'cinderella'")
+        .expect("SELECT with WHERE executes");
+    assert_eq!(filtered.result.len(), 1, "WHERE label='cinderella' matches one node");
+    assert_eq!(text_at(&filtered, 0, "label"), "cinderella");
+    assert_eq!(text_at(&filtered, 0, "name"), "Cinderella");
+}
+
+#[test]
+fn aggregate_over_graph_collection_still_works() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('a', 'A')")
+        .expect("insert a");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('b', 'B')")
+        .expect("insert b");
+
+    let agg = rt
+        .execute_query("SELECT COUNT(*) AS n FROM tales")
+        .expect("aggregate executes");
+    let n = match agg.result.records[0].get("n") {
+        Some(Value::UnsignedInteger(v)) => *v as usize,
+        Some(Value::Integer(v)) => *v as usize,
+        other => panic!("expected count value, got {other:?}"),
+    };
+    assert!(n >= 1, "aggregate must still see graph entities (got {n})");
+}

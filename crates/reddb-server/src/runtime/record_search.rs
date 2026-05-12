@@ -189,7 +189,10 @@ pub(super) fn runtime_table_record_lean_ref(entity: &UnifiedEntity) -> Option<Un
     let updated_at = entity.updated_at;
     let row = match &entity.data {
         EntityData::Row(row) => row,
-        _ => return None,
+        // Issue #414: graph/vector/queue/etc. entities must surface in
+        // SELECT scans. Lean path can't construct a "pure row" for them,
+        // so delegate to the universal materializer.
+        _ => return runtime_any_record_from_entity_ref(entity),
     };
     if let Some(named) = &row.named {
         let mut record = UnifiedRecord::with_capacity(3 + named.len());
@@ -231,11 +234,15 @@ pub(super) fn runtime_table_record_lean_ref(entity: &UnifiedEntity) -> Option<Un
 
 #[inline]
 pub(super) fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<UnifiedRecord> {
+    // Issue #414: surface graph/vector/queue/etc. entities in SELECT scans.
+    if !matches!(entity.data, EntityData::Row(_)) {
+        return runtime_any_record_from_entity(entity);
+    }
     let created_at = entity.created_at;
     let updated_at = entity.updated_at;
     let row = match entity.data {
         EntityData::Row(row) => row,
-        _ => return None,
+        _ => unreachable!(),
     };
     if let Some(named) = row.named {
         let mut record = UnifiedRecord::with_capacity(3 + named.len());
@@ -281,6 +288,10 @@ pub(super) fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<Unified
 
 #[inline(never)]
 pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<UnifiedRecord> {
+    // Issue #414: surface graph/vector/queue/etc. entities in SELECT scans.
+    if !matches!(entity.data, EntityData::Row(_) | EntityData::TimeSeries(_)) {
+        return runtime_any_record_from_entity(entity);
+    }
     match entity.data {
         EntityData::Row(row) => {
             // Pre-allocate: ~9 system fields + user fields
@@ -396,6 +407,10 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
 pub(super) fn runtime_table_record_from_entity_ref(
     entity: &UnifiedEntity,
 ) -> Option<UnifiedRecord> {
+    // Issue #414: surface graph/vector/queue/etc. entities in SELECT scans.
+    if !matches!(&entity.data, EntityData::Row(_) | EntityData::TimeSeries(_)) {
+        return runtime_any_record_from_entity_ref(entity);
+    }
     match &entity.data {
         EntityData::Row(row) => {
             let user_field_count = row
@@ -511,6 +526,12 @@ pub(super) fn runtime_table_record_from_entity_projected(
 ) -> Option<UnifiedRecord> {
     if columns.is_empty() {
         return runtime_table_record_from_entity(entity);
+    }
+    // Issue #414: graph/vector/queue/etc. — produce a full record so SELECT
+    // can project named graph properties. Extra fields are harmless; the
+    // outer projection layer keeps only the requested ones.
+    if !matches!(entity.data, EntityData::Row(_) | EntityData::TimeSeries(_)) {
+        return runtime_any_record_from_entity(entity);
     }
 
     match entity.data {
@@ -628,6 +649,12 @@ pub(super) fn runtime_table_record_from_entity_ref_projected(
 ) -> Option<UnifiedRecord> {
     if columns.is_empty() {
         return None; // caller should use full materialization for SELECT *
+    }
+    // Issue #414: non-Row entities (graph/vector/queue) must be surfaced in
+    // SELECT scans. Fall back to the universal materializer; the outer
+    // projection layer keeps only the requested columns.
+    if !matches!(&entity.data, EntityData::Row(_)) {
+        return runtime_any_record_from_entity_ref(entity);
     }
     let row = entity.data.as_row()?;
 
