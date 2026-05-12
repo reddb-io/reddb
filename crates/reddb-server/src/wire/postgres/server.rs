@@ -20,6 +20,9 @@ use super::protocol::{
     FrontendMessage, PgWireError, TransactionStatus,
 };
 use super::types::{value_to_pg_wire_bytes, PgOid};
+use crate::runtime::ai::ask_response_envelope::{
+    AskResult, Citation, Mode, SourceRow, Validation, ValidationError, ValidationWarning,
+};
 use crate::runtime::RedDBRuntime;
 use crate::storage::query::unified::UnifiedRecord;
 use crate::storage::schema::Value;
@@ -260,29 +263,7 @@ where
 
     match query_result {
         Ok(result) => {
-            if result.statement_type == "select" {
-                emit_result_rows(stream, &result.result).await?;
-                write_frame(
-                    stream,
-                    &BackendMessage::CommandComplete(format!(
-                        "SELECT {}",
-                        result.result.records.len()
-                    )),
-                )
-                .await?;
-            } else {
-                // DDL / DML / config statements: echo the runtime's
-                // high-level statement tag back. PG format is
-                // "<CMD> [<OID>] <COUNT>"; we keep the count where
-                // applicable and fall back to the runtime's message.
-                let tag = match result.statement_type {
-                    "insert" => format!("INSERT 0 {}", result.affected_rows),
-                    "update" => format!("UPDATE {}", result.affected_rows),
-                    "delete" => format!("DELETE {}", result.affected_rows),
-                    other => other.to_uppercase(),
-                };
-                write_frame(stream, &BackendMessage::CommandComplete(tag)).await?;
-            }
+            emit_success_result(stream, &result).await?;
         }
         Err(err) => {
             // PG SQLSTATE class 42 covers syntax / binding errors; we use
@@ -298,6 +279,43 @@ where
         &BackendMessage::ReadyForQuery(TransactionStatus::Idle),
     )
     .await?;
+    Ok(())
+}
+
+async fn emit_success_result<S>(
+    stream: &mut S,
+    result: &crate::runtime::RuntimeQueryResult,
+) -> Result<(), PgWireError>
+where
+    S: AsyncWrite + Unpin,
+{
+    if result.statement == "ask" {
+        emit_ask_result_row(stream, result).await?;
+        write_frame(
+            stream,
+            &BackendMessage::CommandComplete("SELECT 1".to_string()),
+        )
+        .await?;
+    } else if result.statement_type == "select" {
+        emit_result_rows(stream, &result.result).await?;
+        write_frame(
+            stream,
+            &BackendMessage::CommandComplete(format!("SELECT {}", result.result.records.len())),
+        )
+        .await?;
+    } else {
+        // DDL / DML / config statements: echo the runtime's
+        // high-level statement tag back. PG format is
+        // "<CMD> [<OID>] <COUNT>"; we keep the count where
+        // applicable and fall back to the runtime's message.
+        let tag = match result.statement_type {
+            "insert" => format!("INSERT 0 {}", result.affected_rows),
+            "update" => format!("UPDATE {}", result.affected_rows),
+            "delete" => format!("DELETE {}", result.affected_rows),
+            other => other.to_uppercase(),
+        };
+        write_frame(stream, &BackendMessage::CommandComplete(tag)).await?;
+    }
     Ok(())
 }
 
@@ -361,6 +379,207 @@ where
     Ok(())
 }
 
+async fn emit_ask_result_row<S>(
+    stream: &mut S,
+    result: &crate::runtime::RuntimeQueryResult,
+) -> Result<(), PgWireError>
+where
+    S: AsyncWrite + Unpin,
+{
+    let row = ask_query_result_to_pg_wire_row(result)
+        .ok_or_else(|| PgWireError::Protocol("ASK result missing row body".to_string()))?;
+    let descriptors: Vec<ColumnDescriptor> = row
+        .columns
+        .iter()
+        .map(|col| ColumnDescriptor {
+            name: col.name.to_string(),
+            table_oid: 0,
+            column_attr: 0,
+            type_oid: col.oid.as_u32(),
+            type_size: -1,
+            type_mod: -1,
+            format: 0,
+        })
+        .collect();
+
+    write_frame(stream, &BackendMessage::RowDescription(descriptors)).await?;
+    write_frame(stream, &BackendMessage::DataRow(row.cells)).await?;
+    Ok(())
+}
+
+fn ask_query_result_to_pg_wire_row(
+    result: &crate::runtime::RuntimeQueryResult,
+) -> Option<crate::runtime::ai::pg_wire_ask_row_encoder::AskRow> {
+    if result.statement != "ask" {
+        return None;
+    }
+    let record = result.result.records.first()?;
+    let sources_flat_json =
+        json_field(record, "sources_flat").unwrap_or(crate::json::Value::Array(Vec::new()));
+    let citations_json =
+        json_field(record, "citations").unwrap_or(crate::json::Value::Array(Vec::new()));
+    let validation_json = json_field(record, "validation")
+        .unwrap_or_else(|| crate::json::Value::Object(Default::default()));
+
+    let effective_mode = match text_field(record, "mode").as_deref() {
+        Some("lenient") => Mode::Lenient,
+        _ => Mode::Strict,
+    };
+
+    let ask = AskResult {
+        answer: text_field(record, "answer")?,
+        sources_flat: ask_sources_flat(&sources_flat_json),
+        citations: ask_citations(&citations_json),
+        validation: ask_validation(&validation_json),
+        cache_hit: bool_field(record, "cache_hit").unwrap_or(false),
+        provider: text_field(record, "provider").unwrap_or_default(),
+        model: text_field(record, "model").unwrap_or_default(),
+        prompt_tokens: u32_field(record, "prompt_tokens").unwrap_or(0),
+        completion_tokens: u32_field(record, "completion_tokens").unwrap_or(0),
+        cost_usd: f64_field(record, "cost_usd").unwrap_or(0.0),
+        effective_mode,
+        retry_count: u32_field(record, "retry_count").unwrap_or(0),
+    };
+
+    Some(crate::runtime::ai::pg_wire_ask_row_encoder::encode(&ask))
+}
+
+fn record_field<'a>(record: &'a UnifiedRecord, key: &str) -> Option<&'a Value> {
+    record.iter_fields().find_map(|(name, value)| {
+        let name: &str = name;
+        (name == key).then_some(value)
+    })
+}
+
+fn text_field(record: &UnifiedRecord, key: &str) -> Option<String> {
+    match record_field(record, key)? {
+        Value::Text(s) => Some(s.to_string()),
+        Value::Email(s) | Value::Url(s) | Value::NodeRef(s) | Value::EdgeRef(s) => Some(s.clone()),
+        other => Some(other.to_string()),
+    }
+}
+
+fn bool_field(record: &UnifiedRecord, key: &str) -> Option<bool> {
+    match record_field(record, key)? {
+        Value::Boolean(value) => Some(*value),
+        _ => None,
+    }
+}
+
+fn u32_field(record: &UnifiedRecord, key: &str) -> Option<u32> {
+    match record_field(record, key)? {
+        Value::Integer(n) => (*n >= 0).then_some((*n).min(u32::MAX as i64) as u32),
+        Value::UnsignedInteger(n) => Some((*n).min(u32::MAX as u64) as u32),
+        Value::BigInt(n)
+        | Value::TimestampMs(n)
+        | Value::Timestamp(n)
+        | Value::Duration(n)
+        | Value::Decimal(n) => (*n >= 0).then_some((*n).min(u32::MAX as i64) as u32),
+        Value::Float(n) => (*n >= 0.0).then_some((*n).min(u32::MAX as f64) as u32),
+        _ => None,
+    }
+}
+
+fn f64_field(record: &UnifiedRecord, key: &str) -> Option<f64> {
+    match record_field(record, key)? {
+        Value::Integer(n) => Some(*n as f64),
+        Value::UnsignedInteger(n) => Some(*n as f64),
+        Value::BigInt(n)
+        | Value::TimestampMs(n)
+        | Value::Timestamp(n)
+        | Value::Duration(n)
+        | Value::Decimal(n) => Some(*n as f64),
+        Value::Float(n) => Some(*n),
+        _ => None,
+    }
+}
+
+fn json_field(record: &UnifiedRecord, key: &str) -> Option<crate::json::Value> {
+    match record_field(record, key)? {
+        Value::Json(bytes) => crate::json::from_slice(bytes).ok(),
+        Value::Text(text) => crate::json::from_str(text).ok(),
+        _ => None,
+    }
+}
+
+fn ask_sources_flat(value: &crate::json::Value) -> Vec<SourceRow> {
+    value
+        .as_array()
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|source| {
+            let urn = source
+                .get("urn")
+                .and_then(crate::json::Value::as_str)?
+                .to_string();
+            let payload = source
+                .get("payload")
+                .and_then(crate::json::Value::as_str)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| source.to_string_compact());
+            Some(SourceRow { urn, payload })
+        })
+        .collect()
+}
+
+fn ask_citations(value: &crate::json::Value) -> Vec<Citation> {
+    value
+        .as_array()
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|citation| {
+            let marker = citation
+                .get("marker")
+                .and_then(crate::json::Value::as_u64)?;
+            let urn = citation
+                .get("urn")
+                .and_then(crate::json::Value::as_str)?
+                .to_string();
+            Some(Citation {
+                marker: marker.min(u32::MAX as u64) as u32,
+                urn,
+            })
+        })
+        .collect()
+}
+
+fn ask_validation(value: &crate::json::Value) -> Validation {
+    Validation {
+        ok: value
+            .get("ok")
+            .and_then(crate::json::Value::as_bool)
+            .unwrap_or(true),
+        warnings: validation_items(value, "warnings")
+            .into_iter()
+            .map(|(kind, detail)| ValidationWarning { kind, detail })
+            .collect(),
+        errors: validation_items(value, "errors")
+            .into_iter()
+            .map(|(kind, detail)| ValidationError { kind, detail })
+            .collect(),
+    }
+}
+
+fn validation_items(value: &crate::json::Value, key: &str) -> Vec<(String, String)> {
+    value
+        .get(key)
+        .and_then(crate::json::Value::as_array)
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|item| {
+            Some((
+                item.get("kind")
+                    .and_then(crate::json::Value::as_str)?
+                    .to_string(),
+                item.get("detail")
+                    .and_then(crate::json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            ))
+        })
+        .collect()
+}
+
 /// Best-effort field lookup on a `UnifiedRecord`. The record API lives in
 /// `storage::query::unified` and today uses `HashMap<String, Value>` under
 /// the hood — we use `get` if it exists, else fall back to serialised map.
@@ -418,5 +637,162 @@ fn classify_sqlstate(msg: &str) -> &'static str {
         "28000"
     } else {
         "XX000"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::RuntimeQueryResult;
+    use crate::storage::query::modes::QueryMode;
+    use crate::storage::query::unified::UnifiedResult;
+
+    #[tokio::test]
+    async fn ask_success_result_uses_canonical_pg_wire_row_shape() {
+        let mut result = UnifiedResult::with_columns(vec![
+            "answer".into(),
+            "provider".into(),
+            "model".into(),
+            "prompt_tokens".into(),
+            "completion_tokens".into(),
+            "sources_count".into(),
+            "sources_flat".into(),
+            "citations".into(),
+            "validation".into(),
+        ]);
+        let mut record = UnifiedRecord::new();
+        record.set("answer", Value::text("Deploy failed [^1]."));
+        record.set("provider", Value::text("openai"));
+        record.set("model", Value::text("gpt-4o-mini"));
+        record.set("prompt_tokens", Value::Integer(11));
+        record.set("completion_tokens", Value::Integer(7));
+        record.set(
+            "sources_flat",
+            Value::Json(
+                br#"[{"urn":"urn:reddb:row:deployments:1","kind":"row","collection":"deployments","id":"1"}]"#
+                    .to_vec(),
+            ),
+        );
+        record.set(
+            "citations",
+            Value::Json(br#"[{"marker":1,"urn":"urn:reddb:row:deployments:1"}]"#.to_vec()),
+        );
+        record.set(
+            "validation",
+            Value::Json(br#"{"ok":true,"warnings":[],"errors":[]}"#.to_vec()),
+        );
+        result.push(record);
+
+        let qr = RuntimeQueryResult {
+            query: "ASK 'why did deploy fail?'".to_string(),
+            mode: QueryMode::Sql,
+            statement: "ask",
+            engine: "runtime-ai",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+        };
+
+        let mut out = Vec::new();
+        emit_success_result(&mut out, &qr).await.unwrap();
+        let frames = decode_frames(&out);
+
+        assert_eq!(
+            frames.iter().map(|(tag, _)| *tag).collect::<Vec<_>>(),
+            b"TDC"
+        );
+
+        let columns = decode_row_description(frames[0].1);
+        assert_eq!(
+            columns,
+            vec![
+                ("answer".to_string(), PgOid::Text.as_u32()),
+                ("cache_hit".to_string(), PgOid::Bool.as_u32()),
+                ("citations".to_string(), PgOid::Jsonb.as_u32()),
+                ("completion_tokens".to_string(), PgOid::Int8.as_u32()),
+                ("cost_usd".to_string(), PgOid::Numeric.as_u32()),
+                ("mode".to_string(), PgOid::Text.as_u32()),
+                ("model".to_string(), PgOid::Text.as_u32()),
+                ("prompt_tokens".to_string(), PgOid::Int8.as_u32()),
+                ("provider".to_string(), PgOid::Text.as_u32()),
+                ("retry_count".to_string(), PgOid::Int8.as_u32()),
+                ("sources_flat".to_string(), PgOid::Jsonb.as_u32()),
+                ("validation".to_string(), PgOid::Jsonb.as_u32()),
+            ]
+        );
+
+        let cells = decode_data_row(frames[1].1);
+        assert_eq!(cells.len(), 12);
+        assert_eq!(cells[0].as_deref(), Some(b"Deploy failed [^1].".as_slice()));
+        assert_eq!(cells[1].as_deref(), Some(b"f".as_slice()));
+        assert_eq!(cells[4].as_deref(), Some(b"0".as_slice()));
+        assert_eq!(cells[5].as_deref(), Some(b"strict".as_slice()));
+        assert_eq!(cells[9].as_deref(), Some(b"0".as_slice()));
+        assert!(std::str::from_utf8(cells[10].as_deref().unwrap())
+            .unwrap()
+            .contains(r#""payload""#));
+        assert_eq!(decode_command_complete(frames[2].1), "SELECT 1");
+    }
+
+    fn decode_frames(bytes: &[u8]) -> Vec<(u8, &[u8])> {
+        let mut pos = 0;
+        let mut frames = Vec::new();
+        while pos < bytes.len() {
+            let tag = bytes[pos];
+            let len = u32::from_be_bytes([
+                bytes[pos + 1],
+                bytes[pos + 2],
+                bytes[pos + 3],
+                bytes[pos + 4],
+            ]) as usize;
+            let body_start = pos + 5;
+            let body_end = pos + 1 + len;
+            frames.push((tag, &bytes[body_start..body_end]));
+            pos = body_end;
+        }
+        frames
+    }
+
+    fn decode_row_description(body: &[u8]) -> Vec<(String, u32)> {
+        let count = i16::from_be_bytes([body[0], body[1]]) as usize;
+        let mut pos = 2;
+        let mut columns = Vec::with_capacity(count);
+        for _ in 0..count {
+            let end = body[pos..].iter().position(|&b| b == 0).unwrap() + pos;
+            let name = std::str::from_utf8(&body[pos..end]).unwrap().to_string();
+            pos = end + 1;
+            pos += 4; // table oid
+            pos += 2; // column attr
+            let oid = u32::from_be_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]);
+            pos += 4;
+            pos += 2; // type size
+            pos += 4; // type mod
+            pos += 2; // format
+            columns.push((name, oid));
+        }
+        columns
+    }
+
+    fn decode_data_row(body: &[u8]) -> Vec<Option<Vec<u8>>> {
+        let count = i16::from_be_bytes([body[0], body[1]]) as usize;
+        let mut pos = 2;
+        let mut cells = Vec::with_capacity(count);
+        for _ in 0..count {
+            let len = i32::from_be_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]);
+            pos += 4;
+            if len < 0 {
+                cells.push(None);
+            } else {
+                let len = len as usize;
+                cells.push(Some(body[pos..pos + len].to_vec()));
+                pos += len;
+            }
+        }
+        cells
+    }
+
+    fn decode_command_complete(body: &[u8]) -> &str {
+        let nul = body.iter().position(|&b| b == 0).unwrap_or(body.len());
+        std::str::from_utf8(&body[..nul]).unwrap()
     }
 }
