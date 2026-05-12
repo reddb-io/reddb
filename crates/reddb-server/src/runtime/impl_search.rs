@@ -1150,12 +1150,14 @@ impl RedDBRuntime {
         let row_cap = ask
             .limit
             .unwrap_or(crate::runtime::ask_pipeline::DEFAULT_ROW_CAP);
-        let ask_context = crate::runtime::ask_pipeline::AskPipeline::execute_with_limit(
-            self,
-            &scope,
-            &ask.question,
-            row_cap,
-        )?;
+        let ask_context =
+            crate::runtime::ask_pipeline::AskPipeline::execute_with_limit_and_min_score(
+                self,
+                &scope,
+                &ask.question,
+                row_cap,
+                ask.min_score,
+            )?;
 
         let full_prompt = render_prompt(&ask_context, &ask.question);
         // Issue #394: sources_flat ordering mirrors the prompt render

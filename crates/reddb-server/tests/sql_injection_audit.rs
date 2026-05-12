@@ -181,6 +181,7 @@ fn ask_path_does_not_re_execute_llm_output_as_sql() {
         &ask.collection,
         &ask.depth,
         &ask.limit,
+        &ask.min_score,
         &ask.provider,
         &ask.model,
     );

@@ -207,11 +207,12 @@ fn ask_with_model_only_parses() {
 
 #[test]
 fn ask_with_depth_limit_collection_parses() {
-    let q = parse_query("ASK 'q' DEPTH 3 LIMIT 25 COLLECTION docs");
+    let q = parse_query("ASK 'q' DEPTH 3 LIMIT 25 MIN_SCORE 0.7 COLLECTION docs");
     match q {
         QueryExpr::Ask(ask) => {
             assert_eq!(ask.depth, Some(3));
             assert_eq!(ask.limit, Some(25));
+            assert_eq!(ask.min_score, Some(0.7));
             assert_eq!(ask.collection.as_deref(), Some("docs"));
             assert_eq!(ask.provider, None);
         }
@@ -226,7 +227,7 @@ fn ask_full_chain_without_using_parses() {
     // separately. Every other documented clause is exercised here.
     let q = parse_query(
         "ASK 'what happened?' MODEL 'claude-3-5-sonnet' \
-         DEPTH 2 LIMIT 50 COLLECTION events",
+         DEPTH 2 LIMIT 50 MIN_SCORE 0.7 COLLECTION events",
     );
     match q {
         QueryExpr::Ask(ask) => {
@@ -234,6 +235,7 @@ fn ask_full_chain_without_using_parses() {
             assert_eq!(ask.model.as_deref(), Some("claude-3-5-sonnet"));
             assert_eq!(ask.depth, Some(2));
             assert_eq!(ask.limit, Some(50));
+            assert_eq!(ask.min_score, Some(0.7));
             assert_eq!(ask.collection.as_deref(), Some("events"));
             assert_eq!(ask.provider, None);
         }
