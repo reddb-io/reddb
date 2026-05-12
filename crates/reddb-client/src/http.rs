@@ -148,7 +148,13 @@ impl HttpClient {
             .as_object()
             .and_then(|o| o.get("affected"))
             .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+            .unwrap_or_else(|| {
+                value
+                    .as_object()
+                    .and_then(|o| o.get("id"))
+                    .map(|_| 1)
+                    .unwrap_or(0)
+            });
         let id = value
             .as_object()
             .and_then(|o| o.get("id"))

@@ -25,7 +25,7 @@ Options (any/all):
 
 ## Acceptance criteria
 
-- [ ] Single-row INSERT (table, document, graph node, graph edge, KV, vector) returns the assigned id.
-- [ ] `RETURNING *` parses and executes for graph insert paths.
-- [ ] Drivers expose the id in their idiomatic shape (`{affected, id}` in JS, tuple in Python, etc.).
-- [ ] Tests covering id surfacing across all entity kinds.
+- [x] Single-row INSERT (table, document, graph node, graph edge, KV, vector) returns the assigned id.
+- [x] `RETURNING *` parses and executes for graph insert paths.
+- [x] Drivers expose the id in their idiomatic shape (`{affected, id}` in JS/Python/Rust).
+- [x] Tests covering id surfacing across all entity kinds.

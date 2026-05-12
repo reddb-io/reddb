@@ -156,6 +156,15 @@ pub trait RuntimeEntityPort {
         column_names: std::sync::Arc<Vec<String>>,
         rows: Vec<Vec<crate::storage::schema::Value>>,
     ) -> RedDBResult<usize>;
+    /// Columnar bulk insert that also returns assigned entity ids.
+    /// Kept separate from [`Self::create_rows_batch_columnar`] so bulk wire
+    /// callers can retain their count-only contract.
+    fn create_rows_batch_columnar_with_outputs(
+        &self,
+        collection: String,
+        column_names: std::sync::Arc<Vec<String>>,
+        rows: Vec<Vec<crate::storage::schema::Value>>,
+    ) -> RedDBResult<Vec<CreateEntityOutput>>;
     fn create_node(&self, input: CreateNodeInput) -> RedDBResult<CreateEntityOutput>;
     fn create_edge(&self, input: CreateEdgeInput) -> RedDBResult<CreateEntityOutput>;
     fn create_vector(&self, input: CreateVectorInput) -> RedDBResult<CreateEntityOutput>;

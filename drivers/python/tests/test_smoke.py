@@ -35,9 +35,11 @@ def test_insert_then_query_round_trip():
     with reddb.connect("memory://") as db:
         ins = db.insert("users", {"name": "Alice", "age": 30})
         assert ins["affected"] == 1
+        assert int(ins["id"]) > 0
 
         ins2 = db.insert("users", {"name": "Bob", "age": 25})
         assert ins2["affected"] == 1
+        assert int(ins2["id"]) > int(ins["id"])
 
         result = db.query("SELECT * FROM users")
         assert result["statement"] == "select"
