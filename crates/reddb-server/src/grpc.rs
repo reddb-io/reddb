@@ -518,6 +518,152 @@ mod grpc_query_value_tests {
     }
 }
 
+#[cfg(test)]
+mod grpc_ask_query_reply_tests {
+    use super::*;
+    use crate::storage::query::modes::QueryMode;
+    use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
+    use crate::storage::schema::Value as SchemaValue;
+
+    fn ask_runtime_result() -> RuntimeQueryResult {
+        let mut result = UnifiedResult::with_columns(vec![
+            "answer".into(),
+            "provider".into(),
+            "model".into(),
+            "mode".into(),
+            "retry_count".into(),
+            "prompt_tokens".into(),
+            "completion_tokens".into(),
+            "sources_flat".into(),
+            "citations".into(),
+            "validation".into(),
+        ]);
+        let mut record = UnifiedRecord::new();
+        record.set("answer", SchemaValue::text("Deploy failed [^1]."));
+        record.set("provider", SchemaValue::text("openai"));
+        record.set("model", SchemaValue::text("gpt-4o-mini"));
+        record.set("mode", SchemaValue::text("strict"));
+        record.set("retry_count", SchemaValue::Integer(0));
+        record.set("prompt_tokens", SchemaValue::Integer(11));
+        record.set("completion_tokens", SchemaValue::Integer(7));
+        record.set(
+            "sources_flat",
+            SchemaValue::Json(
+                br#"[{"urn":"urn:reddb:row:deployments:1","kind":"row","collection":"deployments","id":"1"}]"#.to_vec(),
+            ),
+        );
+        record.set(
+            "citations",
+            SchemaValue::Json(br#"[{"marker":1,"urn":"urn:reddb:row:deployments:1"}]"#.to_vec()),
+        );
+        record.set(
+            "validation",
+            SchemaValue::Json(br#"{"ok":true,"warnings":[],"errors":[]}"#.to_vec()),
+        );
+        result.push(record);
+
+        RuntimeQueryResult {
+            query: "ASK 'why did deploy fail?'".to_string(),
+            mode: QueryMode::Sql,
+            statement: "ask",
+            engine: "runtime-ai",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+        }
+    }
+
+    #[test]
+    fn query_reply_ask_result_json_uses_full_canonical_schema() {
+        let reply = query_reply(ask_runtime_result(), &None, &None);
+        let json: crate::json::Value =
+            crate::json::from_str(&reply.result_json).expect("valid ask json");
+
+        assert_eq!(
+            json.get("answer").and_then(crate::json::Value::as_str),
+            Some("Deploy failed [^1].")
+        );
+        assert_eq!(
+            json.get("cache_hit").and_then(crate::json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            json.get("cost_usd").and_then(crate::json::Value::as_f64),
+            Some(0.0)
+        );
+        assert_eq!(
+            json.get("mode").and_then(crate::json::Value::as_str),
+            Some("strict")
+        );
+        assert_eq!(
+            json.get("retry_count").and_then(crate::json::Value::as_u64),
+            Some(0)
+        );
+        assert!(
+            json.get("records").is_none(),
+            "ASK must not be row-wrapped: {}",
+            reply.result_json
+        );
+        assert!(
+            json.get("sources_flat")
+                .and_then(crate::json::Value::as_array)
+                .is_some_and(|sources| sources.len() == 1
+                    && sources[0]
+                        .get("payload")
+                        .and_then(crate::json::Value::as_str)
+                        .is_some()),
+            "sources_flat must be parsed with payload fallback: {}",
+            reply.result_json
+        );
+        assert!(
+            json.get("citations")
+                .and_then(crate::json::Value::as_array)
+                .is_some_and(|citations| citations.len() == 1),
+            "citations must be parsed: {}",
+            reply.result_json
+        );
+        assert_eq!(
+            json.get("validation")
+                .and_then(|v| v.get("ok"))
+                .and_then(crate::json::Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn query_reply_non_ask_answer_column_keeps_row_shape() {
+        let mut result = UnifiedResult::with_columns(vec!["answer".into()]);
+        let mut record = UnifiedRecord::new();
+        record.set("answer", SchemaValue::text("plain select"));
+        result.push(record);
+
+        let reply = query_reply(
+            RuntimeQueryResult {
+                query: "SELECT 'plain select' AS answer".to_string(),
+                mode: QueryMode::Sql,
+                statement: "select",
+                engine: "runtime-sql",
+                result,
+                affected_rows: 0,
+                statement_type: "select",
+            },
+            &None,
+            &None,
+        );
+        let json: crate::json::Value =
+            crate::json::from_str(&reply.result_json).expect("valid query json");
+
+        assert!(
+            json.get("records").is_some(),
+            "non-ASK must stay row-wrapped"
+        );
+        assert!(
+            json.get("answer").is_none(),
+            "non-ASK must not use ASK envelope"
+        );
+    }
+}
+
 /// Emit a single info-level event with the SHA-256 fingerprint of the
 /// active gRPC server cert + an mTLS flag. Never logs PEM bytes.
 fn log_grpc_tls_identity(tls: &GrpcTlsOptions) {
