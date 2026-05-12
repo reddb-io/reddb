@@ -2612,6 +2612,48 @@ fn test_parse_graph_traverse() {
 }
 
 #[test]
+fn test_parse_graph_traverse_docs_form() {
+    // Pin the docs syntax: `GRAPH TRAVERSE FROM '...' STRATEGY ... DIRECTION ... MAX_DEPTH n`
+    // (see docs/query/graph-commands.md). Regression for #417.
+    let query =
+        parse("GRAPH TRAVERSE FROM 'alice' STRATEGY bfs DIRECTION outgoing MAX_DEPTH 3").unwrap();
+    if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Traverse {
+        source,
+        strategy,
+        depth,
+        direction,
+    }) = query
+    {
+        assert_eq!(source, "alice");
+        assert_eq!(strategy, "bfs");
+        assert_eq!(depth, 3);
+        assert!(direction.eq_ignore_ascii_case("outgoing"));
+    } else {
+        panic!("Expected GraphCommand::Traverse");
+    }
+}
+
+#[test]
+fn test_parse_graph_shortest_path_docs_form() {
+    // Pin `GRAPH SHORTEST_PATH FROM '...' TO '...' ALGORITHM ...` (docs). Regression for #417.
+    let query =
+        parse("GRAPH SHORTEST_PATH FROM 'alice' TO 'charlie' ALGORITHM dijkstra").unwrap();
+    if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::ShortestPath {
+        source,
+        target,
+        algorithm,
+        ..
+    }) = query
+    {
+        assert_eq!(source, "alice");
+        assert_eq!(target, "charlie");
+        assert_eq!(algorithm, "dijkstra");
+    } else {
+        panic!("Expected GraphCommand::ShortestPath");
+    }
+}
+
+#[test]
 fn test_parse_graph_centrality() {
     let query = parse("GRAPH CENTRALITY ALGORITHM pagerank").unwrap();
     if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Centrality {

@@ -63,9 +63,10 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parse: GRAPH SHORTEST_PATH 'source' TO 'target' [ALGORITHM bfs|dijkstra] [DIRECTION dir]
+    /// Parse: GRAPH SHORTEST_PATH [FROM] 'source' TO 'target' [ALGORITHM bfs|dijkstra] [DIRECTION dir]
     fn parse_graph_shortest_path(&mut self) -> Result<QueryExpr, ParseError> {
         self.advance()?; // consume SHORTEST_PATH
+        let _ = self.consume(&Token::From)?; // optional FROM (docs syntax)
         let source = self.parse_string()?;
         self.expect(Token::To)?;
         let target = self.parse_string()?;
@@ -87,25 +88,25 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parse: GRAPH TRAVERSE 'source' [STRATEGY bfs|dfs] [DEPTH n] [DIRECTION dir]
+    /// Parse: GRAPH TRAVERSE [FROM] 'source' [STRATEGY bfs|dfs] [DEPTH n | MAX_DEPTH n] [DIRECTION dir]
     fn parse_graph_traverse(&mut self) -> Result<QueryExpr, ParseError> {
         self.advance()?; // consume TRAVERSE
+        let _ = self.consume(&Token::From)?; // optional FROM (docs syntax)
         let source = self.parse_string()?;
-        let strategy = if self.consume(&Token::Strategy)? {
-            self.expect_ident_or_keyword()?
-        } else {
-            "bfs".to_string()
-        };
-        let depth = if self.consume(&Token::Depth)? {
-            self.parse_integer()? as u32
-        } else {
-            5
-        };
-        let direction = if self.consume(&Token::Direction)? {
-            self.expect_ident_or_keyword()?
-        } else {
-            "outgoing".to_string()
-        };
+        let mut strategy = "bfs".to_string();
+        let mut depth: u32 = 5;
+        let mut direction = "outgoing".to_string();
+        loop {
+            if self.consume(&Token::Strategy)? {
+                strategy = self.expect_ident_or_keyword()?;
+            } else if self.consume(&Token::Depth)? || self.consume_ident_ci("MAX_DEPTH")? {
+                depth = self.parse_integer()? as u32;
+            } else if self.consume(&Token::Direction)? {
+                direction = self.expect_ident_or_keyword()?;
+            } else {
+                break;
+            }
+        }
         Ok(QueryExpr::GraphCommand(GraphCommand::Traverse {
             source,
             strategy,
