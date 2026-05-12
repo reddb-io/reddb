@@ -1,0 +1,47 @@
+name: Install protoc
+description: |
+  Downloads protoc from the official protobuf release page and puts it on PATH.
+  Inline replacement for `arduino/setup-protoc@v3` so we don't drag in a
+  Node 20-based action that GitHub is forcing to Node 24 in June 2026.
+  Same protoc version as the Docker builds.
+inputs:
+  version:
+    description: protoc release version (without the leading `v`)
+    required: false
+    default: '28.3'
+runs:
+  using: composite
+  steps:
+    - name: Download protoc
+      shell: bash
+      env:
+        PROTOC_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        case "${RUNNER_OS}" in
+          Linux)
+            case "${RUNNER_ARCH}" in
+              X64)   ASSET="protoc-${PROTOC_VERSION}-linux-x86_64.zip" ;;
+              ARM64) ASSET="protoc-${PROTOC_VERSION}-linux-aarch_64.zip" ;;
+              *) echo "unsupported RUNNER_ARCH=${RUNNER_ARCH} on Linux" >&2; exit 1 ;;
+            esac
+            ;;
+          macOS)
+            ASSET="protoc-${PROTOC_VERSION}-osx-universal_binary.zip"
+            ;;
+          Windows)
+            ASSET="protoc-${PROTOC_VERSION}-win64.zip"
+            ;;
+          *)
+            echo "unsupported RUNNER_OS=${RUNNER_OS}" >&2
+            exit 1
+            ;;
+        esac
+        DEST="${RUNNER_TEMP}/protoc"
+        mkdir -p "${DEST}"
+        URL="https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${ASSET}"
+        echo "downloading ${URL}"
+        curl -fsSL "${URL}" -o "${DEST}/protoc.zip"
+        unzip -o "${DEST}/protoc.zip" -d "${DEST}" >/dev/null
+        echo "${DEST}/bin" >> "${GITHUB_PATH}"
+        "${DEST}/bin/protoc" --version

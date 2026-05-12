@@ -112,10 +112,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.91.0
         with:
           components: rustfmt, clippy
-      - uses: arduino/setup-protoc@v3
+      - uses: ./.github/actions/install-protoc
         with:
-          version: '28.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          version: '28.3'
       - uses: rui314/setup-mold@v1
       - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
@@ -155,10 +154,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.91.0
-      - uses: arduino/setup-protoc@v3
+      - uses: ./.github/actions/install-protoc
         with:
-          version: '28.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          version: '28.3'
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ubuntu-features-rust-1.91.0-${{ matrix.features.label }}
@@ -177,10 +175,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.91.0
-      - uses: arduino/setup-protoc@v3
+      - uses: ./.github/actions/install-protoc
         with:
-          version: '28.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          version: '28.3'
       - uses: rui314/setup-mold@v1
       - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
@@ -219,10 +216,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.91.0
-      - uses: arduino/setup-protoc@v3
+      - uses: ./.github/actions/install-protoc
         with:
-          version: '28.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          version: '28.3'
       - uses: rui314/setup-mold@v1
       - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
@@ -289,10 +285,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.91.0
-      - uses: arduino/setup-protoc@v3
+      - uses: ./.github/actions/install-protoc
         with:
-          version: '28.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          version: '28.3'
       - uses: rui314/setup-mold@v1
       - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
@@ -335,10 +330,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.91.0
-      - uses: arduino/setup-protoc@v3
+      - uses: ./.github/actions/install-protoc
         with:
-          version: '28.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          version: '28.3'
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ubuntu-rust-1.91.0
@@ -361,10 +355,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.91.0
-      - uses: arduino/setup-protoc@v3
+      - uses: ./.github/actions/install-protoc
         with:
-          version: '28.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          version: '28.3'
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: windows-rust-1.91.0
@@ -386,10 +379,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.91.0
-      - uses: arduino/setup-protoc@v3
+      - uses: ./.github/actions/install-protoc
         with:
-          version: '28.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          version: '28.3'
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: macos-rust-1.91.0
@@ -413,10 +405,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
-      - uses: arduino/setup-protoc@v3
+      - uses: ./.github/actions/install-protoc
         with:
-          version: '28.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          version: '28.3'
       - uses: rui314/setup-mold@v1
       - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
@@ -461,10 +452,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.91.0
-      - uses: arduino/setup-protoc@v3
+      - uses: ./.github/actions/install-protoc
         with:
-          version: '28.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          version: '28.3'
       - uses: Swatinem/rust-cache@v2
       - name: cargo package --workspace
         run: cargo package --workspace --allow-dirty --no-verify

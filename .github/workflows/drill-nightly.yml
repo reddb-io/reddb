@@ -24,10 +24,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.91.0
-      - uses: arduino/setup-protoc@v3
+      - uses: ./.github/actions/install-protoc
         with:
-          version: '28.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          version: '28.3'
       - uses: rui314/setup-mold@v1
       - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2

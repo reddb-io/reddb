@@ -45,10 +45,9 @@ jobs:
         with:
           components: llvm-tools-preview
 
-      - uses: arduino/setup-protoc@v3
+      - uses: ./.github/actions/install-protoc
         with:
-          version: '28.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          version: '28.3'
 
       - uses: rui314/setup-mold@v1
       - uses: mozilla-actions/sccache-action@v0.0.10
