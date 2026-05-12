@@ -3,6 +3,17 @@
 The `SELECT` statement retrieves records from a collection with optional filtering, sorting,
 grouping, and pagination.
 
+Prefer positional parameters for runtime values:
+
+```ts
+const sql = "SELECT name, email FROM users WHERE age > $1 AND active = $2 ORDER BY name LIMIT $3";
+const params = [21, true, 10];
+const rows = await db.query(sql, params);
+```
+
+The parameterized-query design is tracked in
+[ADR #352](https://github.com/reddb-io/reddb/issues/352).
+
 ## Syntax
 
 ```sql
@@ -43,19 +54,19 @@ FROM wallets
 ### With Filters
 
 ```sql
-SELECT * FROM users WHERE age > 21 AND active = true
+SELECT * FROM users WHERE age > $1 AND active = $2
 ```
 
 ### Ordered Results
 
 ```sql
-SELECT * FROM users ORDER BY created_at DESC LIMIT 20
+SELECT * FROM users ORDER BY created_at DESC LIMIT $1
 ```
 
 ### With Pagination
 
 ```sql
-SELECT * FROM hosts ORDER BY ip ASC LIMIT 50 OFFSET 100
+SELECT * FROM hosts ORDER BY ip ASC LIMIT $1 OFFSET $2
 ```
 
 ## Filter Operators
@@ -128,14 +139,14 @@ Every query returns a standard envelope:
 ```bash
 curl -X POST http://127.0.0.1:8080/query \
   -H 'content-type: application/json' \
-  -d '{"query": "SELECT name, email FROM users WHERE age > 21 ORDER BY name LIMIT 10"}'
+  -d '{"query": "SELECT name, email FROM users WHERE age > $1 ORDER BY name LIMIT $2", "params": [21, 10]}'
 ```
 
 ## Executing via gRPC
 
 ```bash
 grpcurl -plaintext \
-  -d '{"query": "SELECT * FROM users WHERE active = true"}' \
+  -d '{"query": "SELECT * FROM users WHERE active = $1", "params": [{"boolValue": true}]}' \
   127.0.0.1:50051 reddb.v1.RedDb/Query
 ```
 
@@ -172,7 +183,7 @@ SELECT time_bucket(5m) AS bucket,
        avg(value) AS avg_value,
        count(*) AS samples
 FROM cpu_metrics
-WHERE metric = 'cpu.idle'
+WHERE metric = $1
 GROUP BY time_bucket(5m)
 ORDER BY bucket ASC
 ```
@@ -190,7 +201,7 @@ an explicit column, use `time_bucket(5m, timestamp_ns)`.
 Perform a BFS traversal from every entity returned by the query. `DEPTH` controls how many hops to follow.
 
 ```sql
-SELECT * FROM customers WHERE passport = 'AB1234567' WITH EXPAND GRAPH DEPTH 2
+SELECT * FROM customers WHERE passport = $1 WITH EXPAND GRAPH DEPTH 2
 ```
 
 ### Expand via Cross-References
@@ -198,7 +209,7 @@ SELECT * FROM customers WHERE passport = 'AB1234567' WITH EXPAND GRAPH DEPTH 2
 Include entities that share cross-referenced identifiers with the matched rows.
 
 ```sql
-SELECT * FROM ANY WHERE name = 'Alice' WITH EXPAND CROSS_REFS
+SELECT * FROM ANY WHERE name = $1 WITH EXPAND CROSS_REFS
 ```
 
 ### Expand All (Graph + Cross-Refs)
@@ -224,7 +235,7 @@ Get the execution plan without running the query:
 
 ```bash
 grpcurl -plaintext \
-  -d '{"query": "SELECT * FROM users WHERE age > 21"}' \
+  -d '{"query": "SELECT * FROM users WHERE age > $1", "params": [{"intValue": 21}]}' \
   127.0.0.1:50051 reddb.v1.RedDb/ExplainQuery
 ```
 
