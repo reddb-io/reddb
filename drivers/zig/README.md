@@ -59,8 +59,51 @@ pub fn main() !void {
     const result = try conn.query("SELECT 1");
     defer a.free(result);
     std.debug.print("server said: {s}\n", .{result});
+
+    const params = [_]reddb.redwire.Value{
+        .{ .int = 42 },
+        .{ .text = "Ada" },
+        .{ .@"null" = {} },
+    };
+    const rows = try conn.queryWithParams(
+        "SELECT * FROM users WHERE id = $1 AND name = $2 OR note IS $3",
+        &params,
+    );
+    defer a.free(rows);
+
+    const embedding = [_]f32{ 0.12, 0.34, 0.56 };
+    const vector_params = [_]reddb.redwire.Value{.{ .vector = &embedding }};
+    const hits = try conn.queryWithParams(
+        "SEARCH SIMILAR $1 COLLECTION docs LIMIT 3",
+        &vector_params,
+    );
+    defer a.free(hits);
 }
 ```
+
+`query(sql)` is unchanged and always uses the legacy RedWire `Query` frame.
+`queryWithParams(sql, params)` binds positional `$N` placeholders. Empty param
+slices delegate to `query(sql)`; non-empty slices require the server to
+advertise `FEATURE_PARAMS` during the RedWire handshake or the driver returns
+`error.ParamsUnsupported`.
+
+Native value mapping:
+
+| Zig value                                | Engine value |
+|------------------------------------------|--------------|
+| `.{ .int = i64 }`                        | int          |
+| `.{ .float = f64 }`                      | float        |
+| `.{ .@"bool" = bool }`                   | bool         |
+| `.{ .@"null" = {} }`                     | null         |
+| `.{ .text = []const u8 }`                | text         |
+| `.{ .bytes = []const u8 }`               | bytes        |
+| `.{ .vector = []const f32 }`             | vector       |
+| `.{ .json = []const u8 }`                | json         |
+| `.{ .timestamp = i64 }`                  | timestamp seconds |
+| `.{ .uuid = [16]u8 }` / `uuidFromString` | uuid         |
+
+Parameter slices and nested text/bytes/vector/json slices are borrowed for the
+duration of the call. The driver does not retain them.
 
 ## URI scheme
 
