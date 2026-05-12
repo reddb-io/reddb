@@ -30,3 +30,77 @@ The JSON-RPC `query` method already routes `ASK` SQL today — this slice ensure
 ## Blocked by
 
 - #393
+
+## Progress
+
+Slice 1: `AskResponseEnvelope` deep module landed at
+`crates/reddb-server/src/runtime/ai/ask_response_envelope.rs` with 19
+unit tests. Pure — no I/O, no transport, no clock. Pins the canonical
+non-streaming ASK JSON shape that the embedded stdio JSON-RPC `query`
+method returns, and that gRPC (#407), PG-wire (#408), and MCP non-
+stream (#409) embed verbatim. Mirrors the slice-1 pattern of #395,
+#396, #398, #400, #401, #402, #403, #405, #409, #411.
+
+Exposes:
+
+- `SourceRow { urn, payload }`, `Citation { marker, urn }`,
+  `ValidationWarning { kind, detail }`, `ValidationError { kind, detail }`,
+  `Validation { ok, warnings, errors }`.
+- `Mode::{Strict, Lenient}` — *effective* mode after #396 fallback.
+- `AskResult { answer, sources_flat, citations, validation, cache_hit,
+  provider, model, prompt_tokens, completion_tokens, cost_usd,
+  effective_mode, retry_count }`.
+- `build(&AskResult) -> Value` — BTreeMap-backed JSON, keys
+  alphabetised.
+
+Output shape pinned by tests:
+
+- top-level keys: `answer, cache_hit, citations, completion_tokens,
+  cost_usd, mode, model, prompt_tokens, provider, retry_count,
+  sources_flat, validation` (one test asserts the exact key set so a
+  future field can't silently rename one);
+- `citations` sorted by `marker` ascending; tie on marker is
+  stable-sorted (pinned because `sort_by_key` is stable; an unstable
+  sort would non-determinise the response and break #400);
+- `sources_flat` preserves caller-provided order verbatim — post-RRF
+  rank order is the contract since `[^N]` indexes into the array;
+- `validation = {errors, ok, warnings}` matches the shape audit row
+  (#402) and SSE terminal frame (#405) already pin, so HTTP clients
+  share parsing code across the streaming and non-streaming paths;
+- `mode` serialises as `"strict"` / `"lenient"` — the *effective*
+  mode after provider-capability fallback (#396), mirrors the audit
+  row #402 so what the caller sees matches what was stored;
+- `prompt_tokens` / `completion_tokens` / `cost_usd` are flat at the
+  top level (no `usage` nesting) — matches the audit row and SSE
+  audit frame so transports don't need a re-shape step;
+- empty `sources_flat` / `citations` serialise as `[]` not `null`
+  (a `STRICT OFF` refusal can legitimately produce no citations; a
+  missing key would break downstream `.length` access);
+- `seed` and `temperature` are NOT in the response — recorded in the
+  audit row only (leaking the seed would let a hostile caller replay
+  deterministic answers, breaking the determinism privacy boundary);
+- byte-stable across calls and across `clone()` inputs.
+
+Deferred to follow-up slices (each independently shippable):
+
+- Adapter in `execute_ask` that produces `AskResult` from the
+  internal answer + retrieval state, then calls `build()` and stamps
+  the bytes into the JSON-RPC `result` field. Hook lives in
+  `rpc_stdio.rs` next to the existing `query` method dispatch.
+- gRPC (#407) and PG-wire (#408) embed the same envelope — gRPC as
+  a proto `google.protobuf.Struct` (or per-field mirror), PG-wire as
+  jsonb columns of a single-row result.
+- JS SDK round-trip test against embedded engine — depends on the
+  adapter slice above plus the stubbable LLM transport refactor
+  already deferred by #395/#396.
+- JSON-RPC notification framing for `STREAM` — separate slice
+  (likely a thin wrapper around the SSE frame encoder #405 so the
+  on-wire JSON payloads match across transports).
+
+Deep module is the load-bearing piece; remaining slices are wiring
+and can land independently. Issue stays open with this progress note.
+
+Verification (this slice):
+- `cargo check -p reddb-io-server` clean.
+- `cargo test -p reddb-io-server --lib runtime::ai::ask_response_envelope`
+  → 19 passed.
