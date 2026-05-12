@@ -219,6 +219,18 @@ impl UnifiedStore {
             .collect()
     }
 
+    /// Look up entity IDs for a graph node label scoped to a single collection.
+    pub fn lookup_graph_nodes_by_label_in(
+        &self,
+        collection: &str,
+        label: &str,
+    ) -> Vec<EntityId> {
+        let idx = self.graph_label_index.read();
+        idx.get(&(collection.to_string(), label.to_string()))
+            .cloned()
+            .unwrap_or_default()
+    }
+
     pub fn create_collection(&self, name: impl Into<String>) -> Result<(), StoreError> {
         let name = name.into();
         let mut collections = self.collections.write();
