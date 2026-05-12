@@ -39,6 +39,9 @@ const (
 	CodeNotFound ErrorCode = "NOT_FOUND"
 	// CodeClosed — operation attempted on a closed connection.
 	CodeClosed ErrorCode = "CLOSED"
+	// CodeParamsUnsupported — a parameterized query was issued but the server
+	// did not advertise FEATURE_PARAMS (mirrors JS `PARAMS_UNSUPPORTED`).
+	CodeParamsUnsupported ErrorCode = "PARAMS_UNSUPPORTED"
 )
 
 // Error is the typed error returned across the driver surface.

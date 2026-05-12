@@ -21,6 +21,52 @@ if err := c.Insert(ctx, "users", row); err != nil { ... }
 body, err := c.Query(ctx, "SELECT name FROM users")
 ```
 
+## Parameterized queries
+
+`Query` is variadic: pass `$N` bind values after the SQL string. Native Go
+types map to the engine's `Value` variants via the wire codec from #357.
+With no params the call keeps emitting the legacy `Query` frame byte-for-byte
+— the parameterized path only kicks in when at least one param is supplied.
+
+```go
+// int + text + null
+body, err := c.Query(ctx,
+  "SELECT * FROM users WHERE age > $1 AND name = $2 AND nick IS $3",
+  int64(18), "alice", nil)
+
+// vector similarity ([]float32 → Vector)
+embedding := []float32{0.12, -0.45, 0.88 /* … 1536 dims */}
+hits, err := c.Query(ctx,
+  "SELECT id FROM docs SEARCH SIMILAR embedding TO $1 LIMIT 10",
+  embedding)
+
+// bytes + timestamp + uuid
+u, _ := redwire.UUIDFromString("550e8400-e29b-41d4-a716-446655440000")
+_, err = c.Query(ctx,
+  "INSERT INTO blobs (id, body, at) VALUES ($1, $2, $3)",
+  u, []byte{0xde, 0xad}, time.Now())
+```
+
+Native Go type mapping:
+
+| Go type                              | Wire `Value`            |
+| ------------------------------------ | ----------------------- |
+| `nil`                                | `Null`                  |
+| `bool`                               | `Bool`                  |
+| `int`, `int8`..`int64`, `uint8`..`uint32`, in-range `uint`/`uint64` | `Int` (i64) |
+| `float32`, `float64`                 | `Float` (f64)           |
+| `string`                             | `Text` (utf-8)          |
+| `[]byte`                             | `Bytes`                 |
+| `[]float32`, `[]float64`             | `Vector` (f32 on-wire)  |
+| `map[string]any`, `[]any`, `json.RawMessage` | `Json` (canonical) |
+| `time.Time`                          | `Timestamp` (unix secs) |
+| `redwire.UUID`                       | `Uuid`                  |
+| `*T` (any of the above)              | recurses, nil → `Null`  |
+
+If the server didn't advertise `FEATURE_PARAMS` during the handshake the
+driver returns `reddb.CodeParamsUnsupported` rather than silently sending
+raw `$N` literals.
+
 ## Connection strings
 
 | URI                                  | Transport                                    |

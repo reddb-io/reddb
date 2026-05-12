@@ -130,6 +130,17 @@ func Dial(ctx context.Context, opts ConnOptions) (*Conn, error) {
 	return c, nil
 }
 
+// Features returns the raw feature bitmask advertised by the server during
+// the handshake (HelloAck/AuthOk `features` field).
+func (c *Conn) Features() uint32 { return c.features }
+
+// SupportsParams reports whether the server advertised FeatureParams (the
+// `QueryWithParams` frame from #357). Clients gate parameterized queries on
+// this before emitting frame kind 0x28.
+func (c *Conn) SupportsParams() bool {
+	return c.features&FeatureParams == FeatureParams
+}
+
 // SessionID returns the session id the server assigned during AuthOk.
 func (c *Conn) SessionID() string { return c.sessionID }
 
@@ -247,6 +258,9 @@ func (c *Conn) handshake(opts ConnOptions) error {
 	if err != nil {
 		return err
 	}
+	// HelloAck.features is the authoritative server bitmask for older builds
+	// that don't repeat it in AuthOk; AuthOk wins when present (applied below).
+	c.features = parseFeatures(ack.Payload)
 
 	// 4. AuthResponse for the chosen method.
 	switch chosen {
@@ -462,6 +476,17 @@ func authMethodsForCreds(m AuthMethod) []string {
 	}
 }
 
+func parseFeatures(payload []byte) uint32 {
+	var obj map[string]any
+	if err := json.Unmarshal(payload, &obj); err != nil {
+		return 0
+	}
+	if f, ok := obj["features"].(float64); ok {
+		return uint32(f)
+	}
+	return 0
+}
+
 func parseChosenAuth(payload []byte) (string, error) {
 	var obj map[string]any
 	if err := json.Unmarshal(payload, &obj); err != nil {
@@ -488,8 +513,11 @@ func parseReason(payload []byte) string {
 
 // --- Operations ------------------------------------------------------
 
-// Query sends a SQL string and returns the raw Result.payload bytes.
-func (c *Conn) Query(ctx context.Context, sql string) ([]byte, error) {
+// Query sends a SQL string and returns the raw Result.payload bytes. When
+// `params` is non-empty the call routes through the binary `QueryWithParams`
+// frame (0x28) and requires the server to have advertised FeatureParams; an
+// older server triggers ErrParamsUnsupported.
+func (c *Conn) Query(ctx context.Context, sql string, params ...any) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed.Load() {
@@ -497,7 +525,21 @@ func (c *Conn) Query(ctx context.Context, sql string) ([]byte, error) {
 	}
 	cleanup := c.applyDeadline(ctx)
 	defer cleanup()
-	if err := c.writeFrame(NewFrame(KindQuery, c.nextCorr(), []byte(sql))); err != nil {
+
+	var frame *Frame
+	if len(params) == 0 {
+		frame = NewFrame(KindQuery, c.nextCorr(), []byte(sql))
+	} else {
+		if !c.SupportsParams() {
+			return nil, ErrParamsUnsupported
+		}
+		payload, err := EncodeQueryWithParams(sql, params)
+		if err != nil {
+			return nil, err
+		}
+		frame = NewFrame(KindQueryWithParams, c.nextCorr(), payload)
+	}
+	if err := c.writeFrame(frame); err != nil {
 		return nil, err
 	}
 	resp, err := c.readFrame()
@@ -512,6 +554,14 @@ func (c *Conn) Query(ctx context.Context, sql string) ([]byte, error) {
 	}
 	return nil, fmt.Errorf("redwire: query: unexpected kind 0x%02x", resp.Kind)
 }
+
+// ErrParamsUnsupported is returned when a parameterized Query is issued
+// against a server that did not advertise FeatureParams during the handshake.
+// Mirrors the JS `PARAMS_UNSUPPORTED` error code.
+var ErrParamsUnsupported = errors.New(
+	"redwire: server did not advertise FEATURE_PARAMS — upgrade the server " +
+		"to one that supports parameterized queries",
+)
 
 // Insert delivers a single row into the named collection.
 func (c *Conn) Insert(ctx context.Context, collection string, payload any) error {

@@ -126,8 +126,26 @@ func (c *Client) Health(ctx context.Context) (any, error) {
 
 // Query sends a SQL string. Returns the parsed envelope (`{records: [...]}` or
 // the engine's wrapper).
-func (c *Client) Query(ctx context.Context, sql string) (any, error) {
-	body, _ := json.Marshal(map[string]any{"query": sql})
+//
+// When `params` is non-empty the request body grows a typed `params` array
+// per ADR 0011 — positional `$N` bind values. Type mapping mirrors
+// `redwire.EncodeValue`'s native-Go table (see `paramToJSON` for the JSON
+// envelopes used for non-JSON-native types: `{"$bytes":…}`, `{"$ts":…}`,
+// `{"$uuid":…}`).
+func (c *Client) Query(ctx context.Context, sql string, params ...any) (any, error) {
+	req := map[string]any{"query": sql}
+	if len(params) > 0 {
+		converted := make([]any, len(params))
+		for i, p := range params {
+			v, err := paramToJSON(p)
+			if err != nil {
+				return nil, fmt.Errorf("httpx: param[%d]: %w", i, err)
+			}
+			converted[i] = v
+		}
+		req["params"] = converted
+	}
+	body, _ := json.Marshal(req)
 	resp, err := c.do(ctx, http.MethodPost, "/query", body)
 	if err != nil {
 		return nil, err
