@@ -362,6 +362,14 @@ mod tests {
     use super::*;
     use crate::api::RedDBOptions;
     use crate::runtime::RedDBRuntime;
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread::{self, JoinHandle};
+    use std::time::Duration;
+
+    static ASK_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn make_server() -> RedDBServer {
         let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
@@ -456,5 +464,172 @@ mod tests {
             text.contains("max_prompt_tokens"),
             "missing limit name: {text}"
         );
+    }
+
+    #[test]
+    fn http_query_ask_provider_timeout_guard_returns_504_with_limit_name() {
+        let _guard = ASK_ENV_LOCK.lock().expect("env lock");
+        let stub = SlowOpenAiStub::start(Duration::from_millis(25));
+        let _api_base =
+            EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
+        let _api_key = EnvVarGuard::unset("REDDB_OPENAI_API_KEY");
+
+        let server = make_server();
+        server
+            .runtime
+            .execute_query("SET CONFIG ask.timeout_ms = 1")
+            .expect("set timeout guard");
+        server
+            .runtime
+            .execute_query("SET CONFIG runtime.ai.transport_retry_max_attempts = 1")
+            .expect("disable retries");
+        server
+            .runtime
+            .execute_query("SET CONFIG red.config.ai.openai.default.key = 'sk-test'")
+            .expect("set api key");
+
+        let r = server.handle_query(br#"{"query": "ASK 'why did login fail?'"}"#.to_vec());
+
+        assert_eq!(r.status, 504, "{}", body_str(&r));
+        let text = body_str(&r);
+        assert!(text.contains("timeout_ms"), "missing limit name: {text}");
+    }
+
+    #[test]
+    fn http_query_ask_completion_token_guard_returns_413_with_limit_name() {
+        let _guard = ASK_ENV_LOCK.lock().expect("env lock");
+        let stub = SlowOpenAiStub::start_with_completion(Duration::ZERO, 3);
+        let _api_base =
+            EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
+        let _api_key = EnvVarGuard::unset("REDDB_OPENAI_API_KEY");
+
+        let server = make_server();
+        server
+            .runtime
+            .execute_query("SET CONFIG ask.max_completion_tokens = 1")
+            .expect("set completion guard");
+        server
+            .runtime
+            .execute_query("SET CONFIG runtime.ai.transport_retry_max_attempts = 1")
+            .expect("disable retries");
+        server
+            .runtime
+            .execute_query("SET CONFIG red.config.ai.openai.default.key = 'sk-test'")
+            .expect("set api key");
+
+        let r = server.handle_query(br#"{"query": "ASK 'why did login fail?'"}"#.to_vec());
+
+        assert_eq!(r.status, 413, "{}", body_str(&r));
+        let text = body_str(&r);
+        assert!(
+            text.contains("max_completion_tokens"),
+            "missing limit name: {text}"
+        );
+    }
+
+    struct EnvVarGuard {
+        name: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var(name).ok();
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+
+        fn unset(name: &'static str) -> Self {
+            let previous = std::env::var(name).ok();
+            std::env::remove_var(name);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                std::env::set_var(self.name, value);
+            } else {
+                std::env::remove_var(self.name);
+            }
+        }
+    }
+
+    struct SlowOpenAiStub {
+        addr: SocketAddr,
+        shutdown: Arc<AtomicBool>,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl SlowOpenAiStub {
+        fn start(delay: Duration) -> Self {
+            Self::start_with_completion(delay, 3)
+        }
+
+        fn start_with_completion(delay: Duration, completion_tokens: u64) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("stub bind");
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            let addr = listener.local_addr().expect("local addr");
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let server_shutdown = Arc::clone(&shutdown);
+            let handle = thread::spawn(move || {
+                while !server_shutdown.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            read_stub_request(&mut stream);
+                            thread::sleep(delay);
+                            write_openai_response(&mut stream, completion_tokens);
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            Self {
+                addr,
+                shutdown,
+                handle: Some(handle),
+            }
+        }
+
+        fn addr(&self) -> SocketAddr {
+            self.addr
+        }
+    }
+
+    impl Drop for SlowOpenAiStub {
+        fn drop(&mut self) {
+            self.shutdown.store(true, Ordering::Relaxed);
+            let _ = TcpStream::connect(self.addr);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn read_stub_request(stream: &mut TcpStream) {
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+        let mut buffer = [0_u8; 1024];
+        let _ = stream.read(&mut buffer);
+    }
+
+    fn write_openai_response(stream: &mut TcpStream, completion_tokens: u64) {
+        let total_tokens = 12 + completion_tokens;
+        let body = format!(
+            r#"{{"model":"test-model","choices":[{{"message":{{"content":"login failed [^1]"}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":12,"completion_tokens":{completion_tokens},"total_tokens":{total_tokens}}}}}"#
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write stub response");
     }
 }
