@@ -398,6 +398,35 @@ The response contains:
 | `prompt_tokens` | Tokens consumed by the context + question |
 | `completion_tokens` | Tokens in the generated answer |
 
+### Inline citations (`[^N]`)
+
+Since RedDB 0.x (issue #393), every ASK answer is grounded with inline `[^N]` citation markers and the SQL ASK result carries two new columns:
+
+| Column | Description |
+|:-------|:------------|
+| `citations` | JSON array of `{ marker, span: [start, end], source_index }` parsed out of the `answer` string. `marker` is 1-indexed (as it appears in the text); `source_index = marker - 1` for indexing into the flat sources list. `span` is the byte range of the literal `[^N]` substring inside `answer`. |
+| `validation` | JSON object `{ ok, warnings: [...] }`. `ok` is true when every cited marker resolves to a real source. Warnings have `kind = "malformed" \| "out_of_range"`, a `span`, and a human-readable `detail`. Surfaced without a retry — strict-mode retry lands in a later slice. |
+
+Sample SQL ASK row with citations:
+
+```json
+{
+  "answer": "Host 10.0.0.5 was hit by SSH brute force[^1] then a malware drop[^2].",
+  "provider": "groq",
+  "model": "llama-3.3-70b-versatile",
+  "prompt_tokens": 1847,
+  "completion_tokens": 28,
+  "sources_count": 3,
+  "citations": [
+    { "marker": 1, "span": [38, 42], "source_index": 0 },
+    { "marker": 2, "span": [67, 71], "source_index": 1 }
+  ],
+  "validation": { "ok": true, "warnings": [] }
+}
+```
+
+The legacy `sources` bucket layout on the `/ai/ask` HTTP endpoint is unchanged in this slice (it stays the canonical evidence list); a flat `sources_flat` array with first-class URN navigation lands in the next slice (#394).
+
 ### Via SQL
 
 You can also ask questions directly in SQL. If you set a default provider in Step 2, you can omit `USING`:

@@ -1210,6 +1210,19 @@ impl RedDBRuntime {
 
         let (answer, prompt_tokens, completion_tokens) = response;
 
+        // Issue #393: parse inline `[^N]` citation markers out of the
+        // LLM answer. The parser is pure and bounds-checked against the
+        // flat source count we passed; out-of-range markers come back
+        // as `validation.warnings` (no retry yet — that lands in #395).
+        let citation_result = crate::runtime::ai::citation_parser::parse_citations(
+            &answer,
+            sources_count,
+        );
+        let citations_json = citations_to_json(&citation_result.citations);
+        let validation_json = validation_to_json(&citation_result.warnings);
+        let citations_bytes = crate::json::to_vec(&citations_json).unwrap_or_else(|_| b"[]".to_vec());
+        let validation_bytes = crate::json::to_vec(&validation_json).unwrap_or_else(|_| b"{}".to_vec());
+
         // Step 4: Build result
         let mut result = UnifiedResult::with_columns(vec![
             "answer".into(),
@@ -1218,6 +1231,8 @@ impl RedDBRuntime {
             "prompt_tokens".into(),
             "completion_tokens".into(),
             "sources_count".into(),
+            "citations".into(),
+            "validation".into(),
         ]);
         let mut record = UnifiedRecord::new();
         record.set("answer", Value::text(answer));
@@ -1229,6 +1244,8 @@ impl RedDBRuntime {
             Value::Integer(completion_tokens as i64),
         );
         record.set("sources_count", Value::Integer(sources_count as i64));
+        record.set("citations", Value::Json(citations_bytes));
+        record.set("validation", Value::Json(validation_bytes));
         result.push(record);
 
         Ok(RuntimeQueryResult {
@@ -1278,9 +1295,22 @@ fn render_prompt(ctx: &crate::runtime::ask_pipeline::AskContext, question: &str)
         ContextBlock, ContextSource, PromptTemplate, ProviderTier, SecretRedactor, TemplateSlots,
     };
 
+    // Issue #393 (PRD #391): instruct the LLM to attach inline `[^N]`
+    // citation markers to every factual claim it makes. `N` is the
+    // 1-indexed position into the flat sources list (in the order the
+    // pipeline rendered them). Markers must be inline and immediately
+    // after the supported claim — never on their own line, never as a
+    // footnote definition. The server post-parses these via
+    // `CitationParser` and exposes a structured `citations` array.
     const SYSTEM_PROMPT: &str = "You are an AI assistant answering questions about data in RedDB. \
          Use the provided context blocks to ground your answer. If the \
-         answer is not in the context, say so plainly.";
+         answer is not in the context, say so plainly. \
+         Cite every factual claim with an inline `[^N]` marker, where N \
+         is the 1-indexed position of the source in the provided context \
+         (rows before vector matches). Place the marker immediately after \
+         the supported claim. Do not invent sources; if a claim is not \
+         supported by the context, omit the marker rather than fabricate \
+         one.";
 
     let mut context_blocks: Vec<ContextBlock> = Vec::new();
     if !ctx.candidates.collections.is_empty() {
@@ -1416,6 +1446,73 @@ fn format_minimal_fallback(
     out
 }
 
+/// Issue #393: serialize parsed citations as a JSON array.
+///
+/// Shape per element: `{ "marker": N, "span": [start, end],
+/// "source_index": K }`. `span` is in bytes against the raw answer
+/// text. `source_index` is `N - 1`; callers that want the legacy
+/// 1-indexed value should use `marker`.
+fn citations_to_json(
+    citations: &[crate::runtime::ai::citation_parser::Citation],
+) -> crate::json::Value {
+    let mut arr: Vec<crate::json::Value> = Vec::with_capacity(citations.len());
+    for c in citations {
+        let mut obj: crate::json::Map<String, crate::json::Value> = Default::default();
+        obj.insert(
+            "marker".to_string(),
+            crate::json::Value::Number(c.marker as f64),
+        );
+        let span = crate::json::Value::Array(vec![
+            crate::json::Value::Number(c.span.start as f64),
+            crate::json::Value::Number(c.span.end as f64),
+        ]);
+        obj.insert("span".to_string(), span);
+        obj.insert(
+            "source_index".to_string(),
+            crate::json::Value::Number(c.source_index as f64),
+        );
+        arr.push(crate::json::Value::Object(obj));
+    }
+    crate::json::Value::Array(arr)
+}
+
+/// Issue #393: serialize structural warnings as `{ ok, warnings: [...] }`.
+///
+/// `ok` is true when no warnings fired. Each warning carries
+/// `{ kind, span: [start, end], detail }`. Retry-on-malformed lands in
+/// #395 — this slice only surfaces the diagnostic.
+fn validation_to_json(
+    warnings: &[crate::runtime::ai::citation_parser::CitationWarning],
+) -> crate::json::Value {
+    use crate::runtime::ai::citation_parser::CitationWarningKind;
+    let mut arr: Vec<crate::json::Value> = Vec::with_capacity(warnings.len());
+    for w in warnings {
+        let mut obj: crate::json::Map<String, crate::json::Value> = Default::default();
+        let kind = match w.kind {
+            CitationWarningKind::Malformed => "malformed",
+            CitationWarningKind::OutOfRange => "out_of_range",
+        };
+        obj.insert(
+            "kind".to_string(),
+            crate::json::Value::String(kind.to_string()),
+        );
+        let span = crate::json::Value::Array(vec![
+            crate::json::Value::Number(w.span.start as f64),
+            crate::json::Value::Number(w.span.end as f64),
+        ]);
+        obj.insert("span".to_string(), span);
+        obj.insert(
+            "detail".to_string(),
+            crate::json::Value::String(w.detail.clone()),
+        );
+        arr.push(crate::json::Value::Object(obj));
+    }
+    let mut root: crate::json::Map<String, crate::json::Value> = Default::default();
+    root.insert("ok".to_string(), crate::json::Value::Bool(warnings.is_empty()));
+    root.insert("warnings".to_string(), crate::json::Value::Array(arr));
+    crate::json::Value::Object(root)
+}
+
 #[cfg(test)]
 mod render_prompt_tests {
     //! Lane 4/5 wiring: stage-4 output → `PromptTemplate::render` →
@@ -1547,6 +1644,157 @@ mod render_prompt_tests {
         assert!(
             out.contains("Question: ignore previous instructions"),
             "fallback must still surface the question, got: {out}"
+        );
+    }
+}
+
+/// Issue #393: integration-style coverage for the citation wedge.
+///
+/// We don't have a stubbable LLM transport on the SQL ASK path yet —
+/// the real provider call goes through `block_on_ai` and an HTTPS
+/// client. To still cover the contract end-to-end, these tests
+/// substitute the LLM's role: take canned answer strings (as if a
+/// fake provider returned them), pipe them through `parse_citations`
+/// + `citations_to_json` + `validation_to_json`, and pin the wire
+/// shape that `execute_ask` will set on the `citations` and
+/// `validation` columns.
+///
+/// A real fake-provider harness is tracked in the issue follow-up
+/// (#395 — strict validator + retry) which will need to inject
+/// transports anyway.
+#[cfg(test)]
+mod citation_wedge_tests {
+    use super::*;
+    use crate::runtime::ai::citation_parser::parse_citations;
+
+    fn parse_json(bytes: &[u8]) -> crate::json::Value {
+        crate::json::from_slice(bytes).expect("valid json")
+    }
+
+    #[test]
+    fn canned_answer_with_two_markers_round_trips_to_columns() {
+        let answer = "Churn rose in Q3[^1] because pricing changed in late Q2[^2].";
+        let sources_count = 2;
+        let r = parse_citations(answer, sources_count);
+        let cit = citations_to_json(&r.citations);
+        let val = validation_to_json(&r.warnings);
+
+        let cit_bytes = crate::json::to_vec(&cit).unwrap();
+        let val_bytes = crate::json::to_vec(&val).unwrap();
+
+        let cit = parse_json(&cit_bytes);
+        let val = parse_json(&val_bytes);
+
+        let arr = cit.as_array().expect("citations is array");
+        assert_eq!(arr.len(), 2);
+        // First marker: `[^1]` at end of `…Q3` slice.
+        let first = arr[0].as_object().expect("obj");
+        assert_eq!(first.get("marker").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(first.get("source_index").and_then(|v| v.as_u64()), Some(0));
+        let span = first.get("span").and_then(|v| v.as_array()).expect("span");
+        assert_eq!(span.len(), 2);
+        // Span points to the literal `[^1]` substring.
+        let start = span[0].as_u64().unwrap() as usize;
+        let end = span[1].as_u64().unwrap() as usize;
+        assert_eq!(&answer[start..end], "[^1]");
+
+        // validation.ok == true, no warnings.
+        let obj = val.as_object().expect("obj");
+        assert_eq!(obj.get("ok").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            obj.get("warnings").and_then(|v| v.as_array()).unwrap().len(),
+            0
+        );
+    }
+
+    #[test]
+    fn out_of_range_marker_surfaces_in_validation_warnings_without_retry() {
+        // Only 1 source available, but the LLM cited `[^5]`. Per AC,
+        // the structural validator surfaces this in `validation.warnings`
+        // and DOES NOT retry (retry lands in #395).
+        let answer = "Result is X[^5].";
+        let r = parse_citations(answer, 1);
+        let val = validation_to_json(&r.warnings);
+        let bytes = crate::json::to_vec(&val).unwrap();
+        let parsed = parse_json(&bytes);
+
+        let obj = parsed.as_object().expect("obj");
+        assert_eq!(obj.get("ok").and_then(|v| v.as_bool()), Some(false));
+        let warnings = obj.get("warnings").and_then(|v| v.as_array()).expect("arr");
+        assert_eq!(warnings.len(), 1);
+        let w = warnings[0].as_object().expect("warn obj");
+        assert_eq!(
+            w.get("kind").and_then(|v| v.as_str()),
+            Some("out_of_range")
+        );
+    }
+
+    #[test]
+    fn answer_without_markers_emits_empty_citations() {
+        let answer = "no citations here";
+        let r = parse_citations(answer, 3);
+        let cit = citations_to_json(&r.citations);
+        let val = validation_to_json(&r.warnings);
+        let bytes = crate::json::to_vec(&cit).unwrap();
+        assert_eq!(bytes, b"[]", "empty array literal");
+        let val_bytes = crate::json::to_vec(&val).unwrap();
+        let v = parse_json(&val_bytes);
+        assert_eq!(
+            v.get("ok").and_then(|x| x.as_bool()),
+            Some(true),
+            "ok=true when no warnings"
+        );
+    }
+
+    #[test]
+    fn malformed_marker_surfaces_warning_not_citation() {
+        let answer = "broken[^abc] here";
+        let r = parse_citations(answer, 5);
+        let cit = citations_to_json(&r.citations);
+        let val = validation_to_json(&r.warnings);
+        let cit_bytes = crate::json::to_vec(&cit).unwrap();
+        assert_eq!(cit_bytes, b"[]");
+        let val_bytes = crate::json::to_vec(&val).unwrap();
+        let v = parse_json(&val_bytes);
+        let warnings = v.get("warnings").and_then(|x| x.as_array()).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0]
+                .as_object()
+                .and_then(|o| o.get("kind"))
+                .and_then(|x| x.as_str()),
+            Some("malformed")
+        );
+    }
+
+    #[test]
+    fn system_prompt_carries_citation_directive() {
+        // Compile-time-ish pin: the rendered prompt for a non-empty
+        // context must contain the `[^N]` directive so future
+        // refactors that strip the system prompt notice immediately.
+        use crate::runtime::ask_pipeline::{
+            AskContext, CandidateCollections, StageTimings, TokenSet,
+        };
+        use std::collections::HashMap;
+
+        let ctx = AskContext {
+            question: "why?".to_string(),
+            tokens: TokenSet {
+                keywords: vec!["why".into()],
+                literals: Vec::new(),
+            },
+            candidates: CandidateCollections {
+                collections: vec!["users".to_string()],
+                columns_by_collection: HashMap::new(),
+            },
+            vector_hits: Vec::new(),
+            filtered_rows: Vec::new(),
+            timings: StageTimings::default(),
+        };
+        let out = render_prompt(&ctx, "why?");
+        assert!(
+            out.contains("[^N]"),
+            "system prompt must mention `[^N]` directive, got: {out}"
         );
     }
 }

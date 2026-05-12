@@ -13,6 +13,7 @@
 //! at runtime config time.
 
 pub mod batch_client;
+pub mod citation_parser;
 pub mod dedup_cache;
 pub mod metrics;
 pub mod ner;
