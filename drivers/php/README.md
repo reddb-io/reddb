@@ -24,12 +24,20 @@ they do).
 require __DIR__ . '/vendor/autoload.php';
 
 use Reddb\Reddb;
+use Reddb\Value;
 
 // Binary protocol (anonymous)
 $conn = Reddb::connect('red://localhost:5050');
 $conn->ping();
 $conn->insert('users', ['name' => 'alice', 'age' => 30]);
-$rows = json_decode($conn->query('SELECT * FROM users'), true);
+$rows = json_decode(
+    $conn->query('SELECT * FROM users WHERE age = $1 AND name = $2', [30, 'alice']),
+    true,
+);
+$conn->query(
+    'INSERT INTO embeddings VECTOR (dense, content) VALUES ($1, $2)',
+    [[0.7, 0.7], 'parameterized doc'],
+);
 $conn->close();
 
 // HTTPS with auto-login
@@ -57,7 +65,7 @@ the `$opts` array; the latter wins on collision.
 ```php
 interface Reddb\Conn
 {
-    public function query(string $sql): string;
+    public function query(string $sql, array $params = []): string;
     public function insert(string $collection, array|object $payload): void;
     public function bulkInsert(string $collection, iterable $rows): void;
     public function get(string $collection, string $id): string;
@@ -66,6 +74,24 @@ interface Reddb\Conn
     public function close(): void;
 }
 ```
+
+`query` binds positional `$N` placeholders when `$params` is non-empty. The
+single-argument form is unchanged and still sends the legacy query frame.
+RedWire requires the server to advertise `FEATURE_PARAMS`; HTTP forwards the
+same typed values as the `/query` JSON `params` array.
+
+| PHP value | Engine value |
+| --- | --- |
+| `int` | `Int` |
+| `float` | `Float` |
+| `bool` | `Bool` |
+| `null` | `Null` |
+| `string` | `Text` |
+| `Value::bytes($binary)` | `Bytes` |
+| `array` of numbers, e.g. `[0.1, 0.2]` | `Vector` |
+| associative array, object, or `Value::json($value)` | `Json` |
+| `DateTimeImmutable` | `Timestamp` |
+| `Value::uuid('00112233-4455-6677-8899-aabbccddeeff')` | `Uuid` |
 
 `query` and `get` return raw JSON — pick your own decoder
 (`json_decode`, `JsonMachine`, ...).
@@ -83,6 +109,7 @@ All exceptions extend `Reddb\RedDBException`:
 | `RedDBException\UnknownFlags` | Peer set a flag bit we don't recognise. |
 | `RedDBException\CompressedButNoZstd` | Compressed frame but `ext-zstd` isn't loaded. |
 | `RedDBException\EmbeddedUnsupported` | URL selected the embedded engine. |
+| `RedDBException\ParamsUnsupported` | Parameterized RedWire query sent to a server without `FEATURE_PARAMS`. |
 
 ## Testing
 

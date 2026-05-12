@@ -109,9 +109,13 @@ final class HttpClient implements Conn
     // Conn methods
     // -----------------------------------------------------------------
 
-    public function query(string $sql): string
+    public function query(string $sql, array $params = []): string
     {
-        $body = json_encode(['query' => $sql], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        $payload = ['query' => $sql];
+        if ($params !== []) {
+            $payload['params'] = \Reddb\Redwire\ValueCodec::toHttpParams($params);
+        }
+        $body = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
         return $this->request('POST', '/query', $body);
     }
 

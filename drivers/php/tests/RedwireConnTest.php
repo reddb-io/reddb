@@ -6,6 +6,7 @@ namespace Reddb\Tests;
 
 use PHPUnit\Framework\TestCase;
 use Reddb\RedDBException\AuthRefused;
+use Reddb\RedDBException\ParamsUnsupported;
 use Reddb\RedDBException\ProtocolError;
 use Reddb\Redwire\Frame;
 use Reddb\Redwire\RedwireConn;
@@ -207,6 +208,87 @@ final class RedwireConnTest extends TestCase
             return $session;
         });
         $this->assertSame('rwsess-q', $sessionResult['session_id']);
+    }
+
+    public function test_query_with_params_uses_query_with_params_frame(): void
+    {
+        $sessionResult = $this->withFakeServer(static function ($serverSock): void {
+            self::expectMagic($serverSock);
+            $hello = self::readFrameFromSock($serverSock);
+            self::writeFrameToSock(
+                $serverSock,
+                Frame::make(Frame::KIND_HELLO_ACK, $hello->correlationId, json_encode([
+                    'auth' => 'anonymous',
+                    'features' => Frame::FEATURE_PARAMS,
+                ])),
+            );
+            $resp = self::readFrameFromSock($serverSock);
+            self::writeFrameToSock(
+                $serverSock,
+                Frame::make(Frame::KIND_AUTH_OK, $resp->correlationId, json_encode([
+                    'session_id' => 'rwsess-params',
+                    'features' => Frame::FEATURE_PARAMS,
+                ])),
+            );
+
+            $q = self::readFrameFromSock($serverSock);
+            self::assertSame(Frame::KIND_QUERY_WITH_PARAMS, $q->kind);
+            self::assertSame('SELECT * FROM users WHERE id = $1 AND name = $2', substr($q->payload, 4, 47));
+            self::assertSame(4, unpack('V', substr($q->payload, 4 + 47, 4))[1]);
+            self::writeFrameToSock(
+                $serverSock,
+                Frame::make(Frame::KIND_RESULT, $q->correlationId, json_encode([
+                    'ok' => true, 'affected' => 1,
+                ])),
+            );
+
+            try {
+                self::readFrameFromSock($serverSock);
+            } catch (\Throwable) {
+                // pipe close
+            }
+        }, function ($clientSock) {
+            $session = RedwireConn::performHandshake($clientSock, null, null, null, 'test-driver');
+            $conn = new RedwireConn($clientSock, $session);
+            self::assertTrue($conn->supportsParams());
+            $body = json_decode($conn->query(
+                'SELECT * FROM users WHERE id = $1 AND name = $2',
+                [42, 'alice', null, [1.0, 2.0]],
+            ), true);
+            self::assertTrue($body['ok']);
+            $conn->close();
+            return $session;
+        });
+        $this->assertSame('rwsess-params', $sessionResult['session_id']);
+    }
+
+    public function test_query_with_params_requires_feature_params(): void
+    {
+        $this->expectException(ParamsUnsupported::class);
+        $this->withFakeServer(static function ($serverSock): void {
+            self::expectMagic($serverSock);
+            $hello = self::readFrameFromSock($serverSock);
+            self::writeFrameToSock(
+                $serverSock,
+                Frame::make(Frame::KIND_HELLO_ACK, $hello->correlationId, json_encode([
+                    'auth' => 'anonymous',
+                    'features' => 0,
+                ])),
+            );
+            $resp = self::readFrameFromSock($serverSock);
+            self::writeFrameToSock(
+                $serverSock,
+                Frame::make(Frame::KIND_AUTH_OK, $resp->correlationId, json_encode([
+                    'session_id' => 'rwsess-no-params',
+                    'features' => 0,
+                ])),
+            );
+        }, function ($clientSock): void {
+            $session = RedwireConn::performHandshake($clientSock, null, null, null, 'test-driver');
+            $conn = new RedwireConn($clientSock, $session);
+            self::assertFalse($conn->supportsParams());
+            $conn->query('SELECT $1', [1]);
+        });
     }
 
     public function test_client_sends_magic_byte_first(): void
