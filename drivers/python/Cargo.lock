@@ -1709,7 +1709,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "reddb-io-client",
  "reddb-io-grpc-proto",
@@ -1803,7 +1803,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-python"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "prost 0.13.5",
  "pyo3",
