@@ -46,12 +46,32 @@ impl BatchBuilder {
     ) -> Self {
         let collection = collection.into();
         let label_str = label.into();
+        self = self.add_node_with_type(
+            collection,
+            label_str.clone(),
+            label_str,
+            properties,
+            metadata,
+        );
+        self
+    }
 
+    /// Add a node with an explicit node type to the batch.
+    pub fn add_node_with_type(
+        mut self,
+        collection: impl Into<String>,
+        label: impl Into<String>,
+        node_type: impl Into<String>,
+        properties: HashMap<String, Value>,
+        metadata: HashMap<String, MetadataValue>,
+    ) -> Self {
+        let collection = collection.into();
+        let label_str = label.into();
         let id = self.store.next_entity_id();
 
         let kind = EntityKind::GraphNode(Box::new(GraphNodeKind {
             label: label_str.clone(),
-            node_type: label_str,
+            node_type: node_type.into(),
         }));
 
         let entity = UnifiedEntity::new(
@@ -60,6 +80,44 @@ impl BatchBuilder {
             EntityData::Node(NodeData::with_properties(properties)),
         );
         self.nodes.push((collection, entity, metadata));
+        self
+    }
+
+    /// Add an edge to the batch.
+    pub fn add_edge(
+        mut self,
+        collection: impl Into<String>,
+        label: impl Into<String>,
+        from: EntityId,
+        to: EntityId,
+        weight: f32,
+        properties: HashMap<String, Value>,
+        metadata: HashMap<String, MetadataValue>,
+    ) -> Self {
+        let collection = collection.into();
+        let id = self.store.next_entity_id();
+        let kind = EntityKind::GraphEdge(Box::new(super::super::GraphEdgeKind {
+            label: label.into(),
+            from_node: from.0.to_string(),
+            to_node: to.0.to_string(),
+            weight: (weight * 1000.0) as u32,
+        }));
+        let mut edge_data = super::super::EdgeData::new(weight);
+        edge_data.properties = properties;
+        let mut entity = UnifiedEntity::new(id, kind, EntityData::Edge(edge_data));
+        entity.add_cross_ref(CrossRef::new(
+            id,
+            from,
+            collection.clone(),
+            RefType::DerivesFrom,
+        ));
+        entity.add_cross_ref(CrossRef::new(
+            id,
+            to,
+            collection.clone(),
+            RefType::RelatedTo,
+        ));
+        self.edges.push((collection, entity, metadata));
         self
     }
 
@@ -135,16 +193,47 @@ impl BatchBuilder {
         let mut inserted_rows = Vec::new();
 
         // Insert nodes
-        for (collection, mut entity, metadata) in self.nodes {
-            let id = entity.id;
-            run_preprocessors(&self.preprocessors, &mut entity)?;
-            if self.store.insert_auto(&collection, entity).is_ok() {
+        let mut nodes = self.nodes.into_iter().peekable();
+        while let Some((collection, mut first_entity, first_metadata)) = nodes.next() {
+            let mut entities = Vec::new();
+            let mut metadata_items = Vec::new();
+            run_preprocessors(&self.preprocessors, &mut first_entity)?;
+            entities.push(first_entity);
+            metadata_items.push(first_metadata);
+
+            while let Some((next_collection, _, _)) = nodes.peek() {
+                if next_collection != &collection {
+                    break;
+                }
+                let (_, mut entity, metadata) = nodes.next().expect("peeked node missing");
+                run_preprocessors(&self.preprocessors, &mut entity)?;
+                entities.push(entity);
+                metadata_items.push(metadata);
+            }
+
+            let ids = self
+                .store
+                .bulk_insert(&collection, entities)
+                .map_err(|err| DevXError::Storage(format!("{err:?}")))?;
+
+            for (id, metadata) in ids.iter().zip(metadata_items) {
                 if !metadata.is_empty() {
                     let _ =
                         self.store
-                            .set_metadata(&collection, id, Metadata::with_fields(metadata));
+                            .set_metadata(&collection, *id, Metadata::with_fields(metadata));
                 }
-                inserted_nodes.push(id);
+                if self
+                    .store
+                    .context_index()
+                    .is_collection_enabled(&collection)
+                {
+                    if let Some(entity) = self.store.get(&collection, *id) {
+                        self.store
+                            .context_index()
+                            .index_entity(&collection, &entity);
+                    }
+                }
+                inserted_nodes.push(*id);
             }
         }
 
@@ -163,16 +252,42 @@ impl BatchBuilder {
         }
 
         // Insert edges
-        for (collection, mut entity, metadata) in self.edges {
-            let id = entity.id;
-            run_preprocessors(&self.preprocessors, &mut entity)?;
-            if self.store.insert_auto(&collection, entity).is_ok() {
+        let mut edges = self.edges.into_iter().peekable();
+        while let Some((collection, mut first_entity, first_metadata)) = edges.next() {
+            let mut entities = Vec::new();
+            let mut metadata_items = Vec::new();
+            run_preprocessors(&self.preprocessors, &mut first_entity)?;
+            entities.push(first_entity);
+            metadata_items.push(first_metadata);
+
+            while let Some((next_collection, _, _)) = edges.peek() {
+                if next_collection != &collection {
+                    break;
+                }
+                let (_, mut entity, metadata) = edges.next().expect("peeked edge missing");
+                run_preprocessors(&self.preprocessors, &mut entity)?;
+                entities.push(entity);
+                metadata_items.push(metadata);
+            }
+
+            let ids = self
+                .store
+                .bulk_insert(&collection, entities)
+                .map_err(|err| DevXError::Storage(format!("{err:?}")))?;
+
+            for (id, metadata) in ids.iter().zip(metadata_items) {
                 if !metadata.is_empty() {
                     let _ =
                         self.store
-                            .set_metadata(&collection, id, Metadata::with_fields(metadata));
+                            .set_metadata(&collection, *id, Metadata::with_fields(metadata));
                 }
-                inserted_edges.push(id);
+                if let Some(entity) = self.store.get(&collection, *id) {
+                    self.store
+                        .context_index()
+                        .index_entity(&collection, &entity);
+                    let _ = self.store.index_cross_refs(&entity, &collection);
+                }
+                inserted_edges.push(*id);
             }
         }
 
