@@ -272,12 +272,16 @@ impl RedDBRuntime {
                     statement_type: "select",
                 })
             }
-            GraphCommand::Components { mode } => {
+            GraphCommand::Components { mode, limit } => {
                 let m = parse_components_mode(mode)?;
                 let res = self.graph_components(m, 1, None)?;
                 let mut result =
                     UnifiedResult::with_columns(vec!["component_id".into(), "size".into()]);
+                let cap = limit.map(|n| n as usize).unwrap_or(usize::MAX);
                 for component in &res.components {
+                    if result.records.len() >= cap {
+                        break;
+                    }
                     let mut record = UnifiedRecord::new();
                     record.set("component_id", Value::text(component.id.clone()));
                     record.set("size", Value::Integer(component.size as i64));
