@@ -28,7 +28,7 @@
 
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import { existsSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs'
 
 import { fetchReleaseAsset } from './src/internal/asset-fetcher/index.js'
@@ -42,6 +42,20 @@ const BIN_NAME = 'red_client'
 
 if (process.env.REDDB_SKIP_POSTINSTALL === '1') {
   process.stdout.write('@reddb-io/client: postinstall skipped (REDDB_SKIP_POSTINSTALL=1)\n')
+  process.exit(0)
+}
+
+// Workspace-local install detection — see drivers/js/postinstall.js for
+// the matching guard and rationale. connect() in this package doesn't need
+// the binary anyway; the helper CLI is the only consumer.
+if (!HERE.includes(`${sep}node_modules${sep}`)) {
+  process.stdout.write(
+    '@reddb-io/client: skipping postinstall — running from a workspace checkout (no node_modules/).\n' +
+    '       connect() works without the binary. If you also want the red_client CLI:\n' +
+    '         cargo build --release --bin red_client -p reddb-io-client --no-default-features\n' +
+    '         export REDDB_CLIENT_BIN="$PWD/target/release/red_client"\n' +
+    '       Set REDDB_SKIP_POSTINSTALL=1 to silence this message.\n',
+  )
   process.exit(0)
 }
 

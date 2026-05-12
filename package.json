@@ -18,6 +18,9 @@
   "scripts": {
     "postinstall": "node drivers/js/cli-postinstall.js",
     "test": "node drivers/js/test/smoke.test.mjs",
+    "changeset": "changeset",
+    "release:version": "changeset version && node scripts/sync-version.js",
+    "release:publish": "changeset publish",
     "version": "node scripts/sync-version.js"
   },
   "keywords": [
@@ -35,5 +38,9 @@
     "type": "git",
     "url": "https://github.com/reddb-io/reddb"
   },
-  "homepage": "https://github.com/reddb-io/reddb"
+  "homepage": "https://github.com/reddb-io/reddb",
+  "devDependencies": {
+    "@changesets/changelog-github": "^0.7.0",
+    "@changesets/cli": "^2.31.0"
+  }
 }

@@ -18,7 +18,7 @@
 
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import { existsSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs'
 
 import { fetchReleaseAsset } from './src/internal/asset-fetcher/index.js'
@@ -31,6 +31,24 @@ const DEFAULT_REPO = 'reddb-io/reddb'
 
 if (process.env.REDDB_SKIP_POSTINSTALL === '1') {
   process.stdout.write('reddb: postinstall skipped (REDDB_SKIP_POSTINSTALL=1)\n')
+  process.exit(0)
+}
+
+// Workspace-local install detection. When this file's resolved path is not
+// inside a `node_modules` tree we're running from a fresh checkout of the
+// reddb monorepo (or a fork), where `package.json` may already carry a
+// version whose GitHub Release has not been built yet — and where the
+// developer typically builds `red` with `cargo build` anyway. Skip the
+// download with a clear pointer; release flows still work because the npm
+// tarball, when installed, lives under `node_modules/`.
+if (!HERE.includes(`${sep}node_modules${sep}`)) {
+  process.stdout.write(
+    'reddb: skipping postinstall — running from a workspace checkout (no node_modules/).\n' +
+    '       If you need the binary, either:\n' +
+    '         - cargo build --release --bin red  &&  export REDDB_BIN="$PWD/target/release/red"\n' +
+    '         - or:  curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash\n' +
+    '       Set REDDB_SKIP_POSTINSTALL=1 to silence this message.\n',
+  )
   process.exit(0)
 }
 

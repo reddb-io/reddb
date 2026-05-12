@@ -21,7 +21,7 @@
 
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import { existsSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs'
 import { execSync } from 'node:child_process'
 
@@ -44,6 +44,19 @@ if (process.env.REDDB_SKIP_POSTINSTALL === '1') {
 if (typeof process.env.REDDB_BIN === 'string' && process.env.REDDB_BIN !== '') {
   process.stdout.write(
     `reddb-cli: postinstall skipped (REDDB_BIN=${process.env.REDDB_BIN})\n`,
+  )
+  process.exit(0)
+}
+
+// Workspace-local install detection — see the matching block in
+// drivers/js/postinstall.js for the rationale.
+if (!HERE.includes(`${sep}node_modules${sep}`)) {
+  process.stdout.write(
+    'reddb-cli: skipping postinstall — running from a workspace checkout (no node_modules/).\n' +
+    '          Build `red` locally if you need it:\n' +
+    '            cargo build --release --bin red\n' +
+    '            export REDDB_BIN="$PWD/target/release/red"\n' +
+    '          Set REDDB_SKIP_POSTINSTALL=1 to silence this message.\n',
   )
   process.exit(0)
 }

@@ -2,4 +2,5 @@ packages:
   - "."
   - "drivers/js"
   - "drivers/js-client"
+  - "drivers/bun"
   - "packages/*"

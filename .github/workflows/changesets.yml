@@ -1,0 +1,72 @@
+name: Changesets
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: changesets-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  changesets:
+    name: Version Packages
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Skip on the version-bump commit itself to avoid an infinite loop. The
+    # commit landing the version bump is authored by github-actions[bot] —
+    # that push doesn't need to re-trigger this workflow.
+    if: github.actor != 'github-actions[bot]'
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Full history so `changesets/action` can rewrite tags / detect
+          # changes against main.
+          fetch-depth: 0
+          # Use a PAT so the version-bump commit pushed by this workflow
+          # can re-trigger downstream tag-driven workflows (release.yml).
+          # Falls back to GITHUB_TOKEN if no PAT is configured.
+          token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Configure git identity
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+      - name: Create release PR or tag the release
+        id: changesets
+        uses: changesets/action@v1
+        with:
+          # Run via pnpm so root-package `release:version` chains
+          # `changeset version` + `node scripts/sync-version.js`. This is
+          # what propagates the new npm version into Cargo.toml, the workspace
+          # crates, drivers/python/{Cargo,pyproject}.toml, packages/internal-*,
+          # and drivers/bun/package.json.
+          version: pnpm release:version
+          # When all changesets have been consumed (i.e. the Version Packages
+          # PR has been merged) the action runs this script. We use it to push
+          # the version tag — that tag push then triggers release.yml, which
+          # owns the actual binary builds and multi-registry publish.
+          publish: bash scripts/changesets-tag-release.sh
+          commit: 'chore(release): version packages'
+          title: 'chore(release): version packages'
+          # Do not let the action create a GitHub release; release.yml does
+          # that as part of the `publish-github` job once binaries are built.
+          createGithubReleases: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}

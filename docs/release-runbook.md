@@ -1,23 +1,84 @@
 # Release runbook
 
-Operator-facing runbook for tagging + post-publish maintenance steps that
-sit outside `.github/workflows/release.yml`.
+Operator-facing runbook for cutting a release and post-publish
+maintenance.
 
-## Cutting a release
+## Cutting a release (Changesets flow)
 
-1. Land all PRs targeting the release on `main`.
-2. From `main`, run `pnpm version <patch|minor|major>` (or `pnpm version 1.0.0`
-   for a pinned bump). The npm `version` lifecycle hook calls
-   `scripts/sync-version.js`, which propagates the new version to every
-   lock-stepped manifest (`Cargo.toml`, `crates/**/Cargo.toml`,
-   `drivers/js/package.json`, `drivers/js-client/package.json`,
-   `drivers/python/Cargo.toml`, `drivers/python/pyproject.toml`) and stages
-   the result.
-3. Verify with `bash scripts/check-versions.sh` — all lock-stepped targets
-   must report the same version.
-4. `git push --follow-tags`. The pushed tag triggers
-   `.github/workflows/release.yml`, which runs the `publish-js-cli`,
-   `publish-js-driver`, `publish-js-client`, and crates.io publish jobs.
+> The previous `pnpm version <patch|minor|major>` flow ran the bump
+> **locally** before CI built anything, which opened a window where
+> `package.json` on `main` had a version that no GitHub Release covered.
+> The `postinstall` hook in `@reddb-io/sdk` would `404` in that window.
+> The Changesets flow described below eliminates that race: the version
+> bump and the release tag are produced atomically by CI.
+
+### Contributors: drop a changeset on every release-worthy PR
+
+```bash
+pnpm changeset
+```
+
+Pick the affected packages (the four public npm packages are locked
+together, so picking one bumps all four), choose `patch|minor|major`,
+and write a one-line summary. Commit the generated
+`.changeset/<slug>.md` alongside your code change. See
+[`.changeset/README.md`](../../.changeset/README.md) for details.
+
+### Operator: ship the release
+
+1. Land all release-worthy PRs (each carrying its own changeset) on
+   `main`.
+2. Wait for `.github/workflows/changesets.yml` to open or update the
+   "Version Packages" Release PR. The PR description shows the
+   aggregated changelog and the bump it intends to apply.
+3. Review the PR. If you want to defer something, drop the relevant
+   `.changeset/<slug>.md` from a follow-up commit on `main`; the bot
+   will refresh the PR.
+4. **Merge the Release PR.** That re-fires the changesets workflow,
+   which now sees zero pending changesets and therefore:
+   - runs `pnpm release:version` — `changeset version` bumps the four
+     npm packages and writes `CHANGELOG.md`, then
+     `node scripts/sync-version.js` propagates the new version into
+     every lock-stepped manifest (`Cargo.toml`, `crates/**/Cargo.toml`,
+     `drivers/python/{Cargo,pyproject}.toml`,
+     `packages/internal-*/package.json`, `drivers/bun/package.json`).
+   - commits the version bump with author `github-actions[bot]`.
+   - runs [`scripts/changesets-tag-release.sh`](../../scripts/changesets-tag-release.sh),
+     which creates and pushes `v<version>`.
+5. The pushed tag triggers `.github/workflows/release.yml`, which
+   builds every platform binary, creates the GitHub Release with the
+   assets attached, and only **after** that publishes to npm /
+   crates.io / PyPI / GHCR.
+
+There is no step at which an `@reddb-io/sdk@X.Y.Z` exists on npm
+without a corresponding GitHub Release containing `red-<plat>-<arch>`
+for the supported platforms.
+
+### Manual override (skip Changesets)
+
+If the Changesets bot is unavailable or you need an emergency cut, you
+can still tag manually:
+
+```bash
+git checkout main && git pull
+# bump versions yourself — `release:version` works even outside CI as
+# long as there's at least one changeset under `.changeset/`.
+pnpm changeset && pnpm release:version
+git add -A && git commit -m "chore(release): version packages (manual)"
+VERSION="$(node -e 'process.stdout.write(require(`./package.json`).version)')"
+git tag -a "v$VERSION" -m "Release v$VERSION"
+git push origin main "v$VERSION"
+```
+
+The pushed tag still triggers `release.yml` end-to-end.
+
+### Verifying lock-step
+
+```bash
+bash scripts/check-versions.sh
+```
+
+All lock-stepped targets must report the same version.
 
 ## Registry ownership and package names
 
