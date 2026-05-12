@@ -101,3 +101,33 @@ Verification (this slice):
 - No code touched, no behavior change.
 - `cargo check` / `pnpm test` not relevant — pure docs change.
 
+Slice 4 (this commit): `docs/clients/drivers/php.md` and
+`docs/clients/drivers/rust.md` got the same safe-binding treatment now
+that the PHP and Rust params implementations have landed.
+
+- PHP hub quickstart now uses `$conn->query($sql, $params)` as the
+  first query example instead of a bare `SELECT *`, and the API surface
+  shows `query(string $sql, array $params = [])`.
+- PHP got a new "Safe parameter binding" section with scalar and vector
+  examples, the native PHP → engine type table from `drivers/php/README.md`,
+  `FEATURE_PARAMS` / `ParamsUnsupported` behavior, and the error added to
+  the stable exception table.
+- Rust hub quickstart now uses `Reddb::query_with` as the first query
+  example and shows a vector `SEARCH SIMILAR` call with explicit
+  `Value` variants so the heterogeneous slice is valid Rust.
+- Rust got a new "Safe parameter binding" section with scalar and vector
+  examples, the native Rust → engine type table from
+  `crates/reddb-client/src/params.rs`, and the embedded / HTTP / gRPC
+  transport note.
+- No ADR cross-link added yet because #352 is still a HITL issue and no
+  `docs/adr/00XX-parameterized-queries.md` file exists to link to.
+
+Verification (this slice):
+- TDD red check first failed because `docs/clients/drivers/php.md` was
+  missing `## Safe parameter binding`.
+- Green check: both PHP and Rust hub pages contain `## Safe parameter binding`
+  and a `SEARCH SIMILAR $1` vector example.
+- `git diff --check` clean.
+- `pnpm test` ran and skipped because `target/debug/red` is not built.
+- `pnpm typecheck` exited 1; `pnpm run typecheck` confirms the repo has no
+  `typecheck` script. No TypeScript files changed.

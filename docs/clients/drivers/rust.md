@@ -31,7 +31,7 @@ You can enable any combination; `Reddb::connect(uri)` dispatches by URI scheme.
 ## Connect and query
 
 ```rust
-use reddb_client::{Reddb, JsonValue};
+use reddb_client::{Reddb, JsonValue, Value};
 
 #[tokio::main]
 async fn main() -> reddb_client::Result<()> {
@@ -42,8 +42,20 @@ async fn main() -> reddb_client::Result<()> {
         &JsonValue::object([("name", JsonValue::string("Alice"))]),
     ).await?;
 
-    let result = db.query("SELECT * FROM users LIMIT 10").await?;
+    let result = db
+        .query_with(
+            "SELECT * FROM users WHERE name = $1 LIMIT $2",
+            &[Value::Text("Alice".into()), Value::Int(10)],
+        )
+        .await?;
     println!("{} rows", result.rows.len());
+
+    let _hits = db
+        .query_with(
+            "SEARCH SIMILAR $1 IN embeddings K $2",
+            &[Value::Vector(vec![0.1, 0.2, 0.3]), Value::Int(5)],
+        )
+        .await?;
 
     db.close().await?;
     Ok(())
@@ -95,6 +107,53 @@ The driver round-robins reads across replicas and pins writes to the primary. Se
 - `reddb_client::connector::RedDBClient` — back-compat re-export of the tiny tonic-only connector (lives in `reddb-io-client-connector`).
 
 Full API: [docs.rs/reddb-io-client](https://docs.rs/reddb-io-client).
+
+## Safe parameter binding
+
+`query_with(sql, &[params])` binds positional `$N` placeholders. Use it for any
+user-supplied value — concatenation is a SQL-injection footgun:
+
+```rust
+use reddb_client::{Reddb, Value};
+
+# async fn run(db: Reddb) -> reddb_client::Result<()> {
+// Scalar params: int / text / null
+let rows = db
+    .query_with(
+        "SELECT id, name FROM users WHERE id = $1 AND tenant = $2 AND deleted_at IS $3",
+        &[Value::Int(42), Value::Text("acme".into()), Value::Null],
+    )
+    .await?;
+
+// Vector param (HNSW / IVF similarity search):
+let hits = db
+    .query_with(
+        "SEARCH SIMILAR $1 IN embeddings K $2",
+        &[Value::Vector(vec![0.1, 0.2, 0.3]), Value::Int(5)],
+    )
+    .await?;
+# let _ = (rows, hits);
+# Ok(())
+# }
+```
+
+Native Rust → engine type mapping (see `reddb_client::params::IntoValue`):
+
+| Rust | Engine value |
+|------|--------------|
+| `Option<T>::None` | Null |
+| `bool` | Bool |
+| `i8..i64`, `u8..u32` | Int |
+| `f32`, `f64` | Float |
+| `&str`, `String` | Text |
+| `Vec<u8>`, `&[u8]` | Bytes |
+| `Vec<f32>`, `&[f32]`, `Value::Vector` | Vector |
+| `serde_json::Value`, `JsonValue`, `Value::Json` | Json |
+| `Value::Timestamp(seconds)` | Timestamp |
+| `Value::Uuid(bytes)` | Uuid |
+
+The embedded, HTTP, and gRPC transports carry params end-to-end. Empty params
+are equivalent to `query(sql)` and stay on the legacy no-params path.
 
 ## Embedded mode
 
