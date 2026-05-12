@@ -71,3 +71,24 @@ Adds a `QueryWithParams` RPC (or extends the existing query RPC with an optional
     RedWire/HTTP parameter support but no gRPC client surface in this repo.
   - gRPC integration test covering int/text/null/vector/bytes over a real
     server remains open.
+
+- 2026-05-12: Slice 2 — Go driver gRPC tracer completed.
+  - Added a minimal Go gRPC proto/client package for `reddb.v1.RedDb.Query`
+    and `Health`, reusing the same `QueryRequest.params` oneof field added
+    by Slice 1.
+  - `Connect` now accepts `grpc://host[:5055]`, `grpcs://host[:5055]`, and
+    `red://host?proto=grpc`; `Conn.Query(ctx, sql, params...)` routes through
+    gRPC for int, text, null, vector, bytes, float, json, timestamp, and uuid
+    values.
+  - Added a Go driver gRPC integration-style test with an in-process gRPC
+    server asserting typed `QueryValue` variants for int/text/null/vector/bytes
+    and the additional scalar/envelope variants.
+  - Updated the Go README connection-string and parameterized-query notes.
+
+  Verification:
+  - `go test ./...` in `drivers/go`.
+
+  Notes:
+  - The Go gRPC driver surface currently implements `Query`, `Ping`, and
+    `Close`; RedWire/HTTP remain the mutation-capable transports in this
+    driver.

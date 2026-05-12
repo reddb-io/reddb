@@ -79,6 +79,18 @@ func TestParseURI_TableDriven(t *testing.T) {
 		{name: "http path preserved",
 			uri: "http://host:8080/api/v1",
 			w:   want{kind: KindHTTP, host: "host", port: 8080, path: "/api/v1"}},
+		{name: "grpc default port",
+			uri: "grpc://host",
+			w:   want{kind: KindGRPC, host: "host", port: 5055}},
+		{name: "grpc explicit port",
+			uri: "grpc://host:6000",
+			w:   want{kind: KindGRPC, host: "host", port: 6000}},
+		{name: "grpcs default port",
+			uri: "grpcs://host",
+			w:   want{kind: KindGRPCS, host: "host", port: 5055}},
+		{name: "red proto=grpc default port",
+			uri: "red://host?proto=grpc",
+			w:   want{kind: KindGRPC, host: "host", port: 5055}},
 
 		// errors
 		{name: "empty uri", uri: "", errCode: CodeUnparseableURI},

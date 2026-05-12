@@ -1,7 +1,8 @@
 # reddb-go
 
 Pure-Go driver for [RedDB](https://github.com/reddb-io/reddb). Speaks the
-RedWire binary TCP protocol and the HTTP REST surface from a single facade.
+RedWire binary TCP protocol, gRPC query API, and HTTP REST surface from a
+single facade.
 
 ```go
 import reddb "github.com/reddb-io/reddb-go"
@@ -26,7 +27,8 @@ body, err := c.Query(ctx, "SELECT name FROM users")
 `Query` is variadic: pass `$N` bind values after the SQL string. Native Go
 types map to the engine's `Value` variants via the wire codec from #357.
 With no params the call keeps emitting the legacy `Query` frame byte-for-byte
-— the parameterized path only kicks in when at least one param is supplied.
+on RedWire. On gRPC the same typed values are sent in `QueryRequest.params`;
+empty params keep that field unset.
 
 ```go
 // int + text + null
@@ -73,6 +75,9 @@ raw `$N` literals.
 | ------------------------------------ | -------------------------------------------- |
 | `red://host[:5050]`                  | RedWire (default)                            |
 | `reds://host[:5050]`                 | RedWire over TLS (`redwire/1` ALPN)          |
+| `grpc://host[:5055]`                 | gRPC query API                               |
+| `grpcs://host[:5055]`                | gRPC query API over TLS                      |
+| `red://host?proto=grpc`              | RedWire URI, but routed over gRPC            |
 | `red://host?proto=https`             | RedWire URI, but routed over HTTPS           |
 | `http://host[:8080]`                 | RedDB HTTP REST                              |
 | `https://host[:8443]`                | RedDB HTTP REST over TLS                     |
@@ -103,6 +108,7 @@ reddb.Connect(ctx, "red://h", reddb.WithJWT("eyJ..."))
 | `reddb.go`                        | top-level `Connect` + `Conn` interface (facade)               |
 | `url.go` / `url_test.go`          | URI parser shared with the JS driver                          |
 | `errors.go`                       | typed `Error` + `IsCode`                                      |
+| `grpcx/`                          | minimal gRPC Query client + typed param mapper                 |
 | `redwire/frame.go`                | 16-byte header, encode / decode, MAX_FRAME_SIZE               |
 | `redwire/codec.go`                | pooled zstd compress / decompress                             |
 | `redwire/scram.go`                | RFC 5802 client primitives (HMAC-SHA-256, PBKDF2, proof)      |
@@ -128,6 +134,7 @@ The end-to-end engine smoke at `internal/redserver/` is opt-in:
 
 - Embedded mode (`red:///path` and `red://memory`). The pure-Go build can't
   link the engine; a future cgo build will close that gap.
+- gRPC mutations beyond `Query` and `Ping`.
 - `bulk_insert_binary` (0x06) — JSON path is wired; binary fast path is TODO.
 - Streaming bulk inserts (`BulkStreamStart` / `BulkStreamRows`).
 

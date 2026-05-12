@@ -7,15 +7,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"strconv"
 	"time"
 
+	"github.com/reddb-io/reddb-go/grpcx"
 	"github.com/reddb-io/reddb-go/httpx"
 	"github.com/reddb-io/reddb-go/redwire"
 )
 
 // Conn is the transport-agnostic connection interface every Connect call
-// returns. The same set of operations works whether the underlying transport
-// is RedWire (binary TCP) or HTTP REST.
+// returns. Query and Ping work across RedWire, HTTP REST, and gRPC; mutation
+// helpers are wired for RedWire and HTTP today.
 type Conn interface {
 	// Query runs a SQL string and returns the raw JSON-encoded payload bytes
 	// (the engine's `Result.payload`). Callers decode them however they like.
@@ -132,6 +135,8 @@ func WithTLSConfig(rootCAs *x509.CertPool, certs []tls.Certificate, serverName s
 //
 //	red://host:5050              RedWire (default port 5050)
 //	reds://host:5050             RedWire over TLS
+//	grpc://host:5055             gRPC
+//	grpcs://host:5055            gRPC over TLS
 //	http://host:8080             HTTP
 //	https://host:8443            HTTPS
 //
@@ -164,6 +169,8 @@ func Connect(ctx context.Context, uri string, opts ...Option) (Conn, error) {
 	switch parsed.Kind {
 	case KindRedWire, KindRedWires:
 		return connectRedWire(ctx, parsed, &o)
+	case KindGRPC, KindGRPCS:
+		return connectGRPC(ctx, parsed, &o)
 	case KindHTTP, KindHTTPS:
 		return connectHTTP(ctx, parsed, &o)
 	case KindEmbedded:
@@ -331,3 +338,51 @@ func jsonBytes(v any) ([]byte, error) {
 	}
 	return json.Marshal(v)
 }
+
+// --- gRPC facade ------------------------------------------------------
+
+func connectGRPC(ctx context.Context, p *ParsedURI, o *Options) (Conn, error) {
+	c, err := grpcx.Dial(ctx, grpcx.Options{
+		Addr:                  net.JoinHostPort(p.Host, strconv.Itoa(p.Port)),
+		Token:                 o.Token,
+		Timeout:               o.DialTimeout,
+		TLSRootCAs:            o.TLSRootCAs,
+		TLSCertificates:       o.TLSCertificates,
+		TLSInsecureSkipVerify: o.TLSInsecureSkipVerify,
+		TLSServerName:         o.TLSServerName,
+		Plaintext:             p.Kind == KindGRPC,
+	})
+	if err != nil {
+		return nil, WrapError(CodeNetwork, "grpc dial", err)
+	}
+	return &grpcFacade{c: c}, nil
+}
+
+type grpcFacade struct{ c *grpcx.Client }
+
+func (g *grpcFacade) Query(ctx context.Context, sql string, params ...any) ([]byte, error) {
+	reply, err := g.c.Query(ctx, sql, params...)
+	if err != nil {
+		return nil, WrapError(CodeEngine, "grpc query", err)
+	}
+	return []byte(reply.GetResultJson()), nil
+}
+
+func (g *grpcFacade) Insert(context.Context, string, any) error {
+	return NewError(CodeProtocol, "grpc Insert is not implemented in the Go driver")
+}
+
+func (g *grpcFacade) BulkInsert(context.Context, string, []any) error {
+	return NewError(CodeProtocol, "grpc BulkInsert is not implemented in the Go driver")
+}
+
+func (g *grpcFacade) Get(context.Context, string, string) ([]byte, error) {
+	return nil, NewError(CodeProtocol, "grpc Get is not implemented in the Go driver")
+}
+
+func (g *grpcFacade) Delete(context.Context, string, string) error {
+	return NewError(CodeProtocol, "grpc Delete is not implemented in the Go driver")
+}
+
+func (g *grpcFacade) Ping(ctx context.Context) error { return g.c.Ping(ctx) }
+func (g *grpcFacade) Close() error                   { return g.c.Close() }
