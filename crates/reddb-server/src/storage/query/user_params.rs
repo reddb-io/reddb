@@ -251,6 +251,11 @@ fn collect_non_expr_indices(expr: &QueryExpr, out: &mut Vec<usize>) {
                 out.push(*idx);
             }
         }
+        QueryExpr::SearchCommand(SearchCommand::Index { limit_param, .. }) => {
+            if let Some(idx) = limit_param {
+                out.push(*idx);
+            }
+        }
         _ => {}
     }
 }
@@ -554,6 +559,50 @@ pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamEr
             query: query.clone(),
             collection: collection.clone(),
             limit: bound_limit,
+            limit_param: None,
+        }));
+    }
+
+    if let QueryExpr::SearchCommand(SearchCommand::Index {
+        index,
+        value,
+        collection,
+        limit,
+        exact,
+        limit_param,
+    }) = expr
+    {
+        let bound_limit = if let Some(idx) = limit_param {
+            let value = params.get(*idx).ok_or(UserParamError::Arity {
+                expected: idx + 1,
+                got: params.len(),
+            })?;
+            match value {
+                Value::Integer(n) if *n > 0 => *n as usize,
+                Value::UnsignedInteger(n) if *n > 0 => *n as usize,
+                Value::BigInt(n) if *n > 0 => *n as usize,
+                Value::Integer(_) | Value::UnsignedInteger(_) | Value::BigInt(_) => {
+                    return Err(UserParamError::TypeMismatch {
+                        slot: "SEARCH INDEX LIMIT parameter (must be > 0)",
+                        got: value_variant_name(value),
+                    });
+                }
+                other => {
+                    return Err(UserParamError::TypeMismatch {
+                        slot: "SEARCH INDEX LIMIT parameter",
+                        got: value_variant_name(other),
+                    });
+                }
+            }
+        } else {
+            *limit
+        };
+        return Ok(QueryExpr::SearchCommand(SearchCommand::Index {
+            index: index.clone(),
+            value: value.clone(),
+            collection: collection.clone(),
+            limit: bound_limit,
+            exact: *exact,
             limit_param: None,
         }));
     }
@@ -1146,6 +1195,51 @@ mod tests {
             err,
             UserParamError::TypeMismatch {
                 slot: "SEARCH MULTIMODAL LIMIT parameter",
+                got: "text"
+            }
+        ));
+    }
+
+    #[test]
+    fn bind_search_index_limit_param() {
+        // Issue #361: `SEARCH INDEX ... LIMIT $N` binds an integer.
+        let q = parse(
+            "SEARCH INDEX cpf VALUE '000.000.000-00' COLLECTION people LIMIT $1",
+        );
+        let bound = bind(&q, &[Value::Integer(50)]).unwrap();
+        let QueryExpr::SearchCommand(SearchCommand::Index {
+            limit,
+            limit_param,
+            ..
+        }) = bound
+        else {
+            panic!("expected SearchCommand::Index");
+        };
+        assert_eq!(limit, 50);
+        assert_eq!(limit_param, None, "limit_param must be cleared post-bind");
+    }
+
+    #[test]
+    fn bind_search_index_limit_rejects_zero() {
+        let q = parse("SEARCH INDEX cpf VALUE 'x' COLLECTION people LIMIT $1");
+        let err = bind(&q, &[Value::Integer(0)]).unwrap_err();
+        assert!(matches!(
+            err,
+            UserParamError::TypeMismatch {
+                slot: "SEARCH INDEX LIMIT parameter (must be > 0)",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn bind_search_index_limit_rejects_non_integer() {
+        let q = parse("SEARCH INDEX cpf VALUE 'x' COLLECTION people LIMIT $1");
+        let err = bind(&q, &[Value::text("five")]).unwrap_err();
+        assert!(matches!(
+            err,
+            UserParamError::TypeMismatch {
+                slot: "SEARCH INDEX LIMIT parameter",
                 got: "text"
             }
         ));

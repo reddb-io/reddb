@@ -2898,6 +2898,7 @@ fn test_parse_search_index_defaults() {
         collection,
         limit,
         exact,
+        ..
     }) = query
     {
         assert_eq!(index, "cpf");
@@ -2920,6 +2921,7 @@ fn test_parse_search_index_with_collection_limit_fuzzy() {
         collection,
         limit,
         exact,
+        ..
     }) = query
     {
         assert_eq!(index, "cpf");

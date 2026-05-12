@@ -549,7 +549,14 @@ impl RedDBRuntime {
                 collection,
                 limit,
                 exact,
+                limit_param,
             } => {
+                if limit_param.is_some() {
+                    return Err(RedDBError::Query(
+                        "SEARCH INDEX LIMIT $N parameter was not bound before execution"
+                            .to_string(),
+                    ));
+                }
                 let collections = collection.as_ref().map(|c| vec![c.clone()]);
                 let res = self.search_index(
                     index.clone(),
