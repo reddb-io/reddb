@@ -41,14 +41,21 @@ public final class RedWireConn implements Conn {
     private final Object lock = new Object();
     private final AtomicLong nextCorrelation = new AtomicLong(1);
     private final String sessionId;
+    private final int serverFeatures;
     private volatile boolean closed;
 
     /** Raw constructor — caller already has streams + something to close. Tests use this. */
     public RedWireConn(InputStream in, OutputStream out, Closeable owner, String sessionId) {
+        this(in, out, owner, sessionId, 0);
+    }
+
+    /** Raw constructor with known server features. Tests use this. */
+    public RedWireConn(InputStream in, OutputStream out, Closeable owner, String sessionId, int serverFeatures) {
         this.in = in;
         this.out = out;
         this.owner = owner;
         this.sessionId = sessionId;
+        this.serverFeatures = serverFeatures;
     }
 
     /** Open a TCP / TLS connection and run the RedWire handshake. */
@@ -75,7 +82,7 @@ public final class RedWireConn implements Conn {
             String clientName = opts.clientName() != null ? opts.clientName() : "reddb-jvm/0.1";
 
             HandshakeResult handshake = performHandshake(rawIn, rawOut, username, password, token, clientName);
-            return new RedWireConn(rawIn, rawOut, socket, handshake.sessionId);
+            return new RedWireConn(rawIn, rawOut, socket, handshake.sessionId, handshake.features);
         } catch (IOException e) {
             closeQuietly(socket);
             throw new RedDBException.ProtocolError("redwire connect failed: " + e.getMessage(), e);
@@ -137,12 +144,13 @@ public final class RedWireConn implements Conn {
         if (chosen == null) {
             throw new RedDBException.ProtocolError("HelloAck missing 'auth' field");
         }
+        int features = featuresField(ackJson, 0);
 
         // 4. Auth dispatch.
         switch (chosen) {
             case "anonymous":
                 writeFrame(out, new Frame(Frame.Kind.AuthResponse, 2L, new byte[0]));
-                return finishOneRtt(in);
+                return finishOneRtt(in, features);
             case "bearer": {
                 if (token == null) {
                     throw new RedDBException.AuthRefused(
@@ -151,14 +159,14 @@ public final class RedWireConn implements Conn {
                 ObjectNode body = MAPPER.createObjectNode();
                 body.put("token", token);
                 writeFrame(out, new Frame(Frame.Kind.AuthResponse, 2L, MAPPER.writeValueAsBytes(body)));
-                return finishOneRtt(in);
+                return finishOneRtt(in, features);
             }
             case "scram-sha-256": {
                 if (username == null || password == null) {
                     throw new RedDBException.AuthRefused(
                         "server picked scram-sha-256 but no username/password configured");
                 }
-                return performScram(in, out, username, password);
+                return performScram(in, out, username, password, features);
             }
             case "oauth-jwt": {
                 if (token == null) {
@@ -168,7 +176,7 @@ public final class RedWireConn implements Conn {
                 ObjectNode body = MAPPER.createObjectNode();
                 body.put("jwt", token);
                 writeFrame(out, new Frame(Frame.Kind.AuthResponse, 2L, MAPPER.writeValueAsBytes(body)));
-                return finishOneRtt(in);
+                return finishOneRtt(in, features);
             }
             default:
                 throw new RedDBException.ProtocolError(
@@ -176,7 +184,7 @@ public final class RedWireConn implements Conn {
         }
     }
 
-    private static HandshakeResult finishOneRtt(InputStream in) throws IOException {
+    private static HandshakeResult finishOneRtt(InputStream in, int fallbackFeatures) throws IOException {
         Frame f = readFrame(in);
         if (f.kind == Frame.Kind.AuthFail) {
             throw new RedDBException.AuthRefused(reason(f.payload, "auth refused"));
@@ -187,11 +195,12 @@ public final class RedWireConn implements Conn {
         }
         JsonNode j = parseJson(f.payload, "AuthOk");
         String sid = textField(j, "session_id");
-        return new HandshakeResult(sid == null ? "" : sid);
+        return new HandshakeResult(sid == null ? "" : sid, featuresField(j, fallbackFeatures));
     }
 
     private static HandshakeResult performScram(InputStream in, OutputStream out,
-                                                String username, String password) throws IOException {
+                                                String username, String password,
+                                                int fallbackFeatures) throws IOException {
         // RFC 5802 § 3 — three round trips after the version byte.
         String clientNonce = Scram.newClientNonce();
         String clientFirst = Scram.clientFirst(username, clientNonce);
@@ -243,7 +252,7 @@ public final class RedWireConn implements Conn {
             throw new RedDBException.AuthRefused(
                 "scram: server signature did not verify — possible MITM");
         }
-        return new HandshakeResult(sid == null ? "" : sid);
+        return new HandshakeResult(sid == null ? "" : sid, featuresField(j, fallbackFeatures));
     }
 
     /** Pull the server-first string out of an AuthRequest payload. */
@@ -296,11 +305,27 @@ public final class RedWireConn implements Conn {
 
     @Override
     public byte[] query(String sql) {
+        return sendQuery(Frame.Kind.Query, sql.getBytes(StandardCharsets.UTF_8), "query");
+    }
+
+    @Override
+    public byte[] query(String sql, Object... params) {
+        if (params == null || params.length == 0) {
+            return query(sql);
+        }
+        if (!supportsParams()) {
+            throw new RedDBException.ParamsUnsupported(
+                "server did not advertise FEATURE_PARAMS — upgrade the server to use parameterized queries");
+        }
+        return sendQuery(Frame.Kind.QueryWithParams, ValueCodec.encodeQueryWithParams(sql, params), "query");
+    }
+
+    private byte[] sendQuery(int kind, byte[] payload, String label) {
         synchronized (lock) {
             ensureOpen();
             long corr = nextCorrelation.getAndIncrement();
             try {
-                writeFrame(out, new Frame(Frame.Kind.Query, corr, sql.getBytes(StandardCharsets.UTF_8)));
+                writeFrame(out, new Frame(kind, corr, payload));
                 Frame resp = readFrame(in);
                 if (resp.kind == Frame.Kind.Result) return resp.payload;
                 if (resp.kind == Frame.Kind.Error) {
@@ -309,7 +334,7 @@ public final class RedWireConn implements Conn {
                 throw new RedDBException.ProtocolError(
                     "expected Result/Error, got " + Frame.Kind.name(resp.kind));
             } catch (IOException e) {
-                throw new RedDBException.ProtocolError("query I/O: " + e.getMessage(), e);
+                throw new RedDBException.ProtocolError(label + " I/O: " + e.getMessage(), e);
             }
         }
     }
@@ -430,6 +455,8 @@ public final class RedWireConn implements Conn {
     }
 
     public String sessionId() { return sessionId; }
+    public int features() { return serverFeatures; }
+    public boolean supportsParams() { return (serverFeatures & Frame.FEATURE_PARAMS) == Frame.FEATURE_PARAMS; }
 
     // ---------------------------------------------------------------
     // Helpers
@@ -491,6 +518,12 @@ public final class RedWireConn implements Conn {
         return (v != null && v.isTextual()) ? v.asText() : null;
     }
 
+    private static int featuresField(JsonNode node, int fallback) {
+        if (node == null || !node.isObject()) return fallback;
+        JsonNode v = node.get("features");
+        return (v != null && v.isNumber()) ? v.asInt() : fallback;
+    }
+
     private static SSLSocket openTls(String host, int port) throws IOException {
         SSLContext ctx;
         try {
@@ -516,6 +549,11 @@ public final class RedWireConn implements Conn {
     /** Outcome of a successful handshake — exposed mostly for tests. */
     public static final class HandshakeResult {
         public final String sessionId;
-        public HandshakeResult(String sessionId) { this.sessionId = sessionId; }
+        public final int features;
+        public HandshakeResult(String sessionId) { this(sessionId, 0); }
+        public HandshakeResult(String sessionId, int features) {
+            this.sessionId = sessionId;
+            this.features = features;
+        }
     }
 }

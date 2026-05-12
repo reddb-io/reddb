@@ -54,6 +54,7 @@ public final class Frame {
         public static final int Get = 0x19;
         public static final int Delete = 0x1A;
         public static final int DeleteOk = 0x1B;
+        public static final int QueryWithParams = 0x28;
 
         private Kind() {}
 
@@ -80,10 +81,14 @@ public final class Frame {
                 case Get: return "Get";
                 case Delete: return "Delete";
                 case DeleteOk: return "DeleteOk";
+                case QueryWithParams: return "QueryWithParams";
                 default: return String.format("0x%02x", kind & 0xff);
             }
         }
     }
+
+    /** Server feature bitmask: QueryWithParams frame support. */
+    public static final int FEATURE_PARAMS = 0x0000_0001;
 
     /** Flag bits that may appear in the header. */
     public static final class Flags {

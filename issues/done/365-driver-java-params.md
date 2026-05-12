@@ -24,12 +24,12 @@ JDBC-style. Vector accepts `float[]`. `null` maps to `Value::Null`. `byte[]` map
 
 ## Acceptance criteria
 
-- [ ] New `query(sql, params)` overload implemented.
-- [ ] Original `query(sql)` signature unchanged.
-- [ ] Native type mapping documented: int, float, bool, null, text, bytes, vector, json, timestamp, uuid.
-- [ ] Driver-side parameter serialization tested (deep module per driver) — golden fixtures shared with other drivers.
-- [ ] Integration test covering int/text/null/vector params end-to-end.
-- [ ] README example updated with the parameterized form (especially vector example).
+- [x] New `query(sql, params)` overload implemented.
+- [x] Original `query(sql)` signature unchanged.
+- [x] Native type mapping documented: int, float, bool, null, text, bytes, vector, json, timestamp, uuid.
+- [x] Driver-side parameter serialization tested (deep module per driver) — golden fixtures shared with other drivers.
+- [x] Integration test covering int/text/null/vector params end-to-end.
+- [x] README example updated with the parameterized form (especially vector example).
 
 ## Blocked by
 

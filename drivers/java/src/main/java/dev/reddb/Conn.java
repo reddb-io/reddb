@@ -11,6 +11,9 @@ public interface Conn extends AutoCloseable {
     /** Run a SQL query. Returns the engine's JSON envelope as bytes. */
     byte[] query(String sql);
 
+    /** Run a SQL query with positional `$N` bind parameters. */
+    byte[] query(String sql, Object... params);
+
     /** Insert a single row into a collection. `payload` is anything Jackson can serialise. */
     void insert(String collection, Object payload);
 

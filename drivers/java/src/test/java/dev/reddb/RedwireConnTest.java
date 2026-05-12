@@ -306,6 +306,151 @@ class RedwireConnTest {
     }
 
     @Test
+    void queryWithParamsUsesQueryWithParamsFrame() throws Exception {
+        Pipes p = new Pipes();
+        AtomicReference<Throwable> serverErr = new AtomicReference<>();
+
+        Thread server = new Thread(() -> {
+            try {
+                readMagic(p.serverIn);
+                Frame hello = readClientFrame(p.serverIn);
+                ObjectNode ack = MAPPER.createObjectNode();
+                ack.put("auth", "anonymous");
+                ack.put("features", Frame.FEATURE_PARAMS);
+                writeServerFrame(p.serverOut, Frame.Kind.HelloAck, hello.correlationId, MAPPER.writeValueAsBytes(ack));
+
+                Frame resp = readClientFrame(p.serverIn);
+                ObjectNode ok = MAPPER.createObjectNode();
+                ok.put("session_id", "rwsess-test-params");
+                ok.put("features", Frame.FEATURE_PARAMS);
+                writeServerFrame(p.serverOut, Frame.Kind.AuthOk, resp.correlationId, MAPPER.writeValueAsBytes(ok));
+
+                Frame q = readClientFrame(p.serverIn);
+                assertEquals(Frame.Kind.QueryWithParams, q.kind);
+                ByteBuffer payload = ByteBuffer.wrap(q.payload).order(ByteOrder.LITTLE_ENDIAN);
+                int sqlLen = payload.getInt();
+                byte[] sqlBytes = new byte[sqlLen];
+                payload.get(sqlBytes);
+                assertEquals("SELECT $1, $2, $3, $4", new String(sqlBytes, StandardCharsets.UTF_8));
+                assertEquals(4, payload.getInt());
+                assertEquals(0x02, payload.get() & 0xff);
+                assertEquals(42L, payload.getLong());
+                assertEquals(0x04, payload.get() & 0xff);
+                int textLen = payload.getInt();
+                byte[] textBytes = new byte[textLen];
+                payload.get(textBytes);
+                assertEquals("alice", new String(textBytes, StandardCharsets.UTF_8));
+                assertEquals(0x00, payload.get() & 0xff);
+                assertEquals(0x06, payload.get() & 0xff);
+                assertEquals(3, payload.getInt());
+                assertEquals(1.0f, payload.getFloat());
+                assertEquals(2.0f, payload.getFloat());
+                assertEquals(3.0f, payload.getFloat());
+
+                ObjectNode result = MAPPER.createObjectNode();
+                result.put("ok", true);
+                writeServerFrame(p.serverOut, Frame.Kind.Result, q.correlationId, MAPPER.writeValueAsBytes(result));
+
+                readClientFrame(p.serverIn);
+            } catch (Throwable t) {
+                serverErr.set(t);
+            }
+        }, "fake-redwire-server-query-params");
+        server.setDaemon(true);
+        server.start();
+
+        RedWireConn.HandshakeResult res = RedWireConn.performHandshake(
+            p.clientIn, p.clientOut, null, null, null, "test-driver");
+        RedWireConn conn = new RedWireConn(p.clientIn, p.clientOut, () -> {}, res.sessionId, res.features);
+        assertTrue(conn.supportsParams());
+        byte[] resultBytes = conn.query("SELECT $1, $2, $3, $4", 42, "alice", null, new float[]{1, 2, 3});
+        assertTrue(MAPPER.readTree(resultBytes).get("ok").asBoolean());
+        conn.close();
+
+        server.join(5_000);
+        if (serverErr.get() != null) throw new AssertionError("server thread", serverErr.get());
+    }
+
+    @Test
+    void queryWithParamsRequiresFeatureParams() throws Exception {
+        Pipes p = new Pipes();
+        AtomicReference<Throwable> serverErr = new AtomicReference<>();
+
+        Thread server = new Thread(() -> {
+            try {
+                readMagic(p.serverIn);
+                Frame hello = readClientFrame(p.serverIn);
+                ObjectNode ack = MAPPER.createObjectNode();
+                ack.put("auth", "anonymous");
+                ack.put("features", 0);
+                writeServerFrame(p.serverOut, Frame.Kind.HelloAck, hello.correlationId, MAPPER.writeValueAsBytes(ack));
+
+                Frame resp = readClientFrame(p.serverIn);
+                ObjectNode ok = MAPPER.createObjectNode();
+                ok.put("session_id", "rwsess-test-no-params");
+                ok.put("features", 0);
+                writeServerFrame(p.serverOut, Frame.Kind.AuthOk, resp.correlationId, MAPPER.writeValueAsBytes(ok));
+            } catch (Throwable t) {
+                serverErr.set(t);
+            }
+        }, "fake-redwire-server-no-params");
+        server.setDaemon(true);
+        server.start();
+
+        RedWireConn.HandshakeResult res = RedWireConn.performHandshake(
+            p.clientIn, p.clientOut, null, null, null, "test-driver");
+        RedWireConn conn = new RedWireConn(p.clientIn, p.clientOut, () -> {}, res.sessionId, res.features);
+        assertFalse(conn.supportsParams());
+        assertThrows(RedDBException.ParamsUnsupported.class, () -> conn.query("SELECT $1", 1));
+
+        server.join(5_000);
+        if (serverErr.get() != null) throw new AssertionError("server thread", serverErr.get());
+    }
+
+    @Test
+    void queryWithEmptyParamsUsesLegacyQueryFrame() throws Exception {
+        Pipes p = new Pipes();
+        AtomicReference<Throwable> serverErr = new AtomicReference<>();
+
+        Thread server = new Thread(() -> {
+            try {
+                readMagic(p.serverIn);
+                Frame hello = readClientFrame(p.serverIn);
+                ObjectNode ack = MAPPER.createObjectNode();
+                ack.put("auth", "anonymous");
+                ack.put("features", Frame.FEATURE_PARAMS);
+                writeServerFrame(p.serverOut, Frame.Kind.HelloAck, hello.correlationId, MAPPER.writeValueAsBytes(ack));
+
+                Frame resp = readClientFrame(p.serverIn);
+                ObjectNode ok = MAPPER.createObjectNode();
+                ok.put("session_id", "rwsess-test-empty-params");
+                ok.put("features", Frame.FEATURE_PARAMS);
+                writeServerFrame(p.serverOut, Frame.Kind.AuthOk, resp.correlationId, MAPPER.writeValueAsBytes(ok));
+
+                Frame q = readClientFrame(p.serverIn);
+                assertEquals(Frame.Kind.Query, q.kind);
+                assertEquals("SELECT 1", new String(q.payload, StandardCharsets.UTF_8));
+                writeServerFrame(p.serverOut, Frame.Kind.Result, q.correlationId, "{}".getBytes(StandardCharsets.UTF_8));
+
+                readClientFrame(p.serverIn);
+            } catch (Throwable t) {
+                serverErr.set(t);
+            }
+        }, "fake-redwire-server-empty-params");
+        server.setDaemon(true);
+        server.start();
+
+        RedWireConn.HandshakeResult res = RedWireConn.performHandshake(
+            p.clientIn, p.clientOut, null, null, null, "test-driver");
+        RedWireConn conn = new RedWireConn(p.clientIn, p.clientOut, () -> {}, res.sessionId, res.features);
+        conn.query("SELECT 1", new Object[0]);
+        conn.close();
+
+        server.join(5_000);
+        if (serverErr.get() != null) throw new AssertionError("server thread", serverErr.get());
+    }
+
+    @Test
     void clientSendsMagicByteFirst() throws Exception {
         // Spin a tiny "server" that captures the first two bytes off the wire.
         Pipes p = new Pipes();

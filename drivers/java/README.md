@@ -21,13 +21,47 @@ import dev.reddb.Reddb;
 try (Conn conn = Reddb.connect("red://localhost:5050")) {
     conn.ping();
     conn.insert("users", java.util.Map.of("name", "alice", "age", 30));
-    byte[] body = conn.query("SELECT * FROM users WHERE name = 'alice'");
+    byte[] body = conn.query("SELECT * FROM users WHERE age = $1 AND name = $2", 30, "alice");
     System.out.println(new String(body, java.nio.charset.StandardCharsets.UTF_8));
 }
 ```
 
 Use `Options.builder().username(...).password(...)` to enable
 SCRAM-SHA-256 over RedWire, or `.token(...)` for bearer auth.
+
+## Parameterized queries
+
+`query(String sql, Object... params)` binds positional `$N` placeholders.
+The original `query(String sql)` call is unchanged, and empty params keep
+using the legacy RedWire `Query` frame.
+
+```java
+byte[] rows = conn.query(
+    "VECTOR SEARCH embeddings SIMILAR TO $1 LIMIT $2",
+    new float[]{0.1f, 0.2f, 0.3f},
+    10
+);
+```
+
+Native mapping:
+
+| Java type | RedDB value |
+|-----------|-------------|
+| `null` | `Null` |
+| `Boolean` | `Bool` |
+| `Byte`, `Short`, `Integer`, `Long` | `Int` |
+| `Float`, `Double` | `Float` |
+| `String` | `Text` |
+| `byte[]` | `Bytes` |
+| `float[]` | `Vector` |
+| `Map`, `List`, Jackson `JsonNode` | `Json` |
+| `Instant` | `Timestamp` |
+| `UUID` | `Uuid` |
+
+RedWire parameterized queries require the server to advertise
+`FEATURE_PARAMS`; otherwise the driver throws
+`RedDBException.ParamsUnsupported`. HTTP sends the same typed values as
+the `/query` JSON `params` array.
 
 ## URL grammar
 

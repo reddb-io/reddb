@@ -7,6 +7,7 @@ import dev.reddb.Conn;
 import dev.reddb.Options;
 import dev.reddb.RedDBException;
 import dev.reddb.Url;
+import dev.reddb.redwire.ValueCodec;
 
 import javax.net.ssl.SSLContext;
 import java.io.IOException;
@@ -95,8 +96,16 @@ public final class HttpConn implements Conn {
 
     @Override
     public byte[] query(String sql) {
+        return query(sql, new Object[0]);
+    }
+
+    @Override
+    public byte[] query(String sql, Object... params) {
         ObjectNode body = MAPPER.createObjectNode();
-        body.put("sql", sql);
+        body.put("query", sql);
+        if (params != null && params.length > 0) {
+            body.set("params", ValueCodec.toHttpParams(params));
+        }
         return post("/query", body, true);
     }
 

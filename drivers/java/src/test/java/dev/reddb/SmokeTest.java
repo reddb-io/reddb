@@ -46,6 +46,14 @@ class SmokeTest {
                 byte[] result = conn.query("SELECT * FROM smoke_users WHERE name = 'alice'");
                 String body = new String(result, StandardCharsets.UTF_8);
                 assertTrue(body.contains("alice"), "expected alice in: " + body);
+                byte[] paramResult = conn.query(
+                    "SELECT * FROM smoke_users WHERE age = $1 AND name = $2 AND $3 IS NULL",
+                    30,
+                    "alice",
+                    null
+                );
+                String paramBody = new String(paramResult, StandardCharsets.UTF_8);
+                assertTrue(paramBody.contains("alice"), "expected parameterized alice in: " + paramBody);
                 conn.delete("smoke_users", "alice");
             }
         } finally {

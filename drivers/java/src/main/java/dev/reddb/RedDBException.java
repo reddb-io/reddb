@@ -25,6 +25,11 @@ public class RedDBException extends RuntimeException {
         public EngineError(String message) { super(message); }
     }
 
+    /** Parameterized query was issued against a RedWire server without FEATURE_PARAMS. */
+    public static class ParamsUnsupported extends RedDBException {
+        public ParamsUnsupported(String message) { super(message); }
+    }
+
     /** Frame length out of range (negative, < 16, or > 16 MiB). */
     public static class FrameTooLarge extends ProtocolError {
         public FrameTooLarge(String message) { super(message); }
