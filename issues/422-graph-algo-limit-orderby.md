@@ -49,8 +49,19 @@ Verification:
 - `cargo test -p reddb-io-server --test runtime_query_behavior graph_centrality_limit`
 - `make check`
 
+Slice 2: `GRAPH COMPONENTS LIMIT N` landed.
+
+- Parser accepts `GRAPH COMPONENTS LIMIT n` and `GRAPH COMPONENTS MODE weak LIMIT n`.
+- Runtime applies the cap to emitted component rows; omitted `LIMIT` preserves existing unbounded component output.
+- Tests landed in parser coverage and `crates/reddb-server/tests/runtime_query_behavior.rs`.
+
+Verification:
+
+- `cargo test -p reddb-io-server --test graph_dsl_parser graph_components_limit_parses`
+- `cargo test -p reddb-io-server --test runtime_query_behavior graph_components_limit_caps_returned_rows`
+
 Remaining slices:
 
-- `LIMIT` for community, components, shortest path, and any other documented `GRAPH <algorithm>` command.
+- `LIMIT` for community, shortest path, and any other documented `GRAPH <algorithm>` command.
 - `ORDER BY <metric> [ASC|DESC]` support and tests.
 - Docs for default top-K behavior and explicit limit/order examples.

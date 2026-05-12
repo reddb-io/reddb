@@ -379,6 +379,18 @@ fn graph_shortest_path_from_to_form_parses() {
 }
 
 #[test]
+fn graph_components_limit_parses() {
+    let q = parse_query("GRAPH COMPONENTS MODE weak LIMIT 2");
+    match q {
+        QueryExpr::GraphCommand(GraphCommand::Components { mode, limit }) => {
+            assert_eq!(mode, "weak");
+            assert_eq!(limit, Some(2));
+        }
+        other => panic!("expected Components, got {other:?}"),
+    }
+}
+
+#[test]
 fn path_query_with_via_parses() {
     let q = parse_query("PATH FROM host('a') TO host('b') VIA [:KNOWS, :FOLLOWS]");
     match q {
