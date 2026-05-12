@@ -413,7 +413,14 @@ impl RedDBRuntime {
                 collection,
                 limit,
                 fuzzy,
+                limit_param,
             } => {
+                if limit_param.is_some() {
+                    return Err(RedDBError::Query(
+                        "SEARCH TEXT LIMIT $N parameter was not bound before execution"
+                            .to_string(),
+                    ));
+                }
                 let collections = collection.as_ref().map(|c| vec![c.clone()]);
                 // Issue #119: gate the candidate set by visible_collections.
                 let scope = self.ai_scope();

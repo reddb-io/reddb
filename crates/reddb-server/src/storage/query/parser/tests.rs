@@ -2759,6 +2759,7 @@ fn test_parse_search_text() {
         collection,
         limit,
         fuzzy,
+        ..
     }) = query
     {
         assert_eq!(q, "find all vulnerabilities");
@@ -2778,6 +2779,7 @@ fn test_parse_search_text_minimal() {
         collection,
         limit,
         fuzzy,
+        ..
     }) = query
     {
         assert_eq!(q, "hello world");
