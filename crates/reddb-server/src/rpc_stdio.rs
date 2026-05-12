@@ -1694,6 +1694,24 @@ mod tests {
     }
 
     #[test]
+    fn query_with_params_insert_and_search_round_trip() {
+        let rt = make_runtime();
+        let insert = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{"sql":"INSERT INTO bun_embeddings VECTOR (dense, content) VALUES ($1, $2)","params":[[1.0,0.0],"bun vector"]}}"#,
+        );
+        assert!(insert.contains("\"affected\":1"), "got: {insert}");
+
+        let search = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":2,"method":"query","params":{"sql":"SEARCH SIMILAR $1 COLLECTION bun_embeddings LIMIT 1","params":[[1.0,0.0]]}}"#,
+        );
+        assert!(search.contains("\"rows\""), "got: {search}");
+        assert!(search.contains("\"score\":1"), "got: {search}");
+        assert!(!search.contains("\"error\""), "got: {search}");
+    }
+
+    #[test]
     fn query_with_params_arity_mismatch_rejected() {
         let rt = make_runtime();
         let _ = handle(
