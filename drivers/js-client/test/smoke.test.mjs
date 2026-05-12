@@ -89,6 +89,26 @@ test('connect(http://) round-trips query() through the mock', async () => {
   }
 })
 
+test('connect(http://) insert() returns affected count and assigned id', async () => {
+  const stub = await startMockServer({
+    'GET /health': () => ({ ok: true, version: 'mock-0.0.0' }),
+    'POST /collections/users/rows': () => ({
+      ok: true,
+      id: 102,
+      entity: { id: 102 },
+    }),
+  })
+  try {
+    const db = await connect(stub.baseUrl)
+    const result = await db.insert('users', { name: 'Alice' })
+    assert.equal(result.affected, 1)
+    assert.equal(result.id, 102)
+    await db.close()
+  } finally {
+    await stub.close()
+  }
+})
+
 test('connect(http://) surfaces server errors as RedDBError', async () => {
   const stub = await startMockServer({
     'GET /health': () => ({ ok: true, version: 'mock-0.0.0' }),

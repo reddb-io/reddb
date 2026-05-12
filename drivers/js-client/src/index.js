@@ -272,8 +272,17 @@ export class RedDB {
   }
 
   /** Insert one row. Returns `{ affected, id? }`. */
-  insert(collection, payload) {
-    return this.client.call('insert', { collection, payload })
+  async insert(collection, payload) {
+    const result = await this.client.call('insert', { collection, payload })
+    if (
+      result &&
+      typeof result === 'object' &&
+      !('affected' in result) &&
+      'id' in result
+    ) {
+      return { ...result, affected: 1 }
+    }
+    return result
   }
 
   /** Insert many rows in one call. Returns `{ affected }`. */
