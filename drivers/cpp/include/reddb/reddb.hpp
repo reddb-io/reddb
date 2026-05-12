@@ -11,10 +11,13 @@
 #include "reddb/http/client.hpp"
 #include "reddb/redwire/conn.hpp"
 #include "reddb/url.hpp"
+#include "reddb/value.hpp"
 
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace reddb {
@@ -39,6 +42,11 @@ class Conn {
 public:
     virtual ~Conn() = default;
     virtual std::string query(const std::string& sql) = 0;
+    virtual std::string query(std::string_view sql, std::span<const Value> params) {
+        if (params.empty()) return query(std::string(sql));
+        throw RedDBError(ErrorCode::ParamsUnsupported,
+                         "parameterized queries are not supported by this connection");
+    }
     virtual std::string insert(const std::string& collection,
                                const std::string& json_payload) = 0;
     virtual std::string bulk_insert(const std::string& collection,

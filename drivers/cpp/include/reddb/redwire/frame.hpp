@@ -40,7 +40,10 @@ enum class MessageKind : uint8_t {
     Get = 0x19,
     Delete = 0x1A,
     DeleteOk = 0x1B,
+    QueryWithParams = 0x28,
 };
+
+constexpr uint32_t FEATURE_PARAMS = 0x0000'0001;
 
 bool is_known_kind(uint8_t byte) noexcept;
 
