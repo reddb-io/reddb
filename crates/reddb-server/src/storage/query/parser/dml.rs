@@ -92,10 +92,27 @@ impl<'a> Parser<'a> {
             self.expect(Token::LParen)?;
             let row_exprs = self.parse_dml_expr_list()?;
             self.expect(Token::RParen)?;
+            // Tolerate `$N` / `?` placeholders in VALUES rows: fold to
+            // Value::Null and rely on `user_params::bind` to substitute
+            // the caller's values before execution. Issue #355.
+            // Tolerate `$N` / `?` placeholders in VALUES rows: if fold
+            // fails on an expression that contains `Expr::Parameter`,
+            // emit a `Value::Null` placeholder. `user_params::bind`
+            // substitutes the caller-supplied value before execution.
+            // Issue #355.
             let row_values = row_exprs
                 .iter()
                 .cloned()
-                .map(fold_expr_to_value)
+                .map(|expr| match fold_expr_to_value(expr.clone()) {
+                    Ok(value) => Ok(value),
+                    Err(msg) => {
+                        if crate::storage::query::user_params::expr_contains_parameter(&expr) {
+                            Ok(Value::Null)
+                        } else {
+                            Err(msg)
+                        }
+                    }
+                })
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|msg| ParseError::new(msg, self.position()))?;
             all_value_exprs.push(row_exprs);

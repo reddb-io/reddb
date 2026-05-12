@@ -87,16 +87,29 @@ Done:
     with vector param (#355)" case covering `number[]`, `Float32Array`, and
     the type-mismatch rejection.
 
-Deferred to follow-up — keep this issue open until done:
+## Progress (2026-05-12) — INSERT half landed
 
-- `INSERT INTO <coll> (dense, ...) VALUES ($1, ...)`. The parser folds
-  `value_exprs` to `values` via `fold_expr_to_value`, which currently errors
-  on `Expr::Parameter`. Wiring requires either (a) folding `Parameter` to a
-  sentinel `Value` plus a re-fold step inside `user_params::bind`, or
-  (b) deferring fold until after binding. Both are bigger than the SEARCH
-  SIMILAR slot — split out so this issue can ship the search-side win.
-- Large-vector dimensional sweep (1024 / 4096) — straightforward extension
-  of the JS smoke test once INSERT is wired.
+- Parser `parse_insert_query`: when an expression in VALUES contains
+  `Expr::Parameter`, fold to a `Value::Null` placeholder rather than
+  erroring out. Non-parameter folding errors still surface.
+- `user_params::expr_contains_parameter` + `substitute_params_in_expr`:
+  new helpers that detect placeholders and rewrite an `Expr` tree by
+  swapping each `Expr::Parameter` for an `Expr::Literal` carrying the
+  caller-supplied value.
+- `user_params::collect_indices` now traverses `QueryExpr::Insert`
+  rows so arity/gap validation covers INSERT placeholders.
+- `user_params::bind` handles `QueryExpr::Insert`: substitutes
+  parameters in `value_exprs`, re-folds each row to refresh `values`,
+  and returns the bound `InsertQuery`. Type validation (vector slot,
+  etc.) remains the engine type checker's job downstream.
+- Tests: `bind_insert_values_with_vector_param`,
+  `bind_insert_arity_mismatch` (`user_params::tests` now 13 passed).
+- JS smoke test: new
+  "parameterized INSERT VALUES with vector param (#355)" case inserts
+  a vector via `$1`/`$2`, then SEARCH SIMILAR finds the inserted row.
+
+Large-vector dimensional sweep (1024 / 4096) still TODO — minor
+extension of the smoke test, deferred to a wire-codec / driver issue.
 
 Files touched:
 

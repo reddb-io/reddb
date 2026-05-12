@@ -8,7 +8,148 @@
 
 use crate::storage::query::ast::{Expr, QueryExpr, SearchCommand};
 use crate::storage::query::planner::shape::bind_user_param_query;
+use crate::storage::query::sql_lowering::fold_expr_to_value;
 use crate::storage::schema::Value;
+
+/// Recursively check whether `expr` contains any `Expr::Parameter` node.
+/// Used by the INSERT parser to know when to defer literal folding to
+/// the user_params binder.
+pub fn expr_contains_parameter(expr: &Expr) -> bool {
+    match expr {
+        Expr::Parameter { .. } => true,
+        Expr::Literal { .. } | Expr::Column { .. } => false,
+        Expr::BinaryOp { lhs, rhs, .. } => {
+            expr_contains_parameter(lhs) || expr_contains_parameter(rhs)
+        }
+        Expr::UnaryOp { operand, .. } => expr_contains_parameter(operand),
+        Expr::Cast { inner, .. } => expr_contains_parameter(inner),
+        Expr::FunctionCall { args, .. } => args.iter().any(expr_contains_parameter),
+        Expr::Case { branches, else_, .. } => {
+            branches
+                .iter()
+                .any(|(c, v)| expr_contains_parameter(c) || expr_contains_parameter(v))
+                || else_.as_deref().is_some_and(expr_contains_parameter)
+        }
+        Expr::IsNull { operand, .. } => expr_contains_parameter(operand),
+        Expr::InList { target, values, .. } => {
+            expr_contains_parameter(target) || values.iter().any(expr_contains_parameter)
+        }
+        Expr::Between {
+            target, low, high, ..
+        } => {
+            expr_contains_parameter(target)
+                || expr_contains_parameter(low)
+                || expr_contains_parameter(high)
+        }
+    }
+}
+
+/// Substitute every `Expr::Parameter { index }` in `expr` with
+/// `Expr::Literal { value: params[index] }`. Used by INSERT binding,
+/// which must hand a fully literal AST to `fold_expr_to_value`.
+fn substitute_params_in_expr(expr: Expr, params: &[Value]) -> Result<Expr, UserParamError> {
+    match expr {
+        Expr::Parameter { index, span } => {
+            let value = params.get(index).ok_or(UserParamError::Arity {
+                expected: index + 1,
+                got: params.len(),
+            })?;
+            Ok(Expr::Literal {
+                value: value.clone(),
+                span,
+            })
+        }
+        Expr::Literal { .. } | Expr::Column { .. } => Ok(expr),
+        Expr::BinaryOp { op, lhs, rhs, span } => Ok(Expr::BinaryOp {
+            op,
+            lhs: Box::new(substitute_params_in_expr(*lhs, params)?),
+            rhs: Box::new(substitute_params_in_expr(*rhs, params)?),
+            span,
+        }),
+        Expr::UnaryOp { op, operand, span } => Ok(Expr::UnaryOp {
+            op,
+            operand: Box::new(substitute_params_in_expr(*operand, params)?),
+            span,
+        }),
+        Expr::Cast { inner, target, span } => Ok(Expr::Cast {
+            inner: Box::new(substitute_params_in_expr(*inner, params)?),
+            target,
+            span,
+        }),
+        Expr::FunctionCall { name, args, span } => {
+            let new_args = args
+                .into_iter()
+                .map(|a| substitute_params_in_expr(a, params))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Expr::FunctionCall {
+                name,
+                args: new_args,
+                span,
+            })
+        }
+        Expr::Case {
+            branches,
+            else_,
+            span,
+        } => {
+            let new_branches = branches
+                .into_iter()
+                .map(|(c, v)| {
+                    Ok::<_, UserParamError>((
+                        substitute_params_in_expr(c, params)?,
+                        substitute_params_in_expr(v, params)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let new_else = match else_ {
+                Some(e) => Some(Box::new(substitute_params_in_expr(*e, params)?)),
+                None => None,
+            };
+            Ok(Expr::Case {
+                branches: new_branches,
+                else_: new_else,
+                span,
+            })
+        }
+        Expr::IsNull {
+            operand,
+            negated,
+            span,
+        } => Ok(Expr::IsNull {
+            operand: Box::new(substitute_params_in_expr(*operand, params)?),
+            negated,
+            span,
+        }),
+        Expr::InList {
+            target,
+            values,
+            negated,
+            span,
+        } => Ok(Expr::InList {
+            target: Box::new(substitute_params_in_expr(*target, params)?),
+            values: values
+                .into_iter()
+                .map(|v| substitute_params_in_expr(v, params))
+                .collect::<Result<Vec<_>, _>>()?,
+            negated,
+            span,
+        }),
+        Expr::Between {
+            target,
+            low,
+            high,
+            negated,
+            span,
+        } => Ok(Expr::Between {
+            target: Box::new(substitute_params_in_expr(*target, params)?),
+            low: Box::new(substitute_params_in_expr(*low, params)?),
+            high: Box::new(substitute_params_in_expr(*high, params)?),
+            negated,
+            span,
+        }),
+    }
+}
+
 
 /// Errors surfaced when binding fails. The wire layer turns these into
 /// `QUERY_ERROR` / `INVALID_PARAMS` responses.
@@ -166,6 +307,32 @@ pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamEr
         }));
     }
 
+    if let QueryExpr::Insert(insert) = expr {
+        let mut bound = insert.clone();
+        let mut new_values: Vec<Vec<Value>> = Vec::with_capacity(bound.value_exprs.len());
+        let new_exprs = bound
+            .value_exprs
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|e| substitute_params_in_expr(e, params))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for row in &new_exprs {
+            let folded = row
+                .iter()
+                .cloned()
+                .map(fold_expr_to_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| UserParamError::UnsupportedShape)?;
+            new_values.push(folded);
+        }
+        bound.value_exprs = new_exprs;
+        bound.values = new_values;
+        return Ok(QueryExpr::Insert(bound));
+    }
+
     bind_user_param_query(expr, params).ok_or(UserParamError::UnsupportedShape)
 }
 
@@ -217,6 +384,13 @@ fn visit_query_expr<F: FnMut(&Expr)>(expr: &QueryExpr, visit: &mut F) {
         }
         QueryExpr::Hybrid(q) => {
             visit_query_expr(&q.structured, visit);
+        }
+        QueryExpr::Insert(q) => {
+            for row in &q.value_exprs {
+                for e in row {
+                    visit_expr(e, visit);
+                }
+            }
         }
         // Vector / Graph / Path: parameter slots in #355 / later issues.
         _ => {}
@@ -403,6 +577,43 @@ mod tests {
             panic!("expected SearchCommand::Similar");
         };
         assert!(vector.is_empty());
+    }
+
+    #[test]
+    fn bind_insert_values_with_vector_param() {
+        // Issue #355 INSERT half: $1 in VALUES is bound to a Value::Vector
+        // and surfaces in both `value_exprs` (as a Literal) and `values`.
+        let q = parse(
+            "INSERT INTO embeddings (dense, content) VALUES ($1, $2)",
+        );
+        let vec = Value::Vector(vec![0.1, 0.2, 0.3]);
+        let bound = bind(&q, &[vec.clone(), Value::text("doc text")]).unwrap();
+        let QueryExpr::Insert(insert) = bound else {
+            panic!("expected Insert");
+        };
+        assert_eq!(insert.values.len(), 1);
+        assert_eq!(insert.values[0].len(), 2);
+        assert!(matches!(insert.values[0][0], Value::Vector(ref v) if v == &vec![0.1f32, 0.2, 0.3]));
+        assert!(matches!(insert.values[0][1], Value::Text(ref s) if s.as_ref() == "doc text"));
+        // value_exprs row 0 col 0 is now a Literal carrying the vector.
+        let row0 = &insert.value_exprs[0];
+        assert!(matches!(
+            &row0[0],
+            Expr::Literal { value: Value::Vector(_), .. }
+        ));
+    }
+
+    #[test]
+    fn bind_insert_arity_mismatch() {
+        let q = parse("INSERT INTO t (a, b) VALUES ($1, $2)");
+        let err = bind(&q, &[Value::Integer(1)]).unwrap_err();
+        assert!(matches!(
+            err,
+            UserParamError::Arity {
+                expected: 2,
+                got: 1
+            }
+        ));
     }
 
     #[test]

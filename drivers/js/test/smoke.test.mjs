@@ -202,6 +202,23 @@ await test('parameterized SEARCH SIMILAR $N with vector param (#355)', async () 
   await db.close()
 })
 
+await test('parameterized INSERT VALUES with vector param (#355)', async () => {
+  const db = await connect('memory://', { binary: BINARY })
+  // INSERT with vector + text params, then verify SEARCH finds it.
+  const vec = [0.7, 0.7]
+  await db.query(
+    'INSERT INTO embeddings VECTOR (dense, content) VALUES ($1, $2)',
+    [vec, 'parameterized doc'],
+  )
+  const r = await db.query(
+    'SEARCH SIMILAR $1 COLLECTION embeddings LIMIT 1',
+    [new Float32Array([0.7, 0.7])],
+  )
+  assertEqual(r.rows.length, 1, 'one row')
+  assertEqual(r.rows[0].content, 'parameterized doc', 'matches inserted')
+  await db.close()
+})
+
 await test('query error rejects with RedDBError', async () => {
   const db = await connect('memory://', { binary: BINARY })
   try {
