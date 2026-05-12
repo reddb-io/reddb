@@ -41,3 +41,53 @@ Add a "Safe parameter binding" section to the JS/TS driver guide showing the vec
 - #361
 - #362
 - #363
+
+## Progress
+
+Slice 1 (commit f74c55c0): `docs/clients/drivers/go.md` got the
+"Safe parameter binding" section + native-type table + FEATURE_PARAMS
+gating note. Brought the Go hub page in sync with the driver README.
+
+Slice 2 (this commit): `docs/guides/javascript-typescript-driver.md`
+gets the same treatment.
+
+- New "4. Safe parameter binding" section sits between "Query and
+  mutate data" and "Error handling", mirroring the Go hub page
+  ordering so the params surface is visible before config noise.
+- Scalar (int/text/null) + vector (Float32Array → HNSW SEARCH SIMILAR)
+  examples — the vector example is what the issue explicitly
+  requested for the JS/TS guide.
+- Native JS → engine type mapping table inlined; covers `null` /
+  `undefined`, `bigint`, integer-vs-float `number`, `Uint8Array` /
+  `Buffer`, `Float32Array` / `Float64Array` / `number[]`, the
+  `$bytes` / `$ts` / `$uuid` envelopes, and the plain-object → Json
+  fallback. Matches `encodeValue` in `drivers/js/src/redwire.js`.
+- Empty-params byte-equality call-out so operators inspecting the
+  wire know upgrading the SDK is a no-op for un-parameterized
+  workloads.
+- `PARAMS_UNSUPPORTED` error code mentioned so callers know how the
+  old-server failure surfaces.
+- "Available methods" list now points `db.query(sql)` at the new
+  section.
+- Subsequent section numbers (5/6/7) bumped accordingly.
+
+No ADR cross-link yet — the parameterized-queries ADR for PRD #352
+still hasn't landed.
+
+Deferred to follow-up slices (each independently shippable):
+
+- `docs/clients/drivers/python.md`, `python-asyncio.md`, `rust.md`,
+  `bun.md`, `dart.md`, `php.md`, `cpp.md`, `zig.md` hub pages — same
+  treatment.
+- `docs/data-models/vectors.md` (every SEARCH SIMILAR / INSERT
+  example), `docs/vectors/hnsw.md`, `docs/vectors/ivf.md`.
+- `docs/query/select.md`, `insert.md`, `update.md`, `delete.md`,
+  `search-commands.md`, `universal.md` — replace string-concat
+  examples with `db.query(sql, params)`.
+- `docs/api/embedded.md`, `docs/api/http.md`, `docs/api/postgres-wire.md`.
+- `docs/getting-started/quick-start.md`.
+
+Verification (this slice):
+- No code touched, no behavior change.
+- `cargo check` / `pnpm test` not relevant — pure docs change.
+

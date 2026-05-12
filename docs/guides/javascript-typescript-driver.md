@@ -134,7 +134,7 @@ await db.close()
 
 Available methods:
 
-- `db.query(sql)`
+- `db.query(sql)`, `db.query(sql, params)` (see [Safe parameter binding](#4-safe-parameter-binding))
 - `db.insert(collection, payload)`
 - `db.bulkInsert(collection, payloads)`
 - `db.get(collection, id)`
@@ -143,7 +143,57 @@ Available methods:
 - `db.version()`
 - `db.close()`
 
-## 4. Error handling
+## 4. Safe parameter binding
+
+`db.query` accepts positional `$N` bind values as a second argument. Use it
+for any user-supplied value — string concatenation is a SQL-injection
+footgun:
+
+```ts
+import { connect } from '@reddb-io/sdk'
+
+const db = await connect('memory://')
+
+// Scalar params: int / text / null
+const result = await db.query(
+  'SELECT id, name FROM users WHERE id = $1 AND tenant = $2 AND deleted_at IS $3',
+  [42, 'acme', null],
+)
+
+// Vector param (HNSW / IVF similarity search)
+const hits = await db.query(
+  'SEARCH SIMILAR $1 IN embeddings K 5',
+  [Float32Array.from([0.1, 0.2, 0.3])],
+)
+```
+
+Native JS → engine type mapping (see `encodeValue` in
+`drivers/js/src/redwire.js`):
+
+| JS                                            | Engine             |
+| --------------------------------------------- | ------------------ |
+| `null` / `undefined`                          | Null               |
+| `boolean`                                     | Bool               |
+| `bigint`                                      | Int (i64)          |
+| `number` (integer, safe range)                | Int (i64)          |
+| `number` (otherwise)                          | Float (f64)        |
+| `string`                                      | Text               |
+| `Uint8Array` / `Buffer`                       | Bytes              |
+| `Float32Array`, `Float64Array`, `number[]`    | Vector (f32)       |
+| `{ $bytes: '<base64>' }`                      | Bytes (envelope)   |
+| `{ $ts: <unix-seconds> }`                     | Timestamp          |
+| `{ $uuid: '<hyphenated>' }`                   | Uuid               |
+| plain object / array                          | Json (canonical)   |
+
+RedWire routes through the binary `QueryWithParams` frame (`0x28`) when the
+server advertises `FEATURE_PARAMS`; older servers raise `PARAMS_UNSUPPORTED`
+instead of silently dropping the params. HTTP forwards a typed `params`
+array — `Uint8Array` ships as `{"$bytes": "<base64>"}`, the timestamp /
+UUID envelopes pass through unchanged. `db.query(sql)` with no params stays
+byte-identical to the legacy path — old servers and the embedded fast path
+don't see the new frame at all.
+
+## 5. Error handling
 
 ```ts
 import { connect, RedDBError } from '@reddb-io/sdk'
@@ -162,7 +212,7 @@ try {
 await db.close()
 ```
 
-## 5. Override the binary path
+## 6. Override the binary path
 
 If you already manage the `red` binary yourself:
 
@@ -174,7 +224,7 @@ const db = await connect('memory://', {
 })
 ```
 
-## 6. CLI vs driver
+## 7. CLI vs driver
 
 Use this rule:
 
