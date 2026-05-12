@@ -34,10 +34,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@1.91.0
 
-      - uses: arduino/setup-protoc@v3
+      - uses: ./.github/actions/install-protoc
         with:
-          version: '28.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          version: '28.3'
 
       - uses: Swatinem/rust-cache@v2
         with:
