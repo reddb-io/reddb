@@ -42,6 +42,7 @@ class MessageKind {
   static const int get = 0x19;
   static const int delete = 0x1A;
   static const int deleteOk = 0x1B;
+  static const int queryWithParams = 0x28;
 
   /// Reverse map for human-readable error messages.
   static String name(int kind) {
@@ -86,11 +87,16 @@ class MessageKind {
         return 'Delete';
       case deleteOk:
         return 'DeleteOk';
+      case queryWithParams:
+        return 'QueryWithParams';
       default:
         return '0x${kind.toRadixString(16).padLeft(2, '0')}';
     }
   }
 }
+
+/// Server feature bitmask: QueryWithParams frame support.
+const int FEATURE_PARAMS = 0x00000001;
 
 /// Bit values for the frame `flags` byte.
 class Flags {

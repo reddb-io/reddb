@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 
 import '../conn.dart';
 import '../errors.dart';
+import '../redwire/value_codec.dart';
 
 /// HTTP transport. Stateless: every request carries an `Authorization:
 /// Bearer <token>` header (when a token is set). `setToken()` swaps it
@@ -56,11 +57,15 @@ class HttpConn implements Conn {
   // ---------------------------------------------------------------------
 
   @override
-  Future<Uint8List> query(String sql) async {
+  Future<Uint8List> query(String sql, [List<Object?>? params]) async {
+    final payload = <String, Object?>{'query': sql};
+    if (params != null && params.isNotEmpty) {
+      payload['params'] = ValueCodec.toHttpParams(params);
+    }
     final resp = await _request(
       'POST',
       '/query',
-      body: jsonEncode({'query': sql}),
+      body: jsonEncode(payload),
     );
     return resp;
   }

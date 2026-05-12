@@ -3,6 +3,7 @@ library;
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:reddb/reddb.dart';
 import 'package:test/test.dart';
@@ -43,6 +44,28 @@ void main() {
       final decoded = jsonDecode(utf8.decode(raw));
       expect(decoded, isNotNull);
       await db.ping();
+    } finally {
+      await db.close();
+    }
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  test('parameterized query binds int text null and vector', () async {
+    final db = await connect('red://127.0.0.1:$port');
+    try {
+      await db.query(
+        'CREATE TABLE dart_params (id INT, name TEXT, nick TEXT, embedding VECTOR)',
+      );
+      await db.query(
+        r'INSERT INTO dart_params '
+        r'(id, name, nick, embedding) VALUES ($1, $2, $3, $4)',
+        [1, 'alice', null, Float32List.fromList([0.1, 0.2, 0.3])],
+      );
+      final raw = await db.query(
+        r'SELECT id, name, nick FROM dart_params WHERE id = $1 AND name = $2',
+        [1, 'alice'],
+      );
+      final decoded = jsonDecode(utf8.decode(raw));
+      expect(decoded, isNotNull);
     } finally {
       await db.close();
     }
