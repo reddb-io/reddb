@@ -458,7 +458,10 @@ impl<'a> Parser<'a> {
         // clause kinds, so each can appear at most once.
         for _ in 0..9 {
             if self.consume(&Token::Using)? {
-                provider = Some(self.expect_ident()?);
+                provider = Some(match &self.current.token {
+                    Token::String(_) => self.parse_string()?,
+                    _ => self.expect_ident()?,
+                });
             } else if self.consume_ident_ci("MODEL")? {
                 model = Some(self.parse_string()?);
             } else if self.consume(&Token::Depth)? {
@@ -474,7 +477,7 @@ impl<'a> Parser<'a> {
             } else if self.consume_ident_ci("SEED")? {
                 seed = Some(self.parse_integer()? as u64);
             } else if self.consume_ident_ci("STRICT")? {
-                let value = self.expect_ident()?;
+                let value = self.expect_ident_or_keyword()?;
                 if value.eq_ignore_ascii_case("ON") {
                     strict = true;
                 } else if value.eq_ignore_ascii_case("OFF") {

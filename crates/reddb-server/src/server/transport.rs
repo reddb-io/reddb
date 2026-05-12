@@ -224,7 +224,9 @@ pub(crate) fn map_runtime_error(err: &crate::api::RedDBError) -> (u16, String) {
     let status = match err {
         NotFound(_) => 404,
         ReadOnly(_) => 403,
-        InvalidConfig(_) | Query(_) | InvalidOperation(_) => 400,
+        InvalidConfig(_) | InvalidOperation(_) => 400,
+        Query(msg) if msg.starts_with("ask_provider_failover_exhausted:") => 503,
+        Query(_) => 400,
         Validation { .. } => 422,
         FeatureNotEnabled(_) => 501,
         SchemaVersionMismatch { .. } => 409,

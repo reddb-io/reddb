@@ -110,3 +110,48 @@ Blockers / notes for next iteration:
   should be `use crate::serde_json::{...}`). Not authored here and
   removed from `mod.rs` so the workspace compiles. Owner of that
   file needs to fix the import before re-declaring the module.
+
+## Progress note (2026-05-12, HTTP wiring slice)
+
+Wired ordered ASK provider failover through the parser, runtime, and
+HTTP query surface.
+
+Implemented:
+- `ASK '...' USING 'groq,openai'` now parses as a string-valued provider
+  override and is interpreted as an ordered provider list.
+- `ask.providers.fallback = 'groq,openai'` is honored when the query has
+  no `USING` override. The parser also accepts bracketed text forms such
+  as `['groq','openai']` in the runtime list parser.
+- Retryable provider failures are limited to transport errors, 5xx, and
+  transport timeout strings. Non-retryable errors keep their original
+  `RedDBError`, preserving existing 413/422/504 HTTP behavior.
+- All retryable providers exhausted now returns HTTP 503 with the
+  attempted providers and status errors in the response body.
+- The successful provider is recorded in the ASK result row `provider`
+  field.
+
+Tests added/updated:
+- HTTP per-query failover from a 502 Groq stub to a successful OpenAI
+  stub.
+- HTTP global fallback list with no `USING` override.
+- HTTP all-retryable-failures response maps to 503 and lists attempts.
+- Parser test for `USING 'groq,openai'`.
+- Parser fix for `STRICT ON`, which must accept keyword token `ON`.
+
+Verification:
+- `cargo test -p reddb-io-server http_query_ask --lib -- --nocapture`
+  → 11 passed.
+- `cargo test -p reddb-io-server test_parse_dml_extended_literals_auto_embed_and_ask_forms --lib -- --nocapture`
+  → 1 passed.
+- `cargo test -p reddb-io-server runtime::ai::provider_failover --lib`
+  → 19 passed.
+- `cargo check -p reddb-io-server` → passed.
+- `pnpm test` → exited 0, skipped because `target/debug/red` is missing.
+- `pnpm typecheck` → printed `TypeScript: No errors found` and exited 1.
+
+Remaining blocker:
+- Audit-row persistence is not wired yet. The winning provider and prior
+  retryable failures should be written to `red_ask_audit`, but the audit
+  insertion surface is still owned by open issue #402. Keep this issue
+  blocked until #402 lands or explicitly folds the audit insertion into
+  this failover path.

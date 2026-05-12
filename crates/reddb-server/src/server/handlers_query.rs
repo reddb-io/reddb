@@ -656,6 +656,110 @@ mod tests {
         assert!(text.contains("mode_fallback"), "{text}");
     }
 
+    #[test]
+    fn http_query_ask_using_provider_list_fails_over_to_second_provider() {
+        let _guard = ASK_ENV_LOCK.lock().expect("env lock");
+        let groq = StatusOpenAiStub::start(502, "groq unavailable", None);
+        let openai = StatusOpenAiStub::start(200, "", Some("openai answered"));
+        let _groq_api_base =
+            EnvVarGuard::set("REDDB_GROQ_API_BASE", &format!("http://{}", groq.addr()));
+        let _openai_api_base = EnvVarGuard::set(
+            "REDDB_OPENAI_API_BASE",
+            &format!("http://{}", openai.addr()),
+        );
+        let _groq_api_key = EnvVarGuard::unset("REDDB_GROQ_API_KEY");
+        let _openai_api_key = EnvVarGuard::unset("REDDB_OPENAI_API_KEY");
+
+        let server = make_server();
+        configure_ask_stub_runtime(&server);
+        server
+            .runtime
+            .execute_query("SET CONFIG red.config.ai.groq.default.key = 'sk-groq'")
+            .expect("set groq api key");
+
+        let r = server.handle_query(
+            br#"{"query": "ASK 'why did login fail?' USING 'groq,openai'"}"#.to_vec(),
+        );
+
+        assert_eq!(r.status, 200, "{}", body_str(&r));
+        assert_eq!(groq.request_count(), 1);
+        assert_eq!(openai.request_count(), 1);
+        let text = body_str(&r);
+        assert!(text.contains("openai answered"), "{text}");
+        assert!(text.contains(r#""provider":"openai""#), "{text}");
+    }
+
+    #[test]
+    fn http_query_ask_global_provider_fallback_is_used_when_query_has_no_using() {
+        let _guard = ASK_ENV_LOCK.lock().expect("env lock");
+        let groq = StatusOpenAiStub::start(502, "groq unavailable", None);
+        let openai = StatusOpenAiStub::start(200, "", Some("global fallback answered"));
+        let _groq_api_base =
+            EnvVarGuard::set("REDDB_GROQ_API_BASE", &format!("http://{}", groq.addr()));
+        let _openai_api_base = EnvVarGuard::set(
+            "REDDB_OPENAI_API_BASE",
+            &format!("http://{}", openai.addr()),
+        );
+        let _groq_api_key = EnvVarGuard::unset("REDDB_GROQ_API_KEY");
+        let _openai_api_key = EnvVarGuard::unset("REDDB_OPENAI_API_KEY");
+
+        let server = make_server();
+        configure_ask_stub_runtime(&server);
+        server
+            .runtime
+            .execute_query("SET CONFIG red.config.ai.groq.default.key = 'sk-groq'")
+            .expect("set groq api key");
+        server
+            .runtime
+            .execute_query("SET CONFIG ask.providers.fallback = 'groq,openai'")
+            .expect("set fallback list");
+
+        let r = server.handle_query(br#"{"query": "ASK 'why did login fail?'"}"#.to_vec());
+
+        assert_eq!(r.status, 200, "{}", body_str(&r));
+        assert_eq!(groq.request_count(), 1);
+        assert_eq!(openai.request_count(), 1);
+        let text = body_str(&r);
+        assert!(text.contains("global fallback answered"), "{text}");
+        assert!(text.contains(r#""provider":"openai""#), "{text}");
+    }
+
+    #[test]
+    fn http_query_ask_all_retryable_providers_failed_returns_503_with_attempts() {
+        let _guard = ASK_ENV_LOCK.lock().expect("env lock");
+        let groq = StatusOpenAiStub::start(502, "groq unavailable", None);
+        let openai = StatusOpenAiStub::start(503, "openai unavailable", None);
+        let _groq_api_base =
+            EnvVarGuard::set("REDDB_GROQ_API_BASE", &format!("http://{}", groq.addr()));
+        let _openai_api_base = EnvVarGuard::set(
+            "REDDB_OPENAI_API_BASE",
+            &format!("http://{}", openai.addr()),
+        );
+        let _groq_api_key = EnvVarGuard::unset("REDDB_GROQ_API_KEY");
+        let _openai_api_key = EnvVarGuard::unset("REDDB_OPENAI_API_KEY");
+
+        let server = make_server();
+        configure_ask_stub_runtime(&server);
+        server
+            .runtime
+            .execute_query("SET CONFIG red.config.ai.groq.default.key = 'sk-groq'")
+            .expect("set groq api key");
+
+        let r = server.handle_query(
+            br#"{"query": "ASK 'why did login fail?' USING 'groq,openai'"}"#.to_vec(),
+        );
+
+        assert_eq!(r.status, 503, "{}", body_str(&r));
+        assert_eq!(groq.request_count(), 1);
+        assert_eq!(openai.request_count(), 1);
+        let text = body_str(&r);
+        assert!(text.contains("ask_provider_failover_exhausted"), "{text}");
+        assert!(text.contains("groq"), "{text}");
+        assert!(text.contains("openai"), "{text}");
+        assert!(text.contains("502"), "{text}");
+        assert!(text.contains("503"), "{text}");
+    }
+
     fn configure_ask_stub_runtime(server: &RedDBServer) {
         server
             .runtime
@@ -846,6 +950,81 @@ mod tests {
         );
         let response = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write stub response");
+    }
+
+    struct StatusOpenAiStub {
+        addr: SocketAddr,
+        shutdown: Arc<AtomicBool>,
+        requests: Arc<std::sync::atomic::AtomicUsize>,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl StatusOpenAiStub {
+        fn start(status: u16, body: &'static str, output: Option<&'static str>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("stub bind");
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            let addr = listener.local_addr().expect("local addr");
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let server_shutdown = Arc::clone(&shutdown);
+            let server_requests = Arc::clone(&requests);
+            let handle = thread::spawn(move || {
+                while !server_shutdown.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            read_stub_request(&mut stream);
+                            server_requests.fetch_add(1, Ordering::Relaxed);
+                            if let Some(output) = output {
+                                write_openai_text_response(&mut stream, output);
+                            } else {
+                                write_status_response(&mut stream, status, body);
+                            }
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            Self {
+                addr,
+                shutdown,
+                requests,
+                handle: Some(handle),
+            }
+        }
+
+        fn addr(&self) -> SocketAddr {
+            self.addr
+        }
+
+        fn request_count(&self) -> usize {
+            self.requests.load(Ordering::Relaxed)
+        }
+    }
+
+    impl Drop for StatusOpenAiStub {
+        fn drop(&mut self) {
+            self.shutdown.store(true, Ordering::Relaxed);
+            let _ = TcpStream::connect(self.addr);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn write_status_response(stream: &mut TcpStream, status: u16, body: &str) {
+        let response = format!(
+            "HTTP/1.1 {status} Test\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
             body.len()
         );
         stream
