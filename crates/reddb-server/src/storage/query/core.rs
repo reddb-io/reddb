@@ -2196,6 +2196,11 @@ pub enum SearchCommand {
         collection: Option<String>,
         limit: usize,
         fuzzy: bool,
+        /// `$N` placeholder for the `LIMIT` slot (issue #361). Same
+        /// shape as `SearchCommand::Hybrid::limit_param`; the binder
+        /// substitutes the user-supplied positive integer into `limit`
+        /// and clears this back to `None`.
+        limit_param: Option<usize>,
     },
     /// SEARCH HYBRID [vector] [TEXT 'query'] COLLECTION col [LIMIT n]
     Hybrid {

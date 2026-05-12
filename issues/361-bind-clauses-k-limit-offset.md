@@ -120,3 +120,24 @@ LIMIT/DEPTH not K so the prior progress note was imprecise; LIMIT
 parameterization for SEARCH TEXT / MULTIMODAL / INDEX / CONTEXT and
 the SPATIAL RADIUS/BBOX `LIMIT` slot are trivial follow-ups now that
 the SpatialNearest pattern is in place).
+
+## Progress (2026-05-12, slice 4)
+
+Fourth slice landed: `SEARCH TEXT ... LIMIT $N`.
+
+- `SearchCommand::Text` gained `limit_param: Option<usize>` (AST in
+  `storage/query/core.rs`), same shape as `Hybrid::limit_param`.
+- Parser routes `$N` (and `?`, mode permitting) in the SEARCH TEXT
+  LIMIT slot via `parse_param_slot`.
+- `user_params::collect_non_expr_indices` matches Text.
+- `user_params::bind` gained a Text branch with the same typed error
+  set as the SIMILAR / HYBRID / SPATIAL NEAREST LIMIT paths.
+- `runtime/impl_graph_commands.rs` guards the new param.
+- `parser/tests.rs` destructures switched to `..` for future slots.
+- Tests in `user_params` (3 new): TEXT LIMIT happy path, rejects 0,
+  rejects non-integer.
+
+Remaining LIMIT $N slices (same trivial pattern, one variant each):
+MULTIMODAL, INDEX, CONTEXT, SPATIAL RADIUS, SPATIAL BBOX. Plus
+SELECT LIMIT / OFFSET (TableQuery shape), SIMILAR TEXT $N (text
+embedding pipeline), and PROBES $N (IVF).
