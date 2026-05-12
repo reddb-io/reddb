@@ -49,10 +49,19 @@ const conn = await connectTls('reddb.example.com:5050', {
 The Bun driver is intentionally narrow:
 
 - **Address format is `host:port`** — not a full `red://` URI. Pair it with [`URL`](https://developer.mozilla.org/docs/Web/API/URL) yourself if you need parsing.
+- **Parameterized embedded queries use `@reddb-io/sdk`.** The shared SDK is verified under Bun for `db.query(sql, params)`, including vector params. The native `@reddb-io/client-bun` TCP fast path remains a simple SQL string client in this preview.
 - **No URI-level auth.** No SCRAM / OAuth handshake — it speaks a simple `MSG_QUERY` / `MSG_BULK_INSERT` framing on top of plain TCP (or TLS). For full auth + transport feature parity, use [`@reddb-io/client`](../../guides/javascript-typescript-driver.md#reddb-ioclient).
 - **Bun-only.** Calls `Bun.connect`. Doesn't run on Node / Deno / browsers.
 
 For a feature-complete JS/TS client (RedWire + HTTP + gRPC + SCRAM/OAuth/mTLS), use [`@reddb-io/client`](../../guides/javascript-typescript-driver.md#reddb-ioclient).
+
+## Test
+
+```bash
+cargo build --bin red
+cd drivers/bun
+bun run params.test.ts
+```
 
 ## Production checklist
 
