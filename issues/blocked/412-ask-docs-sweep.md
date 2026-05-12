@@ -38,3 +38,11 @@ Add a 'Grounding and citations' section to the JS/TS driver guide. Cross-link to
 - #405
 - #408
 - #409
+
+## Progress
+
+2026-05-12: Confirmed blocked before editing docs. The pages in scope
+must document `STREAM`, Postgres-wire ASK, and MCP ASK as user-facing
+surfaces, but #405, #408, and #409 are still open. #408 also remains
+blocked on HITL #360 for PG-wire extended protocol. Deferring the docs
+sweep avoids presenting unimplemented transport behavior as available.
