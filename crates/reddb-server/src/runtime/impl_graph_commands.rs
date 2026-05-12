@@ -201,27 +201,41 @@ impl RedDBRuntime {
                     statement_type: "select",
                 })
             }
-            GraphCommand::Centrality { algorithm } => {
+            GraphCommand::Centrality { algorithm, limit } => {
                 let alg = parse_centrality_algorithm(algorithm)?;
-                let res = self.graph_centrality(alg, 100, false, None, None, None, None)?;
+                // `limit = None` keeps historical implicit top-100 cap.
+                // `Some(0)` returns zero rows (standard SQL LIMIT 0 semantics).
+                let limit_usize = limit.map(|n| n as usize);
+                let top_k = limit_usize.unwrap_or(100).max(1);
+                let res = self.graph_centrality(alg, top_k, false, None, None, None, None)?;
                 let mut result = UnifiedResult::with_columns(vec![
                     "node_id".into(),
                     "label".into(),
                     "score".into(),
                 ]);
+                let cap = limit_usize.unwrap_or(usize::MAX);
+                let mut emitted: usize = 0;
                 for score in &res.scores {
+                    if emitted >= cap {
+                        break;
+                    }
                     let mut record = UnifiedRecord::new();
                     record.set("node_id", Value::text(score.node.id.clone()));
                     record.set("label", Value::text(score.node.label.clone()));
                     record.set("score", Value::Float(score.score));
                     result.push(record);
+                    emitted += 1;
                 }
                 for ds in &res.degree_scores {
+                    if emitted >= cap {
+                        break;
+                    }
                     let mut record = UnifiedRecord::new();
                     record.set("node_id", Value::text(ds.node.id.clone()));
                     record.set("label", Value::text(ds.node.label.clone()));
                     record.set("score", Value::Float(ds.total_degree as f64));
                     result.push(record);
+                    emitted += 1;
                 }
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),

@@ -2679,9 +2679,11 @@ fn test_parse_graph_centrality() {
     let query = parse("GRAPH CENTRALITY ALGORITHM pagerank").unwrap();
     if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Centrality {
         algorithm,
+        limit,
     }) = query
     {
         assert_eq!(algorithm, "pagerank");
+        assert_eq!(limit, None);
     } else {
         panic!("Expected GraphCommand::Centrality");
     }
@@ -2692,11 +2694,62 @@ fn test_parse_graph_centrality_default() {
     let query = parse("GRAPH CENTRALITY").unwrap();
     if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Centrality {
         algorithm,
+        limit,
     }) = query
     {
         assert_eq!(algorithm, "degree");
+        assert_eq!(limit, None);
     } else {
         panic!("Expected GraphCommand::Centrality with default algorithm");
+    }
+}
+
+#[test]
+fn test_parse_graph_centrality_with_limit() {
+    let query = parse("GRAPH CENTRALITY LIMIT 10").unwrap();
+    if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Centrality {
+        algorithm,
+        limit,
+    }) = query
+    {
+        assert_eq!(algorithm, "degree");
+        assert_eq!(limit, Some(10));
+    } else {
+        panic!("Expected GraphCommand::Centrality with LIMIT");
+    }
+
+    let query = parse("GRAPH CENTRALITY ALGORITHM pagerank LIMIT 5").unwrap();
+    if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Centrality {
+        algorithm,
+        limit,
+    }) = query
+    {
+        assert_eq!(algorithm, "pagerank");
+        assert_eq!(limit, Some(5));
+    } else {
+        panic!("Expected GraphCommand::Centrality with algorithm+limit");
+    }
+}
+
+#[test]
+fn test_parse_graph_centrality_negative_limit_errors() {
+    // Negative literals never reach the guard — the lexer rejects `-` at the
+    // integer slot. Pin both: a literal `-1` errors at parse time, and a
+    // syntactically-valid `LIMIT 0` is accepted (zero-row semantics handled
+    // in the runtime, not the parser).
+    let err = parse("GRAPH CENTRALITY LIMIT -1").unwrap_err();
+    let msg = format!("{}", err);
+    assert!(msg.contains("expected: integer"), "unexpected error: {msg}");
+
+    let query = parse("GRAPH CENTRALITY LIMIT 0").unwrap();
+    if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Centrality {
+        limit,
+        ..
+    }) = query
+    {
+        assert_eq!(limit, Some(0));
+    } else {
+        panic!("Expected GraphCommand::Centrality LIMIT 0");
     }
 }
 

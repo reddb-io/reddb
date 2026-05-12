@@ -2166,8 +2166,15 @@ pub enum GraphCommand {
         depth: u32,
         direction: String,
     },
-    /// GRAPH CENTRALITY [ALGORITHM alg]
-    Centrality { algorithm: String },
+    /// GRAPH CENTRALITY [ALGORITHM alg] [LIMIT n]
+    ///
+    /// `limit = None` keeps the historical implicit top-100 cap. `Some(n)`
+    /// caps the returned rows at `n` (issue #422 tracer slice — other
+    /// algorithms + ORDER BY still pending).
+    Centrality {
+        algorithm: String,
+        limit: Option<u32>,
+    },
     /// GRAPH COMMUNITY [ALGORITHM alg] [MAX_ITERATIONS n]
     Community {
         algorithm: String,

@@ -742,3 +742,83 @@ fn graph_properties_ambiguous_label_errors() {
         "error must mention ambiguity, got: {err}"
     );
 }
+
+// ── Issue #422 tracer: GRAPH CENTRALITY LIMIT N ─────────────────────────────
+
+fn seed_centrality_graph(rt: &RedDBRuntime, n: usize) {
+    for i in 0..n {
+        rt.execute_query(&format!(
+            "INSERT INTO net NODE (label, name) VALUES ('n{i}', 'Node {i}')"
+        ))
+        .unwrap_or_else(|e| panic!("seed node {i}: {e}"));
+    }
+    // Build a hub-and-spoke so degrees differ — n0 connects to every other node.
+    for i in 1..n {
+        rt.execute_query(&format!(
+            "INSERT INTO net EDGE (label, from, to) VALUES ('e', 'n0', 'n{i}')"
+        ))
+        .unwrap_or_else(|e| panic!("seed edge n0->n{i}: {e}"));
+    }
+}
+
+#[test]
+fn graph_centrality_limit_caps_returned_rows() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    seed_centrality_graph(&rt, 6);
+    let res = rt
+        .execute_query("GRAPH CENTRALITY LIMIT 3")
+        .expect("limit 3 parses+executes");
+    assert_eq!(
+        res.result.records.len(),
+        3,
+        "LIMIT 3 must cap output rows"
+    );
+}
+
+#[test]
+fn graph_centrality_limit_zero_returns_no_rows() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    seed_centrality_graph(&rt, 4);
+    let res = rt
+        .execute_query("GRAPH CENTRALITY LIMIT 0")
+        .expect("limit 0 parses+executes");
+    assert_eq!(
+        res.result.records.len(),
+        0,
+        "LIMIT 0 returns zero rows (SQL semantics)"
+    );
+}
+
+#[test]
+fn graph_centrality_without_limit_uses_implicit_top_100() {
+    // Sanity: omitted LIMIT keeps the historical implicit cap (verified by
+    // simply executing and producing rows; cap exercised in scale tests).
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    seed_centrality_graph(&rt, 4);
+    let res = rt
+        .execute_query("GRAPH CENTRALITY")
+        .expect("no-limit form still works");
+    assert!(
+        !res.result.records.is_empty(),
+        "default centrality must surface at least one row"
+    );
+    assert!(
+        res.result.records.len() <= 100,
+        "default cap is 100, got {}",
+        res.result.records.len()
+    );
+}
+
+#[test]
+fn graph_centrality_limit_combined_with_algorithm() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    seed_centrality_graph(&rt, 8);
+    let res = rt
+        .execute_query("GRAPH CENTRALITY ALGORITHM pagerank LIMIT 2")
+        .expect("ALGORITHM + LIMIT both parse");
+    assert_eq!(
+        res.result.records.len(),
+        2,
+        "ALGORITHM pagerank LIMIT 2 must cap output rows"
+    );
+}
