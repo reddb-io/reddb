@@ -85,6 +85,7 @@ pub struct OpenAiPromptRequest {
     pub model: String,
     pub prompt: String,
     pub temperature: Option<f32>,
+    pub seed: Option<u64>,
     pub max_output_tokens: Option<usize>,
     pub api_base: String,
 }
@@ -165,6 +166,7 @@ pub fn openai_prompt(request: OpenAiPromptRequest) -> RedDBResult<AiPromptRespon
         &request.prompt,
         request.temperature,
         request.max_output_tokens,
+        request.seed,
     );
 
     let (status, body) = http_post_json(&url, &request.api_key, &[], payload, 120)
@@ -290,6 +292,7 @@ pub async fn openai_prompt_async(
         &request.prompt,
         request.temperature,
         request.max_output_tokens,
+        request.seed,
     );
     let http_req = crate::runtime::ai::transport::AiHttpRequest::post_json("openai", url, payload)
         .model(request.model.clone())
@@ -415,6 +418,7 @@ fn build_openai_prompt_payload(
     prompt: &str,
     temperature: Option<f32>,
     max_output_tokens: Option<usize>,
+    seed: Option<u64>,
 ) -> String {
     let mut object = Map::new();
     object.insert("model".to_string(), JsonValue::String(model.to_string()));
@@ -432,6 +436,10 @@ fn build_openai_prompt_payload(
             "temperature".to_string(),
             JsonValue::Number(temperature as f64),
         );
+    }
+
+    if let Some(seed) = seed {
+        object.insert("seed".to_string(), JsonValue::Number(seed as f64));
     }
 
     if let Some(max_output_tokens) = max_output_tokens {
@@ -793,6 +801,38 @@ mod tests {
     }
 
     #[test]
+    fn openai_prompt_payload_includes_seed_when_present() {
+        let payload = build_openai_prompt_payload(
+            "gpt-4.1-mini",
+            "Question?",
+            Some(0.0),
+            Some(1024),
+            Some(42),
+        );
+        let parsed = parse_json(&payload).expect("payload json");
+        let json = JsonValue::from(parsed);
+
+        assert_eq!(
+            json.get("temperature").and_then(JsonValue::as_f64),
+            Some(0.0)
+        );
+        assert_eq!(json.get("seed").and_then(JsonValue::as_i64), Some(42));
+    }
+
+    #[test]
+    fn openai_prompt_payload_omits_seed_when_absent() {
+        let payload =
+            build_openai_prompt_payload("gpt-4.1-mini", "Question?", Some(0.0), Some(1024), None);
+        let parsed = parse_json(&payload).expect("payload json");
+        let json = JsonValue::from(parsed);
+
+        assert!(
+            json.get("seed").is_none(),
+            "seed must be omitted when not applied"
+        );
+    }
+
+    #[test]
     fn resolve_api_key_prefers_vault_secret_over_legacy_config() {
         let provider = AiProvider::OpenAi;
         let alias = "vault_unit_alias";
@@ -838,6 +878,7 @@ mod tests {
             model: "  ".to_string(),
             prompt: "hello".to_string(),
             temperature: None,
+            seed: None,
             max_output_tokens: None,
             api_base: "https://api.openai.com/v1".to_string(),
         };
@@ -853,6 +894,7 @@ mod tests {
             model: "gpt-4.1-mini".to_string(),
             prompt: "".to_string(),
             temperature: None,
+            seed: None,
             max_output_tokens: None,
             api_base: "https://api.openai.com/v1".to_string(),
         };

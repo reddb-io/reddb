@@ -1163,6 +1163,7 @@ impl RedDBRuntime {
         // the LLM emits index correctly into this flat array.
         let (sources_flat_json, source_urns) = build_sources_flat(&ask_context);
         let sources_count = source_urns.len();
+        let sources_fingerprint = build_sources_fingerprint(self, &ask_context, &source_urns);
 
         // Step 3: Call LLM — use configured defaults if no provider/model specified
         let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self);
@@ -1173,6 +1174,8 @@ impl RedDBRuntime {
         let api_key = resolve_api_key_from_runtime(&provider, None, self)?;
         let model = ask.model.clone().unwrap_or(default_model);
         let api_base = provider.resolve_api_base();
+        let applied_determinism =
+            resolve_ask_determinism(self, ask, provider.token(), &sources_fingerprint);
 
         let transport = crate::runtime::ai::transport::AiTransport::from_runtime(self);
         let prompt_response = match provider {
@@ -1181,7 +1184,7 @@ impl RedDBRuntime {
                     api_key,
                     model: model.clone(),
                     prompt: full_prompt,
-                    temperature: Some(0.3),
+                    temperature: applied_determinism.temperature,
                     max_output_tokens: Some(1024),
                     api_base,
                     anthropic_version: crate::ai::DEFAULT_ANTHROPIC_VERSION.to_string(),
@@ -1196,7 +1199,8 @@ impl RedDBRuntime {
                     api_key,
                     model: model.clone(),
                     prompt: full_prompt,
-                    temperature: Some(0.3),
+                    temperature: applied_determinism.temperature,
+                    seed: applied_determinism.seed,
                     max_output_tokens: Some(1024),
                     api_base,
                 };
@@ -1563,6 +1567,79 @@ fn build_sources_flat(
         urns.push(urn);
     }
     (crate::json::Value::Array(arr), urns)
+}
+
+/// Issue #400: hash the same source URNs exposed in `sources_flat`
+/// with the storage content version that was observed during
+/// retrieval. `UnifiedEntity::sequence_id` is the current stable row
+/// version handle available on the Stage-4 rows; vector hits are
+/// resolved back through the collection manager to get the same field.
+fn build_sources_fingerprint(
+    runtime: &crate::runtime::RedDBRuntime,
+    ctx: &crate::runtime::ask_pipeline::AskContext,
+    source_urns: &[String],
+) -> String {
+    use crate::runtime::ai::sources_fingerprint::{fingerprint, Source};
+    use crate::storage::unified::entity::EntityId;
+
+    let mut sources = Vec::with_capacity(source_urns.len());
+    let mut urn_index = 0usize;
+
+    for row in &ctx.filtered_rows {
+        if let Some(urn) = source_urns.get(urn_index) {
+            sources.push(Source {
+                urn,
+                content_version: row.entity.sequence_id,
+            });
+        }
+        urn_index += 1;
+    }
+
+    let store = runtime.inner.db.store();
+    for hit in &ctx.vector_hits {
+        if let Some(urn) = source_urns.get(urn_index) {
+            let content_version = store
+                .get_collection(&hit.collection)
+                .and_then(|manager| manager.get(EntityId::new(hit.entity_id)))
+                .map(|entity| entity.sequence_id)
+                .unwrap_or(0);
+            sources.push(Source {
+                urn,
+                content_version,
+            });
+        }
+        urn_index += 1;
+    }
+
+    fingerprint(&sources)
+}
+
+/// Resolve the exact determinism knobs that will be sent to the
+/// selected provider. This is also the value the audit row records
+/// when #402's storage hook is wired.
+fn resolve_ask_determinism(
+    runtime: &crate::runtime::RedDBRuntime,
+    ask: &crate::storage::query::ast::AskQuery,
+    provider_token: &str,
+    sources_fingerprint: &str,
+) -> crate::runtime::ai::determinism_decider::Applied {
+    use crate::runtime::ai::determinism_decider::{decide, Inputs, Overrides, Settings};
+    use crate::runtime::ai::provider_capabilities::Capabilities;
+
+    decide(
+        Inputs {
+            question: &ask.question,
+            sources_fingerprint,
+        },
+        Capabilities::for_provider(provider_token),
+        Overrides {
+            temperature: ask.temperature,
+            seed: ask.seed,
+        },
+        Settings {
+            default_temperature: runtime.config_f32("ask.default_temperature", 0.0),
+        },
+    )
 }
 
 /// Issue #393: serialize structural warnings as `{ ok, warnings: [...] }`.
@@ -1958,6 +2035,98 @@ mod citation_wedge_tests {
             UrnKind::VectorHit { score } => assert!((score - 0.5).abs() < 1e-5),
             _ => panic!("vector_hit kind expected"),
         }
+    }
+
+    #[test]
+    fn sources_fingerprint_uses_source_urns_and_content_versions() {
+        use crate::api::RedDBOptions;
+        use crate::runtime::ask_pipeline::{
+            AskContext, CandidateCollections, FilteredRow, StageTimings, TokenSet,
+        };
+        use crate::runtime::RedDBRuntime;
+        use crate::storage::schema::Value;
+        use crate::storage::unified::entity::{
+            EntityData, EntityId, EntityKind, RowData, UnifiedEntity,
+        };
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        fn ctx_with_sequence(sequence_id: u64) -> AskContext {
+            let mut entity = UnifiedEntity::new(
+                EntityId::new(42),
+                EntityKind::TableRow {
+                    table: Arc::from("incidents"),
+                    row_id: 42,
+                },
+                EntityData::Row(RowData {
+                    columns: Vec::new(),
+                    named: Some(
+                        [("body".to_string(), Value::text("ticket FDD-1".to_string()))]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    schema: None,
+                }),
+            );
+            entity.sequence_id = sequence_id;
+            AskContext {
+                question: "q?".to_string(),
+                tokens: TokenSet {
+                    keywords: vec!["ticket".into()],
+                    literals: vec!["FDD-1".into()],
+                },
+                candidates: CandidateCollections {
+                    collections: vec!["incidents".to_string()],
+                    columns_by_collection: HashMap::new(),
+                },
+                vector_hits: Vec::new(),
+                filtered_rows: vec![FilteredRow {
+                    collection: "incidents".to_string(),
+                    entity,
+                    matched_literal: "FDD-1".to_string(),
+                    matched_column: Some("body".to_string()),
+                }],
+                timings: StageTimings::default(),
+            }
+        }
+
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+        let urns = vec!["reddb:incidents/42".to_string()];
+        let first = build_sources_fingerprint(&rt, &ctx_with_sequence(7), &urns);
+        let same = build_sources_fingerprint(&rt, &ctx_with_sequence(7), &urns);
+        let changed_version = build_sources_fingerprint(&rt, &ctx_with_sequence(8), &urns);
+
+        assert_eq!(first, same);
+        assert_ne!(first, changed_version);
+    }
+
+    #[test]
+    fn ask_default_temperature_setting_feeds_determinism_decider() {
+        use crate::api::RedDBOptions;
+        use crate::runtime::ai::determinism_decider::derive_seed;
+        use crate::runtime::RedDBRuntime;
+        use crate::storage::query::ast::AskQuery;
+
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+        rt.inner
+            .db
+            .store()
+            .set_config_tree("ask.default_temperature", &crate::json!(0.7));
+        let ask = AskQuery {
+            question: "why did FDD-1 fail?".to_string(),
+            provider: Some("openai".to_string()),
+            model: None,
+            depth: None,
+            limit: None,
+            collection: None,
+            temperature: None,
+            seed: None,
+        };
+
+        let applied = resolve_ask_determinism(&rt, &ask, "openai", "abc123");
+
+        assert_eq!(applied.temperature, Some(0.7));
+        assert_eq!(applied.seed, Some(derive_seed(&ask.question, "abc123")));
     }
 
     /// Issue #394: citations attach the URN of the source they cite,

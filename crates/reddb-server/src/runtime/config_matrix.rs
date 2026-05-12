@@ -168,6 +168,12 @@ pub const MATRIX: &[ConfigDefault] = &[
         tier: Tier::Optional,
         default: || text("use_heuristic"),
     },
+    // ask.* — ASK synthesis defaults.
+    ConfigDefault {
+        key: "ask.default_temperature",
+        tier: Tier::Optional,
+        default: || num(0.0),
+    },
     // runtime.ai.transport.* — shared outbound AI HTTP client foundation
     // (issue #274). Provider rewiring can opt into these defaults
     // incrementally.

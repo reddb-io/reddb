@@ -172,3 +172,42 @@ Verification (this slice):
 - `cargo check -p reddb-io-server` clean.
 - `cargo test -p reddb-io-server --lib runtime::ai::sources_fingerprint`
   → 14 passed.
+
+Slice 4 (this commit): runtime ASK wiring.
+
+- `execute_ask` now computes a sources fingerprint from the same
+  `sources_flat` URNs used for citation indexing plus the observed
+  source content version (`UnifiedEntity::sequence_id` for Stage-4
+  rows; vector hits resolve the entity back through the collection
+  manager for the same handle).
+- `execute_ask` calls `determinism_decider::decide` after provider
+  resolution and sends the applied temperature to Anthropic/OpenAI-
+  compatible providers and the applied seed to OpenAI-compatible
+  providers only.
+- OpenAI-compatible prompt payloads now include `seed` only when the
+  decider applied one; Anthropic still receives no seed because its
+  capability row says `supports_seed=false`.
+- Added `ask.default_temperature` to the config matrix and a scoped
+  `config_f32` runtime reader so persisted/env settings can feed the
+  decider without string-only parsing.
+- Parser-level `TEMPERATURE`/`SEED` overrides now affect the actual
+  provider request on the SQL ASK path because `execute_ask` threads
+  `ask.temperature` and `ask.seed` into the decider.
+- Fixed a Rust 1.95 test-only temporary-borrow issue in
+  `pg_wire_ask_row_encoder` that blocked lib test compilation.
+
+Verification (this slice):
+- `cargo test -p reddb-io-server --lib openai_prompt_payload`
+  → 2 passed.
+- `cargo test -p reddb-io-server --lib sources_fingerprint_uses_source_urns_and_content_versions`
+  → 1 passed.
+- `cargo test -p reddb-io-server --lib ask_default_temperature_setting_feeds_determinism_decider`
+  → 1 passed.
+- `cargo check -p reddb-io-server` clean.
+
+Still deferred:
+- Write the applied seed/temperature into `red_ask_audit`; the pure
+  audit row builder exists, but the storage hook remains part of #402.
+- Real OpenAI/Groq stub integration test for same question + same data
+  → byte-equal answer; this still depends on the stubbable LLM
+  transport harness from #395/#396 follow-up work.
