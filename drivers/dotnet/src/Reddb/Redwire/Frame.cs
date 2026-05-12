@@ -56,6 +56,7 @@ public sealed class Frame
         public const byte Get = 0x19;
         public const byte Delete = 0x1A;
         public const byte DeleteOk = 0x1B;
+        public const byte QueryWithParams = 0x28;
 
         /// <summary>Pretty-print a kind byte. Falls back to hex for unknown values.</summary>
         public static string Name(byte kind) => kind switch
@@ -80,9 +81,13 @@ public sealed class Frame
             Get => nameof(Get),
             Delete => nameof(Delete),
             DeleteOk => nameof(DeleteOk),
+            QueryWithParams => nameof(QueryWithParams),
             _ => $"0x{kind:x2}",
         };
     }
+
+    /// <summary>Server feature bitmask: QueryWithParams frame support.</summary>
+    public const int FeatureParams = 0x0000_0001;
 
     /// <summary>Flag bits that may appear in the header.</summary>
     public static class Flags

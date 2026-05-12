@@ -33,9 +33,12 @@ public sealed class RedWireConn : IConn
     private readonly SemaphoreSlim _lock = new(1, 1);
     private long _nextCorrelation = 1;
     private readonly TimeSpan _timeout;
+    private readonly int _serverFeatures;
     private bool _closed;
 
     public string SessionId { get; }
+    public int Features => _serverFeatures;
+    public bool SupportsParams => (_serverFeatures & Frame.FeatureParams) == Frame.FeatureParams;
 
     /// <summary>
     /// Raw constructor — caller already has a stream. Used by tests
@@ -43,11 +46,18 @@ public sealed class RedWireConn : IConn
     /// Production code should call <see cref="ConnectAsync"/>.
     /// </summary>
     public RedWireConn(Stream stream, IDisposable? owner, string sessionId, TimeSpan timeout)
+        : this(stream, owner, sessionId, timeout, 0) { }
+
+    /// <summary>
+    /// Raw constructor with known server feature bits. Tests use this.
+    /// </summary>
+    public RedWireConn(Stream stream, IDisposable? owner, string sessionId, TimeSpan timeout, int serverFeatures)
     {
         _stream = stream;
         _owner = owner;
         SessionId = sessionId;
         _timeout = timeout <= TimeSpan.Zero ? TimeSpan.FromSeconds(30) : timeout;
+        _serverFeatures = serverFeatures;
     }
 
     /// <summary>Open a TCP / TLS connection and run the v2 handshake.</summary>
@@ -103,7 +113,7 @@ public sealed class RedWireConn : IConn
             HandshakeResult handshake = await PerformHandshakeAsync(
                 stream, username, password, token, clientName, cancellationToken).ConfigureAwait(false);
 
-            return new RedWireConn(stream, owner, handshake.SessionId, opTimeout);
+            return new RedWireConn(stream, owner, handshake.SessionId, opTimeout, handshake.Features);
         }
         catch
         {
@@ -178,13 +188,14 @@ public sealed class RedWireConn : IConn
         {
             throw new RedDBException.ProtocolError("HelloAck missing 'auth' field");
         }
+        int features = FeaturesField(ackJson, 0);
 
         // 4. Auth dispatch.
         switch (chosen)
         {
             case "anonymous":
                 await WriteFrameAsync(stream, new Frame(Frame.Kind.AuthResponse, 2UL, Array.Empty<byte>()), cancellationToken).ConfigureAwait(false);
-                return await FinishOneRttAsync(stream, cancellationToken).ConfigureAwait(false);
+                return await FinishOneRttAsync(stream, features, cancellationToken).ConfigureAwait(false);
             case "bearer":
             {
                 if (token is null)
@@ -194,7 +205,7 @@ public sealed class RedWireConn : IConn
                 }
                 var body = new JsonObject { ["token"] = token };
                 await WriteFrameAsync(stream, new Frame(Frame.Kind.AuthResponse, 2UL, JsonSerializer.SerializeToUtf8Bytes(body, JsonOpts)), cancellationToken).ConfigureAwait(false);
-                return await FinishOneRttAsync(stream, cancellationToken).ConfigureAwait(false);
+                return await FinishOneRttAsync(stream, features, cancellationToken).ConfigureAwait(false);
             }
             case "scram-sha-256":
             {
@@ -203,7 +214,7 @@ public sealed class RedWireConn : IConn
                     throw new RedDBException.AuthRefused(
                         "server picked scram-sha-256 but no username/password configured");
                 }
-                return await PerformScramAsync(stream, username, password, cancellationToken).ConfigureAwait(false);
+                return await PerformScramAsync(stream, username, password, features, cancellationToken).ConfigureAwait(false);
             }
             case "oauth-jwt":
             {
@@ -214,7 +225,7 @@ public sealed class RedWireConn : IConn
                 }
                 var body = new JsonObject { ["jwt"] = token };
                 await WriteFrameAsync(stream, new Frame(Frame.Kind.AuthResponse, 2UL, JsonSerializer.SerializeToUtf8Bytes(body, JsonOpts)), cancellationToken).ConfigureAwait(false);
-                return await FinishOneRttAsync(stream, cancellationToken).ConfigureAwait(false);
+                return await FinishOneRttAsync(stream, features, cancellationToken).ConfigureAwait(false);
             }
             default:
                 throw new RedDBException.ProtocolError(
@@ -222,7 +233,7 @@ public sealed class RedWireConn : IConn
         }
     }
 
-    private static async ValueTask<HandshakeResult> FinishOneRttAsync(Stream stream, CancellationToken ct)
+    private static async ValueTask<HandshakeResult> FinishOneRttAsync(Stream stream, int fallbackFeatures, CancellationToken ct)
     {
         Frame f = await ReadFrameAsync(stream, ct).ConfigureAwait(false);
         if (f.MessageKind == Frame.Kind.AuthFail)
@@ -232,11 +243,11 @@ public sealed class RedWireConn : IConn
                 $"expected AuthOk, got {Frame.Kind.Name(f.MessageKind)}");
         JsonNode? j = ParseJson(f.Payload, "AuthOk");
         string sid = TextField(j, "session_id") ?? string.Empty;
-        return new HandshakeResult(sid);
+        return new HandshakeResult(sid, FeaturesField(j, fallbackFeatures));
     }
 
     private static async ValueTask<HandshakeResult> PerformScramAsync(
-        Stream stream, string username, string password, CancellationToken ct)
+        Stream stream, string username, string password, int fallbackFeatures, CancellationToken ct)
     {
         // RFC 5802 § 3 — three round trips after the version byte.
         string clientNonce = Scram.NewClientNonce();
@@ -279,7 +290,7 @@ public sealed class RedWireConn : IConn
             throw new RedDBException.AuthRefused(
                 "scram: server signature did not verify — possible MITM");
         }
-        return new HandshakeResult(sid);
+        return new HandshakeResult(sid, FeaturesField(j, fallbackFeatures));
     }
 
     private static string ScramServerFirst(byte[] payload)
@@ -338,14 +349,36 @@ public sealed class RedWireConn : IConn
 
     public async ValueTask<ReadOnlyMemory<byte>> QueryAsync(string sql, CancellationToken cancellationToken = default)
     {
+        return await SendQueryAsync(Frame.Kind.Query, Encoding.UTF8.GetBytes(sql), cancellationToken).ConfigureAwait(false);
+    }
+
+    public async ValueTask<ReadOnlyMemory<byte>> QueryAsync(string sql, params object?[] args)
+    {
+        if (args.Length == 0)
+            return await QueryAsync(sql, CancellationToken.None).ConfigureAwait(false);
+        if (!SupportsParams)
+        {
+            throw new RedDBException.ParamsUnsupported(
+                "server did not advertise FEATURE_PARAMS — upgrade the server to use parameterized queries");
+        }
+        return await SendQueryAsync(
+            Frame.Kind.QueryWithParams,
+            ValueCodec.EncodeQueryWithParams(sql, args),
+            CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private async ValueTask<ReadOnlyMemory<byte>> SendQueryAsync(
+        byte kind,
+        byte[] payload,
+        CancellationToken cancellationToken)
+    {
         EnsureOpen();
         await _lock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             ulong corr = NextCorr();
-            byte[] payload = Encoding.UTF8.GetBytes(sql);
             using var ctx = WithTimeout(cancellationToken);
-            await WriteFrameAsync(_stream, new Frame(Frame.Kind.Query, corr, payload), ctx.Token).ConfigureAwait(false);
+            await WriteFrameAsync(_stream, new Frame(kind, corr, payload), ctx.Token).ConfigureAwait(false);
             Frame resp = await ReadFrameAsync(_stream, ctx.Token).ConfigureAwait(false);
             if (resp.MessageKind == Frame.Kind.Result) return resp.Payload;
             if (resp.MessageKind == Frame.Kind.Error)
@@ -577,10 +610,24 @@ public sealed class RedWireConn : IConn
         return null;
     }
 
+    private static int FeaturesField(JsonNode? node, int fallback)
+    {
+        if (node is not JsonObject obj) return fallback;
+        if (!obj.TryGetPropertyValue("features", out JsonNode? v) || v is not JsonValue val) return fallback;
+        if (val.TryGetValue(out int i)) return i;
+        if (val.TryGetValue(out long l) && l >= int.MinValue && l <= int.MaxValue) return (int)l;
+        return fallback;
+    }
+
     /// <summary>Outcome of a successful handshake — exposed mostly for tests.</summary>
     public sealed class HandshakeResult
     {
         public string SessionId { get; }
-        public HandshakeResult(string sessionId) { SessionId = sessionId; }
+        public int Features { get; }
+        public HandshakeResult(string sessionId, int features = 0)
+        {
+            SessionId = sessionId;
+            Features = features;
+        }
     }
 }

@@ -24,7 +24,41 @@ await conn.InsertAsync("users", new { name = "alice", age = 30 });
 
 ReadOnlyMemory<byte> rows = await conn.QueryAsync("SELECT * FROM users");
 string json = System.Text.Encoding.UTF8.GetString(rows.Span);
+
+ReadOnlyMemory<byte> filtered = await conn.QueryAsync(
+    "SELECT * FROM users WHERE age = $1 AND name = $2",
+    30,
+    "alice");
+
+ReadOnlyMemory<byte> nearest = await conn.QueryAsync(
+    "SELECT * FROM docs ORDER BY embedding <-> $1 LIMIT 3",
+    new float[] { 0.12f, 0.34f, 0.56f });
 ```
+
+## Query parameters
+
+`QueryAsync(string sql)` is unchanged. Use
+`QueryAsync(string sql, params object?[] args)` to bind positional `$N`
+placeholders:
+
+```csharp
+await conn.QueryAsync("SELECT * FROM users WHERE id = $1", 42);
+```
+
+Native mappings:
+
+| .NET value                                      | RedDB value      |
+| ----------------------------------------------- | ---------------- |
+| `sbyte`, `byte`, `short`, `ushort`, `int`, `uint`, `long` | integer |
+| `float`, `double`                               | float            |
+| `bool`                                          | bool             |
+| `null`, `DBNull.Value`                          | null             |
+| `string`                                        | text             |
+| `byte[]`                                        | bytes            |
+| `float[]`, `ReadOnlyMemory<float>`              | vector           |
+| `JsonNode`, `JsonElement`, dictionaries, lists, arrays | json      |
+| `DateTimeOffset`                                | timestamp        |
+| `Guid`                                          | uuid             |
 
 ## Supported URIs
 
