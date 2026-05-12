@@ -121,6 +121,24 @@ impl HttpClient {
         Ok(QueryResult::from_envelope(value))
     }
 
+    /// Parameterized HTTP query — sends `{"query": sql, "params": [...]}`
+    /// to `POST /query`. The server-side binder (`#358`) accepts the
+    /// same JSON envelope shape `Value::into_json_param` emits.
+    pub async fn query_with(
+        &self,
+        sql: &str,
+        params: &[crate::params::Value],
+    ) -> Result<QueryResult> {
+        let json_params: Vec<serde_json::Value> = params
+            .iter()
+            .cloned()
+            .map(crate::params::Value::into_json_param)
+            .collect();
+        let body = serde_json::json!({ "query": sql, "params": json_params });
+        let value = self.send_json(Method::POST, "/query", &body).await?;
+        Ok(QueryResult::from_envelope(value))
+    }
+
     pub async fn insert(&self, collection: &str, payload: &JsonValue) -> Result<InsertResult> {
         let url_path = format!("/collections/{}/rows", urlencoded(collection),);
         let value = self

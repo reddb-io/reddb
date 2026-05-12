@@ -56,6 +56,31 @@ impl EmbeddedClient {
         Ok(map_query_result(&qr))
     }
 
+    /// Parameterized embedded query — see [`crate::Reddb::query_with`].
+    /// Empty `params` short-circuits to the legacy `execute_query` fast
+    /// path so the parameter-less hot path pays zero overhead.
+    pub fn query_with(&self, sql: &str, params: &[crate::params::Value]) -> Result<QueryResult> {
+        if params.is_empty() {
+            return self.query(sql);
+        }
+        use reddb_server::storage::query::modes::parse_multi;
+        use reddb_server::storage::query::user_params;
+        let binds: Vec<SchemaValue> = params
+            .iter()
+            .cloned()
+            .map(crate::params::Value::into_schema_value)
+            .collect();
+        let parsed =
+            parse_multi(sql).map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
+        let bound = user_params::bind(&parsed, &binds)
+            .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
+        let qr = self
+            .runtime
+            .execute_query_expr(bound)
+            .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
+        Ok(map_query_result(&qr))
+    }
+
     /// Single-row insert. Routes through the same
     /// `runtime.create_rows_batch_columnar` port that
     /// [`Self::bulk_insert`] uses (#110), passing a one-row batch.

@@ -26,6 +26,58 @@ db.close().await?;
 # }
 ```
 
+### Parameterized queries
+
+`query_with(sql, &[params])` binds positional `$N` placeholders. SQL
+literals never carry untrusted values — vector / int / text params
+travel through the same engine binder the prepared-statement path uses,
+so injection-by-string is structurally impossible.
+
+```rust,no_run
+use reddb_client::{Reddb, Value};
+
+# async fn run() -> reddb_client::Result<()> {
+let db = Reddb::connect("memory://").await?;
+
+// Scalars use IntoValue conversions:
+let rows = db
+    .query_with(
+        "SELECT * FROM users WHERE id = $1 AND name = $2",
+        &[1i64.into(), "Alice".into()],
+    )
+    .await?;
+
+// Vector params route through `Value::Vector` (no string-formatting):
+let hits = db
+    .query_with(
+        "SEARCH SIMILAR $1 COLLECTION embeddings LIMIT $2",
+        &[Value::Vector(vec![0.1, 0.2, 0.3]), Value::Int(5)],
+    )
+    .await?;
+# let _ = (rows, hits);
+# Ok(())
+# }
+```
+
+Native Rust → engine `Value` mapping:
+
+| Rust                  | Engine variant          |
+|-----------------------|-------------------------|
+| `bool`                | `Boolean`               |
+| `i8..i64` / `u8..u32` | `Integer` (i64)         |
+| `f32` / `f64`         | `Float` (f64)           |
+| `&str` / `String`     | `Text`                  |
+| `Vec<u8>` / `&[u8]`   | `Blob`                  |
+| `Vec<f32>` / `&[f32]` | `Vector`                |
+| `Option<T>` (None)    | `Null`                  |
+| `serde_json::Value`   | `Json`                  |
+| `Value::Timestamp(s)` | `Timestamp` (seconds)   |
+| `Value::Uuid(b)`      | `Uuid` (16 raw bytes)   |
+
+Today the `embedded` and `http` transports carry parameters
+end-to-end. `grpc` returns a `FEATURE_DISABLED` error — the gRPC
+params frame is tracked in [#359](https://github.com/reddb-io/reddb/issues/359).
+
 ## Cargo features
 
 - `embedded` (default) — pulls the engine in-process for
