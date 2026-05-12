@@ -2720,6 +2720,8 @@ fn test_parse_search_similar() {
         text: _,
         provider: _,
         vector_param: _,
+        limit_param: _,
+        min_score_param: _,
     }) = query
     {
         assert_eq!(vector.len(), 3);

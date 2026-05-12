@@ -349,6 +349,55 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parse a `$N` or `?` placeholder in a non-Expr slot (e.g. the
+    /// `LIMIT` / `MIN_SCORE` slots of SEARCH SIMILAR; issue #361). The
+    /// `field` name is used only to enrich placeholder-mixing errors.
+    /// Returns the 0-based parameter index.
+    pub fn parse_param_slot(&mut self, field: &'static str) -> Result<usize, ParseError> {
+        match self.peek().clone() {
+            Token::Dollar => {
+                self.advance()?;
+                let n = match *self.peek() {
+                    Token::Integer(n) if n >= 1 => {
+                        self.advance()?;
+                        n as usize
+                    }
+                    _ => {
+                        return Err(ParseError::new(
+                            format!("expected `$N` (N >= 1) for {field} parameter"),
+                            self.position(),
+                        ));
+                    }
+                };
+                if self.placeholder_mode == PlaceholderMode::Question {
+                    return Err(ParseError::new(
+                        "cannot mix `?` and `$N` placeholders in one statement".to_string(),
+                        self.position(),
+                    ));
+                }
+                self.placeholder_mode = PlaceholderMode::Dollar;
+                Ok(n - 1)
+            }
+            Token::Question => {
+                self.advance()?;
+                if self.placeholder_mode == PlaceholderMode::Dollar {
+                    return Err(ParseError::new(
+                        "cannot mix `?` and `$N` placeholders in one statement".to_string(),
+                        self.position(),
+                    ));
+                }
+                self.placeholder_mode = PlaceholderMode::Question;
+                self.question_count += 1;
+                Ok(self.question_count - 1)
+            }
+            other => Err(ParseError::expected(
+                vec!["$N", "?"],
+                &other,
+                self.position(),
+            )),
+        }
+    }
+
     /// Parse a strictly-positive integer literal (`> 0`).
     ///
     /// Surfaces a `ValueOutOfRange` error for `field` when the literal

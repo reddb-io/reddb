@@ -322,10 +322,24 @@ impl RedDBRuntime {
                 limit,
                 min_score,
                 vector_param,
+                limit_param,
+                min_score_param,
             } => {
                 if vector_param.is_some() {
                     return Err(RedDBError::Query(
                         "SEARCH SIMILAR $N vector parameter was not bound before execution"
+                            .to_string(),
+                    ));
+                }
+                if limit_param.is_some() {
+                    return Err(RedDBError::Query(
+                        "SEARCH SIMILAR LIMIT $N parameter was not bound before execution"
+                            .to_string(),
+                    ));
+                }
+                if min_score_param.is_some() {
+                    return Err(RedDBError::Query(
+                        "SEARCH SIMILAR MIN_SCORE $N parameter was not bound before execution"
                             .to_string(),
                     ));
                 }

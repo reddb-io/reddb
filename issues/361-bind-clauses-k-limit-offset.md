@@ -37,3 +37,42 @@ Each clause requires a typed binder context (integer for K/LIMIT/OFFSET/PROBES, 
 ## Blocked by
 
 - #355
+
+## Progress (2026-05-12)
+
+Tracer slice landed: `SEARCH SIMILAR ... LIMIT $N MIN_SCORE $N`
+parameterization end-to-end through the same binder used by the existing
+vector-slot path (#355).
+
+Done in this slice:
+- `SearchCommand::Similar` gained `limit_param: Option<usize>` and
+  `min_score_param: Option<usize>` (AST in `storage/query/core.rs`).
+- Parser routes `$N` (and `?`, mode permitting) in the `LIMIT` and
+  `MIN_SCORE` slots via a new shared helper `Parser::parse_param_slot`
+  in `parser/mod.rs`. Lives next to `parse_integer` so future SELECT
+  / OFFSET / K / PROBES slots can reuse it without duplication.
+- `user_params::bind` binds the new slots with typed errors:
+  - LIMIT: accepts Integer / UnsignedInteger / BigInt with N > 0;
+    rejects 0/negative with `LIMIT parameter (must be > 0)`.
+  - MIN_SCORE: accepts Float and any integer family (widened to f32).
+- `runtime/impl_graph_commands.rs` asserts both new params are bound
+  pre-execution (same defense-in-depth pattern as vector_param).
+- Tests in `user_params` (6 new): limit_param happy path, min_score
+  happy path, both together with vector_param, LIMIT rejects
+  non-integer, LIMIT rejects 0/negative, MIN_SCORE rejects non-numeric.
+- TypeMismatch Display generalized from "requires a vector" to
+  "(got {variant})" so the same enum can describe non-vector slots.
+
+Deferred to follow-up slices:
+- SELECT `LIMIT $N` / `OFFSET $N` — needs param slots on TableQuery
+  (multiple AST sites; lift cleanly once SELECT shape binder grows
+  non-Expr param slot support).
+- `K $N` in SEARCH HYBRID / spatial / context — same shape as LIMIT.
+- `SEARCH SIMILAR TEXT $N` — text param into the embedding pipeline;
+  the embedding provider call is the only wrinkle. Same parser
+  routing as the existing TEXT 'literal' branch.
+- `PROBES $N` (IVF) — slot lives outside SearchCommand::Similar.
+
+`?` placeholder works at the helper level but parse_multi routes any
+`?`-bearing input to the SPARQL frontend, so an end-to-end `?` test
+for SEARCH SIMILAR LIMIT is deferred alongside detector tightening.

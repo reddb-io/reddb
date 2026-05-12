@@ -2181,6 +2181,14 @@ pub enum SearchCommand {
         /// user-supplied `Value::Vector` and clears this back to `None`.
         /// Runtime executors assert this is `None` post-bind.
         vector_param: Option<usize>,
+        /// `$N` placeholder for the `LIMIT` slot (issue #361). The binder
+        /// substitutes the user-supplied positive integer into `limit`
+        /// and clears this back to `None`.
+        limit_param: Option<usize>,
+        /// `$N` placeholder for the `MIN_SCORE` slot (issue #361). The
+        /// binder substitutes the user-supplied float into `min_score`
+        /// and clears this back to `None`.
+        min_score_param: Option<usize>,
     },
     /// SEARCH TEXT 'query' [COLLECTION col] [LIMIT n] [FUZZY]
     Text {

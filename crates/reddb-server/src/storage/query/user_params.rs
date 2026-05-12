@@ -189,7 +189,7 @@ impl std::fmt::Display for UserParamError {
             ),
             UserParamError::TypeMismatch { slot, got } => write!(
                 f,
-                "parameter type mismatch: {slot} requires a vector, got {got}"
+                "parameter type mismatch: {slot} (got {got})"
             ),
         }
     }
@@ -214,8 +214,20 @@ pub fn collect_indices(expr: &QueryExpr) -> Vec<usize> {
 /// Parameter slots that live on AST nodes outside the `Expr` tree
 /// (e.g. `SearchCommand::Similar { vector_param }`).
 fn collect_non_expr_indices(expr: &QueryExpr, out: &mut Vec<usize>) {
-    if let QueryExpr::SearchCommand(SearchCommand::Similar { vector_param, .. }) = expr {
+    if let QueryExpr::SearchCommand(SearchCommand::Similar {
+        vector_param,
+        limit_param,
+        min_score_param,
+        ..
+    }) = expr
+    {
         if let Some(idx) = vector_param {
+            out.push(*idx);
+        }
+        if let Some(idx) = limit_param {
+            out.push(*idx);
+        }
+        if let Some(idx) = min_score_param {
             out.push(*idx);
         }
     }
@@ -276,6 +288,8 @@ pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamEr
         limit,
         min_score,
         vector_param,
+        limit_param,
+        min_score_param,
     }) = expr
     {
         let mut bound_vector = vector.clone();
@@ -296,14 +310,61 @@ pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamEr
                 }
             };
         }
+        let bound_limit = if let Some(idx) = limit_param {
+            let value = params.get(*idx).ok_or(UserParamError::Arity {
+                expected: idx + 1,
+                got: params.len(),
+            })?;
+            match value {
+                Value::Integer(n) if *n > 0 => *n as usize,
+                Value::UnsignedInteger(n) if *n > 0 => *n as usize,
+                Value::BigInt(n) if *n > 0 => *n as usize,
+                Value::Integer(_) | Value::UnsignedInteger(_) | Value::BigInt(_) => {
+                    return Err(UserParamError::TypeMismatch {
+                        slot: "SEARCH SIMILAR LIMIT parameter (must be > 0)",
+                        got: value_variant_name(value),
+                    });
+                }
+                other => {
+                    return Err(UserParamError::TypeMismatch {
+                        slot: "SEARCH SIMILAR LIMIT parameter",
+                        got: value_variant_name(other),
+                    });
+                }
+            }
+        } else {
+            *limit
+        };
+        let bound_min_score = if let Some(idx) = min_score_param {
+            let value = params.get(*idx).ok_or(UserParamError::Arity {
+                expected: idx + 1,
+                got: params.len(),
+            })?;
+            match value {
+                Value::Float(f) => *f as f32,
+                Value::Integer(n) => *n as f32,
+                Value::UnsignedInteger(n) => *n as f32,
+                Value::BigInt(n) => *n as f32,
+                other => {
+                    return Err(UserParamError::TypeMismatch {
+                        slot: "SEARCH SIMILAR MIN_SCORE parameter",
+                        got: value_variant_name(other),
+                    });
+                }
+            }
+        } else {
+            *min_score
+        };
         return Ok(QueryExpr::SearchCommand(SearchCommand::Similar {
             vector: bound_vector,
             text: text.clone(),
             provider: provider.clone(),
             collection: collection.clone(),
-            limit: *limit,
-            min_score: *min_score,
+            limit: bound_limit,
+            min_score: bound_min_score,
             vector_param: None,
+            limit_param: None,
+            min_score_param: None,
         }));
     }
 
@@ -552,6 +613,131 @@ mod tests {
         assert_eq!(collection, "embeddings");
         assert_eq!(limit, 5);
     }
+
+    #[test]
+    fn bind_search_similar_limit_param() {
+        // Issue #361: `LIMIT $N` binds an integer parameter.
+        let q = parse("SEARCH SIMILAR [0.1, 0.2] COLLECTION embeddings LIMIT $1");
+        let bound = bind(&q, &[Value::Integer(25)]).unwrap();
+        let QueryExpr::SearchCommand(SearchCommand::Similar {
+            limit,
+            limit_param,
+            min_score_param,
+            ..
+        }) = bound
+        else {
+            panic!("expected SearchCommand::Similar");
+        };
+        assert_eq!(limit, 25);
+        assert_eq!(limit_param, None, "limit_param must be cleared post-bind");
+        assert_eq!(min_score_param, None);
+    }
+
+    #[test]
+    fn bind_search_similar_min_score_param() {
+        let q = parse("SEARCH SIMILAR [0.1, 0.2] COLLECTION embeddings MIN_SCORE $1");
+        let bound = bind(&q, &[Value::Float(0.42)]).unwrap();
+        let QueryExpr::SearchCommand(SearchCommand::Similar {
+            min_score,
+            min_score_param,
+            ..
+        }) = bound
+        else {
+            panic!("expected SearchCommand::Similar");
+        };
+        assert!((min_score - 0.42_f32).abs() < 1e-6);
+        assert_eq!(min_score_param, None);
+    }
+
+    #[test]
+    fn bind_search_similar_limit_and_min_score_together() {
+        let q = parse(
+            "SEARCH SIMILAR $1 COLLECTION embeddings LIMIT $2 MIN_SCORE $3",
+        );
+        let bound = bind(
+            &q,
+            &[
+                Value::Vector(vec![0.1, 0.2]),
+                Value::Integer(7),
+                Value::Float(0.9),
+            ],
+        )
+        .unwrap();
+        let QueryExpr::SearchCommand(SearchCommand::Similar {
+            limit,
+            min_score,
+            vector,
+            vector_param,
+            limit_param,
+            min_score_param,
+            ..
+        }) = bound
+        else {
+            panic!("expected SearchCommand::Similar");
+        };
+        assert_eq!(vector, vec![0.1_f32, 0.2]);
+        assert_eq!(limit, 7);
+        assert!((min_score - 0.9_f32).abs() < 1e-6);
+        assert_eq!(vector_param, None);
+        assert_eq!(limit_param, None);
+        assert_eq!(min_score_param, None);
+    }
+
+    #[test]
+    fn bind_search_similar_limit_rejects_non_integer() {
+        let q = parse("SEARCH SIMILAR [0.1] COLLECTION e LIMIT $1");
+        let err = bind(&q, &[Value::text("five")]).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                UserParamError::TypeMismatch {
+                    slot: "SEARCH SIMILAR LIMIT parameter",
+                    got: "text"
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn bind_search_similar_limit_rejects_zero_or_negative() {
+        let q = parse("SEARCH SIMILAR [0.1] COLLECTION e LIMIT $1");
+        let err = bind(&q, &[Value::Integer(0)]).unwrap_err();
+        assert!(matches!(
+            err,
+            UserParamError::TypeMismatch {
+                slot: "SEARCH SIMILAR LIMIT parameter (must be > 0)",
+                ..
+            }
+        ));
+        let err = bind(&q, &[Value::Integer(-3)]).unwrap_err();
+        assert!(matches!(
+            err,
+            UserParamError::TypeMismatch {
+                slot: "SEARCH SIMILAR LIMIT parameter (must be > 0)",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn bind_search_similar_min_score_rejects_non_numeric() {
+        let q = parse("SEARCH SIMILAR [0.1] COLLECTION e MIN_SCORE $1");
+        let err = bind(&q, &[Value::Vector(vec![1.0])]).unwrap_err();
+        assert!(matches!(
+            err,
+            UserParamError::TypeMismatch {
+                slot: "SEARCH SIMILAR MIN_SCORE parameter",
+                got: "vector"
+            }
+        ));
+    }
+
+    // Note: `?` placeholder at LIMIT/MIN_SCORE is correctly handled by
+    // `parse_param_slot`, but `parse_multi` routes any `?`-bearing input
+    // to the SPARQL frontend (see modes::detect). Exercising `?` for
+    // non-Expr slots will land alongside the SPARQL detector tightening
+    // tracked separately. The Dollar path covers the same code below.
 
     #[test]
     fn bind_search_similar_rejects_non_vector_param() {

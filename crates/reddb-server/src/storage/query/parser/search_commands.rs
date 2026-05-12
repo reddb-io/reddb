@@ -83,16 +83,28 @@ impl<'a> Parser<'a> {
         self.expect(Token::Collection)?;
         let collection = self.expect_ident()?;
 
-        // Optional LIMIT
+        // Optional LIMIT — accepts an integer literal or `$N` placeholder (#361).
+        let mut limit_param: Option<usize> = None;
         let limit = if self.consume(&Token::Limit)? {
-            self.parse_integer()? as usize
+            if matches!(self.peek(), Token::Dollar | Token::Question) {
+                limit_param = Some(self.parse_param_slot("LIMIT")?);
+                0
+            } else {
+                self.parse_integer()? as usize
+            }
         } else {
             10
         };
 
-        // Optional MIN_SCORE
+        // Optional MIN_SCORE — accepts a float literal or `$N` placeholder (#361).
+        let mut min_score_param: Option<usize> = None;
         let min_score = if self.consume(&Token::MinScore)? {
-            self.parse_float()? as f32
+            if matches!(self.peek(), Token::Dollar | Token::Question) {
+                min_score_param = Some(self.parse_param_slot("MIN_SCORE")?);
+                0.0
+            } else {
+                self.parse_float()? as f32
+            }
         } else {
             0.0
         };
@@ -115,6 +127,8 @@ impl<'a> Parser<'a> {
             limit,
             min_score,
             vector_param,
+            limit_param,
+            min_score_param,
         }))
     }
 
