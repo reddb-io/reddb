@@ -143,7 +143,7 @@ jobs:
           - { os: ubuntu-latest,  target: aarch64-unknown-linux-musl,    asset_name: linux-aarch64-static, cross: true }
           - { os: macos-14,       target: aarch64-apple-darwin,          asset_name: macos-aarch64,       cross: false }
           - { os: macos-13,       target: x86_64-apple-darwin,           asset_name: macos-x86_64,        cross: false }
-          - { os: blacksmith-8vcpu-windows-2022, target: x86_64-pc-windows-msvc, asset_name: windows-x86_64, cross: false }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, asset_name: windows-x86_64, cross: false }
     steps:
       - uses: actions/checkout@v6
 
