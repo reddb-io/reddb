@@ -365,9 +365,32 @@ jobs:
           files: release/*
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  verify-release-assets:
+    # Gate every npm publish on the GitHub Release carrying the binary
+    # assets the SDK postinstall expects. Closes #418 — 1.0.5 shipped to
+    # npm without `red-linux-x86_64`, which broke every Linux x86_64
+    # postinstall with a 404 until users discovered `REDDB_BIN`. The
+    # `needs: [build]` chain on `publish-github` was supposed to make
+    # this impossible (matrix failure blocks the release), but defense
+    # in depth: explicitly check the assets are listed on the Release
+    # before any npm tarball ships.
+    name: Verify release assets
+    needs: [plan, publish-github]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: |
+      needs.plan.outputs.should_skip != 'true' &&
+      needs.plan.outputs.release_channel == 'stable'
+    steps:
+      - uses: actions/checkout@v6
+      - name: Assert every postinstall-required asset is published
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
+        run: bash scripts/verify-release-assets.sh "$RELEASE_TAG"
+
   publish-npm:
     name: Publish CLI npm package
-    needs: [plan, publish-github]
+    needs: [plan, publish-github, verify-release-assets]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     if: |
       needs.plan.outputs.should_skip != 'true' &&
@@ -455,7 +478,7 @@ jobs:
 
   publish-js-driver:
     name: Publish @reddb-io/sdk (npm)
-    needs: [plan, publish-github]
+    needs: [plan, publish-github, verify-release-assets]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     if: |
       needs.plan.outputs.should_skip != 'true' &&
@@ -491,7 +514,7 @@ jobs:
 
   publish-js-client:
     name: Publish @reddb-io/client (npm)
-    needs: [plan, publish-github]
+    needs: [plan, publish-github, verify-release-assets]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     if: |
       needs.plan.outputs.should_skip != 'true' &&
@@ -527,7 +550,7 @@ jobs:
 
   publish-bun-client:
     name: Publish @reddb-io/client-bun (npm)
-    needs: [plan, publish-github]
+    needs: [plan, publish-github, verify-release-assets]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     if: |
       needs.plan.outputs.should_skip != 'true' &&

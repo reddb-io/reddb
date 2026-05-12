@@ -307,6 +307,67 @@ flipping the switch.
 > this table and mark the row, and remove any "build from source"
 > caveats from the corresponding `docs/clients/drivers/<lang>.md`.
 
+## Release asset contract
+
+Every `v<x.y.z>` stable GitHub Release **must** carry the following
+twelve binary assets before any npm package at the same version may
+ship. The list mirrors the platform/arch matrix served by the SDK
+postinstall (`drivers/js/src/internal/asset-fetcher/asset-name.js`)
+plus the `red_client` thin-client variant of each:
+
+| Bin          | linux-x86_64 | linux-aarch64 | linux-armv7 | macos-x86_64 | macos-aarch64 | windows-x86_64.exe |
+|--------------|--------------|---------------|-------------|--------------|---------------|---------------------|
+| `red`        | required     | required      | required    | required     | required      | required            |
+| `red_client` | required     | required      | required    | required     | required      | required            |
+
+The musl variant (`linux-aarch64-static`) is built but **not** part of
+the contract — it backs the thin `Dockerfile.client` image, not npm
+postinstall.
+
+The release workflow enforces the contract automatically:
+
+- `.github/workflows/release.yml` → job `verify-release-assets` runs
+  `scripts/verify-release-assets.sh "$RELEASE_TAG"` after
+  `publish-github` finishes uploading. Every `publish-js-*` job
+  (`@reddb-io/sdk`, `@reddb-io/client`, `@reddb-io/client-bun`) and
+  `publish-npm` (`@reddb-io/cli`) depends on it, so a missing asset
+  blocks every Node-side publish at the gate.
+- `scripts/verify-release-assets.sh` queries `gh release view --json
+  assets`, asserts each `(bin, suffix)` pair is present, and exits 1
+  with the explicit missing list on failure. Run it locally against any
+  past tag to audit:
+
+  ```bash
+  GH_TOKEN="$(gh auth token)" scripts/verify-release-assets.sh v1.0.5
+  ```
+
+### Recovering from a missing-asset release (lessons from v1.0.5)
+
+1.0.5 shipped `@reddb-io/sdk@1.0.5` to npm without
+`red-linux-x86_64` on the GitHub Release. Every fresh Linux x86_64
+install hit a 404 in postinstall and had to fall back to `REDDB_BIN`.
+The recovery playbook for any future repeat:
+
+1. Run `scripts/verify-release-assets.sh v<x.y.z>` to enumerate
+   exactly which assets are missing.
+2. If the asset can be reproduced from the matching tag, re-run the
+   release workflow's `build` job for that tag via
+   `gh workflow run release.yml --ref v<x.y.z>` and upload the
+   produced binary with `gh release upload v<x.y.z> red-<suffix>`.
+3. If the binary cannot be reproduced (toolchain drift), publish a
+   patch release (`v<x.y.z+1>`) and deprecate the broken npm version:
+   ```bash
+   npm deprecate @reddb-io/sdk@<x.y.z> \
+     "missing red-<suffix> binary — install v<x.y.z+1> or set REDDB_BIN"
+   ```
+4. The SDK postinstall already prints an actionable error
+   (`drivers/js/postinstall.js`, `formatFailure` for the
+   `ASSET_NOT_FOUND` code) — verify the message renders correctly
+   once with a deliberately bad tag:
+   ```bash
+   REDDB_POSTINSTALL_VERSION=v0.0.0-does-not-exist npm rebuild @reddb-io/sdk
+   ```
+
 ## macOS x86_64 binary
 
 Before issue #404 (this runbook entry), `red-macos-x86_64` and
