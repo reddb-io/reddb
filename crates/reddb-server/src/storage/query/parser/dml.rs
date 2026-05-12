@@ -437,7 +437,8 @@ impl<'a> Parser<'a> {
         Ok(Some(items))
     }
 
-    /// Parse: ASK 'question' [USING provider] [MODEL 'model'] [DEPTH n] [LIMIT n] [COLLECTION col]
+    /// Parse: ASK 'question' [USING provider] [MODEL 'model'] [DEPTH n]
+    /// [LIMIT n] [MIN_SCORE x] [COLLECTION col]
     pub fn parse_ask_query(&mut self) -> Result<QueryExpr, ParseError> {
         self.advance()?; // consume ASK
 
@@ -447,13 +448,14 @@ impl<'a> Parser<'a> {
         let mut model = None;
         let mut depth = None;
         let mut limit = None;
+        let mut min_score = None;
         let mut collection = None;
         let mut temperature = None;
         let mut seed = None;
 
         // Parse optional clauses in any order. Loop bound = number of
         // clause kinds, so each can appear at most once.
-        for _ in 0..7 {
+        for _ in 0..8 {
             if self.consume(&Token::Using)? {
                 provider = Some(self.expect_ident()?);
             } else if self.consume_ident_ci("MODEL")? {
@@ -462,6 +464,8 @@ impl<'a> Parser<'a> {
                 depth = Some(self.parse_integer()? as usize);
             } else if self.consume(&Token::Limit)? {
                 limit = Some(self.parse_integer()? as usize);
+            } else if self.consume(&Token::MinScore)? {
+                min_score = Some(self.parse_float()? as f32);
             } else if self.consume(&Token::Collection)? {
                 collection = Some(self.expect_ident()?);
             } else if self.consume_ident_ci("TEMPERATURE")? {
@@ -479,6 +483,7 @@ impl<'a> Parser<'a> {
             model,
             depth,
             limit,
+            min_score,
             collection,
             temperature,
             seed,

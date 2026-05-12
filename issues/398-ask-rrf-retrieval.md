@@ -66,3 +66,42 @@ Deferred to follow-up slices (each independently shippable):
   expected ranked URNs (depends on the wiring above).
 
 Issue stays open with this progress note.
+
+Slice 2: `ASK '...' MIN_SCORE <f>` now parses into the public
+`AskQuery` AST and is threaded into the ASK vector retrieval bucket.
+The existing `AskPipeline::execute_with_limit` path remains as the
+legacy no-threshold wrapper; `execute_with_limit_and_min_score` carries
+the per-query floor and `vector_search_scoped` forwards it to
+`AuthorizedSearch::execute_similar`. gRPC ASK JSON payloads also accept
+`min_score`.
+
+Tests added/updated:
+
+- `crates/reddb-server/tests/ask_parser.rs` covers ASK `MIN_SCORE`
+  alongside DEPTH/LIMIT/COLLECTION.
+- `crates/reddb-server/tests/support/parser_hardening/ask_grammar.rs`
+  now emits optional `MIN_SCORE` in the ASK property generator.
+
+Verification for this slice:
+
+- Red check: targeted ASK parser test failed on missing
+  `AskQuery.min_score`.
+- Green check: `cargo test -p reddb-io-server --test ask_parser`.
+- `cargo check -p reddb-io-server --lib`.
+- `git diff --check`.
+- `pnpm test` skipped because `target/debug/red` is not built.
+- `pnpm typecheck` exited 1 after reporting `TypeScript: No errors
+  found` through the repo wrapper.
+- Attempted a focused server lib-test for vector-bucket threshold
+  behavior, but the server lib-test binary currently fails before
+  targeted ASK tests can run because of unrelated borrow-check errors
+  in `crates/reddb-server/src/runtime/ai/pg_wire_ask_row_encoder.rs`.
+
+Deferred to follow-up slices:
+
+- Route all ASK retrieval buckets through `RrfFuser` as a single fused
+  source list rather than preserving the current rows-then-vector
+  ordering.
+- Thread `ASK '...' DEPTH N` into graph traversal retrieval.
+- Add the final known-good ranked-URN integration test after the fused
+  source-list wiring lands.

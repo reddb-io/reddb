@@ -750,8 +750,8 @@ pub struct DropIndexQuery {
     pub if_exists: bool,
 }
 
-/// ASK 'question' [USING provider] [MODEL 'model'] [DEPTH n] [LIMIT n] [COLLECTION col]
-///                [TEMPERATURE x] [SEED n]
+/// ASK 'question' [USING provider] [MODEL 'model'] [DEPTH n] [LIMIT n] [MIN_SCORE x]
+///                [COLLECTION col] [TEMPERATURE x] [SEED n]
 ///
 /// `temperature` and `seed` are per-query overrides resolved by the
 /// `DeterminismDecider` (issue #400). The parser merely surfaces the
@@ -763,6 +763,7 @@ pub struct AskQuery {
     pub model: Option<String>,
     pub depth: Option<usize>,
     pub limit: Option<usize>,
+    pub min_score: Option<f32>,
     pub collection: Option<String>,
     /// Per-query temperature override (`ASK '...' TEMPERATURE 0.7`).
     /// `None` means fall back to `ask.default_temperature`.

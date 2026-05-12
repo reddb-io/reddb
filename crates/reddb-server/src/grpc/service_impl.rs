@@ -2369,6 +2369,10 @@ impl RedDb for GrpcRuntime {
                 .get("limit")
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize),
+            min_score: payload
+                .get("min_score")
+                .and_then(|v| v.as_f64())
+                .map(|v| v as f32),
             collection: payload
                 .get("collection")
                 .and_then(|v| v.as_str())
