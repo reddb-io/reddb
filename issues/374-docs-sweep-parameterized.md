@@ -156,7 +156,7 @@ Verification (this slice):
 - `pnpm typecheck` exited nonzero; raw pnpm reports
   `Command "typecheck" not found`. No TypeScript files changed.
 
-Slice 6 (this commit): `docs/clients/drivers/cpp.md` now shows the
+Slice 6 (commit 6f8af813): `docs/clients/drivers/cpp.md` now shows the
 parameterized form first.
 
 - C++ hub overview now says C++20, matching the driver API's `std::span`
@@ -182,3 +182,29 @@ Verification (this slice):
 - `pnpm test` ran and skipped because `target/debug/red` is not built.
 - `pnpm typecheck` exited nonzero; `rtk proxy pnpm typecheck` confirms
   `Command "typecheck" not found`. No TypeScript files changed.
+
+Slice 7 (this commit): `docs/clients/drivers/zig.md` now shows the
+parameterized form first.
+
+- Zig hub quickstart now uses `conn.queryWithParams(sql, params)` with
+  explicit `reddb.Value` variants instead of the bare `SELECT 1` example.
+- Added a "Safe parameter binding" section with scalar params, a vector
+  `SEARCH SIMILAR $1` example, and the native Zig → engine value table from
+  `drivers/zig/README.md`.
+- Documented the legacy no-param query path, RedWire `FEATURE_PARAMS`
+  requirement, `ParamsUnsupported`, HTTP `/query` typed params behavior, and
+  borrowed slice lifetimes.
+- Added the temporary ADR #352 GitHub cross-link because no local
+  `docs/adr/00XX-parameterized-queries.md` exists yet.
+
+Verification (this slice):
+- TDD red check first failed because `docs/clients/drivers/zig.md` was missing
+  `## Safe parameter binding`, `SEARCH SIMILAR $1`, `FEATURE_PARAMS`,
+  `ParamsUnsupported`, and the ADR #352 cross-link.
+- Green check: the Zig hub page contains `## Safe parameter binding`,
+  `SEARCH SIMILAR $1`, `FEATURE_PARAMS`, `ParamsUnsupported`, and the ADR #352
+  cross-link.
+- `git diff --check` clean.
+- `pnpm test` ran and skipped because `target/debug/red` is not built.
+- `pnpm typecheck` exited nonzero after reporting `TypeScript: No errors
+  found`. No TypeScript files changed.
