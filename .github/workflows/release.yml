@@ -142,7 +142,11 @@ jobs:
           - { os: ubuntu-latest,  target: armv7-unknown-linux-gnueabihf, asset_name: linux-armv7,         cross: true  }
           - { os: ubuntu-latest,  target: aarch64-unknown-linux-musl,    asset_name: linux-aarch64-static, cross: true }
           - { os: macos-14,       target: aarch64-apple-darwin,          asset_name: macos-aarch64,       cross: false }
-          - { os: macos-13,       target: x86_64-apple-darwin,           asset_name: macos-x86_64,        cross: false }
+          # macos-13 (x86_64-apple-darwin) temporarily disabled: GH-hosted
+          # macos-13 pool was unreachable during v1.0.7 release attempts
+          # (jobs queued > 1h without picking up a runner). Intel Mac users
+          # can run the aarch64 binary under Rosetta 2 until this is restored.
+          # - { os: macos-13,       target: x86_64-apple-darwin,           asset_name: macos-x86_64,        cross: false }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, asset_name: windows-x86_64, cross: false }
     steps:
       - uses: actions/checkout@v6
