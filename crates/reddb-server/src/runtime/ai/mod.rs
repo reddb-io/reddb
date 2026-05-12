@@ -26,6 +26,7 @@ pub mod prompt_template;
 pub mod provider_capabilities;
 pub mod provider_failover;
 pub mod rrf_fuser;
+pub mod sources_fingerprint;
 pub mod strict_validator;
 pub mod text_chunker;
 pub mod transport;
