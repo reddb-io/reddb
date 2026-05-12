@@ -231,3 +231,31 @@ Eighth slice landed: `SEARCH SPATIAL RADIUS ... LIMIT $N`.
 Remaining LIMIT $N slices: SPATIAL BBOX.
 Plus SELECT LIMIT / OFFSET (TableQuery shape), SIMILAR TEXT $N
 (text embedding pipeline), and PROBES $N (IVF).
+
+## Progress (2026-05-12, slice 9)
+
+Ninth slice landed: `SEARCH SPATIAL BBOX ... LIMIT $N`. Closes
+the LIMIT-on-SearchCommand family — every SEARCH variant now
+accepts `$N` in its LIMIT/K slot via the shared `parse_param_slot`
+helper.
+
+- `SearchCommand::SpatialBbox` gained `limit_param: Option<usize>`
+  (AST in `storage/query/core.rs`), same shape as
+  `Hybrid::limit_param`.
+- Parser routes `$N` (and `?`, mode permitting) in SPATIAL BBOX
+  LIMIT via `parse_param_slot`. Literal path keeps
+  `parse_integer()`.
+- `user_params::collect_non_expr_indices` matches SpatialBbox.
+- `user_params::bind` gained a SpatialBbox branch with the same
+  typed error set as the SIMILAR / HYBRID / SPATIAL NEAREST /
+  TEXT / MULTIMODAL / INDEX / CONTEXT / SPATIAL RADIUS LIMIT
+  paths.
+- `runtime/impl_graph_commands.rs` guards the new param.
+- `tests/geo_parser.rs` SpatialBbox destructure switched to `..`
+  for future slots.
+- Tests in `user_params` (3 new): BBOX LIMIT happy path, rejects
+  0, rejects non-integer.
+
+Remaining work in #361: SELECT LIMIT / OFFSET (TableQuery shape;
+multiple AST sites), SIMILAR TEXT $N (text embedding pipeline),
+and PROBES $N (IVF).
