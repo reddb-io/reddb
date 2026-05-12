@@ -236,6 +236,11 @@ fn collect_non_expr_indices(expr: &QueryExpr, out: &mut Vec<usize>) {
                 out.push(*idx);
             }
         }
+        QueryExpr::SearchCommand(SearchCommand::SpatialNearest { k_param, .. }) => {
+            if let Some(idx) = k_param {
+                out.push(*idx);
+            }
+        }
         _ => {}
     }
 }
@@ -414,6 +419,50 @@ pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamEr
             collection: collection.clone(),
             limit: bound_limit,
             limit_param: None,
+        }));
+    }
+
+    if let QueryExpr::SearchCommand(SearchCommand::SpatialNearest {
+        lat,
+        lon,
+        k,
+        collection,
+        column,
+        k_param,
+    }) = expr
+    {
+        let bound_k = if let Some(idx) = k_param {
+            let value = params.get(*idx).ok_or(UserParamError::Arity {
+                expected: idx + 1,
+                got: params.len(),
+            })?;
+            match value {
+                Value::Integer(n) if *n > 0 => *n as usize,
+                Value::UnsignedInteger(n) if *n > 0 => *n as usize,
+                Value::BigInt(n) if *n > 0 => *n as usize,
+                Value::Integer(_) | Value::UnsignedInteger(_) | Value::BigInt(_) => {
+                    return Err(UserParamError::TypeMismatch {
+                        slot: "SEARCH SPATIAL NEAREST K parameter (must be > 0)",
+                        got: value_variant_name(value),
+                    });
+                }
+                other => {
+                    return Err(UserParamError::TypeMismatch {
+                        slot: "SEARCH SPATIAL NEAREST K parameter",
+                        got: value_variant_name(other),
+                    });
+                }
+            }
+        } else {
+            *k
+        };
+        return Ok(QueryExpr::SearchCommand(SearchCommand::SpatialNearest {
+            lat: *lat,
+            lon: *lon,
+            k: bound_k,
+            collection: collection.clone(),
+            column: column.clone(),
+            k_param: None,
         }));
     }
 
@@ -875,6 +924,51 @@ mod tests {
             UserParamError::TypeMismatch {
                 slot: "SEARCH HYBRID LIMIT parameter (must be > 0)",
                 ..
+            }
+        ));
+    }
+
+    #[test]
+    fn bind_search_spatial_nearest_k_param() {
+        // Issue #361: `SEARCH SPATIAL NEAREST ... K $N` binds an integer.
+        let q = parse(
+            "SEARCH SPATIAL NEAREST 40.7128 74.0060 K $1 COLLECTION sites COLUMN location",
+        );
+        let bound = bind(&q, &[Value::Integer(7)]).unwrap();
+        let QueryExpr::SearchCommand(SearchCommand::SpatialNearest { k, k_param, .. }) = bound
+        else {
+            panic!("expected SpatialNearest");
+        };
+        assert_eq!(k, 7);
+        assert_eq!(k_param, None, "k_param must be cleared post-bind");
+    }
+
+    #[test]
+    fn bind_search_spatial_nearest_k_rejects_zero() {
+        let q = parse(
+            "SEARCH SPATIAL NEAREST 40.7128 74.0060 K $1 COLLECTION sites COLUMN location",
+        );
+        let err = bind(&q, &[Value::Integer(0)]).unwrap_err();
+        assert!(matches!(
+            err,
+            UserParamError::TypeMismatch {
+                slot: "SEARCH SPATIAL NEAREST K parameter (must be > 0)",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn bind_search_spatial_nearest_k_rejects_non_integer() {
+        let q = parse(
+            "SEARCH SPATIAL NEAREST 40.7128 74.0060 K $1 COLLECTION sites COLUMN location",
+        );
+        let err = bind(&q, &[Value::text("five")]).unwrap_err();
+        assert!(matches!(
+            err,
+            UserParamError::TypeMismatch {
+                slot: "SEARCH SPATIAL NEAREST K parameter",
+                got: "text"
             }
         ));
     }

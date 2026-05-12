@@ -245,6 +245,7 @@ fn happy_nearest_k_5_parses() {
             k,
             collection,
             column,
+            ..
         }) => {
             assert!((lat - 40.7128).abs() < 1e-9);
             assert!((lon - 74.0060).abs() < 1e-9);

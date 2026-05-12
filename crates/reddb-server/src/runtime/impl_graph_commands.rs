@@ -729,7 +729,14 @@ impl RedDBRuntime {
                 k,
                 collection,
                 column,
+                k_param,
             } => {
+                if k_param.is_some() {
+                    return Err(RedDBError::Query(
+                        "SEARCH SPATIAL NEAREST K $N parameter was not bound before execution"
+                            .to_string(),
+                    ));
+                }
                 use crate::storage::unified::spatial_index::haversine_km;
                 let _ = column;
                 let store = self.inner.db.store();

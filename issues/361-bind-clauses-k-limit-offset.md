@@ -97,3 +97,26 @@ Done in this slice:
 `?` placeholder works at the helper level but parse_multi routes any
 `?`-bearing input to the SPARQL frontend, so an end-to-end `?` test
 for SEARCH SIMILAR LIMIT is deferred alongside detector tightening.
+
+## Progress (2026-05-12, slice 3)
+
+Third slice landed: `SEARCH SPATIAL NEAREST ... K $N`.
+
+- `SearchCommand::SpatialNearest` gained `k_param: Option<usize>`
+  (AST in `storage/query/core.rs`), same shape as `Hybrid::limit_param`.
+- Parser routes `$N` (and `?`, mode permitting) in the NEAREST K slot
+  via `parse_param_slot`. Literal path keeps `parse_positive_integer`.
+- `user_params::collect_non_expr_indices` matches SpatialNearest.
+- `user_params::bind` gained a SpatialNearest branch with the same
+  typed error set as the SIMILAR / HYBRID LIMIT paths.
+- `runtime/impl_graph_commands.rs` guards the new param.
+- `tests/geo_parser.rs` destructure switched to `..` for future slots.
+- Tests in `user_params` (3 new): NEAREST K happy path, NEAREST K
+  rejects 0, NEAREST K rejects non-integer.
+
+Remaining slices documented above (SELECT LIMIT / OFFSET, SIMILAR
+TEXT $N, PROBES, K in SEARCH CONTEXT — note CONTEXT actually uses
+LIMIT/DEPTH not K so the prior progress note was imprecise; LIMIT
+parameterization for SEARCH TEXT / MULTIMODAL / INDEX / CONTEXT and
+the SPATIAL RADIUS/BBOX `LIMIT` slot are trivial follow-ups now that
+the SpatialNearest pattern is in place).
