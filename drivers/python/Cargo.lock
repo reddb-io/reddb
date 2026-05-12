@@ -1509,7 +1509,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "aes-gcm",
  "fs2",
@@ -1543,7 +1543,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-python"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "prost 0.13.5",
  "pyo3",
