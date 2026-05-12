@@ -14,6 +14,7 @@
 
 pub mod batch_client;
 pub mod citation_parser;
+pub mod cost_guard;
 pub mod dedup_cache;
 pub mod metrics;
 pub mod ner;
