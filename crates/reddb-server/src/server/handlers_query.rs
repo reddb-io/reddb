@@ -63,6 +63,20 @@ impl RedDBServer {
                 )
             }
             Err(err) => {
+                if let crate::api::RedDBError::Validation {
+                    message,
+                    validation,
+                } = &err
+                {
+                    let mut object = crate::json::Map::new();
+                    object.insert("ok".to_string(), crate::json::Value::Bool(false));
+                    object.insert(
+                        "error".to_string(),
+                        crate::json_field::SerializedJsonField::tainted(message),
+                    );
+                    object.insert("validation".to_string(), validation.clone());
+                    return json_response(422, crate::json::Value::Object(object));
+                }
                 let (status, msg) = map_runtime_error(&err);
                 json_error(status, msg)
             }
@@ -527,6 +541,80 @@ mod tests {
         );
     }
 
+    #[test]
+    fn http_query_ask_retries_once_when_strict_citation_is_invalid() {
+        let _guard = ASK_ENV_LOCK.lock().expect("env lock");
+        let stub = SequenceOpenAiStub::start(vec!["first invalid [^1]", "retry ok"]);
+        let _api_base =
+            EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
+        let _api_key = EnvVarGuard::unset("REDDB_OPENAI_API_KEY");
+
+        let server = make_server();
+        configure_ask_stub_runtime(&server);
+
+        let r = server.handle_query(br#"{"query": "ASK 'why did login fail?'"}"#.to_vec());
+
+        assert_eq!(r.status, 200, "{}", body_str(&r));
+        assert_eq!(stub.request_count(), 2);
+        let text = body_str(&r);
+        assert!(text.contains("retry ok"), "{text}");
+    }
+
+    #[test]
+    fn http_query_ask_retry_exhaustion_returns_422_validation_errors() {
+        let _guard = ASK_ENV_LOCK.lock().expect("env lock");
+        let stub = SequenceOpenAiStub::start(vec!["first invalid [^1]", "still invalid [^1]"]);
+        let _api_base =
+            EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
+        let _api_key = EnvVarGuard::unset("REDDB_OPENAI_API_KEY");
+
+        let server = make_server();
+        configure_ask_stub_runtime(&server);
+
+        let r = server.handle_query(br#"{"query": "ASK 'why did login fail?'"}"#.to_vec());
+
+        assert_eq!(r.status, 422, "{}", body_str(&r));
+        assert_eq!(stub.request_count(), 2);
+        let text = body_str(&r);
+        assert!(text.contains(r#""validation""#), "{text}");
+        assert!(text.contains(r#""ok":false"#), "{text}");
+        assert!(text.contains(r#""errors""#), "{text}");
+        assert!(text.contains("out_of_range"), "{text}");
+    }
+
+    #[test]
+    fn http_query_ask_strict_off_surfaces_warning_without_retry() {
+        let _guard = ASK_ENV_LOCK.lock().expect("env lock");
+        let stub = SequenceOpenAiStub::start(vec!["lenient invalid [^1]"]);
+        let _api_base =
+            EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
+        let _api_key = EnvVarGuard::unset("REDDB_OPENAI_API_KEY");
+
+        let server = make_server();
+        configure_ask_stub_runtime(&server);
+
+        let r =
+            server.handle_query(br#"{"query": "ASK 'why did login fail?' STRICT OFF"}"#.to_vec());
+
+        assert_eq!(r.status, 200, "{}", body_str(&r));
+        assert_eq!(stub.request_count(), 1);
+        let text = body_str(&r);
+        assert!(text.contains("lenient invalid"), "{text}");
+        assert!(text.contains(r#""warnings""#), "{text}");
+        assert!(text.contains("out_of_range"), "{text}");
+    }
+
+    fn configure_ask_stub_runtime(server: &RedDBServer) {
+        server
+            .runtime
+            .execute_query("SET CONFIG runtime.ai.transport_retry_max_attempts = 1")
+            .expect("disable transport retries");
+        server
+            .runtime
+            .execute_query("SET CONFIG red.config.ai.openai.default.key = 'sk-test'")
+            .expect("set api key");
+    }
+
     struct EnvVarGuard {
         name: &'static str,
         previous: Option<String>,
@@ -623,6 +711,86 @@ mod tests {
         let total_tokens = 12 + completion_tokens;
         let body = format!(
             r#"{{"model":"test-model","choices":[{{"message":{{"content":"login failed [^1]"}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":12,"completion_tokens":{completion_tokens},"total_tokens":{total_tokens}}}}}"#
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write stub response");
+    }
+
+    struct SequenceOpenAiStub {
+        addr: SocketAddr,
+        shutdown: Arc<AtomicBool>,
+        requests: Arc<std::sync::atomic::AtomicUsize>,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl SequenceOpenAiStub {
+        fn start(outputs: Vec<&'static str>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("stub bind");
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            let addr = listener.local_addr().expect("local addr");
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let server_shutdown = Arc::clone(&shutdown);
+            let server_requests = Arc::clone(&requests);
+            let handle = thread::spawn(move || {
+                while !server_shutdown.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            read_stub_request(&mut stream);
+                            let index = server_requests.fetch_add(1, Ordering::Relaxed);
+                            let output = outputs
+                                .get(index)
+                                .or_else(|| outputs.last())
+                                .copied()
+                                .unwrap_or("");
+                            write_openai_text_response(&mut stream, output);
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            Self {
+                addr,
+                shutdown,
+                requests,
+                handle: Some(handle),
+            }
+        }
+
+        fn addr(&self) -> SocketAddr {
+            self.addr
+        }
+
+        fn request_count(&self) -> usize {
+            self.requests.load(Ordering::Relaxed)
+        }
+    }
+
+    impl Drop for SequenceOpenAiStub {
+        fn drop(&mut self) {
+            self.shutdown.store(true, Ordering::Relaxed);
+            let _ = TcpStream::connect(self.addr);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn write_openai_text_response(stream: &mut TcpStream, output: &str) {
+        let escaped = output.replace('\\', "\\\\").replace('"', "\\\"");
+        let body = format!(
+            r#"{{"model":"test-model","choices":[{{"message":{{"content":"{escaped}"}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}}}}"#
         );
         let response = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",

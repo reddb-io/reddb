@@ -225,6 +225,7 @@ pub(crate) fn map_runtime_error(err: &crate::api::RedDBError) -> (u16, String) {
         NotFound(_) => 404,
         ReadOnly(_) => 403,
         InvalidConfig(_) | Query(_) | InvalidOperation(_) => 400,
+        Validation { .. } => 422,
         FeatureNotEnabled(_) => 501,
         SchemaVersionMismatch { .. } => 409,
         QuotaExceeded(payload) => {
@@ -281,6 +282,14 @@ mod transport_tests {
             400
         );
         assert_eq!(map_runtime_error(&RedDBError::Query("x".into())).0, 400);
+        assert_eq!(
+            map_runtime_error(&RedDBError::Validation {
+                message: "x".into(),
+                validation: JsonValue::Object(Map::new()),
+            })
+            .0,
+            422
+        );
         assert_eq!(
             map_runtime_error(&RedDBError::FeatureNotEnabled("x".into())).0,
             501

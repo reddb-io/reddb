@@ -751,7 +751,7 @@ pub struct DropIndexQuery {
 }
 
 /// ASK 'question' [USING provider] [MODEL 'model'] [DEPTH n] [LIMIT n] [MIN_SCORE x]
-///                [COLLECTION col] [TEMPERATURE x] [SEED n]
+///                [COLLECTION col] [TEMPERATURE x] [SEED n] [STRICT ON|OFF]
 ///
 /// `temperature` and `seed` are per-query overrides resolved by the
 /// `DeterminismDecider` (issue #400). The parser merely surfaces the
@@ -771,6 +771,9 @@ pub struct AskQuery {
     /// Per-query seed override (`ASK '...' SEED 42`). `None` means the
     /// decider derives one from `hash(question + sources_fingerprint)`.
     pub seed: Option<u64>,
+    /// Strict citation validation is on by default. `STRICT OFF` keeps
+    /// citation diagnostics as warnings and skips retry/error handling.
+    pub strict: bool,
 }
 
 impl QueryExpr {

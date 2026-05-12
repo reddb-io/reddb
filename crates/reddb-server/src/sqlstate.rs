@@ -186,6 +186,7 @@ pub fn sqlstate_for_reddb_error(err: &crate::api::RedDBError) -> SqlState {
         E::Engine(_) => INTERNAL_ERROR,
         E::Catalog(_) => INTERNAL_ERROR,
         E::Query(_) => SYNTAX_ERROR,
+        E::Validation { .. } => SYNTAX_ERROR_OR_ACCESS_RULE_VIOLATION,
         E::Io(_) => IO_ERROR,
         E::VersionUnavailable => INTERNAL_ERROR,
         // 53400 = configuration_limit_exceeded — closest PG class for
