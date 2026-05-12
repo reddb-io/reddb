@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <array>
 #include <string>
 #include <thread>
 
@@ -84,6 +85,26 @@ TEST(Smoke, FullRoundTrip) {
         conn->query("CREATE TABLE smoke_users (name TEXT, age INTEGER)");
         auto ok = conn->insert("smoke_users", R"({"name":"alice","age":30})");
         EXPECT_FALSE(ok.empty());
+        std::array<reddb::Value, 3> filters = {
+            reddb::Value(30),
+            reddb::Value("alice"),
+            reddb::Value(std::nullopt),
+        };
+        auto param_got = conn->query(
+            "SELECT * FROM smoke_users WHERE age = $1 AND name = $2 AND $3 IS NULL",
+            filters);
+        EXPECT_FALSE(param_got.empty());
+        std::array<float, 2> vector = {0.7f, 0.7f};
+        std::array<reddb::Value, 2> vector_insert = {
+            reddb::Value::vector(vector),
+            reddb::Value("parameterized doc"),
+        };
+        conn->query("INSERT INTO smoke_embeddings VECTOR (dense, content) VALUES ($1, $2)",
+                    vector_insert);
+        std::array<reddb::Value, 1> vector_search = {reddb::Value::vector(vector)};
+        auto vector_got = conn->query("SEARCH SIMILAR $1 COLLECTION smoke_embeddings LIMIT 1",
+                                      vector_search);
+        EXPECT_FALSE(vector_got.empty());
         auto got = conn->get("smoke_users", "alice");
         EXPECT_FALSE(got.empty());
         auto deld = conn->del("smoke_users", "alice");

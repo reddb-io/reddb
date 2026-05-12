@@ -11,6 +11,9 @@ class RedWireConnAdapter final : public Conn {
 public:
     explicit RedWireConnAdapter(std::unique_ptr<redwire::RedWireConn> c) : c_(std::move(c)) {}
     std::string query(const std::string& sql) override { return c_->query(sql); }
+    std::string query(std::string_view sql, std::span<const Value> params) override {
+        return c_->query(sql, params);
+    }
     std::string insert(const std::string& col, const std::string& body) override { return c_->insert(col, body); }
     std::string bulk_insert(const std::string& col, const std::vector<std::string>& rows) override {
         return c_->bulk_insert(col, rows);
@@ -30,6 +33,9 @@ public:
 
     std::string query(const std::string& sql) override {
         return c_->query(sql).body;
+    }
+    std::string query(std::string_view sql, std::span<const Value> params) override {
+        return c_->query(sql, params).body;
     }
     std::string insert(const std::string& col, const std::string& body) override {
         return c_->insert(col, body).body;

@@ -1,6 +1,6 @@
 # reddb C++ driver
 
-C++17 client for RedDB. Speaks the RedWire binary protocol over TCP
+C++20 client for RedDB. Speaks the RedWire binary protocol over TCP
 (plain or TLS) and the HTTP/HTTPS REST surface. Remote-only — embedded
 URIs (`red:///path`, `memory://`, `file://`) throw
 `EmbeddedUnsupported`.
@@ -25,14 +25,55 @@ ctest --test-dir drivers/cpp/build --output-on-failure
 ## Quickstart
 
 ```cpp
+#include <array>
+
 #include "reddb/reddb.hpp"
 
 int main() {
     auto conn = reddb::connect("red://localhost:5050");
     auto json = conn->query("SELECT 1");
+
+    std::array<reddb::Value, 2> params = {
+        reddb::Value(30),
+        reddb::Value("alice"),
+    };
+    auto rows = conn->query(
+        "SELECT * FROM users WHERE age = $1 AND name = $2",
+        params);
+
+    std::array<float, 3> embedding = {0.1f, 0.2f, 0.3f};
+    std::array<reddb::Value, 1> vector_params = {
+        reddb::Value::vector(embedding),
+    };
+    auto hits = conn->query(
+        "SEARCH SIMILAR $1 COLLECTION docs LIMIT 5",
+        vector_params);
+
     conn->close();
 }
 ```
+
+`query(sql)` is unchanged. `query(std::string_view sql,
+std::span<const reddb::Value> params)` binds positional `$N` placeholders
+and uses the RedWire `QueryWithParams` frame only when the server advertises
+`FEATURE_PARAMS`; otherwise the driver throws `PARAMS_UNSUPPORTED`.
+HTTP sends the canonical `/query` body with `query` and adds `params` only
+for non-empty parameter spans.
+
+Native C++ parameter mapping:
+
+| C++ value | RedDB Value |
+|-----------|-------------|
+| `std::nullopt` | null |
+| `bool` | bool |
+| signed integer / unsigned integer up to `INT64_MAX` | int |
+| `float`, `double` | float |
+| `std::string`, `std::string_view`, string literal | text |
+| `reddb::Value::bytes(std::span<const std::byte>)` | bytes |
+| `reddb::Value::vector(std::span<const float>)` | vector |
+| `reddb::Value::json(std::string_view)` | json |
+| `reddb::Value::timestamp_seconds(int64_t)` / `timestamp(time_point)` | timestamp |
+| `reddb::Value::uuid("00112233-4455-6677-8899-aabbccddeeff")` | uuid |
 
 ### Auth options
 

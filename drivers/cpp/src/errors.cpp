@@ -13,6 +13,7 @@ const char* error_code_name(ErrorCode code) noexcept {
         case ErrorCode::Engine: return "ENGINE";
         case ErrorCode::NotFound: return "NOT_FOUND";
         case ErrorCode::CompressedButNoZstd: return "COMPRESSED_BUT_NO_ZSTD";
+        case ErrorCode::ParamsUnsupported: return "PARAMS_UNSUPPORTED";
         case ErrorCode::Tls: return "TLS";
         case ErrorCode::Unknown: return "UNKNOWN";
     }

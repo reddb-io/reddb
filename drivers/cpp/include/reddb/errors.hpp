@@ -21,6 +21,7 @@ enum class ErrorCode {
     Engine,
     NotFound,
     CompressedButNoZstd,
+    ParamsUnsupported,
     Tls,
     Unknown,
 };
