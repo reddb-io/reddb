@@ -34,3 +34,23 @@ Reuses the Blob Cache infrastructure (ADR 0006) for storage and invalidation. Mu
 ## Blocked by
 
 - #402
+
+## Progress
+
+- 2026-05-12: Slice 1 — `AnswerCacheKey` deep module landed
+  (`crates/reddb-server/src/runtime/ai/answer_cache_key.rs`). Pure key
+  derivation + TTL policy with 34 unit tests:
+  - SHA-256 over `tenant|user|question|provider|model|temperature|seed|fingerprint`
+    delimited by 0x1f. Pinned key value test guards canonical form.
+  - Per-tenant + per-user scope separation (cross-tenant leak guard).
+  - `None` vs `Some(0)` distinct for both temperature and seed
+    (same regression class `DeterminismDecider` already pins).
+  - `Mode::{Default,Cache(d),NoCache}` × `Settings{enabled,default_ttl}`
+    → `Decision::{Bypass,Use{ttl}}`. `NOCACHE` always wins; per-query
+    `CACHE TTL` always opts in; default mode honours deployment toggle.
+  - `parse_ttl("Ns|Nm|Nh|Nd")` with rejection of empty, zero,
+    missing-unit, unknown-unit, embedded whitespace, leading `-`,
+    u64-overflow on both integer parse and unit multiplication.
+- Not yet wired: parser `CACHE TTL '...'` / `NOCACHE` clauses,
+  runtime cache lookup/populate, settings surface, mutation
+  invalidation, audit row `cache_hit` flag. Each is a follow-up slice.

@@ -12,6 +12,7 @@
 //! [`super::ask_pipeline`] and is opt-in via `ai.ner.backend = "llm"`
 //! at runtime config time.
 
+pub mod answer_cache_key;
 pub mod audit_record_builder;
 pub mod batch_client;
 pub mod citation_parser;
