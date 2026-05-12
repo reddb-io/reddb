@@ -36,6 +36,46 @@ Go driver and any other gRPC-based clients should round-trip the schema correctl
 
 ## Progress
 
+- 2026-05-12: Slice 2 — gRPC `Query` now returns the canonical ASK
+  envelope in `QueryReply.result_json` when the runtime result is
+  `statement == "ask"`. This unblocks the current Go gRPC facade path
+  (`db.Query(ctx, "ASK '...'")`) because the driver already returns
+  `QueryReply.result_json` bytes unchanged.
+
+  Key decisions:
+  - Keep `QueryReply` itself backwards-compatible; no proto field shape
+    changed in this slice.
+  - Special-case only `statement == "ask"` so a normal `SELECT ... AS
+    answer` remains row-wrapped.
+  - Reconstruct the same canonical `AskResult` used by JSON-RPC, MCP,
+    and PG-wire from the runtime ASK row, preserving existing defaults
+    for absent `cache_hit`, `cost_usd`, `mode`, and `retry_count`.
+  - Parse `sources_flat`, `citations`, and `validation` from their
+    runtime JSON columns before serialising the envelope, so gRPC
+    clients receive arrays/objects rather than `null`.
+
+  Tests:
+  - `grpc_ask_query_reply_tests::query_reply_ask_result_json_uses_full_canonical_schema`
+  - `grpc_ask_query_reply_tests::query_reply_non_ask_answer_column_keeps_row_shape`
+
+  Verification:
+  - `cargo test -p reddb-io-server grpc_ask_query_reply_tests --lib -- --nocapture`
+    → 2 passed.
+  - `cargo test -p reddb-io-server runtime::ai::grpc_ask_message --lib -- --nocapture`
+    → 19 passed.
+  - `cargo check -p reddb-io-server` passed.
+  - `pnpm test` exited 0 but skipped because `target/debug/red` is
+    missing.
+  - `pnpm typecheck` printed `TypeScript: No errors found` but exited
+    1.
+
+  Deferred to follow-up slices:
+  - typed `AskRequest`/`AskReply` proto evolution and `service_impl::ask`
+    wiring;
+  - `AskStream` server-streaming RPC over the #405 frame shape;
+  - generated Go proto/client refresh and a real Go-driver integration
+    test against stubbed ASK execution.
+
 - 2026-05-12: Slice 1 — `GrpcAskMessage` deep module landed at
   `crates/reddb-server/src/runtime/ai/grpc_ask_message.rs`. Pure
   builder + typed shape mirroring the canonical
