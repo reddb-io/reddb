@@ -51,6 +51,7 @@
 pub mod connect;
 pub mod connector;
 pub mod error;
+pub mod params;
 pub mod topology;
 pub mod types;
 
@@ -70,6 +71,7 @@ pub mod redwire;
 pub mod http;
 
 pub use error::{ClientError, ErrorCode, Result};
+pub use params::{IntoValue, Value};
 pub use types::{InsertResult, JsonValue, KvWatchEvent, QueryResult, ValueOut};
 
 // Back-compat re-exports for the previous `reddb-client-internal`
@@ -178,6 +180,50 @@ impl Reddb {
             Reddb::Grpc(c) => c.query(sql).await,
             #[cfg(feature = "http")]
             Reddb::Http(c) => c.query(sql).await,
+            Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
+        }
+    }
+
+    /// Parameterized query — `$N` placeholders in `sql` are bound to
+    /// `params[N-1]`. Empty params is equivalent to [`Self::query`].
+    ///
+    /// Native type mapping (driver-side, [`IntoValue`]):
+    ///
+    /// | Rust                    | Engine `Value` variant |
+    /// |-------------------------|------------------------|
+    /// | `i8..i64` / `u8..u32`   | `Integer` (i64)        |
+    /// | `bool`                  | `Boolean`              |
+    /// | `f32` / `f64`           | `Float` (f64)          |
+    /// | `&str` / `String`       | `Text`                 |
+    /// | `Vec<u8>` / `&[u8]`     | `Blob`                 |
+    /// | `Vec<f32>` / `&[f32]`   | `Vector`               |
+    /// | `Option<T>`             | `Null` when `None`     |
+    /// | `serde_json::Value`     | `Json`                 |
+    /// | [`Value::Timestamp`]    | `Timestamp` (seconds)  |
+    /// | [`Value::Uuid`]         | `Uuid` (16 raw bytes)  |
+    ///
+    /// Today the [`Reddb::Embedded`] and [`Reddb::Http`] transports carry
+    /// parameters end-to-end. [`Reddb::Grpc`] surfaces a
+    /// `FEATURE_DISABLED` error — the gRPC params frame is tracked in
+    /// issue #359.
+    pub async fn query_with<V: IntoValue + Clone>(
+        &self,
+        sql: &str,
+        params: &[V],
+    ) -> Result<QueryResult> {
+        let values: Vec<Value> = params.iter().cloned().map(IntoValue::into_value).collect();
+        match self {
+            #[cfg(feature = "embedded")]
+            Reddb::Embedded(c) => c.query_with(sql, &values),
+            #[cfg(feature = "grpc")]
+            Reddb::Grpc(_) => {
+                let _ = values;
+                Err(ClientError::feature_disabled(
+                    "grpc parameterized query (#359)",
+                ))
+            }
+            #[cfg(feature = "http")]
+            Reddb::Http(c) => c.query_with(sql, &values).await,
             Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
         }
     }
