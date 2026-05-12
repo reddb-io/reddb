@@ -8,7 +8,7 @@ That executable is the **`red` binary**, not the same thing as:
 - the wire binary protocol
 - the binary `.rdb` file format
 
-In JavaScript and TypeScript, use the `reddb` driver package in application code and `@reddb-io/cli` only as the npm CLI launcher.
+In JavaScript and TypeScript, use the `@reddb-io/sdk` driver package in application code and `@reddb-io/cli` only as the npm CLI launcher.
 
 If you want the terminology first, read [Modes and Transports](/getting-started/modes-and-transports.md).
 
@@ -117,12 +117,14 @@ sudo install -m 0755 target/release/red /usr/local/bin/red
 
 ## Use as an embedded Rust dependency
 
-For in-process usage, add `reddb` to your project:
+For in-process usage, add `reddb-io` to your project:
 
 ```toml
 [dependencies]
-reddb = "0.1"
+reddb-io = "1.0"
 ```
+
+The crate publishes on crates.io as `reddb-io`; the in-code import path stays `use reddb::…`.
 
 Optional feature flags:
 
@@ -137,7 +139,7 @@ Example:
 
 ```toml
 [dependencies]
-reddb = { version = "0.1", features = ["backend-s3", "otel"] }
+reddb-io = { version = "1.0", features = ["backend-s3", "otel"] }
 ```
 
 ## Docker

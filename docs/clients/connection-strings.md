@@ -118,7 +118,7 @@ Full flag / env-var reference:
 
 ### gRPC cluster (primary + read replicas)
 
-The `reddb-client` Rust driver accepts a comma-separated host list
+The `reddb-io-client` Rust driver accepts a comma-separated host list
 in the URI authority. The first entry is the primary; subsequent
 entries are read replicas. Writes always go to the primary; reads
 round-robin across the replicas.
@@ -207,8 +207,8 @@ OAuth/JWT validates via the server's pluggable `JwtVerifier`.
 
 | Driver | Transports landed | Auth methods |
 |--------|--------------------|--------------|
-| `reddb` (JS / TS) — `drivers/js` | embedded, HTTP, HTTPS, RedWire (TCP / TLS / mTLS), PG wire | bearer, login, mTLS, OAuth/JWT, SCRAM (via RedWire) |
-| `reddb-client` (Rust) — `crates/reddb-client` | embedded, HTTP, HTTPS, RedWire (TCP / TLS / mTLS), PG wire | bearer, login, mTLS, OAuth/JWT, SCRAM (via RedWire) |
+| `@reddb-io/sdk` (JS / TS) — `drivers/js` | embedded, HTTP, HTTPS, RedWire (TCP / TLS / mTLS), PG wire | bearer, login, mTLS, OAuth/JWT, SCRAM (via RedWire) |
+| `reddb-io-client` (Rust) — `crates/reddb-client` | embedded, HTTP, HTTPS, RedWire (TCP / TLS / mTLS), PG wire | bearer, login, mTLS, OAuth/JWT, SCRAM (via RedWire) |
 | `reddb` (Python) — `drivers/python` | embedded (PyO3), HTTP | bearer, login |
 
 The JS and Rust drivers share the **6-transport matrix** (embedded,
