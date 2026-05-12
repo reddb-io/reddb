@@ -142,11 +142,14 @@ impl RedDb {
             #[cfg(feature = "embedded")]
             Backend::Embedded(rt) => {
                 let fields = pydict_to_fields(payload)?;
-                let affected = rt
+                let result = rt
                     .insert_object(collection, &fields)
                     .map_err(|e| err("QUERY_ERROR", e))?;
                 let out = PyDict::new(py);
-                out.set_item("affected", affected)?;
+                out.set_item("affected", result.affected)?;
+                if let Some(id) = result.id {
+                    out.set_item("id", id)?;
+                }
                 Ok(out)
             }
             Backend::Grpc(client) => {
@@ -177,17 +180,23 @@ impl RedDb {
             #[cfg(feature = "embedded")]
             Backend::Embedded(rt) => {
                 let mut total: u64 = 0;
+                let mut ids = Vec::with_capacity(payloads.len());
                 for item in payloads.iter() {
                     let dict = item
                         .downcast::<PyDict>()
                         .map_err(|_| err("INVALID_PARAMS", "bulk_insert payloads must be dicts"))?;
                     let fields = pydict_to_fields(dict)?;
-                    total += rt
+                    let result = rt
                         .insert_object(collection, &fields)
                         .map_err(|e| err("QUERY_ERROR", e))?;
+                    total += result.affected;
+                    if let Some(id) = result.id {
+                        ids.push(id);
+                    }
                 }
                 let out = PyDict::new(py);
                 out.set_item("affected", total)?;
+                out.set_item("ids", ids)?;
                 Ok(out)
             }
             Backend::Grpc(client) => {

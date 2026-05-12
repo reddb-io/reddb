@@ -325,11 +325,17 @@ fn insert_round_trip() {
         )
         .expect("single insert");
     assert_eq!(res.affected, 1);
+    let id = res.id.expect("insert returns assigned id");
 
     let result = db
-        .query("SELECT sku, qty FROM items")
+        .query("SELECT red_entity_id, sku, qty FROM items")
         .expect("select after insert");
     assert_eq!(result.rows.len(), 1, "expected 1 row back from select");
+    let returned_id = result.rows[0]
+        .iter()
+        .find_map(|(name, value)| (name == "red_entity_id").then_some(value.to_string()))
+        .expect("select returns red_entity_id");
+    assert_eq!(id, returned_id);
 
     drop(db);
     cleanup_db(&path);
