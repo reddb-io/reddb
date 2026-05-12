@@ -67,11 +67,32 @@ Deferred to follow-up slices:
 - SELECT `LIMIT $N` / `OFFSET $N` — needs param slots on TableQuery
   (multiple AST sites; lift cleanly once SELECT shape binder grows
   non-Expr param slot support).
-- `K $N` in SEARCH HYBRID / spatial / context — same shape as LIMIT.
 - `SEARCH SIMILAR TEXT $N` — text param into the embedding pipeline;
   the embedding provider call is the only wrinkle. Same parser
   routing as the existing TEXT 'literal' branch.
 - `PROBES $N` (IVF) — slot lives outside SearchCommand::Similar.
+- `K $N` in SEARCH CONTEXT / SPATIAL — same shape as HYBRID; trivial.
+
+## Progress (2026-05-12, slice 2)
+
+Second tracer slice landed: `SEARCH HYBRID ... LIMIT $N` (and `K $N`,
+which the HYBRID parser treats as a LIMIT alias).
+
+Done in this slice:
+- `SearchCommand::Hybrid` gained `limit_param: Option<usize>` mirroring
+  the `Similar::limit_param` shape from slice 1.
+- Parser routes `$N` (and `?`, mode permitting) in HYBRID LIMIT / K via
+  the same `parse_param_slot` helper.
+- `user_params::collect_non_expr_indices` now walks Hybrid as well.
+- `user_params::bind` gained a Hybrid branch with the same typed error
+  set as the SIMILAR LIMIT path: non-integer rejected, 0/negative
+  rejected with `(must be > 0)`.
+- `runtime/impl_graph_commands.rs` guards the new param.
+- Existing destructures in `parser/tests.rs` and
+  `tests/vector_search_snapshots.rs` switched to `..` so future slots
+  can be added without churning unrelated tests.
+- Tests in `user_params` (4 new): hybrid LIMIT happy path, K alias
+  happy path, LIMIT rejects non-integer, LIMIT rejects 0.
 
 `?` placeholder works at the helper level but parse_multi routes any
 `?`-bearing input to the SPARQL frontend, so an end-to-end `?` test

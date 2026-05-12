@@ -2799,6 +2799,7 @@ fn test_parse_search_hybrid() {
         query: q,
         collection,
         limit,
+        ..
     }) = query
     {
         assert_eq!(vector.unwrap().len(), 2);

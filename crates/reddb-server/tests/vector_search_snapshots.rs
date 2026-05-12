@@ -260,6 +260,7 @@ fn happy_search_hybrid_vector_and_text() {
             query,
             collection,
             limit,
+            ..
         }) => {
             assert!(vector.is_some());
             assert_eq!(vector.as_ref().unwrap().len(), 2);

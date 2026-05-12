@@ -2203,6 +2203,11 @@ pub enum SearchCommand {
         query: Option<String>,
         collection: String,
         limit: usize,
+        /// `$N` placeholder for the `LIMIT` / `K` slot (issue #361).
+        /// Same shape as `SearchCommand::Similar::limit_param`; the
+        /// binder substitutes the user-supplied positive integer and
+        /// clears this back to `None`.
+        limit_param: Option<usize>,
     },
     /// SEARCH MULTIMODAL 'key_or_query' [COLLECTION col] [LIMIT n]
     Multimodal {

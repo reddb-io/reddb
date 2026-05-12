@@ -464,7 +464,14 @@ impl RedDBRuntime {
                 query,
                 collection,
                 limit,
+                limit_param,
             } => {
+                if limit_param.is_some() {
+                    return Err(RedDBError::Query(
+                        "SEARCH HYBRID LIMIT $N parameter was not bound before execution"
+                            .to_string(),
+                    ));
+                }
                 let res = self.search_hybrid(
                     vector.clone(),
                     query.clone(),
