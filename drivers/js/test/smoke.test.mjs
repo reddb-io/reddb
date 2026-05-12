@@ -9,6 +9,7 @@
  */
 
 import { existsSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 
@@ -220,6 +221,53 @@ await test('parameterized INSERT VALUES with vector param (#355)', async () => {
   await db.close()
 })
 
+await test('embedded stdio ASK returns the full citation envelope (#406)', async () => {
+  const provider = await startAskProvider()
+  const previousEnv = {
+    REDDB_AI_PROVIDER: process.env.REDDB_AI_PROVIDER,
+    REDDB_AI_MODEL: process.env.REDDB_AI_MODEL,
+    REDDB_OLLAMA_API_BASE: process.env.REDDB_OLLAMA_API_BASE,
+  }
+  process.env.REDDB_AI_PROVIDER = 'ollama'
+  process.env.REDDB_AI_MODEL = 'mock-ask'
+  process.env.REDDB_OLLAMA_API_BASE = provider.baseUrl
+
+  let db
+  try {
+    db = await connect('memory://', { binary: BINARY })
+    await db.query('CREATE TABLE travel (id INT, passport TEXT, notes TEXT)')
+    await db.query(
+      "INSERT INTO travel (id, passport, notes) VALUES (1, 'PT-002', 'incident FDD-12313 escalated')",
+    )
+
+    const result = await db.query("ASK 'passport FDD-12313'")
+
+    assertEqual(result.answer, 'FDD-12313 escalated [^1].', 'answer')
+    assertEqual(result.provider, 'ollama', 'provider')
+    assertEqual(result.model, 'mock-ask', 'model')
+    assertEqual(result.mode, 'lenient', 'mode')
+    assertEqual(result.prompt_tokens, 10, 'prompt tokens')
+    assertEqual(result.completion_tokens, 4, 'completion tokens')
+    assertEqual(result.cache_hit, false, 'cache hit default')
+    assertEqual(result.cost_usd, 0, 'cost default')
+    assertEqual(result.retry_count, 0, 'retry count')
+    assert(Array.isArray(result.sources_flat), 'sources_flat is array')
+    assert(Array.isArray(result.citations), 'citations is array')
+    assertEqual(result.sources_flat.length, 1, 'one source')
+    assertEqual(result.citations.length, 1, 'one citation')
+    assertEqual(result.citations[0].marker, 1, 'citation marker')
+    assertEqual(result.citations[0].urn, result.sources_flat[0].urn, 'citation urn')
+    assertEqual(result.validation.ok, true, 'validation ok')
+    assert(Array.isArray(result.validation.warnings), 'validation warnings')
+    assert(Array.isArray(result.validation.errors), 'validation errors')
+    assert(!('rows' in result), 'ASK result is not row-wrapped')
+  } finally {
+    if (db) await db.close()
+    restoreEnv(previousEnv)
+    await provider.close()
+  }
+})
+
 await test('query error rejects with RedDBError', async () => {
   const db = await connect('memory://', { binary: BINARY })
   try {
@@ -267,4 +315,65 @@ function detectRuntime() {
   if (typeof globalThis.Bun !== 'undefined') return `bun ${globalThis.Bun.version}`
   if (typeof globalThis.Deno !== 'undefined') return `deno ${globalThis.Deno.version.deno}`
   return `node ${process.version}`
+}
+
+function restoreEnv(previousEnv) {
+  for (const [key, value] of Object.entries(previousEnv)) {
+    if (value === undefined) {
+      delete process.env[key]
+    } else {
+      process.env[key] = value
+    }
+  }
+}
+
+function startAskProvider() {
+  const server = createServer(async (req, res) => {
+    await drain(req)
+    res.setHeader('content-type', 'application/json')
+    if (req.method === 'POST' && req.url === '/v1/embeddings') {
+      res.end(
+        JSON.stringify({
+          model: 'mock-embedding',
+          data: [{ index: 0, embedding: [1, 0, 0] }],
+          usage: { prompt_tokens: 3, total_tokens: 3 },
+        }),
+      )
+      return
+    }
+    if (req.method === 'POST' && req.url === '/v1/chat/completions') {
+      res.end(
+        JSON.stringify({
+          model: 'mock-ask',
+          choices: [
+            {
+              message: { role: 'assistant', content: 'FDD-12313 escalated [^1].' },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
+        }),
+      )
+      return
+    }
+    res.statusCode = 404
+    res.end(JSON.stringify({ error: { message: `unexpected ${req.method} ${req.url}` } }))
+  })
+  return new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject)
+      const address = server.address()
+      resolve({
+        baseUrl: `http://127.0.0.1:${address.port}/v1`,
+        close: () => new Promise((closeResolve) => server.close(closeResolve)),
+      })
+    })
+  })
+}
+
+async function drain(req) {
+  for await (const _chunk of req) {
+    // consume the request body so the client can reuse the connection
+  }
 }

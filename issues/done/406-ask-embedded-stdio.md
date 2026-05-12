@@ -22,16 +22,41 @@ The JSON-RPC `query` method already routes `ASK` SQL today — this slice ensure
 
 ## Acceptance criteria
 
-- [ ] Embedded stdio JSON-RPC `query` method returns the full new ASK schema.
-- [ ] JS SDK `db.query('ASK \'...\'')` round-trips all fields.
-- [ ] `STREAM` over JSON-RPC works via notification frames (or documented as not-yet if streaming is HTTP-only).
-- [ ] Integration test from JS SDK against embedded engine.
+- [x] Embedded stdio JSON-RPC `query` method returns the full new ASK schema.
+- [x] JS SDK `db.query('ASK \'...\'')` round-trips all fields.
+- [x] `STREAM` over JSON-RPC works via notification frames (or documented as not-yet if streaming is HTTP-only).
+- [x] Integration test from JS SDK against embedded engine.
 
 ## Blocked by
 
 - #393
 
 ## Progress
+
+Final slice: JS SDK embedded-engine ASK integration landed.
+
+- `drivers/js/test/smoke.test.mjs` now starts a local
+  OpenAI-compatible mock provider, configures embedded `red rpc --stdio`
+  through the existing Ollama provider path, seeds a matching row, and
+  verifies `db.query("ASK ...")` returns the full canonical ASK
+  envelope directly.
+- The test pins the user-visible fields from the embedded stdio path:
+  `answer`, `sources_flat`, `citations`, `validation`, `cache_hit`,
+  `cost_usd`, `provider`, `model`, token counts, `mode`, and
+  `retry_count`, and asserts ASK is not row-wrapped.
+- `ASK ... STREAM` remains documented as not wired in the JS stdio
+  JSON-RPC client; HTTP streaming is the incremental ASK path for now.
+  This satisfies the issue's explicit "documented as not-yet" option.
+
+Verification (final slice):
+- `cargo build --bin red`
+- `REDDB_BINARY_PATH=/home/cyber/.cache/cargo-target/debug/red node drivers/js/test/smoke.test.mjs`
+- `cargo test -p reddb-io-server --lib rpc_stdio::tests::ask_query_result_uses_canonical_envelope`
+- `REDDB_BINARY_PATH=/home/cyber/.cache/cargo-target/debug/red node --test drivers/js/test/ask.test.mjs`
+- `git diff --check`
+- `cargo check -p reddb-io-server`
+- `REDDB_BINARY_PATH=/home/cyber/.cache/cargo-target/debug/red pnpm test`
+- `pnpm typecheck` (nonzero wrapper despite `TypeScript: No errors found`)
 
 Slice 2: embedded stdio JSON-RPC non-streaming envelope adapter landed.
 
