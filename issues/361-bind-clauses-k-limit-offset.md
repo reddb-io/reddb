@@ -288,3 +288,46 @@ Tenth slice landed: `SEARCH SIMILAR TEXT $N`.
 Remaining work in #361: SELECT LIMIT / OFFSET (TableQuery shape;
 multiple AST sites) and PROBES $N (IVF — slot not yet plumbed
 through the parser).
+
+## Progress (2026-05-12, slice 11)
+
+Eleventh slice landed: `SELECT ... LIMIT $N OFFSET $N`.
+
+- `TableQuery` gained `limit_param: Option<usize>` and
+  `offset_param: Option<usize>` (AST in `storage/query/core.rs`).
+  Both initialised to `None` in `TableQuery::new` and
+  `TableQuery::from_subquery`.
+- 17 other TableQuery struct-literal sites (planner: shape, cache,
+  optimizer, cost, logical_helpers; parser: table, join,
+  property_tests; runtime: impl_core) updated to init both slots
+  to `None`. No Default impl exists, so each site is touched
+  explicitly — mirrors the SearchCommand slot pattern.
+- Parser routes `$N` (and `?`, mode permitting) in the SELECT
+  LIMIT / OFFSET slots via `parse_param_slot`. Literal path keeps
+  `parse_integer()`.
+- `user_params::collect_non_expr_indices` matches Table.
+- `user_params::bind` gained a Table branch BEFORE the
+  bind_user_param_query fallthrough: runs the Expr-tree binder
+  first, then post-processes the resulting TableQuery to bind
+  limit_param/offset_param. Typed errors:
+  - LIMIT: Integer / UnsignedInteger / BigInt, > 0; rejects 0/neg
+    with "SELECT LIMIT parameter (must be > 0)"; rejects non-int
+    with "SELECT LIMIT parameter".
+  - OFFSET: Integer / UnsignedInteger / BigInt, >= 0 (offset 0
+    is valid); rejects negative with
+    "SELECT OFFSET parameter (must be >= 0)"; rejects non-int
+    with "SELECT OFFSET parameter".
+- The planner's `parameterize_table_query` / `bind_table_query`
+  pass `limit_param` / `offset_param` through unchanged so the
+  prepared-statement shape cache still round-trips.
+- Tests in `user_params` (7 new): LIMIT $1 happy path; OFFSET $1
+  happy path with literal LIMIT; LIMIT $1 + OFFSET $1 + WHERE $1
+  together to prove no cross-talk between non-Expr param slots
+  and the Expr-tree binder; OFFSET 0 is valid; LIMIT rejects 0;
+  LIMIT rejects non-integer; OFFSET rejects negative.
+
+Remaining work in #361: PROBES $N (IVF — slot not yet plumbed
+through the parser; the only literal-only knob left on the
+SearchCommand family). This will require both literal and
+parameter parsing since PROBES isn't currently a recognised
+clause in the parser.

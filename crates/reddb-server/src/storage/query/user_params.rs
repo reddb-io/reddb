@@ -283,6 +283,14 @@ fn collect_non_expr_indices(expr: &QueryExpr, out: &mut Vec<usize>) {
                 out.push(*idx);
             }
         }
+        QueryExpr::Table(q) => {
+            if let Some(idx) = q.limit_param {
+                out.push(idx);
+            }
+            if let Some(idx) = q.offset_param {
+                out.push(idx);
+            }
+        }
         _ => {}
     }
 }
@@ -813,6 +821,72 @@ pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamEr
         bound.value_exprs = new_exprs;
         bound.values = new_values;
         return Ok(QueryExpr::Insert(bound));
+    }
+
+    // SELECT LIMIT / OFFSET $N — the planner's Expr-tree binder doesn't
+    // see these slots (they live on TableQuery, not inside any Expr).
+    // Run the Expr-tree bind first, then substitute the non-Expr slots
+    // post-hoc. Mirrors the SearchCommand::Similar pattern above.
+    if let QueryExpr::Table(table) = expr {
+        if table.limit_param.is_some() || table.offset_param.is_some() {
+            let bound_inner = bind_user_param_query(expr, params)
+                .ok_or(UserParamError::UnsupportedShape)?;
+            let mut bound_table = match bound_inner {
+                QueryExpr::Table(t) => t,
+                _ => return Err(UserParamError::UnsupportedShape),
+            };
+            if let Some(idx) = table.limit_param {
+                let value = params.get(idx).ok_or(UserParamError::Arity {
+                    expected: idx + 1,
+                    got: params.len(),
+                })?;
+                let n = match value {
+                    Value::Integer(n) if *n > 0 => *n as u64,
+                    Value::UnsignedInteger(n) if *n > 0 => *n,
+                    Value::BigInt(n) if *n > 0 => *n as u64,
+                    Value::Integer(_) | Value::UnsignedInteger(_) | Value::BigInt(_) => {
+                        return Err(UserParamError::TypeMismatch {
+                            slot: "SELECT LIMIT parameter (must be > 0)",
+                            got: value_variant_name(value),
+                        });
+                    }
+                    other => {
+                        return Err(UserParamError::TypeMismatch {
+                            slot: "SELECT LIMIT parameter",
+                            got: value_variant_name(other),
+                        });
+                    }
+                };
+                bound_table.limit = Some(n);
+                bound_table.limit_param = None;
+            }
+            if let Some(idx) = table.offset_param {
+                let value = params.get(idx).ok_or(UserParamError::Arity {
+                    expected: idx + 1,
+                    got: params.len(),
+                })?;
+                let n = match value {
+                    Value::Integer(n) if *n >= 0 => *n as u64,
+                    Value::UnsignedInteger(n) => *n,
+                    Value::BigInt(n) if *n >= 0 => *n as u64,
+                    Value::Integer(_) | Value::BigInt(_) => {
+                        return Err(UserParamError::TypeMismatch {
+                            slot: "SELECT OFFSET parameter (must be >= 0)",
+                            got: value_variant_name(value),
+                        });
+                    }
+                    other => {
+                        return Err(UserParamError::TypeMismatch {
+                            slot: "SELECT OFFSET parameter",
+                            got: value_variant_name(other),
+                        });
+                    }
+                };
+                bound_table.offset = Some(n);
+                bound_table.offset_param = None;
+            }
+            return Ok(QueryExpr::Table(bound_table));
+        }
     }
 
     bind_user_param_query(expr, params).ok_or(UserParamError::UnsupportedShape)
@@ -1644,6 +1718,108 @@ mod tests {
                 got: 1
             }
         ));
+    }
+
+    #[test]
+    fn bind_select_limit_param() {
+        let q = parse("SELECT * FROM users LIMIT $1");
+        let bound = bind(&q, &[Value::Integer(7)]).unwrap();
+        let QueryExpr::Table(t) = bound else {
+            panic!("expected Table");
+        };
+        assert_eq!(t.limit, Some(7));
+        assert_eq!(t.limit_param, None, "limit_param must be cleared post-bind");
+        assert_eq!(t.offset, None);
+        assert_eq!(t.offset_param, None);
+    }
+
+    #[test]
+    fn bind_select_offset_param() {
+        let q = parse("SELECT * FROM users LIMIT 10 OFFSET $1");
+        let bound = bind(&q, &[Value::Integer(20)]).unwrap();
+        let QueryExpr::Table(t) = bound else {
+            panic!("expected Table");
+        };
+        assert_eq!(t.limit, Some(10));
+        assert_eq!(t.offset, Some(20));
+        assert_eq!(t.offset_param, None);
+    }
+
+    #[test]
+    fn bind_select_limit_and_offset_params_together() {
+        let q = parse("SELECT * FROM users WHERE id = $1 LIMIT $2 OFFSET $3");
+        let bound = bind(
+            &q,
+            &[Value::Integer(5), Value::Integer(10), Value::Integer(20)],
+        )
+        .unwrap();
+        let QueryExpr::Table(t) = bound else {
+            panic!("expected Table");
+        };
+        assert_eq!(t.limit, Some(10));
+        assert_eq!(t.offset, Some(20));
+        assert_eq!(t.limit_param, None);
+        assert_eq!(t.offset_param, None);
+        // WHERE id = $1 → Expr-tree bind also ran.
+        assert!(t.where_expr.is_some());
+    }
+
+    #[test]
+    fn bind_select_offset_zero_is_valid() {
+        let q = parse("SELECT * FROM users LIMIT 10 OFFSET $1");
+        let bound = bind(&q, &[Value::Integer(0)]).unwrap();
+        let QueryExpr::Table(t) = bound else {
+            panic!("expected Table");
+        };
+        assert_eq!(t.offset, Some(0));
+    }
+
+    #[test]
+    fn bind_select_limit_rejects_zero() {
+        let q = parse("SELECT * FROM users LIMIT $1");
+        let err = bind(&q, &[Value::Integer(0)]).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                UserParamError::TypeMismatch {
+                    slot: "SELECT LIMIT parameter (must be > 0)",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn bind_select_limit_rejects_non_integer() {
+        let q = parse("SELECT * FROM users LIMIT $1");
+        let err = bind(&q, &[Value::text("ten")]).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                UserParamError::TypeMismatch {
+                    slot: "SELECT LIMIT parameter",
+                    got: "text"
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn bind_select_offset_rejects_negative() {
+        let q = parse("SELECT * FROM users LIMIT 10 OFFSET $1");
+        let err = bind(&q, &[Value::Integer(-1)]).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                UserParamError::TypeMismatch {
+                    slot: "SELECT OFFSET parameter (must be >= 0)",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
     }
 
     #[test]

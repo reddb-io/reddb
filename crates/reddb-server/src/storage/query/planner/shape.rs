@@ -150,7 +150,9 @@ fn parameterize_table_query(query: &TableQuery, next_index: &mut usize) -> Optio
         having: None,
         order_by,
         limit: query.limit,
+        limit_param: query.limit_param,
         offset: query.offset,
+        offset_param: query.offset_param,
         expand: query.expand.clone(),
         as_of: query.as_of.clone(),
     })
@@ -1156,7 +1158,9 @@ fn bind_table_query(query: &TableQuery, binds: &[Value]) -> Option<TableQuery> {
             .map(|clause| bind_order_by(clause, binds))
             .collect::<Option<Vec<_>>>()?,
         limit: query.limit,
+        limit_param: query.limit_param,
         offset: query.offset,
+        offset_param: query.offset_param,
         expand: query.expand.clone(),
         as_of: query.as_of.clone(),
     })
@@ -1313,7 +1317,9 @@ mod tests {
             having: None,
             order_by: Vec::new(),
             limit: None,
+            limit_param: None,
             offset: None,
+            offset_param: None,
             expand: None,
             as_of: None,
         });

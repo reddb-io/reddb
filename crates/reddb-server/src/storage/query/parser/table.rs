@@ -185,7 +185,9 @@ impl<'a> Parser<'a> {
             having: None,
             order_by: Vec::new(),
             limit: None,
+            limit_param: None,
             offset: None,
+            offset_param: None,
             expand: None,
             as_of: None,
         };
@@ -397,12 +399,22 @@ impl<'a> Parser<'a> {
 
         // LIMIT clause
         if self.consume(&Token::Limit)? {
-            query.limit = Some(self.parse_integer()? as u64);
+            if matches!(self.peek(), Token::Dollar | Token::Question) {
+                query.limit_param = Some(self.parse_param_slot("LIMIT")?);
+                query.limit = None;
+            } else {
+                query.limit = Some(self.parse_integer()? as u64);
+            }
         }
 
         // OFFSET clause
         if self.consume(&Token::Offset)? {
-            query.offset = Some(self.parse_integer()? as u64);
+            if matches!(self.peek(), Token::Dollar | Token::Question) {
+                query.offset_param = Some(self.parse_param_slot("OFFSET")?);
+                query.offset = None;
+            } else {
+                query.offset = Some(self.parse_integer()? as u64);
+            }
         }
 
         // WITH EXPAND clause

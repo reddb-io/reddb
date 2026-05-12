@@ -820,8 +820,17 @@ pub struct TableQuery {
     pub order_by: Vec<OrderByClause>,
     /// Limit
     pub limit: Option<u64>,
+    /// User-supplied-parameter slot for `LIMIT $N`. Set by the parser
+    /// when the LIMIT clause references `$N`/`?` instead of a literal;
+    /// cleared by the binder (`user_params::bind`) after substituting
+    /// the parameter into `limit`. Mirrors the `limit_param` slot on
+    /// `SearchCommand` variants — see #361 slice 11.
+    pub limit_param: Option<usize>,
     /// Offset
     pub offset: Option<u64>,
+    /// User-supplied-parameter slot for `OFFSET $N`. Same lifecycle as
+    /// `limit_param`. See #361 slice 11.
+    pub offset_param: Option<usize>,
     /// WITH EXPAND options (graph traversal, cross-ref following)
     pub expand: Option<ExpandOptions>,
     /// Time-travel anchor. When present the executor resolves this
@@ -889,7 +898,9 @@ impl TableQuery {
             having: None,
             order_by: Vec::new(),
             limit: None,
+            limit_param: None,
             offset: None,
+            offset_param: None,
             expand: None,
             as_of: None,
         }
@@ -919,7 +930,9 @@ impl TableQuery {
             having: None,
             order_by: Vec::new(),
             limit: None,
+            limit_param: None,
             offset: None,
+            offset_param: None,
             expand: None,
             as_of: None,
         }

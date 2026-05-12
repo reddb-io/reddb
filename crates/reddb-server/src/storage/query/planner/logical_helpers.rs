@@ -919,7 +919,9 @@ mod tests {
             having: None,
             order_by: vec![],
             limit: None,
+            limit_param: None,
             offset: None,
+            offset_param: None,
             expand: None,
             as_of: None,
         })
