@@ -339,6 +339,45 @@ fn graph_traverse_command_parses() {
     }
 }
 
+// Issue #417: docs↔parser drift — documented `GRAPH TRAVERSE FROM '<id>'
+// STRATEGY bfs MAX_DEPTH n` form must parse identically to the bare form.
+#[test]
+fn graph_traverse_from_strategy_max_depth_form_parses() {
+    let q = parse_query("GRAPH TRAVERSE FROM 'alice' STRATEGY bfs DIRECTION outgoing MAX_DEPTH 3");
+    match q {
+        QueryExpr::GraphCommand(GraphCommand::Traverse {
+            source,
+            strategy,
+            depth,
+            direction,
+        }) => {
+            assert_eq!(source, "alice");
+            assert_eq!(strategy, "bfs");
+            assert_eq!(depth, 3);
+            assert_eq!(direction, "outgoing");
+        }
+        other => panic!("expected Traverse, got {other:?}"),
+    }
+}
+
+#[test]
+fn graph_shortest_path_from_to_form_parses() {
+    let q = parse_query("GRAPH SHORTEST_PATH FROM 'a' TO 'b' ALGORITHM dijkstra");
+    match q {
+        QueryExpr::GraphCommand(GraphCommand::ShortestPath {
+            source,
+            target,
+            algorithm,
+            ..
+        }) => {
+            assert_eq!(source, "a");
+            assert_eq!(target, "b");
+            assert_eq!(algorithm, "dijkstra");
+        }
+        other => panic!("expected ShortestPath, got {other:?}"),
+    }
+}
+
 #[test]
 fn path_query_with_via_parses() {
     let q = parse_query("PATH FROM host('a') TO host('b') VIA [:KNOWS, :FOLLOWS]");
