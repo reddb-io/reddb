@@ -2772,10 +2772,13 @@ fn test_parse_graph_community() {
 #[test]
 fn test_parse_graph_components() {
     let query = parse("GRAPH COMPONENTS MODE strong").unwrap();
-    if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Components { mode }) =
-        query
+    if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Components {
+        mode,
+        limit,
+    }) = query
     {
         assert_eq!(mode, "strong");
+        assert_eq!(limit, None);
     } else {
         panic!("Expected GraphCommand::Components");
     }

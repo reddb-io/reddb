@@ -157,15 +157,25 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parse: GRAPH COMPONENTS [MODE connected|weak|strong]
+    /// Parse: GRAPH COMPONENTS [MODE connected|weak|strong] [LIMIT n]
     fn parse_graph_components(&mut self) -> Result<QueryExpr, ParseError> {
         self.advance()?; // consume COMPONENTS
-        let mode = if self.consume(&Token::Mode)? {
-            self.expect_ident_or_keyword()?
-        } else {
-            "connected".to_string()
-        };
-        Ok(QueryExpr::GraphCommand(GraphCommand::Components { mode }))
+        let mut mode: Option<String> = None;
+        let mut limit: Option<u32> = None;
+        loop {
+            if mode.is_none() && self.consume(&Token::Mode)? {
+                mode = Some(self.expect_ident_or_keyword()?);
+            } else if limit.is_none() && self.consume(&Token::Limit)? {
+                let n = self.parse_integer()?;
+                limit = Some(n as u32);
+            } else {
+                break;
+            }
+        }
+        Ok(QueryExpr::GraphCommand(GraphCommand::Components {
+            mode: mode.unwrap_or_else(|| "connected".to_string()),
+            limit,
+        }))
     }
 
     /// Parse: GRAPH CYCLES [MAX_LENGTH n]
