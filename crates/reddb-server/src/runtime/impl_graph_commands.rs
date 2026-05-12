@@ -723,7 +723,14 @@ impl RedDBRuntime {
                 collection,
                 column,
                 limit,
+                limit_param,
             } => {
+                if limit_param.is_some() {
+                    return Err(RedDBError::Query(
+                        "SEARCH SPATIAL BBOX LIMIT $N parameter was not bound before execution"
+                            .to_string(),
+                    ));
+                }
                 let _ = column;
                 let store = self.inner.db.store();
                 let entities = store

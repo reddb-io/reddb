@@ -222,6 +222,7 @@ fn happy_bbox_unit_square_parses() {
             collection,
             column,
             limit,
+            ..
         }) => {
             assert_eq!(min_lat, 0.0);
             assert_eq!(min_lon, 0.0);
