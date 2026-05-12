@@ -604,6 +604,58 @@ mod tests {
         assert!(text.contains("out_of_range"), "{text}");
     }
 
+    #[test]
+    fn http_query_ask_strict_falls_back_for_non_citing_provider() {
+        let _guard = ASK_ENV_LOCK.lock().expect("env lock");
+        let stub = SequenceOpenAiStub::start(vec!["ollama invalid [^1]"]);
+        let _api_base =
+            EnvVarGuard::set("REDDB_OLLAMA_API_BASE", &format!("http://{}", stub.addr()));
+
+        let server = make_server();
+        server
+            .runtime
+            .execute_query("SET CONFIG runtime.ai.transport_retry_max_attempts = 1")
+            .expect("disable transport retries");
+
+        let r =
+            server.handle_query(br#"{"query": "ASK 'why did login fail?' USING ollama"}"#.to_vec());
+
+        assert_eq!(r.status, 200, "{}", body_str(&r));
+        assert_eq!(stub.request_count(), 1);
+        let text = body_str(&r);
+        assert!(text.contains("ollama invalid"), "{text}");
+        assert!(text.contains(r#""mode":"lenient""#), "{text}");
+        assert!(text.contains("mode_fallback"), "{text}");
+        assert!(text.contains("out_of_range"), "{text}");
+    }
+
+    #[test]
+    fn http_query_ask_capability_setting_can_downgrade_provider() {
+        let _guard = ASK_ENV_LOCK.lock().expect("env lock");
+        let stub = SequenceOpenAiStub::start(vec!["override invalid [^1]"]);
+        let _api_base =
+            EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
+        let _api_key = EnvVarGuard::unset("REDDB_OPENAI_API_KEY");
+
+        let server = make_server();
+        configure_ask_stub_runtime(&server);
+        server
+            .runtime
+            .execute_query(
+                "SET CONFIG ask.providers.capabilities.openai.supports_citations = false",
+            )
+            .expect("set provider capability override");
+
+        let r = server.handle_query(br#"{"query": "ASK 'why did login fail?'"}"#.to_vec());
+
+        assert_eq!(r.status, 200, "{}", body_str(&r));
+        assert_eq!(stub.request_count(), 1);
+        let text = body_str(&r);
+        assert!(text.contains("override invalid"), "{text}");
+        assert!(text.contains(r#""mode":"lenient""#), "{text}");
+        assert!(text.contains("mode_fallback"), "{text}");
+    }
+
     fn configure_ask_stub_runtime(server: &RedDBServer) {
         server
             .runtime
