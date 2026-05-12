@@ -184,3 +184,27 @@ Sixth slice landed: `SEARCH INDEX ... LIMIT $N`.
 Remaining LIMIT $N slices: CONTEXT, SPATIAL RADIUS, SPATIAL BBOX.
 Plus SELECT LIMIT / OFFSET (TableQuery shape), SIMILAR TEXT $N
 (text embedding pipeline), and PROBES $N (IVF).
+
+## Progress (2026-05-12, slice 7)
+
+Seventh slice landed: `SEARCH CONTEXT ... LIMIT $N`.
+
+- `SearchCommand::Context` gained `limit_param: Option<usize>` (AST in
+  `storage/query/core.rs`), same shape as `Hybrid::limit_param`.
+- Parser routes `$N` (and `?`, mode permitting) in CONTEXT LIMIT via
+  `parse_param_slot`. The 2-iteration LIMIT/DEPTH loop now branches
+  on Token::Dollar/Question for the LIMIT slot only; DEPTH stays
+  literal.
+- `user_params::collect_non_expr_indices` matches Context.
+- `user_params::bind` gained a Context branch with the same typed
+  error set as the SIMILAR / HYBRID / SPATIAL NEAREST / TEXT /
+  MULTIMODAL / INDEX LIMIT paths.
+- `runtime/impl_graph_commands.rs` guards the new param.
+- `parser/tests.rs` (2) and `tests/ask_parser.rs` (2) destructures
+  switched to `..` for future slots.
+- Tests in `user_params` (3 new): CONTEXT LIMIT happy path,
+  rejects 0, rejects non-integer.
+
+Remaining LIMIT $N slices: SPATIAL RADIUS, SPATIAL BBOX.
+Plus SELECT LIMIT / OFFSET (TableQuery shape), SIMILAR TEXT $N
+(text embedding pipeline), and PROBES $N (IVF).

@@ -256,6 +256,11 @@ fn collect_non_expr_indices(expr: &QueryExpr, out: &mut Vec<usize>) {
                 out.push(*idx);
             }
         }
+        QueryExpr::SearchCommand(SearchCommand::Context { limit_param, .. }) => {
+            if let Some(idx) = limit_param {
+                out.push(*idx);
+            }
+        }
         _ => {}
     }
 }
@@ -603,6 +608,50 @@ pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamEr
             collection: collection.clone(),
             limit: bound_limit,
             exact: *exact,
+            limit_param: None,
+        }));
+    }
+
+    if let QueryExpr::SearchCommand(SearchCommand::Context {
+        query,
+        field,
+        collection,
+        limit,
+        depth,
+        limit_param,
+    }) = expr
+    {
+        let bound_limit = if let Some(idx) = limit_param {
+            let value = params.get(*idx).ok_or(UserParamError::Arity {
+                expected: idx + 1,
+                got: params.len(),
+            })?;
+            match value {
+                Value::Integer(n) if *n > 0 => *n as usize,
+                Value::UnsignedInteger(n) if *n > 0 => *n as usize,
+                Value::BigInt(n) if *n > 0 => *n as usize,
+                Value::Integer(_) | Value::UnsignedInteger(_) | Value::BigInt(_) => {
+                    return Err(UserParamError::TypeMismatch {
+                        slot: "SEARCH CONTEXT LIMIT parameter (must be > 0)",
+                        got: value_variant_name(value),
+                    });
+                }
+                other => {
+                    return Err(UserParamError::TypeMismatch {
+                        slot: "SEARCH CONTEXT LIMIT parameter",
+                        got: value_variant_name(other),
+                    });
+                }
+            }
+        } else {
+            *limit
+        };
+        return Ok(QueryExpr::SearchCommand(SearchCommand::Context {
+            query: query.clone(),
+            field: field.clone(),
+            collection: collection.clone(),
+            limit: bound_limit,
+            depth: *depth,
             limit_param: None,
         }));
     }
@@ -1240,6 +1289,49 @@ mod tests {
             err,
             UserParamError::TypeMismatch {
                 slot: "SEARCH INDEX LIMIT parameter",
+                got: "text"
+            }
+        ));
+    }
+
+    #[test]
+    fn bind_search_context_limit_param() {
+        // Issue #361: `SEARCH CONTEXT ... LIMIT $N` binds an integer.
+        let q = parse("SEARCH CONTEXT 'hello' COLLECTION docs LIMIT $1");
+        let bound = bind(&q, &[Value::Integer(60)]).unwrap();
+        let QueryExpr::SearchCommand(SearchCommand::Context {
+            limit,
+            limit_param,
+            ..
+        }) = bound
+        else {
+            panic!("expected SearchCommand::Context");
+        };
+        assert_eq!(limit, 60);
+        assert_eq!(limit_param, None, "limit_param must be cleared post-bind");
+    }
+
+    #[test]
+    fn bind_search_context_limit_rejects_zero() {
+        let q = parse("SEARCH CONTEXT 'hello' COLLECTION docs LIMIT $1");
+        let err = bind(&q, &[Value::Integer(0)]).unwrap_err();
+        assert!(matches!(
+            err,
+            UserParamError::TypeMismatch {
+                slot: "SEARCH CONTEXT LIMIT parameter (must be > 0)",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn bind_search_context_limit_rejects_non_integer() {
+        let q = parse("SEARCH CONTEXT 'hello' COLLECTION docs LIMIT $1");
+        let err = bind(&q, &[Value::text("five")]).unwrap_err();
+        assert!(matches!(
+            err,
+            UserParamError::TypeMismatch {
+                slot: "SEARCH CONTEXT LIMIT parameter",
                 got: "text"
             }
         ));

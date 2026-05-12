@@ -591,7 +591,14 @@ impl RedDBRuntime {
                 collection,
                 limit,
                 depth,
+                limit_param,
             } => {
+                if limit_param.is_some() {
+                    return Err(RedDBError::Query(
+                        "SEARCH CONTEXT LIMIT $N parameter was not bound before execution"
+                            .to_string(),
+                    ));
+                }
                 use crate::application::SearchContextInput;
                 // Issue #119: route through AuthorizedSearch so the
                 // candidate set + every expansion bucket is bounded by

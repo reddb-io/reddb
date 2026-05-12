@@ -364,9 +364,15 @@ impl<'a> Parser<'a> {
         // Parse optional clauses in any order
         let mut limit = 25usize;
         let mut depth = 1usize;
+        let mut limit_param: Option<usize> = None;
         for _ in 0..2 {
             if self.consume(&Token::Limit)? {
-                limit = self.parse_integer()? as usize;
+                if matches!(self.peek(), Token::Dollar | Token::Question) {
+                    limit_param = Some(self.parse_param_slot("LIMIT")?);
+                    limit = 0;
+                } else {
+                    limit = self.parse_integer()? as usize;
+                }
             } else if self.consume(&Token::Depth)? {
                 depth = self.parse_integer()? as usize;
             }
@@ -378,6 +384,7 @@ impl<'a> Parser<'a> {
             collection,
             limit,
             depth,
+            limit_param,
         }))
     }
 
