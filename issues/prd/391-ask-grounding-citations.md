@@ -1,6 +1,6 @@
 # PRD: ASK with inline citations — grounding-citable AI queries as RedDB's wedge
 
-Labels: needs-triage
+Labels: prd
 
 GitHub: https://github.com/reddb-io/reddb/issues/391
 

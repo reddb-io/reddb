@@ -1,6 +1,6 @@
 # PRD: Parameterized queries (prepared statements) across engine, wire, and all drivers
 
-Labels: needs-triage
+Labels: prd
 
 GitHub: https://github.com/reddb-io/reddb/issues/351
 

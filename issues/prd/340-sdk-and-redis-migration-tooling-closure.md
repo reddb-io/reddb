@@ -2,7 +2,7 @@
 
 GitHub: https://github.com/reddb-io/reddb/issues/340
 
-Labels: needs-triage
+Labels: prd
 
 GitHub issue number: #340
 

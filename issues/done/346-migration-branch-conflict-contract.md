@@ -2,7 +2,7 @@
 
 GitHub: local follow-up from reddb-io/reddb#335
 
-Labels: needs-triage
+Labels: enhancement
 
 GitHub issue number: #346
 

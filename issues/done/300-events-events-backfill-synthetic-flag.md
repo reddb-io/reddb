@@ -2,7 +2,7 @@
 
 GitHub: https://github.com/reddb-io/reddb/issues/300
 
-Labels: needs-triage
+Labels: enhancement
 
 GitHub issue number: #300
 

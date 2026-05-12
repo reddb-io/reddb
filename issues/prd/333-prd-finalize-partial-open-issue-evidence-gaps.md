@@ -1,6 +1,6 @@
 # PRD: Finalize partial and still-open issue evidence gaps
 
-Labels: needs-triage
+Labels: prd
 
 GitHub: https://github.com/reddb-io/reddb/issues/333
 
