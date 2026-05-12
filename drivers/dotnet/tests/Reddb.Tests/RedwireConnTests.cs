@@ -352,4 +352,154 @@ public class RedwireConnTests
 
         ssock.Dispose(); listener.Stop();
     }
+
+    [Fact]
+    public async Task QueryWithParams_UsesQueryWithParamsFrame()
+    {
+        var (client, server, csock, ssock, listener) = await OpenSocketPairAsync();
+        Exception? serverErr = null;
+
+        var serverTask = Task.Run(async () =>
+        {
+            try
+            {
+                await ReadMagicAsync(server);
+                Frame hello = await ReadClientFrameAsync(server);
+                var ack = new JsonObject
+                {
+                    ["auth"] = "anonymous",
+                    ["features"] = Frame.FeatureParams,
+                };
+                await WriteServerFrameAsync(server, Frame.Kind.HelloAck, hello.CorrelationId, Json(ack));
+
+                Frame resp = await ReadClientFrameAsync(server);
+                var ok = new JsonObject
+                {
+                    ["session_id"] = "rwsess-test-params",
+                    ["features"] = Frame.FeatureParams,
+                };
+                await WriteServerFrameAsync(server, Frame.Kind.AuthOk, resp.CorrelationId, Json(ok));
+
+                Frame q = await ReadClientFrameAsync(server);
+                Assert.Equal(Frame.Kind.QueryWithParams, q.MessageKind);
+                Assert.Equal("SELECT $1, $2, $3, $4",
+                    Encoding.UTF8.GetString(q.Payload.AsSpan(4, 23)));
+                Assert.Equal(4, BinaryPrimitives.ReadInt32LittleEndian(q.Payload.AsSpan(27, 4)));
+                Assert.Equal(ValueCodec.TagInt, q.Payload[31]);
+                Assert.Equal(42L, BinaryPrimitives.ReadInt64LittleEndian(q.Payload.AsSpan(32, 8)));
+                Assert.Equal(ValueCodec.TagText, q.Payload[40]);
+                Assert.Equal(5, BinaryPrimitives.ReadInt32LittleEndian(q.Payload.AsSpan(41, 4)));
+                Assert.Equal("alice", Encoding.UTF8.GetString(q.Payload.AsSpan(45, 5)));
+                Assert.Equal(ValueCodec.TagNull, q.Payload[50]);
+                Assert.Equal(ValueCodec.TagVector, q.Payload[51]);
+                Assert.Equal(3, BinaryPrimitives.ReadInt32LittleEndian(q.Payload.AsSpan(52, 4)));
+                Assert.Equal(1.0f, BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(q.Payload.AsSpan(56, 4))));
+                Assert.Equal(2.0f, BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(q.Payload.AsSpan(60, 4))));
+                Assert.Equal(3.0f, BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(q.Payload.AsSpan(64, 4))));
+
+                var result = new JsonObject { ["ok"] = true };
+                await WriteServerFrameAsync(server, Frame.Kind.Result, q.CorrelationId, Json(result));
+
+                await ReadClientFrameAsync(server);
+            }
+            catch (Exception ex) { serverErr = ex; }
+        });
+
+        var res = await RedWireConn.PerformHandshakeAsync(client, null, null, null, "test-driver");
+        var conn = new RedWireConn(client, csock, res.SessionId, TimeSpan.FromSeconds(5), res.Features);
+        Assert.True(conn.SupportsParams);
+        var bytes = await conn.QueryAsync("SELECT $1, $2, $3, $4", 42, "alice", null, new float[] { 1, 2, 3 });
+        Assert.True((bool)JsonNode.Parse(bytes.Span)!["ok"]!);
+
+        await conn.DisposeAsync();
+        await serverTask;
+        if (serverErr is not null) throw new Exception("server thread", serverErr);
+
+        ssock.Dispose(); listener.Stop();
+    }
+
+    [Fact]
+    public async Task QueryWithParams_RequiresFeatureParams()
+    {
+        var (client, server, csock, ssock, listener) = await OpenSocketPairAsync();
+        Exception? serverErr = null;
+
+        var serverTask = Task.Run(async () =>
+        {
+            try
+            {
+                await ReadMagicAsync(server);
+                Frame hello = await ReadClientFrameAsync(server);
+                var ack = new JsonObject { ["auth"] = "anonymous", ["features"] = 0 };
+                await WriteServerFrameAsync(server, Frame.Kind.HelloAck, hello.CorrelationId, Json(ack));
+
+                Frame resp = await ReadClientFrameAsync(server);
+                var ok = new JsonObject { ["session_id"] = "rwsess-test-no-params", ["features"] = 0 };
+                await WriteServerFrameAsync(server, Frame.Kind.AuthOk, resp.CorrelationId, Json(ok));
+            }
+            catch (Exception ex) { serverErr = ex; }
+        });
+
+        var res = await RedWireConn.PerformHandshakeAsync(client, null, null, null, "test-driver");
+        var conn = new RedWireConn(client, csock, res.SessionId, TimeSpan.FromSeconds(5), res.Features);
+        Assert.False(conn.SupportsParams);
+        await Assert.ThrowsAsync<RedDBException.ParamsUnsupported>(async () =>
+        {
+            await conn.QueryAsync("SELECT $1", 1);
+        });
+
+        await serverTask;
+        if (serverErr is not null) throw new Exception("server thread", serverErr);
+        await conn.DisposeAsync();
+
+        ssock.Dispose(); listener.Stop();
+    }
+
+    [Fact]
+    public async Task QueryWithEmptyParams_UsesLegacyQueryFrame()
+    {
+        var (client, server, csock, ssock, listener) = await OpenSocketPairAsync();
+        Exception? serverErr = null;
+
+        var serverTask = Task.Run(async () =>
+        {
+            try
+            {
+                await ReadMagicAsync(server);
+                Frame hello = await ReadClientFrameAsync(server);
+                var ack = new JsonObject
+                {
+                    ["auth"] = "anonymous",
+                    ["features"] = Frame.FeatureParams,
+                };
+                await WriteServerFrameAsync(server, Frame.Kind.HelloAck, hello.CorrelationId, Json(ack));
+
+                Frame resp = await ReadClientFrameAsync(server);
+                var ok = new JsonObject
+                {
+                    ["session_id"] = "rwsess-test-empty-params",
+                    ["features"] = Frame.FeatureParams,
+                };
+                await WriteServerFrameAsync(server, Frame.Kind.AuthOk, resp.CorrelationId, Json(ok));
+
+                Frame q = await ReadClientFrameAsync(server);
+                Assert.Equal(Frame.Kind.Query, q.MessageKind);
+                Assert.Equal("SELECT 1", Encoding.UTF8.GetString(q.Payload));
+                await WriteServerFrameAsync(server, Frame.Kind.Result, q.CorrelationId, Encoding.UTF8.GetBytes("{}"));
+
+                await ReadClientFrameAsync(server);
+            }
+            catch (Exception ex) { serverErr = ex; }
+        });
+
+        var res = await RedWireConn.PerformHandshakeAsync(client, null, null, null, "test-driver");
+        var conn = new RedWireConn(client, csock, res.SessionId, TimeSpan.FromSeconds(5), res.Features);
+        await conn.QueryAsync("SELECT 1", Array.Empty<object?>());
+
+        await conn.DisposeAsync();
+        await serverTask;
+        if (serverErr is not null) throw new Exception("server thread", serverErr);
+
+        ssock.Dispose(); listener.Stop();
+    }
 }

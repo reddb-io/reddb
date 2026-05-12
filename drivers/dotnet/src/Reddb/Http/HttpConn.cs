@@ -104,8 +104,18 @@ public sealed class HttpConn : IConn
 
     public async ValueTask<ReadOnlyMemory<byte>> QueryAsync(string sql, CancellationToken cancellationToken = default)
     {
-        var body = new JsonObject { ["sql"] = sql };
+        var body = new JsonObject { ["query"] = sql };
         return await PostAsync("/query", body, requireAuth: true, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async ValueTask<ReadOnlyMemory<byte>> QueryAsync(string sql, params object?[] args)
+    {
+        var body = new JsonObject { ["query"] = sql };
+        if (args.Length > 0)
+        {
+            body["params"] = global::Reddb.Redwire.ValueCodec.ToHttpParams(args);
+        }
+        return await PostAsync("/query", body, requireAuth: true, CancellationToken.None).ConfigureAwait(false);
     }
 
     public async ValueTask InsertAsync(string collection, object payload, CancellationToken cancellationToken = default)

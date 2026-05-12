@@ -33,6 +33,12 @@ public class RedDBException : Exception
         public EngineError(string message, Exception inner) : base(message, inner) { }
     }
 
+    /// <summary>Parameterized query was issued against a RedWire server without FEATURE_PARAMS.</summary>
+    public sealed class ParamsUnsupported : RedDBException
+    {
+        public ParamsUnsupported(string message) : base(message) { }
+    }
+
     /// <summary>Frame length out of range (below the header size or above 16 MiB).</summary>
     public sealed class FrameTooLarge : ProtocolError
     {

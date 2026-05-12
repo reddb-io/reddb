@@ -16,6 +16,9 @@ public interface IConn : IAsyncDisposable
     /// <summary>Run a SQL query. Returns the engine's JSON envelope as bytes.</summary>
     ValueTask<ReadOnlyMemory<byte>> QueryAsync(string sql, CancellationToken cancellationToken = default);
 
+    /// <summary>Run a SQL query with positional parameters bound to <c>$N</c> placeholders.</summary>
+    ValueTask<ReadOnlyMemory<byte>> QueryAsync(string sql, params object?[] args);
+
     /// <summary>Insert a single row into a collection. <paramref name="payload"/> is anything <c>System.Text.Json</c> can serialise.</summary>
     ValueTask InsertAsync(string collection, object payload, CancellationToken cancellationToken = default);
 

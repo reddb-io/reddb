@@ -59,6 +59,13 @@ public class SmokeTests
             var result = await conn.QueryAsync("SELECT * FROM smoke_users WHERE name = 'alice'");
             string body = Encoding.UTF8.GetString(result.Span);
             Assert.Contains("alice", body);
+            var paramResult = await conn.QueryAsync(
+                "SELECT * FROM smoke_users WHERE age = $1 AND name = $2 AND $3 IS NULL",
+                30,
+                "alice",
+                null);
+            string paramBody = Encoding.UTF8.GetString(paramResult.Span);
+            Assert.Contains("alice", paramBody);
             await conn.DeleteAsync("smoke_users", "alice");
         }
         finally
