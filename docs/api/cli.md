@@ -13,7 +13,7 @@ red <command> [args] [flags]
 | Command | Description |
 |:--------|:------------|
 | `server` | Start the database server (router, HTTP, gRPC, or wire) |
-| `query` | Query command (currently placeholder; execution not wired) |
+| `query` | One-shot SQL with `--path` (embedded) and `--param` bindings |
 | `insert` | Insert command (currently placeholder; execution not wired) |
 | `get` | Get command (currently placeholder; execution not wired) |
 | `delete` | Delete command (currently placeholder; execution not wired) |
@@ -124,18 +124,64 @@ red service print-unit \
 
 ## red query
 
-Query command scaffold.
-
-> [!WARNING]
-> `red query` is not wired to runtime execution yet. For actual query execution, use `red connect --query "<sql>" <grpc-addr>` or `POST /query` over HTTP.
+One-shot SQL execution against an embedded engine (`--path`) or
+in-memory database.
 
 ```bash
-red query "SELECT * FROM users WHERE age > 21"
+red query "SELECT * FROM users WHERE age > 21" --path ./data.rdb
 ```
 
 | Flag | Short | Default | Description |
 |:-----|:------|:--------|:------------|
-| `--bind` | `-b` | `0.0.0.0:6380` | Reserved for future runtime wiring |
+| `--path` | `-p` | (in-memory) | Open a local `.rdb` file |
+| `--param` | | | Positional parameter for `$1`, `$2`, … (repeatable) |
+| `--param-type` | | (auto) | Type override for the preceding `--param` |
+| `--json` | | `false` | Emit a JSON envelope on stdout |
+
+### Parameterized queries
+
+`--param <value>` binds positionally — the first `--param` fills
+`$1`, the second `$2`, and so on. Values are auto-typed: anything
+that parses as JSON is taken as that JSON type, otherwise the value
+is bound as text.
+
+| Input | Bound as |
+|:------|:---------|
+| `42` | integer |
+| `2.5` | float |
+| `true` / `false` | boolean |
+| `null` | NULL |
+| `[1,2,3]` | vector |
+| `hello` | text |
+
+`@<path>` reads the file at `<path>` and uses its (JSON) content as
+the parameter — useful for large vectors:
+
+```bash
+red query "SEARCH SIMILAR $1 IN embeddings K 5" \
+  --param @query_vec.json \
+  --path ./data.rdb
+```
+
+`--param-type` overrides the auto-type for the **preceding**
+`--param`. Accepted: `text`, `int`, `float`, `bool`, `null`, `vec`,
+`json`.
+
+```bash
+# Force "42" to bind as a text literal (otherwise it would auto-type to int).
+red query "SELECT * FROM t WHERE name = $1" \
+  --param 42 --param-type text \
+  --path ./data.rdb
+
+# Two-arg INSERT.
+red query "INSERT INTO articles (title, body) VALUES ($1, $2)" \
+  --param 'AI Safety' --param @body.txt \
+  --path ./data.rdb
+```
+
+Parameter binding goes through the same `user_params` binder the
+HTTP `/query` and `POST { "query": ..., "params": [...] }` paths
+use, so semantics are identical across surfaces.
 
 Examples:
 

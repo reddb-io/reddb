@@ -100,6 +100,164 @@ fn attach_cli_vault(
     Ok(Some(auth))
 }
 
+/// Collect every `--param <value>` (and the optional following
+/// `--param-type <ty>`) from raw argv. The schema-driven flag parser
+/// only retains the LAST value of each flag in its `HashMap`, so the
+/// query handler walks the original argv directly to support the
+/// repeatable form that issue #375 asks for.
+///
+/// `@<path>` loads the JSON content of `<path>` as the parameter.
+/// Without an explicit type, plain values are auto-typed by trying
+/// to parse them as JSON first (so `42` → integer, `[1,2,3]` →
+/// vector, `true` → boolean, `null` → Null) and falling back to text.
+fn collect_query_params(
+    args: &[String],
+) -> Result<Vec<reddb::storage::schema::Value>, String> {
+    let mut pairs: Vec<(String, Option<String>)> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--param" {
+            i += 1;
+            let v = args
+                .get(i)
+                .ok_or_else(|| "--param requires a value".to_string())?
+                .clone();
+            pairs.push((v, None));
+        } else if let Some(rest) = arg.strip_prefix("--param=") {
+            pairs.push((rest.to_string(), None));
+        } else if arg == "--param-type" {
+            i += 1;
+            let ty = args
+                .get(i)
+                .ok_or_else(|| "--param-type requires a value".to_string())?
+                .clone();
+            let last = pairs
+                .last_mut()
+                .ok_or_else(|| "--param-type must follow a --param".to_string())?;
+            last.1 = Some(ty);
+        } else if let Some(rest) = arg.strip_prefix("--param-type=") {
+            let last = pairs
+                .last_mut()
+                .ok_or_else(|| "--param-type must follow a --param".to_string())?;
+            last.1 = Some(rest.to_string());
+        }
+        i += 1;
+    }
+    let mut out = Vec::with_capacity(pairs.len());
+    for (raw, ty) in pairs {
+        out.push(parse_cli_param(&raw, ty.as_deref())?);
+    }
+    Ok(out)
+}
+
+/// Map a CLI `--param` token (and optional `--param-type`) into a
+/// schema `Value`. `@path` is unwrapped before type coercion so a
+/// file holding a JSON vector or large text works with every type.
+fn parse_cli_param(
+    raw: &str,
+    ty: Option<&str>,
+) -> Result<reddb::storage::schema::Value, String> {
+    use reddb::storage::schema::Value;
+    let body: String = if let Some(path) = raw.strip_prefix('@') {
+        std::fs::read_to_string(path).map_err(|e| format!("--param @{path}: {e}"))?
+    } else {
+        raw.to_string()
+    };
+    let trimmed = body.trim();
+    match ty {
+        Some("text") | Some("string") => Ok(Value::text(body.clone())),
+        Some("int") | Some("integer") => trimmed
+            .parse::<i64>()
+            .map(Value::Integer)
+            .map_err(|e| format!("--param-type int: {e}")),
+        Some("float") => trimmed
+            .parse::<f64>()
+            .map(Value::Float)
+            .map_err(|e| format!("--param-type float: {e}")),
+        Some("bool") | Some("boolean") => trimmed
+            .parse::<bool>()
+            .map(Value::Boolean)
+            .map_err(|e| format!("--param-type bool: {e}")),
+        Some("null") => Ok(Value::Null),
+        Some("vec") | Some("vector") => json_str_to_vector(trimmed),
+        Some("json") => {
+            // Canonicalise via the project JSON parser so embedded code
+            // sees the same canonical form HTTP callers do.
+            let parsed: reddb::json::Value = reddb::json::from_str(trimmed)
+                .map_err(|e| format!("--param-type json: {e}"))?;
+            Ok(Value::text(
+                reddb::json::to_string(&parsed).unwrap_or_default(),
+            ))
+        }
+        Some(other) => Err(format!("unknown --param-type: {other}")),
+        None => Ok(auto_type_param(&body)),
+    }
+}
+
+fn json_str_to_vector(
+    s: &str,
+) -> Result<reddb::storage::schema::Value, String> {
+    use reddb::json::Value as J;
+    let parsed: J = reddb::json::from_str(s)
+        .map_err(|e| format!("--param-type vec: {e}"))?;
+    let J::Array(items) = parsed else {
+        return Err("--param-type vec: expected a JSON array of numbers".into());
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for v in &items {
+        match v {
+            J::Number(n) => out.push(*n as f32),
+            _ => {
+                return Err(
+                    "--param-type vec: array must contain only numbers".into()
+                )
+            }
+        }
+    }
+    Ok(reddb::storage::schema::Value::Vector(out))
+}
+
+/// Auto-type a CLI string: try JSON first (covers ints, floats, bools,
+/// null, arrays, objects) and fall back to text. Mirrors the
+/// `json_value_to_schema_value` mapping used by HTTP `params`.
+fn auto_type_param(s: &str) -> reddb::storage::schema::Value {
+    use reddb::json::Value as J;
+    use reddb::storage::schema::Value;
+    let trimmed = s.trim();
+    if let Ok(parsed) = reddb::json::from_str::<J>(trimmed) {
+        return match parsed {
+            J::Null => Value::Null,
+            J::Bool(b) => Value::Boolean(b),
+            J::Number(n) => {
+                if n.fract() == 0.0 && n.abs() < i64::MAX as f64 {
+                    Value::Integer(n as i64)
+                } else {
+                    Value::Float(n)
+                }
+            }
+            J::String(t) => Value::text(t),
+            J::Array(items) => {
+                if items.iter().all(|v| matches!(v, J::Number(_))) {
+                    let floats: Vec<f32> = items
+                        .iter()
+                        .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+                        .collect();
+                    Value::Vector(floats)
+                } else {
+                    Value::text(
+                        reddb::json::to_string(&J::Array(items)).unwrap_or_default(),
+                    )
+                }
+            }
+            J::Object(_) => Value::text(
+                reddb::json::to_string(&parsed).unwrap_or_default(),
+            ),
+        };
+    }
+    Value::text(s.to_string())
+}
+
 /// Convert a RedDB `Value` to a minimal JSON fragment. Numbers and
 /// booleans come out unquoted; everything else is a JSON string.
 /// `Value::Password` / `Value::Secret` are intentionally rendered as
@@ -507,6 +665,13 @@ fn main() {
                 eprintln!("Example: red query \"SELECT * FROM users\"");
                 std::process::exit(1);
             }
+            let params = collect_query_params(&args).unwrap_or_else(|err| {
+                if json_mode {
+                    json_error("query", &err);
+                }
+                eprintln!("query: {err}");
+                std::process::exit(1);
+            });
             let rt = open_local_runtime(&result.flags).unwrap_or_else(|err| {
                 if json_mode {
                     json_error("query", &err);
@@ -514,7 +679,32 @@ fn main() {
                 eprintln!("error: {err}");
                 std::process::exit(1);
             });
-            match rt.execute_query(sql) {
+            let exec_result = if params.is_empty() {
+                rt.execute_query(sql)
+            } else {
+                use reddb::storage::query::modes::parse_multi;
+                use reddb::storage::query::user_params;
+                match parse_multi(sql) {
+                    Ok(expr) => match user_params::bind(&expr, &params) {
+                        Ok(bound) => rt.execute_query_expr(bound),
+                        Err(err) => {
+                            if json_mode {
+                                json_error("query", &err.to_string());
+                            }
+                            eprintln!("query error: {err}");
+                            std::process::exit(1);
+                        }
+                    },
+                    Err(err) => {
+                        if json_mode {
+                            json_error("query", &err.to_string());
+                        }
+                        eprintln!("query error: {err}");
+                        std::process::exit(1);
+                    }
+                }
+            };
+            match exec_result {
                 Ok(qr) => {
                     checkpoint_local_runtime(&rt);
                     if json_mode {
@@ -2225,6 +2415,25 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_short('p')
                     .with_description("Open a local .rdb file in embedded mode"),
             );
+            if command == Some("query") {
+                // Repeatable. The schema parser keeps only the last value
+                // in flags; the query handler walks argv directly via
+                // `collect_query_params` to gather every occurrence.
+                flags.push(
+                    cli::types::FlagSchema::new("param")
+                        .with_description(
+                            "Positional parameter for $1, $2, … (repeatable). \
+                             Prefix with `@` to load JSON from a file.",
+                        ),
+                );
+                flags.push(
+                    cli::types::FlagSchema::new("param-type")
+                        .with_description(
+                            "Type override for the preceding --param \
+                             (text|int|float|bool|null|vec|json).",
+                        ),
+                );
+            }
         }
         Some("admin") => {
             flags.extend(vec![
