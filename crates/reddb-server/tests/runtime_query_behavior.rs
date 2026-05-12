@@ -929,3 +929,30 @@ fn graph_centrality_limit_combined_with_algorithm() {
         "ALGORITHM pagerank LIMIT 2 must cap output rows"
     );
 }
+
+// ── Issue #422 slice: GRAPH COMPONENTS LIMIT N ─────────────────────────────
+
+fn seed_components_graph(rt: &RedDBRuntime) {
+    for label in ["a1", "a2", "b1", "b2", "c1", "c2"] {
+        rt.execute_query(&format!(
+            "INSERT INTO components_net NODE (label, name) VALUES ('{label}', '{label}')"
+        ))
+        .unwrap_or_else(|e| panic!("seed node {label}: {e}"));
+    }
+    for (from, to) in [("a1", "a2"), ("b1", "b2"), ("c1", "c2")] {
+        rt.execute_query(&format!(
+            "INSERT INTO components_net EDGE (label, from, to) VALUES ('link', '{from}', '{to}')"
+        ))
+        .unwrap_or_else(|e| panic!("seed edge {from}->{to}: {e}"));
+    }
+}
+
+#[test]
+fn graph_components_limit_caps_returned_rows() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    seed_components_graph(&rt);
+    let res = rt
+        .execute_query("GRAPH COMPONENTS MODE weak LIMIT 2")
+        .expect("components limit parses+executes");
+    assert_eq!(res.result.records.len(), 2, "LIMIT 2 must cap output rows");
+}

@@ -2181,8 +2181,11 @@ pub enum GraphCommand {
         algorithm: String,
         max_iterations: u32,
     },
-    /// GRAPH COMPONENTS [MODE connected|weak|strong]
-    Components { mode: String },
+    /// GRAPH COMPONENTS [MODE connected|weak|strong] [LIMIT n]
+    Components {
+        mode: String,
+        limit: Option<u32>,
+    },
     /// GRAPH CYCLES [MAX_LENGTH n]
     Cycles { max_length: u32 },
     /// GRAPH CLUSTERING
