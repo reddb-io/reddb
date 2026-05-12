@@ -9,6 +9,7 @@ const reddb = @import("reddb");
 const conn = reddb.redwire.conn;
 const frame = reddb.redwire.frame;
 const codec = reddb.redwire.codec;
+const value_codec = reddb.redwire.value_codec;
 
 const t = std.testing;
 
@@ -25,6 +26,7 @@ const FakeServer = struct {
         auth_fail_at_helloack,
         auth_fail_at_authok,
         bad_magic,
+        params_ok,
     };
 
     pub fn start(behaviour: Behaviour) !*FakeServer {
@@ -80,8 +82,12 @@ const FakeServer = struct {
                 try writeJsonFrame(conn_inst.stream, .auth_fail, 1, "{\"reason\":\"locked\"}");
                 return;
             },
-            .anonymous_ok, .auth_fail_at_authok => {
-                try writeJsonFrame(conn_inst.stream, .hello_ack, 1, "{\"auth\":\"anonymous\"}");
+            .anonymous_ok, .auth_fail_at_authok, .params_ok => {
+                const hello_ack = if (self.behaviour == .params_ok)
+                    "{\"auth\":\"anonymous\",\"features\":1}"
+                else
+                    "{\"auth\":\"anonymous\"}";
+                try writeJsonFrame(conn_inst.stream, .hello_ack, 1, hello_ack);
             },
             .bearer_ok => {
                 try writeJsonFrame(conn_inst.stream, .hello_ack, 1, "{\"auth\":\"bearer\"}");
@@ -99,8 +105,12 @@ const FakeServer = struct {
             .auth_fail_at_authok => {
                 try writeJsonFrame(conn_inst.stream, .auth_fail, 2, "{\"reason\":\"bad token\"}");
             },
-            .anonymous_ok, .bearer_ok => {
-                try writeJsonFrame(conn_inst.stream, .auth_ok, 2, "{\"session_id\":\"sess-1\",\"features\":0}");
+            .anonymous_ok, .bearer_ok, .params_ok => {
+                const auth_ok = if (self.behaviour == .params_ok)
+                    "{\"session_id\":\"sess-1\",\"features\":1}"
+                else
+                    "{\"session_id\":\"sess-1\",\"features\":0}";
+                try writeJsonFrame(conn_inst.stream, .auth_ok, 2, auth_ok);
                 // Echo a Ping → Pong, then close on Bye.
                 while (true) {
                     const next_frame = readFrame(allocator, conn_inst.stream) catch return;
@@ -111,6 +121,10 @@ const FakeServer = struct {
                         .query => {
                             // Echo a trivial Result envelope back.
                             try writeJsonFrame(conn_inst.stream, .result, next_frame.frame.correlation_id, "{\"ok\":true}");
+                        },
+                        .query_with_params => {
+                            try expectParamsPayload(allocator, next_frame.frame.payload);
+                            try writeJsonFrame(conn_inst.stream, .result, next_frame.frame.correlation_id, "{\"params\":true}");
                         },
                         else => return,
                     }
@@ -161,6 +175,23 @@ const FakeServer = struct {
         const bytes = try codec.encodeFrame(allocator, f);
         defer allocator.free(bytes);
         try stream.writeAll(bytes);
+    }
+
+    fn expectParamsPayload(allocator: std.mem.Allocator, payload: []const u8) !void {
+        const vector = [_]f32{ 1.0, 2.0, -0.5 };
+        const params = [_]value_codec.Value{
+            .{ .int = 7 },
+            .{ .text = "zig" },
+            .{ .@"null" = {} },
+            .{ .vector = &vector },
+        };
+        const expected = try value_codec.encodeQueryWithParams(
+            allocator,
+            "SELECT $1, $2, $3, $4",
+            &params,
+        );
+        defer allocator.free(expected);
+        if (!std.mem.eql(u8, expected, payload)) return error.UnexpectedFrame;
     }
 };
 
@@ -232,4 +263,62 @@ test "bad magic → connection error" {
         c.deinit();
         t.allocator.destroy(c);
     } else |_| {}
+}
+
+test "query with params uses QueryWithParams when advertised" {
+    var server = try FakeServer.start(.params_ok);
+    defer server.stop();
+    const c = try conn.connect(t.allocator, .{
+        .host = "127.0.0.1",
+        .port = server.addr.getPort(),
+    });
+    defer {
+        c.deinit();
+        t.allocator.destroy(c);
+    }
+    try t.expect(c.supportsParams());
+
+    const vector = [_]f32{ 1.0, 2.0, -0.5 };
+    const params = [_]value_codec.Value{
+        .{ .int = 7 },
+        .{ .text = "zig" },
+        .{ .@"null" = {} },
+        .{ .vector = &vector },
+    };
+    const result = try c.queryWithParams("SELECT $1, $2, $3, $4", &params);
+    defer t.allocator.free(result);
+    try t.expect(std.mem.indexOf(u8, result, "params") != null);
+}
+
+test "query with params requires FEATURE_PARAMS" {
+    var server = try FakeServer.start(.anonymous_ok);
+    defer server.stop();
+    const c = try conn.connect(t.allocator, .{
+        .host = "127.0.0.1",
+        .port = server.addr.getPort(),
+    });
+    defer {
+        c.deinit();
+        t.allocator.destroy(c);
+    }
+
+    const params = [_]value_codec.Value{.{ .int = 1 }};
+    try t.expectError(error.ParamsUnsupported, c.queryWithParams("SELECT $1", &params));
+}
+
+test "empty params use legacy Query frame" {
+    var server = try FakeServer.start(.anonymous_ok);
+    defer server.stop();
+    const c = try conn.connect(t.allocator, .{
+        .host = "127.0.0.1",
+        .port = server.addr.getPort(),
+    });
+    defer {
+        c.deinit();
+        t.allocator.destroy(c);
+    }
+
+    const result = try c.queryWithParams("SELECT 1", &.{});
+    defer t.allocator.free(result);
+    try t.expect(std.mem.indexOf(u8, result, "ok") != null);
 }

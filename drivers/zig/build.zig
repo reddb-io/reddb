@@ -59,6 +59,7 @@ pub fn build(b: *std.Build) void {
         "tests/url_test.zig",
         "tests/scram_test.zig",
         "tests/frame_test.zig",
+        "tests/value_codec_test.zig",
         "tests/redwire_conn_test.zig",
     };
 
