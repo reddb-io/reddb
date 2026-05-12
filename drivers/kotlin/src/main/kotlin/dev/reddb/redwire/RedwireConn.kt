@@ -43,6 +43,7 @@ public class RedwireConn internal constructor(
     private val writeCh: ByteWriteChannel,
     private val owner: Closeable,
     public val sessionId: String,
+    public val serverFeatures: Int = 0,
 ) : Conn {
 
     private val mutex = Mutex()
@@ -86,7 +87,7 @@ public class RedwireConn internal constructor(
                     try { activeSocket.close() } catch (_: Throwable) { /* ignore */ }
                     try { selector.close() } catch (_: Throwable) { /* ignore */ }
                 }
-                return RedwireConn(readCh, writeCh, owner, handshake.sessionId)
+                return RedwireConn(readCh, writeCh, owner, handshake.sessionId, handshake.features)
             } catch (e: RedDBException) {
                 runCatching { socket?.close() }
                 runCatching { selector.close() }
@@ -141,12 +142,13 @@ public class RedwireConn internal constructor(
             val ackJson = parseJson(ack.payload, "HelloAck")
             val chosen = textField(ackJson, "auth")
                 ?: throw RedDBException.ProtocolError("HelloAck missing 'auth' field")
+            val features = featuresField(ackJson, 0)
 
             // 4. Auth dispatch.
             return when (chosen) {
                 "anonymous" -> {
                     writeFrame(writeCh, Frame(MessageKind.AuthResponse, 2L, ByteArray(0)))
-                    finishOneRtt(readCh)
+                    finishOneRtt(readCh, features)
                 }
                 "bearer" -> {
                     if (token == null) {
@@ -156,7 +158,7 @@ public class RedwireConn internal constructor(
                     }
                     val body = MAPPER.createObjectNode().put("token", token)
                     writeFrame(writeCh, Frame(MessageKind.AuthResponse, 2L, MAPPER.writeValueAsBytes(body)))
-                    finishOneRtt(readCh)
+                    finishOneRtt(readCh, features)
                 }
                 "scram-sha-256" -> {
                     if (username == null || password == null) {
@@ -164,7 +166,7 @@ public class RedwireConn internal constructor(
                             "server picked scram-sha-256 but no username/password configured"
                         )
                     }
-                    performScram(readCh, writeCh, username, password)
+                    performScram(readCh, writeCh, username, password, features)
                 }
                 "oauth-jwt" -> {
                     if (token == null) {
@@ -174,7 +176,7 @@ public class RedwireConn internal constructor(
                     }
                     val body = MAPPER.createObjectNode().put("jwt", token)
                     writeFrame(writeCh, Frame(MessageKind.AuthResponse, 2L, MAPPER.writeValueAsBytes(body)))
-                    finishOneRtt(readCh)
+                    finishOneRtt(readCh, features)
                 }
                 else -> throw RedDBException.ProtocolError(
                     "server picked unsupported auth method: $chosen"
@@ -182,7 +184,7 @@ public class RedwireConn internal constructor(
             }
         }
 
-        private suspend fun finishOneRtt(readCh: ByteReadChannel): HandshakeResult {
+        private suspend fun finishOneRtt(readCh: ByteReadChannel, fallbackFeatures: Int): HandshakeResult {
             val f = readFrame(readCh)
             if (f.kind == MessageKind.AuthFail) {
                 throw RedDBException.AuthRefused(reason(f.payload, "auth refused"))
@@ -191,7 +193,7 @@ public class RedwireConn internal constructor(
                 throw RedDBException.ProtocolError("expected AuthOk, got ${MessageKind.name(f.kind)}")
             }
             val j = parseJson(f.payload, "AuthOk")
-            return HandshakeResult(textField(j, "session_id") ?: "")
+            return HandshakeResult(textField(j, "session_id") ?: "", featuresField(j, fallbackFeatures))
         }
 
         private suspend fun performScram(
@@ -199,6 +201,7 @@ public class RedwireConn internal constructor(
             writeCh: ByteWriteChannel,
             username: String,
             password: String,
+            fallbackFeatures: Int,
         ): HandshakeResult {
             val clientNonce = Scram.newClientNonce()
             val clientFirst = Scram.clientFirst(username, clientNonce)
@@ -243,7 +246,7 @@ public class RedwireConn internal constructor(
                     "scram: server signature did not verify — possible MITM"
                 )
             }
-            return HandshakeResult(sid)
+            return HandshakeResult(sid, featuresField(j, fallbackFeatures))
         }
 
         /** Pull the server-first string out of an AuthRequest payload. */
@@ -334,18 +337,39 @@ public class RedwireConn internal constructor(
             val v = node.get(name)
             return if (v != null && v.isTextual) v.asText() else null
         }
+
+        private fun featuresField(node: JsonNode?, fallback: Int): Int {
+            if (node == null || !node.isObject) return fallback
+            val v = node.get("features")
+            return if (v != null && v.isNumber) v.asInt() else fallback
+        }
     }
 
     // ---------------------------------------------------------------
     // Conn methods
     // ---------------------------------------------------------------
 
-    override suspend fun query(sql: String): ByteArray = withContext(Dispatchers.IO) {
+    override suspend fun query(sql: String): ByteArray =
+        sendQuery(MessageKind.Query, sql.toByteArray(StandardCharsets.UTF_8), "query")
+
+    override suspend fun query(sql: String, vararg params: Any?): ByteArray {
+        if (params.isEmpty()) {
+            return query(sql)
+        }
+        if (!supportsParams()) {
+            throw RedDBException.ParamsUnsupported(
+                "server did not advertise FEATURE_PARAMS — upgrade the server to use parameterized queries"
+            )
+        }
+        return sendQuery(MessageKind.QueryWithParams, ValueCodec.encodeQueryWithParams(sql, params), "query")
+    }
+
+    private suspend fun sendQuery(kind: Int, payload: ByteArray, label: String): ByteArray = withContext(Dispatchers.IO) {
         mutex.withLock {
             ensureOpen()
             val corr = nextCorrelation.getAndIncrement()
             try {
-                writeFrame(writeCh, Frame(MessageKind.Query, corr, sql.toByteArray(StandardCharsets.UTF_8)))
+                writeFrame(writeCh, Frame(kind, corr, payload))
                 val resp = readFrame(readCh)
                 when (resp.kind) {
                     MessageKind.Result -> resp.payload
@@ -359,7 +383,7 @@ public class RedwireConn internal constructor(
             } catch (e: RedDBException) {
                 throw e
             } catch (e: Throwable) {
-                throw RedDBException.ProtocolError("query I/O: ${e.message}", e)
+                throw RedDBException.ProtocolError("$label I/O: ${e.message}", e)
             }
         }
     }
@@ -499,5 +523,8 @@ public class RedwireConn internal constructor(
     }
 
     /** Outcome of a successful handshake — exposed mostly for tests. */
-    public class HandshakeResult(public val sessionId: String)
+    public class HandshakeResult(public val sessionId: String, public val features: Int = 0)
+
+    public fun supportsParams(): Boolean =
+        (serverFeatures and Frame.FEATURE_PARAMS) == Frame.FEATURE_PARAMS
 }

@@ -39,6 +39,26 @@ class SmokeTest {
                     val result = conn.query("SELECT * FROM smoke_users WHERE name = 'alice'")
                     val body = String(result, StandardCharsets.UTF_8)
                     assertTrue(body.contains("alice"), "expected alice in: $body")
+                    val paramResult = conn.query(
+                        "SELECT * FROM smoke_users WHERE age = \$1 AND name = \$2 AND \$3 IS NULL",
+                        30,
+                        "alice",
+                        null,
+                    )
+                    val paramBody = String(paramResult, StandardCharsets.UTF_8)
+                    assertTrue(paramBody.contains("alice"), "expected parameterized alice in: $paramBody")
+                    val embedding = floatArrayOf(0.7f, 0.7f)
+                    conn.query(
+                        "INSERT INTO smoke_embeddings VECTOR (dense, content) VALUES (\$1, \$2)",
+                        embedding,
+                        "parameterized doc",
+                    )
+                    val vectorResult = conn.query(
+                        "SEARCH SIMILAR \$1 COLLECTION smoke_embeddings LIMIT 1",
+                        listOf(0.7f, 0.7f),
+                    )
+                    val vectorBody = String(vectorResult, StandardCharsets.UTF_8)
+                    assertTrue(vectorBody.contains("parameterized doc"), "expected vector hit in: $vectorBody")
                     conn.delete("smoke_users", "alice")
                 }
             }

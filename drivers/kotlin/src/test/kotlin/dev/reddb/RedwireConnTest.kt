@@ -20,6 +20,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -245,6 +246,143 @@ class RedwireConnTest {
                 }
             }
             serverJob.await()
+        }
+    }
+
+    @Test
+    fun queryWithParamsUsesQueryWithParamsFrame() = runBlocking {
+        withTimeout(5_000) {
+            val p = Pipes()
+            coroutineScope {
+                val server = launch(Dispatchers.IO) {
+                    readMagic(p.serverRead)
+                    val hello = readClientFrame(p.serverRead)
+                    val ack: ObjectNode = mapper.createObjectNode().apply {
+                        put("auth", "anonymous")
+                        put("features", Frame.FEATURE_PARAMS)
+                    }
+                    writeServerFrame(p.serverWrite, MessageKind.HelloAck, hello.correlationId, mapper.writeValueAsBytes(ack))
+
+                    val resp = readClientFrame(p.serverRead)
+                    val ok: ObjectNode = mapper.createObjectNode().apply {
+                        put("session_id", "rwsess-test-params")
+                        put("features", Frame.FEATURE_PARAMS)
+                    }
+                    writeServerFrame(p.serverWrite, MessageKind.AuthOk, resp.correlationId, mapper.writeValueAsBytes(ok))
+
+                    val q = readClientFrame(p.serverRead)
+                    assertEquals(MessageKind.QueryWithParams, q.kind)
+                    val payload = ByteBuffer.wrap(q.payload).order(ByteOrder.LITTLE_ENDIAN)
+                    val sqlLen = payload.int
+                    val sqlBytes = ByteArray(sqlLen)
+                    payload.get(sqlBytes)
+                    assertEquals("SELECT $1, $2, $3, $4", String(sqlBytes, StandardCharsets.UTF_8))
+                    assertEquals(4, payload.int)
+                    assertEquals(0x02, payload.get().toInt() and 0xff)
+                    assertEquals(42L, payload.long)
+                    assertEquals(0x04, payload.get().toInt() and 0xff)
+                    val textLen = payload.int
+                    val textBytes = ByteArray(textLen)
+                    payload.get(textBytes)
+                    assertEquals("alice", String(textBytes, StandardCharsets.UTF_8))
+                    assertEquals(0x00, payload.get().toInt() and 0xff)
+                    assertEquals(0x06, payload.get().toInt() and 0xff)
+                    assertEquals(3, payload.int)
+                    assertEquals(1.0f, payload.float)
+                    assertEquals(2.0f, payload.float)
+                    assertEquals(3.0f, payload.float)
+
+                    val result: ObjectNode = mapper.createObjectNode().put("ok", true)
+                    writeServerFrame(p.serverWrite, MessageKind.Result, q.correlationId, mapper.writeValueAsBytes(result))
+
+                    readClientFrame(p.serverRead)
+                }
+
+                val res = RedwireConn.performHandshake(
+                    p.clientRead, p.clientWrite, null, null, null, "test-driver"
+                )
+                val conn = RedwireConn(p.clientRead, p.clientWrite, java.io.Closeable {}, res.sessionId, res.features)
+                assertTrue(conn.supportsParams())
+                val resultBytes = conn.query("SELECT $1, $2, $3, $4", 42, "alice", null, floatArrayOf(1f, 2f, 3f))
+                assertTrue(mapper.readTree(resultBytes).get("ok").asBoolean())
+                conn.close()
+                server.join()
+            }
+        }
+    }
+
+    @Test
+    fun queryWithParamsRequiresFeatureParams() = runBlocking {
+        withTimeout(5_000) {
+            val p = Pipes()
+            coroutineScope {
+                val server = launch(Dispatchers.IO) {
+                    readMagic(p.serverRead)
+                    val hello = readClientFrame(p.serverRead)
+                    val ack: ObjectNode = mapper.createObjectNode().apply {
+                        put("auth", "anonymous")
+                        put("features", 0)
+                    }
+                    writeServerFrame(p.serverWrite, MessageKind.HelloAck, hello.correlationId, mapper.writeValueAsBytes(ack))
+
+                    val resp = readClientFrame(p.serverRead)
+                    val ok: ObjectNode = mapper.createObjectNode().apply {
+                        put("session_id", "rwsess-test-no-params")
+                        put("features", 0)
+                    }
+                    writeServerFrame(p.serverWrite, MessageKind.AuthOk, resp.correlationId, mapper.writeValueAsBytes(ok))
+                }
+
+                val res = RedwireConn.performHandshake(
+                    p.clientRead, p.clientWrite, null, null, null, "test-driver"
+                )
+                val conn = RedwireConn(p.clientRead, p.clientWrite, java.io.Closeable {}, res.sessionId, res.features)
+                assertFalse(conn.supportsParams())
+                assertThrows(RedDBException.ParamsUnsupported::class.java) {
+                    runBlocking { conn.query("SELECT $1", 1) }
+                }
+                server.join()
+            }
+        }
+    }
+
+    @Test
+    fun queryWithEmptyParamsUsesLegacyQueryFrame() = runBlocking {
+        withTimeout(5_000) {
+            val p = Pipes()
+            coroutineScope {
+                val server = launch(Dispatchers.IO) {
+                    readMagic(p.serverRead)
+                    val hello = readClientFrame(p.serverRead)
+                    val ack: ObjectNode = mapper.createObjectNode().apply {
+                        put("auth", "anonymous")
+                        put("features", Frame.FEATURE_PARAMS)
+                    }
+                    writeServerFrame(p.serverWrite, MessageKind.HelloAck, hello.correlationId, mapper.writeValueAsBytes(ack))
+
+                    val resp = readClientFrame(p.serverRead)
+                    val ok: ObjectNode = mapper.createObjectNode().apply {
+                        put("session_id", "rwsess-test-empty-params")
+                        put("features", Frame.FEATURE_PARAMS)
+                    }
+                    writeServerFrame(p.serverWrite, MessageKind.AuthOk, resp.correlationId, mapper.writeValueAsBytes(ok))
+
+                    val q = readClientFrame(p.serverRead)
+                    assertEquals(MessageKind.Query, q.kind)
+                    assertEquals("SELECT 1", String(q.payload, StandardCharsets.UTF_8))
+                    writeServerFrame(p.serverWrite, MessageKind.Result, q.correlationId, "{}".toByteArray(StandardCharsets.UTF_8))
+
+                    readClientFrame(p.serverRead)
+                }
+
+                val res = RedwireConn.performHandshake(
+                    p.clientRead, p.clientWrite, null, null, null, "test-driver"
+                )
+                val conn = RedwireConn(p.clientRead, p.clientWrite, java.io.Closeable {}, res.sessionId, res.features)
+                conn.query("SELECT 1", *emptyArray<Any?>())
+                conn.close()
+                server.join()
+            }
         }
     }
 

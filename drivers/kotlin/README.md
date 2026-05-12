@@ -26,7 +26,11 @@ fun main() = runBlocking {
     connect("red://localhost:5050").use { conn ->
         conn.ping()
         conn.insert("users", mapOf("name" to "alice", "age" to 30))
-        val rows = conn.query("SELECT * FROM users WHERE name = 'alice'")
+        val rows = conn.query(
+            "SELECT * FROM users WHERE age = \$1 AND name = \$2",
+            30,
+            "alice",
+        )
         println(String(rows))
     }
 }
@@ -46,6 +50,40 @@ HTTP transport with bearer token:
 ```kotlin
 connect("https://reddb.example.com:5050?token=tok-abc")
 ```
+
+## Parameterized queries
+
+`query(sql, vararg params)` binds positional `$N` placeholders. The
+original `query(sql)` call is unchanged, and empty params keep using the
+legacy RedWire `Query` frame.
+
+```kotlin
+val hits = conn.query(
+    "SEARCH SIMILAR \$1 COLLECTION docs LIMIT \$2",
+    floatArrayOf(0.1f, 0.2f, 0.3f),
+    5,
+)
+```
+
+Native Kotlin/JVM mapping:
+
+| Kotlin/JVM type | RedDB value |
+| --- | --- |
+| `null` | `Null` |
+| `Boolean` | `Bool` |
+| `Byte`, `Short`, `Int`, `Long` | `Int` |
+| `Float`, `Double` | `Float` |
+| `String` | `Text` |
+| `ByteArray` | `Bytes` |
+| `FloatArray`, `List<Float>` | `Vector` |
+| `Map`, `List`, Jackson `JsonNode` | `Json` |
+| `Instant` | `Timestamp` |
+| `UUID` | `Uuid` |
+
+RedWire parameterized queries require the server to advertise
+`FEATURE_PARAMS`; otherwise the driver throws
+`RedDBException.ParamsUnsupported`. HTTP sends the canonical `/query`
+body with `query` and adds typed `params` only for non-empty varargs.
 
 ## URL shapes
 

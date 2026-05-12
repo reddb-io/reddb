@@ -7,6 +7,7 @@ import dev.reddb.Conn
 import dev.reddb.Options
 import dev.reddb.RedDBException
 import dev.reddb.Url
+import dev.reddb.redwire.ValueCodec
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.request.get
@@ -95,7 +96,14 @@ public class HttpConn internal constructor(
     }
 
     override suspend fun query(sql: String): ByteArray {
-        val body = MAPPER.createObjectNode().put("sql", sql)
+        return query(sql, *emptyArray<Any?>())
+    }
+
+    override suspend fun query(sql: String, vararg params: Any?): ByteArray {
+        val body = MAPPER.createObjectNode().put("query", sql)
+        if (params.isNotEmpty()) {
+            body.set<com.fasterxml.jackson.databind.JsonNode>("params", ValueCodec.toHttpParams(params))
+        }
         return post("/query", body, requireAuthHeader = true)
     }
 

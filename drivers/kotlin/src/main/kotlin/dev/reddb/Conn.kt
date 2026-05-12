@@ -13,6 +13,9 @@ public interface Conn : AutoCloseable {
     /** Run a SQL query. Returns the engine's JSON envelope as bytes. */
     public suspend fun query(sql: String): ByteArray
 
+    /** Run a SQL query with positional `$N` parameters. */
+    public suspend fun query(sql: String, vararg params: Any?): ByteArray
+
     /** Insert a single row into a collection. `payload` is anything Jackson can serialise. */
     public suspend fun insert(collection: String, payload: Any)
 

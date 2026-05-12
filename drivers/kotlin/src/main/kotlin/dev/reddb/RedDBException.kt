@@ -17,6 +17,9 @@ public sealed class RedDBException(message: String, cause: Throwable? = null) : 
     /** Server returned an `Error` frame / HTTP 4xx-5xx with an engine-side reason. */
     public class EngineError(message: String) : RedDBException(message)
 
+    /** Parameterized query was issued against a RedWire server without FEATURE_PARAMS. */
+    public class ParamsUnsupported(message: String) : RedDBException(message)
+
     /** Frame length out of range (negative, < 16, or > 16 MiB). */
     public class FrameTooLarge(message: String) : ProtocolError(message)
 

@@ -45,6 +45,9 @@ public class Frame(
         /** Highest minor protocol version this driver speaks. */
         public const val SUPPORTED_VERSION: Byte = 0x01
 
+        /** Server feature bitmask: QueryWithParams frame support. */
+        public const val FEATURE_PARAMS: Int = 0x0000_0001
+
         /**
          * Encode a frame into wire bytes. Honours the COMPRESSED flag —
          * the payload field on `frame` is always plaintext; if the
@@ -150,6 +153,7 @@ public object MessageKind {
     public const val Get: Int = 0x19
     public const val Delete: Int = 0x1A
     public const val DeleteOk: Int = 0x1B
+    public const val QueryWithParams: Int = 0x28
 
     /** Pretty-print a kind byte. Falls back to hex for unknown values. */
     public fun name(kind: Int): String = when (kind) {
@@ -173,6 +177,7 @@ public object MessageKind {
         Get -> "Get"
         Delete -> "Delete"
         DeleteOk -> "DeleteOk"
+        QueryWithParams -> "QueryWithParams"
         else -> "0x%02x".format(kind and 0xff)
     }
 }
