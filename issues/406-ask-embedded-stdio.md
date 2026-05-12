@@ -33,6 +33,46 @@ The JSON-RPC `query` method already routes `ASK` SQL today — this slice ensure
 
 ## Progress
 
+Slice 2: embedded stdio JSON-RPC non-streaming envelope adapter landed.
+
+- `rpc_stdio::query_result_to_json` now detects `RuntimeQueryResult`
+  rows from `statement == "ask"` and returns the canonical
+  `AskResponseEnvelope` directly in the JSON-RPC `result` field
+  instead of wrapping it as `{ statement, affected, columns, rows }`.
+- The adapter parses runtime `Value::Json` blobs for `sources_flat`,
+  `citations`, and `validation`, preserves citation/source URNs, and
+  fills currently-unwired transport fields with conservative defaults:
+  `cache_hit = false`, `cost_usd = 0`, `mode = "strict"`,
+  `retry_count = 0`.
+- JS SDK types now expose the ASK result shape for `query(\`ASK ...\`)`.
+  The driver round-trip test pins that `db.query("ASK ...")` returns
+  every field unchanged from the transport response.
+- JS stdio README documents that `ASK ... STREAM` notifications are not
+  wired in the JS stdio JSON-RPC client yet; HTTP streaming remains the
+  incremental ASK path for now.
+
+Remaining follow-up:
+
+- A true JS SDK embedded-engine integration test still needs a
+  stubbable ASK LLM/provider path. The current SQL ASK executor calls
+  the real provider transport directly, so this slice uses a Rust
+  stdio adapter test plus a JS SDK transport round-trip test instead of
+  spawning embedded `red` for an actual ASK provider call.
+- Runtime wiring for real cache hits, cost accounting, strict/lenient
+  mode fallback, and retry count should populate the same envelope
+  fields when those ASK slices land.
+- JSON-RPC notification frames for `ASK ... STREAM` remain deferred.
+
+Verification (this slice):
+- `cargo test -p reddb-io-server --lib rpc_stdio::tests::ask_query_result_uses_canonical_envelope`
+- `cargo check -p reddb-io-server`
+- `node --test drivers/js/test/ask.test.mjs`
+- `pnpm --dir drivers/js test` (JS smoke skipped: `target/debug/red`
+  missing)
+- `git diff --check`
+- `pnpm test` (skipped: `target/debug/red` missing)
+- `pnpm typecheck` (nonzero wrapper despite `TypeScript: No errors found`)
+
 Slice 1: `AskResponseEnvelope` deep module landed at
 `crates/reddb-server/src/runtime/ai/ask_response_envelope.rs` with 19
 unit tests. Pure — no I/O, no transport, no clock. Pins the canonical
