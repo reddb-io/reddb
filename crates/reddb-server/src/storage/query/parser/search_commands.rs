@@ -44,11 +44,36 @@ impl<'a> Parser<'a> {
     fn parse_search_similar(&mut self) -> Result<QueryExpr, ParseError> {
         self.advance()?; // consume SIMILAR
 
-        // Parse vector literal OR text for semantic search
+        // Parse vector literal OR text for semantic search OR $N placeholder
+        let mut vector_param: Option<usize> = None;
         let (vector, text) = if self.consume(&Token::Text)? {
             // SEARCH SIMILAR TEXT 'query' — semantic search
             let query_text = self.parse_string()?;
             (Vec::new(), Some(query_text))
+        } else if matches!(self.peek(), Token::Dollar) {
+            // SEARCH SIMILAR $N — parameterized vector
+            if self.placeholder_mode == super::PlaceholderMode::Question {
+                return Err(ParseError::new(
+                    "cannot mix `?` and `$N` placeholders in one statement".to_string(),
+                    self.position(),
+                ));
+            }
+            self.advance()?;
+            let idx = match *self.peek() {
+                Token::Integer(n) if n >= 1 => {
+                    self.advance()?;
+                    (n - 1) as usize
+                }
+                _ => {
+                    return Err(ParseError::new(
+                        "expected `$N` (N >= 1) for SEARCH SIMILAR vector parameter".to_string(),
+                        self.position(),
+                    ));
+                }
+            };
+            self.placeholder_mode = super::PlaceholderMode::Dollar;
+            vector_param = Some(idx);
+            (Vec::new(), None)
         } else {
             // SEARCH SIMILAR [0.1, 0.2] — classic vector search
             (self.parse_vector_literal()?, None)
@@ -89,6 +114,7 @@ impl<'a> Parser<'a> {
             collection,
             limit,
             min_score,
+            vector_param,
         }))
     }
 
