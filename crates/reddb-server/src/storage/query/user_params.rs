@@ -1501,9 +1501,8 @@ mod tests {
     #[test]
     fn bind_search_spatial_bbox_limit_param() {
         // Issue #361: `SEARCH SPATIAL BBOX ... LIMIT $N` binds an integer.
-        let q = parse(
-            "SEARCH SPATIAL BBOX 0.0 0.0 1.0 1.0 COLLECTION sites COLUMN location LIMIT $1",
-        );
+        let q =
+            parse("SEARCH SPATIAL BBOX 0.0 0.0 1.0 1.0 COLLECTION sites COLUMN location LIMIT $1");
         let bound = bind(&q, &[Value::Integer(50)]).unwrap();
         let QueryExpr::SearchCommand(SearchCommand::SpatialBbox {
             limit, limit_param, ..
@@ -1517,9 +1516,8 @@ mod tests {
 
     #[test]
     fn bind_search_spatial_bbox_limit_rejects_zero() {
-        let q = parse(
-            "SEARCH SPATIAL BBOX 0.0 0.0 1.0 1.0 COLLECTION sites COLUMN location LIMIT $1",
-        );
+        let q =
+            parse("SEARCH SPATIAL BBOX 0.0 0.0 1.0 1.0 COLLECTION sites COLUMN location LIMIT $1");
         let err = bind(&q, &[Value::Integer(0)]).unwrap_err();
         assert!(matches!(
             err,
@@ -1532,9 +1530,8 @@ mod tests {
 
     #[test]
     fn bind_search_spatial_bbox_limit_rejects_non_integer() {
-        let q = parse(
-            "SEARCH SPATIAL BBOX 0.0 0.0 1.0 1.0 COLLECTION sites COLUMN location LIMIT $1",
-        );
+        let q =
+            parse("SEARCH SPATIAL BBOX 0.0 0.0 1.0 1.0 COLLECTION sites COLUMN location LIMIT $1");
         let err = bind(&q, &[Value::text("five")]).unwrap_err();
         assert!(matches!(
             err,
