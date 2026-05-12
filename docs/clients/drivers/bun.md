@@ -33,6 +33,17 @@ conn.close()
 
 `query()` returns the raw JSON string from the server — call `JSON.parse` (or use `queryParsed()`) yourself.
 
+## Parameterized queries
+
+For Bun applications that need `db.query(sql, params)`, use the shared
+[`@reddb-io/sdk`](../../guides/javascript-typescript-driver.md). The SDK is
+verified under Bun for parameterized SELECT, INSERT, and `SEARCH SIMILAR` vector
+queries.
+
+The native `@reddb-io/client-bun` package remains a low-level wire client in
+this preview. Its `query(sql)` method still sends the legacy raw query frame and
+does not expose a parameter array overload yet.
+
 ## TLS
 
 ```ts
@@ -50,6 +61,7 @@ The Bun driver is intentionally narrow:
 
 - **Address format is `host:port`** — not a full `red://` URI. Pair it with [`URL`](https://developer.mozilla.org/docs/Web/API/URL) yourself if you need parsing.
 - **No URI-level auth.** No SCRAM / OAuth handshake — it speaks a simple `MSG_QUERY` / `MSG_BULK_INSERT` framing on top of plain TCP (or TLS). For full auth + transport feature parity, use [`@reddb-io/client`](../../guides/javascript-typescript-driver.md#reddb-ioclient).
+- **No native parameter overload yet.** Use `@reddb-io/sdk` under Bun when you need `db.query(sql, params)`.
 - **Bun-only.** Calls `Bun.connect`. Doesn't run on Node / Deno / browsers.
 
 For a feature-complete JS/TS client (RedWire + HTTP + gRPC + SCRAM/OAuth/mTLS), use [`@reddb-io/client`](../../guides/javascript-typescript-driver.md#reddb-ioclient).
