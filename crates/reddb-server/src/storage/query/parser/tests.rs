@@ -1349,6 +1349,20 @@ fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
     assert_eq!(ask.temperature, Some(0.0_f32));
     assert_eq!(ask.seed, Some(7_u64));
 
+    // Issue #395: STRICT OFF opts ASK into lenient citation validation.
+    let query = parse("ASK 'q' STRICT OFF").unwrap();
+    let QueryExpr::Ask(ask) = query else {
+        panic!("Expected AskQuery");
+    };
+    assert!(!ask.strict);
+
+    let query = parse("ASK 'q' STRICT ON LIMIT 3").unwrap();
+    let QueryExpr::Ask(ask) = query else {
+        panic!("Expected AskQuery");
+    };
+    assert!(ask.strict);
+    assert_eq!(ask.limit, Some(3));
+
     for sql in [
         "INSERT INTO docs (body) VALUES ('x') WITH UNKNOWN",
         "INSERT INTO docs (body) VALUES ('x') WITH TTL 1 parsec",
@@ -1363,6 +1377,8 @@ fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
         "ASK 'q' COLLECTION",
         "ASK 'q' TEMPERATURE",
         "ASK 'q' SEED",
+        "ASK 'q' STRICT",
+        "ASK 'q' STRICT MAYBE",
     ] {
         assert!(parse(sql).is_err(), "{sql}");
     }

@@ -2378,6 +2378,7 @@ impl RedDb for GrpcRuntime {
                 .and_then(|v| v.as_f64())
                 .map(|v| v as f32),
             seed: payload.get("seed").and_then(|v| v.as_u64()),
+            strict: true,
         };
 
         let result = self

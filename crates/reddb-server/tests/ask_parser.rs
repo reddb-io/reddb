@@ -187,6 +187,7 @@ fn ask_minimal_question_parses() {
             assert_eq!(ask.depth, None);
             assert_eq!(ask.limit, None);
             assert_eq!(ask.collection, None);
+            assert!(ask.strict);
         }
         other => panic!("expected Ask, got {other:?}"),
     }
@@ -253,6 +254,31 @@ fn ask_using_provider_parses() {
         QueryExpr::Ask(ask) => {
             assert_eq!(ask.question, "who?");
             assert_eq!(ask.provider.as_deref(), Some("openai"));
+        }
+        other => panic!("expected Ask, got {other:?}"),
+    }
+}
+
+#[test]
+fn ask_strict_off_parses_as_lenient() {
+    let q = parse_query("ASK 'who?' STRICT OFF USING openai");
+    match q {
+        QueryExpr::Ask(ask) => {
+            assert_eq!(ask.question, "who?");
+            assert_eq!(ask.provider.as_deref(), Some("openai"));
+            assert!(!ask.strict);
+        }
+        other => panic!("expected Ask, got {other:?}"),
+    }
+}
+
+#[test]
+fn ask_strict_on_parses_as_default_strict() {
+    let q = parse_query("ASK 'who?' LIMIT 5 STRICT ON");
+    match q {
+        QueryExpr::Ask(ask) => {
+            assert_eq!(ask.limit, Some(5));
+            assert!(ask.strict);
         }
         other => panic!("expected Ask, got {other:?}"),
     }

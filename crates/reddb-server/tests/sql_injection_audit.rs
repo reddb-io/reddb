@@ -183,6 +183,7 @@ fn ask_path_does_not_re_execute_llm_output_as_sql() {
         &ask.limit,
         &ask.provider,
         &ask.model,
+        &ask.strict,
     );
 
     // Sanity: an injection-shaped question string is just text.

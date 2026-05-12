@@ -69,3 +69,41 @@ Deferred to follow-up slices:
 The deep module is the load-bearing piece; the remaining slices are
 mechanical wiring and can land independently. Issue stays open with
 this progress note.
+
+Slice 2 (this commit): parser/AST tracer for `ASK '...' STRICT ON|OFF`.
+
+- Added `AskQuery.strict: bool`, defaulting to `true` for existing SQL and
+  transport callers.
+- Parsed `STRICT OFF` as the lenient citation-validation opt-in and
+  `STRICT ON` as explicit strict mode, in any order with the existing ASK
+  clauses.
+- Added parser coverage for default strict mode, `STRICT OFF`, `STRICT ON`,
+  and malformed `STRICT` clauses.
+- Updated the gRPC ASK JSON-payload adapter to preserve existing strict
+  behavior until the typed gRPC ASK schema slice lands.
+- Fixed a pre-existing `pg_wire_ask_row_encoder` unit-test lifetime issue
+  found during the red check so lib unit-test targets compile again.
+
+Deferred to follow-up slices:
+
+- Wire `ask.strict` into `execute_ask` and map it to
+  `strict_validator::Mode::{Strict, Lenient}`.
+- Issue the one retry LLM call on `Decision::Retry` and enforce the typed
+  one-retry budget.
+- Map `Decision::GiveUp` to HTTP 422 with `validation.errors` in the
+  response body.
+- Integration tests with a fake LLM provider emitting invalid markers first,
+  then valid markers, still depend on the stubbable LLM transport refactor.
+
+Verification (this slice):
+- Red check first failed on missing `AskQuery.strict`.
+- `cargo test -p reddb-io-server --lib test_parse_dml_extended_literals_auto_embed_and_ask_forms -- --nocapture`
+  → 1 passed.
+- `cargo test -p reddb-io-server --test ask_parser -- --nocapture`
+  → 26 passed.
+- `cargo test -p reddb-io-server --lib runtime::ai::pg_wire_ask_row_encoder -- --nocapture`
+  → 25 passed.
+- `cargo check -p reddb-io-server` clean.
+- `pnpm test` ran and skipped because `target/debug/red` is not built.
+- `pnpm typecheck` exits 1; `pnpm run typecheck` confirms the repo has no
+  `typecheck` script. The direct TypeScript output said "No errors found".
