@@ -2245,6 +2245,11 @@ pub enum SearchCommand {
         collection: Option<String>,
         limit: usize,
         depth: usize,
+        /// `$N` placeholder for the `LIMIT` slot (issue #361). Same
+        /// shape as `SearchCommand::Hybrid::limit_param`; the binder
+        /// substitutes the user-supplied positive integer into `limit`
+        /// and clears this back to `None`.
+        limit_param: Option<usize>,
     },
     /// SEARCH SPATIAL RADIUS lat lon radius_km COLLECTION col COLUMN col [LIMIT n]
     SpatialRadius {

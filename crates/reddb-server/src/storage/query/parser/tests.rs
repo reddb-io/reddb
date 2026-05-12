@@ -2943,6 +2943,7 @@ fn test_parse_search_context_defaults() {
         collection,
         limit,
         depth,
+        ..
     }) = query
     {
         assert_eq!(q, "000.000.000-00");
@@ -2966,6 +2967,7 @@ fn test_parse_search_context_with_field_collection_limit_depth() {
         collection,
         limit,
         depth,
+        ..
     }) = query
     {
         assert_eq!(q, "000.000.000-00");

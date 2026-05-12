@@ -268,6 +268,7 @@ fn search_context_minimal_parses_with_defaults() {
             collection,
             limit,
             depth,
+            ..
         }) => {
             assert_eq!(query, "find this");
             assert_eq!(field, None);
@@ -293,6 +294,7 @@ fn search_context_full_clause_chain_parses() {
             collection,
             limit,
             depth,
+            ..
         }) => {
             assert_eq!(query, "000.000.000-00");
             assert_eq!(field.as_deref(), Some("cpf"));
