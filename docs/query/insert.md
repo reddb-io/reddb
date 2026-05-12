@@ -3,6 +3,17 @@
 The `INSERT` statement adds new entities to a collection. RedDB supports inserting rows, native
 time-series points, nodes, edges, vectors, documents, and KV pairs.
 
+Prefer positional parameters for row values:
+
+```ts
+const sql = "INSERT INTO users (name, email, age, active) VALUES ($1, $2, $3, $4)";
+const params = ["Alice", "alice@example.com", 30, true];
+await db.query(sql, params);
+```
+
+The parameterized-query design is tracked in
+[ADR #352](https://github.com/reddb-io/reddb/issues/352).
+
 ## SQL Syntax
 
 ```sql
@@ -12,15 +23,15 @@ INSERT INTO table_name (column1, column2, ...) VALUES (value1, value2, ...)
 ### Insert a Row
 
 ```sql
-INSERT INTO users (name, email, age, active) VALUES ('Alice', 'alice@example.com', 30, true)
+INSERT INTO users (name, email, age, active) VALUES ($1, $2, $3, $4)
 ```
 
 ### Multiple Rows
 
 ```sql
 INSERT INTO users (name, email, age) VALUES
-  ('Bob', 'bob@example.com', 25),
-  ('Charlie', 'charlie@example.com', 35)
+  ($1, $2, $3),
+  ($4, $5, $6)
 ```
 
 ### Insert a Native Time-Series Point
@@ -32,7 +43,7 @@ time-series points instead of table rows.
 CREATE TIMESERIES cpu_metrics RETENTION 7 d
 
 INSERT INTO cpu_metrics (metric, value, tags, timestamp)
-  VALUES ('cpu.idle', 94.8, {host: 'srv1', region: 'us-east'}, 1704067200000000000)
+  VALUES ($1, $2, $3, $4)
 ```
 
 Supported columns for native time-series inserts:
@@ -185,8 +196,8 @@ INSERT INTO table_name (columns) VALUES (values) [WITH TTL duration] [WITH EXPIR
 Sets a relative expiration on the entity. After the specified duration, RedDB automatically removes the entity. Supported units: `ms` (milliseconds), `s` (seconds), `m` (minutes), `h` (hours), `d` (days).
 
 ```sql
-INSERT INTO sessions (token, user_id) VALUES ('abc', 42) WITH TTL 1 h
-INSERT INTO cache (key, value) VALUES ('theme', 'dark') WITH TTL 30 m
+INSERT INTO sessions (token, user_id) VALUES ($1, $2) WITH TTL 1 h
+INSERT INTO cache (key, value) VALUES ($1, $2) WITH TTL 30 m
 ```
 
 ### WITH EXPIRES AT
@@ -194,7 +205,7 @@ INSERT INTO cache (key, value) VALUES ('theme', 'dark') WITH TTL 30 m
 Sets an absolute expiration using a Unix timestamp in milliseconds. The entity is removed when the system clock passes this timestamp.
 
 ```sql
-INSERT INTO events (name) VALUES ('launch') WITH EXPIRES AT 1735689600000
+INSERT INTO events (name) VALUES ($1) WITH EXPIRES AT 1735689600000
 ```
 
 ### WITH METADATA
@@ -202,7 +213,7 @@ INSERT INTO events (name) VALUES ('launch') WITH EXPIRES AT 1735689600000
 Attaches structured key-value metadata to the entity. Metadata is stored separately from the entity fields and can be used for filtering, auditing, or routing.
 
 ```sql
-INSERT INTO events (name) VALUES ('login') WITH METADATA (priority = 'high', source = 'web')
+INSERT INTO events (name) VALUES ($1) WITH METADATA (priority = 'high', source = 'web')
 ```
 
 ### Combining WITH Clauses
@@ -210,7 +221,7 @@ INSERT INTO events (name) VALUES ('login') WITH METADATA (priority = 'high', sou
 You can chain multiple `WITH` clauses on a single statement:
 
 ```sql
-INSERT INTO sessions (token) VALUES ('abc') WITH TTL 1 h WITH METADATA (source = 'mobile')
+INSERT INTO sessions (token) VALUES ($1) WITH TTL 1 h WITH METADATA (source = 'mobile')
 ```
 
 ### WITH AUTO EMBED
@@ -219,10 +230,10 @@ Automatically generates a vector embedding for one or more text fields at insert
 
 ```sql
 -- Auto-embed with different providers
-INSERT INTO articles (title, body) VALUES ('AI', 'Long text...')
+INSERT INTO articles (title, body) VALUES ($1, $2)
   WITH AUTO EMBED (body) USING openai
 
-INSERT INTO docs (content) VALUES ('Security report...')
+INSERT INTO docs (content) VALUES ($1)
   WITH AUTO EMBED (content) USING ollama MODEL 'nomic-embed-text'
 ```
 
@@ -235,7 +246,7 @@ INSERT INTO docs (content) VALUES ('Security report...')
 You can combine `WITH AUTO EMBED` with other `WITH` clauses:
 
 ```sql
-INSERT INTO logs (message) VALUES ('Unusual traffic spike')
+INSERT INTO logs (message) VALUES ($1)
   WITH AUTO EMBED (message) USING openai
   WITH TTL 30 d
   WITH METADATA (severity = 'high')

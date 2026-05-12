@@ -2,6 +2,17 @@
 
 The universal query is one of RedDB's most powerful features. It searches across **all entity types and all collections** in a single query, returning results in a unified envelope.
 
+Prefer positional parameters for filter values and result caps:
+
+```ts
+const sql = "FROM ANY WHERE _collection = $1 ORDER BY _score DESC LIMIT $2";
+const params = ["hosts", 20];
+const rows = await db.query(sql, params);
+```
+
+The parameterized-query design is tracked in
+[ADR #352](https://github.com/reddb-io/reddb/issues/352).
+
 ## Syntax
 
 ```sql
@@ -19,23 +30,23 @@ FROM ANY ORDER BY _score DESC LIMIT 10
 ### Filter by Entity Kind
 
 ```sql
-FROM ANY WHERE _kind = 'row' LIMIT 50
+FROM ANY WHERE _kind = $1 LIMIT $2
 ```
 
 ```sql
-FROM ANY WHERE _kind = 'node' OR _kind = 'edge' LIMIT 50
+FROM ANY WHERE _kind = $1 OR _kind = $2 LIMIT $3
 ```
 
 ### Filter by Collection
 
 ```sql
-FROM ANY WHERE _collection = 'users' LIMIT 20
+FROM ANY WHERE _collection = $1 LIMIT $2
 ```
 
 ### Combined Filters
 
 ```sql
-FROM ANY WHERE _kind = 'row' AND _collection = 'hosts' ORDER BY _entity_id DESC LIMIT 10
+FROM ANY WHERE _kind = $1 AND _collection = $2 ORDER BY _entity_id DESC LIMIT $3
 ```
 
 ## Entity Kinds
@@ -82,7 +93,7 @@ This is the power of universal queries. In a single request, you can retrieve a 
 ```bash
 curl -X POST http://127.0.0.1:8080/query \
   -H 'content-type: application/json' \
-  -d '{"query": "FROM ANY ORDER BY _score DESC LIMIT 20"}'
+  -d '{"query": "FROM ANY ORDER BY _score DESC LIMIT $1", "params": [20]}'
 ```
 
 Response:
@@ -128,7 +139,8 @@ The gRPC `Query` RPC accepts additional filters:
 ```bash
 grpcurl -plaintext \
   -d '{
-    "query": "FROM ANY LIMIT 20",
+    "query": "FROM ANY LIMIT $1",
+    "params": [{"intValue": 20}],
     "entity_types": ["row", "node"],
     "capabilities": ["read"]
   }' \

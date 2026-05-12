@@ -2,12 +2,23 @@
 
 RedDB supports vector, text, hybrid, multimodal, and indexed lookup commands within the query engine.
 
+Use positional parameters for supported runtime values, especially vectors and limits:
+
+```ts
+const sql = "SEARCH SIMILAR $1 COLLECTION embeddings LIMIT $2 MIN_SCORE $3";
+const params = [new Float32Array([0.12, 0.91, 0.44]), 5, 0.7];
+const rows = await db.query(sql, params);
+```
+
+The parameterized-query design is tracked in
+[ADR #352](https://github.com/reddb-io/reddb/issues/352).
+
 ## SEARCH SIMILAR
 
 Find vectors similar to a query vector:
 
 ```sql
-SEARCH SIMILAR [0.12, 0.91, 0.44] IN embeddings K 5 MIN_SCORE 0.7
+SEARCH SIMILAR $1 COLLECTION embeddings LIMIT $2 MIN_SCORE $3
 ```
 
 If you are using the canonical vector-query form inside `/query`, the equivalent syntax is:
@@ -45,12 +56,12 @@ Instead of providing a raw vector, you can pass a text string. RedDB generates t
 
 ```sql
 -- Search by text (embedding generated automatically)
-SEARCH SIMILAR TEXT 'suspicious login attempt' COLLECTION logs LIMIT 10
-SEARCH SIMILAR TEXT 'CVE in OpenSSH' COLLECTION cves LIMIT 5 USING openai
+SEARCH SIMILAR TEXT $1 COLLECTION logs LIMIT $2
+SEARCH SIMILAR TEXT $1 COLLECTION cves LIMIT $2 USING openai
 
 -- Specify provider
-SEARCH SIMILAR TEXT 'anomaly detected' COLLECTION events USING groq
-SEARCH SIMILAR TEXT 'network scan' COLLECTION logs USING ollama
+SEARCH SIMILAR TEXT $1 COLLECTION events USING groq
+SEARCH SIMILAR TEXT $1 COLLECTION logs USING ollama
 ```
 
 The same semantic lookup is also available in vector-query form:
@@ -77,13 +88,13 @@ VECTOR SEARCH cves SIMILAR TO 'remote code execution' LIMIT 5
 Full-text search across collections:
 
 ```sql
-SEARCH TEXT 'machine learning basics' IN docs LIMIT 10
+SEARCH TEXT 'machine learning basics' IN docs LIMIT $1
 ```
 
 ### With Fuzzy Matching
 
 ```sql
-SEARCH TEXT 'machne lerning' IN docs FUZZY LIMIT 10
+SEARCH TEXT 'machne lerning' IN docs FUZZY LIMIT $1
 ```
 
 ## SEARCH HYBRID
@@ -91,7 +102,7 @@ SEARCH TEXT 'machne lerning' IN docs FUZZY LIMIT 10
 Combine text and vector search:
 
 ```sql
-SEARCH HYBRID TEXT 'neural networks' VECTOR [0.15, 0.89, 0.40] IN docs K 10
+SEARCH HYBRID TEXT 'neural networks' VECTOR [0.15, 0.89, 0.40] IN docs LIMIT $1
 ```
 
 ## SEARCH IVF
@@ -108,7 +119,7 @@ Global key lookup that spans every data model — tables, documents,
 key-values, vectors, and graphs — in a single call:
 
 ```sql
-SEARCH MULTIMODAL 'passport: AB1234567' COLLECTION people LIMIT 20
+SEARCH MULTIMODAL 'passport: AB1234567' COLLECTION people LIMIT $1
 ```
 
 ## SEARCH INDEX
@@ -116,13 +127,13 @@ SEARCH MULTIMODAL 'passport: AB1234567' COLLECTION people LIMIT 20
 Structured lookup via a declared global index:
 
 ```sql
-SEARCH INDEX passport VALUE 'AB1234567' COLLECTION people LIMIT 20
+SEARCH INDEX passport VALUE 'AB1234567' COLLECTION people LIMIT $1
 ```
 
 Exact match by default. Use `FUZZY` for approximate lookups:
 
 ```sql
-SEARCH INDEX passport VALUE 'AB1234567' FUZZY LIMIT 20
+SEARCH INDEX passport VALUE 'AB1234567' FUZZY LIMIT $1
 ```
 
 ## SEARCH CONTEXT
@@ -130,7 +141,7 @@ SEARCH INDEX passport VALUE 'AB1234567' FUZZY LIMIT 20
 Unified context search across **all** data structures — tables, graphs, vectors, documents, and key-values — in a single command. SEARCH CONTEXT uses a 3-tier strategy (field-value index, token index, then global scan), automatically expands results via graph traversal and cross-references, groups results by structure type, and returns connections between found entities.
 
 ```sql
-SEARCH CONTEXT '<query>' [FIELD <field>] [COLLECTION <col>] [DEPTH <n>] [LIMIT <n>]
+SEARCH CONTEXT '<query>' [FIELD <field>] [COLLECTION <col>] [DEPTH <n>] [LIMIT $1]
 ```
 
 ### Parameters
@@ -160,7 +171,7 @@ SEARCH CONTEXT 'AB1234567' FIELD passport
 Scope to a collection with deeper graph expansion:
 
 ```sql
-SEARCH CONTEXT 'Alice' COLLECTION customers DEPTH 2 LIMIT 50
+SEARCH CONTEXT 'Alice' COLLECTION customers DEPTH 2 LIMIT $1
 ```
 
 ### Response Shape
