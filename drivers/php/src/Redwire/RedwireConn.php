@@ -22,6 +22,7 @@ use Reddb\Conn;
 use Reddb\Options;
 use Reddb\RedDBException\AuthRefused;
 use Reddb\RedDBException\EngineError;
+use Reddb\RedDBException\ParamsUnsupported;
 use Reddb\RedDBException\ProtocolError;
 use Reddb\Url;
 
@@ -31,6 +32,7 @@ final class RedwireConn implements Conn
     private $stream;
     private bool $closed = false;
     private int $nextCorrelation = 1;
+    private int $serverFeatures;
 
     /**
      * @param resource $stream A connected, post-handshake stream resource.
@@ -42,6 +44,7 @@ final class RedwireConn implements Conn
             throw new \InvalidArgumentException('RedwireConn requires a stream resource');
         }
         $this->stream = $stream;
+        $this->serverFeatures = self::featuresFromArray($session);
     }
 
     /** Open a TCP / TLS connection and run the RedWire handshake. */
@@ -176,12 +179,13 @@ final class RedwireConn implements Conn
         if ($chosen === null) {
             throw new ProtocolError("HelloAck missing 'auth' field");
         }
+        $serverFeatures = self::featuresFromArray($ackJson);
 
         // 4. Auth dispatch.
         switch ($chosen) {
             case 'anonymous':
                 self::writeFrame($stream, Frame::make(Frame::KIND_AUTH_RESPONSE, 2, ''));
-                return self::finishOneRtt($stream);
+                return self::finishOneRtt($stream, $serverFeatures);
             case 'bearer':
                 if ($token === null) {
                     throw new AuthRefused(
@@ -190,14 +194,14 @@ final class RedwireConn implements Conn
                 }
                 $body = json_encode(['token' => $token], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
                 self::writeFrame($stream, Frame::make(Frame::KIND_AUTH_RESPONSE, 2, $body));
-                return self::finishOneRtt($stream);
+                return self::finishOneRtt($stream, $serverFeatures);
             case 'scram-sha-256':
                 if ($username === null || $password === null) {
                     throw new AuthRefused(
                         'server picked scram-sha-256 but no username/password configured'
                     );
                 }
-                return self::performScram($stream, $username, $password);
+                return self::performScram($stream, $username, $password, $serverFeatures);
             default:
                 throw new ProtocolError(
                     "server picked unsupported auth method: {$chosen}"
@@ -206,7 +210,7 @@ final class RedwireConn implements Conn
     }
 
     /** @param resource $stream */
-    private static function finishOneRtt($stream): array
+    private static function finishOneRtt($stream, int $serverFeatures): array
     {
         $f = self::readFrame($stream);
         if ($f->kind === Frame::KIND_AUTH_FAIL) {
@@ -218,11 +222,11 @@ final class RedwireConn implements Conn
             );
         }
         $j = self::decodeJson($f->payload, 'AuthOk');
-        return is_array($j) ? $j : [];
+        return self::sessionWithFeatures(is_array($j) ? $j : [], $serverFeatures);
     }
 
     /** @param resource $stream */
-    private static function performScram($stream, string $username, string $password): array
+    private static function performScram($stream, string $username, string $password, int $serverFeatures): array
     {
         $clientNonce = Scram::newClientNonce();
         $clientFirst = Scram::clientFirst($username, $clientNonce);
@@ -261,7 +265,7 @@ final class RedwireConn implements Conn
             );
         }
         $j = self::decodeJson($ok->payload, 'AuthOk');
-        $session = is_array($j) ? $j : [];
+        $session = self::sessionWithFeatures(is_array($j) ? $j : [], $serverFeatures);
         $sig = self::parseServerSignature($session);
         if ($sig !== null
             && !Scram::verifyServerSignature($password, $sf['salt'], $sf['iter'], $authMessage, $sig)
@@ -312,11 +316,37 @@ final class RedwireConn implements Conn
     // Conn methods
     // -----------------------------------------------------------------
 
-    public function query(string $sql): string
+    public function features(): int
+    {
+        return $this->serverFeatures;
+    }
+
+    public function supportsParams(): bool
+    {
+        return ($this->serverFeatures & Frame::FEATURE_PARAMS) === Frame::FEATURE_PARAMS;
+    }
+
+    public function query(string $sql, array $params = []): string
     {
         $this->ensureOpen();
         $corr = $this->nextCorr();
-        self::writeFrame($this->stream, Frame::make(Frame::KIND_QUERY, $corr, $sql));
+        if ($params === []) {
+            self::writeFrame($this->stream, Frame::make(Frame::KIND_QUERY, $corr, $sql));
+        } else {
+            if (!$this->supportsParams()) {
+                throw new ParamsUnsupported(
+                    'server did not advertise FEATURE_PARAMS — upgrade the server to use parameterized queries'
+                );
+            }
+            self::writeFrame(
+                $this->stream,
+                Frame::make(
+                    Frame::KIND_QUERY_WITH_PARAMS,
+                    $corr,
+                    ValueCodec::encodeQueryWithParams($sql, $params),
+                ),
+            );
+        }
         $resp = self::readFrame($this->stream);
         $this->assertCorr($resp, $corr);
         if ($resp->kind === Frame::KIND_RESULT) {
@@ -552,6 +582,25 @@ final class RedwireConn implements Conn
             return $j['reason'];
         }
         return $payload;
+    }
+
+    /** @param array<int|string,mixed> $json */
+    private static function featuresFromArray(array $json): int
+    {
+        $features = $json['features'] ?? 0;
+        return is_int($features) ? $features : (is_float($features) ? (int) $features : 0);
+    }
+
+    /**
+     * @param array<int|string,mixed> $session
+     * @return array<int|string,mixed>
+     */
+    private static function sessionWithFeatures(array $session, int $serverFeatures): array
+    {
+        if (!array_key_exists('features', $session)) {
+            $session['features'] = $serverFeatures;
+        }
+        return $session;
     }
 
     /**

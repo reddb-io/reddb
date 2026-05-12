@@ -12,8 +12,12 @@ namespace Reddb;
 
 interface Conn
 {
-    /** Run a SQL query. Returns the engine's JSON envelope as a string. */
-    public function query(string $sql): string;
+    /**
+     * Run a SQL query. Optional params bind positional `$N` placeholders.
+     *
+     * @param array<int,mixed> $params
+     */
+    public function query(string $sql, array $params = []): string;
 
     /**
      * Insert a single row into a collection.
