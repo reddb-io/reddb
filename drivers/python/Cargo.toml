@@ -1,3 +1,8 @@
+# Keep this crate out of the top-level workspace — it's a cdylib built by
+# maturin, not a workspace member. Without this empty table cargo treats
+# the package as a workspace member candidate and fails with E0464.
+[workspace]
+
 [package]
 name = "reddb-python"
 version = "1.0.7"

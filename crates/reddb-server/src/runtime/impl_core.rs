@@ -5742,7 +5742,7 @@ impl RedDBRuntime {
     /// calls pay zero parse + cache overhead.
     ///
     /// Applies secret decryption on SELECT results, identical to `execute_query`.
-    pub(crate) fn execute_query_expr(&self, expr: QueryExpr) -> RedDBResult<RuntimeQueryResult> {
+    pub fn execute_query_expr(&self, expr: QueryExpr) -> RedDBResult<RuntimeQueryResult> {
         let _config_snapshot_guard = ConfigSnapshotGuard::install(Arc::clone(&self.inner.db));
         let _secret_store_guard = SecretStoreGuard::install(self.inner.auth_store.read().clone());
         // View rewrite (Phase 2.1): substitute any `QueryExpr::Table(tq)`

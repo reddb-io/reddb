@@ -38,6 +38,66 @@ with reddb.connect("memory://") as db:
     print(db.query("SELECT * FROM users"))
 ```
 
+## Parameterized queries
+
+`db.query(sql, *params)` binds positional `$N` placeholders without
+splicing values into the SQL string — the engine evaluates a parsed
+expression with typed values, so quoting bugs and SQL injection are
+not on the menu.
+
+```python
+import datetime, uuid
+import reddb
+
+with reddb.connect("memory://") as db:
+    db.query("CREATE TABLE users (id INT, name TEXT, age INT)")
+    db.insert("users", {"id": 1, "name": "Alice", "age": 30})
+    db.insert("users", {"id": 2, "name": "Bob",   "age": 25})
+
+    # variadic positional form
+    rows = db.query("SELECT * FROM users WHERE id = $1", 2)["rows"]
+
+    # keyword form — both produce the same wire call
+    rows = db.query("SELECT * FROM users WHERE id = $1", params=[2])["rows"]
+
+    # vector parameter for SEARCH SIMILAR
+    db.query(
+        "SEARCH SIMILAR $1 IN embeddings LIMIT $2",
+        [0.1, 0.2, 0.3], 10,
+    )
+
+    # bytes / timestamp / uuid are first-class
+    db.query("SELECT * FROM blobs WHERE blob = $1", b"\\x00\\x01\\x02")
+    db.query("SELECT * FROM events WHERE at = $1", datetime.datetime(2026, 5, 12))
+    db.query("SELECT * FROM users WHERE uid = $1",
+             uuid.UUID("12345678-1234-5678-1234-567812345678"))
+```
+
+### Native type mapping
+
+| Python                                | Engine `Value`     |
+|---------------------------------------|--------------------|
+| `None`                                | `Null`             |
+| `bool`                                | `Boolean`          |
+| `int`  (`-2^63 .. 2^63-1`)            | `Integer`          |
+| `int`  (`2^63 .. 2^64-1`)             | `UnsignedInteger`  |
+| `float`                               | `Float`            |
+| `str`                                 | `Text`             |
+| `bytes`, `bytearray`                  | `Blob`             |
+| `list[float|int]`                     | `Vector` (f32)     |
+| `datetime.datetime`                   | `Timestamp` (sec)  |
+| `uuid.UUID`                           | `Uuid` (16 bytes)  |
+| `dict[str, scalar]`                   | `Json`             |
+
+Anything else raises `ValueError("[INVALID_PARAMS] ...")` so a typo
+(`tuple`, `set`, unsupported numpy scalar) fails loud instead of
+silently coercing.
+
+> Parameterized queries currently require the embedded backend
+> (`memory://` or `file://`). Over `grpc://` they raise
+> `[PARAMS_UNSUPPORTED] ...` until the gRPC server advertises
+> `FEATURE_PARAMS` (tracked alongside the Rust client work in #364).
+
 ## Connection URIs
 
 | URI                       | Backend                          | Status        |
@@ -61,7 +121,8 @@ import reddb
 
 db = reddb.connect(uri: str) -> RedDb
 
-db.query(sql: str)                              -> {"statement", "affected", "columns", "rows"}
+db.query(sql: str, *params)                      -> {"statement", "affected", "columns", "rows"}
+db.query(sql: str, params=[...])                 -> {"statement", "affected", "columns", "rows"}
 db.insert(collection: str, payload: dict)        -> {"affected"}
 db.bulk_insert(collection: str, payloads: list[dict]) -> {"affected"}
 db.delete(collection: str, id: str)              -> {"affected"}

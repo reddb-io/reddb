@@ -7,8 +7,12 @@ use std::sync::Arc;
 
 use reddb::api::RedDBOptions;
 use reddb::runtime::RedDBRuntime;
+use reddb::storage::query::modes::parse_multi;
 use reddb::storage::query::unified::UnifiedRecord;
+use reddb::storage::query::user_params;
 use reddb::storage::schema::Value as SchemaValue;
+
+pub use reddb::storage::schema::Value as ParamValue;
 
 pub struct EmbeddedRuntime {
     runtime: Arc<RedDBRuntime>,
@@ -50,6 +54,22 @@ impl EmbeddedRuntime {
 
     pub fn query(&self, sql: &str) -> Result<QueryRows, String> {
         let qr = self.runtime.execute_query(sql).map_err(|e| e.to_string())?;
+        Ok(map_query_result(&qr))
+    }
+
+    /// Parameterized query: parse `sql`, bind `$N` slots with `params`,
+    /// then run the expression directly (skips the SQL plan cache).
+    pub fn query_with_params(
+        &self,
+        sql: &str,
+        params: &[ParamValue],
+    ) -> Result<QueryRows, String> {
+        let parsed = parse_multi(sql).map_err(|e| e.to_string())?;
+        let bound = user_params::bind(&parsed, params).map_err(|e| e.to_string())?;
+        let qr = self
+            .runtime
+            .execute_query_expr(bound)
+            .map_err(|e| e.to_string())?;
         Ok(map_query_result(&qr))
     }
 
@@ -114,7 +134,8 @@ fn map_query_result(qr: &reddb::runtime::RuntimeQueryResult) -> QueryRows {
         .records
         .first()
         .map(|r| {
-            let mut keys: Vec<String> = r.values.keys().cloned().collect();
+            let mut keys: Vec<String> =
+                r.iter_fields().map(|(k, _)| k.to_string()).collect();
             keys.sort();
             keys
         })
@@ -132,11 +153,12 @@ fn map_query_result(qr: &reddb::runtime::RuntimeQueryResult) -> QueryRows {
 }
 
 fn record_to_pairs(record: &UnifiedRecord) -> Vec<(String, ScalarOut)> {
-    let mut entries: Vec<(&String, &SchemaValue)> = record.iter_fields().collect();
-    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let mut entries: Vec<(&std::sync::Arc<str>, &SchemaValue)> =
+        record.iter_fields().collect();
+    entries.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
     entries
         .into_iter()
-        .map(|(k, v)| (k.clone(), schema_value_to_scalar(v)))
+        .map(|(k, v)| (k.to_string(), schema_value_to_scalar(v)))
         .collect()
 }
 
@@ -153,8 +175,8 @@ fn schema_value_to_scalar(v: &SchemaValue) -> ScalarOut {
         | SchemaValue::Duration(n)
         | SchemaValue::Decimal(n) => ScalarOut::Int(*n),
         SchemaValue::Password(_) | SchemaValue::Secret(_) => ScalarOut::Text("***".to_string()),
-        SchemaValue::Text(s)
-        | SchemaValue::Email(s)
+        SchemaValue::Text(s) => ScalarOut::Text(s.to_string()),
+        SchemaValue::Email(s)
         | SchemaValue::Url(s)
         | SchemaValue::NodeRef(s)
         | SchemaValue::EdgeRef(s) => ScalarOut::Text(s.clone()),

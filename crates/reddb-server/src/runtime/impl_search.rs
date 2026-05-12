@@ -1158,7 +1158,11 @@ impl RedDBRuntime {
         )?;
 
         let full_prompt = render_prompt(&ask_context, &ask.question);
-        let sources_count = ask_context.vector_hits.len() + ask_context.filtered_rows.len();
+        // Issue #394: sources_flat ordering mirrors the prompt render
+        // order (filtered_rows first, then vector_hits) so `[^N]` markers
+        // the LLM emits index correctly into this flat array.
+        let (sources_flat_json, source_urns) = build_sources_flat(&ask_context);
+        let sources_count = source_urns.len();
 
         // Step 3: Call LLM — use configured defaults if no provider/model specified
         let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self);
@@ -1214,14 +1218,16 @@ impl RedDBRuntime {
         // LLM answer. The parser is pure and bounds-checked against the
         // flat source count we passed; out-of-range markers come back
         // as `validation.warnings` (no retry yet — that lands in #395).
-        let citation_result = crate::runtime::ai::citation_parser::parse_citations(
-            &answer,
-            sources_count,
-        );
-        let citations_json = citations_to_json(&citation_result.citations);
+        let citation_result =
+            crate::runtime::ai::citation_parser::parse_citations(&answer, sources_count);
+        let citations_json = citations_to_json(&citation_result.citations, &source_urns);
         let validation_json = validation_to_json(&citation_result.warnings);
-        let citations_bytes = crate::json::to_vec(&citations_json).unwrap_or_else(|_| b"[]".to_vec());
-        let validation_bytes = crate::json::to_vec(&validation_json).unwrap_or_else(|_| b"{}".to_vec());
+        let citations_bytes =
+            crate::json::to_vec(&citations_json).unwrap_or_else(|_| b"[]".to_vec());
+        let validation_bytes =
+            crate::json::to_vec(&validation_json).unwrap_or_else(|_| b"{}".to_vec());
+        let sources_flat_bytes =
+            crate::json::to_vec(&sources_flat_json).unwrap_or_else(|_| b"[]".to_vec());
 
         // Step 4: Build result
         let mut result = UnifiedResult::with_columns(vec![
@@ -1231,6 +1237,7 @@ impl RedDBRuntime {
             "prompt_tokens".into(),
             "completion_tokens".into(),
             "sources_count".into(),
+            "sources_flat".into(),
             "citations".into(),
             "validation".into(),
         ]);
@@ -1244,6 +1251,7 @@ impl RedDBRuntime {
             Value::Integer(completion_tokens as i64),
         );
         record.set("sources_count", Value::Integer(sources_count as i64));
+        record.set("sources_flat", Value::Json(sources_flat_bytes));
         record.set("citations", Value::Json(citations_bytes));
         record.set("validation", Value::Json(validation_bytes));
         result.push(record);
@@ -1454,6 +1462,7 @@ fn format_minimal_fallback(
 /// 1-indexed value should use `marker`.
 fn citations_to_json(
     citations: &[crate::runtime::ai::citation_parser::Citation],
+    source_urns: &[String],
 ) -> crate::json::Value {
     let mut arr: Vec<crate::json::Value> = Vec::with_capacity(citations.len());
     for c in citations {
@@ -1471,9 +1480,89 @@ fn citations_to_json(
             "source_index".to_string(),
             crate::json::Value::Number(c.source_index as f64),
         );
+        // Issue #394: thread the URN through. Out-of-range markers
+        // (already surfaced as `validation.warnings`) get `null`.
+        let idx = c.source_index as usize;
+        let urn = if idx < source_urns.len() {
+            crate::json::Value::String(source_urns[idx].clone())
+        } else {
+            crate::json::Value::Null
+        };
+        obj.insert("urn".to_string(), urn);
         arr.push(crate::json::Value::Object(obj));
     }
     crate::json::Value::Array(arr)
+}
+
+/// Issue #394: assemble the flat `sources_flat` view that mirrors the
+/// prompt render order (filtered_rows first, then vector_hits). Returns
+/// the JSON array plus a parallel `Vec<String>` of URNs aligned by
+/// index so the citation serializer can fill the per-marker `urn`
+/// field without re-deriving it.
+fn build_sources_flat(
+    ctx: &crate::runtime::ask_pipeline::AskContext,
+) -> (crate::json::Value, Vec<String>) {
+    use crate::runtime::ai::urn_codec::{encode, Urn};
+    let mut arr: Vec<crate::json::Value> =
+        Vec::with_capacity(ctx.filtered_rows.len() + ctx.vector_hits.len());
+    let mut urns: Vec<String> = Vec::with_capacity(arr.capacity());
+    for row in &ctx.filtered_rows {
+        let urn = encode(&Urn::row(
+            row.collection.clone(),
+            row.entity.id.raw().to_string(),
+        ));
+        let mut obj: crate::json::Map<String, crate::json::Value> = Default::default();
+        obj.insert("kind".to_string(), crate::json::Value::String("row".into()));
+        obj.insert("urn".to_string(), crate::json::Value::String(urn.clone()));
+        obj.insert(
+            "collection".to_string(),
+            crate::json::Value::String(row.collection.clone()),
+        );
+        obj.insert(
+            "id".to_string(),
+            crate::json::Value::String(row.entity.id.raw().to_string()),
+        );
+        obj.insert(
+            "matched_literal".to_string(),
+            crate::json::Value::String(row.matched_literal.clone()),
+        );
+        if let Some(col) = &row.matched_column {
+            obj.insert(
+                "matched_column".to_string(),
+                crate::json::Value::String(col.clone()),
+            );
+        }
+        arr.push(crate::json::Value::Object(obj));
+        urns.push(urn);
+    }
+    for hit in &ctx.vector_hits {
+        let urn = encode(&Urn::vector_hit(
+            hit.collection.clone(),
+            hit.entity_id.to_string(),
+            hit.score,
+        ));
+        let mut obj: crate::json::Map<String, crate::json::Value> = Default::default();
+        obj.insert(
+            "kind".to_string(),
+            crate::json::Value::String("vector_hit".into()),
+        );
+        obj.insert("urn".to_string(), crate::json::Value::String(urn.clone()));
+        obj.insert(
+            "collection".to_string(),
+            crate::json::Value::String(hit.collection.clone()),
+        );
+        obj.insert(
+            "id".to_string(),
+            crate::json::Value::String(hit.entity_id.to_string()),
+        );
+        obj.insert(
+            "score".to_string(),
+            crate::json::Value::Number(hit.score as f64),
+        );
+        arr.push(crate::json::Value::Object(obj));
+        urns.push(urn);
+    }
+    (crate::json::Value::Array(arr), urns)
 }
 
 /// Issue #393: serialize structural warnings as `{ ok, warnings: [...] }`.
@@ -1508,7 +1597,10 @@ fn validation_to_json(
         arr.push(crate::json::Value::Object(obj));
     }
     let mut root: crate::json::Map<String, crate::json::Value> = Default::default();
-    root.insert("ok".to_string(), crate::json::Value::Bool(warnings.is_empty()));
+    root.insert(
+        "ok".to_string(),
+        crate::json::Value::Bool(warnings.is_empty()),
+    );
     root.insert("warnings".to_string(), crate::json::Value::Array(arr));
     crate::json::Value::Object(root)
 }
@@ -1676,7 +1768,13 @@ mod citation_wedge_tests {
         let answer = "Churn rose in Q3[^1] because pricing changed in late Q2[^2].";
         let sources_count = 2;
         let r = parse_citations(answer, sources_count);
-        let cit = citations_to_json(&r.citations);
+        // Issue #394: thread URNs so the per-citation `urn` field shows
+        // up in the serialized form.
+        let urns = vec![
+            "reddb:incidents/1".to_string(),
+            "reddb:incidents/2".to_string(),
+        ];
+        let cit = citations_to_json(&r.citations, &urns);
         let val = validation_to_json(&r.warnings);
 
         let cit_bytes = crate::json::to_vec(&cit).unwrap();
@@ -1691,6 +1789,17 @@ mod citation_wedge_tests {
         let first = arr[0].as_object().expect("obj");
         assert_eq!(first.get("marker").and_then(|v| v.as_u64()), Some(1));
         assert_eq!(first.get("source_index").and_then(|v| v.as_u64()), Some(0));
+        assert_eq!(
+            first.get("urn").and_then(|v| v.as_str()),
+            Some("reddb:incidents/1")
+        );
+        assert_eq!(
+            arr[1]
+                .as_object()
+                .and_then(|o| o.get("urn"))
+                .and_then(|v| v.as_str()),
+            Some("reddb:incidents/2")
+        );
         let span = first.get("span").and_then(|v| v.as_array()).expect("span");
         assert_eq!(span.len(), 2);
         // Span points to the literal `[^1]` substring.
@@ -1702,7 +1811,10 @@ mod citation_wedge_tests {
         let obj = val.as_object().expect("obj");
         assert_eq!(obj.get("ok").and_then(|v| v.as_bool()), Some(true));
         assert_eq!(
-            obj.get("warnings").and_then(|v| v.as_array()).unwrap().len(),
+            obj.get("warnings")
+                .and_then(|v| v.as_array())
+                .unwrap()
+                .len(),
             0
         );
     }
@@ -1723,17 +1835,14 @@ mod citation_wedge_tests {
         let warnings = obj.get("warnings").and_then(|v| v.as_array()).expect("arr");
         assert_eq!(warnings.len(), 1);
         let w = warnings[0].as_object().expect("warn obj");
-        assert_eq!(
-            w.get("kind").and_then(|v| v.as_str()),
-            Some("out_of_range")
-        );
+        assert_eq!(w.get("kind").and_then(|v| v.as_str()), Some("out_of_range"));
     }
 
     #[test]
     fn answer_without_markers_emits_empty_citations() {
         let answer = "no citations here";
         let r = parse_citations(answer, 3);
-        let cit = citations_to_json(&r.citations);
+        let cit = citations_to_json(&r.citations, &[]);
         let val = validation_to_json(&r.warnings);
         let bytes = crate::json::to_vec(&cit).unwrap();
         assert_eq!(bytes, b"[]", "empty array literal");
@@ -1750,7 +1859,7 @@ mod citation_wedge_tests {
     fn malformed_marker_surfaces_warning_not_citation() {
         let answer = "broken[^abc] here";
         let r = parse_citations(answer, 5);
-        let cit = citations_to_json(&r.citations);
+        let cit = citations_to_json(&r.citations, &[]);
         let val = validation_to_json(&r.warnings);
         let cit_bytes = crate::json::to_vec(&cit).unwrap();
         assert_eq!(cit_bytes, b"[]");
@@ -1764,6 +1873,149 @@ mod citation_wedge_tests {
                 .and_then(|o| o.get("kind"))
                 .and_then(|x| x.as_str()),
             Some("malformed")
+        );
+    }
+
+    /// Issue #394: `build_sources_flat` yields one entry per
+    /// filtered_row + vector_hit, in render order, each carrying a
+    /// `urn` that round-trips through the codec.
+    #[test]
+    fn build_sources_flat_orders_rows_before_vectors_with_urns() {
+        use crate::runtime::ai::urn_codec::{decode, KindHint, UrnKind};
+        use crate::runtime::ask_pipeline::{
+            AskContext, CandidateCollections, FilteredRow, StageTimings, TokenSet, VectorHit,
+        };
+        use crate::storage::schema::Value;
+        use crate::storage::unified::entity::{
+            EntityData, EntityId, EntityKind, RowData, UnifiedEntity,
+        };
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let entity = UnifiedEntity::new(
+            EntityId::new(42),
+            EntityKind::TableRow {
+                table: Arc::from("incidents"),
+                row_id: 42,
+            },
+            EntityData::Row(RowData {
+                columns: Vec::new(),
+                named: Some(
+                    [("body".to_string(), Value::text("ticket FDD-1".to_string()))]
+                        .into_iter()
+                        .collect(),
+                ),
+                schema: None,
+            }),
+        );
+        let row = FilteredRow {
+            collection: "incidents".to_string(),
+            entity,
+            matched_literal: "FDD-1".to_string(),
+            matched_column: Some("body".to_string()),
+        };
+        let hit = VectorHit {
+            collection: "docs".to_string(),
+            entity_id: 9,
+            score: 0.5,
+        };
+        let ctx = AskContext {
+            question: "q?".to_string(),
+            tokens: TokenSet {
+                keywords: vec!["q".into()],
+                literals: vec!["FDD-1".into()],
+            },
+            candidates: CandidateCollections {
+                collections: vec!["incidents".to_string(), "docs".to_string()],
+                columns_by_collection: HashMap::new(),
+            },
+            vector_hits: vec![hit],
+            filtered_rows: vec![row],
+            timings: StageTimings::default(),
+        };
+        let (sources_flat, urns) = build_sources_flat(&ctx);
+
+        assert_eq!(urns.len(), 2);
+        assert_eq!(urns[0], "reddb:incidents/42");
+        // Row entry comes first (render order); vector_hit second.
+        let arr = sources_flat.as_array().expect("arr");
+        assert_eq!(arr.len(), 2);
+        let first = arr[0].as_object().expect("obj");
+        assert_eq!(first.get("kind").and_then(|v| v.as_str()), Some("row"));
+        assert_eq!(
+            first.get("urn").and_then(|v| v.as_str()),
+            Some(urns[0].as_str())
+        );
+        let second = arr[1].as_object().expect("obj");
+        assert_eq!(
+            second.get("kind").and_then(|v| v.as_str()),
+            Some("vector_hit")
+        );
+        // URN round-trips: every kind decodes back without error.
+        assert_eq!(decode(&urns[0], KindHint::Row).unwrap().kind, UrnKind::Row);
+        let dec = decode(&urns[1], KindHint::VectorHit).unwrap();
+        match dec.kind {
+            UrnKind::VectorHit { score } => assert!((score - 0.5).abs() < 1e-5),
+            _ => panic!("vector_hit kind expected"),
+        }
+    }
+
+    /// Issue #394: citations attach the URN of the source they cite,
+    /// matched by `source_index` into the parallel `urns` slice.
+    #[test]
+    fn citation_urn_matches_sources_flat_by_index() {
+        let answer = "X[^1] and Y[^2].";
+        let r = parse_citations(answer, 2);
+        let urns = vec![
+            "reddb:incidents/1".to_string(),
+            "reddb:docs/9#0.5".to_string(),
+        ];
+        let cit = citations_to_json(&r.citations, &urns);
+        let arr = cit.as_array().expect("arr");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(
+            arr[0]
+                .as_object()
+                .and_then(|o| o.get("urn"))
+                .and_then(|v| v.as_str()),
+            Some("reddb:incidents/1")
+        );
+        assert_eq!(
+            arr[1]
+                .as_object()
+                .and_then(|o| o.get("urn"))
+                .and_then(|v| v.as_str()),
+            Some("reddb:docs/9#0.5")
+        );
+    }
+
+    /// Issue #394: out-of-range source_index gets a JSON `null` urn
+    /// rather than panicking or dropping the citation entry — the
+    /// validation column already flags the marker.
+    #[test]
+    fn citation_urn_is_null_when_source_index_out_of_range() {
+        let answer = "X[^5].";
+        let r = parse_citations(answer, 1);
+        // parser produces a warning, not a citation, for out-of-range
+        // markers — so synthesize a citation with an unsafe index to
+        // pin the serializer's bounds check directly.
+        use crate::runtime::ai::citation_parser::Citation;
+        let cit = vec![Citation {
+            marker: 5,
+            span: 0..4,
+            source_index: 4,
+        }];
+        let urns = vec!["reddb:incidents/1".to_string()];
+        let _ = r;
+        let json = citations_to_json(&cit, &urns);
+        let arr = json.as_array().expect("arr");
+        assert!(
+            arr[0]
+                .as_object()
+                .and_then(|o| o.get("urn"))
+                .map(|v| matches!(v, crate::json::Value::Null))
+                .unwrap_or(false),
+            "expected urn=null for out-of-range source_index"
         );
     }
 
