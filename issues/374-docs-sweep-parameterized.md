@@ -208,3 +208,34 @@ Verification (this slice):
 - `pnpm test` ran and skipped because `target/debug/red` is not built.
 - `pnpm typecheck` exited nonzero after reporting `TypeScript: No errors
   found`. No TypeScript files changed.
+
+Slice 8 (this commit): `docs/data-models/vectors.md` now defaults the
+supported SQL vector examples to bind parameters where the parser already
+accepts them.
+
+- The first `SEARCH SIMILAR` example now uses `$1` for the vector, `$2` for
+  limit, and `$3` for `MIN_SCORE`.
+- The similarity section now shows both bound-vector and bound-text
+  `SEARCH SIMILAR` forms.
+- `SEARCH TEXT` and `SEARCH HYBRID` examples use bound limit slots while
+  keeping text/vector values literal because those parser paths do not yet
+  accept placeholder values.
+- The `WITH AUTO EMBED` `INSERT INTO docs` example now binds row values while
+  keeping provider/model tokens literal.
+- Added the temporary ADR #352 GitHub cross-link because no local
+  `docs/adr/00XX-parameterized-queries.md` exists yet.
+
+Verification (this slice):
+- TDD red check first failed because `docs/data-models/vectors.md` was missing
+  supported `SEARCH SIMILAR $1` markers and the ADR #352 cross-link.
+- Green marker check passed for supported `SEARCH SIMILAR` vector/text
+  placeholders, bound `INSERT` values, the ADR #352 cross-link, and absence of
+  unsupported `VECTOR SEARCH ... $1` / `SEARCH IVF $1` examples.
+- `cargo test -p reddb-io-server --lib bind_search_similar_text_with_limit_param`
+  passed.
+- `cargo test -p reddb-io-server --lib bind_insert_values_with_vector_param`
+  passed.
+- `git diff --check` clean.
+- `pnpm test` ran and skipped because `target/debug/red` is not built.
+- `pnpm typecheck` exited nonzero after reporting `TypeScript: No errors
+  found`. No TypeScript files changed.
