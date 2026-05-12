@@ -3,9 +3,9 @@ import 'dart:typed_data';
 /// Common surface for both transports. The `Reddb` facade holds one
 /// of these and routes calls.
 abstract class Conn {
-  /// Run a SQL string. Returns the raw JSON envelope as bytes — caller
-  /// decodes with `dart:convert` (`jsonDecode(utf8.decode(bytes))`).
-  Future<Uint8List> query(String sql);
+  /// Run a SQL string with optional positional params. Returns the raw JSON
+  /// envelope as bytes — caller decodes with `dart:convert`.
+  Future<Uint8List> query(String sql, [List<Object?>? params]);
 
   /// Insert a single row. `payload` is encoded JSON (object).
   Future<Uint8List> insert(String collection, Map<String, dynamic> payload);

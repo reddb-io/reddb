@@ -31,6 +31,11 @@ class EngineError extends RedDBError {
       : super('ENGINE', message, details);
 }
 
+/// Parameterized query issued against a server without FEATURE_PARAMS.
+class ParamsUnsupported extends RedDBError {
+  ParamsUnsupported(String message) : super('PARAMS_UNSUPPORTED', message);
+}
+
 /// Caller tried to send a frame larger than 16 MiB.
 class FrameTooLarge extends RedDBError {
   FrameTooLarge(int size, int max)
