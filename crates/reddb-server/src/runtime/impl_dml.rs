@@ -443,196 +443,294 @@ impl RedDBRuntime {
             // because create_timeseries_point isn't plumbed through this fn.
             let mut entity_outputs: Vec<crate::application::entity::CreateEntityOutput> =
                 Vec::with_capacity(effective_rows.len());
-            let mut returning_field_snaps: Vec<Vec<(String, Value)>> =
-                if query.returning.is_some() {
-                    Vec::with_capacity(effective_rows.len())
-                } else {
-                    Vec::new()
-                };
-            for row_values in &effective_rows {
-                if row_values.len() != query.columns.len() {
-                    return Err(RedDBError::Query(format!(
-                        "INSERT column count ({}) does not match value count ({})",
-                        query.columns.len(),
-                        row_values.len()
-                    )));
+            let mut returning_field_snaps: Vec<Vec<(String, Value)>> = if query.returning.is_some()
+            {
+                Vec::with_capacity(effective_rows.len())
+            } else {
+                Vec::new()
+            };
+            if matches!(
+                query.entity_type,
+                InsertEntityType::Node | InsertEntityType::Edge
+            ) {
+                enum PreparedGraphInsert {
+                    Node {
+                        fields: Vec<(String, Value)>,
+                        input: CreateNodeInput,
+                    },
+                    Edge {
+                        fields: Vec<(String, Value)>,
+                        input: CreateEdgeInput,
+                    },
                 }
 
-                match query.entity_type {
-                    InsertEntityType::Row => {
-                        if query.returning.is_some() {
-                            return Err(RedDBError::Query(
+                let mut prepared = Vec::with_capacity(effective_rows.len());
+                for row_values in &effective_rows {
+                    if row_values.len() != query.columns.len() {
+                        return Err(RedDBError::Query(format!(
+                            "INSERT column count ({}) does not match value count ({})",
+                            query.columns.len(),
+                            row_values.len()
+                        )));
+                    }
+
+                    match query.entity_type {
+                        InsertEntityType::Node => {
+                            let (node_values, mut metadata) =
+                                split_insert_metadata(self, &query.columns, row_values)?;
+                            merge_with_clauses(
+                                &mut metadata,
+                                query.ttl_ms,
+                                query.expires_at_ms,
+                                &query.with_metadata,
+                            );
+                            ensure_non_tree_reserved_metadata_entries(&metadata)?;
+                            apply_collection_default_ttl_metadata(
+                                self,
+                                &query.table,
+                                &mut metadata,
+                            );
+                            let (columns, values) = pairwise_columns_values(&node_values);
+                            let label = find_column_value_string(&columns, &values, "label")?;
+                            let node_type =
+                                find_column_value_opt_string(&columns, &values, "node_type");
+                            let properties = extract_remaining_properties(
+                                &columns,
+                                &values,
+                                &["label", "node_type"],
+                            );
+                            prepared.push(PreparedGraphInsert::Node {
+                                fields: node_values,
+                                input: CreateNodeInput {
+                                    collection: query.table.clone(),
+                                    label,
+                                    node_type,
+                                    properties,
+                                    metadata,
+                                    embeddings: Vec::new(),
+                                    table_links: Vec::new(),
+                                    node_links: Vec::new(),
+                                },
+                            });
+                        }
+                        InsertEntityType::Edge => {
+                            let (edge_values, mut metadata) =
+                                split_insert_metadata(self, &query.columns, row_values)?;
+                            merge_with_clauses(
+                                &mut metadata,
+                                query.ttl_ms,
+                                query.expires_at_ms,
+                                &query.with_metadata,
+                            );
+                            ensure_non_tree_reserved_metadata_entries(&metadata)?;
+                            apply_collection_default_ttl_metadata(
+                                self,
+                                &query.table,
+                                &mut metadata,
+                            );
+                            let (columns, values) = pairwise_columns_values(&edge_values);
+                            let label = find_column_value_string(&columns, &values, "label")?;
+                            ensure_non_tree_structural_edge_label(&label)?;
+                            let from_id = resolve_edge_endpoint(
+                                self.inner.db.store().as_ref(),
+                                &query.table,
+                                &columns,
+                                &values,
+                                "from",
+                            )?;
+                            let to_id = resolve_edge_endpoint(
+                                self.inner.db.store().as_ref(),
+                                &query.table,
+                                &columns,
+                                &values,
+                                "to",
+                            )?;
+                            let weight = find_column_value_f32_opt(&columns, &values, "weight");
+                            let properties = extract_remaining_properties(
+                                &columns,
+                                &values,
+                                &["label", "from", "to", "weight"],
+                            );
+                            prepared.push(PreparedGraphInsert::Edge {
+                                fields: edge_values,
+                                input: CreateEdgeInput {
+                                    collection: query.table.clone(),
+                                    label,
+                                    from: EntityId::new(from_id),
+                                    to: EntityId::new(to_id),
+                                    weight,
+                                    properties,
+                                    metadata,
+                                },
+                            });
+                        }
+                        _ => unreachable!("prepared graph insert only handles NODE and EDGE"),
+                    }
+                }
+
+                ensure_graph_insert_contract(self, &query.table)?;
+                let mut batch = self.inner.db.batch();
+                for item in prepared {
+                    match item {
+                        PreparedGraphInsert::Node { fields, input } => {
+                            if query.returning.is_some() {
+                                returning_field_snaps.push(fields);
+                            }
+                            let node_type = input.node_type.unwrap_or_else(|| input.label.clone());
+                            batch = batch.add_node_with_type(
+                                input.collection,
+                                input.label,
+                                node_type,
+                                input.properties.into_iter().collect(),
+                                input.metadata.into_iter().collect(),
+                            );
+                        }
+                        PreparedGraphInsert::Edge { fields, input } => {
+                            if query.returning.is_some() {
+                                returning_field_snaps.push(fields);
+                            }
+                            batch = batch.add_edge(
+                                input.collection,
+                                input.label,
+                                input.from,
+                                input.to,
+                                input.weight.unwrap_or(1.0),
+                                input.properties.into_iter().collect(),
+                                input.metadata.into_iter().collect(),
+                            );
+                        }
+                    }
+                }
+                let batch_result = batch
+                    .execute()
+                    .map_err(|err| RedDBError::Internal(format!("{err:?}")))?;
+                let (ids, entity_kind) = match query.entity_type {
+                    InsertEntityType::Node => (batch_result.nodes, "graph_node"),
+                    InsertEntityType::Edge => (batch_result.edges, "graph_edge"),
+                    _ => unreachable!("prepared graph insert only handles NODE and EDGE"),
+                };
+                for id in &ids {
+                    self.stamp_xmin_if_in_txn(&query.table, *id);
+                }
+                self.cdc_emit_insert_batch_no_cache_invalidate(&query.table, &ids, entity_kind);
+                entity_outputs.extend(ids.iter().map(|id| {
+                    crate::application::entity::CreateEntityOutput {
+                        id: *id,
+                        entity: None,
+                    }
+                }));
+                inserted_count = ids.len() as u64;
+            } else {
+                for row_values in &effective_rows {
+                    if row_values.len() != query.columns.len() {
+                        return Err(RedDBError::Query(format!(
+                            "INSERT column count ({}) does not match value count ({})",
+                            query.columns.len(),
+                            row_values.len()
+                        )));
+                    }
+
+                    match query.entity_type {
+                        InsertEntityType::Row => {
+                            if query.returning.is_some() {
+                                return Err(RedDBError::Query(
                                 "RETURNING is not yet supported for this INSERT path (TimeSeries)"
                                     .to_string(),
                             ));
+                            }
+                            let (fields, mut metadata) =
+                                split_insert_metadata(self, &query.columns, row_values)?;
+                            merge_with_clauses(
+                                &mut metadata,
+                                query.ttl_ms,
+                                query.expires_at_ms,
+                                &query.with_metadata,
+                            );
+                            self.insert_timeseries_point(&query.table, fields, metadata)?;
                         }
-                        let (fields, mut metadata) =
-                            split_insert_metadata(self, &query.columns, row_values)?;
-                        merge_with_clauses(
-                            &mut metadata,
-                            query.ttl_ms,
-                            query.expires_at_ms,
-                            &query.with_metadata,
-                        );
-                        self.insert_timeseries_point(&query.table, fields, metadata)?;
-                    }
-                    InsertEntityType::Node => {
-                        let (node_values, mut metadata) =
-                            split_insert_metadata(self, &query.columns, row_values)?;
-                        merge_with_clauses(
-                            &mut metadata,
-                            query.ttl_ms,
-                            query.expires_at_ms,
-                            &query.with_metadata,
-                        );
-                        ensure_non_tree_reserved_metadata_entries(&metadata)?;
-                        let (columns, values) = pairwise_columns_values(&node_values);
-                        let label = find_column_value_string(&columns, &values, "label")?;
-                        let node_type =
-                            find_column_value_opt_string(&columns, &values, "node_type");
-                        let properties = extract_remaining_properties(
-                            &columns,
-                            &values,
-                            &["label", "node_type"],
-                        );
-                        if query.returning.is_some() {
-                            returning_field_snaps.push(node_values.clone());
+                        InsertEntityType::Node | InsertEntityType::Edge => {
+                            unreachable!("NODE and EDGE are handled by the prepared graph path")
                         }
-                        let input = CreateNodeInput {
-                            collection: query.table.clone(),
-                            label,
-                            node_type,
-                            properties,
-                            metadata,
-                            embeddings: Vec::new(),
-                            table_links: Vec::new(),
-                            node_links: Vec::new(),
-                        };
-                        entity_outputs.push(self.create_node(input)?);
-                    }
-                    InsertEntityType::Edge => {
-                        let (edge_values, mut metadata) =
-                            split_insert_metadata(self, &query.columns, row_values)?;
-                        merge_with_clauses(
-                            &mut metadata,
-                            query.ttl_ms,
-                            query.expires_at_ms,
-                            &query.with_metadata,
-                        );
-                        ensure_non_tree_reserved_metadata_entries(&metadata)?;
-                        let (columns, values) = pairwise_columns_values(&edge_values);
-                        let label = find_column_value_string(&columns, &values, "label")?;
-                        ensure_non_tree_structural_edge_label(&label)?;
-                        let from_id = resolve_edge_endpoint(
-                            self.inner.db.store().as_ref(),
-                            &query.table,
-                            &columns,
-                            &values,
-                            "from",
-                        )?;
-                        let to_id = resolve_edge_endpoint(
-                            self.inner.db.store().as_ref(),
-                            &query.table,
-                            &columns,
-                            &values,
-                            "to",
-                        )?;
-                        let weight = find_column_value_f32_opt(&columns, &values, "weight");
-                        let properties = extract_remaining_properties(
-                            &columns,
-                            &values,
-                            &["label", "from", "to", "weight"],
-                        );
-                        if query.returning.is_some() {
-                            returning_field_snaps.push(edge_values.clone());
+                        InsertEntityType::Vector => {
+                            let (vector_values, mut metadata) =
+                                split_insert_metadata(self, &query.columns, row_values)?;
+                            merge_with_clauses(
+                                &mut metadata,
+                                query.ttl_ms,
+                                query.expires_at_ms,
+                                &query.with_metadata,
+                            );
+                            let (columns, values) = pairwise_columns_values(&vector_values);
+                            let dense = find_column_value_vec_f32(&columns, &values, "dense")?;
+                            let content =
+                                find_column_value_opt_string(&columns, &values, "content");
+                            if query.returning.is_some() {
+                                returning_field_snaps.push(vector_values.clone());
+                            }
+                            let input = CreateVectorInput {
+                                collection: query.table.clone(),
+                                dense,
+                                content,
+                                metadata,
+                                link_row: None,
+                                link_node: None,
+                            };
+                            entity_outputs.push(self.create_vector(input)?);
                         }
-                        let input = CreateEdgeInput {
-                            collection: query.table.clone(),
-                            label,
-                            from: EntityId::new(from_id),
-                            to: EntityId::new(to_id),
-                            weight,
-                            properties,
-                            metadata,
-                        };
-                        entity_outputs.push(self.create_edge(input)?);
-                    }
-                    InsertEntityType::Vector => {
-                        let (vector_values, mut metadata) =
-                            split_insert_metadata(self, &query.columns, row_values)?;
-                        merge_with_clauses(
-                            &mut metadata,
-                            query.ttl_ms,
-                            query.expires_at_ms,
-                            &query.with_metadata,
-                        );
-                        let (columns, values) = pairwise_columns_values(&vector_values);
-                        let dense = find_column_value_vec_f32(&columns, &values, "dense")?;
-                        let content = find_column_value_opt_string(&columns, &values, "content");
-                        if query.returning.is_some() {
-                            returning_field_snaps.push(vector_values.clone());
+                        InsertEntityType::Document => {
+                            let (document_values, mut metadata) =
+                                split_insert_metadata(self, &query.columns, row_values)?;
+                            merge_with_clauses(
+                                &mut metadata,
+                                query.ttl_ms,
+                                query.expires_at_ms,
+                                &query.with_metadata,
+                            );
+                            let (columns, values) = pairwise_columns_values(&document_values);
+                            let body_str = find_column_value_string(&columns, &values, "body")?;
+                            let body: crate::json::Value = crate::json::from_str(&body_str)
+                                .map_err(|e| {
+                                    RedDBError::Query(format!("invalid JSON body: {e}"))
+                                })?;
+                            if query.returning.is_some() {
+                                returning_field_snaps.push(document_values.clone());
+                            }
+                            let input = CreateDocumentInput {
+                                collection: query.table.clone(),
+                                body,
+                                metadata,
+                                node_links: Vec::new(),
+                                vector_links: Vec::new(),
+                            };
+                            entity_outputs.push(self.create_document(input)?);
                         }
-                        let input = CreateVectorInput {
-                            collection: query.table.clone(),
-                            dense,
-                            content,
-                            metadata,
-                            link_row: None,
-                            link_node: None,
-                        };
-                        entity_outputs.push(self.create_vector(input)?);
-                    }
-                    InsertEntityType::Document => {
-                        let (document_values, mut metadata) =
-                            split_insert_metadata(self, &query.columns, row_values)?;
-                        merge_with_clauses(
-                            &mut metadata,
-                            query.ttl_ms,
-                            query.expires_at_ms,
-                            &query.with_metadata,
-                        );
-                        let (columns, values) = pairwise_columns_values(&document_values);
-                        let body_str = find_column_value_string(&columns, &values, "body")?;
-                        let body: crate::json::Value = crate::json::from_str(&body_str)
-                            .map_err(|e| RedDBError::Query(format!("invalid JSON body: {e}")))?;
-                        if query.returning.is_some() {
-                            returning_field_snaps.push(document_values.clone());
+                        InsertEntityType::Kv => {
+                            let (kv_values, mut metadata) =
+                                split_insert_metadata(self, &query.columns, row_values)?;
+                            merge_with_clauses(
+                                &mut metadata,
+                                query.ttl_ms,
+                                query.expires_at_ms,
+                                &query.with_metadata,
+                            );
+                            let (columns, values) = pairwise_columns_values(&kv_values);
+                            let key = find_column_value_string(&columns, &values, "key")?;
+                            let value = find_column_value(&columns, &values, "value")?;
+                            if query.returning.is_some() {
+                                returning_field_snaps.push(kv_values.clone());
+                            }
+                            let input = CreateKvInput {
+                                collection: query.table.clone(),
+                                key,
+                                value,
+                                metadata,
+                            };
+                            entity_outputs.push(self.create_kv(input)?);
                         }
-                        let input = CreateDocumentInput {
-                            collection: query.table.clone(),
-                            body,
-                            metadata,
-                            node_links: Vec::new(),
-                            vector_links: Vec::new(),
-                        };
-                        entity_outputs.push(self.create_document(input)?);
                     }
-                    InsertEntityType::Kv => {
-                        let (kv_values, mut metadata) =
-                            split_insert_metadata(self, &query.columns, row_values)?;
-                        merge_with_clauses(
-                            &mut metadata,
-                            query.ttl_ms,
-                            query.expires_at_ms,
-                            &query.with_metadata,
-                        );
-                        let (columns, values) = pairwise_columns_values(&kv_values);
-                        let key = find_column_value_string(&columns, &values, "key")?;
-                        let value = find_column_value(&columns, &values, "value")?;
-                        if query.returning.is_some() {
-                            returning_field_snaps.push(kv_values.clone());
-                        }
-                        let input = CreateKvInput {
-                            collection: query.table.clone(),
-                            key,
-                            value,
-                            metadata,
-                        };
-                        entity_outputs.push(self.create_kv(input)?);
-                    }
-                }
 
-                inserted_count += 1;
+                    inserted_count += 1;
+                }
             }
 
             if let Some(items) = query.returning.as_ref() {
@@ -1533,6 +1631,55 @@ fn build_returning_result(
         stats: Default::default(),
         pre_serialized_json: None,
     }
+}
+
+fn ensure_graph_insert_contract(runtime: &RedDBRuntime, collection: &str) -> RedDBResult<()> {
+    let db = runtime.db();
+    if let Some(contract) = db.collection_contract(collection) {
+        let advisory_implicit_dynamic = matches!(
+            (&contract.origin, &contract.schema_mode),
+            (
+                crate::physical::ContractOrigin::Implicit,
+                crate::catalog::SchemaMode::Dynamic,
+            )
+        );
+        if advisory_implicit_dynamic
+            || matches!(
+                contract.declared_model,
+                crate::catalog::CollectionModel::Graph | crate::catalog::CollectionModel::Mixed
+            )
+        {
+            return Ok(());
+        }
+        return Err(RedDBError::InvalidOperation(format!(
+            "collection '{}' is declared as '{:?}' and does not allow 'Graph' writes",
+            collection, contract.declared_model
+        )));
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    db.save_collection_contract(crate::physical::CollectionContract {
+        name: collection.to_string(),
+        declared_model: crate::catalog::CollectionModel::Graph,
+        schema_mode: crate::catalog::SchemaMode::Dynamic,
+        origin: crate::physical::ContractOrigin::Implicit,
+        version: 1,
+        created_at_unix_ms: now,
+        updated_at_unix_ms: now,
+        default_ttl_ms: db.collection_default_ttl_ms(collection),
+        context_index_fields: Vec::new(),
+        declared_columns: Vec::new(),
+        table_def: None,
+        timestamps_enabled: false,
+        context_index_enabled: false,
+        append_only: false,
+        subscriptions: Vec::new(),
+    })
+    .map(|_| ())
+    .map_err(|err| RedDBError::Internal(err.to_string()))
 }
 
 fn dedupe_update_columns(mut columns: Vec<String>) -> Vec<String> {
