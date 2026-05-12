@@ -502,7 +502,14 @@ impl<'a> Parser<'a> {
                 }
 
                 self.expect(Token::K)?;
-                let k = self.parse_positive_integer("K")? as usize;
+                // K accepts a positive integer literal OR `$N` placeholder (#361).
+                let mut k_param: Option<usize> = None;
+                let k = if matches!(self.peek(), Token::Dollar | Token::Question) {
+                    k_param = Some(self.parse_param_slot("K")?);
+                    0
+                } else {
+                    self.parse_positive_integer("K")? as usize
+                };
 
                 self.expect(Token::Collection)?;
                 let collection = self.expect_ident()?;
@@ -516,6 +523,7 @@ impl<'a> Parser<'a> {
                     k,
                     collection,
                     column,
+                    k_param,
                 }))
             }
             _ => Err(ParseError::expected(

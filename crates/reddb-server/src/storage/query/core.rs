@@ -2257,6 +2257,11 @@ pub enum SearchCommand {
         k: usize,
         collection: String,
         column: String,
+        /// `$N` placeholder for the `K` slot (issue #361). Same shape
+        /// as `SearchCommand::Hybrid::limit_param`; the binder
+        /// substitutes the user-supplied positive integer into `k`
+        /// and clears this back to `None`.
+        k_param: Option<usize>,
     },
 }
 
