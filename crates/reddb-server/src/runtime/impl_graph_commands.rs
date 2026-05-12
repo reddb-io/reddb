@@ -321,7 +321,14 @@ impl RedDBRuntime {
                 collection,
                 limit,
                 min_score,
+                vector_param,
             } => {
+                if vector_param.is_some() {
+                    return Err(RedDBError::Query(
+                        "SEARCH SIMILAR $N vector parameter was not bound before execution"
+                            .to_string(),
+                    ));
+                }
                 // If text provided, generate embedding first (semantic search)
                 let search_vector = if let Some(query_text) = text {
                     let (default_provider, _) = crate::ai::resolve_defaults_from_runtime(self);

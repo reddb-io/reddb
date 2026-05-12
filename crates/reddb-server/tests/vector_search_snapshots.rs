@@ -189,6 +189,7 @@ fn happy_search_similar_vector_minimal() {
             limit,
             min_score,
             provider,
+            vector_param: _,
         }) => {
             assert_eq!(vector.len(), 3);
             assert!(text.is_none());

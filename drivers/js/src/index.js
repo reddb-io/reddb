@@ -167,6 +167,17 @@ export async function connect(uri, options = {}) {
   )
 }
 
+// Coerce a JS query parameter to a JSON-serializable shape the server
+// understands. The tracer scope (#355) lifts vector params: `Float32Array`
+// and `Float64Array` round-trip as plain JSON arrays of numbers, which
+// the embedded stdio handler maps to `Value::Vector`.
+function serializeParam(value) {
+  if (value instanceof Float32Array || value instanceof Float64Array) {
+    return Array.from(value)
+  }
+  return value
+}
+
 function embeddedArgs(parsed) {
   if (parsed.path) return ['rpc', '--stdio', '--path', parsed.path]
   return ['rpc', '--stdio']
@@ -363,7 +374,8 @@ export class RedDB {
     if (!Array.isArray(params)) {
       throw new TypeError('query: `params` must be an array')
     }
-    return this.client.call('query', { sql, params })
+    const wireParams = params.map(serializeParam)
+    return this.client.call('query', { sql, params: wireParams })
   }
 
   /** Insert one row. Returns `{ affected, id? }`. */

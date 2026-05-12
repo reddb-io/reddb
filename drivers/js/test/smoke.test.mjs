@@ -164,6 +164,44 @@ await test('parameterized query: arity mismatch rejects with INVALID_PARAMS', as
   await db.close()
 })
 
+await test('parameterized SEARCH SIMILAR $N with vector param (#355)', async () => {
+  const db = await connect('memory://', { binary: BINARY })
+  // Seed a tiny vector collection.
+  await db.query(
+    "INSERT INTO embeddings VECTOR (dense, content) VALUES ([1.0, 0.0], 'gateway')",
+  )
+  await db.query(
+    "INSERT INTO embeddings VECTOR (dense, content) VALUES ([0.0, 1.0], 'database')",
+  )
+
+  // number[] form.
+  const r1 = await db.query(
+    'SEARCH SIMILAR $1 COLLECTION embeddings LIMIT 1',
+    [[1.0, 0.0]],
+  )
+  assertEqual(r1.rows.length, 1, 'one row')
+  assertEqual(r1.rows[0].content, 'gateway', 'closest is gateway')
+
+  // Float32Array form — driver coerces to plain array on the wire.
+  const r2 = await db.query(
+    'SEARCH SIMILAR $1 COLLECTION embeddings LIMIT 1',
+    [new Float32Array([0.0, 1.0])],
+  )
+  assertEqual(r2.rows.length, 1, 'one row')
+  assertEqual(r2.rows[0].content, 'database', 'closest is database')
+
+  // Type mismatch rejects.
+  try {
+    await db.query('SEARCH SIMILAR $1 COLLECTION embeddings', [42])
+    throw new Error('expected reject')
+  } catch (err) {
+    assert(err instanceof RedDBError, 'RedDBError')
+    assertEqual(err.code, 'INVALID_PARAMS', 'code')
+  }
+
+  await db.close()
+})
+
 await test('query error rejects with RedDBError', async () => {
   const db = await connect('memory://', { binary: BINARY })
   try {

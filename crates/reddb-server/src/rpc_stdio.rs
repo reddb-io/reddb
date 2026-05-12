@@ -1177,7 +1177,22 @@ fn json_value_to_schema_value(v: &Value) -> SchemaValue {
             }
         }
         Value::String(s) => SchemaValue::text(s.clone()),
-        Value::Array(_) | Value::Object(_) => {
+        Value::Array(items) => {
+            // Tracer for #355: a JSON array of numbers (or empty) is taken
+            // as a `Value::Vector`. Mixed/non-number arrays fall back to
+            // the JSON-string form so the binder can reject them with a
+            // typed error when they land in a vector slot.
+            if items.iter().all(|v| matches!(v, Value::Number(_))) {
+                let floats: Vec<f32> = items
+                    .iter()
+                    .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+                    .collect();
+                SchemaValue::Vector(floats)
+            } else {
+                SchemaValue::text(crate::json::to_string(v).unwrap_or_default())
+            }
+        }
+        Value::Object(_) => {
             SchemaValue::text(crate::json::to_string(v).unwrap_or_default())
         }
     }

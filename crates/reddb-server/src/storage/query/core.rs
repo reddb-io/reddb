@@ -2168,7 +2168,7 @@ pub enum GraphCommand {
 /// Search command issued via SQL-like syntax
 #[derive(Debug, Clone)]
 pub enum SearchCommand {
-    /// SEARCH SIMILAR [v1, v2, ...] | TEXT 'query' [COLLECTION col] [LIMIT n] [MIN_SCORE f] [USING provider]
+    /// SEARCH SIMILAR [v1, v2, ...] | $N | TEXT 'query' [COLLECTION col] [LIMIT n] [MIN_SCORE f] [USING provider]
     Similar {
         vector: Vec<f32>,
         text: Option<String>,
@@ -2176,6 +2176,11 @@ pub enum SearchCommand {
         collection: String,
         limit: usize,
         min_score: f32,
+        /// `$N` placeholder for the vector slot. `Some(idx)` when the SQL
+        /// used `SEARCH SIMILAR $N ...`; the binder substitutes the
+        /// user-supplied `Value::Vector` and clears this back to `None`.
+        /// Runtime executors assert this is `None` post-bind.
+        vector_param: Option<usize>,
     },
     /// SEARCH TEXT 'query' [COLLECTION col] [LIMIT n] [FUZZY]
     Text {

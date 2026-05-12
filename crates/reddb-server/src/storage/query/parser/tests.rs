@@ -2719,6 +2719,7 @@ fn test_parse_search_similar() {
         min_score,
         text: _,
         provider: _,
+        vector_param: _,
     }) = query
     {
         assert_eq!(vector.len(), 3);

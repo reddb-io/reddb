@@ -6,7 +6,7 @@
 //! into the AST. Type validation is delegated to the existing engine
 //! type checker, which runs on the substituted literals downstream.
 
-use crate::storage::query::ast::{Expr, QueryExpr};
+use crate::storage::query::ast::{Expr, QueryExpr, SearchCommand};
 use crate::storage::query::planner::shape::bind_user_param_query;
 use crate::storage::schema::Value;
 
@@ -26,6 +26,10 @@ pub enum UserParamError {
     /// Other shapes (DDL, KV ops, etc.) cannot carry placeholders in
     /// the tracer-bullet scope.
     UnsupportedShape,
+    /// A parameter was supplied in a slot that requires a specific type
+    /// (e.g. a vector slot received a string). `slot` describes the
+    /// context, `got` describes the user-supplied value's variant.
+    TypeMismatch { slot: &'static str, got: &'static str },
 }
 
 impl std::fmt::Display for UserParamError {
@@ -42,6 +46,10 @@ impl std::fmt::Display for UserParamError {
             UserParamError::UnsupportedShape => f.write_str(
                 "this query shape does not support `$N` parameters in the tracer-bullet slice",
             ),
+            UserParamError::TypeMismatch { slot, got } => write!(
+                f,
+                "parameter type mismatch: {slot} requires a vector, got {got}"
+            ),
         }
     }
 }
@@ -49,6 +57,8 @@ impl std::fmt::Display for UserParamError {
 impl std::error::Error for UserParamError {}
 
 /// Walk `expr`, collect every `Expr::Parameter { index }` encountered.
+/// Also picks up parameter slots that live outside the `Expr` tree —
+/// today only the vector slot of `SEARCH SIMILAR $N` (see #355).
 pub fn collect_indices(expr: &QueryExpr) -> Vec<usize> {
     let mut out = Vec::new();
     visit_query_expr(expr, &mut |e| {
@@ -56,7 +66,18 @@ pub fn collect_indices(expr: &QueryExpr) -> Vec<usize> {
             out.push(*index);
         }
     });
+    collect_non_expr_indices(expr, &mut out);
     out
+}
+
+/// Parameter slots that live on AST nodes outside the `Expr` tree
+/// (e.g. `SearchCommand::Similar { vector_param }`).
+fn collect_non_expr_indices(expr: &QueryExpr, out: &mut Vec<usize>) {
+    if let QueryExpr::SearchCommand(SearchCommand::Similar { vector_param, .. }) = expr {
+        if let Some(idx) = vector_param {
+            out.push(*idx);
+        }
+    }
 }
 
 /// Validate that the indices used by the SQL match the caller's
@@ -103,7 +124,65 @@ pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamEr
         return Ok(expr.clone());
     }
 
+    // SEARCH SIMILAR $N has its parameter slot outside the `Expr`
+    // tree — handle it here rather than threading the binds through
+    // the planner's shape binder, which only knows about `Expr` slots.
+    if let QueryExpr::SearchCommand(SearchCommand::Similar {
+        vector,
+        text,
+        provider,
+        collection,
+        limit,
+        min_score,
+        vector_param,
+    }) = expr
+    {
+        let mut bound_vector = vector.clone();
+        if let Some(idx) = vector_param {
+            let value = params
+                .get(*idx)
+                .ok_or(UserParamError::Arity {
+                    expected: idx + 1,
+                    got: params.len(),
+                })?;
+            bound_vector = match value {
+                Value::Vector(v) => v.clone(),
+                other => {
+                    return Err(UserParamError::TypeMismatch {
+                        slot: "SEARCH SIMILAR vector parameter",
+                        got: value_variant_name(other),
+                    });
+                }
+            };
+        }
+        return Ok(QueryExpr::SearchCommand(SearchCommand::Similar {
+            vector: bound_vector,
+            text: text.clone(),
+            provider: provider.clone(),
+            collection: collection.clone(),
+            limit: *limit,
+            min_score: *min_score,
+            vector_param: None,
+        }));
+    }
+
     bind_user_param_query(expr, params).ok_or(UserParamError::UnsupportedShape)
+}
+
+fn value_variant_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Integer(_) => "integer",
+        Value::UnsignedInteger(_) => "unsigned integer",
+        Value::BigInt(_) => "bigint",
+        Value::Float(_) => "float",
+        Value::Text(_) => "text",
+        Value::Boolean(_) => "boolean",
+        Value::Vector(_) => "vector",
+        Value::Json(_) => "json",
+        Value::Blob(_) => "bytes",
+        _ => "other",
+    }
 }
 
 fn visit_query_expr<F: FnMut(&Expr)>(expr: &QueryExpr, visit: &mut F) {
@@ -276,6 +355,54 @@ mod tests {
             .iter()
             .any(|v| matches!(v, Value::Text(s) if s.as_ref() == "Alice")));
         assert!(literals.iter().any(|v| matches!(v, Value::Null)));
+    }
+
+    #[test]
+    fn bind_search_similar_vector_param() {
+        // Tracer for #355: `SEARCH SIMILAR $1 COLLECTION embeddings`
+        // binds the supplied `Value::Vector` into the vector slot.
+        let q = parse("SEARCH SIMILAR $1 COLLECTION embeddings LIMIT 5");
+        let bound = bind(&q, &[Value::Vector(vec![0.1, 0.2, 0.3])]).unwrap();
+        let QueryExpr::SearchCommand(SearchCommand::Similar {
+            vector,
+            vector_param,
+            collection,
+            limit,
+            ..
+        }) = bound
+        else {
+            panic!("expected SearchCommand::Similar");
+        };
+        assert_eq!(vector, vec![0.1f32, 0.2, 0.3]);
+        assert_eq!(vector_param, None, "vector_param must be cleared post-bind");
+        assert_eq!(collection, "embeddings");
+        assert_eq!(limit, 5);
+    }
+
+    #[test]
+    fn bind_search_similar_rejects_non_vector_param() {
+        let q = parse("SEARCH SIMILAR $1 COLLECTION embeddings");
+        let err = bind(&q, &[Value::Integer(42)]).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                UserParamError::TypeMismatch {
+                    slot: "SEARCH SIMILAR vector parameter",
+                    got: "integer"
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn bind_search_similar_empty_vector_param() {
+        let q = parse("SEARCH SIMILAR $1 COLLECTION embeddings");
+        let bound = bind(&q, &[Value::Vector(vec![])]).unwrap();
+        let QueryExpr::SearchCommand(SearchCommand::Similar { vector, .. }) = bound else {
+            panic!("expected SearchCommand::Similar");
+        };
+        assert!(vector.is_empty());
     }
 
     #[test]
