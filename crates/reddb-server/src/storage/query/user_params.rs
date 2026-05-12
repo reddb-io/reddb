@@ -829,8 +829,8 @@ pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamEr
     // post-hoc. Mirrors the SearchCommand::Similar pattern above.
     if let QueryExpr::Table(table) = expr {
         if table.limit_param.is_some() || table.offset_param.is_some() {
-            let bound_inner = bind_user_param_query(expr, params)
-                .ok_or(UserParamError::UnsupportedShape)?;
+            let bound_inner =
+                bind_user_param_query(expr, params).ok_or(UserParamError::UnsupportedShape)?;
             let mut bound_table = match bound_inner {
                 QueryExpr::Table(t) => t,
                 _ => return Err(UserParamError::UnsupportedShape),

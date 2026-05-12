@@ -276,10 +276,7 @@ fn read_marker(bytes: &[u8], start: usize) -> MarkerScan {
         };
     }
 
-    MarkerScan::Ok {
-        marker,
-        end: j + 1,
-    }
+    MarkerScan::Ok { marker, end: j + 1 }
 }
 
 fn is_line_start(bytes: &[u8], i: usize) -> bool {
