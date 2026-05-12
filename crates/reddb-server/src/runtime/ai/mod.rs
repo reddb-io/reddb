@@ -21,6 +21,7 @@ pub mod cost_guard;
 pub mod dedup_cache;
 pub mod determinism_decider;
 pub mod explain_plan_builder;
+pub mod grpc_ask_message;
 pub mod mcp_ask_tool;
 pub mod metrics;
 pub mod ner;
