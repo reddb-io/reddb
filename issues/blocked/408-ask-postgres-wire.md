@@ -98,3 +98,29 @@ Deferred to follow-up slices (each independently shippable):
 Issue stays open with this progress note. The deep module is the
 load-bearing piece; the remaining slices are mechanical wiring and
 can land independently.
+
+Slice 2 (simple-query wiring): PG-wire simple-query ASK results now
+route through `PgWireAskRowEncoder` in
+`crates/reddb-server/src/wire/postgres/server.rs` instead of the
+generic table-row codec. `statement == "ask"` emits the pinned twelve
+column `RowDescription`, one `DataRow`, and `CommandComplete`
+`SELECT 1`. The adapter reconstructs the canonical `AskResult` from
+the runtime ASK row, preserving legacy defaults for fields the current
+runtime does not yet materialize (`cache_hit=false`, `cost_usd=0`,
+`mode=strict`, `retry_count=0`).
+
+Pinned contract:
+
+- Unit test
+  `wire::postgres::server::tests::ask_success_result_uses_canonical_pg_wire_row_shape`
+  covers the actual backend frame sequence (`T`/`D`/`C`), column names,
+  OIDs, default cells, payload-shaped `sources_flat`, and `SELECT 1`.
+
+Remaining blockers:
+
+- Extended-query `Parse` / `Bind` / `Describe` / `Execute` and
+  parameterized ASK question text are still blocked by HITL #360.
+- psycopg / pgx / JDBC integration tests still depend on #360 because
+  the acceptance criteria require no fallback to simple-query mode.
+- Public docs are still deferred to blocked docs sweep #412 so planned
+  extended-protocol behavior is not documented as available.
