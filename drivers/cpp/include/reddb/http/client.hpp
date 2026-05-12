@@ -4,10 +4,14 @@
 
 #pragma once
 
+#include "reddb/value.hpp"
+
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace reddb::http {
@@ -43,6 +47,7 @@ public:
     HttpResponse health();
     HttpResponse login(const std::string& username, const std::string& password);
     HttpResponse query(const std::string& sql);
+    HttpResponse query(std::string_view sql, std::span<const reddb::Value> params);
     HttpResponse insert(const std::string& collection, const std::string& json_payload);
     HttpResponse bulk_insert(const std::string& collection,
                              const std::vector<std::string>& json_rows);

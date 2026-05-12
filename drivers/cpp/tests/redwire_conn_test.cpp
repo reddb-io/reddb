@@ -6,6 +6,7 @@
 #include "reddb/redwire/codec.hpp"
 #include "reddb/redwire/conn.hpp"
 #include "reddb/redwire/frame.hpp"
+#include "reddb/value.hpp"
 
 #include <gtest/gtest.h>
 
@@ -14,6 +15,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <array>
 #include <cstring>
 #include <future>
 #include <memory>
@@ -24,6 +26,10 @@
 using namespace reddb::redwire;
 
 namespace {
+
+uint8_t b(unsigned value) {
+    return static_cast<uint8_t>(value);
+}
 
 // Read exactly N bytes from fd; returns false on EOF/error.
 bool read_n(int fd, void* buf, size_t n) {
@@ -325,4 +331,163 @@ TEST(RedWireConn, QueryRoundTrip) {
     auto conn = RedWireConn::from_stream(std::move(stream), opts);
     auto json = conn->query("SELECT 1");
     EXPECT_EQ(json, R"({"ok":true,"rows":[]})");
+}
+
+TEST(RedWireConn, QueryWithParamsRoundTrip) {
+    auto fs = FakeServer::make();
+    fs->th = std::thread([fd = fs->server_fd]() {
+        uint8_t magic[2];
+        ASSERT_TRUE(read_n(fd, magic, 2));
+        Frame hello; ASSERT_TRUE(read_frame_fd(fd, hello));
+
+        Frame ack;
+        ack.kind = MessageKind::HelloAck;
+        ack.correlation_id = hello.correlation_id;
+        std::string body = R"({"version":1,"auth":"anonymous","features":1})";
+        ack.payload.assign(body.begin(), body.end());
+        ASSERT_TRUE(write_frame_fd(fd, ack));
+
+        Frame resp; ASSERT_TRUE(read_frame_fd(fd, resp));
+
+        Frame ok;
+        ok.kind = MessageKind::AuthOk;
+        ok.correlation_id = resp.correlation_id;
+        std::string ob = R"({"session_id":"s"})";
+        ok.payload.assign(ob.begin(), ob.end());
+        ASSERT_TRUE(write_frame_fd(fd, ok));
+
+        Frame qf;
+        ASSERT_TRUE(read_frame_fd(fd, qf));
+        ASSERT_EQ(qf.kind, MessageKind::QueryWithParams);
+
+        const std::vector<uint8_t> expected = {
+            21, 0, 0, 0,
+            'S', 'E', 'L', 'E', 'C', 'T', ' ', '$', '1', ',', ' ', '$', '2',
+            ',', ' ', '$', '3', ',', ' ', '$', '4',
+            4, 0, 0, 0,
+            0x02, 42, 0, 0, 0, 0, 0, 0, 0,
+            0x04, 5, 0, 0, 0, 'a', 'l', 'i', 'c', 'e',
+            0x00,
+            0x06, 3, 0, 0, 0,
+            0x00, 0x00, b(0x80), 0x3f,
+            0x00, 0x00, 0x00, 0x40,
+            0x00, 0x00, 0x40, 0x40,
+        };
+        ASSERT_EQ(qf.payload, expected);
+
+        Frame result;
+        result.kind = MessageKind::Result;
+        result.correlation_id = qf.correlation_id;
+        std::string rb = R"({"records":[]})";
+        result.payload.assign(rb.begin(), rb.end());
+        ASSERT_TRUE(write_frame_fd(fd, result));
+    });
+
+    auto stream = wrap_fd(fs->client_fd);
+    fs->client_fd = -1;
+    ConnectOpts opts;
+    opts.host = "fake";
+    opts.auth.method = AuthMethod::Anonymous;
+    auto conn = RedWireConn::from_stream(std::move(stream), opts);
+    ASSERT_TRUE((conn->server_features() & FEATURE_PARAMS) == FEATURE_PARAMS);
+
+    std::array<float, 3> vec = {1.0f, 2.0f, 3.0f};
+    std::array<reddb::Value, 4> params = {
+        reddb::Value(42),
+        reddb::Value("alice"),
+        reddb::Value(std::nullopt),
+        reddb::Value::vector(vec),
+    };
+    auto json = conn->query("SELECT $1, $2, $3, $4", params);
+    EXPECT_EQ(json, R"({"records":[]})");
+}
+
+TEST(RedWireConn, QueryWithParamsRequiresFeatureParams) {
+    auto fs = FakeServer::make();
+    fs->th = std::thread([fd = fs->server_fd]() {
+        uint8_t magic[2];
+        ASSERT_TRUE(read_n(fd, magic, 2));
+        Frame hello; ASSERT_TRUE(read_frame_fd(fd, hello));
+
+        Frame ack;
+        ack.kind = MessageKind::HelloAck;
+        ack.correlation_id = hello.correlation_id;
+        std::string body = R"({"version":1,"auth":"anonymous","features":0})";
+        ack.payload.assign(body.begin(), body.end());
+        ASSERT_TRUE(write_frame_fd(fd, ack));
+
+        Frame resp; ASSERT_TRUE(read_frame_fd(fd, resp));
+
+        Frame ok;
+        ok.kind = MessageKind::AuthOk;
+        ok.correlation_id = resp.correlation_id;
+        std::string ob = R"({"session_id":"s","features":0})";
+        ok.payload.assign(ob.begin(), ob.end());
+        ASSERT_TRUE(write_frame_fd(fd, ok));
+    });
+
+    auto stream = wrap_fd(fs->client_fd);
+    fs->client_fd = -1;
+    ConnectOpts opts;
+    opts.host = "fake";
+    opts.auth.method = AuthMethod::Anonymous;
+    auto conn = RedWireConn::from_stream(std::move(stream), opts);
+
+    std::array<reddb::Value, 1> params = {reddb::Value(1)};
+    try {
+        (void)conn->query("SELECT $1", params);
+        FAIL() << "expected ParamsUnsupported";
+    } catch (const reddb::RedDBError& e) {
+        EXPECT_EQ(e.code(), reddb::ErrorCode::ParamsUnsupported);
+        EXPECT_NE(std::string(e.what()).find("FEATURE_PARAMS"), std::string::npos);
+    }
+}
+
+TEST(RedWireConn, EmptyParamsEmitLegacyQueryFrame) {
+    auto fs = FakeServer::make();
+    fs->th = std::thread([fd = fs->server_fd]() {
+        uint8_t magic[2];
+        ASSERT_TRUE(read_n(fd, magic, 2));
+        Frame hello; ASSERT_TRUE(read_frame_fd(fd, hello));
+
+        Frame ack;
+        ack.kind = MessageKind::HelloAck;
+        ack.correlation_id = hello.correlation_id;
+        std::string body = R"({"version":1,"auth":"anonymous","features":1})";
+        ack.payload.assign(body.begin(), body.end());
+        ASSERT_TRUE(write_frame_fd(fd, ack));
+
+        Frame resp; ASSERT_TRUE(read_frame_fd(fd, resp));
+
+        Frame ok;
+        ok.kind = MessageKind::AuthOk;
+        ok.correlation_id = resp.correlation_id;
+        std::string ob = R"({"session_id":"s","features":1})";
+        ok.payload.assign(ob.begin(), ob.end());
+        ASSERT_TRUE(write_frame_fd(fd, ok));
+
+        Frame qf;
+        ASSERT_TRUE(read_frame_fd(fd, qf));
+        ASSERT_EQ(qf.kind, MessageKind::Query);
+        std::string sql(qf.payload.begin(), qf.payload.end());
+        ASSERT_EQ(sql, "SELECT 1");
+
+        Frame result;
+        result.kind = MessageKind::Result;
+        result.correlation_id = qf.correlation_id;
+        std::string rb = R"({"ok":true})";
+        result.payload.assign(rb.begin(), rb.end());
+        ASSERT_TRUE(write_frame_fd(fd, result));
+    });
+
+    auto stream = wrap_fd(fs->client_fd);
+    fs->client_fd = -1;
+    ConnectOpts opts;
+    opts.host = "fake";
+    opts.auth.method = AuthMethod::Anonymous;
+    auto conn = RedWireConn::from_stream(std::move(stream), opts);
+
+    std::span<const reddb::Value> no_params;
+    auto json = conn->query("SELECT 1", no_params);
+    EXPECT_EQ(json, R"({"ok":true})");
 }

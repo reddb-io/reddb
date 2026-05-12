@@ -11,6 +11,7 @@ bool is_known_kind(uint8_t byte) noexcept {
         case 0x10: case 0x11: case 0x12: case 0x13:
         case 0x14: case 0x15: case 0x16: case 0x17:
         case 0x18: case 0x19: case 0x1A: case 0x1B:
+        case 0x28:
             return true;
         default:
             return false;

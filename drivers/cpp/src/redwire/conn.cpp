@@ -1,6 +1,7 @@
 #include "reddb/redwire/conn.hpp"
 #include "reddb/redwire/codec.hpp"
 #include "reddb/redwire/scram.hpp"
+#include "reddb/redwire/value_codec.hpp"
 #include "reddb/errors.hpp"
 
 #include <openssl/err.h>
@@ -434,6 +435,8 @@ void RedWireConn::run_handshake(const ConnectOpts& opts) {
     if (!chosen) {
         throw RedDBError(ErrorCode::Protocol, "HelloAck missing 'auth' field");
     }
+    uint32_t fallback_features = static_cast<uint32_t>(
+        tinyjson::find_u64_field(ack_json, "features").value_or(0));
 
     if (*chosen == "anonymous") {
         Frame resp;
@@ -469,7 +472,7 @@ void RedWireConn::run_handshake(const ConnectOpts& opts) {
         resp.payload.assign(body.begin(), body.end());
         write_frame(resp);
     } else if (*chosen == "scram-sha-256") {
-        run_scram(opts);
+        run_scram(opts, fallback_features);
         return;
     } else {
         throw RedDBError(ErrorCode::Protocol,
@@ -482,7 +485,7 @@ void RedWireConn::run_handshake(const ConnectOpts& opts) {
         std::string body(final_frame.payload.begin(), final_frame.payload.end());
         session_id_ = tinyjson::find_string_field(body, "session_id").value_or("");
         server_features_ = static_cast<uint32_t>(
-            tinyjson::find_u64_field(body, "features").value_or(0));
+            tinyjson::find_u64_field(body, "features").value_or(fallback_features));
         return;
     }
     if (final_frame.kind == MessageKind::AuthFail) {
@@ -495,7 +498,7 @@ void RedWireConn::run_handshake(const ConnectOpts& opts) {
                      std::to_string(static_cast<int>(final_frame.kind)));
 }
 
-void RedWireConn::run_scram(const ConnectOpts& opts) {
+void RedWireConn::run_scram(const ConnectOpts& opts, uint32_t fallback_features) {
     if (opts.auth.username.empty() || opts.auth.password.empty()) {
         throw RedDBError(ErrorCode::AuthRefused,
                          "scram-sha-256 requires username + password");
@@ -579,7 +582,7 @@ void RedWireConn::run_scram(const ConnectOpts& opts) {
     std::string body(ok.payload.begin(), ok.payload.end());
     session_id_ = tinyjson::find_string_field(body, "session_id").value_or("");
     server_features_ = static_cast<uint32_t>(
-        tinyjson::find_u64_field(body, "features").value_or(0));
+        tinyjson::find_u64_field(body, "features").value_or(fallback_features));
 
     // Optional: if the server sent a base64 server-signature ("v"
     // field), verify it. Hex32 form ("server_signature") also
@@ -607,6 +610,31 @@ std::string RedWireConn::query(const std::string& sql) {
     req.kind = MessageKind::Query;
     req.correlation_id = next_corr();
     req.payload.assign(sql.begin(), sql.end());
+    write_frame(req);
+    Frame resp = read_frame();
+    if (resp.kind == MessageKind::Result) {
+        return std::string(resp.payload.begin(), resp.payload.end());
+    }
+    if (resp.kind == MessageKind::Error) {
+        throw RedDBError(ErrorCode::Engine,
+                         std::string(resp.payload.begin(), resp.payload.end()));
+    }
+    throw RedDBError(ErrorCode::Protocol, "expected Result/Error after query");
+}
+
+std::string RedWireConn::query(std::string_view sql, std::span<const reddb::Value> params) {
+    if (params.empty()) {
+        return query(std::string(sql));
+    }
+    if ((server_features_ & FEATURE_PARAMS) != FEATURE_PARAMS) {
+        throw RedDBError(ErrorCode::ParamsUnsupported,
+                         "server did not advertise FEATURE_PARAMS; upgrade the server to use parameterized queries");
+    }
+    std::lock_guard<std::mutex> g(io_);
+    Frame req;
+    req.kind = MessageKind::QueryWithParams;
+    req.correlation_id = next_corr();
+    req.payload = encode_query_with_params(sql, params);
     write_frame(req);
     Frame resp = read_frame();
     if (resp.kind == MessageKind::Result) {

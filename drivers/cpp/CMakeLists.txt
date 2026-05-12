@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(reddb LANGUAGES CXX VERSION 0.1.0)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -55,9 +55,11 @@ endif()
 set(REDDB_SOURCES
     src/url.cpp
     src/errors.cpp
+    src/value.cpp
     src/reddb.cpp
     src/redwire/frame.cpp
     src/redwire/codec.cpp
+    src/redwire/value_codec.cpp
     src/redwire/scram.cpp
     src/redwire/conn.cpp
 )
@@ -110,5 +112,6 @@ endfunction()
 reddb_add_test(url_test)
 reddb_add_test(scram_test)
 reddb_add_test(frame_test)
+reddb_add_test(value_codec_test)
 reddb_add_test(redwire_conn_test)
 reddb_add_test(smoke_test)

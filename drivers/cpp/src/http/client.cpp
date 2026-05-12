@@ -1,5 +1,6 @@
 #include "reddb/http/client.hpp"
 #include "reddb/errors.hpp"
+#include "reddb/redwire/value_codec.hpp"
 
 #if REDDB_HAS_CURL
 #include <curl/curl.h>
@@ -154,15 +155,11 @@ HttpResponse HttpClient::login(const std::string& username, const std::string& p
 }
 
 HttpResponse HttpClient::query(const std::string& sql) {
-    std::string body = "{\"query\":";
-    body.push_back('"');
-    for (char c : sql) {
-        if (c == '"' || c == '\\') body.push_back('\\');
-        body.push_back(c);
-    }
-    body.push_back('"');
-    body += "}";
-    return request("POST", "/query", body);
+    return query(std::string_view(sql), std::span<const reddb::Value>{});
+}
+
+HttpResponse HttpClient::query(std::string_view sql, std::span<const reddb::Value> params) {
+    return request("POST", "/query", redwire::to_http_query_body(sql, params));
 }
 
 HttpResponse HttpClient::insert(const std::string& collection, const std::string& json_payload) {
@@ -210,6 +207,7 @@ HttpResponse HttpClient::request(const std::string&, const std::string&,
 HttpResponse HttpClient::health() { return request("GET", "/admin/health"); }
 HttpResponse HttpClient::login(const std::string&, const std::string&) { return request("POST", ""); }
 HttpResponse HttpClient::query(const std::string&) { return request("POST", ""); }
+HttpResponse HttpClient::query(std::string_view, std::span<const reddb::Value>) { return request("POST", ""); }
 HttpResponse HttpClient::insert(const std::string&, const std::string&) { return request("POST", ""); }
 HttpResponse HttpClient::bulk_insert(const std::string&, const std::vector<std::string>&) { return request("POST", ""); }
 HttpResponse HttpClient::scan(const std::string&) { return request("GET", ""); }

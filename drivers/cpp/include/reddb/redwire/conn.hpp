@@ -8,12 +8,15 @@
 #pragma once
 
 #include "reddb/redwire/frame.hpp"
+#include "reddb/value.hpp"
 
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // Forward declarations to keep openssl out of the public header.
@@ -88,6 +91,7 @@ public:
 
     // ---- Public ops — return raw JSON strings. -----------------
     std::string query(const std::string& sql);
+    std::string query(std::string_view sql, std::span<const reddb::Value> params);
     std::string insert(const std::string& collection, const std::string& json_payload);
     std::string bulk_insert(const std::string& collection,
                             const std::vector<std::string>& json_rows);
@@ -104,7 +108,7 @@ private:
     explicit RedWireConn(std::unique_ptr<IoStream> stream);
     void send_magic_and_version();
     void run_handshake(const ConnectOpts& opts);
-    void run_scram(const ConnectOpts& opts);
+    void run_scram(const ConnectOpts& opts, uint32_t fallback_features);
 
     Frame read_frame();
     void write_frame(const Frame& frame);
