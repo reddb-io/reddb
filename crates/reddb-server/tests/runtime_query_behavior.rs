@@ -630,3 +630,30 @@ fn insert_multi_row_node_returning_star_emits_one_row_per_insert() {
     let id_b = u64_at(&res, 1, "red_entity_id");
     assert!(id_a > 0 && id_b > 0 && id_a != id_b);
 }
+
+// ── Issue #421: first user-inserted entity id is documented & pinned ────────
+//
+// The first ~100 entity ids are consumed by internal collection-descriptor
+// records before any user INSERT runs. The exact offset is part of the
+// documented contract in `docs/data-models/graphs.md` and
+// `docs/engine/file-format.md` (look for "first user id"). If you tripped
+// this test by changing the descriptor allocation, update the docs in the
+// same commit — the number IS the contract for users computing ids
+// off-thread.
+
+#[test]
+fn first_user_entity_id_is_one_hundred_and_two() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    let res = rt
+        .execute_query(
+            "INSERT INTO tales NODE (label, name) VALUES ('cinderella', 'Cinderella') RETURNING *",
+        )
+        .expect("first user insert");
+    let id = u64_at(&res, 0, "red_entity_id");
+    assert_eq!(
+        id, 102,
+        "first user-inserted entity id must be 102 (documented offset). \
+         If you changed this, update docs/data-models/graphs.md AND \
+         docs/engine/file-format.md."
+    );
+}
