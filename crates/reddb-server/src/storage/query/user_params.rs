@@ -246,6 +246,11 @@ fn collect_non_expr_indices(expr: &QueryExpr, out: &mut Vec<usize>) {
                 out.push(*idx);
             }
         }
+        QueryExpr::SearchCommand(SearchCommand::Multimodal { limit_param, .. }) => {
+            if let Some(idx) = limit_param {
+                out.push(*idx);
+            }
+        }
         _ => {}
     }
 }
@@ -509,6 +514,46 @@ pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamEr
             collection: collection.clone(),
             limit: bound_limit,
             fuzzy: *fuzzy,
+            limit_param: None,
+        }));
+    }
+
+    if let QueryExpr::SearchCommand(SearchCommand::Multimodal {
+        query,
+        collection,
+        limit,
+        limit_param,
+    }) = expr
+    {
+        let bound_limit = if let Some(idx) = limit_param {
+            let value = params.get(*idx).ok_or(UserParamError::Arity {
+                expected: idx + 1,
+                got: params.len(),
+            })?;
+            match value {
+                Value::Integer(n) if *n > 0 => *n as usize,
+                Value::UnsignedInteger(n) if *n > 0 => *n as usize,
+                Value::BigInt(n) if *n > 0 => *n as usize,
+                Value::Integer(_) | Value::UnsignedInteger(_) | Value::BigInt(_) => {
+                    return Err(UserParamError::TypeMismatch {
+                        slot: "SEARCH MULTIMODAL LIMIT parameter (must be > 0)",
+                        got: value_variant_name(value),
+                    });
+                }
+                other => {
+                    return Err(UserParamError::TypeMismatch {
+                        slot: "SEARCH MULTIMODAL LIMIT parameter",
+                        got: value_variant_name(other),
+                    });
+                }
+            }
+        } else {
+            *limit
+        };
+        return Ok(QueryExpr::SearchCommand(SearchCommand::Multimodal {
+            query: query.clone(),
+            collection: collection.clone(),
+            limit: bound_limit,
             limit_param: None,
         }));
     }
@@ -1058,6 +1103,49 @@ mod tests {
             err,
             UserParamError::TypeMismatch {
                 slot: "SEARCH TEXT LIMIT parameter",
+                got: "text"
+            }
+        ));
+    }
+
+    #[test]
+    fn bind_search_multimodal_limit_param() {
+        // Issue #361: `SEARCH MULTIMODAL ... LIMIT $N` binds an integer.
+        let q = parse("SEARCH MULTIMODAL 'user:123' COLLECTION people LIMIT $1");
+        let bound = bind(&q, &[Value::Integer(40)]).unwrap();
+        let QueryExpr::SearchCommand(SearchCommand::Multimodal {
+            limit,
+            limit_param,
+            ..
+        }) = bound
+        else {
+            panic!("expected SearchCommand::Multimodal");
+        };
+        assert_eq!(limit, 40);
+        assert_eq!(limit_param, None, "limit_param must be cleared post-bind");
+    }
+
+    #[test]
+    fn bind_search_multimodal_limit_rejects_zero() {
+        let q = parse("SEARCH MULTIMODAL 'k' COLLECTION people LIMIT $1");
+        let err = bind(&q, &[Value::Integer(0)]).unwrap_err();
+        assert!(matches!(
+            err,
+            UserParamError::TypeMismatch {
+                slot: "SEARCH MULTIMODAL LIMIT parameter (must be > 0)",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn bind_search_multimodal_limit_rejects_non_integer() {
+        let q = parse("SEARCH MULTIMODAL 'k' COLLECTION people LIMIT $1");
+        let err = bind(&q, &[Value::text("five")]).unwrap_err();
+        assert!(matches!(
+            err,
+            UserParamError::TypeMismatch {
+                slot: "SEARCH MULTIMODAL LIMIT parameter",
                 got: "text"
             }
         ));

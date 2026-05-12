@@ -514,7 +514,14 @@ impl RedDBRuntime {
                 query,
                 collection,
                 limit,
+                limit_param,
             } => {
+                if limit_param.is_some() {
+                    return Err(RedDBError::Query(
+                        "SEARCH MULTIMODAL LIMIT $N parameter was not bound before execution"
+                            .to_string(),
+                    ));
+                }
                 let collections = collection.as_ref().map(|c| vec![c.clone()]);
                 let res =
                     self.search_multimodal(query.clone(), collections, None, None, Some(*limit))?;

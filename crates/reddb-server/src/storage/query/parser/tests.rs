@@ -2860,6 +2860,7 @@ fn test_parse_search_multimodal() {
         query,
         collection,
         limit,
+        ..
     }) = query
     {
         assert_eq!(query, "CPF: 000.000.000-00");
@@ -2877,6 +2878,7 @@ fn test_parse_search_multimodal_defaults() {
         query,
         collection,
         limit,
+        ..
     }) = query
     {
         assert_eq!(query, "user:123");

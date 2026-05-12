@@ -2219,6 +2219,11 @@ pub enum SearchCommand {
         query: String,
         collection: Option<String>,
         limit: usize,
+        /// `$N` placeholder for the `LIMIT` slot (issue #361). Same
+        /// shape as `SearchCommand::Hybrid::limit_param`; the binder
+        /// substitutes the user-supplied positive integer into `limit`
+        /// and clears this back to `None`.
+        limit_param: Option<usize>,
     },
     /// SEARCH INDEX index VALUE 'value' [COLLECTION col] [LIMIT n] [EXACT]
     Index {

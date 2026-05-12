@@ -141,3 +141,24 @@ Remaining LIMIT $N slices (same trivial pattern, one variant each):
 MULTIMODAL, INDEX, CONTEXT, SPATIAL RADIUS, SPATIAL BBOX. Plus
 SELECT LIMIT / OFFSET (TableQuery shape), SIMILAR TEXT $N (text
 embedding pipeline), and PROBES $N (IVF).
+
+## Progress (2026-05-12, slice 5)
+
+Fifth slice landed: `SEARCH MULTIMODAL ... LIMIT $N`.
+
+- `SearchCommand::Multimodal` gained `limit_param: Option<usize>` (AST
+  in `storage/query/core.rs`), same shape as `Hybrid::limit_param`.
+- Parser routes `$N` (and `?`, mode permitting) in MULTIMODAL LIMIT
+  via `parse_param_slot`.
+- `user_params::collect_non_expr_indices` matches Multimodal.
+- `user_params::bind` gained a Multimodal branch with the same typed
+  error set as the SIMILAR / HYBRID / SPATIAL NEAREST / TEXT LIMIT
+  paths.
+- `runtime/impl_graph_commands.rs` guards the new param.
+- `parser/tests.rs` destructures switched to `..` for future slots.
+- Tests in `user_params` (3 new): MULTIMODAL LIMIT happy path,
+  rejects 0, rejects non-integer.
+
+Remaining LIMIT $N slices: INDEX, CONTEXT, SPATIAL RADIUS, SPATIAL
+BBOX. Plus SELECT LIMIT / OFFSET (TableQuery shape), SIMILAR TEXT $N
+(text embedding pipeline), and PROBES $N (IVF).

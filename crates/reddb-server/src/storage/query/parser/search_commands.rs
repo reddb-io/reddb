@@ -243,8 +243,15 @@ impl<'a> Parser<'a> {
             None
         };
 
+        // Optional LIMIT — accepts an integer literal or `$N` placeholder (#361).
+        let mut limit_param: Option<usize> = None;
         let limit = if self.consume(&Token::Limit)? {
-            self.parse_integer()? as usize
+            if matches!(self.peek(), Token::Dollar | Token::Question) {
+                limit_param = Some(self.parse_param_slot("LIMIT")?);
+                0
+            } else {
+                self.parse_integer()? as usize
+            }
         } else {
             25
         };
@@ -253,6 +260,7 @@ impl<'a> Parser<'a> {
             query,
             collection,
             limit,
+            limit_param,
         }))
     }
 
