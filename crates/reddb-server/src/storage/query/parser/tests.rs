@@ -1317,7 +1317,7 @@ fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
     ));
 
     let query =
-        parse("ASK 'why did login fail?' USING openai MODEL 'gpt-4.1-mini' DEPTH 3 LIMIT 25 COLLECTION events")
+        parse("ASK 'why did login fail?' USING openai MODEL 'gpt-4.1-mini' DEPTH 3 LIMIT 25 MIN_SCORE 0.7 COLLECTION events")
             .unwrap();
     assert!(matches!(
         query,
@@ -1327,6 +1327,7 @@ fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
                 && ask.model.as_deref() == Some("gpt-4.1-mini")
                 && ask.depth == Some(3)
                 && ask.limit == Some(25)
+                && ask.min_score == Some(0.7)
                 && ask.collection.as_deref() == Some("events")
                 && ask.temperature.is_none()
                 && ask.seed.is_none()

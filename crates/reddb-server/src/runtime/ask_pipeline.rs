@@ -143,11 +143,24 @@ impl AskPipeline {
         question: &str,
         row_cap: usize,
     ) -> RedDBResult<AskContext> {
+        Self::execute_with_limit_and_min_score(runtime, scope, question, row_cap, None)
+    }
+
+    /// Run all four stages with a configurable row cap and per-bucket
+    /// minimum score for retrieval stages that expose native scores.
+    pub fn execute_with_limit_and_min_score(
+        runtime: &RedDBRuntime,
+        scope: &EffectiveScope,
+        question: &str,
+        row_cap: usize,
+        min_score: Option<f32>,
+    ) -> RedDBResult<AskContext> {
         let span = info_span!(
             "ask_pipeline.execute",
             tenant = ?scope.effective_scope(),
             question_len = question.len(),
             row_cap = row_cap,
+            min_score = ?min_score,
         );
         let _enter = span.enter();
 
@@ -192,7 +205,8 @@ impl AskPipeline {
 
         // Stage 3.
         let stage3 = Instant::now();
-        let vector_hits = vector_search_scoped(runtime, scope, question, &candidates, row_cap);
+        let vector_hits =
+            vector_search_scoped(runtime, scope, question, &candidates, row_cap, min_score);
         let vector_us = stage3.elapsed().as_micros() as u64;
         debug!(
             target: "ask_pipeline",
@@ -549,6 +563,7 @@ pub fn vector_search_scoped(
     question: &str,
     candidates: &CandidateCollections,
     top_k: usize,
+    min_score: Option<f32>,
 ) -> Vec<VectorHit> {
     if candidates.collections.is_empty() {
         return Vec::new();
@@ -565,7 +580,7 @@ pub fn vector_search_scoped(
             collection,
             &embedding,
             per_collection,
-            0.0,
+            min_score.unwrap_or(0.0),
         ) {
             Ok(results) => {
                 for result in results {
