@@ -168,6 +168,10 @@ struct ParsedQueryRequest {
     query: String,
     entity_types: Option<Vec<String>>,
     capabilities: Option<Vec<String>>,
+    /// Optional positional `$N` bind parameters (#358). When `Some`, the
+    /// query handler runs the user_params binder before executing.
+    /// Absence preserves the legacy `query`-only behavior.
+    params: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Clone, Copy)]

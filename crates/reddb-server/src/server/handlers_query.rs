@@ -10,9 +10,30 @@ impl RedDBServer {
             query,
             entity_types,
             capabilities,
+            params,
         } = request;
 
-        match self.query_use_cases().execute(ExecuteQueryInput { query }) {
+        // #358: when the client supplied `params`, bind them through the
+        // shared user_params binder before dispatch. Falls back to the
+        // legacy `execute_query` path when `params` is absent.
+        let exec_result = match params {
+            Some(binds) => {
+                use crate::storage::query::modes::parse_multi;
+                use crate::storage::query::user_params;
+                match parse_multi(&query) {
+                    Ok(parsed) => match user_params::bind(&parsed, &binds) {
+                        Ok(bound) => self.runtime.execute_query_expr(bound),
+                        Err(err) => return json_error(400, err.to_string()),
+                    },
+                    Err(err) => return json_error(400, err.to_string()),
+                }
+            }
+            None => self
+                .query_use_cases()
+                .execute(ExecuteQueryInput { query }),
+        };
+
+        match exec_result {
             Ok(result) => {
                 // PLAN.md Phase 11.4 — when the operator picked a
                 // commit policy that requires replica acks (`ack_n`),
@@ -332,5 +353,80 @@ impl RedDBServer {
             ),
             Err(err) => json_error(400, err.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::RedDBOptions;
+    use crate::runtime::RedDBRuntime;
+
+    fn make_server() -> RedDBServer {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        RedDBServer::new(rt)
+    }
+
+    fn body_str(resp: &HttpResponse) -> String {
+        String::from_utf8_lossy(&resp.body).to_string()
+    }
+
+    #[test]
+    fn http_query_params_select_round_trip() {
+        // Mirrors `rpc_stdio::query_with_int_text_params_round_trips` over
+        // the HTTP transport. Inserts via unparameterized SQL, then issues
+        // a SELECT carrying both an int and a text `$N`.
+        let server = make_server();
+        let ddl = br#"{"query": "CREATE TABLE p (id INTEGER, name TEXT)"}"#;
+        let r = server.handle_query(ddl.to_vec());
+        assert_eq!(r.status, 200, "ddl: {}", body_str(&r));
+
+        for ins in [
+            br#"{"query": "INSERT INTO p (id, name) VALUES (1, 'Alice')"}"# as &[u8],
+            br#"{"query": "INSERT INTO p (id, name) VALUES (2, 'Bob')"}"#,
+        ] {
+            let r = server.handle_query(ins.to_vec());
+            assert_eq!(r.status, 200, "insert: {}", body_str(&r));
+        }
+
+        let sel = br#"{"query": "SELECT id, name FROM p WHERE id = $1 AND name = $2", "params": [1, "Alice"]}"#;
+        let r = server.handle_query(sel.to_vec());
+        assert_eq!(r.status, 200, "select: {}", body_str(&r));
+        let text = body_str(&r);
+        assert!(text.contains("\"Alice\""), "expected Alice in response: {text}");
+        assert!(!text.contains("\"Bob\""), "Bob should be filtered out: {text}");
+    }
+
+    #[test]
+    fn http_query_params_arity_mismatch_returns_400() {
+        let server = make_server();
+        let ddl = br#"{"query": "CREATE TABLE pa (id INTEGER)"}"#;
+        assert_eq!(server.handle_query(ddl.to_vec()).status, 200);
+
+        let body = br#"{"query": "SELECT * FROM pa WHERE id = $1", "params": [1, 2]}"#;
+        let r = server.handle_query(body.to_vec());
+        assert_eq!(r.status, 400, "body: {}", body_str(&r));
+        let text = body_str(&r).to_lowercase();
+        assert!(text.contains("param") || text.contains("arity"), "got: {text}");
+    }
+
+    #[test]
+    fn http_query_params_must_be_array() {
+        let server = make_server();
+        let body = br#"{"query": "SELECT 1", "params": "not-an-array"}"#;
+        let r = server.handle_query(body.to_vec());
+        assert_eq!(r.status, 400);
+        assert!(body_str(&r).contains("params"));
+    }
+
+    #[test]
+    fn http_query_no_params_keeps_legacy_path() {
+        // Sanity: absence of `params` keeps the existing single-arg
+        // `execute_query(sql)` path so legacy clients are unaffected.
+        let server = make_server();
+        let ddl = br#"{"query": "CREATE TABLE legacy (id INTEGER)"}"#;
+        assert_eq!(server.handle_query(ddl.to_vec()).status, 200);
+        let r = server.handle_query(br#"{"query": "SELECT * FROM legacy"}"#.to_vec());
+        assert_eq!(r.status, 200, "{}", body_str(&r));
     }
 }
