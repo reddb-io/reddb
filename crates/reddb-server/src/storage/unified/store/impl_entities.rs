@@ -220,11 +220,7 @@ impl UnifiedStore {
     }
 
     /// Look up entity IDs for a graph node label scoped to a single collection.
-    pub fn lookup_graph_nodes_by_label_in(
-        &self,
-        collection: &str,
-        label: &str,
-    ) -> Vec<EntityId> {
+    pub fn lookup_graph_nodes_by_label_in(&self, collection: &str, label: &str) -> Vec<EntityId> {
         let idx = self.graph_label_index.read();
         idx.get(&(collection.to_string(), label.to_string()))
             .cloned()

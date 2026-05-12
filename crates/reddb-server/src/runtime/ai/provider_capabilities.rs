@@ -343,8 +343,14 @@ mod tests {
         let r = Registry::new();
         // Built-in path lower-cases the token before consulting the
         // match arm, so OPENAI / OpenAI / openai all resolve.
-        assert_eq!(r.capabilities("OPENAI"), Capabilities::for_provider("openai"));
-        assert_eq!(r.capabilities("OpenAi"), Capabilities::for_provider("openai"));
+        assert_eq!(
+            r.capabilities("OPENAI"),
+            Capabilities::for_provider("openai")
+        );
+        assert_eq!(
+            r.capabilities("OpenAi"),
+            Capabilities::for_provider("openai")
+        );
     }
 
     #[test]

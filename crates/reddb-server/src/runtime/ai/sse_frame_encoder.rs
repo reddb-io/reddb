@@ -122,7 +122,10 @@ fn warning_value(w: &ValidationWarning) -> Value {
 fn audit_value(a: &AuditSummary) -> Value {
     obj(&[
         ("cache_hit", Value::Bool(a.cache_hit)),
-        ("completion_tokens", Value::Number(a.completion_tokens as f64)),
+        (
+            "completion_tokens",
+            Value::Number(a.completion_tokens as f64),
+        ),
         ("model", Value::String(a.model.clone())),
         ("prompt_tokens", Value::Number(a.prompt_tokens as f64)),
         ("provider", Value::String(a.provider.clone())),
@@ -134,13 +137,9 @@ fn audit_value(a: &AuditSummary) -> Value {
 #[derive(Debug, Clone)]
 pub enum Frame {
     /// First frame. Full retrieved sources.
-    Sources {
-        sources_flat: Vec<SourceRow>,
-    },
+    Sources { sources_flat: Vec<SourceRow> },
     /// Incremental answer text. Many of these per stream.
-    AnswerToken {
-        text: String,
-    },
+    AnswerToken { text: String },
     /// Terminal happy-path frame.
     Validation {
         ok: bool,
@@ -151,10 +150,7 @@ pub enum Frame {
     /// `code` mirrors the HTTP status the non-streaming path would
     /// have returned (413, 504, 422, 500) so clients can branch
     /// identically.
-    Error {
-        code: u16,
-        message: String,
-    },
+    Error { code: u16, message: String },
 }
 
 /// SSE event name pinned per variant. Exposed so the wiring layer
@@ -396,8 +392,12 @@ mod tests {
         // The single most common SSE bug: forgetting the blank line.
         // Pinned independently for every frame kind.
         for frame in [
-            Frame::Sources { sources_flat: vec![] },
-            Frame::AnswerToken { text: String::new() },
+            Frame::Sources {
+                sources_flat: vec![],
+            },
+            Frame::AnswerToken {
+                text: String::new(),
+            },
             Frame::Validation {
                 ok: true,
                 warnings: vec![],
@@ -409,11 +409,7 @@ mod tests {
             },
         ] {
             let out = encode(&frame);
-            assert!(
-                out.ends_with("\n\n"),
-                "frame missing terminator: {:?}",
-                out
-            );
+            assert!(out.ends_with("\n\n"), "frame missing terminator: {:?}", out);
             // And NOT a triple newline — that would split into an
             // extra empty frame on the client.
             assert!(!out.ends_with("\n\n\n"));
@@ -459,11 +455,17 @@ mod tests {
     #[test]
     fn event_name_matches_pinned_constants() {
         assert_eq!(
-            Frame::Sources { sources_flat: vec![] }.event_name(),
+            Frame::Sources {
+                sources_flat: vec![]
+            }
+            .event_name(),
             event::SOURCES
         );
         assert_eq!(
-            Frame::AnswerToken { text: String::new() }.event_name(),
+            Frame::AnswerToken {
+                text: String::new()
+            }
+            .event_name(),
             event::ANSWER_TOKEN
         );
         assert_eq!(

@@ -96,17 +96,14 @@ impl RedDBRuntime {
                     // Per-node property lookup (#423). Uses the same label
                     // resolution as NEIGHBORHOOD/TRAVERSE so '<label>' and
                     // '<numeric id>' both work.
-                    let graph = materialize_graph_with_projection(
-                        self.inner.db.store().as_ref(),
-                        None,
-                    )?;
+                    let graph =
+                        materialize_graph_with_projection(self.inner.db.store().as_ref(), None)?;
                     let resolved = resolve_graph_node_id(&graph, node_ref)?;
-                    let stored = graph.get_node(&resolved).ok_or_else(|| {
-                        RedDBError::NotFound(node_ref.to_string())
-                    })?;
-                    let all_props = materialize_graph_node_properties(
-                        self.inner.db.store().as_ref(),
-                    )?;
+                    let stored = graph
+                        .get_node(&resolved)
+                        .ok_or_else(|| RedDBError::NotFound(node_ref.to_string()))?;
+                    let all_props =
+                        materialize_graph_node_properties(self.inner.db.store().as_ref())?;
                     let props = all_props.get(&resolved).cloned().unwrap_or_default();
 
                     // Fixed columns first, then property keys in sorted order so

@@ -105,7 +105,10 @@ pub enum ParseError {
     /// `question` is present but not a string.
     QuestionWrongType,
     /// An option carries the wrong JSON type.
-    WrongType { path: String, expected: &'static str },
+    WrongType {
+        path: String,
+        expected: &'static str,
+    },
     /// A numeric option is outside its declared range.
     OutOfRange { path: String, detail: String },
     /// Both `cache` and `nocache` were set.
@@ -180,8 +183,7 @@ fn options_schema() -> Value {
     s.insert(
         "description".into(),
         Value::String(
-            "Per-call overrides mirroring `ASK '...'` SQL clauses. All fields optional."
-                .into(),
+            "Per-call overrides mirroring `ASK '...'` SQL clauses. All fields optional.".into(),
         ),
     );
 
@@ -198,7 +200,10 @@ fn options_schema() -> Value {
             ),
         ]),
     );
-    p.insert("using".into(), string_prop("Provider token override (e.g. \"openai\", \"anthropic\")."));
+    p.insert(
+        "using".into(),
+        string_prop("Provider token override (e.g. \"openai\", \"anthropic\")."),
+    );
     p.insert("model".into(), string_prop("Specific model id to invoke."));
     p.insert(
         "limit".into(),
@@ -363,9 +368,7 @@ pub fn parse(args: &Value) -> Result<AskInvocation, ParseError> {
 
     for (key, _) in obj.iter() {
         if key != "question" && key != "options" {
-            return Err(ParseError::UnknownOption {
-                path: key.clone(),
-            });
+            return Err(ParseError::UnknownOption { path: key.clone() });
         }
     }
 
@@ -389,10 +392,7 @@ pub fn parse(args: &Value) -> Result<AskInvocation, ParseError> {
     Ok(inv)
 }
 
-fn parse_options(
-    opts: &Map<String, Value>,
-    inv: &mut AskInvocation,
-) -> Result<(), ParseError> {
+fn parse_options(opts: &Map<String, Value>, inv: &mut AskInvocation) -> Result<(), ParseError> {
     for (key, val) in opts.iter() {
         match key.as_str() {
             "strict" => inv.strict = Some(expect_bool(val, "options.strict")?),
@@ -433,10 +433,7 @@ fn parse_options(
                 if !(TEMPERATURE_MIN..=TEMPERATURE_MAX).contains(&f) {
                     return Err(ParseError::OutOfRange {
                         path: "options.temperature".into(),
-                        detail: format!(
-                            "must be in {}..={}",
-                            TEMPERATURE_MIN, TEMPERATURE_MAX
-                        ),
+                        detail: format!("must be in {}..={}", TEMPERATURE_MIN, TEMPERATURE_MAX),
                     });
                 }
                 inv.temperature = Some(f);
@@ -564,7 +561,9 @@ mod tests {
     use super::*;
 
     fn json(s: &str) -> Value {
-        crate::utils::json::parse_json(s).expect("valid test json").into()
+        crate::utils::json::parse_json(s)
+            .expect("valid test json")
+            .into()
     }
 
     // ---- descriptor ----
@@ -611,13 +610,19 @@ mod tests {
     #[test]
     fn input_schema_rejects_additional_properties() {
         let schema = descriptor().get("inputSchema").cloned().unwrap();
-        assert_eq!(schema.get("additionalProperties").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(
+            schema.get("additionalProperties").and_then(|v| v.as_bool()),
+            Some(false)
+        );
         let opts = schema
             .get("properties")
             .and_then(|p| p.get("options"))
             .cloned()
             .unwrap();
-        assert_eq!(opts.get("additionalProperties").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(
+            opts.get("additionalProperties").and_then(|v| v.as_bool()),
+            Some(false)
+        );
     }
 
     #[test]
@@ -629,7 +634,12 @@ mod tests {
             .and_then(|o| o.get("properties"))
             .cloned()
             .unwrap();
-        let mut keys: Vec<&str> = opts.as_object().unwrap().keys().map(|s| s.as_str()).collect();
+        let mut keys: Vec<&str> = opts
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|s| s.as_str())
+            .collect();
         keys.sort();
         assert_eq!(
             keys,
@@ -753,10 +763,7 @@ mod tests {
 
     #[test]
     fn parse_rejects_missing_question() {
-        assert_eq!(
-            parse(&json("{}")).unwrap_err(),
-            ParseError::MissingQuestion
-        );
+        assert_eq!(parse(&json("{}")).unwrap_err(), ParseError::MissingQuestion);
     }
 
     #[test]
@@ -934,9 +941,7 @@ mod tests {
 
     #[test]
     fn parse_is_deterministic() {
-        let v = json(
-            r#"{"question":"q","options":{"strict":true,"limit":10,"seed":7}}"#,
-        );
+        let v = json(r#"{"question":"q","options":{"strict":true,"limit":10,"seed":7}}"#);
         assert_eq!(parse(&v).unwrap(), parse(&v).unwrap());
     }
 }

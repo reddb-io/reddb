@@ -93,18 +93,54 @@ pub struct AskRow {
 /// Canonical column list, in wire order. Kept private so callers can't
 /// pull out a stale copy and drift from `encode()`.
 const COLUMNS: &[ColumnDesc] = &[
-    ColumnDesc { name: "answer", oid: PgOid::Text },
-    ColumnDesc { name: "cache_hit", oid: PgOid::Bool },
-    ColumnDesc { name: "citations", oid: PgOid::Jsonb },
-    ColumnDesc { name: "completion_tokens", oid: PgOid::Int8 },
-    ColumnDesc { name: "cost_usd", oid: PgOid::Numeric },
-    ColumnDesc { name: "mode", oid: PgOid::Text },
-    ColumnDesc { name: "model", oid: PgOid::Text },
-    ColumnDesc { name: "prompt_tokens", oid: PgOid::Int8 },
-    ColumnDesc { name: "provider", oid: PgOid::Text },
-    ColumnDesc { name: "retry_count", oid: PgOid::Int8 },
-    ColumnDesc { name: "sources_flat", oid: PgOid::Jsonb },
-    ColumnDesc { name: "validation", oid: PgOid::Jsonb },
+    ColumnDesc {
+        name: "answer",
+        oid: PgOid::Text,
+    },
+    ColumnDesc {
+        name: "cache_hit",
+        oid: PgOid::Bool,
+    },
+    ColumnDesc {
+        name: "citations",
+        oid: PgOid::Jsonb,
+    },
+    ColumnDesc {
+        name: "completion_tokens",
+        oid: PgOid::Int8,
+    },
+    ColumnDesc {
+        name: "cost_usd",
+        oid: PgOid::Numeric,
+    },
+    ColumnDesc {
+        name: "mode",
+        oid: PgOid::Text,
+    },
+    ColumnDesc {
+        name: "model",
+        oid: PgOid::Text,
+    },
+    ColumnDesc {
+        name: "prompt_tokens",
+        oid: PgOid::Int8,
+    },
+    ColumnDesc {
+        name: "provider",
+        oid: PgOid::Text,
+    },
+    ColumnDesc {
+        name: "retry_count",
+        oid: PgOid::Int8,
+    },
+    ColumnDesc {
+        name: "sources_flat",
+        oid: PgOid::Jsonb,
+    },
+    ColumnDesc {
+        name: "validation",
+        oid: PgOid::Jsonb,
+    },
 ];
 
 /// Encode an [`AskResult`] as the single-row PG-wire result set.
@@ -143,7 +179,11 @@ pub fn columns() -> Vec<ColumnDesc> {
 }
 
 fn bool_cell(b: bool) -> Vec<u8> {
-    if b { b"t".to_vec() } else { b"f".to_vec() }
+    if b {
+        b"t".to_vec()
+    } else {
+        b"f".to_vec()
+    }
 }
 
 fn mode_cell(m: ask_response_envelope::Mode) -> Vec<u8> {
@@ -304,11 +344,8 @@ mod tests {
     #[test]
     fn oids_match_pg_type_d_h_canonical_values() {
         let row = encode(&fixture());
-        let by_name: std::collections::BTreeMap<&str, PgOid> = row
-            .columns
-            .iter()
-            .map(|c| (c.name, c.oid))
-            .collect();
+        let by_name: std::collections::BTreeMap<&str, PgOid> =
+            row.columns.iter().map(|c| (c.name, c.oid)).collect();
         assert_eq!(by_name["answer"], PgOid::Text);
         assert_eq!(by_name["cache_hit"], PgOid::Bool);
         assert_eq!(by_name["citations"], PgOid::Jsonb);
@@ -342,9 +379,18 @@ mod tests {
     fn citations_jsonb_is_marker_ascending() {
         let mut r = fixture();
         r.citations = vec![
-            Citation { marker: 3, urn: "urn:c".into() },
-            Citation { marker: 1, urn: "urn:a".into() },
-            Citation { marker: 2, urn: "urn:b".into() },
+            Citation {
+                marker: 3,
+                urn: "urn:c".into(),
+            },
+            Citation {
+                marker: 1,
+                urn: "urn:a".into(),
+            },
+            Citation {
+                marker: 2,
+                urn: "urn:b".into(),
+            },
         ];
         let row = encode(&r);
         let s = cell_str(&row, 2);
@@ -427,8 +473,14 @@ mod tests {
         // array, so reordering would silently break grounding.
         let mut r = fixture();
         r.sources_flat = vec![
-            SourceRow { urn: "urn:z".into(), payload: "{}".into() },
-            SourceRow { urn: "urn:a".into(), payload: "{}".into() },
+            SourceRow {
+                urn: "urn:z".into(),
+                payload: "{}".into(),
+            },
+            SourceRow {
+                urn: "urn:a".into(),
+                payload: "{}".into(),
+            },
         ];
         let row = encode(&r);
         let s = cell_str(&row, 10);

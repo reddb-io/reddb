@@ -218,9 +218,7 @@ pub fn evaluate(usage: &Usage, daily: &DailyState, settings: &Settings, now: Now
         if projected > cap {
             return reject(
                 LimitKind::DailyCostCap,
-                format!(
-                    "projected spend ${projected:.6} exceeds daily_cost_cap_usd=${cap:.6}"
-                ),
+                format!("projected spend ${projected:.6} exceeds daily_cost_cap_usd=${cap:.6}"),
             );
         }
     }
