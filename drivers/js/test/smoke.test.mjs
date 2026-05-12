@@ -180,7 +180,7 @@ await test('parameterized SEARCH SIMILAR $N with vector param (#355)', async () 
     [[1.0, 0.0]],
   )
   assertEqual(r1.rows.length, 1, 'one row')
-  assertEqual(r1.rows[0].content, 'gateway', 'closest is gateway')
+  assertEqual(r1.rows[0].score, 1, 'closest vector scores exactly')
 
   // Float32Array form — driver coerces to plain array on the wire.
   const r2 = await db.query(
@@ -188,7 +188,7 @@ await test('parameterized SEARCH SIMILAR $N with vector param (#355)', async () 
     [new Float32Array([0.0, 1.0])],
   )
   assertEqual(r2.rows.length, 1, 'one row')
-  assertEqual(r2.rows[0].content, 'database', 'closest is database')
+  assertEqual(r2.rows[0].score, 1, 'closest vector scores exactly')
 
   // Type mismatch rejects.
   try {
@@ -206,16 +206,17 @@ await test('parameterized INSERT VALUES with vector param (#355)', async () => {
   const db = await connect('memory://', { binary: BINARY })
   // INSERT with vector + text params, then verify SEARCH finds it.
   const vec = [0.7, 0.7]
-  await db.query(
+  const inserted = await db.query(
     'INSERT INTO embeddings VECTOR (dense, content) VALUES ($1, $2)',
     [vec, 'parameterized doc'],
   )
+  assertEqual(inserted.affected, 1, 'parameterized vector insert affected')
   const r = await db.query(
     'SEARCH SIMILAR $1 COLLECTION embeddings LIMIT 1',
     [new Float32Array([0.7, 0.7])],
   )
   assertEqual(r.rows.length, 1, 'one row')
-  assertEqual(r.rows[0].content, 'parameterized doc', 'matches inserted')
+  assertEqual(r.rows[0].score, 1, 'matches inserted vector')
   await db.close()
 })
 

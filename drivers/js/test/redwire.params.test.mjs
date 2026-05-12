@@ -8,7 +8,6 @@
  * cross-driver fixtures in #373).
  */
 
-import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
@@ -18,6 +17,25 @@ import {
   encodeValue,
   encodeQueryWithParams,
 } from '../src/redwire.js'
+
+let passed = 0
+let failed = 0
+
+function test(name, fn) {
+  try {
+    fn()
+    console.log(`  ok  ${name}`)
+    passed++
+  } catch (err) {
+    console.error(`  FAIL ${name}\n        ${err.stack || err.message}`)
+    failed++
+  }
+}
+
+process.on('beforeExit', () => {
+  console.log(`redwire params codec: ${passed} passed, ${failed} failed`)
+  if (failed > 0) process.exitCode = 1
+})
 
 test('catalog: QueryWithParams discriminant pinned to 0x28', () => {
   assert.equal(MessageKind.QueryWithParams, 0x28)
