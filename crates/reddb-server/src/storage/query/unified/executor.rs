@@ -206,14 +206,27 @@ impl UnifiedExecutor {
     }
 
     /// Execute a graph query on a specific graph reference
+    ///
+    /// Single-node `MATCH (n) [WHERE ...] RETURN ...` patterns get the
+    /// full filter + projection treatment using the passed `graph` (the
+    /// runtime materialises a fresh `GraphStore` per query, so `self.graph`
+    /// is empty here). Multi-node patterns (edges) are still emitted as
+    /// node-only matches — full pattern matching against a foreign graph
+    /// is a separate piece of work tracked outside #415.
     fn exec_graph_on(
         &self,
         graph: &GraphStore,
         query: &GraphQuery,
     ) -> Result<UnifiedResult, ExecutionError> {
         let mut result = UnifiedResult::empty();
+        let effective_filter = effective_graph_filter(query);
+        let effective_projections = effective_graph_projections(query);
 
-        // Get all nodes that match the pattern
+        // Build pattern matches per node pattern. Without edge expansion
+        // the result is the union of single-node matches across each
+        // node pattern — same shape the previous implementation produced,
+        // just now filter- and projection-aware.
+        let mut matches: Vec<PatternMatch> = Vec::new();
         for pattern_node in &query.pattern.nodes {
             let matching_nodes: Vec<_> = if let Some(ref category) = pattern_node.node_label {
                 graph.nodes_with_category(category)
@@ -221,25 +234,41 @@ impl UnifiedExecutor {
                 graph.iter_nodes().collect()
             };
 
-            // Filter and add matching nodes
             for node in matching_nodes {
-                let mut matches = true;
+                let matched = self.matched_node(&node);
+
+                // Stored-node property filters from the pattern itself
+                // (the `{key: val}` form) still need the StoredNode for
+                // node_property_value(), which also consults custom
+                // node_properties.
+                let mut ok = true;
                 for prop_filter in &pattern_node.properties {
                     if !self.eval_node_property_filter(&node, prop_filter) {
-                        matches = false;
+                        ok = false;
                         break;
                     }
                 }
-
-                if matches {
-                    let mut record = UnifiedRecord::new();
-                    record.set_node(&pattern_node.alias, self.matched_node(&node));
-                    result.records.push(record);
+                if !ok {
+                    continue;
                 }
+
+                let mut pm = PatternMatch::new();
+                pm.nodes.insert(pattern_node.alias.clone(), matched);
+                matches.push(pm);
             }
         }
 
-        result.stats.nodes_scanned = result.records.len() as u64;
+        let scanned = matches.len() as u64;
+
+        for matched in matches {
+            if !self.eval_filter_on_match(&effective_filter, &matched) {
+                continue;
+            }
+            let record = self.project_match(&matched, &effective_projections);
+            result.records.push(record);
+        }
+
+        result.stats.nodes_scanned = scanned;
         Ok(result)
     }
 
@@ -817,8 +846,30 @@ impl UnifiedExecutor {
                         _ => None,
                     })
             }
-            FieldRef::TableColumn { .. } => {
-                // Table columns not available in graph-only match
+            FieldRef::TableColumn { table, column } => {
+                // The shared SQL `WHERE` parser emits `n.foo` as
+                // `TableColumn { table: "n", column: "foo" }` — for
+                // graph MATCH we want to treat that as a node-property
+                // lookup against the matched alias when one exists,
+                // so `MATCH (n) WHERE n.label = 'x'` actually filters.
+                if !table.is_empty() {
+                    if let Some(n) = matched.nodes.get(table) {
+                        return match column.as_str() {
+                            "id" => Some(Value::text(n.id.clone())),
+                            "label" => Some(Value::text(n.label.clone())),
+                            "type" | "node_type" => Some(Value::text(n.node_label.clone())),
+                            other => n.properties.get(other).cloned(),
+                        };
+                    }
+                    if let Some(e) = matched.edges.get(table) {
+                        return match column.as_str() {
+                            "weight" => Some(Value::Float(e.weight as f64)),
+                            "from" => Some(Value::text(e.from.clone())),
+                            "to" => Some(Value::text(e.to.clone())),
+                            _ => None,
+                        };
+                    }
+                }
                 None
             }
         }
@@ -869,6 +920,30 @@ impl UnifiedExecutor {
         for proj in projections {
             match proj {
                 Projection::Field(field, alias) => {
+                    // `RETURN n` (whole-entity projection) expands into
+                    // every property the match holds for that alias —
+                    // id, label, node_type, plus user properties — so
+                    // callers don't get an empty `{}` row.
+                    if let (FieldRef::NodeId { alias: node_alias }, None) = (field, alias) {
+                        if let Some(node) = matched.nodes.get(node_alias) {
+                            record.set(
+                                &format!("{}.id", node_alias),
+                                Value::text(node.id.clone()),
+                            );
+                            record.set(
+                                &format!("{}.label", node_alias),
+                                Value::text(node.label.clone()),
+                            );
+                            record.set(
+                                &format!("{}.node_type", node_alias),
+                                Value::text(node.node_label.clone()),
+                            );
+                            for (k, v) in &node.properties {
+                                record.set(&format!("{}.{}", node_alias, k), v.clone());
+                            }
+                            continue;
+                        }
+                    }
                     if let Some(value) = self.get_field_value(field, matched) {
                         let key = alias.clone().unwrap_or_else(|| self.field_to_string(field));
                         record.set(&key, value);

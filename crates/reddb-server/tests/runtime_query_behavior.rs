@@ -376,3 +376,77 @@ fn graph_shortest_path_resolves_labels_for_both_endpoints() {
         other => panic!("expected text source, got {other:?}"),
     }
 }
+
+// ── Issue #415: MATCH WHERE / RETURN n.foo on single-node patterns ──────────
+
+#[test]
+fn match_where_filters_nodes_by_label_property() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('cinderella', 'Cinderella')")
+        .expect("insert cinderella");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('prince', 'Prince')")
+        .expect("insert prince");
+
+    let res = rt
+        .execute_query("MATCH (n) WHERE n.label = 'cinderella' RETURN n.name")
+        .expect("MATCH executes");
+    assert_eq!(
+        res.result.len(),
+        1,
+        "WHERE n.label='cinderella' must keep exactly one node, got {}",
+        res.result.len()
+    );
+    let name = match res.result.records[0].get("n.name") {
+        Some(Value::Text(s)) => s.as_ref().to_string(),
+        other => panic!("expected n.name text, got {other:?}"),
+    };
+    assert_eq!(name, "Cinderella");
+}
+
+#[test]
+fn match_return_property_projects_actual_values() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('a', 'Alice')")
+        .expect("insert a");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('b', 'Bob')")
+        .expect("insert b");
+
+    let res = rt
+        .execute_query("MATCH (n) RETURN n.name")
+        .expect("MATCH RETURN n.name executes");
+    assert_eq!(res.result.len(), 2);
+    let mut names: Vec<String> = res
+        .result
+        .records
+        .iter()
+        .map(|r| match r.get("n.name") {
+            Some(Value::Text(s)) => s.as_ref().to_string(),
+            other => panic!("expected n.name text, got {other:?}"),
+        })
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["Alice".to_string(), "Bob".to_string()]);
+}
+
+#[test]
+fn match_return_whole_node_surfaces_property_bag() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('cinderella', 'Cinderella')")
+        .expect("insert");
+
+    let res = rt
+        .execute_query("MATCH (n) WHERE n.label = 'cinderella' RETURN n")
+        .expect("MATCH RETURN n executes");
+    assert_eq!(res.result.len(), 1);
+    // The whole-entity projection should populate at least the node's
+    // user-supplied properties as record fields.
+    let rec = &res.result.records[0];
+    let name = rec
+        .get("n.name")
+        .and_then(|v| match v {
+            Value::Text(s) => Some(s.as_ref().to_string()),
+            _ => None,
+        })
+        .expect("RETURN n must surface property 'name'");
+    assert_eq!(name, "Cinderella");
+}
