@@ -8,7 +8,6 @@
  * cross-driver fixtures in #373).
  */
 
-import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
@@ -18,6 +17,25 @@ import {
   encodeValue,
   encodeQueryWithParams,
 } from '../src/redwire.js'
+
+const test = await testFn()
+
+async function testFn() {
+  if (typeof globalThis.Bun === 'undefined') {
+    return (await import('node:test')).test
+  }
+  // Bun 0.6.x does not provide a usable `node:test` shim for this file,
+  // so run the same synchronous assertions as a plain Bun script.
+  return (name, fn) => {
+    try {
+      fn()
+      console.log(`ok ${name}`)
+    } catch (err) {
+      console.error(`FAIL ${name}`)
+      throw err
+    }
+  }
+}
 
 test('catalog: QueryWithParams discriminant pinned to 0x28', () => {
   assert.equal(MessageKind.QueryWithParams, 0x28)

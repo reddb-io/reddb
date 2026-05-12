@@ -1519,6 +1519,45 @@ mod tests {
     }
 
     #[test]
+    fn query_with_params_insert_values_round_trips() {
+        let rt = make_runtime();
+        let _ = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{"sql":"CREATE TABLE pi (id INTEGER, name TEXT)"}}"#,
+        );
+        let inserted = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":2,"method":"query","params":{"sql":"INSERT INTO pi (id, name) VALUES ($1, $2)","params":[1,"Alice"]}}"#,
+        );
+        assert!(!inserted.contains("\"error\""), "got: {inserted}");
+
+        let selected = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":3,"method":"query","params":{"sql":"SELECT * FROM pi WHERE id = $1","params":[1]}}"#,
+        );
+        assert!(selected.contains("\"Alice\""), "got: {selected}");
+    }
+
+    #[test]
+    fn query_with_params_search_similar_vector_round_trips() {
+        let rt = make_runtime();
+        let _ = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{"sql":"INSERT INTO embeddings VECTOR (dense, content) VALUES ([1.0, 0.0], 'gateway')"}}"#,
+        );
+        let _ = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":2,"method":"query","params":{"sql":"INSERT INTO embeddings VECTOR (dense, content) VALUES ([0.0, 1.0], 'database')"}}"#,
+        );
+        let resp = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":3,"method":"query","params":{"sql":"SEARCH SIMILAR $1 COLLECTION embeddings LIMIT 1","params":[[1.0,0.0]]}}"#,
+        );
+        assert!(!resp.contains("\"error\""), "got: {resp}");
+        assert!(resp.contains("\"score\""), "got: {resp}");
+    }
+
+    #[test]
     fn query_with_params_arity_mismatch_rejected() {
         let rt = make_runtime();
         let _ = handle(

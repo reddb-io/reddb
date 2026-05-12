@@ -3,6 +3,11 @@
   "version": "1.0.8",
   "description": "RedDB wire protocol client for Bun — ultra-fast native TCP",
   "main": "index.ts",
+  "scripts": {
+    "test": "bun params.test.ts",
+    "test:js-redwire": "bun ../js/test/redwire.params.test.mjs",
+    "test:js-smoke": "bun ../js/test/smoke.test.mjs"
+  },
   "license": "MIT",
   "keywords": [
     "reddb",

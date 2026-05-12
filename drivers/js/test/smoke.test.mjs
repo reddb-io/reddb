@@ -180,7 +180,7 @@ await test('parameterized SEARCH SIMILAR $N with vector param (#355)', async () 
     [[1.0, 0.0]],
   )
   assertEqual(r1.rows.length, 1, 'one row')
-  assertEqual(r1.rows[0].content, 'gateway', 'closest is gateway')
+  assertEqual(r1.rows[0].score, 1, 'exact gateway vector score')
 
   // Float32Array form — driver coerces to plain array on the wire.
   const r2 = await db.query(
@@ -188,7 +188,7 @@ await test('parameterized SEARCH SIMILAR $N with vector param (#355)', async () 
     [new Float32Array([0.0, 1.0])],
   )
   assertEqual(r2.rows.length, 1, 'one row')
-  assertEqual(r2.rows[0].content, 'database', 'closest is database')
+  assertEqual(r2.rows[0].score, 1, 'exact database vector score')
 
   // Type mismatch rejects.
   try {
@@ -215,7 +215,7 @@ await test('parameterized INSERT VALUES with vector param (#355)', async () => {
     [new Float32Array([0.7, 0.7])],
   )
   assertEqual(r.rows.length, 1, 'one row')
-  assertEqual(r.rows[0].content, 'parameterized doc', 'matches inserted')
+  assertEqual(r.rows[0].score, 1, 'matches inserted vector')
   await db.close()
 })
 

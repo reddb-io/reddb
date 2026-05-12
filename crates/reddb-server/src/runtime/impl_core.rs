@@ -6276,6 +6276,13 @@ impl RedDBRuntime {
                 affected_rows: 0,
                 statement_type: "select",
             }),
+            QueryExpr::Insert(ref insert) if super::red_schema::is_virtual_table(&insert.table) => {
+                Err(RedDBError::Query(
+                    super::red_schema::READ_ONLY_ERROR.to_string(),
+                ))
+            }
+            QueryExpr::Insert(ref insert) => self.execute_insert(query_str, insert),
+            QueryExpr::SearchCommand(ref cmd) => self.execute_search_command(query_str, cmd),
             _ => Err(RedDBError::Query(format!(
                 "prepared-statement execution does not support {statement} statements"
             ))),
