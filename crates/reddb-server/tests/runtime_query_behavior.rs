@@ -700,17 +700,107 @@ fn insert_edge_returning_star_exposes_entity_id() {
 #[test]
 fn insert_multi_row_node_returning_star_emits_one_row_per_insert() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
-    let res = rt.execute_query(
-        "INSERT INTO tales NODE (label, name) VALUES ('a', 'A'), ('b', 'B') RETURNING *",
-    );
-    // Multi-row NODE inserts may not parse yet (#424). Skip if so —
-    // the single-row path is what #419 pins.
-    let Ok(res) = res else { return };
+    let res = rt
+        .execute_query(
+            "INSERT INTO tales NODE (label, name) VALUES ('a', 'A'), ('b', 'B') RETURNING *",
+        )
+        .expect("multi-row NODE insert executes");
     assert_eq!(res.affected_rows, 2);
     assert_eq!(res.result.len(), 2);
     let id_a = u64_at(&res, 0, "red_entity_id");
     let id_b = u64_at(&res, 1, "red_entity_id");
     assert!(id_a > 0 && id_b > 0 && id_a != id_b);
+}
+
+#[test]
+fn insert_multi_row_edge_returning_star_emits_one_row_per_insert() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    let a = rt
+        .execute_query("INSERT INTO tales NODE (label, name) VALUES ('a', 'A') RETURNING *")
+        .expect("insert a");
+    let b = rt
+        .execute_query("INSERT INTO tales NODE (label, name) VALUES ('b', 'B') RETURNING *")
+        .expect("insert b");
+    let c = rt
+        .execute_query("INSERT INTO tales NODE (label, name) VALUES ('c', 'C') RETURNING *")
+        .expect("insert c");
+    let a_id = u64_at(&a, 0, "red_entity_id");
+    let b_id = u64_at(&b, 0, "red_entity_id");
+    let c_id = u64_at(&c, 0, "red_entity_id");
+
+    let res = rt
+        .execute_query(&format!(
+            "INSERT INTO tales EDGE (label, from, to) VALUES \
+             ('KNOWS', {a_id}, {b_id}), ('KNOWS', {b_id}, {c_id}) RETURNING *"
+        ))
+        .expect("multi-row EDGE insert executes");
+    assert_eq!(res.affected_rows, 2);
+    assert_eq!(res.result.len(), 2);
+    let id_a = u64_at(&res, 0, "red_entity_id");
+    let id_b = u64_at(&res, 1, "red_entity_id");
+    assert!(id_a > 0 && id_b > 0 && id_a != id_b);
+    assert_eq!(text_at(&res, 0, "label"), "KNOWS");
+    assert_eq!(text_at(&res, 1, "label"), "KNOWS");
+}
+
+#[test]
+fn insert_multi_row_node_failure_is_atomic() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    let err = rt
+        .execute_query(
+            "INSERT INTO tales NODE (label, name, _ttl_ms) VALUES \
+             ('a', 'A', 60000), ('b', 'B', -1) RETURNING *",
+        )
+        .expect_err("invalid second NODE row must fail");
+    assert!(
+        err.to_string().contains("_ttl_ms"),
+        "expected TTL metadata validation error, got {err}"
+    );
+
+    let all = rt
+        .execute_query("SELECT * FROM tales")
+        .expect("SELECT after failed insert executes");
+    assert_eq!(all.result.len(), 0, "failed batch must leave no graph rows");
+}
+
+#[test]
+fn insert_multi_row_edge_failure_is_atomic() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    let a = rt
+        .execute_query("INSERT INTO tales NODE (label, name) VALUES ('a', 'A') RETURNING *")
+        .expect("insert a");
+    let b = rt
+        .execute_query("INSERT INTO tales NODE (label, name) VALUES ('b', 'B') RETURNING *")
+        .expect("insert b");
+    let a_id = u64_at(&a, 0, "red_entity_id");
+    let b_id = u64_at(&b, 0, "red_entity_id");
+
+    let err = rt
+        .execute_query(&format!(
+            "INSERT INTO tales EDGE (label, from, to) VALUES \
+             ('KNOWS', {a_id}, {b_id}), ('TREE_CHILD', {b_id}, {a_id}) RETURNING *"
+        ))
+        .expect_err("invalid second EDGE row must fail");
+    assert!(
+        err.to_string().contains("TREE_CHILD"),
+        "expected reserved edge label error, got {err}"
+    );
+
+    let all = rt
+        .execute_query("SELECT * FROM tales")
+        .expect("SELECT after failed insert executes");
+    let edge_count = all
+        .result
+        .records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.get("red_entity_type"),
+                Some(Value::Text(value)) if value.as_ref() == "graph_edge"
+            )
+        })
+        .count();
+    assert_eq!(edge_count, 0, "failed batch must leave no graph edges");
 }
 
 // ── Issue #421: first user-inserted entity id is documented & pinned ────────
