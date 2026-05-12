@@ -443,12 +443,12 @@ impl RedDBRuntime {
             // because create_timeseries_point isn't plumbed through this fn.
             let mut entity_outputs: Vec<crate::application::entity::CreateEntityOutput> =
                 Vec::with_capacity(effective_rows.len());
-            let mut returning_field_snaps: Vec<Vec<(String, Value)>> =
-                if query.returning.is_some() {
-                    Vec::with_capacity(effective_rows.len())
-                } else {
-                    Vec::new()
-                };
+            let mut returning_field_snaps: Vec<Vec<(String, Value)>> = if query.returning.is_some()
+            {
+                Vec::with_capacity(effective_rows.len())
+            } else {
+                Vec::new()
+            };
             for row_values in &effective_rows {
                 if row_values.len() != query.columns.len() {
                     return Err(RedDBError::Query(format!(

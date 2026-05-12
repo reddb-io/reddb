@@ -235,14 +235,10 @@ fn dlq_is_auto_created_on_first_overflow() {
 #[test]
 fn select_star_returns_graph_nodes_inserted_into_collection() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
-    rt.execute_query(
-        "INSERT INTO tales NODE (label, name) VALUES ('cinderella', 'Cinderella')",
-    )
-    .expect("insert node");
-    rt.execute_query(
-        "INSERT INTO tales NODE (label, name) VALUES ('prince', 'Prince Charming')",
-    )
-    .expect("insert second node");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('cinderella', 'Cinderella')")
+        .expect("insert node");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('prince', 'Prince Charming')")
+        .expect("insert second node");
 
     let all = rt
         .execute_query("SELECT * FROM tales")
@@ -257,7 +253,11 @@ fn select_star_returns_graph_nodes_inserted_into_collection() {
     let filtered = rt
         .execute_query("SELECT label, name FROM tales WHERE label = 'cinderella'")
         .expect("SELECT with WHERE executes");
-    assert_eq!(filtered.result.len(), 1, "WHERE label='cinderella' matches one node");
+    assert_eq!(
+        filtered.result.len(),
+        1,
+        "WHERE label='cinderella' matches one node"
+    );
     assert_eq!(text_at(&filtered, 0, "label"), "cinderella");
     assert_eq!(text_at(&filtered, 0, "name"), "Cinderella");
 }
@@ -421,7 +421,9 @@ fn edge_insert_still_accepts_numeric_ids() {
     rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('bob', 'Bob')")
         .expect("bob");
     // First user entity id is 102 (#421). Use TRAVERSE to discover ids.
-    let res = rt.execute_query("GRAPH TRAVERSE 'alice'").expect("traverse");
+    let res = rt
+        .execute_query("GRAPH TRAVERSE 'alice'")
+        .expect("traverse");
     let aid: u64 = match res.result.records[0].get("node_id") {
         Some(Value::Text(s)) => s.as_ref().parse().expect("numeric id"),
         other => panic!("unexpected node_id: {other:?}"),
@@ -467,7 +469,9 @@ fn edge_insert_ambiguous_label_errors() {
         .expect("villain");
 
     let err = rt
-        .execute_query("INSERT INTO tales EDGE (label, from, to) VALUES ('FIGHTS', 'hero', 'villain')")
+        .execute_query(
+            "INSERT INTO tales EDGE (label, from, to) VALUES ('FIGHTS', 'hero', 'villain')",
+        )
         .expect_err("ambiguous label must error");
     assert!(
         format!("{err}").contains("ambiguous"),

@@ -110,9 +110,7 @@ fn attach_cli_vault(
 /// Without an explicit type, plain values are auto-typed by trying
 /// to parse them as JSON first (so `42` → integer, `[1,2,3]` →
 /// vector, `true` → boolean, `null` → Null) and falling back to text.
-fn collect_query_params(
-    args: &[String],
-) -> Result<Vec<reddb::storage::schema::Value>, String> {
+fn collect_query_params(args: &[String]) -> Result<Vec<reddb::storage::schema::Value>, String> {
     let mut pairs: Vec<(String, Option<String>)> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -154,10 +152,7 @@ fn collect_query_params(
 /// Map a CLI `--param` token (and optional `--param-type`) into a
 /// schema `Value`. `@path` is unwrapped before type coercion so a
 /// file holding a JSON vector or large text works with every type.
-fn parse_cli_param(
-    raw: &str,
-    ty: Option<&str>,
-) -> Result<reddb::storage::schema::Value, String> {
+fn parse_cli_param(raw: &str, ty: Option<&str>) -> Result<reddb::storage::schema::Value, String> {
     use reddb::storage::schema::Value;
     let body: String = if let Some(path) = raw.strip_prefix('@') {
         std::fs::read_to_string(path).map_err(|e| format!("--param @{path}: {e}"))?
@@ -184,8 +179,8 @@ fn parse_cli_param(
         Some("json") => {
             // Canonicalise via the project JSON parser so embedded code
             // sees the same canonical form HTTP callers do.
-            let parsed: reddb::json::Value = reddb::json::from_str(trimmed)
-                .map_err(|e| format!("--param-type json: {e}"))?;
+            let parsed: reddb::json::Value =
+                reddb::json::from_str(trimmed).map_err(|e| format!("--param-type json: {e}"))?;
             Ok(Value::text(
                 reddb::json::to_string(&parsed).unwrap_or_default(),
             ))
@@ -195,12 +190,9 @@ fn parse_cli_param(
     }
 }
 
-fn json_str_to_vector(
-    s: &str,
-) -> Result<reddb::storage::schema::Value, String> {
+fn json_str_to_vector(s: &str) -> Result<reddb::storage::schema::Value, String> {
     use reddb::json::Value as J;
-    let parsed: J = reddb::json::from_str(s)
-        .map_err(|e| format!("--param-type vec: {e}"))?;
+    let parsed: J = reddb::json::from_str(s).map_err(|e| format!("--param-type vec: {e}"))?;
     let J::Array(items) = parsed else {
         return Err("--param-type vec: expected a JSON array of numbers".into());
     };
@@ -208,11 +200,7 @@ fn json_str_to_vector(
     for v in &items {
         match v {
             J::Number(n) => out.push(*n as f32),
-            _ => {
-                return Err(
-                    "--param-type vec: array must contain only numbers".into()
-                )
-            }
+            _ => return Err("--param-type vec: array must contain only numbers".into()),
         }
     }
     Ok(reddb::storage::schema::Value::Vector(out))
@@ -245,14 +233,10 @@ fn auto_type_param(s: &str) -> reddb::storage::schema::Value {
                         .collect();
                     Value::Vector(floats)
                 } else {
-                    Value::text(
-                        reddb::json::to_string(&J::Array(items)).unwrap_or_default(),
-                    )
+                    Value::text(reddb::json::to_string(&J::Array(items)).unwrap_or_default())
                 }
             }
-            J::Object(_) => Value::text(
-                reddb::json::to_string(&parsed).unwrap_or_default(),
-            ),
+            J::Object(_) => Value::text(reddb::json::to_string(&parsed).unwrap_or_default()),
         };
     }
     Value::text(s.to_string())
@@ -2419,20 +2403,14 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                 // Repeatable. The schema parser keeps only the last value
                 // in flags; the query handler walks argv directly via
                 // `collect_query_params` to gather every occurrence.
-                flags.push(
-                    cli::types::FlagSchema::new("param")
-                        .with_description(
-                            "Positional parameter for $1, $2, … (repeatable). \
+                flags.push(cli::types::FlagSchema::new("param").with_description(
+                    "Positional parameter for $1, $2, … (repeatable). \
                              Prefix with `@` to load JSON from a file.",
-                        ),
-                );
-                flags.push(
-                    cli::types::FlagSchema::new("param-type")
-                        .with_description(
-                            "Type override for the preceding --param \
+                ));
+                flags.push(cli::types::FlagSchema::new("param-type").with_description(
+                    "Type override for the preceding --param \
                              (text|int|float|bool|null|vec|json).",
-                        ),
-                );
+                ));
             }
         }
         Some("admin") => {

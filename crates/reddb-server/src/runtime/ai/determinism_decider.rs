@@ -105,7 +105,8 @@ pub fn decide(
     overrides: Overrides,
     settings: Settings,
 ) -> Applied {
-    let temperature = resolve_temperature(caps, overrides.temperature, settings.default_temperature);
+    let temperature =
+        resolve_temperature(caps, overrides.temperature, settings.default_temperature);
     let seed = resolve_seed(caps, overrides.seed, inputs);
     Applied { temperature, seed }
 }

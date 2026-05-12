@@ -2657,8 +2657,7 @@ fn test_parse_graph_traverse_docs_form() {
 #[test]
 fn test_parse_graph_shortest_path_docs_form() {
     // Pin `GRAPH SHORTEST_PATH FROM '...' TO '...' ALGORITHM ...` (docs). Regression for #417.
-    let query =
-        parse("GRAPH SHORTEST_PATH FROM 'alice' TO 'charlie' ALGORITHM dijkstra").unwrap();
+    let query = parse("GRAPH SHORTEST_PATH FROM 'alice' TO 'charlie' ALGORITHM dijkstra").unwrap();
     if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::ShortestPath {
         source,
         target,

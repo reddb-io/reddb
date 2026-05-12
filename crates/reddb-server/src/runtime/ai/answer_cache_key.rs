@@ -217,9 +217,7 @@ pub fn parse_ttl(literal: &str) -> Result<Duration, TtlParseError> {
         return Err(TtlParseError::MissingNumber);
     }
     let (num_part, unit_part) = literal.split_at(unit_idx);
-    let n: u64 = num_part
-        .parse()
-        .map_err(|_| TtlParseError::InvalidNumber)?;
+    let n: u64 = num_part.parse().map_err(|_| TtlParseError::InvalidNumber)?;
     if n == 0 {
         return Err(TtlParseError::ZeroTtl);
     }
@@ -278,7 +276,9 @@ mod tests {
         assert_eq!(k1, k2);
         // sha256 hex is 64 chars.
         assert_eq!(k1.len(), 64);
-        assert!(k1.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        assert!(k1
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
     }
 
     #[test]

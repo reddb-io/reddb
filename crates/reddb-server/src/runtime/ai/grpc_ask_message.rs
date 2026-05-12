@@ -320,9 +320,18 @@ mod tests {
     fn citations_sorted_by_marker_ascending() {
         let mut r = sample_result();
         r.citations = vec![
-            EnvCitation { marker: 3, urn: "urn:c".to_string() },
-            EnvCitation { marker: 1, urn: "urn:a".to_string() },
-            EnvCitation { marker: 2, urn: "urn:b".to_string() },
+            EnvCitation {
+                marker: 3,
+                urn: "urn:c".to_string(),
+            },
+            EnvCitation {
+                marker: 1,
+                urn: "urn:a".to_string(),
+            },
+            EnvCitation {
+                marker: 2,
+                urn: "urn:b".to_string(),
+            },
         ];
         let reply = build(&r);
         assert_eq!(
@@ -335,8 +344,14 @@ mod tests {
     fn citation_same_marker_is_stable() {
         let mut r = sample_result();
         r.citations = vec![
-            EnvCitation { marker: 1, urn: "urn:first".to_string() },
-            EnvCitation { marker: 1, urn: "urn:second".to_string() },
+            EnvCitation {
+                marker: 1,
+                urn: "urn:first".to_string(),
+            },
+            EnvCitation {
+                marker: 1,
+                urn: "urn:second".to_string(),
+            },
         ];
         let reply = build(&r);
         assert_eq!(reply.citations[0].urn, "urn:first");
@@ -347,8 +362,14 @@ mod tests {
     fn sources_flat_preserves_order_verbatim() {
         let mut r = sample_result();
         r.sources_flat = vec![
-            SourceRow { urn: "urn:b".to_string(), payload: "{}".to_string() },
-            SourceRow { urn: "urn:a".to_string(), payload: "{}".to_string() },
+            SourceRow {
+                urn: "urn:b".to_string(),
+                payload: "{}".to_string(),
+            },
+            SourceRow {
+                urn: "urn:a".to_string(),
+                payload: "{}".to_string(),
+            },
         ];
         let reply = build(&r);
         let pos_b = reply.sources_flat_json.find("urn:b").unwrap();
@@ -533,8 +554,7 @@ mod tests {
         // map to a GrpcAskReply field. If the envelope grows, this
         // test forces a matching GrpcAskReply field + proto tag.
         let r = sample_result();
-        let envelope =
-            crate::runtime::ai::ask_response_envelope::build(&r);
+        let envelope = crate::runtime::ai::ask_response_envelope::build(&r);
         let keys: Vec<&str> = envelope
             .as_object()
             .unwrap()

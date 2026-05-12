@@ -926,10 +926,7 @@ impl UnifiedExecutor {
                     // callers don't get an empty `{}` row.
                     if let (FieldRef::NodeId { alias: node_alias }, None) = (field, alias) {
                         if let Some(node) = matched.nodes.get(node_alias) {
-                            record.set(
-                                &format!("{}.id", node_alias),
-                                Value::text(node.id.clone()),
-                            );
+                            record.set(&format!("{}.id", node_alias), Value::text(node.id.clone()));
                             record.set(
                                 &format!("{}.label", node_alias),
                                 Value::text(node.label.clone()),
