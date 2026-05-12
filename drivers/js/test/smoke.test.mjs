@@ -129,6 +129,41 @@ await test('bulkInsert affects N rows', async () => {
   await db.close()
 })
 
+await test('parameterized query: $N int + text + null bindings', async () => {
+  const db = await connect('memory://', { binary: BINARY })
+  await db.query('CREATE TABLE u (id INTEGER, name TEXT, nickname TEXT)')
+  await db.insert('u', { id: 1, name: 'Alice', nickname: 'al' })
+  await db.insert('u', { id: 2, name: 'Bob', nickname: 'bo' })
+
+  // int + text
+  const r1 = await db.query('SELECT * FROM u WHERE id = $1 AND name = $2', [1, 'Alice'])
+  assertEqual(r1.rows.length, 1, 'one row matches')
+  assertEqual(r1.rows[0].name, 'Alice', 'name match')
+
+  // null binding
+  const r2 = await db.query('SELECT * FROM u WHERE name = $1', [null])
+  assertEqual(r2.rows.length, 0, 'no rows for null name')
+
+  // legacy single-arg form still works
+  const r3 = await db.query('SELECT * FROM u')
+  assertEqual(r3.rows.length, 2, 'legacy two rows')
+
+  await db.close()
+})
+
+await test('parameterized query: arity mismatch rejects with INVALID_PARAMS', async () => {
+  const db = await connect('memory://', { binary: BINARY })
+  await db.query('CREATE TABLE pp (id INTEGER)')
+  try {
+    await db.query('SELECT * FROM pp WHERE id = $1', [1, 2])
+    throw new Error('expected reject')
+  } catch (err) {
+    assert(err instanceof RedDBError, 'RedDBError')
+    assertEqual(err.code, 'INVALID_PARAMS', 'code')
+  }
+  await db.close()
+})
+
 await test('query error rejects with RedDBError', async () => {
   const db = await connect('memory://', { binary: BINARY })
   try {

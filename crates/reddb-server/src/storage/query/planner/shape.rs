@@ -35,6 +35,19 @@ pub fn parameterize_query_expr(expr: &QueryExpr) -> Option<ParameterizedQuery> {
     })
 }
 
+/// Bind user-supplied positional `$N` parameters into a freshly-parsed
+/// query expression. Unlike [`bind_parameterized_query`] — which is the
+/// other half of the auto-parameterized prepared-statement shape cache —
+/// this entry point assumes the parser already emitted `Expr::Parameter`
+/// nodes (one per `$N` reference) and just substitutes them in place.
+///
+/// Validation (arity, gaps) is performed by `user_params::validate`
+/// before this call; here we trust the slice indexes match the parser's
+/// 0-based slot numbering.
+pub fn bind_user_param_query(expr: &QueryExpr, params: &[Value]) -> Option<QueryExpr> {
+    bind_query_expr_inner(expr, params)
+}
+
 pub fn bind_parameterized_query(
     expr: &QueryExpr,
     binds: &[Value],

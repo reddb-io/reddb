@@ -70,6 +70,7 @@ pub mod step;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod unified;
+pub mod user_params;
 pub(crate) mod value_compare;
 
 // Re-export common types

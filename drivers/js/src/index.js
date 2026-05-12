@@ -344,9 +344,26 @@ export class RedDB {
     this.vault = (collection = 'red.vault') => new VaultClient(client, collection)
   }
 
-  /** Execute a SQL query. Returns `{ statement, affected, columns, rows }`. */
-  query(sql) {
-    return this.client.call('query', { sql })
+  /**
+   * Execute a SQL query.
+   *
+   * Two signatures:
+   *   - `query(sql)` — legacy single-arg form.
+   *   - `query(sql, params)` — positional `$N` bind values. `params` is
+   *     an array (JS scalars: number | string | null map to engine
+   *     int/float / text / null). Indices in the SQL are 1-based
+   *     (`$1`, `$2`, ...), `params` is 0-based JS-style.
+   *
+   * Returns `{ statement, affected, columns, rows }`.
+   */
+  query(sql, params) {
+    if (params === undefined) {
+      return this.client.call('query', { sql })
+    }
+    if (!Array.isArray(params)) {
+      throw new TypeError('query: `params` must be an array')
+    }
+    return this.client.call('query', { sql, params })
   }
 
   /** Insert one row. Returns `{ affected, id? }`. */
