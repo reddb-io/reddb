@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -18,7 +19,26 @@ import (
 type Conn interface {
 	// Query runs a SQL string and returns the raw JSON-encoded payload bytes
 	// (the engine's `Result.payload`). Callers decode them however they like.
-	Query(ctx context.Context, sql string) ([]byte, error)
+	//
+	// Optional `params` carry positional `$N` bind values. The variadic form is
+	// backwards-compatible — `Query(ctx, sql)` keeps its byte-identical wire
+	// path. When params are present, RedWire routes through the binary
+	// `QueryWithParams` frame (0x28) and requires the server to advertise
+	// `FeatureParams`; HTTP forwards the typed JSON `params` array to
+	// `/query`.
+	//
+	// Native Go type mapping (see `redwire.EncodeValue` for the full list):
+	//   nil                    -> Null
+	//   bool                   -> Bool
+	//   intN / uintN           -> Int (i64)
+	//   float32 / float64      -> Float (f64)
+	//   string                 -> Text
+	//   []byte                 -> Bytes
+	//   []float32 / []float64  -> Vector
+	//   time.Time              -> Timestamp (unix seconds)
+	//   redwire.UUID           -> Uuid
+	//   map[string]any         -> Json (canonical bytes)
+	Query(ctx context.Context, sql string, params ...any) ([]byte, error)
 	// Insert delivers a single row.
 	Insert(ctx context.Context, collection string, payload any) error
 	// BulkInsert delivers a batch of rows.
@@ -197,8 +217,15 @@ type redwireFacade struct {
 	conn *redwire.Conn
 }
 
-func (r *redwireFacade) Query(ctx context.Context, sql string) ([]byte, error) {
-	return r.conn.Query(ctx, sql)
+func (r *redwireFacade) Query(ctx context.Context, sql string, params ...any) ([]byte, error) {
+	body, err := r.conn.Query(ctx, sql, params...)
+	if err != nil {
+		if errors.Is(err, redwire.ErrParamsUnsupported) {
+			return nil, NewError(CodeParamsUnsupported, err.Error())
+		}
+		return nil, err
+	}
+	return body, nil
 }
 func (r *redwireFacade) Insert(ctx context.Context, collection string, payload any) error {
 	return r.conn.Insert(ctx, collection, payload)
@@ -240,12 +267,35 @@ func connectHTTP(ctx context.Context, p *ParsedURI, o *Options) (Conn, error) {
 
 type httpFacade struct{ c *httpx.Client }
 
-func (h *httpFacade) Query(ctx context.Context, sql string) ([]byte, error) {
-	out, err := h.c.Query(ctx, sql)
+func (h *httpFacade) Query(ctx context.Context, sql string, params ...any) ([]byte, error) {
+	httpParams, err := convertParamsForHTTP(params)
+	if err != nil {
+		return nil, NewError(CodeParamsUnsupported, err.Error())
+	}
+	out, err := h.c.Query(ctx, sql, httpParams...)
 	if err != nil {
 		return nil, err
 	}
 	return jsonBytes(out)
+}
+
+// convertParamsForHTTP lifts top-level `redwire.UUID` params into the
+// httpx-local UUID so the HTTP transport doesn't need a redwire dependency.
+// Other Go types pass through unchanged.
+func convertParamsForHTTP(params []any) ([]any, error) {
+	if len(params) == 0 {
+		return nil, nil
+	}
+	out := make([]any, len(params))
+	for i, p := range params {
+		switch v := p.(type) {
+		case redwire.UUID:
+			out[i] = httpx.UUID(v)
+		default:
+			out[i] = v
+		}
+	}
+	return out, nil
 }
 func (h *httpFacade) Insert(ctx context.Context, collection string, payload any) error {
 	_, err := h.c.Insert(ctx, collection, payload)

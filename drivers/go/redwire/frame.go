@@ -55,6 +55,15 @@ const (
 	KindGet                    MessageKind = 0x19
 	KindDelete                 MessageKind = 0x1A
 	KindDeleteOk               MessageKind = 0x1B
+	KindQueryWithParams        MessageKind = 0x28
+)
+
+// Server feature bitmask advertised in HelloAck / AuthOk `features` field.
+const (
+	// FeatureParams is set when the server understands the `QueryWithParams`
+	// frame (#357). Old servers leave it clear and clients must keep emitting
+	// the plain `Query` frame.
+	FeatureParams uint32 = 0x0000_0001
 )
 
 // FrameHeader captures the parsed 16-byte header.
@@ -188,7 +197,8 @@ func isKnownKind(k MessageKind) bool {
 		KindHello, KindHelloAck,
 		KindAuthRequest, KindAuthResponse, KindAuthOk, KindAuthFail,
 		KindBye, KindPing, KindPong,
-		KindGet, KindDelete, KindDeleteOk:
+		KindGet, KindDelete, KindDeleteOk,
+		KindQueryWithParams:
 		return true
 	}
 	// Accept the control-plane numeric range that the engine reserves so we
