@@ -1144,7 +1144,11 @@ pub fn assert_native_consistency(rt: &RedDBRuntime) {
     // Operational readiness (`readiness_for_write`, `readiness_for_repair`) is
     // checked below and is independent of the bootstrap-complete flag because
     // the non-serverless path gates those on `sidecar_loaded_from.is_some()`.
-    for key in ["native_header.registry_page", "native_header.recovery_page", "native_header.catalog_page"] {
+    for key in [
+        "native_header.registry_page",
+        "native_header.recovery_page",
+        "native_header.catalog_page",
+    ] {
         assert_ne!(
             health.diagnostics.get(key).map(String::as_str),
             Some("0"),

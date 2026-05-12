@@ -28,9 +28,7 @@ impl RedDBServer {
                     Err(err) => return json_error(400, err.to_string()),
                 }
             }
-            None => self
-                .query_use_cases()
-                .execute(ExecuteQueryInput { query }),
+            None => self.query_use_cases().execute(ExecuteQueryInput { query }),
         };
 
         match exec_result {
@@ -393,8 +391,14 @@ mod tests {
         let r = server.handle_query(sel.to_vec());
         assert_eq!(r.status, 200, "select: {}", body_str(&r));
         let text = body_str(&r);
-        assert!(text.contains("\"Alice\""), "expected Alice in response: {text}");
-        assert!(!text.contains("\"Bob\""), "Bob should be filtered out: {text}");
+        assert!(
+            text.contains("\"Alice\""),
+            "expected Alice in response: {text}"
+        );
+        assert!(
+            !text.contains("\"Bob\""),
+            "Bob should be filtered out: {text}"
+        );
     }
 
     #[test]
@@ -407,7 +411,10 @@ mod tests {
         let r = server.handle_query(body.to_vec());
         assert_eq!(r.status, 400, "body: {}", body_str(&r));
         let text = body_str(&r).to_lowercase();
-        assert!(text.contains("param") || text.contains("arity"), "got: {text}");
+        assert!(
+            text.contains("param") || text.contains("arity"),
+            "got: {text}"
+        );
     }
 
     #[test]

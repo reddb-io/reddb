@@ -1223,14 +1223,18 @@ mod tests {
             panic!("root must be And");
         };
         let Expr::BinaryOp {
-            op: BinOp::Eq, rhs: r1, ..
+            op: BinOp::Eq,
+            rhs: r1,
+            ..
         } = *lhs
         else {
             panic!("lhs must be Eq");
         };
         assert!(matches!(*r1, Expr::Parameter { index: 0, .. }));
         let Expr::BinaryOp {
-            op: BinOp::Eq, rhs: r2, ..
+            op: BinOp::Eq,
+            rhs: r2,
+            ..
         } = *rhs
         else {
             panic!("rhs must be Eq");

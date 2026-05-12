@@ -417,8 +417,7 @@ impl RedDBRuntime {
             } => {
                 if limit_param.is_some() {
                     return Err(RedDBError::Query(
-                        "SEARCH TEXT LIMIT $N parameter was not bound before execution"
-                            .to_string(),
+                        "SEARCH TEXT LIMIT $N parameter was not bound before execution".to_string(),
                     ));
                 }
                 let collections = collection.as_ref().map(|c| vec![c.clone()]);

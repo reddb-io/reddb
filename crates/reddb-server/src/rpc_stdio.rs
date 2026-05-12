@@ -705,8 +705,8 @@ fn dispatch_method(
             if let Some(binds) = bind_values {
                 use crate::storage::query::modes::parse_multi;
                 use crate::storage::query::user_params;
-                let parsed = parse_multi(sql)
-                    .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
+                let parsed =
+                    parse_multi(sql).map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
                 let bound = user_params::bind(&parsed, &binds)
                     .map_err(|e| (error_code::INVALID_PARAMS, e.to_string()))?;
                 let qr = runtime
@@ -1192,9 +1192,7 @@ pub(crate) fn json_value_to_schema_value(v: &Value) -> SchemaValue {
                 SchemaValue::text(crate::json::to_string(v).unwrap_or_default())
             }
         }
-        Value::Object(_) => {
-            SchemaValue::text(crate::json::to_string(v).unwrap_or_default())
-        }
+        Value::Object(_) => SchemaValue::text(crate::json::to_string(v).unwrap_or_default()),
     }
 }
 

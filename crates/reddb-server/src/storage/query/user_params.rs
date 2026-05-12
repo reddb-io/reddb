@@ -24,7 +24,9 @@ pub fn expr_contains_parameter(expr: &Expr) -> bool {
         Expr::UnaryOp { operand, .. } => expr_contains_parameter(operand),
         Expr::Cast { inner, .. } => expr_contains_parameter(inner),
         Expr::FunctionCall { args, .. } => args.iter().any(expr_contains_parameter),
-        Expr::Case { branches, else_, .. } => {
+        Expr::Case {
+            branches, else_, ..
+        } => {
             branches
                 .iter()
                 .any(|(c, v)| expr_contains_parameter(c) || expr_contains_parameter(v))
@@ -71,7 +73,11 @@ fn substitute_params_in_expr(expr: Expr, params: &[Value]) -> Result<Expr, UserP
             operand: Box::new(substitute_params_in_expr(*operand, params)?),
             span,
         }),
-        Expr::Cast { inner, target, span } => Ok(Expr::Cast {
+        Expr::Cast {
+            inner,
+            target,
+            span,
+        } => Ok(Expr::Cast {
             inner: Box::new(substitute_params_in_expr(*inner, params)?),
             target,
             span,
@@ -150,7 +156,6 @@ fn substitute_params_in_expr(expr: Expr, params: &[Value]) -> Result<Expr, UserP
     }
 }
 
-
 /// Errors surfaced when binding fails. The wire layer turns these into
 /// `QUERY_ERROR` / `INVALID_PARAMS` responses.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,7 +175,10 @@ pub enum UserParamError {
     /// A parameter was supplied in a slot that requires a specific type
     /// (e.g. a vector slot received a string). `slot` describes the
     /// context, `got` describes the user-supplied value's variant.
-    TypeMismatch { slot: &'static str, got: &'static str },
+    TypeMismatch {
+        slot: &'static str,
+        got: &'static str,
+    },
 }
 
 impl std::fmt::Display for UserParamError {
@@ -331,12 +339,10 @@ pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamEr
     {
         let mut bound_vector = vector.clone();
         if let Some(idx) = vector_param {
-            let value = params
-                .get(*idx)
-                .ok_or(UserParamError::Arity {
-                    expected: idx + 1,
-                    got: params.len(),
-                })?;
+            let value = params.get(*idx).ok_or(UserParamError::Arity {
+                expected: idx + 1,
+                got: params.len(),
+            })?;
             bound_vector = match value {
                 Value::Vector(v) => v.clone(),
                 other => {
@@ -812,7 +818,9 @@ fn visit_expr<F: FnMut(&Expr)>(expr: &Expr, visit: &mut F) {
                 visit_expr(a, visit);
             }
         }
-        Expr::Case { branches, else_, .. } => {
+        Expr::Case {
+            branches, else_, ..
+        } => {
             for (c, v) in branches {
                 visit_expr(c, visit);
                 visit_expr(v, visit);
@@ -990,9 +998,7 @@ mod tests {
 
     #[test]
     fn bind_search_similar_limit_and_min_score_together() {
-        let q = parse(
-            "SEARCH SIMILAR $1 COLLECTION embeddings LIMIT $2 MIN_SCORE $3",
-        );
+        let q = parse("SEARCH SIMILAR $1 COLLECTION embeddings LIMIT $2 MIN_SCORE $3");
         let bound = bind(
             &q,
             &[
@@ -1107,14 +1113,10 @@ mod tests {
     #[test]
     fn bind_search_hybrid_limit_param() {
         // Issue #361: `SEARCH HYBRID ... LIMIT $N` binds integer parameter.
-        let q = parse(
-            "SEARCH HYBRID SIMILAR [0.1, 0.2] TEXT 'q' COLLECTION svc LIMIT $1",
-        );
+        let q = parse("SEARCH HYBRID SIMILAR [0.1, 0.2] TEXT 'q' COLLECTION svc LIMIT $1");
         let bound = bind(&q, &[Value::Integer(30)]).unwrap();
         let QueryExpr::SearchCommand(SearchCommand::Hybrid {
-            limit,
-            limit_param,
-            ..
+            limit, limit_param, ..
         }) = bound
         else {
             panic!("expected SearchCommand::Hybrid");
@@ -1129,9 +1131,7 @@ mod tests {
         let q = parse("SEARCH HYBRID TEXT 'q' COLLECTION svc K $1");
         let bound = bind(&q, &[Value::Integer(7)]).unwrap();
         let QueryExpr::SearchCommand(SearchCommand::Hybrid {
-            limit,
-            limit_param,
-            ..
+            limit, limit_param, ..
         }) = bound
         else {
             panic!("expected SearchCommand::Hybrid");
@@ -1172,9 +1172,8 @@ mod tests {
     #[test]
     fn bind_search_spatial_nearest_k_param() {
         // Issue #361: `SEARCH SPATIAL NEAREST ... K $N` binds an integer.
-        let q = parse(
-            "SEARCH SPATIAL NEAREST 40.7128 74.0060 K $1 COLLECTION sites COLUMN location",
-        );
+        let q =
+            parse("SEARCH SPATIAL NEAREST 40.7128 74.0060 K $1 COLLECTION sites COLUMN location");
         let bound = bind(&q, &[Value::Integer(7)]).unwrap();
         let QueryExpr::SearchCommand(SearchCommand::SpatialNearest { k, k_param, .. }) = bound
         else {
@@ -1186,9 +1185,8 @@ mod tests {
 
     #[test]
     fn bind_search_spatial_nearest_k_rejects_zero() {
-        let q = parse(
-            "SEARCH SPATIAL NEAREST 40.7128 74.0060 K $1 COLLECTION sites COLUMN location",
-        );
+        let q =
+            parse("SEARCH SPATIAL NEAREST 40.7128 74.0060 K $1 COLLECTION sites COLUMN location");
         let err = bind(&q, &[Value::Integer(0)]).unwrap_err();
         assert!(matches!(
             err,
@@ -1201,9 +1199,8 @@ mod tests {
 
     #[test]
     fn bind_search_spatial_nearest_k_rejects_non_integer() {
-        let q = parse(
-            "SEARCH SPATIAL NEAREST 40.7128 74.0060 K $1 COLLECTION sites COLUMN location",
-        );
+        let q =
+            parse("SEARCH SPATIAL NEAREST 40.7128 74.0060 K $1 COLLECTION sites COLUMN location");
         let err = bind(&q, &[Value::text("five")]).unwrap_err();
         assert!(matches!(
             err,
@@ -1220,9 +1217,7 @@ mod tests {
         let q = parse("SEARCH TEXT 'hello' COLLECTION docs LIMIT $1");
         let bound = bind(&q, &[Value::Integer(15)]).unwrap();
         let QueryExpr::SearchCommand(SearchCommand::Text {
-            limit,
-            limit_param,
-            ..
+            limit, limit_param, ..
         }) = bound
         else {
             panic!("expected SearchCommand::Text");
@@ -1263,9 +1258,7 @@ mod tests {
         let q = parse("SEARCH MULTIMODAL 'user:123' COLLECTION people LIMIT $1");
         let bound = bind(&q, &[Value::Integer(40)]).unwrap();
         let QueryExpr::SearchCommand(SearchCommand::Multimodal {
-            limit,
-            limit_param,
-            ..
+            limit, limit_param, ..
         }) = bound
         else {
             panic!("expected SearchCommand::Multimodal");
@@ -1303,14 +1296,10 @@ mod tests {
     #[test]
     fn bind_search_index_limit_param() {
         // Issue #361: `SEARCH INDEX ... LIMIT $N` binds an integer.
-        let q = parse(
-            "SEARCH INDEX cpf VALUE '000.000.000-00' COLLECTION people LIMIT $1",
-        );
+        let q = parse("SEARCH INDEX cpf VALUE '000.000.000-00' COLLECTION people LIMIT $1");
         let bound = bind(&q, &[Value::Integer(50)]).unwrap();
         let QueryExpr::SearchCommand(SearchCommand::Index {
-            limit,
-            limit_param,
-            ..
+            limit, limit_param, ..
         }) = bound
         else {
             panic!("expected SearchCommand::Index");
@@ -1351,9 +1340,7 @@ mod tests {
         let q = parse("SEARCH CONTEXT 'hello' COLLECTION docs LIMIT $1");
         let bound = bind(&q, &[Value::Integer(60)]).unwrap();
         let QueryExpr::SearchCommand(SearchCommand::Context {
-            limit,
-            limit_param,
-            ..
+            limit, limit_param, ..
         }) = bound
         else {
             panic!("expected SearchCommand::Context");
@@ -1396,9 +1383,7 @@ mod tests {
         );
         let bound = bind(&q, &[Value::Integer(50)]).unwrap();
         let QueryExpr::SearchCommand(SearchCommand::SpatialRadius {
-            limit,
-            limit_param,
-            ..
+            limit, limit_param, ..
         }) = bound
         else {
             panic!("expected SearchCommand::SpatialRadius");
@@ -1441,9 +1426,7 @@ mod tests {
     fn bind_insert_values_with_vector_param() {
         // Issue #355 INSERT half: $1 in VALUES is bound to a Value::Vector
         // and surfaces in both `value_exprs` (as a Literal) and `values`.
-        let q = parse(
-            "INSERT INTO embeddings (dense, content) VALUES ($1, $2)",
-        );
+        let q = parse("INSERT INTO embeddings (dense, content) VALUES ($1, $2)");
         let vec = Value::Vector(vec![0.1, 0.2, 0.3]);
         let bound = bind(&q, &[vec.clone(), Value::text("doc text")]).unwrap();
         let QueryExpr::Insert(insert) = bound else {
@@ -1451,13 +1434,18 @@ mod tests {
         };
         assert_eq!(insert.values.len(), 1);
         assert_eq!(insert.values[0].len(), 2);
-        assert!(matches!(insert.values[0][0], Value::Vector(ref v) if v == &vec![0.1f32, 0.2, 0.3]));
+        assert!(
+            matches!(insert.values[0][0], Value::Vector(ref v) if v == &vec![0.1f32, 0.2, 0.3])
+        );
         assert!(matches!(insert.values[0][1], Value::Text(ref s) if s.as_ref() == "doc text"));
         // value_exprs row 0 col 0 is now a Literal carrying the vector.
         let row0 = &insert.value_exprs[0];
         assert!(matches!(
             &row0[0],
-            Expr::Literal { value: Value::Vector(_), .. }
+            Expr::Literal {
+                value: Value::Vector(_),
+                ..
+            }
         ));
     }
 
