@@ -17,6 +17,7 @@ pub mod citation_parser;
 pub mod dedup_cache;
 pub mod metrics;
 pub mod ner;
+pub mod prompt_assembler;
 pub mod prompt_template;
 pub mod text_chunker;
 pub mod transport;
