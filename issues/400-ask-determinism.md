@@ -116,3 +116,59 @@ Verification (this slice):
 Deep module + SQL surface together unblock the wiring slice — at
 that point a follow-up can land `decide()` into `execute_ask` in
 one focused PR without re-touching the parser or the AST.
+
+Slice 3 (this commit): `SourcesFingerprint` deep module landed at
+`crates/reddb-server/src/runtime/ai/sources_fingerprint.rs` with 14
+unit tests. Pure — no I/O, no clock. Pins the canonical format that
+both `determinism_decider::derive_seed` and `answer_cache_key` (#403)
+already treat as opaque, so changing it later is a one-way wire
+break that the tests will catch.
+
+Exposes:
+
+- `Source<'a> { urn, content_version: u64 }` — one retrieved row.
+- `fingerprint(&[Source]) -> String` — lowercase-hex SHA-256.
+
+Canonical form pinned by tests:
+
+- Tuples sorted by urn bytes ascending, then version ascending;
+- `dedup` after sort so the same `(urn, version)` from two buckets
+  (BM25 + vector) collapses;
+- Per tuple: `urn || 0x1f || version.to_be_bytes() || 0x1e`;
+- Empty input hashes to sha256("") — keeps the seed derivation
+  total without an `Option<String>` thread.
+
+Tests pin:
+
+- empty-input hash equals the known sha256 of "";
+- output is 64 lowercase-hex chars;
+- deterministic across calls;
+- order-independent across input permutations;
+- duplicates collapse;
+- version change flips the hash;
+- different urns produce different hashes;
+- `(urn, v1)` and `(urn, v2)` both contribute (no urn-only dedup);
+- version width pinned to BE-8 bytes (1 vs 1<<56 differ);
+- urn boundary is injective with the field delimiter;
+- one hand-computed single-entry hash so the byte layout can't
+  silently drift;
+- bytewise sort, not lex (capital "Z" sorts before lowercase "a");
+- empty-urn entry is distinct from empty-set.
+
+Deferred to follow-up slices (each independently shippable):
+
+- Compute `(urn, content_version)` pairs at the retrieval layer
+  (post-#398 fusion) and call `fingerprint()` before invoking
+  `determinism_decider::decide` in `execute_ask`. Same fingerprint
+  flows into the future answer-cache key (#403) so the two stay
+  aligned.
+- Decide where the `content_version` for each retrieved row comes
+  from — the unified record currently exposes one through the
+  catalog, but vector/graph buckets need the same handle.
+- Wire-up + integration test depend on the stubbable LLM transport
+  refactor already deferred by #395/#396.
+
+Verification (this slice):
+- `cargo check -p reddb-io-server` clean.
+- `cargo test -p reddb-io-server --lib runtime::ai::sources_fingerprint`
+  → 14 passed.
