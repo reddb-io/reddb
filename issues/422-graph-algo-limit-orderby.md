@@ -33,3 +33,24 @@ Today: parse error. `GRAPH CENTRALITY` returns implicit top-100 with no way to c
 - [ ] `ORDER BY` with the algorithm's natural metric works (e.g. centrality_score, component_size).
 - [ ] Default top-K is documented; removed implicit truncation surfaces correctly.
 - [ ] Tests for limit cap, order direction, and combined `ORDER BY ... LIMIT`.
+
+## Progress
+
+Slice 1 (commit 7315cfb5): `GRAPH CENTRALITY LIMIT N` landed.
+
+- Parser accepts `GRAPH CENTRALITY LIMIT n` and `GRAPH CENTRALITY ALGORITHM pagerank LIMIT n`.
+- Runtime applies the cap to centrality output while preserving the historical implicit top-100 cap when `LIMIT` is omitted.
+- `LIMIT 0` returns zero rows; negative limits fail through the existing integer parser.
+- Tests landed in parser coverage and `tests/runtime_query_behavior.rs`.
+
+Verification:
+
+- `cargo test -p reddb-io-server --lib test_parse_graph_centrality`
+- `cargo test -p reddb-io-server --test runtime_query_behavior graph_centrality_limit`
+- `make check`
+
+Remaining slices:
+
+- `LIMIT` for community, components, shortest path, and any other documented `GRAPH <algorithm>` command.
+- `ORDER BY <metric> [ASC|DESC]` support and tests.
+- Docs for default top-K behavior and explicit limit/order examples.
