@@ -48,8 +48,18 @@ Slice 1 (commit f74c55c0): `docs/clients/drivers/go.md` got the
 "Safe parameter binding" section + native-type table + FEATURE_PARAMS
 gating note. Brought the Go hub page in sync with the driver README.
 
-Slice 2 (this commit): `docs/guides/javascript-typescript-driver.md`
-gets the same treatment.
+Slice 3 (this commit): `docs/clients/drivers/python.md` gets the same
+treatment — new "Safe parameter binding" section between API surface
+and Errors, native-type table mirroring `py_to_param_value` in
+`drivers/python/src/high_level.rs`, gRPC backend `PARAMS_UNSUPPORTED`
+gotcha called out, and the error code added to the stable codes table.
+Variadic and `params=` kwarg forms both shown — `db.query` accepts
+both per `drivers/python/tests/test_params.py`. Mixed-list /
+bool-before-int gotchas surfaced. No ADR cross-link yet (PRD #352 ADR
+still hasn't landed).
+
+Slice 2 (commit 2e3233a6): `docs/guides/javascript-typescript-driver.md`
+got the same treatment.
 
 - New "4. Safe parameter binding" section sits between "Query and
   mutate data" and "Error handling", mirroring the Go hub page
