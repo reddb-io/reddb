@@ -17,6 +17,8 @@ const (
 	KindRedWires Kind = "redwires"
 	KindHTTP     Kind = "http"
 	KindHTTPS    Kind = "https"
+	KindGRPC     Kind = "grpc"
+	KindGRPCS    Kind = "grpcs"
 )
 
 // ParsedURI is the normalised representation of a connection string. Only the
@@ -52,6 +54,10 @@ func ParseURI(uri string) (*ParsedURI, error) {
 		return parseRedURI(uri)
 	case strings.HasPrefix(uri, "reds://"):
 		return parseRemoteURI(uri, KindRedWires, defaultPortFor(KindRedWires))
+	case strings.HasPrefix(uri, "grpc://"):
+		return parseRemoteURI(uri, KindGRPC, defaultPortFor(KindGRPC))
+	case strings.HasPrefix(uri, "grpcs://"):
+		return parseRemoteURI(uri, KindGRPCS, defaultPortFor(KindGRPCS))
 	case strings.HasPrefix(uri, "http://"):
 		return parseRemoteURI(uri, KindHTTP, defaultPortFor(KindHTTP))
 	case strings.HasPrefix(uri, "https://"):
@@ -190,9 +196,13 @@ func resolveKind(proto string) (Kind, error) {
 		return KindHTTP, nil
 	case "https":
 		return KindHTTPS, nil
+	case "grpc":
+		return KindGRPC, nil
+	case "grpcs":
+		return KindGRPCS, nil
 	default:
 		return "", NewError(CodeUnsupportedProto,
-			fmt.Sprintf("unknown proto=%q. Supported: red | reds | http | https", proto))
+			fmt.Sprintf("unknown proto=%q. Supported: red | reds | http | https | grpc | grpcs", proto))
 	}
 }
 
@@ -204,6 +214,8 @@ func defaultPortFor(k Kind) int {
 		return 8080
 	case KindHTTPS:
 		return 8443
+	case KindGRPC, KindGRPCS:
+		return 5055
 	}
 	return 0
 }
