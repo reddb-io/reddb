@@ -5,7 +5,7 @@
 
 [package]
 name = "reddb-python"
-version = "1.0.7"
+version = "1.0.8"
 edition = "2021"
 description = "Native Python driver for RedDB (compiled Rust via pyo3)"
 license = "MIT"
