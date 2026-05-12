@@ -98,6 +98,50 @@ const result = await db.query('SELECT * FROM users LIMIT 10')
 await db.close()
 ```
 
+## Troubleshooting: `npm install @reddb-io/sdk` printed a warning
+
+The npm packages `@reddb-io/sdk`, `@reddb-io/cli`, and `@reddb-io/client` ship a `postinstall` hook that downloads the matching `red` (or `red_client`) binary from GitHub Releases. The hook is **soft-fail** — if the download can't complete, the package still installs and exits 0, but the driver can't actually run until you provide a binary.
+
+You may see one of these warnings:
+
+- **`release asset not found (HTTP 404)`** — usually means the GitHub Release for that SDK version has not been published yet, or your platform has no prebuilt binary in that release.
+- **`no prebuilt red binary for <platform>/<arch>`** — your platform/arch combination is not (yet) produced by the release pipeline. macOS Intel (`darwin/x64`) was added recently and is only present from `v1.0.6` onward.
+
+### Three ways to unblock
+
+1. **Install the latest stable `red` via the official installer and point the SDK at it.** The SDK consults `REDDB_BIN` before anything else, so this works regardless of which release contains your platform's asset:
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash
+   export REDDB_BIN="$(command -v red)"
+   ```
+
+2. **Pin the postinstall to a release tag you know exists** and re-run the hook:
+
+   ```bash
+   REDDB_POSTINSTALL_VERSION=v1.0.5 pnpm rebuild @reddb-io/sdk
+   # or:  REDDB_POSTINSTALL_VERSION=v1.0.5 npm rebuild @reddb-io/sdk
+   ```
+
+   Check available tags at <https://github.com/reddb-io/reddb/releases>.
+
+3. **Skip the download entirely** if you'll bring your own binary:
+
+   ```bash
+   REDDB_SKIP_POSTINSTALL=1 pnpm add @reddb-io/sdk
+   export REDDB_BIN=/path/to/red
+   ```
+
+### Postinstall env-var reference
+
+| Variable                    | Effect                                                        |
+|-----------------------------|---------------------------------------------------------------|
+| `REDDB_BIN`                 | Runtime override consulted by `@reddb-io/sdk` and `@reddb-io/cli` before falling back to the bundled binary. Also tells `cli-postinstall` to skip downloading. |
+| `REDDB_CLIENT_BIN`          | Same idea for `@reddb-io/client`'s `red_client` helper.       |
+| `REDDB_SKIP_POSTINSTALL=1`  | Don't try to download anything during `npm install`.          |
+| `REDDB_POSTINSTALL_VERSION` | Pull a specific release tag instead of `v${pkg.version}`.     |
+| `REDDB_POSTINSTALL_REPO`    | Pull from a fork (defaults to `reddb-io/reddb`).              |
+
 ## Build from source
 
 RedDB requires Rust and `protoc`.

@@ -35,14 +35,46 @@ if (process.env.REDDB_SKIP_POSTINSTALL === '1') {
 }
 
 main().catch((err) => {
-  process.stderr.write(
-    `reddb: postinstall could not download the binary (${err.message}).\n` +
-      `       The package will still install. To use the driver you can:\n` +
-      `         - set REDDB_BINARY_PATH=/path/to/red\n` +
-      `         - or install the binary manually from https://github.com/${DEFAULT_REPO}/releases\n`,
-  )
+  process.stderr.write(formatFailure(err))
   process.exit(0)
 })
+
+function formatFailure(err) {
+  const repo = process.env.REDDB_POSTINSTALL_REPO || DEFAULT_REPO
+  if (err && err.code === 'UNSUPPORTED_PLATFORM') {
+    return (
+      `reddb: no prebuilt red binary for ${process.platform}/${process.arch}.\n` +
+      `       Options:\n` +
+      `         - build from source: https://github.com/${repo}#build-from-source\n` +
+      `         - or set REDDB_BIN=/path/to/red to point at one you compiled.\n`
+    )
+  }
+  if (err && err.code === 'ASSET_NOT_FOUND') {
+    return (
+      `reddb: release asset not found at ${err.url}\n` +
+      `       Common cause: the GitHub Release for this SDK version has not\n` +
+      `       been published yet (or your platform's binary was not produced\n` +
+      `       for that release). To unblock without reinstalling:\n` +
+      `         1. Install the latest stable red via the official installer\n` +
+      `            and point the SDK at it:\n` +
+      `              curl -fsSL https://raw.githubusercontent.com/${repo}/main/install.sh | bash\n` +
+      `              export REDDB_BIN="$(command -v red)"\n` +
+      `         2. Or pull a specific tag explicitly and re-run postinstall:\n` +
+      `              REDDB_POSTINSTALL_VERSION=v1.0.5 npm rebuild @reddb-io/sdk\n` +
+      `         3. Or skip the download entirely and provide the binary yourself:\n` +
+      `              REDDB_SKIP_POSTINSTALL=1 (re-install), then export REDDB_BIN=…\n` +
+      `       Releases: https://github.com/${repo}/releases\n`
+    )
+  }
+  return (
+    `reddb: postinstall could not download the binary (${err && err.message}).\n` +
+    `       The package itself still installs. To use the driver:\n` +
+    `         - run the installer: curl -fsSL https://raw.githubusercontent.com/${repo}/main/install.sh | bash\n` +
+    `           then: export REDDB_BIN="$(command -v red)"\n` +
+    `         - or download manually from https://github.com/${repo}/releases\n` +
+    `         - or set REDDB_BIN=/path/to/red.\n`
+  )
+}
 
 async function main() {
   const repo = process.env.REDDB_POSTINSTALL_REPO || DEFAULT_REPO

@@ -46,14 +46,42 @@ if (process.env.REDDB_SKIP_POSTINSTALL === '1') {
 }
 
 main().catch((err) => {
-  process.stderr.write(
-    `@reddb-io/client: postinstall could not download red_client (${err.message}).\n`
-      + `       The package will still install. To use the binary you can:\n`
-      + `         - set REDDB_CLIENT_BIN=/path/to/red_client\n`
-      + `         - or install it manually from https://github.com/${DEFAULT_REPO}/releases\n`,
-  )
+  process.stderr.write(formatFailure(err))
   process.exit(0)
 })
+
+function formatFailure(err) {
+  const repo = process.env.REDDB_POSTINSTALL_REPO || DEFAULT_REPO
+  if (err && err.code === 'UNSUPPORTED_PLATFORM') {
+    return (
+      `@reddb-io/client: no prebuilt red_client binary for ${process.platform}/${process.arch}.\n`
+      + `       Note: connect() itself does not need the binary — it is only used as a CLI helper.\n`
+      + `       Options:\n`
+      + `         - build from source: https://github.com/${repo}#build-from-source\n`
+      + `         - or set REDDB_CLIENT_BIN=/path/to/red_client.\n`
+    )
+  }
+  if (err && err.code === 'ASSET_NOT_FOUND') {
+    return (
+      `@reddb-io/client: release asset not found at ${err.url}\n`
+      + `       The GitHub Release for this client version likely has not been\n`
+      + `       published yet. The driver still installs and connect() works\n`
+      + `       without the binary; this only affects the bundled CLI helper.\n`
+      + `       To unblock:\n`
+      + `         1. Pull a specific tag and rebuild:\n`
+      + `              REDDB_POSTINSTALL_VERSION=v1.0.5 npm rebuild @reddb-io/client\n`
+      + `         2. Or download red_client manually and export REDDB_CLIENT_BIN.\n`
+      + `       Releases: https://github.com/${repo}/releases\n`
+    )
+  }
+  return (
+    `@reddb-io/client: postinstall could not download red_client (${err && err.message}).\n`
+    + `       The package itself still installs (connect() does not need the binary).\n`
+    + `       To get the bundled CLI working:\n`
+    + `         - set REDDB_CLIENT_BIN=/path/to/red_client\n`
+    + `         - or install it manually from https://github.com/${repo}/releases\n`
+  )
+}
 
 async function main() {
   const repo = process.env.REDDB_POSTINSTALL_REPO || DEFAULT_REPO
