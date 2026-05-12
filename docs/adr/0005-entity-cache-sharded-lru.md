@@ -133,14 +133,14 @@ public methods were added (`entity_cache_hit_rate`,
 
 ## Validation
 
-- `cargo check -p reddb-server` — clean.
-- `cargo test -p reddb-server --lib storage::unified::entity_cache` —
+- `cargo check -p reddb-io-server` — clean.
+- `cargo test -p reddb-io-server --lib storage::unified::entity_cache` —
   6 new unit tests, all passing (LRU eviction order, hit/miss
   counters, retain semantics, sharded `remove_many`, cold-cache
   fast path).
-- `cargo test -p reddb-server --lib storage::unified` — full unified
+- `cargo test -p reddb-io-server --lib storage::unified` — full unified
   storage suite stays green.
-- `cargo test -p reddb-server --tests` — full integration suite
+- `cargo test -p reddb-io-server --tests` — full integration suite
   stays green.
 
 A live bench delta against the `delete_sequential` mini-duel was not

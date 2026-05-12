@@ -13,8 +13,10 @@ There are two practical embedded APIs:
 
 ```toml
 [dependencies]
-reddb = "0.1"
+reddb-io = "1.0"
 ```
+
+The crate is published on crates.io as `reddb-io`; the in-code import path stays `use reddb::…` (the `[lib]` name is unchanged).
 
 ### Open a database
 

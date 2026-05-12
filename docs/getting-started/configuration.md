@@ -394,7 +394,7 @@ When using RedDB as a Rust crate, you control features at compile time:
 
 ```toml
 [dependencies]
-reddb = { version = "0.1", features = ["backend-s3", "otel"] }
+reddb-io = { version = "1.0", features = ["backend-s3", "otel"] }
 ```
 
 | Feature | What It Enables |
