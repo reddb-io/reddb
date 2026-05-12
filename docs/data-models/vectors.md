@@ -7,7 +7,7 @@ RedDB includes a native vector engine for similarity search, supporting HNSW, IV
 If you want to work with vectors from the query language, RedDB exposes search commands directly in SQL-style syntax:
 
 ```sql
-SEARCH SIMILAR [0.12, 0.91, 0.44] IN embeddings K 5 MIN_SCORE 0.7
+SEARCH SIMILAR $1 COLLECTION embeddings LIMIT $2 MIN_SCORE $3
 ```
 
 You can also use the canonical vector-query form:
@@ -31,16 +31,23 @@ LIMIT 5
 ```
 
 ```sql
-SEARCH TEXT 'machine learning basics' IN docs LIMIT 10
+SEARCH TEXT 'machine learning basics' IN docs LIMIT $1
 ```
 
 ```sql
-SEARCH HYBRID TEXT 'neural networks' VECTOR [0.15, 0.89, 0.40] IN docs K 10
+SEARCH HYBRID TEXT 'neural networks' VECTOR [0.15, 0.89, 0.40] IN docs K $1
 ```
 
 ```sql
 SEARCH IVF [0.12, 0.91, 0.44] IN embeddings K 10 PROBES 3
 ```
+
+Submit placeholder examples through `db.query(sql, params)` so supported
+values stay out of the SQL string. `SEARCH SIMILAR` accepts bound vectors,
+text, limits, and thresholds; other vector command forms only accept the
+placeholder slots implemented by the parser today. The parameterized query
+design is tracked in [ADR #352](https://github.com/reddb-io/reddb/issues/352)
+until the local ADR lands.
 
 And if you just want to inspect stored vectors:
 
@@ -126,16 +133,16 @@ Parameters:
 SQL form:
 
 ```sql
-SEARCH SIMILAR [0.15, 0.89, 0.40, 0.30, 0.70, 0.85, 0.25, 0.50]
-IN docs
-K 5
-MIN_SCORE 0.7
+SEARCH SIMILAR $1
+COLLECTION docs
+LIMIT $2
+MIN_SCORE $3
 ```
 
 Text-to-embedding form:
 
 ```sql
-SEARCH SIMILAR TEXT 'machine learning fundamentals' COLLECTION docs LIMIT 5
+SEARCH SIMILAR TEXT $1 COLLECTION docs LIMIT $2
 VECTOR SEARCH docs SIMILAR TO 'machine learning fundamentals' LIMIT 5
 ```
 
@@ -185,11 +192,11 @@ curl -X POST http://127.0.0.1:8080/text/search \
 SQL form:
 
 ```sql
-SEARCH TEXT 'machine learning basics' IN docs LIMIT 10
+SEARCH TEXT 'machine learning basics' IN docs LIMIT $1
 ```
 
 ```sql
-SEARCH TEXT 'machne lerning' IN docs FUZZY LIMIT 10
+SEARCH TEXT 'machne lerning' IN docs FUZZY LIMIT $1
 ```
 
 ## Hybrid Search
@@ -213,7 +220,7 @@ curl -X POST http://127.0.0.1:8080/hybrid/search \
 SQL form:
 
 ```sql
-SEARCH HYBRID TEXT 'neural networks' VECTOR [0.15, 0.89, 0.40] IN docs K 10
+SEARCH HYBRID TEXT 'neural networks' VECTOR [0.15, 0.89, 0.40] IN docs K $1
 ```
 
 ## Inspecting Stored Vectors with SQL
@@ -248,8 +255,8 @@ curl -X POST http://127.0.0.1:8080/collections/docs/bulk/vectors \
 ```sql
 INSERT INTO docs (id, title, body)
 VALUES
-  (1, 'Intro', 'Introduction to machine learning fundamentals'),
-  (2, 'Ops', 'Incident response checklist for Linux hosts')
+  ($1, $2, $3),
+  ($4, $5, $6)
 WITH AUTO EMBED (title, body) USING openai MODEL 'text-embedding-3-small'
 ```
 
