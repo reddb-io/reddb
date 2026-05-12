@@ -224,6 +224,7 @@ export class RedDB {
   readonly vault: (collection?: string) => VaultClient
 
   query(sql: string): Promise<QueryResult>
+  query(sql: string, params: Array<number | string | null>): Promise<QueryResult>
   insert(collection: string, payload: Record<string, unknown>): Promise<InsertResult>
   bulkInsert(
     collection: string,

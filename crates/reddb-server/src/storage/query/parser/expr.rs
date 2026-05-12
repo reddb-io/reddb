@@ -279,6 +279,23 @@ impl<'a> Parser<'a> {
         }
 
         if self.consume(&Token::Dollar)? {
+            // `$N` positional parameter placeholder (1-based in source,
+            // 0-based in the AST so it matches `Vec<Value>` indexing).
+            // Rejected at parse time when N < 1; gaps and arity are
+            // validated by the binder once the full statement is parsed.
+            if let Token::Integer(n) = *self.peek() {
+                if n < 1 {
+                    return Err(ParseError::new(
+                        "placeholder index must be >= 1".to_string(),
+                        self.position(),
+                    ));
+                }
+                self.advance()?;
+                return Ok(Expr::Parameter {
+                    index: (n - 1) as usize,
+                    span: Span::new(start, self.position()),
+                });
+            }
             let path = self.parse_dollar_ref_path()?;
             let path_lc = path.to_ascii_lowercase();
             let (name, key) = if let Some(rest) = path_lc.strip_prefix("secret.") {
@@ -1101,6 +1118,57 @@ mod tests {
             "expected Text(\"5m\"), got {:?}",
             args[0]
         );
+    }
+
+    #[test]
+    fn placeholder_dollar_one() {
+        let e = parse("$1");
+        match e {
+            Expr::Parameter { index: 0, .. } => {}
+            other => panic!("expected Parameter(0), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn placeholder_dollar_n() {
+        let e = parse("$7");
+        match e {
+            Expr::Parameter { index: 6, .. } => {}
+            other => panic!("expected Parameter(6), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn placeholder_in_string_literal_is_text() {
+        // `$1` inside a string literal must NOT parse as a placeholder.
+        let e = parse("'$1'");
+        match e {
+            Expr::Literal {
+                value: Value::Text(s),
+                ..
+            } if s.as_ref() == "$1" => {}
+            other => panic!("expected text literal '$1', got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn placeholder_in_comparison() {
+        // SELECT-WHERE shape: `id = $1`
+        let e = parse("id = $1");
+        let Expr::BinaryOp {
+            op: BinOp::Eq, rhs, ..
+        } = e
+        else {
+            panic!("root must be Eq");
+        };
+        assert!(matches!(*rhs, Expr::Parameter { index: 0, .. }));
+    }
+
+    #[test]
+    fn placeholder_zero_rejected() {
+        let mut parser = Parser::new("$0").expect("lexer");
+        let err = parser.parse_expr().unwrap_err();
+        assert!(err.to_string().contains("placeholder"));
     }
 
     #[test]

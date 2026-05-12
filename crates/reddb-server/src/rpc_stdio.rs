@@ -687,6 +687,34 @@ fn dispatch_method(
                 error_code::INVALID_PARAMS,
                 "missing 'sql' string".to_string(),
             ))?;
+
+            // Optional positional `$N` bind parameters (#353 tracer slice).
+            // Absence preserves the legacy single-arg `query(sql)` path.
+            let bind_values: Option<Vec<SchemaValue>> = params
+                .get("params")
+                .map(|v| {
+                    v.as_array()
+                        .ok_or((
+                            error_code::INVALID_PARAMS,
+                            "'params' must be an array".to_string(),
+                        ))
+                        .map(|arr| arr.iter().map(json_value_to_schema_value).collect())
+                })
+                .transpose()?;
+
+            if let Some(binds) = bind_values {
+                use crate::storage::query::modes::parse_multi;
+                use crate::storage::query::user_params;
+                let parsed = parse_multi(sql)
+                    .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
+                let bound = user_params::bind(&parsed, &binds)
+                    .map_err(|e| (error_code::INVALID_PARAMS, e.to_string()))?;
+                let qr = runtime
+                    .execute_query_expr(bound)
+                    .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
+                return Ok(query_result_to_json(&qr));
+            }
+
             let qr = runtime
                 .execute_query(sql)
                 .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
@@ -1452,6 +1480,57 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":1,"method":"close","params":{}}"#,
         );
         assert!(resp.contains("\"__close__\":true"));
+    }
+
+    #[test]
+    fn query_with_int_text_params_round_trips() {
+        let rt = make_runtime();
+        let _ = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{"sql":"CREATE TABLE p (id INTEGER, name TEXT)"}}"#,
+        );
+        let _ = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":2,"method":"query","params":{"sql":"INSERT INTO p (id, name) VALUES (1, 'Alice')"}}"#,
+        );
+        let _ = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":3,"method":"query","params":{"sql":"INSERT INTO p (id, name) VALUES (2, 'Bob')"}}"#,
+        );
+        let resp = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":4,"method":"query","params":{"sql":"SELECT * FROM p WHERE id = $1 AND name = $2","params":[1,"Alice"]}}"#,
+        );
+        assert!(resp.contains("\"Alice\""), "got: {resp}");
+        assert!(!resp.contains("\"Bob\""), "got: {resp}");
+    }
+
+    #[test]
+    fn query_with_params_arity_mismatch_rejected() {
+        let rt = make_runtime();
+        let _ = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{"sql":"CREATE TABLE pa (id INTEGER)"}}"#,
+        );
+        let resp = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":2,"method":"query","params":{"sql":"SELECT * FROM pa WHERE id = $1","params":[1,2]}}"#,
+        );
+        assert!(resp.contains("\"INVALID_PARAMS\""), "got: {resp}");
+    }
+
+    #[test]
+    fn query_with_params_gap_rejected() {
+        let rt = make_runtime();
+        let _ = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{"sql":"CREATE TABLE pg (a INTEGER, b INTEGER)"}}"#,
+        );
+        let resp = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":2,"method":"query","params":{"sql":"SELECT * FROM pg WHERE a = $1 AND b = $3","params":[1,2,3]}}"#,
+        );
+        assert!(resp.contains("\"INVALID_PARAMS\""), "got: {resp}");
     }
 
     #[test]
