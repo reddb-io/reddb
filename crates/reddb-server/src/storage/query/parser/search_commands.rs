@@ -46,10 +46,16 @@ impl<'a> Parser<'a> {
 
         // Parse vector literal OR text for semantic search OR $N placeholder
         let mut vector_param: Option<usize> = None;
+        let mut text_param: Option<usize> = None;
         let (vector, text) = if self.consume(&Token::Text)? {
-            // SEARCH SIMILAR TEXT 'query' — semantic search
-            let query_text = self.parse_string()?;
-            (Vec::new(), Some(query_text))
+            // SEARCH SIMILAR TEXT ('query' | $N) — semantic search
+            if matches!(self.peek(), Token::Dollar | Token::Question) {
+                text_param = Some(self.parse_param_slot("SEARCH SIMILAR TEXT")?);
+                (Vec::new(), None)
+            } else {
+                let query_text = self.parse_string()?;
+                (Vec::new(), Some(query_text))
+            }
         } else if matches!(self.peek(), Token::Dollar) {
             // SEARCH SIMILAR $N — parameterized vector
             if self.placeholder_mode == super::PlaceholderMode::Question {
@@ -129,6 +135,7 @@ impl<'a> Parser<'a> {
             vector_param,
             limit_param,
             min_score_param,
+            text_param,
         }))
     }
 

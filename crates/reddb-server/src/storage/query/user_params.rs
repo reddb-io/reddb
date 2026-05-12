@@ -227,6 +227,7 @@ fn collect_non_expr_indices(expr: &QueryExpr, out: &mut Vec<usize>) {
             vector_param,
             limit_param,
             min_score_param,
+            text_param,
             ..
         }) => {
             if let Some(idx) = vector_param {
@@ -236,6 +237,9 @@ fn collect_non_expr_indices(expr: &QueryExpr, out: &mut Vec<usize>) {
                 out.push(*idx);
             }
             if let Some(idx) = min_score_param {
+                out.push(*idx);
+            }
+            if let Some(idx) = text_param {
                 out.push(*idx);
             }
         }
@@ -340,6 +344,7 @@ pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamEr
         vector_param,
         limit_param,
         min_score_param,
+        text_param,
     }) = expr
     {
         let mut bound_vector = vector.clone();
@@ -403,9 +408,26 @@ pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamEr
         } else {
             *min_score
         };
+        let bound_text = if let Some(idx) = text_param {
+            let value = params.get(*idx).ok_or(UserParamError::Arity {
+                expected: idx + 1,
+                got: params.len(),
+            })?;
+            match value {
+                Value::Text(s) => Some(s.to_string()),
+                other => {
+                    return Err(UserParamError::TypeMismatch {
+                        slot: "SEARCH SIMILAR TEXT parameter",
+                        got: value_variant_name(other),
+                    });
+                }
+            }
+        } else {
+            text.clone()
+        };
         return Ok(QueryExpr::SearchCommand(SearchCommand::Similar {
             vector: bound_vector,
-            text: text.clone(),
+            text: bound_text,
             provider: provider.clone(),
             collection: collection.clone(),
             limit: bound_limit,
@@ -413,6 +435,7 @@ pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamEr
             vector_param: None,
             limit_param: None,
             min_score_param: None,
+            text_param: None,
         }));
     }
 
@@ -1520,6 +1543,70 @@ mod tests {
                 got: "text"
             }
         ));
+    }
+
+    #[test]
+    fn bind_search_similar_text_param() {
+        // Issue #361: `SEARCH SIMILAR TEXT $N` binds a Value::Text into
+        // the text slot. The embedding pipeline reads `text` downstream.
+        let q = parse("SEARCH SIMILAR TEXT $1 COLLECTION docs LIMIT 5 USING openai");
+        let bound = bind(&q, &[Value::text("find vulnerabilities")]).unwrap();
+        let QueryExpr::SearchCommand(SearchCommand::Similar {
+            vector,
+            text,
+            text_param,
+            collection,
+            limit,
+            provider,
+            ..
+        }) = bound
+        else {
+            panic!("expected SearchCommand::Similar");
+        };
+        assert!(vector.is_empty());
+        assert_eq!(text.as_deref(), Some("find vulnerabilities"));
+        assert_eq!(text_param, None, "text_param must be cleared post-bind");
+        assert_eq!(collection, "docs");
+        assert_eq!(limit, 5);
+        assert_eq!(provider.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn bind_search_similar_text_rejects_non_text() {
+        let q = parse("SEARCH SIMILAR TEXT $1 COLLECTION docs");
+        let err = bind(&q, &[Value::Integer(42)]).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                UserParamError::TypeMismatch {
+                    slot: "SEARCH SIMILAR TEXT parameter",
+                    got: "integer"
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn bind_search_similar_text_with_limit_param() {
+        // TEXT $1 + LIMIT $2 — verify both non-Expr param slots bind
+        // together without cross-talk.
+        let q = parse("SEARCH SIMILAR TEXT $1 COLLECTION docs LIMIT $2");
+        let bound = bind(&q, &[Value::text("hello"), Value::Integer(11)]).unwrap();
+        let QueryExpr::SearchCommand(SearchCommand::Similar {
+            text,
+            text_param,
+            limit,
+            limit_param,
+            ..
+        }) = bound
+        else {
+            panic!("expected SearchCommand::Similar");
+        };
+        assert_eq!(text.as_deref(), Some("hello"));
+        assert_eq!(text_param, None);
+        assert_eq!(limit, 11);
+        assert_eq!(limit_param, None);
     }
 
     #[test]
