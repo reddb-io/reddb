@@ -7,10 +7,10 @@ use std::sync::{Arc, Mutex};
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyDict, PyList};
+use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyTuple};
 
 #[cfg(feature = "embedded")]
-use crate::embedded::{EmbeddedRuntime, QueryRows, ScalarOut};
+use crate::embedded::{EmbeddedRuntime, ParamValue, QueryRows, ScalarOut};
 #[cfg(feature = "embedded")]
 use reddb::runtime::RedDBRuntime;
 #[cfg(feature = "embedded")]
@@ -78,15 +78,47 @@ pub struct RedDb {
 impl RedDb {
     /// Run a SQL query and return a result dict:
     /// `{"statement": str, "affected": int, "columns": [str], "rows": [dict]}`.
-    fn query<'py>(&self, py: Python<'py>, sql: &str) -> PyResult<Bound<'py, PyDict>> {
+    ///
+    /// Positional `$N` bind parameters can be passed either variadically
+    /// (`db.query("SELECT * FROM t WHERE id = $1", 42)`) or via the
+    /// `params=` keyword (`db.query("...", params=[42, "x"])`). When both
+    /// forms are supplied, the keyword form wins.
+    #[pyo3(signature = (sql, *args, params=None))]
+    fn query<'py>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+        args: &Bound<'py, PyTuple>,
+        params: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyDict>> {
         self.ensure_open()?;
+
+        let binds = collect_params(args, params)?;
+
         match &self.backend {
             #[cfg(feature = "embedded")]
             Backend::Embedded(rt) => {
-                let qr = rt.query(sql).map_err(|e| err("QUERY_ERROR", e))?;
+                let qr = if binds.is_empty() {
+                    rt.query(sql).map_err(|e| err("QUERY_ERROR", e))?
+                } else {
+                    let values: Vec<ParamValue> = binds
+                        .iter()
+                        .map(|b| py_to_param_value(b))
+                        .collect::<PyResult<Vec<_>>>()?;
+                    rt.query_with_params(sql, &values)
+                        .map_err(|e| err("QUERY_ERROR", e))?
+                };
                 query_rows_to_pydict(py, qr)
             }
             Backend::Grpc(client) => {
+                if !binds.is_empty() {
+                    return Err(err(
+                        "PARAMS_UNSUPPORTED",
+                        "parameterized queries over grpc:// are not supported yet \
+                         (the gRPC server does not advertise FEATURE_PARAMS). \
+                         Use file:// or memory:// for now.",
+                    ));
+                }
                 let json_str = crate::get_runtime()
                     .block_on(async {
                         let mut guard = client.lock().expect("client poisoned");
@@ -364,7 +396,7 @@ impl CacheClient {
                 }
                 rt.result_blob_cache()
                     .put(namespace, key, put)
-                    .map_err(|e| err("CACHE_ERROR", e.to_string()))?;
+                    .map_err(|e| err("CACHE_ERROR", format!("{e:?}")))?;
                 Ok(())
             }
             CacheBackend::Grpc => Err(err("NOT_SUPPORTED", "cache not available over gRPC transport")),
@@ -490,6 +522,166 @@ pub fn connect(uri: &str) -> PyResult<RedDb> {
     Err(err(
         "UNSUPPORTED_SCHEME",
         format!("unsupported URI: {uri}. Expected file://, memory:// or grpc://"),
+    ))
+}
+
+// -----------------------------------------------------------------------
+// Parameterized queries — Python -> SchemaValue
+// -----------------------------------------------------------------------
+
+/// Resolve the effective bind list from positional `*args` and the
+/// `params=` keyword. The keyword form wins when both are present —
+/// callers typically pick one or the other.
+fn collect_params<'py>(
+    args: &Bound<'py, PyTuple>,
+    params_kw: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    if let Some(kw) = params_kw {
+        if kw.is_none() {
+            return collect_args(args);
+        }
+        let list = kw
+            .downcast::<PyList>()
+            .map_err(|_| err("INVALID_PARAMS", "params= must be a list"))?;
+        let mut out = Vec::with_capacity(list.len());
+        for item in list.iter() {
+            out.push(item);
+        }
+        return Ok(out);
+    }
+    collect_args(args)
+}
+
+fn collect_args<'py>(args: &Bound<'py, PyTuple>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    let mut out = Vec::with_capacity(args.len());
+    for item in args.iter() {
+        out.push(item);
+    }
+    Ok(out)
+}
+
+/// Convert a single Python value into a `SchemaValue` for `$N` binding.
+///
+/// Mapping (mirrors the issue's contract):
+///   None                 -> Null
+///   bool                 -> Boolean
+///   int                  -> Integer        (i64; UnsignedInteger above i64::MAX)
+///   float                -> Float          (f64)
+///   str                  -> Text
+///   bytes / bytearray    -> Blob
+///   list[float|int]      -> Vector         (downcast to f32)
+///   datetime.datetime    -> Timestamp      (seconds since epoch)
+///   uuid.UUID            -> Uuid           (16 raw bytes)
+///   dict                 -> Json           (canonical JSON bytes)
+#[cfg(feature = "embedded")]
+fn py_to_param_value(value: &Bound<'_, PyAny>) -> PyResult<ParamValue> {
+    use pyo3::types::{PyByteArray, PyDict as PyDictT, PyFloat, PyList as PyListT};
+    use reddb::storage::schema::Value as SV;
+
+    if value.is_none() {
+        return Ok(SV::Null);
+    }
+
+    // bool MUST be checked before int — `bool` is an `int` subclass in
+    // Python and `extract::<i64>(True) == Ok(1)`.
+    let type_name = value
+        .get_type()
+        .name()
+        .ok()
+        .map(|n| n.to_string())
+        .unwrap_or_default();
+    if type_name == "bool" {
+        if let Ok(b) = value.extract::<bool>() {
+            return Ok(SV::Boolean(b));
+        }
+    }
+
+    if let Ok(b) = value.downcast::<PyBytes>() {
+        return Ok(SV::Blob(b.as_bytes().to_vec()));
+    }
+    if let Ok(ba) = value.downcast::<PyByteArray>() {
+        let bytes = unsafe { ba.as_bytes() }.to_vec();
+        return Ok(SV::Blob(bytes));
+    }
+
+    // int — try i64 first, then fall back to u64 for values above i64::MAX.
+    // Floats also extract as i64 in pyo3 when the fractional part is zero,
+    // so guard by `PyFloat` first.
+    if value.downcast::<PyFloat>().is_err() {
+        if let Ok(i) = value.extract::<i64>() {
+            return Ok(SV::Integer(i));
+        }
+        if let Ok(u) = value.extract::<u64>() {
+            return Ok(SV::UnsignedInteger(u));
+        }
+    }
+    if let Ok(f) = value.extract::<f64>() {
+        return Ok(SV::Float(f));
+    }
+
+    if let Ok(s) = value.extract::<String>() {
+        return Ok(SV::Text(std::sync::Arc::from(s.as_str())));
+    }
+
+    // list[float|int] -> Vector
+    if let Ok(list) = value.downcast::<PyListT>() {
+        let mut floats: Vec<f32> = Vec::with_capacity(list.len());
+        let mut all_numeric = true;
+        for item in list.iter() {
+            if let Ok(f) = item.extract::<f64>() {
+                floats.push(f as f32);
+            } else if let Ok(i) = item.extract::<i64>() {
+                floats.push(i as f32);
+            } else {
+                all_numeric = false;
+                break;
+            }
+        }
+        if all_numeric {
+            return Ok(SV::Vector(floats));
+        }
+        return Err(err(
+            "INVALID_PARAMS",
+            "list params must contain only numbers (for Vector binding)",
+        ));
+    }
+
+    // datetime.datetime -> Timestamp(seconds). Detected by duck typing:
+    // requires `.timestamp()` returning a float AND a `.year` attribute,
+    // so arbitrary objects with a stray `timestamp()` method don't hijack
+    // the path.
+    if value.getattr("year").is_ok() {
+        if let Ok(ts) = value.call_method0("timestamp") {
+            if let Ok(secs) = ts.extract::<f64>() {
+                return Ok(SV::Timestamp(secs as i64));
+            }
+        }
+    }
+
+    // uuid.UUID -> Uuid([u8;16]) via the `.bytes` attribute.
+    if let Ok(bytes_attr) = value.getattr("bytes") {
+        if let Ok(b) = bytes_attr.downcast::<PyBytes>() {
+            let raw = b.as_bytes();
+            if raw.len() == 16 {
+                let mut arr = [0u8; 16];
+                arr.copy_from_slice(raw);
+                return Ok(SV::Uuid(arr));
+            }
+        }
+    }
+
+    if let Ok(dict) = value.downcast::<PyDictT>() {
+        let json_str = pydict_to_json_str(dict)?;
+        return Ok(SV::Json(json_str.into_bytes()));
+    }
+
+    Err(err(
+        "INVALID_PARAMS",
+        format!(
+            "unsupported parameter type: {} (expected None, bool, int, float, str, \
+             bytes, list[number], dict, datetime.datetime, or uuid.UUID)",
+            type_name,
+        ),
     ))
 }
 

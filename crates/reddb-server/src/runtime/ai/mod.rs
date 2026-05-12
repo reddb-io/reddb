@@ -21,6 +21,7 @@ pub mod prompt_assembler;
 pub mod prompt_template;
 pub mod text_chunker;
 pub mod transport;
+pub mod urn_codec;
 
 pub(crate) fn block_on_ai<F, T>(future: F) -> crate::RedDBResult<T>
 where
