@@ -148,6 +148,22 @@
   - [Command Reference](/vcs/commands.md)
   - [Walkthrough](/vcs/walkthrough.md)
 
+- **Clients & Drivers**
+  - [Driver Matrix](/clients/drivers.md)
+  - [JavaScript / TypeScript (full guide)](/guides/javascript-typescript-driver.md)
+  - [Rust](/clients/drivers/rust.md)
+  - [Python (embedded, PyO3)](/clients/drivers/python.md)
+  - [Python (pure asyncio)](/clients/drivers/python-asyncio.md)
+  - [Go](/clients/drivers/go.md)
+  - [PHP](/clients/drivers/php.md)
+  - [Dart / Flutter](/clients/drivers/dart.md)
+  - [C++](/clients/drivers/cpp.md)
+  - [Zig](/clients/drivers/zig.md)
+  - [Bun (native TCP)](/clients/drivers/bun.md)
+  - [Connection Strings](/clients/connection-strings.md)
+  - [SDK & Client Compatibility](/clients/sdk-compatibility.md)
+  - [Wire Protocol Comparison](/clients/wire-protocol-comparison.md)
+
 - **Deployment**
   - [Embedded Mode](/deployment/embedded.md)
   - [Server Mode](/deployment/server.md)

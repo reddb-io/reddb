@@ -96,11 +96,22 @@ For dashboard / dev workloads pick HTTP or PG wire instead.
 
 ### Reference drivers
 
+See the [Driver Matrix](./drivers.md) for the full per-language hub. RedWire-capable drivers:
+
 | Driver | Status | RedWire | HTTP / HTTPS | PG wire | mTLS | OAuth-JWT | SCRAM |
 |--------|--------|---------|--------------|---------|------|-----------|-------|
-| `@reddb-io/sdk` (JS / TS) | ✅ | TCP/TLS/mTLS | ✅ | via `pg` | ✅ | ✅ | ✅ |
-| `reddb-io-client` (Rust) | ✅ | TCP/TLS/mTLS | ✅ | via `tokio-postgres` | ✅ | ✅ | ✅ |
-| `reddb` (Python / PyO3) | ✅ embedded + HTTP | planned | ✅ | via `psycopg` | planned | planned | planned |
+| [`@reddb-io/sdk`](../guides/javascript-typescript-driver.md) (JS / TS) | ✅ Stable | TCP/TLS/mTLS | ✅ | via `pg` | ✅ | ✅ | ✅ |
+| [`@reddb-io/client`](../guides/javascript-typescript-driver.md#reddb-ioclient) (JS / TS, thin remote) | ✅ Stable | TCP/TLS/mTLS | ✅ | via `pg` | ✅ | ✅ | ✅ |
+| [`@reddb-io/client-bun`](./drivers/bun.md) (Bun) | 🟡 Preview | TCP / TLS | — | — | — | — | — |
+| [`reddb-io-client`](./drivers/rust.md) (Rust) | ✅ Stable | TCP/TLS/mTLS | ✅ | via `tokio-postgres` | ✅ | ✅ | ✅ |
+| [`reddb`](./drivers/python.md) (Python, PyO3 embedded) | 🟡 Preview | — | — | via `psycopg` | — | — | — |
+| [`reddb-asyncio`](./drivers/python-asyncio.md) (Python, pure asyncio) | 🟡 Preview | TCP / TLS / mTLS | ✅ | — | ✅ | ✅ | ✅ |
+| [`reddb-go`](./drivers/go.md) (Go) | 🟡 Preview | TCP / TLS | ✅ | — | ✅ | ✅ | ✅ |
+| [`reddb-io/reddb`](./drivers/php.md) (PHP) | 🟡 Preview | TCP / TLS | ✅ | — | ✅ | — | ✅ |
+| [`reddb`](./drivers/dart.md) (Dart / Flutter) | 🟡 Preview | TCP / TLS | ✅ | — | ✅ | — | ✅ |
+| [cpp source](./drivers/cpp.md) (C++17) | 🟡 Preview | TCP / TLS | ✅ | — | ✅ | ✅ | ✅ |
+| [zig source](./drivers/zig.md) (Zig 0.13+) | 🟡 Preview | TCP / TLS (no ALPN) | ✅ | — | partial | — | ✅ |
+| .NET, Java, Kotlin | ⏳ Planned | — | — | — | — | — | — |
 
 ## Versioning Promise
 
