@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 fn red_binary() -> PathBuf {
     // CARGO_BIN_EXE_red is set by Cargo when running integration tests
@@ -56,6 +56,16 @@ impl StdioSession {
         drop(self.stdin);
         let _ = self.child.wait();
     }
+}
+
+fn result_rows(response: &str) -> Vec<Value> {
+    serde_json::from_str::<Value>(response)
+        .expect("response json")
+        .get("result")
+        .and_then(|result| result.get("rows"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
 }
 
 #[test]
@@ -179,6 +189,51 @@ fn insert_then_query_round_trip() {
     );
     assert!(r3.contains("\"result\""), "got: {r3}");
     assert!(r3.contains("Alice"), "got: {r3}");
+    s.close();
+}
+
+#[test]
+fn question_params_cover_select_insert_update_delete_over_stdio() {
+    let mut s = StdioSession::spawn();
+    let create = s.send(
+        r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{"sql":"CREATE TABLE qp (id INTEGER, name TEXT)"}}"#,
+    );
+    assert!(!create.contains("\"error\""), "got: {create}");
+
+    let insert = s.send(
+        r#"{"jsonrpc":"2.0","id":2,"method":"query","params":{"sql":"INSERT INTO qp (id, name) VALUES (?, ?)","params":[1,"O'Reilly"]}}"#,
+    );
+    assert!(insert.contains("\"affected\":1"), "got: {insert}");
+
+    let select = s.send(
+        r#"{"jsonrpc":"2.0","id":3,"method":"query","params":{"sql":"SELECT name FROM qp WHERE id = ?","params":[1]}}"#,
+    );
+    let rows = result_rows(&select);
+    assert_eq!(rows.len(), 1, "got: {select}");
+    assert_eq!(rows[0].get("name"), Some(&json!("O'Reilly")));
+
+    let select_numbered = s.send(
+        r#"{"jsonrpc":"2.0","id":4,"method":"query","params":{"sql":"SELECT name FROM qp WHERE name = ?1 AND id = ?2","params":["O'Reilly",1]}}"#,
+    );
+    assert_eq!(
+        result_rows(&select_numbered).len(),
+        1,
+        "got: {select_numbered}"
+    );
+
+    let update = s.send(
+        r#"{"jsonrpc":"2.0","id":5,"method":"query","params":{"sql":"UPDATE qp SET name = ? WHERE id = ?","params":["Alice",1]}}"#,
+    );
+    assert!(update.contains("\"affected\":1"), "got: {update}");
+
+    let delete = s.send(
+        r#"{"jsonrpc":"2.0","id":6,"method":"query","params":{"sql":"DELETE FROM qp WHERE name = ?","params":["Alice"]}}"#,
+    );
+    assert!(delete.contains("\"affected\":1"), "got: {delete}");
+
+    let remaining =
+        s.send(r#"{"jsonrpc":"2.0","id":7,"method":"query","params":{"sql":"SELECT * FROM qp"}}"#);
+    assert!(result_rows(&remaining).is_empty(), "got: {remaining}");
     s.close();
 }
 

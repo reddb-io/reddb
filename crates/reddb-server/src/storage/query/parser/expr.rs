@@ -280,24 +280,12 @@ impl<'a> Parser<'a> {
             });
         }
 
-        // `?` positional placeholder — auto-numbered left-to-right
-        // starting at 1. Mixing with `$N` in one statement is rejected.
-        if self.consume(&Token::Question)? {
-            match self.placeholder_mode {
-                PlaceholderMode::Dollar => {
-                    return Err(ParseError::new(
-                        "cannot mix `?` and `$N` placeholders in one statement".to_string(),
-                        self.position(),
-                    ));
-                }
-                _ => self.placeholder_mode = PlaceholderMode::Question,
-            }
-            self.question_count += 1;
-            let index = self.question_count - 1;
-            return Ok(Expr::Parameter {
-                index,
-                span: Span::new(start, self.position()),
-            });
+        // `?` positional placeholder — auto-numbered left-to-right.
+        // Immediate `?N` uses an explicit 1-based index. Mixing with
+        // `$N` in one statement is rejected.
+        if self.check(&Token::Question) {
+            let (index, span) = self.parse_question_param_index()?;
+            return Ok(Expr::Parameter { index, span });
         }
 
         if self.consume(&Token::Dollar)? {
@@ -1208,6 +1196,22 @@ mod tests {
             Expr::Parameter { index: 0, .. } => {}
             other => panic!("expected Parameter(0), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn placeholder_question_numbered() {
+        let e = parse("?7");
+        match e {
+            Expr::Parameter { index: 6, .. } => {}
+            other => panic!("expected Parameter(6), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn placeholder_question_numbered_zero_rejected() {
+        let mut parser = Parser::new("?0").expect("lexer");
+        let err = parser.parse_expr().unwrap_err();
+        assert!(err.to_string().contains("placeholder"));
     }
 
     #[test]

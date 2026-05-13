@@ -1573,11 +1573,7 @@ pub(crate) fn json_value_to_schema_value(v: &Value) -> SchemaValue {
 fn json_i64(value: &Value) -> Option<i64> {
     match value {
         Value::Number(n) => {
-            if n.is_finite()
-                && n.fract() == 0.0
-                && *n >= i64::MIN as f64
-                && *n <= i64::MAX as f64
-            {
+            if n.is_finite() && n.fract() == 0.0 && *n >= i64::MIN as f64 && *n <= i64::MAX as f64 {
                 Some(*n as i64)
             } else {
                 None
@@ -1960,6 +1956,19 @@ mod tests {
         Value::Object(request).to_string_compact()
     }
 
+    fn query_request_with_params(id: u64, sql: &str, binds: Vec<Value>) -> String {
+        let mut params = json::Map::new();
+        params.insert("sql".to_string(), Value::String(sql.to_string()));
+        params.insert("params".to_string(), Value::Array(binds));
+
+        let mut request = json::Map::new();
+        request.insert("jsonrpc".to_string(), Value::String("2.0".to_string()));
+        request.insert("id".to_string(), Value::Number(id as f64));
+        request.insert("method".to_string(), Value::String("query".to_string()));
+        request.insert("params".to_string(), Value::Object(params));
+        Value::Object(request).to_string_compact()
+    }
+
     /// Stateful helper: keeps the same `Session` across multiple calls so
     /// tests can exercise multi-step transaction flows in a single closure.
     fn with_session<F>(rt: &RedDBRuntime, f: F)
@@ -2002,6 +2011,26 @@ mod tests {
                 (name, kind)
             })
             .collect()
+    }
+
+    fn json_scalar_param() -> impl Strategy<Value = Value> {
+        prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            (-1000_i64..1000_i64).prop_map(|n| Value::Number(n as f64)),
+            "[a-z']{0,8}".prop_map(Value::String),
+        ]
+    }
+
+    fn sql_literal_for_json(value: &Value) -> String {
+        match value {
+            Value::Null => "NULL".to_string(),
+            Value::Bool(true) => "TRUE".to_string(),
+            Value::Bool(false) => "FALSE".to_string(),
+            Value::Number(n) => format!("{n:.0}"),
+            Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+            _ => panic!("unsupported scalar param: {value:?}"),
+        }
     }
 
     #[test]
@@ -2095,6 +2124,70 @@ mod tests {
     }
 
     #[test]
+    fn query_with_question_params_covers_select_insert_update_delete() {
+        let rt = make_runtime();
+        let create = handle(
+            &rt,
+            &query_request(1, "CREATE TABLE qp (id INTEGER, name TEXT)"),
+        );
+        assert!(!create.contains("\"error\""), "got: {create}");
+
+        let inserted = handle(
+            &rt,
+            &query_request_with_params(
+                2,
+                "INSERT INTO qp (id, name) VALUES (?, ?)",
+                vec![json!(1), json!("O'Reilly")],
+            ),
+        );
+        assert!(inserted.contains("\"affected\":1"), "got: {inserted}");
+
+        let selected = handle(
+            &rt,
+            &query_request_with_params(3, "SELECT name FROM qp WHERE id = ?", vec![json!(1)]),
+        );
+        let rows = result_rows(&selected);
+        assert_eq!(rows.len(), 1, "got: {selected}");
+        assert_eq!(
+            rows[0].get("name").and_then(Value::as_str),
+            Some("O'Reilly")
+        );
+
+        let selected_numbered = handle(
+            &rt,
+            &query_request_with_params(
+                4,
+                "SELECT name FROM qp WHERE name = ?1 AND id = ?2",
+                vec![json!("O'Reilly"), json!(1)],
+            ),
+        );
+        assert_eq!(
+            result_rows(&selected_numbered).len(),
+            1,
+            "got: {selected_numbered}"
+        );
+
+        let updated = handle(
+            &rt,
+            &query_request_with_params(
+                5,
+                "UPDATE qp SET name = ? WHERE id = ?",
+                vec![json!("Alice"), json!(1)],
+            ),
+        );
+        assert!(updated.contains("\"affected\":1"), "got: {updated}");
+
+        let deleted = handle(
+            &rt,
+            &query_request_with_params(6, "DELETE FROM qp WHERE name = ?", vec![json!("Alice")]),
+        );
+        assert!(deleted.contains("\"affected\":1"), "got: {deleted}");
+
+        let remaining = handle(&rt, &query_request(7, "SELECT * FROM qp"));
+        assert!(result_rows(&remaining).is_empty(), "got: {remaining}");
+    }
+
+    #[test]
     fn query_with_params_insert_and_search_round_trip() {
         let rt = make_runtime();
         let insert = handle(
@@ -2106,6 +2199,32 @@ mod tests {
         let search = handle(
             &rt,
             r#"{"jsonrpc":"2.0","id":2,"method":"query","params":{"sql":"SEARCH SIMILAR $1 COLLECTION bun_embeddings LIMIT 1","params":[[1.0,0.0]]}}"#,
+        );
+        assert!(search.contains("\"rows\""), "got: {search}");
+        assert!(search.contains("\"score\":1"), "got: {search}");
+        assert!(!search.contains("\"error\""), "got: {search}");
+    }
+
+    #[test]
+    fn query_with_question_vector_param_round_trips() {
+        let rt = make_runtime();
+        let insert = handle(
+            &rt,
+            &query_request_with_params(
+                1,
+                "INSERT INTO question_embeddings VECTOR (dense, content) VALUES (?, ?)",
+                vec![json!([1.0, 0.0]), json!("question vector")],
+            ),
+        );
+        assert!(insert.contains("\"affected\":1"), "got: {insert}");
+
+        let search = handle(
+            &rt,
+            &query_request_with_params(
+                2,
+                "SEARCH SIMILAR ? COLLECTION question_embeddings LIMIT 1",
+                vec![json!([1.0, 0.0])],
+            ),
         );
         assert!(search.contains("\"rows\""), "got: {search}");
         assert!(search.contains("\"score\":1"), "got: {search}");
@@ -2294,6 +2413,22 @@ mod tests {
     }
 
     #[test]
+    fn query_with_question_params_arity_mismatch_rejected() {
+        let rt = make_runtime();
+        let _ = handle(&rt, &query_request(1, "CREATE TABLE qpa (id INTEGER)"));
+        let resp = handle(
+            &rt,
+            &query_request_with_params(
+                2,
+                "SELECT * FROM qpa WHERE id = ?",
+                vec![json!(1), json!(2)],
+            ),
+        );
+        assert!(resp.contains("\"INVALID_PARAMS\""), "got: {resp}");
+        assert!(resp.contains("SQL expects 1, got 2"), "got: {resp}");
+    }
+
+    #[test]
     fn query_with_params_gap_rejected() {
         let rt = make_runtime();
         let _ = handle(
@@ -2305,6 +2440,39 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":2,"method":"query","params":{"sql":"SELECT * FROM pg WHERE a = $1 AND b = $3","params":[1,2,3]}}"#,
         );
         assert!(resp.contains("\"INVALID_PARAMS\""), "got: {resp}");
+    }
+
+    #[test]
+    fn query_with_question_numbered_gap_rejected() {
+        let rt = make_runtime();
+        let _ = handle(&rt, &query_request(1, "CREATE TABLE qpg (id INTEGER)"));
+        let resp = handle(
+            &rt,
+            &query_request_with_params(
+                2,
+                "SELECT * FROM qpg WHERE id = ?2",
+                vec![json!(1), json!(2)],
+            ),
+        );
+        assert!(resp.contains("\"INVALID_PARAMS\""), "got: {resp}");
+        assert!(resp.contains("parameter $`1` is missing"), "got: {resp}");
+    }
+
+    #[test]
+    fn query_with_question_params_type_mismatch_names_slot() {
+        let rt = make_runtime();
+        let _ = handle(&rt, &query_request(1, "CREATE TABLE qpt (id INTEGER)"));
+        let resp = handle(
+            &rt,
+            &query_request_with_params(
+                2,
+                "INSERT INTO qpt (id) VALUES (?)",
+                vec![json!("not-an-integer")],
+            ),
+        );
+        assert!(resp.contains("\"QUERY_ERROR\""), "got: {resp}");
+        assert!(resp.contains("id"), "got: {resp}");
+        assert!(resp.contains("integer"), "got: {resp}");
     }
 
     #[test]
@@ -2600,6 +2768,24 @@ mod tests {
                 r#"{"jsonrpc":"2.0","id":100,"method":"query","params":{"sql":"SELECT name, kind FROM seq_prop ORDER BY red_entity_id"}}"#,
             ));
             prop_assert_eq!(bulk_rows, seq_rows);
+        }
+
+        #[test]
+        fn question_param_select_matches_inlined_literal(value in json_scalar_param()) {
+            let rt = make_runtime();
+            let bound = handle(
+                &rt,
+                &query_request_with_params(1, "SELECT ? AS v", vec![value.clone()]),
+            );
+            let inline_sql = format!("SELECT {} AS v", sql_literal_for_json(&value));
+            let inlined = handle(&rt, &query_request(2, &inline_sql));
+            prop_assert_eq!(
+                result_rows(&bound),
+                result_rows(&inlined),
+                "bound={}, inlined={}",
+                bound,
+                inlined
+            );
         }
     }
 
