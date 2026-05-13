@@ -44,11 +44,15 @@ const db = await connect('red://reddb.example.com:5050', {
 })
 
 await db.insert('users', { name: 'Alice' })
-const result = await db.query('SELECT * FROM users LIMIT 10')
+const result = await db.query('SELECT * FROM users WHERE name = $1', 'Alice')
 console.log(result.rows)
 
 await db.close()
 ```
+
+Use `db.query(sql, ...params)` or `db.execute(sql, ...params)` for
+parameterized statements. The compatibility form `db.query(sql, paramsArray)`
+is still accepted.
 
 ## Accepted URI schemes
 

@@ -30,6 +30,19 @@ export interface QueryResult {
   rows: Array<Record<string, unknown>>
 }
 
+export type QueryParam =
+  | null
+  | boolean
+  | number
+  | string
+  | Uint8Array
+  | Buffer
+  | Date
+  | Float32Array
+  | Float64Array
+  | number[]
+  | Record<string, unknown>
+
 export interface InsertResult { affected: number; id?: string | number }
 export interface BulkInsertResult { affected: number; ids?: Array<string | number> }
 export interface GetResult { entity: Record<string, unknown> | null }
@@ -164,6 +177,11 @@ export class RedDB {
   readonly vault: (collection?: string) => VaultClient
 
   query(sql: string): Promise<QueryResult>
+  query(sql: string, params: QueryParam[]): Promise<QueryResult>
+  query(sql: string, ...params: QueryParam[]): Promise<QueryResult>
+  execute(sql: string): Promise<QueryResult>
+  execute(sql: string, params: QueryParam[]): Promise<QueryResult>
+  execute(sql: string, ...params: QueryParam[]): Promise<QueryResult>
   insert(collection: string, payload: Record<string, unknown>): Promise<InsertResult>
   bulkInsert(
     collection: string,

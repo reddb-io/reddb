@@ -137,7 +137,7 @@ await test('parameterized query: $N int + text + null bindings', async () => {
   await db.insert('u', { id: 2, name: 'Bob', nickname: 'bo' })
 
   // int + text
-  const r1 = await db.query('SELECT * FROM u WHERE id = $1 AND name = $2', [1, 'Alice'])
+  const r1 = await db.query('SELECT * FROM u WHERE id = $1 AND name = $2', 1, 'Alice')
   assertEqual(r1.rows.length, 1, 'one row matches')
   assertEqual(r1.rows[0].name, 'Alice', 'name match')
 
@@ -148,6 +148,14 @@ await test('parameterized query: $N int + text + null bindings', async () => {
   // legacy single-arg form still works
   const r3 = await db.query('SELECT * FROM u')
   assertEqual(r3.rows.length, 2, 'legacy two rows')
+
+  const inserted = await db.execute(
+    'INSERT INTO u (id, name, nickname) VALUES ($1, $2, $3)',
+    3,
+    'Cara',
+    null,
+  )
+  assertEqual(inserted.affected, 1, 'execute with params affected')
 
   await db.close()
 })

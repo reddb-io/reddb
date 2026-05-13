@@ -89,6 +89,43 @@ test('connect(http://) round-trips query() through the mock', async () => {
   }
 })
 
+test('connect(http://) sends query varargs and execute params', async () => {
+  const seen = []
+  const stub = await startMockServer({
+    'GET /health': () => ({ ok: true, version: 'mock-0.0.0' }),
+    'POST /query': (body) => {
+      seen.push(body)
+      return {
+        ok: true,
+        statement: body.query.startsWith('INSERT') ? 'INSERT' : 'SELECT',
+        affected: body.query.startsWith('INSERT') ? 1 : 0,
+        columns: [],
+        rows: [],
+      }
+    },
+  })
+  try {
+    const db = await connect(stub.baseUrl)
+    await db.query('SELECT * FROM t WHERE id = $1 AND name = $2', 42, 'Ada')
+    const inserted = await db.execute('INSERT INTO t (payload) VALUES ($1)', [
+      new Uint8Array([0xde, 0xad]),
+    ])
+
+    assert.deepEqual(seen[0], {
+      query: 'SELECT * FROM t WHERE id = $1 AND name = $2',
+      params: [42, 'Ada'],
+    })
+    assert.deepEqual(seen[1], {
+      query: 'INSERT INTO t (payload) VALUES ($1)',
+      params: [{ $bytes: '3q0=' }],
+    })
+    assert.equal(inserted.affected, 1)
+    await db.close()
+  } finally {
+    await stub.close()
+  }
+})
+
 test('connect(http://) insert() returns affected count and assigned id', async () => {
   const stub = await startMockServer({
     'GET /health': () => ({ ok: true, version: 'mock-0.0.0' }),

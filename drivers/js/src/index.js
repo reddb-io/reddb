@@ -171,6 +171,7 @@ export async function connect(uri, options = {}) {
 // understands. Values JSON cannot represent losslessly use the
 // stdio/HTTP query parameter envelopes.
 function serializeParam(value) {
+  assertSupportedParam(value)
   if (value instanceof Float32Array || value instanceof Float64Array) {
     return Array.from(value)
   }
@@ -188,6 +189,51 @@ function serializeParam(value) {
     return { $uuid: value }
   }
   return value
+}
+
+function assertSupportedParam(value) {
+  if (value == null) return
+  if (
+    typeof value === 'boolean'
+    || typeof value === 'number'
+    || typeof value === 'string'
+  ) {
+    return
+  }
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) {
+      throw new RedDBError('UNSUPPORTED_PARAM', 'cannot encode invalid Date query parameter')
+    }
+    return
+  }
+  if (
+    value instanceof Uint8Array
+    || value instanceof Float32Array
+    || value instanceof Float64Array
+    || (typeof Buffer !== 'undefined' && value instanceof Buffer)
+  ) {
+    return
+  }
+  if (Array.isArray(value)) {
+    if (value.every((item) => typeof item === 'number')) return
+    throw new RedDBError(
+      'UNSUPPORTED_PARAM',
+      'array query parameters must contain only numbers',
+    )
+  }
+  if (typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+    return
+  }
+  throw new RedDBError(
+    'UNSUPPORTED_PARAM',
+    `cannot encode query parameter of type ${typeof value}`,
+  )
+}
+
+function normalizeQueryParams(args) {
+  if (args.length === 0) return null
+  if (args.length === 1 && Array.isArray(args[0])) return args[0].map(serializeParam)
+  return args.map(serializeParam)
 }
 
 function bytesToBase64(value) {
@@ -434,22 +480,22 @@ export class RedDB {
    *
    * Two signatures:
    *   - `query(sql)` — legacy single-arg form.
-   *   - `query(sql, params)` — positional `$N` bind values. `params` is
-   *     an array (JS scalars: number | string | null map to engine
-   *     int/float / text / null). Indices in the SQL are 1-based
-   *     (`$1`, `$2`, ...), `params` is 0-based JS-style.
+   *   - `query(sql, ...params)` — positional `$N` bind values.
+   *   - `query(sql, paramsArray)` — legacy array form.
    *
    * Returns `{ statement, affected, columns, rows }`.
    */
-  query(sql, params) {
-    if (params === undefined) {
+  query(sql, ...params) {
+    const wireParams = normalizeQueryParams(params)
+    if (wireParams == null) {
       return this.client.call('query', { sql }).then(normalizeResult)
     }
-    if (!Array.isArray(params)) {
-      throw new TypeError('query: `params` must be an array')
-    }
-    const wireParams = params.map(serializeParam)
     return this.client.call('query', { sql, params: wireParams }).then(normalizeResult)
+  }
+
+  /** Execute a SQL statement. Alias for `query`, including parameter binding. */
+  execute(sql, ...params) {
+    return this.query(sql, ...params)
   }
 
   /** Insert one row. Returns `{ affected, id? }`. */

@@ -123,9 +123,14 @@ async function parseResponse(response) {
 const ROUTES = {
   health: (base) => ({ url: `${base}/health`, init: { method: 'GET' } }),
   version: (base) => ({ url: `${base}/admin/version`, init: { method: 'GET' } }),
-  query: (base, { sql }) => ({
+  query: (base, { sql, params }) => ({
     url: `${base}/query`,
-    init: { method: 'POST', body: JSON.stringify({ query: sql }) },
+    init: {
+      method: 'POST',
+      body: JSON.stringify(
+        Array.isArray(params) ? { query: sql, params } : { query: sql },
+      ),
+    },
   }),
   insert: (base, { collection, payload }) => ({
     url: `${base}/collections/${encodeURIComponent(collection)}/rows`,
