@@ -182,6 +182,13 @@ export interface CacheInvalidateResult {
   removed: number
 }
 
+/**
+ * Cache client. Requires an HTTP or gRPC / RedWire transport — the
+ * underlying `cache.*` RPC methods are not served by the embedded
+ * (stdio JSON-RPC) handler. Calls on an unsupported transport throw
+ * `RedDBError` with code `UNSUPPORTED_TRANSPORT` before issuing any
+ * RPC.
+ */
 export class CacheClient {
   /** Fetch a cached value. Returns Uint8Array on hit, null on miss. */
   get(namespace: string, key: string): Promise<Uint8Array | null>
@@ -256,6 +263,8 @@ export class VaultClient {
 }
 
 export class RedDB {
+  /** Underlying transport label: 'embedded' | 'http' | 'https' | 'grpc' | 'grpcs' | null. */
+  readonly transport: string | null
   readonly cache: CacheClient
   readonly kv: KvClient & ((collection?: string) => KvClient)
   readonly config: (collection?: string) => ConfigClient

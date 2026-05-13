@@ -143,6 +143,13 @@ pub enum FusedSourceRef {
     VectorHit(usize),
 }
 
+/// One fused source reference plus its RRF score.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FusedSource {
+    pub source: FusedSourceRef,
+    pub rrf_score: f64,
+}
+
 /// Pipeline entry point. Instances are stateless — kept as an empty
 /// enum so callers spell `AskPipeline::execute(...)` (matches the
 /// shape #121 calls out).
@@ -270,6 +277,15 @@ impl AskPipeline {
 /// Fuse row-filter and vector buckets into the single ranked source
 /// order used by prompt rendering and `sources_flat`.
 pub fn fused_source_order(ctx: &AskContext) -> Vec<FusedSourceRef> {
+    fused_sources(ctx)
+        .into_iter()
+        .map(|fused| fused.source)
+        .collect()
+}
+
+/// Fuse row-filter and vector buckets into the single ranked source
+/// order with the RRF score preserved for `EXPLAIN ASK`.
+pub fn fused_sources(ctx: &AskContext) -> Vec<FusedSource> {
     use super::ai::rrf_fuser::{fuse, Bucket, Candidate, RRF_K_DEFAULT};
 
     if ctx.source_limit == 0 || (ctx.filtered_rows.is_empty() && ctx.vector_hits.is_empty()) {
@@ -315,7 +331,12 @@ pub fn fused_source_order(ctx: &AskContext) -> Vec<FusedSourceRef> {
         ctx.source_limit,
     )
     .into_iter()
-    .filter_map(|item| refs.get(&item.id).copied())
+    .filter_map(|item| {
+        refs.get(&item.id).copied().map(|source| FusedSource {
+            source,
+            rrf_score: item.rrf_score,
+        })
+    })
     .collect()
 }
 

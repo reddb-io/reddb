@@ -24,11 +24,11 @@ Same options apply (`USING`, `LIMIT`, `MIN_SCORE`, `DEPTH`).
 
 ## Acceptance criteria
 
-- [ ] `EXPLAIN ASK '...'` parses and dispatches.
-- [ ] Output shows: per-bucket retrieval plan, RRF budget allocation, source URNs that would be selected, chosen provider/model, estimated prompt tokens.
-- [ ] No LLM call is made.
-- [ ] No audit row written for EXPLAIN.
-- [ ] Integration test with stub retrievals.
+- [x] `EXPLAIN ASK '...'` parses and dispatches.
+- [x] Output shows: per-bucket retrieval plan, RRF budget allocation, source URNs that would be selected, chosen provider/model, estimated prompt tokens.
+- [x] No LLM call is made.
+- [x] No audit row written for EXPLAIN.
+- [x] Integration test with stub retrievals.
 
 ## Blocked by
 
@@ -96,3 +96,37 @@ Verification (this slice):
 - `cargo check -p reddb-io-server` clean.
 - `cargo test -p reddb-io-server --lib runtime::ai::explain_plan_builder`
   → 17 passed.
+
+Slice 2: parser/runtime wiring landed.
+
+- Added `AskQuery.explain` and `EXPLAIN ASK '...'` parsing. The generic
+  `EXPLAIN <stmt>` planner now defers `EXPLAIN ASK` to the normal parser
+  instead of treating it as a planner-only explain.
+- `execute_ask` now short-circuits after retrieval/prompt assembly when
+  `explain == true`, builds the canonical `ExplainPlanBuilder` output,
+  and returns one `plan` JSON column with statement `explain_ask`.
+- The plan includes `bm25`, `vector`, and `graph` bucket budgets,
+  `fusion.algorithm = "rrf"` with `k_constant = 60`, selected source
+  URNs with RRF scores, chosen provider/model and capability flags,
+  determinism knobs, and estimated prompt/max-completion tokens.
+- The short-circuit happens before the synthesis provider call and before
+  any ASK audit write path, so EXPLAIN does not call the LLM and does not
+  write an audit row.
+- Added a focused HTTP test that seeds a table row as the retrieval
+  fixture, routes `EXPLAIN ASK ... USING openai LIMIT 3 MIN_SCORE 0.7
+  DEPTH 2`, verifies the plan fields and selected URN, and verifies the
+  stub provider receives zero requests.
+
+Verification (slice 2):
+- `cargo test -p reddb-io-server --lib storage::query::parser::tests::test_parse_dml_extended_literals_auto_embed_and_ask_forms`
+  → 1 passed.
+- `cargo test -p reddb-io-server --lib server::handlers_query::tests::http_query_explain_ask_returns_plan_without_llm_call`
+  → 1 passed.
+- `cargo test -p reddb-io-server --lib runtime::ask_pipeline::tests::fused_source_order_uses_rrf_and_total_limit`
+  → 1 passed.
+- `cargo test -p reddb-io-server --lib runtime::ai::explain_plan_builder`
+  → 17 passed.
+- `cargo check -p reddb-io-server` clean.
+- `pnpm test` exited 0 but skipped because `target/debug/red` was not present.
+- `pnpm typecheck` printed `TypeScript: No errors found` and exited 1,
+  matching the existing wrapper behavior noted by prior ASK slices.

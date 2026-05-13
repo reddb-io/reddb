@@ -1023,13 +1023,13 @@ fn graph_centrality_limit_combined_with_algorithm() {
 // ── Issue #422 slice: GRAPH COMPONENTS LIMIT N ─────────────────────────────
 
 fn seed_components_graph(rt: &RedDBRuntime) {
-    for label in ["a1", "a2", "b1", "b2", "c1", "c2"] {
+    for label in ["a1", "a2", "a3", "b1", "b2", "c1"] {
         rt.execute_query(&format!(
             "INSERT INTO components_net NODE (label, name) VALUES ('{label}', '{label}')"
         ))
         .unwrap_or_else(|e| panic!("seed node {label}: {e}"));
     }
-    for (from, to) in [("a1", "a2"), ("b1", "b2"), ("c1", "c2")] {
+    for (from, to) in [("a1", "a2"), ("a2", "a3"), ("b1", "b2")] {
         rt.execute_query(&format!(
             "INSERT INTO components_net EDGE (label, from, to) VALUES ('link', '{from}', '{to}')"
         ))
@@ -1045,4 +1045,42 @@ fn graph_components_limit_caps_returned_rows() {
         .execute_query("GRAPH COMPONENTS MODE weak LIMIT 2")
         .expect("components limit parses+executes");
     assert_eq!(res.result.records.len(), 2, "LIMIT 2 must cap output rows");
+}
+
+#[test]
+fn graph_components_order_by_size_asc_then_limit() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    seed_components_graph(&rt);
+    let res = rt
+        .execute_query("GRAPH COMPONENTS MODE weak ORDER BY component_size ASC LIMIT 2")
+        .expect("components order+limit parses+executes");
+    assert_eq!(res.result.records.len(), 2, "LIMIT 2 must cap output rows");
+    assert_eq!(int_at(&res, 0, "size"), 1, "smallest component first");
+    assert_eq!(int_at(&res, 1, "size"), 2, "second-smallest component second");
+}
+
+#[test]
+fn graph_community_order_by_size_desc_limit_executes() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    seed_components_graph(&rt);
+    let res = rt
+        .execute_query("GRAPH COMMUNITY ALGORITHM louvain ORDER BY size DESC LIMIT 1")
+        .expect("community order+limit parses+executes");
+    assert!(
+        res.result.records.len() <= 1,
+        "LIMIT 1 must cap community output rows"
+    );
+}
+
+#[test]
+fn graph_shortest_path_limit_zero_returns_no_rows() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO path_net NODE (label, name) VALUES ('alice', 'Alice')")
+        .expect("insert alice");
+    rt.execute_query("INSERT INTO path_net NODE (label, name) VALUES ('bob', 'Bob')")
+        .expect("insert bob");
+    let res = rt
+        .execute_query("GRAPH SHORTEST_PATH 'alice' TO 'bob' LIMIT 0")
+        .expect("shortest path limit parses+executes");
+    assert_eq!(res.result.records.len(), 0, "LIMIT 0 returns zero rows");
 }
