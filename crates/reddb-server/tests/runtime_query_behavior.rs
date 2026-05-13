@@ -11,6 +11,19 @@ fn int_at(result: &RuntimeQueryResult, row: usize, column: &str) -> i64 {
     }
 }
 
+fn number_at_any(result: &RuntimeQueryResult, row: usize, columns: &[&str]) -> f64 {
+    let value = columns
+        .iter()
+        .find_map(|column| result.result.records[row].get(*column))
+        .unwrap_or_else(|| panic!("expected one of columns {columns:?} at row {row}"));
+    match value {
+        Value::Integer(value) => *value as f64,
+        Value::UnsignedInteger(value) => *value as f64,
+        Value::Float(value) => *value,
+        other => panic!("expected numeric value at row {row}, got {other:?}"),
+    }
+}
+
 fn text_at<'a>(result: &'a RuntimeQueryResult, row: usize, column: &str) -> &'a str {
     match result.result.records[row].get(column) {
         Some(Value::Text(value)) => value.as_ref(),
@@ -341,6 +354,70 @@ fn aggregate_over_graph_collection_still_works() {
         other => panic!("expected count value, got {other:?}"),
     };
     assert!(n >= 1, "aggregate must still see graph entities (got {n})");
+}
+
+#[test]
+fn aggregate_keyword_columns_parse_and_execute_as_columns() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("CREATE TABLE tw (word TEXT, count INTEGER, tale TEXT)")
+        .expect("create tw");
+    rt.execute_query("INSERT INTO tw (word, count, tale) VALUES ('wolf', 5, 'lrc')")
+        .expect("insert tw");
+
+    let projected = rt
+        .execute_query("SELECT count FROM tw")
+        .expect("select count column");
+    assert_eq!(int_at(&projected, 0, "count"), 5);
+
+    let aggregate = rt
+        .execute_query("SELECT word, SUM(count) FROM tw GROUP BY word")
+        .expect("aggregate count column");
+    assert_eq!(text_at(&aggregate, 0, "word"), "wolf");
+    assert_eq!(
+        number_at_any(&aggregate, 0, &["SUM(count)", "sum(count)"]),
+        5.0
+    );
+
+    let count_star = rt
+        .execute_query("SELECT COUNT(*) AS n FROM tw")
+        .expect("count star still works");
+    assert_eq!(int_at(&count_star, 0, "n"), 1);
+}
+
+#[test]
+fn aggregate_function_keywords_can_all_be_user_column_names() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query(
+        "CREATE TABLE metrics (word TEXT, sum INTEGER, avg INTEGER, min INTEGER, max INTEGER)",
+    )
+    .expect("create metrics");
+    rt.execute_query(
+        "INSERT INTO metrics (word, sum, avg, min, max) VALUES \
+         ('wolf', 2, 4, 9, 10), ('wolf', 3, 8, 5, 12)",
+    )
+    .expect("insert metrics");
+
+    let projected = rt
+        .execute_query("SELECT sum, avg, min, max FROM metrics")
+        .expect("select aggregate-keyword columns");
+    assert_eq!(int_at(&projected, 0, "sum"), 2);
+    assert_eq!(int_at(&projected, 0, "avg"), 4);
+    assert_eq!(int_at(&projected, 0, "min"), 9);
+    assert_eq!(int_at(&projected, 0, "max"), 10);
+
+    let aggregate = rt
+        .execute_query(
+            "SELECT word, SUM(sum), AVG(avg), MIN(min), MAX(max) FROM metrics GROUP BY word",
+        )
+        .expect("aggregate keyword-named columns");
+    assert_eq!(text_at(&aggregate, 0, "word"), "wolf");
+    assert_eq!(number_at_any(&aggregate, 0, &["SUM(sum)", "sum(sum)"]), 5.0);
+    assert_eq!(number_at_any(&aggregate, 0, &["AVG(avg)", "avg(avg)"]), 6.0);
+    assert_eq!(number_at_any(&aggregate, 0, &["MIN(min)", "min(min)"]), 5.0);
+    assert_eq!(
+        number_at_any(&aggregate, 0, &["MAX(max)", "max(max)"]),
+        12.0
+    );
 }
 
 // ── Issue #416: GRAPH algorithms must resolve labels to ids ─────────────────

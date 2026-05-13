@@ -555,7 +555,7 @@ impl<'a> Parser<'a> {
     fn parse_ident_list(&mut self) -> Result<Vec<String>, ParseError> {
         let mut idents = Vec::new();
         loop {
-            idents.push(self.expect_ident_or_keyword()?);
+            idents.push(self.expect_column_ident()?);
             if !self.consume(&Token::Comma)? {
                 break;
             }

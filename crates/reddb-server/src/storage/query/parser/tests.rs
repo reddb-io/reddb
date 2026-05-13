@@ -30,6 +30,55 @@ fn test_parse_simple_select() {
 }
 
 #[test]
+fn test_parse_aggregate_keywords_as_column_identifiers() {
+    let create = parse("CREATE TABLE tw (word TEXT, count INTEGER, sum INTEGER, avg INTEGER, min INTEGER, max INTEGER)").unwrap();
+    let QueryExpr::CreateTable(table) = create else {
+        panic!("Expected CreateTableQuery");
+    };
+    let column_names = table
+        .columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        column_names,
+        vec!["word", "count", "sum", "avg", "min", "max"]
+    );
+
+    let insert =
+        parse("INSERT INTO tw (word, count, sum, avg, min, max) VALUES ('wolf', 5, 6, 7, 8, 9)")
+            .unwrap();
+    let QueryExpr::Insert(insert) = insert else {
+        panic!("Expected InsertQuery");
+    };
+    assert_eq!(
+        insert.columns,
+        vec!["word", "count", "sum", "avg", "min", "max"]
+    );
+
+    let select =
+        parse("SELECT count, sum, avg, min, max, SUM(count), AVG(avg), MIN(min), MAX(max) FROM tw")
+            .unwrap();
+    let QueryExpr::Table(table) = select else {
+        panic!("Expected TableQuery");
+    };
+    assert!(matches!(
+        &table.columns[0],
+        Projection::Field(FieldRef::TableColumn { column, .. }, _) if column == "count"
+    ));
+    assert!(matches!(
+        &table.columns[5],
+        Projection::Function(name, args)
+            if name == "SUM"
+                && matches!(
+                    args.first(),
+                    Some(Projection::Field(FieldRef::TableColumn { column, .. }, _))
+                        if column == "count"
+                )
+    ));
+}
+
+#[test]
 fn test_parse_arithmetic_projection_sub() {
     // Regression: Fase 1.3 projection Pratt referenced Token::Minus
     // but the lexer emits Token::Dash. Subtraction silently fell
