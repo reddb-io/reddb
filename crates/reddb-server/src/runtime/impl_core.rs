@@ -609,12 +609,12 @@ pub fn entity_visible_under_current_snapshot(
     entity: &crate::storage::unified::entity::UnifiedEntity,
 ) -> bool {
     // Fast path — one `Cell<bool>` read, no RefCell borrow. Autocommit
-    // reads (no active MVCC transaction) see `HAS_SNAPSHOT == false`
-    // and return `true` without ever touching the snapshot context.
+    // reads (no active MVCC transaction) still hide superseded physical
+    // versions while avoiding a full snapshot-context lookup.
     // This runs on every row of every scan; the slow path only fires
     // inside an explicit transaction.
     if !HAS_SNAPSHOT.with(|c| c.get()) {
-        return true;
+        return entity.xmax == 0;
     }
     CURRENT_SNAPSHOT.with(|cell| {
         let guard = cell.borrow();

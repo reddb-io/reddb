@@ -857,19 +857,65 @@ impl UnifiedStore {
         if let Some(entity) = self.get(collection, logical_id) {
             if matches!(entity.kind, EntityKind::TableRow { .. })
                 && entity.logical_id() == logical_id
+                && entity.xmax == 0
             {
                 return Some(entity);
             }
         }
 
         let manager = self.get_collection(collection)?;
-        manager
-            .query_all(|entity| {
-                matches!(entity.kind, EntityKind::TableRow { .. })
-                    && entity.logical_id() == logical_id
+        let mut matches = manager.query_all(|entity| {
+            matches!(entity.kind, EntityKind::TableRow { .. }) && entity.logical_id() == logical_id
+        });
+        matches
+            .iter()
+            .find(|entity| entity.xmax == 0)
+            .cloned()
+            .or_else(|| matches.pop())
+    }
+
+    pub fn table_row_versions_by_logical_id(
+        &self,
+        collection: &str,
+        logical_id: EntityId,
+    ) -> Vec<UnifiedEntity> {
+        self.get_collection(collection)
+            .map(|manager| {
+                manager.query_all(|entity| {
+                    matches!(entity.kind, EntityKind::TableRow { .. })
+                        && entity.logical_id() == logical_id
+                })
             })
-            .into_iter()
-            .next()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn install_versioned_table_row_update(
+        &self,
+        collection: &str,
+        old_version: UnifiedEntity,
+        new_version: UnifiedEntity,
+        metadata: Option<&Metadata>,
+    ) -> Result<(), StoreError> {
+        let manager = self
+            .get_collection(collection)
+            .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
+
+        let old_id = old_version.id;
+        let new_id = new_version.id;
+        let inherited_metadata = metadata.cloned().or_else(|| manager.get_metadata(old_id));
+
+        self.entity_cache.remove(old_id.raw());
+        self.entity_cache.remove(new_id.raw());
+        manager.update(old_version.clone())?;
+        self.context_index.remove_entity(old_id);
+        self.persist_entities_to_pager(collection, std::slice::from_ref(&old_version))?;
+
+        self.insert_auto(collection, new_version)?;
+        if let Some(metadata) = inherited_metadata {
+            self.set_metadata(collection, new_id, metadata)?;
+        }
+
+        Ok(())
     }
 
     /// Batch-fetch multiple entities from the same collection in minimal lock acquisitions.

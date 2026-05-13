@@ -1628,6 +1628,7 @@ impl RedDBRuntime {
             modified_columns,
             persist_metadata: metadata_changed,
             context_index_dirty,
+            replaced_entity: None,
             pre_mutation_fields,
         })
     }
@@ -1652,6 +1653,20 @@ impl RedDBRuntime {
                 "collection not found: {collection}"
             )));
         };
+
+        let versioned_update_xid = if self.current_xid().is_none() {
+            let snapshot_manager = self.snapshot_manager();
+            let xid = snapshot_manager.begin();
+            snapshot_manager.commit(xid);
+            Some(xid)
+        } else {
+            None
+        };
+        let mut replaced_entity = versioned_update_xid.map(|xid| {
+            let mut old = entity.clone();
+            old.set_xmax(xid);
+            old
+        });
 
         let mut patch_metadata: Option<crate::storage::unified::Metadata> = None;
         let row_contract_timestamps = row_contract_plan
@@ -1710,16 +1725,28 @@ impl RedDBRuntime {
             .unwrap_or_default()
             .as_secs();
 
+        if let Some(xid) = versioned_update_xid {
+            let logical_id = entity.logical_id();
+            entity.id = store.next_entity_id();
+            entity.set_logical_id(logical_id);
+            entity.set_xmin(xid);
+            entity.set_xmax(0);
+            if let Some(old) = replaced_entity.as_mut() {
+                old.set_xmax(xid);
+            }
+        }
+
         modified_columns = dedupe_modified_columns(modified_columns);
 
         Ok(AppliedEntityMutation {
-            id,
+            id: entity.id,
             collection,
             entity,
             metadata: patch_metadata,
             modified_columns,
             persist_metadata: metadata_changed,
             context_index_dirty,
+            replaced_entity,
             pre_mutation_fields,
         })
     }
@@ -1740,8 +1767,31 @@ impl RedDBRuntime {
             )));
         };
 
+        let mut ordinary = Vec::with_capacity(applied.len());
+        for item in applied {
+            if let Some(old_version) = item.replaced_entity.as_ref() {
+                store
+                    .install_versioned_table_row_update(
+                        collection,
+                        old_version.clone(),
+                        item.entity.clone(),
+                        if item.persist_metadata {
+                            item.metadata.as_ref()
+                        } else {
+                            None
+                        },
+                    )
+                    .map_err(|err| crate::RedDBError::Internal(err.to_string()))?;
+            } else {
+                ordinary.push(item);
+            }
+        }
+        if ordinary.is_empty() {
+            return Ok(());
+        }
+
         manager
-            .update_hot_batch_with_metadata(applied.iter().map(|item| {
+            .update_hot_batch_with_metadata(ordinary.iter().map(|item| {
                 (
                     &item.entity,
                     item.modified_columns.as_slice(),
@@ -1766,20 +1816,20 @@ impl RedDBRuntime {
             .index_store_ref()
             .indexed_columns_set(collection.as_str());
         let all_hot = !indexed_cols.is_empty()
-            && applied.iter().all(|item| {
+            && ordinary.iter().all(|item| {
                 !item.persist_metadata
                     && !item
                         .modified_columns
                         .iter()
                         .any(|c| indexed_cols.contains(c))
             })
-            || indexed_cols.is_empty() && applied.iter().all(|item| !item.persist_metadata);
+            || indexed_cols.is_empty() && ordinary.iter().all(|item| !item.persist_metadata);
 
         // Pass `&[&UnifiedEntity]` — no per-entity clone. The SQL UPDATE
         // inner loop hands us `applied` which already owns the post-image
         // entity; all we need for the persist path is a read borrow.
         let entity_refs: Vec<&crate::storage::UnifiedEntity> =
-            applied.iter().map(|item| &item.entity).collect();
+            ordinary.iter().map(|item| &item.entity).collect();
         let persist_fn = if all_hot {
             crate::storage::unified::UnifiedStore::persist_entity_refs_to_pager_wal_only
         } else {

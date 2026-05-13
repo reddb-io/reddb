@@ -124,9 +124,8 @@ pub(super) fn execute_runtime_table_query(
         && !is_universal_query_source(&query.table)
     {
         if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
-            let store = db.store();
             if let Some(entity) =
-                store.get_table_row_by_logical_id(&query.table, EntityId::new(entity_id))
+                resolve_table_row_by_logical_id(db, &query.table, EntityId::new(entity_id))
             {
                 let json = execute_runtime_serialize_single_entity(&entity);
                 let records: Vec<UnifiedRecord> = runtime_table_record_from_entity(entity)
@@ -156,6 +155,26 @@ pub(super) fn execute_runtime_table_query(
         stats: Default::default(),
         pre_serialized_json: None,
     })
+}
+
+fn resolve_table_row_by_logical_id(
+    db: &RedDB,
+    table: &str,
+    logical_id: EntityId,
+) -> Option<UnifiedEntity> {
+    let store = db.store();
+    let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+    if let Some(snapshot) = snapshot.as_ref() {
+        return store
+            .table_row_versions_by_logical_id(table, logical_id)
+            .into_iter()
+            .filter(|entity| {
+                crate::runtime::impl_core::entity_visible_with_context(Some(snapshot), entity)
+            })
+            .max_by_key(|entity| entity.xmin);
+    }
+
+    store.get_table_row_by_logical_id(table, logical_id)
 }
 
 pub(super) fn runtime_record_has_document_capability(record: &UnifiedRecord) -> bool {
