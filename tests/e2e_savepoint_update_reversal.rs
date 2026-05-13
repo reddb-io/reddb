@@ -1,17 +1,7 @@
-//! Pin for savepoint-aware UPDATE reversal (Eixo 1, task 2).
-//!
-//! PG semantics: `ROLLBACK TO SAVEPOINT sp1` must restore the
-//! pre-update value of any row mutated after `sp1`. Today reddb
-//! UPDATE overwrites in place without writing a new version chain
-//! entry tagged by sub-xid, so the pre-image is lost. This test
-//! encodes the target behaviour and is gated with `#[ignore]`
-//! until the per-connection update pre-image journal (or full
-//! MVCC row-level UPDATE) lands.
-//!
-//! When the fix is in place, remove `#[ignore]` and the test
-//! should start passing.
+//! Savepoint-aware UPDATE reversal.
 
 use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn rt() -> RedDBRuntime {
@@ -23,30 +13,111 @@ fn exec(rt: &RedDBRuntime, sql: &str) {
         .unwrap_or_else(|err| panic!("{sql}: {err:?}"));
 }
 
+fn red_entity_id(rt: &RedDBRuntime, table: &str) -> u64 {
+    let result = rt
+        .execute_query(&format!("SELECT red_entity_id FROM {table} WHERE id = 1"))
+        .expect("select red_entity_id");
+    match result.result.records[0].get("red_entity_id") {
+        Some(Value::UnsignedInteger(id)) => *id,
+        Some(Value::Integer(id)) => *id as u64,
+        other => panic!("expected red_entity_id, got {other:?}"),
+    }
+}
+
+fn label_for(rt: &RedDBRuntime, table: &str, red_entity_id: u64) -> String {
+    let result = rt
+        .execute_query(&format!(
+            "SELECT label FROM {table} WHERE red_entity_id = {red_entity_id}"
+        ))
+        .expect("select label");
+    match result.result.records[0].get("label") {
+        Some(Value::Text(value)) => value.to_string(),
+        other => panic!("expected label, got {other:?}"),
+    }
+}
+
 #[test]
-#[ignore = "savepoint-aware UPDATE reversal not yet implemented — see docs/query/transactions.md"]
 fn rollback_to_savepoint_restores_pre_update_value() {
     let rt = rt();
     set_current_connection_id(7701);
 
     exec(&rt, "CREATE TABLE sp_upd (id INT, label TEXT)");
     exec(&rt, "INSERT INTO sp_upd (id, label) VALUES (1, 'before')");
+    let eid = red_entity_id(&rt, "sp_upd");
 
     exec(&rt, "BEGIN");
     exec(&rt, "SAVEPOINT sp1");
-    exec(&rt, "UPDATE sp_upd SET label = 'after' WHERE id = 1");
+    exec(
+        &rt,
+        &format!("UPDATE sp_upd SET label = 'after' WHERE red_entity_id = {eid}"),
+    );
     exec(&rt, "ROLLBACK TO SAVEPOINT sp1");
     exec(&rt, "COMMIT");
 
-    let after = rt
-        .execute_query("SELECT label FROM sp_upd WHERE id = 1")
-        .expect("select after rollback");
-    let rec = &after.result.records[0];
-    let label = rec.get("label").expect("label column present").to_string();
-    assert!(
-        label.contains("before"),
-        "label should be rolled back to 'before', got {label}"
+    assert_eq!(label_for(&rt, "sp_upd", eid), "before");
+
+    clear_current_connection_id();
+}
+
+#[test]
+fn nested_savepoints_restore_the_right_update_version() {
+    let rt = rt();
+    set_current_connection_id(7702);
+
+    exec(&rt, "CREATE TABLE sp_nested_upd (id INT, label TEXT)");
+    exec(
+        &rt,
+        "INSERT INTO sp_nested_upd (id, label) VALUES (1, 'base')",
     );
+    let eid = red_entity_id(&rt, "sp_nested_upd");
+
+    exec(&rt, "BEGIN");
+    exec(
+        &rt,
+        &format!("UPDATE sp_nested_upd SET label = 'one' WHERE red_entity_id = {eid}"),
+    );
+    exec(&rt, "SAVEPOINT sp1");
+    exec(
+        &rt,
+        &format!("UPDATE sp_nested_upd SET label = 'two' WHERE red_entity_id = {eid}"),
+    );
+    exec(&rt, "SAVEPOINT sp2");
+    exec(
+        &rt,
+        &format!("UPDATE sp_nested_upd SET label = 'three' WHERE red_entity_id = {eid}"),
+    );
+    exec(&rt, "ROLLBACK TO SAVEPOINT sp2");
+    assert_eq!(label_for(&rt, "sp_nested_upd", eid), "two");
+    exec(&rt, "ROLLBACK TO SAVEPOINT sp1");
+    assert_eq!(label_for(&rt, "sp_nested_upd", eid), "one");
+    exec(&rt, "COMMIT");
+    assert_eq!(label_for(&rt, "sp_nested_upd", eid), "one");
+
+    clear_current_connection_id();
+}
+
+#[test]
+fn release_savepoint_preserves_update_work() {
+    let rt = rt();
+    set_current_connection_id(7703);
+
+    exec(&rt, "CREATE TABLE sp_release_upd (id INT, label TEXT)");
+    exec(
+        &rt,
+        "INSERT INTO sp_release_upd (id, label) VALUES (1, 'base')",
+    );
+    let eid = red_entity_id(&rt, "sp_release_upd");
+
+    exec(&rt, "BEGIN");
+    exec(&rt, "SAVEPOINT sp1");
+    exec(
+        &rt,
+        &format!("UPDATE sp_release_upd SET label = 'kept' WHERE red_entity_id = {eid}"),
+    );
+    exec(&rt, "RELEASE SAVEPOINT sp1");
+    assert_eq!(label_for(&rt, "sp_release_upd", eid), "kept");
+    exec(&rt, "COMMIT");
+    assert_eq!(label_for(&rt, "sp_release_upd", eid), "kept");
 
     clear_current_connection_id();
 }

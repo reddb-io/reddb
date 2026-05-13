@@ -121,8 +121,8 @@ fn system_keyed_collection_contract(
 /// are cheap (HashSet lookup under a parking_lot read guard).
 ///
 /// `own_xids` (Phase 2.3.2e) lists the xids belonging to the current
-/// connection's transaction — the parent xid plus every open
-/// savepoint sub-xid. The visibility rule promotes rows stamped with
+/// connection's transaction — the parent xid plus open and released
+/// savepoint sub-xids. The visibility rule promotes rows stamped with
 /// these xids to "always visible (unless aborted)" so the writer sees
 /// its own nested-savepoint writes even though their xids exceed
 /// `snapshot.xid`.
@@ -5180,12 +5180,14 @@ impl RedDBRuntime {
                                 for x in &aborted {
                                     mgr.rollback(*x);
                                 }
+                                let reverted_updates =
+                                    self.revive_versioned_updates_since(conn_id, savepoint_xid);
                                 let revived = self.revive_tombstones_since(conn_id, savepoint_xid);
                                 (
                                     "rollback_to_savepoint",
                                     format!(
-                                        "ROLLBACK TO SAVEPOINT {name} — aborted {} sub_xid(s), revived {revived} tombstone(s)",
-                                        aborted.len()
+                                        "ROLLBACK TO SAVEPOINT {name} — aborted {} sub_xid(s), reverted {reverted_updates} update(s), revived {revived} tombstone(s)",
+                                        aborted.len(),
                                     ),
                                 )
                             }
@@ -6956,6 +6958,34 @@ impl RedDBRuntime {
         }
     }
 
+    pub(crate) fn revive_versioned_updates_since(&self, conn_id: u64, stamper_xid: u64) -> usize {
+        let mut guard = self.inner.pending_versioned_updates.write();
+        let Some(pending) = guard.get_mut(&conn_id) else {
+            return 0;
+        };
+
+        let store = self.inner.db.store();
+        let mut reverted = 0usize;
+        pending.retain(|(collection, old_id, new_id, xid)| {
+            if *xid < stamper_xid {
+                return true;
+            }
+            if let Some(manager) = store.get_collection(collection) {
+                if let Some(mut old) = manager.get(*old_id) {
+                    old.set_xmax(0);
+                    let _ = manager.update(old);
+                }
+            }
+            let _ = store.delete_batch(collection, &[*new_id]);
+            reverted += 1;
+            false
+        });
+        if pending.is_empty() {
+            guard.remove(&conn_id);
+        }
+        reverted
+    }
+
     /// Flush tombstones on COMMIT — tuples are physically removed from
     /// storage. Safe to call with an empty list (no-op).
     pub(crate) fn finalize_pending_tombstones(&self, conn_id: u64) {
@@ -7271,7 +7301,7 @@ impl RedDBRuntime {
         Arc::clone(&self.inner.snapshot_manager)
     }
 
-    /// Own-tx xids (parent + open savepoints) for the current
+    /// Own-tx xids (parent + open/released savepoints) for the current
     /// connection. Transports + tests that build a `SnapshotContext`
     /// manually (outside the `execute_query` scope) need this set so
     /// the writer's own uncommitted tuples stay visible to self.
@@ -7282,6 +7312,9 @@ impl RedDBRuntime {
         if let Some(ctx) = self.inner.tx_contexts.read().get(&current_connection_id()) {
             set.insert(ctx.xid);
             for (_, sub) in &ctx.savepoints {
+                set.insert(*sub);
+            }
+            for sub in &ctx.released_sub_xids {
                 set.insert(*sub);
             }
         }

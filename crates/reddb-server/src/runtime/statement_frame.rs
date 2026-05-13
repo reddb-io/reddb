@@ -847,6 +847,9 @@ impl RedDBRuntime {
             for (_, sub) in &ctx.savepoints {
                 set.insert(*sub);
             }
+            for sub in &ctx.released_sub_xids {
+                set.insert(*sub);
+            }
         }
         set
     }
