@@ -280,12 +280,15 @@ public static class ValueCodec
         if (value is IDictionary dict)
         {
             var output = new JsonObject();
-            var entries = dict.Cast<DictionaryEntry>()
-                .OrderBy(e => Convert.ToString(e.Key, System.Globalization.CultureInfo.InvariantCulture), StringComparer.Ordinal);
-            foreach (DictionaryEntry entry in entries)
+            var entries = new List<(string Key, object? Value)>();
+            foreach (object? key in dict.Keys)
             {
-                string key = Convert.ToString(entry.Key, System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
-                output[key] = Canonicalize(entry.Value);
+                string normalized = Convert.ToString(key, System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
+                entries.Add((normalized, dict[key]));
+            }
+            foreach (var entry in entries.OrderBy(e => e.Key, StringComparer.Ordinal))
+            {
+                output[entry.Key] = Canonicalize(entry.Value);
             }
             return output;
         }
