@@ -278,6 +278,27 @@ impl SnapshotManager {
         self.next_xid.load(Ordering::Relaxed)
     }
 
+    /// Advance the allocator so future snapshots consider an xid
+    /// recovered from storage/WAL to be in the committed past.
+    pub fn observe_committed_xid(&self, xid: Xid) {
+        if xid == XID_NONE {
+            return;
+        }
+        let target = xid.saturating_add(1);
+        let mut current = self.next_xid.load(Ordering::Relaxed);
+        while current < target {
+            match self.next_xid.compare_exchange(
+                current,
+                target,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
     /// Prune the aborted-xid set. Safe to call once every aborted xid is
     /// below `oldest_active`, which guarantees no live snapshot depends
     /// on the distinction between "aborted" and "never existed". Pinned

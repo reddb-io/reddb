@@ -440,16 +440,10 @@ impl StoreCommitCoordinator {
         if matches!(self.mode, DurabilityMode::Strict) {
             let commit_lsn = {
                 let mut wal = self.wal.lock();
-                wal.append(&WalRecord::Begin { tx_id })?;
-                for action in actions {
-                    let payload = action.encode();
-                    wal.append(&WalRecord::PageWrite {
-                        tx_id,
-                        page_id: 0,
-                        data: payload,
-                    })?;
-                }
-                wal.append(&WalRecord::Commit { tx_id })?;
+                wal.append(&WalRecord::TxCommitBatch {
+                    tx_id,
+                    actions: actions.iter().map(StoreWalAction::encode).collect(),
+                })?;
                 wal.current_lsn()
             };
             self.force_sync()?;
@@ -460,22 +454,15 @@ impl StoreCommitCoordinator {
         // Grouped / Async path — lock-free enqueue. Encode every
         // WalRecord into one contiguous byte blob OUTSIDE any lock,
         // then hand it to the queue with a single fetch_add+push.
-        let mut blob: Vec<u8> = Vec::with_capacity(64 + actions.len() * 128);
-        blob.extend_from_slice(&WalRecord::Begin { tx_id }.encode());
-        let mut wal_bytes = 0u64;
-        for action in actions {
-            let payload = action.encode();
-            wal_bytes = wal_bytes.saturating_add(payload.len() as u64);
-            blob.extend_from_slice(
-                &WalRecord::PageWrite {
-                    tx_id,
-                    page_id: 0,
-                    data: payload,
-                }
-                .encode(),
-            );
+        let encoded_actions: Vec<Vec<u8>> = actions.iter().map(StoreWalAction::encode).collect();
+        let wal_bytes = encoded_actions.iter().fold(0u64, |total, payload| {
+            total.saturating_add(payload.len() as u64)
+        });
+        let blob = WalRecord::TxCommitBatch {
+            tx_id,
+            actions: encoded_actions,
         }
-        blob.extend_from_slice(&WalRecord::Commit { tx_id }.encode());
+        .encode();
 
         let commit_lsn = self.queue.enqueue(blob);
         self.wait_until_durable(commit_lsn, wal_bytes)?;
@@ -542,8 +529,20 @@ impl StoreCommitCoordinator {
         let mut pending = Vec::<(u64, Vec<u8>)>::new();
 
         for record in reader.iter() {
-            let (_lsn, record) = record?;
+            let (_lsn, record) = match record {
+                Ok(record) => record,
+                Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(err) => return Err(err),
+            };
             match record {
+                WalRecord::TxCommitBatch { actions, .. } => {
+                    for payload in actions {
+                        let action = StoreWalAction::decode(&payload)?;
+                        store.apply_replayed_action(&action).map_err(|err| {
+                            io::Error::other(format!("failed to replay store wal action: {err}"))
+                        })?;
+                    }
+                }
                 WalRecord::Begin { tx_id } => {
                     tx_states.insert(tx_id, false);
                 }

@@ -49,6 +49,13 @@ pub enum RecordType {
     /// `OrigLen` is the original (uncompressed) size; needed to pre-allocate
     /// the decompression buffer.
     PageWriteCompressed = 6,
+    /// Logical autocommit transaction commit batch (v2 format).
+    ///
+    /// Layout (after the type byte):
+    /// ```text
+    /// [TxID: 8][ActionCount: 4][[DataLen: 4][Data: N]...][CRC: 4]
+    /// ```
+    TxCommitBatch = 7,
 }
 
 impl RecordType {
@@ -60,6 +67,7 @@ impl RecordType {
             4 => Some(RecordType::PageWrite),
             5 => Some(RecordType::Checkpoint),
             6 => Some(RecordType::PageWriteCompressed),
+            7 => Some(RecordType::TxCommitBatch),
             _ => None,
         }
     }
@@ -81,6 +89,9 @@ pub enum WalRecord {
         page_id: u32,
         data: Vec<u8>,
     },
+    /// Atomic logical commit batch. Recovery applies all actions in
+    /// order iff this complete record and checksum are present.
+    TxCommitBatch { tx_id: u64, actions: Vec<Vec<u8>> },
     /// Checkpoint marker (indicates up to which LSN pages are flushed)
     Checkpoint { lsn: u64 },
 }
@@ -104,6 +115,9 @@ impl WalRecord {
         //
         // PageWriteCompressed:
         // [Type: 1][TxID: 8][PageID: 4][Compression: 1][OrigLen: 4][DataLen: 4][Data: N][CRC: 4]
+        //
+        // TxCommitBatch:
+        // [Type: 1][TxID: 8][ActionCount: 4][[DataLen: 4][Data: N]...][CRC: 4]
 
         match self {
             WalRecord::Begin { tx_id } => {
@@ -149,6 +163,15 @@ impl WalRecord {
                 buf.extend_from_slice(&page_id.to_le_bytes());
                 buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
                 buf.extend_from_slice(data);
+            }
+            WalRecord::TxCommitBatch { tx_id, actions } => {
+                buf.push(RecordType::TxCommitBatch as u8);
+                buf.extend_from_slice(&tx_id.to_le_bytes());
+                buf.extend_from_slice(&(actions.len() as u32).to_le_bytes());
+                for action in actions {
+                    buf.extend_from_slice(&(action.len() as u32).to_le_bytes());
+                    buf.extend_from_slice(action);
+                }
             }
             WalRecord::Checkpoint { lsn } => {
                 buf.push(RecordType::Checkpoint as u8);
@@ -288,6 +311,32 @@ impl WalRecord {
                     data,
                 }
             }
+            RecordType::TxCommitBatch => {
+                let mut tx_buf = [0u8; 8];
+                reader.read_exact(&mut tx_buf)?;
+                running_crc = crc32_update(running_crc, &tx_buf);
+                let tx_id = u64::from_le_bytes(tx_buf);
+
+                let mut count_buf = [0u8; 4];
+                reader.read_exact(&mut count_buf)?;
+                running_crc = crc32_update(running_crc, &count_buf);
+                let count = u32::from_le_bytes(count_buf) as usize;
+
+                let mut actions = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let mut len_buf = [0u8; 4];
+                    reader.read_exact(&mut len_buf)?;
+                    running_crc = crc32_update(running_crc, &len_buf);
+                    let len = u32::from_le_bytes(len_buf) as usize;
+
+                    let mut action = vec![0u8; len];
+                    reader.read_exact(&mut action)?;
+                    running_crc = crc32_update(running_crc, &action);
+                    actions.push(action);
+                }
+
+                WalRecord::TxCommitBatch { tx_id, actions }
+            }
             RecordType::Checkpoint => {
                 let mut buf = [0u8; 8];
                 reader.read_exact(&mut buf)?;
@@ -331,12 +380,13 @@ mod tests {
             RecordType::from_u8(6),
             Some(RecordType::PageWriteCompressed)
         );
+        assert_eq!(RecordType::from_u8(7), Some(RecordType::TxCommitBatch));
     }
 
     #[test]
     fn test_record_type_invalid() {
         assert_eq!(RecordType::from_u8(0), None);
-        assert_eq!(RecordType::from_u8(7), None);
+        assert_eq!(RecordType::from_u8(8), None);
         assert_eq!(RecordType::from_u8(255), None);
     }
 
@@ -408,6 +458,17 @@ mod tests {
         assert_eq!(encoded.len(), 21);
     }
 
+    #[test]
+    fn test_encode_tx_commit_batch() {
+        let record = WalRecord::TxCommitBatch {
+            tx_id: 7,
+            actions: vec![b"insert".to_vec(), b"update".to_vec()],
+        };
+        let encoded = record.encode();
+
+        assert_eq!(encoded[0], RecordType::TxCommitBatch as u8);
+    }
+
     // ==================== WalRecord::read Tests ====================
 
     #[test]
@@ -460,6 +521,20 @@ mod tests {
             tx_id: 50,
             page_id: 100,
             data: vec![10, 20, 30, 40, 50, 60, 70, 80],
+        };
+        let encoded = original.encode();
+
+        let mut cursor = Cursor::new(encoded);
+        let decoded = WalRecord::read(&mut cursor).unwrap().unwrap();
+
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn test_read_tx_commit_batch_roundtrip() {
+        let original = WalRecord::TxCommitBatch {
+            tx_id: 42,
+            actions: vec![b"old-version".to_vec(), b"new-version".to_vec()],
         };
         let encoded = original.encode();
 

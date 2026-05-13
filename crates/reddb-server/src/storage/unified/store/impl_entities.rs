@@ -893,7 +893,7 @@ impl UnifiedStore {
         &self,
         collection: &str,
         old_version: UnifiedEntity,
-        new_version: UnifiedEntity,
+        mut new_version: UnifiedEntity,
         metadata: Option<&Metadata>,
     ) -> Result<(), StoreError> {
         let manager = self
@@ -908,12 +908,36 @@ impl UnifiedStore {
         self.entity_cache.remove(new_id.raw());
         manager.update(old_version.clone())?;
         self.context_index.remove_entity(old_id);
-        self.persist_entities_to_pager(collection, std::slice::from_ref(&old_version))?;
 
-        self.insert_auto(collection, new_version)?;
-        if let Some(metadata) = inherited_metadata {
-            self.set_metadata(collection, new_id, metadata)?;
+        self.register_entity_id(new_version.id);
+        if let EntityKind::TableRow { ref mut row_id, .. } = new_version.kind {
+            if *row_id == 0 {
+                *row_id = manager.next_row_id();
+            } else {
+                manager.register_row_id(*row_id);
+            }
         }
+        new_version.ensure_table_logical_id();
+        manager.insert(new_version.clone())?;
+        if let Some(metadata) = inherited_metadata {
+            manager.set_metadata(new_id, metadata)?;
+        }
+        self.context_index.index_entity(collection, &new_version);
+        if self.config.auto_index_refs {
+            self.index_cross_refs(&new_version, collection)?;
+        }
+
+        let old_metadata = manager.get_metadata(old_id);
+        let new_metadata = manager.get_metadata(new_id);
+        let fv = self.format_version();
+        let records = vec![
+            Self::serialize_entity_record(&old_version, old_metadata.as_ref(), fv),
+            Self::serialize_entity_record(&new_version, new_metadata.as_ref(), fv),
+        ];
+        self.finish_paged_write([StoreWalAction::BulkUpsertEntityRecords {
+            collection: collection.to_string(),
+            records,
+        }])?;
 
         Ok(())
     }

@@ -226,6 +226,7 @@ impl RedDBRuntime {
         let conn_id = crate::runtime::impl_core::current_connection_id();
         let mut autocommit_xid = None;
         let mut tombstoned_ids = Vec::new();
+        let mut tombstoned_entities = Vec::new();
         let mut physical_delete_ids = Vec::new();
 
         for &id in ids {
@@ -253,9 +254,11 @@ impl RedDBRuntime {
                     },
                 };
                 entity.set_xmax(xid);
-                if manager.update(entity).is_ok() {
+                if manager.update(entity.clone()).is_ok() {
                     if active_xid.is_some() {
                         self.record_pending_tombstone(conn_id, collection, id, xid, previous_xmax);
+                    } else {
+                        tombstoned_entities.push(entity);
                     }
                     tombstoned_ids.push(id);
                 }
@@ -271,6 +274,9 @@ impl RedDBRuntime {
         let mut affected = tombstoned_ids.len() as u64;
         let mut lsns = Vec::with_capacity(tombstoned_ids.len() + physical_delete_ids.len());
         if active_xid.is_none() {
+            store
+                .persist_entities_to_pager(collection, &tombstoned_entities)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
             for id in &tombstoned_ids {
                 store.context_index().remove_entity(*id);
                 let lsn = self.cdc_emit(

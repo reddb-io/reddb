@@ -2145,6 +2145,7 @@ impl RedDBRuntime {
             .unwrap_or(0)
             .max(runtime.config_u64("red.config.timeline.last_archived_lsn", 0));
         runtime.inner.cdc.set_current_lsn(restored_cdc_lsn);
+        runtime.rehydrate_snapshot_xid_floor();
         runtime.bootstrap_system_keyed_collections()?;
 
         // Phase 2.5.4: replay `tenant_tables.{table}.column` markers so
@@ -2519,6 +2520,23 @@ impl RedDBRuntime {
         runtime.inner.lifecycle.mark_ready();
 
         Ok(runtime)
+    }
+
+    fn rehydrate_snapshot_xid_floor(&self) {
+        let store = self.inner.db.store();
+        for collection in store.list_collections() {
+            let Some(manager) = store.get_collection(&collection) else {
+                continue;
+            };
+            for entity in manager.query_all(|_| true) {
+                self.inner
+                    .snapshot_manager
+                    .observe_committed_xid(entity.xmin);
+                self.inner
+                    .snapshot_manager
+                    .observe_committed_xid(entity.xmax);
+            }
+        }
     }
 
     fn bootstrap_system_keyed_collections(&self) -> RedDBResult<()> {

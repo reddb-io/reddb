@@ -189,6 +189,10 @@ impl Checkpointer {
                     // Checkpoint marker - we can skip records before this LSN
                     // For now, we process everything
                 }
+                WalRecord::TxCommitBatch { .. } => {
+                    // Store-level logical commit batches are replayed by
+                    // UnifiedStore, not by the pager page checkpoint path.
+                }
             }
         }
 

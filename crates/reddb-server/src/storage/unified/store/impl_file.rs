@@ -79,6 +79,7 @@ impl UnifiedStore {
             && version != STORE_VERSION_V6
             && version != STORE_VERSION_V7
             && version != STORE_VERSION_V8
+            && version != STORE_VERSION_V9
         {
             return Err(format!("Unsupported version: {}", version).into());
         }
@@ -194,8 +195,8 @@ impl UnifiedStore {
             }
         }
 
-        if store.format_version() < STORE_VERSION_V8 {
-            store.set_format_version(STORE_VERSION_V8);
+        if store.format_version() < STORE_VERSION_V9 {
+            store.set_format_version(STORE_VERSION_V9);
         }
 
         Ok(store)
@@ -215,15 +216,15 @@ impl UnifiedStore {
         // Magic bytes "RDST"
         buf.extend_from_slice(STORE_MAGIC);
 
-        // Version (8 — includes explicit table-row logical identity
-        // alongside the V7 entity-record metadata envelope).
-        buf.extend_from_slice(&STORE_VERSION_V8.to_le_bytes());
+        // Version (9 — includes explicit table-row logical identity
+        // plus MVCC xmin/xmax alongside the V7 metadata envelope).
+        buf.extend_from_slice(&STORE_VERSION_V9.to_le_bytes());
 
         // Get all collections
         let collections = self.collections.read();
         write_varu32(&mut buf, collections.len() as u32);
 
-        let fv = STORE_VERSION_V8;
+        let fv = STORE_VERSION_V9;
         for (name, manager) in collections.iter() {
             // Collection name
             write_varu32(&mut buf, name.len() as u32);
@@ -258,7 +259,7 @@ impl UnifiedStore {
             }
         }
 
-        self.set_format_version(STORE_VERSION_V8);
+        self.set_format_version(STORE_VERSION_V9);
 
         // Append CRC32 footer over entire content
         let checksum = crate::storage::engine::crc32::crc32(&buf);
@@ -606,6 +607,12 @@ impl UnifiedStore {
                 entity.set_logical_id(EntityId::new(logical_id));
             }
         }
+        if format_version >= STORE_VERSION_V9 && *pos < buf.len() {
+            let xmin = Self::read_varu64_safe(buf, pos)?;
+            let xmax = Self::read_varu64_safe(buf, pos)?;
+            entity.set_xmin(xmin);
+            entity.set_xmax(xmax);
+        }
         if !embeddings.is_empty() || !cross_refs.is_empty() {
             entity.embeddings_mut().extend(embeddings);
             entity.cross_refs_mut().extend(cross_refs);
@@ -820,6 +827,10 @@ impl UnifiedStore {
             if entity.has_explicit_logical_id() {
                 write_varu64(buf, entity.logical_id().raw());
             }
+        }
+        if format_version >= STORE_VERSION_V9 {
+            write_varu64(buf, entity.xmin);
+            write_varu64(buf, entity.xmax);
         }
     }
 

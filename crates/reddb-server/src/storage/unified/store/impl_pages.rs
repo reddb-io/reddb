@@ -63,7 +63,7 @@ impl UnifiedStore {
             }
         }
 
-        let format_version = STORE_VERSION_V8;
+        let format_version = STORE_VERSION_V9;
         self.set_format_version(format_version);
 
         let collections = self.collections.read();
@@ -136,7 +136,7 @@ impl UnifiedStore {
     pub fn with_config(config: UnifiedStoreConfig) -> Self {
         Self {
             config,
-            format_version: AtomicU32::new(STORE_VERSION_V8),
+            format_version: AtomicU32::new(STORE_VERSION_V9),
             next_entity_id: AtomicU64::new(1),
             collections: RwLock::new(HashMap::new()),
             cross_refs: RwLock::new(HashMap::new()),
@@ -208,7 +208,7 @@ impl UnifiedStore {
 
         let store = Self {
             config,
-            format_version: AtomicU32::new(STORE_VERSION_V8),
+            format_version: AtomicU32::new(STORE_VERSION_V9),
             next_entity_id: AtomicU64::new(1),
             collections: RwLock::new(HashMap::new()),
             cross_refs: RwLock::new(HashMap::new()),
@@ -448,8 +448,8 @@ impl UnifiedStore {
             }
         }
 
-        if self.format_version() < STORE_VERSION_V8 {
-            self.set_format_version(STORE_VERSION_V8);
+        if self.format_version() < STORE_VERSION_V9 {
+            self.set_format_version(STORE_VERSION_V9);
         }
 
         Ok(())
@@ -696,7 +696,7 @@ impl UnifiedStore {
         // Write collection metadata to page 1
         let mut meta_data = Vec::with_capacity(4096);
 
-        let format_version = STORE_VERSION_V8;
+        let format_version = STORE_VERSION_V9;
         self.set_format_version(format_version);
 
         // Metadata header: magic + version + collection count
