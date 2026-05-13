@@ -2,6 +2,7 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import argparse
 import json
+import os
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -16,6 +17,8 @@ class Handler(BaseHTTPRequestHandler):
                 "usage": {"prompt_tokens": 1, "total_tokens": 1},
             }
         else:
+            prompt_tokens = int(os.environ.get("MOCK_AI_PROMPT_TOKENS", "1"))
+            completion_tokens = int(os.environ.get("MOCK_AI_COMPLETION_TOKENS", "1"))
             body = {
                 "id": "chatcmpl-mock",
                 "object": "chat.completion",
@@ -27,7 +30,11 @@ class Handler(BaseHTTPRequestHandler):
                         "finish_reason": "stop",
                     }
                 ],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                },
             }
         raw = json.dumps(body, separators=(",", ":")).encode("utf-8")
         self.send_response(200)

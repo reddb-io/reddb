@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reddb::client::RedDBClient;
 
@@ -21,6 +21,18 @@ fn runtime() -> tokio::runtime::Runtime {
         .enable_all()
         .build()
         .expect("tokio runtime should build")
+}
+
+fn unique_table(prefix: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_nanos();
+    format!("{}_{}_{}", prefix, std::process::id(), nanos)
+}
+
+fn sql_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn http_call(
@@ -214,46 +226,43 @@ fn external_ask_on_two_replicas_forwards_audit_and_cost_to_primary() {
         eprintln!("skipping ASK cluster check: REDDB_TEST_PROFILE must be full");
         return;
     }
-    if env("REDDB_TEST_ASK_CLUSTER_ENABLED").as_deref() != Some("1") {
-        eprintln!("skipping ASK cluster check: set REDDB_TEST_ASK_CLUSTER_ENABLED=1");
-        return;
-    }
 
     let primary_addr = required_env("REDDB_TEST_PRIMARY_GRPC_ADDR");
     let replica_addr = required_env("REDDB_TEST_REPLICA_GRPC_ADDR");
     let secondary_replica_addr = required_env("REDDB_TEST_SECONDARY_REPLICA_GRPC_ADDR");
     let question_one = format!("replica audit sync {}", std::process::id());
     let question_two = format!("replica cost sync {}", std::process::id());
+    let table = unique_table("external_ask_context");
+    let context = format!(
+        "deploy failed because checkout timed out {}",
+        std::process::id()
+    );
 
     runtime().block_on(async {
         let mut primary = RedDBClient::connect(&primary_addr, None)
             .await
             .expect("primary grpc connection should succeed");
         primary
-            .query("SET CONFIG ask.daily_cost_cap_usd = 0.000003")
+            .query("SET CONFIG ask.daily_cost_cap_usd = 0.003000")
             .await
             .expect("set primary ASK daily cap");
+        let create = format!("CREATE TABLE {table} (body TEXT)");
         primary
-            .create_row(
-                "external_ask_context",
-                r#"{"fields":{"body":"deploy failed because checkout timed out"}}"#,
-            )
+            .query(&create)
             .await
-            .expect("seed ASK context");
+            .expect("create ASK context table");
+        let insert = format!(
+            "INSERT INTO {table} (body) VALUES ({})",
+            sql_string(&context)
+        );
+        primary.query(&insert).await.expect("seed ASK context");
     });
 
-    wait_for_replica_visibility(
-        &replica_addr,
-        "SELECT * FROM external_ask_context",
-        "checkout timed out",
-    )
-    .expect("replica-1 should catch up");
-    wait_for_replica_visibility(
-        &secondary_replica_addr,
-        "SELECT * FROM external_ask_context",
-        "checkout timed out",
-    )
-    .expect("replica-2 should catch up");
+    let select = format!("SELECT * FROM {table}");
+    wait_for_replica_visibility(&replica_addr, &select, &context)
+        .expect("replica-1 should catch up");
+    wait_for_replica_visibility(&secondary_replica_addr, &select, &context)
+        .expect("replica-2 should catch up");
 
     runtime().block_on(async {
         let mut replica =
@@ -268,7 +277,7 @@ fn external_ask_on_two_replicas_forwards_audit_and_cost_to_primary() {
                 depth: Some(1),
                 limit: Some(1),
                 min_score: None,
-                collection: Some("external_ask_context".to_string()),
+                collection: Some(table.clone()),
                 temperature: Some(0.0),
                 seed: Some(1),
                 strict: Some(false),
@@ -279,20 +288,15 @@ fn external_ask_on_two_replicas_forwards_audit_and_cost_to_primary() {
         assert_eq!(reply.answer, "mock response");
     });
 
-    wait_for_primary_query(
-        &primary_addr,
-        "SELECT * FROM red_ask_audit",
-        &question_one,
-    )
-    .expect("primary audit row should be visible before the first ASK is considered complete");
+    wait_for_primary_query(&primary_addr, "SELECT * FROM red_ask_audit", &question_one)
+        .expect("primary audit row should be visible before the first ASK is considered complete");
 
     runtime().block_on(async {
-        let mut replica =
-            reddb::grpc::proto::red_db_client::RedDbClient::connect(grpc_endpoint(
-                &secondary_replica_addr,
-            ))
-            .await
-            .expect("replica-2 grpc connection should succeed");
+        let mut replica = reddb::grpc::proto::red_db_client::RedDbClient::connect(grpc_endpoint(
+            &secondary_replica_addr,
+        ))
+        .await
+        .expect("replica-2 grpc connection should succeed");
         let err = replica
             .ask(reddb::grpc::proto::AskRequest {
                 question: question_two,
@@ -301,7 +305,7 @@ fn external_ask_on_two_replicas_forwards_audit_and_cost_to_primary() {
                 depth: Some(1),
                 limit: Some(1),
                 min_score: None,
-                collection: Some("external_ask_context".to_string()),
+                collection: Some(table),
                 temperature: Some(0.0),
                 seed: Some(2),
                 strict: Some(false),
@@ -316,6 +320,72 @@ fn external_ask_on_two_replicas_forwards_audit_and_cost_to_primary() {
             "unexpected ASK over-cap error: {rendered}"
         );
     });
+}
+
+#[test]
+#[ignore = "requires a fresh full profile and intentionally stops the primary container"]
+fn external_ask_on_replica_primary_down_returns_503() {
+    if test_profile() != "full" {
+        eprintln!("skipping primary-down ASK check: REDDB_TEST_PROFILE must be full");
+        return;
+    }
+    if env("REDDB_TEST_ASK_PRIMARY_DOWN_ENABLED").as_deref() != Some("1") {
+        eprintln!("skipping primary-down ASK check: set REDDB_TEST_ASK_PRIMARY_DOWN_ENABLED=1");
+        return;
+    }
+
+    let primary_addr = required_env("REDDB_TEST_PRIMARY_GRPC_ADDR");
+    let replica_http = required_env("REDDB_TEST_REPLICA_HTTP_URL");
+    let replica_addr = required_env("REDDB_TEST_REPLICA_GRPC_ADDR");
+    let table = unique_table("external_ask_primary_down_context");
+    let context = format!("primary down context is replicated {}", std::process::id());
+
+    runtime().block_on(async {
+        let mut primary = RedDBClient::connect(&primary_addr, None)
+            .await
+            .expect("primary grpc connection should succeed");
+        let create = format!("CREATE TABLE {table} (body TEXT)");
+        primary
+            .query(&create)
+            .await
+            .expect("create primary-down ASK context table");
+        let insert = format!(
+            "INSERT INTO {table} (body) VALUES ({})",
+            sql_string(&context)
+        );
+        primary
+            .query(&insert)
+            .await
+            .expect("seed primary-down ASK context");
+    });
+
+    let select = format!("SELECT * FROM {table}");
+    wait_for_replica_visibility(&replica_addr, &select, &context)
+        .expect("replica should catch up before primary is stopped");
+
+    let stop_status = std::process::Command::new("docker")
+        .args([
+            "compose",
+            "-f",
+            "testdata/compose/full.yml",
+            "stop",
+            "primary",
+        ])
+        .status()
+        .expect("docker compose stop primary should run");
+    assert!(stop_status.success(), "docker compose stop primary failed");
+
+    let body = format!(
+        "{{\"query\":\"ASK 'issue410 primary down' COLLECTION {} USING openai MODEL 'mock-chat' STRICT OFF LIMIT 1\"}}",
+        table
+    );
+    let (status, response) = http_call("POST", &format!("{replica_http}/query"), Some(&body))
+        .expect("replica HTTP ASK should respond");
+    assert_eq!(status, 503, "unexpected primary-down ASK body: {response}");
+    assert!(
+        response.contains("ask_primary_sync_unavailable"),
+        "unexpected primary-down ASK body: {response}"
+    );
 }
 
 #[test]

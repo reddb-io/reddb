@@ -119,3 +119,32 @@ Still not done:
 - Primary-unreachable-on-replica-ASK is covered by mapping/unit behavior, but
   not yet by a Docker test that pauses/stops the primary and asserts the
   client-visible 503.
+
+## Progress note (2026-05-13, full Docker closure)
+
+Closed the remaining full-cluster verification gap:
+
+- Added a deterministic `mock-ai` service to the full Docker compose profile
+  and wired primary plus both replicas to it with OpenAI-compatible env vars.
+- Made the mock chat completion usage configurable so the shared daily cost cap
+  test can prove that cost accounting is forwarded synchronously to primary.
+- Promoted the 1-primary + 2-replica ASK audit/cost test so it runs whenever
+  `REDDB_TEST_PROFILE=full`.
+- Added a gated destructive Docker test for replica ASK when the primary is
+  stopped; it requires a fresh full profile and
+  `REDDB_TEST_ASK_PRIMARY_DOWN_ENABLED=1`.
+- Seeded ASK test tables with unique names via SQL so full-profile tests do not
+  pass because of persisted stale rows.
+
+Verified with:
+
+- `rustfmt tests/integration_external_env.rs`
+- `python3 -m py_compile tests/pgwire_clients/mock_ai.py`
+- `docker compose -f testdata/compose/full.yml config`
+- `cargo test --locked --test integration_external_env --no-run`
+- `REDDB_TEST_PROFILE=full ... cargo test --locked --test integration_external_env external_ask_on_two_replicas_forwards_audit_and_cost_to_primary -- --ignored --nocapture`
+- fresh full stack:
+  `REDDB_TEST_PROFILE=full REDDB_TEST_ASK_PRIMARY_DOWN_ENABLED=1 ... cargo test --locked --test integration_external_env external_ask_on_replica_primary_down_returns_503 -- --ignored --nocapture`
+
+All acceptance criteria for #410 are now covered by runtime/unit tests plus the
+full Docker harness. Ready to move to `issues/done/` and close GitHub #410.
