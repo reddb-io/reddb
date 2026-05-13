@@ -8,15 +8,13 @@
 package redserver
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"fmt"
-	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -41,22 +39,20 @@ func TestSmoke_AgainstRealServer(t *testing.T) {
 	}
 
 	tmpdir := t.TempDir()
-	dataPath := filepath.Join(tmpdir, "data")
-	_ = os.MkdirAll(dataPath, 0o755)
+	dataPath := filepath.Join(tmpdir, "data.db")
 
-	// Bind on :0 so the OS picks a free port; parse it from stdout.
+	port, err := pickFreePort()
+	if err != nil {
+		t.Fatalf("pick free port: %v", err)
+	}
+
+	var logs bytes.Buffer
 	cmd := exec.Command(bin, "server",
 		"--path", dataPath,
-		"--bind", "127.0.0.1:0",
+		"--bind", fmt.Sprintf("127.0.0.1:%d", port),
 	)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
+	cmd.Stdout = &logs
+	cmd.Stderr = &logs
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start engine: %v", err)
 	}
@@ -65,18 +61,14 @@ func TestSmoke_AgainstRealServer(t *testing.T) {
 		_ = cmd.Wait()
 	})
 
-	port, err := waitForPort(io.MultiReader(stdout, stderr), 15*time.Second)
-	if err != nil {
-		t.Fatalf("read engine port: %v", err)
-	}
 	uri := fmt.Sprintf("red://127.0.0.1:%d", port)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	c, err := reddb.Connect(ctx, uri)
+	c, err := waitForConnect(ctx, uri)
 	if err != nil {
-		t.Fatalf("connect: %v", err)
+		t.Fatalf("connect: %v\nserver logs:\n%s", err, logs.String())
 	}
 	defer c.Close()
 
@@ -85,6 +77,23 @@ func TestSmoke_AgainstRealServer(t *testing.T) {
 	}
 	if _, err := c.Query(ctx, "SELECT 1"); err != nil {
 		t.Errorf("query SELECT 1: %v", err)
+	}
+	if _, err := c.Exec(ctx, "CREATE TABLE go_params (id INT, name TEXT)"); err != nil {
+		t.Errorf("create go_params: %v", err)
+	}
+	inserted, err := c.Exec(ctx,
+		"INSERT INTO go_params (id, name) VALUES ($1, $2)",
+		int64(42), "Ada")
+	if err != nil {
+		t.Errorf("parameterized exec insert: %v", err)
+	} else if inserted.RowsAffected() != 1 {
+		t.Errorf("parameterized exec affected = %d", inserted.RowsAffected())
+	}
+	body, err := c.Query(ctx, "SELECT name FROM go_params WHERE id = $1", int64(42))
+	if err != nil {
+		t.Errorf("parameterized query select: %v", err)
+	} else if !strings.Contains(string(body), "Ada") {
+		t.Errorf("parameterized query body missing row: %s", body)
 	}
 
 	row := map[string]any{"id": "k1", "v": "hello"}
@@ -99,32 +108,35 @@ func TestSmoke_AgainstRealServer(t *testing.T) {
 	}
 }
 
-// waitForPort scans the engine's combined stdout/stderr for a "listening on
-// 127.0.0.1:<port>" line. Times out if nothing matches in time.
-func waitForPort(r io.Reader, timeout time.Duration) (int, error) {
-	deadline := time.Now().Add(timeout)
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 1<<16), 1<<20)
-	re := regexp.MustCompile(`(?:listening on|bound to|bind=)\s*(?:127\.0\.0\.1|0\.0\.0\.0|\[::\]|\[::1\]):(\d+)`)
-	for scanner.Scan() {
-		if time.Now().After(deadline) {
-			return 0, fmt.Errorf("timeout reading engine output")
-		}
-		line := scanner.Text()
-		if m := re.FindStringSubmatch(line); m != nil {
-			return strconv.Atoi(m[1])
-		}
-		// Cheaper alternative: any line containing :NNNN that's a likely port.
-		if strings.Contains(line, "redwire") || strings.Contains(line, "0.0.0.0:") {
-			if alt := regexp.MustCompile(`:(\d{4,5})\b`).FindStringSubmatch(line); alt != nil {
-				if n, err := strconv.Atoi(alt[1]); err == nil {
-					return n, nil
-				}
-			}
-		}
-	}
-	if err := scanner.Err(); err != nil {
+func pickFreePort() (int, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
 		return 0, err
 	}
-	return 0, fmt.Errorf("engine output ended before port was logged")
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port, nil
+}
+
+func waitForConnect(ctx context.Context, uri string) (reddb.Conn, error) {
+	var lastErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, err
+		}
+		c, err := reddb.Connect(ctx, uri)
+		if err == nil {
+			if err := c.Ping(ctx); err == nil {
+				return c, nil
+			} else {
+				lastErr = err
+				_ = c.Close()
+			}
+		} else {
+			lastErr = err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }

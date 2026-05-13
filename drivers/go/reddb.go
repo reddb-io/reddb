@@ -42,6 +42,9 @@ type Conn interface {
 	//   redwire.UUID           -> Uuid
 	//   map[string]any         -> Json (canonical bytes)
 	Query(ctx context.Context, sql string, params ...any) ([]byte, error)
+	// Exec runs a SQL statement with the same parameter binding rules as Query
+	// and returns a compact mutation result.
+	Exec(ctx context.Context, sql string, params ...any) (Result, error)
 	// Insert delivers a single row.
 	Insert(ctx context.Context, collection string, payload any) error
 	// BulkInsert delivers a batch of rows.
@@ -64,6 +67,16 @@ type BulkInsertResult struct {
 	Affected uint64   `json:"affected"`
 	IDs      []string `json:"ids,omitempty"`
 }
+
+// Result is returned by Exec.
+type Result struct {
+	Affected uint64          `json:"affected"`
+	Raw      json.RawMessage `json:"-"`
+}
+
+// RowsAffected reports the number of rows changed by the statement, when the
+// server supplied one.
+func (r Result) RowsAffected() uint64 { return r.Affected }
 
 // Options tweaks the Connect behaviour.
 type Options struct {
@@ -241,6 +254,13 @@ func (r *redwireFacade) Query(ctx context.Context, sql string, params ...any) ([
 	}
 	return body, nil
 }
+func (r *redwireFacade) Exec(ctx context.Context, sql string, params ...any) (Result, error) {
+	body, err := r.Query(ctx, sql, params...)
+	if err != nil {
+		return Result{}, err
+	}
+	return execResultFromJSON(body)
+}
 func (r *redwireFacade) Insert(ctx context.Context, collection string, payload any) error {
 	return r.conn.Insert(ctx, collection, payload)
 }
@@ -295,6 +315,13 @@ func (h *httpFacade) Query(ctx context.Context, sql string, params ...any) ([]by
 		return nil, err
 	}
 	return jsonBytes(out)
+}
+func (h *httpFacade) Exec(ctx context.Context, sql string, params ...any) (Result, error) {
+	body, err := h.Query(ctx, sql, params...)
+	if err != nil {
+		return Result{}, err
+	}
+	return execResultFromJSON(body)
 }
 
 // convertParamsForHTTP lifts top-level `redwire.UUID` params into the
@@ -351,6 +378,41 @@ func jsonBytes(v any) ([]byte, error) {
 		return bs, nil
 	}
 	return json.Marshal(v)
+}
+
+func execResultFromJSON(body []byte) (Result, error) {
+	result := Result{Raw: append(json.RawMessage(nil), body...)}
+	if len(body) == 0 {
+		return result, nil
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return Result{}, err
+	}
+	result.Affected = affectedFromMap(obj)
+	if result.Affected == 0 {
+		if nested, ok := obj["result"].(map[string]any); ok {
+			result.Affected = affectedFromMap(nested)
+		}
+	}
+	return result, nil
+}
+
+func affectedFromMap(obj map[string]any) uint64 {
+	for _, key := range []string{"affected_rows", "affected"} {
+		switch v := obj[key].(type) {
+		case float64:
+			if v > 0 {
+				return uint64(v)
+			}
+		case json.Number:
+			n, _ := v.Int64()
+			if n > 0 {
+				return uint64(n)
+			}
+		}
+	}
+	return 0
 }
 
 func parseBulkInsertResult(v any) (*BulkInsertResult, error) {
@@ -418,6 +480,14 @@ func (g *grpcFacade) Query(ctx context.Context, sql string, params ...any) ([]by
 		return nil, WrapError(CodeEngine, "grpc query", err)
 	}
 	return []byte(reply.GetResultJson()), nil
+}
+
+func (g *grpcFacade) Exec(ctx context.Context, sql string, params ...any) (Result, error) {
+	body, err := g.Query(ctx, sql, params...)
+	if err != nil {
+		return Result{}, err
+	}
+	return execResultFromJSON(body)
 }
 
 func (g *grpcFacade) Insert(context.Context, string, any) error {

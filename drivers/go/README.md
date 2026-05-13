@@ -20,12 +20,14 @@ row := map[string]any{"name": "alice"}
 if err := c.Insert(ctx, "users", row); err != nil { ... }
 
 body, err := c.Query(ctx, "SELECT name FROM users")
+result, err := c.Exec(ctx, "INSERT INTO users (id, name) VALUES ($1, $2)", int64(42), "Ada")
+affected := result.RowsAffected()
 ```
 
 ## Parameterized queries
 
-`Query` is variadic: pass `$N` bind values after the SQL string. Native Go
-types map to the engine's `Value` variants via the wire codec from #357.
+`Query` and `Exec` are variadic: pass `$N` bind values after the SQL string.
+Native Go types map to the engine's `Value` variants via the wire codec from #357.
 With no params the call keeps emitting the legacy `Query` frame byte-for-byte
 on RedWire. On gRPC the same typed values are sent in `QueryRequest.params`;
 empty params keep that field unset.
@@ -47,6 +49,11 @@ u, _ := redwire.UUIDFromString("550e8400-e29b-41d4-a716-446655440000")
 _, err = c.Query(ctx,
   "INSERT INTO blobs (id, body, at) VALUES ($1, $2, $3)",
   u, []byte{0xde, 0xad}, time.Now())
+
+result, err := c.Exec(ctx,
+  "INSERT INTO users (id, name) VALUES ($1, $2)",
+  int64(42), "Ada")
+affected := result.RowsAffected()
 ```
 
 Native Go type mapping:

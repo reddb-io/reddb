@@ -17,10 +17,14 @@ type fakeGrpcServer struct {
 	pb.UnimplementedRedDbServer
 	t       *testing.T
 	lastReq *pb.QueryRequest
+	reply   func(*pb.QueryRequest) *pb.QueryReply
 }
 
 func (s *fakeGrpcServer) Query(ctx context.Context, req *pb.QueryRequest) (*pb.QueryReply, error) {
 	s.lastReq = req
+	if s.reply != nil {
+		return s.reply(req), nil
+	}
 	return &pb.QueryReply{
 		Ok:          true,
 		Mode:        "query",
@@ -30,6 +34,56 @@ func (s *fakeGrpcServer) Query(ctx context.Context, req *pb.QueryRequest) (*pb.Q
 		RecordCount: 1,
 		ResultJson:  `{"records":[{"ok":true}]}`,
 	}, nil
+}
+
+func TestGrpcExecWithParamsUsesTypedQueryValues(t *testing.T) {
+	srv, addr := startFakeGrpcServer(t)
+	srv.reply = func(req *pb.QueryRequest) *pb.QueryReply {
+		return &pb.QueryReply{
+			Ok:          true,
+			Mode:        "query",
+			Statement:   req.Query,
+			Engine:      "fake",
+			RecordCount: 0,
+			ResultJson:  `{"affected_rows":1}`,
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	c, err := Connect(ctx, "grpc://"+addr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer c.Close()
+
+	result, err := c.Exec(ctx,
+		"INSERT INTO users (id, name) VALUES ($1, $2)",
+		int64(42), "Ada")
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if result.RowsAffected() != 1 {
+		t.Fatalf("affected = %d", result.RowsAffected())
+	}
+
+	req := srv.lastReq
+	if req == nil {
+		t.Fatal("server did not receive Query")
+	}
+	if req.Query != "INSERT INTO users (id, name) VALUES ($1, $2)" {
+		t.Fatalf("query = %q", req.Query)
+	}
+	if len(req.Params) != 2 {
+		t.Fatalf("params len = %d", len(req.Params))
+	}
+	if got := req.Params[0].GetIntValue(); got != 42 {
+		t.Fatalf("int param = %d", got)
+	}
+	if got := req.Params[1].GetTextValue(); got != "Ada" {
+		t.Fatalf("text param = %q", got)
+	}
 }
 
 func TestGrpcQueryWithParamsUsesTypedQueryValues(t *testing.T) {
