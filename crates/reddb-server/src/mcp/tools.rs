@@ -113,6 +113,15 @@ fn boolean_field(description: &str) -> JsonValue {
     JsonValue::Object(f)
 }
 
+fn type_field(field_type: &str) -> JsonValue {
+    let mut f = Map::new();
+    f.insert(
+        "type".to_string(),
+        JsonValue::String(field_type.to_string()),
+    );
+    JsonValue::Object(f)
+}
+
 /// Object field descriptor (accepts arbitrary JSON object).
 fn object_field(description: &str) -> JsonValue {
     let mut f = Map::new();
@@ -165,7 +174,18 @@ pub fn all_tools() -> Vec<ToolDef> {
                     ("sql", string_field("SQL or universal query to execute. Use `$1`, `$2`, ... placeholders for any value that came from the user.")),
                     ("params", {
                         let mut items = Map::new();
-                        items.insert("description".to_string(), JsonValue::String("Bind value for the matching $N placeholder. Accepts null, boolean, number, string, or a number array (vector).".to_string()));
+                        items.insert("description".to_string(), JsonValue::String("Bind value for the matching $N placeholder. Accepts null, boolean, number, string, array, or object.".to_string()));
+                        items.insert(
+                            "anyOf".to_string(),
+                            JsonValue::Array(vec![
+                                type_field("null"),
+                                type_field("boolean"),
+                                type_field("number"),
+                                type_field("string"),
+                                type_field("array"),
+                                type_field("object"),
+                            ]),
+                        );
                         let mut f = Map::new();
                         f.insert("type".to_string(), JsonValue::String("array".to_string()));
                         f.insert("items".to_string(), JsonValue::Object(items));
@@ -676,6 +696,28 @@ mod tests {
                 tool.name,
             );
         }
+    }
+
+    #[test]
+    fn test_query_tool_schema_exposes_optional_params_array() {
+        let tools = all_tools();
+        let tool = tools.iter().find(|t| t.name == "reddb_query").unwrap();
+        let props = tool
+            .input_schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        let params = props.get("params").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(params.get("type").and_then(|v| v.as_str()), Some("array"));
+
+        let required = tool
+            .input_schema
+            .get("required")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(required_strs.contains(&"sql"));
+        assert!(!required_strs.contains(&"params"));
     }
 
     #[test]

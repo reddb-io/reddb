@@ -133,17 +133,21 @@ red query "SELECT * FROM users WHERE age > 21" --path ./data.rdb
 
 | Flag | Short | Default | Description |
 |:-----|:------|:--------|:------------|
-| `--path` | `-p` | (in-memory) | Open a local `.rdb` file |
-| `--param` | | | Positional parameter for `$1`, `$2`, … (repeatable) |
+| `--path` | | (in-memory) | Open a local `.rdb` file |
+| `--param` | `-p` | | Positional parameter for `$1`, `$2`, … (repeatable) |
 | `--param-type` | | (auto) | Type override for the preceding `--param` |
 | `--json` | | `false` | Emit a JSON envelope on stdout |
 
 ### Parameterized queries
 
-`--param <value>` binds positionally — the first `--param` fills
-`$1`, the second `$2`, and so on. Values are auto-typed: anything
-that parses as JSON is taken as that JSON type, otherwise the value
-is bound as text.
+`--param <value>` (or `-p <value>`) binds positionally — the first
+param fills `$1`, the second `$2`, and so on. Values are auto-typed:
+anything that parses as JSON is taken as that JSON type, otherwise
+the value is bound as text.
+
+```bash
+red query "SELECT $1" -p 42
+```
 
 | Input | Bound as |
 |:------|:---------|

@@ -30,7 +30,7 @@ console.log(rows.rows)
 await db.close()
 
 const conn = await connectNative('127.0.0.1:5050')
-const json = await conn.query('SELECT * FROM users LIMIT 10')
+const json = await conn.query('SELECT * FROM users WHERE name = $1', 'Alice')
 console.log(JSON.parse(json))
 
 conn.close()
@@ -40,13 +40,14 @@ conn.close()
 
 ## Safe parameter binding
 
-Use the shared `@reddb-io/sdk` under Bun for positional `$N` bind values. The
-native TCP preview is intentionally narrow and keeps `query(sql)` as a raw SQL
-string fast path; do not compose user input into that string. The cross-driver
-contract is tracked in [ADR #352](https://github.com/reddb-io/reddb/issues/352).
+Use positional `$N` bind values for user input. The shared `@reddb-io/sdk`
+accepts params arrays, and the native `@reddb-io/client-bun` TCP client accepts
+either variadic params or a single params array. The cross-driver contract is
+tracked in [ADR #352](https://github.com/reddb-io/reddb/issues/352).
 
 ```ts
 import { connect } from '@reddb-io/sdk'
+import { connect as connectNative } from '@reddb-io/client-bun'
 
 const db = await connect('memory://')
 
@@ -59,6 +60,14 @@ const hits = await db.query(
   'SEARCH SIMILAR $1 IN embeddings K 5',
   [Float32Array.from([0.1, 0.2, 0.3])],
 )
+
+const conn = await connectNative('127.0.0.1:5050')
+const raw = await conn.query(
+  'SELECT id, name FROM users WHERE id = $1 AND tenant = $2',
+  42,
+  'acme',
+)
+const parsed = JSON.parse(raw)
 ```
 
 ## TLS
@@ -77,7 +86,7 @@ const conn = await connectTls('reddb.example.com:5050', {
 The Bun driver is intentionally narrow:
 
 - **Address format is `host:port`** — not a full `red://` URI. Pair it with [`URL`](https://developer.mozilla.org/docs/Web/API/URL) yourself if you need parsing.
-- **Parameterized embedded queries use `@reddb-io/sdk`.** The shared SDK is verified under Bun for `db.query(sql, params)`, including vector params. The native `@reddb-io/client-bun` TCP fast path remains a simple SQL string client in this preview.
+- **Parameterized embedded queries use `@reddb-io/sdk`.** The shared SDK is verified under Bun for `db.query(sql, params)`, including vector params. The native `@reddb-io/client-bun` TCP path uses `QueryWithParams` for non-empty params when the server advertises `FEATURE_PARAMS`.
 - **No URI-level auth.** No SCRAM / OAuth handshake — it speaks a simple `MSG_QUERY` / `MSG_BULK_INSERT` framing on top of plain TCP (or TLS). For full auth + transport feature parity, use [`@reddb-io/client`](../../guides/javascript-typescript-driver.md#reddb-ioclient).
 - **Bun-only.** Calls `Bun.connect`. Doesn't run on Node / Deno / browsers.
 

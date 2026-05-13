@@ -5,6 +5,8 @@ use crate::storage::query::ast::{
 };
 use crate::storage::schema::Value;
 
+pub const PARAMETER_PROJECTION_PREFIX: &str = "__user_param_projection__:";
+
 pub fn expr_to_projection(expr: &Expr) -> Option<Projection> {
     match expr {
         Expr::Literal { value, .. } => projection_from_literal(value),
@@ -18,7 +20,9 @@ pub fn expr_to_projection(expr: &Expr) -> Option<Projection> {
                 Some(Projection::Field(field.clone(), None))
             }
         }
-        Expr::Parameter { .. } => None,
+        Expr::Parameter { index, .. } => Some(Projection::Column(format!(
+            "{PARAMETER_PROJECTION_PREFIX}{index}"
+        ))),
         Expr::BinaryOp { op, lhs, rhs, .. } => match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Concat => {
                 Some(Projection::Function(

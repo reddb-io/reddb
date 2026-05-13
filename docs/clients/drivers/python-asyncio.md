@@ -96,8 +96,8 @@ async with await connect(uri) as db: ...
 
 ## Safe parameter binding
 
-`await db.query(sql, params)` binds positional `$N` placeholders over the HTTP
-transport. Use it for any user-supplied value — string concatenation is a
+`await db.query(sql, params)` binds positional `$N` placeholders over HTTP and
+RedWire. Use it for any user-supplied value — string concatenation is a
 SQL-injection footgun. The cross-driver contract is tracked in
 [ADR #352](https://github.com/reddb-io/reddb/issues/352).
 
@@ -116,9 +116,9 @@ hits = await db.query(
 ```
 
 HTTP sends the `params` array directly to `/query`, where numeric arrays bind
-as vectors and objects bind as JSON. Non-empty params over the RedWire preview
-raise `PARAMS_UNSUPPORTED` until the binary `QueryWithParams` frame lands
-there; use `http://` / `https://` for safe binding with `reddb-asyncio` today.
+as vectors and objects bind as JSON. RedWire routes non-empty params through
+the binary `QueryWithParams` frame when the server advertises `FEATURE_PARAMS`;
+older servers raise `PARAMS_UNSUPPORTED` instead of silently dropping params.
 
 ## Production checklist
 
