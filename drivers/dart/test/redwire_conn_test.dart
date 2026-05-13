@@ -313,7 +313,7 @@ void main() {
       try {
         final conn = await RedwireConn.connect(host: server.host, port: server.port);
         expect(conn.supportsParams, isTrue);
-        final raw = await conn.query(r'SELECT $1, $2, $3, $4', [
+        final raw = await conn.query(r'SELECT $1, $2, $3, $4', params: [
           42,
           'alice',
           null,
@@ -353,7 +353,7 @@ void main() {
         final conn = await RedwireConn.connect(host: server.host, port: server.port);
         expect(conn.supportsParams, isFalse);
         await expectLater(
-          conn.query(r'SELECT $1', [1]),
+          conn.query(r'SELECT $1', params: [1]),
           throwsA(isA<ParamsUnsupported>()),
         );
         await conn.close();

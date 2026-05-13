@@ -13,6 +13,7 @@
 #include "reddb/url.hpp"
 #include "reddb/value.hpp"
 
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <span>
@@ -46,6 +47,9 @@ public:
         if (params.empty()) return query(std::string(sql));
         throw RedDBError(ErrorCode::ParamsUnsupported,
                          "parameterized queries are not supported by this connection");
+    }
+    std::string query(std::string_view sql, std::initializer_list<Value> params) {
+        return query(sql, std::span<const Value>(params.begin(), params.size()));
     }
     virtual std::string insert(const std::string& collection,
                                const std::string& json_payload) = 0;

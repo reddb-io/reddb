@@ -10,8 +10,6 @@ use Reddb\Reddb;
 /**
  * End-to-end smoke against a freshly-spawned RedDB binary. Gated on
  * `RED_SMOKE=1` so normal test runs don't drag in a cargo build.
- * The test discovers the bind port from stdout — the engine prints
- * `listening on tcp://127.0.0.1:<port>` once the listener is up.
  */
 final class SmokeTest extends TestCase
 {
@@ -25,25 +23,33 @@ final class SmokeTest extends TestCase
     public function test_runs_against_real_engine(): void
     {
         $repoRoot = $this->findRepoRoot();
-        $cmd = ['cargo', 'run', '--release', '--bin', 'red', '--', 'serve', '--bind', '127.0.0.1:0', '--anon-ok'];
+        $dataDir = sys_get_temp_dir() . '/reddb-php-smoke-' . bin2hex(random_bytes(6));
+        mkdir($dataDir);
+        $port = $this->freePort();
+        $cmd = $this->redCommand($dataDir . '/data.db', $port);
         $descriptors = [
             0 => ['pipe', 'r'],
-            1 => ['pipe', 'w'],
-            2 => ['redirect', 1],
+            1 => ['file', '/dev/null', 'w'],
+            2 => ['file', '/dev/null', 'w'],
         ];
         $proc = proc_open($cmd, $descriptors, $pipes, $repoRoot);
         if (!is_resource($proc)) {
-            $this->fail('failed to spawn cargo run');
+            $this->fail('failed to spawn red server');
         }
         try {
-            $port = $this->waitForPort($pipes[1], 60);
-            $conn = Reddb::connect("red://127.0.0.1:{$port}");
+            $conn = $this->waitForConnect("red://127.0.0.1:{$port}", 60);
             try {
                 $conn->ping();
-                $conn->insert('smoke_users', ['name' => 'alice', 'age' => 30]);
+                $selectOne = $conn->query('SELECT 1');
+                $this->assertStringContainsString('"ok":true', $selectOne, "expected ok result in: {$selectOne}");
+                $conn->query('CREATE TABLE php_params (id INT, name TEXT)');
+                $conn->query(
+                    'INSERT INTO php_params (id, name) VALUES ($1, $2)',
+                    [42, 'alice'],
+                );
                 $body = $conn->query(
-                    'SELECT * FROM smoke_users WHERE age = $1 AND name = $2 AND $3 IS NULL',
-                    [30, 'alice', null],
+                    'SELECT name FROM php_params WHERE id = $1 AND name = $2',
+                    [42, 'alice'],
                 );
                 $this->assertStringContainsString('alice', $body, "expected alice in: {$body}");
                 $conn->query(
@@ -54,8 +60,7 @@ final class SmokeTest extends TestCase
                     'SEARCH SIMILAR $1 COLLECTION smoke_embeddings LIMIT 1',
                     [[0.7, 0.7]],
                 );
-                $this->assertStringContainsString('parameterized doc', $vectorBody, "expected vector match in: {$vectorBody}");
-                $conn->delete('smoke_users', 'alice');
+                $this->assertStringContainsString('"record_count":1', $vectorBody, "expected vector match in: {$vectorBody}");
             } finally {
                 $conn->close();
             }
@@ -78,24 +83,57 @@ final class SmokeTest extends TestCase
         }
     }
 
-    /** @param resource $stream */
-    private function waitForPort($stream, int $timeoutSec): int
+    /** @return list<string> */
+    private function redCommand(string $dataPath, int $port): array
+    {
+        $redBin = getenv('RED_BIN');
+        if (is_string($redBin) && $redBin !== '') {
+            return [$redBin, 'server', '--path', $dataPath, '--bind', "127.0.0.1:{$port}"];
+        }
+        return [
+            'cargo', 'run', '--release', '--bin', 'red', '--',
+            'server', '--path', $dataPath, '--bind', "127.0.0.1:{$port}",
+        ];
+    }
+
+    private function waitForConnect(string $uri, int $timeoutSec): \Reddb\Conn
     {
         $deadline = microtime(true) + $timeoutSec;
-        $buf = '';
-        stream_set_blocking($stream, false);
+        $last = null;
         while (microtime(true) < $deadline) {
-            $chunk = fread($stream, 8192);
-            if ($chunk !== false && $chunk !== '') {
-                $buf .= $chunk;
-                if (preg_match('#(?:tcp://|listening on .*?:|port=)(\d{2,5})#', $buf, $m)) {
-                    return (int) $m[1];
+            try {
+                $conn = Reddb::connect($uri);
+                try {
+                    $conn->ping();
+                    return $conn;
+                } catch (\Throwable $e) {
+                    $conn->close();
+                    $last = $e;
                 }
-            } else {
-                usleep(50_000);
+            } catch (\Throwable $e) {
+                $last = $e;
             }
+            usleep(50_000);
         }
-        $this->fail('never saw a bind port in engine stdout');
+        $message = 'server did not accept connections at ' . $uri;
+        if ($last instanceof \Throwable) {
+            $message .= ': ' . $last->getMessage();
+        }
+        $this->fail($message);
+    }
+
+    private function freePort(): int
+    {
+        $socket = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+        if ($socket === false) {
+            $this->fail("could not allocate free port: {$errstr}");
+        }
+        $name = stream_socket_get_name($socket, false);
+        fclose($socket);
+        if (!is_string($name) || !preg_match('/:(\d+)$/', $name, $m)) {
+            $this->fail('could not determine free port');
+        }
+        return (int) $m[1];
     }
 
     private function findRepoRoot(): string

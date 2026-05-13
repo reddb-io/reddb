@@ -57,7 +57,7 @@ class HttpConn implements Conn {
   // ---------------------------------------------------------------------
 
   @override
-  Future<Uint8List> query(String sql, [List<Object?>? params]) async {
+  Future<Uint8List> query(String sql, {List<Object?>? params}) async {
     final payload = <String, Object?>{'query': sql};
     if (params != null && params.isNotEmpty) {
       payload['params'] = ValueCodec.toHttpParams(params);

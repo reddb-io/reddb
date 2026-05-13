@@ -47,7 +47,9 @@ public:
     Value(std::string value) : storage_(std::move(value)) {}
     Value(std::string_view value) : storage_(std::string(value)) {}
 
+    static Value int64(int64_t value);
     static Value bytes(std::span<const std::byte> value);
+    static Value bytes(std::span<const uint8_t> value);
     static Value vector(std::span<const float> value);
     static Value json(std::string_view value);
     static Value timestamp_seconds(int64_t epoch_seconds);
