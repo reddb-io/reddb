@@ -885,5 +885,6 @@ pub enum MigrationKind {
 #[path = "ports_impls.rs"]
 mod ports_impls;
 pub(crate) use ports_impls::build_row_update_contract_plan;
+pub(crate) use ports_impls::entity_row_fields_snapshot;
 pub(crate) use ports_impls::normalize_row_update_assignment_with_plan;
 pub(crate) use ports_impls::normalize_row_update_value_for_rule;

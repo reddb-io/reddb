@@ -7,14 +7,14 @@
 //! applied.
 
 use crate::application::entity::{
-    metadata_from_json, AppliedEntityMutation, CreateDocumentInput, CreateEdgeInput,
-    CreateKvInput, CreateNodeInput, CreateRowInput, CreateRowsBatchInput, CreateVectorInput,
-    DeleteEntityInput,
+    metadata_from_json, AppliedEntityMutation, CreateDocumentInput, CreateEdgeInput, CreateKvInput,
+    CreateNodeInput, CreateRowInput, CreateRowsBatchInput, CreateVectorInput, DeleteEntityInput,
     PatchEntityOperation, PatchEntityOperationType, RowUpdateColumnRule, RowUpdateContractPlan,
 };
 use crate::application::ports::{
-    build_row_update_contract_plan, normalize_row_update_assignment_with_plan,
-    normalize_row_update_value_for_rule, RuntimeEntityPort,
+    build_row_update_contract_plan, entity_row_fields_snapshot,
+    normalize_row_update_assignment_with_plan, normalize_row_update_value_for_rule,
+    RuntimeEntityPort,
 };
 use crate::application::ttl_payload::has_internal_ttl_metadata;
 use crate::presentation::entity_json::storage_value_to_json;
@@ -313,9 +313,9 @@ impl RedDBRuntime {
 
     /// Flushes context-index updates and CDC for each applied mutation.
     /// Returns one LSN per entity in the same order as `applied`.
-    fn flush_update_chunk(&self, applied: &[AppliedEntityMutation]) -> Vec<u64> {
+    fn flush_update_chunk(&self, applied: &[AppliedEntityMutation]) -> RedDBResult<Vec<u64>> {
         if applied.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         let store = self.db().store();
@@ -327,6 +327,10 @@ impl RedDBRuntime {
                     .filter(|item| item.context_index_dirty)
                     .map(|item| &item.entity),
             );
+        }
+
+        for item in applied {
+            self.refresh_update_secondary_indexes(item)?;
         }
 
         let mut lsns = Vec::with_capacity(applied.len());
@@ -341,11 +345,71 @@ impl RedDBRuntime {
             );
             lsns.push(lsn);
         }
-        lsns
+        Ok(lsns)
     }
 
     fn persist_update_chunk(&self, applied: &[AppliedEntityMutation]) -> RedDBResult<()> {
         self.persist_applied_entity_mutations(applied)
+    }
+
+    fn refresh_update_secondary_indexes(&self, applied: &AppliedEntityMutation) -> RedDBResult<()> {
+        if applied.pre_mutation_fields.is_empty() {
+            return Ok(());
+        }
+        let post = entity_row_fields_snapshot(&applied.entity);
+        if post.is_empty() {
+            return Ok(());
+        }
+
+        let indexed_cols = self
+            .index_store_ref()
+            .indexed_columns_set(&applied.collection);
+        if indexed_cols.is_empty() {
+            return Ok(());
+        }
+
+        if let Some(old_version) = applied.replaced_entity.as_ref() {
+            let old_index_fields: Vec<(String, crate::storage::schema::Value)> = applied
+                .pre_mutation_fields
+                .iter()
+                .filter(|(col, _)| indexed_cols.contains(col))
+                .cloned()
+                .collect();
+            let new_index_fields: Vec<(String, crate::storage::schema::Value)> = post
+                .iter()
+                .filter(|(col, _)| indexed_cols.contains(col))
+                .cloned()
+                .collect();
+            if !old_index_fields.is_empty() {
+                self.index_store_ref()
+                    .index_entity_delete(&applied.collection, old_version.id, &old_index_fields)
+                    .map_err(crate::RedDBError::Internal)?;
+            }
+            if !new_index_fields.is_empty() {
+                self.index_store_ref()
+                    .index_entity_insert(&applied.collection, applied.entity.id, &new_index_fields)
+                    .map_err(crate::RedDBError::Internal)?;
+            }
+            return Ok(());
+        }
+
+        let damage =
+            crate::application::entity::row_damage_vector(&applied.pre_mutation_fields, &post);
+        if damage
+            .touched_columns()
+            .into_iter()
+            .any(|col| indexed_cols.contains(col))
+        {
+            self.index_store_ref()
+                .index_entity_update(
+                    &applied.collection,
+                    applied.id,
+                    &applied.pre_mutation_fields,
+                    &post,
+                )
+                .map_err(crate::RedDBError::Internal)?;
+        }
+        Ok(())
     }
 
     /// Execute INSERT INTO table [entity_type] (cols) VALUES (vals), ...
@@ -1146,7 +1210,7 @@ impl RedDBRuntime {
             }
             self.persist_update_chunk(&applied_chunk)?;
             affected += applied_chunk.len() as u64;
-            let lsns = self.flush_update_chunk(&applied_chunk);
+            let lsns = self.flush_update_chunk(&applied_chunk)?;
             if !query.suppress_events {
                 self.emit_update_events_for_collection(&query.table, &applied_chunk, &lsns)?;
             }
