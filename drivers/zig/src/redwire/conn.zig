@@ -157,9 +157,48 @@ pub const Conn = struct {
 
     // ---- High level operations ----
 
-    /// Run a SQL query. Returns the raw JSON envelope (allocated by
-    /// `self.allocator`) — caller frees.
-    pub fn query(self: *Conn, sql: []const u8) ![]const u8 {
+    /// Run a SQL query with an idiomatic tuple of params:
+    /// `try conn.query("SELECT $1", .{42})`. Empty tuples preserve the
+    /// legacy Query frame path. Returned bytes are allocated by
+    /// `self.allocator`; caller frees.
+    pub fn query(self: *Conn, sql: []const u8, params: anytype) ![]const u8 {
+        const ParamType = @TypeOf(params);
+        switch (@typeInfo(ParamType)) {
+            .@"struct" => |info| {
+                if (!info.is_tuple) @compileError("query params must be a tuple or []const Value");
+                const values = try self.allocator.alloc(value_codec.Value, info.fields.len);
+                defer self.allocator.free(values);
+                inline for (info.fields, 0..) |field, i| {
+                    values[i] = try nativeParamToValue(@field(params, field.name));
+                }
+                return self.queryWithParams(sql, values);
+            },
+            .pointer => |ptr| {
+                switch (ptr.size) {
+                    .slice => {
+                        if (ptr.child != value_codec.Value) @compileError("query params must be []const Value");
+                        return self.queryWithParams(sql, params);
+                    },
+                    .one => {
+                        switch (@typeInfo(ptr.child)) {
+                            .array => |array| {
+                                if (array.child != value_codec.Value) {
+                                    @compileError("query params must be a Value array pointer");
+                                }
+                                return self.queryWithParams(sql, params[0..]);
+                            },
+                            else => @compileError("query params must be a tuple or []const Value"),
+                        }
+                    },
+                    else => @compileError("query params must be a tuple or []const Value"),
+                }
+            },
+            else => @compileError("query params must be a tuple or []const Value"),
+        }
+    }
+
+    /// Run a SQL query through the legacy Query frame.
+    pub fn queryRaw(self: *Conn, sql: []const u8) ![]const u8 {
         self.mutex.lock();
         defer self.mutex.unlock();
         const corr = self.nextCorr();
@@ -190,7 +229,7 @@ pub const Conn = struct {
         sql: []const u8,
         params: []const value_codec.Value,
     ) ![]const u8 {
-        if (params.len == 0) return self.query(sql);
+        if (params.len == 0) return self.queryRaw(sql);
         self.mutex.lock();
         defer self.mutex.unlock();
         if (!self.supportsParams()) return error.ParamsUnsupported;
@@ -225,6 +264,36 @@ pub const Conn = struct {
         if (resp.frame.kind != .pong) return error.UnexpectedFrame;
     }
 };
+
+fn nativeParamToValue(value: anytype) !value_codec.Value {
+    const ValueType = @TypeOf(value);
+    if (ValueType == value_codec.Value) return value;
+
+    return switch (@typeInfo(ValueType)) {
+        .null => .{ .@"null" = {} },
+        .bool => .{ .@"bool" = value },
+        .int, .comptime_int => .{ .int = std.math.cast(i64, value) orelse return error.ParamOutOfRange },
+        .float, .comptime_float => .{ .float = @as(f64, @floatCast(value)) },
+        .optional => if (value) |payload| try nativeParamToValue(payload) else .{ .@"null" = {} },
+        .pointer => |ptr| switch (ptr.size) {
+            .slice => {
+                if (ptr.child != u8) @compileError("only []const u8 slices can bind as text");
+                return .{ .text = value };
+            },
+            .one => {
+                switch (@typeInfo(ptr.child)) {
+                    .array => |array| {
+                        if (array.child != u8) @compileError("only string literals can bind as text");
+                        return .{ .text = value[0..] };
+                    },
+                    else => @compileError("only string literals can bind as text"),
+                }
+            },
+            else => @compileError("unsupported pointer parameter type"),
+        },
+        else => @compileError("unsupported query parameter type"),
+    };
+}
 
 /// Move ownership of a decoded payload to a fresh slice the caller
 /// owns. Frees any temporary buffers held by the `Decoded` struct.

@@ -5,7 +5,7 @@ import 'dart:typed_data';
 abstract class Conn {
   /// Run a SQL string with optional positional params. Returns the raw JSON
   /// envelope as bytes — caller decodes with `dart:convert`.
-  Future<Uint8List> query(String sql, [List<Object?>? params]);
+  Future<Uint8List> query(String sql, {List<Object?>? params});
 
   /// Insert a single row. `payload` is encoded JSON (object).
   Future<Uint8List> insert(String collection, Map<String, dynamic> payload);

@@ -73,8 +73,8 @@ class Reddb {
   /// Run a SQL string with optional positional params.
   ///
   /// Returns the raw response bytes (UTF-8 JSON).
-  Future<Uint8List> query(String sql, [List<Object?>? params]) =>
-      _conn.query(sql, params);
+  Future<Uint8List> query(String sql, {List<Object?>? params}) =>
+      _conn.query(sql, params: params);
 
   /// Insert a single row. `payload` is a JSON-encodable map.
   Future<Uint8List> insert(String collection, Map<String, dynamic> payload) =>

@@ -11,6 +11,7 @@
 #include "reddb/value.hpp"
 
 #include <cstdint>
+#include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -92,6 +93,9 @@ public:
     // ---- Public ops — return raw JSON strings. -----------------
     std::string query(const std::string& sql);
     std::string query(std::string_view sql, std::span<const reddb::Value> params);
+    std::string query(std::string_view sql, std::initializer_list<reddb::Value> params) {
+        return query(sql, std::span<const reddb::Value>(params.begin(), params.size()));
+    }
     std::string insert(const std::string& collection, const std::string& json_payload);
     std::string bulk_insert(const std::string& collection,
                             const std::vector<std::string>& json_rows);

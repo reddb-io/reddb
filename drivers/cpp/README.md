@@ -34,12 +34,13 @@ int main() {
     auto json = conn->query("SELECT 1");
 
     std::array<reddb::Value, 2> params = {
-        reddb::Value(30),
+        reddb::Value::int64(30),
         reddb::Value("alice"),
     };
     auto rows = conn->query(
         "SELECT * FROM users WHERE age = $1 AND name = $2",
         params);
+    auto one = conn->query("SELECT $1", {reddb::Value::int64(42)});
 
     std::array<float, 3> embedding = {0.1f, 0.2f, 0.3f};
     std::array<reddb::Value, 1> vector_params = {
@@ -54,8 +55,9 @@ int main() {
 ```
 
 `query(sql)` is unchanged. `query(std::string_view sql,
-std::span<const reddb::Value> params)` binds positional `$N` placeholders
-and uses the RedWire `QueryWithParams` frame only when the server advertises
+std::span<const reddb::Value> params)` and
+`query(sql, {reddb::Value::int64(42)})` bind positional `$N` placeholders and
+use the RedWire `QueryWithParams` frame only when the server advertises
 `FEATURE_PARAMS`; otherwise the driver throws `PARAMS_UNSUPPORTED`.
 HTTP sends the canonical `/query` body with `query` and adds `params` only
 for non-empty parameter spans.
@@ -66,10 +68,10 @@ Native C++ parameter mapping:
 |-----------|-------------|
 | `std::nullopt` | null |
 | `bool` | bool |
-| signed integer / unsigned integer up to `INT64_MAX` | int |
+| `reddb::Value::int64(...)`, signed integer / unsigned integer up to `INT64_MAX` | int |
 | `float`, `double` | float |
 | `std::string`, `std::string_view`, string literal | text |
-| `reddb::Value::bytes(std::span<const std::byte>)` | bytes |
+| `reddb::Value::bytes(std::span<const std::byte>)`, `reddb::Value::bytes(std::span<const uint8_t>)` | bytes |
 | `reddb::Value::vector(std::span<const float>)` | vector |
 | `reddb::Value::json(std::string_view)` | json |
 | `reddb::Value::timestamp_seconds(int64_t)` / `timestamp(time_point)` | timestamp |
@@ -101,9 +103,9 @@ auto conn = reddb::connect("reds://db.example.com:5050", o);
 ## Smoke test
 
 `tests/smoke_test.cpp` is gated by `RED_SMOKE=1`. It spawns a server
-binary (`RED_BINARY`, default `target/debug/reddb`) and exercises the
-public ops end-to-end. CI does not run it; developers do, after `cargo
-build` against a real engine.
+binary from `RED_BIN` (or `RED_BINARY`) and exercises parameterized RedWire
+queries end-to-end. CI does not run it; developers do, after building a real
+engine binary.
 
 ## Layout
 

@@ -6,6 +6,7 @@
 
 #include "reddb/value.hpp"
 
+#include <initializer_list>
 #include <map>
 #include <memory>
 #include <optional>
@@ -48,6 +49,9 @@ public:
     HttpResponse login(const std::string& username, const std::string& password);
     HttpResponse query(const std::string& sql);
     HttpResponse query(std::string_view sql, std::span<const reddb::Value> params);
+    HttpResponse query(std::string_view sql, std::initializer_list<reddb::Value> params) {
+        return query(sql, std::span<const reddb::Value>(params.begin(), params.size()));
+    }
     HttpResponse insert(const std::string& collection, const std::string& json_payload);
     HttpResponse bulk_insert(const std::string& collection,
                              const std::vector<std::string>& json_rows);

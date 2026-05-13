@@ -175,7 +175,7 @@ class RedwireConn implements Conn {
       (_serverFeatures & FEATURE_PARAMS) == FEATURE_PARAMS;
 
   @override
-  Future<Uint8List> query(String sql, [List<Object?>? params]) async {
+  Future<Uint8List> query(String sql, {List<Object?>? params}) async {
     final queryParams = params ?? const <Object?>[];
     final hasParams = queryParams.isNotEmpty;
     if (hasParams && !supportsParams) {

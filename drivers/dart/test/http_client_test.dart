@@ -32,7 +32,7 @@ void main() {
         }),
       );
 
-      await conn.query(r'SELECT $1, $2, $3, $4', [
+      await conn.query(r'SELECT $1, $2, $3, $4', params: [
         42,
         'alice',
         null,

@@ -32,21 +32,22 @@ red://host?token=sk-...               # static bearer token
 
 ## Parameterized queries
 
-`query` accepts an optional params list. With no params it keeps emitting the
-legacy `Query` frame; with params it uses the typed parameter codec.
+`query` accepts an optional named `params` list. With no params it keeps
+emitting the legacy `Query` frame; with params it uses the typed parameter
+codec.
 
 ```dart
 import 'dart:typed_data';
 
 final rows = await db.query(
   r'SELECT * FROM users WHERE age > $1 AND name = $2 AND nick IS $3',
-  [18, 'alice', null],
+  params: [18, 'alice', null],
 );
 
 final embedding = Float32List.fromList([0.12, -0.45, 0.88]);
 final hits = await db.query(
   r'SELECT id FROM docs SEARCH SIMILAR embedding TO $1 LIMIT 10',
-  [embedding],
+  params: [embedding],
 );
 ```
 

@@ -183,7 +183,7 @@ TEST(ValueCodec, EncodesVectorFromFloatSpan) {
 }
 
 TEST(ValueCodec, EncodesQueryWithParamsPayload) {
-    std::array<Value, 3> params = {Value(42), Value("x"), Value(std::nullopt)};
+    std::array<Value, 3> params = {Value::int64(42), Value("x"), Value(std::nullopt)};
     auto encoded = encode_query_with_params("Q", params);
     EXPECT_EQ(encoded, std::vector<uint8_t>({
         1, 0, 0, 0, 'Q',
@@ -194,13 +194,18 @@ TEST(ValueCodec, EncodesQueryWithParamsPayload) {
     }));
 }
 
+TEST(ValueCodec, AcceptedCppSnippetParamShapeCompiles) {
+    auto encoded = encode_query_with_params("SELECT $1", {Value::int64(42)});
+    EXPECT_EQ(encoded[0], 8);
+}
+
 TEST(ValueCodec, HttpParamsUseJsonEnvelopesForTaggedValues) {
-    std::array<std::byte, 2> bytes = {std::byte{'h'}, std::byte{'i'}};
+    std::array<uint8_t, 2> bytes = {static_cast<uint8_t>('h'), static_cast<uint8_t>('i')};
     std::array<float, 2> vec = {1.0f, 2.0f};
     std::array<Value, 10> params = {
         Value(std::nullopt),
         Value(true),
-        Value(42),
+        Value::int64(42),
         Value(1.5),
         Value("txt"),
         Value::bytes(bytes),

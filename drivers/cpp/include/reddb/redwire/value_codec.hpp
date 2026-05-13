@@ -4,6 +4,7 @@
 #include "reddb/redwire/frame.hpp"
 
 #include <cstdint>
+#include <initializer_list>
 #include <span>
 #include <string>
 #include <string_view>
@@ -28,6 +29,11 @@ constexpr size_t MAX_VALUE_PAYLOAD_LEN = MAX_FRAME_SIZE;
 std::vector<uint8_t> encode_value(const reddb::Value& value);
 std::vector<uint8_t> encode_query_with_params(std::string_view sql,
                                               std::span<const reddb::Value> params);
+inline std::vector<uint8_t> encode_query_with_params(
+    std::string_view sql,
+    std::initializer_list<reddb::Value> params) {
+    return encode_query_with_params(sql, std::span<const reddb::Value>(params.begin(), params.size()));
+}
 
 std::string to_http_params_json(std::span<const reddb::Value> params);
 std::string to_http_query_body(std::string_view sql, std::span<const reddb::Value> params);

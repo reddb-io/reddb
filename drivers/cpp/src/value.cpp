@@ -29,9 +29,22 @@ std::string canonical_uuid(std::string_view input) {
 
 } // namespace
 
+Value Value::int64(int64_t value) {
+    return Value(value);
+}
+
 Value Value::bytes(std::span<const std::byte> value) {
     Bytes out;
     out.data.assign(value.begin(), value.end());
+    return Value(std::move(out));
+}
+
+Value Value::bytes(std::span<const uint8_t> value) {
+    Bytes out;
+    out.data.reserve(value.size());
+    for (uint8_t byte : value) {
+        out.data.push_back(std::byte(byte));
+    }
     return Value(std::move(out));
 }
 

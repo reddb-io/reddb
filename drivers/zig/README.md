@@ -56,24 +56,19 @@ pub fn main() !void {
         conn.deinit();
         a.destroy(conn);
     }
-    const result = try conn.query("SELECT 1");
+    const result = try conn.query("SELECT 1", .{});
     defer a.free(result);
     std.debug.print("server said: {s}\n", .{result});
 
-    const params = [_]reddb.redwire.Value{
-        .{ .int = 42 },
-        .{ .text = "Ada" },
-        .{ .@"null" = {} },
-    };
-    const rows = try conn.queryWithParams(
+    const rows = try conn.query(
         "SELECT * FROM users WHERE id = $1 AND name = $2 OR note IS $3",
-        &params,
+        .{ @as(i64, 42), "Ada", null },
     );
     defer a.free(rows);
 
     const embedding = [_]f32{ 0.12, 0.34, 0.56 };
     const vector_params = [_]reddb.redwire.Value{.{ .vector = &embedding }};
-    const hits = try conn.queryWithParams(
+    const hits = try conn.query(
         "SEARCH SIMILAR $1 COLLECTION docs LIMIT 3",
         &vector_params,
     );
@@ -81,9 +76,10 @@ pub fn main() !void {
 }
 ```
 
-`query(sql)` is unchanged and always uses the legacy RedWire `Query` frame.
-`queryWithParams(sql, params)` binds positional `$N` placeholders. Empty param
-slices delegate to `query(sql)`; non-empty slices require the server to
+`query(sql, .{})` uses the legacy RedWire `Query` frame. `query(sql, .{42})`
+binds positional `$N` placeholders from native Zig tuple values, and
+`query(sql, []const Value)` accepts explicit wire values. Empty params delegate
+to the legacy frame; non-empty params require the server to
 advertise `FEATURE_PARAMS` during the RedWire handshake or the driver returns
 `error.ParamsUnsupported`.
 
@@ -91,11 +87,13 @@ Native value mapping:
 
 | Zig value                                | Engine value |
 |------------------------------------------|--------------|
-| `.{ .int = i64 }`                        | int          |
-| `.{ .float = f64 }`                      | float        |
+| tuple `null`                             | null         |
+| tuple `bool`                             | bool         |
+| tuple integer / `.{ .int = i64 }`        | int          |
+| tuple float / `.{ .float = f64 }`        | float        |
+| tuple string / `.{ .text = []const u8 }` | text         |
 | `.{ .@"bool" = bool }`                   | bool         |
 | `.{ .@"null" = {} }`                     | null         |
-| `.{ .text = []const u8 }`                | text         |
 | `.{ .bytes = []const u8 }`               | bytes        |
 | `.{ .vector = []const f32 }`             | vector       |
 | `.{ .json = []const u8 }`                | json         |

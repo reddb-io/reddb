@@ -207,7 +207,7 @@ test "anonymous handshake succeeds" {
         t.allocator.destroy(c);
     }
     try c.ping();
-    const result = try c.query("SELECT 1");
+    const result = try c.query("SELECT 1", .{});
     defer t.allocator.free(result);
     try t.expect(std.mem.indexOf(u8, result, "ok") != null);
 }
@@ -279,13 +279,12 @@ test "query with params uses QueryWithParams when advertised" {
     try t.expect(c.supportsParams());
 
     const vector = [_]f32{ 1.0, 2.0, -0.5 };
-    const params = [_]value_codec.Value{
-        .{ .int = 7 },
-        .{ .text = "zig" },
-        .{ .@"null" = {} },
-        .{ .vector = &vector },
-    };
-    const result = try c.queryWithParams("SELECT $1, $2, $3, $4", &params);
+    const result = try c.query("SELECT $1, $2, $3, $4", .{
+        @as(i64, 7),
+        "zig",
+        null,
+        value_codec.Value{ .vector = &vector },
+    });
     defer t.allocator.free(result);
     try t.expect(std.mem.indexOf(u8, result, "params") != null);
 }
