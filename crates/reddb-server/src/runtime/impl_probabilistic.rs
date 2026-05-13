@@ -11,7 +11,79 @@ fn probabilistic_write<'a, T>(lock: &'a RwLock<T>, _name: &str) -> RwLockWriteGu
     lock.write()
 }
 
+fn probabilistic_collection_contract(
+    name: &str,
+    model: crate::catalog::CollectionModel,
+) -> crate::physical::CollectionContract {
+    let now = crate::utils::now_unix_millis() as u128;
+    crate::physical::CollectionContract {
+        name: name.to_string(),
+        declared_model: model,
+        schema_mode: crate::catalog::SchemaMode::Dynamic,
+        origin: crate::physical::ContractOrigin::Explicit,
+        version: 1,
+        created_at_unix_ms: now,
+        updated_at_unix_ms: now,
+        default_ttl_ms: None,
+        vector_dimension: None,
+        vector_metric: None,
+        context_index_fields: Vec::new(),
+        declared_columns: Vec::new(),
+        table_def: None,
+        timestamps_enabled: false,
+        context_index_enabled: false,
+        append_only: false,
+        subscriptions: Vec::new(),
+    }
+}
+
 impl RedDBRuntime {
+    fn create_probabilistic_catalog_entry(
+        &self,
+        name: &str,
+        model: crate::catalog::CollectionModel,
+    ) -> RedDBResult<()> {
+        let store = self.inner.db.store();
+        store
+            .create_collection(name)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.inner
+            .db
+            .save_collection_contract(probabilistic_collection_contract(name, model))
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        if let Some(tenant_id) = crate::runtime::impl_core::current_tenant() {
+            store.set_config_tree(
+                &format!("red.collection_tenants.{name}"),
+                &crate::serde_json::Value::String(tenant_id),
+            );
+        }
+        self.inner
+            .db
+            .persist_metadata()
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.invalidate_result_cache();
+        Ok(())
+    }
+
+    fn drop_probabilistic_catalog_entry(&self, name: &str) -> RedDBResult<()> {
+        let store = self.inner.db.store();
+        if store.get_collection(name).is_some() {
+            store
+                .drop_collection(name)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        }
+        self.inner
+            .db
+            .remove_collection_contract(name)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.inner
+            .db
+            .persist_metadata()
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.invalidate_result_cache();
+        Ok(())
+    }
+
     pub fn execute_probabilistic_command(
         &self,
         raw_query: &str,
@@ -65,6 +137,10 @@ impl RedDBRuntime {
                         "HLL precision must be between 4 and 18, got {precision}"
                     ))
                 })?;
+                self.create_probabilistic_catalog_entry(
+                    name,
+                    crate::catalog::CollectionModel::Hll,
+                )?;
                 hlls.insert(name.clone(), hll);
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
@@ -198,6 +274,7 @@ impl RedDBRuntime {
                     }
                     return Err(RedDBError::NotFound(format!("HLL '{}' not found", name)));
                 }
+                self.drop_probabilistic_catalog_entry(name)?;
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
                     &format!("HLL '{}' dropped", name),
@@ -229,6 +306,10 @@ impl RedDBRuntime {
                         name
                     )));
                 }
+                self.create_probabilistic_catalog_entry(
+                    name,
+                    crate::catalog::CollectionModel::Sketch,
+                )?;
                 sketches.insert(
                     name.clone(),
                     crate::storage::primitives::count_min_sketch::CountMinSketch::new(
@@ -370,6 +451,7 @@ impl RedDBRuntime {
                     }
                     return Err(RedDBError::NotFound(format!("SKETCH '{}' not found", name)));
                 }
+                self.drop_probabilistic_catalog_entry(name)?;
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
                     &format!("SKETCH '{}' dropped", name),
@@ -400,6 +482,10 @@ impl RedDBRuntime {
                         name
                     )));
                 }
+                self.create_probabilistic_catalog_entry(
+                    name,
+                    crate::catalog::CollectionModel::Filter,
+                )?;
                 filters.insert(
                     name.clone(),
                     crate::storage::primitives::cuckoo_filter::CuckooFilter::new(*capacity),
@@ -539,6 +625,7 @@ impl RedDBRuntime {
                     }
                     return Err(RedDBError::NotFound(format!("FILTER '{}' not found", name)));
                 }
+                self.drop_probabilistic_catalog_entry(name)?;
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
                     &format!("FILTER '{}' dropped", name),
