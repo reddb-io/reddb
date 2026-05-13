@@ -931,6 +931,22 @@ struct RuntimeInner {
             )>,
         >,
     >,
+    /// Per-connection table-row UPDATE versions created by an open
+    /// transaction. Each entry is `(collection, old_entity_id,
+    /// new_entity_id, stamper_xid)`. COMMIT keeps both physical
+    /// versions and drops the pending marker; ROLLBACK revives the old
+    /// version and removes the new uncommitted version.
+    pending_versioned_updates: parking_lot::RwLock<
+        HashMap<
+            u64,
+            Vec<(
+                String,
+                crate::storage::unified::entity::EntityId,
+                crate::storage::unified::entity::EntityId,
+                crate::storage::transaction::snapshot::Xid,
+            )>,
+        >,
+    >,
     pending_kv_watch_events:
         parking_lot::RwLock<HashMap<u64, Vec<crate::replication::cdc::KvWatchEvent>>>,
     /// Table-scoped tenancy registry (Phase 2.5.4).

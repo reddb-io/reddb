@@ -2034,6 +2034,7 @@ impl RedDBRuntime {
                 rls_enabled_tables: parking_lot::RwLock::new(HashSet::new()),
                 foreign_tables: Arc::new(crate::storage::fdw::ForeignTableRegistry::with_builtins()),
                 pending_tombstones: parking_lot::RwLock::new(HashMap::new()),
+                pending_versioned_updates: parking_lot::RwLock::new(HashMap::new()),
                 pending_kv_watch_events: parking_lot::RwLock::new(HashMap::new()),
                 tenant_tables: parking_lot::RwLock::new(HashMap::new()),
                 ddl_epoch: std::sync::atomic::AtomicU64::new(0),
@@ -5044,6 +5045,7 @@ impl RedDBRuntime {
                                 // marked for deletion. Before commit the rows
                                 // only had their xmax stamped — now the
                                 // deletion is durable.
+                                self.finalize_pending_versioned_updates(conn_id);
                                 self.finalize_pending_tombstones(conn_id);
                                 self.finalize_pending_kv_watch_events(conn_id);
                                 ("commit", format!("COMMIT — xid={} committed", ctx.xid))
@@ -5071,6 +5073,7 @@ impl RedDBRuntime {
                                 // Phase 2.3.2b: tuples that the txn had
                                 // xmax-stamped become live again — wipe xmax
                                 // back to 0 so later snapshots see them.
+                                self.revive_pending_versioned_updates(conn_id);
                                 self.revive_pending_tombstones(conn_id);
                                 self.discard_pending_kv_watch_events(conn_id);
                                 ("rollback", format!("ROLLBACK — xid={} aborted", ctx.xid))
@@ -6906,6 +6909,51 @@ impl RedDBRuntime {
             .entry(conn_id)
             .or_default()
             .push((collection.to_string(), id, stamper_xid));
+    }
+
+    pub(crate) fn record_pending_versioned_update(
+        &self,
+        conn_id: u64,
+        collection: &str,
+        old_id: crate::storage::unified::entity::EntityId,
+        new_id: crate::storage::unified::entity::EntityId,
+        stamper_xid: crate::storage::transaction::snapshot::Xid,
+    ) {
+        self.inner
+            .pending_versioned_updates
+            .write()
+            .entry(conn_id)
+            .or_default()
+            .push((collection.to_string(), old_id, new_id, stamper_xid));
+    }
+
+    pub(crate) fn finalize_pending_versioned_updates(&self, conn_id: u64) {
+        self.inner
+            .pending_versioned_updates
+            .write()
+            .remove(&conn_id);
+    }
+
+    pub(crate) fn revive_pending_versioned_updates(&self, conn_id: u64) {
+        let Some(pending) = self
+            .inner
+            .pending_versioned_updates
+            .write()
+            .remove(&conn_id)
+        else {
+            return;
+        };
+
+        let store = self.inner.db.store();
+        for (collection, old_id, new_id, _xid) in pending {
+            if let Some(manager) = store.get_collection(&collection) {
+                if let Some(mut old) = manager.get(old_id) {
+                    old.set_xmax(0);
+                    let _ = manager.update(old);
+                }
+            }
+            let _ = store.delete_batch(&collection, &[new_id]);
+        }
     }
 
     /// Flush tombstones on COMMIT — tuples are physically removed from

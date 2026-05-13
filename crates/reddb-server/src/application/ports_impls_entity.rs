@@ -1654,13 +1654,14 @@ impl RedDBRuntime {
             )));
         };
 
-        let versioned_update_xid = if self.current_xid().is_none() {
-            let snapshot_manager = self.snapshot_manager();
-            let xid = snapshot_manager.begin();
-            snapshot_manager.commit(xid);
-            Some(xid)
-        } else {
-            None
+        let versioned_update_xid = match self.current_xid() {
+            Some(xid) => Some(xid),
+            None => {
+                let snapshot_manager = self.snapshot_manager();
+                let xid = snapshot_manager.begin();
+                snapshot_manager.commit(xid);
+                Some(xid)
+            }
         };
         let mut replaced_entity = versioned_update_xid.map(|xid| {
             let mut old = entity.clone();
@@ -1782,6 +1783,15 @@ impl RedDBRuntime {
                         },
                     )
                     .map_err(|err| crate::RedDBError::Internal(err.to_string()))?;
+                if self.current_xid().is_some() {
+                    self.record_pending_versioned_update(
+                        crate::runtime::impl_core::current_connection_id(),
+                        collection,
+                        old_version.id,
+                        item.entity.id,
+                        old_version.xmax,
+                    );
+                }
             } else {
                 ordinary.push(item);
             }
