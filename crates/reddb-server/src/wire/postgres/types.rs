@@ -34,6 +34,10 @@ pub enum PgOid {
     Numeric = 1700,
     Uuid = 2950,
     Jsonb = 3802,
+    /// RedDB-reserved synthetic vector OID. PostgreSQL extension OIDs are
+    /// cluster-local; RedDB uses a stable high value for wire clients that
+    /// want to bind vector parameters explicitly.
+    Vector = 38000,
 }
 
 impl PgOid {
@@ -62,6 +66,7 @@ impl PgOid {
             1700 => PgOid::Numeric,
             2950 => PgOid::Uuid,
             3802 => PgOid::Jsonb,
+            38000 => PgOid::Vector,
             _ => PgOid::Unknown,
         }
     }
@@ -83,6 +88,7 @@ impl PgOid {
             Value::Date(_) => PgOid::Date,
             Value::Timestamp(_) => PgOid::TimestampTz,
             Value::TimestampMs(_) => PgOid::TimestampTz,
+            Value::Vector(_) => PgOid::Vector,
             // Domain / richer types collapse to TEXT so psql can render them.
             _ => PgOid::Text,
         }
@@ -127,6 +133,7 @@ fn pg_text_param_to_value(oid: PgOid, bytes: &[u8]) -> Result<Value, String> {
             .map(Value::Timestamp)
             .or_else(|_| Ok(Value::Text(std::sync::Arc::from(text)))),
         PgOid::Uuid => parse_uuid_text(text).map(Value::Uuid),
+        PgOid::Vector => parse_vector_text(text).map(Value::Vector),
         PgOid::Text | PgOid::Varchar | PgOid::Unknown | PgOid::Date | PgOid::Time => {
             Ok(Value::Text(std::sync::Arc::from(text)))
         }
@@ -169,6 +176,7 @@ fn pg_binary_param_to_value(oid: PgOid, bytes: &[u8]) -> Result<Value, String> {
                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
             ])),
         )),
+        PgOid::Vector => parse_vector_binary(bytes).map(Value::Vector),
         _ => Err(format!(
             "unsupported binary parameter for OID {} with {} bytes",
             oid.as_u32(),
@@ -189,6 +197,51 @@ fn parse_bytea_text(text: &str) -> Result<Vec<u8>, String> {
         .map(|idx| {
             u8::from_str_radix(&hex[idx..idx + 2], 16)
                 .map_err(|e| format!("invalid bytea hex: {e}"))
+        })
+        .collect()
+}
+
+fn parse_vector_text(text: &str) -> Result<Vec<f32>, String> {
+    let parsed: crate::json::Value =
+        crate::json::from_str(text).map_err(|e| format!("invalid vector parameter: {e}"))?;
+    let crate::json::Value::Array(items) = parsed else {
+        return Err("invalid vector parameter: expected JSON number array".to_string());
+    };
+    items
+        .iter()
+        .map(|item| {
+            item.as_f64().map(|value| value as f32).ok_or_else(|| {
+                "invalid vector parameter: array must contain only numbers".to_string()
+            })
+        })
+        .collect()
+}
+
+fn parse_vector_binary(bytes: &[u8]) -> Result<Vec<f32>, String> {
+    if bytes.len() < 4 {
+        return Err("invalid binary vector parameter: payload too short".to_string());
+    }
+    let dims = i16::from_be_bytes([bytes[0], bytes[1]]);
+    if dims < 0 {
+        return Err("invalid binary vector parameter: negative dimension".to_string());
+    }
+    let dims = dims as usize;
+    let expected = 4 + dims * 4;
+    if bytes.len() != expected {
+        return Err(format!(
+            "invalid binary vector parameter: expected {expected} bytes, got {}",
+            bytes.len()
+        ));
+    }
+    (0..dims)
+        .map(|idx| {
+            let off = 4 + idx * 4;
+            Ok(f32::from_be_bytes([
+                bytes[off],
+                bytes[off + 1],
+                bytes[off + 2],
+                bytes[off + 3],
+            ]))
         })
         .collect()
 }
@@ -306,6 +359,15 @@ mod tests {
             pg_param_to_value(PgOid::Uuid.as_u32(), 1, Some(&[0x11; 16])).unwrap(),
             Value::Uuid([0x11; 16])
         );
+        let mut vector = Vec::new();
+        vector.extend_from_slice(&2i16.to_be_bytes());
+        vector.extend_from_slice(&0i16.to_be_bytes());
+        vector.extend_from_slice(&1.0f32.to_be_bytes());
+        vector.extend_from_slice(&(-0.5f32).to_be_bytes());
+        assert_eq!(
+            pg_param_to_value(PgOid::Vector.as_u32(), 1, Some(&vector)).unwrap(),
+            Value::Vector(vec![1.0, -0.5])
+        );
     }
 
     #[test]
@@ -313,6 +375,14 @@ mod tests {
         assert_eq!(
             pg_param_to_value(PgOid::Text.as_u32(), 0, None).unwrap(),
             Value::Null
+        );
+    }
+
+    #[test]
+    fn pg_vector_text_param_decodes_json_array() {
+        assert_eq!(
+            pg_param_to_value(PgOid::Vector.as_u32(), 0, Some(b"[1.0, -0.5]")).unwrap(),
+            Value::Vector(vec![1.0, -0.5])
         );
     }
 }
