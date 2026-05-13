@@ -367,6 +367,7 @@ pub(super) fn execute_runtime_canonical_expr_node(
         }
         QueryExpr::Vector(vector) => Ok(execute_runtime_vector_query(db, vector)?.records),
         QueryExpr::Hybrid(hybrid) => Ok(execute_runtime_hybrid_query(db, hybrid)?.records),
+        QueryExpr::Join(join) => join::execute_runtime_canonical_join_node(db, node, join),
         other => Err(RedDBError::Query(format!(
             "canonical join execution does not yet support {} child expressions",
             query_expr_name(other)

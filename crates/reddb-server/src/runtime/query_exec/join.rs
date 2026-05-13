@@ -149,8 +149,13 @@ pub(crate) fn execute_runtime_canonical_join_base(
     let right_join_field = canonical_join_field(node, "right_field")?;
     let join_strategy = canonical_join_strategy(node)?;
 
+    let synthetic_left_query;
     let left_query = match query.left.as_ref() {
         QueryExpr::Table(table) => table,
+        QueryExpr::Join(_) => {
+            synthetic_left_query = TableQuery::new("");
+            &synthetic_left_query
+        }
         _ => {
             return Err(RedDBError::Query(
                 "runtime joins currently require a table expression on the left side".to_string(),
@@ -360,6 +365,11 @@ pub(crate) fn resolve_runtime_join_field(
             let matches_right =
                 runtime_table_context_matches(table.as_str(), right_table_name, right_table_alias);
             if !(matches_left || matches_right) {
+                if left_table_name.is_none() && left_table_alias.is_none() {
+                    if let Some(value) = record.get(column.as_str()) {
+                        return Some(value.clone());
+                    }
+                }
                 return None;
             }
 
