@@ -1180,6 +1180,7 @@ impl RedDBRuntime {
         let sources_flat_bytes =
             crate::json::to_vec(&sources_flat_json).unwrap_or_else(|_| b"[]".to_vec());
         let sources_count = source_urns.len();
+        let sources_fingerprint = sources_fingerprint_for_context(&ask_context, &source_urns);
 
         let settings = self.ask_cost_guard_settings();
         if ask.explain {
@@ -1234,6 +1235,23 @@ impl RedDBRuntime {
                 .evaluate_mode(&provider_token, requested_mode);
             let effective_mode = mode_outcome.effective();
             let mode_warning = mode_outcome.warning().cloned();
+            let capabilities = self
+                .ask_provider_capability_registry(&provider_token)
+                .capabilities(&provider_token);
+            let determinism = crate::runtime::ai::determinism_decider::decide(
+                crate::runtime::ai::determinism_decider::Inputs {
+                    question: &ask.question,
+                    sources_fingerprint: &sources_fingerprint,
+                },
+                capabilities,
+                crate::runtime::ai::determinism_decider::Overrides {
+                    temperature: ask.temperature,
+                    seed: ask.seed,
+                },
+                crate::runtime::ai::determinism_decider::Settings {
+                    default_temperature: self.config_f64("ask.default_temperature", 0.0) as f32,
+                },
+            );
 
             let mut attempt = crate::runtime::ai::strict_validator::Attempt::First;
             let mut retry_count = 0_u32;
@@ -1248,6 +1266,8 @@ impl RedDBRuntime {
                     prompt_for_call.clone(),
                     api_base.clone(),
                     settings.max_completion_tokens as usize,
+                    determinism.temperature,
+                    determinism.seed,
                 )?;
                 let elapsed_ms = duration_millis_u32(provider_started.elapsed());
                 let completion_tokens = prompt_response.completion_tokens.unwrap_or(0);
@@ -1438,15 +1458,7 @@ impl RedDBRuntime {
             .evaluate_mode(&provider_token, requested_mode)
             .effective();
 
-        let source_versions: Vec<crate::runtime::ai::sources_fingerprint::Source<'_>> = source_urns
-            .iter()
-            .map(|urn| crate::runtime::ai::sources_fingerprint::Source {
-                urn,
-                content_version: explain_source_version(ask_context, urn),
-            })
-            .collect();
-        let sources_fingerprint =
-            crate::runtime::ai::sources_fingerprint::fingerprint(&source_versions);
+        let sources_fingerprint = sources_fingerprint_for_context(ask_context, source_urns);
         let determinism = crate::runtime::ai::determinism_decider::decide(
             crate::runtime::ai::determinism_decider::Inputs {
                 question: &ask.question,
@@ -1865,6 +1877,8 @@ fn call_ask_llm(
     prompt: String,
     api_base: String,
     max_output_tokens: usize,
+    temperature: Option<f32>,
+    seed: Option<u64>,
 ) -> RedDBResult<crate::ai::AiPromptResponse> {
     match provider {
         crate::ai::AiProvider::Anthropic => {
@@ -1872,7 +1886,7 @@ fn call_ask_llm(
                 api_key,
                 model,
                 prompt,
-                temperature: Some(0.3),
+                temperature,
                 max_output_tokens: Some(max_output_tokens),
                 api_base,
                 anthropic_version: crate::ai::DEFAULT_ANTHROPIC_VERSION.to_string(),
@@ -1887,7 +1901,8 @@ fn call_ask_llm(
                 api_key,
                 model,
                 prompt,
-                temperature: Some(0.3),
+                temperature,
+                seed,
                 max_output_tokens: Some(max_output_tokens),
                 api_base,
             };
@@ -2359,6 +2374,20 @@ fn explain_planned_sources(
 
 fn explain_source_version(_ctx: &crate::runtime::ask_pipeline::AskContext, _urn: &str) -> u64 {
     0
+}
+
+fn sources_fingerprint_for_context(
+    ctx: &crate::runtime::ask_pipeline::AskContext,
+    source_urns: &[String],
+) -> String {
+    let source_versions: Vec<crate::runtime::ai::sources_fingerprint::Source<'_>> = source_urns
+        .iter()
+        .map(|urn| crate::runtime::ai::sources_fingerprint::Source {
+            urn,
+            content_version: explain_source_version(ctx, urn),
+        })
+        .collect();
+    crate::runtime::ai::sources_fingerprint::fingerprint(&source_versions)
 }
 
 fn explain_mode(
@@ -2910,6 +2939,74 @@ mod citation_wedge_tests {
                 .unwrap_or(false),
             "expected urn=null for out-of-range source_index"
         );
+    }
+
+    #[test]
+    fn default_seed_is_stable_for_same_source_set() {
+        use crate::runtime::ai::provider_capabilities::Capabilities;
+        use crate::runtime::ask_pipeline::{
+            AskContext, CandidateCollections, StageTimings, TokenSet,
+        };
+        use std::collections::HashMap;
+
+        let ctx = AskContext {
+            question: "which incident matters?".to_string(),
+            tokens: TokenSet {
+                keywords: vec!["incident".into()],
+                literals: Vec::new(),
+            },
+            candidates: CandidateCollections {
+                collections: vec!["incidents".to_string()],
+                columns_by_collection: HashMap::new(),
+            },
+            text_hits: Vec::new(),
+            vector_hits: Vec::new(),
+            graph_hits: Vec::new(),
+            filtered_rows: Vec::new(),
+            source_limit: crate::runtime::ask_pipeline::DEFAULT_ROW_CAP,
+            timings: StageTimings::default(),
+        };
+        let urns_a = vec![
+            "reddb:incidents/2".to_string(),
+            "reddb:incidents/1".to_string(),
+            "reddb:incidents/1".to_string(),
+        ];
+        let urns_b = vec![
+            "reddb:incidents/1".to_string(),
+            "reddb:incidents/2".to_string(),
+        ];
+        let fp_a = sources_fingerprint_for_context(&ctx, &urns_a);
+        let fp_b = sources_fingerprint_for_context(&ctx, &urns_b);
+        assert_eq!(fp_a, fp_b);
+
+        let caps = Capabilities {
+            supports_citations: true,
+            supports_seed: true,
+            supports_temperature_zero: true,
+            supports_streaming: true,
+        };
+        let seed_a = crate::runtime::ai::determinism_decider::decide(
+            crate::runtime::ai::determinism_decider::Inputs {
+                question: &ctx.question,
+                sources_fingerprint: &fp_a,
+            },
+            caps,
+            crate::runtime::ai::determinism_decider::Overrides::default(),
+            crate::runtime::ai::determinism_decider::Settings::default(),
+        );
+        let seed_b = crate::runtime::ai::determinism_decider::decide(
+            crate::runtime::ai::determinism_decider::Inputs {
+                question: &ctx.question,
+                sources_fingerprint: &fp_b,
+            },
+            caps,
+            crate::runtime::ai::determinism_decider::Overrides::default(),
+            crate::runtime::ai::determinism_decider::Settings::default(),
+        );
+
+        assert_eq!(seed_a.temperature, Some(0.0));
+        assert_eq!(seed_a.seed, seed_b.seed);
+        assert!(seed_a.seed.is_some());
     }
 
     #[test]
