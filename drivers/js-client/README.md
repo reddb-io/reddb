@@ -54,6 +54,10 @@ Use `db.query(sql, ...params)` or `db.execute(sql, ...params)` for
 parameterized statements. The compatibility form `db.query(sql, paramsArray)`
 is still accepted.
 
+For `http://` and `https://` connections, `connect()` verifies readiness with
+a lightweight `SELECT 1` round-trip. `/health` states such as `degraded` are
+transient during boot and are not fatal as long as queries succeed.
+
 ## Accepted URI schemes
 
 | Scheme         | Transport                     | Default port |

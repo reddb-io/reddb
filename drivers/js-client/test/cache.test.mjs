@@ -17,12 +17,15 @@ import { connect } from '../src/index.js'
 // ---------------------------------------------------------------------------
 
 async function startMockServer(handlers) {
+  const defaultHandlers = {
+    'POST /query': () => readinessOk(),
+  }
   const server = createServer(async (req, res) => {
     let body = ''
     req.on('data', (chunk) => { body += chunk })
     req.on('end', async () => {
       const key = `${req.method} ${req.url}`
-      const handler = handlers[key] ?? handlers['*']
+      const handler = handlers[key] ?? defaultHandlers[key] ?? handlers['*']
       if (!handler) {
         res.statusCode = 404
         res.setHeader('content-type', 'application/json')
@@ -47,6 +50,16 @@ async function startMockServer(handlers) {
   return {
     baseUrl: `http://127.0.0.1:${port}`,
     close: () => new Promise((resolve) => server.close(resolve)),
+  }
+}
+
+function readinessOk() {
+  return {
+    ok: true,
+    statement: 'SELECT',
+    affected: 0,
+    columns: ['1'],
+    rows: [{ 1: 1 }],
   }
 }
 

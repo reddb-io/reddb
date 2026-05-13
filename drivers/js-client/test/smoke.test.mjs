@@ -20,11 +20,15 @@ import { connect, RedDB, RedDBError } from '../src/index.js'
  * RedDB endpoints. Returns `{ baseUrl, close }`.
  */
 async function startMockServer(handlers) {
+  const defaultHandlers = {
+    'POST /query': () => readinessOk(),
+  }
   const server = createServer(async (req, res) => {
     let body = ''
     req.on('data', (chunk) => { body += chunk })
     req.on('end', async () => {
-      const handler = handlers[`${req.method} ${req.url}`]
+      const key = `${req.method} ${req.url}`
+      const handler = handlers[key] ?? defaultHandlers[key]
       if (!handler) {
         res.statusCode = 404
         res.setHeader('content-type', 'application/json')
@@ -52,6 +56,16 @@ async function startMockServer(handlers) {
   }
 }
 
+function readinessOk() {
+  return {
+    ok: true,
+    statement: 'SELECT',
+    affected: 0,
+    columns: ['1'],
+    rows: [{ 1: 1 }],
+  }
+}
+
 test('connect(http://) returns a RedDB handle', async () => {
   const stub = await startMockServer({
     'GET /health': () => ({ ok: true, version: 'mock-0.0.0' }),
@@ -59,6 +73,29 @@ test('connect(http://) returns a RedDB handle', async () => {
   try {
     const db = await connect(stub.baseUrl)
     assert.ok(db instanceof RedDB, 'returned RedDB')
+    await db.close()
+  } finally {
+    await stub.close()
+  }
+})
+
+test('connect(http://) uses SELECT 1 readiness instead of degraded health', async () => {
+  let readinessQueries = 0
+  const stub = await startMockServer({
+    'GET /health': () => ({
+      status: 503,
+      body: { ok: false, state: 'degraded', error: 'warming up' },
+    }),
+    'POST /query': (body) => {
+      assert.equal(body.query, 'SELECT 1')
+      readinessQueries += 1
+      return readinessOk()
+    },
+  })
+  try {
+    const db = await connect(stub.baseUrl)
+    assert.ok(db instanceof RedDB, 'returned RedDB')
+    assert.equal(readinessQueries, 1)
     await db.close()
   } finally {
     await stub.close()
@@ -94,6 +131,9 @@ test('connect(http://) sends query varargs and execute params', async () => {
   const stub = await startMockServer({
     'GET /health': () => ({ ok: true, version: 'mock-0.0.0' }),
     'POST /query': (body) => {
+      if (body.query === 'SELECT 1') {
+        return readinessOk()
+      }
       seen.push(body)
       return {
         ok: true,
@@ -149,10 +189,15 @@ test('connect(http://) insert() returns affected count and assigned id', async (
 test('connect(http://) surfaces server errors as RedDBError', async () => {
   const stub = await startMockServer({
     'GET /health': () => ({ ok: true, version: 'mock-0.0.0' }),
-    'POST /query': () => ({
-      status: 400,
-      body: { ok: false, error_code: 'QUERY_ERROR', error: 'bad SQL' },
-    }),
+    'POST /query': (body) => {
+      if (body.query === 'SELECT 1') {
+        return readinessOk()
+      }
+      return {
+        status: 400,
+        body: { ok: false, error_code: 'QUERY_ERROR', error: 'bad SQL' },
+      }
+    },
   })
   try {
     const db = await connect(stub.baseUrl)
@@ -173,9 +218,9 @@ test('connect(http://) surfaces server errors as RedDBError', async () => {
 test('connect(http://) honours auth.token (Bearer header)', async () => {
   let seenAuth = null
   const stub = await startMockServer({
-    'GET /health': (_body, req) => {
+    'POST /query': (_body, req) => {
       seenAuth = req.headers['authorization'] ?? null
-      return { ok: true, version: 'mock-0.0.0' }
+      return readinessOk()
     },
   })
   try {
@@ -192,6 +237,9 @@ test('domain clients expose explicit kv config and vault surfaces', async () => 
   const stub = await startMockServer({
     'GET /health': () => ({ ok: true, version: 'mock-0.0.0' }),
     'POST /query': (body) => {
+      if (body.query === 'SELECT 1') {
+        return readinessOk()
+      }
       seen.push(body.query)
       return {
         ok: true,
@@ -229,6 +277,9 @@ test('config and vault clients reject volatile options before query dispatch', a
   const stub = await startMockServer({
     'GET /health': () => ({ ok: true, version: 'mock-0.0.0' }),
     'POST /query': (body) => {
+      if (body.query === 'SELECT 1') {
+        return readinessOk()
+      }
       seen.push(body.query)
       return { ok: true, statement: 'KEYED', affected: 1, columns: [], rows: [] }
     },
