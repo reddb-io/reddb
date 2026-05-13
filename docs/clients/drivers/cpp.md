@@ -33,12 +33,13 @@ int main() {
     auto conn = reddb::connect("red://localhost:5050");
 
     std::array<reddb::Value, 2> params = {
-        reddb::Value(30),
+        reddb::Value::int64(30),
         reddb::Value("alice"),
     };
     auto rows = conn->query(
         "SELECT * FROM users WHERE age = $1 AND name = $2",
         params);
+    auto one = conn->query("SELECT $1", {reddb::Value::int64(42)});
 
     conn->close();
 }
@@ -46,10 +47,11 @@ int main() {
 
 ## Safe parameter binding
 
-`query(std::string_view sql, std::span<const reddb::Value> params)` binds
-positional `$N` placeholders. Use it for user input and vectors instead of
-interpolating values into SQL strings. The parameterized-query design is
-tracked in [ADR #352](https://github.com/reddb-io/reddb/issues/352).
+`query(std::string_view sql, std::span<const reddb::Value> params)` and
+`query(sql, {reddb::Value::int64(42)})` bind positional `$N` placeholders. Use
+them for user input and vectors instead of interpolating values into SQL
+strings. The parameterized-query design is tracked in
+[ADR #352](https://github.com/reddb-io/reddb/issues/352).
 
 ```cpp
 #include <array>
@@ -60,7 +62,7 @@ tracked in [ADR #352](https://github.com/reddb-io/reddb/issues/352).
 auto conn = reddb::connect("red://localhost:5050");
 
 std::array<reddb::Value, 3> scalar_params = {
-    reddb::Value(42),
+    reddb::Value::int64(42),
     reddb::Value("acme"),
     reddb::Value(std::nullopt),
 };
@@ -86,7 +88,7 @@ Native C++ parameter mapping:
 | signed integer / unsigned integer up to `INT64_MAX` | Int |
 | `float`, `double` | Float |
 | `std::string`, `std::string_view`, string literal | Text |
-| `reddb::Value::bytes(std::span<const std::byte>)` | Bytes |
+| `reddb::Value::bytes(std::span<const std::byte>)`, `reddb::Value::bytes(std::span<const uint8_t>)` | Bytes |
 | `reddb::Value::vector(std::span<const float>)` | Vector |
 | `reddb::Value::json(std::string_view)` | Json |
 | `reddb::Value::timestamp_seconds(int64_t)` / `timestamp(time_point)` | Timestamp |

@@ -62,9 +62,9 @@ Drivers surface the same contract as ordered values:
 | Kotlin | `query(sql, vararg params)` |
 | PHP | `query(string $sql, array $params = [])` |
 | Dart | `query(sql, params: [...])` |
-| C++ | `query(sql, std::span<const reddb::Value> params)` |
-| Zig | `queryWithParams(sql, params)` |
-| CLI / MCP / stdio | JSON `params` array alongside `sql` |
+| C++ | `query(sql, std::span<const reddb::Value> params)` or `query(sql, {Value::int64(42)})` |
+| Zig | `query(sql, .{...})` or `query(sql, []const Value)` |
+| CLI / MCP / stdio | JSON `params` array alongside `sql`; CLI also accepts repeatable `-p` / `--param` |
 
 Driver documentation may prefer `$N` examples because it is stable across
 query rewrites and easier to reason about in generated SQL, but `?` remains a

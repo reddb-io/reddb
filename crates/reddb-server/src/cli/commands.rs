@@ -83,7 +83,7 @@ pub fn all_commands() -> Vec<CommandDef> {
     CommandDef {
       name: "query",
       summary: "Execute a query against the database",
-      usage: "red query \"SELECT * FROM users WHERE age > 21\"",
+      usage: "red query \"SELECT * FROM users WHERE age > $1\" -p 21",
       flags: query_flags(),
     },
     CommandDef {
@@ -449,10 +449,17 @@ fn service_flags() -> Vec<FlagSchema> {
 }
 
 fn query_flags() -> Vec<FlagSchema> {
-    vec![FlagSchema::new("bind")
-        .with_short('b')
-        .with_description("Server address")
-        .with_default("0.0.0.0:6380")]
+    vec![
+        FlagSchema::new("bind")
+            .with_short('b')
+            .with_description("Server address")
+            .with_default("0.0.0.0:6380"),
+        FlagSchema::new("path").with_description("Open a local .rdb file in embedded mode"),
+        FlagSchema::new("param")
+            .with_short('p')
+            .with_description("Positional parameter for $1, $2, ... (repeatable)"),
+        FlagSchema::new("param-type").with_description("Type override for the preceding --param"),
+    ]
 }
 
 fn insert_flags() -> Vec<FlagSchema> {

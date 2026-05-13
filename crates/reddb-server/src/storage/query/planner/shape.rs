@@ -5,7 +5,7 @@ use crate::storage::query::ast::{
     TableQuery, TableSource, VectorQuery, VectorSource,
 };
 use crate::storage::query::sql_lowering::{
-    expr_to_filter, filter_to_expr, projection_from_literal,
+    expr_to_filter, filter_to_expr, projection_from_literal, PARAMETER_PROJECTION_PREFIX,
 };
 use crate::storage::schema::Value;
 
@@ -840,6 +840,9 @@ fn bind_projection_column(
     if let Some(index) = parse_placeholder_index(column, PROJECTION_PARAM_PREFIX) {
         let projection = projection_from_literal(binds.get(index)?)?;
         Some(attach_projection_alias(projection, alias))
+    } else if let Some(index) = parse_placeholder_index(column, PARAMETER_PROJECTION_PREFIX) {
+        let projection = projection_from_literal(binds.get(index)?)?;
+        Some(attach_projection_alias(projection, alias))
     } else if let Some(alias) = alias {
         Some(Projection::Alias(column.to_string(), alias.to_string()))
     } else {
@@ -1135,7 +1138,11 @@ fn bind_table_query(query: &TableQuery, binds: &[Value]) -> Option<TableQuery> {
             .iter()
             .map(|item| bind_select_item(item, binds))
             .collect::<Option<Vec<_>>>()?,
-        columns: Vec::new(),
+        columns: query
+            .columns
+            .iter()
+            .map(|projection| bind_projection(projection, binds))
+            .collect::<Option<Vec<_>>>()?,
         where_expr: query
             .where_expr
             .as_ref()
@@ -1277,6 +1284,7 @@ fn bind_expr(expr: &Expr, binds: &[Value]) -> Option<Expr> {
 mod tests {
     use super::*;
     use crate::storage::query::ast::{BinOp, FieldRef, SelectItem, TableQuery};
+    use crate::storage::query::modes::parse_multi;
 
     #[test]
     fn table_shape_round_trips_with_new_binds() {
@@ -1344,5 +1352,18 @@ mod tests {
             },
             other => panic!("expected binary op, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn user_param_binding_preserves_literal_projection_columns() {
+        let query = parse_multi("SELECT $1").unwrap();
+        let rebound = bind_user_param_query(&query, &[Value::Integer(42)]).unwrap();
+        let QueryExpr::Table(bound_table) = rebound else {
+            panic!("expected table query");
+        };
+        assert_eq!(
+            bound_table.columns,
+            vec![Projection::Column("LIT:42".into())]
+        );
     }
 }

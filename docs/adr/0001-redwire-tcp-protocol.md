@@ -99,8 +99,40 @@ TCP port as HTTP/1.x and HTTP/2 (gRPC) without ambiguity:
 | 0x25 | `StreamEnd`              | S→C | end-of-stream marker |
 | 0x26 | `VectorSearch`           | C→S | vector index probe |
 | 0x27 | `GraphTraverse`          | C→S | graph walk |
+| 0x28 | `QueryWithParams`        | C→S | SQL plus positional typed params |
 
 Kinds are stable: a value once shipped is never reused for a different message.
+
+## QueryWithParams
+
+`QueryWithParams` is gated by the `FEATURE_PARAMS` bit in `HelloAck.server_features`.
+Clients must keep using `Query` for empty parameter lists or when the server
+does not advertise that feature.
+
+Payload layout, all little-endian:
+
+```text
+u32 sql_len
+u8[sql_len] sql_utf8
+u32 param_count
+param_value[param_count]
+```
+
+`param_count` is capped at 65,536. Each `param_value` starts with a one-byte
+tag followed by the tag-specific body:
+
+| Tag | Value | Body |
+|-----|-------|------|
+| 0x00 | null | empty |
+| 0x01 | bool | `u8` (`0` false, `1` true) |
+| 0x02 | int | `i64` |
+| 0x03 | float | `f64` |
+| 0x04 | text | `u32 len` + UTF-8 bytes |
+| 0x05 | bytes | `u32 len` + raw bytes |
+| 0x06 | vector | `u32 len` + `f32[len]` |
+| 0x07 | json | `u32 len` + canonical JSON bytes |
+| 0x08 | timestamp | `i64` Unix seconds |
+| 0x09 | uuid | 16 raw UUID bytes |
 
 ## Handshake
 

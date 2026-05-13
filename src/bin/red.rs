@@ -100,7 +100,7 @@ fn attach_cli_vault(
     Ok(Some(auth))
 }
 
-/// Collect every `--param <value>` (and the optional following
+/// Collect every `--param <value>` / `-p <value>` (and the optional following
 /// `--param-type <ty>`) from raw argv. The schema-driven flag parser
 /// only retains the LAST value of each flag in its `HashMap`, so the
 /// query handler walks the original argv directly to support the
@@ -110,21 +110,21 @@ fn attach_cli_vault(
 /// Without an explicit type, plain values are auto-typed by trying
 /// to parse them as JSON first (so `42` → integer, `[1,2,3]` →
 /// vector, `true` → boolean, `null` → Null) and falling back to text.
-fn collect_query_params(
-    args: &[String],
-) -> Result<Vec<reddb::storage::schema::Value>, String> {
+fn collect_query_params(args: &[String]) -> Result<Vec<reddb::storage::schema::Value>, String> {
     let mut pairs: Vec<(String, Option<String>)> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
-        if arg == "--param" {
+        if arg == "--param" || arg == "-p" {
             i += 1;
             let v = args
                 .get(i)
-                .ok_or_else(|| "--param requires a value".to_string())?
+                .ok_or_else(|| "--param/-p requires a value".to_string())?
                 .clone();
             pairs.push((v, None));
         } else if let Some(rest) = arg.strip_prefix("--param=") {
+            pairs.push((rest.to_string(), None));
+        } else if let Some(rest) = arg.strip_prefix("-p=") {
             pairs.push((rest.to_string(), None));
         } else if arg == "--param-type" {
             i += 1;
@@ -154,10 +154,7 @@ fn collect_query_params(
 /// Map a CLI `--param` token (and optional `--param-type`) into a
 /// schema `Value`. `@path` is unwrapped before type coercion so a
 /// file holding a JSON vector or large text works with every type.
-fn parse_cli_param(
-    raw: &str,
-    ty: Option<&str>,
-) -> Result<reddb::storage::schema::Value, String> {
+fn parse_cli_param(raw: &str, ty: Option<&str>) -> Result<reddb::storage::schema::Value, String> {
     use reddb::storage::schema::Value;
     let body: String = if let Some(path) = raw.strip_prefix('@') {
         std::fs::read_to_string(path).map_err(|e| format!("--param @{path}: {e}"))?
@@ -184,8 +181,8 @@ fn parse_cli_param(
         Some("json") => {
             // Canonicalise via the project JSON parser so embedded code
             // sees the same canonical form HTTP callers do.
-            let parsed: reddb::json::Value = reddb::json::from_str(trimmed)
-                .map_err(|e| format!("--param-type json: {e}"))?;
+            let parsed: reddb::json::Value =
+                reddb::json::from_str(trimmed).map_err(|e| format!("--param-type json: {e}"))?;
             Ok(Value::text(
                 reddb::json::to_string(&parsed).unwrap_or_default(),
             ))
@@ -195,12 +192,9 @@ fn parse_cli_param(
     }
 }
 
-fn json_str_to_vector(
-    s: &str,
-) -> Result<reddb::storage::schema::Value, String> {
+fn json_str_to_vector(s: &str) -> Result<reddb::storage::schema::Value, String> {
     use reddb::json::Value as J;
-    let parsed: J = reddb::json::from_str(s)
-        .map_err(|e| format!("--param-type vec: {e}"))?;
+    let parsed: J = reddb::json::from_str(s).map_err(|e| format!("--param-type vec: {e}"))?;
     let J::Array(items) = parsed else {
         return Err("--param-type vec: expected a JSON array of numbers".into());
     };
@@ -208,11 +202,7 @@ fn json_str_to_vector(
     for v in &items {
         match v {
             J::Number(n) => out.push(*n as f32),
-            _ => {
-                return Err(
-                    "--param-type vec: array must contain only numbers".into()
-                )
-            }
+            _ => return Err("--param-type vec: array must contain only numbers".into()),
         }
     }
     Ok(reddb::storage::schema::Value::Vector(out))
@@ -245,14 +235,10 @@ fn auto_type_param(s: &str) -> reddb::storage::schema::Value {
                         .collect();
                     Value::Vector(floats)
                 } else {
-                    Value::text(
-                        reddb::json::to_string(&J::Array(items)).unwrap_or_default(),
-                    )
+                    Value::text(reddb::json::to_string(&J::Array(items)).unwrap_or_default())
                 }
             }
-            J::Object(_) => Value::text(
-                reddb::json::to_string(&parsed).unwrap_or_default(),
-            ),
+            J::Object(_) => Value::text(reddb::json::to_string(&parsed).unwrap_or_default()),
         };
     }
     Value::text(s.to_string())
@@ -2410,29 +2396,30 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_description("Server address")
                     .with_default("0.0.0.0:6380"),
             );
-            flags.push(
-                cli::types::FlagSchema::new("path")
-                    .with_short('p')
-                    .with_description("Open a local .rdb file in embedded mode"),
-            );
+            let path_flag = cli::types::FlagSchema::new("path")
+                .with_description("Open a local .rdb file in embedded mode");
+            let path_flag = if command == Some("query") {
+                path_flag
+            } else {
+                path_flag.with_short('p')
+            };
+            flags.push(path_flag);
             if command == Some("query") {
                 // Repeatable. The schema parser keeps only the last value
                 // in flags; the query handler walks argv directly via
                 // `collect_query_params` to gather every occurrence.
                 flags.push(
                     cli::types::FlagSchema::new("param")
+                        .with_short('p')
                         .with_description(
                             "Positional parameter for $1, $2, … (repeatable). \
                              Prefix with `@` to load JSON from a file.",
                         ),
                 );
-                flags.push(
-                    cli::types::FlagSchema::new("param-type")
-                        .with_description(
-                            "Type override for the preceding --param \
+                flags.push(cli::types::FlagSchema::new("param-type").with_description(
+                    "Type override for the preceding --param \
                              (text|int|float|bool|null|vec|json).",
-                        ),
-                );
+                ));
             }
         }
         Some("admin") => {
@@ -4621,6 +4608,41 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn query_params_accept_short_p_alias() {
+        let args = vec![
+            "query".to_string(),
+            "SELECT $1, $2".to_string(),
+            "-p".to_string(),
+            "42".to_string(),
+            "-p=alice".to_string(),
+        ];
+        let params = collect_query_params(&args).unwrap();
+        assert_eq!(params[0], reddb::storage::schema::Value::Integer(42));
+        assert_eq!(params[1], reddb::storage::schema::Value::text("alice"));
+    }
+
+    #[test]
+    fn query_short_p_parses_as_param_not_path() {
+        let args = vec![
+            "query".to_string(),
+            "SELECT $1".to_string(),
+            "-p".to_string(),
+            "42".to_string(),
+            "--path".to_string(),
+            "/tmp/data.rdb".to_string(),
+        ];
+        let tokens = cli::token::tokenize(&args);
+        let parser = cli::schema::SchemaParser::new(build_flags_for_command(Some("query")));
+        let result = parser.parse(&tokens);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            result.flags.get("path").unwrap().as_str_value(),
+            "/tmp/data.rdb"
+        );
+        assert_eq!(result.flags.get("param").unwrap().as_str_value(), "42");
     }
 
     struct EnvGuard {
