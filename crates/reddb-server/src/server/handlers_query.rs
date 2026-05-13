@@ -378,6 +378,21 @@ impl RedDBServer {
             Err(err) => json_error(400, err.to_string()),
         }
     }
+
+    pub(crate) fn handle_query_sse_stream<W: std::io::Write>(
+        &self,
+        body: Vec<u8>,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        let response = self.handle_query(body);
+        write_sse_http_response(&response, writer)
+    }
+}
+
+pub(crate) fn is_stream_ask_query_body(body: &[u8]) -> bool {
+    extract_query_request(body)
+        .map(|request| is_stream_ask_query(&request.query))
+        .unwrap_or(false)
 }
 
 fn is_stream_ask_query(query: &str) -> bool {
@@ -385,6 +400,48 @@ fn is_stream_ask_query(query: &str) -> bool {
         crate::storage::query::modes::parse_multi(query),
         Ok(crate::storage::query::ast::QueryExpr::Ask(ask)) if ask.stream
     )
+}
+
+fn write_sse_http_response<W: std::io::Write>(
+    response: &HttpResponse,
+    writer: &mut W,
+) -> io::Result<()> {
+    if response.content_type != "text/event-stream" {
+        writer.write_all(&response.to_http_bytes())?;
+        writer.flush()?;
+        return Ok(());
+    }
+
+    let header = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n",
+        response.status,
+        status_text(response.status),
+        response.content_type
+    );
+    writer.write_all(header.as_bytes())?;
+    for (name, value) in &response.extra_headers {
+        writer.write_all(name.as_bytes())?;
+        writer.write_all(b": ")?;
+        writer.write_all(value.as_bytes())?;
+        writer.write_all(b"\r\n")?;
+    }
+    writer.write_all(b"\r\n")?;
+    flush_sse_frames(&response.body, writer)
+}
+
+fn flush_sse_frames<W: std::io::Write>(body: &[u8], writer: &mut W) -> io::Result<()> {
+    let mut start = 0;
+    while let Some(offset) = body[start..].windows(2).position(|window| window == b"\n\n") {
+        let end = start + offset + 2;
+        writer.write_all(&body[start..end])?;
+        writer.flush()?;
+        start = end;
+    }
+    if start < body.len() {
+        writer.write_all(&body[start..])?;
+        writer.flush()?;
+    }
+    Ok(())
 }
 
 fn ask_sse_response(result: &crate::runtime::RuntimeQueryResult) -> HttpResponse {
@@ -574,7 +631,7 @@ mod tests {
     use crate::runtime::RedDBRuntime;
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
-    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread::{self, JoinHandle};
@@ -1254,6 +1311,60 @@ mod tests {
         assert!(text.contains(r#""audit":{"cache_hit":false"#), "{text}");
         assert!(text.contains(r#""ok":true"#), "{text}");
         assert!(!text.contains("event: error\n"), "{text}");
+    }
+
+    #[test]
+    fn http_query_ask_stream_socket_uses_sse_without_content_length() {
+        let _guard = ASK_ENV_LOCK.lock().expect("env lock");
+        let stub = StreamingOpenAiStub::start(vec!["streamed ", "answer"]);
+        let _api_base =
+            EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
+        let _api_key = EnvVarGuard::unset("REDDB_OPENAI_API_KEY");
+
+        let server = make_server();
+        configure_ask_stub_runtime(&server);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("server bind");
+        let addr = listener.local_addr().expect("server addr");
+        let handle = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept request");
+            server.handle_connection(stream).expect("handle request");
+        });
+
+        let body = br#"{"query": "ASK 'why did login fail?' STREAM"}"#;
+        let request = format!(
+            "POST /query HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).expect("utf8 body")
+        );
+        let mut client = TcpStream::connect(addr).expect("connect server");
+        client
+            .write_all(request.as_bytes())
+            .expect("write request");
+        client.shutdown(Shutdown::Write).expect("shutdown request");
+
+        let mut response = String::new();
+        client
+            .read_to_string(&mut response)
+            .expect("read response");
+        handle.join().expect("server thread");
+
+        assert_eq!(stub.request_count(), 1);
+        let (headers, body) = response.split_once("\r\n\r\n").expect("http response");
+        let lower_headers = headers.to_ascii_lowercase();
+        assert!(headers.starts_with("HTTP/1.1 200 OK"), "{headers}");
+        assert!(
+            lower_headers.contains("content-type: text/event-stream"),
+            "{headers}"
+        );
+        assert!(
+            lower_headers.contains("cache-control: no-cache"),
+            "{headers}"
+        );
+        assert!(!lower_headers.contains("content-length:"), "{headers}");
+        assert!(body.contains(r#"data: {"text":"streamed "}"#), "{body}");
+        assert!(body.contains(r#"data: {"text":"answer"}"#), "{body}");
+        assert_eq!(body.matches("event: answer_token\n").count(), 2, "{body}");
+        assert_eq!(body.matches("event: validation\n").count(), 1, "{body}");
     }
 
     #[test]

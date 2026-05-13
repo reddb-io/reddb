@@ -345,6 +345,9 @@ impl RedDBServer {
         stream.set_write_timeout(Some(Duration::from_millis(self.options.write_timeout_ms)))?;
 
         let request = HttpRequest::read_from(&mut stream, self.options.max_body_bytes)?;
+        if self.try_route_streaming(&request, &mut stream)? {
+            return Ok(());
+        }
         let response = self.route(request);
         stream.write_all(&response.to_http_bytes())?;
         stream.flush()?;
@@ -380,6 +383,9 @@ impl RedDBServer {
                 return Err(err);
             }
         };
+        if self.try_route_streaming(&request, &mut tls_stream)? {
+            return Ok(());
+        }
         let response = self.route(request);
         tls_stream.write_all(&response.to_http_bytes())?;
         tls_stream.flush()?;

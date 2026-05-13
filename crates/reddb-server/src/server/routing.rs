@@ -54,6 +54,52 @@ fn warn_deprecated_catalog_endpoint(endpoint: &'static str) {
 }
 
 impl RedDBServer {
+    pub(crate) fn try_route_streaming<W: std::io::Write>(
+        &self,
+        request: &HttpRequest,
+        writer: &mut W,
+    ) -> io::Result<bool> {
+        if !matches!((request.method.as_str(), request.path.as_str()), ("POST", "/query"))
+            || !is_stream_ask_query_body(&request.body)
+        {
+            return Ok(false);
+        }
+
+        if !self.surface_allows(&request.path) {
+            writer.write_all(&json_error(404, "not found on this listener").to_http_bytes())?;
+            writer.flush()?;
+            return Ok(true);
+        }
+
+        if !self.is_authorized(&request.method, &request.path, &request.headers) {
+            writer.write_all(&json_error(401, "unauthorized").to_http_bytes())?;
+            writer.flush()?;
+            return Ok(true);
+        }
+
+        let principal = principal_for(&request.headers);
+        match self.runtime.quota_bucket().consume(&principal) {
+            crate::runtime::quota_bucket::QuotaOutcome::Throttled => {
+                let retry = self.runtime.quota_bucket().retry_after_secs();
+                let response = HttpResponse {
+                    status: 429,
+                    content_type: "application/json",
+                    body: format!("{{\"error\":\"rate limited\",\"retry_after_secs\":{retry}}}")
+                        .into_bytes(),
+                    extra_headers: Vec::new(),
+                };
+                writer.write_all(&response.to_http_bytes())?;
+                writer.flush()?;
+                Ok(true)
+            }
+            crate::runtime::quota_bucket::QuotaOutcome::Granted
+            | crate::runtime::quota_bucket::QuotaOutcome::NotConfigured => {
+                self.handle_query_sse_stream(request.body.clone(), writer)?;
+                Ok(true)
+            }
+        }
+    }
+
     pub(crate) fn route(&self, request: HttpRequest) -> HttpResponse {
         let HttpRequest {
             method,
