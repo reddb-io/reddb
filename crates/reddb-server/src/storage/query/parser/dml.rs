@@ -1,8 +1,8 @@
 //! DML SQL Parser: INSERT, UPDATE, DELETE
 
 use super::super::ast::{
-    AskQuery, DeleteQuery, Expr, Filter, InsertEntityType, InsertQuery, QueryExpr, ReturningItem,
-    UpdateQuery,
+    AskCacheClause, AskQuery, DeleteQuery, Expr, Filter, InsertEntityType, InsertQuery, QueryExpr,
+    ReturningItem, UpdateQuery,
 };
 use super::super::lexer::Token;
 use super::error::ParseError;
@@ -471,10 +471,11 @@ impl<'a> Parser<'a> {
         let mut seed = None;
         let mut strict = true;
         let mut stream = false;
+        let mut cache = AskCacheClause::Default;
 
         // Parse optional clauses in any order. Loop bound = number of
         // clause kinds, so each can appear at most once.
-        for _ in 0..10 {
+        for _ in 0..12 {
             if self.consume(&Token::Using)? {
                 provider = Some(match &self.current.token {
                     Token::String(_) => self.parse_string()?,
@@ -508,6 +509,26 @@ impl<'a> Parser<'a> {
                 }
             } else if self.consume_ident_ci("STREAM")? {
                 stream = true;
+            } else if self.consume_ident_ci("CACHE")? {
+                if !matches!(cache, AskCacheClause::Default) {
+                    return Err(ParseError::new(
+                        "ASK cache clause specified more than once",
+                        self.position(),
+                    ));
+                }
+                let ttl = self.expect_ident_or_keyword()?;
+                if !ttl.eq_ignore_ascii_case("TTL") {
+                    return Err(ParseError::new("Expected TTL after CACHE", self.position()));
+                }
+                cache = AskCacheClause::CacheTtl(self.parse_string()?);
+            } else if self.consume_ident_ci("NOCACHE")? {
+                if !matches!(cache, AskCacheClause::Default) {
+                    return Err(ParseError::new(
+                        "ASK cache clause specified more than once",
+                        self.position(),
+                    ));
+                }
+                cache = AskCacheClause::NoCache;
             } else {
                 break;
             }
@@ -526,6 +547,7 @@ impl<'a> Parser<'a> {
             seed,
             strict,
             stream,
+            cache,
         }))
     }
 

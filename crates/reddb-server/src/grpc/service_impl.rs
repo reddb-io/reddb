@@ -2407,6 +2407,7 @@ impl RedDb for GrpcRuntime {
             seed: request.seed,
             strict: request.strict.unwrap_or(true),
             stream: false,
+            cache: crate::storage::query::ast::AskCacheClause::Default,
         };
 
         let result = self

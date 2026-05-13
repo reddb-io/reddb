@@ -2014,6 +2014,10 @@ impl RedDBRuntime {
                     HashMap::new(),
                     std::collections::VecDeque::new(),
                 )),
+                ask_answer_cache_entries: parking_lot::RwLock::new((
+                    HashSet::new(),
+                    std::collections::VecDeque::new(),
+                )),
                 result_cache_shadow_divergences: std::sync::atomic::AtomicU64::new(0),
                 ask_daily_spend: parking_lot::RwLock::new(HashMap::new()),
                 queue_message_locks: parking_lot::RwLock::new(HashMap::new()),
@@ -6663,6 +6667,12 @@ impl RedDBRuntime {
         self.inner
             .result_blob_cache
             .invalidate_namespace(RESULT_CACHE_BLOB_NAMESPACE);
+        let mut ask_entries = self.inner.ask_answer_cache_entries.write();
+        ask_entries.0.clear();
+        ask_entries.1.clear();
+        self.inner
+            .result_blob_cache
+            .invalidate_namespace(ASK_ANSWER_CACHE_NAMESPACE);
     }
 
     /// Invalidate only result cache entries that declared a dependency on `table`.
@@ -6704,6 +6714,12 @@ impl RedDBRuntime {
             blob_map.retain(|_, entry| !entry.scopes.contains(table));
             blob_order.retain(|key| blob_map.contains_key(key));
         }
+        let mut ask_entries = self.inner.ask_answer_cache_entries.write();
+        ask_entries.0.clear();
+        ask_entries.1.clear();
+        self.inner
+            .result_blob_cache
+            .invalidate_namespace(ASK_ANSWER_CACHE_NAMESPACE);
     }
 
     pub(crate) fn invalidate_plan_cache(&self) {

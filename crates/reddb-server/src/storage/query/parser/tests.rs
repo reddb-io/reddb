@@ -1377,6 +1377,24 @@ fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
     assert!(ask.stream);
     assert!(!ask.explain);
 
+    let query = parse("ASK 'q' CACHE TTL '5m'").unwrap();
+    let QueryExpr::Ask(ask) = query else {
+        panic!("Expected AskQuery");
+    };
+    assert!(matches!(
+        ask.cache,
+        crate::storage::query::ast::AskCacheClause::CacheTtl(ref ttl) if ttl == "5m"
+    ));
+
+    let query = parse("ASK 'q' NOCACHE").unwrap();
+    let QueryExpr::Ask(ask) = query else {
+        panic!("Expected AskQuery");
+    };
+    assert!(matches!(
+        ask.cache,
+        crate::storage::query::ast::AskCacheClause::NoCache
+    ));
+
     let query = parse("EXPLAIN ASK 'q' USING openai LIMIT 3 MIN_SCORE 0.7 DEPTH 2").unwrap();
     let QueryExpr::Ask(ask) = query else {
         panic!("Expected AskQuery");
@@ -1403,6 +1421,11 @@ fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
         "ASK 'q' SEED",
         "ASK 'q' STRICT",
         "ASK 'q' STRICT MAYBE",
+        "ASK 'q' CACHE",
+        "ASK 'q' CACHE FOR '5m'",
+        "ASK 'q' CACHE TTL",
+        "ASK 'q' CACHE TTL '5m' NOCACHE",
+        "ASK 'q' NOCACHE CACHE TTL '5m'",
     ] {
         assert!(parse(sql).is_err(), "{sql}");
     }

@@ -752,6 +752,7 @@ pub struct DropIndexQuery {
 
 /// ASK 'question' [USING provider] [MODEL 'model'] [DEPTH n] [LIMIT n] [MIN_SCORE x]
 ///                [COLLECTION col] [TEMPERATURE x] [SEED n] [STRICT ON|OFF] [STREAM]
+///                [CACHE TTL '5m' | NOCACHE]
 ///
 /// `temperature` and `seed` are per-query overrides resolved by the
 /// `DeterminismDecider` (issue #400). The parser merely surfaces the
@@ -779,6 +780,21 @@ pub struct AskQuery {
     pub strict: bool,
     /// HTTP-only SSE response requested via `ASK '...' STREAM`.
     pub stream: bool,
+    /// Per-query answer-cache override.
+    pub cache: AskCacheClause,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AskCacheClause {
+    Default,
+    CacheTtl(String),
+    NoCache,
+}
+
+impl Default for AskCacheClause {
+    fn default() -> Self {
+        Self::Default
+    }
 }
 
 impl QueryExpr {
