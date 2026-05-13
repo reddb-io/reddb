@@ -29,6 +29,42 @@ fn test_parse_simple_select() {
     }
 }
 
+fn assert_unsupported_token(input: &str, token: &str) {
+    let err = parse(input).unwrap_err();
+    assert!(
+        err.to_string().contains(&format!(
+            "token {token} is recognized but not supported in this position"
+        )),
+        "{err}"
+    );
+    assert!(
+        !err.to_string().contains("expected:"),
+        "unsupported-token errors must not render an expected list: {err}"
+    );
+    assert!(matches!(
+        err.kind,
+        ParseErrorKind::UnsupportedToken { token: ref found } if found == token
+    ));
+}
+
+#[test]
+fn test_parse_create_unsupported_recognized_tokens_use_clear_error() {
+    for (input, token) in [
+        ("CREATE VECTOR vt", "VECTOR"),
+        ("CREATE DOCUMENT docs", "DOCUMENT"),
+        ("CREATE GRAPH g", "GRAPH"),
+        ("CREATE COLLECTION c", "COLLECTION"),
+    ] {
+        assert_unsupported_token(input, token);
+    }
+}
+
+#[test]
+fn test_parse_unsupported_recognized_tokens_in_other_statement_positions() {
+    assert_unsupported_token("DROP SELECT vt", "SELECT");
+    assert_unsupported_token("ALTER VECTOR vt ADD COLUMN x INTEGER", "VECTOR");
+}
+
 #[test]
 fn test_parse_aggregate_keywords_as_column_identifiers() {
     let create = parse("CREATE TABLE tw (word TEXT, count INTEGER, sum INTEGER, avg INTEGER, min INTEGER, max INTEGER)").unwrap();

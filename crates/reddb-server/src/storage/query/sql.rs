@@ -1632,6 +1632,10 @@ impl<'a> Parser<'a> {
                             self.position(),
                         )),
                     }
+                } else if let Some(err) =
+                    ParseError::unsupported_recognized_token(self.peek(), self.position())
+                {
+                    Err(err)
                 } else {
                     Err(ParseError::expected(
                         vec![
@@ -1875,6 +1879,10 @@ impl<'a> Parser<'a> {
                         name,
                         if_exists,
                     }))
+                } else if let Some(err) =
+                    ParseError::unsupported_recognized_token(self.peek(), self.position())
+                {
+                    Err(err)
                 } else {
                     Err(ParseError::expected(
                         vec![
@@ -1914,6 +1922,10 @@ impl<'a> Parser<'a> {
                             self.position(),
                         )),
                     }
+                } else if let Some(err) =
+                    ParseError::unsupported_recognized_token(&next, self.position())
+                {
+                    Err(err)
                 } else {
                     match self.parse_alter_table_query()? {
                         QueryExpr::AlterTable(query) => Ok(SqlCommand::AlterTable(query)),
