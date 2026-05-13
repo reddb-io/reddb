@@ -48,6 +48,15 @@ UUID, timestamp, and RedDB vector parameters without string concatenation. The
 cross-driver binding contract is tracked in
 [ADR #352](https://github.com/reddb-io/reddb/issues/352).
 
+`ASK` also accepts a bound question over the extended protocol:
+
+```sql
+ASK $1::text STRICT OFF LIMIT 5
+```
+
+The PG listener returns `ASK` as a normal non-streaming, single-row result set.
+Streaming `ASK ... STREAM` is available through HTTP/SSE, not PG-wire.
+
 ## From a driver
 
 The examples below use normal driver APIs. Static SQL may use the simple-query
@@ -72,6 +81,7 @@ let rows = client
 ```go
 conn, err := pgx.Connect(ctx, "postgres://reddb@localhost:5432/reddb")
 rows, err := conn.Query(ctx, "SELECT id, email FROM users WHERE id = $1", 42)
+ask, err := conn.Query(ctx, "ASK $1::text STRICT OFF LIMIT 5", "why did login fail?")
 ```
 
 ### Python (`psycopg`)
@@ -83,7 +93,43 @@ with psycopg.connect("host=localhost port=5432 user=reddb") as conn:
         cur.execute("SELECT id, email FROM users WHERE id = %s", (42,))
         for row in cur.fetchall():
             print(row)
+        cur.execute("ASK %s::text STRICT OFF LIMIT 5", ("why did login fail?",), prepare=True)
+        print(cur.fetchone())
 ```
+
+### Java (JDBC)
+
+```java
+try (PreparedStatement ps = conn.prepareStatement(
+        "ASK ?::text STRICT OFF LIMIT 5")) {
+    ps.setString(1, "why did login fail?");
+    try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+            System.out.println(rs.getString("answer"));
+        }
+    }
+}
+```
+
+## ASK Result Columns
+
+`ASK` over PG-wire always returns one row with the canonical non-streaming ASK
+shape:
+
+| Column | PG type/OID | Notes |
+|--------|-------------|-------|
+| `answer` | text / 25 | Synthesised answer text |
+| `cache_hit` | bool / 16 | Whether answer cache supplied the row |
+| `citations` | jsonb / 3802 | Citation marker metadata |
+| `completion_tokens` | int8 / 20 | Completion token count |
+| `cost_usd` | numeric / 1700 | Estimated provider cost |
+| `mode` | text / 25 | `strict` or `lenient` |
+| `model` | text / 25 | Provider model that answered |
+| `prompt_tokens` | int8 / 20 | Prompt token count |
+| `provider` | text / 25 | Provider that answered |
+| `retry_count` | int8 / 20 | Citation-validation retries |
+| `sources_flat` | jsonb / 3802 | Flat source array used by `[^N]` markers |
+| `validation` | jsonb / 3802 | Validation result, warnings, and errors |
 
 ## Protocol coverage
 

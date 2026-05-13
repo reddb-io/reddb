@@ -48,6 +48,7 @@ struct PgPortal {
     params: Vec<Value>,
     #[allow(dead_code)]
     result_format_codes: Vec<i16>,
+    row_description_sent: bool,
     described_result: Option<crate::runtime::RuntimeQueryResult>,
 }
 
@@ -287,6 +288,7 @@ where
             sql: stmt.sql.clone(),
             params,
             result_format_codes: msg.result_format_codes,
+            row_description_sent: false,
             described_result: None,
         },
     );
@@ -319,7 +321,11 @@ where
                 &BackendMessage::ParameterDescription(stmt.param_type_oids.clone()),
             )
             .await?;
-            write_frame(stream, &BackendMessage::NoData).await
+            if is_ask_query(&stmt.sql) {
+                emit_ask_row_description(stream).await
+            } else {
+                write_frame(stream, &BackendMessage::NoData).await
+            }
         }
         DescribeTarget::Portal => {
             let Some(portal) = portals.get_mut(&msg.name) else {
@@ -331,7 +337,11 @@ where
                 .await?;
                 return Ok(());
             };
-            if is_row_returning_query(&portal.sql) {
+            if is_ask_query(&portal.sql) {
+                emit_ask_row_description(stream).await?;
+                portal.row_description_sent = true;
+                Ok(())
+            } else if is_row_returning_query(&portal.sql) {
                 let result = match execute_pg_query_result(runtime, &portal.sql, &portal.params) {
                     Ok(result) => result,
                     Err(err) => {
@@ -341,6 +351,7 @@ where
                     }
                 };
                 emit_row_description_for_result(stream, &result).await?;
+                portal.row_description_sent = true;
                 portal.described_result = Some(result);
                 Ok(())
             } else {
@@ -369,7 +380,8 @@ where
         return Ok(());
     };
     let _max_rows = msg.max_rows;
-    let was_described = portal.described_result.is_some();
+    let was_described = portal.row_description_sent || portal.described_result.is_some();
+    portal.row_description_sent = false;
     let result = match portal.described_result.take() {
         Some(result) => Ok(result),
         None => execute_pg_query_result(runtime, &portal.sql, &portal.params),
@@ -621,6 +633,10 @@ fn is_row_returning_query(sql: &str) -> bool {
         || trimmed.starts_with("hybrid")
 }
 
+fn is_ask_query(sql: &str) -> bool {
+    sql.trim_start().to_ascii_lowercase().starts_with("ask")
+}
+
 async fn send_auth_ok<S>(
     stream: &mut S,
     config: &PgWireConfig,
@@ -828,22 +844,7 @@ where
     S: AsyncWrite + Unpin,
 {
     if result.statement == "ask" {
-        let row = ask_query_result_to_pg_wire_row(result)
-            .ok_or_else(|| PgWireError::Protocol("ASK result missing row body".to_string()))?;
-        let descriptors: Vec<ColumnDescriptor> = row
-            .columns
-            .iter()
-            .map(|col| ColumnDescriptor {
-                name: col.name.to_string(),
-                table_oid: 0,
-                column_attr: 0,
-                type_oid: col.oid.as_u32(),
-                type_size: -1,
-                type_mod: -1,
-                format: 0,
-            })
-            .collect();
-        write_frame(stream, &BackendMessage::RowDescription(descriptors)).await
+        emit_ask_row_description(stream).await
     } else if result_returns_rows(result) {
         emit_result_row_description(stream, &result.result).await
     } else {
@@ -950,8 +951,17 @@ where
 {
     let row = ask_query_result_to_pg_wire_row(result)
         .ok_or_else(|| PgWireError::Protocol("ASK result missing row body".to_string()))?;
-    let descriptors: Vec<ColumnDescriptor> = row
-        .columns
+
+    emit_ask_row_description(stream).await?;
+    write_frame(stream, &BackendMessage::DataRow(row.cells)).await?;
+    Ok(())
+}
+
+async fn emit_ask_row_description<S>(stream: &mut S) -> Result<(), PgWireError>
+where
+    S: AsyncWrite + Unpin,
+{
+    let descriptors: Vec<ColumnDescriptor> = crate::runtime::ai::pg_wire_ask_row_encoder::columns()
         .iter()
         .map(|col| ColumnDescriptor {
             name: col.name.to_string(),
@@ -963,10 +973,7 @@ where
             format: 0,
         })
         .collect();
-
-    write_frame(stream, &BackendMessage::RowDescription(descriptors)).await?;
-    write_frame(stream, &BackendMessage::DataRow(row.cells)).await?;
-    Ok(())
+    write_frame(stream, &BackendMessage::RowDescription(descriptors)).await
 }
 
 fn ask_query_result_to_pg_wire_row(

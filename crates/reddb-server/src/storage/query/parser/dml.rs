@@ -459,7 +459,20 @@ impl<'a> Parser<'a> {
     fn parse_ask_query_with_explain(&mut self, explain: bool) -> Result<QueryExpr, ParseError> {
         self.advance()?; // consume ASK
 
-        let question = self.parse_string()?;
+        let (question, question_param) = match self.peek() {
+            Token::String(_) => (self.parse_string()?, None),
+            Token::Dollar | Token::Question => {
+                let index = self.parse_param_slot("ASK question")?;
+                (String::new(), Some(index))
+            }
+            other => {
+                return Err(ParseError::expected(
+                    vec!["string", "$N", "?"],
+                    other,
+                    self.position(),
+                ));
+            }
+        };
 
         let mut provider = None;
         let mut model = None;
@@ -537,6 +550,7 @@ impl<'a> Parser<'a> {
         Ok(QueryExpr::Ask(AskQuery {
             explain,
             question,
+            question_param,
             provider,
             model,
             depth,
