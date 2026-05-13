@@ -1629,6 +1629,7 @@ impl RedDBRuntime {
             persist_metadata: metadata_changed,
             context_index_dirty,
             replaced_entity: None,
+            replaced_entity_previous_xmax: 0,
             pre_mutation_fields,
         })
     }
@@ -1646,6 +1647,7 @@ impl RedDBRuntime {
         row_touches_unique_columns: bool,
     ) -> RedDBResult<AppliedEntityMutation> {
         let id = entity.id;
+        let previous_xmax = entity.xmax;
         let db = self.db();
         let store = db.store();
         let Some(_) = store.get_collection(&collection) else {
@@ -1748,6 +1750,7 @@ impl RedDBRuntime {
             persist_metadata: metadata_changed,
             context_index_dirty,
             replaced_entity,
+            replaced_entity_previous_xmax: previous_xmax,
             pre_mutation_fields,
         })
     }
@@ -1790,6 +1793,7 @@ impl RedDBRuntime {
                         old_version.id,
                         item.entity.id,
                         old_version.xmax,
+                        item.replaced_entity_previous_xmax,
                     );
                 }
             } else {

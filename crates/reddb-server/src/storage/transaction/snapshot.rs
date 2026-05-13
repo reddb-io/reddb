@@ -261,6 +261,11 @@ impl SnapshotManager {
         self.state.read().aborted.contains(&xid)
     }
 
+    /// Is this xid still active?
+    pub fn is_active(&self, xid: Xid) -> bool {
+        self.state.read().active.contains(&xid)
+    }
+
     /// Snapshot of every still-active xid (for VACUUM oldest-active-xid
     /// calculation — any row with `xmax < min(active)` is reclaimable).
     pub fn oldest_active_xid(&self) -> Option<Xid> {

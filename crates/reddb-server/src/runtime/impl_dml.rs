@@ -233,6 +233,7 @@ impl RedDBRuntime {
                 continue;
             };
             if matches!(entity.data, EntityData::Row(_)) {
+                let previous_xmax = entity.xmax;
                 // Skip if this tuple was already tombstoned by a prior
                 // statement in the same txn — idempotent DELETE.
                 if entity.xmax != 0 {
@@ -254,7 +255,7 @@ impl RedDBRuntime {
                 entity.set_xmax(xid);
                 if manager.update(entity).is_ok() {
                     if active_xid.is_some() {
-                        self.record_pending_tombstone(conn_id, collection, id, xid);
+                        self.record_pending_tombstone(conn_id, collection, id, xid, previous_xmax);
                     }
                     tombstoned_ids.push(id);
                 }

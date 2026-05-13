@@ -355,10 +355,17 @@ pub(super) fn delete_message_with_state(
             if let Some(manager) = store.get_collection(queue) {
                 if let Some(mut entity) = manager.get(message_id) {
                     if entity.xmax == 0 {
+                        let previous_xmax = entity.xmax;
                         entity.set_xmax(xid);
                         if manager.update(entity).is_ok() {
                             let conn_id = crate::runtime::impl_core::current_connection_id();
-                            runtime.record_pending_tombstone(conn_id, queue, message_id, xid);
+                            runtime.record_pending_tombstone(
+                                conn_id,
+                                queue,
+                                message_id,
+                                xid,
+                                previous_xmax,
+                            );
                             super::impl_queue::forget_queue_message_lock(
                                 runtime, queue, message_id,
                             );

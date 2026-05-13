@@ -913,12 +913,13 @@ struct RuntimeInner {
     foreign_tables: Arc<crate::storage::fdw::ForeignTableRegistry>,
     /// Per-connection list of tuples marked for deletion by the current
     /// transaction (Phase 2.3.2b MVCC tombstones + 2.3.2e savepoints).
-    /// Each entry is `(collection, entity_id, stamper_xid)` — the xid
-    /// that stamped xmax on the tuple. For a plain transaction the
+    /// Each entry is `(collection, entity_id, stamper_xid, previous_xmax)`
+    /// — the xid that stamped xmax on the tuple plus the value it
+    /// replaced. For a plain transaction the
     /// stamper equals `ctx.xid`; with savepoints the stamper equals
     /// the innermost open sub-xid so ROLLBACK TO SAVEPOINT can revive
     /// only the matching subset. COMMIT drains the whole conn list
-    /// and physical-deletes; ROLLBACK (whole-tx) revives them all;
+    /// and keeps the committed tombstones; ROLLBACK (whole-tx) revives them all;
     /// ROLLBACK TO SAVEPOINT revives those with `stamper_xid >=
     /// savepoint_xid`. Autocommit DELETE bypasses this map.
     pending_tombstones: parking_lot::RwLock<
@@ -928,12 +929,13 @@ struct RuntimeInner {
                 String,
                 crate::storage::unified::entity::EntityId,
                 crate::storage::transaction::snapshot::Xid,
+                crate::storage::transaction::snapshot::Xid,
             )>,
         >,
     >,
     /// Per-connection table-row UPDATE versions created by an open
     /// transaction. Each entry is `(collection, old_entity_id,
-    /// new_entity_id, stamper_xid)`. COMMIT keeps both physical
+    /// new_entity_id, stamper_xid, previous_xmax)`. COMMIT keeps both physical
     /// versions and drops the pending marker; ROLLBACK revives the old
     /// version and removes the new uncommitted version.
     pending_versioned_updates: parking_lot::RwLock<
@@ -943,6 +945,7 @@ struct RuntimeInner {
                 String,
                 crate::storage::unified::entity::EntityId,
                 crate::storage::unified::entity::EntityId,
+                crate::storage::transaction::snapshot::Xid,
                 crate::storage::transaction::snapshot::Xid,
             )>,
         >,

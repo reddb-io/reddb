@@ -5029,6 +5029,32 @@ impl RedDBRuntime {
                         let ctx = self.inner.tx_contexts.write().remove(&conn_id);
                         match ctx {
                             Some(ctx) => {
+                                let mut own_xids = std::collections::HashSet::new();
+                                own_xids.insert(ctx.xid);
+                                for (_, sub) in &ctx.savepoints {
+                                    own_xids.insert(*sub);
+                                }
+                                for sub in &ctx.released_sub_xids {
+                                    own_xids.insert(*sub);
+                                }
+                                if let Err(err) = self.check_table_row_write_conflicts(
+                                    conn_id,
+                                    &ctx.snapshot,
+                                    &own_xids,
+                                ) {
+                                    for (_, sub) in &ctx.savepoints {
+                                        self.inner.snapshot_manager.rollback(*sub);
+                                    }
+                                    for sub in &ctx.released_sub_xids {
+                                        self.inner.snapshot_manager.rollback(*sub);
+                                    }
+                                    self.inner.snapshot_manager.rollback(ctx.xid);
+                                    self.revive_pending_versioned_updates(conn_id);
+                                    self.revive_pending_tombstones(conn_id);
+                                    self.discard_pending_kv_watch_events(conn_id);
+                                    return Err(err);
+                                }
+                                self.restore_pending_write_stamps(conn_id);
                                 // Phase 2.3.2e: commit every open sub-xid
                                 // so they also become visible. Their
                                 // work is promoted to the parent txn's
@@ -5041,10 +5067,6 @@ impl RedDBRuntime {
                                     self.inner.snapshot_manager.commit(*sub);
                                 }
                                 self.inner.snapshot_manager.commit(ctx.xid);
-                                // Phase 2.3.2b: physically remove tuples the txn
-                                // marked for deletion. Before commit the rows
-                                // only had their xmax stamped — now the
-                                // deletion is durable.
                                 self.finalize_pending_versioned_updates(conn_id);
                                 self.finalize_pending_tombstones(conn_id);
                                 self.finalize_pending_kv_watch_events(conn_id);
@@ -6904,13 +6926,14 @@ impl RedDBRuntime {
         collection: &str,
         id: crate::storage::unified::entity::EntityId,
         stamper_xid: crate::storage::transaction::snapshot::Xid,
+        previous_xmax: crate::storage::transaction::snapshot::Xid,
     ) {
         self.inner
             .pending_tombstones
             .write()
             .entry(conn_id)
             .or_default()
-            .push((collection.to_string(), id, stamper_xid));
+            .push((collection.to_string(), id, stamper_xid, previous_xmax));
     }
 
     pub(crate) fn record_pending_versioned_update(
@@ -6920,13 +6943,173 @@ impl RedDBRuntime {
         old_id: crate::storage::unified::entity::EntityId,
         new_id: crate::storage::unified::entity::EntityId,
         stamper_xid: crate::storage::transaction::snapshot::Xid,
+        previous_xmax: crate::storage::transaction::snapshot::Xid,
     ) {
         self.inner
             .pending_versioned_updates
             .write()
             .entry(conn_id)
             .or_default()
-            .push((collection.to_string(), old_id, new_id, stamper_xid));
+            .push((
+                collection.to_string(),
+                old_id,
+                new_id,
+                stamper_xid,
+                previous_xmax,
+            ));
+    }
+
+    fn xid_conflicts_with_snapshot(
+        &self,
+        xid: crate::storage::transaction::snapshot::Xid,
+        snapshot: &crate::storage::transaction::snapshot::Snapshot,
+        own_xids: &std::collections::HashSet<crate::storage::transaction::snapshot::Xid>,
+    ) -> bool {
+        xid != 0
+            && !own_xids.contains(&xid)
+            && !self.inner.snapshot_manager.is_aborted(xid)
+            && !self.inner.snapshot_manager.is_active(xid)
+            && (xid > snapshot.xid || snapshot.in_progress.contains(&xid))
+    }
+
+    fn conflict_error(
+        collection: &str,
+        logical_id: crate::storage::unified::entity::EntityId,
+        xid: crate::storage::transaction::snapshot::Xid,
+    ) -> RedDBError {
+        RedDBError::Query(format!(
+            "serialization conflict: table row {collection}/{} was modified by concurrent transaction {xid}",
+            logical_id.raw()
+        ))
+    }
+
+    fn check_logical_row_conflict(
+        &self,
+        collection: &str,
+        logical_id: crate::storage::unified::entity::EntityId,
+        excluded_ids: &[crate::storage::unified::entity::EntityId],
+        snapshot: &crate::storage::transaction::snapshot::Snapshot,
+        own_xids: &std::collections::HashSet<crate::storage::transaction::snapshot::Xid>,
+    ) -> RedDBResult<()> {
+        let store = self.inner.db.store();
+        let Some(manager) = store.get_collection(collection) else {
+            return Ok(());
+        };
+
+        for candidate in manager.query_all(|_| true) {
+            if excluded_ids.contains(&candidate.id) || candidate.logical_id() != logical_id {
+                continue;
+            }
+            if self.xid_conflicts_with_snapshot(candidate.xmin, snapshot, own_xids) {
+                return Err(Self::conflict_error(collection, logical_id, candidate.xmin));
+            }
+            if self.xid_conflicts_with_snapshot(candidate.xmax, snapshot, own_xids) {
+                return Err(Self::conflict_error(collection, logical_id, candidate.xmax));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn check_table_row_write_conflicts(
+        &self,
+        conn_id: u64,
+        snapshot: &crate::storage::transaction::snapshot::Snapshot,
+        own_xids: &std::collections::HashSet<crate::storage::transaction::snapshot::Xid>,
+    ) -> RedDBResult<()> {
+        let versioned_updates = self
+            .inner
+            .pending_versioned_updates
+            .read()
+            .get(&conn_id)
+            .cloned()
+            .unwrap_or_default();
+        let tombstones = self
+            .inner
+            .pending_tombstones
+            .read()
+            .get(&conn_id)
+            .cloned()
+            .unwrap_or_default();
+
+        let store = self.inner.db.store();
+        for (collection, old_id, new_id, xid, previous_xmax) in versioned_updates {
+            let Some(manager) = store.get_collection(&collection) else {
+                continue;
+            };
+            let Some(old) = manager.get(old_id) else {
+                continue;
+            };
+            let logical_id = old.logical_id();
+            if self.xid_conflicts_with_snapshot(previous_xmax, snapshot, own_xids) {
+                return Err(Self::conflict_error(&collection, logical_id, previous_xmax));
+            }
+            if old.xmax != xid && self.xid_conflicts_with_snapshot(old.xmax, snapshot, own_xids) {
+                return Err(Self::conflict_error(&collection, logical_id, old.xmax));
+            }
+            self.check_logical_row_conflict(
+                &collection,
+                logical_id,
+                &[old_id, new_id],
+                snapshot,
+                own_xids,
+            )?;
+        }
+
+        for (collection, id, xid, previous_xmax) in tombstones {
+            let Some(manager) = store.get_collection(&collection) else {
+                continue;
+            };
+            let Some(entity) = manager.get(id) else {
+                continue;
+            };
+            let logical_id = entity.logical_id();
+            if self.xid_conflicts_with_snapshot(previous_xmax, snapshot, own_xids) {
+                return Err(Self::conflict_error(&collection, logical_id, previous_xmax));
+            }
+            if entity.xmax != xid
+                && self.xid_conflicts_with_snapshot(entity.xmax, snapshot, own_xids)
+            {
+                return Err(Self::conflict_error(&collection, logical_id, entity.xmax));
+            }
+            self.check_logical_row_conflict(&collection, logical_id, &[id], snapshot, own_xids)?;
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn restore_pending_write_stamps(&self, conn_id: u64) {
+        let versioned_updates = self
+            .inner
+            .pending_versioned_updates
+            .read()
+            .get(&conn_id)
+            .cloned()
+            .unwrap_or_default();
+        let tombstones = self
+            .inner
+            .pending_tombstones
+            .read()
+            .get(&conn_id)
+            .cloned()
+            .unwrap_or_default();
+
+        let store = self.inner.db.store();
+        for (collection, old_id, _new_id, xid, _previous_xmax) in versioned_updates {
+            if let Some(manager) = store.get_collection(&collection) {
+                if let Some(mut entity) = manager.get(old_id) {
+                    entity.set_xmax(xid);
+                    let _ = manager.update(entity);
+                }
+            }
+        }
+        for (collection, id, xid, _previous_xmax) in tombstones {
+            if let Some(manager) = store.get_collection(&collection) {
+                if let Some(mut entity) = manager.get(id) {
+                    entity.set_xmax(xid);
+                    let _ = manager.update(entity);
+                }
+            }
+        }
     }
 
     pub(crate) fn finalize_pending_versioned_updates(&self, conn_id: u64) {
@@ -6947,11 +7130,13 @@ impl RedDBRuntime {
         };
 
         let store = self.inner.db.store();
-        for (collection, old_id, new_id, _xid) in pending {
+        for (collection, old_id, new_id, xid, previous_xmax) in pending {
             if let Some(manager) = store.get_collection(&collection) {
                 if let Some(mut old) = manager.get(old_id) {
-                    old.set_xmax(0);
-                    let _ = manager.update(old);
+                    if old.xmax == xid {
+                        old.set_xmax(previous_xmax);
+                        let _ = manager.update(old);
+                    }
                 }
             }
             let _ = store.delete_batch(&collection, &[new_id]);
@@ -6966,14 +7151,16 @@ impl RedDBRuntime {
 
         let store = self.inner.db.store();
         let mut reverted = 0usize;
-        pending.retain(|(collection, old_id, new_id, xid)| {
+        pending.retain(|(collection, old_id, new_id, xid, previous_xmax)| {
             if *xid < stamper_xid {
                 return true;
             }
             if let Some(manager) = store.get_collection(collection) {
                 if let Some(mut old) = manager.get(*old_id) {
-                    old.set_xmax(0);
-                    let _ = manager.update(old);
+                    if old.xmax == *xid {
+                        old.set_xmax(*previous_xmax);
+                        let _ = manager.update(old);
+                    }
                 }
             }
             let _ = store.delete_batch(collection, &[*new_id]);
@@ -6999,7 +7186,7 @@ impl RedDBRuntime {
         }
 
         let store = self.inner.db.store();
-        for (collection, id, _xid) in pending {
+        for (collection, id, _xid, _previous_xmax) in pending {
             store.context_index().remove_entity(id);
             self.cdc_emit(
                 crate::replication::cdc::ChangeOperation::Delete,
@@ -7022,13 +7209,15 @@ impl RedDBRuntime {
         };
 
         let store = self.inner.db.store();
-        for (collection, id, _xid) in pending {
+        for (collection, id, xid, previous_xmax) in pending {
             let Some(manager) = store.get_collection(&collection) else {
                 continue;
             };
             if let Some(mut entity) = manager.get(id) {
-                entity.set_xmax(0);
-                let _ = manager.update(entity);
+                if entity.xmax == xid {
+                    entity.set_xmax(previous_xmax);
+                    let _ = manager.update(entity);
+                }
             }
         }
     }
@@ -7218,16 +7407,18 @@ impl RedDBRuntime {
 
         let store = self.inner.db.store();
         let mut revived = 0usize;
-        pending.retain(|(collection, id, xid)| {
+        pending.retain(|(collection, id, xid, previous_xmax)| {
             if *xid < stamper_xid {
                 // Stamped before the savepoint — keep in queue.
                 return true;
             }
             if let Some(manager) = store.get_collection(collection) {
                 if let Some(mut entity) = manager.get(*id) {
-                    entity.set_xmax(0);
-                    let _ = manager.update(entity);
-                    revived += 1;
+                    if entity.xmax == *xid {
+                        entity.set_xmax(*previous_xmax);
+                        let _ = manager.update(entity);
+                        revived += 1;
+                    }
                 }
             }
             false
