@@ -27,6 +27,7 @@ import { KvClient } from './kv.js'
 import { QueueClient } from './queue.js'
 import { ConfigClient } from './config.js'
 import { VaultClient } from './vault.js'
+import { TypedQueryBuilder, collectionExists, listCollections } from './db-helpers.js'
 
 export { RedDBError }
 export { CacheClient } from './cache.js'
@@ -34,6 +35,7 @@ export { KvClient } from './kv.js'
 export { QueueClient } from './queue.js'
 export { ConfigClient } from './config.js'
 export { VaultClient } from './vault.js'
+export { TypedQueryBuilder } from './db-helpers.js'
 export { parseUri, deriveLoginUrl } from './url.js'
 
 export const EMBEDDED_ONLY_MESSAGE =
@@ -326,6 +328,21 @@ export class RedDB {
   /** Insert many rows in one call. Returns `{ affected }`. */
   bulkInsert(collection, payloads) {
     return this.client.call('bulk_insert', { collection, payloads })
+  }
+
+  /** Return true when a collection is visible in the catalog. */
+  exists(collection) {
+    return collectionExists(this, collection)
+  }
+
+  /** List visible collections using SHOW COLLECTIONS. */
+  list() {
+    return listCollections(this)
+  }
+
+  /** Return a caller-typed query builder for a collection. */
+  from(collection) {
+    return new TypedQueryBuilder(this, collection)
   }
 
   /** Get an entity by id. Returns `{ entity }` (entity is `null` if not found). */

@@ -47,6 +47,12 @@ export interface InsertResult { affected: number; id?: string | number }
 export interface BulkInsertResult { affected: number; ids?: Array<string | number> }
 export interface GetResult { entity: Record<string, unknown> | null }
 export interface DeleteResult { affected: number }
+export interface CollectionMeta {
+  name: string
+  model: string
+  capabilities: string[]
+  [key: string]: unknown
+}
 export interface HealthResult { ok: boolean; version: string }
 export interface VersionResult { version: string; protocol: string }
 
@@ -143,6 +149,20 @@ export class QueueClient {
   purge(queue: string): Promise<QueryResult>
 }
 
+/**
+ * Caller-typed SELECT builder. RedDB does not infer `T`; provide it
+ * explicitly with `db.from<T>('collection')`.
+ */
+export class TypedQueryBuilder<T extends Record<string, unknown> = Record<string, unknown>> {
+  select(): TypedQueryBuilder<T>
+  select(column: '*'): TypedQueryBuilder<T>
+  select<K extends keyof T & string>(...columns: K[]): TypedQueryBuilder<Pick<T, K>>
+  select<K extends keyof T & string>(columns: K[]): TypedQueryBuilder<Pick<T, K>>
+  where(condition: string, params: QueryParam[]): TypedQueryBuilder<T>
+  where(condition: string, ...params: QueryParam[]): TypedQueryBuilder<T>
+  run(): Promise<T[]>
+}
+
 export class ConfigClient {
   put(
     key: string,
@@ -202,6 +222,15 @@ export class RedDB {
     collection: string,
     payloads: Array<Record<string, unknown>>,
   ): Promise<BulkInsertResult>
+  exists(collection: string): Promise<boolean>
+  list(): Promise<CollectionMeta[]>
+  /**
+   * Caller-typed collection handle. Supply `T`; the SDK does not
+   * generate or validate row types at runtime.
+   */
+  from<T extends Record<string, unknown> = Record<string, unknown>>(
+    collection: string,
+  ): TypedQueryBuilder<T>
   get(collection: string, id: string | number): Promise<GetResult>
   delete(collection: string, id: string | number): Promise<DeleteResult>
   health(): Promise<HealthResult>
