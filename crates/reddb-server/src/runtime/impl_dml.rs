@@ -7,8 +7,9 @@
 //! applied.
 
 use crate::application::entity::{
-    AppliedEntityMutation, CreateDocumentInput, CreateEdgeInput, CreateKvInput, CreateNodeInput,
-    CreateRowInput, CreateRowsBatchInput, CreateVectorInput, DeleteEntityInput,
+    metadata_from_json, AppliedEntityMutation, CreateDocumentInput, CreateEdgeInput,
+    CreateKvInput, CreateNodeInput, CreateRowInput, CreateRowsBatchInput, CreateVectorInput,
+    DeleteEntityInput,
     PatchEntityOperation, PatchEntityOperationType, RowUpdateColumnRule, RowUpdateContractPlan,
 };
 use crate::application::ports::{
@@ -701,7 +702,12 @@ impl RedDBRuntime {
                                 &query.with_metadata,
                             );
                             let (columns, values) = pairwise_columns_values(&vector_values);
-                            let dense = find_column_value_vec_f32(&columns, &values, "dense")?;
+                            let dense = find_column_value_vec_f32_any(
+                                &columns,
+                                &values,
+                                &["dense", "embedding"],
+                            )?;
+                            merge_vector_metadata_column(&mut metadata, &columns, &values)?;
                             let content =
                                 find_column_value_opt_string(&columns, &values, "content");
                             if query.returning.is_some() {
@@ -1914,6 +1920,39 @@ fn merge_with_clauses(
     }
 }
 
+fn merge_vector_metadata_column(
+    metadata: &mut Vec<(String, MetadataValue)>,
+    columns: &[String],
+    values: &[Value],
+) -> RedDBResult<()> {
+    let Some(value) = columns
+        .iter()
+        .position(|column| column.eq_ignore_ascii_case("metadata"))
+        .map(|index| &values[index])
+    else {
+        return Ok(());
+    };
+    let json = match value {
+        Value::Null => return Ok(()),
+        Value::Json(bytes) => crate::json::from_slice(bytes).map_err(|err| {
+            RedDBError::Query(format!("column 'metadata' invalid JSON object: {err}"))
+        })?,
+        Value::Text(text) => crate::json::from_str(text).map_err(|err| {
+            RedDBError::Query(format!("column 'metadata' invalid JSON object: {err}"))
+        })?,
+        other => {
+            return Err(RedDBError::Query(format!(
+                "column 'metadata' expected JSON object, got {other:?}"
+            )))
+        }
+    };
+    let parsed = metadata_from_json(&json)?;
+    for (key, value) in parsed.iter() {
+        metadata.push((key.clone(), value.clone()));
+    }
+    Ok(())
+}
+
 fn apply_collection_default_ttl_metadata(
     runtime: &RedDBRuntime,
     collection: &str,
@@ -2133,6 +2172,25 @@ fn find_column_value_vec_f32(
             "column '{name}' expected vector, got {other:?}"
         ))),
     }
+}
+
+fn find_column_value_vec_f32_any(
+    columns: &[String],
+    values: &[Value],
+    names: &[&str],
+) -> RedDBResult<Vec<f32>> {
+    for name in names {
+        if columns
+            .iter()
+            .any(|column| column.eq_ignore_ascii_case(name))
+        {
+            return find_column_value_vec_f32(columns, values, name);
+        }
+    }
+    Err(RedDBError::Query(format!(
+        "required vector column '{}' not found in INSERT",
+        names.join("' or '")
+    )))
 }
 
 /// Extract remaining properties (all columns not in the exclusion list).

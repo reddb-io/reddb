@@ -8,6 +8,8 @@
 //! Uses `use super::*;` to inherit the parent executor's imports.
 
 use super::*;
+use crate::runtime::vector_index::{BruteForceVectorIndex, VectorIndexEntry};
+use crate::storage::engine::distance::DistanceMetric;
 use crate::storage::query::sql_lowering::effective_vector_filter;
 
 pub(crate) fn execute_runtime_vector_query(
@@ -51,7 +53,10 @@ pub(crate) fn execute_runtime_canonical_vector_node(
         "similarity_threshold" => {
             let mut records = execute_runtime_canonical_vector_child(db, node, query)?;
             if let Some(threshold) = query.threshold {
-                records.retain(|record| runtime_record_rank_score(record) >= threshold as f64);
+                let metric = runtime_vector_metric(db, query);
+                records.retain(|record| {
+                    runtime_vector_record_within_threshold(record, metric, threshold)
+                });
             }
             Ok(records)
         }
@@ -86,57 +91,34 @@ pub(crate) fn runtime_vector_matches(
     query: &VectorQuery,
     vector: &[f32],
 ) -> RedDBResult<Vec<SimilarResult>> {
+    validate_vector_query_shape(db, query, vector)?;
+    let metric = runtime_vector_metric(db, query);
     let manager = db
         .store()
         .get_collection(&query.collection)
         .ok_or_else(|| RedDBError::NotFound(query.collection.clone()))?;
 
-    if effective_vector_filter(query).is_none() {
-        let mut results = db.similar(&query.collection, vector, manager.count().max(1));
-        // Phase 1.2 MVCC universal: the ANN path (`db.similar`) bypasses
-        // the general scan filter, so post-filter the top-K list here
-        // against the connection's snapshot. Each `SimilarResult` owns
-        // its entity, so visibility is cheap (no extra fetch).
-        let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
-        if snap_ctx.is_some() {
-            results.retain(|r| {
-                crate::runtime::impl_core::entity_visible_with_context(snap_ctx.as_ref(), &r.entity)
+    let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
+    let mut index = BruteForceVectorIndex::default();
+    let search_k = if effective_vector_filter(query).is_some() {
+        manager.count().max(1)
+    } else {
+        query.k.max(1)
+    };
+
+    for entity in manager.query_all(|entity| {
+        crate::runtime::impl_core::entity_visible_with_context(snap_ctx.as_ref(), entity)
+    }) {
+        if let EntityData::Vector(data) = &entity.data {
+            index.upsert(VectorIndexEntry {
+                entity_id: entity.id,
+                vector: data.dense.clone(),
+                entity,
             });
         }
-        results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| a.entity_id.raw().cmp(&b.entity_id.raw()))
-        });
-        return Ok(results);
     }
 
-    let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
-    let mut results: Vec<SimilarResult> = manager
-        .query_all(|entity| {
-            crate::runtime::impl_core::entity_visible_with_context(snap_ctx.as_ref(), entity)
-        })
-        .into_iter()
-        .filter_map(|entity| {
-            let score = runtime_entity_vector_similarity(&entity, vector);
-            let distance = (1.0 - score).max(0.0);
-            (score > 0.0).then_some(SimilarResult {
-                entity_id: entity.id,
-                score,
-                distance,
-                entity,
-            })
-        })
-        .collect();
-
-    results.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| a.entity_id.raw().cmp(&b.entity_id.raw()))
-    });
-    Ok(results)
+    Ok(index.search(vector, search_k, metric, query.threshold))
 }
 
 pub(crate) fn runtime_vector_record_matches_filter(
@@ -164,4 +146,47 @@ pub(crate) fn runtime_vector_record_matches_filter(
         .unwrap_or_default();
     let entry = runtime_metadata_entry(&metadata);
     filter.matches(&entry)
+}
+
+pub(crate) fn runtime_vector_metric(db: &RedDB, query: &VectorQuery) -> DistanceMetric {
+    query
+        .metric
+        .or_else(|| {
+            db.collection_contract(&query.collection)
+                .and_then(|contract| contract.vector_metric)
+        })
+        .unwrap_or(DistanceMetric::Cosine)
+}
+
+fn validate_vector_query_shape(db: &RedDB, query: &VectorQuery, vector: &[f32]) -> RedDBResult<()> {
+    if let Some(expected) = db
+        .collection_contract(&query.collection)
+        .and_then(|contract| contract.vector_dimension)
+    {
+        if expected != vector.len() {
+            return Err(RedDBError::Query(format!(
+                "vector dimension mismatch for collection '{}': expected {}, got {}",
+                query.collection,
+                expected,
+                vector.len()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn runtime_vector_record_within_threshold(
+    record: &UnifiedRecord,
+    metric: DistanceMetric,
+    threshold: f32,
+) -> bool {
+    match metric {
+        DistanceMetric::L2 => record
+            .get("distance")
+            .and_then(runtime_value_number)
+            .is_some_and(|distance| distance <= threshold as f64),
+        DistanceMetric::Cosine | DistanceMetric::InnerProduct => {
+            runtime_record_rank_score(record) >= threshold as f64
+        }
+    }
 }

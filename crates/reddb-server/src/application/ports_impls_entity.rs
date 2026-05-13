@@ -139,6 +139,25 @@ fn collection_model_allows(
     declared_model == requested_model || declared_model == crate::catalog::CollectionModel::Mixed
 }
 
+fn ensure_vector_dimension_contract(
+    db: &crate::storage::unified::devx::RedDB,
+    collection: &str,
+    actual_dimension: usize,
+) -> RedDBResult<()> {
+    let Some(expected_dimension) = db
+        .collection_contract(collection)
+        .and_then(|contract| contract.vector_dimension)
+    else {
+        return Ok(());
+    };
+    if expected_dimension == actual_dimension {
+        return Ok(());
+    }
+    Err(crate::RedDBError::Query(format!(
+        "vector dimension mismatch for collection '{collection}': expected {expected_dimension}, got {actual_dimension}"
+    )))
+}
+
 fn collection_model_name(model: crate::catalog::CollectionModel) -> &'static str {
     match model {
         crate::catalog::CollectionModel::Table => "table",
@@ -2488,6 +2507,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         let db = self.db();
         let contract = CollectionContractWriteEnforcer::new(&db, &input.collection);
         contract.ensure_model(crate::catalog::CollectionModel::Vector)?;
+        ensure_vector_dimension_contract(&db, &input.collection, input.dense.len())?;
         let mut metadata = input.metadata;
         apply_collection_default_ttl(&db, &input.collection, &mut metadata);
         let mut builder = db.vector(&input.collection).dense(input.dense);
