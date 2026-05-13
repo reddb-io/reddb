@@ -28,6 +28,7 @@
 
 import { RedDBError } from './protocol.js'
 import { HttpRpcClient } from './http.js'
+import { GrpcRpcClient } from './grpc.js'
 import { connectRedwire } from './redwire.js'
 import { parseUri, deriveLoginUrl } from './url.js'
 import {
@@ -94,12 +95,25 @@ export async function connect(uri, options = {}) {
     return new RedDB(client)
   }
 
-  if (
-    parsed.kind === 'red'
-    || parsed.kind === 'reds'
-    || parsed.kind === 'grpc'
-    || parsed.kind === 'grpcs'
-  ) {
+  if (parsed.kind === 'grpc' || parsed.kind === 'grpcs') {
+    let token = merged.token
+    if (!token && merged.username && merged.password) {
+      const loginUrl = merged.loginUrl ?? deriveLoginUrl(parsed)
+      const session = await login(loginUrl, {
+        username: merged.username,
+        password: merged.password,
+      })
+      token = session.token
+    }
+    const scheme = parsed.kind === 'grpcs' ? 'https' : 'http'
+    const client = new GrpcRpcClient({
+      baseUrl: `${scheme}://${parsed.host}:${parsed.port}`,
+      token,
+    })
+    return new RedDB(client)
+  }
+
+  if (parsed.kind === 'red' || parsed.kind === 'reds') {
     let token = merged.token
     if (!token && merged.username && merged.password) {
       const loginUrl = merged.loginUrl ?? deriveLoginUrl(parsed)
