@@ -6,6 +6,7 @@
 //! SERIALIZABLE explicitly rather than silently downgrading.
 
 use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn rt() -> RedDBRuntime {
@@ -178,6 +179,14 @@ fn snapshot_isolation_blocks_read_skew() {
     set_current_connection_id(9940);
     try_exec(&rt, "CREATE TABLE skew_check (id INT, v INT)").unwrap();
     try_exec(&rt, "INSERT INTO skew_check (id, v) VALUES (1, 10)").unwrap();
+    let inserted = rt
+        .execute_query("SELECT red_entity_id FROM skew_check WHERE id = 1")
+        .unwrap();
+    let red_entity_id = match inserted.result.records[0].get("red_entity_id") {
+        Some(Value::UnsignedInteger(id)) => *id,
+        Some(Value::Integer(id)) => *id as u64,
+        other => panic!("expected red_entity_id, got {other:?}"),
+    };
 
     // Conn A: BEGIN — captures snapshot, sees v=10.
     try_exec(&rt, "BEGIN").unwrap();
@@ -185,6 +194,7 @@ fn snapshot_isolation_blocks_read_skew() {
         .execute_query("SELECT v FROM skew_check WHERE id = 1")
         .unwrap();
     assert_eq!(res1.result.records.len(), 1, "first read sees row");
+    assert_eq!(res1.result.records[0].get("v"), Some(&Value::Integer(10)));
 
     // Conn B: autocommit UPDATE, commits.
     set_current_connection_id(9941);
@@ -203,7 +213,24 @@ fn snapshot_isolation_blocks_read_skew() {
         res1.result.records.len(),
         "snapshot tx must see same row count both reads"
     );
+    assert_eq!(
+        res2.result.records[0].get("v"),
+        Some(&Value::Integer(10)),
+        "snapshot tx must keep reading the pre-update value"
+    );
     try_exec(&rt, "COMMIT").unwrap();
+
+    let res3 = rt
+        .execute_query(&format!(
+            "SELECT v FROM skew_check WHERE red_entity_id = {red_entity_id}"
+        ))
+        .unwrap();
+    assert_eq!(res3.result.records.len(), 1, "new snapshot sees row");
+    assert_eq!(
+        res3.result.records[0].get("v"),
+        Some(&Value::Integer(99)),
+        "new snapshot must see the updated value"
+    );
     clear_current_connection_id();
 }
 

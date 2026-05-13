@@ -24,6 +24,9 @@ pub struct AppliedEntityMutation {
     pub modified_columns: Vec<String>,
     pub persist_metadata: bool,
     pub context_index_dirty: bool,
+    /// Prior physical version retained for MVCC history. Present when an
+    /// UPDATE creates a new physical entity for the same logical row.
+    pub replaced_entity: Option<UnifiedEntity>,
     /// Snapshot of the row's named fields BEFORE the mutation was
     /// applied. Carried so the post-write secondary-index hook can
     /// `delete(old) + insert(new)` for changed indexed columns.
