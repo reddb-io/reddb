@@ -1000,6 +1000,8 @@ pub struct GraphQuery {
     pub filter: Option<Filter>,
     /// Return projections
     pub return_: Vec<Projection>,
+    /// Optional row limit
+    pub limit: Option<u64>,
 }
 
 impl GraphQuery {
@@ -1010,6 +1012,7 @@ impl GraphQuery {
             pattern,
             filter: None,
             return_: Vec::new(),
+            limit: None,
         }
     }
 

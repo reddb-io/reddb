@@ -23,13 +23,40 @@ impl<'a> Parser<'a> {
 
         self.expect(Token::Return)?;
         let return_ = self.parse_return_list()?;
+        let limit = self.parse_match_limit()?;
 
         Ok(QueryExpr::Graph(GraphQuery {
             alias: None,
             pattern,
             filter,
             return_,
+            limit,
         }))
+    }
+
+    fn parse_match_limit(&mut self) -> Result<Option<u64>, ParseError> {
+        if !self.consume(&Token::Limit)? && !self.consume_ident_ci("LIMIT")? {
+            return Ok(None);
+        }
+
+        let pos = self.position();
+        if matches!(self.current.token, Token::Minus | Token::Dash) {
+            return Err(ParseError::value_out_of_range(
+                "MATCH LIMIT",
+                "must be a non-negative integer",
+                pos,
+            ));
+        }
+
+        let raw = self.parse_integer()?;
+        if raw < 0 {
+            return Err(ParseError::value_out_of_range(
+                "MATCH LIMIT",
+                "must be a non-negative integer",
+                pos,
+            ));
+        }
+        Ok(Some(raw as u64))
     }
 
     /// Parse graph pattern: (a)-[r]->(b)

@@ -964,6 +964,7 @@ impl GremlinTraversal {
             pattern: GraphPattern { nodes, edges },
             filter: combined_filter,
             return_: projections,
+            limit: None,
         })
     }
 }

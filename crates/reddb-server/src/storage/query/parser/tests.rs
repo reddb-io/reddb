@@ -624,6 +624,41 @@ fn test_parse_match_incoming_edge() {
 }
 
 #[test]
+fn test_parse_match_limit() {
+    let query = parse("MATCH (n) RETURN n LIMIT 1").unwrap();
+    if let QueryExpr::Graph(gq) = query {
+        assert_eq!(gq.limit, Some(1));
+    } else {
+        panic!("Expected GraphQuery");
+    }
+}
+
+#[test]
+fn test_parse_match_limit_zero() {
+    let query = parse("MATCH (n) RETURN n LIMIT 0").unwrap();
+    if let QueryExpr::Graph(gq) = query {
+        assert_eq!(gq.limit, Some(0));
+    } else {
+        panic!("Expected GraphQuery");
+    }
+}
+
+#[test]
+fn test_parse_match_limit_rejects_negative_and_non_integer() {
+    let negative = parse("MATCH (n) RETURN n LIMIT -1").unwrap_err();
+    assert!(
+        negative.to_string().contains("MATCH LIMIT"),
+        "negative LIMIT error should name MATCH LIMIT, got {negative}"
+    );
+
+    let non_integer = parse("MATCH (n) RETURN n LIMIT nope").unwrap_err();
+    assert!(
+        non_integer.to_string().contains("integer"),
+        "non-integer LIMIT error should mention integer, got {non_integer}"
+    );
+}
+
+#[test]
 fn test_parse_path_query() {
     let query =
         parse("PATH FROM host('192.168.1.1') TO host('10.0.0.1') VIA [:AUTH_ACCESS]").unwrap();

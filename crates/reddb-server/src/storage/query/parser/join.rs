@@ -178,6 +178,7 @@ impl<'a> Parser<'a> {
             pattern,
             filter: None,
             return_: Vec::new(),
+            limit: None,
         };
 
         Ok(QueryExpr::Join(JoinQuery {

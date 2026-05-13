@@ -223,6 +223,9 @@ impl UnifiedExecutor {
         let matches = self.match_pattern_on(graph, &query.pattern, &mut stats)?;
 
         for matched in matches {
+            if Self::graph_limit_reached(result.records.len(), query.limit) {
+                break;
+            }
             if !self.eval_filter_on_match(&effective_filter, &matched) {
                 continue;
             }
@@ -451,22 +454,26 @@ impl UnifiedExecutor {
         // Match the pattern
         let matches = self.match_pattern(&query.pattern, &mut stats)?;
 
-        // Apply filter
         let effective_filter = effective_graph_filter(query);
         let effective_projections = effective_graph_projections(query);
-        let filtered: Vec<_> = matches
-            .into_iter()
-            .filter(|m| self.eval_filter_on_match(&effective_filter, m))
-            .collect();
 
-        // Build result records with projections
-        for matched in filtered {
+        for matched in matches {
+            if Self::graph_limit_reached(result.records.len(), query.limit) {
+                break;
+            }
+            if !self.eval_filter_on_match(&effective_filter, &matched) {
+                continue;
+            }
             let record = self.project_match(&matched, &effective_projections);
             result.push(record);
         }
 
         result.stats = stats;
         Ok(result)
+    }
+
+    fn graph_limit_reached(row_count: usize, limit: Option<u64>) -> bool {
+        limit.is_some_and(|limit| row_count as u64 >= limit)
     }
 
     /// Match a graph pattern

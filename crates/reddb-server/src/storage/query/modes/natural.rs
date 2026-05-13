@@ -711,6 +711,7 @@ impl NaturalQuery {
             pattern: GraphPattern { nodes, edges },
             filter: combined_filter,
             return_: projections,
+            limit: self.limit,
         })
     }
 }

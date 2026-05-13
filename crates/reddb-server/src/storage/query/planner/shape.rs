@@ -694,6 +694,7 @@ fn parameterize_graph_query(query: &GraphQuery, next_index: &mut usize) -> Optio
             .iter()
             .map(|projection| parameterize_projection(projection, next_index))
             .collect::<Option<Vec<_>>>()?,
+        limit: query.limit,
     })
 }
 
@@ -710,6 +711,7 @@ fn bind_graph_query(query: &GraphQuery, binds: &[Value]) -> Option<GraphQuery> {
             .iter()
             .map(|projection| bind_projection(projection, binds))
             .collect::<Option<Vec<_>>>()?,
+        limit: query.limit,
     })
 }
 

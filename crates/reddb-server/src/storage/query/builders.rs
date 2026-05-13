@@ -198,6 +198,12 @@ impl GraphQueryBuilder {
         self
     }
 
+    /// Set row limit
+    pub fn limit(mut self, n: u64) -> Self {
+        self.query.limit = Some(n);
+        self
+    }
+
     /// Add return projection
     pub fn return_field(mut self, field: FieldRef) -> Self {
         self.query.return_.push(Projection::from_field(field));

@@ -297,6 +297,7 @@ fn test_graph_query_empty_pattern() {
         },
         filter: None,
         return_: vec![],
+        limit: None,
     });
 
     let result = executor.execute(&query).unwrap();
