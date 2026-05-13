@@ -562,14 +562,21 @@ fn collect_params<'py>(
         if kw.is_none() {
             return collect_args(args);
         }
-        let list = kw
-            .downcast::<PyList>()
-            .map_err(|_| err("INVALID_PARAMS", "params= must be a list"))?;
-        let mut out = Vec::with_capacity(list.len());
-        for item in list.iter() {
-            out.push(item);
+        if let Ok(list) = kw.downcast::<PyList>() {
+            let mut out = Vec::with_capacity(list.len());
+            for item in list.iter() {
+                out.push(item);
+            }
+            return Ok(out);
         }
-        return Ok(out);
+        if let Ok(tuple) = kw.downcast::<PyTuple>() {
+            let mut out = Vec::with_capacity(tuple.len());
+            for item in tuple.iter() {
+                out.push(item);
+            }
+            return Ok(out);
+        }
+        return Err(err("INVALID_PARAMS", "params= must be a list or tuple"));
     }
     collect_args(args)
 }
