@@ -1815,7 +1815,7 @@ fn render_prompt(ctx: &crate::runtime::ask_pipeline::AskContext, question: &str)
          answer is not in the context, say so plainly. \
          Cite every factual claim with an inline `[^N]` marker, where N \
          is the 1-indexed position of the source in the provided context \
-         (rows before vector matches). Place the marker immediately after \
+         source list. Place the marker immediately after \
          the supported claim. Do not invent sources; if a claim is not \
          supported by the context, omit the marker rather than fabricate \
          one.";
@@ -1830,29 +1830,11 @@ fn render_prompt(ctx: &crate::runtime::ask_pipeline::AskContext, question: &str)
         }
         context_blocks.push(ContextBlock::new(ContextSource::SchemaVocabulary, s));
     }
-    if !ctx.filtered_rows.is_empty() {
-        let mut s = String::from("Rows matching literal filters:\n");
-        for row in &ctx.filtered_rows {
-            s.push_str(&format!(
-                "- {} #{} (literal `{}`{})\n",
-                row.collection,
-                row.entity.id.raw(),
-                row.matched_literal,
-                row.matched_column
-                    .as_ref()
-                    .map(|c| format!(" in `{}`", c))
-                    .unwrap_or_default(),
-            ));
-        }
-        context_blocks.push(ContextBlock::new(ContextSource::AskPipelineRow, s));
-    }
-    if !ctx.vector_hits.is_empty() {
-        let mut s = String::from("Top vector matches:\n");
-        for hit in &ctx.vector_hits {
-            s.push_str(&format!(
-                "- {} #{} (score={:.3})\n",
-                hit.collection, hit.entity_id, hit.score,
-            ));
+    let fused_sources = crate::runtime::ask_pipeline::fused_source_order(ctx);
+    if !fused_sources.is_empty() {
+        let mut s = String::from("Fused ASK sources:\n");
+        for source in fused_sources {
+            s.push_str(&format!("- {}\n", format_fused_source_line(ctx, source)));
         }
         context_blocks.push(ContextBlock::new(ContextSource::AskPipelineRow, s));
     }
@@ -1924,29 +1906,11 @@ fn format_minimal_fallback(
         }
         out.push('\n');
     }
-    if !ctx.filtered_rows.is_empty() {
-        out.push_str("Rows matching literal filters:\n");
-        for row in &ctx.filtered_rows {
-            out.push_str(&format!(
-                "- {} #{} (literal `{}`{})\n",
-                row.collection,
-                row.entity.id.raw(),
-                row.matched_literal,
-                row.matched_column
-                    .as_ref()
-                    .map(|c| format!(" in `{}`", c))
-                    .unwrap_or_default(),
-            ));
-        }
-        out.push('\n');
-    }
-    if !ctx.vector_hits.is_empty() {
-        out.push_str("Top vector matches:\n");
-        for hit in &ctx.vector_hits {
-            out.push_str(&format!(
-                "- {} #{} (score={:.3})\n",
-                hit.collection, hit.entity_id, hit.score,
-            ));
+    let fused_sources = crate::runtime::ask_pipeline::fused_source_order(ctx);
+    if !fused_sources.is_empty() {
+        out.push_str("Fused ASK sources:\n");
+        for source in fused_sources {
+            out.push_str(&format!("- {}\n", format_fused_source_line(ctx, source)));
         }
         out.push('\n');
     }
@@ -1994,73 +1958,109 @@ fn citations_to_json(
     crate::json::Value::Array(arr)
 }
 
-/// Issue #394: assemble the flat `sources_flat` view that mirrors the
-/// prompt render order (filtered_rows first, then vector_hits). Returns
-/// the JSON array plus a parallel `Vec<String>` of URNs aligned by
-/// index so the citation serializer can fill the per-marker `urn`
-/// field without re-deriving it.
+fn format_fused_source_line(
+    ctx: &crate::runtime::ask_pipeline::AskContext,
+    source: crate::runtime::ask_pipeline::FusedSourceRef,
+) -> String {
+    match source {
+        crate::runtime::ask_pipeline::FusedSourceRef::FilteredRow(idx) => {
+            let row = &ctx.filtered_rows[idx];
+            format!(
+                "{} #{} (literal `{}`{})",
+                row.collection,
+                row.entity.id.raw(),
+                row.matched_literal,
+                row.matched_column
+                    .as_ref()
+                    .map(|c| format!(" in `{}`", c))
+                    .unwrap_or_default(),
+            )
+        }
+        crate::runtime::ask_pipeline::FusedSourceRef::VectorHit(idx) => {
+            let hit = &ctx.vector_hits[idx];
+            format!(
+                "{} #{} (score={:.3})",
+                hit.collection, hit.entity_id, hit.score
+            )
+        }
+    }
+}
+
+/// Issue #394/#398: assemble the flat `sources_flat` view that mirrors
+/// the RRF-fused prompt source order. Returns the JSON array plus a
+/// parallel `Vec<String>` of URNs aligned by index so the citation
+/// serializer can fill the per-marker `urn` field without re-deriving
+/// it.
 fn build_sources_flat(
     ctx: &crate::runtime::ask_pipeline::AskContext,
 ) -> (crate::json::Value, Vec<String>) {
     use crate::runtime::ai::urn_codec::{encode, Urn};
-    let mut arr: Vec<crate::json::Value> =
-        Vec::with_capacity(ctx.filtered_rows.len() + ctx.vector_hits.len());
+    let mut arr: Vec<crate::json::Value> = Vec::with_capacity(
+        ctx.source_limit
+            .min(ctx.filtered_rows.len() + ctx.vector_hits.len()),
+    );
     let mut urns: Vec<String> = Vec::with_capacity(arr.capacity());
-    for row in &ctx.filtered_rows {
-        let urn = encode(&Urn::row(
-            row.collection.clone(),
-            row.entity.id.raw().to_string(),
-        ));
-        let mut obj: crate::json::Map<String, crate::json::Value> = Default::default();
-        obj.insert("kind".to_string(), crate::json::Value::String("row".into()));
-        obj.insert("urn".to_string(), crate::json::Value::String(urn.clone()));
-        obj.insert(
-            "collection".to_string(),
-            crate::json::Value::String(row.collection.clone()),
-        );
-        obj.insert(
-            "id".to_string(),
-            crate::json::Value::String(row.entity.id.raw().to_string()),
-        );
-        obj.insert(
-            "matched_literal".to_string(),
-            crate::json::Value::String(row.matched_literal.clone()),
-        );
-        if let Some(col) = &row.matched_column {
-            obj.insert(
-                "matched_column".to_string(),
-                crate::json::Value::String(col.clone()),
-            );
+    for source in crate::runtime::ask_pipeline::fused_source_order(ctx) {
+        match source {
+            crate::runtime::ask_pipeline::FusedSourceRef::FilteredRow(idx) => {
+                let row = &ctx.filtered_rows[idx];
+                let urn = encode(&Urn::row(
+                    row.collection.clone(),
+                    row.entity.id.raw().to_string(),
+                ));
+                let mut obj: crate::json::Map<String, crate::json::Value> = Default::default();
+                obj.insert("kind".to_string(), crate::json::Value::String("row".into()));
+                obj.insert("urn".to_string(), crate::json::Value::String(urn.clone()));
+                obj.insert(
+                    "collection".to_string(),
+                    crate::json::Value::String(row.collection.clone()),
+                );
+                obj.insert(
+                    "id".to_string(),
+                    crate::json::Value::String(row.entity.id.raw().to_string()),
+                );
+                obj.insert(
+                    "matched_literal".to_string(),
+                    crate::json::Value::String(row.matched_literal.clone()),
+                );
+                if let Some(col) = &row.matched_column {
+                    obj.insert(
+                        "matched_column".to_string(),
+                        crate::json::Value::String(col.clone()),
+                    );
+                }
+                arr.push(crate::json::Value::Object(obj));
+                urns.push(urn);
+            }
+            crate::runtime::ask_pipeline::FusedSourceRef::VectorHit(idx) => {
+                let hit = &ctx.vector_hits[idx];
+                let urn = encode(&Urn::vector_hit(
+                    hit.collection.clone(),
+                    hit.entity_id.to_string(),
+                    hit.score,
+                ));
+                let mut obj: crate::json::Map<String, crate::json::Value> = Default::default();
+                obj.insert(
+                    "kind".to_string(),
+                    crate::json::Value::String("vector_hit".into()),
+                );
+                obj.insert("urn".to_string(), crate::json::Value::String(urn.clone()));
+                obj.insert(
+                    "collection".to_string(),
+                    crate::json::Value::String(hit.collection.clone()),
+                );
+                obj.insert(
+                    "id".to_string(),
+                    crate::json::Value::String(hit.entity_id.to_string()),
+                );
+                obj.insert(
+                    "score".to_string(),
+                    crate::json::Value::Number(hit.score as f64),
+                );
+                arr.push(crate::json::Value::Object(obj));
+                urns.push(urn);
+            }
         }
-        arr.push(crate::json::Value::Object(obj));
-        urns.push(urn);
-    }
-    for hit in &ctx.vector_hits {
-        let urn = encode(&Urn::vector_hit(
-            hit.collection.clone(),
-            hit.entity_id.to_string(),
-            hit.score,
-        ));
-        let mut obj: crate::json::Map<String, crate::json::Value> = Default::default();
-        obj.insert(
-            "kind".to_string(),
-            crate::json::Value::String("vector_hit".into()),
-        );
-        obj.insert("urn".to_string(), crate::json::Value::String(urn.clone()));
-        obj.insert(
-            "collection".to_string(),
-            crate::json::Value::String(hit.collection.clone()),
-        );
-        obj.insert(
-            "id".to_string(),
-            crate::json::Value::String(hit.entity_id.to_string()),
-        );
-        obj.insert(
-            "score".to_string(),
-            crate::json::Value::Number(hit.score as f64),
-        );
-        arr.push(crate::json::Value::Object(obj));
-        urns.push(urn);
     }
     (crate::json::Value::Array(arr), urns)
 }
@@ -2211,6 +2211,7 @@ mod render_prompt_tests {
             },
             vector_hits: Vec::new(),
             filtered_rows: filtered,
+            source_limit: crate::runtime::ask_pipeline::DEFAULT_ROW_CAP,
             timings: StageTimings::default(),
         }
     }
@@ -2480,33 +2481,36 @@ mod citation_wedge_tests {
             },
             vector_hits: vec![hit],
             filtered_rows: vec![row],
+            source_limit: crate::runtime::ask_pipeline::DEFAULT_ROW_CAP,
             timings: StageTimings::default(),
         };
         let (sources_flat, urns) = build_sources_flat(&ctx);
 
         assert_eq!(urns.len(), 2);
-        assert_eq!(urns[0], "reddb:incidents/42");
-        // Row entry comes first (render order); vector_hit second.
+        assert_eq!(urns[0], "reddb:docs/9#0.5");
+        assert_eq!(urns[1], "reddb:incidents/42");
+        // RRF source order: same one-bucket contribution, then
+        // deterministic source-id tie-break.
         let arr = sources_flat.as_array().expect("arr");
         assert_eq!(arr.len(), 2);
         let first = arr[0].as_object().expect("obj");
-        assert_eq!(first.get("kind").and_then(|v| v.as_str()), Some("row"));
+        assert_eq!(
+            first.get("kind").and_then(|v| v.as_str()),
+            Some("vector_hit")
+        );
         assert_eq!(
             first.get("urn").and_then(|v| v.as_str()),
             Some(urns[0].as_str())
         );
         let second = arr[1].as_object().expect("obj");
-        assert_eq!(
-            second.get("kind").and_then(|v| v.as_str()),
-            Some("vector_hit")
-        );
+        assert_eq!(second.get("kind").and_then(|v| v.as_str()), Some("row"));
         // URN round-trips: every kind decodes back without error.
-        assert_eq!(decode(&urns[0], KindHint::Row).unwrap().kind, UrnKind::Row);
-        let dec = decode(&urns[1], KindHint::VectorHit).unwrap();
+        let dec = decode(&urns[0], KindHint::VectorHit).unwrap();
         match dec.kind {
             UrnKind::VectorHit { score } => assert!((score - 0.5).abs() < 1e-5),
             _ => panic!("vector_hit kind expected"),
         }
+        assert_eq!(decode(&urns[1], KindHint::Row).unwrap().kind, UrnKind::Row);
     }
 
     /// Issue #394: citations attach the URN of the source they cite,
@@ -2590,6 +2594,7 @@ mod citation_wedge_tests {
             },
             vector_hits: Vec::new(),
             filtered_rows: Vec::new(),
+            source_limit: crate::runtime::ask_pipeline::DEFAULT_ROW_CAP,
             timings: StageTimings::default(),
         };
         let out = render_prompt(&ctx, "why?");
