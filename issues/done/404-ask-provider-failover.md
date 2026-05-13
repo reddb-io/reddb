@@ -155,3 +155,17 @@ Remaining blocker:
   insertion surface is still owned by open issue #402. Keep this issue
   blocked until #402 lands or explicitly folds the audit insertion into
   this failover path.
+
+## Progress note (2026-05-13, finalization)
+
+Unblocked after #396 and #402 were closed. Added a final HTTP regression
+assertion for the remaining #404 acceptance surface:
+
+- `ASK ... USING 'groq,openai' TEMPERATURE 0.7 SEED 42` fails over from
+  a 502 Groq stub to a successful OpenAI stub.
+- Both provider attempts receive the same `temperature` and `seed`
+  payload fields.
+- The successful provider is surfaced in the response and recorded in
+  `red_ask_audit` with the winning provider plus determinism fields.
+
+This completes the issue criteria; the issue file moved to `issues/done/`.
