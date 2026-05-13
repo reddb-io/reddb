@@ -947,6 +947,66 @@ fn test_parse_table_join_variants_and_from_subquery() {
 }
 
 #[test]
+fn test_parse_select_led_table_join_variants() {
+    let cases = [
+        (
+            "SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id",
+            JoinType::Inner,
+        ),
+        (
+            "SELECT u.name, o.total FROM users u INNER JOIN orders o ON u.id = o.user_id",
+            JoinType::Inner,
+        ),
+        (
+            "SELECT u.name, o.total FROM users u LEFT JOIN orders o ON u.id = o.user_id",
+            JoinType::LeftOuter,
+        ),
+        (
+            "SELECT u.name, o.total FROM users u RIGHT JOIN orders o ON u.id = o.user_id",
+            JoinType::RightOuter,
+        ),
+        (
+            "SELECT u.name, o.total FROM users u FULL JOIN orders o ON u.id = o.user_id",
+            JoinType::FullOuter,
+        ),
+        (
+            "SELECT u.name, r.name FROM users u CROSS JOIN regions r",
+            JoinType::Cross,
+        ),
+    ];
+
+    for (sql, expected) in cases {
+        let query = parse(sql).unwrap_or_else(|err| panic!("failed to parse {sql}: {err}"));
+        let QueryExpr::Join(join) = query else {
+            panic!("expected SELECT-led JOIN for {sql}");
+        };
+        assert_eq!(join.join_type, expected, "wrong join type for {sql}");
+        assert_eq!(join.return_items.len(), 2, "wrong return items for {sql}");
+        assert_eq!(join.return_.len(), 2, "wrong projections for {sql}");
+        let QueryExpr::Table(left) = join.left.as_ref() else {
+            panic!("expected table left side for {sql}");
+        };
+        assert!(left.select_items.is_empty());
+        assert!(left.columns.is_empty());
+    }
+}
+
+#[test]
+fn test_parse_select_led_multiple_table_joins() {
+    let query = parse(
+        "SELECT u.name, o.total, r.name \
+         FROM users u JOIN orders o ON u.id = o.user_id \
+         JOIN regions r ON o.region_id = r.id",
+    )
+    .unwrap();
+    let QueryExpr::Join(join) = query else {
+        panic!("expected SELECT-led JOIN");
+    };
+    assert_eq!(join.return_items.len(), 3);
+    assert!(matches!(join.left.as_ref(), QueryExpr::Join(_)));
+}
+
+#[test]
 fn test_parse_join_vector_query() {
     let query = parse(
         "FROM docs d JOIN VECTOR SEARCH embeddings SIMILAR TO [0.1, 0.2] LIMIT 5 AS sim ON d.id = sim.entity_id RETURN d.id, sim.score",

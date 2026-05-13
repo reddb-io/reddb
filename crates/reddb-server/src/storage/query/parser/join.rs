@@ -1,7 +1,8 @@
 //! Join query parsing (FROM ... JOIN GRAPH/PATH/TABLE/VECTOR ...)
 
 use super::super::ast::{
-    FieldRef, GraphQuery, JoinCondition, JoinQuery, JoinType, QueryExpr, SelectItem, TableQuery,
+    FieldRef, GraphQuery, JoinCondition, JoinQuery, JoinType, Projection, QueryExpr, SelectItem,
+    TableQuery,
 };
 use super::super::lexer::Token;
 use super::error::ParseError;
@@ -74,7 +75,7 @@ impl<'a> Parser<'a> {
 
         // Check for JOIN
         if self.is_join_keyword() {
-            return self.parse_join_query(table_query);
+            return self.parse_join_query(QueryExpr::Table(table_query));
         }
 
         // Parse optional WHERE clause
@@ -117,7 +118,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse JOIN query
-    fn parse_join_query(&mut self, left_table: TableQuery) -> Result<QueryExpr, ParseError> {
+    pub(crate) fn parse_join_query(&mut self, left: QueryExpr) -> Result<QueryExpr, ParseError> {
         // Parse join type
         let join_type = if self.consume(&Token::Inner)? {
             self.expect(Token::Join)?;
@@ -144,24 +145,24 @@ impl<'a> Parser<'a> {
         };
 
         if self.consume(&Token::Graph)? {
-            return self.parse_graph_join_query(left_table, join_type);
+            return self.parse_graph_join_query(left, join_type);
         }
         if self.check(&Token::Path) {
-            return self.parse_path_join_query(left_table, join_type);
+            return self.parse_path_join_query(left, join_type);
         }
         if self.check(&Token::Vector) {
-            return self.parse_vector_join_query(left_table, join_type);
+            return self.parse_vector_join_query(left, join_type);
         }
         if self.check(&Token::Hybrid) {
-            return self.parse_hybrid_join_query(left_table, join_type);
+            return self.parse_hybrid_join_query(left, join_type);
         }
 
-        self.parse_table_join_query(left_table, join_type)
+        self.parse_table_join_query(left, join_type)
     }
 
     fn parse_graph_join_query(
         &mut self,
-        left_table: TableQuery,
+        left: QueryExpr,
         join_type: JoinType,
     ) -> Result<QueryExpr, ParseError> {
         // Parse graph pattern
@@ -182,7 +183,7 @@ impl<'a> Parser<'a> {
         };
 
         Ok(QueryExpr::Join(JoinQuery {
-            left: Box::new(QueryExpr::Table(left_table)),
+            left: Box::new(left),
             right: Box::new(QueryExpr::Graph(graph_query)),
             join_type,
             on,
@@ -197,7 +198,7 @@ impl<'a> Parser<'a> {
 
     fn parse_table_join_query(
         &mut self,
-        left_table: TableQuery,
+        left: QueryExpr,
         join_type: JoinType,
     ) -> Result<QueryExpr, ParseError> {
         let table = self.parse_table_source()?;
@@ -217,8 +218,6 @@ impl<'a> Parser<'a> {
             self.expect(Token::On)?;
             self.parse_table_join_condition()?
         };
-        let (filter, order_by, limit, offset, return_items, return_) =
-            self.parse_join_post_clauses()?;
         let table_query = TableQuery {
             table,
             source: None,
@@ -240,23 +239,43 @@ impl<'a> Parser<'a> {
             as_of: None,
         };
 
-        Ok(QueryExpr::Join(JoinQuery {
-            left: Box::new(QueryExpr::Table(left_table)),
+        let mut expr = QueryExpr::Join(JoinQuery {
+            left: Box::new(left),
             right: Box::new(QueryExpr::Table(table_query)),
             join_type,
             on,
-            filter,
-            order_by,
-            limit,
-            offset,
-            return_items,
-            return_,
-        }))
+            filter: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            return_items: Vec::new(),
+            return_: Vec::new(),
+        });
+
+        if self.is_join_keyword() {
+            return self.parse_join_query(expr);
+        }
+
+        let (filter, order_by, limit, offset, _, return_) = self.parse_join_post_clauses()?;
+        let return_ = normalize_table_join_return_projections(return_);
+        let return_items = return_
+            .iter()
+            .filter_map(projection_to_select_item)
+            .collect();
+        if let QueryExpr::Join(join) = &mut expr {
+            join.filter = filter;
+            join.order_by = order_by;
+            join.limit = limit;
+            join.offset = offset;
+            join.return_items = return_items;
+            join.return_ = return_;
+        }
+        Ok(expr)
     }
 
     fn parse_vector_join_query(
         &mut self,
-        left_table: TableQuery,
+        left: QueryExpr,
         join_type: JoinType,
     ) -> Result<QueryExpr, ParseError> {
         let mut right = match self.parse_vector_query()? {
@@ -270,7 +289,7 @@ impl<'a> Parser<'a> {
             self.parse_join_post_clauses()?;
 
         Ok(QueryExpr::Join(JoinQuery {
-            left: Box::new(QueryExpr::Table(left_table)),
+            left: Box::new(left),
             right: Box::new(QueryExpr::Vector(right)),
             join_type,
             on,
@@ -285,7 +304,7 @@ impl<'a> Parser<'a> {
 
     fn parse_path_join_query(
         &mut self,
-        left_table: TableQuery,
+        left: QueryExpr,
         join_type: JoinType,
     ) -> Result<QueryExpr, ParseError> {
         let mut right = match self.parse_path_query()? {
@@ -299,7 +318,7 @@ impl<'a> Parser<'a> {
             self.parse_join_post_clauses()?;
 
         Ok(QueryExpr::Join(JoinQuery {
-            left: Box::new(QueryExpr::Table(left_table)),
+            left: Box::new(left),
             right: Box::new(QueryExpr::Path(right)),
             join_type,
             on,
@@ -314,7 +333,7 @@ impl<'a> Parser<'a> {
 
     fn parse_hybrid_join_query(
         &mut self,
-        left_table: TableQuery,
+        left: QueryExpr,
         join_type: JoinType,
     ) -> Result<QueryExpr, ParseError> {
         let mut right = match self.parse_hybrid_query()? {
@@ -328,7 +347,7 @@ impl<'a> Parser<'a> {
             self.parse_join_post_clauses()?;
 
         Ok(QueryExpr::Join(JoinQuery {
-            left: Box::new(QueryExpr::Table(left_table)),
+            left: Box::new(left),
             right: Box::new(QueryExpr::Hybrid(right)),
             join_type,
             on,
@@ -354,41 +373,33 @@ impl<'a> Parser<'a> {
         ),
         ParseError,
     > {
-        let filter = if self.consume(&Token::Where)? {
-            Some(self.parse_filter()?)
-        } else {
-            None
-        };
+        let mut filter = None;
+        let mut order_by = Vec::new();
+        let mut limit = None;
+        let mut offset = None;
+        let mut return_items = Vec::new();
+        let mut return_ = Vec::new();
 
-        let order_by = if self.consume(&Token::Order)? {
-            self.expect(Token::By)?;
-            self.parse_order_by_list()?
-        } else {
-            Vec::new()
-        };
-
-        let limit = if self.consume(&Token::Limit)? {
-            Some(self.parse_integer()? as u64)
-        } else {
-            None
-        };
-
-        let offset = if self.consume(&Token::Offset)? {
-            Some(self.parse_integer()? as u64)
-        } else {
-            None
-        };
-
-        let (return_items, return_) = if self.consume(&Token::Return)? {
-            let projections = self.parse_return_list()?;
-            let items = projections
-                .iter()
-                .filter_map(projection_to_select_item)
-                .collect();
-            (items, projections)
-        } else {
-            (Vec::new(), Vec::new())
-        };
+        loop {
+            if self.consume(&Token::Where)? {
+                filter = Some(self.parse_filter()?);
+            } else if self.consume(&Token::Order)? {
+                self.expect(Token::By)?;
+                order_by = self.parse_order_by_list()?;
+            } else if self.consume(&Token::Limit)? {
+                limit = Some(self.parse_integer()? as u64);
+            } else if self.consume(&Token::Offset)? {
+                offset = Some(self.parse_integer()? as u64);
+            } else if self.consume(&Token::Return)? {
+                return_ = self.parse_return_list()?;
+                return_items = return_
+                    .iter()
+                    .filter_map(projection_to_select_item)
+                    .collect();
+            } else {
+                break;
+            }
+        }
 
         Ok((filter, order_by, limit, offset, return_items, return_))
     }
@@ -463,6 +474,25 @@ impl<'a> Parser<'a> {
             right_field,
         })
     }
+}
+
+fn normalize_table_join_return_projections(projections: Vec<Projection>) -> Vec<Projection> {
+    projections
+        .into_iter()
+        .map(|projection| match projection {
+            Projection::Field(FieldRef::NodeProperty { alias, property }, output_alias) => {
+                let output_alias = output_alias.or_else(|| Some(property.clone()));
+                Projection::Field(
+                    FieldRef::TableColumn {
+                        table: alias,
+                        column: property,
+                    },
+                    output_alias,
+                )
+            }
+            other => other,
+        })
+        .collect()
 }
 
 /// Sentinel JoinCondition used for CROSS JOIN — neither field references
