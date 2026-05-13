@@ -1,14 +1,22 @@
 # Transactions & MVCC
 
-RedDB implements PostgreSQL-style transactions with snapshot isolation
-and full MVCC visibility. Every connection can open a transaction,
-nest savepoints, and roll back to any level without affecting other
-connections.
+RedDB implements PostgreSQL-style transaction control with snapshot
+isolation. Every connection can open a transaction, nest savepoints,
+and roll back to any level without affecting other connections.
 
-A single `BEGIN / COMMIT` is atomic across every data model — not
-just tables. Graph nodes, vectors, queue messages, and timeseries
-points all carry `xmin` / `xmax` headers and honour the same
-visibility rules, so one transaction can span all of them.
+The v1 table-row guarantee is the MVCC history-store contract from
+[ADR 0014](../adr/0014-mvcc-history-store-and-transaction-recovery.md)
+and [PRD #432](https://github.com/reddb-io/reddb/issues/432): SQL
+table rows use stable logical identity, versioned `UPDATE`, tombstone
+`DELETE`, first-committer-wins conflict checks, atomic `TxCommitBatch`
+recovery, and manual `VACUUM` for obsolete history.
+
+Non-table models keep their existing documented transaction behavior
+until each path adopts the same history-store resolver. Some paths
+already route reads through the shared `xmin` / `xmax` visibility
+resolver, so they participate in single-node transaction visibility,
+but RedDB does not claim versioned `UPDATE`, historical index fallback,
+or old-snapshot history-store reads for every model yet.
 
 ```sql
 BEGIN;
@@ -17,23 +25,21 @@ INSERT INTO social NODE (label, name) VALUES ('User', 'alice');
 INSERT VECTOR INTO embeddings (id, dense) VALUES (1, [...]);
 QUEUE PUSH fulfillment {order_id: 1};
 COMMIT;
--- every mutation becomes visible at the same moment; ROLLBACK
--- reverts all four
+-- table-row MVCC uses the history-store contract; non-table model
+-- behavior is limited to the documented path for that model
 ```
-
-PostgreSQL has no graphs or vectors. Neo4j has no queues. Kafka has no
-MVCC. RedDB does all of this natively.
 
 ## Quick reference
 
 | Statement | Effect |
 |-----------|--------|
 | `BEGIN` / `START TRANSACTION` | Open a transaction; allocate `xid` |
-| `COMMIT` | Make all writes visible; drain tombstones |
-| `ROLLBACK` | Discard writes; revive tombstoned rows |
+| `COMMIT` | Publish the transaction's staged writes |
+| `ROLLBACK` | Discard staged writes |
 | `SAVEPOINT name` | Push a sub-transaction level |
 | `RELEASE SAVEPOINT name` | Pop savepoint (work survives) |
 | `ROLLBACK TO SAVEPOINT name` | Abort sub-xids above the savepoint |
+| `VACUUM [table]` | Reclaim obsolete table-row history and tombstones not pinned by active snapshots |
 
 ## Basic usage
 
@@ -45,8 +51,8 @@ COMMIT;
 ```
 
 If the application crashes or the connection drops before `COMMIT`,
-every write is rolled back automatically because the WAL never sees
-the commit record.
+in-flight transaction state is discarded because the WAL never sees a
+complete commit record.
 
 ## Isolation
 
@@ -73,6 +79,12 @@ SELECT count(*) FROM users;   -- 101 — autocommit sees latest
 Own writes are always visible inside the writing transaction even when
 the sub-xid exceeds the captured snapshot (needed so the writer can
 observe its own savepoint work).
+
+RedDB uses snapshot isolation with first-committer-wins conflict
+detection for table rows. If two concurrent transactions update or
+delete the same logical row, the first transaction to commit wins; the
+later conflicting commit fails with a serialization conflict instead
+of silently overwriting the committed version.
 
 ## Savepoints
 
@@ -101,20 +113,20 @@ it up".
 
 ## MVCC tombstones
 
-`DELETE` inside a transaction is a two-phase operation:
+For SQL table rows, `DELETE` writes a tombstone version for the row's
+logical identity instead of physically removing the row immediately:
 
-1. The row's `xmax` is stamped with the current writing xid. Other
-   active snapshots still see the row.
-2. On `COMMIT`, the row is physically removed and CDC emits the Delete
-   event.
-3. On `ROLLBACK` (or `ROLLBACK TO SAVEPOINT`), `xmax` is wiped back to
-   0 so the row reappears for every snapshot that opens after the
-   rollback.
+1. The pre-delete row version is retained in the history store.
+2. The current store records a tombstone for the same `logical_id`.
+3. Other active snapshots can still resolve the historical version.
+4. `VACUUM` later reclaims the tombstone and historical version only
+   after no active transaction, snapshot, VCS pin, or retention horizon
+   can still need them.
 
-Queue `ACK` (via `QUEUE POP`) inside a transaction behaves the same
-way: the message is tombstoned rather than removed, so other
-consumers still see it until the txn commits. If the txn rolls back,
-the message reappears in the queue automatically.
+Queue `ACK` (via `QUEUE POP`) inside a transaction keeps its existing
+tombstone-based transaction behavior: the message is not made
+permanently unavailable until the transaction commits. That is not the
+same as the table-row history-store guarantee.
 
 ```sql
 BEGIN;
@@ -124,8 +136,43 @@ ROLLBACK;
 -- message is visible again for the next consumer
 ```
 
-Autocommit `DELETE` (without `BEGIN`) still physically removes the row
-immediately — no tombstone overhead for one-shot deletes.
+Autocommit table-row `DELETE` uses the same tombstone/history path as
+explicit transactions. Physical removal is a maintenance concern for
+manual `VACUUM`.
+
+## Commit recovery boundary
+
+Committed table-row transactions are durable at the `TxCommitBatch`
+boundary. Recovery applies only complete, valid commit batches; an
+incomplete batch or in-flight transaction is discarded after restart.
+Complete committed batches are replayed idempotently.
+
+The commit path preserves WAL-before-data ordering: RedDB validates
+conflicts, builds and appends the `TxCommitBatch`, makes the batch
+durable according to the configured WAL policy, applies current-store,
+history-store, and index changes, then acknowledges success.
+
+## Versioned UPDATE
+
+For SQL table rows, `UPDATE` creates a new physical version for the
+same logical row. The previous committed version is retained as
+history and remains visible to snapshots that started before the
+update committed.
+
+```sql
+-- session A
+BEGIN;
+SELECT status FROM orders WHERE id = 1; -- 'pending'
+
+-- session B
+UPDATE orders SET status = 'paid' WHERE id = 1;
+
+-- back in session A: old snapshot still resolves the prior version
+SELECT status FROM orders WHERE id = 1; -- 'pending'
+COMMIT;
+
+SELECT status FROM orders WHERE id = 1; -- 'paid'
+```
 
 ## Visibility rules
 
@@ -178,14 +225,28 @@ current snapshot engine.
 
 ## Limitations
 
-- `UPDATE` overwrites the tuple in place rather than writing a new
-  version. A `ROLLBACK TO SAVEPOINT` after an UPDATE cannot restore
-  the pre-update value. INSERT and DELETE are fully reversible.
-- Phase 2.3 snapshots are in-process; crash recovery of in-flight
-  transactions arrives with Phase 4.
+- The history-store MVCC guarantee applies to SQL table rows first.
+  Full multi-model rollout is out of scope for this slice; non-table
+  models either use the shared resolver where implemented or retain
+  their existing documented behavior.
+- `SERIALIZABLE` isolation and SSI are out of scope. RedDB rejects
+  `SERIALIZABLE` instead of silently downgrading it.
+- Manual `VACUUM` is supported for table-row history and tombstone GC.
+  An autovacuum daemon is out of scope.
+- Current secondary indexes plus MVCC recheck/fallback provide the
+  table-row correctness target. Historical secondary indexes are out
+  of scope.
+- Prepared transactions, two-phase commit, distributed transaction
+  consensus, and cross-node transaction atomicity are out of scope.
+- The commit recovery boundary is the complete `TxCommitBatch`.
+  In-flight transactions that do not reach that boundary before crash
+  are discarded on recovery. Complete committed batches are replayed
+  idempotently.
 
 ## See also
 
+- [ADR 0014 — MVCC history store and transaction crash recovery](../adr/0014-mvcc-history-store-and-transaction-recovery.md)
+- [PRD #432 — MVCC history store and transaction crash recovery](https://github.com/reddb-io/reddb/issues/432)
 - [Row Level Security](../security/rls.md)
 - [Multi-Tenancy](../security/multi-tenancy.md)
 - [WAL & Recovery](../engine/wal.md)

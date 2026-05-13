@@ -1,11 +1,10 @@
-//! Phase 1 MVCC universal — cross-model atomic transactions.
+//! Cross-model transaction guardrails.
 //!
-//! Validates that `BEGIN / COMMIT / ROLLBACK` applies visibility
-//! filters and xmin stamping across every entity kind — not just
-//! tables. An uncommitted write to a graph node / vector / queue
-//! message must stay invisible to other connections until COMMIT,
-//! and `ROLLBACK` must hide every writer's mutations regardless of
-//! model.
+//! Validates existing non-table paths that route through the shared
+//! `xmin` / `xmax` visibility resolver. This is intentionally narrower
+//! than the table-row history-store contract from ADR 0014: these tests
+//! do not claim versioned UPDATE, historical indexes, or full
+//! history-store MVCC for every data model.
 //!
 //! Two connections are simulated on the same thread by toggling the
 //! thread-local connection id via `set_current_connection_id`.
