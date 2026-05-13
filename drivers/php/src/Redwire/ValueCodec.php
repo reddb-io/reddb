@@ -117,6 +117,7 @@ final class ValueCodec
         return match ($value->kind) {
             Value::KIND_BYTES => self::encodeLenPrefixed(self::TAG_BYTES, self::expectString($value->value, 'bytes')),
             Value::KIND_JSON => self::encodeLenPrefixed(self::TAG_JSON, self::canonicalJson($value->value)),
+            Value::KIND_TIMESTAMP => chr(self::TAG_TIMESTAMP) . self::packI64(self::expectInt($value->value, 'timestamp')),
             Value::KIND_UUID => chr(self::TAG_UUID) . self::parseUuid(self::expectString($value->value, 'uuid')),
             default => throw new \InvalidArgumentException("unknown Value wrapper '{$value->kind}'"),
         };
@@ -128,6 +129,7 @@ final class ValueCodec
             return match ($value->kind) {
                 Value::KIND_BYTES => ['$bytes' => base64_encode(self::expectString($value->value, 'bytes'))],
                 Value::KIND_JSON => self::canonicalize($value->value),
+                Value::KIND_TIMESTAMP => ['$ts' => self::expectInt($value->value, 'timestamp')],
                 Value::KIND_UUID => ['$uuid' => self::formatUuid(self::parseUuid(self::expectString($value->value, 'uuid')))],
                 default => throw new \InvalidArgumentException("unknown Value wrapper '{$value->kind}'"),
             };
@@ -263,6 +265,14 @@ final class ValueCodec
     {
         if (!is_string($value)) {
             throw new \InvalidArgumentException("{$label} value must be a string");
+        }
+        return $value;
+    }
+
+    private static function expectInt(mixed $value, string $label): int
+    {
+        if (!is_int($value)) {
+            throw new \InvalidArgumentException("{$label} value must be an int");
         }
         return $value;
     }

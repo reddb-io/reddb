@@ -74,6 +74,32 @@ final class ValueCodecTest extends TestCase
         $this->assertSame(25, strlen($encoded));
     }
 
+    public function test_param_fixture_manifest(): void
+    {
+        $manifest = json_decode(
+            file_get_contents(__DIR__ . '/../../../crates/reddb-wire/tests/fixtures/params/manifest.json'),
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+
+        foreach ($manifest['values'] as $fixture) {
+            $this->assertSame(
+                $fixture['redwire_hex'],
+                bin2hex(ValueCodec::encodeValue($this->fixtureValue($fixture['name']))),
+                $fixture['name'],
+            );
+        }
+
+        foreach ($manifest['queries'] as $fixture) {
+            $params = array_map(fn (string $name): mixed => $this->fixtureValue($name), $fixture['params']);
+            $this->assertSame(
+                $fixture['redwire_hex'],
+                bin2hex(ValueCodec::encodeQueryWithParams($fixture['sql'], $params)),
+                $fixture['name'],
+            );
+        }
+    }
+
     public function test_http_params_use_json_envelopes_for_tagged_values(): void
     {
         $params = ValueCodec::toHttpParams([
@@ -101,5 +127,32 @@ final class ValueCodecTest extends TestCase
             ['$ts' => 1700000000],
             ['$uuid' => '00112233-4455-6677-8899-aabbccddeeff'],
         ], $params);
+    }
+
+    private function fixtureValue(string $name): mixed
+    {
+        return match ($name) {
+            'null' => null,
+            'bool_true' => true,
+            'bool_false' => false,
+            'int_min' => PHP_INT_MIN,
+            'int_max' => PHP_INT_MAX,
+            'int_42' => 42,
+            'float_nan' => NAN,
+            'float_pos_inf' => INF,
+            'float_neg_inf' => -INF,
+            'float_subnormal_min' => unpack('e', hex2bin('0100000000000000'))[1],
+            'text_unicode' => 'héllo',
+            'text_x' => 'x',
+            'bytes_empty' => Value::bytes(''),
+            'bytes_deadbeef' => Value::bytes("\xde\xad\xbe\xef"),
+            'json_nested' => Value::json(['z' => [1, ['deep' => [true, false]]], 'a' => null]),
+            'timestamp_zero' => Value::timestamp(0),
+            'timestamp_max' => Value::timestamp(PHP_INT_MAX),
+            'uuid_001122' => Value::uuid('00112233-4455-6677-8899-aabbccddeeff'),
+            'vector_empty' => [],
+            'vector_three' => [1.0, 2.0, -0.5],
+            default => throw new \InvalidArgumentException("unknown fixture {$name}"),
+        };
     }
 }

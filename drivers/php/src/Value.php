@@ -14,6 +14,7 @@ final class Value
 {
     public const KIND_BYTES = 'bytes';
     public const KIND_JSON = 'json';
+    public const KIND_TIMESTAMP = 'timestamp';
     public const KIND_UUID = 'uuid';
 
     private function __construct(
@@ -30,6 +31,11 @@ final class Value
     public static function json(mixed $value): self
     {
         return new self(self::KIND_JSON, $value);
+    }
+
+    public static function timestamp(int $seconds): self
+    {
+        return new self(self::KIND_TIMESTAMP, $seconds);
     }
 
     public static function uuid(string $uuid): self
