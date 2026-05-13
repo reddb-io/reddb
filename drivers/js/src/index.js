@@ -24,12 +24,14 @@ import { RpcClient, RedDBError } from './protocol.js'
 import { parseUri } from './url.js'
 import { CacheClient } from './cache.js'
 import { KvClient } from './kv.js'
+import { QueueClient } from './queue.js'
 import { ConfigClient } from './config.js'
 import { VaultClient } from './vault.js'
 
 export { RedDBError }
 export { CacheClient } from './cache.js'
 export { KvClient } from './kv.js'
+export { QueueClient } from './queue.js'
 export { ConfigClient } from './config.js'
 export { VaultClient } from './vault.js'
 export { parseUri, deriveLoginUrl } from './url.js'
@@ -281,6 +283,7 @@ export class RedDB {
     this.client = client
     this.transport = opts.transport ?? null
     this.cache = new CacheClient(client, this.transport)
+    this.queue = new QueueClient(client)
     const defaultKv = new KvClient(client)
     this.kv = Object.assign((collection = 'kv_default') => new KvClient(client, collection), {
       put: defaultKv.put.bind(defaultKv),

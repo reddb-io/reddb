@@ -3949,6 +3949,13 @@ fn test_parse_queue_control_and_group_command_forms() {
             if queue == "tasks" && count == 5
     ));
 
+    let query = parse("QUEUE PEEK tasks COUNT 5").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::QueueCommand(QueueCommand::Peek { queue, count })
+            if queue == "tasks" && count == 5
+    ));
+
     let query = parse("QUEUE PEEK tasks").unwrap();
     assert!(matches!(
         query,

@@ -239,6 +239,18 @@ export class KvClient {
   ): AsyncIterable<KvWatchEvent>
 }
 
+export class QueueClient {
+  push(
+    queue: string,
+    value: unknown,
+    options?: { priority?: number },
+  ): Promise<QueryResult>
+  pop(queue: string, count?: number): Promise<unknown[]>
+  peek(queue: string, count?: number): Promise<unknown[]>
+  len(queue: string): Promise<number>
+  purge(queue: string): Promise<QueryResult>
+}
+
 export class ConfigClient {
   put(
     key: string,
@@ -267,6 +279,7 @@ export class RedDB {
   /** Underlying transport label. connect() returns 'embedded'. */
   readonly transport: string | null
   readonly cache: CacheClient
+  readonly queue: QueueClient
   readonly kv: KvClient & ((collection?: string) => KvClient)
   readonly config: (collection?: string) => ConfigClient
   readonly vault: (collection?: string) => VaultClient
