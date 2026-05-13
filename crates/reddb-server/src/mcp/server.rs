@@ -333,6 +333,7 @@ impl McpServer {
             temperature: invocation.temperature.map(|v| v as f32),
             seed: invocation.seed,
             strict: invocation.strict.unwrap_or(true),
+            stream: false,
         };
 
         // `cache` / `nocache` are accepted and validated by the MCP
