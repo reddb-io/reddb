@@ -3,6 +3,7 @@
 //! This module currently supports OpenAI embeddings and is intended to be
 //! consumed by server handlers and future query/runtime integrations.
 
+use std::io::BufRead;
 use std::time::Duration;
 
 use crate::json::{parse_json, Map, Value as JsonValue};
@@ -312,6 +313,176 @@ pub async fn openai_prompt_async(
     } else {
         parse_openai_prompt_response(&response.body, &request.model)
     }
+}
+
+/// Blocking OpenAI-compatible streaming prompt.
+///
+/// This is used by the socket-level `ASK ... STREAM` path so each provider
+/// `delta.content` can be forwarded to the HTTP client before the provider
+/// body has completed.
+pub fn openai_prompt_streaming(
+    request: OpenAiPromptRequest,
+    mut on_chunk: impl FnMut(&str) -> RedDBResult<()>,
+) -> RedDBResult<AiPromptResponse> {
+    if request.model.trim().is_empty() {
+        return Err(RedDBError::Query(
+            "OpenAI prompt model cannot be empty".to_string(),
+        ));
+    }
+    if request.prompt.trim().is_empty() {
+        return Err(RedDBError::Query("prompt cannot be empty".to_string()));
+    }
+
+    let url = format!(
+        "{}/chat/completions",
+        request.api_base.trim_end_matches('/')
+    );
+    let payload = build_openai_prompt_payload(
+        &request.model,
+        &request.prompt,
+        request.temperature,
+        request.seed,
+        request.max_output_tokens,
+        true,
+    );
+
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(10)))
+        .timeout_send_request(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(120)))
+        .timeout_recv_body(Some(Duration::from_secs(120)))
+        .http_status_as_error(false)
+        .build()
+        .into();
+
+    let mut req = agent
+        .post(&url)
+        .header("content-type", "application/json")
+        .header("accept", "text/event-stream");
+    let trimmed_key = request.api_key.trim();
+    if !trimmed_key.is_empty() {
+        req = req.header("authorization", &format!("Bearer {}", trimmed_key));
+    }
+
+    let mut response = req
+        .send(payload)
+        .map_err(|err| RedDBError::Query(format!("OpenAI transport error: {err}")))?;
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        let body = response
+            .body_mut()
+            .read_to_string()
+            .unwrap_or_else(|err| format!("failed to read response body: {err}"));
+        let message = openai_error_message(&body)
+            .unwrap_or_else(|| "OpenAI prompt request failed".to_string());
+        return Err(RedDBError::Query(format!(
+            "OpenAI prompt request failed (status {status}): {message}"
+        )));
+    }
+
+    let mut model = request.model;
+    let mut chunks = Vec::new();
+    let mut prompt_tokens = None;
+    let mut completion_tokens = None;
+    let mut total_tokens = None;
+    let mut stop_reason = None;
+
+    let mut reader = std::io::BufReader::new(response.body_mut().as_reader());
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line).map_err(|err| {
+            RedDBError::Query(format!("failed to read OpenAI streaming response: {err}"))
+        })?;
+        if read == 0 {
+            break;
+        }
+
+        let trimmed = line.trim();
+        let Some(data) = trimmed.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data.is_empty() {
+            continue;
+        }
+        if data == "[DONE]" {
+            break;
+        }
+
+        let parsed = parse_json(data).map_err(|err| {
+            RedDBError::Query(format!(
+                "invalid OpenAI streaming prompt JSON response: {err}"
+            ))
+        })?;
+        let json = JsonValue::from(parsed);
+        if let Some(value) = json.get("model").and_then(JsonValue::as_str) {
+            model = value.to_string();
+        }
+        if let Some(usage) = json.get("usage") {
+            prompt_tokens = usage
+                .get("prompt_tokens")
+                .and_then(JsonValue::as_i64)
+                .and_then(|value| u64::try_from(value).ok())
+                .or(prompt_tokens);
+            completion_tokens = usage
+                .get("completion_tokens")
+                .and_then(JsonValue::as_i64)
+                .and_then(|value| u64::try_from(value).ok())
+                .or(completion_tokens);
+            total_tokens = usage
+                .get("total_tokens")
+                .and_then(JsonValue::as_i64)
+                .and_then(|value| u64::try_from(value).ok())
+                .or(total_tokens);
+        }
+
+        let Some(choices) = json.get("choices").and_then(JsonValue::as_array) else {
+            continue;
+        };
+        let Some(first_choice) = choices.first() else {
+            continue;
+        };
+        if let Some(reason) = first_choice
+            .get("finish_reason")
+            .and_then(JsonValue::as_str)
+        {
+            stop_reason = Some(reason.to_string());
+        }
+        if let Some(text) = first_choice
+            .get("delta")
+            .and_then(|delta| delta.get("content"))
+            .and_then(JsonValue::as_str)
+        {
+            if !text.is_empty() {
+                on_chunk(text)?;
+                chunks.push(text.to_string());
+            }
+        }
+    }
+
+    if chunks.is_empty() {
+        return Err(RedDBError::Query(
+            "OpenAI streaming prompt response missing text content".to_string(),
+        ));
+    }
+
+    let output_text = chunks.concat();
+    let total_tokens = total_tokens.or_else(|| match (prompt_tokens, completion_tokens) {
+        (Some(prompt), Some(completion)) => Some(prompt.saturating_add(completion)),
+        _ => None,
+    });
+
+    Ok(AiPromptResponse {
+        provider: "openai",
+        model,
+        output_text,
+        output_chunks: Some(chunks),
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        stop_reason,
+    })
 }
 
 /// Async Anthropic messages-API prompt via [`AiTransport`].
