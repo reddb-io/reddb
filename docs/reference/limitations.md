@@ -18,7 +18,7 @@ RedDB v0.1 (Beta) has the following known limitations:
 | SQL joins across collections | Limited | Single-table joins supported |
 | Persistent binary index formats | In progress | Being hardened |
 | Streaming query results | Not supported | Full result sets only |
-| PG wire `Parse`/`Bind` (extended query) | Not supported | Simple query protocol only; binary format not emitted. |
+| PG wire binary result format | Not supported | `Parse`/`Bind` extended query is supported; result rows are emitted in text format. |
 | Subqueries in `FROM`/`WHERE` | Limited | Only `SELECT ... FROM (SELECT ...) AS alias` for the simple nested-select case lands today. |
 | Partition pruning in the planner | Library ready, DDL wiring pending | Pruner (`src/storage/query/planner/partition_pruning.rs`) ships RANGE / LIST / HASH rules with AND tightening + OR widening + conservative fallback. Planner call-site lands in the sprint that follows B5 projections. |
 | Append-only tables | Shipped | `CREATE TABLE ... APPEND ONLY` (or `WITH (append_only = true)`) rejects UPDATE / DELETE at parse time. |

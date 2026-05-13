@@ -74,6 +74,16 @@ pub enum FrontendMessage {
     GssEncRequest,
     /// `Q` — simple query.
     Query(String),
+    /// `P` — Parse: name a prepared statement and its SQL text.
+    Parse(ParseMessage),
+    /// `B` — Bind: attach concrete parameter bytes to a named statement.
+    Bind(BindMessage),
+    /// `D` — Describe a prepared statement or portal.
+    Describe(DescribeMessage),
+    /// `E` — Execute a bound portal.
+    Execute(ExecuteMessage),
+    /// `C` — Close a prepared statement or portal.
+    Close(CloseMessage),
     /// `p` — password / SASL response. Payload is ignored for `trust` auth.
     PasswordMessage(Vec<u8>),
     /// `X` — Terminate.
@@ -85,6 +95,46 @@ pub enum FrontendMessage {
     /// Any other frame we don't implement yet; carries the raw tag for
     /// logging / ErrorResponse reply.
     Unknown { tag: u8, payload: Vec<u8> },
+}
+
+#[derive(Debug, Clone)]
+pub struct ParseMessage {
+    pub statement: String,
+    pub query: String,
+    pub param_type_oids: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BindMessage {
+    pub portal: String,
+    pub statement: String,
+    pub param_format_codes: Vec<i16>,
+    pub params: Vec<Option<Vec<u8>>>,
+    pub result_format_codes: Vec<i16>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DescribeMessage {
+    pub target: DescribeTarget,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DescribeTarget {
+    Statement,
+    Portal,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecuteMessage {
+    pub portal: String,
+    pub max_rows: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct CloseMessage {
+    pub target: DescribeTarget,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -119,6 +169,16 @@ pub enum BackendMessage {
     DataRow(Vec<Option<Vec<u8>>>),
     /// `C` — CommandComplete (e.g. "SELECT 3", "INSERT 0 1").
     CommandComplete(String),
+    /// `1` — ParseComplete.
+    ParseComplete,
+    /// `2` — BindComplete.
+    BindComplete,
+    /// `3` — CloseComplete.
+    CloseComplete,
+    /// `t` — ParameterDescription.
+    ParameterDescription(Vec<u32>),
+    /// `n` — NoData.
+    NoData,
     /// `E` — ErrorResponse with severity + code + message.
     ErrorResponse {
         severity: String,
@@ -260,6 +320,11 @@ pub async fn read_frame<R: AsyncRead + Unpin>(
             let query = read_cstring(&payload, &mut pos)?;
             FrontendMessage::Query(query)
         }
+        b'P' => FrontendMessage::Parse(parse_parse_message(&payload)?),
+        b'B' => FrontendMessage::Bind(parse_bind_message(&payload)?),
+        b'D' => FrontendMessage::Describe(parse_describe_message(&payload)?),
+        b'E' => FrontendMessage::Execute(parse_execute_message(&payload)?),
+        b'C' => FrontendMessage::Close(parse_close_message(&payload)?),
         b'p' => FrontendMessage::PasswordMessage(payload),
         b'X' => FrontendMessage::Terminate,
         b'H' => FrontendMessage::Flush,
@@ -398,6 +463,18 @@ fn encode_backend(msg: &BackendMessage) -> (u8, Vec<u8>) {
             push_cstring(&mut buf, tag);
             (b'C', buf)
         }
+        BackendMessage::ParseComplete => (b'1', Vec::new()),
+        BackendMessage::BindComplete => (b'2', Vec::new()),
+        BackendMessage::CloseComplete => (b'3', Vec::new()),
+        BackendMessage::ParameterDescription(oids) => {
+            let mut buf = Vec::with_capacity(2 + oids.len() * 4);
+            buf.extend_from_slice(&(oids.len() as i16).to_be_bytes());
+            for oid in oids {
+                buf.extend_from_slice(&oid.to_be_bytes());
+            }
+            (b't', buf)
+        }
+        BackendMessage::NoData => (b'n', Vec::new()),
         BackendMessage::ErrorResponse {
             severity,
             code,
@@ -456,6 +533,169 @@ fn read_cstring(buf: &[u8], pos: &mut usize) -> Result<String, PgWireError> {
     Ok(s)
 }
 
+fn parse_parse_message(payload: &[u8]) -> Result<ParseMessage, PgWireError> {
+    let mut pos = 0;
+    let statement = read_cstring(payload, &mut pos)?;
+    let query = read_cstring(payload, &mut pos)?;
+    let nparams = read_i16(payload, &mut pos, "Parse parameter count")?;
+    if nparams < 0 {
+        return Err(PgWireError::Protocol(
+            "negative Parse parameter count".into(),
+        ));
+    }
+    let mut param_type_oids = Vec::with_capacity(nparams as usize);
+    for _ in 0..nparams {
+        param_type_oids.push(read_u32(payload, &mut pos, "Parse parameter type OID")?);
+    }
+    ensure_consumed(payload, pos, "Parse")?;
+    Ok(ParseMessage {
+        statement,
+        query,
+        param_type_oids,
+    })
+}
+
+fn parse_bind_message(payload: &[u8]) -> Result<BindMessage, PgWireError> {
+    let mut pos = 0;
+    let portal = read_cstring(payload, &mut pos)?;
+    let statement = read_cstring(payload, &mut pos)?;
+
+    let nformats = read_i16(payload, &mut pos, "Bind format count")?;
+    if nformats < 0 {
+        return Err(PgWireError::Protocol("negative Bind format count".into()));
+    }
+    let mut param_format_codes = Vec::with_capacity(nformats as usize);
+    for _ in 0..nformats {
+        param_format_codes.push(read_i16(payload, &mut pos, "Bind format code")?);
+    }
+
+    let nparams = read_i16(payload, &mut pos, "Bind parameter count")?;
+    if nparams < 0 {
+        return Err(PgWireError::Protocol(
+            "negative Bind parameter count".into(),
+        ));
+    }
+    let mut params = Vec::with_capacity(nparams as usize);
+    for _ in 0..nparams {
+        let len = read_i32(payload, &mut pos, "Bind parameter length")?;
+        if len == -1 {
+            params.push(None);
+        } else if len < -1 {
+            return Err(PgWireError::Protocol(
+                "invalid Bind parameter length".into(),
+            ));
+        } else {
+            params.push(Some(
+                read_bytes(payload, &mut pos, len as usize, "Bind parameter")?.to_vec(),
+            ));
+        }
+    }
+
+    let nresult_formats = read_i16(payload, &mut pos, "Bind result format count")?;
+    if nresult_formats < 0 {
+        return Err(PgWireError::Protocol(
+            "negative Bind result format count".into(),
+        ));
+    }
+    let mut result_format_codes = Vec::with_capacity(nresult_formats as usize);
+    for _ in 0..nresult_formats {
+        result_format_codes.push(read_i16(payload, &mut pos, "Bind result format code")?);
+    }
+    ensure_consumed(payload, pos, "Bind")?;
+
+    Ok(BindMessage {
+        portal,
+        statement,
+        param_format_codes,
+        params,
+        result_format_codes,
+    })
+}
+
+fn parse_describe_message(payload: &[u8]) -> Result<DescribeMessage, PgWireError> {
+    let mut pos = 0;
+    let target = read_describe_target(payload, &mut pos, "Describe")?;
+    let name = read_cstring(payload, &mut pos)?;
+    ensure_consumed(payload, pos, "Describe")?;
+    Ok(DescribeMessage { target, name })
+}
+
+fn parse_execute_message(payload: &[u8]) -> Result<ExecuteMessage, PgWireError> {
+    let mut pos = 0;
+    let portal = read_cstring(payload, &mut pos)?;
+    let max_rows = read_u32(payload, &mut pos, "Execute max rows")?;
+    ensure_consumed(payload, pos, "Execute")?;
+    Ok(ExecuteMessage { portal, max_rows })
+}
+
+fn parse_close_message(payload: &[u8]) -> Result<CloseMessage, PgWireError> {
+    let mut pos = 0;
+    let target = read_describe_target(payload, &mut pos, "Close")?;
+    let name = read_cstring(payload, &mut pos)?;
+    ensure_consumed(payload, pos, "Close")?;
+    Ok(CloseMessage { target, name })
+}
+
+fn read_describe_target(
+    payload: &[u8],
+    pos: &mut usize,
+    frame: &'static str,
+) -> Result<DescribeTarget, PgWireError> {
+    let byte = *read_bytes(payload, pos, 1, frame)?
+        .first()
+        .expect("one target byte");
+    match byte {
+        b'S' => Ok(DescribeTarget::Statement),
+        b'P' => Ok(DescribeTarget::Portal),
+        other => Err(PgWireError::Protocol(format!(
+            "{frame} target must be 'S' or 'P', got 0x{other:02x}"
+        ))),
+    }
+}
+
+fn read_i16(payload: &[u8], pos: &mut usize, field: &'static str) -> Result<i16, PgWireError> {
+    let bytes = read_bytes(payload, pos, 2, field)?;
+    Ok(i16::from_be_bytes([bytes[0], bytes[1]]))
+}
+
+fn read_i32(payload: &[u8], pos: &mut usize, field: &'static str) -> Result<i32, PgWireError> {
+    let bytes = read_bytes(payload, pos, 4, field)?;
+    Ok(i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn read_u32(payload: &[u8], pos: &mut usize, field: &'static str) -> Result<u32, PgWireError> {
+    let bytes = read_bytes(payload, pos, 4, field)?;
+    Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn read_bytes<'a>(
+    payload: &'a [u8],
+    pos: &mut usize,
+    len: usize,
+    field: &'static str,
+) -> Result<&'a [u8], PgWireError> {
+    let end = pos
+        .checked_add(len)
+        .ok_or_else(|| PgWireError::Protocol(format!("{field} length overflow")))?;
+    if end > payload.len() {
+        return Err(PgWireError::Protocol(format!("{field} truncated")));
+    }
+    let bytes = &payload[*pos..end];
+    *pos = end;
+    Ok(bytes)
+}
+
+fn ensure_consumed(payload: &[u8], pos: usize, frame: &'static str) -> Result<(), PgWireError> {
+    if pos == payload.len() {
+        Ok(())
+    } else {
+        Err(PgWireError::Protocol(format!(
+            "{frame} had {} trailing bytes",
+            payload.len() - pos
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,6 +750,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn parse_extended_query_frames() {
+        let mut parse_payload = Vec::new();
+        push_test_cstring(&mut parse_payload, "");
+        push_test_cstring(&mut parse_payload, "SELECT $1");
+        parse_payload.extend_from_slice(&1i16.to_be_bytes());
+        parse_payload.extend_from_slice(&23u32.to_be_bytes());
+        let mut frame = tagged_frame(b'P', parse_payload);
+        let mut cursor = std::io::Cursor::new(frame);
+        match read_frame(&mut cursor).await.unwrap() {
+            FrontendMessage::Parse(msg) => {
+                assert_eq!(msg.statement, "");
+                assert_eq!(msg.query, "SELECT $1");
+                assert_eq!(msg.param_type_oids, vec![23]);
+            }
+            other => panic!("expected Parse, got {other:?}"),
+        }
+
+        let mut bind_payload = Vec::new();
+        push_test_cstring(&mut bind_payload, "");
+        push_test_cstring(&mut bind_payload, "");
+        bind_payload.extend_from_slice(&1i16.to_be_bytes());
+        bind_payload.extend_from_slice(&0i16.to_be_bytes());
+        bind_payload.extend_from_slice(&1i16.to_be_bytes());
+        bind_payload.extend_from_slice(&2i32.to_be_bytes());
+        bind_payload.extend_from_slice(b"42");
+        bind_payload.extend_from_slice(&0i16.to_be_bytes());
+        frame = tagged_frame(b'B', bind_payload);
+        let mut cursor = std::io::Cursor::new(frame);
+        match read_frame(&mut cursor).await.unwrap() {
+            FrontendMessage::Bind(msg) => {
+                assert_eq!(msg.portal, "");
+                assert_eq!(msg.statement, "");
+                assert_eq!(msg.param_format_codes, vec![0]);
+                assert_eq!(msg.params, vec![Some(b"42".to_vec())]);
+                assert!(msg.result_format_codes.is_empty());
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+
+        let mut describe_payload = vec![b'P'];
+        push_test_cstring(&mut describe_payload, "");
+        let mut cursor = std::io::Cursor::new(tagged_frame(b'D', describe_payload));
+        assert!(matches!(
+            read_frame(&mut cursor).await.unwrap(),
+            FrontendMessage::Describe(DescribeMessage {
+                target: DescribeTarget::Portal,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
     async fn emit_ready_for_query() {
         let mut out: Vec<u8> = Vec::new();
         write_frame(
@@ -548,6 +840,30 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(data[0], b'D');
+    }
+
+    #[tokio::test]
+    async fn emit_extended_completion_frames() {
+        let mut out = Vec::new();
+        write_frame(&mut out, &BackendMessage::ParseComplete)
+            .await
+            .unwrap();
+        write_frame(&mut out, &BackendMessage::BindComplete)
+            .await
+            .unwrap();
+        write_frame(
+            &mut out,
+            &BackendMessage::ParameterDescription(vec![23, 25]),
+        )
+        .await
+        .unwrap();
+        write_frame(&mut out, &BackendMessage::NoData)
+            .await
+            .unwrap();
+        write_frame(&mut out, &BackendMessage::CloseComplete)
+            .await
+            .unwrap();
+        assert_eq!(collect_tags(&out), vec![b'1', b'2', b't', b'n', b'3']);
     }
 
     // ---------------------------------------------------------------
@@ -675,5 +991,33 @@ mod tests {
         assert!(!out.contains(&0));
         assert_eq!(&out[1..4], &[0xEF, 0xBF, 0xBD]);
         assert_eq!(&out[5..8], &[0xEF, 0xBF, 0xBD]);
+    }
+
+    fn tagged_frame(tag: u8, payload: Vec<u8>) -> Vec<u8> {
+        let mut frame = vec![tag];
+        frame.extend_from_slice(&((payload.len() + 4) as u32).to_be_bytes());
+        frame.extend_from_slice(&payload);
+        frame
+    }
+
+    fn push_test_cstring(out: &mut Vec<u8>, value: &str) {
+        out.extend_from_slice(value.as_bytes());
+        out.push(0);
+    }
+
+    fn collect_tags(bytes: &[u8]) -> Vec<u8> {
+        let mut tags = Vec::new();
+        let mut pos = 0;
+        while pos < bytes.len() {
+            tags.push(bytes[pos]);
+            let len = u32::from_be_bytes([
+                bytes[pos + 1],
+                bytes[pos + 2],
+                bytes[pos + 3],
+                bytes[pos + 4],
+            ]) as usize;
+            pos += 1 + len;
+        }
+        tags
     }
 }
