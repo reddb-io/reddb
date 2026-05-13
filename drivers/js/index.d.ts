@@ -89,14 +89,12 @@ export interface AskQueryResult {
 
 export interface InsertResult {
   affected: number
-  /** Present when the underlying engine surfaces the inserted entity id. */
-  id?: string | number
+  id: string | number
 }
 
 export interface BulkInsertResult {
   affected: number
-  /** Present when the server surfaces inserted entity ids for the batch. */
-  ids?: Array<string | number>
+  ids: Array<string | number>
 }
 
 export interface GetResult {
