@@ -90,7 +90,7 @@ export async function connect(uri, options = {}) {
       token = session.token
     }
     const client = new HttpRpcClient({ baseUrl, token })
-    await client.call('health', {})
+    await client.call('query', { sql: 'SELECT 1' })
     return new RedDB(client)
   }
 
