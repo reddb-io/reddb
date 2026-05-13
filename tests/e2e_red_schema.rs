@@ -150,6 +150,8 @@ fn select_from_red_collections_materializes_catalog_rows() {
             "internal",
             "tenant_id",
             "queue_mode",
+            "dimension",
+            "metric",
         ]
     );
     assert_eq!(result.result.records.len(), 1);

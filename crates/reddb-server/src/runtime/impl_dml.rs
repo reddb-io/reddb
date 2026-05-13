@@ -1710,6 +1710,8 @@ fn ensure_graph_insert_contract(runtime: &RedDBRuntime, collection: &str) -> Red
         created_at_unix_ms: now,
         updated_at_unix_ms: now,
         default_ttl_ms: db.collection_default_ttl_ms(collection),
+        vector_dimension: None,
+        vector_metric: None,
         context_index_fields: Vec::new(),
         declared_columns: Vec::new(),
         table_def: None,

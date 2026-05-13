@@ -260,6 +260,56 @@ impl RedDBRuntime {
         self.execute_create_table(raw_query, &create)
     }
 
+    pub fn execute_create_vector(
+        &self,
+        raw_query: &str,
+        query: &CreateVectorQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        if is_system_schema_name(&query.name) {
+            return Err(RedDBError::Query("system schema is read-only".to_string()));
+        }
+        let store = self.inner.db.store();
+        if store.get_collection(&query.name).is_some() {
+            if query.if_not_exists {
+                return Ok(RuntimeQueryResult::ok_message(
+                    raw_query.to_string(),
+                    &format!("vector '{}' already exists", query.name),
+                    "create",
+                ));
+            }
+            return Err(RedDBError::Query(format!(
+                "vector '{}' already exists",
+                query.name
+            )));
+        }
+
+        store
+            .create_collection(&query.name)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.inner
+            .db
+            .save_collection_contract(vector_collection_contract(query))
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        if let Some(tenant_id) = crate::runtime::impl_core::current_tenant() {
+            store.set_config_tree(
+                &format!("red.collection_tenants.{}", query.name),
+                &crate::serde_json::Value::String(tenant_id),
+            );
+        }
+        self.inner
+            .db
+            .persist_metadata()
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.invalidate_result_cache();
+
+        Ok(RuntimeQueryResult::ok_message(
+            raw_query.to_string(),
+            &format!("vector '{}' created", query.name),
+            "create",
+        ))
+    }
+
     fn provision_vault_key_material(
         &self,
         collection: &str,
@@ -1294,6 +1344,8 @@ fn collection_contract_from_create_table(
         created_at_unix_ms: now,
         updated_at_unix_ms: now,
         default_ttl_ms: query.default_ttl_ms,
+        vector_dimension: None,
+        vector_metric: None,
         context_index_fields: query.context_index_fields.clone(),
         declared_columns,
         table_def: Some(build_table_def_from_create_table(query)?),
@@ -1318,6 +1370,8 @@ fn default_collection_contract_for_existing_table(
         created_at_unix_ms: now,
         updated_at_unix_ms: now,
         default_ttl_ms: None,
+        vector_dimension: None,
+        vector_metric: None,
         context_index_fields: Vec::new(),
         declared_columns: Vec::new(),
         table_def: Some(crate::storage::schema::TableDef::new(name.to_string())),
@@ -1342,6 +1396,31 @@ fn keyed_collection_contract(
         created_at_unix_ms: now,
         updated_at_unix_ms: now,
         default_ttl_ms: None,
+        vector_dimension: None,
+        vector_metric: None,
+        context_index_fields: Vec::new(),
+        declared_columns: Vec::new(),
+        table_def: None,
+        timestamps_enabled: false,
+        context_index_enabled: false,
+        append_only: false,
+        subscriptions: Vec::new(),
+    }
+}
+
+fn vector_collection_contract(query: &CreateVectorQuery) -> crate::physical::CollectionContract {
+    let now = current_unix_ms();
+    crate::physical::CollectionContract {
+        name: query.name.clone(),
+        declared_model: crate::catalog::CollectionModel::Vector,
+        schema_mode: crate::catalog::SchemaMode::Dynamic,
+        origin: crate::physical::ContractOrigin::Explicit,
+        version: 1,
+        created_at_unix_ms: now,
+        updated_at_unix_ms: now,
+        default_ttl_ms: None,
+        vector_dimension: Some(query.dimension),
+        vector_metric: Some(query.metric),
         context_index_fields: Vec::new(),
         declared_columns: Vec::new(),
         table_def: None,
@@ -1835,6 +1914,8 @@ fn event_queue_collection_contract(queue: &str) -> crate::physical::CollectionCo
         created_at_unix_ms: now,
         updated_at_unix_ms: now,
         default_ttl_ms: None,
+        vector_dimension: None,
+        vector_metric: None,
         context_index_fields: Vec::new(),
         declared_columns: Vec::new(),
         table_def: None,

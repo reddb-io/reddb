@@ -264,6 +264,7 @@ pub(crate) fn runtime_join_table_context(
         | QueryExpr::Delete(_)
         | QueryExpr::CreateTable(_)
         | QueryExpr::CreateCollection(_)
+        | QueryExpr::CreateVector(_)
         | QueryExpr::DropTable(_)
         | QueryExpr::DropGraph(_)
         | QueryExpr::DropVector(_)

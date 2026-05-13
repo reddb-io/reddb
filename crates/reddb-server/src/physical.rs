@@ -208,6 +208,8 @@ pub struct CollectionContract {
     pub created_at_unix_ms: u128,
     pub updated_at_unix_ms: u128,
     pub default_ttl_ms: Option<u64>,
+    pub vector_dimension: Option<usize>,
+    pub vector_metric: Option<crate::storage::engine::distance::DistanceMetric>,
     pub context_index_fields: Vec<String>,
     pub declared_columns: Vec<DeclaredColumnContract>,
     pub table_def: Option<crate::storage::schema::TableDef>,

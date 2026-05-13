@@ -87,6 +87,8 @@ pub struct CollectionDescriptor {
     pub declared_model: Option<CollectionModel>,
     pub observed_model: CollectionModel,
     pub queue_mode: Option<QueueMode>,
+    pub vector_dimension: Option<usize>,
+    pub vector_metric: Option<crate::storage::engine::distance::DistanceMetric>,
     pub declared_schema_mode: Option<SchemaMode>,
     pub observed_schema_mode: SchemaMode,
     pub entities: usize,
@@ -359,6 +361,8 @@ pub fn snapshot_store_with_declarations(
             } else {
                 None
             },
+            vector_dimension: contract.and_then(|contract| contract.vector_dimension),
+            vector_metric: contract.and_then(|contract| contract.vector_metric),
             declared_schema_mode: contract.map(|contract| contract.schema_mode),
             observed_schema_mode: inferred_schema_mode,
             entities: entity_count,

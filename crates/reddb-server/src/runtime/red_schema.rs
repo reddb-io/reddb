@@ -32,7 +32,7 @@ pub(super) const SUBSCRIPTIONS: &str = "red.subscriptions";
 pub(super) const SUBSCRIPTIONS_INTERNAL: &str = "__red_schema_subscriptions";
 pub(super) const READ_ONLY_ERROR: &str = "system schema is read-only";
 
-const COLLECTION_COLUMNS: [&str; 11] = [
+const COLLECTION_COLUMNS: [&str; 13] = [
     "name",
     "model",
     "schema_mode",
@@ -44,6 +44,8 @@ const COLLECTION_COLUMNS: [&str; 11] = [
     "internal",
     "tenant_id",
     "queue_mode",
+    "dimension",
+    "metric",
 ];
 
 const COLUMN_COLUMNS: [&str; 7] = [
@@ -919,6 +921,14 @@ fn collections_snapshot(
             } else {
                 Value::Null
             };
+            let vector_dimension = collection
+                .vector_dimension
+                .map(|dimension| Value::UnsignedInteger(dimension as u64))
+                .unwrap_or(Value::Null);
+            let vector_metric = collection
+                .vector_metric
+                .map(|metric| Value::text(distance_metric_name(metric)))
+                .unwrap_or(Value::Null);
             UnifiedRecord::with_schema(
                 Arc::clone(&schema),
                 vec![
@@ -933,10 +943,20 @@ fn collections_snapshot(
                     Value::Boolean(internal),
                     visible_tenant.map(Value::text).unwrap_or(Value::Null),
                     queue_mode,
+                    vector_dimension,
+                    vector_metric,
                 ],
             )
         })
         .collect()
+}
+
+fn distance_metric_name(metric: crate::storage::engine::distance::DistanceMetric) -> &'static str {
+    match metric {
+        crate::storage::engine::distance::DistanceMetric::L2 => "l2",
+        crate::storage::engine::distance::DistanceMetric::Cosine => "cosine",
+        crate::storage::engine::distance::DistanceMetric::InnerProduct => "inner_product",
+    }
 }
 
 fn stats_snapshot(

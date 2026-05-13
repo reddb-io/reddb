@@ -2,9 +2,9 @@
 
 use super::super::ast::{
     AlterOperation, AlterTableQuery, CreateCollectionQuery, CreateColumnDef, CreateTableQuery,
-    DropCollectionQuery, DropDocumentQuery, DropGraphQuery, DropKvQuery, DropTableQuery,
-    DropVectorQuery, ExplainAlterQuery, ExplainFormat, PartitionKind, PartitionSpec, QueryExpr,
-    TruncateQuery,
+    CreateVectorQuery, DropCollectionQuery, DropDocumentQuery, DropGraphQuery, DropKvQuery,
+    DropTableQuery, DropVectorQuery, ExplainAlterQuery, ExplainFormat, PartitionKind,
+    PartitionSpec, QueryExpr, TruncateQuery,
 };
 use super::super::lexer::Token;
 use super::error::ParseError;
@@ -408,6 +408,36 @@ impl<'a> Parser<'a> {
         Ok(QueryExpr::CreateCollection(CreateCollectionQuery {
             name,
             kind,
+            if_not_exists,
+        }))
+    }
+
+    pub fn parse_create_vector_body(&mut self) -> Result<QueryExpr, ParseError> {
+        let if_not_exists = self.match_if_not_exists()?;
+        let name = self.parse_drop_collection_name()?;
+        if !self.consume_ident_ci("DIM")? {
+            return Err(ParseError::expected(
+                vec!["DIM"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        let dimension = self.parse_integer()?;
+        if dimension <= 0 {
+            return Err(ParseError::new(
+                "VECTOR DIM must be a positive integer".to_string(),
+                self.position(),
+            ));
+        }
+        let metric = if self.consume(&Token::Metric)? {
+            self.parse_distance_metric()?
+        } else {
+            crate::storage::engine::distance::DistanceMetric::Cosine
+        };
+        Ok(QueryExpr::CreateVector(CreateVectorQuery {
+            name,
+            dimension: dimension as usize,
+            metric,
             if_not_exists,
         }))
     }

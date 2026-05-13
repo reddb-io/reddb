@@ -108,6 +108,8 @@ fn ensure_collection_model_contract(
         created_at_unix_ms: now,
         updated_at_unix_ms: now,
         default_ttl_ms: db.collection_default_ttl_ms(collection),
+        vector_dimension: None,
+        vector_metric: None,
         context_index_fields: Vec::new(),
         declared_columns: Vec::new(),
         table_def: matches!(requested_model, crate::catalog::CollectionModel::Table)

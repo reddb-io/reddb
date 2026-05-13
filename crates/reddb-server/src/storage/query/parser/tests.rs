@@ -49,7 +49,7 @@ fn assert_unsupported_token(input: &str, token: &str) {
 
 #[test]
 fn test_parse_create_unsupported_recognized_tokens_use_clear_error() {
-    for (input, token) in [("CREATE VECTOR vt", "VECTOR")] {
+    for (input, token) in [("CREATE SELECT vt", "SELECT")] {
         assert_unsupported_token(input, token);
     }
 }
@@ -101,6 +101,36 @@ fn test_parse_create_graph_document_and_collection_forms() {
     };
     assert_eq!(name, "h");
     assert_eq!(precision, 14);
+}
+
+#[test]
+fn test_parse_create_vector_forms() {
+    let vector = parse("CREATE VECTOR embeddings DIM 4").unwrap();
+    let QueryExpr::CreateVector(vector) = vector else {
+        panic!("Expected CreateVectorQuery");
+    };
+    assert_eq!(vector.name, "embeddings");
+    assert_eq!(vector.dimension, 4);
+    assert_eq!(
+        vector.metric,
+        crate::storage::engine::distance::DistanceMetric::Cosine
+    );
+
+    let vector = parse("CREATE VECTOR embeddings DIM 4 METRIC cosine").unwrap();
+    let QueryExpr::CreateVector(vector) = vector else {
+        panic!("Expected CreateVectorQuery");
+    };
+    assert_eq!(
+        vector.metric,
+        crate::storage::engine::distance::DistanceMetric::Cosine
+    );
+
+    let err = parse("CREATE VECTOR embeddings DIM 4 METRIC unknown").unwrap_err();
+    assert!(err.to_string().contains("Unknown distance metric: unknown"));
+    assert!(err.to_string().contains("L2, COSINE, INNER_PRODUCT"));
+
+    let err = parse("CREATE VECTOR embeddings").unwrap_err();
+    assert!(err.to_string().contains("DIM"));
 }
 
 #[test]

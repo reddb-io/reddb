@@ -82,14 +82,14 @@ pub use analyzer::{
 pub use ast::{
     AlterOperation, AlterQueueQuery, AlterTableQuery, AlterUserAttribute, AlterUserStmt, CompareOp,
     CreateColumnDef, CreateQueueQuery, CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery,
-    CteDefinition, CteQueryBuilder, DeleteQuery, DropCollectionQuery, DropDocumentQuery,
-    DropGraphQuery, DropKvQuery, DropQueueQuery, DropTableQuery, DropTimeSeriesQuery,
-    DropTreeQuery, DropVectorQuery, EdgeDirection, EdgePattern, FieldRef, Filter as AstFilter,
-    GrantObject, GrantObjectKind, GrantPrincipalRef, GrantStmt, GraphCommand, GraphPattern,
-    GraphQuery, InsertEntityType, InsertQuery, JoinCondition, JoinQuery, JoinType, NodePattern,
-    NodeSelector, OrderByClause, PathQuery, PolicyPrincipalRef, PolicyResourceRef, PolicyUserRef,
-    Projection, QueryExpr, QueryWithCte, RevokeStmt, SearchCommand, SelectItem, TableQuery,
-    TreeCommand, TreeNodeSpec, TreePosition, UpdateQuery, WithClause,
+    CreateVectorQuery, CteDefinition, CteQueryBuilder, DeleteQuery, DropCollectionQuery,
+    DropDocumentQuery, DropGraphQuery, DropKvQuery, DropQueueQuery, DropTableQuery,
+    DropTimeSeriesQuery, DropTreeQuery, DropVectorQuery, EdgeDirection, EdgePattern, FieldRef,
+    Filter as AstFilter, GrantObject, GrantObjectKind, GrantPrincipalRef, GrantStmt, GraphCommand,
+    GraphPattern, GraphQuery, InsertEntityType, InsertQuery, JoinCondition, JoinQuery, JoinType,
+    NodePattern, NodeSelector, OrderByClause, PathQuery, PolicyPrincipalRef, PolicyResourceRef,
+    PolicyUserRef, Projection, QueryExpr, QueryWithCte, RevokeStmt, SearchCommand, SelectItem,
+    TableQuery, TreeCommand, TreeNodeSpec, TreePosition, UpdateQuery, WithClause,
 };
 pub use engine::{
     Binding, BindingBuilder, BindingIterator, Op, OpBGP, OpDisjunction, OpDistinct, OpExtend,

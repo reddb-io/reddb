@@ -1028,6 +1028,8 @@ mod tests {
             created_at_unix_ms: now,
             updated_at_unix_ms: now,
             default_ttl_ms: None,
+            vector_dimension: None,
+            vector_metric: None,
             context_index_fields: Vec::new(),
             declared_columns: Vec::new(),
             table_def: None,
