@@ -581,6 +581,46 @@ fn io_err(err: io::Error) -> ClientError {
     ClientError::new(ErrorCode::Network, err.to_string())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::param_to_redwire;
+    use crate::{JsonValue, Value};
+    use reddb_wire::query_with_params::ParamValue as WireValue;
+
+    #[test]
+    fn param_to_redwire_preserves_all_wire_variants() {
+        let uuid = [0x11; 16];
+        let cases = vec![
+            (Value::Null, WireValue::Null),
+            (Value::Bool(true), WireValue::Bool(true)),
+            (Value::Int64(42), WireValue::Int(42)),
+            (Value::Float(1.5), WireValue::Float(1.5)),
+            (Value::Text("Ada".into()), WireValue::Text("Ada".into())),
+            (
+                Value::Bytes(vec![0xde, 0xad]),
+                WireValue::Bytes(vec![0xde, 0xad]),
+            ),
+            (
+                Value::Vector(vec![0.25, 0.5]),
+                WireValue::Vector(vec![0.25, 0.5]),
+            ),
+            (
+                Value::Json(JsonValue::object([("role", JsonValue::string("admin"))])),
+                WireValue::Json(br#"{"role":"admin"}"#.to_vec()),
+            ),
+            (
+                Value::Timestamp(1_700_000_000),
+                WireValue::Timestamp(1_700_000_000),
+            ),
+            (Value::Uuid(uuid), WireValue::Uuid(uuid)),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(param_to_redwire(&input), expected);
+        }
+    }
+}
+
 fn bulk_insert_result_from_json(value: serde_json::Value) -> BulkInsertResult {
     let affected = value
         .as_object()

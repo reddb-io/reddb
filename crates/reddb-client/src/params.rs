@@ -48,6 +48,13 @@ pub enum Value {
 }
 
 impl Value {
+    /// Compatibility constructor for issue #386 examples and callers coming
+    /// from drivers that spell the integer wire value as `Int64`.
+    #[allow(non_snake_case)]
+    pub fn Int64(value: i64) -> Self {
+        Self::Int(value)
+    }
+
     /// Canonical JSON envelope used by HTTP `POST /query`'s `params`
     /// field and any future JSON-RPC transport. Matches the shape
     /// `crates/reddb-server/src/server/handlers_query.rs` accepts.

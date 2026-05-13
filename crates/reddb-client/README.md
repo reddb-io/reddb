@@ -51,10 +51,31 @@ let rows = db
 let hits = db
     .query_with(
         "SEARCH SIMILAR $1 COLLECTION embeddings LIMIT $2",
-        &[Value::Vector(vec![0.1, 0.2, 0.3]), Value::Int(5)],
+        &[Value::Vector(vec![0.1, 0.2, 0.3]), Value::Int64(5)],
     )
     .await?;
 # let _ = (rows, hits);
+# Ok(())
+# }
+```
+
+The native RedWire client uses the same parameter API when the crate is built
+with `--features redwire`:
+
+```rust,no_run
+use reddb_client::redwire::{Auth, ConnectOptions, RedWireClient};
+use reddb_client::Value;
+
+# async fn run() -> reddb_client::Result<()> {
+let mut client = RedWireClient::connect(
+    ConnectOptions::new("127.0.0.1", 5050).with_auth(Auth::Anonymous),
+)
+.await?;
+
+let rows = client
+    .query_with("SELECT $1", &[Value::Int64(42)])
+    .await?;
+# let _ = rows;
 # Ok(())
 # }
 ```
@@ -71,12 +92,13 @@ Native Rust → engine `Value` mapping:
 | `Vec<f32>` / `&[f32]` | `Vector`                |
 | `Option<T>` (None)    | `Null`                  |
 | `serde_json::Value`   | `Json`                  |
+| `Value::Int64(n)` | `Int` (i64 compatibility constructor) |
 | `Value::Timestamp(s)` | `Timestamp` (seconds)   |
 | `Value::Uuid(b)`      | `Uuid` (16 raw bytes)   |
 
 Today the `embedded`, `http`, and Rust `grpc` transports carry parameters
-end-to-end. RedWire support is separate from this crate's gRPC path and still
-depends on the server advertising `FEATURE_PARAMS`.
+end-to-end. The native Rust RedWire client also carries parameters end-to-end
+with `QueryWithParams` and depends on the server advertising `FEATURE_PARAMS`.
 
 ## Cargo features
 
