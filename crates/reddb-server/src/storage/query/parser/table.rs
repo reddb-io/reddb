@@ -192,6 +192,17 @@ impl<'a> Parser<'a> {
             as_of: None,
         };
 
+        if self.is_join_keyword() {
+            let return_items = std::mem::take(&mut query.select_items);
+            let return_ = std::mem::take(&mut query.columns);
+            let mut expr = self.parse_join_query(QueryExpr::Table(query))?;
+            if let QueryExpr::Join(join) = &mut expr {
+                join.return_items = return_items;
+                join.return_ = return_;
+            }
+            return Ok(expr);
+        }
+
         // Parse optional clauses
         self.parse_table_clauses(&mut query)?;
 

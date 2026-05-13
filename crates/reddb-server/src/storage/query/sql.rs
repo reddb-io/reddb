@@ -733,6 +733,9 @@ impl<'a> Parser<'a> {
                 QueryExpr::Table(query) => Ok(FrontendStatement::Sql(SqlStatement::Query(
                     SqlQuery::Select(query),
                 ))),
+                QueryExpr::Join(query) => Ok(FrontendStatement::Sql(SqlStatement::Query(
+                    SqlQuery::Join(query),
+                ))),
                 QueryExpr::QueueSelect(query) => Ok(FrontendStatement::QueueSelect(query)),
                 other => Err(ParseError::new(
                     format!("internal: SELECT produced unexpected query kind {other:?}"),
@@ -1186,6 +1189,7 @@ impl<'a> Parser<'a> {
         match self.peek() {
             Token::Select => match self.parse_select_query()? {
                 QueryExpr::Table(query) => Ok(SqlCommand::Select(query)),
+                QueryExpr::Join(query) => Ok(SqlCommand::Join(query)),
                 other => Err(ParseError::new(
                     format!("internal: SELECT produced unexpected query kind {other:?}"),
                     self.position(),

@@ -1354,6 +1354,11 @@ pub(super) fn resolve_runtime_field(
                 let matches_context =
                     runtime_table_context_matches(table.as_str(), table_name, table_alias);
                 if !matches_context {
+                    if table_name.is_none() && table_alias.is_none() {
+                        if let Some(value) = record.get(column.as_str()) {
+                            return Some(value.clone());
+                        }
+                    }
                     return resolve_runtime_document_path(record, &format!("{table}.{column}"));
                 }
             }

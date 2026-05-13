@@ -46,6 +46,10 @@ fn bool_at(result: &RuntimeQueryResult, row: usize, column: &str) -> bool {
     }
 }
 
+fn is_null_at(result: &RuntimeQueryResult, row: usize, column: &str) -> bool {
+    matches!(result.result.records[row].get(column), Some(Value::Null))
+}
+
 fn collection_model(rt: &RedDBRuntime, name: &str) -> Option<reddb_server::CollectionModel> {
     rt.db()
         .catalog_model_snapshot()
@@ -109,6 +113,108 @@ fn join_query_executes_against_real_table_rows() {
     assert_eq!(int_at(&result, 0, "total"), 50);
     assert_eq!(text_at(&result, 1, "name"), "Linus");
     assert_eq!(int_at(&result, 1, "total"), 75);
+}
+
+fn seed_select_led_join_tables(rt: &RedDBRuntime) {
+    rt.execute_query("CREATE TABLE users (id INT, name TEXT)")
+        .expect("create users");
+    rt.execute_query("CREATE TABLE orders (id INT, user_id INT, region_id INT, total INT)")
+        .expect("create orders");
+    rt.execute_query("CREATE TABLE regions (id INT, name TEXT)")
+        .expect("create regions");
+    rt.execute_query("INSERT INTO users (id, name) VALUES (1, 'Ada'), (2, 'Linus'), (3, 'Grace')")
+        .expect("insert users");
+    rt.execute_query(
+        "INSERT INTO orders (id, user_id, region_id, total) \
+         VALUES (10, 1, 100, 50), (11, 2, 200, 75), (12, 99, 999, 999)",
+    )
+    .expect("insert orders");
+    rt.execute_query("INSERT INTO regions (id, name) VALUES (100, 'NA'), (200, 'EU')")
+        .expect("insert regions");
+}
+
+#[test]
+fn select_led_inner_join_executes_against_real_table_rows() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    seed_select_led_join_tables(&rt);
+
+    let result = rt
+        .execute_query(
+            "SELECT u.name AS user_name, o.total AS total FROM users u JOIN orders o ON u.id = o.user_id \
+             ORDER BY o.total",
+        )
+        .expect("select-led join executes");
+
+    assert_eq!(result.engine, "runtime-join");
+    assert_eq!(result.result.len(), 2);
+    assert_eq!(text_at(&result, 0, "user_name"), "Ada");
+    assert_eq!(int_at(&result, 0, "total"), 50);
+    assert_eq!(text_at(&result, 1, "user_name"), "Linus");
+    assert_eq!(int_at(&result, 1, "total"), 75);
+}
+
+#[test]
+fn select_led_outer_and_cross_join_flavors_execute() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    seed_select_led_join_tables(&rt);
+
+    let left = rt
+        .execute_query(
+            "SELECT u.name AS user_name, o.total AS total FROM users u LEFT JOIN orders o ON u.id = o.user_id \
+             ORDER BY u.name",
+        )
+        .expect("left join executes");
+    assert_eq!(left.result.len(), 3);
+    assert_eq!(text_at(&left, 0, "user_name"), "Ada");
+    assert_eq!(text_at(&left, 1, "user_name"), "Grace");
+    assert!(is_null_at(&left, 1, "total"));
+
+    let right = rt
+        .execute_query(
+            "SELECT u.name AS user_name, o.total AS total FROM users u RIGHT JOIN orders o ON u.id = o.user_id \
+             ORDER BY o.total",
+        )
+        .expect("right join executes");
+    assert_eq!(right.result.len(), 3);
+    assert_eq!(int_at(&right, 2, "total"), 999);
+    assert!(is_null_at(&right, 2, "user_name"));
+
+    let full = rt
+        .execute_query(
+            "SELECT u.name AS user_name, o.total AS total \
+             FROM users u FULL JOIN orders o ON u.id = o.user_id",
+        )
+        .expect("full join executes");
+    assert_eq!(full.result.len(), 4);
+
+    let cross = rt
+        .execute_query(
+            "SELECT u.name AS user_name, r.name AS region_name FROM users u CROSS JOIN regions r",
+        )
+        .expect("cross join executes");
+    assert_eq!(cross.result.len(), 6);
+}
+
+#[test]
+fn select_led_multiple_table_joins_execute() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    seed_select_led_join_tables(&rt);
+
+    let result = rt
+        .execute_query(
+            "SELECT u.name AS user_name, o.total AS total, r.name AS region_name \
+             FROM users u JOIN orders o ON u.id = o.user_id \
+             JOIN regions r ON o.region_id = r.id ORDER BY o.total",
+        )
+        .expect("multiple select-led joins execute");
+
+    assert_eq!(result.engine, "runtime-join");
+    assert_eq!(result.result.len(), 2);
+    assert_eq!(text_at(&result, 0, "user_name"), "Ada");
+    assert_eq!(int_at(&result, 0, "total"), 50);
+    assert_eq!(text_at(&result, 0, "region_name"), "NA");
+    assert_eq!(text_at(&result, 1, "user_name"), "Linus");
+    assert_eq!(text_at(&result, 1, "region_name"), "EU");
 }
 
 #[test]
