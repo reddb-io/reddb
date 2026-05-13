@@ -402,6 +402,7 @@ impl RedDBServer {
                     seed: None,
                     max_output_tokens: Some(2048),
                     api_base,
+                    stream: false,
                 };
                 crate::runtime::ai::block_on_ai(async move {
                     crate::ai::openai_prompt_async(&transport, request).await
@@ -780,6 +781,7 @@ impl RedDBServer {
                         seed: None,
                         max_output_tokens,
                         api_base: api_base.clone(),
+                        stream: false,
                     };
                     crate::runtime::ai::block_on_ai(async move {
                         crate::ai::openai_prompt_async(&transport, request).await
