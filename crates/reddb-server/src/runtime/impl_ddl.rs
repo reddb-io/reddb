@@ -158,6 +158,11 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &CreateTableQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        if query.collection_model == CollectionModel::Document {
+            return Err(RedDBError::Query(
+                "NOT_YET_SUPPORTED: CREATE DOCUMENT is not implemented yet; use an auto-created table by inserting JSON rows into a normal table as a workaround".to_string(),
+            ));
+        }
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         if is_system_schema_name(&query.name) {
             return Err(RedDBError::Query("system schema is read-only".to_string()));
@@ -221,6 +226,38 @@ impl RedDBRuntime {
             &format!("{label} '{}' created", query.name),
             "create",
         ))
+    }
+
+    pub fn execute_create_collection(
+        &self,
+        raw_query: &str,
+        query: &CreateCollectionQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let model = match query.kind.as_str() {
+            "graph" => CollectionModel::Graph,
+            "document" => CollectionModel::Document,
+            other => {
+                return Err(RedDBError::Query(format!(
+                    "NOT_YET_SUPPORTED: CREATE COLLECTION KIND {other} is not implemented"
+                )));
+            }
+        };
+        let create = CreateTableQuery {
+            collection_model: model,
+            name: query.name.clone(),
+            columns: Vec::new(),
+            if_not_exists: query.if_not_exists,
+            default_ttl_ms: None,
+            context_index_fields: Vec::new(),
+            context_index_enabled: false,
+            timestamps: false,
+            partition_by: None,
+            tenant_by: None,
+            append_only: false,
+            subscriptions: Vec::new(),
+            vault_own_master_key: false,
+        };
+        self.execute_create_table(raw_query, &create)
     }
 
     fn provision_vault_key_material(

@@ -883,6 +883,7 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
         QueryExpr::Update(query) => cache_scope_insert(scopes, &query.table),
         QueryExpr::Delete(query) => cache_scope_insert(scopes, &query.table),
         QueryExpr::CreateTable(query) => cache_scope_insert(scopes, &query.name),
+        QueryExpr::CreateCollection(query) => cache_scope_insert(scopes, &query.name),
         QueryExpr::DropTable(query) => cache_scope_insert(scopes, &query.name),
         QueryExpr::DropGraph(query) => cache_scope_insert(scopes, &query.name),
         QueryExpr::DropVector(query) => cache_scope_insert(scopes, &query.name),
@@ -1849,6 +1850,7 @@ pub(super) fn intent_lock_modes_for(
         // other writers + readers on `c` but leaves other collections
         // running (because Global stays IX, not X).
         QueryExpr::CreateTable(_)
+        | QueryExpr::CreateCollection(_)
         | QueryExpr::DropTable(_)
         | QueryExpr::DropGraph(_)
         | QueryExpr::DropVector(_)
@@ -1918,6 +1920,7 @@ fn walk_collections(expr: &QueryExpr, out: &mut Vec<String>) {
         // on the same collection. Other collections stay live
         // because Global is still IX.
         QueryExpr::CreateTable(q) => out.push(q.name.clone()),
+        QueryExpr::CreateCollection(q) => out.push(q.name.clone()),
         QueryExpr::DropTable(q) => out.push(q.name.clone()),
         QueryExpr::DropGraph(q) => out.push(q.name.clone()),
         QueryExpr::DropVector(q) => out.push(q.name.clone()),
@@ -4794,6 +4797,9 @@ impl RedDBRuntime {
             }
             // DDL execution
             QueryExpr::CreateTable(ref create) => self.execute_create_table(query, create),
+            QueryExpr::CreateCollection(ref create) => {
+                self.execute_create_collection(query, create)
+            }
             QueryExpr::DropTable(ref drop_tbl) => self.execute_drop_table(query, drop_tbl),
             QueryExpr::DropGraph(ref drop_graph) => self.execute_drop_graph(query, drop_graph),
             QueryExpr::DropVector(ref drop_vector) => self.execute_drop_vector(query, drop_vector),
@@ -8141,6 +8147,7 @@ impl RedDBRuntime {
             }
             // Remaining DDL — gate on Write role. Fine-grained grants TBD.
             QueryExpr::CreateTable(_)
+            | QueryExpr::CreateCollection(_)
             | QueryExpr::AlterTable(_)
             | QueryExpr::CreateIndex(_)
             | QueryExpr::DropIndex(_)
