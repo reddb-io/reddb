@@ -114,6 +114,12 @@ class ValueCodec {
       case Value.kindJson:
         final jsonBytes = utf8.encode(_canonicalJson(value.value));
         return _encodeLenPrefixed(tagJson, Uint8List.fromList(jsonBytes));
+      case Value.kindTimestamp:
+        final seconds = value.value;
+        if (seconds is! int) {
+          throw ArgumentError('timestamp wrapper requires int');
+        }
+        return _encodeI64(seconds, tagTimestamp);
       case Value.kindUuid:
         final uuid = value.value;
         if (uuid is! String) {
@@ -147,6 +153,12 @@ class ValueCodec {
           throw ArgumentError('bytes wrapper requires List<int>');
         case Value.kindJson:
           return _canonicalize(value.value);
+        case Value.kindTimestamp:
+          final seconds = value.value;
+          if (seconds is! int) {
+            throw ArgumentError('timestamp wrapper requires int');
+          }
+          return {'\$ts': seconds};
         case Value.kindUuid:
           final uuid = value.value;
           if (uuid is! String) {

@@ -1,6 +1,7 @@
 package dev.reddb
 
 import com.fasterxml.jackson.databind.JsonNode
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import dev.reddb.redwire.ValueCodec
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -9,10 +10,14 @@ import org.junit.jupiter.api.Test
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.Path
 import java.time.Instant
 import java.util.UUID
 
 class ValueCodecTest {
+    private val mapper = jacksonObjectMapper()
+
 
     @Test
     fun valueTagTableIsPinned() {
@@ -140,4 +145,58 @@ class ValueCodecTest {
         assertEquals("00112233-4455-6677-8899-aabbccddeeff", params[9]["\$uuid"].asText())
         assertEquals("json", params[10][0].asText())
     }
+
+    @Test
+    fun sharedParameterFixturesMatchManifest() {
+        val manifest = mapper.readTree(
+            Files.readString(Path.of("..", "..", "crates", "reddb-wire", "tests", "fixtures", "params", "manifest.json")),
+        )
+
+        for (fixture in manifest["values"]) {
+            val name = fixture["name"].asText()
+            assertEquals(
+                fixture["redwire_hex"].asText(),
+                ValueCodec.encodeValue(fixtureValue(name)).toHex(),
+                name,
+            )
+        }
+
+        val query = manifest["queries"][0]
+        val params = query["params"].map { fixtureValue(it.asText()) }.toTypedArray()
+        assertEquals(
+            query["redwire_hex"].asText(),
+            ValueCodec.encodeQueryWithParams(query["sql"].asText(), params).toHex(),
+            query["name"].asText(),
+        )
+    }
+
+    private fun fixtureValue(name: String): Any? = when (name) {
+        "null" -> null
+        "bool_true" -> true
+        "bool_false" -> false
+        "int_min" -> Long.MIN_VALUE
+        "int_max" -> Long.MAX_VALUE
+        "int_42" -> 42L
+        "float_nan" -> Double.fromBits(0x7ff8000000000000L)
+        "float_pos_inf" -> Double.POSITIVE_INFINITY
+        "float_neg_inf" -> Double.NEGATIVE_INFINITY
+        "float_subnormal_min" -> Double.fromBits(1L)
+        "text_unicode" -> "h\u00e9llo"
+        "text_x" -> "x"
+        "bytes_empty" -> byteArrayOf()
+        "bytes_deadbeef" -> byteArrayOf(0xde.toByte(), 0xad.toByte(), 0xbe.toByte(), 0xef.toByte())
+        "json_nested" -> linkedMapOf<String, Any?>(
+            "z" to listOf(1, mapOf("deep" to listOf(true, false))),
+            "a" to null,
+        )
+        "timestamp_zero" -> ValueCodec.Timestamp(0L)
+        "timestamp_max" -> ValueCodec.Timestamp(Long.MAX_VALUE)
+        "uuid_001122" -> UUID.fromString("00112233-4455-6677-8899-aabbccddeeff")
+        "vector_empty" -> floatArrayOf()
+        "vector_three" -> floatArrayOf(1.0f, 2.0f, -0.5f)
+        else -> throw IllegalArgumentException("unknown fixture $name")
+    }
+
+    private fun ByteArray.toHex(): String =
+        joinToString("") { "%02x".format(it.toInt() and 0xff) }
 }

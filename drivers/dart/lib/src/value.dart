@@ -9,6 +9,7 @@ class Value {
 
   static const String kindBytes = 'bytes';
   static const String kindJson = 'json';
+  static const String kindTimestamp = 'timestamp';
   static const String kindUuid = 'uuid';
 
   final String kind;
@@ -18,6 +19,8 @@ class Value {
       Value._(kindBytes, Uint8List.fromList(bytes));
 
   static Value json(Object? value) => Value._(kindJson, value);
+
+  static Value timestamp(int seconds) => Value._(kindTimestamp, seconds);
 
   static Value uuid(String uuid) => Value._(kindUuid, uuid);
 }
