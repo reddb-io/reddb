@@ -1362,7 +1362,7 @@ mod tests {
     #[test]
     fn collection_columns_includes_queue_mode() {
         assert!(COLLECTION_COLUMNS.contains(&"queue_mode"));
-        assert_eq!(COLLECTION_COLUMNS.len(), 11);
+        assert_eq!(COLLECTION_COLUMNS.len(), 13);
     }
 
     #[test]
