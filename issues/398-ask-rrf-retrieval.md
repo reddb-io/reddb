@@ -152,3 +152,35 @@ Deferred to follow-up slices:
 - Thread `ASK '...' DEPTH N` into graph traversal retrieval.
 - Add the final known-good ranked-URN integration test once graph/text
   buckets participate in the fused list.
+
+Slice 4: `ASK '...' DEPTH N` now participates in retrieval. The ASK
+pipeline calls `search_context` with graph expansion scoped to the
+candidate collections, keeps `DiscoveryMethod::GraphTraversal` hits as
+a third RRF bucket, and threads those graph hits through prompt source
+formatting, `sources_flat`, citation URN alignment, and EXPLAIN
+planned sources. Absent `DEPTH` uses the existing ASK tool default;
+explicit `DEPTH 1`/`DEPTH 2` changes the graph traversal horizon.
+
+Tests added/updated:
+
+- `runtime::ask_pipeline::tests::graph_search_scoped_honors_depth`
+  builds a small graph and proves `DEPTH 2` surfaces a second-hop hit
+  while `DEPTH 1` does not.
+- `runtime::ask_pipeline::tests::fused_source_order_includes_graph_bucket`
+  pins row/vector/graph RRF fusion order.
+- `runtime::impl_search::citation_wedge_tests::build_sources_flat_orders_rows_before_vectors_with_urns`
+  now includes a graph-node source and verifies its URN round-trips.
+
+Verification for this slice:
+
+- `env CARGO_INCREMENTAL=0 cargo test -p reddb-io-server --lib -- ask_pipeline::tests::fused_source_order_uses_rrf_and_total_limit ask_pipeline::tests::fused_source_order_includes_graph_bucket ask_pipeline::tests::graph_search_scoped_honors_depth render_prompt_tests citation_wedge_tests::build_sources_flat_orders_rows_before_vectors_with_urns citation_wedge_tests::system_prompt_carries_citation_directive`
+- `env CARGO_INCREMENTAL=0 cargo check -p reddb-io-server --lib`
+- `git diff --check`
+
+Deferred to follow-up slices:
+
+- Add a true BM25/text retrieval bucket rather than treating the
+  existing literal row-filter bucket as the text side of hybrid
+  retrieval.
+- Add a full end-to-end known-good ASK ranking fixture once the text
+  bucket is real.
