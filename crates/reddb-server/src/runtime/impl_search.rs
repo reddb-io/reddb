@@ -2,6 +2,8 @@ use super::*;
 use crate::application::SearchContextInput;
 use crate::storage::unified::context_index::{entity_tokens_for_search, tokenize_query};
 
+const ASK_AUDIT_COLLECTION: &str = "red_ask_audit";
+
 impl RedDBRuntime {
     pub fn explain_query(&self, query: &str) -> RedDBResult<RuntimeQueryExplain> {
         let mode = detect_mode(query);
@@ -1257,7 +1259,7 @@ impl RedDBRuntime {
             let mut attempt = crate::runtime::ai::strict_validator::Attempt::First;
             let mut retry_count = 0_u32;
             let mut prompt_for_call = full_prompt.clone();
-            let (answer, prompt_tokens, completion_tokens, citation_result) = loop {
+            let (answer, prompt_tokens, completion_tokens, cost_usd, citation_result) = loop {
                 let provider_started = std::time::Instant::now();
                 let prompt_response = call_ask_llm(
                     &provider,
@@ -1301,6 +1303,7 @@ impl RedDBRuntime {
                             answer,
                             prompt_response.prompt_tokens.unwrap_or(0),
                             completion_tokens,
+                            cost_usd,
                             citation_result,
                         );
                     }
@@ -1310,6 +1313,26 @@ impl RedDBRuntime {
                         prompt_for_call = format!("{prompt}\n\n{full_prompt}");
                     }
                     crate::runtime::ai::strict_validator::Decision::GiveUp { errors } => {
+                        let citation_markers = citation_markers(&citation_result.citations);
+                        self.record_ask_audit(AskAuditInput {
+                            scope: &scope,
+                            question: &ask.question,
+                            source_urns: &source_urns,
+                            provider: &provider_token,
+                            model: &model,
+                            prompt_tokens: i64::from(prompt_tokens),
+                            completion_tokens: completion_tokens.min(i64::MAX as u64) as i64,
+                            cost_usd,
+                            answer: &answer,
+                            citations: &citation_markers,
+                            cache_hit: false,
+                            effective_mode,
+                            temperature: determinism.temperature,
+                            seed: determinism.seed,
+                            validation_ok: false,
+                            retry_count,
+                            errors: &errors,
+                        })?;
                         let validation = validation_to_json_with_mode_warning(
                             &citation_result.warnings,
                             &errors,
@@ -1330,9 +1353,12 @@ impl RedDBRuntime {
                 model,
                 effective_mode,
                 mode_warning,
+                temperature: determinism.temperature,
+                seed: determinism.seed,
                 retry_count,
                 prompt_tokens,
                 completion_tokens,
+                cost_usd,
                 citation_result,
             })
         };
@@ -1375,6 +1401,27 @@ impl RedDBRuntime {
             crate::json::to_vec(&citations_json).unwrap_or_else(|_| b"[]".to_vec());
         let validation_bytes =
             crate::json::to_vec(&validation_json).unwrap_or_else(|_| b"{}".to_vec());
+
+        let citation_markers = citation_markers(&ask_attempt.citation_result.citations);
+        self.record_ask_audit(AskAuditInput {
+            scope: &scope,
+            question: &ask.question,
+            source_urns: &source_urns,
+            provider: &ask_attempt.provider_token,
+            model: &ask_attempt.model,
+            prompt_tokens: ask_attempt.prompt_tokens.min(i64::MAX as u64) as i64,
+            completion_tokens: ask_attempt.completion_tokens.min(i64::MAX as u64) as i64,
+            cost_usd: ask_attempt.cost_usd,
+            answer: &ask_attempt.answer,
+            citations: &citation_markers,
+            cache_hit: false,
+            effective_mode: ask_attempt.effective_mode,
+            temperature: ask_attempt.temperature,
+            seed: ask_attempt.seed,
+            validation_ok: true,
+            retry_count: ask_attempt.retry_count,
+            errors: &[],
+        })?;
 
         // Step 4: Build result
         let mut result = UnifiedResult::with_columns(vec![
@@ -1609,6 +1656,136 @@ impl RedDBRuntime {
         }
     }
 
+    fn ask_audit_settings(&self) -> crate::runtime::ai::audit_record_builder::Settings {
+        crate::runtime::ai::audit_record_builder::Settings {
+            include_answer: self.config_bool("ask.audit.include_answer", false),
+        }
+    }
+
+    fn ask_audit_retention_days(&self) -> u64 {
+        self.config_u64("ask.audit.retention_days", 90)
+    }
+
+    fn record_ask_audit(&self, input: AskAuditInput<'_>) -> RedDBResult<()> {
+        let ts_nanos = ask_audit_now_nanos();
+        self.ensure_ask_audit_collection()?;
+        self.purge_ask_audit_retention(ts_nanos)?;
+
+        let (user, role) = input
+            .scope
+            .identity
+            .as_ref()
+            .map(|(user, role)| (user.as_str(), role.as_str()))
+            .unwrap_or(("", ""));
+        let tenant = input.scope.tenant.as_deref().unwrap_or("");
+        let state = crate::runtime::ai::audit_record_builder::CallState {
+            ts_nanos,
+            tenant,
+            user,
+            role,
+            question: input.question,
+            sources_urns: input.source_urns,
+            provider: input.provider,
+            model: input.model,
+            prompt_tokens: input.prompt_tokens,
+            completion_tokens: input.completion_tokens,
+            cost_usd: input.cost_usd,
+            answer: input.answer,
+            citations: input.citations,
+            cache_hit: input.cache_hit,
+            effective_mode: input.effective_mode,
+            temperature: input.temperature,
+            seed: input.seed,
+            validation_ok: input.validation_ok,
+            retry_count: input.retry_count,
+            errors: input.errors,
+        };
+        let row =
+            crate::runtime::ai::audit_record_builder::build(&state, self.ask_audit_settings());
+        self.insert_ask_audit_row(row)
+    }
+
+    fn ensure_ask_audit_collection(&self) -> RedDBResult<()> {
+        let store = self.inner.db.store();
+        let _ = store.get_or_create_collection(ASK_AUDIT_COLLECTION);
+        if self
+            .inner
+            .db
+            .collection_contract(ASK_AUDIT_COLLECTION)
+            .is_none()
+        {
+            self.inner
+                .db
+                .save_collection_contract(ask_audit_collection_contract())
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            self.inner
+                .db
+                .persist_metadata()
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn insert_ask_audit_row(
+        &self,
+        row: std::collections::BTreeMap<&'static str, crate::json::Value>,
+    ) -> RedDBResult<()> {
+        let mut fields = std::collections::HashMap::with_capacity(row.len());
+        for (key, value) in row {
+            fields.insert(
+                key.to_string(),
+                crate::application::entity::json_to_storage_value(&value)?,
+            );
+        }
+        self.inner
+            .db
+            .store()
+            .insert_auto(
+                ASK_AUDIT_COLLECTION,
+                UnifiedEntity::new(
+                    EntityId::new(0),
+                    EntityKind::TableRow {
+                        table: std::sync::Arc::from(ASK_AUDIT_COLLECTION),
+                        row_id: 0,
+                    },
+                    EntityData::Row(crate::storage::unified::entity::RowData {
+                        columns: Vec::new(),
+                        named: Some(fields),
+                        schema: None,
+                    }),
+                ),
+            )
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        Ok(())
+    }
+
+    fn purge_ask_audit_retention(&self, now_nanos: i64) -> RedDBResult<()> {
+        let retention_days = self.ask_audit_retention_days();
+        let retention_nanos = (retention_days as i128)
+            .saturating_mul(86_400)
+            .saturating_mul(1_000_000_000);
+        let cutoff = (now_nanos as i128).saturating_sub(retention_nanos);
+        let Some(manager) = self.inner.db.store().get_collection(ASK_AUDIT_COLLECTION) else {
+            return Ok(());
+        };
+        let expired = manager.query_all(|entity| {
+            entity
+                .data
+                .as_row()
+                .and_then(|row| row.get_field("ts"))
+                .and_then(storage_value_i128)
+                .is_some_and(|ts| ts < cutoff)
+        });
+        for entity in expired {
+            self.inner
+                .db
+                .store()
+                .delete(ASK_AUDIT_COLLECTION, entity.id)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        }
+        Ok(())
+    }
+
     fn ask_provider_capability_registry(
         &self,
         provider_token: &str,
@@ -1698,10 +1875,33 @@ struct AskLlmAttempt {
     model: String,
     effective_mode: crate::runtime::ai::strict_validator::Mode,
     mode_warning: Option<crate::runtime::ai::provider_capabilities::ModeWarning>,
+    temperature: Option<f32>,
+    seed: Option<u64>,
     retry_count: u32,
     prompt_tokens: u64,
     completion_tokens: u64,
+    cost_usd: f64,
     citation_result: crate::runtime::ai::citation_parser::CitationParseResult,
+}
+
+struct AskAuditInput<'a> {
+    scope: &'a crate::runtime::statement_frame::EffectiveScope,
+    question: &'a str,
+    source_urns: &'a [String],
+    provider: &'a str,
+    model: &'a str,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    cost_usd: f64,
+    answer: &'a str,
+    citations: &'a [u32],
+    cache_hit: bool,
+    effective_mode: crate::runtime::ai::strict_validator::Mode,
+    temperature: Option<f32>,
+    seed: Option<u64>,
+    validation_ok: bool,
+    retry_count: u32,
+    errors: &'a [crate::runtime::ai::strict_validator::ValidationError],
 }
 
 fn provider_list_from_storage_value(value: &crate::storage::schema::Value) -> Option<Vec<String>> {
@@ -1919,6 +2119,13 @@ fn ask_cost_guard_now() -> crate::runtime::ai::cost_guard::Now {
     crate::runtime::ai::cost_guard::Now { epoch_secs }
 }
 
+fn ask_audit_now_nanos() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos().min(i64::MAX as u128) as i64)
+        .unwrap_or_default()
+}
+
 fn ask_cost_guard_tenant_key(tenant: Option<&str>) -> String {
     match tenant {
         Some(tenant) if !tenant.trim().is_empty() => format!("tenant:{tenant}"),
@@ -1929,6 +2136,40 @@ fn ask_cost_guard_tenant_key(tenant: Option<&str>) -> String {
 fn estimate_ask_cost_usd(prompt_tokens: u32, completion_tokens: u32) -> f64 {
     let total_tokens = u64::from(prompt_tokens) + u64::from(completion_tokens);
     total_tokens as f64 / 1_000_000.0
+}
+
+fn citation_markers(citations: &[crate::runtime::ai::citation_parser::Citation]) -> Vec<u32> {
+    citations.iter().map(|citation| citation.marker).collect()
+}
+
+fn ask_audit_collection_contract() -> crate::physical::CollectionContract {
+    let now = crate::utils::now_unix_millis() as u128;
+    crate::physical::CollectionContract {
+        name: ASK_AUDIT_COLLECTION.to_string(),
+        declared_model: crate::catalog::CollectionModel::Table,
+        schema_mode: crate::catalog::SchemaMode::Dynamic,
+        origin: crate::physical::ContractOrigin::Implicit,
+        version: 1,
+        created_at_unix_ms: now,
+        updated_at_unix_ms: now,
+        default_ttl_ms: None,
+        context_index_fields: Vec::new(),
+        declared_columns: Vec::new(),
+        table_def: None,
+        timestamps_enabled: false,
+        context_index_enabled: false,
+        append_only: false,
+        subscriptions: Vec::new(),
+    }
+}
+
+fn storage_value_i128(value: &Value) -> Option<i128> {
+    match value {
+        Value::Integer(value) => Some(i128::from(*value)),
+        Value::UnsignedInteger(value) => Some(i128::from(*value)),
+        Value::Float(value) if value.is_finite() => Some(*value as i128),
+        _ => None,
+    }
 }
 
 fn cost_guard_rejection_to_error(
@@ -3053,6 +3294,66 @@ mod citation_wedge_tests {
         assert_eq!(ask_cost_guard_tenant_key(None), "tenant:<default>");
         assert_eq!(ask_cost_guard_tenant_key(Some("")), "tenant:<default>");
         assert_eq!(ask_cost_guard_tenant_key(Some("acme")), "tenant:acme");
+    }
+
+    #[test]
+    fn ask_audit_retention_purge_deletes_rows_older_than_setting() {
+        let rt = crate::runtime::RedDBRuntime::in_memory().expect("runtime");
+        rt.execute_query("SET CONFIG ask.audit.retention_days = 1")
+            .expect("set retention");
+        rt.ensure_ask_audit_collection().expect("audit collection");
+
+        let urns: Vec<String> = Vec::new();
+        let citations: Vec<u32> = Vec::new();
+        let errors: Vec<crate::runtime::ai::strict_validator::ValidationError> = Vec::new();
+        for (ts_nanos, question) in [
+            (0_i64, "old audit row"),
+            (86_400_000_000_001_i64, "fresh audit row"),
+        ] {
+            let state = crate::runtime::ai::audit_record_builder::CallState {
+                ts_nanos,
+                tenant: "",
+                user: "",
+                role: "",
+                question,
+                sources_urns: &urns,
+                provider: "openai",
+                model: "gpt-4o-mini",
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                cost_usd: 0.000_002,
+                answer: "answer",
+                citations: &citations,
+                cache_hit: false,
+                effective_mode: crate::runtime::ai::strict_validator::Mode::Strict,
+                temperature: Some(0.0),
+                seed: Some(1),
+                validation_ok: true,
+                retry_count: 0,
+                errors: &errors,
+            };
+            let row = crate::runtime::ai::audit_record_builder::build(
+                &state,
+                crate::runtime::ai::audit_record_builder::Settings::default(),
+            );
+            rt.insert_ask_audit_row(row).expect("insert audit row");
+        }
+
+        rt.purge_ask_audit_retention(172_800_000_000_000)
+            .expect("purge audit retention");
+
+        let manager = rt
+            .db()
+            .store()
+            .get_collection(ASK_AUDIT_COLLECTION)
+            .expect("audit collection");
+        let rows = manager.query_all(|entity| entity.data.as_row().is_some());
+        assert_eq!(rows.len(), 1);
+        let row = rows[0].data.as_row().expect("audit row");
+        assert!(matches!(
+            row.get_field("question"),
+            Some(Value::Text(text)) if text.as_ref() == "fresh audit row"
+        ));
     }
 
     #[test]

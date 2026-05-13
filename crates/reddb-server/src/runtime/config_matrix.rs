@@ -77,6 +77,16 @@ pub const MATRIX: &[ConfigDefault] = &[
         tier: Tier::Optional,
         default: || text(""),
     },
+    ConfigDefault {
+        key: "ask.audit.include_answer",
+        tier: Tier::Optional,
+        default: || JsonValue::Bool(false),
+    },
+    ConfigDefault {
+        key: "ask.audit.retention_days",
+        tier: Tier::Optional,
+        default: || num(90.0),
+    },
     // cache.blob.*
     ConfigDefault {
         key: "cache.blob.l1_bytes_max",

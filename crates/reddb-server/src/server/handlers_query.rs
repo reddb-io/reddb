@@ -558,6 +558,7 @@ mod tests {
     use super::*;
     use crate::api::RedDBOptions;
     use crate::runtime::RedDBRuntime;
+    use std::collections::BTreeMap;
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -766,6 +767,116 @@ mod tests {
         assert!(
             text.contains("daily_cost_cap_usd"),
             "missing limit name: {text}"
+        );
+    }
+
+    #[test]
+    fn http_query_ask_writes_five_audit_rows_with_fields() {
+        let _guard = ASK_ENV_LOCK.lock().expect("env lock");
+        let stub = SequenceOpenAiStub::start(vec![
+            "answer one",
+            "answer two",
+            "answer three",
+            "answer four",
+            "answer five",
+        ]);
+        let _api_base =
+            EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
+        let _api_key = EnvVarGuard::unset("REDDB_OPENAI_API_KEY");
+
+        let server = make_server();
+        configure_ask_stub_runtime(&server);
+        assert!(server
+            .runtime
+            .db()
+            .store()
+            .get_collection("red_ask_audit")
+            .is_none());
+
+        for _ in 0..5 {
+            let response =
+                server.handle_query(br#"{"query": "ASK 'why did login fail?'"}"#.to_vec());
+            assert_eq!(response.status, 200, "{}", body_str(&response));
+        }
+
+        assert_eq!(stub.request_count(), 5);
+        let rows = ask_audit_rows(&server);
+        assert_eq!(rows.len(), 5);
+        let row = &rows[0];
+        for key in [
+            "ts",
+            "tenant",
+            "user",
+            "role",
+            "question",
+            "sources_urns",
+            "provider",
+            "model",
+            "prompt_tokens",
+            "completion_tokens",
+            "cost_usd",
+            "answer_hash",
+            "citations",
+            "cache_hit",
+            "mode",
+            "temperature",
+            "seed",
+            "validation_ok",
+            "retry_count",
+            "errors",
+        ] {
+            assert!(row.contains_key(key), "audit row missing `{key}`: {row:?}");
+        }
+        assert!(
+            !row.contains_key("answer"),
+            "answer should be redacted by default"
+        );
+        assert_eq!(row["question"], crate::json!("why did login fail?"));
+        assert_eq!(row["provider"], crate::json!("openai"));
+        assert_eq!(row["model"], crate::json!("gpt-4.1-mini"));
+        assert_eq!(row["prompt_tokens"], crate::json!(12));
+        assert_eq!(row["completion_tokens"], crate::json!(3));
+        assert_eq!(row["cache_hit"], crate::json!(false));
+        assert_eq!(row["mode"], crate::json!("strict"));
+        assert_eq!(row["validation_ok"], crate::json!(true));
+        assert_eq!(row["retry_count"], crate::json!(0));
+    }
+
+    #[test]
+    fn http_query_ask_audit_include_answer_toggle_changes_shape() {
+        let _guard = ASK_ENV_LOCK.lock().expect("env lock");
+        let stub = SequenceOpenAiStub::start(vec!["redacted answer", "visible answer"]);
+        let _api_base =
+            EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
+        let _api_key = EnvVarGuard::unset("REDDB_OPENAI_API_KEY");
+
+        let server = make_server();
+        configure_ask_stub_runtime(&server);
+
+        let response = server.handle_query(br#"{"query": "ASK 'why did login fail?'"}"#.to_vec());
+        assert_eq!(response.status, 200, "{}", body_str(&response));
+        let rows = ask_audit_rows(&server);
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].contains_key("answer"), "{:?}", rows[0]);
+        assert!(rows[0].contains_key("answer_hash"), "{:?}", rows[0]);
+
+        server
+            .runtime
+            .execute_query("SET CONFIG ask.audit.include_answer = true")
+            .expect("enable answer audit");
+        let response = server.handle_query(br#"{"query": "ASK 'why did login fail?'"}"#.to_vec());
+        assert_eq!(response.status, 200, "{}", body_str(&response));
+        let rows = ask_audit_rows(&server);
+        assert_eq!(rows.len(), 2);
+        let row = rows
+            .iter()
+            .find(|row| row.get("answer") == Some(&crate::json!("visible answer")))
+            .expect("visible answer audit row");
+        assert_eq!(
+            row["answer_hash"],
+            crate::json!(crate::runtime::ai::audit_record_builder::answer_hash(
+                "visible answer"
+            ))
         );
     }
 
@@ -1095,6 +1206,30 @@ mod tests {
             .runtime
             .execute_query("SET CONFIG red.config.ai.openai.default.key = 'sk-test'")
             .expect("set api key");
+    }
+
+    fn ask_audit_rows(server: &RedDBServer) -> Vec<BTreeMap<String, crate::json::Value>> {
+        let manager = server
+            .runtime
+            .db()
+            .store()
+            .get_collection("red_ask_audit")
+            .expect("red_ask_audit collection");
+        manager
+            .query_all(|entity| entity.data.as_row().is_some())
+            .into_iter()
+            .map(|entity| {
+                let row = entity.data.as_row().expect("audit row");
+                row.iter_fields()
+                    .map(|(key, value)| {
+                        (
+                            key.to_string(),
+                            crate::presentation::entity_json::storage_value_to_json(value),
+                        )
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     struct EnvVarGuard {
