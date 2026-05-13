@@ -164,7 +164,7 @@ pub const Conn = struct {
     pub fn query(self: *Conn, sql: []const u8, params: anytype) ![]const u8 {
         const ParamType = @TypeOf(params);
         switch (@typeInfo(ParamType)) {
-            .@"struct" => |info| {
+            .Struct => |info| {
                 if (!info.is_tuple) @compileError("query params must be a tuple or []const Value");
                 const values = try self.allocator.alloc(value_codec.Value, info.fields.len);
                 defer self.allocator.free(values);
@@ -173,15 +173,15 @@ pub const Conn = struct {
                 }
                 return self.queryWithParams(sql, values);
             },
-            .pointer => |ptr| {
+            .Pointer => |ptr| {
                 switch (ptr.size) {
-                    .slice => {
+                    .Slice => {
                         if (ptr.child != value_codec.Value) @compileError("query params must be []const Value");
                         return self.queryWithParams(sql, params);
                     },
-                    .one => {
+                    .One => {
                         switch (@typeInfo(ptr.child)) {
-                            .array => |array| {
+                            .Array => |array| {
                                 if (array.child != value_codec.Value) {
                                     @compileError("query params must be a Value array pointer");
                                 }
@@ -270,19 +270,19 @@ fn nativeParamToValue(value: anytype) !value_codec.Value {
     if (ValueType == value_codec.Value) return value;
 
     return switch (@typeInfo(ValueType)) {
-        .null => .{ .@"null" = {} },
-        .bool => .{ .@"bool" = value },
-        .int, .comptime_int => .{ .int = std.math.cast(i64, value) orelse return error.ParamOutOfRange },
-        .float, .comptime_float => .{ .float = @as(f64, @floatCast(value)) },
-        .optional => if (value) |payload| try nativeParamToValue(payload) else .{ .@"null" = {} },
-        .pointer => |ptr| switch (ptr.size) {
-            .slice => {
+        .Null => .{ .@"null" = {} },
+        .Bool => .{ .@"bool" = value },
+        .Int, .ComptimeInt => .{ .int = std.math.cast(i64, value) orelse return error.ParamOutOfRange },
+        .Float, .ComptimeFloat => .{ .float = @as(f64, @floatCast(value)) },
+        .Optional => if (value) |payload| try nativeParamToValue(payload) else .{ .@"null" = {} },
+        .Pointer => |ptr| switch (ptr.size) {
+            .Slice => {
                 if (ptr.child != u8) @compileError("only []const u8 slices can bind as text");
                 return .{ .text = value };
             },
-            .one => {
+            .One => {
                 switch (@typeInfo(ptr.child)) {
-                    .array => |array| {
+                    .Array => |array| {
                         if (array.child != u8) @compileError("only string literals can bind as text");
                         return .{ .text = value[0..] };
                     },

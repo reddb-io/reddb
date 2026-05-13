@@ -86,7 +86,7 @@ Future<int> _freePort() async {
   return port;
 }
 
-Future<Conn> _waitForConnect(int port) async {
+Future<Reddb> _waitForConnect(int port) async {
   final deadline = DateTime.now().add(const Duration(seconds: 60));
   Object? last;
   while (DateTime.now().isBefore(deadline)) {
