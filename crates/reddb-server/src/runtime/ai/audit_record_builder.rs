@@ -41,6 +41,9 @@
 //!   cache (#403) without calling the LLM.
 //! - `mode` — `"strict"` or `"lenient"`, the mode *effectively* used
 //!   after any provider-capability fallback (#396).
+//! - `temperature`, `seed` — determinism knobs actually sent to the
+//!   provider. `null` means the selected provider does not support that
+//!   knob, not that a default was forgotten.
 //! - `validation_ok` — boolean; `true` iff the citation validator
 //!   (#395) returned `Decision::Ok` for the final answer.
 //! - `retry_count` — `0` or `1`. The strict-mode retry budget is
@@ -121,6 +124,8 @@ pub struct CallState<'a> {
     /// The mode effectively used — after provider capability fallback
     /// (#396), not the mode the user asked for.
     pub effective_mode: Mode,
+    pub temperature: Option<f32>,
+    pub seed: Option<u64>,
     pub validation_ok: bool,
     pub retry_count: u32,
     pub errors: &'a [ValidationError],
@@ -151,6 +156,17 @@ pub fn build(state: &CallState<'_>, settings: Settings) -> BTreeMap<&'static str
     row.insert("citations", json!(state.citations));
     row.insert("cache_hit", json!(state.cache_hit));
     row.insert("mode", json!(mode_str(state.effective_mode)));
+    row.insert(
+        "temperature",
+        state
+            .temperature
+            .map(|value| json!(value))
+            .unwrap_or(Value::Null),
+    );
+    row.insert(
+        "seed",
+        state.seed.map(|value| json!(value)).unwrap_or(Value::Null),
+    );
     row.insert("validation_ok", json!(state.validation_ok));
     row.insert("retry_count", json!(state.retry_count));
     row.insert(
@@ -227,6 +243,8 @@ mod tests {
             citations,
             cache_hit: false,
             effective_mode: Mode::Strict,
+            temperature: Some(0.0),
+            seed: Some(42),
             validation_ok: true,
             retry_count: 0,
             errors,
@@ -292,6 +310,8 @@ mod tests {
             "citations",
             "cache_hit",
             "mode",
+            "temperature",
+            "seed",
             "validation_ok",
             "retry_count",
             "errors",
@@ -324,9 +344,26 @@ mod tests {
         assert_eq!(row["citations"], json!([3]));
         assert_eq!(row["cache_hit"], json!(false));
         assert_eq!(row["mode"], json!("strict"));
+        assert_eq!(row["temperature"], json!(0.0));
+        assert_eq!(row["seed"], json!(42u64));
         assert_eq!(row["validation_ok"], json!(true));
         assert_eq!(row["retry_count"], json!(0));
         assert_eq!(row["errors"], json!([]));
+    }
+
+    #[test]
+    fn unsupported_determinism_knobs_are_recorded_as_null() {
+        let urns: Vec<String> = vec![];
+        let citations: Vec<u32> = vec![];
+        let errors: Vec<ValidationError> = vec![];
+        let mut state = base_state("q", &urns, "a", &citations, &errors);
+        state.temperature = None;
+        state.seed = None;
+
+        let row = build(&state, Settings::default());
+
+        assert_eq!(row["temperature"], Value::Null);
+        assert_eq!(row["seed"], Value::Null);
     }
 
     // ---- include_answer toggle -----------------------------------------

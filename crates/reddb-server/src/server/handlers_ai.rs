@@ -399,6 +399,7 @@ impl RedDBServer {
                     model: model.clone(),
                     prompt: full_prompt,
                     temperature: Some(0.3),
+                    seed: None,
                     max_output_tokens: Some(2048),
                     api_base,
                 };
@@ -776,6 +777,7 @@ impl RedDBServer {
                         model: model.clone(),
                         prompt: prompt.clone(),
                         temperature,
+                        seed: None,
                         max_output_tokens,
                         api_base: api_base.clone(),
                     };
