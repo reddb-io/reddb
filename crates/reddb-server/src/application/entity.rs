@@ -27,6 +27,8 @@ pub struct AppliedEntityMutation {
     /// Prior physical version retained for MVCC history. Present when an
     /// UPDATE creates a new physical entity for the same logical row.
     pub replaced_entity: Option<UnifiedEntity>,
+    /// xmax carried by `replaced_entity` before this mutation stamped it.
+    pub replaced_entity_previous_xmax: u64,
     /// Snapshot of the row's named fields BEFORE the mutation was
     /// applied. Carried so the post-write secondary-index hook can
     /// `delete(old) + insert(new)` for changed indexed columns.
