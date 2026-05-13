@@ -131,6 +131,42 @@ await test('bulkInsert affects N rows', async () => {
   await db.close()
 })
 
+await test('queue client round trips push pop peek len purge over stdio', async () => {
+  const db = await connect('memory://', { binary: BINARY })
+  assert(typeof db.queue.push === 'function', 'queue.push exists')
+  assert(typeof db.queue.pop === 'function', 'queue.pop exists')
+  assert(typeof db.queue.peek === 'function', 'queue.peek exists')
+  assert(typeof db.queue.len === 'function', 'queue.len exists')
+  assert(typeof db.queue.purge === 'function', 'queue.purge exists')
+
+  await db.query('CREATE QUEUE jobs')
+  await db.queue.push('jobs', 'alpha')
+  await db.queue.push('jobs', 42)
+  await db.queue.push('jobs', { task: 'ship', retries: 2 })
+
+  assertEqual(await db.queue.len('jobs'), 3, 'queue length after pushes')
+  const peeked = await db.queue.peek('jobs', 3)
+  assertEqual(peeked[0], 'alpha', 'peek string payload')
+  assertEqual(peeked[1], 42, 'peek number payload')
+  assertEqual(peeked[2].task, 'ship', 'peek JSON task')
+  assertEqual(peeked[2].retries, 2, 'peek JSON retries')
+
+  assertEqual((await db.queue.pop('jobs'))[0], 'alpha', 'default pop count is one')
+  assertEqual((await db.queue.pop('jobs', 0)).length, 0, 'pop zero returns empty array')
+  const remaining = await db.queue.pop('jobs', 2)
+  assertEqual(remaining.length, 2, 'pop count returns remaining values')
+
+  await db.queue.push('jobs', 'purge-me')
+  await db.queue.purge('jobs')
+  assertEqual(await db.queue.len('jobs'), 0, 'purge clears queue')
+
+  await db.query('CREATE QUEUE urgent PRIORITY')
+  await db.queue.push('urgent', { task: 'deploy' }, { priority: 10 })
+  assertEqual((await db.queue.peek('urgent'))[0].task, 'deploy', 'priority push payload')
+
+  await db.close()
+})
+
 await test('parameterized query: $N int + text + null bindings', async () => {
   const db = await connect('memory://', { binary: BINARY })
   await db.query('CREATE TABLE u (id INTEGER, name TEXT, nickname TEXT)')
