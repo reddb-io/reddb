@@ -72,7 +72,7 @@ test "red:// proto=pg picks default port 5432" {
     try t.expectEqual(url.Kind.pg, p.kind);
 }
 
-test "red:// proto=grpcs uses 5052 default" {
+test "red:// proto=grpcs uses 5056 default" {
     var p = try url.parse(t.allocator, "red://h?proto=grpcs");
     defer p.deinit(t.allocator);
     try t.expectEqual(url.Kind.grpcs, p.kind);
@@ -125,7 +125,7 @@ test "grpcs:// legacy parses" {
     var p = try url.parse(t.allocator, "grpcs://h");
     defer p.deinit(t.allocator);
     try t.expectEqual(url.Kind.grpcs, p.kind);
-    try t.expectEqual(@as(u16, 5052), p.port.?);
+    try t.expectEqual(@as(u16, 5056), p.port.?);
 }
 
 test "http:// parses host and port" {
