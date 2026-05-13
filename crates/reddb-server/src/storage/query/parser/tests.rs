@@ -1370,6 +1370,12 @@ fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
     };
     assert!(ask.strict);
 
+    let query = parse("ASK 'q' STREAM").unwrap();
+    let QueryExpr::Ask(ask) = query else {
+        panic!("Expected AskQuery");
+    };
+    assert!(ask.stream);
+
     for sql in [
         "INSERT INTO docs (body) VALUES ('x') WITH UNKNOWN",
         "INSERT INTO docs (body) VALUES ('x') WITH TTL 1 parsec",
