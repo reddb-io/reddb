@@ -406,6 +406,61 @@ fn create_vector_declares_dimension_and_metric() {
 }
 
 #[test]
+fn show_collections_reports_declared_models_for_probabilistic_collections() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    for sql in [
+        "CREATE TABLE t_users (id INT)",
+        "CREATE GRAPH g_graph",
+        "CREATE VECTOR v_embed DIM 2",
+        "CREATE QUEUE q_jobs",
+        "CREATE KV kv_cache",
+        "CREATE TIMESERIES ts_metrics RETENTION 7 d",
+        "CREATE HLL h_visitors",
+        "CREATE SKETCH s_freqs",
+        "CREATE FILTER f_seen",
+    ] {
+        rt.execute_query(sql)
+            .unwrap_or_else(|err| panic!("{sql} failed: {err}"));
+    }
+
+    let rows = rt
+        .execute_query(
+            "SHOW COLLECTIONS WHERE name IN (\
+             'f_seen', 'g_graph', 'h_visitors', 'kv_cache', 'q_jobs', \
+             's_freqs', 't_users', 'ts_metrics', 'v_embed'\
+             )",
+        )
+        .expect("show collections");
+    assert_eq!(rows.result.len(), 9);
+
+    for (name, model) in [
+        ("f_seen", "filter"),
+        ("g_graph", "graph"),
+        ("h_visitors", "hll"),
+        ("kv_cache", "kv"),
+        ("q_jobs", "queue"),
+        ("s_freqs", "sketch"),
+        ("t_users", "table"),
+        ("ts_metrics", "time_series"),
+        ("v_embed", "vector"),
+    ] {
+        let row = rows
+            .result
+            .records
+            .iter()
+            .find(
+                |record| matches!(record.get("name"), Some(Value::Text(value)) if &**value == name),
+            )
+            .unwrap_or_else(|| panic!("missing row for {name}"));
+        assert_eq!(
+            row.get("model"),
+            Some(&Value::text(model)),
+            "unexpected model for {name}",
+        );
+    }
+}
+
+#[test]
 fn native_vector_collection_validates_inserts_and_searches_by_metric() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
     rt.execute_query("CREATE VECTOR v DIM 2 METRIC cosine")
