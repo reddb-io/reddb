@@ -35,3 +35,22 @@ Reuses the existing replication module's primary-sync RPC mechanism.
 ## Blocked by
 
 - #402
+
+## Progress note (2026-05-13)
+
+Rechecked after #402 and #403 closed. The ASK audit writer and answer
+cache now exist, so the original listed blocker is no longer the
+limiting factor.
+
+The remaining blocker is architectural: current replication gRPC exposes
+WAL pull/ack (`PullWalRecords`, `AckReplicaLsn`) but no primary-sync RPC
+for a replica to durably submit non-WAL side effects such as `red_ask_audit`
+rows and daily cost counter increments before returning an ASK answer.
+`execute_ask` is synchronous and is also called from async gRPC handlers,
+so adding this safely requires a defined primary-sync command/RPC contract
+and async/sync boundary rather than a one-off transport call hidden inside
+the ASK path.
+
+Leaving runtime code unchanged and keeping this issue blocked until the
+primary-sync RPC contract/harness exists. Acceptance items requiring a
+1-primary + 2-replica harness remain unverified.
