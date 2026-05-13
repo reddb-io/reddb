@@ -34,7 +34,7 @@ export class CacheClient {
       throw new RedDBError(
         'UNSUPPORTED_TRANSPORT',
         `cache.${method} is not available on '${this._transport}' transport; `
-          + `connect via http(s)://, grpc(s):// or redwire(s):// instead.`,
+          + 'use @reddb-io/client for remote cache endpoints.',
       )
     }
   }

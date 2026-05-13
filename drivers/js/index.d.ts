@@ -4,16 +4,6 @@
  * Hand-written, kept in sync with src/index.js.
  */
 
-/**
- * Authentication credentials. Only meaningful for `grpc://` URIs;
- * embedded modes (memory://, file://) inherit the caller's
- * filesystem privileges and reject auth options at the boundary.
- *
- * The shape is `{ token }` (or its `{ apiKey }` alias). For
- * username/password login, mint a token first via the standalone
- * `login(httpUrl, { username, password })` helper, then pass it
- * here — the gRPC surface does not currently bridge `auth.login`.
- */
 export type AuthOptions =
   | { token: string }
   | { apiKey: string }
@@ -35,13 +25,9 @@ export interface TlsOptions {
 export interface ConnectOptions {
   /** Override the path to the `red` binary (defaults to bundled). */
   binary?: string
-  /** Authentication credentials (grpc:// only). */
+  /** Rejected for embedded SDK connections; use @reddb-io/client remotely. */
   auth?: AuthOptions
-  /**
-   * TLS for `redwire(s)://` connections. URL params (`tls=true`,
-   * `cert=`, `key=`, `ca=`) feed the same field; this option
-   * always wins.
-   */
+  /** Reserved for remote clients; ignored by the embedded SDK. */
   tls?: TlsOptions
 }
 
@@ -276,7 +262,7 @@ export class VaultClient {
 }
 
 export class RedDB {
-  /** Underlying transport label: 'embedded' | 'http' | 'https' | 'grpc' | 'grpcs' | null. */
+  /** Underlying transport label. connect() returns 'embedded'. */
   readonly transport: string | null
   readonly cache: CacheClient
   readonly kv: KvClient & ((collection?: string) => KvClient)
@@ -300,8 +286,8 @@ export class RedDB {
   health(): Promise<HealthResult>
   version(): Promise<VersionResult>
 
-  // Auth surface — only meaningful when connected via grpc://.
-  // Embedded modes will receive 'unknown method' from the bridge.
+  // Auth surface is not available through embedded SDK connections.
+  // Use @reddb-io/client for remote authenticated servers.
   login(username: string, password: string): Promise<LoginResult>
   whoami(): Promise<WhoamiResult>
   changePassword(currentPassword: string, newPassword: string): Promise<ChangePasswordResult>
@@ -317,32 +303,16 @@ export class RedDB {
  * Accepted URI schemes:
  *   - `memory://`              — ephemeral in-memory database
  *   - `file:///absolute/path`  — embedded, persisted to disk
- *   - `grpc://host:port`       — remote server
+ *
+ * Remote URI schemes throw `EMBEDDED_ONLY`; use @reddb-io/client.
  */
 export function connect(uri: string, options?: ConnectOptions): Promise<RedDB>
 
-/**
- * Exchange username + password for a bearer token by hitting the
- * server's `POST /auth/login` HTTP endpoint. The returned `token`
- * can be passed to `connect(uri, { auth: { token } })`.
- *
- * @example
- * import { connect, login } from '@reddb-io/sdk'
- * const { token } = await login(
- *   'https://reddb.example.com/auth/login',
- *   { username: 'admin', password: 'secret' },
- * )
- * const db = await connect('grpc://reddb.example.com:5051', { auth: { token } })
- */
-export function login(
-  loginUrl: string,
-  credentials: { username: string; password: string },
-): Promise<LoginResult>
+export const EMBEDDED_ONLY_MESSAGE: string
 
 /**
  * Translate a connection URI + (optional) auth into argv for
- * `red rpc --stdio`. Exported for tests / debug. New code should
- * use `parseUri` directly and let `connect` handle dispatch.
+ * `red rpc --stdio`. Remote URI schemes throw `EMBEDDED_ONLY`.
  */
 export function uriToArgs(
   uri: string,
@@ -353,7 +323,7 @@ export function uriToArgs(
  * Parsed `red://` (or legacy) URI. Returned by `parseUri`.
  */
 export interface ParsedUri {
-  kind: 'embedded' | 'http' | 'https' | 'grpc' | 'grpcs' | 'pg'
+  kind: 'embedded' | 'http' | 'https' | 'red' | 'reds' | 'grpc' | 'grpcs' | 'pg'
   host?: string
   port?: number
   path?: string

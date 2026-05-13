@@ -1,7 +1,7 @@
 {
   "name": "@reddb-io/sdk",
   "version": "1.0.8",
-  "description": "Official RedDB driver — talks the native RedWire TCP protocol (mTLS), HTTP, gRPC bridge, or embedded stdio JSON-RPC. Works in Node 18+, Bun and Deno.",
+  "description": "Official embedded RedDB SDK — launches a local red binary over stdio JSON-RPC. Use @reddb-io/client for remote HTTP, gRPC, and RedWire.",
   "type": "module",
   "main": "src/index.js",
   "exports": {
@@ -20,7 +20,7 @@
   ],
   "scripts": {
     "postinstall": "node postinstall.js",
-    "test": "node --test test/ask.test.mjs test/cache.test.mjs test/params.test.mjs test/postinstall.test.mjs test/redwire.params.test.mjs && node test/smoke.test.mjs"
+    "test": "node --test test/ask.test.mjs test/cache.test.mjs test/embedded-only.test.mjs test/params.test.mjs test/postinstall.test.mjs test/redwire.params.test.mjs && node test/smoke.test.mjs"
   },
   "engines": {
     "node": ">=18"

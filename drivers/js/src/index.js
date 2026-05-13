@@ -14,34 +14,14 @@
  * Connection URIs:
  *   - 'memory://'                — ephemeral in-memory database (embedded)
  *   - 'file:///absolute/path'    — embedded, persisted to disk
- *   - 'grpc://host:port'         — remote server via gRPC
  *
- * Authentication (only meaningful for `grpc://`; embedded modes ignore
- * auth options because the spawned binary inherits the caller's
- * filesystem privileges):
- *
- *   await connect('grpc://host:5051', {
- *     auth: { token: 'sk-...' }                     // raw bearer / api key
- *   })
- *   await connect('grpc://host:5051', {
- *     auth: { apiKey: 'ak-...' }                    // alias for token
- *   })
- *   await connect('grpc://host:5051', {
- *     auth: { username: 'admin', password: 'x' }    // login flow — driver
- *                                                   // calls /auth/login,
- *                                                   // caches the bearer
- *   })
- *
- * Username/password requires the server to expose the `auth.login`
- * JSON-RPC method (proxied through the gRPC bridge).
+ * Remote URIs belong to @reddb-io/client. This SDK is embedded-only.
  */
 
 import { spawnRed } from './spawn.js'
 import { resolveSdkBinary } from './binary.js'
 import { RpcClient, RedDBError } from './protocol.js'
-import { HttpRpcClient } from './http.js'
-import { connectRedwire } from './redwire.js'
-import { parseUri, deriveLoginUrl } from './url.js'
+import { parseUri } from './url.js'
 import { CacheClient } from './cache.js'
 import { KvClient } from './kv.js'
 import { ConfigClient } from './config.js'
@@ -53,6 +33,9 @@ export { KvClient } from './kv.js'
 export { ConfigClient } from './config.js'
 export { VaultClient } from './vault.js'
 export { parseUri, deriveLoginUrl } from './url.js'
+
+export const EMBEDDED_ONLY_MESSAGE =
+  'remote URIs are not supported in @reddb-io/sdk; install @reddb-io/client for grpc/http/red transports'
 
 /**
  * Connect to a RedDB instance.
@@ -69,11 +52,12 @@ export { parseUri, deriveLoginUrl } from './url.js'
  */
 export async function connect(uri, options = {}) {
   const parsed = parseUri(uri)
-  const merged = mergeAuthFromUri(parsed, options.auth)
+  rejectRemoteUri(parsed)
 
   // Embedded modes: spawn the binary with stdio JSON-RPC. Auth is
   // not applicable (caller already has filesystem privileges).
   if (parsed.kind === 'embedded') {
+    const merged = mergeAuthFromUri(parsed, options.auth)
     if (merged.token || merged.username) {
       throw new RedDBError(
         'AUTH_NOT_APPLICABLE',
@@ -87,84 +71,6 @@ export async function connect(uri, options = {}) {
     await client.call('version', {})
     return new RedDB(client, { transport: 'embedded' })
   }
-
-  // HTTP / HTTPS: speak directly to the server via fetch().
-  if (parsed.kind === 'http' || parsed.kind === 'https') {
-    const baseUrl = `${parsed.kind}://${parsed.host}:${parsed.port}`
-    let token = merged.token
-    if (!token && merged.username && merged.password) {
-      const loginUrl = merged.loginUrl ?? `${baseUrl}/auth/login`
-      const session = await login(loginUrl, {
-        username: merged.username,
-        password: merged.password,
-      })
-      token = session.token
-    }
-    const client = new HttpRpcClient({ baseUrl, token })
-    // Sanity check before returning the handle.
-    await client.call('health', {})
-    return new RedDB(client, { transport: parsed.kind })
-  }
-
-  // gRPC / gRPCs / RedWire (default for grpc-shaped URIs):
-  // speak the RedWire binary protocol natively via TCP. No spawn, no
-  // gRPC bridge. Resolves bearer auth from username/password via
-  // HTTP /auth/login first when needed.
-  //
-  // The server multiplexes RedWire on the same port as gRPC and HTTP
-  // via the service router's 0xFE detector, so pure grpc:// URLs
-  // still flow through RedWire because it wins on perf and parity.
-  if (parsed.kind === 'grpc' || parsed.kind === 'grpcs') {
-    let token = merged.token
-    if (!token && merged.username && merged.password) {
-      const loginUrl = merged.loginUrl ?? deriveLoginUrl(parsed)
-      const session = await login(loginUrl, {
-        username: merged.username,
-        password: merged.password,
-      })
-      token = session.token
-    }
-
-    // Honour `proto=spawn-grpc` as an escape hatch for callers that
-    // explicitly want the legacy stdio→gRPC bridge. Default is the
-    // RedWire transport.
-    const protoOverride = parsed.params?.get?.('proto') ?? ''
-    if (protoOverride === 'spawn-grpc') {
-      const args = grpcArgs(parsed, token)
-      const binary = options.binary ?? resolveSdkBinary()
-      const child = await spawnRed(binary, args)
-      const legacy = new RpcClient(child)
-      await legacy.call('version', {})
-      return new RedDB(legacy, { transport: parsed.kind })
-    }
-
-    const auth = token ? { kind: 'bearer', token } : { kind: 'anonymous' }
-    const tls = buildTlsOpts(parsed, options.tls)
-    const client = await connectRedwire({
-      host: parsed.host,
-      port: parsed.port,
-      auth,
-      ...(tls ? { tls } : {}),
-    })
-    return new RedDB(client, { transport: parsed.kind })
-  }
-
-  // Postgres wire: not yet wired in the driver. Document the gap
-  // so users get a clear actionable error instead of a silent
-  // unsupported transport.
-  if (parsed.kind === 'pg') {
-    throw new RedDBError(
-      'PG_TRANSPORT_NOT_WIRED',
-      "PostgreSQL wire (proto=pg) requires a node-pg-style client; "
-        + "the JS driver doesn't bundle one yet. Use a separate `pg` package "
-        + 'against the same host:port for now, or open an issue if you want it built in.',
-    )
-  }
-
-  throw new RedDBError(
-    'UNSUPPORTED_KIND',
-    `internal: parsed kind '${parsed.kind}' has no transport`,
-  )
 }
 
 // Coerce a JS query parameter to a JSON-serializable shape the server
@@ -296,51 +202,11 @@ function embeddedArgs(parsed) {
   return ['rpc', '--stdio']
 }
 
-function grpcArgs(parsed, token) {
-  const scheme = parsed.kind === 'grpcs' ? 'grpcs' : 'grpc'
-  const url = `${scheme}://${parsed.host}:${parsed.port}${parsed.path ?? ''}`
-  const args = ['rpc', '--stdio', '--connect', url]
-  if (token) args.push('--token', token)
-  return args
-}
-
 /**
  * Merge `options.auth` (legacy `{ token, apiKey, username, password }`
  * shape) with credentials lifted from the URI itself. Explicit
  * `options.auth` always wins to keep behaviour predictable.
  */
-/**
- * Resolve TLS options for a redwire(s) connection.
- *
- * Sources, in priority order:
- *   - `options.tls` from the caller (object form), wins everything
- *   - `parsed.kind === 'grpcs'` (i.e. `redwires://` or `?proto=grpcs`)
- *   - `?tls=true` in the URL params
- *   - `?ca=`, `?cert=`, `?key=`, `?servername=`,
- *     `?rejectUnauthorized=false` URL params (paths or PEM strings)
- *
- * Returns `null` when TLS isn't requested.
- */
-function buildTlsOpts(parsed, callerTls) {
-  if (callerTls && typeof callerTls === 'object') {
-    return callerTls
-  }
-  const params = parsed.params
-  const wantsTls =
-    parsed.kind === 'grpcs'
-    || params?.get?.('tls') === 'true'
-    || params?.get?.('tls') === '1'
-  if (!wantsTls) return null
-  return {
-    ca: params?.get?.('ca') ?? undefined,
-    cert: params?.get?.('cert') ?? undefined,
-    key: params?.get?.('key') ?? undefined,
-    servername: params?.get?.('servername') ?? undefined,
-    rejectUnauthorized:
-      params?.get?.('rejectUnauthorized') === 'false' ? false : true,
-  }
-}
-
 function mergeAuthFromUri(parsed, optionAuth) {
   const out = {
     token: parsed.token ?? parsed.apiKey ?? null,
@@ -383,53 +249,6 @@ function mergeAuthFromUri(parsed, optionAuth) {
 }
 
 /**
- * Exchange username + password for a bearer token by hitting the
- * server's `POST /auth/login` HTTP endpoint, then return that token
- * for use with subsequent `connect({ auth: { token } })` calls.
- *
- * Why a separate function: the gRPC surface does not currently
- * expose `auth.login` as an RPC, so the driver can't piggyback on
- * the binary spawn for password auth. The HTTP listener does
- * expose it, and is the canonical login site (the same endpoint
- * the dashboard uses).
- *
- * @param {string} loginUrl Full URL of the server's auth endpoint
- *                          (e.g. `https://reddb.example.com/auth/login`).
- * @param {{ username: string, password: string }} credentials
- * @returns {Promise<{ token: string, username: string, role: string, expires_at: number }>}
- */
-export async function login(loginUrl, { username, password }) {
-  if (typeof loginUrl !== 'string' || !loginUrl.startsWith('http')) {
-    throw new TypeError("login() requires an http(s):// URL pointing at /auth/login")
-  }
-  if (typeof username !== 'string' || username.length === 0) {
-    throw new TypeError('login() requires a non-empty username')
-  }
-  if (typeof password !== 'string' || password.length === 0) {
-    throw new TypeError('login() requires a non-empty password')
-  }
-  const response = await fetch(loginUrl, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ username, password }),
-  })
-  const body = await response.json().catch(() => ({}))
-  if (!response.ok || body.ok === false) {
-    const code = body.error_code || `HTTP_${response.status}`
-    const message = body.error || `auth/login returned ${response.status}`
-    throw new RedDBError(code, message, body)
-  }
-  if (typeof body.token !== 'string') {
-    throw new RedDBError(
-      'AUTH_LOGIN_BAD_RESPONSE',
-      'auth/login response missing string token',
-      body,
-    )
-  }
-  return body
-}
-
-/**
  * Backwards-compatible shim: translate a URI into argv for
  * `red rpc --stdio`. New code should call `parseUri` directly and
  * route via `connect`. Kept exported for tests that pre-date the
@@ -438,14 +257,12 @@ export async function login(loginUrl, { username, password }) {
 export function uriToArgs(uri, auth = null) {
   const parsed = parseUri(uri)
   if (parsed.kind === 'embedded') return embeddedArgs(parsed)
-  if (parsed.kind === 'grpc' || parsed.kind === 'grpcs') {
-    const token = auth?.kind === 'token' ? auth.token : (parsed.token ?? parsed.apiKey ?? null)
-    return grpcArgs(parsed, token)
-  }
-  throw new RedDBError(
-    'UNSUPPORTED_SCHEME',
-    `uriToArgs() supports embedded + grpc kinds; for '${parsed.kind}' use connect() directly.`,
-  )
+  rejectRemoteUri(parsed)
+}
+
+function rejectRemoteUri(parsed) {
+  if (parsed.kind === 'embedded') return
+  throw new RedDBError('EMBEDDED_ONLY', EMBEDDED_ONLY_MESSAGE)
 }
 
 
@@ -457,8 +274,8 @@ export class RedDB {
    * @param {RpcClient} client
    * @param {object} [opts]
    * @param {string} [opts.transport] Underlying transport label
-   *   (e.g. 'http', 'grpc', 'embedded'). Used to gate calls that
-   *   only some transports serve, like `cache.*`.
+   *   (normally 'embedded'). Used to gate calls that the embedded
+   *   stdio bridge does not serve, like `cache.*`.
    */
   constructor(client, opts = {}) {
     this.client = client
@@ -529,18 +346,14 @@ export class RedDB {
   }
 
   // ---------------------------------------------------------------
-  // Auth surface — these are no-ops in embedded mode because the
+  // Auth surface — these are not available in embedded mode because the
   // bridge layer doesn't expose `auth.*` JSON-RPC methods locally.
-  // They forward to the server when the connection is grpc://.
+  // Use @reddb-io/client for remote authenticated servers.
   // ---------------------------------------------------------------
 
   /**
-   * Exchange username + password for a bearer token. Returns
-   * `{ token, username, role, expires_at }`. Server-side this
-   * routes to `POST /auth/login`.
-   *
-   * Prefer the `auth: { username, password }` form on `connect()`
-   * — it does the same exchange + caches the token transparently.
+   * Exchange username + password for a bearer token when the underlying
+   * client supports auth RPCs. Embedded SDK connections do not.
    */
   login(username, password) {
     return this.client.call('auth.login', { username, password })

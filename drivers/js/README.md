@@ -5,8 +5,9 @@ stdio to a local `red` binary, which is downloaded automatically on install.
 Works in **Node 18+**, **Bun** and **Deno** (via `npm:` specifier) — same
 package, no per-runtime fork.
 
-Use this package for application code. If you just want to launch the CLI from
-npm, use:
+Use this package when your application should run an embedded local RedDB
+engine. For remote HTTP, gRPC, or RedWire connections, install
+`@reddb-io/client` instead. If you just want to launch the CLI from npm, use:
 
 ```bash
 npx @reddb-io/cli@latest version
@@ -76,10 +77,9 @@ await db.close()
 |----------------------------|--------------------------------------|
 | `memory://`                | Ephemeral, in-memory database        |
 | `file:///absolute/path`    | Embedded engine, persisted to disk   |
-| `grpc://host:port`         | Remote server (planned, not yet)     |
 
-`grpc://` is not supported by the JS driver yet — the binary needs the
-`--connect` flag wired up first. See `PLAN_DRIVERS.md` in the repo root.
+Remote URIs such as `http://...`, `red://...`, and `grpc://...` are rejected
+with `EMBEDDED_ONLY`. Use `@reddb-io/client` for those transports.
 
 ## API
 
@@ -210,9 +210,11 @@ bun test/smoke.test.mjs
 deno run -A test/smoke.test.mjs
 ```
 
-## Production deploy
+## Remote Deploy
 
-When you're ready to point this driver at a production RedDB cluster:
+When you're ready to point JavaScript code at a production RedDB cluster, use
+`@reddb-io/client`. The SDK package is embedded-only and intentionally rejects
+remote URIs.
 
 - **Run RedDB with the encrypted vault** so auth state and
   `red.secret.*` values are protected at rest. See
@@ -223,8 +225,7 @@ When you're ready to point this driver at a production RedDB cluster:
 - **Track every secret** the driver consumes (bearer tokens, mTLS
   cert + key, OAuth JWTs) in
   [`docs/operations/secrets.md`](../../docs/operations/secrets.md).
-- **Use `reds://` (TLS)** or `red://...?tls=true` for any traffic
-  crossing the network — never plain `red://` outside localhost.
+- **Use TLS** for any traffic crossing the network.
 - **TLS posture, mTLS, OAuth/JWT and reverse-proxy patterns** are
   covered in [`docs/security/transport-tls.md`](../../docs/security/transport-tls.md).
 - See [Policies](../../docs/security/policies.md) for IAM-style authorization.
