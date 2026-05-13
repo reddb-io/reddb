@@ -993,6 +993,51 @@ mod tests {
         assert!(!text.contains("event: validation\n"), "{text}");
     }
 
+    #[test]
+    fn http_query_explain_ask_returns_plan_without_llm_call() {
+        let _guard = ASK_ENV_LOCK.lock().expect("env lock");
+        let stub = SequenceOpenAiStub::start(vec!["should not be called"]);
+        let _api_base =
+            EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
+        let _api_key = EnvVarGuard::unset("REDDB_OPENAI_API_KEY");
+
+        let server = make_server();
+        assert_eq!(
+            server
+                .handle_query(br#"{"query": "CREATE TABLE incidents (body TEXT)"}"#.to_vec())
+                .status,
+            200
+        );
+        assert_eq!(
+            server
+                .handle_query(
+                    br#"{"query": "INSERT INTO incidents (body) VALUES ('login failed FDD-12313')"}"#.to_vec(),
+                )
+                .status,
+            200
+        );
+
+        let r = server.handle_query(
+            br#"{"query": "EXPLAIN ASK 'incidents FDD-12313' USING openai LIMIT 3 MIN_SCORE 0.7 DEPTH 2"}"#.to_vec(),
+        );
+
+        assert_eq!(r.status, 200, "{}", body_str(&r));
+        assert_eq!(stub.request_count(), 0);
+        let text = body_str(&r);
+        assert!(text.contains(r#""statement":"explain_ask""#), "{text}");
+        assert!(text.contains(r#""retrieval""#), "{text}");
+        assert!(text.contains(r#""bucket":"bm25""#), "{text}");
+        assert!(text.contains(r#""bucket":"vector""#), "{text}");
+        assert!(text.contains(r#""bucket":"graph""#), "{text}");
+        assert!(text.contains(r#""limit":3"#), "{text}");
+        assert!(text.contains(r#""depth":2"#), "{text}");
+        assert!(text.contains(r#""provider":{"model":"#), "{text}");
+        assert!(text.contains(r#""name":"openai""#), "{text}");
+        assert!(text.contains(r#""prompt_tokens""#), "{text}");
+        assert!(text.contains("reddb:incidents/"), "{text}");
+        assert!(!text.contains("should not be called"), "{text}");
+    }
+
     fn configure_ask_stub_runtime(server: &RedDBServer) {
         server
             .runtime

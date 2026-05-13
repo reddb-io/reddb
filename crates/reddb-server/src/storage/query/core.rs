@@ -758,6 +758,9 @@ pub struct DropIndexQuery {
 /// requested values; capability-based dropping happens at decide time.
 #[derive(Debug, Clone)]
 pub struct AskQuery {
+    /// `EXPLAIN ASK '...'` returns the retrieval/provider/cost plan
+    /// without making the LLM call.
+    pub explain: bool,
     pub question: String,
     pub provider: Option<String>,
     pub model: Option<String>,
