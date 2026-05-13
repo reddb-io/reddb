@@ -88,6 +88,7 @@ pub struct OpenAiPromptRequest {
     pub seed: Option<u64>,
     pub max_output_tokens: Option<usize>,
     pub api_base: String,
+    pub stream: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +107,7 @@ pub struct AiPromptResponse {
     pub provider: &'static str,
     pub model: String,
     pub output_text: String,
+    pub output_chunks: Option<Vec<String>>,
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
@@ -167,6 +169,7 @@ pub fn openai_prompt(request: OpenAiPromptRequest) -> RedDBResult<AiPromptRespon
         request.temperature,
         request.seed,
         request.max_output_tokens,
+        false,
     );
 
     let (status, body) = http_post_json(&url, &request.api_key, &[], payload, 120)
@@ -293,6 +296,7 @@ pub async fn openai_prompt_async(
         request.temperature,
         request.seed,
         request.max_output_tokens,
+        request.stream,
     );
     let http_req = crate::runtime::ai::transport::AiHttpRequest::post_json("openai", url, payload)
         .model(request.model.clone())
@@ -303,7 +307,11 @@ pub async fn openai_prompt_async(
         .await
         .map_err(|e| RedDBError::Query(e.to_string()))?;
 
-    parse_openai_prompt_response(&response.body, &request.model)
+    if request.stream {
+        parse_openai_streaming_prompt_response(&response.body, &request.model)
+    } else {
+        parse_openai_prompt_response(&response.body, &request.model)
+    }
 }
 
 /// Async Anthropic messages-API prompt via [`AiTransport`].
@@ -419,6 +427,7 @@ fn build_openai_prompt_payload(
     temperature: Option<f32>,
     seed: Option<u64>,
     max_output_tokens: Option<usize>,
+    stream: bool,
 ) -> String {
     let mut object = Map::new();
     object.insert("model".to_string(), JsonValue::String(model.to_string()));
@@ -447,6 +456,13 @@ fn build_openai_prompt_payload(
             "max_tokens".to_string(),
             JsonValue::Number(max_output_tokens as f64),
         );
+    }
+
+    if stream {
+        object.insert("stream".to_string(), JsonValue::Bool(true));
+        let mut options = Map::new();
+        options.insert("include_usage".to_string(), JsonValue::Bool(true));
+        object.insert("stream_options".to_string(), JsonValue::Object(options));
     }
 
     JsonValue::Object(object).to_string_compact()
@@ -585,6 +601,105 @@ fn parse_openai_prompt_response(
         provider: "openai",
         model,
         output_text,
+        output_chunks: None,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        stop_reason,
+    })
+}
+
+fn parse_openai_streaming_prompt_response(
+    body: &str,
+    requested_model: &str,
+) -> RedDBResult<AiPromptResponse> {
+    let mut model = requested_model.to_string();
+    let mut chunks = Vec::new();
+    let mut prompt_tokens = None;
+    let mut completion_tokens = None;
+    let mut total_tokens = None;
+    let mut stop_reason = None;
+
+    for line in body.lines() {
+        let line = line.trim();
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data.is_empty() {
+            continue;
+        }
+        if data == "[DONE]" {
+            break;
+        }
+
+        let parsed = parse_json(data).map_err(|err| {
+            RedDBError::Query(format!(
+                "invalid OpenAI streaming prompt JSON response: {err}"
+            ))
+        })?;
+        let json = JsonValue::from(parsed);
+        if let Some(value) = json.get("model").and_then(JsonValue::as_str) {
+            model = value.to_string();
+        }
+        if let Some(usage) = json.get("usage") {
+            prompt_tokens = usage
+                .get("prompt_tokens")
+                .and_then(JsonValue::as_i64)
+                .and_then(|value| u64::try_from(value).ok())
+                .or(prompt_tokens);
+            completion_tokens = usage
+                .get("completion_tokens")
+                .and_then(JsonValue::as_i64)
+                .and_then(|value| u64::try_from(value).ok())
+                .or(completion_tokens);
+            total_tokens = usage
+                .get("total_tokens")
+                .and_then(JsonValue::as_i64)
+                .and_then(|value| u64::try_from(value).ok())
+                .or(total_tokens);
+        }
+
+        let Some(choices) = json.get("choices").and_then(JsonValue::as_array) else {
+            continue;
+        };
+        let Some(first_choice) = choices.first() else {
+            continue;
+        };
+        if let Some(reason) = first_choice
+            .get("finish_reason")
+            .and_then(JsonValue::as_str)
+        {
+            stop_reason = Some(reason.to_string());
+        }
+        if let Some(text) = first_choice
+            .get("delta")
+            .and_then(|delta| delta.get("content"))
+            .and_then(JsonValue::as_str)
+        {
+            if !text.is_empty() {
+                chunks.push(text.to_string());
+            }
+        }
+    }
+
+    if chunks.is_empty() {
+        return Err(RedDBError::Query(
+            "OpenAI streaming prompt response missing text content".to_string(),
+        ));
+    }
+
+    let output_text = chunks.concat();
+    let total_tokens = total_tokens.or_else(|| match (prompt_tokens, completion_tokens) {
+        (Some(prompt), Some(completion)) => Some(prompt.saturating_add(completion)),
+        _ => None,
+    });
+
+    Ok(AiPromptResponse {
+        provider: "openai",
+        model,
+        output_text,
+        output_chunks: Some(chunks),
         prompt_tokens,
         completion_tokens,
         total_tokens,
@@ -641,6 +756,7 @@ fn parse_anthropic_prompt_response(
         provider: "anthropic",
         model,
         output_text,
+        output_chunks: None,
         prompt_tokens,
         completion_tokens,
         total_tokens,
@@ -840,8 +956,14 @@ mod tests {
 
     #[test]
     fn openai_prompt_payload_includes_temperature_and_seed_when_present() {
-        let payload =
-            build_openai_prompt_payload("gpt-4.1-mini", "hello", Some(0.0), Some(42), Some(128));
+        let payload = build_openai_prompt_payload(
+            "gpt-4.1-mini",
+            "hello",
+            Some(0.0),
+            Some(42),
+            Some(128),
+            false,
+        );
         let parsed = JsonValue::from(parse_json(&payload).expect("valid json"));
 
         assert_eq!(
@@ -857,14 +979,57 @@ mod tests {
 
     #[test]
     fn openai_prompt_payload_omits_seed_when_none() {
-        let payload = build_openai_prompt_payload("gpt-4.1-mini", "hello", Some(0.0), None, None);
+        let payload =
+            build_openai_prompt_payload("gpt-4.1-mini", "hello", Some(0.0), None, None, false);
         let parsed = JsonValue::from(parse_json(&payload).expect("valid json"));
 
         assert!(parsed.get("seed").is_none());
+        assert!(parsed.get("stream").is_none());
         assert_eq!(
             parsed.get("temperature").and_then(JsonValue::as_f64),
             Some(0.0)
         );
+    }
+
+    #[test]
+    fn openai_prompt_payload_enables_stream_options() {
+        let payload =
+            build_openai_prompt_payload("gpt-4.1-mini", "hello", Some(0.0), None, None, true);
+        let parsed = JsonValue::from(parse_json(&payload).expect("valid json"));
+
+        assert_eq!(
+            parsed.get("stream").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            parsed
+                .get("stream_options")
+                .and_then(|value| value.get("include_usage"))
+                .and_then(JsonValue::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn openai_streaming_prompt_response_collects_delta_chunks() {
+        let body = concat!(
+            "data: {\"model\":\"gpt-test\",\"choices\":[{\"delta\":{\"content\":\"login \"},\"finish_reason\":null}]}\n\n",
+            "data: {\"model\":\"gpt-test\",\"choices\":[{\"delta\":{\"content\":\"failed\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"model\":\"gpt-test\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":2,\"total_tokens\":14}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let parsed = parse_openai_streaming_prompt_response(body, "fallback").unwrap();
+
+        assert_eq!(parsed.model, "gpt-test");
+        assert_eq!(parsed.output_text, "login failed");
+        assert_eq!(
+            parsed.output_chunks.as_deref(),
+            Some(["login ".to_string(), "failed".to_string()].as_slice())
+        );
+        assert_eq!(parsed.prompt_tokens, Some(12));
+        assert_eq!(parsed.completion_tokens, Some(2));
+        assert_eq!(parsed.total_tokens, Some(14));
+        assert_eq!(parsed.stop_reason.as_deref(), Some("stop"));
     }
 
     #[tokio::test]
@@ -878,6 +1043,7 @@ mod tests {
             seed: None,
             max_output_tokens: None,
             api_base: "https://api.openai.com/v1".to_string(),
+            stream: false,
         };
         let err = openai_prompt_async(&transport, request).await.unwrap_err();
         assert!(err.to_string().contains("model cannot be empty"));
@@ -894,6 +1060,7 @@ mod tests {
             seed: None,
             max_output_tokens: None,
             api_base: "https://api.openai.com/v1".to_string(),
+            stream: false,
         };
         let err = openai_prompt_async(&transport, request).await.unwrap_err();
         assert!(err.to_string().contains("prompt cannot be empty"));
@@ -1466,6 +1633,7 @@ pub fn huggingface_prompt(
         provider: "huggingface",
         model: model.to_string(),
         output_text,
+        output_chunks: None,
         prompt_tokens: None,
         completion_tokens: None,
         total_tokens: None,

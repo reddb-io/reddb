@@ -159,3 +159,26 @@ Verification (slice 2):
   present.
 - `pnpm typecheck` exited 1 while printing `TypeScript: No errors
   found`, matching the prior wrapper behavior.
+
+Slice 3: OpenAI-compatible streamed deltas now fan out to multiple SSE `answer_token` frames.
+
+What changed:
+
+- `OpenAiPromptRequest` gained a `stream` flag.
+- ASK STREAM calls OpenAI-compatible providers with `stream: true` and `stream_options.include_usage: true`.
+- OpenAI-compatible SSE responses are parsed from `data:` frames, preserving each `delta.content` as an answer chunk while still accumulating the full answer for validation/audit/result parity.
+- The runtime ASK result now carries `answer_tokens` when provider deltas are available.
+- HTTP SSE serialization emits one `answer_token` frame per preserved delta, falling back to the full answer for non-streaming providers.
+- Tests now use a streaming OpenAI-compatible stub and assert two ordered `answer_token` frames plus exactly one terminal `validation` frame.
+
+Still deferred:
+
+- The server transport still returns a buffered `HttpResponse` with `Content-Length`; true socket-level incremental writes and per-frame flushes still need a route/connection streaming response type.
+- Mid-stream cost checkpoints still happen after provider completion in this slice because `AiTransport::request` still reads the provider body fully before parsing.
+- A socket-level SSE integration test with delayed provider chunks remains needed to prove client-visible incremental delivery timing.
+
+Verification (slice 3):
+
+- `cargo check -q` passed.
+- `cargo test -q -p reddb-io-server --lib openai_prompt_payload -- --test-threads=1` → 3 passed.
+- `cargo test -q -p reddb-io-server --lib http_query_ask_stream -- --test-threads=1` → 2 passed.

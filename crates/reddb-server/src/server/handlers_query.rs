@@ -481,9 +481,11 @@ fn ask_sse_body(result: &crate::runtime::RuntimeQueryResult) -> Option<String> {
 
     let mut body = String::new();
     body.push_str(&encode(&Frame::Sources { sources_flat }));
-    body.push_str(&encode(&Frame::AnswerToken {
-        text: schema_text_field(row, "answer")?,
-    }));
+    for token in ask_answer_tokens(row)
+        .unwrap_or_else(|| vec![schema_text_field(row, "answer").unwrap_or_default()])
+    {
+        body.push_str(&encode(&Frame::AnswerToken { text: token }));
+    }
     body.push_str(&encode(&Frame::Validation {
         ok: validation_json
             .get("ok")
@@ -493,6 +495,18 @@ fn ask_sse_body(result: &crate::runtime::RuntimeQueryResult) -> Option<String> {
         audit,
     }));
     Some(body)
+}
+
+fn ask_answer_tokens(
+    record: &crate::storage::query::unified::UnifiedRecord,
+) -> Option<Vec<String>> {
+    let value = schema_json_field(record, "answer_tokens")?;
+    let tokens = value
+        .as_array()?
+        .iter()
+        .filter_map(|token| token.as_str().map(ToString::to_string))
+        .collect::<Vec<_>>();
+    (!tokens.is_empty()).then_some(tokens)
 }
 
 fn schema_field<'a>(
@@ -1211,7 +1225,7 @@ mod tests {
     #[test]
     fn http_query_ask_stream_returns_ordered_sse_frames() {
         let _guard = ASK_ENV_LOCK.lock().expect("env lock");
-        let stub = SequenceOpenAiStub::start(vec!["streamed answer"]);
+        let stub = StreamingOpenAiStub::start(vec!["streamed ", "answer"]);
         let _api_base =
             EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
         let _api_key = EnvVarGuard::unset("REDDB_OPENAI_API_KEY");
@@ -1233,10 +1247,10 @@ mod tests {
         assert!(sources_pos < token_pos, "{text}");
         assert!(token_pos < validation_pos, "{text}");
         assert!(text.contains(r#"data: {"sources_flat":[]}"#), "{text}");
-        assert!(
-            text.contains(r#"data: {"text":"streamed answer"}"#),
-            "{text}"
-        );
+        assert!(text.contains(r#"data: {"text":"streamed "}"#), "{text}");
+        assert!(text.contains(r#"data: {"text":"answer"}"#), "{text}");
+        assert_eq!(text.matches("event: answer_token\n").count(), 2, "{text}");
+        assert_eq!(text.matches("event: validation\n").count(), 1, "{text}");
         assert!(text.contains(r#""audit":{"cache_hit":false"#), "{text}");
         assert!(text.contains(r#""ok":true"#), "{text}");
         assert!(!text.contains("event: error\n"), "{text}");
@@ -1513,6 +1527,67 @@ mod tests {
         }
     }
 
+    struct StreamingOpenAiStub {
+        addr: SocketAddr,
+        shutdown: Arc<AtomicBool>,
+        requests: Arc<std::sync::atomic::AtomicUsize>,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl StreamingOpenAiStub {
+        fn start(chunks: Vec<&'static str>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("stub bind");
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            let addr = listener.local_addr().expect("local addr");
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let server_shutdown = Arc::clone(&shutdown);
+            let server_requests = Arc::clone(&requests);
+            let handle = thread::spawn(move || {
+                while !server_shutdown.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            read_stub_request(&mut stream);
+                            server_requests.fetch_add(1, Ordering::Relaxed);
+                            write_openai_streaming_response(&mut stream, &chunks);
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            Self {
+                addr,
+                shutdown,
+                requests,
+                handle: Some(handle),
+            }
+        }
+
+        fn addr(&self) -> SocketAddr {
+            self.addr
+        }
+
+        fn request_count(&self) -> usize {
+            self.requests.load(Ordering::Relaxed)
+        }
+    }
+
+    impl Drop for StreamingOpenAiStub {
+        fn drop(&mut self) {
+            self.shutdown.store(true, Ordering::Relaxed);
+            let _ = TcpStream::connect(self.addr);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
     fn write_openai_text_response(stream: &mut TcpStream, output: &str) {
         let escaped = output.replace('\\', "\\\\").replace('"', "\\\"");
         let body = format!(
@@ -1525,6 +1600,30 @@ mod tests {
         stream
             .write_all(response.as_bytes())
             .expect("write stub response");
+    }
+
+    fn write_openai_streaming_response(stream: &mut TcpStream, chunks: &[&str]) {
+        let mut body = String::new();
+        for chunk in chunks {
+            let escaped = chunk.replace('\\', "\\\\").replace('"', "\\\"");
+            body.push_str(&format!(
+                r#"data: {{"model":"test-model","choices":[{{"delta":{{"content":"{escaped}"}},"finish_reason":null}}]}}"#
+            ));
+            body.push_str("\n\n");
+        }
+        body.push_str(&format!(
+            r#"data: {{"model":"test-model","choices":[{{"delta":{{}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":12,"completion_tokens":{},"total_tokens":{}}}}}"#,
+            chunks.len(),
+            12 + chunks.len()
+        ));
+        body.push_str("\n\ndata: [DONE]\n\n");
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write stub streaming response");
     }
 
     struct StatusOpenAiStub {
