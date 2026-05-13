@@ -307,6 +307,13 @@ mod transport_tests {
         );
         assert_eq!(map_runtime_error(&RedDBError::Query("x".into())).0, 400);
         assert_eq!(
+            map_runtime_error(&RedDBError::Query(
+                "ask_primary_sync_unavailable: connect failed".into()
+            ))
+            .0,
+            503
+        );
+        assert_eq!(
             map_runtime_error(&RedDBError::Validation {
                 message: "x".into(),
                 validation: JsonValue::Object(Map::new()),
