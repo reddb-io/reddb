@@ -216,11 +216,38 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Consume an identifier or aggregate keyword when the grammar expects
+    /// a user-defined column name.
+    pub fn expect_column_ident(&mut self) -> Result<String, ParseError> {
+        let name = match &self.current.token {
+            Token::Ident(name) => name.clone(),
+            Token::Count => "count".to_string(),
+            Token::Sum => "sum".to_string(),
+            Token::Avg => "avg".to_string(),
+            Token::Min => "min".to_string(),
+            Token::Max => "max".to_string(),
+            other => {
+                return Err(ParseError::expected(
+                    vec!["identifier"],
+                    other,
+                    self.position(),
+                ));
+            }
+        };
+        self.advance()?;
+        Ok(name)
+    }
+
     /// Consume an identifier or keyword (for type names where keywords are valid)
     pub fn expect_ident_or_keyword(&mut self) -> Result<String, ParseError> {
         // Get the string representation of the current token
         let name = match &self.current.token {
             Token::Ident(name) => name.clone(),
+            Token::Count => "count".to_string(),
+            Token::Sum => "sum".to_string(),
+            Token::Avg => "avg".to_string(),
+            Token::Min => "min".to_string(),
+            Token::Max => "max".to_string(),
             // Keywords that can be type names (convert to uppercase for type matching)
             Token::Contains => "CONTAINS".to_string(),
             Token::Left => "LEFT".to_string(),

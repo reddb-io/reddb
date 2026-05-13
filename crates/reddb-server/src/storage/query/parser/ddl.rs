@@ -709,7 +709,7 @@ impl<'a> Parser<'a> {
 
     /// Parse a single column definition: name TYPE [NOT NULL] [DEFAULT=val] [COMPRESS:N] [UNIQUE] [PRIMARY KEY]
     fn parse_column_def(&mut self) -> Result<CreateColumnDef, ParseError> {
-        let name = self.expect_ident()?;
+        let name = self.expect_column_ident()?;
         let sql_type = self.parse_column_type()?;
         let data_type = sql_type.to_string();
 
