@@ -1,9 +1,29 @@
 services:
+  mock-ai:
+    image: python:3.12-alpine
+    container_name: reddb-mock-ai
+    working_dir: /repo
+    volumes:
+      - ../..:/repo:ro
+    environment:
+      MOCK_AI_PROMPT_TOKENS: "1000"
+      MOCK_AI_COMPLETION_TOKENS: "1000"
+    command:
+      - "python"
+      - "tests/pgwire_clients/mock_ai.py"
+      - "--listen"
+      - "0.0.0.0:55436"
+
   primary:
     build:
       context: ../..
       dockerfile: Dockerfile
     container_name: reddb-primary
+    environment:
+      REDDB_AI_PROVIDER: openai
+      REDDB_OPENAI_API_BASE: http://mock-ai:55436/v1
+      REDDB_OPENAI_API_KEY: test-key
+      REDDB_OPENAI_PROMPT_MODEL: mock-chat
     ports:
       - "50051:50051"
       - "8080:8080"
@@ -15,12 +35,19 @@ services:
       - "0.0.0.0:50051"
       - "--http-bind"
       - "0.0.0.0:8080"
+    depends_on:
+      - mock-ai
 
   replica-1:
     build:
       context: ../..
       dockerfile: Dockerfile
     container_name: reddb-replica-1
+    environment:
+      REDDB_AI_PROVIDER: openai
+      REDDB_OPENAI_API_BASE: http://mock-ai:55436/v1
+      REDDB_OPENAI_API_KEY: test-key
+      REDDB_OPENAI_PROMPT_MODEL: mock-chat
     ports:
       - "50052:50051"
       - "8081:8080"
@@ -34,12 +61,18 @@ services:
       - "0.0.0.0:8080"
     depends_on:
       - primary
+      - mock-ai
 
   replica-2:
     build:
       context: ../..
       dockerfile: Dockerfile
     container_name: reddb-replica-2
+    environment:
+      REDDB_AI_PROVIDER: openai
+      REDDB_OPENAI_API_BASE: http://mock-ai:55436/v1
+      REDDB_OPENAI_API_KEY: test-key
+      REDDB_OPENAI_PROMPT_MODEL: mock-chat
     ports:
       - "50053:50051"
       - "8082:8080"
@@ -53,3 +86,4 @@ services:
       - "0.0.0.0:8080"
     depends_on:
       - primary
+      - mock-ai
