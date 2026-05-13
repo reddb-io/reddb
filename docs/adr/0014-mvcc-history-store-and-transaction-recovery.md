@@ -1,6 +1,6 @@
 # ADR 0014 — MVCC history store and transaction crash recovery
 
-**Status:** Draft (open for human review)
+**Status:** Accepted
 **Date:** 2026-05-12
 **Supersedes:** —
 **Superseded by:** —
@@ -41,6 +41,20 @@ cross-model transactions, VCS pins, replication, and existing WAL recovery.
 Introduce a RedDB MVCC storage contract based on a stable logical identity, a
 global history store, and an atomic transaction commit record in the WAL.
 
+This ADR ratifies the implementation contract for the first rollout:
+
+- The first product guarantee is SQL table-row MVCC correctness.
+- The shared engine concepts may be introduced in common storage modules, but
+  non-table models must not claim the new guarantee until their read and write
+  paths explicitly adopt the resolver.
+- RedDB implements snapshot isolation with first-committer-wins write conflict
+  detection. It does not implement serializable isolation or SSI.
+- The first rollout includes manual `VACUUM` / GC only. It does not include an
+  autovacuum daemon.
+- Current secondary indexes plus MVCC recheck and fallback are the first
+  correctness target. Historical secondary indexes are deferred.
+- Full multi-model adoption is deferred behind table-row correctness.
+
 ### 1. Logical identity
 
 Add a logical identity distinct from the physical entity version:
@@ -56,6 +70,12 @@ Add a logical identity distinct from the physical entity version:
 
 This avoids overloading one id with two meanings. A future `UPDATE` can create a
 new physical version without changing the user's row identity.
+
+Persisted table-row records may add the logical identity in row metadata rather
+than changing the meaning of `EntityId`. Legacy records without that metadata
+resolve as `logical_id = entity.id`. The exact byte placement belongs to the
+logical-identity compatibility slice, but the compatibility rule is final:
+missing metadata must remain readable and updatable through the lazy mapping.
 
 ### 2. History store
 
@@ -75,6 +95,10 @@ valid_to_xid
 physical_version_id
 payload
 ```
+
+The first implementation should store history entries using existing pager /
+B-tree primitives where possible. A dedicated compact history record format is a
+storage optimization and must not block table-row correctness.
 
 This follows the useful part of WiredTiger's history-store shape: old versions
 are kept out of the hot current store, can be garbage-collected with one policy,
@@ -134,6 +158,7 @@ The first durable format should be an atomic `TxCommitBatch` WAL record:
 ```text
 TxCommitBatch {
   xid,
+  batch_id,
   mutations[],
   history_puts[],
   index_deltas[],
@@ -150,6 +175,11 @@ The replay rule is deliberately simple:
 
 Prepared transactions and two-phase commit are out of scope for this ADR. Any
 `PREPARE TRANSACTION` surface must be rejected until a separate design lands.
+
+Replica apply must preserve the primary `xid` and commit-batch ordering when it
+replays a primary commit. A replica must not synthesize a replacement local xid
+for a primary batch. Replication transport details are outside this ADR, but the
+storage contract requires xid-preserving apply.
 
 ### 7. Commit ordering
 
@@ -221,6 +251,11 @@ snapshots.
 Historical indexes are a performance follow-up, not a correctness requirement
 for the first cut.
 
+For old snapshots, `AS OF`, or VCS-pinned reads, correctness beats index use. If
+the current index cannot prove completeness for the requested snapshot, the
+query path must fall back to a version-aware scan or history lookup before
+returning user data.
+
 ### 11. VACUUM / GC
 
 The first cut must include manual GC, but not an autovacuum daemon.
@@ -237,6 +272,17 @@ oldest required xid. That horizon must consider:
 Expose metrics for history-store bytes, version count, oldest pinned xid, and
 reclaimable versions. Autovacuum can be designed later using those metrics and
 thresholds.
+
+### 12. CDC and replay side effects
+
+`TxCommitBatch` replay is a storage recovery operation and must be idempotent.
+It must not duplicate externally visible CDC side effects after restart.
+
+Live commit apply may emit CDC events after the batch has a stable identity, or
+replay may feed a durable outbox keyed by `batch_id`, but either approach must
+include an idempotence marker. The first MVCC storage slices do not need to
+finish the CDC surface; they must only avoid a design that makes duplicate CDC
+events unavoidable.
 
 ## Consequences
 
@@ -268,18 +314,28 @@ thresholds.
 
 ## Implementation slices
 
-1. Add the `logical_id` abstraction with lazy `logical_id = entity.id`
-   compatibility.
-2. Add the history-store module and physical inspection tests.
-3. Add `TxCommitBatch` WAL record, replay, torn-record truncation, and
-   idempotent apply tests.
-4. Route autocommit table `UPDATE` through the write set and batch commit path.
-5. Route explicit table transactions through the same path, including
-   savepoint rollback of update pre-images.
-6. Replace user read fast paths with `resolve_visible`.
-7. Add current-index recheck and historical fallback.
-8. Add manual `VACUUM` history/tombstone GC.
-9. Expand from table rows to selected non-table `UnifiedEntity` models.
+1. [#434](https://github.com/reddb-io/reddb/issues/434): add the
+   `logical_id` abstraction with lazy `logical_id = entity.id` compatibility.
+2. [#435](https://github.com/reddb-io/reddb/issues/435): route autocommit table
+   `UPDATE` through versioned row writes.
+3. [#436](https://github.com/reddb-io/reddb/issues/436): add the transaction
+   write set for rollback-safe table updates.
+4. [#437](https://github.com/reddb-io/reddb/issues/437): make savepoint
+   rollback discard transaction-local update pre-images.
+5. [#438](https://github.com/reddb-io/reddb/issues/438): implement table-row
+   `DELETE` tombstones and old-snapshot visibility.
+6. [#439](https://github.com/reddb-io/reddb/issues/439): enforce
+   first-committer-wins write conflicts by `logical_id`.
+7. [#440](https://github.com/reddb-io/reddb/issues/440): add `TxCommitBatch`
+   WAL coverage for autocommit table writes.
+8. [#441](https://github.com/reddb-io/reddb/issues/441): route explicit
+   transaction commit through `TxCommitBatch`.
+9. [#442](https://github.com/reddb-io/reddb/issues/442): add current-index
+   MVCC recheck and old-snapshot fallback.
+10. [#443](https://github.com/reddb-io/reddb/issues/443): add manual
+    `VACUUM` history/tombstone GC.
+11. [#444](https://github.com/reddb-io/reddb/issues/444): document table-row
+    guarantees and cross-model guardrails.
 
 ## Required tests
 
@@ -295,12 +351,23 @@ thresholds.
 - `DELETE` tombstone hides current reads and preserves old snapshot reads.
 - `VACUUM` does not remove versions pinned by active snapshots or VCS commits.
 
-## Open questions
+## Resolved questions and deferrals
 
-- Exact on-disk encoding for `logical_id` when it differs from `entity.id`.
-- Whether the history store should reuse existing B-tree/pager primitives or
-  get a dedicated compact record format immediately.
-- How replica apply preserves primary xids and history-store ordering.
-- Whether CDC events should be emitted from `TxCommitBatch` replay or from the
-  live apply path with an idempotence marker.
-- How much old-snapshot index performance is required before v1.0.
+- `logical_id` encoding: the compatibility rule is accepted now. Legacy rows
+  without persisted logical identity map to their physical `EntityId`; new
+  table-row versions may persist logical identity in row metadata. Exact byte
+  placement is delegated to #434 because it is a format detail, not an
+  unresolved semantic contract.
+- History-store physical format: the first implementation should reuse existing
+  pager / B-tree primitives when they are sufficient. A compact dedicated
+  history format is deferred until correctness is proven.
+- Replica apply: primary xids and commit-batch ordering are part of the storage
+  contract. Replication transport work may be later, but replay/apply must not
+  rewrite primary xids.
+- CDC emission: recovery replay must be idempotent and must not duplicate
+  external CDC events. Exact outbox or live-emission plumbing is deferred, but
+  every design must key side effects by `batch_id` or an equivalent durable
+  idempotence marker.
+- Old-snapshot index performance: v1.0 table-row correctness requires MVCC
+  recheck plus fallback scan/history lookup. Historical secondary indexes are
+  explicitly deferred as a performance feature.
