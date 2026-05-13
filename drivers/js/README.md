@@ -102,7 +102,21 @@ const persisted = await connect('file:///tmp/app.rdb')
 const custom = await connect('memory://', { binary: '/usr/local/bin/red' })
 ```
 
-### `db.query(sql) → Promise<{ statement, affected, columns, rows }>`
+### `db.query(sql, ...params) → Promise<{ statement, affected, columns, rows }>`
+
+Bind user values with `$1`, `$2`, ... placeholders. The variadic form is the
+preferred API; the older `db.query(sql, paramsArray)` form remains supported.
+
+```js
+const result = await db.query(
+  'SELECT * FROM users WHERE id = $1 AND name = $2',
+  42,
+  'Alice',
+)
+```
+
+`db.execute(sql, ...params)` is an alias for statements where the affected row
+count is the primary result.
 
 `ASK '...'` returns the ASK envelope directly:
 

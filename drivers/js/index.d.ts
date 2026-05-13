@@ -286,6 +286,10 @@ export class RedDB {
   query(sql: `ASK ${string}`): Promise<AskQueryResult>
   query(sql: string): Promise<QueryResult>
   query(sql: string, params: QueryParam[]): Promise<QueryResult>
+  query(sql: string, ...params: QueryParam[]): Promise<QueryResult>
+  execute(sql: string): Promise<QueryResult>
+  execute(sql: string, params: QueryParam[]): Promise<QueryResult>
+  execute(sql: string, ...params: QueryParam[]): Promise<QueryResult>
   insert(collection: string, payload: Record<string, unknown>): Promise<InsertResult>
   bulkInsert(
     collection: string,
