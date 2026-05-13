@@ -92,6 +92,13 @@ Value fixture_value(const std::string& name) {
         };
         return Value::bytes(bytes);
     }
+    if (name == "bytes_256") {
+        std::array<std::byte, 256> bytes = {};
+        for (size_t i = 0; i < bytes.size(); ++i) {
+            bytes[i] = std::byte{static_cast<unsigned char>(i)};
+        }
+        return Value::bytes(bytes);
+    }
     if (name == "json_nested") {
         return Value::json(R"({"a":null,"z":[1,{"deep":[true,false]}]})");
     }
@@ -104,6 +111,13 @@ Value fixture_value(const std::string& name) {
     }
     if (name == "vector_three") {
         std::array<float, 3> vector = {1.0f, 2.0f, -0.5f};
+        return Value::vector(vector);
+    }
+    if (name == "vector_128") {
+        std::array<float, 128> vector = {};
+        for (size_t i = 0; i < vector.size(); ++i) {
+            vector[i] = static_cast<float>(i);
+        }
         return Value::vector(vector);
     }
     throw std::runtime_error("unknown fixture: " + name);
@@ -202,7 +216,7 @@ TEST(ValueCodec, HttpParamsUseJsonEnvelopesForTaggedValues) {
 
 TEST(ValueCodec, SharedParameterFixturesMatchManifest) {
     const std::string manifest = read_fixture_manifest();
-    const std::array<const char*, 20> names = {
+    const std::array<const char*, 22> names = {
         "null",
         "bool_true",
         "bool_false",
@@ -217,12 +231,14 @@ TEST(ValueCodec, SharedParameterFixturesMatchManifest) {
         "text_x",
         "bytes_empty",
         "bytes_deadbeef",
+        "bytes_256",
         "json_nested",
         "timestamp_zero",
         "timestamp_max",
         "uuid_001122",
         "vector_empty",
         "vector_three",
+        "vector_128",
     };
 
     for (const char* name : names) {

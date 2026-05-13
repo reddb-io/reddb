@@ -5,6 +5,24 @@ const value_codec = reddb.redwire.value_codec;
 const t = std.testing;
 const empty_vector = [_]f32{};
 const vector_three = [_]f32{ 1.0, 2.0, -0.5 };
+const bytes_256 = makeBytes256();
+const vector_128 = makeVector128();
+
+fn makeBytes256() [256]u8 {
+    var out: [256]u8 = undefined;
+    for (&out, 0..) |*byte, i| {
+        byte.* = @intCast(i);
+    }
+    return out;
+}
+
+fn makeVector128() [128]f32 {
+    var out: [128]f32 = undefined;
+    for (&out, 0..) |*value, i| {
+        value.* = @floatFromInt(i);
+    }
+    return out;
+}
 
 fn readFixtureManifest(allocator: std.mem.Allocator) ![]u8 {
     const candidates = [_][]const u8{
@@ -50,9 +68,9 @@ fn f64FromBits(bits: u64) f64 {
 }
 
 fn fixtureValue(name: []const u8) !value_codec.Value {
-    if (std.mem.eql(u8, name, "null")) return .{ .@"null" = {} };
-    if (std.mem.eql(u8, name, "bool_true")) return .{ .@"bool" = true };
-    if (std.mem.eql(u8, name, "bool_false")) return .{ .@"bool" = false };
+    if (std.mem.eql(u8, name, "null")) return .{ .null = {} };
+    if (std.mem.eql(u8, name, "bool_true")) return .{ .bool = true };
+    if (std.mem.eql(u8, name, "bool_false")) return .{ .bool = false };
     if (std.mem.eql(u8, name, "int_min")) return .{ .int = std.math.minInt(i64) };
     if (std.mem.eql(u8, name, "int_max")) return .{ .int = std.math.maxInt(i64) };
     if (std.mem.eql(u8, name, "int_42")) return .{ .int = 42 };
@@ -64,18 +82,20 @@ fn fixtureValue(name: []const u8) !value_codec.Value {
     if (std.mem.eql(u8, name, "text_x")) return .{ .text = "x" };
     if (std.mem.eql(u8, name, "bytes_empty")) return .{ .bytes = &.{} };
     if (std.mem.eql(u8, name, "bytes_deadbeef")) return .{ .bytes = &.{ 0xde, 0xad, 0xbe, 0xef } };
+    if (std.mem.eql(u8, name, "bytes_256")) return .{ .bytes = &bytes_256 };
     if (std.mem.eql(u8, name, "json_nested")) return .{ .json = "{\"a\":null,\"z\":[1,{\"deep\":[true,false]}]}" };
     if (std.mem.eql(u8, name, "timestamp_zero")) return .{ .timestamp = 0 };
     if (std.mem.eql(u8, name, "timestamp_max")) return .{ .timestamp = std.math.maxInt(i64) };
     if (std.mem.eql(u8, name, "uuid_001122")) return try value_codec.Value.uuidFromString("00112233-4455-6677-8899-aabbccddeeff");
     if (std.mem.eql(u8, name, "vector_empty")) return .{ .vector = &empty_vector };
     if (std.mem.eql(u8, name, "vector_three")) return .{ .vector = &vector_three };
+    if (std.mem.eql(u8, name, "vector_128")) return .{ .vector = &vector_128 };
     return error.UnknownFixture;
 }
 
 test "value tag table is pinned" {
-    try t.expectEqual(@as(u8, 0x00), @intFromEnum(value_codec.ValueTag.@"null"));
-    try t.expectEqual(@as(u8, 0x01), @intFromEnum(value_codec.ValueTag.@"bool"));
+    try t.expectEqual(@as(u8, 0x00), @intFromEnum(value_codec.ValueTag.null));
+    try t.expectEqual(@as(u8, 0x01), @intFromEnum(value_codec.ValueTag.bool));
     try t.expectEqual(@as(u8, 0x02), @intFromEnum(value_codec.ValueTag.int));
     try t.expectEqual(@as(u8, 0x03), @intFromEnum(value_codec.ValueTag.float));
     try t.expectEqual(@as(u8, 0x04), @intFromEnum(value_codec.ValueTag.text));
@@ -87,11 +107,11 @@ test "value tag table is pinned" {
 }
 
 test "encodes scalar values" {
-    const null_value = try value_codec.encodeValue(t.allocator, .{ .@"null" = {} });
+    const null_value = try value_codec.encodeValue(t.allocator, .{ .null = {} });
     defer t.allocator.free(null_value);
     try t.expectEqualSlices(u8, &.{0x00}, null_value);
 
-    const true_value = try value_codec.encodeValue(t.allocator, .{ .@"bool" = true });
+    const true_value = try value_codec.encodeValue(t.allocator, .{ .bool = true });
     defer t.allocator.free(true_value);
     try t.expectEqualSlices(u8, &.{ 0x01, 0x01 }, true_value);
 
@@ -135,10 +155,10 @@ test "encodes bytes timestamp uuid json and vector" {
     const vector_value = try value_codec.encodeValue(t.allocator, .{ .vector = &vector });
     defer t.allocator.free(vector_value);
     try t.expectEqualSlices(u8, &.{
-        0x06, 3, 0, 0, 0,
-        0x00, 0x00, 0x80, 0x3f,
-        0x00, 0x00, 0x00, 0x40,
-        0x00, 0x00, 0x00, 0xbf,
+        0x06, 3,    0,    0,    0,
+        0x00, 0x00, 0x80, 0x3f, 0x00,
+        0x00, 0x00, 0x40, 0x00, 0x00,
+        0x00, 0xbf,
     }, vector_value);
 }
 
@@ -146,16 +166,16 @@ test "encodes query with params payload" {
     const params = [_]value_codec.Value{
         .{ .int = 42 },
         .{ .text = "x" },
-        .{ .@"null" = {} },
+        .{ .null = {} },
     };
     const encoded = try value_codec.encodeQueryWithParams(t.allocator, "Q", &params);
     defer t.allocator.free(encoded);
     try t.expectEqualSlices(u8, &.{
-        1, 0, 0, 0, 'Q',
-        3, 0, 0, 0,
-        0x02, 42, 0, 0, 0, 0, 0, 0, 0,
-        0x04, 1, 0, 0, 0, 'x',
-        0x00,
+        1,  0, 0, 0,    'Q',
+        3,  0, 0, 0,    0x02,
+        42, 0, 0, 0,    0,
+        0,  0, 0, 0x04, 1,
+        0,  0, 0, 'x',  0x00,
     }, encoded);
 }
 
@@ -167,8 +187,8 @@ test "http query body adds typed params only when non-empty" {
     const bytes = [_]u8{ 'h', 'i' };
     const vector = [_]f32{ 1.0, 2.0 };
     const params = [_]value_codec.Value{
-        .{ .@"null" = {} },
-        .{ .@"bool" = true },
+        .{ .null = {} },
+        .{ .bool = true },
         .{ .int = 42 },
         .{ .float = 1.5 },
         .{ .text = "txt" },
@@ -207,12 +227,14 @@ test "shared parameter fixtures match manifest" {
         "text_x",
         "bytes_empty",
         "bytes_deadbeef",
+        "bytes_256",
         "json_nested",
         "timestamp_zero",
         "timestamp_max",
         "uuid_001122",
         "vector_empty",
         "vector_three",
+        "vector_128",
     };
 
     for (names) |name| {

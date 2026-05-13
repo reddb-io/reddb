@@ -212,6 +212,8 @@ Object? _fixtureValue(String name) {
       return Uint8List(0);
     case 'bytes_deadbeef':
       return Uint8List.fromList([0xde, 0xad, 0xbe, 0xef]);
+    case 'bytes_256':
+      return Uint8List.fromList(List<int>.generate(256, (i) => i));
     case 'json_nested':
       return Value.json({
         'z': [1, {'deep': [true, false]}],
@@ -227,6 +229,10 @@ Object? _fixtureValue(String name) {
       return Float32List(0);
     case 'vector_three':
       return Float32List.fromList([1.0, 2.0, -0.5]);
+    case 'vector_128':
+      return Float32List.fromList(
+        List<double>.generate(128, (i) => i.toDouble()),
+      );
     default:
       throw ArgumentError('unknown fixture $name');
   }

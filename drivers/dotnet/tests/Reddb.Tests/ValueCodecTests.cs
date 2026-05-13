@@ -198,6 +198,7 @@ public class ValueCodecTests
             "text_x" => "x",
             "bytes_empty" => Array.Empty<byte>(),
             "bytes_deadbeef" => new byte[] { 0xde, 0xad, 0xbe, 0xef },
+            "bytes_256" => Bytes256(),
             "json_nested" => new Dictionary<string, object?>
             {
                 ["z"] = new object?[] { 1, new Dictionary<string, object?> { ["deep"] = new object?[] { true, false } } },
@@ -208,7 +209,24 @@ public class ValueCodecTests
             "uuid_001122" => Guid.Parse("00112233-4455-6677-8899-aabbccddeeff"),
             "vector_empty" => Array.Empty<float>(),
             "vector_three" => new float[] { 1.0f, 2.0f, -0.5f },
+            "vector_128" => Vector128(),
             _ => throw new ArgumentException($"unknown fixture {name}", nameof(name)),
         };
+    }
+
+    private static byte[] Bytes256()
+    {
+        byte[] output = new byte[256];
+        for (int i = 0; i < output.Length; i++)
+            output[i] = (byte)i;
+        return output;
+    }
+
+    private static float[] Vector128()
+    {
+        float[] output = new float[128];
+        for (int i = 0; i < output.Length; i++)
+            output[i] = i;
+        return output;
     }
 }

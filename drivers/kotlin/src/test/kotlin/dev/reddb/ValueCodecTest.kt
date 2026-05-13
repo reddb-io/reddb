@@ -185,6 +185,7 @@ class ValueCodecTest {
         "text_x" -> "x"
         "bytes_empty" -> byteArrayOf()
         "bytes_deadbeef" -> byteArrayOf(0xde.toByte(), 0xad.toByte(), 0xbe.toByte(), 0xef.toByte())
+        "bytes_256" -> ByteArray(256) { it.toByte() }
         "json_nested" -> linkedMapOf<String, Any?>(
             "z" to listOf(1, mapOf("deep" to listOf(true, false))),
             "a" to null,
@@ -194,6 +195,7 @@ class ValueCodecTest {
         "uuid_001122" -> UUID.fromString("00112233-4455-6677-8899-aabbccddeeff")
         "vector_empty" -> floatArrayOf()
         "vector_three" -> floatArrayOf(1.0f, 2.0f, -0.5f)
+        "vector_128" -> FloatArray(128) { it.toFloat() }
         else -> throw IllegalArgumentException("unknown fixture $name")
     }
 

@@ -380,6 +380,8 @@ func goFixtureValue(t *testing.T, name string) any {
 		return []byte{}
 	case "bytes_deadbeef":
 		return []byte{0xde, 0xad, 0xbe, 0xef}
+	case "bytes_256":
+		return bytes256()
 	case "json_nested":
 		return map[string]any{"z": []any{float64(1), map[string]any{"deep": []any{true, false}}}, "a": nil}
 	case "timestamp_zero":
@@ -396,10 +398,28 @@ func goFixtureValue(t *testing.T, name string) any {
 		return []float32{}
 	case "vector_three":
 		return []float32{1, 2, -0.5}
+	case "vector_128":
+		return vector128()
 	default:
 		t.Fatalf("unknown fixture %s", name)
 		return nil
 	}
+}
+
+func bytes256() []byte {
+	out := make([]byte, 256)
+	for i := range out {
+		out[i] = byte(i)
+	}
+	return out
+}
+
+func vector128() []float32 {
+	out := make([]float32, 128)
+	for i := range out {
+		out[i] = float32(i)
+	}
+	return out
 }
 
 func TestEncodeQueryWithParams_Mixed(t *testing.T) {
