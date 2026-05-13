@@ -146,8 +146,10 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("show policies")
         || lower.starts_with("show effective ")
     {
-        // But check if it's SPARQL-style SELECT with ?variable
-        if lower.starts_with("select ") && lower.contains(" ?") {
+        // But check if it's SPARQL-style SELECT with ?variable.
+        // Bare SQL placeholders (`?`) and numbered placeholders (`?1`)
+        // must stay in SQL mode for parameter binding.
+        if lower.starts_with("select ") && has_sparql_variable(&lower) {
             return QueryMode::Sparql;
         }
         return QueryMode::Sql;
@@ -166,8 +168,9 @@ fn has_sparql_pattern(lower: &str) -> bool {
     // SPARQL variables start with ? or $
     // SPARQL has WHERE { } with triple patterns
 
-    // Check for ?variable pattern (not after comparison operators)
-    let has_var = lower.contains(" ?") && !lower.contains("= ?") && !lower.contains("> ?");
+    // Check for ?variable pattern. Bare SQL placeholders (`?`) and
+    // numbered placeholders (`?1`) are not SPARQL variables.
+    let has_var = has_sparql_variable(lower);
 
     // Check for typical SPARQL structure
     let has_triple_pattern = lower.contains(" where {") || lower.contains(" where{");
@@ -179,6 +182,17 @@ fn has_sparql_pattern(lower: &str) -> bool {
             || lower.contains(" :") && lower.contains("?"));
 
     has_var || has_triple_pattern || has_prefix_pattern
+}
+
+fn has_sparql_variable(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    bytes
+        .windows(2)
+        .any(|pair| pair[0] == b'?' && is_sparql_variable_start(pair[1]))
+}
+
+fn is_sparql_variable_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_'
 }
 
 /// Detect natural language patterns
@@ -280,6 +294,18 @@ mod tests {
             QueryMode::Sql
         );
         assert_eq!(
+            detect_mode("SELECT name FROM t WHERE id = ?"),
+            QueryMode::Sql
+        );
+        assert_eq!(
+            detect_mode("SELECT name FROM t WHERE id = ?1"),
+            QueryMode::Sql
+        );
+        assert_eq!(
+            detect_mode("INSERT INTO t (id, name) VALUES (?, ?)"),
+            QueryMode::Sql
+        );
+        assert_eq!(
             detect_mode("SET SECRET red.secret.api = 'x'"),
             QueryMode::Sql
         );
@@ -356,6 +382,10 @@ mod tests {
         );
         assert_eq!(
             detect_mode("SELECT ?host ?ip WHERE { ?host :hasIP ?ip }"),
+            QueryMode::Sparql
+        );
+        assert_eq!(
+            detect_mode("SELECT ?x WHERE { ?x rdf:type :Foo }"),
             QueryMode::Sparql
         );
     }
