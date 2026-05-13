@@ -51,13 +51,14 @@ pub use reddb_grpc_proto as proto;
 
 use proto::red_db_server::{RedDb, RedDbServer};
 use proto::{
-    BatchQueryReply, BatchQueryRequest, BulkEntityReply, CollectionRequest, CollectionsReply,
-    DeleteEntityRequest, DeploymentProfileRequest, Empty, EntityReply, ExecutePreparedRequest,
-    ExportRequest, GraphProjectionUpsertRequest, HealthReply, IndexNameRequest, IndexToggleRequest,
-    JsonBulkCreateRequest, JsonCreateRequest, JsonPayloadRequest, KvWatchEvent, KvWatchRequest,
-    ManifestRequest, OperationReply, PayloadReply, PrepareQueryReply, PrepareQueryRequest,
-    QueryReply, QueryRequest, QueryValue, ScanEntity, ScanReply, ScanRequest, StatsReply,
-    TopologyReply, TopologyRequest, UpdateEntityRequest,
+    AskReply, AskRequest, BatchQueryReply, BatchQueryRequest, BulkEntityReply, Citation,
+    CollectionRequest, CollectionsReply, DeleteEntityRequest, DeploymentProfileRequest, Empty,
+    EntityReply, ExecutePreparedRequest, ExportRequest, GraphProjectionUpsertRequest, HealthReply,
+    IndexNameRequest, IndexToggleRequest, JsonBulkCreateRequest, JsonCreateRequest,
+    JsonPayloadRequest, KvWatchEvent, KvWatchRequest, ManifestRequest, OperationReply,
+    PayloadReply, PrepareQueryReply, PrepareQueryRequest, QueryReply, QueryRequest, QueryValue,
+    ScanEntity, ScanReply, ScanRequest, StatsReply, TopologyReply, TopologyRequest,
+    UpdateEntityRequest, Validation, ValidationItem,
 };
 
 mod control_support;

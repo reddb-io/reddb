@@ -567,6 +567,418 @@ func (x *QueryReply) GetResultJson() string {
 	return ""
 }
 
+type AskRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Question      string                 `protobuf:"bytes,1,opt,name=question,proto3" json:"question,omitempty"`
+	Provider      *string                `protobuf:"bytes,2,opt,name=provider,proto3,oneof" json:"provider,omitempty"`
+	Model         *string                `protobuf:"bytes,3,opt,name=model,proto3,oneof" json:"model,omitempty"`
+	Depth         *uint32                `protobuf:"varint,4,opt,name=depth,proto3,oneof" json:"depth,omitempty"`
+	Limit         *uint32                `protobuf:"varint,5,opt,name=limit,proto3,oneof" json:"limit,omitempty"`
+	MinScore      *float32               `protobuf:"fixed32,6,opt,name=min_score,json=minScore,proto3,oneof" json:"min_score,omitempty"`
+	Collection    *string                `protobuf:"bytes,7,opt,name=collection,proto3,oneof" json:"collection,omitempty"`
+	Temperature   *float32               `protobuf:"fixed32,8,opt,name=temperature,proto3,oneof" json:"temperature,omitempty"`
+	Seed          *uint64                `protobuf:"varint,9,opt,name=seed,proto3,oneof" json:"seed,omitempty"`
+	Strict        *bool                  `protobuf:"varint,10,opt,name=strict,proto3,oneof" json:"strict,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AskRequest) Reset() {
+	*x = AskRequest{}
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AskRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AskRequest) ProtoMessage() {}
+
+func (x *AskRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AskRequest.ProtoReflect.Descriptor instead.
+func (*AskRequest) Descriptor() ([]byte, []int) {
+	return file_grpcx_proto_reddb_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *AskRequest) GetQuestion() string {
+	if x != nil {
+		return x.Question
+	}
+	return ""
+}
+
+func (x *AskRequest) GetProvider() string {
+	if x != nil && x.Provider != nil {
+		return *x.Provider
+	}
+	return ""
+}
+
+func (x *AskRequest) GetModel() string {
+	if x != nil && x.Model != nil {
+		return *x.Model
+	}
+	return ""
+}
+
+func (x *AskRequest) GetDepth() uint32 {
+	if x != nil && x.Depth != nil {
+		return *x.Depth
+	}
+	return 0
+}
+
+func (x *AskRequest) GetLimit() uint32 {
+	if x != nil && x.Limit != nil {
+		return *x.Limit
+	}
+	return 0
+}
+
+func (x *AskRequest) GetMinScore() float32 {
+	if x != nil && x.MinScore != nil {
+		return *x.MinScore
+	}
+	return 0
+}
+
+func (x *AskRequest) GetCollection() string {
+	if x != nil && x.Collection != nil {
+		return *x.Collection
+	}
+	return ""
+}
+
+func (x *AskRequest) GetTemperature() float32 {
+	if x != nil && x.Temperature != nil {
+		return *x.Temperature
+	}
+	return 0
+}
+
+func (x *AskRequest) GetSeed() uint64 {
+	if x != nil && x.Seed != nil {
+		return *x.Seed
+	}
+	return 0
+}
+
+func (x *AskRequest) GetStrict() bool {
+	if x != nil && x.Strict != nil {
+		return *x.Strict
+	}
+	return false
+}
+
+type AskReply struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	Answer           string                 `protobuf:"bytes,1,opt,name=answer,proto3" json:"answer,omitempty"`
+	SourcesFlatJson  string                 `protobuf:"bytes,2,opt,name=sources_flat_json,json=sourcesFlatJson,proto3" json:"sources_flat_json,omitempty"`
+	Citations        []*Citation            `protobuf:"bytes,3,rep,name=citations,proto3" json:"citations,omitempty"`
+	Validation       *Validation            `protobuf:"bytes,4,opt,name=validation,proto3" json:"validation,omitempty"`
+	Provider         string                 `protobuf:"bytes,5,opt,name=provider,proto3" json:"provider,omitempty"`
+	Model            string                 `protobuf:"bytes,6,opt,name=model,proto3" json:"model,omitempty"`
+	PromptTokens     uint32                 `protobuf:"varint,7,opt,name=prompt_tokens,json=promptTokens,proto3" json:"prompt_tokens,omitempty"`
+	CompletionTokens uint32                 `protobuf:"varint,8,opt,name=completion_tokens,json=completionTokens,proto3" json:"completion_tokens,omitempty"`
+	CostUsd          float64                `protobuf:"fixed64,9,opt,name=cost_usd,json=costUsd,proto3" json:"cost_usd,omitempty"`
+	CacheHit         bool                   `protobuf:"varint,10,opt,name=cache_hit,json=cacheHit,proto3" json:"cache_hit,omitempty"`
+	Mode             string                 `protobuf:"bytes,11,opt,name=mode,proto3" json:"mode,omitempty"`
+	RetryCount       uint32                 `protobuf:"varint,12,opt,name=retry_count,json=retryCount,proto3" json:"retry_count,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *AskReply) Reset() {
+	*x = AskReply{}
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AskReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AskReply) ProtoMessage() {}
+
+func (x *AskReply) ProtoReflect() protoreflect.Message {
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AskReply.ProtoReflect.Descriptor instead.
+func (*AskReply) Descriptor() ([]byte, []int) {
+	return file_grpcx_proto_reddb_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *AskReply) GetAnswer() string {
+	if x != nil {
+		return x.Answer
+	}
+	return ""
+}
+
+func (x *AskReply) GetSourcesFlatJson() string {
+	if x != nil {
+		return x.SourcesFlatJson
+	}
+	return ""
+}
+
+func (x *AskReply) GetCitations() []*Citation {
+	if x != nil {
+		return x.Citations
+	}
+	return nil
+}
+
+func (x *AskReply) GetValidation() *Validation {
+	if x != nil {
+		return x.Validation
+	}
+	return nil
+}
+
+func (x *AskReply) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *AskReply) GetModel() string {
+	if x != nil {
+		return x.Model
+	}
+	return ""
+}
+
+func (x *AskReply) GetPromptTokens() uint32 {
+	if x != nil {
+		return x.PromptTokens
+	}
+	return 0
+}
+
+func (x *AskReply) GetCompletionTokens() uint32 {
+	if x != nil {
+		return x.CompletionTokens
+	}
+	return 0
+}
+
+func (x *AskReply) GetCostUsd() float64 {
+	if x != nil {
+		return x.CostUsd
+	}
+	return 0
+}
+
+func (x *AskReply) GetCacheHit() bool {
+	if x != nil {
+		return x.CacheHit
+	}
+	return false
+}
+
+func (x *AskReply) GetMode() string {
+	if x != nil {
+		return x.Mode
+	}
+	return ""
+}
+
+func (x *AskReply) GetRetryCount() uint32 {
+	if x != nil {
+		return x.RetryCount
+	}
+	return 0
+}
+
+type Citation struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Marker        uint32                 `protobuf:"varint,1,opt,name=marker,proto3" json:"marker,omitempty"`
+	Urn           string                 `protobuf:"bytes,2,opt,name=urn,proto3" json:"urn,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Citation) Reset() {
+	*x = Citation{}
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Citation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Citation) ProtoMessage() {}
+
+func (x *Citation) ProtoReflect() protoreflect.Message {
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Citation.ProtoReflect.Descriptor instead.
+func (*Citation) Descriptor() ([]byte, []int) {
+	return file_grpcx_proto_reddb_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *Citation) GetMarker() uint32 {
+	if x != nil {
+		return x.Marker
+	}
+	return 0
+}
+
+func (x *Citation) GetUrn() string {
+	if x != nil {
+		return x.Urn
+	}
+	return ""
+}
+
+type Validation struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Ok            bool                   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	Warnings      []*ValidationItem      `protobuf:"bytes,2,rep,name=warnings,proto3" json:"warnings,omitempty"`
+	Errors        []*ValidationItem      `protobuf:"bytes,3,rep,name=errors,proto3" json:"errors,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Validation) Reset() {
+	*x = Validation{}
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Validation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Validation) ProtoMessage() {}
+
+func (x *Validation) ProtoReflect() protoreflect.Message {
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Validation.ProtoReflect.Descriptor instead.
+func (*Validation) Descriptor() ([]byte, []int) {
+	return file_grpcx_proto_reddb_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *Validation) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *Validation) GetWarnings() []*ValidationItem {
+	if x != nil {
+		return x.Warnings
+	}
+	return nil
+}
+
+func (x *Validation) GetErrors() []*ValidationItem {
+	if x != nil {
+		return x.Errors
+	}
+	return nil
+}
+
+type ValidationItem struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Kind          string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`
+	Detail        string                 `protobuf:"bytes,2,opt,name=detail,proto3" json:"detail,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ValidationItem) Reset() {
+	*x = ValidationItem{}
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ValidationItem) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ValidationItem) ProtoMessage() {}
+
+func (x *ValidationItem) ProtoReflect() protoreflect.Message {
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ValidationItem.ProtoReflect.Descriptor instead.
+func (*ValidationItem) Descriptor() ([]byte, []int) {
+	return file_grpcx_proto_reddb_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *ValidationItem) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *ValidationItem) GetDetail() string {
+	if x != nil {
+		return x.Detail
+	}
+	return ""
+}
+
 var File_grpcx_proto_reddb_proto protoreflect.FileDescriptor
 
 const file_grpcx_proto_reddb_proto_rawDesc = "" +
@@ -615,10 +1027,64 @@ const file_grpcx_proto_reddb_proto_rawDesc = "" +
 	"\acolumns\x18\x05 \x03(\tR\acolumns\x12!\n" +
 	"\frecord_count\x18\x06 \x01(\x04R\vrecordCount\x12\x1f\n" +
 	"\vresult_json\x18\a \x01(\tR\n" +
-	"resultJson2p\n" +
+	"resultJson\"\xaa\x03\n" +
+	"\n" +
+	"AskRequest\x12\x1a\n" +
+	"\bquestion\x18\x01 \x01(\tR\bquestion\x12\x1f\n" +
+	"\bprovider\x18\x02 \x01(\tH\x00R\bprovider\x88\x01\x01\x12\x19\n" +
+	"\x05model\x18\x03 \x01(\tH\x01R\x05model\x88\x01\x01\x12\x19\n" +
+	"\x05depth\x18\x04 \x01(\rH\x02R\x05depth\x88\x01\x01\x12\x19\n" +
+	"\x05limit\x18\x05 \x01(\rH\x03R\x05limit\x88\x01\x01\x12 \n" +
+	"\tmin_score\x18\x06 \x01(\x02H\x04R\bminScore\x88\x01\x01\x12#\n" +
+	"\n" +
+	"collection\x18\a \x01(\tH\x05R\n" +
+	"collection\x88\x01\x01\x12%\n" +
+	"\vtemperature\x18\b \x01(\x02H\x06R\vtemperature\x88\x01\x01\x12\x17\n" +
+	"\x04seed\x18\t \x01(\x04H\aR\x04seed\x88\x01\x01\x12\x1b\n" +
+	"\x06strict\x18\n" +
+	" \x01(\bH\bR\x06strict\x88\x01\x01B\v\n" +
+	"\t_providerB\b\n" +
+	"\x06_modelB\b\n" +
+	"\x06_depthB\b\n" +
+	"\x06_limitB\f\n" +
+	"\n" +
+	"_min_scoreB\r\n" +
+	"\v_collectionB\x0e\n" +
+	"\f_temperatureB\a\n" +
+	"\x05_seedB\t\n" +
+	"\a_strict\"\xa7\x03\n" +
+	"\bAskReply\x12\x16\n" +
+	"\x06answer\x18\x01 \x01(\tR\x06answer\x12*\n" +
+	"\x11sources_flat_json\x18\x02 \x01(\tR\x0fsourcesFlatJson\x120\n" +
+	"\tcitations\x18\x03 \x03(\v2\x12.reddb.v1.CitationR\tcitations\x124\n" +
+	"\n" +
+	"validation\x18\x04 \x01(\v2\x14.reddb.v1.ValidationR\n" +
+	"validation\x12\x1a\n" +
+	"\bprovider\x18\x05 \x01(\tR\bprovider\x12\x14\n" +
+	"\x05model\x18\x06 \x01(\tR\x05model\x12#\n" +
+	"\rprompt_tokens\x18\a \x01(\rR\fpromptTokens\x12+\n" +
+	"\x11completion_tokens\x18\b \x01(\rR\x10completionTokens\x12\x19\n" +
+	"\bcost_usd\x18\t \x01(\x01R\acostUsd\x12\x1b\n" +
+	"\tcache_hit\x18\n" +
+	" \x01(\bR\bcacheHit\x12\x12\n" +
+	"\x04mode\x18\v \x01(\tR\x04mode\x12\x1f\n" +
+	"\vretry_count\x18\f \x01(\rR\n" +
+	"retryCount\"4\n" +
+	"\bCitation\x12\x16\n" +
+	"\x06marker\x18\x01 \x01(\rR\x06marker\x12\x10\n" +
+	"\x03urn\x18\x02 \x01(\tR\x03urn\"\x84\x01\n" +
+	"\n" +
+	"Validation\x12\x0e\n" +
+	"\x02ok\x18\x01 \x01(\bR\x02ok\x124\n" +
+	"\bwarnings\x18\x02 \x03(\v2\x18.reddb.v1.ValidationItemR\bwarnings\x120\n" +
+	"\x06errors\x18\x03 \x03(\v2\x18.reddb.v1.ValidationItemR\x06errors\"<\n" +
+	"\x0eValidationItem\x12\x12\n" +
+	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x16\n" +
+	"\x06detail\x18\x02 \x01(\tR\x06detail2\xa1\x01\n" +
 	"\x05RedDb\x120\n" +
 	"\x06Health\x12\x0f.reddb.v1.Empty\x1a\x15.reddb.v1.HealthReply\x125\n" +
-	"\x05Query\x12\x16.reddb.v1.QueryRequest\x1a\x14.reddb.v1.QueryReplyB0Z.github.com/reddb-io/reddb-go/grpcx/proto;protob\x06proto3"
+	"\x05Query\x12\x16.reddb.v1.QueryRequest\x1a\x14.reddb.v1.QueryReply\x12/\n" +
+	"\x03Ask\x12\x14.reddb.v1.AskRequest\x1a\x12.reddb.v1.AskReplyB0Z.github.com/reddb-io/reddb-go/grpcx/proto;protob\x06proto3"
 
 var (
 	file_grpcx_proto_reddb_proto_rawDescOnce sync.Once
@@ -632,29 +1098,40 @@ func file_grpcx_proto_reddb_proto_rawDescGZIP() []byte {
 	return file_grpcx_proto_reddb_proto_rawDescData
 }
 
-var file_grpcx_proto_reddb_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_grpcx_proto_reddb_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_grpcx_proto_reddb_proto_goTypes = []any{
-	(*Empty)(nil),        // 0: reddb.v1.Empty
-	(*HealthReply)(nil),  // 1: reddb.v1.HealthReply
-	(*QueryRequest)(nil), // 2: reddb.v1.QueryRequest
-	(*QueryValue)(nil),   // 3: reddb.v1.QueryValue
-	(*QueryNull)(nil),    // 4: reddb.v1.QueryNull
-	(*QueryVector)(nil),  // 5: reddb.v1.QueryVector
-	(*QueryReply)(nil),   // 6: reddb.v1.QueryReply
+	(*Empty)(nil),          // 0: reddb.v1.Empty
+	(*HealthReply)(nil),    // 1: reddb.v1.HealthReply
+	(*QueryRequest)(nil),   // 2: reddb.v1.QueryRequest
+	(*QueryValue)(nil),     // 3: reddb.v1.QueryValue
+	(*QueryNull)(nil),      // 4: reddb.v1.QueryNull
+	(*QueryVector)(nil),    // 5: reddb.v1.QueryVector
+	(*QueryReply)(nil),     // 6: reddb.v1.QueryReply
+	(*AskRequest)(nil),     // 7: reddb.v1.AskRequest
+	(*AskReply)(nil),       // 8: reddb.v1.AskReply
+	(*Citation)(nil),       // 9: reddb.v1.Citation
+	(*Validation)(nil),     // 10: reddb.v1.Validation
+	(*ValidationItem)(nil), // 11: reddb.v1.ValidationItem
 }
 var file_grpcx_proto_reddb_proto_depIdxs = []int32{
-	3, // 0: reddb.v1.QueryRequest.params:type_name -> reddb.v1.QueryValue
-	4, // 1: reddb.v1.QueryValue.null_value:type_name -> reddb.v1.QueryNull
-	5, // 2: reddb.v1.QueryValue.vector_value:type_name -> reddb.v1.QueryVector
-	0, // 3: reddb.v1.RedDb.Health:input_type -> reddb.v1.Empty
-	2, // 4: reddb.v1.RedDb.Query:input_type -> reddb.v1.QueryRequest
-	1, // 5: reddb.v1.RedDb.Health:output_type -> reddb.v1.HealthReply
-	6, // 6: reddb.v1.RedDb.Query:output_type -> reddb.v1.QueryReply
-	5, // [5:7] is the sub-list for method output_type
-	3, // [3:5] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	3,  // 0: reddb.v1.QueryRequest.params:type_name -> reddb.v1.QueryValue
+	4,  // 1: reddb.v1.QueryValue.null_value:type_name -> reddb.v1.QueryNull
+	5,  // 2: reddb.v1.QueryValue.vector_value:type_name -> reddb.v1.QueryVector
+	9,  // 3: reddb.v1.AskReply.citations:type_name -> reddb.v1.Citation
+	10, // 4: reddb.v1.AskReply.validation:type_name -> reddb.v1.Validation
+	11, // 5: reddb.v1.Validation.warnings:type_name -> reddb.v1.ValidationItem
+	11, // 6: reddb.v1.Validation.errors:type_name -> reddb.v1.ValidationItem
+	0,  // 7: reddb.v1.RedDb.Health:input_type -> reddb.v1.Empty
+	2,  // 8: reddb.v1.RedDb.Query:input_type -> reddb.v1.QueryRequest
+	7,  // 9: reddb.v1.RedDb.Ask:input_type -> reddb.v1.AskRequest
+	1,  // 10: reddb.v1.RedDb.Health:output_type -> reddb.v1.HealthReply
+	6,  // 11: reddb.v1.RedDb.Query:output_type -> reddb.v1.QueryReply
+	8,  // 12: reddb.v1.RedDb.Ask:output_type -> reddb.v1.AskReply
+	10, // [10:13] is the sub-list for method output_type
+	7,  // [7:10] is the sub-list for method input_type
+	7,  // [7:7] is the sub-list for extension type_name
+	7,  // [7:7] is the sub-list for extension extendee
+	0,  // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_grpcx_proto_reddb_proto_init() }
@@ -674,13 +1151,14 @@ func file_grpcx_proto_reddb_proto_init() {
 		(*QueryValue_TimestampValue)(nil),
 		(*QueryValue_UuidValue)(nil),
 	}
+	file_grpcx_proto_reddb_proto_msgTypes[7].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_grpcx_proto_reddb_proto_rawDesc), len(file_grpcx_proto_reddb_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   7,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

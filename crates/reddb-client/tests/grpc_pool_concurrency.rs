@@ -73,6 +73,19 @@ struct SlowMock;
 
 #[tonic::async_trait]
 impl RedDb for SlowMock {
+    type KvWatchStream = ::core::pin::Pin<
+        Box<dyn tokio_stream::Stream<Item = Result<KvWatchEvent, Status>> + Send + 'static>,
+    >;
+
+    async fn kv_watch(
+        &self,
+        _request: Request<KvWatchRequest>,
+    ) -> Result<Response<Self::KvWatchStream>, Status> {
+        Ok(Response::new(Box::pin(tokio_stream::iter(
+            std::iter::empty::<Result<KvWatchEvent, Status>>(),
+        ))))
+    }
+
     async fn query(&self, _request: Request<QueryRequest>) -> Result<Response<QueryReply>, Status> {
         tokio::time::sleep(RTT).await;
         Ok(Response::new(QueryReply {
@@ -218,7 +231,7 @@ impl RedDb for SlowMock {
         JsonBulkCreateRequest,
         BulkEntityReply
     );
-    stub_rpc!(ask, JsonPayloadRequest, PayloadReply);
+    stub_rpc!(ask, AskRequest, AskReply);
     stub_rpc!(embeddings, JsonPayloadRequest, PayloadReply);
     stub_rpc!(ai_prompt, JsonPayloadRequest, PayloadReply);
     stub_rpc!(ai_credentials, JsonPayloadRequest, PayloadReply);

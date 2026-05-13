@@ -39,27 +39,29 @@ pub(crate) fn query_reply(
     } = result;
 
     if statement == "ask" {
-        let ask_json = ask_query_result_json(&result).unwrap_or_else(|| {
-            let ask = crate::runtime::ai::ask_response_envelope::AskResult {
-                answer: String::new(),
-                sources_flat: Vec::new(),
-                citations: Vec::new(),
-                validation: crate::runtime::ai::ask_response_envelope::Validation {
-                    ok: true,
-                    warnings: Vec::new(),
-                    errors: Vec::new(),
-                },
-                cache_hit: false,
-                provider: String::new(),
-                model: String::new(),
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                cost_usd: 0.0,
-                effective_mode: crate::runtime::ai::ask_response_envelope::Mode::Strict,
-                retry_count: 0,
-            };
-            crate::runtime::ai::ask_response_envelope::build(&ask)
-        });
+        let ask_json = ask_result_from_unified_result(&result)
+            .map(|ask| crate::runtime::ai::ask_response_envelope::build(&ask))
+            .unwrap_or_else(|| {
+                let ask = crate::runtime::ai::ask_response_envelope::AskResult {
+                    answer: String::new(),
+                    sources_flat: Vec::new(),
+                    citations: Vec::new(),
+                    validation: crate::runtime::ai::ask_response_envelope::Validation {
+                        ok: true,
+                        warnings: Vec::new(),
+                        errors: Vec::new(),
+                    },
+                    cache_hit: false,
+                    provider: String::new(),
+                    model: String::new(),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    cost_usd: 0.0,
+                    effective_mode: crate::runtime::ai::ask_response_envelope::Mode::Strict,
+                    retry_count: 0,
+                };
+                crate::runtime::ai::ask_response_envelope::build(&ask)
+            });
         return QueryReply {
             ok: true,
             mode: format!("{mode:?}").to_lowercase(),
@@ -106,9 +108,9 @@ pub(crate) fn query_reply(
     }
 }
 
-fn ask_query_result_json(
+pub(crate) fn ask_result_from_unified_result(
     result: &crate::storage::query::unified::UnifiedResult,
-) -> Option<crate::json::Value> {
+) -> Option<crate::runtime::ai::ask_response_envelope::AskResult> {
     let row = result.records.first()?;
     let answer = text_field(row, "answer")?;
     let provider = text_field(row, "provider").unwrap_or_default();
@@ -125,7 +127,7 @@ fn ask_query_result_json(
         _ => crate::runtime::ai::ask_response_envelope::Mode::Strict,
     };
 
-    let ask = crate::runtime::ai::ask_response_envelope::AskResult {
+    Some(crate::runtime::ai::ask_response_envelope::AskResult {
         answer,
         sources_flat: ask_sources_flat(&sources_flat_json),
         citations: ask_citations(&citations_json),
@@ -138,9 +140,7 @@ fn ask_query_result_json(
         cost_usd: f64_field(row, "cost_usd").unwrap_or(0.0),
         effective_mode,
         retry_count: u32_field(row, "retry_count").unwrap_or(0),
-    };
-
-    Some(crate::runtime::ai::ask_response_envelope::build(&ask))
+    })
 }
 
 fn record_field<'a>(

@@ -110,7 +110,7 @@ service RedDb {
   rpc BulkCreateEdges(JsonBulkCreateRequest) returns (BulkEntityReply);
   rpc BulkCreateVectors(JsonBulkCreateRequest) returns (BulkEntityReply);
   rpc BulkCreateDocuments(JsonBulkCreateRequest) returns (BulkEntityReply);
-  rpc Ask(JsonPayloadRequest) returns (PayloadReply);
+  rpc Ask(AskRequest) returns (AskReply);
   rpc Embeddings(JsonPayloadRequest) returns (PayloadReply);
   rpc AiPrompt(JsonPayloadRequest) returns (PayloadReply);
   rpc AiCredentials(JsonPayloadRequest) returns (PayloadReply);
@@ -297,6 +297,50 @@ message QueryReply {
   repeated string columns = 5;
   uint64 record_count = 6;
   string result_json = 7;
+}
+
+message AskRequest {
+  string question = 1;
+  optional string provider = 2;
+  optional string model = 3;
+  optional uint32 depth = 4;
+  optional uint32 limit = 5;
+  optional float min_score = 6;
+  optional string collection = 7;
+  optional float temperature = 8;
+  optional uint64 seed = 9;
+  optional bool strict = 10;
+}
+
+message AskReply {
+  string answer = 1;
+  string sources_flat_json = 2;
+  repeated Citation citations = 3;
+  Validation validation = 4;
+  string provider = 5;
+  string model = 6;
+  uint32 prompt_tokens = 7;
+  uint32 completion_tokens = 8;
+  double cost_usd = 9;
+  bool cache_hit = 10;
+  string mode = 11;
+  uint32 retry_count = 12;
+}
+
+message Citation {
+  uint32 marker = 1;
+  string urn = 2;
+}
+
+message Validation {
+  bool ok = 1;
+  repeated ValidationItem warnings = 2;
+  repeated ValidationItem errors = 3;
+}
+
+message ValidationItem {
+  string kind = 1;
+  string detail = 2;
 }
 
 message BatchQueryRequest {

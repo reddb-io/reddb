@@ -21,6 +21,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	RedDb_Health_FullMethodName = "/reddb.v1.RedDb/Health"
 	RedDb_Query_FullMethodName  = "/reddb.v1.RedDb/Query"
+	RedDb_Ask_FullMethodName    = "/reddb.v1.RedDb/Ask"
 )
 
 // RedDbClient is the client API for RedDb service.
@@ -29,6 +30,7 @@ const (
 type RedDbClient interface {
 	Health(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*HealthReply, error)
 	Query(ctx context.Context, in *QueryRequest, opts ...grpc.CallOption) (*QueryReply, error)
+	Ask(ctx context.Context, in *AskRequest, opts ...grpc.CallOption) (*AskReply, error)
 }
 
 type redDbClient struct {
@@ -59,12 +61,23 @@ func (c *redDbClient) Query(ctx context.Context, in *QueryRequest, opts ...grpc.
 	return out, nil
 }
 
+func (c *redDbClient) Ask(ctx context.Context, in *AskRequest, opts ...grpc.CallOption) (*AskReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AskReply)
+	err := c.cc.Invoke(ctx, RedDb_Ask_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RedDbServer is the server API for RedDb service.
 // All implementations must embed UnimplementedRedDbServer
 // for forward compatibility.
 type RedDbServer interface {
 	Health(context.Context, *Empty) (*HealthReply, error)
 	Query(context.Context, *QueryRequest) (*QueryReply, error)
+	Ask(context.Context, *AskRequest) (*AskReply, error)
 	mustEmbedUnimplementedRedDbServer()
 }
 
@@ -80,6 +93,9 @@ func (UnimplementedRedDbServer) Health(context.Context, *Empty) (*HealthReply, e
 }
 func (UnimplementedRedDbServer) Query(context.Context, *QueryRequest) (*QueryReply, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Query not implemented")
+}
+func (UnimplementedRedDbServer) Ask(context.Context, *AskRequest) (*AskReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Ask not implemented")
 }
 func (UnimplementedRedDbServer) mustEmbedUnimplementedRedDbServer() {}
 func (UnimplementedRedDbServer) testEmbeddedByValue()               {}
@@ -138,6 +154,24 @@ func _RedDb_Query_Handler(srv interface{}, ctx context.Context, dec func(interfa
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RedDb_Ask_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AskRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RedDbServer).Ask(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RedDb_Ask_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RedDbServer).Ask(ctx, req.(*AskRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RedDb_ServiceDesc is the grpc.ServiceDesc for RedDb service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -152,6 +186,10 @@ var RedDb_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Query",
 			Handler:    _RedDb_Query_Handler,
+		},
+		{
+			MethodName: "Ask",
+			Handler:    _RedDb_Ask_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
