@@ -17,6 +17,20 @@ export class KvClient {
     })
   }
 
+  async get(key, options = {}) {
+    const collection = options.collection ?? this.collection
+    const result = await this.client.call('query', {
+      sql: `KV GET ${kvPath(collection, key)}`,
+    })
+    return result?.rows?.[0]?.value ?? null
+  }
+
+  async getMany(keys, options = {}) {
+    const values = []
+    for (const key of keys) values.push(await this.get(key, options))
+    return values
+  }
+
   async invalidateTags(tags, options = {}) {
     const collection = options.collection ?? this.collection
     const result = await this.client.call('query', {
@@ -56,7 +70,15 @@ function kvPath(collection, key) {
 }
 
 function kvIdentifier(value) {
-  return String(value).replace(/[^A-Za-z0-9_]/g, '_')
+  const ident = String(value)
+  const invalid = ident.match(/[^A-Za-z0-9_]/)
+  if (invalid) {
+    throw new RedDBError(
+      'INVALID_KV_KEY',
+      `invalid KV key "${ident}": character "${invalid[0]}" is not supported`,
+    )
+  }
+  return ident
 }
 
 function kvValueLiteral(value) {
