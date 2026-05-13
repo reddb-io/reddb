@@ -20,7 +20,7 @@ use std::panic::AssertUnwindSafe;
 
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::application::entity::CreateRowInput;
+use crate::application::entity::{CreateRowInput, CreateRowsBatchInput};
 use crate::application::ports::RuntimeEntityPort;
 use crate::json::{self as json, Value};
 use crate::runtime::{RedDBRuntime, RuntimeQueryResult};
@@ -52,6 +52,7 @@ struct RemoteBackend<'a> {
 
 /// Protocol version reported by the `version` method.
 pub const PROTOCOL_VERSION: &str = "1.0";
+const STDIO_BULK_INSERT_CHUNK_ROWS: usize = 500;
 
 /// Stable error codes. Drivers map these to idiomatic exceptions.
 pub mod error_code {
@@ -893,12 +894,24 @@ fn dispatch_method(
 
             let mut total_affected: u64 = 0;
             let mut ids = Vec::with_capacity(objects.len());
-            for obj in objects {
-                let output = runtime
-                    .create_row(flat_payload_to_row_input(collection, obj))
+            for chunk in objects.chunks(STDIO_BULK_INSERT_CHUNK_ROWS) {
+                let rows = chunk
+                    .iter()
+                    .map(|obj| flat_payload_to_row_input(collection, obj))
+                    .collect();
+                let outputs = runtime
+                    .create_rows_batch(CreateRowsBatchInput {
+                        collection: collection.to_string(),
+                        rows,
+                        suppress_events: false,
+                    })
                     .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
-                total_affected += 1;
-                ids.push(Value::String(output.id.raw().to_string()));
+                total_affected += outputs.len() as u64;
+                ids.extend(
+                    outputs
+                        .into_iter()
+                        .map(|output| Value::String(output.id.raw().to_string())),
+                );
             }
             let mut out = json::Map::new();
             out.insert("affected".to_string(), Value::Number(total_affected as f64));
@@ -1076,6 +1089,14 @@ fn flat_payload_to_row_input(
         metadata: Vec::new(),
         node_links: Vec::new(),
         vector_links: Vec::new(),
+    }
+}
+
+fn bulk_insert_chunk_count(row_count: usize) -> usize {
+    if row_count == 0 {
+        0
+    } else {
+        ((row_count - 1) / STDIO_BULK_INSERT_CHUNK_ROWS) + 1
     }
 }
 
@@ -1885,6 +1906,7 @@ fn dispatch_method_remote(
 mod tests {
     use super::*;
     use crate::json::json;
+    use proptest::prelude::*;
 
     fn make_runtime() -> RedDBRuntime {
         RedDBRuntime::in_memory().expect("in-memory runtime")
@@ -1950,6 +1972,36 @@ mod tests {
             handle_line(&Backend::Local(rt), &mut s, line)
         };
         f(&call, rt);
+    }
+
+    fn result_rows(response: &str) -> Vec<Value> {
+        json::from_str::<Value>(response)
+            .expect("json response")
+            .get("result")
+            .and_then(|result| result.get("rows"))
+            .and_then(Value::as_array)
+            .map(|rows| rows.to_vec())
+            .unwrap_or_default()
+    }
+
+    fn result_name_kind(response: &str) -> Vec<(String, String)> {
+        result_rows(response)
+            .into_iter()
+            .map(|row| {
+                let object = row.as_object().expect("row object");
+                let name = object
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .expect("row name")
+                    .to_string();
+                let kind = object
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .expect("row kind")
+                    .to_string();
+                (name, kind)
+            })
+            .collect()
     }
 
     #[test]
@@ -2478,6 +2530,77 @@ mod tests {
             let commit = call(r#"{"jsonrpc":"2.0","id":3,"method":"tx.commit","params":null}"#);
             assert!(commit.contains("\"ops_replayed\":3"));
         });
+    }
+
+    #[test]
+    fn bulk_insert_chunks_at_internal_500_row_limit() {
+        assert_eq!(bulk_insert_chunk_count(0), 0);
+        assert_eq!(bulk_insert_chunk_count(1), 1);
+        assert_eq!(bulk_insert_chunk_count(500), 1);
+        assert_eq!(bulk_insert_chunk_count(501), 2);
+        assert_eq!(bulk_insert_chunk_count(1000), 2);
+        assert_eq!(bulk_insert_chunk_count(1001), 3);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 12,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn bulk_insert_matches_sequential_insert_state(
+            names in proptest::collection::vec("[a-z]{1,8}", 1usize..20)
+        ) {
+            let rt = make_runtime();
+            let payloads = names
+                .iter()
+                .map(|name| format!(r#"{{"name":"{name}","kind":"bulk"}}"#))
+                .collect::<Vec<_>>();
+            let payload_array = payloads.join(",");
+
+            let bulk = handle(
+                &rt,
+                &format!(
+                    r#"{{"jsonrpc":"2.0","id":1,"method":"bulk_insert","params":{{"collection":"bulk_prop","payloads":[{payload_array}]}}}}"#
+                ),
+            );
+            let bulk_result = json::from_str::<Value>(&bulk).expect("bulk json");
+            let bulk_ids = bulk_result
+                .get("result")
+                .and_then(|result| result.get("ids"))
+                .and_then(Value::as_array)
+                .expect("bulk ids");
+            prop_assert_eq!(bulk_ids.len(), names.len());
+
+            for (index, payload) in payloads.iter().enumerate() {
+                let insert = handle(
+                    &rt,
+                    &format!(
+                        r#"{{"jsonrpc":"2.0","id":{},"method":"insert","params":{{"collection":"seq_prop","payload":{payload}}}}}"#,
+                        index + 10
+                    ),
+                );
+                let insert_result = json::from_str::<Value>(&insert).expect("insert json");
+                prop_assert!(
+                    insert_result
+                        .get("result")
+                        .and_then(|result| result.get("id"))
+                        .is_some(),
+                    "insert response missing id: {insert}"
+                );
+            }
+
+            let bulk_rows = result_name_kind(&handle(
+                &rt,
+                r#"{"jsonrpc":"2.0","id":99,"method":"query","params":{"sql":"SELECT name, kind FROM bulk_prop ORDER BY red_entity_id"}}"#,
+            ));
+            let seq_rows = result_name_kind(&handle(
+                &rt,
+                r#"{"jsonrpc":"2.0","id":100,"method":"query","params":{"sql":"SELECT name, kind FROM seq_prop ORDER BY red_entity_id"}}"#,
+            ));
+            prop_assert_eq!(bulk_rows, seq_rows);
+        }
     }
 
     #[test]
