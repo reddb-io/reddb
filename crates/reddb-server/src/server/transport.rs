@@ -247,6 +247,7 @@ pub(crate) fn map_runtime_error(err: &crate::api::RedDBError) -> (u16, String) {
         ReadOnly(_) => 403,
         InvalidConfig(_) | InvalidOperation(_) => 400,
         Query(msg) if msg.starts_with("ask_provider_failover_exhausted:") => 503,
+        Query(msg) if msg.starts_with("ask_primary_sync_unavailable:") => 503,
         Query(_) => 400,
         Validation { .. } => 422,
         FeatureNotEnabled(_) => 501,

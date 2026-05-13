@@ -1771,6 +1771,47 @@ impl RedDBRuntime {
         settings: &crate::runtime::ai::cost_guard::Settings,
         now: crate::runtime::ai::cost_guard::Now,
     ) -> RedDBResult<()> {
+        if self.ask_primary_sync_endpoint().is_some() {
+            let mut usage_json = crate::json::Map::new();
+            usage_json.insert(
+                "prompt_tokens".to_string(),
+                crate::json::Value::Number(f64::from(usage.prompt_tokens)),
+            );
+            usage_json.insert(
+                "completion_tokens".to_string(),
+                crate::json::Value::Number(f64::from(usage.completion_tokens)),
+            );
+            usage_json.insert(
+                "sources_bytes".to_string(),
+                crate::json::Value::Number(f64::from(usage.sources_bytes)),
+            );
+            usage_json.insert(
+                "estimated_cost_usd".to_string(),
+                crate::json::Value::Number(usage.estimated_cost_usd),
+            );
+            usage_json.insert(
+                "elapsed_ms".to_string(),
+                crate::json::Value::Number(f64::from(usage.elapsed_ms)),
+            );
+
+            let mut payload = crate::json::Map::new();
+            payload.insert(
+                "command".to_string(),
+                crate::json::Value::String("ask.side_effects.v1".to_string()),
+            );
+            payload.insert(
+                "tenant_key".to_string(),
+                crate::json::Value::String(tenant_key.to_string()),
+            );
+            payload.insert(
+                "now_epoch_secs".to_string(),
+                crate::json::Value::Number(now.epoch_secs as f64),
+            );
+            payload.insert("usage".to_string(), crate::json::Value::Object(usage_json));
+            self.forward_ask_side_effects_to_primary(crate::json::Value::Object(payload))?;
+            return Ok(());
+        }
+
         let day_epoch_secs =
             crate::runtime::ai::cost_guard::utc_day_start_epoch_secs(now.epoch_secs);
         let mut states = self.inner.ask_daily_spend.write();
@@ -1915,8 +1956,6 @@ impl RedDBRuntime {
 
     fn record_ask_audit(&self, input: AskAuditInput<'_>) -> RedDBResult<()> {
         let ts_nanos = ask_audit_now_nanos();
-        self.ensure_ask_audit_collection()?;
-        self.purge_ask_audit_retention(ts_nanos)?;
 
         let (user, role) = input
             .scope
@@ -1949,7 +1988,49 @@ impl RedDBRuntime {
         };
         let row =
             crate::runtime::ai::audit_record_builder::build(&state, self.ask_audit_settings());
-        self.insert_ask_audit_row(row)
+        self.submit_ask_audit_row(row)
+    }
+
+    pub(crate) fn apply_primary_ask_side_effects_payload(
+        &self,
+        payload: &crate::json::Value,
+    ) -> RedDBResult<crate::json::Value> {
+        let command = payload
+            .get("command")
+            .and_then(crate::json::Value::as_str)
+            .ok_or_else(|| RedDBError::Query("missing primary-sync command".to_string()))?;
+        if command != "ask.side_effects.v1" {
+            return Err(RedDBError::Query(format!(
+                "unsupported primary-sync command: {command}"
+            )));
+        }
+
+        if let Some(usage) = payload.get("usage") {
+            let tenant_key = payload
+                .get("tenant_key")
+                .and_then(crate::json::Value::as_str)
+                .unwrap_or("tenant:<default>");
+            let now = crate::runtime::ai::cost_guard::Now {
+                epoch_secs: payload
+                    .get("now_epoch_secs")
+                    .and_then(crate::json::Value::as_i64)
+                    .unwrap_or_else(|| ask_cost_guard_now().epoch_secs),
+            };
+            let usage = ask_usage_from_json(usage)?;
+            let settings = self.ask_cost_guard_settings();
+            self.check_and_record_ask_daily_cost_at(tenant_key, &usage, &settings, now)?;
+        }
+
+        if let Some(audit_row) = payload.get("audit_row") {
+            let Some(row) = audit_row.as_object() else {
+                return Err(RedDBError::Query(
+                    "ask.side_effects.v1 audit_row must be an object".to_string(),
+                ));
+            };
+            self.insert_ask_audit_json_row(row.clone())?;
+        }
+
+        Ok(crate::json!({"ok": true, "command": command}))
     }
 
     fn ensure_ask_audit_collection(&self) -> RedDBResult<()> {
@@ -1973,14 +2054,50 @@ impl RedDBRuntime {
         Ok(())
     }
 
+    fn submit_ask_audit_row(
+        &self,
+        row: std::collections::BTreeMap<&'static str, crate::json::Value>,
+    ) -> RedDBResult<()> {
+        if self.ask_primary_sync_endpoint().is_some() {
+            let audit_row = crate::json::Value::Object(
+                row.into_iter()
+                    .map(|(key, value)| (key.to_string(), value))
+                    .collect(),
+            );
+            let payload = crate::json!({
+                "command": "ask.side_effects.v1",
+                "audit_row": audit_row,
+            });
+            self.forward_ask_side_effects_to_primary(payload)?;
+            return Ok(());
+        }
+
+        self.insert_ask_audit_row(row)
+    }
+
     fn insert_ask_audit_row(
         &self,
         row: std::collections::BTreeMap<&'static str, crate::json::Value>,
     ) -> RedDBResult<()> {
+        self.insert_ask_audit_json_row(
+            row.into_iter()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect(),
+        )
+    }
+
+    fn insert_ask_audit_json_row(
+        &self,
+        row: crate::json::Map<String, crate::json::Value>,
+    ) -> RedDBResult<()> {
+        let ts_nanos = ask_audit_now_nanos();
+        self.ensure_ask_audit_collection()?;
+        self.purge_ask_audit_retention(ts_nanos)?;
+
         let mut fields = std::collections::HashMap::with_capacity(row.len());
         for (key, value) in row {
             fields.insert(
-                key.to_string(),
+                key,
                 crate::application::entity::json_to_storage_value(&value)?,
             );
         }
@@ -2004,6 +2121,44 @@ impl RedDBRuntime {
             )
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         Ok(())
+    }
+
+    fn ask_primary_sync_endpoint(&self) -> Option<String> {
+        match &self.inner.db.options().replication.role {
+            crate::replication::ReplicationRole::Replica { primary_addr } => {
+                Some(normalize_primary_sync_endpoint(primary_addr))
+            }
+            _ => None,
+        }
+    }
+
+    fn forward_ask_side_effects_to_primary(&self, payload: crate::json::Value) -> RedDBResult<()> {
+        let endpoint = self.ask_primary_sync_endpoint().ok_or_else(|| {
+            RedDBError::Internal("ASK primary-sync requested outside replica role".to_string())
+        })?;
+        let payload_json = crate::json::to_string(&payload)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        runtime.block_on(async move {
+            use crate::grpc::proto::red_db_client::RedDbClient;
+            use crate::grpc::proto::JsonPayloadRequest;
+
+            let mut client = RedDbClient::connect(endpoint.clone())
+                .await
+                .map_err(|err| {
+                    RedDBError::Query(format!(
+                        "ask_primary_sync_unavailable: connect {endpoint}: {err}"
+                    ))
+                })?;
+            client
+                .submit_ask_side_effects(tonic::Request::new(JsonPayloadRequest { payload_json }))
+                .await
+                .map_err(|err| RedDBError::Query(format!("ask_primary_sync_unavailable: {err}")))?;
+            Ok(())
+        })
     }
 
     fn purge_ask_audit_retention(&self, now_nanos: i64) -> RedDBResult<()> {
@@ -2486,6 +2641,50 @@ fn ask_cost_guard_tenant_key(tenant: Option<&str>) -> String {
         Some(tenant) if !tenant.trim().is_empty() => format!("tenant:{tenant}"),
         _ => "tenant:<default>".to_string(),
     }
+}
+
+fn normalize_primary_sync_endpoint(primary_addr: &str) -> String {
+    if primary_addr.starts_with("http://") || primary_addr.starts_with("https://") {
+        primary_addr.to_string()
+    } else {
+        format!("http://{primary_addr}")
+    }
+}
+
+fn ask_usage_from_json(
+    value: &crate::json::Value,
+) -> RedDBResult<crate::runtime::ai::cost_guard::Usage> {
+    let prompt_tokens = json_u32(value, "prompt_tokens")?;
+    let completion_tokens = json_u32(value, "completion_tokens")?;
+    let sources_bytes = json_u32(value, "sources_bytes")?;
+    let elapsed_ms = json_u32(value, "elapsed_ms")?;
+    let estimated_cost_usd = value
+        .get("estimated_cost_usd")
+        .and_then(crate::json::Value::as_f64)
+        .ok_or_else(|| {
+            RedDBError::Query(
+                "ask.side_effects.v1 usage.estimated_cost_usd must be a number".to_string(),
+            )
+        })?;
+    Ok(crate::runtime::ai::cost_guard::Usage {
+        prompt_tokens,
+        completion_tokens,
+        sources_bytes,
+        estimated_cost_usd,
+        elapsed_ms,
+    })
+}
+
+fn json_u32(value: &crate::json::Value, field: &str) -> RedDBResult<u32> {
+    let raw = value
+        .get(field)
+        .and_then(crate::json::Value::as_u64)
+        .ok_or_else(|| {
+            RedDBError::Query(format!(
+                "ask.side_effects.v1 usage.{field} must be an integer"
+            ))
+        })?;
+    Ok(raw.min(u64::from(u32::MAX)) as u32)
 }
 
 fn estimate_ask_cost_usd(prompt_tokens: u32, completion_tokens: u32) -> f64 {
@@ -3684,6 +3883,103 @@ mod citation_wedge_tests {
             .expect("tenant b has independent spend");
         rt.check_and_record_ask_daily_cost_at("tenant:a", &usage, &settings, day1)
             .expect("tenant a resets after UTC midnight");
+    }
+
+    #[test]
+    fn primary_ask_side_effects_payload_records_cost_and_audit() {
+        let rt = crate::runtime::RedDBRuntime::in_memory().expect("runtime");
+        rt.execute_query("SET CONFIG ask.daily_cost_cap_usd = 0.000020")
+            .expect("set daily cap");
+
+        let urns: Vec<String> = Vec::new();
+        let citations: Vec<u32> = Vec::new();
+        let errors: Vec<crate::runtime::ai::strict_validator::ValidationError> = Vec::new();
+        let state = crate::runtime::ai::audit_record_builder::CallState {
+            ts_nanos: 1,
+            tenant: "acme",
+            user: "alice",
+            role: "reader",
+            question: "why?",
+            sources_urns: &urns,
+            provider: "openai",
+            model: "gpt-4o-mini",
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            cost_usd: 0.000_015,
+            answer: "answer",
+            citations: &citations,
+            cache_hit: false,
+            effective_mode: crate::runtime::ai::strict_validator::Mode::Strict,
+            temperature: Some(0.0),
+            seed: Some(1),
+            validation_ok: true,
+            retry_count: 0,
+            errors: &errors,
+        };
+        let audit_row = crate::runtime::ai::audit_record_builder::build(
+            &state,
+            crate::runtime::ai::audit_record_builder::Settings::default(),
+        );
+        let audit_row = crate::json::Value::Object(
+            audit_row
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect(),
+        );
+
+        let mut usage = crate::json::Map::new();
+        usage.insert("prompt_tokens".into(), crate::json::Value::Number(1.0));
+        usage.insert("completion_tokens".into(), crate::json::Value::Number(1.0));
+        usage.insert("sources_bytes".into(), crate::json::Value::Number(0.0));
+        usage.insert(
+            "estimated_cost_usd".into(),
+            crate::json::Value::Number(0.000_015),
+        );
+        usage.insert("elapsed_ms".into(), crate::json::Value::Number(1.0));
+
+        let mut payload = crate::json::Map::new();
+        payload.insert(
+            "command".into(),
+            crate::json::Value::String("ask.side_effects.v1".into()),
+        );
+        payload.insert(
+            "tenant_key".into(),
+            crate::json::Value::String("tenant:acme".into()),
+        );
+        payload.insert("now_epoch_secs".into(), crate::json::Value::Number(1.0));
+        payload.insert("usage".into(), crate::json::Value::Object(usage.clone()));
+        payload.insert("audit_row".into(), audit_row);
+
+        rt.apply_primary_ask_side_effects_payload(&crate::json::Value::Object(payload))
+            .expect("side effects apply");
+
+        let manager = rt
+            .db()
+            .store()
+            .get_collection(ASK_AUDIT_COLLECTION)
+            .expect("audit collection");
+        assert_eq!(
+            manager
+                .query_all(|entity| entity.data.as_row().is_some())
+                .len(),
+            1
+        );
+
+        let mut over_cap_payload = crate::json::Map::new();
+        over_cap_payload.insert(
+            "command".into(),
+            crate::json::Value::String("ask.side_effects.v1".into()),
+        );
+        over_cap_payload.insert(
+            "tenant_key".into(),
+            crate::json::Value::String("tenant:acme".into()),
+        );
+        over_cap_payload.insert("now_epoch_secs".into(), crate::json::Value::Number(1.0));
+        over_cap_payload.insert("usage".into(), crate::json::Value::Object(usage));
+        let err = rt
+            .apply_primary_ask_side_effects_payload(&crate::json::Value::Object(over_cap_payload))
+            .expect_err("second same-day cost should exceed primary cap");
+        assert!(err.to_string().contains("daily_cost_cap_usd"), "{err}");
     }
 
     #[test]

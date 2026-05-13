@@ -194,7 +194,15 @@ impl GrpcRuntime {
 }
 
 pub(crate) fn to_status(err: crate::api::RedDBError) -> Status {
-    Status::internal(err.to_string())
+    match err {
+        crate::api::RedDBError::Query(msg) if msg.starts_with("ask_primary_sync_unavailable:") => {
+            Status::unavailable(msg)
+        }
+        crate::api::RedDBError::QuotaExceeded(msg) => Status::resource_exhausted(msg),
+        crate::api::RedDBError::ReadOnly(msg) => Status::failed_precondition(msg),
+        crate::api::RedDBError::Validation { message, .. } => Status::invalid_argument(message),
+        other => Status::internal(other.to_string()),
+    }
 }
 
 pub(crate) fn grpc_token(metadata: &MetadataMap) -> Option<&str> {

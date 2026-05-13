@@ -133,6 +133,10 @@ service RedDb {
   rpc ReplicationStatus(Empty) returns (PayloadReply);
   rpc PullWalRecords(JsonPayloadRequest) returns (PayloadReply);
   rpc ReplicationSnapshot(Empty) returns (PayloadReply);
+  // Replica-to-primary synchronous side effects. Initial command:
+  // {"command":"ask.side_effects.v1", "usage": {...}, "audit_row": {...}}.
+  // The primary ACKs only after applying the submitted side effects.
+  rpc SubmitAskSideEffects(JsonPayloadRequest) returns (PayloadReply);
   // Replica-driven LSN ack (PLAN.md Phase 11.4). JSON payload:
   // {"replica_id": "...", "applied_lsn": <u64>, "durable_lsn": <u64>}.
   // Idempotent — older LSNs are ignored. Updates per-replica state
