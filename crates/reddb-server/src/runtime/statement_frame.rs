@@ -244,6 +244,9 @@ pub(super) struct StatementExecutionFrame {
     /// `Some(xid)` when AS OF resolved to a historical xid; `None`
     /// for live reads.
     as_of_floor: Option<Xid>,
+    /// True when the statement snapshot can require tuple versions that
+    /// current secondary indexes no longer contain.
+    requires_index_fallback: bool,
     /// Privilege class required by the statement, derived from the
     /// SQL text at frame-build time. Read/write dispatch sites
     /// consult this instead of re-classifying the parsed expression.
@@ -278,6 +281,8 @@ impl StatementExecutionFrame {
         let tx_local_tenant = runtime.inner.tx_local_tenants.read().get(&conn_id).cloned();
         let own_xids = runtime.own_transaction_xids(conn_id);
         let (snapshot, as_of_floor) = runtime.statement_snapshot(query)?;
+        let requires_index_fallback =
+            as_of_floor.is_some() || runtime.inner.tx_contexts.read().contains_key(&conn_id);
         let cache_key = result_cache_key(query);
         let is_volatile_query = query_has_volatile_builtin(query);
         let cache_safe = runtime.result_cache_safe(conn_id);
@@ -323,6 +328,7 @@ impl StatementExecutionFrame {
             effective_scope,
             identity,
             as_of_floor,
+            requires_index_fallback,
             required_privilege,
             lock_intent,
             visible_collections,
@@ -338,6 +344,7 @@ impl StatementExecutionFrame {
                 snapshot: self.snapshot.clone(),
                 manager: Arc::clone(&runtime.inner.snapshot_manager),
                 own_xids: self.own_xids.clone(),
+                requires_index_fallback: self.requires_index_fallback,
             }),
         }
     }

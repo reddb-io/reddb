@@ -38,6 +38,7 @@ fn visible_entities(rt: &RedDBRuntime, collection: &str) -> usize {
         snapshot: rt.current_snapshot(),
         manager: rt.snapshot_manager(),
         own_xids: rt.current_txn_own_xids(),
+        requires_index_fallback: false,
     };
     mgr.query_all(move |e| entity_visible_with_context(Some(&ctx), e))
         .len()
@@ -157,6 +158,7 @@ fn cross_model_atomic_rollback() {
                 snapshot: rt.current_snapshot(),
                 manager: rt.snapshot_manager(),
                 own_xids: rt.current_txn_own_xids(),
+                requires_index_fallback: false,
             };
             mgr.query_all(move |e| {
                 matches!(e.kind, EntityKind::GraphNode(_))

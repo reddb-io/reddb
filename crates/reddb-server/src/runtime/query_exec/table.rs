@@ -139,6 +139,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         return Ok(Vec::new());
     }
 
+    let requires_mvcc_index_fallback =
+        crate::runtime::impl_core::current_snapshot_requires_index_fallback();
+
     // ── INDEX-ASSISTED PATH: sorted (BTREE) index for BETWEEN / >/>= ──
     //
     // Piggy-backs on `try_sorted_index_lookup`, which already knows how
@@ -159,9 +162,12 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             extract_cross_index_predicates(filter, &query.table, idx_store)
         })
         .is_some();
-    if let (Some(idx_store), Some(ref filter), false) =
-        (index_store, &effective_filter, has_cross_index_candidate)
-    {
+    if let (false, Some(idx_store), Some(ref filter), false) = (
+        requires_mvcc_index_fallback,
+        index_store,
+        &effective_filter,
+        has_cross_index_candidate,
+    ) {
         let trace = std::env::var("REDDB_INDEX_TRACE").ok().as_deref() == Some("1");
         let sorted_res = try_sorted_index_lookup(
             filter,
@@ -338,7 +344,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     // Equivalent to PG's bitmap heap scan where two bitmap indexes are AND-ed
     // at word level before touching heap pages. Here we use HashSet instead of
     // actual bitmaps but the reduction in entity fetches is the same.
-    if let (Some(idx_store), Some(ref filter)) = (index_store, &effective_filter) {
+    if let (false, Some(idx_store), Some(ref filter)) =
+        (requires_mvcc_index_fallback, index_store, &effective_filter)
+    {
         if let Some((eq_col, eq_bytes, range_filter)) =
             extract_cross_index_predicates(filter, &query.table, idx_store)
         {
@@ -492,7 +500,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     // - Optionally narrow further via sorted range scan filtered by the intersection set
     // - Fetch only the surviving rows; re-apply full compiled filter for residual predicates
     // Only fires when ≥2 indexed equality columns exist in the filter.
-    if let (Some(idx_store), Some(ref filter)) = (index_store, &effective_filter) {
+    if let (false, Some(idx_store), Some(ref filter)) =
+        (requires_mvcc_index_fallback, index_store, &effective_filter)
+    {
         let mut eq_candidates: Vec<(String, Vec<u8>, crate::storage::schema::Value)> = Vec::new();
         extract_all_eq_candidates(filter, &mut eq_candidates);
 
@@ -641,7 +651,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     }
 
     // ── INDEX-ASSISTED PATH: use hash index for O(1) equality lookups ──
-    if let (Some(idx_store), Some(ref filter)) = (index_store, &effective_filter) {
+    if let (false, Some(idx_store), Some(ref filter)) =
+        (requires_mvcc_index_fallback, index_store, &effective_filter)
+    {
         if let Some((column, value_bytes)) = extract_index_candidate(filter) {
             if let Some(idx) = idx_store.find_index_for_column(&query.table, &column) {
                 // ── INDEX-ONLY SCAN CHECK ──────────────────────────────────────

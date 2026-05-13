@@ -131,6 +131,7 @@ pub struct SnapshotContext {
     pub snapshot: crate::storage::transaction::snapshot::Snapshot,
     pub manager: Arc<crate::storage::transaction::snapshot::SnapshotManager>,
     pub own_xids: std::collections::HashSet<crate::storage::transaction::snapshot::Xid>,
+    pub requires_index_fallback: bool,
 }
 
 /// Install a connection id on the current thread for the duration of a
@@ -651,6 +652,21 @@ pub(crate) fn xids_visible_under_current_snapshot(xmin: u64, xmax: u64) -> bool 
 /// from inside a spawned closure would silently skip the filter.
 pub fn capture_current_snapshot() -> Option<SnapshotContext> {
     CURRENT_SNAPSHOT.with(|cell| cell.borrow().clone())
+}
+
+/// Whether the active read snapshot may need historical tuple versions
+/// that the current secondary indexes cannot prove. Index paths can still
+/// recheck visible candidates, but only a heap scan can discover versions
+/// whose indexed value was changed or deleted after this snapshot.
+pub(crate) fn current_snapshot_requires_index_fallback() -> bool {
+    if !HAS_SNAPSHOT.with(|c| c.get()) {
+        return false;
+    }
+    CURRENT_SNAPSHOT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|ctx| ctx.requires_index_fallback)
+    })
 }
 
 /// Frozen MVCC + identity context for callers that need to reinstall
