@@ -42,6 +42,8 @@ public final class ValueCodec {
 
     private ValueCodec() {}
 
+    public record Timestamp(long seconds) {}
+
     public static byte[] encodeQueryWithParams(String sql, Object[] params) {
         Object[] values = params == null ? new Object[0] : params;
         if (values.length > MAX_PARAM_COUNT) {
@@ -88,6 +90,7 @@ public final class ValueCodec {
         if (value instanceof byte[] bytes) return encodeLenPrefixed(TAG_BYTES, bytes);
         if (value instanceof float[] vector) return encodeVector(vector);
         if (value instanceof Instant instant) return encodeI64(instant.getEpochSecond(), TAG_TIMESTAMP);
+        if (value instanceof Timestamp timestamp) return encodeI64(timestamp.seconds(), TAG_TIMESTAMP);
         if (value instanceof UUID uuid) return encodeUuid(uuid);
         if (value instanceof JsonNode || value instanceof Map<?, ?> || value instanceof List<?>) {
             byte[] json = canonicalJson(value).getBytes(StandardCharsets.UTF_8);
@@ -132,6 +135,11 @@ public final class ValueCodec {
         if (value instanceof Instant instant) {
             ObjectNode node = JsonNodeFactory.instance.objectNode();
             node.put("$ts", instant.getEpochSecond());
+            return node;
+        }
+        if (value instanceof Timestamp timestamp) {
+            ObjectNode node = JsonNodeFactory.instance.objectNode();
+            node.put("$ts", timestamp.seconds());
             return node;
         }
         if (value instanceof UUID uuid) {

@@ -1,12 +1,18 @@
 package dev.reddb;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.reddb.redwire.ValueCodec;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -14,6 +20,7 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ValueCodecTest {
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Test
     void valueTagTableIsPinned() {
@@ -121,5 +128,77 @@ class ValueCodecTest {
         assertEquals(1_700_000_000L, params.get(8).get("$ts").asLong());
         assertEquals("00112233-4455-6677-8899-aabbccddeeff", params.get(9).get("$uuid").asText());
         assertEquals("json", params.get(10).get(0).asText());
+    }
+
+    @Test
+    void sharedParameterFixturesMatchManifest() throws IOException {
+        JsonNode manifest = readFixtureManifest();
+
+        for (JsonNode fixture : manifest.get("values")) {
+            String name = fixture.get("name").asText();
+            assertEquals(
+                fixture.get("redwire_hex").asText(),
+                hex(ValueCodec.encodeValue(fixtureValue(name))),
+                name
+            );
+        }
+
+        JsonNode query = manifest.get("queries").get(0);
+        List<Object> params = new ArrayList<>();
+        for (JsonNode param : query.get("params")) {
+            params.add(fixtureValue(param.asText()));
+        }
+
+        assertEquals(
+            query.get("redwire_hex").asText(),
+            hex(ValueCodec.encodeQueryWithParams(query.get("sql").asText(), params.toArray())),
+            query.get("name").asText()
+        );
+    }
+
+    private static JsonNode readFixtureManifest() throws IOException {
+        Path path = Path.of("..", "..", "crates", "reddb-wire", "tests", "fixtures", "params", "manifest.json");
+        return MAPPER.readTree(Files.readString(path));
+    }
+
+    private static Object fixtureValue(String name) {
+        return switch (name) {
+            case "null" -> null;
+            case "bool_true" -> true;
+            case "bool_false" -> false;
+            case "int_min" -> Long.MIN_VALUE;
+            case "int_max" -> Long.MAX_VALUE;
+            case "int_42" -> 42L;
+            case "float_nan" -> Double.longBitsToDouble(0x7ff8000000000000L);
+            case "float_pos_inf" -> Double.POSITIVE_INFINITY;
+            case "float_neg_inf" -> Double.NEGATIVE_INFINITY;
+            case "float_subnormal_min" -> Double.MIN_VALUE;
+            case "text_unicode" -> "h\u00e9llo";
+            case "text_x" -> "x";
+            case "bytes_empty" -> new byte[]{};
+            case "bytes_deadbeef" -> new byte[]{(byte) 0xde, (byte) 0xad, (byte) 0xbe, (byte) 0xef};
+            case "json_nested" -> jsonNestedFixture();
+            case "timestamp_zero" -> new ValueCodec.Timestamp(0L);
+            case "timestamp_max" -> new ValueCodec.Timestamp(Long.MAX_VALUE);
+            case "uuid_001122" -> UUID.fromString("00112233-4455-6677-8899-aabbccddeeff");
+            case "vector_empty" -> new float[]{};
+            case "vector_three" -> new float[]{1.0f, 2.0f, -0.5f};
+            default -> throw new IllegalArgumentException("unknown fixture " + name);
+        };
+    }
+
+    private static Map<String, Object> jsonNestedFixture() {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("z", List.of(1, Map.of("deep", List.of(true, false))));
+        out.put("a", null);
+        return out;
+    }
+
+    private static String hex(byte[] bytes) {
+        StringBuilder out = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            out.append(String.format("%02x", b & 0xff));
+        }
+        return out.toString();
     }
 }

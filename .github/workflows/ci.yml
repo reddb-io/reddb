@@ -215,12 +215,25 @@ jobs:
         with:
           go-version: '1.25'
           cache-dependency-path: drivers/go/go.sum
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
       - name: JS RedWire parameter fixtures
         working-directory: drivers/js
         run: node --test test/redwire.params.test.mjs
       - name: Go RedWire parameter fixtures
         working-directory: drivers/go
         run: go test ./redwire
+      - name: Java RedWire parameter fixtures
+        working-directory: drivers/java
+        run: ./gradlew test --tests dev.reddb.ValueCodecTest
+      - name: C++ RedWire parameter fixtures configure
+        run: cmake -S drivers/cpp -B /tmp/reddb-cpp-param-conformance -DCMAKE_BUILD_TYPE=Release
+      - name: C++ RedWire parameter fixtures build
+        run: cmake --build /tmp/reddb-cpp-param-conformance --target value_codec_test -j2
+      - name: C++ RedWire parameter fixtures
+        run: /tmp/reddb-cpp-param-conformance/value_codec_test
 
   publish-dry-run:
     # Catches crates.io packaging issues (missing include paths, stale

@@ -6,7 +6,12 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <fstream>
+#include <limits>
+#include <regex>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -17,6 +22,91 @@ namespace {
 
 uint8_t b(unsigned value) {
     return static_cast<uint8_t>(value);
+}
+
+std::string read_fixture_manifest() {
+    const std::array<const char*, 5> paths = {
+        "crates/reddb-wire/tests/fixtures/params/manifest.json",
+        "../../crates/reddb-wire/tests/fixtures/params/manifest.json",
+        "../../../crates/reddb-wire/tests/fixtures/params/manifest.json",
+        "../../../../crates/reddb-wire/tests/fixtures/params/manifest.json",
+        "../../../../../crates/reddb-wire/tests/fixtures/params/manifest.json",
+    };
+
+    for (const char* path : paths) {
+        std::ifstream file(path);
+        if (file) {
+            return std::string(std::istreambuf_iterator<char>(file),
+                               std::istreambuf_iterator<char>());
+        }
+    }
+    throw std::runtime_error("parameter fixture manifest not found");
+}
+
+std::string manifest_hex(const std::string& manifest, const std::string& name) {
+    std::regex pattern("\"name\"\\s*:\\s*\"" + name +
+                       "\"[\\s\\S]*?\"redwire_hex\"\\s*:\\s*\"([0-9a-f]+)\"");
+    std::smatch match;
+    if (!std::regex_search(manifest, match, pattern)) {
+        throw std::runtime_error("fixture not found: " + name);
+    }
+    return match[1].str();
+}
+
+std::vector<uint8_t> hex_to_bytes(const std::string& hex) {
+    if (hex.size() % 2 != 0) throw std::runtime_error("odd hex length");
+    std::vector<uint8_t> out;
+    out.reserve(hex.size() / 2);
+    for (size_t i = 0; i < hex.size(); i += 2) {
+        out.push_back(static_cast<uint8_t>(std::stoul(hex.substr(i, 2), nullptr, 16)));
+    }
+    return out;
+}
+
+double double_from_bits(uint64_t bits) {
+    double value = 0.0;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+Value fixture_value(const std::string& name) {
+    if (name == "null") return Value(std::nullopt);
+    if (name == "bool_true") return Value(true);
+    if (name == "bool_false") return Value(false);
+    if (name == "int_min") return Value(std::numeric_limits<int64_t>::min());
+    if (name == "int_max") return Value(std::numeric_limits<int64_t>::max());
+    if (name == "int_42") return Value(42);
+    if (name == "float_nan") return Value(double_from_bits(0x7ff8000000000000ULL));
+    if (name == "float_pos_inf") return Value(std::numeric_limits<double>::infinity());
+    if (name == "float_neg_inf") return Value(-std::numeric_limits<double>::infinity());
+    if (name == "float_subnormal_min") return Value(double_from_bits(0x0000000000000001ULL));
+    if (name == "text_unicode") return Value(std::string("h\xc3\xa9llo"));
+    if (name == "text_x") return Value("x");
+    if (name == "bytes_empty") {
+        std::array<std::byte, 0> bytes = {};
+        return Value::bytes(bytes);
+    }
+    if (name == "bytes_deadbeef") {
+        std::array<std::byte, 4> bytes = {
+            std::byte{0xde}, std::byte{0xad}, std::byte{0xbe}, std::byte{0xef},
+        };
+        return Value::bytes(bytes);
+    }
+    if (name == "json_nested") {
+        return Value::json(R"({"a":null,"z":[1,{"deep":[true,false]}]})");
+    }
+    if (name == "timestamp_zero") return Value::timestamp_seconds(0);
+    if (name == "timestamp_max") return Value::timestamp_seconds(std::numeric_limits<int64_t>::max());
+    if (name == "uuid_001122") return Value::uuid("00112233-4455-6677-8899-aabbccddeeff");
+    if (name == "vector_empty") {
+        std::array<float, 0> vector = {};
+        return Value::vector(vector);
+    }
+    if (name == "vector_three") {
+        std::array<float, 3> vector = {1.0f, 2.0f, -0.5f};
+        return Value::vector(vector);
+    }
+    throw std::runtime_error("unknown fixture: " + name);
 }
 
 } // namespace
@@ -108,4 +198,38 @@ TEST(ValueCodec, HttpParamsUseJsonEnvelopesForTaggedValues) {
 
     EXPECT_EQ(to_http_params_json(params),
               R"([null,true,42,1.5,"txt",{"$bytes":"aGk="},[1,2],{"a":1,"b":2},{"$ts":1700000000},{"$uuid":"00112233-4455-6677-8899-aabbccddeeff"}])");
+}
+
+TEST(ValueCodec, SharedParameterFixturesMatchManifest) {
+    const std::string manifest = read_fixture_manifest();
+    const std::array<const char*, 20> names = {
+        "null",
+        "bool_true",
+        "bool_false",
+        "int_min",
+        "int_max",
+        "int_42",
+        "float_nan",
+        "float_pos_inf",
+        "float_neg_inf",
+        "float_subnormal_min",
+        "text_unicode",
+        "text_x",
+        "bytes_empty",
+        "bytes_deadbeef",
+        "json_nested",
+        "timestamp_zero",
+        "timestamp_max",
+        "uuid_001122",
+        "vector_empty",
+        "vector_three",
+    };
+
+    for (const char* name : names) {
+        EXPECT_EQ(encode_value(fixture_value(name)), hex_to_bytes(manifest_hex(manifest, name))) << name;
+    }
+
+    std::array<Value, 3> params = {fixture_value("int_42"), fixture_value("text_x"), fixture_value("null")};
+    EXPECT_EQ(encode_query_with_params("SELECT $1", params),
+              hex_to_bytes(manifest_hex(manifest, "select_one_mixed")));
 }
