@@ -113,6 +113,7 @@ async-trait = "0.1"
 # distributions + injected timeouts, asserts circuit-breaker
 # convergence and inverse-RTT weighted distribution.
 proptest = "1"
+prost = "0.14"
 
 [[bin]]
 name = "red_client"

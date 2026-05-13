@@ -77,6 +77,8 @@ func encodeParam(v any) (*pb.QueryValue, error) {
 		return &pb.QueryValue{Kind: &pb.QueryValue_VectorValue{VectorValue: &pb.QueryVector{Values: values}}}, nil
 	case time.Time:
 		return &pb.QueryValue{Kind: &pb.QueryValue_TimestampValue{TimestampValue: x.Unix()}}, nil
+	case redwire.Timestamp:
+		return &pb.QueryValue{Kind: &pb.QueryValue_TimestampValue{TimestampValue: int64(x)}}, nil
 	case redwire.UUID:
 		bytes := make([]byte, len(x))
 		copy(bytes, x[:])
