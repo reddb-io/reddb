@@ -152,6 +152,35 @@ await test('parameterized query: $N int + text + null bindings', async () => {
   await db.close()
 })
 
+await test('parameterized query: typed value params round trip', async () => {
+  const db = await connect('memory://', { binary: BINARY })
+  const seenAt = new Date('2024-01-02T03:04:05.006Z')
+  const uuid = '00112233-4455-6677-8899-aabbccddeeff'
+
+  await db.query(
+    'CREATE TABLE typed_params (ok BOOLEAN, score FLOAT, payload BLOB, body JSON, seen_at TIMESTAMP, ident UUID)',
+  )
+  const inserted = await db.query(
+    'INSERT INTO typed_params (ok, score, payload, body, seen_at, ident) VALUES ($1, $2, $3, $4, $5, $6)',
+    [true, Number.NaN, new Uint8Array([0xde, 0xad, 0xbe, 0xef]), { b: [1, true], a: null }, seenAt, uuid],
+  )
+  assertEqual(inserted.affected, 1, 'typed insert affected')
+
+  const result = await db.query('SELECT * FROM typed_params')
+  assertEqual(result.rows.length, 1, 'one typed row')
+  const row = result.rows[0]
+  assertEqual(row.ok, true, 'boolean round trip')
+  assert(Number.isNaN(row.score), 'NaN round trip')
+  assert(row.payload instanceof Uint8Array, 'bytes return Uint8Array')
+  assertEqual(Buffer.from(row.payload).toString('hex'), 'deadbeef', 'bytes payload')
+  assertEqual(JSON.stringify(row.body), JSON.stringify({ a: null, b: [1, true] }), 'json body')
+  assert(row.seen_at instanceof Date, 'timestamp returns Date')
+  assertEqual(row.seen_at.toISOString(), seenAt.toISOString(), 'timestamp value')
+  assertEqual(row.ident, uuid, 'uuid string')
+
+  await db.close()
+})
+
 await test('parameterized query: arity mismatch rejects with INVALID_PARAMS', async () => {
   const db = await connect('memory://', { binary: BINARY })
   await db.query('CREATE TABLE pp (id INTEGER)')

@@ -956,6 +956,7 @@ pub fn decode(data: &[u8]) -> Result<(Value, usize), ValueError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     /// Pinned on-disk byte layout for the canonical [`Value`]
     /// variants. **If this test breaks, callers with persisted data
@@ -1082,6 +1083,55 @@ mod tests {
             let (recovered, consumed) = decode(&bytes).expect("decode");
             assert_eq!(consumed, bytes.len());
             assert_eq!(original, recovered);
+        }
+    }
+
+    fn value_variant_strategy() -> impl Strategy<Value = Value> {
+        prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Boolean),
+            any::<i64>().prop_map(Value::Integer),
+            prop_oneof![
+                any::<f64>(),
+                Just(f64::NAN),
+                Just(f64::INFINITY),
+                Just(f64::NEG_INFINITY),
+                Just(f64::MIN_POSITIVE),
+                Just(f64::from_bits(1)),
+            ]
+            .prop_map(Value::Float),
+            proptest::collection::vec(any::<u8>(), 0..4096).prop_map(Value::Blob),
+            prop_oneof![
+                Just(br#"{"a":null,"b":[1,true]}"#.to_vec()),
+                Just(br#"[]"#.to_vec()),
+                Just(br#"{"deep":{"nest":{"leaf":[false]}}}"#.to_vec()),
+            ]
+            .prop_map(Value::Json),
+            any::<i64>().prop_map(Value::Timestamp),
+            any::<[u8; 16]>().prop_map(Value::Uuid),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn prop_value_codec_round_trips_remaining_variants(original in value_variant_strategy()) {
+            let mut bytes = Vec::new();
+            encode(&original, &mut bytes);
+            let (recovered, consumed) = decode(&bytes).expect("decode");
+            prop_assert_eq!(consumed, bytes.len());
+            prop_assert!(
+                values_equivalent(&recovered, &original),
+                "recovered={recovered:?} original={original:?}"
+            );
+        }
+    }
+
+    fn values_equivalent(left: &Value, right: &Value) -> bool {
+        match (left, right) {
+            (Value::Float(a), Value::Float(b)) => a.to_bits() == b.to_bits(),
+            _ => left == right,
         }
     }
 }

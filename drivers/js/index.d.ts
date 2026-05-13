@@ -52,6 +52,19 @@ export interface QueryResult {
   rows: Array<Record<string, unknown>>
 }
 
+export type QueryParam =
+  | null
+  | boolean
+  | number
+  | string
+  | Uint8Array
+  | Buffer
+  | Date
+  | Float32Array
+  | Float64Array
+  | number[]
+  | Record<string, unknown>
+
 export interface AskSource {
   urn: string
   payload: string
@@ -272,7 +285,7 @@ export class RedDB {
 
   query(sql: `ASK ${string}`): Promise<AskQueryResult>
   query(sql: string): Promise<QueryResult>
-  query(sql: string, params: Array<number | string | null>): Promise<QueryResult>
+  query(sql: string, params: QueryParam[]): Promise<QueryResult>
   insert(collection: string, payload: Record<string, unknown>): Promise<InsertResult>
   bulkInsert(
     collection: string,
