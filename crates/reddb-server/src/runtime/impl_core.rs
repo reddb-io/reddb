@@ -2036,6 +2036,7 @@ impl RedDBRuntime {
                 pending_tombstones: parking_lot::RwLock::new(HashMap::new()),
                 pending_versioned_updates: parking_lot::RwLock::new(HashMap::new()),
                 pending_kv_watch_events: parking_lot::RwLock::new(HashMap::new()),
+                pending_store_wal_actions: parking_lot::RwLock::new(HashMap::new()),
                 tenant_tables: parking_lot::RwLock::new(HashMap::new()),
                 ddl_epoch: std::sync::atomic::AtomicU64::new(0),
                 write_gate: Arc::new(crate::runtime::write_gate::WriteGate::from_options(
@@ -4731,9 +4732,15 @@ impl RedDBRuntime {
                     super::red_schema::READ_ONLY_ERROR.to_string(),
                 ))
             }
-            QueryExpr::Insert(ref insert) => self.execute_insert(query, insert),
-            QueryExpr::Update(ref update) => self.execute_update(query, update),
-            QueryExpr::Delete(ref delete) => self.execute_delete(query, delete),
+            QueryExpr::Insert(ref insert) => {
+                self.with_deferred_store_wal_if_transaction(|| self.execute_insert(query, insert))
+            }
+            QueryExpr::Update(ref update) => {
+                self.with_deferred_store_wal_if_transaction(|| self.execute_update(query, update))
+            }
+            QueryExpr::Delete(ref delete) => {
+                self.with_deferred_store_wal_if_transaction(|| self.execute_delete(query, delete))
+            }
             // DDL execution
             QueryExpr::CreateTable(ref create) => self.execute_create_table(query, create),
             QueryExpr::DropTable(ref drop_tbl) => self.execute_drop_table(query, drop_tbl),
@@ -5070,9 +5077,23 @@ impl RedDBRuntime {
                                     self.revive_pending_versioned_updates(conn_id);
                                     self.revive_pending_tombstones(conn_id);
                                     self.discard_pending_kv_watch_events(conn_id);
+                                    self.discard_pending_store_wal_actions(conn_id);
                                     return Err(err);
                                 }
                                 self.restore_pending_write_stamps(conn_id);
+                                if let Err(err) = self.flush_pending_store_wal_actions(conn_id) {
+                                    for (_, sub) in &ctx.savepoints {
+                                        self.inner.snapshot_manager.rollback(*sub);
+                                    }
+                                    for sub in &ctx.released_sub_xids {
+                                        self.inner.snapshot_manager.rollback(*sub);
+                                    }
+                                    self.inner.snapshot_manager.rollback(ctx.xid);
+                                    self.revive_pending_versioned_updates(conn_id);
+                                    self.revive_pending_tombstones(conn_id);
+                                    self.discard_pending_kv_watch_events(conn_id);
+                                    return Err(err);
+                                }
                                 // Phase 2.3.2e: commit every open sub-xid
                                 // so they also become visible. Their
                                 // work is promoted to the parent txn's
@@ -5116,6 +5137,7 @@ impl RedDBRuntime {
                                 self.revive_pending_versioned_updates(conn_id);
                                 self.revive_pending_tombstones(conn_id);
                                 self.discard_pending_kv_watch_events(conn_id);
+                                self.discard_pending_store_wal_actions(conn_id);
                                 ("rollback", format!("ROLLBACK — xid={} aborted", ctx.xid))
                             }
                             None => (
@@ -6378,9 +6400,12 @@ impl RedDBRuntime {
                     super::red_schema::READ_ONLY_ERROR.to_string(),
                 ))
             }
-            QueryExpr::Insert(ref insert) => self.execute_insert(query_str, insert),
-            QueryExpr::Update(ref update) => self.execute_update(query_str, update),
-            QueryExpr::Delete(ref delete) => self.execute_delete(query_str, delete),
+            QueryExpr::Insert(ref insert) => self
+                .with_deferred_store_wal_if_transaction(|| self.execute_insert(query_str, insert)),
+            QueryExpr::Update(ref update) => self
+                .with_deferred_store_wal_if_transaction(|| self.execute_update(query_str, update)),
+            QueryExpr::Delete(ref delete) => self
+                .with_deferred_store_wal_if_transaction(|| self.execute_delete(query_str, delete)),
             QueryExpr::SearchCommand(ref cmd) => self.execute_search_command(query_str, cmd),
             _ => Err(RedDBError::Query(format!(
                 "prepared-statement execution does not support {statement} statements"
@@ -6975,6 +7000,62 @@ impl RedDBRuntime {
                 stamper_xid,
                 previous_xmax,
             ));
+    }
+
+    fn with_deferred_store_wal_if_transaction<T>(
+        &self,
+        f: impl FnOnce() -> RedDBResult<T>,
+    ) -> RedDBResult<T> {
+        let conn_id = current_connection_id();
+        if !self.inner.tx_contexts.read().contains_key(&conn_id) {
+            return f();
+        }
+
+        crate::storage::UnifiedStore::begin_deferred_store_wal_capture();
+        let result = f();
+        let captured = crate::storage::UnifiedStore::take_deferred_store_wal_capture();
+        match result {
+            Ok(value) => {
+                self.record_pending_store_wal_actions(conn_id, captured);
+                Ok(value)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn record_pending_store_wal_actions(
+        &self,
+        conn_id: u64,
+        actions: crate::storage::unified::DeferredStoreWalActions,
+    ) {
+        if actions.is_empty() {
+            return;
+        }
+        let mut guard = self.inner.pending_store_wal_actions.write();
+        guard.entry(conn_id).or_default().extend(actions);
+    }
+
+    fn flush_pending_store_wal_actions(&self, conn_id: u64) -> RedDBResult<()> {
+        let Some(actions) = self
+            .inner
+            .pending_store_wal_actions
+            .write()
+            .remove(&conn_id)
+        else {
+            return Ok(());
+        };
+        self.inner
+            .db
+            .store()
+            .append_deferred_store_wal_actions(actions)
+            .map_err(|err| RedDBError::Internal(err.to_string()))
+    }
+
+    fn discard_pending_store_wal_actions(&self, conn_id: u64) {
+        self.inner
+            .pending_store_wal_actions
+            .write()
+            .remove(&conn_id);
     }
 
     fn xid_conflicts_with_snapshot(

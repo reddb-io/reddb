@@ -1,6 +1,7 @@
 use super::*;
 use crate::api::DurabilityMode;
 use crate::storage::wal::{WalReader, WalRecord, WalWriter};
+use std::cell::RefCell;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -69,6 +70,56 @@ pub(crate) enum StoreWalAction {
         collection: String,
         records: Vec<Vec<u8>>,
     },
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct DeferredStoreWalActions {
+    actions: Vec<StoreWalAction>,
+}
+
+impl DeferredStoreWalActions {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.actions.is_empty()
+    }
+
+    pub(crate) fn extend(&mut self, other: Self) {
+        self.actions.extend(other.actions);
+    }
+}
+
+thread_local! {
+    static DEFERRED_STORE_WAL_ACTIONS: RefCell<Option<Vec<StoreWalAction>>> =
+        const { RefCell::new(None) };
+}
+
+fn begin_deferred_store_wal_capture() {
+    DEFERRED_STORE_WAL_ACTIONS.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        debug_assert!(guard.is_none());
+        *guard = Some(Vec::new());
+    });
+}
+
+fn capture_deferred_store_wal_actions(actions: Vec<StoreWalAction>) -> bool {
+    DEFERRED_STORE_WAL_ACTIONS.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        if let Some(pending) = guard.as_mut() {
+            pending.extend(actions);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+fn deferred_store_wal_capture_active() -> bool {
+    DEFERRED_STORE_WAL_ACTIONS.with(|cell| cell.borrow().is_some())
+}
+
+fn take_deferred_store_wal_capture() -> DeferredStoreWalActions {
+    DEFERRED_STORE_WAL_ACTIONS.with(|cell| DeferredStoreWalActions {
+        actions: cell.borrow_mut().take().unwrap_or_default(),
+    })
 }
 
 impl StoreWalAction {
@@ -735,6 +786,35 @@ impl Drop for StoreCommitCoordinator {
 }
 
 impl UnifiedStore {
+    pub(crate) fn begin_deferred_store_wal_capture() {
+        begin_deferred_store_wal_capture();
+    }
+
+    pub(crate) fn take_deferred_store_wal_capture() -> DeferredStoreWalActions {
+        take_deferred_store_wal_capture()
+    }
+
+    pub(crate) fn append_deferred_store_wal_actions(
+        &self,
+        actions: DeferredStoreWalActions,
+    ) -> Result<(), StoreError> {
+        if actions.actions.is_empty() {
+            return Ok(());
+        }
+        match self.config.durability_mode {
+            DurabilityMode::Strict => self.flush_paged_state(),
+            DurabilityMode::WalDurableGrouped | DurabilityMode::Async => {
+                if let Some(commit) = &self.commit {
+                    commit
+                        .append_actions(&actions.actions)
+                        .map_err(StoreError::Io)
+                } else {
+                    self.flush_paged_state()
+                }
+            }
+        }
+    }
+
     pub(crate) fn wal_path_for_db(path: &Path) -> PathBuf {
         path.with_extension("rdb-uwal")
     }
@@ -744,6 +824,11 @@ impl UnifiedStore {
         actions: impl IntoIterator<Item = StoreWalAction>,
     ) -> Result<(), StoreError> {
         let actions: Vec<StoreWalAction> = actions.into_iter().collect();
+        if deferred_store_wal_capture_active() {
+            let captured = capture_deferred_store_wal_actions(actions);
+            debug_assert!(captured);
+            return Ok(());
+        }
         match self.config.durability_mode {
             DurabilityMode::Strict => self.flush_paged_state(),
             DurabilityMode::WalDurableGrouped | DurabilityMode::Async => {

@@ -257,9 +257,8 @@ impl RedDBRuntime {
                 if manager.update(entity.clone()).is_ok() {
                     if active_xid.is_some() {
                         self.record_pending_tombstone(conn_id, collection, id, xid, previous_xmax);
-                    } else {
-                        tombstoned_entities.push(entity);
                     }
+                    tombstoned_entities.push(entity);
                     tombstoned_ids.push(id);
                 }
             } else {
@@ -273,7 +272,11 @@ impl RedDBRuntime {
 
         let mut affected = tombstoned_ids.len() as u64;
         let mut lsns = Vec::with_capacity(tombstoned_ids.len() + physical_delete_ids.len());
-        if active_xid.is_none() {
+        if active_xid.is_some() {
+            store
+                .persist_entities_to_pager(collection, &tombstoned_entities)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        } else {
             store
                 .persist_entities_to_pager(collection, &tombstoned_entities)
                 .map_err(|err| RedDBError::Internal(err.to_string()))?;

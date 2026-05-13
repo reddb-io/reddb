@@ -492,5 +492,6 @@ mod impl_pages;
 mod native_helpers;
 
 pub use self::builder::EntityBuilder;
+pub(crate) use self::commit::DeferredStoreWalActions;
 use self::commit::{StoreCommitCoordinator, StoreWalAction};
 use self::native_helpers::*;

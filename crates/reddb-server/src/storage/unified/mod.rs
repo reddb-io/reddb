@@ -107,6 +107,7 @@ pub use segment::{
 pub use spatial_index::{
     SpatialIndex, SpatialIndexManager, SpatialIndexStats, SpatialSearchResult,
 };
+pub(crate) use store::DeferredStoreWalActions;
 pub use store::{StoreError, StoreStats, UnifiedStore, UnifiedStoreConfig};
 // Query DSL for fluent multi-modal queries
 pub use dsl::{

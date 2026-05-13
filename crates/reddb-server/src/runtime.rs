@@ -952,6 +952,8 @@ struct RuntimeInner {
     >,
     pending_kv_watch_events:
         parking_lot::RwLock<HashMap<u64, Vec<crate::replication::cdc::KvWatchEvent>>>,
+    pending_store_wal_actions:
+        parking_lot::RwLock<HashMap<u64, crate::storage::unified::DeferredStoreWalActions>>,
     /// Table-scoped tenancy registry (Phase 2.5.4).
     ///
     /// Maps `table_name → tenant_column`. DML auto-fill looks here to
