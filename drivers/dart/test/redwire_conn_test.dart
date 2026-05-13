@@ -401,7 +401,7 @@ void main() {
 
       try {
         final conn = await RedwireConn.connect(host: server.host, port: server.port);
-        await conn.query('SELECT 1', const []);
+        await conn.query('SELECT 1', params: const []);
         await conn.close();
       } finally {
         await server.close();

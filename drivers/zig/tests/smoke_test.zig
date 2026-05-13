@@ -10,18 +10,21 @@ test "live red server parameterized query smoke" {
     const red_bin = env.get("RED_BIN") orelse return;
 
     const port: u16 = 5597;
-    var tmp = t.tmpDir(.{});
-    defer tmp.cleanup();
+    const tmp_path = try std.fmt.allocPrint(t.allocator, "/tmp/reddb-zig-smoke-{d}", .{std.time.nanoTimestamp()});
+    defer t.allocator.free(tmp_path);
+    try std.fs.makeDirAbsolute(tmp_path);
+    defer std.fs.deleteTreeAbsolute(tmp_path) catch {};
+    const data_path = try std.fmt.allocPrint(t.allocator, "{s}/zig-smoke.db", .{tmp_path});
+    defer t.allocator.free(data_path);
 
     var child = std.process.Child.init(&.{
         red_bin,
         "server",
         "--path",
-        "zig-smoke.db",
+        data_path,
         "--bind",
         "127.0.0.1:5597",
     }, t.allocator);
-    child.cwd_dir = tmp.dir;
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Ignore;
@@ -62,11 +65,10 @@ test "live red server parameterized query smoke" {
 
 fn waitForConnect(allocator: std.mem.Allocator, port: u16) !*reddb.Conn {
     const deadline = std.time.milliTimestamp() + 60_000;
+    var uri_buf: [64]u8 = undefined;
+    const uri = try std.fmt.bufPrint(&uri_buf, "red://127.0.0.1:{d}", .{port});
     while (std.time.milliTimestamp() < deadline) {
-        const conn = reddb.connect(allocator, "red://127.0.0.1:5597", .{
-            .host = "127.0.0.1",
-            .port = port,
-        }) catch {
+        const conn = reddb.connect(allocator, uri, null) catch {
             std.time.sleep(50 * std.time.ns_per_ms);
             continue;
         };
