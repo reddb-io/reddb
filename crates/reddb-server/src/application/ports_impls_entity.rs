@@ -1931,35 +1931,67 @@ impl RedDBRuntime {
                     .into_iter()
                     .map(str::to_string)
                     .collect();
-                let decision = crate::storage::engine::hot_update::decide(
-                    &crate::storage::engine::hot_update::HotUpdateInputs {
-                        collection: applied.collection.as_str(),
-                        indexed_columns: &indexed_cols,
-                        modified_columns: &modified_cols,
-                        // The storage layer currently handles fit via
-                        // the segment abstraction; we bypass the
-                        // page-size check here.
-                        new_tuple_size: 0,
-                        page_free_space: usize::MAX,
-                    },
-                );
-                if !decision.can_hot {
-                    self.index_store_ref()
-                        .index_entity_update(
-                            &applied.collection,
-                            applied.id,
-                            &applied.pre_mutation_fields,
-                            &post,
-                        )
-                        .map_err(crate::RedDBError::Internal)?;
+                if let Some(old_version) = applied.replaced_entity.as_ref() {
+                    let old_index_fields: Vec<(String, Value)> = applied
+                        .pre_mutation_fields
+                        .iter()
+                        .filter(|(col, _)| indexed_cols.contains(col))
+                        .cloned()
+                        .collect();
+                    let new_index_fields: Vec<(String, Value)> = post
+                        .iter()
+                        .filter(|(col, _)| indexed_cols.contains(col))
+                        .cloned()
+                        .collect();
+                    if !old_index_fields.is_empty() {
+                        self.index_store_ref()
+                            .index_entity_delete(
+                                &applied.collection,
+                                old_version.id,
+                                &old_index_fields,
+                            )
+                            .map_err(crate::RedDBError::Internal)?;
+                    }
+                    if !new_index_fields.is_empty() {
+                        self.index_store_ref()
+                            .index_entity_insert(
+                                &applied.collection,
+                                applied.entity.id,
+                                &new_index_fields,
+                            )
+                            .map_err(crate::RedDBError::Internal)?;
+                    }
                 } else {
-                    // F-04: `applied.collection` is tenant-supplied;
-                    // strip CR/LF/control bytes via the LogField
-                    // escaper (ADR 0010).
-                    tracing::debug!(
-                        collection = %reddb_wire::audit_safe_log_field(&applied.collection),
-                        "hot_update fast-path: skipped index_entity_update"
+                    let decision = crate::storage::engine::hot_update::decide(
+                        &crate::storage::engine::hot_update::HotUpdateInputs {
+                            collection: applied.collection.as_str(),
+                            indexed_columns: &indexed_cols,
+                            modified_columns: &modified_cols,
+                            // The storage layer currently handles fit via
+                            // the segment abstraction; we bypass the
+                            // page-size check here.
+                            new_tuple_size: 0,
+                            page_free_space: usize::MAX,
+                        },
                     );
+                    if !decision.can_hot {
+                        self.index_store_ref()
+                            .index_entity_update(
+                                &applied.collection,
+                                applied.id,
+                                &applied.pre_mutation_fields,
+                                &post,
+                            )
+                            .map_err(crate::RedDBError::Internal)?;
+                    } else {
+                        // F-04: `applied.collection` is tenant-supplied;
+                        // strip CR/LF/control bytes via the LogField
+                        // escaper (ADR 0010).
+                        tracing::debug!(
+                            collection = %reddb_wire::audit_safe_log_field(&applied.collection),
+                            "hot_update fast-path: skipped index_entity_update"
+                        );
+                    }
                 }
             }
         }

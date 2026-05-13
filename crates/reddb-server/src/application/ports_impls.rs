@@ -75,6 +75,7 @@ mod catalog;
 #[path = "ports_impls_entity.rs"]
 mod entity;
 pub(crate) use entity::build_row_update_contract_plan;
+pub(crate) use entity::entity_row_fields_snapshot;
 pub(crate) use entity::normalize_row_update_assignment_with_plan;
 pub(crate) use entity::normalize_row_update_value_for_rule;
 #[path = "ports_impls_graph.rs"]
