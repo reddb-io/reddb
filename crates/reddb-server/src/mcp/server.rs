@@ -168,7 +168,7 @@ impl McpServer {
 
     fn handle_tools_list(&self, id: Option<&JsonValue>) -> String {
         let defs = tools::all_tools();
-        let tools_json: Vec<JsonValue> = defs
+        let mut tools_json: Vec<JsonValue> = defs
             .into_iter()
             .map(|def| {
                 let mut obj = Map::new();
@@ -181,6 +181,7 @@ impl McpServer {
                 JsonValue::Object(obj)
             })
             .collect();
+        tools_json.push(crate::runtime::ai::mcp_ask_tool::descriptor());
 
         let mut result = Map::new();
         result.insert("tools".to_string(), JsonValue::Array(tools_json));
@@ -240,6 +241,7 @@ impl McpServer {
             "reddb_auth_login" => self.tool_auth_login(args),
             "reddb_auth_create_api_key" => self.tool_auth_create_api_key(args),
             "reddb_auth_list_users" => self.tool_auth_list_users(),
+            crate::runtime::ai::mcp_ask_tool::TOOL_NAME => self.tool_ask(args),
             _ => Err(format!("unknown tool: {name}")),
         };
 
@@ -314,6 +316,34 @@ impl McpServer {
             .map_err(|e| format!("{}", e))?;
 
         let json = runtime_query_json(&result, &None, &None);
+        json_to_string(&json).map_err(|e| format!("serialization error: {}", e))
+    }
+
+    fn tool_ask(&self, args: &JsonValue) -> Result<String, String> {
+        let invocation =
+            crate::runtime::ai::mcp_ask_tool::parse(args).map_err(format_mcp_ask_parse_error)?;
+        let ask = crate::storage::query::ast::AskQuery {
+            question: invocation.question,
+            provider: invocation.using,
+            model: invocation.model,
+            depth: invocation.depth.map(|v| v as usize),
+            limit: invocation.limit.map(|v| v as usize),
+            min_score: invocation.min_score.map(|v| v as f32),
+            collection: None,
+            temperature: invocation.temperature.map(|v| v as f32),
+            seed: invocation.seed,
+            strict: invocation.strict.unwrap_or(true),
+        };
+
+        // `cache` / `nocache` are accepted and validated by the MCP
+        // parser for option parity. Runtime cache plumbing currently
+        // lives in the dedicated ASK cache slice, so this transport
+        // path preserves today's conservative non-cache behavior.
+        let result = self
+            .runtime
+            .execute_ask("ASK <mcp>", &ask)
+            .map_err(|e| format!("{}", e))?;
+        let json = crate::rpc_stdio::query_result_to_json(&result);
         json_to_string(&json).map_err(|e| format!("serialization error: {}", e))
     }
 
@@ -1191,6 +1221,26 @@ impl McpServer {
 // Helpers
 // ------------------------------------------------------------------
 
+fn format_mcp_ask_parse_error(err: crate::runtime::ai::mcp_ask_tool::ParseError) -> String {
+    use crate::runtime::ai::mcp_ask_tool::ParseError;
+
+    match err {
+        ParseError::NotAnObject => "arguments must be an object".to_string(),
+        ParseError::MissingQuestion => "missing required field 'question'".to_string(),
+        ParseError::QuestionWrongType => "field 'question' must be a string".to_string(),
+        ParseError::WrongType { path, expected } => {
+            format!("{path} must be {expected}")
+        }
+        ParseError::OutOfRange { path, detail } => {
+            format!("{path} out of range: {detail}")
+        }
+        ParseError::CacheAndNocache => {
+            "options.cache and options.nocache are mutually exclusive".to_string()
+        }
+        ParseError::UnknownOption { path } => format!("unknown option {path}"),
+    }
+}
+
 fn parse_direction(s: Option<&str>) -> RuntimeGraphDirection {
     match s {
         Some("incoming") => RuntimeGraphDirection::Incoming,
@@ -1417,6 +1467,14 @@ impl McpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread::{self, JoinHandle};
+    use std::time::Duration;
+
+    static ASK_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn make_server() -> McpServer {
         let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
@@ -1425,6 +1483,176 @@ mod tests {
 
     fn parse_json(s: &str) -> JsonValue {
         json_from_str(s).expect("valid json")
+    }
+
+    #[test]
+    fn tools_list_registers_reddb_ask_descriptor() {
+        let srv = make_server();
+        let response = srv.handle_tools_list(Some(&JsonValue::Number(1.0)));
+        let parsed = parse_json(&response);
+        let tools = parsed
+            .get("result")
+            .and_then(|result| result.get("tools"))
+            .and_then(JsonValue::as_array)
+            .expect("tools array");
+
+        let ask = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(JsonValue::as_str) == Some("reddb.ask"))
+            .expect("reddb.ask registered");
+
+        let desc = ask
+            .get("description")
+            .and_then(JsonValue::as_str)
+            .expect("description");
+        assert!(desc.contains("citations"), "description: {desc}");
+        assert!(desc.contains("sources_flat"), "description: {desc}");
+        assert!(desc.contains("URN"), "description: {desc}");
+
+        let options = ask
+            .get("inputSchema")
+            .and_then(|schema| schema.get("properties"))
+            .and_then(|props| props.get("options"))
+            .and_then(|opts| opts.get("properties"))
+            .and_then(JsonValue::as_object)
+            .expect("options properties");
+        for key in [
+            "strict",
+            "using",
+            "model",
+            "limit",
+            "min_score",
+            "depth",
+            "temperature",
+            "seed",
+            "cache",
+            "nocache",
+        ] {
+            assert!(
+                options.contains_key(key),
+                "missing option {key} in {options:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tools_call_reddb_ask_uses_typed_argument_parser() {
+        let srv = make_server();
+        let params = parse_json(
+            r#"{
+                "name": "reddb.ask",
+                "arguments": {
+                    "question": "what cites this?",
+                    "options": { "tempurature": 0.2 }
+                }
+            }"#,
+        );
+
+        let response = srv.handle_tools_call(Some(&JsonValue::Number(1.0)), Some(&params));
+        let parsed = parse_json(&response);
+        let result = parsed.get("result").expect("result");
+        assert_eq!(
+            result.get("isError").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        let text = result
+            .get("content")
+            .and_then(JsonValue::as_array)
+            .and_then(|content| content.first())
+            .and_then(|item| item.get("text"))
+            .and_then(JsonValue::as_str)
+            .expect("error text");
+        assert!(text.contains("options.tempurature"), "text: {text}");
+    }
+
+    #[test]
+    fn tools_call_reddb_ask_returns_canonical_citation_envelope() {
+        let _guard = ASK_ENV_LOCK.lock().expect("env lock");
+        let stub = AskStub::start();
+        let _api_base = EnvVarGuard::set(
+            "REDDB_OLLAMA_API_BASE",
+            &format!("http://{}/v1", stub.addr()),
+        );
+
+        let srv = make_server();
+        srv.tool_query(&parse_json(
+            r#"{"sql":"CREATE TABLE travel (id INTEGER, passport TEXT, notes TEXT)"}"#,
+        ))
+        .expect("ddl ok");
+        srv.tool_query(&parse_json(
+            r#"{"sql":"INSERT INTO travel (id, passport, notes) VALUES (1, 'PT-002', 'incident FDD-12313 escalated')"}"#,
+        ))
+        .expect("insert ok");
+
+        let params = parse_json(
+            r#"{
+                "name": "reddb.ask",
+                "arguments": {
+                    "question": "passport FDD-12313",
+                    "options": {
+                        "strict": false,
+                        "using": "ollama",
+                        "model": "mock-ask",
+                        "limit": 1,
+                        "min_score": 0,
+                        "depth": 0,
+                        "temperature": 0,
+                        "seed": 0,
+                        "cache": { "ttl": "5m" }
+                    }
+                }
+            }"#,
+        );
+
+        let response = srv.handle_tools_call(Some(&JsonValue::Number(1.0)), Some(&params));
+        let parsed = parse_json(&response);
+        let result = parsed.get("result").expect("result");
+        assert_ne!(
+            result.get("isError").and_then(JsonValue::as_bool),
+            Some(true),
+            "response: {response}"
+        );
+        let text = result
+            .get("content")
+            .and_then(JsonValue::as_array)
+            .and_then(|content| content.first())
+            .and_then(|item| item.get("text"))
+            .and_then(JsonValue::as_str)
+            .expect("tool text");
+        let envelope = parse_json(text);
+
+        assert_eq!(
+            envelope.get("answer").and_then(JsonValue::as_str),
+            Some("FDD-12313 escalated [^1].")
+        );
+        assert_eq!(
+            envelope.get("provider").and_then(JsonValue::as_str),
+            Some("ollama")
+        );
+        assert_eq!(
+            envelope.get("model").and_then(JsonValue::as_str),
+            Some("mock-ask")
+        );
+        assert_eq!(
+            envelope.get("cache_hit").and_then(JsonValue::as_bool),
+            Some(false)
+        );
+        assert!(envelope
+            .get("sources_flat")
+            .and_then(JsonValue::as_array)
+            .is_some());
+        assert!(envelope
+            .get("citations")
+            .and_then(JsonValue::as_array)
+            .is_some());
+        assert!(envelope
+            .get("validation")
+            .and_then(JsonValue::as_object)
+            .is_some());
+        assert!(
+            envelope.get("rows").is_none(),
+            "ASK must not be row-wrapped: {text}"
+        );
     }
 
     #[test]
@@ -1505,5 +1733,107 @@ mod tests {
                 "param did not bind: {e}"
             );
         }
+    }
+
+    struct EnvVarGuard {
+        name: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var(name).ok();
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.previous.take() {
+                std::env::set_var(self.name, value);
+            } else {
+                std::env::remove_var(self.name);
+            }
+        }
+    }
+
+    struct AskStub {
+        addr: SocketAddr,
+        shutdown: Arc<AtomicBool>,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl AskStub {
+        fn start() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("stub bind");
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            let addr = listener.local_addr().expect("local addr");
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let server_shutdown = Arc::clone(&shutdown);
+            let handle = thread::spawn(move || {
+                while !server_shutdown.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let request = read_stub_request(&mut stream);
+                            if request.contains("/embeddings") {
+                                write_json_response(
+                                    &mut stream,
+                                    r#"{"model":"mock-embedding","data":[{"index":0,"embedding":[1,0,0]}],"usage":{"prompt_tokens":3,"total_tokens":3}}"#,
+                                );
+                            } else {
+                                write_json_response(
+                                    &mut stream,
+                                    r#"{"model":"mock-ask","choices":[{"message":{"role":"assistant","content":"FDD-12313 escalated [^1]."},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}"#,
+                                );
+                            }
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            Self {
+                addr,
+                shutdown,
+                handle: Some(handle),
+            }
+        }
+
+        fn addr(&self) -> SocketAddr {
+            self.addr
+        }
+    }
+
+    impl Drop for AskStub {
+        fn drop(&mut self) {
+            self.shutdown.store(true, Ordering::Relaxed);
+            let _ = TcpStream::connect(self.addr);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn read_stub_request(stream: &mut TcpStream) -> String {
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+        let mut buffer = [0_u8; 4096];
+        let count = stream.read(&mut buffer).unwrap_or(0);
+        String::from_utf8_lossy(&buffer[..count]).into_owned()
+    }
+
+    fn write_json_response(stream: &mut TcpStream, body: &str) {
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write stub response");
     }
 }
