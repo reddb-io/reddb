@@ -57,10 +57,70 @@ fn ask_reply_from_runtime_result(result: &RuntimeQueryResult) -> Result<AskReply
     })
 }
 
+fn ask_query_from_request(
+    request: AskRequest,
+    stream: bool,
+) -> Result<crate::storage::query::ast::AskQuery, Status> {
+    if request.question.trim().is_empty() {
+        return Err(Status::invalid_argument(
+            "field 'question' must be a non-empty string",
+        ));
+    }
+
+    Ok(crate::storage::query::ast::AskQuery {
+        explain: false,
+        question: request.question,
+        provider: request.provider,
+        model: request.model,
+        depth: request.depth.map(|v| v as usize),
+        limit: request.limit.map(|v| v as usize),
+        min_score: request.min_score,
+        collection: request.collection,
+        temperature: request.temperature,
+        seed: request.seed,
+        strict: request.strict.unwrap_or(true),
+        stream,
+        cache: crate::storage::query::ast::AskCacheClause::Default,
+    })
+}
+
+fn ask_stream_events_from_runtime_result(
+    result: &RuntimeQueryResult,
+) -> Result<Vec<AskStreamEvent>, Status> {
+    let reply = ask_reply_from_runtime_result(result)?;
+    let answer_tokens = ask_answer_tokens_from_unified_result(&result.result)
+        .unwrap_or_else(|| vec![reply.answer.clone()]);
+    let validation = reply.validation.unwrap_or(Validation {
+        ok: true,
+        warnings: Vec::new(),
+        errors: Vec::new(),
+    });
+
+    let mut events = Vec::with_capacity(answer_tokens.len() + 2);
+    events.push(AskStreamEvent {
+        event: Some(ask_stream_event::Event::Sources(AskSources {
+            sources_flat_json: reply.sources_flat_json,
+        })),
+    });
+    for token in answer_tokens {
+        events.push(AskStreamEvent {
+            event: Some(ask_stream_event::Event::AnswerToken(AskAnswerToken {
+                text: token,
+            })),
+        });
+    }
+    events.push(AskStreamEvent {
+        event: Some(ask_stream_event::Event::Validation(validation)),
+    });
+    Ok(events)
+}
+
 #[tonic::async_trait]
 impl RedDb for GrpcRuntime {
     type KvWatchStream =
         Pin<Box<dyn tokio_stream::Stream<Item = Result<KvWatchEvent, Status>> + Send + 'static>>;
+    type AskStreamStream =
+        Pin<Box<dyn tokio_stream::Stream<Item = Result<AskStreamEvent, Status>> + Send + 'static>>;
 
     async fn health(&self, _request: Request<Empty>) -> Result<Response<HealthReply>, Status> {
         let report = self.native_use_cases().health();
@@ -2389,32 +2449,32 @@ impl RedDb for GrpcRuntime {
 
     async fn ask(&self, request: Request<AskRequest>) -> Result<Response<AskReply>, Status> {
         self.authorize_read(request.metadata())?;
-        let request = request.into_inner();
-        if request.question.trim().is_empty() {
-            return Err(Status::invalid_argument("field 'question' must be a non-empty string"));
-        }
-
-        let ask_query = crate::storage::query::ast::AskQuery {
-            explain: false,
-            question: request.question,
-            provider: request.provider,
-            model: request.model,
-            depth: request.depth.map(|v| v as usize),
-            limit: request.limit.map(|v| v as usize),
-            min_score: request.min_score,
-            collection: request.collection,
-            temperature: request.temperature,
-            seed: request.seed,
-            strict: request.strict.unwrap_or(true),
-            stream: false,
-            cache: crate::storage::query::ast::AskCacheClause::Default,
-        };
+        let ask_query = ask_query_from_request(request.into_inner(), false)?;
 
         let result = self
             .runtime
             .execute_ask("ASK via gRPC", &ask_query)
             .map_err(to_status)?;
         Ok(Response::new(ask_reply_from_runtime_result(&result)?))
+    }
+
+    async fn ask_stream(
+        &self,
+        request: Request<AskRequest>,
+    ) -> Result<Response<Self::AskStreamStream>, Status> {
+        self.authorize_read(request.metadata())?;
+        let ask_query = ask_query_from_request(request.into_inner(), true)?;
+        let runtime = self.runtime.clone();
+        let events = tokio::task::spawn_blocking(move || {
+            let result = runtime
+                .execute_ask("ASK STREAM via gRPC", &ask_query)
+                .map_err(to_status)?;
+            ask_stream_events_from_runtime_result(&result)
+        })
+        .await
+        .map_err(|e| Status::internal(e.to_string()))??;
+        let stream = tokio_stream::iter(events.into_iter().map(Ok));
+        Ok(Response::new(Box::pin(stream) as Self::AskStreamStream))
     }
 
     async fn context_search(
@@ -3322,5 +3382,117 @@ impl RedDb for GrpcRuntime {
             map.insert("contract_present".into(), JsonValue::Bool(false));
         }
         Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
+
+    fn ask_runtime_result(answer_tokens_json: Option<&str>) -> RuntimeQueryResult {
+        let mut result = UnifiedResult::with_columns(vec![
+            "answer".into(),
+            "answer_tokens".into(),
+            "provider".into(),
+            "model".into(),
+            "mode".into(),
+            "retry_count".into(),
+            "prompt_tokens".into(),
+            "completion_tokens".into(),
+            "cost_usd".into(),
+            "cache_hit".into(),
+            "sources_count".into(),
+            "sources_flat".into(),
+            "citations".into(),
+            "validation".into(),
+        ]);
+        let mut record = UnifiedRecord::new();
+        record.set("answer", Value::text("streamed answer"));
+        if let Some(tokens) = answer_tokens_json {
+            record.set("answer_tokens", Value::Json(tokens.as_bytes().to_vec()));
+        }
+        record.set("provider", Value::text("openai"));
+        record.set("model", Value::text("test-model"));
+        record.set("mode", Value::text("strict"));
+        record.set("retry_count", Value::Integer(0));
+        record.set("prompt_tokens", Value::Integer(12));
+        record.set("completion_tokens", Value::Integer(2));
+        record.set("cost_usd", Value::Float(0.0001));
+        record.set("cache_hit", Value::Boolean(false));
+        record.set("sources_count", Value::Integer(1));
+        record.set(
+            "sources_flat",
+            Value::Json(
+                br#"[{"payload":"{\"body\":\"login\"}","urn":"urn:incident:1"}]"#.to_vec(),
+            ),
+        );
+        record.set(
+            "citations",
+            Value::Json(br#"[{"marker":1,"urn":"urn:incident:1"}]"#.to_vec()),
+        );
+        record.set(
+            "validation",
+            Value::Json(br#"{"ok":true,"warnings":[],"errors":[]}"#.to_vec()),
+        );
+        result.push(record);
+
+        RuntimeQueryResult {
+            query: "ASK STREAM via gRPC".to_string(),
+            mode: crate::storage::query::modes::QueryMode::Sql,
+            statement: "ask",
+            engine: "runtime-ai",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+        }
+    }
+
+    #[test]
+    fn ask_stream_events_preserve_answer_tokens_between_sources_and_validation() {
+        let result = ask_runtime_result(Some(r#"["streamed ","answer"]"#));
+
+        let events = ask_stream_events_from_runtime_result(&result).expect("events");
+
+        assert_eq!(events.len(), 4);
+        match &events[0].event {
+            Some(ask_stream_event::Event::Sources(sources)) => {
+                assert!(sources.sources_flat_json.contains("urn:incident:1"));
+            }
+            other => panic!("expected sources event, got {other:?}"),
+        }
+        match &events[1].event {
+            Some(ask_stream_event::Event::AnswerToken(token)) => {
+                assert_eq!(token.text, "streamed ");
+            }
+            other => panic!("expected first answer_token event, got {other:?}"),
+        }
+        match &events[2].event {
+            Some(ask_stream_event::Event::AnswerToken(token)) => {
+                assert_eq!(token.text, "answer");
+            }
+            other => panic!("expected second answer_token event, got {other:?}"),
+        }
+        match &events[3].event {
+            Some(ask_stream_event::Event::Validation(validation)) => {
+                assert!(validation.ok);
+            }
+            other => panic!("expected validation event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ask_stream_events_fall_back_to_full_answer_when_tokens_are_absent() {
+        let result = ask_runtime_result(None);
+
+        let events = ask_stream_events_from_runtime_result(&result).expect("events");
+
+        assert_eq!(events.len(), 3);
+        match &events[1].event {
+            Some(ask_stream_event::Event::AnswerToken(token)) => {
+                assert_eq!(token.text, "streamed answer");
+            }
+            other => panic!("expected answer_token event, got {other:?}"),
+        }
     }
 }
