@@ -192,7 +192,7 @@ fn appendJsonString(out: *std.ArrayList(u8), s: []const u8) !void {
             '\t' => try out.appendSlice("\\t"),
             0x08 => try out.appendSlice("\\b"),
             0x0c => try out.appendSlice("\\f"),
-            0x00...0x1f => {
+            0x00...0x07, 0x0b, 0x0e...0x1f => {
                 const hex = "0123456789abcdef";
                 try out.appendSlice("\\u00");
                 try out.append(hex[@intCast(c >> 4)]);
