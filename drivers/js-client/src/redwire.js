@@ -65,6 +65,7 @@ export const BinaryTag = Object.freeze({
   F64: 2,
   Text: 3,
   Bool: 4,
+  U64: 5,
 })
 
 const KIND_NAME = Object.fromEntries(
@@ -348,13 +349,13 @@ export class RedWireClient {
       kind = MessageKind.QueryWithParams
       payload = encodeQueryWithParams(sql, params)
     } else {
-      kind = MessageKind.Query
+      kind = isSelectQuery(sql) ? MessageKind.QueryBinary : MessageKind.Query
       payload = new TextEncoder().encode(sql)
     }
     await writeFrame(this.socket, kind, corr, payload)
     const resp = await this.reader.next()
     if (resp.kind === MessageKind.Result) {
-      return jsonOf(resp.payload) ?? {}
+      return decodeResultPayload(resp.payload)
     }
     if (resp.kind === MessageKind.Error) {
       throw new RedDBError(
@@ -658,6 +659,97 @@ function jsonOf(bytes) {
   }
 }
 
+function isSelectQuery(sql) {
+  return typeof sql === 'string' && /^\s*select\b/i.test(sql)
+}
+
+export function decodeResultPayload(payload) {
+  const json = jsonOf(payload)
+  if (json) return json
+  return decodeBinaryResultPayload(payload)
+}
+
+function decodeBinaryResultPayload(payload) {
+  if (!(payload instanceof Uint8Array)) {
+    payload = new Uint8Array(payload)
+  }
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength)
+  const dec = new TextDecoder()
+  let pos = 0
+
+  const read = (n, label) => {
+    if (pos + n > payload.length) {
+      throw new RedDBError('PROTOCOL', `Result payload truncated while reading ${label}`)
+    }
+    const start = pos
+    pos += n
+    return start
+  }
+  const readU16 = (label) => view.getUint16(read(2, label), true)
+  const readU32 = (label) => view.getUint32(read(4, label), true)
+  const readI64 = (label) => safeBigIntToJs(view.getBigInt64(read(8, label), true))
+  const readU64 = (label) => safeBigIntToJs(view.getBigUint64(read(8, label), true))
+  const readF64 = (label) => view.getFloat64(read(8, label), true)
+  const readText = (n, label) => dec.decode(payload.subarray(read(n, label), pos))
+
+  const columnCount = readU16('column count')
+  const columns = []
+  for (let i = 0; i < columnCount; i += 1) {
+    const len = readU16(`column ${i} length`)
+    columns.push(readText(len, `column ${i} name`))
+  }
+
+  const rowCount = readU32('row count')
+  const rows = []
+  for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+    const row = {}
+    for (const column of columns) {
+      row[column] = readBinaryValue()
+    }
+    rows.push(row)
+  }
+
+  return {
+    ok: true,
+    statement: 'SELECT',
+    affected: 0,
+    columns,
+    rows,
+  }
+
+  function readBinaryValue() {
+    const tag = payload[read(1, 'value tag')]
+    switch (tag) {
+      case BinaryTag.Null:
+        return null
+      case BinaryTag.I64:
+        return readI64('i64 value')
+      case BinaryTag.U64:
+        return readU64('u64 value')
+      case BinaryTag.F64:
+        return readF64('f64 value')
+      case BinaryTag.Text: {
+        const len = readU32('text length')
+        return readText(len, 'text value')
+      }
+      case BinaryTag.Bool:
+        return payload[read(1, 'bool value')] !== 0
+      default:
+        throw new RedDBError('PROTOCOL', `Result payload has unknown value tag ${tag}`)
+    }
+  }
+}
+
+function safeBigIntToJs(value) {
+  if (
+    value >= BigInt(Number.MIN_SAFE_INTEGER)
+    && value <= BigInt(Number.MAX_SAFE_INTEGER)
+  ) {
+    return Number(value)
+  }
+  return value
+}
+
 /**
  * Encode the binary bulk-insert payload body (raw, no RedWire frame
  * header — the body is wrapped by the caller as a `BulkInsertBinary`
@@ -720,6 +812,7 @@ function sizeOfBinaryCell(cell) {
       return 1 + 4 + bytes
     }
     case 4: return 1 + 1
+    case 5: return 1 + 8
     default: throw new RedDBError('UNKNOWN_BINARY_TAG', `tag=${tag}`)
   }
 }
@@ -748,6 +841,11 @@ function writeBinaryCell(buf, view, pos, cell, enc) {
     case 4: { // Bool
       buf[pos] = value ? 1 : 0
       return pos + 1
+    }
+    case 5: { // U64
+      const bi = typeof value === 'bigint' ? value : BigInt(value)
+      view.setBigUint64(pos, bi, true)
+      return pos + 8
     }
     default:
       throw new RedDBError('UNKNOWN_BINARY_TAG', `tag=${tag}`)
