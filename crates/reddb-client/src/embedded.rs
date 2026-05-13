@@ -14,6 +14,7 @@ use reddb_server::storage::query::unified::UnifiedRecord;
 use reddb_server::storage::schema::Value as SchemaValue;
 
 use crate::error::{ClientError, ErrorCode, Result};
+use crate::params::IntoParams;
 use crate::types::{BulkInsertResult, InsertResult, JsonValue, QueryResult, ValueOut};
 
 /// In-process handle to a RedDB engine.
@@ -58,7 +59,8 @@ impl EmbeddedClient {
     /// Parameterized embedded query — see [`crate::Reddb::query_with`].
     /// Empty `params` short-circuits to the legacy `execute_query` fast
     /// path so the parameter-less hot path pays zero overhead.
-    pub fn query_with(&self, sql: &str, params: &[crate::params::Value]) -> Result<QueryResult> {
+    pub fn query_with<P: IntoParams>(&self, sql: &str, params: P) -> Result<QueryResult> {
+        let params = params.into_params();
         if params.is_empty() {
             return self.query(sql);
         }
@@ -78,6 +80,13 @@ impl EmbeddedClient {
             .execute_query_expr(bound)
             .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
         Ok(map_query_result(&qr))
+    }
+
+    /// Parameterized execution for INSERT / UPDATE / DELETE. RedDB uses the
+    /// same result envelope for DML as for SELECT, so this forwards to
+    /// [`Self::query_with`].
+    pub fn execute_with<P: IntoParams>(&self, sql: &str, params: P) -> Result<QueryResult> {
+        self.query_with(sql, params)
     }
 
     /// Single-row insert. Routes through the same
