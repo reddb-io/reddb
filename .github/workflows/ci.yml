@@ -229,6 +229,7 @@ jobs:
         with:
           php-version: '8.3'
           extensions: curl, hash, json, openssl
+      - uses: mlugg/setup-zig@v2
       - name: JS RedWire parameter fixtures
         working-directory: drivers/js
         run: node --test test/redwire.params.test.mjs
@@ -249,6 +250,9 @@ jobs:
       - name: PHP RedWire parameter fixtures
         working-directory: drivers/php
         run: composer install --no-interaction --no-progress && vendor/bin/phpunit --filter ValueCodecTest
+      - name: Zig RedWire parameter fixtures
+        working-directory: drivers/zig
+        run: zig build param-fixtures --summary all
       - name: C++ RedWire parameter fixtures configure
         run: cmake -S drivers/cpp -B /tmp/reddb-cpp-param-conformance -DCMAKE_BUILD_TYPE=Release
       - name: C++ RedWire parameter fixtures build

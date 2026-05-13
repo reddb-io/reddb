@@ -85,6 +85,23 @@ pub fn build(b: *std.Build) void {
         const run_t = b.addRunArtifact(t);
         test_step.dependOn(&run_t.step);
     }
+
+    const param_fixtures_step = b.step(
+        "param-fixtures",
+        "Run RedWire parameter fixture conformance tests",
+    );
+    const param_fixtures = b.addTest(.{
+        .root_source_file = b.path("tests/value_codec_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    param_fixtures.root_module.addImport("reddb", reddb_mod);
+    if (enable_zstd) {
+        param_fixtures.linkSystemLibrary("zstd");
+        param_fixtures.linkLibC();
+    }
+    const run_param_fixtures = b.addRunArtifact(param_fixtures);
+    param_fixtures_step.dependOn(&run_param_fixtures.step);
 }
 
 fn detectZstd(b: *std.Build) bool {

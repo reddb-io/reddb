@@ -24,6 +24,6 @@ When adding or changing a wire `Value` variant:
    `cargo test -p reddb-io-wire --test params_fixtures`.
 
 The CI `Driver Param Conformance` job currently runs the shared manifest
-against the JS, Go, Java, Kotlin, .NET, Dart, PHP, and C++ RedWire codecs.
-Other driver tests should use the same manifest rather than copying expected
-bytes inline.
+against the JS, Go, Java, Kotlin, .NET, Dart, PHP, Zig, and C++ RedWire
+codecs. Other driver tests should use the same manifest rather than copying
+expected bytes inline.
