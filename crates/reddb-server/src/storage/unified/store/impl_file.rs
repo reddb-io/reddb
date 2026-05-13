@@ -78,6 +78,7 @@ impl UnifiedStore {
             && version != STORE_VERSION_V5
             && version != STORE_VERSION_V6
             && version != STORE_VERSION_V7
+            && version != STORE_VERSION_V8
         {
             return Err(format!("Unsupported version: {}", version).into());
         }
@@ -193,8 +194,8 @@ impl UnifiedStore {
             }
         }
 
-        if store.format_version() < STORE_VERSION_V7 {
-            store.set_format_version(STORE_VERSION_V7);
+        if store.format_version() < STORE_VERSION_V8 {
+            store.set_format_version(STORE_VERSION_V8);
         }
 
         Ok(store)
@@ -214,15 +215,15 @@ impl UnifiedStore {
         // Magic bytes "RDST"
         buf.extend_from_slice(STORE_MAGIC);
 
-        // Version (7 — includes entity-record metadata alongside the V6
-        // CRC/footer, queue tail, timeseries tag, and vector persistence work).
-        buf.extend_from_slice(&STORE_VERSION_V7.to_le_bytes());
+        // Version (8 — includes explicit table-row logical identity
+        // alongside the V7 entity-record metadata envelope).
+        buf.extend_from_slice(&STORE_VERSION_V8.to_le_bytes());
 
         // Get all collections
         let collections = self.collections.read();
         write_varu32(&mut buf, collections.len() as u32);
 
-        let fv = STORE_VERSION_V7;
+        let fv = STORE_VERSION_V8;
         for (name, manager) in collections.iter() {
             // Collection name
             write_varu32(&mut buf, name.len() as u32);
@@ -257,7 +258,7 @@ impl UnifiedStore {
             }
         }
 
-        self.set_format_version(STORE_VERSION_V7);
+        self.set_format_version(STORE_VERSION_V8);
 
         // Append CRC32 footer over entire content
         let checksum = crate::storage::engine::crc32::crc32(&buf);
@@ -597,6 +598,14 @@ impl UnifiedStore {
         entity.created_at = created_at;
         entity.updated_at = updated_at;
         entity.sequence_id = sequence_id;
+        if format_version >= STORE_VERSION_V8 && *pos < buf.len() {
+            let has_logical_id = buf[*pos] != 0;
+            *pos += 1;
+            if has_logical_id {
+                let logical_id = Self::read_varu64_safe(buf, pos)?;
+                entity.set_logical_id(EntityId::new(logical_id));
+            }
+        }
         if !embeddings.is_empty() || !cross_refs.is_empty() {
             entity.embeddings_mut().extend(embeddings);
             entity.cross_refs_mut().extend(cross_refs);
@@ -803,6 +812,13 @@ impl UnifiedStore {
                 }
                 write_varu32(buf, message.max_attempts);
                 buf.push(u8::from(message.acked));
+            }
+        }
+
+        if format_version >= STORE_VERSION_V8 {
+            buf.push(u8::from(entity.has_explicit_logical_id()));
+            if entity.has_explicit_logical_id() {
+                write_varu64(buf, entity.logical_id().raw());
             }
         }
     }

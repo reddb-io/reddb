@@ -125,7 +125,9 @@ pub(super) fn execute_runtime_table_query(
     {
         if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
             let store = db.store();
-            if let Some(entity) = store.get(&query.table, EntityId::new(entity_id)) {
+            if let Some(entity) =
+                store.get_table_row_by_logical_id(&query.table, EntityId::new(entity_id))
+            {
                 let json = execute_runtime_serialize_single_entity(&entity);
                 let records: Vec<UnifiedRecord> = runtime_table_record_from_entity(entity)
                     .into_iter()

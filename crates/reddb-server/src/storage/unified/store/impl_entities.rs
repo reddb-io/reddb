@@ -220,11 +220,7 @@ impl UnifiedStore {
     }
 
     /// Look up entity IDs for a graph node label scoped to a single collection.
-    pub fn lookup_graph_nodes_by_label_in(
-        &self,
-        collection: &str,
-        label: &str,
-    ) -> Vec<EntityId> {
+    pub fn lookup_graph_nodes_by_label_in(&self, collection: &str, label: &str) -> Vec<EntityId> {
         let idx = self.graph_label_index.read();
         idx.get(&(collection.to_string(), label.to_string()))
             .cloned()
@@ -410,6 +406,7 @@ impl UnifiedStore {
                 manager.register_row_id(*row_id);
             }
         }
+        entity.ensure_table_logical_id();
         // Capture graph node label before entity is moved into the manager
         let graph_node_label: Option<String> = if let EntityKind::GraphNode(ref node) = entity.kind
         {
@@ -544,6 +541,7 @@ impl UnifiedStore {
                     manager.register_row_id(*row_id);
                 }
             }
+            entity.ensure_table_logical_id();
         }
         let t_assign_ids = t0.elapsed();
 
@@ -726,6 +724,7 @@ impl UnifiedStore {
                 manager.register_row_id(*row_id);
             }
         }
+        entity.ensure_table_logical_id();
 
         // Capture graph node label before entity is moved into the manager
         let graph_node_label: Option<String> = if let EntityKind::GraphNode(ref node) = entity.kind
@@ -843,6 +842,34 @@ impl UnifiedStore {
         }
 
         None
+    }
+
+    /// Resolve a table row by stable logical identity.
+    ///
+    /// Legacy rows use `logical_id == id`, so the physical-id lookup remains
+    /// the fast path. Versioned rows may have a different physical id and fall
+    /// back to a scan until the history-store/index slices add a dedicated map.
+    pub fn get_table_row_by_logical_id(
+        &self,
+        collection: &str,
+        logical_id: EntityId,
+    ) -> Option<UnifiedEntity> {
+        if let Some(entity) = self.get(collection, logical_id) {
+            if matches!(entity.kind, EntityKind::TableRow { .. })
+                && entity.logical_id() == logical_id
+            {
+                return Some(entity);
+            }
+        }
+
+        let manager = self.get_collection(collection)?;
+        manager
+            .query_all(|entity| {
+                matches!(entity.kind, EntityKind::TableRow { .. })
+                    && entity.logical_id() == logical_id
+            })
+            .into_iter()
+            .next()
     }
 
     /// Batch-fetch multiple entities from the same collection in minimal lock acquisitions.

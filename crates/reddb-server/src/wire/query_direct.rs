@@ -1438,7 +1438,7 @@ fn encode_entity_wire_value(
     col: &WireColumn,
 ) {
     match &col.source {
-        WireColumnSource::RedEntityId => encode_wire_u64(body, entity.id.raw()),
+        WireColumnSource::RedEntityId => encode_wire_u64(body, entity.logical_id().raw()),
         WireColumnSource::CreatedAt => encode_wire_u64(body, entity.created_at),
         WireColumnSource::UpdatedAt => encode_wire_u64(body, entity.updated_at),
         WireColumnSource::RowIndexTrusted { index } => match row.columns.get(*index) {

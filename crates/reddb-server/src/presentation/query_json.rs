@@ -263,11 +263,11 @@ where
     object.insert("_score".to_string(), JsonValue::Number(score as f64));
     object.insert(
         "entity_id".to_string(),
-        JsonValue::Number(item.entity.id.raw() as f64),
+        JsonValue::Number(item.entity.logical_id().raw() as f64),
     );
     object.insert(
         "red_entity_id".to_string(),
-        JsonValue::Number(item.entity.id.raw() as f64),
+        JsonValue::Number(item.entity.logical_id().raw() as f64),
     );
     object.insert(
         "red_collection".to_string(),

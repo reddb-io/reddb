@@ -198,7 +198,7 @@ pub(super) fn runtime_table_record_lean_ref(entity: &UnifiedEntity) -> Option<Un
         let mut record = UnifiedRecord::with_capacity(3 + named.len());
         record.set_arc(
             sys_key_red_entity_id(),
-            Value::UnsignedInteger(entity.id.raw()),
+            Value::UnsignedInteger(entity.logical_id().raw()),
         );
         record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
         record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
@@ -212,7 +212,7 @@ pub(super) fn runtime_table_record_lean_ref(entity: &UnifiedEntity) -> Option<Un
         // as one contiguous Vec each instead of a HashMap per record.
         let sys_schema = sys_schema_with_row_columns(schema);
         let mut values: Vec<Value> = Vec::with_capacity(sys_schema.len());
-        values.push(Value::UnsignedInteger(entity.id.raw()));
+        values.push(Value::UnsignedInteger(entity.logical_id().raw()));
         values.push(Value::UnsignedInteger(created_at));
         values.push(Value::UnsignedInteger(updated_at));
         values.extend(row.columns.iter().cloned());
@@ -221,7 +221,7 @@ pub(super) fn runtime_table_record_lean_ref(entity: &UnifiedEntity) -> Option<Un
         let mut record = UnifiedRecord::with_capacity(3 + row.columns.len());
         record.set_arc(
             sys_key_red_entity_id(),
-            Value::UnsignedInteger(entity.id.raw()),
+            Value::UnsignedInteger(entity.logical_id().raw()),
         );
         record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
         record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
@@ -240,16 +240,14 @@ pub(super) fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<Unified
     }
     let created_at = entity.created_at;
     let updated_at = entity.updated_at;
+    let logical_id = entity.logical_id().raw();
     let row = match entity.data {
         EntityData::Row(row) => row,
         _ => unreachable!(),
     };
     if let Some(named) = row.named {
         let mut record = UnifiedRecord::with_capacity(3 + named.len());
-        record.set_arc(
-            sys_key_red_entity_id(),
-            Value::UnsignedInteger(entity.id.raw()),
-        );
+        record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(logical_id));
         record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
         record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
         // `set_owned` consumes the already-heap-allocated String key
@@ -261,10 +259,7 @@ pub(super) fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<Unified
         Some(record)
     } else if let Some(ref schema) = row.schema {
         let mut record = UnifiedRecord::with_capacity(3 + schema.len());
-        record.set_arc(
-            sys_key_red_entity_id(),
-            Value::UnsignedInteger(entity.id.raw()),
-        );
+        record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(logical_id));
         record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
         record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
         for (name, value) in schema.iter().zip(row.columns) {
@@ -273,10 +268,7 @@ pub(super) fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<Unified
         Some(record)
     } else {
         let mut record = UnifiedRecord::with_capacity(3 + row.columns.len());
-        record.set_arc(
-            sys_key_red_entity_id(),
-            Value::UnsignedInteger(entity.id.raw()),
-        );
+        record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(logical_id));
         record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
         record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
         for (i, value) in row.columns.into_iter().enumerate() {
@@ -292,6 +284,7 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
     if !matches!(entity.data, EntityData::Row(_) | EntityData::TimeSeries(_)) {
         return runtime_any_record_from_entity(entity);
     }
+    let logical_id = entity.logical_id().raw();
     match entity.data {
         EntityData::Row(row) => {
             // Pre-allocate: ~9 system fields + user fields
@@ -306,10 +299,7 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
                 record.set_arc(sys_key_row_id(), Value::UnsignedInteger(*row_id));
             }
 
-            record.set_arc(
-                sys_key_red_entity_id(),
-                Value::UnsignedInteger(entity.id.raw()),
-            );
+            record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(logical_id));
             record.set(
                 "red_collection",
                 Value::text(entity.kind.collection().to_string()),
@@ -362,10 +352,7 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
         }
         EntityData::TimeSeries(ts) => {
             let mut record = UnifiedRecord::with_capacity(12 + ts.tags.len());
-            record.set_arc(
-                sys_key_red_entity_id(),
-                Value::UnsignedInteger(entity.id.raw()),
-            );
+            record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(logical_id));
             record.set(
                 "red_collection",
                 Value::text(entity.kind.collection().to_string()),
@@ -426,7 +413,7 @@ pub(super) fn runtime_table_record_from_entity_ref(
 
             record.set_arc(
                 sys_key_red_entity_id(),
-                Value::UnsignedInteger(entity.id.raw()),
+                Value::UnsignedInteger(entity.logical_id().raw()),
             );
             record.set(
                 "red_collection",
@@ -480,7 +467,7 @@ pub(super) fn runtime_table_record_from_entity_ref(
             let mut record = UnifiedRecord::with_capacity(12 + ts.tags.len());
             record.set_arc(
                 sys_key_red_entity_id(),
-                Value::UnsignedInteger(entity.id.raw()),
+                Value::UnsignedInteger(entity.logical_id().raw()),
             );
             record.set(
                 "red_collection",
@@ -533,16 +520,14 @@ pub(super) fn runtime_table_record_from_entity_projected(
     if !matches!(entity.data, EntityData::Row(_) | EntityData::TimeSeries(_)) {
         return runtime_any_record_from_entity(entity);
     }
+    let logical_id = entity.logical_id().raw();
 
     match entity.data {
         EntityData::Row(row) => {
             let mut record = UnifiedRecord::with_capacity(1 + columns.len());
 
             // Always include system fields needed for filtering
-            record.set_arc(
-                sys_key_red_entity_id(),
-                Value::UnsignedInteger(entity.id.raw()),
-            );
+            record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(logical_id));
 
             if let Some(named) = row.named {
                 // Named path (single-insert entities): O(1) HashMap lookup per column.
@@ -577,10 +562,7 @@ pub(super) fn runtime_table_record_from_entity_projected(
         }
         EntityData::TimeSeries(ts) => {
             let mut record = UnifiedRecord::new();
-            record.set_arc(
-                sys_key_red_entity_id(),
-                Value::UnsignedInteger(entity.id.raw()),
-            );
+            record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(logical_id));
 
             for col in columns {
                 match col.as_str() {
@@ -629,7 +611,7 @@ pub(super) fn runtime_table_record_with_col_indices(
     let mut record = UnifiedRecord::with_capacity(1 + idx_map.len());
     record.set_arc(
         sys_key_red_entity_id(),
-        Value::UnsignedInteger(entity.id.raw()),
+        Value::UnsignedInteger(entity.logical_id().raw()),
     );
     for &(ci, si) in idx_map {
         if let Some(value) = row.columns.get(si) {
@@ -661,7 +643,7 @@ pub(super) fn runtime_table_record_from_entity_ref_projected(
     let mut record = UnifiedRecord::with_capacity(1 + columns.len());
     record.set_arc(
         sys_key_red_entity_id(),
-        Value::UnsignedInteger(entity.id.raw()),
+        Value::UnsignedInteger(entity.logical_id().raw()),
     );
 
     if let Some(ref named) = row.named {
@@ -696,7 +678,7 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
     let kind = entity.kind.clone();
     let collection = kind.collection().to_string();
     let storage_type = kind.storage_type().to_string();
-    let entity_id = entity.id.raw();
+    let entity_id = entity.logical_id().raw();
     let created_at = entity.created_at;
     let updated_at = entity.updated_at;
     let sequence_id = entity.sequence_id;
@@ -813,7 +795,7 @@ pub(super) fn runtime_any_record_from_entity_ref(entity: &UnifiedEntity) -> Opti
     let kind = &entity.kind;
     let collection = kind.collection().to_string();
     let storage_type = kind.storage_type().to_string();
-    let entity_id = entity.id.raw();
+    let entity_id = entity.logical_id().raw();
     let created_at = entity.created_at;
     let updated_at = entity.updated_at;
     let sequence_id = entity.sequence_id;

@@ -70,10 +70,12 @@ impl<'a> DmlTargetScan<'a> {
         // behaviour, which skips snapshot visibility filtering on this
         // direct-lookup path (the row was named explicitly).
         if let Some(entity_id) = query_exec::extract_entity_id_from_filter(&self.filter.cloned()) {
-            let Some(_entity) = manager.get(EntityId::new(entity_id)) else {
+            let Some(entity) =
+                store.get_table_row_by_logical_id(self.table, EntityId::new(entity_id))
+            else {
                 return Ok(Vec::new());
             };
-            return Ok(vec![EntityId::new(entity_id)]);
+            return Ok(vec![entity.id]);
         }
 
         if let Some(filter) = self.filter {
