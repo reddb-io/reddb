@@ -235,6 +235,81 @@ fn snapshot_isolation_blocks_read_skew() {
 }
 
 #[test]
+fn transaction_update_write_set_rolls_back_cleanly() {
+    let rt = rt();
+
+    set_current_connection_id(9950);
+    try_exec(&rt, "CREATE TABLE tx_update_ws (id INT, v INT)").unwrap();
+    try_exec(&rt, "INSERT INTO tx_update_ws (id, v) VALUES (1, 10)").unwrap();
+    let inserted = rt
+        .execute_query("SELECT red_entity_id FROM tx_update_ws WHERE id = 1")
+        .unwrap();
+    let red_entity_id = match inserted.result.records[0].get("red_entity_id") {
+        Some(Value::UnsignedInteger(id)) => *id,
+        Some(Value::Integer(id)) => *id as u64,
+        other => panic!("expected red_entity_id, got {other:?}"),
+    };
+
+    try_exec(&rt, "BEGIN").unwrap();
+    try_exec(
+        &rt,
+        &format!("UPDATE tx_update_ws SET v = 20 WHERE red_entity_id = {red_entity_id}"),
+    )
+    .unwrap();
+    let writer = rt
+        .execute_query(&format!(
+            "SELECT v FROM tx_update_ws WHERE red_entity_id = {red_entity_id}"
+        ))
+        .unwrap();
+    assert_eq!(writer.result.records[0].get("v"), Some(&Value::Integer(20)));
+
+    set_current_connection_id(9951);
+    let outsider = rt
+        .execute_query(&format!(
+            "SELECT v FROM tx_update_ws WHERE red_entity_id = {red_entity_id}"
+        ))
+        .unwrap();
+    assert_eq!(
+        outsider.result.records[0].get("v"),
+        Some(&Value::Integer(10)),
+        "other connection must not see uncommitted UPDATE"
+    );
+
+    set_current_connection_id(9950);
+    try_exec(&rt, "ROLLBACK").unwrap();
+    let after_rollback = rt
+        .execute_query(&format!(
+            "SELECT v FROM tx_update_ws WHERE red_entity_id = {red_entity_id}"
+        ))
+        .unwrap();
+    assert_eq!(
+        after_rollback.result.records[0].get("v"),
+        Some(&Value::Integer(10)),
+        "ROLLBACK must restore the committed pre-update value"
+    );
+
+    try_exec(&rt, "BEGIN").unwrap();
+    try_exec(
+        &rt,
+        &format!("UPDATE tx_update_ws SET v = 30 WHERE red_entity_id = {red_entity_id}"),
+    )
+    .unwrap();
+    try_exec(&rt, "COMMIT").unwrap();
+    let after_commit = rt
+        .execute_query(&format!(
+            "SELECT v FROM tx_update_ws WHERE red_entity_id = {red_entity_id}"
+        ))
+        .unwrap();
+    assert_eq!(
+        after_commit.result.records[0].get("v"),
+        Some(&Value::Integer(30)),
+        "COMMIT must publish the transaction-local UPDATE"
+    );
+
+    clear_current_connection_id();
+}
+
+#[test]
 fn rolled_back_writer_row_stays_invisible_to_other_connection() {
     // ROLLBACK must hide the row from every other connection — same
     // mechanism as commit-aware visibility, but exercises the
