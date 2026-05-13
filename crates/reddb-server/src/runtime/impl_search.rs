@@ -1297,7 +1297,14 @@ impl RedDBRuntime {
             let mut prompt_for_call = full_prompt.clone();
             let api_key = resolve_api_key_from_runtime(&provider, None, self)?;
             let api_base = provider.resolve_api_base();
-            let (answer, prompt_tokens, completion_tokens, cost_usd, citation_result) = loop {
+            let (
+                answer,
+                answer_tokens,
+                prompt_tokens,
+                completion_tokens,
+                cost_usd,
+                citation_result,
+            ) = loop {
                 let provider_started = std::time::Instant::now();
                 let prompt_response = call_ask_llm(
                     &provider,
@@ -1309,6 +1316,7 @@ impl RedDBRuntime {
                     settings.max_completion_tokens as usize,
                     determinism.temperature,
                     determinism.seed,
+                    ask.stream,
                 )?;
                 let elapsed_ms = duration_millis_u32(provider_started.elapsed());
                 let completion_tokens = prompt_response.completion_tokens.unwrap_or(0);
@@ -1339,6 +1347,7 @@ impl RedDBRuntime {
                     crate::runtime::ai::strict_validator::Decision::Ok => {
                         break (
                             answer,
+                            prompt_response.output_chunks,
                             prompt_response.prompt_tokens.unwrap_or(0),
                             completion_tokens,
                             cost_usd,
@@ -1387,6 +1396,7 @@ impl RedDBRuntime {
 
             let ask_attempt = AskLlmAttempt {
                 answer,
+                answer_tokens,
                 provider_token,
                 model,
                 effective_mode,
@@ -1475,6 +1485,7 @@ impl RedDBRuntime {
         // Step 4: Build result
         let mut result = UnifiedResult::with_columns(vec![
             "answer".into(),
+            "answer_tokens".into(),
             "provider".into(),
             "model".into(),
             "mode".into(),
@@ -1490,6 +1501,20 @@ impl RedDBRuntime {
         ]);
         let mut record = UnifiedRecord::new();
         record.set("answer", Value::text(ask_attempt.answer));
+        if let Some(tokens) = &ask_attempt.answer_tokens {
+            record.set(
+                "answer_tokens",
+                Value::Json(
+                    crate::json::to_vec(&crate::json::Value::Array(
+                        tokens
+                            .iter()
+                            .map(|token| crate::json::Value::String(token.clone()))
+                            .collect(),
+                    ))
+                    .unwrap_or_else(|_| b"[]".to_vec()),
+                ),
+            );
+        }
         record.set("provider", Value::text(ask_attempt.provider_token));
         record.set("model", Value::text(ask_attempt.model));
         record.set(
@@ -1761,6 +1786,7 @@ impl RedDBRuntime {
         }
         Some(AskLlmAttempt {
             answer: payload.answer,
+            answer_tokens: None,
             provider_token: payload.provider_token,
             model: payload.model,
             effective_mode,
@@ -2027,6 +2053,7 @@ impl RedDBRuntime {
 
 struct AskLlmAttempt {
     answer: String,
+    answer_tokens: Option<Vec<String>>,
     provider_token: String,
     model: String,
     effective_mode: crate::runtime::ai::strict_validator::Mode,
@@ -2460,6 +2487,7 @@ fn call_ask_llm(
     max_output_tokens: usize,
     temperature: Option<f32>,
     seed: Option<u64>,
+    stream: bool,
 ) -> RedDBResult<crate::ai::AiPromptResponse> {
     match provider {
         crate::ai::AiProvider::Anthropic => {
@@ -2486,6 +2514,7 @@ fn call_ask_llm(
                 seed,
                 max_output_tokens: Some(max_output_tokens),
                 api_base,
+                stream,
             };
             crate::runtime::ai::block_on_ai(async move {
                 crate::ai::openai_prompt_async(&transport, request).await
