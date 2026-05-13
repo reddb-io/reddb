@@ -51,6 +51,7 @@ const STORE_VERSION_V4: u32 = 4;
 const STORE_VERSION_V5: u32 = 5;
 const STORE_VERSION_V6: u32 = 6;
 const STORE_VERSION_V7: u32 = 7; // entity records include metadata (serialize_entity_record format)
+const STORE_VERSION_V8: u32 = 8; // table rows may carry explicit logical identity
 const METADATA_MAGIC: &[u8; 4] = b"RDM2";
 const NATIVE_COLLECTION_ROOTS_MAGIC: &[u8; 4] = b"RDRT";
 const NATIVE_MANIFEST_MAGIC: &[u8; 4] = b"RDMF";

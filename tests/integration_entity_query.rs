@@ -252,6 +252,126 @@ fn test_select_by_entity_id_sees_latest_updated_row_image() {
     }
 }
 
+#[test]
+fn test_table_row_logical_identity_compatibility() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use reddb::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
+
+    let rt = rt();
+    let query = QueryUseCases::new(&rt);
+
+    query
+        .execute(ExecuteQueryInput {
+            query: "CREATE TABLE logical_identity_rows (name TEXT, seen INT)".into(),
+        })
+        .expect("CREATE TABLE should succeed");
+
+    let legacy = UnifiedEntity::new(
+        EntityId::new(50),
+        EntityKind::TableRow {
+            table: Arc::from("logical_identity_rows"),
+            row_id: 1,
+        },
+        EntityData::Row(RowData {
+            columns: Vec::new(),
+            named: Some(HashMap::from([
+                ("name".to_string(), Value::text("legacy")),
+                ("seen".to_string(), Value::Integer(1)),
+            ])),
+            schema: None,
+        }),
+    );
+    assert!(!legacy.has_explicit_logical_id());
+    assert_eq!(legacy.logical_id(), EntityId::new(50));
+
+    let mut versioned = UnifiedEntity::new(
+        EntityId::new(200),
+        EntityKind::TableRow {
+            table: Arc::from("logical_identity_rows"),
+            row_id: 2,
+        },
+        EntityData::Row(RowData {
+            columns: Vec::new(),
+            named: Some(HashMap::from([
+                ("name".to_string(), Value::text("versioned")),
+                ("seen".to_string(), Value::Integer(1)),
+            ])),
+            schema: None,
+        }),
+    );
+    versioned.set_logical_id(EntityId::new(100));
+
+    let store = rt.db().store();
+    store
+        .insert_auto("logical_identity_rows", legacy)
+        .expect("legacy row insert should succeed");
+    store
+        .insert_auto("logical_identity_rows", versioned)
+        .expect("versioned row insert should succeed");
+
+    let new_row = query
+        .execute(ExecuteQueryInput {
+            query: "INSERT INTO logical_identity_rows (name, seen) VALUES ('new', 1) RETURNING red_entity_id".into(),
+        })
+        .expect("new row insert should succeed");
+    let new_id = match new_row.result.records[0].get("red_entity_id") {
+        Some(Value::Integer(id)) => EntityId::new(*id as u64),
+        Some(Value::UnsignedInteger(id)) => EntityId::new(*id),
+        other => panic!("expected returned red_entity_id, got {other:?}"),
+    };
+    let stored_new = store
+        .get("logical_identity_rows", new_id)
+        .expect("new row should be stored by physical id");
+    assert!(stored_new.has_explicit_logical_id());
+    assert_eq!(stored_new.logical_id(), new_id);
+
+    let selected = query
+        .execute(ExecuteQueryInput {
+            query:
+                "SELECT red_entity_id, name FROM logical_identity_rows WHERE red_entity_id = 100"
+                    .into(),
+        })
+        .expect("SELECT by logical id should succeed");
+    assert_eq!(selected.result.records.len(), 1);
+    assert_eq!(
+        selected.result.records[0].get("red_entity_id"),
+        Some(&Value::UnsignedInteger(100))
+    );
+    assert_eq!(
+        selected.result.records[0].get("name"),
+        Some(&Value::text("versioned"))
+    );
+
+    query
+        .execute(ExecuteQueryInput {
+            query: "UPDATE logical_identity_rows SET seen = 2 WHERE red_entity_id = 100".into(),
+        })
+        .expect("UPDATE by logical id should succeed");
+    let updated = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT seen FROM logical_identity_rows WHERE red_entity_id = 100".into(),
+        })
+        .expect("SELECT after logical-id update should succeed");
+    assert_eq!(
+        updated.result.records[0].get("seen"),
+        Some(&Value::Integer(2))
+    );
+
+    query
+        .execute(ExecuteQueryInput {
+            query: "DELETE FROM logical_identity_rows WHERE red_entity_id = 100".into(),
+        })
+        .expect("DELETE by logical id should succeed");
+    let deleted = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT name FROM logical_identity_rows WHERE red_entity_id = 100".into(),
+        })
+        .expect("SELECT after logical-id delete should succeed");
+    assert!(deleted.result.records.is_empty());
+}
+
 // 4. test_row_delete
 #[test]
 fn test_row_patch_top_level_ttl_payload_expires_entity() {

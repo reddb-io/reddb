@@ -110,7 +110,7 @@ fn encode_entity_binary(entity: &crate::storage::unified::UnifiedEntity) -> Vec<
     body.extend_from_slice(&1u32.to_le_bytes());
     for col in &cols {
         let val = match col.as_str() {
-            "red_entity_id" => Value::UnsignedInteger(entity.id.raw()),
+            "red_entity_id" => Value::UnsignedInteger(entity.logical_id().raw()),
             "created_at" => Value::UnsignedInteger(entity.created_at),
             "updated_at" => Value::UnsignedInteger(entity.updated_at),
             other => {

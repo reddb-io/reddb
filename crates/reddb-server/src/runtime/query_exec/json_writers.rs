@@ -83,7 +83,7 @@ pub(crate) fn write_timestamp_fields_json(buf: &mut Vec<u8>, entity: &UnifiedEnt
 pub(crate) fn write_entity_json_bytes(buf: &mut Vec<u8>, entity: &UnifiedEntity) {
     buf.push(b'{');
     buf.extend_from_slice(b"\"red_entity_id\":");
-    write_u64(buf, entity.id.raw());
+    write_u64(buf, entity.logical_id().raw());
     buf.extend_from_slice(b",\"red_collection\":");
     write_json_bytes(buf, entity.kind.collection().as_bytes());
     buf.extend_from_slice(b",\"red_kind\":");

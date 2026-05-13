@@ -42,7 +42,7 @@ use crate::storage::unified::entity::{field_name_bloom, EntityData, EntityKind, 
 /// only does the cheap match dispatch.
 #[derive(Debug, Clone)]
 pub enum EntityFieldKind {
-    /// `entity.id.raw()`.
+    /// `entity.logical_id().raw()`.
     SystemEntityId,
     /// `entity.created_at`.
     SystemCreatedAt,
@@ -227,9 +227,9 @@ pub(crate) fn resolve_kind<'a>(
     entity: &'a UnifiedEntity,
 ) -> Option<Cow<'a, Value>> {
     match kind {
-        EntityFieldKind::SystemEntityId => {
-            Some(Cow::Owned(Value::UnsignedInteger(entity.id.raw())))
-        }
+        EntityFieldKind::SystemEntityId => Some(Cow::Owned(Value::UnsignedInteger(
+            entity.logical_id().raw(),
+        ))),
         EntityFieldKind::SystemCreatedAt => {
             Some(Cow::Owned(Value::UnsignedInteger(entity.created_at)))
         }

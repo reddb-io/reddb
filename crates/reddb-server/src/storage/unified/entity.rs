@@ -503,6 +503,10 @@ impl EmbeddingSlot {
 pub struct UnifiedEntity {
     /// Unique entity identifier
     pub id: EntityId,
+    /// Stable user-visible identity shared by all physical versions.
+    ///
+    /// `None` is the legacy encoding and resolves to `id`.
+    logical_id: Option<EntityId>,
     /// What kind of entity this is
     pub kind: EntityKind,
     /// Creation timestamp
@@ -638,6 +642,7 @@ impl UnifiedEntity {
 
         Self {
             id,
+            logical_id: None,
             kind,
             created_at: now,
             updated_at: now,
@@ -686,6 +691,35 @@ impl UnifiedEntity {
     #[inline]
     pub fn set_xmax(&mut self, xid: u64) {
         self.xmax = xid;
+    }
+
+    /// Stable user-visible identity. Legacy rows without an explicit
+    /// logical id map to their physical entity id.
+    #[inline]
+    pub fn logical_id(&self) -> EntityId {
+        self.logical_id.unwrap_or(self.id)
+    }
+
+    /// Returns true when the entity carries an explicit logical id on disk.
+    #[inline]
+    pub fn has_explicit_logical_id(&self) -> bool {
+        self.logical_id.is_some()
+    }
+
+    /// Set the stable user-visible identity for this physical version.
+    #[inline]
+    pub fn set_logical_id(&mut self, logical_id: EntityId) {
+        self.logical_id = Some(logical_id);
+    }
+
+    /// Ensure table rows written by the current engine carry explicit
+    /// logical identity. Other models retain the legacy implicit mapping
+    /// until their MVCC rollout adopts the resolver.
+    #[inline]
+    pub(crate) fn ensure_table_logical_id(&mut self) {
+        if matches!(self.kind, EntityKind::TableRow { .. }) && self.logical_id.is_none() {
+            self.logical_id = Some(self.id);
+        }
     }
 
     /// Create a table row entity

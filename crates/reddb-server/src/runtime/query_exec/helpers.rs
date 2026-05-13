@@ -287,7 +287,9 @@ pub(crate) fn resolve_entity_field<'a>(
     // System fields — accessed directly from entity struct fields
     match column {
         "red_entity_id" | "entity_id" => {
-            return Some(Cow::Owned(Value::UnsignedInteger(entity.id.raw())));
+            return Some(Cow::Owned(Value::UnsignedInteger(
+                entity.logical_id().raw(),
+            )));
         }
         "created_at" => {
             return Some(Cow::Owned(Value::UnsignedInteger(entity.created_at)));
