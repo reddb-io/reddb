@@ -6504,6 +6504,7 @@ impl RedDBRuntime {
             QueryExpr::Delete(ref delete) => self
                 .with_deferred_store_wal_if_transaction(|| self.execute_delete(query_str, delete)),
             QueryExpr::SearchCommand(ref cmd) => self.execute_search_command(query_str, cmd),
+            QueryExpr::Ask(ref ask) => self.execute_ask(query_str, ask),
             _ => Err(RedDBError::Query(format!(
                 "prepared-statement execution does not support {statement} statements"
             ))),

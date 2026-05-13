@@ -177,6 +177,89 @@ async fn postgres_extended_query_supports_binary_text_params_insert_and_close() 
     write_frontend_frame(&mut stream, b'X', Vec::new()).await;
 }
 
+#[tokio::test]
+async fn postgres_extended_ask_binds_question_and_returns_canonical_row() {
+    let _ai_addr = start_mock_ai_server();
+    let (addr, _server) = start_server().await;
+    let mut stream = TcpStream::connect(addr).await.expect("connect pg wire");
+
+    write_startup(&mut stream).await;
+    read_until_ready(&mut stream).await;
+
+    write_frontend_frame(
+        &mut stream,
+        b'P',
+        parse_body(
+            "ask_stmt",
+            "ASK $1::text STRICT OFF LIMIT 1",
+            &[PgOid::Text.as_u32()],
+        ),
+    )
+    .await;
+    write_frontend_frame(
+        &mut stream,
+        b'B',
+        bind_body(
+            "ask_portal",
+            "ask_stmt",
+            &[0],
+            &[Some(b"why did incident FDD-12313 fail?".as_slice())],
+            &[],
+        ),
+    )
+    .await;
+    write_frontend_frame(&mut stream, b'D', describe_body(b'P', "ask_portal")).await;
+    write_frontend_frame(&mut stream, b'E', execute_body("ask_portal", 0)).await;
+    write_frontend_frame(&mut stream, b'S', Vec::new()).await;
+
+    let frames = read_until_ready(&mut stream).await;
+    if frames.iter().map(|(tag, _)| *tag).collect::<Vec<_>>() != b"12TDCZ" {
+        panic!(
+            "unexpected ASK frames: {:?}",
+            frames
+                .iter()
+                .map(|(tag, body)| (*tag as char, decode_error_message(body)))
+                .collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(
+        frames.iter().map(|(tag, _)| *tag).collect::<Vec<_>>(),
+        b"12TDCZ"
+    );
+    let columns = decode_row_description(&frames[2].1);
+    assert_eq!(
+        columns
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "answer",
+            "cache_hit",
+            "citations",
+            "completion_tokens",
+            "cost_usd",
+            "mode",
+            "model",
+            "prompt_tokens",
+            "provider",
+            "retry_count",
+            "sources_flat",
+            "validation",
+        ]
+    );
+    assert_eq!(columns[2].1, PgOid::Jsonb.as_u32());
+    assert_eq!(columns[10].1, PgOid::Jsonb.as_u32());
+    assert_eq!(columns[11].1, PgOid::Jsonb.as_u32());
+
+    let cells = decode_data_row(&frames[3].1);
+    assert_eq!(cells.len(), 12);
+    assert_eq!(cells[0].as_deref(), Some(b"mock response".as_slice()));
+    assert_eq!(cells[8].as_deref(), Some(b"openai".as_slice()));
+    assert_eq!(decode_command_complete(&frames[4].1), "SELECT 1");
+
+    write_frontend_frame(&mut stream, b'X', Vec::new()).await;
+}
+
 async fn start_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -192,6 +275,41 @@ async fn start_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     });
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     (addr, handle)
+}
+
+fn start_mock_ai_server() -> SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::env::set_var("REDDB_AI_PROVIDER", "openai");
+    std::env::set_var("REDDB_OPENAI_API_KEY", "test-key");
+    std::env::set_var("REDDB_OPENAI_API_BASE", format!("http://{addr}/v1"));
+    std::env::set_var("REDDB_OPENAI_PROMPT_MODEL", "mock-chat");
+    std::thread::spawn(move || {
+        for socket in listener.incoming() {
+            let Ok(mut socket) = socket else {
+                break;
+            };
+            std::thread::spawn(move || {
+                let mut buf = vec![0u8; 8192];
+                let Ok(n) = std::io::Read::read(&mut socket, &mut buf) else {
+                    return;
+                };
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let body = if request.starts_with("POST /v1/embeddings ") {
+                    r#"{"model":"mock-embedding","data":[{"index":0,"embedding":[1.0,0.0,0.0]}],"usage":{"prompt_tokens":1,"total_tokens":1}}"#
+                } else {
+                    r#"{"id":"chatcmpl-mock","object":"chat.completion","model":"mock-chat","choices":[{"index":0,"message":{"role":"assistant","content":"mock response"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = std::io::Write::write_all(&mut socket, response.as_bytes());
+            });
+        }
+    });
+    addr
 }
 
 async fn write_startup<W: AsyncWrite + Unpin>(stream: &mut W) {
@@ -321,9 +439,51 @@ fn decode_data_row(body: &[u8]) -> Vec<Option<Vec<u8>>> {
     cells
 }
 
+fn decode_row_description(body: &[u8]) -> Vec<(String, u32)> {
+    let count = i16::from_be_bytes([body[0], body[1]]) as usize;
+    let mut pos = 2;
+    let mut columns = Vec::with_capacity(count);
+    for _ in 0..count {
+        let end = body[pos..]
+            .iter()
+            .position(|&b| b == 0)
+            .map(|offset| pos + offset)
+            .unwrap();
+        let name = std::str::from_utf8(&body[pos..end]).unwrap().to_string();
+        pos = end + 1;
+        pos += 4; // table oid
+        pos += 2; // column attr
+        let type_oid = u32::from_be_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]);
+        pos += 4;
+        pos += 2; // type size
+        pos += 4; // type modifier
+        pos += 2; // format code
+        columns.push((name, type_oid));
+    }
+    columns
+}
+
 fn decode_command_complete(body: &[u8]) -> &str {
     let nul = body.iter().position(|&b| b == 0).unwrap_or(body.len());
     std::str::from_utf8(&body[..nul]).unwrap()
+}
+
+fn decode_error_message(body: &[u8]) -> Option<String> {
+    let mut pos = 0;
+    while pos < body.len() {
+        let field = body[pos];
+        pos += 1;
+        if field == 0 {
+            break;
+        }
+        let end = body[pos..].iter().position(|&b| b == 0)? + pos;
+        let value = std::str::from_utf8(&body[pos..end]).ok()?.to_string();
+        pos = end + 1;
+        if field == b'M' {
+            return Some(value);
+        }
+    }
+    None
 }
 
 fn push_pg_cstring(out: &mut Vec<u8>, value: &str) {

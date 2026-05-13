@@ -768,6 +768,8 @@ pub struct AskQuery {
     /// without making the LLM call.
     pub explain: bool,
     pub question: String,
+    /// Optional `$N` / `?` parameter slot for the question text.
+    pub question_param: Option<usize>,
     pub provider: Option<String>,
     pub model: Option<String>,
     pub depth: Option<usize>,

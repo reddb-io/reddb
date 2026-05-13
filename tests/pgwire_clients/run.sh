@@ -5,15 +5,25 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RED_BIN="${RED_BIN:-/home/cyber/.cache/cargo-target/debug/red}"
 PG_PORT="${PG_PORT:-55432}"
 PROXY_PORT="${PROXY_PORT:-55433}"
+AI_PORT="${AI_PORT:-55436}"
 LOG_FILE="${LOG_FILE:-$(mktemp /tmp/reddb-pgwire360-log.XXXXXX)}"
 DB_PATH="${DB_PATH:-$(mktemp /tmp/reddb-pgwire360-db.XXXXXX).rdb}"
 
 cleanup() {
   if [[ -n "${PROXY_PID:-}" ]]; then kill "$PROXY_PID" 2>/dev/null || true; fi
   if [[ -n "${SERVER_PID:-}" ]]; then kill "$SERVER_PID" 2>/dev/null || true; fi
+  if [[ -n "${AI_PID:-}" ]]; then kill "$AI_PID" 2>/dev/null || true; fi
 }
 trap cleanup EXIT
 
+python3 "$ROOT/tests/pgwire_clients/mock_ai.py" \
+  --listen "127.0.0.1:${AI_PORT}" &
+AI_PID=$!
+
+REDDB_AI_PROVIDER=openai \
+REDDB_OPENAI_API_KEY=test-key \
+REDDB_OPENAI_API_BASE="http://127.0.0.1:${AI_PORT}/v1" \
+REDDB_OPENAI_PROMPT_MODEL=mock-chat \
 "$RED_BIN" server --pg-bind "127.0.0.1:${PG_PORT}" --path "$DB_PATH" --no-log-file &
 SERVER_PID=$!
 
@@ -25,7 +35,7 @@ PROXY_PID=$!
 
 python3 - <<PY
 import socket, time
-for port in (${PG_PORT}, ${PROXY_PORT}):
+for port in (${AI_PORT}, ${PG_PORT}, ${PROXY_PORT}):
     deadline = time.time() + 15
     while True:
         try:
