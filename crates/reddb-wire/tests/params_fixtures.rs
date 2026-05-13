@@ -3,6 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use prost::Message;
 use reddb_grpc_proto::query_value::Kind;
 use reddb_grpc_proto::{QueryNull, QueryRequest, QueryValue, QueryVector};
+use reddb_wire::query_with_params::{
+    decode_query_with_params, decode_value as decode_redwire_value, encode_query_with_params,
+    encode_value as encode_redwire_value, ParamValue as RedWireParamValue,
+};
 use serde_json::Value;
 
 #[test]
@@ -30,6 +34,12 @@ fn params_manifest_is_complete_and_well_formed() {
         kinds.insert(kind);
         assert_valid_hex(hex, name);
         assert_valid_hex(grpc_hex, name);
+        let mut encoded = Vec::new();
+        encode_redwire_value(&redwire_value(name), &mut encoded).expect("redwire value");
+        assert_eq!(hex, to_hex(&encoded), "{name}: redwire_hex");
+        let mut pos = 0;
+        let decoded = decode_redwire_value(&from_hex(hex), &mut pos).expect("decode value");
+        assert_redwire_value_eq(&redwire_value(name), &decoded, name);
         assert_eq!(grpc_hex, encode_grpc_value_hex(name), "{name}: grpc_hex");
     }
 
@@ -95,7 +105,37 @@ fn params_manifest_is_complete_and_well_formed() {
             encode_grpc_query_hex(query),
             "{name}: grpc_request_hex"
         );
+        assert_eq!(
+            query["redwire_hex"].as_str().unwrap(),
+            encode_redwire_query_hex(query),
+            "{name}: redwire_hex"
+        );
+        let (decoded_sql, decoded_params) = decode_query_with_params(&from_hex(
+            query["redwire_hex"].as_str().expect("query redwire_hex"),
+        ))
+        .expect("decode redwire query");
+        assert_eq!(query["sql"].as_str().expect("query sql"), decoded_sql);
+        let expected_params = query["params"]
+            .as_array()
+            .expect("query params")
+            .iter()
+            .map(|param| redwire_value(param.as_str().expect("query param name")))
+            .collect::<Vec<_>>();
+        assert_eq!(expected_params, decoded_params, "{name}: redwire decode");
     }
+}
+
+fn encode_redwire_query_hex(query: &Value) -> String {
+    let params = query["params"]
+        .as_array()
+        .expect("query params")
+        .iter()
+        .map(|param| redwire_value(param.as_str().expect("query param name")))
+        .collect::<Vec<_>>();
+    to_hex(
+        &encode_query_with_params(query["sql"].as_str().expect("query sql"), &params)
+            .expect("redwire query"),
+    )
 }
 
 fn encode_grpc_value_hex(name: &str) -> String {
@@ -154,8 +194,56 @@ fn grpc_value(name: &str) -> QueryValue {
     QueryValue { kind: Some(kind) }
 }
 
+fn redwire_value(name: &str) -> RedWireParamValue {
+    match name {
+        "null" => RedWireParamValue::Null,
+        "bool_true" => RedWireParamValue::Bool(true),
+        "bool_false" => RedWireParamValue::Bool(false),
+        "int_min" => RedWireParamValue::Int(i64::MIN),
+        "int_max" => RedWireParamValue::Int(i64::MAX),
+        "int_42" => RedWireParamValue::Int(42),
+        "float_nan" => RedWireParamValue::Float(f64::from_bits(0x7ff8000000000000)),
+        "float_pos_inf" => RedWireParamValue::Float(f64::INFINITY),
+        "float_neg_inf" => RedWireParamValue::Float(f64::NEG_INFINITY),
+        "float_subnormal_min" => RedWireParamValue::Float(f64::from_bits(1)),
+        "text_unicode" => RedWireParamValue::Text("h\u{e9}llo".to_string()),
+        "text_x" => RedWireParamValue::Text("x".to_string()),
+        "bytes_empty" => RedWireParamValue::Bytes(Vec::new()),
+        "bytes_deadbeef" => RedWireParamValue::Bytes(vec![0xde, 0xad, 0xbe, 0xef]),
+        "bytes_256" => RedWireParamValue::Bytes((0..=255).map(|value| value as u8).collect()),
+        "json_nested" => RedWireParamValue::Json(
+            r#"{"a":null,"z":[1,{"deep":[true,false]}]}"#.as_bytes().to_vec(),
+        ),
+        "timestamp_zero" => RedWireParamValue::Timestamp(0),
+        "timestamp_max" => RedWireParamValue::Timestamp(i64::MAX),
+        "uuid_001122" => RedWireParamValue::Uuid([
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ]),
+        "vector_empty" => RedWireParamValue::Vector(Vec::new()),
+        "vector_three" => RedWireParamValue::Vector(vec![1.0, 2.0, -0.5]),
+        "vector_128" => RedWireParamValue::Vector((0..128).map(|value| value as f32).collect()),
+        other => panic!("unknown fixture {other}"),
+    }
+}
+
 fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn from_hex(hex: &str) -> Vec<u8> {
+    assert_eq!(hex.len() % 2, 0, "odd hex length");
+    (0..hex.len())
+        .step_by(2)
+        .map(|idx| u8::from_str_radix(&hex[idx..idx + 2], 16).expect("hex byte"))
+        .collect()
+}
+
+fn assert_redwire_value_eq(expected: &RedWireParamValue, actual: &RedWireParamValue, name: &str) {
+    match (expected, actual) {
+        (RedWireParamValue::Float(a), RedWireParamValue::Float(b)) if a.is_nan() && b.is_nan() => {}
+        _ => assert_eq!(expected, actual, "{name}: redwire decode"),
+    }
 }
 
 fn assert_valid_hex(hex: &str, label: &str) {

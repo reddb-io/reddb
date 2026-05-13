@@ -55,6 +55,8 @@ backend-turso = ["reddb-server/backend-turso"]
 backend-d1 = ["reddb-server/backend-d1"]
 otel = ["reddb-server/otel"]
 ai-ner-network = ["reddb-server/ai-ner-network"]
+embedded = ["reddb-client/embedded"]
+redwire = ["reddb-client/redwire"]
 
 [dev-dependencies]
 # Tests at the umbrella level reach into the published-driver

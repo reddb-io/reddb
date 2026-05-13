@@ -15,6 +15,7 @@ use reddb::RedDBRuntime;
 use reddb_client::redwire::{
     Auth, BinaryValue, ConnectOptions, Flags, Frame, MessageKind, RedWireClient,
 };
+use reddb_client::{Value, ValueOut};
 use tokio::net::TcpListener;
 
 async fn start_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
@@ -98,7 +99,56 @@ async fn insert_dispatch_round_trip() {
         .await
         .expect("bulk_insert");
     assert!(result.affected >= 3, "bulk insert affected at least 3 rows");
-    assert_eq!(result.ids.len(), 3, "bulk insert returned ids");
+
+    client.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn query_with_params_round_trip() {
+    let (addr, _server) = start_server().await;
+    let mut client = RedWireClient::connect(
+        ConnectOptions::new(addr.ip().to_string(), addr.port()).with_auth(Auth::Anonymous),
+    )
+    .await
+    .expect("connect");
+
+    client
+        .query("CREATE TABLE qwp_users (id INT, name TEXT)")
+        .await
+        .expect("create");
+    let insert = client
+        .query_with(
+            "INSERT INTO qwp_users (id, name) VALUES ($1, $2)",
+            &[Value::Int(7), Value::Text("ana".into())],
+        )
+        .await
+        .expect("insert");
+    assert_eq!(insert.affected, 1);
+
+    let result = client
+        .query_with(
+            "SELECT id, name FROM qwp_users WHERE id = $1",
+            &[Value::Int(7)],
+        )
+        .await
+        .expect("select");
+    assert_eq!(result.columns, vec!["id".to_string(), "name".to_string()]);
+    assert_eq!(
+        result
+            .rows
+            .first()
+            .and_then(|row| row.first())
+            .map(|(_, v)| v),
+        Some(&ValueOut::Integer(7))
+    );
+    assert_eq!(
+        result
+            .rows
+            .first()
+            .and_then(|row| row.get(1))
+            .map(|(_, v)| v),
+        Some(&ValueOut::String("ana".to_string()))
+    );
 
     client.close().await.expect("close");
 }

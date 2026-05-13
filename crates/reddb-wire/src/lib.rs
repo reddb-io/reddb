@@ -10,6 +10,7 @@
 //! and framing codec (see ADR 0001 in `docs/adr/`).
 
 pub mod conn_string;
+pub mod query_with_params;
 pub mod redwire;
 pub mod sanitizer;
 pub mod topology;

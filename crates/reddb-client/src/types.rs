@@ -166,23 +166,104 @@ pub struct KvWatchEvent {
 #[cfg(any(feature = "redwire", feature = "http"))]
 impl QueryResult {
     /// Build a `QueryResult` from the JSON envelope the server
-    /// emits in a `Result` frame. Today the envelope only carries
-    /// `{ statement, affected }` — column / row streaming is the
-    /// follow-up that introduces `RowDescription` + `DataRow`
-    /// frames.
+    /// emits in a `Result` frame.
     pub fn from_envelope(value: serde_json::Value) -> Self {
-        let obj = value.as_object().cloned().unwrap_or_default();
+        let Some(obj) = value.as_object() else {
+            return Self {
+                statement: String::new(),
+                affected: 0,
+                columns: Vec::new(),
+                rows: Vec::new(),
+            };
+        };
+        let result_obj = obj.get("result").and_then(|v| v.as_object()).unwrap_or(obj);
         let statement = obj
             .get("statement")
+            .or_else(|| obj.get("statement_type"))
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let affected = obj.get("affected").and_then(|v| v.as_u64()).unwrap_or(0);
+        let affected = obj
+            .get("affected")
+            .or_else(|| obj.get("affected_rows"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let columns: Vec<String> = result_obj
+            .get("columns")
+            .and_then(|v| v.as_array())
+            .map(|cols| {
+                cols.iter()
+                    .filter_map(|col| col.as_str().map(ToOwned::to_owned))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let row_values = result_obj
+            .get("records")
+            .or_else(|| result_obj.get("rows"))
+            .and_then(|v| v.as_array());
+        let rows = row_values
+            .map(|records| {
+                records
+                    .iter()
+                    .map(|record| parse_record(record, &columns))
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             statement,
             affected,
-            columns: Vec::new(),
-            rows: Vec::new(),
+            columns,
+            rows,
+        }
+    }
+}
+
+#[cfg(any(feature = "redwire", feature = "http"))]
+fn parse_record(record: &serde_json::Value, columns: &[String]) -> Vec<(String, ValueOut)> {
+    let Some(record_obj) = record.as_object() else {
+        return Vec::new();
+    };
+    let values = record_obj
+        .get("values")
+        .and_then(|v| v.as_object())
+        .unwrap_or(record_obj);
+    if columns.is_empty() {
+        return values
+            .iter()
+            .map(|(key, value)| (key.clone(), json_to_value_out(value)))
+            .collect();
+    }
+    columns
+        .iter()
+        .map(|column| {
+            (
+                column.clone(),
+                values
+                    .get(column)
+                    .map(json_to_value_out)
+                    .unwrap_or(ValueOut::Null),
+            )
+        })
+        .collect()
+}
+
+#[cfg(any(feature = "redwire", feature = "http"))]
+fn json_to_value_out(value: &serde_json::Value) -> ValueOut {
+    match value {
+        serde_json::Value::Null => ValueOut::Null,
+        serde_json::Value::Bool(value) => ValueOut::Bool(*value),
+        serde_json::Value::Number(value) => {
+            if let Some(n) = value.as_i64() {
+                ValueOut::Integer(n)
+            } else if let Some(n) = value.as_f64() {
+                ValueOut::Float(n)
+            } else {
+                ValueOut::String(value.to_string())
+            }
+        }
+        serde_json::Value::String(value) => ValueOut::String(value.clone()),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            ValueOut::String(value.to_string())
         }
     }
 }

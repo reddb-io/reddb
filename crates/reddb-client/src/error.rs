@@ -36,6 +36,8 @@ pub enum ErrorCode {
     Engine,
     /// HTTP 404 / collection or resource missing.
     NotFound,
+    /// Server does not advertise support for parameterized transport frames.
+    ParamsUnsupported,
 }
 
 impl ErrorCode {
@@ -53,6 +55,7 @@ impl ErrorCode {
             ErrorCode::AuthRefused => "AUTH_REFUSED",
             ErrorCode::Engine => "ENGINE_ERROR",
             ErrorCode::NotFound => "NOT_FOUND",
+            ErrorCode::ParamsUnsupported => "PARAMS_UNSUPPORTED",
         }
     }
 }

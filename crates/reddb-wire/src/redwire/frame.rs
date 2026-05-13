@@ -103,6 +103,7 @@ pub enum MessageKind {
     // RedDB-native data plane.
     VectorSearch = 0x26,
     GraphTraverse = 0x27,
+    QueryWithParams = 0x28,
 }
 
 /// Coarse routing class for a `MessageKind`.
@@ -158,7 +159,8 @@ impl MessageKind {
             | Self::Delete
             | Self::DeleteOk
             | Self::VectorSearch
-            | Self::GraphTraverse => MessageClass::DataPlane,
+            | Self::GraphTraverse
+            | Self::QueryWithParams => MessageClass::DataPlane,
 
             // BulkStream* + RowDescription/StreamEnd describe an
             // in-flight stream rather than a single round trip.
@@ -255,7 +257,8 @@ impl MessageKind {
             | Self::Compress
             | Self::SetSession
             | Self::VectorSearch
-            | Self::GraphTraverse => MessageDirection::ClientToServer,
+            | Self::GraphTraverse
+            | Self::QueryWithParams => MessageDirection::ClientToServer,
 
             // Server-originated replies / push frames.
             Self::HelloAck
@@ -314,6 +317,7 @@ impl MessageKind {
             0x25 => Some(Self::StreamEnd),
             0x26 => Some(Self::VectorSearch),
             0x27 => Some(Self::GraphTraverse),
+            0x28 => Some(Self::QueryWithParams),
             _ => None,
         }
     }
@@ -397,6 +401,7 @@ mod catalog_tests {
         MessageKind::StreamEnd,
         MessageKind::VectorSearch,
         MessageKind::GraphTraverse,
+        MessageKind::QueryWithParams,
     ];
 
     #[test]
@@ -422,6 +427,10 @@ mod catalog_tests {
         assert_eq!(MessageKind::DeleteOk.class(), MessageClass::DataPlane);
         assert_eq!(MessageKind::VectorSearch.class(), MessageClass::DataPlane);
         assert_eq!(MessageKind::GraphTraverse.class(), MessageClass::DataPlane);
+        assert_eq!(
+            MessageKind::QueryWithParams.class(),
+            MessageClass::DataPlane
+        );
 
         // Streamed envelopes.
         assert_eq!(MessageKind::BulkStreamStart.class(), MessageClass::Streamed);
@@ -556,6 +565,7 @@ mod catalog_tests {
             MessageKind::SetSession,
             MessageKind::VectorSearch,
             MessageKind::GraphTraverse,
+            MessageKind::QueryWithParams,
         ] {
             assert_eq!(
                 k.direction(),

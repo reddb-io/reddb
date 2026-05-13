@@ -29,6 +29,10 @@ use std::pin::Pin;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use reddb_wire::query_with_params::{
+    encode_query_with_params, ParamValue as RedWireParamValue, FEATURE_PARAMS,
+};
+
 /// Boxed read+write trait object. Lets `RedWireClient` carry
 /// either a plain `TcpStream` or a `tokio_rustls::TlsStream`
 /// without leaking the type up.
@@ -232,6 +236,50 @@ impl RedWireClient {
     pub async fn query(&mut self, sql: &str) -> Result<QueryResult> {
         let corr = self.next_corr();
         let req = Frame::new(MessageKind::Query, corr, sql.as_bytes().to_vec());
+        self.stream
+            .write_all(&encode_frame(&req))
+            .await
+            .map_err(io_err)?;
+        let resp = self.read_frame().await?;
+        match resp.kind {
+            MessageKind::Result => {
+                let value: serde_json::Value =
+                    serde_json::from_slice(&resp.payload).map_err(|e| {
+                        ClientError::new(ErrorCode::Protocol, format!("decode result: {e}"))
+                    })?;
+                Ok(QueryResult::from_envelope(value))
+            }
+            MessageKind::Error => {
+                let msg = String::from_utf8_lossy(&resp.payload).to_string();
+                Err(ClientError::new(ErrorCode::Engine, msg))
+            }
+            other => Err(ClientError::new(
+                ErrorCode::Protocol,
+                format!("expected Result/Error, got {other:?}"),
+            )),
+        }
+    }
+
+    pub async fn query_with(
+        &mut self,
+        sql: &str,
+        params: &[crate::params::Value],
+    ) -> Result<QueryResult> {
+        if params.is_empty() {
+            return self.query(sql).await;
+        }
+        if self.server_features & FEATURE_PARAMS == 0 {
+            return Err(ClientError::new(
+                ErrorCode::ParamsUnsupported,
+                "server did not advertise RedWire parameter support",
+            ));
+        }
+
+        let wire_params = params.iter().map(param_to_redwire).collect::<Vec<_>>();
+        let payload = encode_query_with_params(sql, &wire_params)
+            .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("encode params: {e}")))?;
+        let corr = self.next_corr();
+        let req = Frame::new(MessageKind::QueryWithParams, corr, payload);
         self.stream
             .write_all(&encode_frame(&req))
             .await
@@ -509,6 +557,23 @@ impl RedWireClient {
         let (frame, _) = decode_frame(&buf)
             .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode frame: {e}")))?;
         Ok(frame)
+    }
+}
+
+fn param_to_redwire(value: &crate::params::Value) -> RedWireParamValue {
+    match value {
+        crate::params::Value::Null => RedWireParamValue::Null,
+        crate::params::Value::Bool(value) => RedWireParamValue::Bool(*value),
+        crate::params::Value::Int(value) => RedWireParamValue::Int(*value),
+        crate::params::Value::Float(value) => RedWireParamValue::Float(*value),
+        crate::params::Value::Text(value) => RedWireParamValue::Text(value.clone()),
+        crate::params::Value::Bytes(value) => RedWireParamValue::Bytes(value.clone()),
+        crate::params::Value::Vector(value) => RedWireParamValue::Vector(value.clone()),
+        crate::params::Value::Json(value) => {
+            RedWireParamValue::Json(value.to_json_string().into_bytes())
+        }
+        crate::params::Value::Timestamp(value) => RedWireParamValue::Timestamp(*value),
+        crate::params::Value::Uuid(value) => RedWireParamValue::Uuid(*value),
     }
 }
 

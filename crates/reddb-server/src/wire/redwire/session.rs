@@ -17,6 +17,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::auth::store::AuthStore;
 use crate::runtime::RedDBRuntime;
 use crate::serde_json::{self, Value as JsonValue};
+use reddb_wire::query_with_params::{
+    decode_query_with_params, ParamValue as RedWireParamValue, FEATURE_PARAMS,
+};
 
 use super::auth::{
     build_auth_fail, build_auth_ok, build_hello_ack, pick_auth_method, validate_auth_response,
@@ -122,6 +125,10 @@ where
             }
             MessageKind::Query => {
                 let response = run_query(&runtime, &frame);
+                stream.write_all(&encode_frame(&response)).await?;
+            }
+            MessageKind::QueryWithParams => {
+                let response = run_query_with_params(&runtime, &frame);
                 stream.write_all(&encode_frame(&response)).await?;
             }
             // BulkInsert handles both single-row and bulk shapes off
@@ -318,7 +325,7 @@ where
     // the correct payload for the bootstrap path. Authenticated
     // principals get the full replica list via the gRPC `Topology`
     // RPC after the connection is established.
-    let server_features = 0u32;
+    let server_features = FEATURE_PARAMS;
     let topology = build_topology_for_hello_ack(runtime);
     let ack_frame = FrameBuilder::reply_to(hello.correlation_id)
         .kind(MessageKind::HelloAck)
@@ -662,6 +669,58 @@ fn run_query(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
             build_dispatch_reply(frame.correlation_id, MessageKind::Result, payload)
         }
         Err(err) => error_frame(frame.correlation_id, &err.to_string()),
+    }
+}
+
+fn run_query_with_params(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
+    let (sql, params) = match decode_query_with_params(&frame.payload) {
+        Ok(decoded) => decoded,
+        Err(err) => return error_frame(frame.correlation_id, &err.to_string()),
+    };
+    let params = params
+        .into_iter()
+        .map(param_to_schema_value)
+        .collect::<Vec<_>>();
+    let parsed = match crate::storage::query::modes::parse_multi(&sql) {
+        Ok(parsed) => parsed,
+        Err(err) => return error_frame(frame.correlation_id, &err.to_string()),
+    };
+    let bound = match crate::storage::query::user_params::bind(&parsed, &params) {
+        Ok(bound) => bound,
+        Err(err) => return error_frame(frame.correlation_id, &err.to_string()),
+    };
+    match runtime.execute_query_expr(bound) {
+        Ok(result) => {
+            let is_mutation = matches!(result.statement_type, "insert" | "update" | "delete");
+            if is_mutation {
+                let post_lsn = runtime.cdc_current_lsn();
+                if let Err(err) = runtime.enforce_commit_policy(post_lsn) {
+                    return error_frame(frame.correlation_id, &err.to_string());
+                }
+            }
+            let payload = serde_json::to_vec(
+                &crate::presentation::query_result_json::runtime_query_json(&result, &None, &None),
+            )
+            .unwrap_or_default();
+            build_dispatch_reply(frame.correlation_id, MessageKind::Result, payload)
+        }
+        Err(err) => error_frame(frame.correlation_id, &err.to_string()),
+    }
+}
+
+fn param_to_schema_value(value: RedWireParamValue) -> crate::storage::schema::Value {
+    use crate::storage::schema::Value;
+    match value {
+        RedWireParamValue::Null => Value::Null,
+        RedWireParamValue::Bool(value) => Value::Boolean(value),
+        RedWireParamValue::Int(value) => Value::Integer(value),
+        RedWireParamValue::Float(value) => Value::Float(value),
+        RedWireParamValue::Text(value) => Value::Text(Arc::from(value.as_str())),
+        RedWireParamValue::Bytes(value) => Value::Blob(value),
+        RedWireParamValue::Vector(value) => Value::Vector(value),
+        RedWireParamValue::Json(value) => Value::Json(value),
+        RedWireParamValue::Timestamp(value) => Value::Timestamp(value),
+        RedWireParamValue::Uuid(value) => Value::Uuid(value),
     }
 }
 
