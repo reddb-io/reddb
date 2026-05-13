@@ -207,7 +207,7 @@ impl RedDBRuntime {
     }
 
     /// Returns `(affected_count, lsns)`. For the txn (xmax-stamp) path,
-    /// `lsns` is empty — events fire at commit time (not yet implemented).
+    /// `lsns` is empty because events fire at commit time.
     fn delete_entities_batch(
         &self,
         collection: &str,
@@ -217,45 +217,75 @@ impl RedDBRuntime {
             return Ok((0, vec![]));
         }
 
-        // Phase 2.3.2b: when the DELETE is running inside a BEGIN-wrapped
-        // transaction, stamp xmax instead of physically removing the
-        // tuple so concurrent snapshots keep seeing the row until this
-        // txn commits. COMMIT drains `pending_tombstones` and does the
-        // real delete_batch; ROLLBACK resets xmax back to 0.
-        if let Some(xid) = self.current_xid() {
-            let store = self.db().store();
-            let Some(manager) = store.get_collection(collection) else {
-                return Ok((0, vec![]));
+        let store = self.db().store();
+        let Some(manager) = store.get_collection(collection) else {
+            return Ok((0, vec![]));
+        };
+
+        let active_xid = self.current_xid();
+        let conn_id = crate::runtime::impl_core::current_connection_id();
+        let mut autocommit_xid = None;
+        let mut tombstoned_ids = Vec::new();
+        let mut physical_delete_ids = Vec::new();
+
+        for &id in ids {
+            let Some(mut entity) = manager.get(id) else {
+                continue;
             };
-            let conn_id = crate::runtime::impl_core::current_connection_id();
-            let mut marked: u64 = 0;
-            for &id in ids {
-                let Some(mut entity) = manager.get(id) else {
-                    continue;
-                };
+            if matches!(entity.data, EntityData::Row(_)) {
                 // Skip if this tuple was already tombstoned by a prior
                 // statement in the same txn — idempotent DELETE.
                 if entity.xmax != 0 {
                     continue;
                 }
+
+                let xid = match active_xid {
+                    Some(xid) => xid,
+                    None => match autocommit_xid {
+                        Some(xid) => xid,
+                        None => {
+                            let mgr = self.snapshot_manager();
+                            let xid = mgr.begin();
+                            autocommit_xid = Some(xid);
+                            xid
+                        }
+                    },
+                };
                 entity.set_xmax(xid);
                 if manager.update(entity).is_ok() {
-                    self.record_pending_tombstone(conn_id, collection, id, xid);
-                    marked += 1;
+                    if active_xid.is_some() {
+                        self.record_pending_tombstone(conn_id, collection, id, xid);
+                    }
+                    tombstoned_ids.push(id);
                 }
+            } else {
+                physical_delete_ids.push(id);
             }
-            return Ok((marked, vec![]));
         }
 
-        let store = self.db().store();
+        if let Some(xid) = autocommit_xid {
+            self.snapshot_manager().commit(xid);
+        }
+
+        let mut affected = tombstoned_ids.len() as u64;
+        let mut lsns = Vec::with_capacity(tombstoned_ids.len() + physical_delete_ids.len());
+        if active_xid.is_none() {
+            for id in &tombstoned_ids {
+                store.context_index().remove_entity(*id);
+                let lsn = self.cdc_emit(
+                    crate::replication::cdc::ChangeOperation::Delete,
+                    collection,
+                    id.raw(),
+                    "entity",
+                );
+                lsns.push(lsn);
+            }
+        }
+
         let deleted_ids = store
-            .delete_batch(collection, ids)
+            .delete_batch(collection, &physical_delete_ids)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
-        if deleted_ids.is_empty() {
-            return Ok((0, vec![]));
-        }
-
-        let mut lsns = Vec::with_capacity(deleted_ids.len());
+        affected += deleted_ids.len() as u64;
         for id in &deleted_ids {
             store.context_index().remove_entity(*id);
             let lsn = self.cdc_emit(
@@ -267,7 +297,7 @@ impl RedDBRuntime {
             lsns.push(lsn);
         }
 
-        Ok((deleted_ids.len() as u64, lsns))
+        Ok((affected, lsns))
     }
 
     /// Flushes context-index updates and CDC for each applied mutation.

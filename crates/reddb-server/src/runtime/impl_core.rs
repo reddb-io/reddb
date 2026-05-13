@@ -6986,8 +6986,10 @@ impl RedDBRuntime {
         reverted
     }
 
-    /// Flush tombstones on COMMIT — tuples are physically removed from
-    /// storage. Safe to call with an empty list (no-op).
+    /// Flush tombstones on COMMIT. The xmax stamp is already the durable
+    /// delete marker; commit only drops the rollback journal and emits
+    /// side effects. Physical reclamation is left for VACUUM so old
+    /// snapshots can still resolve the pre-delete row version.
     pub(crate) fn finalize_pending_tombstones(&self, conn_id: u64) {
         let Some(pending) = self.inner.pending_tombstones.write().remove(&conn_id) else {
             return;
@@ -6996,34 +6998,15 @@ impl RedDBRuntime {
             return;
         }
 
-        // Group by collection so every batch issues a single `delete_batch`.
-        let mut grouped: HashMap<String, Vec<crate::storage::unified::entity::EntityId>> =
-            HashMap::new();
-        for (collection, id, _xid) in pending {
-            grouped.entry(collection).or_default().push(id);
-        }
-
         let store = self.inner.db.store();
-        for (collection, ids) in grouped {
-            if let Err(err) = store.delete_batch(&collection, &ids) {
-                // Best-effort: COMMIT already succeeded at the MVCC level
-                // (xmax keeps the row hidden), so log and move on. A
-                // later VACUUM will reclaim the storage.
-                eprintln!(
-                    "pending tombstone delete_batch failed for {collection}: {err}; \
-                     rows stay xmax-stamped (reader-invisible) until VACUUM"
-                );
-                continue;
-            }
-            for id in &ids {
-                store.context_index().remove_entity(*id);
-                self.cdc_emit(
-                    crate::replication::cdc::ChangeOperation::Delete,
-                    &collection,
-                    id.raw(),
-                    "entity",
-                );
-            }
+        for (collection, id, _xid) in pending {
+            store.context_index().remove_entity(id);
+            self.cdc_emit(
+                crate::replication::cdc::ChangeOperation::Delete,
+                &collection,
+                id.raw(),
+                "entity",
+            );
         }
     }
 
