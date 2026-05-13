@@ -234,6 +234,8 @@ jobs:
       - name: JS RedWire parameter fixtures
         working-directory: drivers/js
         run: node --test test/redwire.params.test.mjs
+      - name: Rust RedWire parameter fixtures
+        run: cargo test -p reddb-io-wire --test params_fixtures
       - name: Rust gRPC parameter fixtures
         run: cargo test -p reddb-io-client --features grpc --lib grpc_params_match_shared_fixtures
       - name: Go RedWire/gRPC parameter fixtures

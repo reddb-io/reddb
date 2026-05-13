@@ -273,6 +273,8 @@ function jsFixtureValue(name) {
       return new Uint8Array()
     case 'bytes_deadbeef':
       return new Uint8Array([0xde, 0xad, 0xbe, 0xef])
+    case 'bytes_256':
+      return Uint8Array.from({ length: 256 }, (_, i) => i)
     case 'json_nested':
       return { z: [1, { deep: [true, false] }], a: null }
     case 'timestamp_zero':
@@ -285,6 +287,8 @@ function jsFixtureValue(name) {
       return []
     case 'vector_three':
       return [1, 2, -0.5]
+    case 'vector_128':
+      return Float32Array.from({ length: 128 }, (_, i) => i)
     default:
       throw new Error(`unknown fixture ${name}`)
   }

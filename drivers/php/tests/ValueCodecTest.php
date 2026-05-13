@@ -146,12 +146,14 @@ final class ValueCodecTest extends TestCase
             'text_x' => 'x',
             'bytes_empty' => Value::bytes(''),
             'bytes_deadbeef' => Value::bytes("\xde\xad\xbe\xef"),
+            'bytes_256' => Value::bytes(implode('', array_map('chr', range(0, 255)))),
             'json_nested' => Value::json(['z' => [1, ['deep' => [true, false]]], 'a' => null]),
             'timestamp_zero' => Value::timestamp(0),
             'timestamp_max' => Value::timestamp(PHP_INT_MAX),
             'uuid_001122' => Value::uuid('00112233-4455-6677-8899-aabbccddeeff'),
             'vector_empty' => [],
             'vector_three' => [1.0, 2.0, -0.5],
+            'vector_128' => array_map(fn (int $i): float => (float) $i, range(0, 127)),
             default => throw new \InvalidArgumentException("unknown fixture {$name}"),
         };
     }

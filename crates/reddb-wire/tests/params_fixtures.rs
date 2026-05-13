@@ -57,11 +57,13 @@ fn params_manifest_is_complete_and_well_formed() {
         "float_subnormal_min",
         "bytes_empty",
         "bytes_deadbeef",
+        "bytes_256",
         "json_nested",
         "timestamp_max",
         "uuid_001122",
         "vector_empty",
         "vector_three",
+        "vector_128",
     ] {
         assert!(by_name.contains_key(required), "missing fixture {required}");
     }
@@ -132,6 +134,7 @@ fn grpc_value(name: &str) -> QueryValue {
         "text_x" => Kind::TextValue("x".to_string()),
         "bytes_empty" => Kind::BytesValue(Vec::new()),
         "bytes_deadbeef" => Kind::BytesValue(vec![0xde, 0xad, 0xbe, 0xef]),
+        "bytes_256" => Kind::BytesValue((0..=255).map(|value| value as u8).collect()),
         "json_nested" => Kind::JsonValue(r#"{"a":null,"z":[1,{"deep":[true,false]}]}"#.to_string()),
         "timestamp_zero" => Kind::TimestampValue(0),
         "timestamp_max" => Kind::TimestampValue(i64::MAX),
@@ -142,6 +145,9 @@ fn grpc_value(name: &str) -> QueryValue {
         "vector_empty" => Kind::VectorValue(QueryVector { values: Vec::new() }),
         "vector_three" => Kind::VectorValue(QueryVector {
             values: vec![1.0, 2.0, -0.5],
+        }),
+        "vector_128" => Kind::VectorValue(QueryVector {
+            values: (0..128).map(|value| value as f32).collect(),
         }),
         other => panic!("unknown fixture {other}"),
     };

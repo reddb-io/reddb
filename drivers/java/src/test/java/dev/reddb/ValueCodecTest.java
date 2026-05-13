@@ -177,14 +177,28 @@ class ValueCodecTest {
             case "text_x" -> "x";
             case "bytes_empty" -> new byte[]{};
             case "bytes_deadbeef" -> new byte[]{(byte) 0xde, (byte) 0xad, (byte) 0xbe, (byte) 0xef};
+            case "bytes_256" -> bytes256();
             case "json_nested" -> jsonNestedFixture();
             case "timestamp_zero" -> new ValueCodec.Timestamp(0L);
             case "timestamp_max" -> new ValueCodec.Timestamp(Long.MAX_VALUE);
             case "uuid_001122" -> UUID.fromString("00112233-4455-6677-8899-aabbccddeeff");
             case "vector_empty" -> new float[]{};
             case "vector_three" -> new float[]{1.0f, 2.0f, -0.5f};
+            case "vector_128" -> vector128();
             default -> throw new IllegalArgumentException("unknown fixture " + name);
         };
+    }
+
+    private static byte[] bytes256() {
+        byte[] out = new byte[256];
+        for (int i = 0; i < out.length; i++) out[i] = (byte) i;
+        return out;
+    }
+
+    private static float[] vector128() {
+        float[] out = new float[128];
+        for (int i = 0; i < out.length; i++) out[i] = (float) i;
+        return out;
     }
 
     private static Map<String, Object> jsonNestedFixture() {

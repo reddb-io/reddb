@@ -643,6 +643,7 @@ mod tests {
             "text_x" => ParamValue::Text("x".to_string()),
             "bytes_empty" => ParamValue::Bytes(Vec::new()),
             "bytes_deadbeef" => ParamValue::Bytes(vec![0xde, 0xad, 0xbe, 0xef]),
+            "bytes_256" => ParamValue::Bytes((0..=255).map(|value| value as u8).collect()),
             "json_nested" => ParamValue::Json(JsonValue::object([
                 ("a", JsonValue::Null),
                 (
@@ -664,6 +665,7 @@ mod tests {
             ]),
             "vector_empty" => ParamValue::Vector(Vec::new()),
             "vector_three" => ParamValue::Vector(vec![1.0, 2.0, -0.5]),
+            "vector_128" => ParamValue::Vector((0..128).map(|value| value as f32).collect()),
             other => panic!("unknown fixture {other}"),
         }
     }
