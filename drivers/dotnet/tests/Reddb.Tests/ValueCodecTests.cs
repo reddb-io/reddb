@@ -53,6 +53,10 @@ public class ValueCodecTests
         Assert.Equal(ValueCodec.TagTimestamp, ts[0]);
         Assert.Equal(1_700_000_000L, BinaryPrimitives.ReadInt64LittleEndian(ts.AsSpan(1, 8)));
 
+        byte[] dt = ValueCodec.EncodeValue(DateTime.UnixEpoch.AddSeconds(1_700_000_000L));
+        Assert.Equal(ValueCodec.TagTimestamp, dt[0]);
+        Assert.Equal(1_700_000_000L, BinaryPrimitives.ReadInt64LittleEndian(dt.AsSpan(1, 8)));
+
         Guid uuid = Guid.Parse("00112233-4455-6677-8899-aabbccddeeff");
         byte[] encodedUuid = ValueCodec.EncodeValue(uuid);
         Assert.Equal(ValueCodec.TagUuid, encodedUuid[0]);
@@ -117,6 +121,7 @@ public class ValueCodecTests
             new float[] { 1.0f, 2.0f },
             new Dictionary<string, object?> { ["b"] = 2, ["a"] = 1 },
             DateTimeOffset.FromUnixTimeSeconds(1_700_000_000L),
+            DateTime.UnixEpoch.AddSeconds(1_700_000_001L),
             Guid.Parse("00112233-4455-6677-8899-aabbccddeeff"),
             new object?[] { "json", 1 },
         });
@@ -131,8 +136,9 @@ public class ValueCodecTests
         Assert.Equal(1, (int)parameters[7]!["a"]!);
         Assert.Equal(2, (int)parameters[7]!["b"]!);
         Assert.Equal(1_700_000_000L, (long)parameters[8]!["$ts"]!);
-        Assert.Equal("00112233-4455-6677-8899-aabbccddeeff", (string)parameters[9]!["$uuid"]!);
-        Assert.Equal("json", (string)parameters[10]![0]!);
+        Assert.Equal(1_700_000_001L, (long)parameters[9]!["$ts"]!);
+        Assert.Equal("00112233-4455-6677-8899-aabbccddeeff", (string)parameters[10]!["$uuid"]!);
+        Assert.Equal("json", (string)parameters[11]![0]!);
     }
 
     [Fact]

@@ -30,6 +30,10 @@ ReadOnlyMemory<byte> filtered = await conn.QueryAsync(
     30,
     "alice");
 
+JsonNode? envelope = await conn.QueryAsync<JsonNode>(
+    "SELECT * FROM users WHERE age = $1",
+    30);
+
 ReadOnlyMemory<byte> nearest = await conn.QueryAsync(
     "SELECT * FROM docs ORDER BY embedding <-> $1 LIMIT 3",
     new float[] { 0.12f, 0.34f, 0.56f });
@@ -57,7 +61,7 @@ Native mappings:
 | `byte[]`                                        | bytes            |
 | `float[]`, `ReadOnlyMemory<float>`              | vector           |
 | `JsonNode`, `JsonElement`, dictionaries, lists, arrays | json      |
-| `DateTimeOffset`                                | timestamp        |
+| `DateTime`, `DateTimeOffset`                    | timestamp        |
 | `Guid`                                          | uuid             |
 
 ## Supported URIs
@@ -93,7 +97,7 @@ dotnet test drivers/dotnet -c Release --nologo
 ```
 
 Smoke tests are gated on `RED_SMOKE=1` and spawn the real engine via
-`cargo run`.
+`cargo run`. Set `RED_BIN=/path/to/red` to reuse an existing binary.
 
 ## Production deploy
 

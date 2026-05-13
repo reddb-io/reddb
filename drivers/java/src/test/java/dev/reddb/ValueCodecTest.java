@@ -101,6 +101,26 @@ class ValueCodecTest {
     }
 
     @Test
+    void preparedStatementBindsParams() {
+        RecordingConn conn = new RecordingConn();
+
+        conn.prepare("SELECT $1, $2")
+            .bind(42)
+            .bind(2, "x")
+            .query();
+
+        assertEquals("SELECT $1, $2", conn.sql);
+        assertArrayEquals(new Object[]{42, "x"}, conn.params);
+
+        conn.prepare("SELECT $1")
+            .bind(1, null)
+            .query();
+
+        assertEquals("SELECT $1", conn.sql);
+        assertArrayEquals(new Object[]{null}, conn.params);
+    }
+
+    @Test
     void httpParamsUseJsonEnvelopesForTaggedValues() {
         JsonNode params = ValueCodec.toHttpParams(new Object[]{
             null,
@@ -214,5 +234,44 @@ class ValueCodecTest {
             out.append(String.format("%02x", b & 0xff));
         }
         return out.toString();
+    }
+
+    private static final class RecordingConn implements Conn {
+        String sql;
+        Object[] params;
+
+        @Override
+        public byte[] query(String sql) {
+            this.sql = sql;
+            this.params = new Object[0];
+            return new byte[0];
+        }
+
+        @Override
+        public byte[] query(String sql, Object... params) {
+            this.sql = sql;
+            this.params = params;
+            return new byte[0];
+        }
+
+        @Override
+        public void insert(String collection, Object payload) {}
+
+        @Override
+        public void bulkInsert(String collection, List<?> rows) {}
+
+        @Override
+        public byte[] get(String collection, String id) {
+            return new byte[0];
+        }
+
+        @Override
+        public void delete(String collection, String id) {}
+
+        @Override
+        public void ping() {}
+
+        @Override
+        public void close() {}
     }
 }

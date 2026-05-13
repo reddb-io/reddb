@@ -83,6 +83,7 @@ public static class ValueCodec
         if (value is byte[] bytes) return EncodeLenPrefixed(TagBytes, bytes);
         if (value is float[] vector) return EncodeVector(vector);
         if (value is ReadOnlyMemory<float> memory) return EncodeVector(memory.Span);
+        if (value is DateTime dt) return EncodeI64(TagTimestamp, DateTimeToUnixSeconds(dt));
         if (value is DateTimeOffset dto) return EncodeI64(TagTimestamp, dto.ToUnixTimeSeconds());
         if (value is Timestamp ts) return EncodeI64(TagTimestamp, ts.Seconds);
         if (value is Guid guid) return EncodeUuid(guid);
@@ -126,6 +127,10 @@ public static class ValueCodec
         }
         if (value is float[] vector) return VectorToJson(vector);
         if (value is ReadOnlyMemory<float> memory) return VectorToJson(memory.Span);
+        if (value is DateTime dt)
+        {
+            return new JsonObject { ["$ts"] = DateTimeToUnixSeconds(dt) };
+        }
         if (value is DateTimeOffset dto)
         {
             return new JsonObject { ["$ts"] = dto.ToUnixTimeSeconds() };
@@ -192,6 +197,14 @@ public static class ValueCodec
         output[0] = TagUuid;
         WriteUuidBytes(guid, output.AsSpan(1));
         return output;
+    }
+
+    private static long DateTimeToUnixSeconds(DateTime value)
+    {
+        DateTime utc = value.Kind == DateTimeKind.Unspecified
+            ? DateTime.SpecifyKind(value, DateTimeKind.Utc)
+            : value.ToUniversalTime();
+        return new DateTimeOffset(utc).ToUnixTimeSeconds();
     }
 
     private static void WriteUuidBytes(Guid guid, Span<byte> output)

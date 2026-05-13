@@ -2,9 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json.Nodes;
-using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Reddb;
 using Xunit;
@@ -14,14 +16,10 @@ namespace Reddb.Tests;
 /// <summary>
 /// End-to-end smoke against a freshly-spawned RedDB binary. Gated on
 /// <c>RED_SMOKE=1</c> so normal test runs don't drag in cargo build
-/// time. The test discovers the bind port from stdout — the engine
-/// prints <c>listening on tcp://127.0.0.1:&lt;port&gt;</c> once the
-/// listener is up.
+/// time.
 /// </summary>
 public class SmokeTests
 {
-    private static readonly Regex PortRe = new(@"(?:tcp://|listening on .*?:|port=)(\d{2,5})", RegexOptions.Compiled);
-
     [Fact]
     public async Task RunsAgainstRealEngine()
     {
@@ -31,42 +29,40 @@ public class SmokeTests
         }
 
         string repoRoot = FindRepoRoot();
-        var psi = new ProcessStartInfo("cargo")
+        string dataDir = Directory.CreateTempSubdirectory("reddb-dotnet-smoke-").FullName;
+        int port = FreePort();
+        IReadOnlyList<string> command = RedCommand(Path.Combine(dataDir, "data.db"), port);
+        var psi = new ProcessStartInfo(command[0])
         {
-            ArgumentList =
-            {
-                "run", "--release", "--bin", "red", "--",
-                "serve", "--bind", "127.0.0.1:0", "--anon-ok",
-            },
             WorkingDirectory = repoRoot,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
+            RedirectStandardOutput = false,
+            RedirectStandardError = false,
             UseShellExecute = false,
         };
+        foreach (string arg in command.Skip(1))
+            psi.ArgumentList.Add(arg);
         var proc = Process.Start(psi)
-            ?? throw new InvalidOperationException("failed to spawn cargo");
+            ?? throw new InvalidOperationException("failed to spawn red server");
         try
         {
-            int port = await WaitForPortAsync(proc, TimeSpan.FromSeconds(60));
-
-            await using IConn conn = await Reddb.ConnectAsync($"red://127.0.0.1:{port}");
+            await using IConn conn = await WaitForConnectAsync($"red://127.0.0.1:{port}", TimeSpan.FromSeconds(60));
             await conn.PingAsync();
-            await conn.InsertAsync("smoke_users", new Dictionary<string, object?>
-            {
-                ["name"] = "alice",
-                ["age"] = 30,
-            });
-            var result = await conn.QueryAsync("SELECT * FROM smoke_users WHERE name = 'alice'");
+            await conn.QueryAsync("CREATE TABLE smoke_params (id INT, name TEXT)");
+            await conn.QueryAsync("INSERT INTO smoke_params (id, name) VALUES ($1, $2)", 42, "alice");
+            var result = await conn.QueryAsync("SELECT 1");
             string body = Encoding.UTF8.GetString(result.Span);
-            Assert.Contains("alice", body);
+            Assert.Contains("\"ok\":true", body);
             var paramResult = await conn.QueryAsync(
-                "SELECT * FROM smoke_users WHERE age = $1 AND name = $2 AND $3 IS NULL",
-                30,
-                "alice",
-                null);
+                "SELECT name FROM smoke_params WHERE id = $1 AND name = $2",
+                42,
+                "alice");
             string paramBody = Encoding.UTF8.GetString(paramResult.Span);
             Assert.Contains("alice", paramBody);
-            await conn.DeleteAsync("smoke_users", "alice");
+            JsonNode? genericBody = await conn.QueryAsync<JsonNode>(
+                "SELECT name FROM smoke_params WHERE id = $1 AND name = $2",
+                42,
+                "alice");
+            Assert.Contains("alice", genericBody!.ToJsonString());
         }
         finally
         {
@@ -75,20 +71,63 @@ public class SmokeTests
         }
     }
 
-    private static async Task<int> WaitForPortAsync(Process proc, TimeSpan timeout)
+    private static IReadOnlyList<string> RedCommand(string dataPath, int port)
+    {
+        string? redBin = Environment.GetEnvironmentVariable("RED_BIN");
+        var command = new List<string>();
+        if (!string.IsNullOrWhiteSpace(redBin))
+        {
+            command.Add(redBin);
+        }
+        else
+        {
+            command.AddRange(new[] { "cargo", "run", "--release", "--bin", "red", "--" });
+        }
+        command.AddRange(new[] { "server", "--path", dataPath, "--bind", $"127.0.0.1:{port}" });
+        return command;
+    }
+
+    private static async Task<IConn> WaitForConnectAsync(string uri, TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow + timeout;
+        Exception? last = null;
         while (DateTime.UtcNow < deadline)
         {
-            string? line = await proc.StandardOutput.ReadLineAsync();
-            if (line is null) break;
-            var m = PortRe.Match(line);
-            if (m.Success)
+            try
             {
-                return int.Parse(m.Groups[1].Value);
+                IConn conn = await Reddb.ConnectAsync(uri);
+                try
+                {
+                    await conn.PingAsync();
+                    return conn;
+                }
+                catch (Exception ex)
+                {
+                    await conn.DisposeAsync();
+                    last = ex;
+                }
             }
+            catch (Exception ex)
+            {
+                last = ex;
+            }
+            await Task.Delay(50);
         }
-        throw new IOException("never saw a bind port in engine stdout");
+        throw new IOException($"server did not accept connections at {uri}", last);
+    }
+
+    private static int FreePort()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            return ((IPEndPoint)listener.LocalEndpoint).Port;
+        }
+        finally
+        {
+            listener.Stop();
+        }
     }
 
     private static string FindRepoRoot()
