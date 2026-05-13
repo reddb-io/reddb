@@ -182,3 +182,35 @@ Verification (slice 3):
 - `cargo check -q` passed.
 - `cargo test -q -p reddb-io-server --lib openai_prompt_payload -- --test-threads=1` → 3 passed.
 - `cargo test -q -p reddb-io-server --lib http_query_ask_stream -- --test-threads=1` → 2 passed.
+
+Slice 4: `/query` now uses socket-level SSE writes for `ASK ... STREAM`.
+
+What changed:
+
+- TCP and TLS connection handling now checks for `POST /query` with an
+  `ASK ... STREAM` body before falling back to the existing buffered
+  `route()` path.
+- The streaming path preserves the same surface, auth, and quota gates
+  as `route()`.
+- SSE responses now write HTTP headers without `Content-Length`, include
+  `Cache-Control: no-cache`, and flush after each encoded SSE frame.
+- Existing `route()` tests and non-streaming `/query` responses keep the
+  regular `HttpResponse` path.
+- Added a socket-level integration test that posts `ASK ... STREAM`,
+  consumes the raw TCP response, and asserts SSE headers, no
+  `Content-Length`, ordered token frames, and one terminal validation
+  frame.
+
+Still deferred:
+
+- Provider-body parsing is still not live: `AiTransport::request` reads
+  the provider response body fully before the SSE frames are written to
+  the client socket.
+- Mid-stream cost checkpoints after partial token emission still need the
+  provider streaming receiver.
+
+Verification (slice 4):
+
+- `cargo check -q` passed.
+- `cargo test -q -p reddb-io-server --lib http_query_ask_stream -- --test-threads=1`
+  → 3 passed.
