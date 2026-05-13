@@ -41,6 +41,8 @@ export { parseUri, deriveLoginUrl } from './url.js'
 export const EMBEDDED_ONLY_MESSAGE =
   'remote URIs are not supported in @reddb-io/sdk; install @reddb-io/client for grpc/http/red transports'
 
+const MIN_INSERT_ID_ENGINE_VERSION = '1.0.9'
+
 /**
  * Connect to a RedDB instance.
  *
@@ -320,14 +322,16 @@ export class RedDB {
     return this.query(sql, ...params)
   }
 
-  /** Insert one row. Returns `{ affected, id? }`. */
-  insert(collection, payload) {
-    return this.client.call('insert', { collection, payload })
+  /** Insert one row. Returns `{ affected, id }`. */
+  async insert(collection, payload) {
+    const result = await this.client.call('insert', { collection, payload })
+    return requireInsertId(result, 'insert')
   }
 
-  /** Insert many rows in one call. Returns `{ affected }`. */
-  bulkInsert(collection, payloads) {
-    return this.client.call('bulk_insert', { collection, payloads })
+  /** Insert many rows in one call. Returns `{ affected, ids }`. */
+  async bulkInsert(collection, payloads) {
+    const result = await this.client.call('bulk_insert', { collection, payloads })
+    return requireInsertIds(result, payloads.length)
   }
 
   /** Return true when a collection is visible in the catalog. */
@@ -411,4 +415,30 @@ export class RedDB {
   close() {
     return this.client.close()
   }
+}
+
+function requireInsertId(result, method) {
+  if (!result || typeof result !== 'object' || result.id == null) {
+    throw new RedDBError(
+      'ENGINE_TOO_OLD',
+      `${method}() requires RedDB engine >= ${MIN_INSERT_ID_ENGINE_VERSION} with insert id support`,
+    )
+  }
+  return result
+}
+
+function requireInsertIds(result, expected) {
+  if (!result || typeof result !== 'object' || !Array.isArray(result.ids)) {
+    throw new RedDBError(
+      'ENGINE_TOO_OLD',
+      `bulkInsert() requires RedDB engine >= ${MIN_INSERT_ID_ENGINE_VERSION} with bulk insert id support`,
+    )
+  }
+  if (result.ids.length !== expected) {
+    throw new RedDBError(
+      'INVALID_RESPONSE',
+      `bulkInsert() expected ${expected} ids, got ${result.ids.length}`,
+    )
+  }
+  return result
 }
