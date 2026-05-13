@@ -65,3 +65,19 @@ Remaining slices:
 - `LIMIT` for community, shortest path, and any other documented `GRAPH <algorithm>` command.
 - `ORDER BY <metric> [ASC|DESC]` support and tests.
 - Docs for default top-K behavior and explicit limit/order examples.
+
+Slice 3 code complete, verification pending:
+
+- Parser accepts `ORDER BY <metric> [ASC|DESC]` and `LIMIT N` for
+  `GRAPH CENTRALITY`, `GRAPH COMMUNITY`, `GRAPH COMPONENTS`, and
+  `GRAPH SHORTEST_PATH`.
+- Runtime applies order+limit after producing graph command rows. Supported
+  natural metrics are `score`/`centrality_score`, `size`/`community_size`,
+  `size`/`component_size`, and shortest-path `hop_count`, `total_weight`,
+  `nodes_visited`.
+- `GRAPH CENTRALITY` keeps the historical implicit top-100 when no explicit
+  limit is supplied.
+- `docs/query/graph-commands.md` documents the default cap and examples for
+  combined `ORDER BY ... LIMIT`.
+- Added focused parser/runtime tests; final verification is deferred to the
+  end-of-cycle test pass per operator instruction.
