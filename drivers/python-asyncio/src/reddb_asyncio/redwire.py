@@ -30,9 +30,11 @@ from .errors import (
     FrameDecompressFailed,
     FrameTooLarge,
     ProtocolError,
+    RedDBError,
     UnknownFlags,
 )
 from . import scram as scram_lib
+from .params import normalize_params
 
 # ---------------------------------------------------------------------------
 # Protocol constants — keep in sync with src/wire/redwire/{frame,mod}.rs.
@@ -43,6 +45,7 @@ SUPPORTED_VERSION: int = 0x01
 FRAME_HEADER_SIZE: int = 16
 MAX_FRAME_SIZE: int = 16 * 1024 * 1024
 KNOWN_FLAGS: int = 0b0000_0011
+FEATURE_PARAMS: int = 0x0000_0001
 
 DEFAULT_TIMEOUT_SECS: float = 30.0
 
@@ -70,6 +73,20 @@ class Kind:
     Get = 0x19
     Delete = 0x1A
     DeleteOk = 0x1B
+    QueryWithParams = 0x28
+
+
+class ValueTag:
+    Null = 0x00
+    Bool = 0x01
+    Int = 0x02
+    Float = 0x03
+    Text = 0x04
+    Bytes = 0x05
+    Vector = 0x06
+    Json = 0x07
+    Timestamp = 0x08
+    Uuid = 0x09
 
 
 _KIND_NAMES = {v: k for k, v in vars(Kind).items() if isinstance(v, int)}
@@ -220,6 +237,7 @@ class RedwireClient:
         self._writer = writer
         self._opts = opts
         self._session = session
+        self._server_features = _as_int(session.get("features"))
         self._next_corr = 4  # reserved 1..3 for handshake frames
         self._lock = asyncio.Lock()
         self._closed = False
@@ -228,6 +246,9 @@ class RedwireClient:
     def session(self) -> dict[str, Any]:
         """Server-supplied session info from ``AuthOk`` (sub, roles, ...)."""
         return self._session
+
+    def supports_params(self) -> bool:
+        return (self._server_features & FEATURE_PARAMS) == FEATURE_PARAMS
 
     @classmethod
     async def connect(cls, opts: RedwireOptions) -> "RedwireClient":
@@ -246,11 +267,38 @@ class RedwireClient:
 
     # -- public ops ---------------------------------------------------------
 
-    async def query(self, sql: str) -> dict[str, Any]:
-        resp = await self._round_trip(
-            Frame(kind=Kind.Query, correlation_id=self._corr(), payload=sql.encode("utf-8"))
-        )
+    async def query(
+        self,
+        sql: str,
+        params: list[Any] | tuple[Any, ...] | None = None,
+    ) -> dict[str, Any]:
+        binds = normalize_params(params)
+        if binds:
+            if not self.supports_params():
+                raise RedDBError(
+                    "server did not advertise FEATURE_PARAMS",
+                    code="PARAMS_UNSUPPORTED",
+                )
+            frame = Frame(
+                kind=Kind.QueryWithParams,
+                correlation_id=self._corr(),
+                payload=encode_query_with_params(sql, binds),
+            )
+        else:
+            frame = Frame(
+                kind=Kind.Query,
+                correlation_id=self._corr(),
+                payload=sql.encode("utf-8"),
+            )
+        resp = await self._round_trip(frame)
         return _expect_json(resp, ok_kinds=(Kind.Result,))
+
+    async def execute(
+        self,
+        sql: str,
+        params: list[Any] | tuple[Any, ...] | None = None,
+    ) -> dict[str, Any]:
+        return await self.query(sql, params)
 
     async def insert(self, collection: str, payload: dict[str, Any]) -> dict[str, Any]:
         body = {"collection": collection, "payload": payload}
@@ -563,6 +611,101 @@ def _json_loads(buf: bytes) -> dict[str, Any]:
     return v if isinstance(v, dict) else {}
 
 
+def _as_int(value: Any) -> int:
+    return int(value) if isinstance(value, (int, float)) else 0
+
+
+def encode_query_with_params(sql: str, params: list[Any]) -> bytes:
+    if len(params) > 65_536:
+        raise RedDBError(
+            f"param_count {len(params)} exceeds RedWire v1 limit",
+            code="PARAM_COUNT_OVER_LIMIT",
+        )
+    sql_bytes = sql.encode("utf-8")
+    values = [_encode_value(value) for value in params]
+    return (
+        struct.pack("<I", len(sql_bytes))
+        + sql_bytes
+        + struct.pack("<I", len(values))
+        + b"".join(values)
+    )
+
+
+def _encode_value(value: Any) -> bytes:
+    if value is None:
+        return bytes([ValueTag.Null])
+    if isinstance(value, bool):
+        return bytes([ValueTag.Bool, 1 if value else 0])
+    if isinstance(value, int):
+        if value < -(2**63) or value > 2**63 - 1:
+            raise RedDBError(
+                "integer param is outside i64 range",
+                code="UNSUPPORTED_PARAM",
+            )
+        return bytes([ValueTag.Int]) + struct.pack("<q", value)
+    if isinstance(value, float):
+        return bytes([ValueTag.Float]) + struct.pack("<d", value)
+    if isinstance(value, str):
+        return _encode_len_prefixed(ValueTag.Text, value.encode("utf-8"))
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return _encode_len_prefixed(ValueTag.Bytes, bytes(value))
+    if isinstance(value, (list, tuple)):
+        if not all(
+            isinstance(item, (int, float)) and not isinstance(item, bool)
+            for item in value
+        ):
+            raise RedDBError(
+                "list params must contain only numbers",
+                code="UNSUPPORTED_PARAM",
+            )
+        out = bytearray([ValueTag.Vector])
+        out.extend(struct.pack("<I", len(value)))
+        for item in value:
+            out.extend(struct.pack("<f", float(item)))
+        return bytes(out)
+    if isinstance(value, dict):
+        if set(value) == {"$bytes"} and isinstance(value["$bytes"], str):
+            import base64
+
+            return _encode_len_prefixed(
+                ValueTag.Bytes,
+                base64.b64decode(value["$bytes"]),
+            )
+        if set(value) == {"$float"} and isinstance(value["$float"], str):
+            names = {
+                "NaN": float("nan"),
+                "Infinity": float("inf"),
+                "-Infinity": float("-inf"),
+            }
+            if value["$float"] in names:
+                return bytes([ValueTag.Float]) + struct.pack(
+                    "<d",
+                    names[value["$float"]],
+                )
+        if set(value) == {"$ts"} and isinstance(value["$ts"], (int, str)):
+            return bytes([ValueTag.Timestamp]) + struct.pack("<q", int(value["$ts"]))
+        if set(value) == {"$uuid"} and isinstance(value["$uuid"], str):
+            raw = bytes.fromhex(value["$uuid"].replace("-", ""))
+            if len(raw) != 16:
+                raise RedDBError(
+                    "uuid param must contain 16 bytes",
+                    code="UNSUPPORTED_PARAM",
+                )
+            return bytes([ValueTag.Uuid]) + raw
+        body = json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        return _encode_len_prefixed(ValueTag.Json, body)
+    raise RedDBError(
+        f"unsupported query parameter type: {type(value).__name__}",
+        code="UNSUPPORTED_PARAM",
+    )
+
+
+def _encode_len_prefixed(tag: int, value: bytes) -> bytes:
+    if len(value) > MAX_FRAME_SIZE:
+        raise FrameTooLarge(f"value length {len(value)} > {MAX_FRAME_SIZE}")
+    return bytes([tag]) + struct.pack("<I", len(value)) + value
+
+
 def _reason(payload: bytes, fallback: str) -> str:
     obj = _json_loads(payload)
     reason = obj.get("reason")
@@ -584,12 +727,15 @@ __all__ = [
     "SUPPORTED_VERSION",
     "FRAME_HEADER_SIZE",
     "MAX_FRAME_SIZE",
+    "FEATURE_PARAMS",
     "Kind",
+    "ValueTag",
     "Flags",
     "Frame",
     "RedwireOptions",
     "RedwireClient",
     "encode_frame",
+    "encode_query_with_params",
     "decode_frame",
     "kind_name",
 ]

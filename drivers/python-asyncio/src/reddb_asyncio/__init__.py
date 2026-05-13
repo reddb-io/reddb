@@ -39,12 +39,15 @@ from .http import HttpClient
 from .redwire import (
     Flags,
     Frame,
+    FEATURE_PARAMS,
     Kind,
     MAGIC,
     SUPPORTED_VERSION,
+    ValueTag,
     RedwireClient,
     RedwireOptions,
     decode_frame,
+    encode_query_with_params,
     encode_frame,
     kind_name,
 )
@@ -68,10 +71,13 @@ __all__ = [
     # Wire constants + helpers.
     "MAGIC",
     "SUPPORTED_VERSION",
+    "FEATURE_PARAMS",
     "Kind",
+    "ValueTag",
     "Flags",
     "Frame",
     "encode_frame",
+    "encode_query_with_params",
     "decode_frame",
     "kind_name",
     # Errors.

@@ -130,6 +130,18 @@ impl RedDb {
         }
     }
 
+    /// Execute a SQL statement using the same parameter binding rules as `query`.
+    #[pyo3(signature = (sql, *args, params=None))]
+    fn execute<'py>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+        args: &Bound<'py, PyTuple>,
+        params: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        self.query(py, sql, args, params)
+    }
+
     /// Insert one row. `payload` must be a `dict[str, scalar]`.
     fn insert<'py>(
         &self,

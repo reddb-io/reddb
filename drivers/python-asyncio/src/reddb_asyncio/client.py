@@ -13,6 +13,7 @@ from typing import Any
 
 from .errors import RedDBError, UnsupportedScheme
 from .http import HttpClient
+from .params import normalize_params
 from .redwire import RedwireClient, RedwireOptions
 from .url import ParsedUri, parse_uri
 
@@ -184,12 +185,10 @@ class _RedwireAdapter:
         self._client = client
 
     async def query(self, sql: str, params: list[Any] | None = None) -> dict[str, Any]:
-        if params:
-            raise RedDBError(
-                "RedWire parameterized queries require QueryWithParams support",
-                code="PARAMS_UNSUPPORTED",
-            )
-        return await self._client.query(sql)
+        return await self._client.query(sql, params)
+
+    async def execute(self, sql: str, params: list[Any] | None = None) -> dict[str, Any]:
+        return await self.query(sql, params)
 
     async def insert(self, collection: str, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._client.insert(collection, payload)
@@ -237,8 +236,20 @@ class Reddb:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
 
-    async def query(self, sql: str, params: list[Any] | None = None) -> dict[str, Any]:
-        return await self._t.query(sql, params)
+    async def query(
+        self,
+        sql: str,
+        params: list[Any] | tuple[Any, ...] | None = None,
+    ) -> dict[str, Any]:
+        normalized = normalize_params(params)
+        return await self._t.query(sql, normalized if normalized else None)
+
+    async def execute(
+        self,
+        sql: str,
+        params: list[Any] | tuple[Any, ...] | None = None,
+    ) -> dict[str, Any]:
+        return await self.query(sql, params)
 
     async def insert(self, collection: str, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._t.insert(collection, payload)

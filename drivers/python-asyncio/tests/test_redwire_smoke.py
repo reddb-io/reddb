@@ -73,6 +73,25 @@ async def test_ping_pong(running_server):
         assert result == {"ok": True}
 
 
+async def test_parameterized_query_round_trip(running_server):
+    async with await connect(
+        f"red://{running_server['host']}:{running_server['port']}"
+    ) as db:
+        await db.query("CREATE TABLE py_params (id INTEGER, name TEXT)")
+        inserted = await db.execute(
+            "INSERT INTO py_params (id, name) VALUES ($1, $2)",
+            params=(42, "Ada"),
+        )
+        assert isinstance(inserted, dict)
+
+        selected = await db.query(
+            "SELECT * FROM py_params WHERE id = $1",
+            params=(42,),
+        )
+        row = _first_values(selected)
+        assert row["name"] == "Ada"
+
+
 async def test_bearer_required_when_auth_enabled(running_server):
     """If the server has auth disabled, anonymous succeeds. If auth is
     enabled and no token is supplied, AuthRefused fires. We can only
@@ -84,3 +103,13 @@ async def test_bearer_required_when_auth_enabled(running_server):
     )
     client = await RedwireClient.connect(opts)
     await client.close()
+
+
+def _first_values(result):
+    rows = result.get("rows")
+    if rows:
+        return rows[0]
+    records = result.get("result", {}).get("records", [])
+    if records:
+        return records[0].get("values", {})
+    raise AssertionError(f"no rows in result: {result!r}")

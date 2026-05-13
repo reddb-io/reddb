@@ -123,6 +123,8 @@ db = reddb.connect(uri: str) -> RedDb
 
 db.query(sql: str, *params)                      -> {"statement", "affected", "columns", "rows"}
 db.query(sql: str, params=[...])                 -> {"statement", "affected", "columns", "rows"}
+db.execute(sql: str, *params)                    -> {"statement", "affected", "columns", "rows"}
+db.execute(sql: str, params=[...])               -> {"statement", "affected", "columns", "rows"}
 db.insert(collection: str, payload: dict)        -> {"affected"}
 db.bulk_insert(collection: str, payloads: list[dict]) -> {"affected"}
 db.delete(collection: str, id: str)              -> {"affected"}

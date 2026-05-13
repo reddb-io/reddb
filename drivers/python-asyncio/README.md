@@ -86,6 +86,7 @@ from reddb_asyncio import (
 `Reddb` exposes:
 
 * `await db.query(sql, params=None)`
+* `await db.execute(sql, params=None)`
 * `await db.insert(collection, payload)`
 * `await db.bulk_insert(collection, payloads)`
 * `await db.get(collection, id)`
@@ -96,7 +97,8 @@ from reddb_asyncio import (
 
 ## Safe parameter binding
 
-`await db.query(sql, params)` binds positional `$N` placeholders over HTTP:
+`await db.query(sql, params)` and `await db.execute(sql, params)` bind
+positional `$N` placeholders over HTTP and RedWire:
 
 ```python
 rows = await db.query(
@@ -110,9 +112,10 @@ hits = await db.query(
 )
 ```
 
-Non-empty params over the RedWire preview raise `PARAMS_UNSUPPORTED` until the
-binary `QueryWithParams` frame lands there. Use `http://` / `https://` for
-safe binding with `reddb-asyncio` today.
+Parameters may be lists or tuples. Native Python values map to RedDB wire
+values: `None`, `bool`, `int`, `float`, `str`, `bytes`, `bytearray`,
+`memoryview`, `datetime.datetime`, and numeric vectors. Unsupported values raise
+`TypeError` before a request is sent.
 
 ## Tests
 

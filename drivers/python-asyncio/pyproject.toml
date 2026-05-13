@@ -45,6 +45,7 @@ Issues = "https://github.com/reddb-io/reddb/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/reddb_asyncio"]
+include = ["src/reddb_asyncio/py.typed", "src/reddb_asyncio/*.pyi"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src/reddb_asyncio", "README.md", "tests"]

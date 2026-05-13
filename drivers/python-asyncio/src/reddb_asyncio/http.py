@@ -31,6 +31,7 @@ from urllib.parse import quote
 import httpx
 
 from .errors import EngineError, HttpError
+from .params import normalize_params
 
 DEFAULT_TIMEOUT_SECS: float = 30.0
 
@@ -90,11 +91,22 @@ class HttpClient:
 
     # ------------------------------------------------------------------ ops
 
-    async def query(self, sql: str, params: list[Any] | None = None) -> dict[str, Any]:
+    async def query(
+        self,
+        sql: str,
+        params: list[Any] | tuple[Any, ...] | None = None,
+    ) -> dict[str, Any]:
         body: dict[str, Any] = {"query": sql}
         if params is not None:
-            body["params"] = params
+            body["params"] = normalize_params(params)
         return await self._post_json("/query", body)
+
+    async def execute(
+        self,
+        sql: str,
+        params: list[Any] | tuple[Any, ...] | None = None,
+    ) -> dict[str, Any]:
+        return await self.query(sql, params)
 
     async def insert(self, collection: str, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._post_json(f"/collections/{quote(collection)}/rows", payload)

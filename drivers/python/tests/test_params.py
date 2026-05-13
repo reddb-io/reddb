@@ -96,6 +96,18 @@ def test_params_kwarg_matches_variadic_form():
         assert a == b
 
 
+def test_execute_accepts_params_keyword():
+    with reddb.connect("memory://") as db:
+        db.query("CREATE TABLE exec_params (id INT, name TEXT)")
+        inserted = db.execute(
+            "INSERT INTO exec_params (id, name) VALUES ($1, $2)",
+            params=[1, "Ada"],
+        )
+        assert inserted["affected"] == 1
+        rows = db.query("SELECT * FROM exec_params WHERE id = $1", params=[1])["rows"]
+        assert rows[0]["name"] == "Ada"
+
+
 def test_params_none_kw_equals_no_params():
     """`params=None` composes with `db.query(sql, params=maybe_list)` callers."""
     with reddb.connect("memory://") as db:
