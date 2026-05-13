@@ -1336,13 +1336,9 @@ impl AuthStore {
     /// the storage layer. The runtime hands it in so this module stays
     /// decoupled from the storage crate. Each collection passes through
     /// `check_grant(SELECT)` under a synthetic `(principal, role,
-    /// tenant)` view.
-    ///
-    /// Why `(tenant, role)` and not `UserId`: the AI pipeline gates
-    /// rows by RLS and grant scope, both of which key off the role +
-    /// tenant pair, not the bare username. Two users that share a
-    /// tenant + role share a cache slot, dropping the steady-state
-    /// memory cost.
+    /// tenant)` view. The cache key includes principal because direct
+    /// grants can differ between users that share the same tenant and
+    /// role.
     pub fn visible_collections_for_scope(
         &self,
         tenant: Option<&str>,
@@ -1350,7 +1346,7 @@ impl AuthStore {
         principal: &str,
         all_collections: &[String],
     ) -> std::collections::HashSet<String> {
-        let key = super::scope_cache::ScopeKey::new(tenant, role);
+        let key = super::scope_cache::ScopeKey::new(tenant, principal, role);
         if let Some(hit) = self.visible_collections_cache.get(&key) {
             return hit;
         }

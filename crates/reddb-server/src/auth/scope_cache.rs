@@ -1,7 +1,7 @@
-//! `(tenant, role) → HashSet<CollectionId>` visibility cache.
+//! `(tenant, principal, role) → HashSet<CollectionId>` visibility cache.
 //!
-//! Computed once per `(tenant, role)` tuple and reused for the 60-second
-//! TTL window. Invalidated explicitly on:
+//! Computed once per `(tenant, principal, role)` tuple and reused for the
+//! 60-second TTL window. Invalidated explicitly on:
 //!
 //!   * GRANT / REVOKE
 //!   * CREATE POLICY / DROP POLICY (and policy attach/detach)
@@ -10,12 +10,12 @@
 //! Why a separate cache from `PermissionCache`: `PermissionCache` answers
 //! "does (resource, action) match for this user?" and is keyed by
 //! `UserId`. The AI pipeline needs the inverse — "what collections is
-//! this caller allowed to see?" — keyed by `(tenant, role)` so two
-//! users that share a tenant + role share the cache slot. A 60s TTL is
-//! tight enough that policy churn becomes visible within one minute even
-//! if an explicit invalidation was missed; the explicit invalidations
-//! still fire on every relevant mutation so the common case is zero
-//! staleness.
+//! this caller allowed to see?" — keyed by principal too because two
+//! users can share tenant + role while holding different direct grants.
+//! A 60s TTL is tight enough that policy churn becomes visible within
+//! one minute even if an explicit invalidation was missed; the explicit
+//! invalidations still fire on every relevant mutation so the common
+//! case is zero staleness.
 //!
 //! The cache exposes hit/miss counters so the `AuthCache::stats()`
 //! probe required by issue #119 can be wired into the runtime metrics
@@ -31,17 +31,19 @@ use super::Role;
 /// Default TTL for a `visible_collections` cache entry.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(60);
 
-/// Cache key — `(tenant, role)`. `None` tenant = platform tenant.
+/// Cache key — `(tenant, principal, role)`. `None` tenant = platform tenant.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct ScopeKey {
     pub tenant: Option<String>,
+    pub principal: String,
     pub role: Role,
 }
 
 impl ScopeKey {
-    pub fn new(tenant: Option<&str>, role: Role) -> Self {
+    pub fn new(tenant: Option<&str>, principal: &str, role: Role) -> Self {
         Self {
             tenant: tenant.map(|s| s.to_string()),
+            principal: principal.to_string(),
             role,
         }
     }
@@ -99,7 +101,7 @@ impl AuthCache {
         }
     }
 
-    /// Look up the cached visible-collections set for `(tenant, role)`.
+    /// Look up the cached visible-collections set for `(tenant, principal, role)`.
     /// Returns `None` on miss or when the entry has expired (the
     /// expired entry stays in place — the next `insert` overwrites it).
     pub fn get(&self, key: &ScopeKey) -> Option<HashSet<String>> {
@@ -111,6 +113,7 @@ impl AuthCache {
             tracing::trace!(
                 target: "auth_cache",
                 tenant = ?key.tenant,
+                principal = %key.principal,
                 role = ?key.role,
                 "scope_cache miss (TTL expired)"
             );
@@ -120,6 +123,7 @@ impl AuthCache {
         tracing::trace!(
             target: "auth_cache",
             tenant = ?key.tenant,
+            principal = %key.principal,
             role = ?key.role,
             "scope_cache hit"
         );
@@ -134,6 +138,7 @@ impl AuthCache {
         tracing::trace!(
             target: "auth_cache",
             tenant = ?key.tenant,
+            principal = %key.principal,
             role = ?key.role,
             n = collections.len(),
             "scope_cache miss → insert"
@@ -184,8 +189,8 @@ mod tests {
     use super::*;
     use std::thread::sleep;
 
-    fn key(tenant: &str, role: Role) -> ScopeKey {
-        ScopeKey::new(Some(tenant), role)
+    fn key(tenant: &str, principal: &str, role: Role) -> ScopeKey {
+        ScopeKey::new(Some(tenant), principal, role)
     }
 
     fn set(items: &[&str]) -> HashSet<String> {
@@ -195,7 +200,7 @@ mod tests {
     #[test]
     fn miss_then_hit() {
         let cache = AuthCache::new(DEFAULT_TTL);
-        let k = key("acme", Role::Read);
+        let k = key("acme", "alice", Role::Read);
         assert!(cache.get(&k).is_none(), "first lookup is a miss");
         cache.insert(k.clone(), set(&["orders", "customers"]));
         let hit = cache.get(&k).expect("post-insert hit");
@@ -210,7 +215,7 @@ mod tests {
     #[test]
     fn ttl_evicts() {
         let cache = AuthCache::new(Duration::from_millis(20));
-        let k = key("acme", Role::Read);
+        let k = key("acme", "alice", Role::Read);
         cache.insert(k.clone(), set(&["x"]));
         sleep(Duration::from_millis(40));
         assert!(
@@ -222,22 +227,32 @@ mod tests {
     #[test]
     fn invalidate_tenant_drops_only_matching() {
         let cache = AuthCache::new(DEFAULT_TTL);
-        cache.insert(key("acme", Role::Read), set(&["a"]));
-        cache.insert(key("globex", Role::Read), set(&["b"]));
+        cache.insert(key("acme", "alice", Role::Read), set(&["a"]));
+        cache.insert(key("globex", "alice", Role::Read), set(&["b"]));
         cache.invalidate_tenant(Some("acme"));
-        assert!(cache.get(&key("acme", Role::Read)).is_none());
-        assert!(cache.get(&key("globex", Role::Read)).is_some());
+        assert!(cache.get(&key("acme", "alice", Role::Read)).is_none());
+        assert!(cache.get(&key("globex", "alice", Role::Read)).is_some());
         assert_eq!(cache.stats().invalidations, 1);
+    }
+
+    #[test]
+    fn same_tenant_and_role_do_not_share_between_principals() {
+        let cache = AuthCache::new(DEFAULT_TTL);
+        cache.insert(key("acme", "alice", Role::Read), set(&["orders"]));
+        assert!(
+            cache.get(&key("acme", "bob", Role::Read)).is_none(),
+            "direct grants are principal-specific"
+        );
     }
 
     #[test]
     fn invalidate_all_drops_every_entry() {
         let cache = AuthCache::new(DEFAULT_TTL);
-        cache.insert(key("acme", Role::Read), set(&["a"]));
-        cache.insert(key("globex", Role::Write), set(&["b"]));
+        cache.insert(key("acme", "alice", Role::Read), set(&["a"]));
+        cache.insert(key("globex", "alice", Role::Write), set(&["b"]));
         cache.invalidate_all();
-        assert!(cache.get(&key("acme", Role::Read)).is_none());
-        assert!(cache.get(&key("globex", Role::Write)).is_none());
+        assert!(cache.get(&key("acme", "alice", Role::Read)).is_none());
+        assert!(cache.get(&key("globex", "alice", Role::Write)).is_none());
     }
 
     #[test]

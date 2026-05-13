@@ -483,6 +483,11 @@ pub fn text_search_bm25_scoped(
         return Vec::new();
     }
 
+    let _scope_guard = AskScopeGuard::install(scope);
+    let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
+    let mut rls_cache: HashMap<String, Option<crate::storage::query::ast::Filter>> = HashMap::new();
+    let store = runtime.inner.db.store();
+
     runtime
         .inner
         .db
@@ -490,10 +495,23 @@ pub fn text_search_bm25_scoped(
         .context_index()
         .search_bm25(question, top_k, Some(&allowed))
         .into_iter()
-        .map(|hit| TextHit {
-            collection: hit.collection,
-            entity_id: hit.entity_id.raw(),
-            score: hit.score,
+        .filter_map(|hit| {
+            let entity = store.get(&hit.collection, hit.entity_id)?;
+            if !ask_entity_allowed(
+                runtime,
+                scope,
+                &hit.collection,
+                &entity,
+                snap_ctx.as_ref(),
+                &mut rls_cache,
+            ) {
+                return None;
+            }
+            Some(TextHit {
+                collection: hit.collection,
+                entity_id: hit.entity_id.raw(),
+                score: hit.score,
+            })
         })
         .collect()
 }
@@ -827,6 +845,10 @@ pub fn vector_search_scoped(
     };
     let per_collection = top_k.max(1);
     let mut hits: Vec<VectorHit> = Vec::new();
+    let _scope_guard = AskScopeGuard::install(scope);
+    let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
+    let mut rls_cache: HashMap<String, Option<crate::storage::query::ast::Filter>> = HashMap::new();
+    let store = runtime.inner.db.store();
     for collection in &candidates.collections {
         match super::authorized_search::AuthorizedSearch::execute_similar(
             runtime,
@@ -838,6 +860,19 @@ pub fn vector_search_scoped(
         ) {
             Ok(results) => {
                 for result in results {
+                    let Some(entity) = store.get(collection, result.entity_id) else {
+                        continue;
+                    };
+                    if !ask_entity_allowed(
+                        runtime,
+                        scope,
+                        collection,
+                        &entity,
+                        snap_ctx.as_ref(),
+                        &mut rls_cache,
+                    ) {
+                        continue;
+                    }
                     hits.push(VectorHit {
                         collection: collection.clone(),
                         entity_id: result.entity_id.raw(),
@@ -887,7 +922,8 @@ pub fn graph_search_scoped(
     let depth = graph_depth
         .unwrap_or(crate::runtime::ai::mcp_ask_tool::DEPTH_DEFAULT as usize)
         .max(1);
-    let result = match runtime.search_context(SearchContextInput {
+    let _scope_guard = AskScopeGuard::install(scope);
+    let input = SearchContextInput {
         query: question.to_string(),
         field: None,
         vector: None,
@@ -901,7 +937,12 @@ pub fn graph_search_scoped(
         reindex: Some(false),
         limit: Some(top_k),
         min_score,
-    }) {
+    };
+    let result = match if scope.visible_collections().is_some() {
+        super::authorized_search::AuthorizedSearch::execute_context(runtime, scope, input)
+    } else {
+        runtime.search_context(input)
+    } {
         Ok(result) => result,
         Err(err) => {
             debug!(
@@ -1002,6 +1043,9 @@ pub fn filter_values(
     let visible = scope.visible_collections();
     let store = runtime.inner.db.store();
     let mut out: Vec<FilteredRow> = Vec::new();
+    let _scope_guard = AskScopeGuard::install(scope);
+    let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
+    let mut rls_cache: HashMap<String, Option<crate::storage::query::ast::Filter>> = HashMap::new();
 
     'collection: for collection in &candidates.collections {
         // Defence-in-depth: redo the visibility check here so a Stage
@@ -1022,6 +1066,16 @@ pub fn filter_values(
             .unwrap_or(&[]);
 
         for entity in manager.query_all(|_| true) {
+            if !ask_entity_allowed(
+                runtime,
+                scope,
+                collection,
+                &entity,
+                snap_ctx.as_ref(),
+                &mut rls_cache,
+            ) {
+                continue;
+            }
             if let Some(hit) = literal_match_in_entity(&entity, &tokens.literals, hint_columns) {
                 out.push(FilteredRow {
                     collection: collection.clone(),
@@ -1036,6 +1090,64 @@ pub fn filter_values(
         }
     }
     out
+}
+
+fn ask_entity_allowed(
+    runtime: &RedDBRuntime,
+    scope: &EffectiveScope,
+    collection: &str,
+    entity: &UnifiedEntity,
+    snap_ctx: Option<&crate::runtime::impl_core::SnapshotContext>,
+    rls_cache: &mut HashMap<String, Option<crate::storage::query::ast::Filter>>,
+) -> bool {
+    if scope
+        .visible_collections()
+        .is_some_and(|visible| !visible.contains(collection))
+    {
+        return false;
+    }
+    runtime.search_entity_allowed(collection, entity, snap_ctx, rls_cache)
+}
+
+struct AskScopeGuard {
+    prev_tenant: Option<String>,
+    prev_auth: Option<(String, crate::auth::Role)>,
+}
+
+impl AskScopeGuard {
+    fn install(scope: &EffectiveScope) -> Self {
+        let prev_tenant = crate::runtime::impl_core::current_tenant();
+        let prev_auth = crate::runtime::impl_core::current_auth_identity();
+
+        match scope.effective_scope() {
+            Some(tenant) => crate::runtime::impl_core::set_current_tenant(tenant.to_string()),
+            None => crate::runtime::impl_core::clear_current_tenant(),
+        }
+        match scope.identity() {
+            Some((user, role)) => {
+                crate::runtime::impl_core::set_current_auth_identity(user.to_string(), role)
+            }
+            None => crate::runtime::impl_core::clear_current_auth_identity(),
+        }
+
+        Self {
+            prev_tenant,
+            prev_auth,
+        }
+    }
+}
+
+impl Drop for AskScopeGuard {
+    fn drop(&mut self) {
+        match self.prev_tenant.take() {
+            Some(tenant) => crate::runtime::impl_core::set_current_tenant(tenant),
+            None => crate::runtime::impl_core::clear_current_tenant(),
+        }
+        match self.prev_auth.take() {
+            Some((user, role)) => crate::runtime::impl_core::set_current_auth_identity(user, role),
+            None => crate::runtime::impl_core::clear_current_auth_identity(),
+        }
+    }
 }
 
 /// Look for any literal in any column value of `entity`. Hint
@@ -1231,6 +1343,29 @@ mod tests {
         }
     }
 
+    struct TenantGuard;
+
+    impl TenantGuard {
+        fn set(tenant: &str) -> Self {
+            crate::runtime::impl_core::set_current_tenant(tenant.to_string());
+            Self
+        }
+    }
+
+    impl Drop for TenantGuard {
+        fn drop(&mut self) {
+            crate::runtime::impl_core::clear_current_tenant();
+        }
+    }
+
+    fn row_text<'a>(entity: &'a UnifiedEntity, field: &str) -> Option<&'a str> {
+        let row = entity.data.as_row()?;
+        match row.get_field(field)? {
+            Value::Text(value) => Some(value.as_ref()),
+            _ => None,
+        }
+    }
+
     #[test]
     fn fused_source_order_uses_rrf_and_total_limit() {
         let ctx = AskContext {
@@ -1324,6 +1459,48 @@ mod tests {
     }
 
     #[test]
+    fn text_search_bm25_scoped_filters_rls_denied_hits() {
+        let rt = fresh_runtime();
+        rt.execute_query(
+            "CREATE TABLE docs (id INT, tenant_id TEXT, body TEXT) WITH CONTEXT INDEX ON (body)",
+        )
+        .expect("create docs");
+        rt.execute_query(
+            "INSERT INTO docs (id, tenant_id, body) VALUES \
+             (1, 'acme', 'shared launch plan'), \
+             (2, 'globex', 'shared launch plan')",
+        )
+        .expect("seed docs");
+        rt.execute_query(
+            "CREATE POLICY tenant_only ON docs FOR SELECT USING (tenant_id = CURRENT_TENANT())",
+        )
+        .expect("create policy");
+        rt.execute_query("ALTER TABLE docs ENABLE ROW LEVEL SECURITY")
+            .expect("enable rls");
+
+        let _tenant = TenantGuard::set("acme");
+        let scope = make_scope(["docs".to_string()].into_iter().collect());
+        let candidates = CandidateCollections {
+            collections: vec!["docs".to_string()],
+            columns_by_collection: HashMap::new(),
+        };
+
+        let hits = text_search_bm25_scoped(&rt, &scope, "shared launch", &candidates, 10);
+
+        assert_eq!(hits.len(), 1, "RLS should hide the globex hit: {hits:?}");
+        let entity = rt
+            .inner
+            .db
+            .store()
+            .get(
+                "docs",
+                crate::storage::unified::entity::EntityId::new(hits[0].entity_id),
+            )
+            .expect("hit entity exists");
+        assert_eq!(row_text(&entity, "tenant_id"), Some("acme"));
+    }
+
+    #[test]
     fn execute_pipeline_retrieves_known_good_bm25_source_order() {
         let rt = fresh_runtime();
         rt.execute_query("CREATE TABLE docs (body TEXT) WITH CONTEXT INDEX ON (body)")
@@ -1400,6 +1577,41 @@ mod tests {
             depth2.iter().any(|hit| hit.depth == 2),
             "DEPTH 2 should include the second-hop graph hit: {depth2:?}"
         );
+    }
+
+    #[test]
+    fn filter_values_filters_rls_denied_rows() {
+        let rt = fresh_runtime();
+        rt.execute_query("CREATE TABLE docs (id INT, tenant_id TEXT, body TEXT)")
+            .expect("create docs");
+        rt.execute_query(
+            "INSERT INTO docs (id, tenant_id, body) VALUES \
+             (1, 'acme', 'incident FDD-12313'), \
+             (2, 'globex', 'incident FDD-12313')",
+        )
+        .expect("seed docs");
+        rt.execute_query(
+            "CREATE POLICY tenant_only ON docs FOR SELECT USING (tenant_id = CURRENT_TENANT())",
+        )
+        .expect("create policy");
+        rt.execute_query("ALTER TABLE docs ENABLE ROW LEVEL SECURITY")
+            .expect("enable rls");
+
+        let _tenant = TenantGuard::set("acme");
+        let scope = make_scope(["docs".to_string()].into_iter().collect());
+        let candidates = CandidateCollections {
+            collections: vec!["docs".to_string()],
+            columns_by_collection: HashMap::from([("docs".to_string(), vec!["body".to_string()])]),
+        };
+        let tokens = TokenSet {
+            keywords: vec!["incident".to_string()],
+            literals: vec!["FDD-12313".to_string()],
+        };
+
+        let rows = filter_values(&rt, &scope, &candidates, &tokens, 10);
+
+        assert_eq!(rows.len(), 1, "RLS should hide the globex row: {rows:?}");
+        assert_eq!(row_text(&rows[0].entity, "tenant_id"), Some("acme"));
     }
 
     /// Empty token sets short-circuit with a structured error before

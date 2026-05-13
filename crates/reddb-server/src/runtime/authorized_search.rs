@@ -538,4 +538,37 @@ mod tests {
         // Hit rate is computable.
         let _ = stats2.hit_rate();
     }
+
+    #[test]
+    fn visible_collections_cache_keeps_principals_separate() {
+        use crate::auth::privileges::{Action, GrantPrincipal, Resource};
+        use crate::auth::store::AuthStore;
+        use crate::auth::{AuthConfig, UserId};
+
+        let store = AuthStore::new(AuthConfig::default());
+        store.create_user("admin", "p", Role::Admin).unwrap();
+        store.create_user("alice", "p", Role::Read).unwrap();
+        store.create_user("bob", "p", Role::Read).unwrap();
+        store
+            .grant(
+                &UserId::platform("admin"),
+                Role::Admin,
+                GrantPrincipal::User(UserId::platform("alice")),
+                Resource::table_from_name("orders"),
+                vec![Action::Select],
+                false,
+                None,
+            )
+            .expect("grant alice orders");
+
+        let collections = vec!["orders".to_string()];
+        let alice = store.visible_collections_for_scope(None, Role::Read, "alice", &collections);
+        let bob = store.visible_collections_for_scope(None, Role::Read, "bob", &collections);
+
+        assert!(alice.contains("orders"));
+        assert!(
+            !bob.contains("orders"),
+            "bob must not reuse alice's visible-collections cache entry"
+        );
+    }
 }
