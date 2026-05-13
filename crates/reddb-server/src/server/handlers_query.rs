@@ -12,6 +12,7 @@ impl RedDBServer {
             capabilities,
             params,
         } = request;
+        let stream_ask = is_stream_ask_query(&query);
 
         // #358: when the client supplied `params`, bind them through the
         // shared user_params binder before dispatch. Falls back to the
@@ -33,6 +34,9 @@ impl RedDBServer {
 
         match exec_result {
             Ok(result) => {
+                if stream_ask {
+                    return ask_sse_response(&result);
+                }
                 // PLAN.md Phase 11.4 — when the operator picked a
                 // commit policy that requires replica acks (`ack_n`),
                 // block until the configured count of replicas have
@@ -63,6 +67,9 @@ impl RedDBServer {
                 )
             }
             Err(err) => {
+                if stream_ask {
+                    return ask_sse_error_response(&err);
+                }
                 if let crate::api::RedDBError::Validation {
                     message,
                     validation,
@@ -371,6 +378,179 @@ impl RedDBServer {
     }
 }
 
+fn is_stream_ask_query(query: &str) -> bool {
+    matches!(
+        crate::storage::query::modes::parse_multi(query),
+        Ok(crate::storage::query::ast::QueryExpr::Ask(ask)) if ask.stream
+    )
+}
+
+fn ask_sse_response(result: &crate::runtime::RuntimeQueryResult) -> HttpResponse {
+    match ask_sse_body(result) {
+        Some(body) => HttpResponse {
+            status: 200,
+            body: body.into_bytes(),
+            content_type: "text/event-stream",
+            extra_headers: Vec::new(),
+        },
+        None => HttpResponse {
+            status: 500,
+            body: crate::runtime::ai::sse_frame_encoder::encode(
+                &crate::runtime::ai::sse_frame_encoder::Frame::Error {
+                    code: 500,
+                    message: "ASK STREAM result missing ASK row".to_string(),
+                },
+            )
+            .into_bytes(),
+            content_type: "text/event-stream",
+            extra_headers: Vec::new(),
+        },
+    }
+}
+
+fn ask_sse_error_response(err: &crate::api::RedDBError) -> HttpResponse {
+    let (code, message) = match err {
+        crate::api::RedDBError::Validation { message, .. } => (422, message.clone()),
+        _ => map_runtime_error(err),
+    };
+    HttpResponse {
+        status: 200,
+        body: crate::runtime::ai::sse_frame_encoder::encode(
+            &crate::runtime::ai::sse_frame_encoder::Frame::Error { code, message },
+        )
+        .into_bytes(),
+        content_type: "text/event-stream",
+        extra_headers: Vec::new(),
+    }
+}
+
+fn ask_sse_body(result: &crate::runtime::RuntimeQueryResult) -> Option<String> {
+    use crate::runtime::ai::sse_frame_encoder::{
+        encode, AuditSummary, Frame, SourceRow, ValidationWarning,
+    };
+
+    if result.statement != "ask" {
+        return None;
+    }
+    let row = result.result.records.first()?;
+    let sources_json = schema_json_field(row, "sources_flat").unwrap_or(JsonValue::Array(vec![]));
+    let validation_json =
+        schema_json_field(row, "validation").unwrap_or(JsonValue::Object(Map::new()));
+
+    let sources_flat = sources_json
+        .as_array()
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|source| {
+            let urn = source.get("urn").and_then(JsonValue::as_str)?.to_string();
+            let payload = source
+                .get("payload")
+                .and_then(JsonValue::as_str)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| source.to_string_compact());
+            Some(SourceRow { urn, payload })
+        })
+        .collect();
+
+    let warnings = validation_json
+        .get("warnings")
+        .and_then(JsonValue::as_array)
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|warning| {
+            Some(ValidationWarning {
+                kind: warning.get("kind").and_then(JsonValue::as_str)?.to_string(),
+                detail: warning
+                    .get("detail")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            })
+        })
+        .collect();
+
+    let audit = AuditSummary {
+        provider: schema_text_field(row, "provider").unwrap_or_default(),
+        model: schema_text_field(row, "model").unwrap_or_default(),
+        prompt_tokens: schema_u32_field(row, "prompt_tokens").unwrap_or(0),
+        completion_tokens: schema_u32_field(row, "completion_tokens").unwrap_or(0),
+        cache_hit: schema_bool_field(row, "cache_hit").unwrap_or(false),
+    };
+
+    let mut body = String::new();
+    body.push_str(&encode(&Frame::Sources { sources_flat }));
+    body.push_str(&encode(&Frame::AnswerToken {
+        text: schema_text_field(row, "answer")?,
+    }));
+    body.push_str(&encode(&Frame::Validation {
+        ok: validation_json
+            .get("ok")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(true),
+        warnings,
+        audit,
+    }));
+    Some(body)
+}
+
+fn schema_field<'a>(
+    record: &'a crate::storage::query::unified::UnifiedRecord,
+    name: &str,
+) -> Option<&'a Value> {
+    record
+        .iter_fields()
+        .find_map(|(key, value)| (key.as_ref() == name).then_some(value))
+}
+
+fn schema_text_field(
+    record: &crate::storage::query::unified::UnifiedRecord,
+    name: &str,
+) -> Option<String> {
+    match schema_field(record, name)? {
+        Value::Text(s) => Some(s.to_string()),
+        Value::Email(s) | Value::Url(s) | Value::NodeRef(s) | Value::EdgeRef(s) => Some(s.clone()),
+        other => Some(format!("{other}")),
+    }
+}
+
+fn schema_u32_field(
+    record: &crate::storage::query::unified::UnifiedRecord,
+    name: &str,
+) -> Option<u32> {
+    match schema_field(record, name)? {
+        Value::Integer(n) => (*n >= 0).then_some((*n).min(u32::MAX as i64) as u32),
+        Value::UnsignedInteger(n) => Some((*n).min(u32::MAX as u64) as u32),
+        Value::BigInt(n)
+        | Value::TimestampMs(n)
+        | Value::Timestamp(n)
+        | Value::Duration(n)
+        | Value::Decimal(n) => (*n >= 0).then_some((*n).min(u32::MAX as i64) as u32),
+        Value::Float(n) => (*n >= 0.0).then_some((*n).min(u32::MAX as f64) as u32),
+        _ => None,
+    }
+}
+
+fn schema_bool_field(
+    record: &crate::storage::query::unified::UnifiedRecord,
+    name: &str,
+) -> Option<bool> {
+    match schema_field(record, name)? {
+        Value::Boolean(value) => Some(*value),
+        _ => None,
+    }
+}
+
+fn schema_json_field(
+    record: &crate::storage::query::unified::UnifiedRecord,
+    name: &str,
+) -> Option<JsonValue> {
+    match schema_field(record, name)? {
+        Value::Json(bytes) => crate::json::from_slice(bytes).ok(),
+        Value::Text(text) => crate::json::from_str(text).ok(),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -654,6 +834,59 @@ mod tests {
         assert!(text.contains("override invalid"), "{text}");
         assert!(text.contains(r#""mode":"lenient""#), "{text}");
         assert!(text.contains("mode_fallback"), "{text}");
+    }
+
+    #[test]
+    fn http_query_ask_stream_returns_ordered_sse_frames() {
+        let _guard = ASK_ENV_LOCK.lock().expect("env lock");
+        let stub = SequenceOpenAiStub::start(vec!["streamed answer"]);
+        let _api_base =
+            EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
+        let _api_key = EnvVarGuard::unset("REDDB_OPENAI_API_KEY");
+
+        let server = make_server();
+        configure_ask_stub_runtime(&server);
+
+        let r = server.handle_query(br#"{"query": "ASK 'why did login fail?' STREAM"}"#.to_vec());
+
+        assert_eq!(r.status, 200, "{}", body_str(&r));
+        assert_eq!(r.content_type, "text/event-stream");
+        assert_eq!(stub.request_count(), 1);
+        let text = body_str(&r);
+        let sources_pos = text.find("event: sources\n").expect("sources frame");
+        let token_pos = text
+            .find("event: answer_token\n")
+            .expect("answer_token frame");
+        let validation_pos = text.find("event: validation\n").expect("validation frame");
+        assert!(sources_pos < token_pos, "{text}");
+        assert!(token_pos < validation_pos, "{text}");
+        assert!(text.contains(r#"data: {"sources_flat":[]}"#), "{text}");
+        assert!(
+            text.contains(r#"data: {"text":"streamed answer"}"#),
+            "{text}"
+        );
+        assert!(text.contains(r#""audit":{"cache_hit":false"#), "{text}");
+        assert!(text.contains(r#""ok":true"#), "{text}");
+        assert!(!text.contains("event: error\n"), "{text}");
+    }
+
+    #[test]
+    fn http_query_ask_stream_cost_guard_returns_sse_error_frame() {
+        let server = make_server();
+        server
+            .runtime
+            .execute_query("SET CONFIG ask.max_prompt_tokens = 1")
+            .expect("set prompt guard");
+
+        let r = server.handle_query(br#"{"query": "ASK 'why did login fail?' STREAM"}"#.to_vec());
+
+        assert_eq!(r.status, 200, "{}", body_str(&r));
+        assert_eq!(r.content_type, "text/event-stream");
+        let text = body_str(&r);
+        assert!(text.starts_with("event: error\n"), "{text}");
+        assert!(text.contains(r#""code":413"#), "{text}");
+        assert!(text.contains("max_prompt_tokens"), "{text}");
+        assert!(!text.contains("event: validation\n"), "{text}");
     }
 
     fn configure_ask_stub_runtime(server: &RedDBServer) {

@@ -2386,6 +2386,7 @@ impl RedDb for GrpcRuntime {
                 .get("strict")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true),
+            stream: false,
         };
 
         let result = self
