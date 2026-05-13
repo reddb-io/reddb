@@ -415,11 +415,7 @@ impl GrpcClient {
             .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
         Ok(BulkInsertResult {
             affected: reply.count,
-            ids: reply
-                .items
-                .into_iter()
-                .map(|item| item.id.to_string())
-                .collect(),
+            ids: reply.ids.into_iter().map(|id| id.to_string()).collect(),
         })
     }
 
@@ -569,6 +565,7 @@ fn params_to_grpc_values(params: &[ParamValue]) -> Vec<reddb_grpc_proto::QueryVa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prost::Message;
 
     #[test]
     fn parse_query_json_extracts_rows_and_columns() {
@@ -590,6 +587,89 @@ mod tests {
         let qr = parse_query_json(input).unwrap();
         assert!(qr.rows.is_empty());
         assert!(qr.columns.is_empty());
+    }
+
+    #[test]
+    fn grpc_params_match_shared_fixtures() {
+        let manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "../../reddb-wire/tests/fixtures/params/manifest.json"
+        ))
+        .expect("manifest json");
+
+        for fixture in manifest["values"].as_array().expect("values array") {
+            let name = fixture["name"].as_str().expect("fixture name");
+            let expected = fixture["grpc_hex"].as_str().expect("fixture grpc_hex");
+            let encoded = params_to_grpc_values(&[fixture_param_value(name)]);
+            assert_eq!(expected, hex(&encoded[0].encode_to_vec()), "{name}");
+        }
+
+        for query in manifest["queries"].as_array().expect("queries array") {
+            let params = query["params"]
+                .as_array()
+                .expect("query params")
+                .iter()
+                .map(|param| fixture_param_value(param.as_str().expect("param name")))
+                .collect::<Vec<_>>();
+            let request = reddb_grpc_proto::QueryRequest {
+                query: query["sql"].as_str().expect("query sql").to_string(),
+                entity_types: Vec::new(),
+                capabilities: Vec::new(),
+                params: params_to_grpc_values(&params),
+            };
+            assert_eq!(
+                query["grpc_request_hex"]
+                    .as_str()
+                    .expect("query grpc_request_hex"),
+                hex(&request.encode_to_vec()),
+                "{}",
+                query["name"].as_str().unwrap()
+            );
+        }
+    }
+
+    fn fixture_param_value(name: &str) -> ParamValue {
+        match name {
+            "null" => ParamValue::Null,
+            "bool_true" => ParamValue::Bool(true),
+            "bool_false" => ParamValue::Bool(false),
+            "int_min" => ParamValue::Int(i64::MIN),
+            "int_max" => ParamValue::Int(i64::MAX),
+            "int_42" => ParamValue::Int(42),
+            "float_nan" => ParamValue::Float(f64::from_bits(0x7ff8000000000000)),
+            "float_pos_inf" => ParamValue::Float(f64::INFINITY),
+            "float_neg_inf" => ParamValue::Float(f64::NEG_INFINITY),
+            "float_subnormal_min" => ParamValue::Float(f64::from_bits(1)),
+            "text_unicode" => ParamValue::Text("h\u{e9}llo".to_string()),
+            "text_x" => ParamValue::Text("x".to_string()),
+            "bytes_empty" => ParamValue::Bytes(Vec::new()),
+            "bytes_deadbeef" => ParamValue::Bytes(vec![0xde, 0xad, 0xbe, 0xef]),
+            "json_nested" => ParamValue::Json(JsonValue::object([
+                ("a", JsonValue::Null),
+                (
+                    "z",
+                    JsonValue::array([
+                        JsonValue::Number(1.0),
+                        JsonValue::object([(
+                            "deep",
+                            JsonValue::array([JsonValue::Bool(true), JsonValue::Bool(false)]),
+                        )]),
+                    ]),
+                ),
+            ])),
+            "timestamp_zero" => ParamValue::Timestamp(0),
+            "timestamp_max" => ParamValue::Timestamp(i64::MAX),
+            "uuid_001122" => ParamValue::Uuid([
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff,
+            ]),
+            "vector_empty" => ParamValue::Vector(Vec::new()),
+            "vector_three" => ParamValue::Vector(vec![1.0, 2.0, -0.5]),
+            other => panic!("unknown fixture {other}"),
+        }
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 
     #[test]

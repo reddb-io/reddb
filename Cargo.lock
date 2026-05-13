@@ -2249,6 +2249,7 @@ dependencies = [
  "async-trait",
  "jsonwebtoken",
  "proptest",
+ "prost",
  "reddb-io-client-connector",
  "reddb-io-grpc-proto",
  "reddb-io-server",
@@ -2343,6 +2344,8 @@ version = "1.0.8"
 dependencies = [
  "insta",
  "proptest",
+ "prost",
+ "reddb-io-grpc-proto",
  "regex",
  "serde_json",
  "url",

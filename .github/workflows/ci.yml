@@ -208,6 +208,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.91.0
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
@@ -233,9 +234,11 @@ jobs:
       - name: JS RedWire parameter fixtures
         working-directory: drivers/js
         run: node --test test/redwire.params.test.mjs
-      - name: Go RedWire parameter fixtures
+      - name: Rust gRPC parameter fixtures
+        run: cargo test -p reddb-io-client --features grpc --lib grpc_params_match_shared_fixtures
+      - name: Go RedWire/gRPC parameter fixtures
         working-directory: drivers/go
-        run: go test ./redwire
+        run: go test ./redwire ./grpcx
       - name: Java RedWire parameter fixtures
         working-directory: drivers/java
         run: ./gradlew test --tests dev.reddb.ValueCodecTest

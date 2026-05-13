@@ -5,102 +5,122 @@
     {
       "name": "null",
       "kind": "null",
-      "redwire_hex": "00"
+      "redwire_hex": "00",
+      "grpc_hex": "0a00"
     },
     {
       "name": "bool_true",
       "kind": "bool",
-      "redwire_hex": "0101"
+      "redwire_hex": "0101",
+      "grpc_hex": "1001"
     },
     {
       "name": "bool_false",
       "kind": "bool",
-      "redwire_hex": "0100"
+      "redwire_hex": "0100",
+      "grpc_hex": "1000"
     },
     {
       "name": "int_min",
       "kind": "int",
-      "redwire_hex": "020000000000000080"
+      "redwire_hex": "020000000000000080",
+      "grpc_hex": "1880808080808080808001"
     },
     {
       "name": "int_max",
       "kind": "int",
-      "redwire_hex": "02ffffffffffffff7f"
+      "redwire_hex": "02ffffffffffffff7f",
+      "grpc_hex": "18ffffffffffffffff7f"
     },
     {
       "name": "int_42",
       "kind": "int",
-      "redwire_hex": "022a00000000000000"
+      "redwire_hex": "022a00000000000000",
+      "grpc_hex": "182a"
     },
     {
       "name": "float_nan",
       "kind": "float",
-      "redwire_hex": "03000000000000f87f"
+      "redwire_hex": "03000000000000f87f",
+      "grpc_hex": "21000000000000f87f"
     },
     {
       "name": "float_pos_inf",
       "kind": "float",
-      "redwire_hex": "03000000000000f07f"
+      "redwire_hex": "03000000000000f07f",
+      "grpc_hex": "21000000000000f07f"
     },
     {
       "name": "float_neg_inf",
       "kind": "float",
-      "redwire_hex": "03000000000000f0ff"
+      "redwire_hex": "03000000000000f0ff",
+      "grpc_hex": "21000000000000f0ff"
     },
     {
       "name": "float_subnormal_min",
       "kind": "float",
-      "redwire_hex": "030100000000000000"
+      "redwire_hex": "030100000000000000",
+      "grpc_hex": "210100000000000000"
     },
     {
       "name": "text_unicode",
       "kind": "text",
-      "redwire_hex": "040600000068c3a96c6c6f"
+      "redwire_hex": "040600000068c3a96c6c6f",
+      "grpc_hex": "2a0668c3a96c6c6f"
     },
     {
       "name": "text_x",
       "kind": "text",
-      "redwire_hex": "040100000078"
+      "redwire_hex": "040100000078",
+      "grpc_hex": "2a0178"
     },
     {
       "name": "bytes_empty",
       "kind": "bytes",
-      "redwire_hex": "0500000000"
+      "redwire_hex": "0500000000",
+      "grpc_hex": "3200"
     },
     {
       "name": "bytes_deadbeef",
       "kind": "bytes",
-      "redwire_hex": "0504000000deadbeef"
+      "redwire_hex": "0504000000deadbeef",
+      "grpc_hex": "3204deadbeef"
     },
     {
       "name": "json_nested",
       "kind": "json",
-      "redwire_hex": "07280000007b2261223a6e756c6c2c227a223a5b312c7b2264656570223a5b747275652c66616c73655d7d5d7d"
+      "redwire_hex": "07280000007b2261223a6e756c6c2c227a223a5b312c7b2264656570223a5b747275652c66616c73655d7d5d7d",
+      "grpc_hex": "42287b2261223a6e756c6c2c227a223a5b312c7b2264656570223a5b747275652c66616c73655d7d5d7d"
     },
     {
       "name": "timestamp_zero",
       "kind": "timestamp",
-      "redwire_hex": "080000000000000000"
+      "redwire_hex": "080000000000000000",
+      "grpc_hex": "4800"
     },
     {
       "name": "timestamp_max",
       "kind": "timestamp",
-      "redwire_hex": "08ffffffffffffff7f"
+      "redwire_hex": "08ffffffffffffff7f",
+      "grpc_hex": "48ffffffffffffffff7f"
     },
     {
       "name": "uuid_001122",
       "kind": "uuid",
-      "redwire_hex": "0900112233445566778899aabbccddeeff"
+      "redwire_hex": "0900112233445566778899aabbccddeeff",
+      "grpc_hex": "521000112233445566778899aabbccddeeff"
     },
     {
       "name": "vector_empty",
       "kind": "vector",
-      "redwire_hex": "0600000000"
+      "redwire_hex": "0600000000",
+      "grpc_hex": "3a00"
     },
     {
       "name": "vector_three",
       "kind": "vector",
-      "redwire_hex": "06030000000000803f00000040000000bf"
+      "redwire_hex": "06030000000000803f00000040000000bf",
+      "grpc_hex": "3a0e0a0c0000803f00000040000000bf"
     }
   ],
   "queries": [
@@ -112,7 +132,8 @@
         "text_x",
         "null"
       ],
-      "redwire_hex": "0900000053454c45435420243103000000022a0000000000000004010000007800"
+      "redwire_hex": "0900000053454c45435420243103000000022a0000000000000004010000007800",
+      "grpc_request_hex": "0a0953454c4543542024312202182a22032a017822020a00"
     }
   ]
 }
