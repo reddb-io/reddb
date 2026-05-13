@@ -5,6 +5,9 @@ RedWire (TCP + mTLS), gRPC, and HTTP straight to a remote RedDB
 server. Ships the `red_client` thin binary for an ad-hoc REPL — about
 10x smaller than `@reddb-io/sdk`.
 
+This package is the remote counterpart to the embedded-only
+`@reddb-io/sdk`.
+
 > Embedded engines (`memory://`, `file:///path`) are intentionally
 > rejected by this package. Use [`@reddb-io/sdk`](../js) instead if you
 > need an in-process database.
