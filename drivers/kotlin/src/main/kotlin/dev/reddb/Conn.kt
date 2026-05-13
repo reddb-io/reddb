@@ -16,6 +16,9 @@ public interface Conn : AutoCloseable {
     /** Run a SQL query with positional `$N` parameters. */
     public suspend fun query(sql: String, vararg params: Any?): ByteArray
 
+    /** Create a small prepared-query builder over positional `$N` parameters. */
+    public fun prepare(sql: String): PreparedQuery = PreparedQuery(this, sql)
+
     /** Insert a single row into a collection. `payload` is anything Jackson can serialise. */
     public suspend fun insert(collection: String, payload: Any)
 
@@ -33,4 +36,33 @@ public interface Conn : AutoCloseable {
 
     /** Idempotent close — second call is a no-op. */
     public override fun close()
+}
+
+public class PreparedQuery internal constructor(
+    private val conn: Conn,
+    private val sql: String,
+) {
+    private val params = mutableListOf<Any?>()
+
+    public fun bind(value: Any?): PreparedQuery {
+        params += value
+        return this
+    }
+
+    public fun bind(index: Int, value: Any?): PreparedQuery {
+        require(index >= 1) { "index is 1-based" }
+        while (params.size < index) {
+            params += null
+        }
+        params[index - 1] = value
+        return this
+    }
+
+    public fun clear(): PreparedQuery {
+        params.clear()
+        return this
+    }
+
+    public suspend fun query(): ByteArray =
+        conn.query(sql, *params.toTypedArray())
 }

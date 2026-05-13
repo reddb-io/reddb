@@ -3,58 +3,58 @@ package dev.reddb;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
-import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
+import java.net.InetAddress;
+import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * End-to-end smoke against a freshly-spawned RedDB binary. Gated on
  * {@code RED_SMOKE=1} so normal test runs don't drag in cargo build
- * time. The test discovers the bind port from stdout — the engine
- * prints `listening on tcp://127.0.0.1:<port>` once the listener is
- * up.
+ * time.
  */
 @EnabledIfEnvironmentVariable(named = "RED_SMOKE", matches = "1")
 class SmokeTest {
 
-    private static final Pattern PORT_RE = Pattern.compile("(?:tcp://|listening on .*?:|port=)(\\d{2,5})");
-
     @Test
     void runsAgainstRealEngine() throws Exception {
         File repoRoot = findRepoRoot();
-        ProcessBuilder pb = new ProcessBuilder(
-            "cargo", "run", "--release", "--bin", "red", "--",
-            "serve", "--bind", "127.0.0.1:0", "--anon-ok"
-        );
+        Path dataDir = Files.createTempDirectory("reddb-java-smoke-");
+        int port = freePort();
+        ProcessBuilder pb = new ProcessBuilder(redCommand(dataDir.resolve("data.db"), port));
         pb.directory(repoRoot);
         pb.redirectErrorStream(true);
+        pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
         Process proc = pb.start();
         try {
-            int port = waitForPort(proc.getInputStream(), 60_000);
-            try (Conn conn = Reddb.connect("red://127.0.0.1:" + port)) {
+            try (Conn conn = waitForConnect("red://127.0.0.1:" + port, Duration.ofSeconds(60))) {
                 conn.ping();
-                conn.insert("smoke_users", Map.of("name", "alice", "age", 30));
-                byte[] result = conn.query("SELECT * FROM smoke_users WHERE name = 'alice'");
+                conn.query("CREATE TABLE smoke_params (id INT, name TEXT)");
+                conn.query("INSERT INTO smoke_params (id, name) VALUES ($1, $2)", 42, "alice");
+                byte[] result = conn.query("SELECT 1");
                 String body = new String(result, StandardCharsets.UTF_8);
-                assertTrue(body.contains("alice"), "expected alice in: " + body);
+                assertTrue(body.contains("\"ok\":true"), "expected ok result in: " + body);
                 byte[] paramResult = conn.query(
-                    "SELECT * FROM smoke_users WHERE age = $1 AND name = $2 AND $3 IS NULL",
-                    30,
-                    "alice",
-                    null
+                    "SELECT name FROM smoke_params WHERE id = $1 AND name = $2",
+                    42,
+                    "alice"
                 );
                 String paramBody = new String(paramResult, StandardCharsets.UTF_8);
                 assertTrue(paramBody.contains("alice"), "expected parameterized alice in: " + paramBody);
-                conn.delete("smoke_users", "alice");
+                byte[] preparedResult = conn.prepare("SELECT name FROM smoke_params WHERE id = $1 AND name = $2")
+                    .bind(42)
+                    .bind("alice")
+                    .query();
+                String preparedBody = new String(preparedResult, StandardCharsets.UTF_8);
+                assertTrue(preparedBody.contains("alice"), "expected prepared alice in: " + preparedBody);
             }
         } finally {
             proc.destroy();
@@ -64,17 +64,54 @@ class SmokeTest {
         }
     }
 
-    private static int waitForPort(InputStream in, long timeoutMs) throws IOException {
-        long deadline = System.currentTimeMillis() + timeoutMs;
-        BufferedReader br = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
-        String line;
-        while (System.currentTimeMillis() < deadline && (line = br.readLine()) != null) {
-            Matcher m = PORT_RE.matcher(line);
-            if (m.find()) {
-                return Integer.parseInt(m.group(1));
-            }
+    private static List<String> redCommand(Path dataPath, int port) {
+        String redBin = System.getenv("RED_BIN");
+        List<String> cmd = new ArrayList<>();
+        if (redBin != null && !redBin.isBlank()) {
+            cmd.add(redBin);
+        } else {
+            cmd.add("cargo");
+            cmd.add("run");
+            cmd.add("--release");
+            cmd.add("--bin");
+            cmd.add("red");
+            cmd.add("--");
         }
-        throw new IOException("never saw a bind port in engine stdout");
+        cmd.add("server");
+        cmd.add("--path");
+        cmd.add(dataPath.toString());
+        cmd.add("--bind");
+        cmd.add("127.0.0.1:" + port);
+        return cmd;
+    }
+
+    private static Conn waitForConnect(String uri, Duration timeout) throws Exception {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        RuntimeException last = null;
+        while (System.nanoTime() < deadline) {
+            try {
+                Conn conn = Reddb.connect(uri);
+                try {
+                    conn.ping();
+                    return conn;
+                } catch (RuntimeException e) {
+                    conn.close();
+                    last = e;
+                }
+            } catch (RuntimeException e) {
+                last = e;
+            }
+            Thread.sleep(50);
+        }
+        IOException error = new IOException("server did not accept connections at " + uri);
+        if (last != null) error.initCause(last);
+        throw error;
+    }
+
+    private static int freePort() throws IOException {
+        try (ServerSocket socket = new ServerSocket(0, 0, InetAddress.getByName("127.0.0.1"))) {
+            return socket.getLocalPort();
+        }
     }
 
     private static File findRepoRoot() {

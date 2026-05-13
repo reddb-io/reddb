@@ -41,6 +41,10 @@ byte[] rows = conn.query(
     new float[]{0.1f, 0.2f, 0.3f},
     10
 );
+
+byte[] prepared = conn.prepare("SELECT * FROM users WHERE id = $1")
+    .bind(42)
+    .query();
 ```
 
 Native mapping:
@@ -91,7 +95,7 @@ embedded engine — they currently throw
 ```
 
 End-to-end smoke against a real engine is gated on
-`RED_SMOKE=1`:
+`RED_SMOKE=1`. Set `RED_BIN=/path/to/red` to reuse an existing binary:
 
 ```
 RED_SMOKE=1 ./gradlew test --tests dev.reddb.SmokeTest

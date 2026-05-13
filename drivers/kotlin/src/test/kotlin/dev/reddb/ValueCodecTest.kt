@@ -3,6 +3,7 @@ package dev.reddb
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import dev.reddb.redwire.ValueCodec
+import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -115,6 +116,26 @@ class ValueCodecTest {
     }
 
     @Test
+    fun preparedQueryBindsParams() = runBlocking {
+        val conn = RecordingConn()
+
+        conn.prepare("SELECT \$1, \$2")
+            .bind(42)
+            .bind(2, "x")
+            .query()
+
+        assertEquals("SELECT \$1, \$2", conn.sql)
+        assertArrayEquals(arrayOf<Any?>(42, "x"), conn.params)
+
+        conn.prepare("SELECT \$1")
+            .bind(1, null)
+            .query()
+
+        assertEquals("SELECT \$1", conn.sql)
+        assertArrayEquals(arrayOf<Any?>(null), conn.params)
+    }
+
+    @Test
     fun httpParamsUseJsonEnvelopesForTaggedValues() {
         val params: JsonNode = ValueCodec.toHttpParams(
             arrayOf<Any?>(
@@ -201,4 +222,33 @@ class ValueCodecTest {
 
     private fun ByteArray.toHex(): String =
         joinToString("") { "%02x".format(it.toInt() and 0xff) }
+
+    private class RecordingConn : Conn {
+        lateinit var sql: String
+        lateinit var params: Array<out Any?>
+
+        override suspend fun query(sql: String): ByteArray {
+            this.sql = sql
+            this.params = emptyArray()
+            return byteArrayOf()
+        }
+
+        override suspend fun query(sql: String, vararg params: Any?): ByteArray {
+            this.sql = sql
+            this.params = params
+            return byteArrayOf()
+        }
+
+        override suspend fun insert(collection: String, payload: Any) {}
+
+        override suspend fun bulkInsert(collection: String, rows: List<Any?>) {}
+
+        override suspend fun get(collection: String, id: String): ByteArray = byteArrayOf()
+
+        override suspend fun delete(collection: String, id: String) {}
+
+        override suspend fun ping() {}
+
+        override fun close() {}
+    }
 }

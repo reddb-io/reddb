@@ -63,6 +63,10 @@ val hits = conn.query(
     floatArrayOf(0.1f, 0.2f, 0.3f),
     5,
 )
+
+val prepared = conn.prepare("SELECT * FROM users WHERE id = \$1")
+    .bind(42)
+    .query()
 ```
 
 Native Kotlin/JVM mapping:
@@ -104,8 +108,8 @@ Default port is **5050** for every scheme.
 ```
 
 The smoke test (`SmokeTest`) is gated on `RED_SMOKE=1` and spawns the
-`red serve` binary via `cargo run --release`. Leave it off for ordinary
-test runs.
+`red server` binary via `cargo run --release`. Set `RED_BIN=/path/to/red`
+to reuse an existing binary. Leave it off for ordinary test runs.
 
 ## Layout
 

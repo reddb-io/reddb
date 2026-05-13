@@ -14,6 +14,11 @@ public interface Conn extends AutoCloseable {
     /** Run a SQL query with positional `$N` bind parameters. */
     byte[] query(String sql, Object... params);
 
+    /** Create a small prepared-query builder over positional `$N` bind parameters. */
+    default PreparedStatement prepare(String sql) {
+        return new PreparedStatement(this, sql);
+    }
+
     /** Insert a single row into a collection. `payload` is anything Jackson can serialise. */
     void insert(String collection, Object payload);
 

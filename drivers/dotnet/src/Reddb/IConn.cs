@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -18,6 +19,13 @@ public interface IConn : IAsyncDisposable
 
     /// <summary>Run a SQL query with positional parameters bound to <c>$N</c> placeholders.</summary>
     ValueTask<ReadOnlyMemory<byte>> QueryAsync(string sql, params object?[] args);
+
+    /// <summary>Run a parameterized query and deserialise the JSON response.</summary>
+    async ValueTask<T?> QueryAsync<T>(string sql, params object?[] args)
+    {
+        ReadOnlyMemory<byte> rows = await QueryAsync(sql, args).ConfigureAwait(false);
+        return JsonSerializer.Deserialize<T>(rows.Span);
+    }
 
     /// <summary>Insert a single row into a collection. <paramref name="payload"/> is anything <c>System.Text.Json</c> can serialise.</summary>
     ValueTask InsertAsync(string collection, object payload, CancellationToken cancellationToken = default);
