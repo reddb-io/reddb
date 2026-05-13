@@ -2309,6 +2309,9 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_description("Path to TLS certificate PEM (auto-generated if omitted)"),
                 cli::types::FlagSchema::new("wire-tls-key")
                     .with_description("Path to TLS private key PEM"),
+                cli::types::FlagSchema::new("pg-bind").with_description(
+                    "PostgreSQL wire protocol bind address (enables psql / JDBC / DBeaver clients)",
+                ),
                 cli::types::FlagSchema::new("role")
                     .with_short('r')
                     .with_description("Server role")
@@ -2325,6 +2328,23 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                 cli::types::FlagSchema::new("workers")
                     .with_short('w')
                     .with_description("Worker thread count (default: auto-detect from CPUs)"),
+                cli::types::FlagSchema::new("log-dir").with_description(
+                    "Directory for rotating log files (defaults to the parent of --path / ./logs)",
+                ),
+                cli::types::FlagSchema::new("log-level")
+                    .with_description(
+                        "Log level filter - trace / debug / info / warn / error, or a RUST_LOG expression",
+                    )
+                    .with_default("info"),
+                cli::types::FlagSchema::new("log-format")
+                    .with_description("Log output format")
+                    .with_choices(&["pretty", "json"])
+                    .with_default("pretty"),
+                cli::types::FlagSchema::new("log-keep-days")
+                    .with_description("Number of rotated log files to keep")
+                    .with_default("14"),
+                cli::types::FlagSchema::boolean("no-log-file")
+                    .with_description("Disable rotating file logs (stderr only)"),
             ]);
         }
         Some("replica") => {
@@ -2669,10 +2689,12 @@ fn build_server_config(
         });
     let wire_bind_addr = flag_string(flags, "wire-bind").filter(|v| !v.is_empty());
     let wire_tls_bind_addr = flag_string(flags, "wire-tls-bind").filter(|v| !v.is_empty());
+    let pg_bind_addr = flag_string(flags, "pg-bind").filter(|v| !v.is_empty());
     let router_bind_addr = if explicit_grpc_bind.is_none()
         && explicit_http_bind.is_none()
         && wire_bind_addr.is_none()
         && wire_tls_bind_addr.is_none()
+        && pg_bind_addr.is_none()
         && !grpc_flag
         && !http_flag
     {
@@ -2684,10 +2706,17 @@ fn build_server_config(
     } else {
         None
     };
+    let should_resolve_grpc_http = grpc_flag
+        || http_flag
+        || explicit_grpc_bind.is_some()
+        || explicit_http_bind.is_some()
+        || legacy_bind.is_some();
     let (grpc_bind_addr, http_bind_addr) = if router_bind_addr.is_some() {
         (None, None)
-    } else {
+    } else if should_resolve_grpc_http {
         resolve_server_binds(flags)?
+    } else {
+        (None, None)
     };
     let path = resolve_server_path(flags).map(PathBuf::from);
     let role = forced_role
@@ -2703,8 +2732,6 @@ fn build_server_config(
     let wire_tls_key = flag_string(flags, "wire-tls-key")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from);
-
-    let pg_bind_addr = flag_string(flags, "pg-bind").filter(|v| !v.is_empty());
 
     // Phase 6 logging: assemble the TelemetryConfig from --log-* flags,
     // falling back to a path-derived default when flags are absent.
@@ -4866,6 +4893,40 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
         );
         assert_eq!(config.grpc_bind_addr.as_deref(), Some("0.0.0.0:50051"));
         assert_eq!(config.http_bind_addr.as_deref(), Some("0.0.0.0:8080"));
+    }
+
+    #[test]
+    fn parser_accepts_pg_bind_and_no_log_file_server_flags() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::clear(&[
+            "REDDB_BIND_ADDR",
+            "REDDB_GRPC_BIND_ADDR",
+            "REDDB_HTTP_BIND_ADDR",
+        ]);
+
+        let args = vec![
+            "server".to_string(),
+            "--pg-bind".to_string(),
+            "127.0.0.1:55432".to_string(),
+            "--no-log-file".to_string(),
+        ];
+        let tokens = cli::token::tokenize(&args);
+        let parser = cli::schema::SchemaParser::new(build_flags_for_command(Some("server")));
+        let result = parser.parse(&tokens);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        let config = build_server_config(&result.flags, None).unwrap();
+        assert_eq!(config.pg_bind_addr.as_deref(), Some("127.0.0.1:55432"));
+        assert_eq!(config.router_bind_addr, None);
+        assert_eq!(config.grpc_bind_addr, None);
+        assert_eq!(config.http_bind_addr, None);
+        assert!(
+            config
+                .telemetry
+                .as_ref()
+                .expect("telemetry config")
+                .log_file_disabled
+        );
     }
 
     #[test]

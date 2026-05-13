@@ -667,7 +667,8 @@ pub fn run_server_with_large_stack(config: ServerCommandConfig) -> Result<(), St
     let has_any = config.router_bind_addr.is_some()
         || config.grpc_bind_addr.is_some()
         || config.http_bind_addr.is_some()
-        || config.wire_bind_addr.is_some();
+        || config.wire_bind_addr.is_some()
+        || config.pg_bind_addr.is_some();
     if !has_any {
         return Err("at least one server bind address must be configured".into());
     }
@@ -681,7 +682,8 @@ pub fn run_server_with_large_stack(config: ServerCommandConfig) -> Result<(), St
             (true, true) => "red-server-dual",
             (true, false) => "red-server-grpc",
             (false, true) => "red-server-http",
-            (false, false) => "red-server-wire",
+            (false, false) if config.wire_bind_addr.is_some() => "red-server-wire",
+            (false, false) => "red-server-pg-wire",
         }
     };
 
@@ -749,9 +751,10 @@ fn run_configured_servers(config: ServerCommandConfig) -> Result<(), String> {
         (Some(grpc_bind_addr), None) => run_grpc_server(config, grpc_bind_addr),
         (None, Some(http_bind_addr)) => run_http_server(config, http_bind_addr),
         (None, None) => {
-            // Wire-only mode
             if let Some(wire_addr) = config.wire_bind_addr.clone() {
                 run_wire_only_server(config, wire_addr)
+            } else if let Some(pg_addr) = config.pg_bind_addr.clone() {
+                run_pg_only_server(config, pg_addr)
             } else {
                 Err("at least one server bind address must be configured".to_string())
             }
@@ -1314,6 +1317,7 @@ fn run_wire_only_server(config: ServerCommandConfig, wire_addr: String) -> Resul
     let signal_runtime = runtime.clone();
     tokio_runtime.block_on(async move {
         spawn_lifecycle_signal_handler(signal_runtime).await;
+        spawn_pg_listener(&config, &runtime);
         let wire_rt = Arc::new(runtime);
         let cfg = crate::wire::RedWireConfig {
             bind_addr: wire_addr,
@@ -1321,6 +1325,35 @@ fn run_wire_only_server(config: ServerCommandConfig, wire_addr: String) -> Resul
             oauth: None,
         };
         crate::wire::start_redwire_listener(cfg, wire_rt)
+            .await
+            .map_err(|e| e.to_string())
+    })
+}
+
+#[inline(never)]
+fn run_pg_only_server(config: ServerCommandConfig, pg_addr: String) -> Result<(), String> {
+    let rt_config = detect_runtime_config();
+    let workers = config.workers.unwrap_or(rt_config.suggested_workers);
+    let cli_telemetry = config.telemetry.clone();
+    let db_options = config.to_db_options();
+
+    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(workers)
+        .thread_stack_size(rt_config.stack_size)
+        .build()
+        .map_err(|err| format!("tokio runtime: {err}"))?;
+
+    let (runtime, _auth_store, _telemetry_guard) =
+        build_runtime_and_auth_store(db_options, cli_telemetry)?;
+    let signal_runtime = runtime.clone();
+    tokio_runtime.block_on(async move {
+        spawn_lifecycle_signal_handler(signal_runtime).await;
+        let cfg = crate::wire::PgWireConfig {
+            bind_addr: pg_addr,
+            ..Default::default()
+        };
+        crate::wire::start_pg_wire_listener(cfg, Arc::new(runtime))
             .await
             .map_err(|e| e.to_string())
     })

@@ -44,6 +44,139 @@ async fn postgres_extended_query_binds_and_returns_rows() {
     write_frontend_frame(&mut stream, b'X', Vec::new()).await;
 }
 
+#[tokio::test]
+async fn postgres_extended_execute_emits_row_description_without_describe() {
+    let (addr, _server) = start_server().await;
+    let mut stream = TcpStream::connect(addr).await.expect("connect pg wire");
+
+    write_startup(&mut stream).await;
+    read_until_ready(&mut stream).await;
+
+    write_frontend_frame(
+        &mut stream,
+        b'P',
+        parse_body("", "SELECT $1::int", &[PgOid::Int4.as_u32()]),
+    )
+    .await;
+    write_frontend_frame(
+        &mut stream,
+        b'B',
+        bind_body("", "", &[0], &[Some(b"42".as_slice())], &[]),
+    )
+    .await;
+    write_frontend_frame(&mut stream, b'E', execute_body("", 0)).await;
+    write_frontend_frame(&mut stream, b'S', Vec::new()).await;
+
+    let frames = read_until_ready(&mut stream).await;
+    assert_eq!(
+        frames.iter().map(|(tag, _)| *tag).collect::<Vec<_>>(),
+        b"12TDCZ"
+    );
+    let cells = decode_data_row(&frames[3].1);
+    assert_eq!(cells[0].as_deref(), Some(b"42".as_slice()));
+
+    write_frontend_frame(&mut stream, b'X', Vec::new()).await;
+}
+
+#[tokio::test]
+async fn postgres_extended_query_supports_binary_text_params_insert_and_close() {
+    let (addr, _server) = start_server().await;
+    let mut stream = TcpStream::connect(addr).await.expect("connect pg wire");
+
+    write_startup(&mut stream).await;
+    read_until_ready(&mut stream).await;
+
+    write_frontend_frame(
+        &mut stream,
+        b'Q',
+        query_body("CREATE TABLE pg_ext_items (id INT, name TEXT)"),
+    )
+    .await;
+    let create_frames = read_until_ready(&mut stream).await;
+    assert_eq!(create_frames.last().map(|(tag, _)| *tag), Some(b'Z'));
+
+    write_frontend_frame(
+        &mut stream,
+        b'P',
+        parse_body(
+            "ins",
+            "INSERT INTO pg_ext_items (id, name) VALUES ($1, $2)",
+            &[PgOid::Int8.as_u32(), PgOid::Text.as_u32()],
+        ),
+    )
+    .await;
+    write_frontend_frame(
+        &mut stream,
+        b'B',
+        bind_body(
+            "ins_portal",
+            "ins",
+            &[1, 0],
+            &[Some(&7i64.to_be_bytes()), Some(b"alice".as_slice())],
+            &[],
+        ),
+    )
+    .await;
+    write_frontend_frame(&mut stream, b'E', execute_body("ins_portal", 0)).await;
+    write_frontend_frame(&mut stream, b'C', close_body(b'P', "ins_portal")).await;
+    write_frontend_frame(&mut stream, b'C', close_body(b'S', "ins")).await;
+    write_frontend_frame(&mut stream, b'S', Vec::new()).await;
+
+    let insert_frames = read_until_ready(&mut stream).await;
+    assert_eq!(
+        insert_frames
+            .iter()
+            .map(|(tag, _)| *tag)
+            .collect::<Vec<_>>(),
+        b"12C33Z"
+    );
+    assert_eq!(decode_command_complete(&insert_frames[2].1), "INSERT 0 1");
+
+    write_frontend_frame(
+        &mut stream,
+        b'P',
+        parse_body(
+            "sel",
+            "SELECT id, name FROM pg_ext_items WHERE id = $1 AND name = $2",
+            &[PgOid::Int4.as_u32(), PgOid::Text.as_u32()],
+        ),
+    )
+    .await;
+    write_frontend_frame(
+        &mut stream,
+        b'B',
+        bind_body(
+            "sel_portal",
+            "sel",
+            &[0],
+            &[Some(b"7".as_slice()), Some(b"alice".as_slice())],
+            &[],
+        ),
+    )
+    .await;
+    write_frontend_frame(&mut stream, b'D', describe_body(b'P', "sel_portal")).await;
+    write_frontend_frame(&mut stream, b'E', execute_body("sel_portal", 0)).await;
+    write_frontend_frame(&mut stream, b'C', close_body(b'P', "sel_portal")).await;
+    write_frontend_frame(&mut stream, b'C', close_body(b'S', "sel")).await;
+    write_frontend_frame(&mut stream, b'S', Vec::new()).await;
+
+    let select_frames = read_until_ready(&mut stream).await;
+    assert_eq!(
+        select_frames
+            .iter()
+            .map(|(tag, _)| *tag)
+            .collect::<Vec<_>>(),
+        b"12TDC33Z"
+    );
+    let cells = decode_data_row(&select_frames[3].1);
+    assert_eq!(cells.len(), 2);
+    assert_eq!(cells[0].as_deref(), Some(b"7".as_slice()));
+    assert_eq!(cells[1].as_deref(), Some(b"alice".as_slice()));
+    assert_eq!(decode_command_complete(&select_frames[4].1), "SELECT 1");
+
+    write_frontend_frame(&mut stream, b'X', Vec::new()).await;
+}
+
 async fn start_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -103,6 +236,12 @@ async fn read_until_ready<R: AsyncRead + Unpin>(stream: &mut R) -> Vec<(u8, Vec<
     }
 }
 
+fn query_body(query: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    push_pg_cstring(&mut out, query);
+    out
+}
+
 fn parse_body(statement: &str, query: &str, oids: &[u32]) -> Vec<u8> {
     let mut out = Vec::new();
     push_pg_cstring(&mut out, statement);
@@ -155,6 +294,12 @@ fn execute_body(portal: &str, max_rows: u32) -> Vec<u8> {
     let mut out = Vec::new();
     push_pg_cstring(&mut out, portal);
     out.extend_from_slice(&max_rows.to_be_bytes());
+    out
+}
+
+fn close_body(target: u8, name: &str) -> Vec<u8> {
+    let mut out = vec![target];
+    push_pg_cstring(&mut out, name);
     out
 }
 

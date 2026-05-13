@@ -213,6 +213,7 @@ async fn handle_parse<S>(
 where
     S: AsyncWrite + Unpin,
 {
+    let inferred_param_type_oids = infer_pg_cast_param_type_oids(&msg.query);
     let sql = rewrite_pg_parameter_casts(&msg.query);
     let parsed_param_count = match crate::storage::query::modes::parse_multi(&sql) {
         Ok(parsed) => Some(
@@ -236,6 +237,14 @@ where
             .or_else(|| pg_scalar_select_param_index(&sql).map(|idx| idx + 1))
             .unwrap_or(0);
         param_type_oids.resize(count, PgOid::Unknown.as_u32());
+    }
+    for (idx, oid) in inferred_param_type_oids {
+        if idx >= param_type_oids.len() {
+            param_type_oids.resize(idx + 1, PgOid::Unknown.as_u32());
+        }
+        if param_type_oids[idx] == PgOid::Unknown.as_u32() {
+            param_type_oids[idx] = oid;
+        }
     }
     prepared.insert(
         msg.statement,
@@ -360,12 +369,16 @@ where
         return Ok(());
     };
     let _max_rows = msg.max_rows;
+    let was_described = portal.described_result.is_some();
     let result = match portal.described_result.take() {
         Some(result) => Ok(result),
         None => execute_pg_query_result(runtime, &portal.sql, &portal.params),
     };
     match result {
-        Ok(result) => emit_success_result_without_row_description(stream, &result).await,
+        Ok(result) if was_described => {
+            emit_success_result_without_row_description(stream, &result).await
+        }
+        Ok(result) => emit_success_result(stream, &result).await,
         Err(err) => {
             let code = classify_sqlstate(&err);
             send_error(stream, code, &err).await
@@ -519,11 +532,7 @@ fn rewrite_pg_parameter_casts(sql: &str) -> String {
             }
             if type_start != pos {
                 out.push_str(&sql[cursor..param_start]);
-                out.push_str("CAST(");
                 out.push_str(&sql[param_start..param_end]);
-                out.push_str(" AS ");
-                out.push_str(&sql[type_start..pos]);
-                out.push(')');
                 cursor = pos;
                 continue;
             }
@@ -533,9 +542,83 @@ fn rewrite_pg_parameter_casts(sql: &str) -> String {
     out
 }
 
+fn infer_pg_cast_param_type_oids(sql: &str) -> Vec<(usize, u32)> {
+    let mut out = Vec::new();
+    let bytes = sql.as_bytes();
+    let mut pos = 0;
+    while pos < bytes.len() {
+        if bytes[pos] != b'$' {
+            pos += 1;
+            continue;
+        }
+        pos += 1;
+        let digits_start = pos;
+        while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+            pos += 1;
+        }
+        if digits_start == pos {
+            continue;
+        }
+        let Some(param_index) = sql[digits_start..pos]
+            .parse::<usize>()
+            .ok()
+            .and_then(|idx| idx.checked_sub(1))
+        else {
+            continue;
+        };
+        if pos + 2 > bytes.len() || &bytes[pos..pos + 2] != b"::" {
+            continue;
+        }
+        pos += 2;
+        let type_start = pos;
+        while pos < bytes.len()
+            && (bytes[pos].is_ascii_alphanumeric() || matches!(bytes[pos], b'_' | b'.'))
+        {
+            pos += 1;
+        }
+        if type_start == pos {
+            continue;
+        }
+        if let Some(oid) = pg_cast_type_oid(&sql[type_start..pos]) {
+            out.push((param_index, oid));
+        }
+    }
+    out
+}
+
+fn pg_cast_type_oid(ty: &str) -> Option<u32> {
+    let lower = ty.to_ascii_lowercase();
+    let short = lower.rsplit('.').next().unwrap_or(lower.as_str());
+    let oid = match short {
+        "bool" | "boolean" => PgOid::Bool,
+        "int2" | "smallint" => PgOid::Int2,
+        "int" | "int4" | "integer" => PgOid::Int4,
+        "int8" | "bigint" => PgOid::Int8,
+        "float4" | "real" => PgOid::Float4,
+        "float8" | "double" | "doubleprecision" => PgOid::Float8,
+        "numeric" | "decimal" => PgOid::Numeric,
+        "bytea" => PgOid::Bytea,
+        "json" => PgOid::Json,
+        "jsonb" => PgOid::Jsonb,
+        "text" => PgOid::Text,
+        "varchar" | "character varying" => PgOid::Varchar,
+        "uuid" => PgOid::Uuid,
+        "timestamp" => PgOid::Timestamp,
+        "timestamptz" | "timestampz" => PgOid::TimestampTz,
+        "vector" => PgOid::Vector,
+        _ => return None,
+    };
+    Some(oid.as_u32())
+}
+
 fn is_row_returning_query(sql: &str) -> bool {
     let trimmed = sql.trim_start().to_ascii_lowercase();
-    trimmed.starts_with("select") || trimmed.starts_with("with") || trimmed.starts_with("ask")
+    trimmed.starts_with("select")
+        || trimmed.starts_with("with")
+        || trimmed.starts_with("ask")
+        || trimmed.starts_with("search")
+        || trimmed.starts_with("vector")
+        || trimmed.starts_with("hybrid")
 }
 
 async fn send_auth_ok<S>(
@@ -612,6 +695,16 @@ where
         return Ok(());
     }
 
+    if let Some(tag) = pg_session_compat_command_tag(sql) {
+        write_frame(stream, &BackendMessage::CommandComplete(tag.to_string())).await?;
+        write_frame(
+            stream,
+            &BackendMessage::ReadyForQuery(TransactionStatus::Idle),
+        )
+        .await?;
+        return Ok(());
+    }
+
     let query_result = match translate_pg_catalog_query(runtime, sql) {
         Ok(Some(result)) => Ok(crate::runtime::RuntimeQueryResult {
             query: sql.to_string(),
@@ -647,6 +740,14 @@ where
     Ok(())
 }
 
+fn pg_session_compat_command_tag(sql: &str) -> Option<&'static str> {
+    let lower = sql.trim().trim_end_matches(';').to_ascii_lowercase();
+    if lower.starts_with("set ") {
+        return Some("SET");
+    }
+    None
+}
+
 async fn emit_success_result<S>(
     stream: &mut S,
     result: &crate::runtime::RuntimeQueryResult,
@@ -661,7 +762,7 @@ where
             &BackendMessage::CommandComplete("SELECT 1".to_string()),
         )
         .await?;
-    } else if result.statement_type == "select" {
+    } else if result_returns_rows(result) {
         emit_result_rows(stream, &result.result).await?;
         write_frame(
             stream,
@@ -700,7 +801,7 @@ where
             &BackendMessage::CommandComplete("SELECT 1".to_string()),
         )
         .await?;
-    } else if result.statement_type == "select" {
+    } else if result_returns_rows(result) {
         emit_result_data_rows(stream, &result.result).await?;
         write_frame(
             stream,
@@ -743,11 +844,15 @@ where
             })
             .collect();
         write_frame(stream, &BackendMessage::RowDescription(descriptors)).await
-    } else if result.statement_type == "select" {
+    } else if result_returns_rows(result) {
         emit_result_row_description(stream, &result.result).await
     } else {
         write_frame(stream, &BackendMessage::NoData).await
     }
+}
+
+fn result_returns_rows(result: &crate::runtime::RuntimeQueryResult) -> bool {
+    result.statement_type == "select"
 }
 
 async fn emit_result_rows<S>(
@@ -1148,6 +1253,31 @@ mod tests {
 
         write_frontend_frame(&mut client_io, b'X', Vec::new()).await;
         server.await.unwrap();
+    }
+
+    #[test]
+    fn infer_pg_cast_param_type_oids_from_parameter_casts() {
+        assert_eq!(
+            infer_pg_cast_param_type_oids("INSERT INTO t (id, name) VALUES ($1::int, $2::text)"),
+            vec![(0, PgOid::Int4.as_u32()), (1, PgOid::Text.as_u32())]
+        );
+        assert_eq!(
+            infer_pg_cast_param_type_oids("SEARCH SIMILAR [1.0] COLLECTION v LIMIT $1::int8"),
+            vec![(0, PgOid::Int8.as_u32())]
+        );
+    }
+
+    #[test]
+    fn pg_session_compat_accepts_driver_setup_set_commands() {
+        assert_eq!(
+            pg_session_compat_command_tag("SET extra_float_digits = 3"),
+            Some("SET")
+        );
+        assert_eq!(
+            pg_session_compat_command_tag("SET application_name = 'pgjdbc'"),
+            Some("SET")
+        );
+        assert_eq!(pg_session_compat_command_tag("SELECT 1"), None);
     }
 
     #[tokio::test]
