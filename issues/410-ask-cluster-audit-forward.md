@@ -2,7 +2,7 @@
 
 GitHub: https://github.com/reddb-io/reddb/issues/410
 
-Labels: enhancement
+Labels: enhancement, ready-for-agent
 
 GitHub issue number: #410
 
@@ -80,3 +80,7 @@ Still not done:
 - Cache async-propagate behavior is still unverified/not implemented here.
 - The issue should remain open until the remaining acceptance criteria are
   covered.
+
+Moved back to the active issue queue because the primary-sync RPC contract
+now exists; the remaining work is implementation/test coverage rather than
+an architectural blocker.
