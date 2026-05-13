@@ -57,8 +57,9 @@ with reddb.connect("memory://") as db:
     # variadic positional form
     rows = db.query("SELECT * FROM users WHERE id = $1", 2)["rows"]
 
-    # keyword form — both produce the same wire call
+    # keyword form — lists and tuples both produce the same wire call
     rows = db.query("SELECT * FROM users WHERE id = $1", params=[2])["rows"]
+    rows = db.query("SELECT * FROM users WHERE id = $1", params=(2,))["rows"]
 
     # vector parameter for SEARCH SIMILAR
     db.query(
@@ -90,7 +91,7 @@ with reddb.connect("memory://") as db:
 | `dict[str, scalar]`                   | `Json`             |
 
 Anything else raises `ValueError("[INVALID_PARAMS] ...")` so a typo
-(`tuple`, `set`, unsupported numpy scalar) fails loud instead of
+(`set`, unsupported numpy scalar) fails loud instead of
 silently coercing.
 
 > Parameterized queries currently require the embedded backend
@@ -122,9 +123,9 @@ import reddb
 db = reddb.connect(uri: str) -> RedDb
 
 db.query(sql: str, *params)                      -> {"statement", "affected", "columns", "rows"}
-db.query(sql: str, params=[...])                 -> {"statement", "affected", "columns", "rows"}
+db.query(sql: str, params=[...] | (...))         -> {"statement", "affected", "columns", "rows"}
 db.execute(sql: str, *params)                    -> {"statement", "affected", "columns", "rows"}
-db.execute(sql: str, params=[...])               -> {"statement", "affected", "columns", "rows"}
+db.execute(sql: str, params=[...] | (...))       -> {"statement", "affected", "columns", "rows"}
 db.insert(collection: str, payload: dict)        -> {"affected"}
 db.bulk_insert(collection: str, payloads: list[dict]) -> {"affected"}
 db.delete(collection: str, id: str)              -> {"affected"}

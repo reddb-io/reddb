@@ -37,3 +37,7 @@ Issues = "https://github.com/reddb-io/reddb/issues"
 [tool.maturin]
 features = ["pyo3/extension-module", "embedded"]
 module-name = "reddb"
+include = [
+  { path = "reddb.pyi", format = "wheel" },
+  { path = "py.typed", format = "wheel" },
+]
