@@ -889,6 +889,61 @@ impl UnifiedStore {
             .unwrap_or_default()
     }
 
+    pub fn vacuum_mvcc_history(
+        &self,
+        collection: &str,
+        cutoff_xid: u64,
+    ) -> Result<MvccVacuumStats, StoreError> {
+        let manager = self
+            .get_collection(collection)
+            .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
+        let entities =
+            manager.query_all(|entity| matches!(entity.kind, EntityKind::TableRow { .. }));
+        let mut logical = HashMap::<EntityId, (bool, u64)>::new();
+        for entity in &entities {
+            let entry = logical.entry(entity.logical_id()).or_insert((false, 0));
+            if entity.xmax == 0 {
+                entry.0 = true;
+            }
+            entry.1 = entry.1.max(entity.xmin);
+        }
+
+        let mut stats = MvccVacuumStats::default();
+        let mut reclaim_ids = Vec::new();
+        for entity in entities {
+            if entity.xmax == 0 {
+                continue;
+            }
+            stats.scanned_versions += 1;
+            let (has_live_version, max_xmin) = logical
+                .get(&entity.logical_id())
+                .copied()
+                .unwrap_or((false, entity.xmin));
+            let is_delete_tombstone = !has_live_version && entity.xmin == max_xmin;
+            if entity.xmax < cutoff_xid {
+                stats.reclaimed_versions += 1;
+                if is_delete_tombstone {
+                    stats.reclaimed_tombstones += 1;
+                } else {
+                    stats.reclaimed_history_versions += 1;
+                }
+                reclaim_ids.push(entity.id);
+            } else {
+                stats.retained_versions += 1;
+                if is_delete_tombstone {
+                    stats.retained_tombstones += 1;
+                } else {
+                    stats.retained_history_versions += 1;
+                }
+            }
+        }
+
+        if !reclaim_ids.is_empty() {
+            self.delete_batch(collection, &reclaim_ids)?;
+        }
+        Ok(stats)
+    }
+
     pub(crate) fn install_versioned_table_row_update(
         &self,
         collection: &str,
