@@ -881,6 +881,115 @@ mod tests {
     }
 
     #[test]
+    fn http_query_ask_cache_ttl_hits_and_writes_cache_hit_audit() {
+        let _guard = ASK_ENV_LOCK.lock().expect("env lock");
+        let stub = SequenceOpenAiStub::start(vec!["cached answer"]);
+        let _api_base =
+            EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
+        let _api_key = EnvVarGuard::unset("REDDB_OPENAI_API_KEY");
+
+        let server = make_server();
+        configure_ask_stub_runtime(&server);
+
+        let first = server
+            .handle_query(br#"{"query": "ASK 'why did login fail?' CACHE TTL '5m'"}"#.to_vec());
+        assert_eq!(first.status, 200, "{}", body_str(&first));
+        let second = server
+            .handle_query(br#"{"query": "ASK 'why did login fail?' CACHE TTL '5m'"}"#.to_vec());
+        assert_eq!(second.status, 200, "{}", body_str(&second));
+
+        assert_eq!(stub.request_count(), 1);
+        let text = body_str(&second);
+        assert!(text.contains(r#""cache_hit":true"#), "{text}");
+        assert!(text.contains(r#""prompt_tokens":0"#), "{text}");
+        assert!(text.contains(r#""completion_tokens":0"#), "{text}");
+        assert!(text.contains(r#""cost_usd":0"#), "{text}");
+
+        let rows = ask_audit_rows(&server);
+        assert_eq!(rows.len(), 2);
+        let hits = rows
+            .iter()
+            .filter(|row| row.get("cache_hit") == Some(&crate::json!(true)))
+            .count();
+        assert_eq!(hits, 1);
+    }
+
+    #[test]
+    fn http_query_ask_cache_default_enabled_and_nocache_bypasses() {
+        let _guard = ASK_ENV_LOCK.lock().expect("env lock");
+        let stub = SequenceOpenAiStub::start(vec!["default cached", "nocache fresh"]);
+        let _api_base =
+            EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
+        let _api_key = EnvVarGuard::unset("REDDB_OPENAI_API_KEY");
+
+        let server = make_server();
+        configure_ask_stub_runtime(&server);
+        server
+            .runtime
+            .execute_query("SET CONFIG ask.cache.enabled = true")
+            .expect("enable ask cache");
+        server
+            .runtime
+            .execute_query("SET CONFIG ask.cache.default_ttl = '5m'")
+            .expect("set default ttl");
+
+        let first = server.handle_query(br#"{"query": "ASK 'cache by default?'"}"#.to_vec());
+        assert_eq!(first.status, 200, "{}", body_str(&first));
+        let second = server.handle_query(br#"{"query": "ASK 'cache by default?'"}"#.to_vec());
+        assert_eq!(second.status, 200, "{}", body_str(&second));
+        assert_eq!(stub.request_count(), 1);
+        assert!(body_str(&second).contains(r#""cache_hit":true"#));
+
+        let bypass =
+            server.handle_query(br#"{"query": "ASK 'cache by default?' NOCACHE"}"#.to_vec());
+        assert_eq!(bypass.status, 200, "{}", body_str(&bypass));
+        assert_eq!(stub.request_count(), 2);
+        let text = body_str(&bypass);
+        assert!(text.contains("nocache fresh"), "{text}");
+        assert!(text.contains(r#""cache_hit":false"#), "{text}");
+    }
+
+    #[test]
+    fn http_query_ask_cache_invalidates_on_source_mutation() {
+        let _guard = ASK_ENV_LOCK.lock().expect("env lock");
+        let stub = SequenceOpenAiStub::start(vec!["before mutation", "after mutation"]);
+        let _api_base =
+            EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
+        let _api_key = EnvVarGuard::unset("REDDB_OPENAI_API_KEY");
+
+        let server = make_server();
+        configure_ask_stub_runtime(&server);
+        server
+            .runtime
+            .execute_query("CREATE TABLE incidents (id INTEGER, notes TEXT)")
+            .expect("create incidents");
+        server
+            .runtime
+            .execute_query("INSERT INTO incidents (id, notes) VALUES (1, 'login failed FDD-1')")
+            .expect("insert incident");
+
+        let query =
+            br#"{"query": "ASK 'login failed FDD-1' STRICT OFF CACHE TTL '5m' LIMIT 1 MIN_SCORE 0"}"#;
+        let first = server.handle_query(query.to_vec());
+        assert_eq!(first.status, 200, "{}", body_str(&first));
+        let second = server.handle_query(query.to_vec());
+        assert_eq!(second.status, 200, "{}", body_str(&second));
+        assert_eq!(stub.request_count(), 1);
+        assert!(body_str(&second).contains(r#""cache_hit":true"#));
+
+        server
+            .runtime
+            .execute_query("INSERT INTO incidents (id, notes) VALUES (2, 'login failed FDD-2')")
+            .expect("mutate incidents");
+        let third = server.handle_query(query.to_vec());
+        assert_eq!(third.status, 200, "{}", body_str(&third));
+        assert_eq!(stub.request_count(), 2);
+        let text = body_str(&third);
+        assert!(text.contains("after mutation"), "{text}");
+        assert!(text.contains(r#""cache_hit":false"#), "{text}");
+    }
+
+    #[test]
     fn http_query_ask_retries_once_when_strict_citation_is_invalid() {
         let _guard = ASK_ENV_LOCK.lock().expect("env lock");
         let stub = SequenceOpenAiStub::start(vec!["first invalid [^1]", "retry ok"]);

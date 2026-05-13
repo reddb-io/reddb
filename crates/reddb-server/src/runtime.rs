@@ -803,6 +803,7 @@ struct RuntimeResultCacheEntry {
 }
 
 pub const METRIC_CACHE_SHADOW_DIVERGENCE_TOTAL: &str = "cache_shadow_divergence_total";
+pub(crate) const ASK_ANSWER_CACHE_NAMESPACE: &str = "runtime.ask_answer_cache";
 
 struct RuntimeInner {
     db: Arc<RedDB>,
@@ -825,6 +826,8 @@ struct RuntimeInner {
         HashMap<String, RuntimeResultCacheEntry>,
         std::collections::VecDeque<String>,
     )>,
+    ask_answer_cache_entries:
+        parking_lot::RwLock<(HashSet<String>, std::collections::VecDeque<String>)>,
     result_cache_shadow_divergences: std::sync::atomic::AtomicU64,
     ask_daily_spend:
         parking_lot::RwLock<HashMap<String, crate::runtime::ai::cost_guard::DailyState>>,

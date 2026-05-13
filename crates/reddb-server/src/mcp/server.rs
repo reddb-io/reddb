@@ -335,12 +335,14 @@ impl McpServer {
             seed: invocation.seed,
             strict: invocation.strict.unwrap_or(true),
             stream: false,
+            cache: if matches!(invocation.nocache, Some(true)) {
+                crate::storage::query::ast::AskCacheClause::NoCache
+            } else if let Some(ttl) = invocation.cache_ttl {
+                crate::storage::query::ast::AskCacheClause::CacheTtl(ttl)
+            } else {
+                crate::storage::query::ast::AskCacheClause::Default
+            },
         };
-
-        // `cache` / `nocache` are accepted and validated by the MCP
-        // parser for option parity. Runtime cache plumbing currently
-        // lives in the dedicated ASK cache slice, so this transport
-        // path preserves today's conservative non-cache behavior.
         let result = self
             .runtime
             .execute_ask("ASK <mcp>", &ask)
