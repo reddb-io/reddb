@@ -55,6 +55,9 @@ pub enum ParseErrorKind {
         /// `"must be in -90.0..=90.0"`.
         constraint: &'static str,
     },
+    /// The lexer recognized this token, but the parser does not support
+    /// it in the current grammar position.
+    UnsupportedToken { token: String },
 }
 
 impl ParseError {
@@ -85,6 +88,18 @@ impl ParseError {
             expected: expected.into_iter().map(|s| s.to_string()).collect(),
             kind: ParseErrorKind::Syntax,
         }
+    }
+
+    /// Create an error when a lexer-known keyword appears in a parser
+    /// position where that keyword has no supported production.
+    pub fn unsupported_recognized_token(found: &Token, position: Position) -> Option<Self> {
+        let token = recognized_keyword_name(found)?;
+        Some(Self {
+            message: format!("token {token} is recognized but not supported in this position"),
+            position,
+            expected: Vec::new(),
+            kind: ParseErrorKind::UnsupportedToken { token },
+        })
     }
 
     /// Recursion depth limit hit. The structured `kind` carries the
@@ -142,6 +157,47 @@ impl ParseError {
             expected: Vec::new(),
             kind: ParseErrorKind::ValueOutOfRange { field, constraint },
         }
+    }
+}
+
+fn recognized_keyword_name(token: &Token) -> Option<String> {
+    match token {
+        Token::String(_)
+        | Token::Integer(_)
+        | Token::Float(_)
+        | Token::JsonLiteral(_)
+        | Token::Ident(_)
+        | Token::Eq
+        | Token::Ne
+        | Token::Lt
+        | Token::Le
+        | Token::Gt
+        | Token::Ge
+        | Token::Plus
+        | Token::Minus
+        | Token::Star
+        | Token::Slash
+        | Token::Percent
+        | Token::LParen
+        | Token::RParen
+        | Token::LBracket
+        | Token::RBracket
+        | Token::LBrace
+        | Token::RBrace
+        | Token::Comma
+        | Token::Dot
+        | Token::Colon
+        | Token::Semi
+        | Token::Dollar
+        | Token::Question
+        | Token::Arrow
+        | Token::ArrowLeft
+        | Token::Dash
+        | Token::DotDot
+        | Token::Pipe
+        | Token::DoublePipe
+        | Token::Eof => None,
+        other => Some(SafeTokenDisplay(other).to_string()),
     }
 }
 
