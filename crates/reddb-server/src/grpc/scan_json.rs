@@ -143,6 +143,19 @@ pub(crate) fn ask_result_from_unified_result(
     })
 }
 
+pub(crate) fn ask_answer_tokens_from_unified_result(
+    result: &crate::storage::query::unified::UnifiedResult,
+) -> Option<Vec<String>> {
+    let row = result.records.first()?;
+    let value = json_field(row, "answer_tokens")?;
+    let tokens = value
+        .as_array()?
+        .iter()
+        .filter_map(|token| token.as_str().map(ToString::to_string))
+        .collect::<Vec<_>>();
+    (!tokens.is_empty()).then_some(tokens)
+}
+
 fn record_field<'a>(
     record: &'a crate::storage::query::unified::UnifiedRecord,
     key: &str,

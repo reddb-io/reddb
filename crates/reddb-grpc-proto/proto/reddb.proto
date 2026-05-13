@@ -111,6 +111,7 @@ service RedDb {
   rpc BulkCreateVectors(JsonBulkCreateRequest) returns (BulkEntityReply);
   rpc BulkCreateDocuments(JsonBulkCreateRequest) returns (BulkEntityReply);
   rpc Ask(AskRequest) returns (AskReply);
+  rpc AskStream(AskRequest) returns (stream AskStreamEvent);
   rpc Embeddings(JsonPayloadRequest) returns (PayloadReply);
   rpc AiPrompt(JsonPayloadRequest) returns (PayloadReply);
   rpc AiCredentials(JsonPayloadRequest) returns (PayloadReply);
@@ -325,6 +326,28 @@ message AskReply {
   bool cache_hit = 10;
   string mode = 11;
   uint32 retry_count = 12;
+}
+
+message AskStreamEvent {
+  oneof event {
+    AskSources sources = 1;
+    AskAnswerToken answer_token = 2;
+    Validation validation = 3;
+    AskStreamError error = 4;
+  }
+}
+
+message AskSources {
+  string sources_flat_json = 1;
+}
+
+message AskAnswerToken {
+  string text = 1;
+}
+
+message AskStreamError {
+  uint32 code = 1;
+  string message = 2;
 }
 
 message Citation {

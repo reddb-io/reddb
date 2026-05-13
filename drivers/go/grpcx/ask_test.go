@@ -2,6 +2,7 @@ package grpcx
 
 import (
 	"context"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -38,6 +39,44 @@ func (s *fakeAskServer) Ask(ctx context.Context, req *pb.AskRequest) (*pb.AskRep
 		Mode:             "strict",
 		RetryCount:       0,
 	}, nil
+}
+
+func (s *fakeAskServer) AskStream(req *pb.AskRequest, stream pb.RedDb_AskStreamServer) error {
+	s.lastReq = req
+	events := []*pb.AskStreamEvent{
+		{
+			Event: &pb.AskStreamEvent_Sources{
+				Sources: &pb.AskSources{
+					SourcesFlatJson: `[{"payload":"{\"name\":\"Lisbon\"}","urn":"urn:city:1"}]`,
+				},
+			},
+		},
+		{
+			Event: &pb.AskStreamEvent_AnswerToken{
+				AnswerToken: &pb.AskAnswerToken{Text: "Lis"},
+			},
+		},
+		{
+			Event: &pb.AskStreamEvent_AnswerToken{
+				AnswerToken: &pb.AskAnswerToken{Text: "bon"},
+			},
+		},
+		{
+			Event: &pb.AskStreamEvent_Validation{
+				Validation: &pb.Validation{
+					Ok:       true,
+					Warnings: []*pb.ValidationItem{},
+					Errors:   []*pb.ValidationItem{},
+				},
+			},
+		},
+	}
+	for _, event := range events {
+		if err := stream.Send(event); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func TestAskRoundTripsTypedGrpcSchema(t *testing.T) {
@@ -83,6 +122,59 @@ func TestAskRoundTripsTypedGrpcSchema(t *testing.T) {
 	}
 	if got := reply.GetMode(); got != "strict" {
 		t.Fatalf("mode = %q", got)
+	}
+}
+
+func TestAskStreamRoundTripsTypedGrpcEvents(t *testing.T) {
+	srv, addr := startFakeAskServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	c, err := Dial(ctx, Options{Addr: addr, Plaintext: true})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+
+	stream, err := c.AskStream(ctx, &pb.AskRequest{
+		Question: "What is the capital of Portugal?",
+	})
+	if err != nil {
+		t.Fatalf("ask stream: %v", err)
+	}
+
+	var events []*pb.AskStreamEvent
+	for {
+		event, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("recv: %v", err)
+		}
+		events = append(events, event)
+	}
+
+	if srv.lastReq == nil {
+		t.Fatal("server did not receive AskStream")
+	}
+	if got := srv.lastReq.GetQuestion(); got != "What is the capital of Portugal?" {
+		t.Fatalf("question = %q", got)
+	}
+	if len(events) != 4 {
+		t.Fatalf("event count = %d", len(events))
+	}
+	if got := events[0].GetSources().GetSourcesFlatJson(); got == "" {
+		t.Fatal("sources_flat_json is empty")
+	}
+	if got := events[1].GetAnswerToken().GetText(); got != "Lis" {
+		t.Fatalf("first token = %q", got)
+	}
+	if got := events[2].GetAnswerToken().GetText(); got != "bon" {
+		t.Fatalf("second token = %q", got)
+	}
+	if !events[3].GetValidation().GetOk() {
+		t.Fatal("validation.ok = false")
 	}
 }
 

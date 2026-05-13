@@ -19,9 +19,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	RedDb_Health_FullMethodName = "/reddb.v1.RedDb/Health"
-	RedDb_Query_FullMethodName  = "/reddb.v1.RedDb/Query"
-	RedDb_Ask_FullMethodName    = "/reddb.v1.RedDb/Ask"
+	RedDb_Health_FullMethodName    = "/reddb.v1.RedDb/Health"
+	RedDb_Query_FullMethodName     = "/reddb.v1.RedDb/Query"
+	RedDb_Ask_FullMethodName       = "/reddb.v1.RedDb/Ask"
+	RedDb_AskStream_FullMethodName = "/reddb.v1.RedDb/AskStream"
 )
 
 // RedDbClient is the client API for RedDb service.
@@ -31,6 +32,7 @@ type RedDbClient interface {
 	Health(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*HealthReply, error)
 	Query(ctx context.Context, in *QueryRequest, opts ...grpc.CallOption) (*QueryReply, error)
 	Ask(ctx context.Context, in *AskRequest, opts ...grpc.CallOption) (*AskReply, error)
+	AskStream(ctx context.Context, in *AskRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[AskStreamEvent], error)
 }
 
 type redDbClient struct {
@@ -71,6 +73,25 @@ func (c *redDbClient) Ask(ctx context.Context, in *AskRequest, opts ...grpc.Call
 	return out, nil
 }
 
+func (c *redDbClient) AskStream(ctx context.Context, in *AskRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[AskStreamEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &RedDb_ServiceDesc.Streams[0], RedDb_AskStream_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[AskRequest, AskStreamEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RedDb_AskStreamClient = grpc.ServerStreamingClient[AskStreamEvent]
+
 // RedDbServer is the server API for RedDb service.
 // All implementations must embed UnimplementedRedDbServer
 // for forward compatibility.
@@ -78,6 +99,7 @@ type RedDbServer interface {
 	Health(context.Context, *Empty) (*HealthReply, error)
 	Query(context.Context, *QueryRequest) (*QueryReply, error)
 	Ask(context.Context, *AskRequest) (*AskReply, error)
+	AskStream(*AskRequest, grpc.ServerStreamingServer[AskStreamEvent]) error
 	mustEmbedUnimplementedRedDbServer()
 }
 
@@ -96,6 +118,9 @@ func (UnimplementedRedDbServer) Query(context.Context, *QueryRequest) (*QueryRep
 }
 func (UnimplementedRedDbServer) Ask(context.Context, *AskRequest) (*AskReply, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Ask not implemented")
+}
+func (UnimplementedRedDbServer) AskStream(*AskRequest, grpc.ServerStreamingServer[AskStreamEvent]) error {
+	return status.Errorf(codes.Unimplemented, "method AskStream not implemented")
 }
 func (UnimplementedRedDbServer) mustEmbedUnimplementedRedDbServer() {}
 func (UnimplementedRedDbServer) testEmbeddedByValue()               {}
@@ -172,6 +197,17 @@ func _RedDb_Ask_Handler(srv interface{}, ctx context.Context, dec func(interface
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RedDb_AskStream_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(AskRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(RedDbServer).AskStream(m, &grpc.GenericServerStream[AskRequest, AskStreamEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RedDb_AskStreamServer = grpc.ServerStreamingServer[AskStreamEvent]
+
 // RedDb_ServiceDesc is the grpc.ServiceDesc for RedDb service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -192,6 +228,12 @@ var RedDb_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _RedDb_Ask_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "AskStream",
+			Handler:       _RedDb_AskStream_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "grpcx/proto/reddb.proto",
 }
