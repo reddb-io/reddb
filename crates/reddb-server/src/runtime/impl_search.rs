@@ -1183,6 +1183,7 @@ impl RedDBRuntime {
         let sources_fingerprint = sources_fingerprint_for_context(&ask_context, &source_urns);
 
         let settings = self.ask_cost_guard_settings();
+        let tenant_key = ask_cost_guard_tenant_key(scope.tenant.as_deref());
         if ask.explain {
             return self.execute_explain_ask(
                 raw_query,
@@ -1194,17 +1195,17 @@ impl RedDBRuntime {
             );
         }
 
+        let now = ask_cost_guard_now();
+        let prompt_tokens = estimate_prompt_tokens(&full_prompt);
+        let planned_cost_usd = estimate_ask_cost_usd(prompt_tokens, settings.max_completion_tokens);
         let usage = crate::runtime::ai::cost_guard::Usage {
-            prompt_tokens: estimate_prompt_tokens(&full_prompt),
+            prompt_tokens,
             sources_bytes: saturating_u32(sources_flat_bytes.len()),
+            estimated_cost_usd: planned_cost_usd,
             ..Default::default()
         };
-        match crate::runtime::ai::cost_guard::evaluate(
-            &usage,
-            &crate::runtime::ai::cost_guard::DailyState::default(),
-            &settings,
-            ask_cost_guard_now(),
-        ) {
+        let daily_state = self.ask_daily_cost_state(&tenant_key, now);
+        match crate::runtime::ai::cost_guard::evaluate(&usage, &daily_state, &settings, now) {
             crate::runtime::ai::cost_guard::Decision::Allow => {}
             crate::runtime::ai::cost_guard::Decision::Reject { limit, detail, .. } => {
                 return Err(cost_guard_rejection_to_error(limit, detail));
@@ -1271,24 +1272,21 @@ impl RedDBRuntime {
                 )?;
                 let elapsed_ms = duration_millis_u32(provider_started.elapsed());
                 let completion_tokens = prompt_response.completion_tokens.unwrap_or(0);
+                let prompt_tokens = prompt_response
+                    .prompt_tokens
+                    .map(u64_to_u32_saturating)
+                    .unwrap_or_else(|| estimate_prompt_tokens(&prompt_for_call));
+                let completion_tokens_u32 = u64_to_u32_saturating(completion_tokens);
+                let cost_usd = estimate_ask_cost_usd(prompt_tokens, completion_tokens_u32);
                 let usage = crate::runtime::ai::cost_guard::Usage {
-                    prompt_tokens: estimate_prompt_tokens(&prompt_for_call),
+                    prompt_tokens,
                     sources_bytes: usage.sources_bytes,
-                    completion_tokens: u64_to_u32_saturating(completion_tokens),
+                    completion_tokens: completion_tokens_u32,
+                    estimated_cost_usd: cost_usd,
                     elapsed_ms,
                     ..Default::default()
                 };
-                match crate::runtime::ai::cost_guard::evaluate(
-                    &usage,
-                    &crate::runtime::ai::cost_guard::DailyState::default(),
-                    &settings,
-                    ask_cost_guard_now(),
-                ) {
-                    crate::runtime::ai::cost_guard::Decision::Allow => {}
-                    crate::runtime::ai::cost_guard::Decision::Reject { limit, detail, .. } => {
-                        return Err(cost_guard_rejection_to_error(limit, detail));
-                    }
-                }
+                self.check_and_record_ask_daily_cost(&tenant_key, &usage, &settings)?;
 
                 let answer = prompt_response.output_text;
                 let citation_result =
@@ -1540,7 +1538,74 @@ impl RedDBRuntime {
                 self.config_u64("ask.max_sources_bytes", defaults.max_sources_bytes as u64),
             ),
             timeout_ms: config_u32(self.config_u64("ask.timeout_ms", defaults.timeout_ms as u64)),
-            daily_cost_cap_usd: daily_cap.is_finite().then_some(daily_cap),
+            daily_cost_cap_usd: (daily_cap.is_finite() && daily_cap >= 0.0).then_some(daily_cap),
+        }
+    }
+
+    fn ask_daily_cost_state(
+        &self,
+        tenant_key: &str,
+        now: crate::runtime::ai::cost_guard::Now,
+    ) -> crate::runtime::ai::cost_guard::DailyState {
+        let day_epoch_secs =
+            crate::runtime::ai::cost_guard::utc_day_start_epoch_secs(now.epoch_secs);
+        let mut states = self.inner.ask_daily_spend.write();
+        let state = states.entry(tenant_key.to_string()).or_insert(
+            crate::runtime::ai::cost_guard::DailyState {
+                spent_usd: 0.0,
+                day_epoch_secs,
+            },
+        );
+        if state.day_epoch_secs != day_epoch_secs {
+            *state = crate::runtime::ai::cost_guard::DailyState {
+                spent_usd: 0.0,
+                day_epoch_secs,
+            };
+        }
+        *state
+    }
+
+    fn check_and_record_ask_daily_cost(
+        &self,
+        tenant_key: &str,
+        usage: &crate::runtime::ai::cost_guard::Usage,
+        settings: &crate::runtime::ai::cost_guard::Settings,
+    ) -> RedDBResult<()> {
+        self.check_and_record_ask_daily_cost_at(tenant_key, usage, settings, ask_cost_guard_now())
+    }
+
+    fn check_and_record_ask_daily_cost_at(
+        &self,
+        tenant_key: &str,
+        usage: &crate::runtime::ai::cost_guard::Usage,
+        settings: &crate::runtime::ai::cost_guard::Settings,
+        now: crate::runtime::ai::cost_guard::Now,
+    ) -> RedDBResult<()> {
+        let day_epoch_secs =
+            crate::runtime::ai::cost_guard::utc_day_start_epoch_secs(now.epoch_secs);
+        let mut states = self.inner.ask_daily_spend.write();
+        let state = states.entry(tenant_key.to_string()).or_insert(
+            crate::runtime::ai::cost_guard::DailyState {
+                spent_usd: 0.0,
+                day_epoch_secs,
+            },
+        );
+        if state.day_epoch_secs != day_epoch_secs {
+            *state = crate::runtime::ai::cost_guard::DailyState {
+                spent_usd: 0.0,
+                day_epoch_secs,
+            };
+        }
+
+        let decision = crate::runtime::ai::cost_guard::evaluate(usage, state, settings, now);
+        if usage.estimated_cost_usd.is_finite() && usage.estimated_cost_usd > 0.0 {
+            state.spent_usd += usage.estimated_cost_usd;
+        }
+        match decision {
+            crate::runtime::ai::cost_guard::Decision::Allow => Ok(()),
+            crate::runtime::ai::cost_guard::Decision::Reject { limit, detail, .. } => {
+                Err(cost_guard_rejection_to_error(limit, detail))
+            }
         }
     }
 
@@ -1852,6 +1917,18 @@ fn ask_cost_guard_now() -> crate::runtime::ai::cost_guard::Now {
         .map(|d| d.as_secs() as i64)
         .unwrap_or_default();
     crate::runtime::ai::cost_guard::Now { epoch_secs }
+}
+
+fn ask_cost_guard_tenant_key(tenant: Option<&str>) -> String {
+    match tenant {
+        Some(tenant) if !tenant.trim().is_empty() => format!("tenant:{tenant}"),
+        _ => "tenant:<default>".to_string(),
+    }
+}
+
+fn estimate_ask_cost_usd(prompt_tokens: u32, completion_tokens: u32) -> f64 {
+    let total_tokens = u64::from(prompt_tokens) + u64::from(completion_tokens);
+    total_tokens as f64 / 1_000_000.0
 }
 
 fn cost_guard_rejection_to_error(
@@ -2939,6 +3016,43 @@ mod citation_wedge_tests {
                 .unwrap_or(false),
             "expected urn=null for out-of-range source_index"
         );
+    }
+
+    #[test]
+    fn ask_daily_cost_state_is_per_tenant_and_resets_at_utc_midnight() {
+        let rt = crate::runtime::RedDBRuntime::in_memory().expect("runtime");
+        let settings = crate::runtime::ai::cost_guard::Settings {
+            daily_cost_cap_usd: Some(0.000_020),
+            ..Default::default()
+        };
+        let usage = crate::runtime::ai::cost_guard::Usage {
+            estimated_cost_usd: 0.000_015,
+            ..Default::default()
+        };
+        let day0 = crate::runtime::ai::cost_guard::Now { epoch_secs: 1 };
+        let day1 = crate::runtime::ai::cost_guard::Now { epoch_secs: 86_401 };
+
+        rt.check_and_record_ask_daily_cost_at("tenant:a", &usage, &settings, day0)
+            .expect("tenant a first call fits");
+        let err = rt
+            .check_and_record_ask_daily_cost_at("tenant:a", &usage, &settings, day0)
+            .expect_err("tenant a second same-day call exceeds cap");
+        assert!(
+            err.to_string().contains("daily_cost_cap_usd"),
+            "unexpected error: {err}"
+        );
+
+        rt.check_and_record_ask_daily_cost_at("tenant:b", &usage, &settings, day0)
+            .expect("tenant b has independent spend");
+        rt.check_and_record_ask_daily_cost_at("tenant:a", &usage, &settings, day1)
+            .expect("tenant a resets after UTC midnight");
+    }
+
+    #[test]
+    fn ask_cost_guard_tenant_key_distinguishes_default_scope() {
+        assert_eq!(ask_cost_guard_tenant_key(None), "tenant:<default>");
+        assert_eq!(ask_cost_guard_tenant_key(Some("")), "tenant:<default>");
+        assert_eq!(ask_cost_guard_tenant_key(Some("acme")), "tenant:acme");
     }
 
     #[test]

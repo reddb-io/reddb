@@ -140,7 +140,29 @@ Verification:
 
 - `cargo test -p reddb-io-server http_query_ask_ -- --nocapture`
 
-Still deferred:
+Slice 4: per-tenant daily cost cap wiring landed.
 
-- Per-tenant daily spend state and UTC reset bookkeeping for
-  `daily_cost_cap_usd`.
+- Added process-local ASK daily spend state keyed by tenant scope, with
+  UTC-day reset based on the injected `CostGuardEvaluator` day
+  boundary helper.
+- Pre-call ASK now checks planned prompt + max-completion estimated
+  cost against `ask.daily_cost_cap_usd` before provider lookup.
+- Post-provider ASK now records actual token-based estimated cost under
+  the tenant lock and rejects with HTTP 413 when projected daily spend
+  exceeds `daily_cost_cap_usd`.
+- Added unit coverage for per-tenant isolation and UTC midnight reset.
+- Added HTTP handler coverage:
+  `ask.daily_cost_cap_usd = 0` plus `ASK 'why did login fail?'`
+  returns 413 and includes `daily_cost_cap_usd` in the error body.
+
+Verification:
+
+- `git diff --check`
+- `cargo check -q`
+- `cargo test -q -p reddb-io-server --lib runtime::ai::cost_guard`
+- `cargo test -q -p reddb-io-server --lib ask_daily_cost_state_is_per_tenant_and_resets_at_utc_midnight`
+- `cargo test -q -p reddb-io-server --lib ask_cost_guard_tenant_key_distinguishes_default_scope`
+- `cargo test -q -p reddb-io-server --lib http_query_ask_daily_cost_guard_returns_413_with_limit_name`
+- `cargo test -q -p reddb-io-server --lib http_query_ask_`
+
+Issue complete.

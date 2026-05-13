@@ -752,6 +752,24 @@ mod tests {
     }
 
     #[test]
+    fn http_query_ask_daily_cost_guard_returns_413_with_limit_name() {
+        let server = make_server();
+        server
+            .runtime
+            .execute_query("SET CONFIG ask.daily_cost_cap_usd = 0")
+            .expect("set daily cost guard");
+
+        let r = server.handle_query(br#"{"query": "ASK 'why did login fail?'"}"#.to_vec());
+
+        assert_eq!(r.status, 413, "{}", body_str(&r));
+        let text = body_str(&r);
+        assert!(
+            text.contains("daily_cost_cap_usd"),
+            "missing limit name: {text}"
+        );
+    }
+
+    #[test]
     fn http_query_ask_retries_once_when_strict_citation_is_invalid() {
         let _guard = ASK_ENV_LOCK.lock().expect("env lock");
         let stub = SequenceOpenAiStub::start(vec!["first invalid [^1]", "retry ok"]);

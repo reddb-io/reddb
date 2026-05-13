@@ -826,6 +826,8 @@ struct RuntimeInner {
         std::collections::VecDeque<String>,
     )>,
     result_cache_shadow_divergences: std::sync::atomic::AtomicU64,
+    ask_daily_spend:
+        parking_lot::RwLock<HashMap<String, crate::runtime::ai::cost_guard::DailyState>>,
     /// Process-local queue message locks used to emulate `SKIP LOCKED`-style
     /// claim semantics for concurrent queue consumers inside this runtime.
     queue_message_locks: parking_lot::RwLock<HashMap<String, Arc<parking_lot::Mutex<()>>>>,

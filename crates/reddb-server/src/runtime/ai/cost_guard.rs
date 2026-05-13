@@ -218,9 +218,7 @@ pub fn evaluate(usage: &Usage, daily: &DailyState, settings: &Settings, now: Now
         if projected > cap {
             return reject(
                 LimitKind::DailyCostCap,
-                format!(
-                    "projected spend ${projected:.6} exceeds daily_cost_cap_usd=${cap:.6}"
-                ),
+                format!("projected spend ${projected:.6} exceeds daily_cost_cap_usd=${cap:.6}"),
             );
         }
     }
@@ -245,8 +243,12 @@ const SECS_PER_DAY: i64 = 86_400;
 /// sign correctly. This is the test boundary for the daily reset — a
 /// call where `now` lands one second past UTC midnight sees a fresh
 /// `spent_usd = 0`.
+pub fn utc_day_start_epoch_secs(epoch_secs: i64) -> i64 {
+    epoch_secs.div_euclid(SECS_PER_DAY) * SECS_PER_DAY
+}
+
 fn same_utc_day(a: i64, b: i64) -> bool {
-    a.div_euclid(SECS_PER_DAY) == b.div_euclid(SECS_PER_DAY)
+    utc_day_start_epoch_secs(a) == utc_day_start_epoch_secs(b)
 }
 
 #[cfg(test)]
@@ -615,5 +617,12 @@ mod tests {
         assert!(!same_utc_day(-1, 0));
         assert!(same_utc_day(0, SECS_PER_DAY - 1));
         assert!(!same_utc_day(0, SECS_PER_DAY));
+    }
+
+    #[test]
+    fn utc_day_start_handles_negative_epoch() {
+        assert_eq!(utc_day_start_epoch_secs(0), 0);
+        assert_eq!(utc_day_start_epoch_secs(SECS_PER_DAY + 123), SECS_PER_DAY);
+        assert_eq!(utc_day_start_epoch_secs(-1), -SECS_PER_DAY);
     }
 }

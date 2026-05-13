@@ -2007,6 +2007,7 @@ impl RedDBRuntime {
                     std::collections::VecDeque::new(),
                 )),
                 result_cache_shadow_divergences: std::sync::atomic::AtomicU64::new(0),
+                ask_daily_spend: parking_lot::RwLock::new(HashMap::new()),
                 queue_message_locks: parking_lot::RwLock::new(HashMap::new()),
                 planner_dirty_tables: parking_lot::RwLock::new(HashSet::new()),
                 ec_registry: Arc::new(crate::ec::config::EcRegistry::new()),
