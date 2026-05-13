@@ -84,3 +84,38 @@ Still not done:
 Moved back to the active issue queue because the primary-sync RPC contract
 now exists; the remaining work is implementation/test coverage rather than
 an architectural blocker.
+
+## Progress note (2026-05-13, cluster/cache coverage slice)
+
+Added follow-up coverage and cache correctness work:
+
+- Added `ask.cache_put.v1` as a best-effort cache-warm command over the
+  existing ASK side-effects RPC.
+- Replica ASK cache writes remain local and now asynchronously submit a cache
+  warm payload to the primary; failures are ignored so audit/cost correctness
+  still owns the blocking path.
+- Primary can apply propagated ASK cache payloads into its BlobCache-backed
+  ASK cache.
+- Replica logical WAL apply now invalidates the local result/ASK caches for
+  the changed collection, so cached ASK answers are not reused after source
+  data catches up from the primary.
+- Added an ignored `full` external-env test shape for 1-primary + 2-replica
+  ASK audit/cost forwarding.
+- Added an HTTP error-map assertion for `ask_primary_sync_unavailable` -> 503.
+
+Verified with:
+
+- `cargo check --locked -p reddb-io-server`
+- `cargo test --locked -p reddb-io-server ask_cache`
+- `cargo test --locked -p reddb-io-server table_cache_invalidation_clears_ask_answer_cache`
+- `cargo test --locked -p reddb-io-server primary_ask_side_effects_payload_records_cost_and_audit`
+- `cargo test --locked -p reddb-io-server map_runtime_error_covers_each_variant`
+- `cargo test --locked --test integration_external_env --no-run`
+
+Still not done:
+
+- The ignored full-cluster ASK test has not been run against Docker with AI
+  provider env injected into the stack.
+- Primary-unreachable-on-replica-ASK is covered by mapping/unit behavior, but
+  not yet by a Docker test that pauses/stops the primary and asserts the
+  client-visible 503.

@@ -76,6 +76,35 @@ fn wait_for_replica_visibility(
     Err(format!("replica never returned expected value: {expected}").into())
 }
 
+fn grpc_endpoint(addr: &str) -> String {
+    if addr.starts_with("http://") || addr.starts_with("https://") {
+        addr.to_string()
+    } else {
+        format!("http://{addr}")
+    }
+}
+
+fn wait_for_primary_query(
+    primary_addr: &str,
+    query: &str,
+    expected: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        let outcome = runtime().block_on(async {
+            let mut client = RedDBClient::connect(primary_addr, None).await?;
+            client.query(query).await
+        });
+        if let Ok(body) = outcome {
+            if body.contains(expected) {
+                return Ok(());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    Err(format!("primary never returned expected value: {expected}").into())
+}
+
 #[test]
 #[ignore = "requires a running docker/example environment"]
 fn external_primary_health_and_query_round_trip() {
@@ -174,6 +203,117 @@ fn external_replica_read_only_and_catches_up() {
                 || rendered.contains("FAILED_PRECONDITION")
                 || rendered.contains("PERMISSION_DENIED"),
             "unexpected replica write error: {rendered}"
+        );
+    });
+}
+
+#[test]
+#[ignore = "requires full profile plus AI env configured inside the docker stack"]
+fn external_ask_on_two_replicas_forwards_audit_and_cost_to_primary() {
+    if test_profile() != "full" {
+        eprintln!("skipping ASK cluster check: REDDB_TEST_PROFILE must be full");
+        return;
+    }
+    if env("REDDB_TEST_ASK_CLUSTER_ENABLED").as_deref() != Some("1") {
+        eprintln!("skipping ASK cluster check: set REDDB_TEST_ASK_CLUSTER_ENABLED=1");
+        return;
+    }
+
+    let primary_addr = required_env("REDDB_TEST_PRIMARY_GRPC_ADDR");
+    let replica_addr = required_env("REDDB_TEST_REPLICA_GRPC_ADDR");
+    let secondary_replica_addr = required_env("REDDB_TEST_SECONDARY_REPLICA_GRPC_ADDR");
+    let question_one = format!("replica audit sync {}", std::process::id());
+    let question_two = format!("replica cost sync {}", std::process::id());
+
+    runtime().block_on(async {
+        let mut primary = RedDBClient::connect(&primary_addr, None)
+            .await
+            .expect("primary grpc connection should succeed");
+        primary
+            .query("SET CONFIG ask.daily_cost_cap_usd = 0.000003")
+            .await
+            .expect("set primary ASK daily cap");
+        primary
+            .create_row(
+                "external_ask_context",
+                r#"{"fields":{"body":"deploy failed because checkout timed out"}}"#,
+            )
+            .await
+            .expect("seed ASK context");
+    });
+
+    wait_for_replica_visibility(
+        &replica_addr,
+        "SELECT * FROM external_ask_context",
+        "checkout timed out",
+    )
+    .expect("replica-1 should catch up");
+    wait_for_replica_visibility(
+        &secondary_replica_addr,
+        "SELECT * FROM external_ask_context",
+        "checkout timed out",
+    )
+    .expect("replica-2 should catch up");
+
+    runtime().block_on(async {
+        let mut replica =
+            reddb::grpc::proto::red_db_client::RedDbClient::connect(grpc_endpoint(&replica_addr))
+                .await
+                .expect("replica-1 grpc connection should succeed");
+        let reply = replica
+            .ask(reddb::grpc::proto::AskRequest {
+                question: question_one.clone(),
+                provider: Some("openai".to_string()),
+                model: Some("mock-chat".to_string()),
+                depth: Some(1),
+                limit: Some(1),
+                min_score: None,
+                collection: Some("external_ask_context".to_string()),
+                temperature: Some(0.0),
+                seed: Some(1),
+                strict: Some(false),
+            })
+            .await
+            .expect("ASK on replica-1 should succeed before cap is exhausted")
+            .into_inner();
+        assert_eq!(reply.answer, "mock response");
+    });
+
+    wait_for_primary_query(
+        &primary_addr,
+        "SELECT * FROM red_ask_audit",
+        &question_one,
+    )
+    .expect("primary audit row should be visible before the first ASK is considered complete");
+
+    runtime().block_on(async {
+        let mut replica =
+            reddb::grpc::proto::red_db_client::RedDbClient::connect(grpc_endpoint(
+                &secondary_replica_addr,
+            ))
+            .await
+            .expect("replica-2 grpc connection should succeed");
+        let err = replica
+            .ask(reddb::grpc::proto::AskRequest {
+                question: question_two,
+                provider: Some("openai".to_string()),
+                model: Some("mock-chat".to_string()),
+                depth: Some(1),
+                limit: Some(1),
+                min_score: None,
+                collection: Some("external_ask_context".to_string()),
+                temperature: Some(0.0),
+                seed: Some(2),
+                strict: Some(false),
+            })
+            .await
+            .expect_err("primary daily cost cap should be shared across replicas");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("RESOURCE_EXHAUSTED")
+                || rendered.contains("daily_cost_cap_usd")
+                || rendered.contains("quota"),
+            "unexpected ASK over-cap error: {rendered}"
         );
     });
 }

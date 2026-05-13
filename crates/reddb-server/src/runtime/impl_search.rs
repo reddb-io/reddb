@@ -1916,11 +1916,32 @@ impl RedDBRuntime {
         source_dependencies: &HashSet<String>,
         attempt: &AskLlmAttempt,
     ) {
+        let bytes = encode_ask_answer_cache_payload(attempt);
+        let inserted =
+            self.put_ask_answer_cache_payload(key, ttl, max_entries, source_dependencies, bytes);
+        if inserted {
+            self.propagate_ask_answer_cache_attempt(
+                key,
+                ttl,
+                max_entries,
+                source_dependencies,
+                attempt,
+            );
+        }
+    }
+
+    fn put_ask_answer_cache_payload(
+        &self,
+        key: &str,
+        ttl: std::time::Duration,
+        max_entries: usize,
+        source_dependencies: &HashSet<String>,
+        bytes: Vec<u8>,
+    ) -> bool {
         if max_entries == 0 {
-            return;
+            return false;
         }
         let ttl_ms = ttl.as_millis().min(u64::MAX as u128) as u64;
-        let bytes = encode_ask_answer_cache_payload(attempt);
         let put = crate::storage::cache::BlobCachePut::new(bytes)
             .with_dependencies(source_dependencies.iter().cloned().collect::<Vec<_>>())
             .with_policy(
@@ -1934,7 +1955,7 @@ impl RedDBRuntime {
             .put(ASK_ANSWER_CACHE_NAMESPACE, key, put)
             .is_err()
         {
-            return;
+            return false;
         }
 
         let mut entries = self.inner.ask_answer_cache_entries.write();
@@ -1952,6 +1973,54 @@ impl RedDBRuntime {
                     .invalidate_key(ASK_ANSWER_CACHE_NAMESPACE, &old_key);
             }
         }
+        true
+    }
+
+    fn propagate_ask_answer_cache_attempt(
+        &self,
+        key: &str,
+        ttl: std::time::Duration,
+        max_entries: usize,
+        source_dependencies: &HashSet<String>,
+        attempt: &AskLlmAttempt,
+    ) {
+        if self.ask_primary_sync_endpoint().is_none() {
+            return;
+        }
+
+        let mut cache_entry = crate::json::Map::new();
+        cache_entry.insert("key".to_string(), crate::json::Value::String(key.to_string()));
+        cache_entry.insert(
+            "ttl_ms".to_string(),
+            crate::json::Value::Number(ttl.as_millis().min(u64::MAX as u128) as f64),
+        );
+        cache_entry.insert(
+            "max_entries".to_string(),
+            crate::json::Value::Number(max_entries as f64),
+        );
+        cache_entry.insert(
+            "source_dependencies".to_string(),
+            crate::json::Value::Array(
+                source_dependencies
+                    .iter()
+                    .cloned()
+                    .map(crate::json::Value::String)
+                    .collect(),
+            ),
+        );
+        cache_entry.insert(
+            "payload".to_string(),
+            ask_answer_cache_payload_json(attempt),
+        );
+
+        let payload = crate::json!({
+            "command": "ask.cache_put.v1",
+            "cache_entry": crate::json::Value::Object(cache_entry),
+        });
+        let runtime = self.clone();
+        std::thread::spawn(move || {
+            let _ = runtime.forward_ask_side_effects_to_primary(payload);
+        });
     }
 
     fn record_ask_audit(&self, input: AskAuditInput<'_>) -> RedDBResult<()> {
@@ -1999,6 +2068,10 @@ impl RedDBRuntime {
             .get("command")
             .and_then(crate::json::Value::as_str)
             .ok_or_else(|| RedDBError::Query("missing primary-sync command".to_string()))?;
+        if command == "ask.cache_put.v1" {
+            self.apply_ask_cache_put_payload(payload)?;
+            return Ok(crate::json!({"ok": true, "command": command}));
+        }
         if command != "ask.side_effects.v1" {
             return Err(RedDBError::Query(format!(
                 "unsupported primary-sync command: {command}"
@@ -2031,6 +2104,53 @@ impl RedDBRuntime {
         }
 
         Ok(crate::json!({"ok": true, "command": command}))
+    }
+
+    fn apply_ask_cache_put_payload(&self, payload: &crate::json::Value) -> RedDBResult<()> {
+        let cache_entry = payload
+            .get("cache_entry")
+            .and_then(crate::json::Value::as_object)
+            .ok_or_else(|| {
+                RedDBError::Query("ask.cache_put.v1 cache_entry must be an object".to_string())
+            })?;
+        let key = cache_entry
+            .get("key")
+            .and_then(crate::json::Value::as_str)
+            .ok_or_else(|| RedDBError::Query("ask.cache_put.v1 key must be a string".to_string()))?;
+        let ttl_ms = cache_entry
+            .get("ttl_ms")
+            .and_then(crate::json::Value::as_u64)
+            .ok_or_else(|| {
+                RedDBError::Query("ask.cache_put.v1 ttl_ms must be an integer".to_string())
+            })?;
+        let max_entries = cache_entry
+            .get("max_entries")
+            .and_then(crate::json::Value::as_u64)
+            .unwrap_or_else(|| self.ask_answer_cache_settings().max_entries as u64)
+            .min(usize::MAX as u64) as usize;
+        let mut source_dependencies = HashSet::new();
+        if let Some(values) = cache_entry
+            .get("source_dependencies")
+            .and_then(crate::json::Value::as_array)
+        {
+            for value in values {
+                if let Some(dep) = value.as_str() {
+                    source_dependencies.insert(dep.to_string());
+                }
+            }
+        }
+        let payload = cache_entry
+            .get("payload")
+            .ok_or_else(|| RedDBError::Query("ask.cache_put.v1 payload is required".to_string()))?;
+        let bytes = payload.to_string_compact().into_bytes();
+        self.put_ask_answer_cache_payload(
+            key,
+            std::time::Duration::from_millis(ttl_ms),
+            max_entries,
+            &source_dependencies,
+            bytes,
+        );
+        Ok(())
     }
 
     fn ensure_ask_audit_collection(&self) -> RedDBResult<()> {
@@ -2350,7 +2470,7 @@ fn ask_cache_ttl_error(err: crate::runtime::ai::answer_cache_key::TtlParseError)
     }
 }
 
-fn encode_ask_answer_cache_payload(attempt: &AskLlmAttempt) -> Vec<u8> {
+fn ask_answer_cache_payload_json(attempt: &AskLlmAttempt) -> crate::json::Value {
     let mut obj: crate::json::Map<String, crate::json::Value> = Default::default();
     obj.insert(
         "answer".to_string(),
@@ -2385,6 +2505,10 @@ fn encode_ask_answer_cache_payload(attempt: &AskLlmAttempt) -> Vec<u8> {
         crate::json::Value::Number(attempt.cost_usd),
     );
     crate::json::Value::Object(obj)
+}
+
+fn encode_ask_answer_cache_payload(attempt: &AskLlmAttempt) -> Vec<u8> {
+    ask_answer_cache_payload_json(attempt)
         .to_string_compact()
         .into_bytes()
 }
@@ -3980,6 +4104,117 @@ mod citation_wedge_tests {
             .apply_primary_ask_side_effects_payload(&crate::json::Value::Object(over_cap_payload))
             .expect_err("second same-day cost should exceed primary cap");
         assert!(err.to_string().contains("daily_cost_cap_usd"), "{err}");
+    }
+
+    fn ask_cache_put_payload_for_test() -> crate::json::Value {
+        let mut cache_payload = crate::json::Map::new();
+        cache_payload.insert(
+            "answer".into(),
+            crate::json::Value::String("cached answer".into()),
+        );
+        cache_payload.insert(
+            "provider".into(),
+            crate::json::Value::String("openai".into()),
+        );
+        cache_payload.insert(
+            "model".into(),
+            crate::json::Value::String("gpt-4o-mini".into()),
+        );
+        cache_payload.insert("mode".into(), crate::json::Value::String("lenient".into()));
+        cache_payload.insert("retry_count".into(), crate::json::Value::Number(0.0));
+        cache_payload.insert("prompt_tokens".into(), crate::json::Value::Number(1.0));
+        cache_payload.insert(
+            "completion_tokens".into(),
+            crate::json::Value::Number(1.0),
+        );
+        cache_payload.insert("cost_usd".into(), crate::json::Value::Number(0.000002));
+
+        let mut cache_entry = crate::json::Map::new();
+        cache_entry.insert(
+            "key".into(),
+            crate::json::Value::String("ask-cache-key".into()),
+        );
+        cache_entry.insert("ttl_ms".into(), crate::json::Value::Number(60_000.0));
+        cache_entry.insert("max_entries".into(), crate::json::Value::Number(16.0));
+        cache_entry.insert(
+            "source_dependencies".into(),
+            crate::json::Value::Array(vec![crate::json::Value::String("incidents".into())]),
+        );
+        cache_entry.insert(
+            "payload".into(),
+            crate::json::Value::Object(cache_payload),
+        );
+
+        let mut payload = crate::json::Map::new();
+        payload.insert(
+            "command".into(),
+            crate::json::Value::String("ask.cache_put.v1".into()),
+        );
+        payload.insert(
+            "cache_entry".into(),
+            crate::json::Value::Object(cache_entry),
+        );
+        crate::json::Value::Object(payload)
+    }
+
+    #[test]
+    fn primary_ask_cache_put_payload_populates_cache() {
+        let rt = crate::runtime::RedDBRuntime::in_memory().expect("runtime");
+        let payload = ask_cache_put_payload_for_test();
+
+        rt.apply_primary_ask_side_effects_payload(&payload)
+            .expect("cache put applies");
+
+        let cached = rt
+            .get_ask_answer_cache_attempt(
+                "ask-cache-key",
+                crate::runtime::ai::strict_validator::Mode::Lenient,
+                None,
+                Some(0.0),
+                Some(1),
+                0,
+            )
+            .expect("cache hit");
+        assert!(cached.cache_hit);
+        assert_eq!(cached.answer, "cached answer");
+        assert_eq!(cached.provider_token, "openai");
+        assert_eq!(cached.model, "gpt-4o-mini");
+    }
+
+    #[test]
+    fn table_cache_invalidation_clears_ask_answer_cache() {
+        let rt = crate::runtime::RedDBRuntime::in_memory().expect("runtime");
+        let payload = ask_cache_put_payload_for_test();
+
+        rt.apply_primary_ask_side_effects_payload(&payload)
+            .expect("cache put applies");
+        assert!(
+            rt.get_ask_answer_cache_attempt(
+                "ask-cache-key",
+                crate::runtime::ai::strict_validator::Mode::Lenient,
+                None,
+                Some(0.0),
+                Some(1),
+                0,
+            )
+            .is_some(),
+            "precondition: cache hit exists"
+        );
+
+        rt.invalidate_result_cache_for_table("incidents");
+
+        assert!(
+            rt.get_ask_answer_cache_attempt(
+                "ask-cache-key",
+                crate::runtime::ai::strict_validator::Mode::Lenient,
+                None,
+                Some(0.0),
+                Some(1),
+                0,
+            )
+            .is_none(),
+            "ASK cache must be cleared when a source table changes"
+        );
     }
 
     #[test]
