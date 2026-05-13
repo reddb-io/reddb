@@ -71,7 +71,7 @@ pub mod redwire;
 pub mod http;
 
 pub use error::{ClientError, ErrorCode, Result};
-pub use params::{IntoValue, Value};
+pub use params::{IntoParams, IntoValue, Value};
 pub use types::{BulkInsertResult, InsertResult, JsonValue, KvWatchEvent, QueryResult, ValueOut};
 
 // Back-compat re-exports for the previous `reddb-client-internal`
@@ -204,21 +204,24 @@ impl Reddb {
     ///
     /// Today the [`Reddb::Embedded`], [`Reddb::Grpc`], and [`Reddb::Http`]
     /// transports carry parameters end-to-end.
-    pub async fn query_with<V: IntoValue + Clone>(
-        &self,
-        sql: &str,
-        params: &[V],
-    ) -> Result<QueryResult> {
-        let values: Vec<Value> = params.iter().cloned().map(IntoValue::into_value).collect();
+    pub async fn query_with<P: IntoParams>(&self, sql: &str, params: P) -> Result<QueryResult> {
+        let values = params.into_params();
         match self {
             #[cfg(feature = "embedded")]
-            Reddb::Embedded(c) => c.query_with(sql, &values),
+            Reddb::Embedded(c) => c.query_with(sql, values),
             #[cfg(feature = "grpc")]
             Reddb::Grpc(c) => c.query_with(sql, &values).await,
             #[cfg(feature = "http")]
             Reddb::Http(c) => c.query_with(sql, &values).await,
             Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
         }
+    }
+
+    /// Parameterized execution for DML statements. This is an alias for
+    /// [`Self::query_with`] because RedDB returns one query result envelope for
+    /// SELECT and DML.
+    pub async fn execute_with<P: IntoParams>(&self, sql: &str, params: P) -> Result<QueryResult> {
+        self.query_with(sql, params).await
     }
 
     pub async fn insert(&self, collection: &str, payload: &JsonValue) -> Result<InsertResult> {

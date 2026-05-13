@@ -134,3 +134,47 @@ async fn query_with_intovalue_ergonomic_form() {
         .expect("query_with intovalue");
     assert_eq!(r.rows.len(), 1);
 }
+
+#[tokio::test]
+async fn execute_with_inserts_then_query_with_tuple_selects() {
+    let c = open();
+    c.execute_with("CREATE TABLE exec_params (id INTEGER, name TEXT)", ())
+        .expect("create table");
+    let inserted = c
+        .execute_with(
+            "INSERT INTO exec_params (id, name) VALUES ($1, $2)",
+            (3i64, "Cara"),
+        )
+        .expect("insert with tuple params");
+    assert_eq!(inserted.affected, 1);
+
+    let selected = c
+        .query_with("SELECT * FROM exec_params WHERE id = $1", (3i64,))
+        .expect("select with tuple params");
+    assert_eq!(selected.rows.len(), 1);
+}
+
+#[test]
+fn intoparams_supports_unit_slices_arrays_vecs_and_tuples_to_arity_8() {
+    use reddb_client::{IntoParams, IntoValue};
+
+    assert!(().into_params().is_empty());
+    assert_eq!((&[Value::Int(1)]).into_params(), vec![Value::Int(1)]);
+    assert_eq!([Value::Int(1), Value::Int(2)].into_params().len(), 2);
+    assert_eq!(vec![Value::Int(1)].into_params(), vec![Value::Int(1)]);
+
+    let values = (
+        1i64,
+        true,
+        2.5f64,
+        "text",
+        String::from("owned"),
+        vec![1u8, 2],
+        vec![0.1f32, 0.2],
+        Option::<i64>::None,
+    )
+        .into_params();
+    assert_eq!(values.len(), 8);
+    assert_eq!(values[0], 1i64.into_value());
+    assert_eq!(values[7], Value::Null);
+}

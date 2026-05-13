@@ -208,6 +208,89 @@ impl<T: IntoValue> IntoValue for Option<T> {
     }
 }
 
+/// Convert user-facing parameter containers into the driver Value list.
+///
+/// This trait is sealed so the accepted parameter shapes remain explicit and
+/// consistent across transports.
+pub trait IntoParams: sealed::Sealed {
+    fn into_params(self) -> Vec<Value>;
+}
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+impl sealed::Sealed for () {}
+
+impl IntoParams for () {
+    fn into_params(self) -> Vec<Value> {
+        Vec::new()
+    }
+}
+
+impl<V: IntoValue> sealed::Sealed for Vec<V> {}
+
+impl<V: IntoValue> IntoParams for Vec<V> {
+    fn into_params(self) -> Vec<Value> {
+        self.into_iter().map(IntoValue::into_value).collect()
+    }
+}
+
+impl<V: IntoValue + Clone> sealed::Sealed for &[V] {}
+
+impl<V: IntoValue + Clone> IntoParams for &[V] {
+    fn into_params(self) -> Vec<Value> {
+        self.iter().cloned().map(IntoValue::into_value).collect()
+    }
+}
+
+impl<V: IntoValue + Clone> sealed::Sealed for &Vec<V> {}
+
+impl<V: IntoValue + Clone> IntoParams for &Vec<V> {
+    fn into_params(self) -> Vec<Value> {
+        self.as_slice().into_params()
+    }
+}
+
+impl<V: IntoValue + Clone, const N: usize> sealed::Sealed for &[V; N] {}
+
+impl<V: IntoValue + Clone, const N: usize> IntoParams for &[V; N] {
+    fn into_params(self) -> Vec<Value> {
+        self.as_slice().into_params()
+    }
+}
+
+impl<V: IntoValue, const N: usize> sealed::Sealed for [V; N] {}
+
+impl<V: IntoValue, const N: usize> IntoParams for [V; N] {
+    fn into_params(self) -> Vec<Value> {
+        self.into_iter().map(IntoValue::into_value).collect()
+    }
+}
+
+macro_rules! tuple_into_params {
+    ($($name:ident),+) => {
+        impl<$($name: IntoValue),+> sealed::Sealed for ($($name,)+) {}
+
+        impl<$($name: IntoValue),+> IntoParams for ($($name,)+) {
+            #[allow(non_snake_case)]
+            fn into_params(self) -> Vec<Value> {
+                let ($($name,)+) = self;
+                vec![$($name.into_value()),+]
+            }
+        }
+    };
+}
+
+tuple_into_params!(A);
+tuple_into_params!(A, B);
+tuple_into_params!(A, B, C);
+tuple_into_params!(A, B, C, D);
+tuple_into_params!(A, B, C, D, E);
+tuple_into_params!(A, B, C, D, E, F);
+tuple_into_params!(A, B, C, D, E, F, G);
+tuple_into_params!(A, B, C, D, E, F, G, H);
+
 fn json_to_serde(v: &JsonValue) -> serde_json::Value {
     match v {
         JsonValue::Null => serde_json::Value::Null,
