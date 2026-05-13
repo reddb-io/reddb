@@ -1070,7 +1070,7 @@ pub(crate) fn value_to_sql_literal(v: &Value) -> String {
     }
 }
 
-fn query_result_to_json(qr: &RuntimeQueryResult) -> Value {
+pub(crate) fn query_result_to_json(qr: &RuntimeQueryResult) -> Value {
     if let Some(ask) = ask_query_result_to_json(qr) {
         return ask;
     }
