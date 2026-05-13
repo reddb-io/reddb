@@ -2151,6 +2151,12 @@ impl OrderByClause {
 
 /// Graph analytics command issued via SQL-like syntax
 #[derive(Debug, Clone)]
+pub struct GraphCommandOrderBy {
+    pub metric: String,
+    pub ascending: bool,
+}
+
+#[derive(Debug, Clone)]
 pub enum GraphCommand {
     /// GRAPH NEIGHBORHOOD 'source' [DEPTH n] [DIRECTION dir]
     Neighborhood {
@@ -2158,12 +2164,14 @@ pub enum GraphCommand {
         depth: u32,
         direction: String,
     },
-    /// GRAPH SHORTEST_PATH 'source' TO 'target' [ALGORITHM alg] [DIRECTION dir]
+    /// GRAPH SHORTEST_PATH 'source' TO 'target' [ALGORITHM alg] [DIRECTION dir] [ORDER BY metric [ASC|DESC]] [LIMIT n]
     ShortestPath {
         source: String,
         target: String,
         algorithm: String,
         direction: String,
+        limit: Option<u32>,
+        order_by: Option<GraphCommandOrderBy>,
     },
     /// GRAPH TRAVERSE 'source' [STRATEGY bfs|dfs] [DEPTH n] [DIRECTION dir]
     Traverse {
@@ -2172,24 +2180,27 @@ pub enum GraphCommand {
         depth: u32,
         direction: String,
     },
-    /// GRAPH CENTRALITY [ALGORITHM alg] [LIMIT n]
+    /// GRAPH CENTRALITY [ALGORITHM alg] [ORDER BY metric [ASC|DESC]] [LIMIT n]
     ///
     /// `limit = None` keeps the historical implicit top-100 cap. `Some(n)`
-    /// caps the returned rows at `n` (issue #422 tracer slice — other
-    /// algorithms + ORDER BY still pending).
+    /// caps the returned rows at `n`.
     Centrality {
         algorithm: String,
         limit: Option<u32>,
+        order_by: Option<GraphCommandOrderBy>,
     },
-    /// GRAPH COMMUNITY [ALGORITHM alg] [MAX_ITERATIONS n]
+    /// GRAPH COMMUNITY [ALGORITHM alg] [MAX_ITERATIONS n] [ORDER BY metric [ASC|DESC]] [LIMIT n]
     Community {
         algorithm: String,
         max_iterations: u32,
+        limit: Option<u32>,
+        order_by: Option<GraphCommandOrderBy>,
     },
-    /// GRAPH COMPONENTS [MODE connected|weak|strong] [LIMIT n]
+    /// GRAPH COMPONENTS [MODE connected|weak|strong] [ORDER BY metric [ASC|DESC]] [LIMIT n]
     Components {
         mode: String,
         limit: Option<u32>,
+        order_by: Option<GraphCommandOrderBy>,
     },
     /// GRAPH CYCLES [MAX_LENGTH n]
     Cycles { max_length: u32 },

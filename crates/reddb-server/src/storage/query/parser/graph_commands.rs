@@ -1,6 +1,6 @@
 //! Graph Command Parser: GRAPH NEIGHBORHOOD | SHORTEST_PATH | TRAVERSE | CENTRALITY | ...
 
-use super::super::ast::{GraphCommand, QueryExpr};
+use super::super::ast::{GraphCommand, GraphCommandOrderBy, QueryExpr};
 use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
@@ -63,28 +63,38 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parse: GRAPH SHORTEST_PATH [FROM] 'source' TO 'target' [ALGORITHM bfs|dijkstra] [DIRECTION dir]
+    /// Parse: GRAPH SHORTEST_PATH [FROM] 'source' TO 'target' [ALGORITHM bfs|dijkstra] [DIRECTION dir] [ORDER BY metric [ASC|DESC]] [LIMIT n]
     fn parse_graph_shortest_path(&mut self) -> Result<QueryExpr, ParseError> {
         self.advance()?; // consume SHORTEST_PATH
         let _ = self.consume(&Token::From)?; // optional FROM (docs syntax)
         let source = self.parse_string()?;
         self.expect(Token::To)?;
         let target = self.parse_string()?;
-        let algorithm = if self.consume(&Token::Algorithm)? {
-            self.expect_ident_or_keyword()?
-        } else {
-            "bfs".to_string()
-        };
-        let direction = if self.consume(&Token::Direction)? {
-            self.expect_ident_or_keyword()?
-        } else {
-            "outgoing".to_string()
-        };
+        let mut algorithm: Option<String> = None;
+        let mut direction: Option<String> = None;
+        let mut limit: Option<u32> = None;
+        let mut order_by: Option<GraphCommandOrderBy> = None;
+        loop {
+            if algorithm.is_none() && self.consume(&Token::Algorithm)? {
+                algorithm = Some(self.expect_ident_or_keyword()?);
+            } else if direction.is_none() && self.consume(&Token::Direction)? {
+                direction = Some(self.expect_ident_or_keyword()?);
+            } else if order_by.is_none() && self.consume(&Token::Order)? {
+                order_by = Some(self.parse_graph_order_by_tail()?);
+            } else if limit.is_none() && self.consume(&Token::Limit)? {
+                let n = self.parse_integer()?;
+                limit = Some(n as u32);
+            } else {
+                break;
+            }
+        }
         Ok(QueryExpr::GraphCommand(GraphCommand::ShortestPath {
             source,
             target,
-            algorithm,
-            direction,
+            algorithm: algorithm.unwrap_or_else(|| "bfs".to_string()),
+            direction: direction.unwrap_or_else(|| "outgoing".to_string()),
+            limit,
+            order_by,
         }))
     }
 
@@ -115,14 +125,17 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parse: GRAPH CENTRALITY [ALGORITHM degree|closeness|betweenness|eigenvector|pagerank] [LIMIT n]
+    /// Parse: GRAPH CENTRALITY [ALGORITHM degree|closeness|betweenness|eigenvector|pagerank] [ORDER BY metric [ASC|DESC]] [LIMIT n]
     fn parse_graph_centrality(&mut self) -> Result<QueryExpr, ParseError> {
         self.advance()?; // consume CENTRALITY
         let mut algorithm: Option<String> = None;
         let mut limit: Option<u32> = None;
+        let mut order_by: Option<GraphCommandOrderBy> = None;
         loop {
             if algorithm.is_none() && self.consume(&Token::Algorithm)? {
                 algorithm = Some(self.expect_ident_or_keyword()?);
+            } else if order_by.is_none() && self.consume(&Token::Order)? {
+                order_by = Some(self.parse_graph_order_by_tail()?);
             } else if limit.is_none() && self.consume(&Token::Limit)? {
                 // `parse_integer` already rejects a leading `-` at the
                 // integer slot, so the value is always non-negative here.
@@ -135,36 +148,50 @@ impl<'a> Parser<'a> {
         Ok(QueryExpr::GraphCommand(GraphCommand::Centrality {
             algorithm: algorithm.unwrap_or_else(|| "degree".to_string()),
             limit,
+            order_by,
         }))
     }
 
-    /// Parse: GRAPH COMMUNITY [ALGORITHM label_propagation|louvain] [MAX_ITERATIONS n]
+    /// Parse: GRAPH COMMUNITY [ALGORITHM label_propagation|louvain] [MAX_ITERATIONS n] [ORDER BY metric [ASC|DESC]] [LIMIT n]
     fn parse_graph_community(&mut self) -> Result<QueryExpr, ParseError> {
         self.advance()?; // consume COMMUNITY
-        let algorithm = if self.consume(&Token::Algorithm)? {
-            self.expect_ident_or_keyword()?
-        } else {
-            "label_propagation".to_string()
-        };
-        let max_iterations = if self.consume(&Token::MaxIterations)? {
-            self.parse_integer()? as u32
-        } else {
-            100
-        };
+        let mut algorithm: Option<String> = None;
+        let mut max_iterations: Option<u32> = None;
+        let mut limit: Option<u32> = None;
+        let mut order_by: Option<GraphCommandOrderBy> = None;
+        loop {
+            if algorithm.is_none() && self.consume(&Token::Algorithm)? {
+                algorithm = Some(self.expect_ident_or_keyword()?);
+            } else if max_iterations.is_none() && self.consume(&Token::MaxIterations)? {
+                max_iterations = Some(self.parse_integer()? as u32);
+            } else if order_by.is_none() && self.consume(&Token::Order)? {
+                order_by = Some(self.parse_graph_order_by_tail()?);
+            } else if limit.is_none() && self.consume(&Token::Limit)? {
+                let n = self.parse_integer()?;
+                limit = Some(n as u32);
+            } else {
+                break;
+            }
+        }
         Ok(QueryExpr::GraphCommand(GraphCommand::Community {
-            algorithm,
-            max_iterations,
+            algorithm: algorithm.unwrap_or_else(|| "label_propagation".to_string()),
+            max_iterations: max_iterations.unwrap_or(100),
+            limit,
+            order_by,
         }))
     }
 
-    /// Parse: GRAPH COMPONENTS [MODE connected|weak|strong] [LIMIT n]
+    /// Parse: GRAPH COMPONENTS [MODE connected|weak|strong] [ORDER BY metric [ASC|DESC]] [LIMIT n]
     fn parse_graph_components(&mut self) -> Result<QueryExpr, ParseError> {
         self.advance()?; // consume COMPONENTS
         let mut mode: Option<String> = None;
         let mut limit: Option<u32> = None;
+        let mut order_by: Option<GraphCommandOrderBy> = None;
         loop {
             if mode.is_none() && self.consume(&Token::Mode)? {
                 mode = Some(self.expect_ident_or_keyword()?);
+            } else if order_by.is_none() && self.consume(&Token::Order)? {
+                order_by = Some(self.parse_graph_order_by_tail()?);
             } else if limit.is_none() && self.consume(&Token::Limit)? {
                 let n = self.parse_integer()?;
                 limit = Some(n as u32);
@@ -175,7 +202,20 @@ impl<'a> Parser<'a> {
         Ok(QueryExpr::GraphCommand(GraphCommand::Components {
             mode: mode.unwrap_or_else(|| "connected".to_string()),
             limit,
+            order_by,
         }))
+    }
+
+    fn parse_graph_order_by_tail(&mut self) -> Result<GraphCommandOrderBy, ParseError> {
+        self.expect(Token::By)?;
+        let metric = self.expect_ident_or_keyword()?;
+        let ascending = if self.consume(&Token::Desc)? {
+            false
+        } else {
+            self.consume(&Token::Asc)?;
+            true
+        };
+        Ok(GraphCommandOrderBy { metric, ascending })
     }
 
     /// Parse: GRAPH CYCLES [MAX_LENGTH n]
