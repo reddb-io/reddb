@@ -3582,6 +3582,7 @@ impl RedDBRuntime {
                                     ApplyMode::Replica,
                                 ) {
                                     Ok(crate::replication::logical::ApplyOutcome::Applied) => {
+                                        self.invalidate_result_cache_for_table(&change.collection);
                                         since_lsn = since_lsn.max(change.lsn);
                                         self.persist_replica_lsn(since_lsn);
                                     }
