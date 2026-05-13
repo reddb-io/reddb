@@ -207,58 +207,20 @@ impl UnifiedExecutor {
 
     /// Execute a graph query on a specific graph reference
     ///
-    /// Single-node `MATCH (n) [WHERE ...] RETURN ...` patterns get the
-    /// full filter + projection treatment using the passed `graph` (the
-    /// runtime materialises a fresh `GraphStore` per query, so `self.graph`
-    /// is empty here). Multi-node patterns (edges) are still emitted as
-    /// node-only matches — full pattern matching against a foreign graph
-    /// is a separate piece of work tracked outside #415.
+    /// Runtime `MATCH` execution uses the passed `graph` because the
+    /// runtime materialises a fresh `GraphStore` per query, so
+    /// `self.graph` is empty here.
     fn exec_graph_on(
         &self,
         graph: &GraphStore,
         query: &GraphQuery,
     ) -> Result<UnifiedResult, ExecutionError> {
         let mut result = UnifiedResult::empty();
+        let mut stats = QueryStats::default();
         let effective_filter = effective_graph_filter(query);
         let effective_projections = effective_graph_projections(query);
 
-        // Build pattern matches per node pattern. Without edge expansion
-        // the result is the union of single-node matches across each
-        // node pattern — same shape the previous implementation produced,
-        // just now filter- and projection-aware.
-        let mut matches: Vec<PatternMatch> = Vec::new();
-        for pattern_node in &query.pattern.nodes {
-            let matching_nodes: Vec<_> = if let Some(ref category) = pattern_node.node_label {
-                graph.nodes_with_category(category)
-            } else {
-                graph.iter_nodes().collect()
-            };
-
-            for node in matching_nodes {
-                let matched = self.matched_node(&node);
-
-                // Stored-node property filters from the pattern itself
-                // (the `{key: val}` form) still need the StoredNode for
-                // node_property_value(), which also consults custom
-                // node_properties.
-                let mut ok = true;
-                for prop_filter in &pattern_node.properties {
-                    if !self.eval_node_property_filter(&node, prop_filter) {
-                        ok = false;
-                        break;
-                    }
-                }
-                if !ok {
-                    continue;
-                }
-
-                let mut pm = PatternMatch::new();
-                pm.nodes.insert(pattern_node.alias.clone(), matched);
-                matches.push(pm);
-            }
-        }
-
-        let scanned = matches.len() as u64;
+        let matches = self.match_pattern_on(graph, &query.pattern, &mut stats)?;
 
         for matched in matches {
             if !self.eval_filter_on_match(&effective_filter, &matched) {
@@ -268,7 +230,7 @@ impl UnifiedExecutor {
             result.records.push(record);
         }
 
-        result.stats.nodes_scanned = scanned;
+        result.stats = stats;
         Ok(result)
     }
 
@@ -513,37 +475,48 @@ impl UnifiedExecutor {
         pattern: &GraphPattern,
         stats: &mut QueryStats,
     ) -> Result<Vec<PatternMatch>, ExecutionError> {
+        self.match_pattern_on(self.graph.as_ref(), pattern, stats)
+    }
+
+    fn match_pattern_on(
+        &self,
+        graph: &GraphStore,
+        pattern: &GraphPattern,
+        stats: &mut QueryStats,
+    ) -> Result<Vec<PatternMatch>, ExecutionError> {
         if pattern.nodes.is_empty() {
             return Ok(Vec::new());
         }
 
         // Start with first node pattern
         let first = &pattern.nodes[0];
-        let mut matches = self.find_matching_nodes(first, stats)?;
+        let mut matches = self.find_matching_nodes_on(graph, first, stats)?;
 
         // Extend matches for each edge pattern
         for edge_pattern in &pattern.edges {
-            matches = self.extend_matches(matches, edge_pattern, &pattern.nodes, stats)?;
+            matches =
+                self.extend_matches_on(graph, matches, edge_pattern, &pattern.nodes, stats)?;
         }
 
         Ok(matches)
     }
 
     /// Find nodes matching a pattern
-    fn find_matching_nodes(
+    fn find_matching_nodes_on(
         &self,
+        graph: &GraphStore,
         pattern: &NodePattern,
         stats: &mut QueryStats,
     ) -> Result<Vec<PatternMatch>, ExecutionError> {
         let mut matches = Vec::new();
 
         // Iterate through all nodes
-        for node in self.graph.iter_nodes() {
+        for node in graph.iter_nodes() {
             stats.nodes_scanned += 1;
 
             // Check label filter (resolved against the graph's registry).
             if let Some(ref expected) = pattern.node_label {
-                let expected_id = self.graph.registry.lookup(Namespace::Node, expected);
+                let expected_id = graph.registry.lookup(Namespace::Node, expected);
                 match expected_id {
                     Some(id) if id == node.label_id => {}
                     _ => continue,
@@ -571,8 +544,9 @@ impl UnifiedExecutor {
     }
 
     /// Extend matches by following an edge pattern
-    fn extend_matches(
+    fn extend_matches_on(
         &self,
+        graph: &GraphStore,
         matches: Vec<PatternMatch>,
         edge_pattern: &EdgePattern,
         node_patterns: &[NodePattern],
@@ -605,28 +579,27 @@ impl UnifiedExecutor {
             // direction so downstream filters know which side the edge came from.
             let edges: Vec<_> = match edge_pattern.direction {
                 EdgeDirection::Outgoing => {
-                    self.graph
+                    graph
                         .outgoing_edges(&source_node.id)
                         .into_iter()
                         .map(|(et, target, w)| (et, target, w, true)) // is_outgoing = true
                         .collect()
                 }
                 EdgeDirection::Incoming => {
-                    self.graph
+                    graph
                         .incoming_edges(&source_node.id)
                         .into_iter()
                         .map(|(et, source, w)| (et, source, w, false)) // is_outgoing = false
                         .collect()
                 }
                 EdgeDirection::Both => {
-                    let mut all: Vec<_> = self
-                        .graph
+                    let mut all: Vec<_> = graph
                         .outgoing_edges(&source_node.id)
                         .into_iter()
                         .map(|(et, target, w)| (et, target, w, true))
                         .collect();
                     all.extend(
-                        self.graph
+                        graph
                             .incoming_edges(&source_node.id)
                             .into_iter()
                             .map(|(et, source, w)| (et, source, w, false)),
@@ -649,10 +622,10 @@ impl UnifiedExecutor {
                 // The target is the other node
                 let target_id = &other_id;
 
-                if let Some(target_node) = self.graph.get_node(target_id) {
+                if let Some(target_node) = graph.get_node(target_id) {
                     // Check target node label filter (registry resolution).
                     if let Some(ref expected) = target_pattern.node_label {
-                        let expected_id = self.graph.registry.lookup(Namespace::Node, expected);
+                        let expected_id = graph.registry.lookup(Namespace::Node, expected);
                         match expected_id {
                             Some(id) if id == target_node.label_id => {}
                             _ => continue,
@@ -824,28 +797,25 @@ impl UnifiedExecutor {
             FieldRef::NodeId { alias } => {
                 matched.nodes.get(alias).map(|n| Value::text(n.id.clone()))
             }
-            FieldRef::NodeProperty { alias, property } => {
-                matched
-                    .nodes
-                    .get(alias)
-                    .and_then(|n| match property.as_str() {
-                        "id" => Some(Value::text(n.id.clone())),
-                        "label" => Some(Value::text(n.label.clone())),
-                        "type" | "node_type" => Some(Value::text(n.node_label.clone())),
-                        _ => n.properties.get(property).cloned(),
-                    })
-            }
-            FieldRef::EdgeProperty { alias, property } => {
-                matched
-                    .edges
-                    .get(alias)
-                    .and_then(|e| match property.as_str() {
-                        "weight" => Some(Value::Float(e.weight as f64)),
-                        "from" => Some(Value::text(e.from.clone())),
-                        "to" => Some(Value::text(e.to.clone())),
-                        _ => None,
-                    })
-            }
+            FieldRef::NodeProperty { alias, property } => matched
+                .nodes
+                .get(alias)
+                .and_then(|n| match property.as_str() {
+                    "id" => Some(Value::text(n.id.clone())),
+                    "label" => Some(Value::text(n.label.clone())),
+                    "type" | "node_type" => Some(Value::text(n.node_label.clone())),
+                    _ => n.properties.get(property).cloned(),
+                })
+                .or_else(|| {
+                    matched
+                        .edges
+                        .get(alias)
+                        .and_then(|e| Self::edge_property_value(e, property))
+                }),
+            FieldRef::EdgeProperty { alias, property } => matched
+                .edges
+                .get(alias)
+                .and_then(|e| Self::edge_property_value(e, property)),
             FieldRef::TableColumn { table, column } => {
                 // The shared SQL `WHERE` parser emits `n.foo` as
                 // `TableColumn { table: "n", column: "foo" }` — for
@@ -862,16 +832,21 @@ impl UnifiedExecutor {
                         };
                     }
                     if let Some(e) = matched.edges.get(table) {
-                        return match column.as_str() {
-                            "weight" => Some(Value::Float(e.weight as f64)),
-                            "from" => Some(Value::text(e.from.clone())),
-                            "to" => Some(Value::text(e.to.clone())),
-                            _ => None,
-                        };
+                        return Self::edge_property_value(e, column);
                     }
                 }
                 None
             }
+        }
+    }
+
+    fn edge_property_value(edge: &MatchedEdge, property: &str) -> Option<Value> {
+        match property {
+            "weight" => Some(Value::Float(edge.weight as f64)),
+            "from" | "source" => Some(Value::text(edge.from.clone())),
+            "to" | "target" => Some(Value::text(edge.to.clone())),
+            "label" | "type" | "edge_type" => Some(Value::text(edge.edge_label.clone())),
+            _ => None,
         }
     }
 
@@ -926,10 +901,7 @@ impl UnifiedExecutor {
                     // callers don't get an empty `{}` row.
                     if let (FieldRef::NodeId { alias: node_alias }, None) = (field, alias) {
                         if let Some(node) = matched.nodes.get(node_alias) {
-                            record.set(
-                                &format!("{}.id", node_alias),
-                                Value::text(node.id.clone()),
-                            );
+                            record.set(&format!("{}.id", node_alias), Value::text(node.id.clone()));
                             record.set(
                                 &format!("{}.label", node_alias),
                                 Value::text(node.label.clone()),
@@ -941,6 +913,22 @@ impl UnifiedExecutor {
                             for (k, v) in &node.properties {
                                 record.set(&format!("{}.{}", node_alias, k), v.clone());
                             }
+                            continue;
+                        }
+                        if let Some(edge) = matched.edges.get(node_alias) {
+                            record.set(
+                                &format!("{}.from", node_alias),
+                                Value::text(edge.from.clone()),
+                            );
+                            record.set(&format!("{}.to", node_alias), Value::text(edge.to.clone()));
+                            record.set(
+                                &format!("{}.label", node_alias),
+                                Value::text(edge.edge_label.clone()),
+                            );
+                            record.set(
+                                &format!("{}.weight", node_alias),
+                                Value::Float(edge.weight as f64),
+                            );
                             continue;
                         }
                     }
