@@ -129,7 +129,9 @@ impl<'a> Parser<'a> {
             Token::Peek => {
                 self.advance()?;
                 let queue = self.expect_ident()?;
-                let count = if matches!(self.peek(), Token::Integer(_)) {
+                let count = if self.consume(&Token::Count)? {
+                    self.parse_integer()? as usize
+                } else if matches!(self.peek(), Token::Integer(_)) {
                     self.parse_integer()? as usize
                 } else {
                     1

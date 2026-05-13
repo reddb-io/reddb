@@ -39,12 +39,14 @@ import {
 } from './embedded-rejection.js'
 import { CacheClient } from './cache.js'
 import { KvClient } from './kv.js'
+import { QueueClient } from './queue.js'
 import { ConfigClient } from './config.js'
 import { VaultClient } from './vault.js'
 
 export { RedDBError, EmbeddedNotSupported, EMBEDDED_REJECTION_MESSAGE, isEmbeddedUri }
 export { CacheClient } from './cache.js'
 export { KvClient } from './kv.js'
+export { QueueClient } from './queue.js'
 export { ConfigClient } from './config.js'
 export { VaultClient } from './vault.js'
 export { parseUri, deriveLoginUrl } from './url.js'
@@ -352,6 +354,7 @@ export class RedDB {
   constructor(client) {
     this.client = client
     this.cache = new CacheClient(client)
+    this.queue = new QueueClient(client)
     const defaultKv = new KvClient(client)
     this.kv = Object.assign((collection = 'kv_default') => new KvClient(client, collection), {
       put: defaultKv.put.bind(defaultKv),
