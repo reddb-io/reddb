@@ -2202,11 +2202,12 @@ pub struct GraphCommandOrderBy {
 
 #[derive(Debug, Clone)]
 pub enum GraphCommand {
-    /// GRAPH NEIGHBORHOOD 'source' [DEPTH n] [DIRECTION dir]
+    /// GRAPH NEIGHBORHOOD 'source' [DEPTH n] [DIRECTION dir] [EDGES IN ('label', ...)]
     Neighborhood {
         source: String,
         depth: u32,
         direction: String,
+        edge_labels: Option<Vec<String>>,
     },
     /// GRAPH SHORTEST_PATH 'source' TO 'target' [ALGORITHM alg] [DIRECTION dir] [ORDER BY metric [ASC|DESC]] [LIMIT n]
     ShortestPath {
@@ -2217,12 +2218,13 @@ pub enum GraphCommand {
         limit: Option<u32>,
         order_by: Option<GraphCommandOrderBy>,
     },
-    /// GRAPH TRAVERSE 'source' [STRATEGY bfs|dfs] [DEPTH n] [DIRECTION dir]
+    /// GRAPH TRAVERSE 'source' [STRATEGY bfs|dfs] [DEPTH n] [DIRECTION dir] [EDGES IN ('label', ...)]
     Traverse {
         source: String,
         strategy: String,
         depth: u32,
         direction: String,
+        edge_labels: Option<Vec<String>>,
     },
     /// GRAPH CENTRALITY [ALGORITHM alg] [ORDER BY metric [ASC|DESC]] [LIMIT n]
     ///
