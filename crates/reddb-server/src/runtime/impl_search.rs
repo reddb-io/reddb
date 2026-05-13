@@ -1153,6 +1153,26 @@ impl RedDBRuntime {
         raw_query: &str,
         ask: &crate::storage::query::ast::AskQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.execute_ask_with_stream_frames(raw_query, ask, None)
+    }
+
+    pub(crate) fn execute_ask_streaming_frames(
+        &self,
+        raw_query: &str,
+        ask: &crate::storage::query::ast::AskQuery,
+        emit: &mut dyn FnMut(crate::runtime::ai::sse_frame_encoder::Frame) -> RedDBResult<()>,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        self.execute_ask_with_stream_frames(raw_query, ask, Some(emit))
+    }
+
+    fn execute_ask_with_stream_frames(
+        &self,
+        raw_query: &str,
+        ask: &crate::storage::query::ast::AskQuery,
+        mut stream_emit: Option<
+            &mut dyn FnMut(crate::runtime::ai::sse_frame_encoder::Frame) -> RedDBResult<()>,
+        >,
+    ) -> RedDBResult<RuntimeQueryResult> {
         use crate::ai::{parse_provider, resolve_api_key_from_runtime};
 
         // Stage 1-4: AskPipeline narrows the candidate set BEFORE any
@@ -1213,6 +1233,11 @@ impl RedDBRuntime {
                 return Err(cost_guard_rejection_to_error(limit, detail));
             }
         }
+        if let Some(emit) = stream_emit.as_deref_mut() {
+            emit(crate::runtime::ai::sse_frame_encoder::Frame::Sources {
+                sources_flat: sse_source_rows_from_sources_json(&sources_flat_json),
+            })?;
+        }
 
         // Step 3: Call LLM — use configured defaults if no provider/model specified
         let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self);
@@ -1224,7 +1249,8 @@ impl RedDBRuntime {
         let cache_mode = ask_cache_mode(&ask.cache)?;
         let source_dependencies = ask_source_dependencies(&ask_context);
 
-        let attempt_provider = |provider_name: &str| -> RedDBResult<AskLlmAttempt> {
+        let live_streaming = stream_emit.is_some();
+        let mut attempt_provider = |provider_name: &str| -> RedDBResult<AskLlmAttempt> {
             let provider = parse_provider(provider_name)?;
             let model = ask.model.clone().unwrap_or_else(|| default_model.clone());
 
@@ -1306,6 +1332,43 @@ impl RedDBRuntime {
                 citation_result,
             ) = loop {
                 let provider_started = std::time::Instant::now();
+                let mut streamed_answer = String::new();
+                let prompt_tokens_for_stream = estimate_prompt_tokens(&prompt_for_call);
+                let mut on_stream_token = |token: &str| -> RedDBResult<()> {
+                    streamed_answer.push_str(token);
+                    let completion_tokens_so_far = estimate_prompt_tokens(&streamed_answer);
+                    let elapsed_ms = duration_millis_u32(provider_started.elapsed());
+                    let cost_usd_so_far =
+                        estimate_ask_cost_usd(prompt_tokens_for_stream, completion_tokens_so_far);
+                    let usage = crate::runtime::ai::cost_guard::Usage {
+                        prompt_tokens: prompt_tokens_for_stream,
+                        sources_bytes: usage.sources_bytes,
+                        completion_tokens: completion_tokens_so_far,
+                        estimated_cost_usd: cost_usd_so_far,
+                        elapsed_ms,
+                        ..Default::default()
+                    };
+                    let daily_state = self.ask_daily_cost_state(&tenant_key, ask_cost_guard_now());
+                    match crate::runtime::ai::cost_guard::evaluate(
+                        &usage,
+                        &daily_state,
+                        &settings,
+                        ask_cost_guard_now(),
+                    ) {
+                        crate::runtime::ai::cost_guard::Decision::Allow => {}
+                        crate::runtime::ai::cost_guard::Decision::Reject {
+                            limit, detail, ..
+                        } => {
+                            return Err(cost_guard_rejection_to_error(limit, detail));
+                        }
+                    }
+                    if let Some(emit) = stream_emit.as_deref_mut() {
+                        emit(crate::runtime::ai::sse_frame_encoder::Frame::AnswerToken {
+                            text: token.to_string(),
+                        })?;
+                    }
+                    Ok(())
+                };
                 let prompt_response = call_ask_llm(
                     &provider,
                     transport.clone(),
@@ -1317,6 +1380,8 @@ impl RedDBRuntime {
                     determinism.temperature,
                     determinism.seed,
                     ask.stream,
+                    live_streaming
+                        .then_some(&mut on_stream_token as &mut dyn FnMut(&str) -> RedDBResult<()>),
                 )?;
                 let elapsed_ms = duration_millis_u32(provider_started.elapsed());
                 let completion_tokens = prompt_response.completion_tokens.unwrap_or(0);
@@ -2488,6 +2553,7 @@ fn call_ask_llm(
     temperature: Option<f32>,
     seed: Option<u64>,
     stream: bool,
+    on_stream_token: Option<&mut dyn FnMut(&str) -> RedDBResult<()>>,
 ) -> RedDBResult<crate::ai::AiPromptResponse> {
     match provider {
         crate::ai::AiProvider::Anthropic => {
@@ -2506,6 +2572,21 @@ fn call_ask_llm(
             .and_then(|result| result)
         }
         _ => {
+            if stream {
+                if let Some(on_stream_token) = on_stream_token {
+                    let request = crate::ai::OpenAiPromptRequest {
+                        api_key,
+                        model,
+                        prompt,
+                        temperature,
+                        seed,
+                        max_output_tokens: Some(max_output_tokens),
+                        api_base,
+                        stream: true,
+                    };
+                    return crate::ai::openai_prompt_streaming(request, on_stream_token);
+                }
+            }
             let request = crate::ai::OpenAiPromptRequest {
                 api_key,
                 model,
@@ -2522,6 +2603,28 @@ fn call_ask_llm(
             .and_then(|result| result)
         }
     }
+}
+
+fn sse_source_rows_from_sources_json(
+    value: &crate::json::Value,
+) -> Vec<crate::runtime::ai::sse_frame_encoder::SourceRow> {
+    value
+        .as_array()
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|source| {
+            let urn = source.get("urn").and_then(crate::json::Value::as_str)?;
+            let payload = source
+                .get("payload")
+                .and_then(crate::json::Value::as_str)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| source.to_string_compact());
+            Some(crate::runtime::ai::sse_frame_encoder::SourceRow {
+                urn: urn.to_string(),
+                payload,
+            })
+        })
+        .collect()
 }
 
 /// Build the full prompt string sent to the synthesis LLM by routing
