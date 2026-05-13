@@ -36,6 +36,47 @@ Go driver and any other gRPC-based clients should round-trip the schema correctl
 
 ## Progress
 
+- 2026-05-13: Slice 3 — typed non-streaming gRPC `Ask` landed.
+
+  Implemented the focused non-streaming slice only; no `AskStream`
+  RPC was added to avoid overlapping #405. The gRPC service now uses
+  `AskRequest`/`AskReply` instead of the legacy
+  `JsonPayloadRequest`/`PayloadReply` for `rpc Ask`, while `Query`
+  remains on the existing `QueryReply.result_json` path from slice 2.
+
+  Key decisions:
+  - Add proto3 typed messages for `AskRequest`, `AskReply`,
+    `Citation`, `Validation`, and `ValidationItem`; reply field
+    numbers match the pinned constants in `grpc_ask_message`.
+  - Keep request scalar controls optional so proto evolution does not
+    introduce required fields; unset `strict` preserves the prior
+    default of `true`.
+  - Reuse the existing ASK runtime modules:
+    `execute_ask` produces the runtime row, `scan_json` lifts it into
+    the canonical `AskResult`, and `grpc_ask_message::build` converts
+    that into the typed reply shape.
+  - Leave HTTP/audit behavior untouched.
+  - Update the Go driver's minimal gRPC proto and add a low-level
+    `grpcx.Client.Ask` round-trip test for the typed schema. The
+    top-level Go facade `db.Query(ctx, "ASK ...")` continues to use
+    the existing `Query` RPC path.
+
+  Tests:
+  - `cargo test -p reddb-io-server grpc_ask_message --lib -- --nocapture`
+    → 19 passed.
+  - `cargo test -p reddb-io-grpc-proto --lib`
+    → 2 passed.
+  - `cargo check -p reddb-io-server`
+    → passed.
+  - `cargo test -p reddb-io-client --features grpc --test grpc_pool_concurrency --test topology_e2e --no-run`
+    → passed.
+  - `go test ./...` in `drivers/go`
+    → 104 passed.
+
+  Issue stays open / not moved to `issues/done/` because the full
+  issue still lists gRPC server-streaming `AskStream`; that remains a
+  follow-up tied to #405.
+
 - 2026-05-12: Slice 2 — gRPC `Query` now returns the canonical ASK
   envelope in `QueryReply.result_json` when the runtime result is
   `statement == "ask"`. This unblocks the current Go gRPC facade path

@@ -79,6 +79,14 @@ func (c *Client) Query(ctx context.Context, sql string, params ...any) (*pb.Quer
 	})
 }
 
+func (c *Client) Ask(ctx context.Context, req *pb.AskRequest) (*pb.AskReply, error) {
+	if req == nil {
+		req = &pb.AskRequest{}
+	}
+	ctx = c.authContext(ctx)
+	return c.client.Ask(ctx, req)
+}
+
 func (c *Client) Ping(ctx context.Context) error {
 	ctx = c.authContext(ctx)
 	_, err := c.client.Health(ctx, &pb.Empty{})

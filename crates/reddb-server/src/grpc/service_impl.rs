@@ -10,6 +10,53 @@ fn insert_snapshot_sidecar(
     Ok(())
 }
 
+fn ask_reply_from_runtime_result(result: &RuntimeQueryResult) -> Result<AskReply, Status> {
+    let ask = ask_result_from_unified_result(&result.result)
+        .ok_or_else(|| Status::internal("ASK runtime result did not contain an answer row"))?;
+    let reply = crate::runtime::ai::grpc_ask_message::build(&ask);
+    Ok(AskReply {
+        answer: reply.answer,
+        sources_flat_json: reply.sources_flat_json,
+        citations: reply
+            .citations
+            .into_iter()
+            .map(|citation| Citation {
+                marker: citation.marker,
+                urn: citation.urn,
+            })
+            .collect(),
+        validation: Some(Validation {
+            ok: reply.validation.ok,
+            warnings: reply
+                .validation
+                .warnings
+                .into_iter()
+                .map(|item| ValidationItem {
+                    kind: item.kind,
+                    detail: item.detail,
+                })
+                .collect(),
+            errors: reply
+                .validation
+                .errors
+                .into_iter()
+                .map(|item| ValidationItem {
+                    kind: item.kind,
+                    detail: item.detail,
+                })
+                .collect(),
+        }),
+        provider: reply.provider,
+        model: reply.model,
+        prompt_tokens: reply.prompt_tokens,
+        completion_tokens: reply.completion_tokens,
+        cost_usd: reply.cost_usd,
+        cache_hit: reply.cache_hit,
+        mode: reply.mode,
+        retry_count: reply.retry_count,
+    })
+}
+
 #[tonic::async_trait]
 impl RedDb for GrpcRuntime {
     type KvWatchStream =
@@ -2340,53 +2387,25 @@ impl RedDb for GrpcRuntime {
         Ok(Response::new(reply))
     }
 
-    async fn ask(
-        &self,
-        request: Request<JsonPayloadRequest>,
-    ) -> Result<Response<PayloadReply>, Status> {
+    async fn ask(&self, request: Request<AskRequest>) -> Result<Response<AskReply>, Status> {
         self.authorize_read(request.metadata())?;
-        let payload = parse_json_payload(&request.into_inner().payload_json)?;
-        let question = payload
-            .get("question")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| Status::invalid_argument("field 'question' must be a string"))?;
+        let request = request.into_inner();
+        if request.question.trim().is_empty() {
+            return Err(Status::invalid_argument("field 'question' must be a non-empty string"));
+        }
 
         let ask_query = crate::storage::query::ast::AskQuery {
             explain: false,
-            question: question.to_string(),
-            provider: payload
-                .get("provider")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            model: payload
-                .get("model")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            depth: payload
-                .get("depth")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as usize),
-            limit: payload
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as usize),
-            min_score: payload
-                .get("min_score")
-                .and_then(|v| v.as_f64())
-                .map(|v| v as f32),
-            collection: payload
-                .get("collection")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            temperature: payload
-                .get("temperature")
-                .and_then(|v| v.as_f64())
-                .map(|v| v as f32),
-            seed: payload.get("seed").and_then(|v| v.as_u64()),
-            strict: payload
-                .get("strict")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true),
+            question: request.question,
+            provider: request.provider,
+            model: request.model,
+            depth: request.depth.map(|v| v as usize),
+            limit: request.limit.map(|v| v as usize),
+            min_score: request.min_score,
+            collection: request.collection,
+            temperature: request.temperature,
+            seed: request.seed,
+            strict: request.strict.unwrap_or(true),
             stream: false,
         };
 
@@ -2394,20 +2413,7 @@ impl RedDb for GrpcRuntime {
             .runtime
             .execute_ask("ASK via gRPC", &ask_query)
             .map_err(to_status)?;
-        let mut object = crate::json::Map::new();
-        // Extract answer from first record
-        if let Some(record) = result.result.records.first() {
-            if let Some(crate::storage::schema::Value::Text(answer)) = record.get("answer") {
-                object.insert("ok".to_string(), crate::json::Value::Bool(true));
-                object.insert(
-                    "answer".to_string(),
-                    crate::json::Value::String(answer.to_string()),
-                );
-            }
-        }
-        Ok(Response::new(json_payload_reply(
-            crate::json::Value::Object(object),
-        )))
+        Ok(Response::new(ask_reply_from_runtime_result(&result)?))
     }
 
     async fn context_search(
