@@ -6,10 +6,19 @@
 //! into the AST. Type validation is delegated to the existing engine
 //! type checker, which runs on the substituted literals downstream.
 
-use crate::storage::query::ast::{Expr, QueryExpr, SearchCommand};
+use crate::storage::query::ast::{Expr, QueryExpr, SearchCommand, Span};
 use crate::storage::query::planner::shape::bind_user_param_query;
 use crate::storage::query::sql_lowering::{expr_to_filter, fold_expr_to_value};
 use crate::storage::schema::Value;
+
+/// One parameter placeholder found in the parsed query AST.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParameterRef {
+    /// Zero-based index into the caller-supplied parameter slice.
+    pub index: usize,
+    /// Source span of the placeholder token.
+    pub span: Span,
+}
 
 /// Recursively check whether `expr` contains any `Expr::Parameter` node.
 /// Used by the INSERT parser to know when to defer literal folding to
@@ -205,16 +214,31 @@ impl std::fmt::Display for UserParamError {
 
 impl std::error::Error for UserParamError {}
 
+/// Public bind error alias matching the parameter-contract ADR wording.
+pub type BindError = UserParamError;
+
+/// Walk `expr`, collecting parameter placeholders that carry source spans.
+pub fn scan_parameters(expr: &QueryExpr) -> Vec<ParameterRef> {
+    let mut out = Vec::new();
+    visit_query_expr(expr, &mut |e| {
+        if let Expr::Parameter { index, span } = e {
+            out.push(ParameterRef {
+                index: *index,
+                span: *span,
+            });
+        }
+    });
+    out
+}
+
 /// Walk `expr`, collect every `Expr::Parameter { index }` encountered.
 /// Also picks up parameter slots that live outside the `Expr` tree —
 /// today only the vector slot of `SEARCH SIMILAR $N` (see #355).
 pub fn collect_indices(expr: &QueryExpr) -> Vec<usize> {
-    let mut out = Vec::new();
-    visit_query_expr(expr, &mut |e| {
-        if let Expr::Parameter { index, .. } = e {
-            out.push(*index);
-        }
-    });
+    let mut out: Vec<usize> = scan_parameters(expr)
+        .into_iter()
+        .map(|param| param.index)
+        .collect();
     collect_non_expr_indices(expr, &mut out);
     out
 }
@@ -937,6 +961,11 @@ pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamEr
     bind_user_param_query(expr, params).ok_or(UserParamError::UnsupportedShape)
 }
 
+/// One-shot helper matching the parameter-contract ADR wording.
+pub fn bind_parameters(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, BindError> {
+    bind(expr, params)
+}
+
 fn value_variant_name(value: &Value) -> &'static str {
     match value {
         Value::Null => "null",
@@ -1069,6 +1098,25 @@ mod tests {
         let mut ix = collect_indices(&q);
         ix.sort();
         assert_eq!(ix, vec![0, 1]);
+    }
+
+    #[test]
+    fn scan_parameters_reports_index_and_span() {
+        let sql = "SELECT * FROM users WHERE id = $1 AND name = $2";
+        let q = parse(sql);
+        let params = scan_parameters(&q);
+        assert_eq!(
+            params.iter().map(|param| param.index).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(
+            &sql[params[0].span.start.offset as usize..params[0].span.end.offset as usize],
+            "$1"
+        );
+        assert_eq!(
+            &sql[params[1].span.start.offset as usize..params[1].span.end.offset as usize],
+            "$2"
+        );
     }
 
     #[test]
@@ -1316,6 +1364,47 @@ mod tests {
             panic!("expected SearchCommand::Similar");
         };
         assert!(vector.is_empty());
+    }
+
+    #[test]
+    fn bind_parameters_substitutes_all_wire_value_variants() {
+        let q = parse(
+            "INSERT INTO value_params \
+             (n, ok, count, score, name, payload, dense, body, seen_at, ident) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        );
+        let uuid = [1_u8; 16];
+        let params = vec![
+            Value::Null,
+            Value::Boolean(true),
+            Value::Integer(42),
+            Value::Float(1.5),
+            Value::text("alice"),
+            Value::Blob(vec![0, 1, 2]),
+            Value::Vector(vec![0.25, 0.5]),
+            Value::Json(br#"{"a":1}"#.to_vec()),
+            Value::Timestamp(1_700_000_000),
+            Value::Uuid(uuid),
+        ];
+        let bound = bind_parameters(&q, &params).unwrap();
+        let QueryExpr::Insert(insert) = bound else {
+            panic!("expected Insert");
+        };
+        assert_eq!(insert.values, vec![params]);
+    }
+
+    #[test]
+    fn bind_parameters_reuses_duplicate_index() {
+        let q = parse("SELECT * FROM users WHERE id = $1 OR manager_id = $1");
+        let bound = bind_parameters(&q, &[Value::Integer(7)]).unwrap();
+        let QueryExpr::Table(table) = bound else {
+            panic!("expected Table");
+        };
+        assert!(table.where_expr.is_some());
+        assert_eq!(
+            collect_indices(&QueryExpr::Table(table)),
+            Vec::<usize>::new()
+        );
     }
 
     #[test]
