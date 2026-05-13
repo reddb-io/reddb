@@ -724,7 +724,6 @@ impl<'a> Parser<'a> {
             | Token::Insert
             | Token::Update
             | Token::Truncate
-            | Token::Explain
             | Token::Create
             | Token::Drop
             | Token::Alter
@@ -739,6 +738,24 @@ impl<'a> Parser<'a> {
             | Token::Analyze
             | Token::Copy
             | Token::Refresh => self.parse_sql_statement().map(FrontendStatement::Sql),
+            Token::Explain => {
+                if matches!(
+                    self.peek_next()?,
+                    Token::Ident(name) if name.eq_ignore_ascii_case("ASK")
+                ) {
+                    match self.parse_explain_ask_query()? {
+                        QueryExpr::Ask(query) => Ok(FrontendStatement::Ask(query)),
+                        other => Err(ParseError::new(
+                            format!(
+                                "internal: EXPLAIN ASK produced unexpected query kind {other:?}"
+                            ),
+                            self.position(),
+                        )),
+                    }
+                } else {
+                    self.parse_sql_statement().map(FrontendStatement::Sql)
+                }
+            }
             Token::Ident(name) if name.eq_ignore_ascii_case("SHOW") => {
                 self.parse_sql_statement().map(FrontendStatement::Sql)
             }

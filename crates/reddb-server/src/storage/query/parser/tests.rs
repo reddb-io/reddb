@@ -1375,6 +1375,17 @@ fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
         panic!("Expected AskQuery");
     };
     assert!(ask.stream);
+    assert!(!ask.explain);
+
+    let query = parse("EXPLAIN ASK 'q' USING openai LIMIT 3 MIN_SCORE 0.7 DEPTH 2").unwrap();
+    let QueryExpr::Ask(ask) = query else {
+        panic!("Expected AskQuery");
+    };
+    assert!(ask.explain);
+    assert_eq!(ask.provider.as_deref(), Some("openai"));
+    assert_eq!(ask.limit, Some(3));
+    assert_eq!(ask.min_score, Some(0.7_f32));
+    assert_eq!(ask.depth, Some(2));
 
     for sql in [
         "INSERT INTO docs (body) VALUES ('x') WITH UNKNOWN",
