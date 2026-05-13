@@ -70,7 +70,7 @@ mod tests;
 pub use error::{ParseError, ParseErrorKind, SafeTokenDisplay};
 pub use limits::ParserLimits;
 
-use super::ast::{QueryExpr, QueryWithCte};
+use super::ast::{QueryExpr, QueryWithCte, Span};
 use super::lexer::{Lexer, Position, Spanned, Token};
 use crate::storage::schema::Value;
 use limits::DepthCounter;
@@ -406,16 +406,8 @@ impl<'a> Parser<'a> {
                 Ok(n - 1)
             }
             Token::Question => {
-                self.advance()?;
-                if self.placeholder_mode == PlaceholderMode::Dollar {
-                    return Err(ParseError::new(
-                        "cannot mix `?` and `$N` placeholders in one statement".to_string(),
-                        self.position(),
-                    ));
-                }
-                self.placeholder_mode = PlaceholderMode::Question;
-                self.question_count += 1;
-                Ok(self.question_count - 1)
+                let (index, _) = self.parse_question_param_index()?;
+                Ok(index)
             }
             other => Err(ParseError::expected(
                 vec!["$N", "?"],
@@ -423,6 +415,42 @@ impl<'a> Parser<'a> {
                 self.position(),
             )),
         }
+    }
+
+    /// Parse a question-style positional placeholder. Bare `?` slots are
+    /// assigned left-to-right. Immediate `?N` slots use the explicit
+    /// 1-based index, matching `$N` without changing the placeholder
+    /// family.
+    pub(crate) fn parse_question_param_index(&mut self) -> Result<(usize, Span), ParseError> {
+        let start = self.position();
+        let question_end = self.current.end;
+        self.expect(Token::Question)?;
+        if self.placeholder_mode == PlaceholderMode::Dollar {
+            return Err(ParseError::new(
+                "cannot mix `?` and `$N` placeholders in one statement".to_string(),
+                self.position(),
+            ));
+        }
+        self.placeholder_mode = PlaceholderMode::Question;
+
+        if let Token::Integer(n) = *self.peek() {
+            if self.current.start.offset == question_end.offset {
+                if n < 1 {
+                    return Err(ParseError::new(
+                        "placeholder index must be >= 1".to_string(),
+                        self.position(),
+                    ));
+                }
+                let end = self.current.end;
+                self.advance()?;
+                let index = n as usize - 1;
+                self.question_count = self.question_count.max(index + 1);
+                return Ok((index, Span::new(start, end)));
+            }
+        }
+
+        self.question_count += 1;
+        Ok((self.question_count - 1, Span::new(start, question_end)))
     }
 
     /// Parse a strictly-positive integer literal (`> 0`).

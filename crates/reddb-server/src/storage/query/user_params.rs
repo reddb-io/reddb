@@ -1177,6 +1177,25 @@ mod tests {
     }
 
     #[test]
+    fn bind_substitutes_question_numbered_param() {
+        let q = parse("SELECT * FROM users WHERE id = ?1 AND name = ?2");
+        let bound = bind(&q, &[Value::Integer(42), Value::text("Alice")]).unwrap();
+        let QueryExpr::Table(t) = bound else {
+            panic!("expected Table");
+        };
+        let mut literals: Vec<Value> = Vec::new();
+        visit_expr(&t.where_expr.unwrap(), &mut |e| {
+            if let Expr::Literal { value, .. } = e {
+                literals.push(value.clone());
+            }
+        });
+        assert!(literals.iter().any(|v| matches!(v, Value::Integer(42))));
+        assert!(literals
+            .iter()
+            .any(|v| matches!(v, Value::Text(s) if s.as_ref() == "Alice")));
+    }
+
+    #[test]
     fn bind_substitutes_text_and_null() {
         let q = parse("SELECT * FROM users WHERE name = $1 AND deleted = $2");
         let bound = bind(&q, &[Value::text("Alice"), Value::Null]).unwrap();
