@@ -20,6 +20,8 @@ use std::panic::AssertUnwindSafe;
 
 use tokio::sync::Mutex as AsyncMutex;
 
+use crate::application::entity::CreateRowInput;
+use crate::application::ports::RuntimeEntityPort;
 use crate::json::{self as json, Value};
 use crate::runtime::{RedDBRuntime, RuntimeQueryResult};
 use crate::storage::query::unified::UnifiedRecord;
@@ -831,17 +833,19 @@ fn dispatch_method(
                 error_code::INVALID_PARAMS,
                 "'payload' must be a JSON object".to_string(),
             ))?;
-            let sql = build_insert_sql(collection, payload_obj.iter());
-
             if let Some(tx) = session.current_tx_mut() {
+                let sql = build_insert_sql(collection, payload_obj.iter());
                 tx.write_set.push(PendingSql::Insert(sql));
                 return Ok(pending_tx_response(tx.tx_id));
             }
 
-            let qr = runtime
-                .execute_query(&sql)
+            let output = runtime
+                .create_row(flat_payload_to_row_input(collection, payload_obj))
                 .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
-            Ok(insert_result_to_json(&qr))
+            let mut out = json::Map::new();
+            out.insert("affected".to_string(), Value::Number(1.0));
+            out.insert("id".to_string(), Value::String(output.id.raw().to_string()));
+            Ok(Value::Object(out))
         }
 
         "bulk_insert" => {
@@ -890,14 +894,11 @@ fn dispatch_method(
             let mut total_affected: u64 = 0;
             let mut ids = Vec::with_capacity(objects.len());
             for obj in objects {
-                let sql = build_insert_sql(collection, obj.iter());
-                let qr = runtime
-                    .execute_query(&sql)
+                let output = runtime
+                    .create_row(flat_payload_to_row_input(collection, obj))
                     .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
-                total_affected += qr.affected_rows;
-                if let Some(id) = insert_result_to_json(&qr).get("id") {
-                    ids.push(id.clone());
-                }
+                total_affected += 1;
+                ids.push(Value::String(output.id.raw().to_string()));
             }
             let mut out = json::Map::new();
             out.insert("affected".to_string(), Value::Number(total_affected as f64));
@@ -914,7 +915,7 @@ fn dispatch_method(
                 error_code::INVALID_PARAMS,
                 "missing 'id' string".to_string(),
             ))?;
-            let sql = format!("SELECT * FROM {collection} WHERE _entity_id = {id} LIMIT 1");
+            let sql = format!("SELECT * FROM {collection} WHERE red_entity_id = {id} LIMIT 1");
             let qr = runtime
                 .execute_query(&sql)
                 .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
@@ -938,7 +939,7 @@ fn dispatch_method(
                 error_code::INVALID_PARAMS,
                 "missing 'id' string".to_string(),
             ))?;
-            let sql = format!("DELETE FROM {collection} WHERE _entity_id = {id}");
+            let sql = format!("DELETE FROM {collection} WHERE red_entity_id = {id}");
 
             if let Some(tx) = session.current_tx_mut() {
                 tx.write_set.push(PendingSql::Delete(sql));
@@ -1060,6 +1061,22 @@ where
         cols.join(", "),
         vals.join(", "),
     )
+}
+
+fn flat_payload_to_row_input(
+    collection: &str,
+    payload: &json::Map<String, Value>,
+) -> CreateRowInput {
+    CreateRowInput {
+        collection: collection.to_string(),
+        fields: payload
+            .iter()
+            .map(|(key, value)| (key.clone(), json_value_to_schema_value(value)))
+            .collect(),
+        metadata: Vec::new(),
+        node_links: Vec::new(),
+        vector_links: Vec::new(),
+    }
 }
 
 pub(crate) fn should_bulk_insert_graph(
@@ -1806,7 +1823,7 @@ fn dispatch_method_remote(
                 error_code::INVALID_PARAMS,
                 "missing 'id' string".to_string(),
             ))?;
-            let sql = format!("SELECT * FROM {collection} WHERE _entity_id = {id} LIMIT 1");
+            let sql = format!("SELECT * FROM {collection} WHERE red_entity_id = {id} LIMIT 1");
             let json_str = tokio_rt
                 .block_on(async {
                     let mut guard = client.lock().await;
