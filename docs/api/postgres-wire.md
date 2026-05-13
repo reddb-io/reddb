@@ -44,8 +44,8 @@ COMMIT;
 The PG listener supports PostgreSQL's extended protocol (`Parse` / `Bind` /
 `Describe` / `Execute`) for `$N` placeholders. PostgreSQL drivers that send
 prepared/parameterized statements can bind numeric, text, bool, bytea, JSON,
-UUID, and timestamp parameters without string concatenation. The cross-driver
-binding contract is tracked in
+UUID, timestamp, and RedDB vector parameters without string concatenation. The
+cross-driver binding contract is tracked in
 [ADR #352](https://github.com/reddb-io/reddb/issues/352).
 
 ## From a driver
@@ -114,7 +114,8 @@ RedDB values are returned in PG text format under the following OIDs:
 | Json / Blob | 114 (json) / 17 (bytea) | |
 | TimestampMs | 1184 (timestamptz) | ms → ISO-8601 |
 | Date | 1082 (date) | Unix days → YYYY-MM-DD |
-| Vector / NodeRef / EdgeRef | 25 (text) | Serialised string |
+| Vector | 38000 (reddb vector) | RedDB-reserved stable OID |
+| NodeRef / EdgeRef | 25 (text) | Serialised string |
 | Null | — | NULL bytes |
 
 Inbound bind parameters accept the following PostgreSQL OIDs:
@@ -129,6 +130,13 @@ Inbound bind parameters accept the following PostgreSQL OIDs:
 | 114/3802 (`json`/`jsonb`) | Json |
 | 1114/1184 (`timestamp`/`timestamptz`) | Timestamp |
 | 2950 (`uuid`) | Uuid |
+| 38000 (`reddb vector`) | Vector |
+
+Vector OID `38000` is RedDB-reserved. PostgreSQL extension OIDs are normally
+cluster-local, so RedDB does not claim pgvector's dynamic catalog OID. Text
+binds use JSON vector literals such as `[1.0, 0.0]`; binary binds use the
+pgvector-compatible shape `i16 dimensions`, `i16 reserved`, then big-endian
+`f32` values.
 
 ## Catalog compatibility
 
