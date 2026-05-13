@@ -453,10 +453,11 @@ impl<'a> Parser<'a> {
         let mut temperature = None;
         let mut seed = None;
         let mut strict = true;
+        let mut stream = false;
 
         // Parse optional clauses in any order. Loop bound = number of
         // clause kinds, so each can appear at most once.
-        for _ in 0..9 {
+        for _ in 0..10 {
             if self.consume(&Token::Using)? {
                 provider = Some(self.expect_ident()?);
             } else if self.consume_ident_ci("MODEL")? {
@@ -474,7 +475,7 @@ impl<'a> Parser<'a> {
             } else if self.consume_ident_ci("SEED")? {
                 seed = Some(self.parse_integer()? as u64);
             } else if self.consume_ident_ci("STRICT")? {
-                let value = self.expect_ident()?;
+                let value = self.expect_ident_or_keyword()?;
                 if value.eq_ignore_ascii_case("ON") {
                     strict = true;
                 } else if value.eq_ignore_ascii_case("OFF") {
@@ -485,6 +486,8 @@ impl<'a> Parser<'a> {
                         self.position(),
                     ));
                 }
+            } else if self.consume_ident_ci("STREAM")? {
+                stream = true;
             } else {
                 break;
             }
@@ -501,6 +504,7 @@ impl<'a> Parser<'a> {
             temperature,
             seed,
             strict,
+            stream,
         }))
     }
 

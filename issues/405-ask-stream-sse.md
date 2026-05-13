@@ -115,3 +115,47 @@ Deep module is the load-bearing piece; remaining slices are
 transport-layer wiring and can land independently. Issue stays open
 with this progress note (mirrors slice 1 pattern of #395, #396,
 #398, #400, #401, #402, #403).
+
+Slice 2: parser flag + buffered HTTP SSE snapshot landed.
+
+What changed:
+
+- `ASK '...' STREAM` now parses into `AskQuery { stream: true }`.
+  Existing non-streaming ASK queries keep `stream: false`, and gRPC's
+  manual `AskQuery` construction is pinned to `stream: false`.
+- `/query` detects `AskQuery.stream` and returns `Content-Type:
+  text/event-stream` with frames produced by `SseFrameEncoder`.
+- The current HTTP slice is deliberately buffered: it reuses the
+  existing non-streaming `execute_ask` result, then emits
+  `sources -> answer_token -> validation`. That proves the parser,
+  runtime result extraction, SSE encoding, and HTTP response contract
+  end-to-end without introducing a new provider streaming seam.
+- Pre-answer cost guard failures on `ASK ... STREAM` return an SSE
+  `error` frame with the mapped HTTP-style status code in the frame
+  payload instead of a JSON error body.
+- While touching the ASK parser, `STRICT ON` was fixed to accept `ON`
+  as the keyword token the lexer already emits.
+
+Still deferred:
+
+- True incremental provider token forwarding. The current
+  `answer_token` frame contains the completed answer as one chunk
+  because `execute_ask` still calls the non-streaming LLM transport.
+- Mid-stream cost checkpoints after partial token emission.
+- Writing the durable audit row before the terminal `validation`
+  frame. The current terminal frame includes the client-visible audit
+  summary from the ASK result fields only.
+- A socket-level SSE integration test with a stub provider that emits
+  tokens incrementally.
+
+Verification (slice 2):
+
+- `cargo test -p reddb-io-server --lib test_parse_dml_extended_literals_auto_embed_and_ask_forms`
+  → 1 passed.
+- `cargo test -p reddb-io-server --lib http_query_ask_stream`
+  → 2 passed.
+- `cargo check -p reddb-io-server` clean.
+- `pnpm test` exited 0 but skipped because `target/debug/red` was not
+  present.
+- `pnpm typecheck` exited 1 while printing `TypeScript: No errors
+  found`, matching the prior wrapper behavior.
