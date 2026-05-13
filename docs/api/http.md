@@ -241,6 +241,33 @@ curl -X PATCH http://127.0.0.1:8080/collections/sessions/entities/1 \
 | `POST` | `/hybrid/search` | Hybrid text + vector search |
 | `POST` | `/search` | Unified search (`mode=auto|index|multimodal|hybrid`) |
 
+### SQL Query with Safe Parameters
+
+`POST /query` accepts positional `$N` bind values in a top-level `params`
+array. Use this shape for user input and vectors instead of building SQL
+strings in the client. The cross-driver contract is tracked in
+[ADR #352](https://github.com/reddb-io/reddb/issues/352).
+
+```bash
+curl -X POST http://127.0.0.1:8080/query \
+  -H 'content-type: application/json' \
+  -d '{
+    "query": "SELECT * FROM hosts WHERE critical = $1 LIMIT $2",
+    "params": [true, 10]
+  }'
+```
+
+Vector parameters use a JSON number array:
+
+```bash
+curl -X POST http://127.0.0.1:8080/query \
+  -H 'content-type: application/json' \
+  -d '{
+    "query": "SEARCH SIMILAR $1 COLLECTION embeddings LIMIT $2",
+    "params": [[0.12, 0.91, 0.44], 5]
+  }'
+```
+
 ### Context Search
 
 `POST /context` performs a unified context search across all data structures (tables, graphs, vectors, documents, key-value pairs). It follows cross-references and optionally expands graph neighborhoods in a single request.

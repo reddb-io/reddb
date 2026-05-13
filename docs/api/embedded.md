@@ -94,6 +94,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Parameterized SQL in embedded apps
+
+For SQL-style queries with user input, use the `reddb-io-client` facade with
+the `embedded` feature. It exposes `query_with(sql, &[params])`, the same bind
+contract used by remote clients and tracked in
+[ADR #352](https://github.com/reddb-io/reddb/issues/352).
+
+```rust
+use reddb_client::{Reddb, Value};
+
+# async fn run() -> reddb_client::Result<()> {
+let db = Reddb::connect("memory://").await?;
+
+let rows = db
+    .query_with(
+        "SELECT id, name FROM users WHERE id = $1 AND tenant = $2",
+        &[Value::Int(42), Value::Text("acme".into())],
+    )
+    .await?;
+
+let hits = db
+    .query_with(
+        "SEARCH SIMILAR $1 IN embeddings K $2",
+        &[Value::Vector(vec![0.12, 0.91, 0.44]), Value::Int(5)],
+    )
+    .await?;
+
+println!("{} rows, {} vector hits", rows.rows.len(), hits.rows.len());
+# Ok(())
+# }
+```
+
 ### Vector similarity search
 
 ```rust

@@ -69,15 +69,24 @@ curl -X POST http://127.0.0.1:8080/collections/embeddings/vectors \
 ```bash
 curl -X POST http://127.0.0.1:8080/query \
   -H 'content-type: application/json' \
-  -d '{"query":"SELECT * FROM hosts WHERE critical = true"}'
+  -d '{
+    "query": "SELECT * FROM hosts WHERE critical = $1",
+    "params": [true]
+  }'
 ```
+
+Use the same `params` shape for user input and vectors; the binding contract is
+tracked in [ADR #352](https://github.com/reddb-io/reddb/issues/352).
 
 ## 6. Query across models
 
 ```bash
 curl -X POST http://127.0.0.1:8080/query \
   -H 'content-type: application/json' \
-  -d '{"query":"FROM ANY ORDER BY _score DESC LIMIT 10"}'
+  -d '{
+    "query": "FROM ANY ORDER BY _score DESC LIMIT $1",
+    "params": [10]
+  }'
 ```
 
 `FROM ANY` is the shortest way to ask RedDB for a cross-model result set.

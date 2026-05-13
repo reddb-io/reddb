@@ -209,6 +209,44 @@ Verification (this slice):
 - `pnpm typecheck` exited nonzero after reporting `TypeScript: No errors
   found`. No TypeScript files changed.
 
+Slice 11 (this commit): completed the remaining docs sweep and closed the
+issue.
+
+- `docs/api/http.md`, `docs/api/embedded.md`,
+  `docs/api/postgres-wire.md`, and `docs/getting-started/quick-start.md`
+  now show safe parameter binding or, for PG-wire, explicitly document that
+  PostgreSQL driver binds depend on the still-planned extended protocol.
+- `docs/clients/drivers/bun.md` now leads with the shared Bun-compatible
+  `@reddb-io/sdk` parameterized form, removes the `JSON.stringify` bulk insert
+  quickstart, and keeps the native TCP preview scoped to static raw SQL.
+- `docs/clients/drivers/python-asyncio.md` now documents
+  `await db.query(sql, params)` for HTTP, includes scalar and vector examples,
+  and calls out RedWire `PARAMS_UNSUPPORTED` until `QueryWithParams` lands.
+- `docs/guides/javascript-typescript-driver.md` and the Go, PHP, Python, and
+  Rust driver hub pages now cross-link the temporary ADR #352 GitHub issue.
+- `drivers/python-asyncio` gained the minimal HTTP params implementation needed
+  to keep the new docs truthful: HTTP forwards `params` to `/query`; RedWire
+  rejects non-empty params with `PARAMS_UNSUPPORTED`.
+
+Verification (this slice):
+- TDD red marker check first failed for missing ADR links, missing Bun /
+  Python-asyncio safe-binding sections, missing vector examples, and missing
+  HTTP params examples.
+- Green marker check passed for ADR #352 on every listed page, `SEARCH SIMILAR
+  $1` examples on the remaining driver/API pages, and no scoped
+  `JSON.stringify` / SQL-formatting examples.
+- `python3 -m compileall -q drivers/python-asyncio/src
+  drivers/python-asyncio/tests/test_query_params.py` passed.
+- Manual `PYTHONPATH=drivers/python-asyncio/src python3` smoke check passed for
+  HTTP `params` body emission, RedWire `PARAMS_UNSUPPORTED`, and empty params
+  preserving the legacy query path.
+- `python3 -m pytest drivers/python-asyncio/tests/test_query_params.py -q`
+  could not run because this environment has no `pytest` module installed.
+- `git diff --check` passed.
+- `pnpm test` ran and skipped because `target/debug/red` is not built.
+- `pnpm typecheck` exited nonzero after reporting `TypeScript: No errors
+  found`.
+
 Slice 8 (this commit): `docs/data-models/vectors.md` now defaults the
 supported SQL vector examples to bind parameters where the parser already
 accepts them.

@@ -39,7 +39,20 @@ ROLLBACK TO SAVEPOINT s1;
 COMMIT;
 ```
 
+## Safe Parameter Binding Status
+
+The PG listener currently supports the simple-query (`Q`) path. PostgreSQL
+driver bind parameters use the extended protocol (`Parse` / `Bind` /
+`Execute`), which is still planned for this adapter. Do not concatenate
+user-supplied values into PG-wire SQL strings; use HTTP, gRPC, RedWire, or the
+embedded client facade with `db.query(sql, params)` / `query_with` until the
+extended-protocol work lands. The cross-driver binding contract is tracked in
+[ADR #352](https://github.com/reddb-io/reddb/issues/352).
+
 ## From a driver
+
+The examples below are simple-query connectivity checks with static SQL.
+Parameter binding in PostgreSQL drivers depends on extended protocol support.
 
 ### Rust (`tokio-postgres` / `sqlx`)
 
@@ -50,8 +63,8 @@ let (client, conn) = tokio_postgres::connect(
 ).await?;
 tokio::spawn(async move { conn.await.unwrap() });
 
-let rows = client
-    .query("SELECT id, email FROM users WHERE id = $1", &[&42i32])
+let messages = client
+    .simple_query("SELECT id, email FROM users LIMIT 10")
     .await?;
 ```
 
@@ -59,7 +72,7 @@ let rows = client
 
 ```go
 conn, err := pgx.Connect(ctx, "postgres://reddb@localhost:5432/reddb")
-rows, err := conn.Query(ctx, "SELECT id, email FROM users")
+rows, err := conn.Query(ctx, "SELECT id, email FROM users LIMIT 10")
 ```
 
 ### Python (`psycopg`)
@@ -68,7 +81,7 @@ rows, err := conn.Query(ctx, "SELECT id, email FROM users")
 import psycopg
 with psycopg.connect("host=localhost port=5432 user=reddb") as conn:
     with conn.cursor() as cur:
-        cur.execute("SELECT id, email FROM users")
+        cur.execute("SELECT id, email FROM users LIMIT 10")
         for row in cur.fetchall():
             print(row)
 ```

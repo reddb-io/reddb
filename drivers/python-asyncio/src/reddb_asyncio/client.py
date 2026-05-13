@@ -183,7 +183,12 @@ class _RedwireAdapter:
     def __init__(self, client: RedwireClient) -> None:
         self._client = client
 
-    async def query(self, sql: str) -> dict[str, Any]:
+    async def query(self, sql: str, params: list[Any] | None = None) -> dict[str, Any]:
+        if params:
+            raise RedDBError(
+                "RedWire parameterized queries require QueryWithParams support",
+                code="PARAMS_UNSUPPORTED",
+            )
         return await self._client.query(sql)
 
     async def insert(self, collection: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -232,8 +237,8 @@ class Reddb:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
 
-    async def query(self, sql: str) -> dict[str, Any]:
-        return await self._t.query(sql)
+    async def query(self, sql: str, params: list[Any] | None = None) -> dict[str, Any]:
+        return await self._t.query(sql, params)
 
     async def insert(self, collection: str, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._t.insert(collection, payload)

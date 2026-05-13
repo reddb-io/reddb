@@ -27,7 +27,7 @@ db = reddb.connect("memory://")
 db.insert("users", {"name": "Alice", "age": 30})
 db.bulk_insert("users", [{"name": "Bob"}, {"name": "Carol"}])
 
-result = db.query("SELECT * FROM users")
+result = db.query("SELECT * FROM users WHERE age >= $1", 30)
 for row in result["rows"]:
     print(row)
 
@@ -68,7 +68,8 @@ db.close()
 
 `db.query` accepts positional `$N` bind values either as variadic args or via
 the `params=` keyword. Use it for any user-supplied value — concatenation is a
-SQL-injection footgun:
+SQL-injection footgun. The cross-driver contract is tracked in
+[ADR #352](https://github.com/reddb-io/reddb/issues/352):
 
 ```python
 # Scalar params: int / text / null

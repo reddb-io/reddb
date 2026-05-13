@@ -23,8 +23,8 @@ import asyncio
 from reddb_asyncio import connect
 
 async def main():
-    async with await connect("red://localhost:5050") as db:
-        print(await db.query("SELECT 1"))
+    async with await connect("http://localhost:8080") as db:
+        print(await db.query("SELECT * FROM users WHERE name = $1", ["alice"]))
         await db.insert("users", {"name": "alice", "age": 30})
         row = await db.get("users", "alice")
         print(row)
@@ -85,7 +85,7 @@ from reddb_asyncio import (
 
 `Reddb` exposes:
 
-* `await db.query(sql)`
+* `await db.query(sql, params=None)`
 * `await db.insert(collection, payload)`
 * `await db.bulk_insert(collection, payloads)`
 * `await db.get(collection, id)`
@@ -93,6 +93,26 @@ from reddb_asyncio import (
 * `await db.ping()`
 * `await db.close()`
 * `async with await connect(uri) as db: ...`
+
+## Safe parameter binding
+
+`await db.query(sql, params)` binds positional `$N` placeholders over HTTP:
+
+```python
+rows = await db.query(
+    "SELECT id, name FROM users WHERE id = $1 AND tenant = $2",
+    [42, "acme"],
+)
+
+hits = await db.query(
+    "SEARCH SIMILAR $1 IN embeddings K 5",
+    [[0.1, 0.2, 0.3]],
+)
+```
+
+Non-empty params over the RedWire preview raise `PARAMS_UNSUPPORTED` until the
+binary `QueryWithParams` frame lands there. Use `http://` / `https://` for
+safe binding with `reddb-asyncio` today.
 
 ## Tests
 
