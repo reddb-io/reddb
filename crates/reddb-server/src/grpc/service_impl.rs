@@ -2451,11 +2451,13 @@ impl RedDb for GrpcRuntime {
     async fn ask(&self, request: Request<AskRequest>) -> Result<Response<AskReply>, Status> {
         self.authorize_read(request.metadata())?;
         let ask_query = ask_query_from_request(request.into_inner(), false)?;
+        let runtime = self.runtime.clone();
 
-        let result = self
-            .runtime
-            .execute_ask("ASK via gRPC", &ask_query)
-            .map_err(to_status)?;
+        let result = tokio::task::spawn_blocking(move || {
+            runtime.execute_ask("ASK via gRPC", &ask_query).map_err(to_status)
+        })
+        .await
+        .map_err(|e| Status::internal(e.to_string()))??;
         Ok(Response::new(ask_reply_from_runtime_result(&result)?))
     }
 
@@ -2919,6 +2921,28 @@ impl RedDb for GrpcRuntime {
         }
 
         Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
+    }
+
+    async fn submit_ask_side_effects(
+        &self,
+        request: Request<JsonPayloadRequest>,
+    ) -> Result<Response<PayloadReply>, Status> {
+        self.authorize_read(request.metadata())?;
+        if !matches!(
+            self.runtime.db().options().replication.role,
+            crate::replication::ReplicationRole::Primary
+        ) {
+            return Err(Status::failed_precondition(
+                "ASK side effects can only be submitted to a replication primary",
+            ));
+        }
+
+        let payload = parse_json_payload(&request.into_inner().payload_json)?;
+        let applied = self
+            .runtime
+            .apply_primary_ask_side_effects_payload(&payload)
+            .map_err(to_status)?;
+        Ok(Response::new(json_payload_reply(applied)))
     }
 
     // =========================================================================
