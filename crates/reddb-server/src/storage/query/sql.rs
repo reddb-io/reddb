@@ -1981,6 +1981,16 @@ impl<'a> Parser<'a> {
                             self.position(),
                         )),
                     }
+                } else if matches!(next, Token::Table) {
+                    match self.parse_alter_table_query()? {
+                        QueryExpr::AlterTable(query) => Ok(SqlCommand::AlterTable(query)),
+                        other => Err(ParseError::new(
+                            format!(
+                                "internal: ALTER TABLE produced unexpected query kind {other:?}"
+                            ),
+                            self.position(),
+                        )),
+                    }
                 } else if let Some(err) =
                     ParseError::unsupported_recognized_token(&next, self.position())
                 {
