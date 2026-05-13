@@ -31,6 +31,8 @@ pub enum QueryExpr {
     Delete(DeleteQuery),
     /// CREATE TABLE name (columns)
     CreateTable(CreateTableQuery),
+    /// CREATE COLLECTION name KIND kind
+    CreateCollection(CreateCollectionQuery),
     /// DROP TABLE name
     DropTable(DropTableQuery),
     /// DROP GRAPH name
@@ -632,6 +634,7 @@ pub enum ProbabilisticCommand {
     // HyperLogLog
     CreateHll {
         name: String,
+        precision: u8,
         if_not_exists: bool,
     },
     HllAdd {
@@ -1774,6 +1777,14 @@ pub struct CreateTableQuery {
     /// `CREATE VAULT ... WITH OWN MASTER KEY`: provision per-vault
     /// key material instead of using the cluster vault key.
     pub vault_own_master_key: bool,
+}
+
+/// CREATE COLLECTION name KIND kind
+#[derive(Debug, Clone)]
+pub struct CreateCollectionQuery {
+    pub name: String,
+    pub kind: String,
+    pub if_not_exists: bool,
 }
 
 /// `PARTITION BY RANGE|LIST|HASH (column)` clause.
