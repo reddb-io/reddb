@@ -1,6 +1,8 @@
 # Example Environments
 
 These Docker Compose files are the quickest way to exercise RedDB deployment modes locally.
+They build the RedDB image from your checkout with Compose `build:` entries,
+so they do not require access to `ghcr.io/reddb-io/reddb`.
 
 Available profiles:
 

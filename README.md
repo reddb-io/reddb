@@ -597,12 +597,14 @@ npx @reddb-io/cli@latest server --wire-bind 127.0.0.1:5050 --http-bind 127.0.0.1
 Or via Docker:
 
 ```bash
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_USER" --password-stdin # if GHCR requires auth
 docker run --rm -p 5050:5050 -p 5055:5055 -p 8080:8080 ghcr.io/reddb-io/reddb:latest
 ```
 
 Or, if you only need the thin remote-only client (~7 MB image):
 
 ```bash
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_USER" --password-stdin # if GHCR requires auth
 docker run --rm ghcr.io/reddb-io/reddb-client:latest red://reddb.example.com:5050 -c "SELECT 1"
 ```
 
