@@ -815,6 +815,260 @@ func (x *AskReply) GetRetryCount() uint32 {
 	return 0
 }
 
+type AskStreamEvent struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Event:
+	//
+	//	*AskStreamEvent_Sources
+	//	*AskStreamEvent_AnswerToken
+	//	*AskStreamEvent_Validation
+	//	*AskStreamEvent_Error
+	Event         isAskStreamEvent_Event `protobuf_oneof:"event"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AskStreamEvent) Reset() {
+	*x = AskStreamEvent{}
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AskStreamEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AskStreamEvent) ProtoMessage() {}
+
+func (x *AskStreamEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AskStreamEvent.ProtoReflect.Descriptor instead.
+func (*AskStreamEvent) Descriptor() ([]byte, []int) {
+	return file_grpcx_proto_reddb_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *AskStreamEvent) GetEvent() isAskStreamEvent_Event {
+	if x != nil {
+		return x.Event
+	}
+	return nil
+}
+
+func (x *AskStreamEvent) GetSources() *AskSources {
+	if x != nil {
+		if x, ok := x.Event.(*AskStreamEvent_Sources); ok {
+			return x.Sources
+		}
+	}
+	return nil
+}
+
+func (x *AskStreamEvent) GetAnswerToken() *AskAnswerToken {
+	if x != nil {
+		if x, ok := x.Event.(*AskStreamEvent_AnswerToken); ok {
+			return x.AnswerToken
+		}
+	}
+	return nil
+}
+
+func (x *AskStreamEvent) GetValidation() *Validation {
+	if x != nil {
+		if x, ok := x.Event.(*AskStreamEvent_Validation); ok {
+			return x.Validation
+		}
+	}
+	return nil
+}
+
+func (x *AskStreamEvent) GetError() *AskStreamError {
+	if x != nil {
+		if x, ok := x.Event.(*AskStreamEvent_Error); ok {
+			return x.Error
+		}
+	}
+	return nil
+}
+
+type isAskStreamEvent_Event interface {
+	isAskStreamEvent_Event()
+}
+
+type AskStreamEvent_Sources struct {
+	Sources *AskSources `protobuf:"bytes,1,opt,name=sources,proto3,oneof"`
+}
+
+type AskStreamEvent_AnswerToken struct {
+	AnswerToken *AskAnswerToken `protobuf:"bytes,2,opt,name=answer_token,json=answerToken,proto3,oneof"`
+}
+
+type AskStreamEvent_Validation struct {
+	Validation *Validation `protobuf:"bytes,3,opt,name=validation,proto3,oneof"`
+}
+
+type AskStreamEvent_Error struct {
+	Error *AskStreamError `protobuf:"bytes,4,opt,name=error,proto3,oneof"`
+}
+
+func (*AskStreamEvent_Sources) isAskStreamEvent_Event() {}
+
+func (*AskStreamEvent_AnswerToken) isAskStreamEvent_Event() {}
+
+func (*AskStreamEvent_Validation) isAskStreamEvent_Event() {}
+
+func (*AskStreamEvent_Error) isAskStreamEvent_Event() {}
+
+type AskSources struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	SourcesFlatJson string                 `protobuf:"bytes,1,opt,name=sources_flat_json,json=sourcesFlatJson,proto3" json:"sources_flat_json,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *AskSources) Reset() {
+	*x = AskSources{}
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AskSources) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AskSources) ProtoMessage() {}
+
+func (x *AskSources) ProtoReflect() protoreflect.Message {
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AskSources.ProtoReflect.Descriptor instead.
+func (*AskSources) Descriptor() ([]byte, []int) {
+	return file_grpcx_proto_reddb_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *AskSources) GetSourcesFlatJson() string {
+	if x != nil {
+		return x.SourcesFlatJson
+	}
+	return ""
+}
+
+type AskAnswerToken struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AskAnswerToken) Reset() {
+	*x = AskAnswerToken{}
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AskAnswerToken) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AskAnswerToken) ProtoMessage() {}
+
+func (x *AskAnswerToken) ProtoReflect() protoreflect.Message {
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AskAnswerToken.ProtoReflect.Descriptor instead.
+func (*AskAnswerToken) Descriptor() ([]byte, []int) {
+	return file_grpcx_proto_reddb_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *AskAnswerToken) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+type AskStreamError struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Code          uint32                 `protobuf:"varint,1,opt,name=code,proto3" json:"code,omitempty"`
+	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AskStreamError) Reset() {
+	*x = AskStreamError{}
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AskStreamError) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AskStreamError) ProtoMessage() {}
+
+func (x *AskStreamError) ProtoReflect() protoreflect.Message {
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AskStreamError.ProtoReflect.Descriptor instead.
+func (*AskStreamError) Descriptor() ([]byte, []int) {
+	return file_grpcx_proto_reddb_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *AskStreamError) GetCode() uint32 {
+	if x != nil {
+		return x.Code
+	}
+	return 0
+}
+
+func (x *AskStreamError) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
 type Citation struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Marker        uint32                 `protobuf:"varint,1,opt,name=marker,proto3" json:"marker,omitempty"`
@@ -825,7 +1079,7 @@ type Citation struct {
 
 func (x *Citation) Reset() {
 	*x = Citation{}
-	mi := &file_grpcx_proto_reddb_proto_msgTypes[9]
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -837,7 +1091,7 @@ func (x *Citation) String() string {
 func (*Citation) ProtoMessage() {}
 
 func (x *Citation) ProtoReflect() protoreflect.Message {
-	mi := &file_grpcx_proto_reddb_proto_msgTypes[9]
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -850,7 +1104,7 @@ func (x *Citation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Citation.ProtoReflect.Descriptor instead.
 func (*Citation) Descriptor() ([]byte, []int) {
-	return file_grpcx_proto_reddb_proto_rawDescGZIP(), []int{9}
+	return file_grpcx_proto_reddb_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *Citation) GetMarker() uint32 {
@@ -878,7 +1132,7 @@ type Validation struct {
 
 func (x *Validation) Reset() {
 	*x = Validation{}
-	mi := &file_grpcx_proto_reddb_proto_msgTypes[10]
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -890,7 +1144,7 @@ func (x *Validation) String() string {
 func (*Validation) ProtoMessage() {}
 
 func (x *Validation) ProtoReflect() protoreflect.Message {
-	mi := &file_grpcx_proto_reddb_proto_msgTypes[10]
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -903,7 +1157,7 @@ func (x *Validation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Validation.ProtoReflect.Descriptor instead.
 func (*Validation) Descriptor() ([]byte, []int) {
-	return file_grpcx_proto_reddb_proto_rawDescGZIP(), []int{10}
+	return file_grpcx_proto_reddb_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Validation) GetOk() bool {
@@ -937,7 +1191,7 @@ type ValidationItem struct {
 
 func (x *ValidationItem) Reset() {
 	*x = ValidationItem{}
-	mi := &file_grpcx_proto_reddb_proto_msgTypes[11]
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -949,7 +1203,7 @@ func (x *ValidationItem) String() string {
 func (*ValidationItem) ProtoMessage() {}
 
 func (x *ValidationItem) ProtoReflect() protoreflect.Message {
-	mi := &file_grpcx_proto_reddb_proto_msgTypes[11]
+	mi := &file_grpcx_proto_reddb_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -962,7 +1216,7 @@ func (x *ValidationItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValidationItem.ProtoReflect.Descriptor instead.
 func (*ValidationItem) Descriptor() ([]byte, []int) {
-	return file_grpcx_proto_reddb_proto_rawDescGZIP(), []int{11}
+	return file_grpcx_proto_reddb_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ValidationItem) GetKind() string {
@@ -1069,7 +1323,23 @@ const file_grpcx_proto_reddb_proto_rawDesc = "" +
 	" \x01(\bR\bcacheHit\x12\x12\n" +
 	"\x04mode\x18\v \x01(\tR\x04mode\x12\x1f\n" +
 	"\vretry_count\x18\f \x01(\rR\n" +
-	"retryCount\"4\n" +
+	"retryCount\"\xf4\x01\n" +
+	"\x0eAskStreamEvent\x120\n" +
+	"\asources\x18\x01 \x01(\v2\x14.reddb.v1.AskSourcesH\x00R\asources\x12=\n" +
+	"\fanswer_token\x18\x02 \x01(\v2\x18.reddb.v1.AskAnswerTokenH\x00R\vanswerToken\x126\n" +
+	"\n" +
+	"validation\x18\x03 \x01(\v2\x14.reddb.v1.ValidationH\x00R\n" +
+	"validation\x120\n" +
+	"\x05error\x18\x04 \x01(\v2\x18.reddb.v1.AskStreamErrorH\x00R\x05errorB\a\n" +
+	"\x05event\"8\n" +
+	"\n" +
+	"AskSources\x12*\n" +
+	"\x11sources_flat_json\x18\x01 \x01(\tR\x0fsourcesFlatJson\"$\n" +
+	"\x0eAskAnswerToken\x12\x12\n" +
+	"\x04text\x18\x01 \x01(\tR\x04text\">\n" +
+	"\x0eAskStreamError\x12\x12\n" +
+	"\x04code\x18\x01 \x01(\rR\x04code\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"4\n" +
 	"\bCitation\x12\x16\n" +
 	"\x06marker\x18\x01 \x01(\rR\x06marker\x12\x10\n" +
 	"\x03urn\x18\x02 \x01(\tR\x03urn\"\x84\x01\n" +
@@ -1080,11 +1350,12 @@ const file_grpcx_proto_reddb_proto_rawDesc = "" +
 	"\x06errors\x18\x03 \x03(\v2\x18.reddb.v1.ValidationItemR\x06errors\"<\n" +
 	"\x0eValidationItem\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x16\n" +
-	"\x06detail\x18\x02 \x01(\tR\x06detail2\xa1\x01\n" +
+	"\x06detail\x18\x02 \x01(\tR\x06detail2\xe0\x01\n" +
 	"\x05RedDb\x120\n" +
 	"\x06Health\x12\x0f.reddb.v1.Empty\x1a\x15.reddb.v1.HealthReply\x125\n" +
 	"\x05Query\x12\x16.reddb.v1.QueryRequest\x1a\x14.reddb.v1.QueryReply\x12/\n" +
-	"\x03Ask\x12\x14.reddb.v1.AskRequest\x1a\x12.reddb.v1.AskReplyB0Z.github.com/reddb-io/reddb-go/grpcx/proto;protob\x06proto3"
+	"\x03Ask\x12\x14.reddb.v1.AskRequest\x1a\x12.reddb.v1.AskReply\x12=\n" +
+	"\tAskStream\x12\x14.reddb.v1.AskRequest\x1a\x18.reddb.v1.AskStreamEvent0\x01B0Z.github.com/reddb-io/reddb-go/grpcx/proto;protob\x06proto3"
 
 var (
 	file_grpcx_proto_reddb_proto_rawDescOnce sync.Once
@@ -1098,7 +1369,7 @@ func file_grpcx_proto_reddb_proto_rawDescGZIP() []byte {
 	return file_grpcx_proto_reddb_proto_rawDescData
 }
 
-var file_grpcx_proto_reddb_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_grpcx_proto_reddb_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_grpcx_proto_reddb_proto_goTypes = []any{
 	(*Empty)(nil),          // 0: reddb.v1.Empty
 	(*HealthReply)(nil),    // 1: reddb.v1.HealthReply
@@ -1109,29 +1380,39 @@ var file_grpcx_proto_reddb_proto_goTypes = []any{
 	(*QueryReply)(nil),     // 6: reddb.v1.QueryReply
 	(*AskRequest)(nil),     // 7: reddb.v1.AskRequest
 	(*AskReply)(nil),       // 8: reddb.v1.AskReply
-	(*Citation)(nil),       // 9: reddb.v1.Citation
-	(*Validation)(nil),     // 10: reddb.v1.Validation
-	(*ValidationItem)(nil), // 11: reddb.v1.ValidationItem
+	(*AskStreamEvent)(nil), // 9: reddb.v1.AskStreamEvent
+	(*AskSources)(nil),     // 10: reddb.v1.AskSources
+	(*AskAnswerToken)(nil), // 11: reddb.v1.AskAnswerToken
+	(*AskStreamError)(nil), // 12: reddb.v1.AskStreamError
+	(*Citation)(nil),       // 13: reddb.v1.Citation
+	(*Validation)(nil),     // 14: reddb.v1.Validation
+	(*ValidationItem)(nil), // 15: reddb.v1.ValidationItem
 }
 var file_grpcx_proto_reddb_proto_depIdxs = []int32{
 	3,  // 0: reddb.v1.QueryRequest.params:type_name -> reddb.v1.QueryValue
 	4,  // 1: reddb.v1.QueryValue.null_value:type_name -> reddb.v1.QueryNull
 	5,  // 2: reddb.v1.QueryValue.vector_value:type_name -> reddb.v1.QueryVector
-	9,  // 3: reddb.v1.AskReply.citations:type_name -> reddb.v1.Citation
-	10, // 4: reddb.v1.AskReply.validation:type_name -> reddb.v1.Validation
-	11, // 5: reddb.v1.Validation.warnings:type_name -> reddb.v1.ValidationItem
-	11, // 6: reddb.v1.Validation.errors:type_name -> reddb.v1.ValidationItem
-	0,  // 7: reddb.v1.RedDb.Health:input_type -> reddb.v1.Empty
-	2,  // 8: reddb.v1.RedDb.Query:input_type -> reddb.v1.QueryRequest
-	7,  // 9: reddb.v1.RedDb.Ask:input_type -> reddb.v1.AskRequest
-	1,  // 10: reddb.v1.RedDb.Health:output_type -> reddb.v1.HealthReply
-	6,  // 11: reddb.v1.RedDb.Query:output_type -> reddb.v1.QueryReply
-	8,  // 12: reddb.v1.RedDb.Ask:output_type -> reddb.v1.AskReply
-	10, // [10:13] is the sub-list for method output_type
-	7,  // [7:10] is the sub-list for method input_type
-	7,  // [7:7] is the sub-list for extension type_name
-	7,  // [7:7] is the sub-list for extension extendee
-	0,  // [0:7] is the sub-list for field type_name
+	13, // 3: reddb.v1.AskReply.citations:type_name -> reddb.v1.Citation
+	14, // 4: reddb.v1.AskReply.validation:type_name -> reddb.v1.Validation
+	10, // 5: reddb.v1.AskStreamEvent.sources:type_name -> reddb.v1.AskSources
+	11, // 6: reddb.v1.AskStreamEvent.answer_token:type_name -> reddb.v1.AskAnswerToken
+	14, // 7: reddb.v1.AskStreamEvent.validation:type_name -> reddb.v1.Validation
+	12, // 8: reddb.v1.AskStreamEvent.error:type_name -> reddb.v1.AskStreamError
+	15, // 9: reddb.v1.Validation.warnings:type_name -> reddb.v1.ValidationItem
+	15, // 10: reddb.v1.Validation.errors:type_name -> reddb.v1.ValidationItem
+	0,  // 11: reddb.v1.RedDb.Health:input_type -> reddb.v1.Empty
+	2,  // 12: reddb.v1.RedDb.Query:input_type -> reddb.v1.QueryRequest
+	7,  // 13: reddb.v1.RedDb.Ask:input_type -> reddb.v1.AskRequest
+	7,  // 14: reddb.v1.RedDb.AskStream:input_type -> reddb.v1.AskRequest
+	1,  // 15: reddb.v1.RedDb.Health:output_type -> reddb.v1.HealthReply
+	6,  // 16: reddb.v1.RedDb.Query:output_type -> reddb.v1.QueryReply
+	8,  // 17: reddb.v1.RedDb.Ask:output_type -> reddb.v1.AskReply
+	9,  // 18: reddb.v1.RedDb.AskStream:output_type -> reddb.v1.AskStreamEvent
+	15, // [15:19] is the sub-list for method output_type
+	11, // [11:15] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_grpcx_proto_reddb_proto_init() }
@@ -1152,13 +1433,19 @@ func file_grpcx_proto_reddb_proto_init() {
 		(*QueryValue_UuidValue)(nil),
 	}
 	file_grpcx_proto_reddb_proto_msgTypes[7].OneofWrappers = []any{}
+	file_grpcx_proto_reddb_proto_msgTypes[9].OneofWrappers = []any{
+		(*AskStreamEvent_Sources)(nil),
+		(*AskStreamEvent_AnswerToken)(nil),
+		(*AskStreamEvent_Validation)(nil),
+		(*AskStreamEvent_Error)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_grpcx_proto_reddb_proto_rawDesc), len(file_grpcx_proto_reddb_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   12,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

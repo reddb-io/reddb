@@ -24,11 +24,11 @@ Go driver and any other gRPC-based clients should round-trip the schema correctl
 
 ## Acceptance criteria
 
-- [ ] gRPC `Query` RPC returns the full ASK schema.
-- [ ] Go driver `db.Query(ctx, 'ASK \'...\'')` works.
-- [ ] Streaming via gRPC server-streaming method available.
-- [ ] Proto evolution preserves backwards compatibility (optional fields, no required additions).
-- [ ] Integration test from Go driver.
+- [x] gRPC `Query` RPC returns the full ASK schema.
+- [x] Go driver `db.Query(ctx, 'ASK \'...\'')` works.
+- [x] Streaming via gRPC server-streaming method available.
+- [x] Proto evolution preserves backwards compatibility (optional fields, no required additions).
+- [x] Integration test from Go driver.
 
 ## Blocked by
 
@@ -187,3 +187,37 @@ Go driver and any other gRPC-based clients should round-trip the schema correctl
   next iteration should run
   `cargo test -p reddb-io-server --lib runtime::ai::grpc_ask_message`
   to confirm before the wiring slice.
+
+- 2026-05-13: Slice 4 — gRPC `AskStream` landed and completes the
+  issue acceptance criteria.
+
+  Implemented `rpc AskStream(AskRequest) returns (stream
+  AskStreamEvent)` as an additive proto evolution. The existing
+  unary `Ask` RPC and `AskReply` field numbers are unchanged.
+
+  Wire shape:
+  - first event: `sources { sources_flat_json }`;
+  - zero or more `answer_token { text }` events, using the preserved
+    `answer_tokens` column from the ASK runtime when present and
+    falling back to the full answer for providers without chunk data;
+  - final event: `validation`.
+
+  Server behavior:
+  - `GrpcRuntime::ask_stream` reuses the same `AskRequest` parsing
+    and auth gate as unary `Ask`;
+  - calls `execute_ask` with `stream: true`, so providers that support
+    streamed OpenAI-compatible deltas can populate token chunks;
+  - maps the runtime ASK row into typed protobuf events.
+
+  Go driver:
+  - regenerated the minimal `drivers/go/grpcx/proto` stubs;
+  - added `grpcx.Client.AskStream`;
+  - added a Go round-trip test that consumes typed `sources`,
+    `answer_token`, and `validation` events from a fake gRPC server.
+
+  Verification:
+  - `cargo check -q -p reddb-io-server` passed.
+  - `cargo test -q -p reddb-io-server ask_stream_events --lib -- --test-threads=1`
+    → 2 passed.
+  - `cargo test -q -p reddb-io-grpc-proto --lib` → 2 passed.
+  - `go test ./...` in `drivers/go` passed.
