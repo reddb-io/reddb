@@ -91,7 +91,39 @@ curl -X POST http://127.0.0.1:8080/query \
 
 `FROM ANY` is the shortest way to ask RedDB for a cross-model result set.
 
-## 7. Check health
+## 7. Ask with citations
+
+After configuring an AI provider, `ASK` retrieves context and returns a
+source-cited answer. `[^1]` maps to `sources_flat[0].urn`; `validation.ok`
+confirms every marker points at a real source. The contract is documented in
+[ADR 0013](../adr/0013-ask-grounding-citations.md), from
+[#392](https://github.com/reddb-io/reddb/issues/392).
+
+```bash
+curl -X POST http://127.0.0.1:8080/query \
+  -H 'content-type: application/json' \
+  -d '{
+    "query": "ASK '\''which critical hosts need investigation?'\'' USING openai STRICT ON CACHE TTL '\''5m'\'' LIMIT 5"
+  }'
+```
+
+Expected row shape:
+
+```json
+{
+  "answer": "Host 10.0.0.1 is critical and runs SSH[^1].",
+  "sources_flat": [
+    { "kind": "table", "urn": "reddb:hosts/1", "content": "...", "score": 0.91 }
+  ],
+  "citations": [
+    { "marker": 1, "span": [45, 49], "urn": "reddb:hosts/1" }
+  ],
+  "validation": { "ok": true, "warnings": [], "errors": [] },
+  "cache_hit": false
+}
+```
+
+## 8. Check health
 
 ```bash
 curl -s http://127.0.0.1:8080/health
@@ -99,7 +131,7 @@ curl -s http://127.0.0.1:8080/ready
 curl -s http://127.0.0.1:8080/stats
 ```
 
-## 8. Optional: connect over gRPC
+## 9. Optional: connect over gRPC
 
 Then connect with the CLI:
 
@@ -107,7 +139,7 @@ Then connect with the CLI:
 red connect 127.0.0.1:50051
 ```
 
-## 9. Optional: use it embedded instead
+## 10. Optional: use it embedded instead
 
 If you want RedDB in-process, open the same kind of file directly from Rust:
 

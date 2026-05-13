@@ -46,3 +46,14 @@ must document `STREAM`, Postgres-wire ASK, and MCP ASK as user-facing
 surfaces, but #405, #408, and #409 are still open. #408 also remains
 blocked on HITL #360 for PG-wire extended protocol. Deferring the docs
 sweep avoids presenting unimplemented transport behavior as available.
+
+2026-05-13: #405, #408, and #409 are closed, so the docs sweep is no
+longer blocked. Updated the listed docs to show the canonical ASK
+envelope (`answer`, `sources_flat`, `citations`, `validation`,
+`cache_hit`, provider/model metadata, token counts, `cost_usd`) and to
+cross-link ADR 0013 / GitHub #392 plus PRD #391 where appropriate.
+Added a worked SQL example using `USING`, `STRICT`, `STREAM`, and
+`CACHE TTL`, documented HTTP/SSE stream frame order, refreshed PG-wire
+ASK docs, and added a Grounding and citations section to the JS/TS
+driver guide. Also refreshed `docs/query/search-commands.md` so the ASK
+query reference matches the new schema.

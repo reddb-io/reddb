@@ -197,7 +197,35 @@ UUID envelopes pass through unchanged. `db.query(sql)` with no params stays
 byte-identical to the legacy path — old servers and the embedded fast path
 don't see the new frame at all.
 
-## 5. Error handling
+## 5. Grounding and citations
+
+`ASK` rows use the same grounded envelope across embedded stdio, HTTP, gRPC,
+MCP, and Postgres-wire. The citation contract is
+[ADR 0013](../adr/0013-ask-grounding-citations.md), created from
+[#392](https://github.com/reddb-io/reddb/issues/392), and is the user-visible
+AI-native wedge tracked by [PRD #391](https://github.com/reddb-io/reddb/issues/391).
+
+```ts
+const ask = await db.query(
+  "ASK $1 USING openai STRICT ON CACHE TTL '5m' LIMIT 5",
+  'why did deploy fail?',
+)
+
+const row = ask.rows[0] ?? ask
+console.log(row.answer)
+console.log(row.sources_flat[0].urn)
+console.log(row.citations[0].marker)
+console.log(row.validation.ok)
+```
+
+Every factual claim in `answer` should carry a marker such as `[^1]`. That
+marker maps to `sources_flat[0]`, whose `urn` is stable enough for UI
+deep-links back to the row, document, vector, graph node, or KV entry. Strict
+mode validates marker structure before returning; `STRICT OFF` keeps warnings
+in `validation` without failing the call. `ASK ... STREAM` is exposed through
+HTTP/SSE; JS stdio returns the non-streaming envelope.
+
+## 6. Error handling
 
 ```ts
 import { connect, RedDBError } from '@reddb-io/sdk'
@@ -216,7 +244,7 @@ try {
 await db.close()
 ```
 
-## 6. Override the binary path
+## 7. Override the binary path
 
 If you already manage the `red` binary yourself:
 
@@ -228,7 +256,7 @@ const db = await connect('memory://', {
 })
 ```
 
-## 7. CLI vs driver
+## 8. CLI vs driver
 
 Use this rule:
 

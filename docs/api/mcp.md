@@ -123,7 +123,9 @@ Use `reddb.ask` when an agent needs an answer grounded in RedDB data. The
 tool returns the canonical ASK envelope: `answer`, `sources_flat`,
 `citations`, `validation`, `cache_hit`, provider/model metadata, token counts,
 and `cost_usd`. Every factual claim in `answer` is expected to cite a marker
-like `[^1]`; that marker maps to `sources_flat[0].urn`.
+like `[^1]`; that marker maps to `sources_flat[0].urn`. The citation contract
+is [ADR 0013](../adr/0013-ask-grounding-citations.md), tracked from
+[#392](https://github.com/reddb-io/reddb/issues/392).
 
 ```json
 {
@@ -158,11 +160,9 @@ Provider, model, determinism, and cache controls mirror the SQL ASK clauses:
 }
 ```
 
-`cache` and `"nocache": true` are accepted and validated for API parity, and
-they are mutually exclusive. The current MCP transport preserves the runtime's
-conservative non-cache behavior (`cache_hit: false`) until the dedicated ASK
-cache backend wiring lands. MCP progressive-response streaming is not enabled
-yet; `reddb.ask` currently returns the full non-streaming ASK response as one
+`cache` and `"nocache": true` are mutually exclusive and mirror
+`ASK ... CACHE TTL` / `NOCACHE`. MCP progressive-response streaming is not
+enabled yet; `reddb.ask` returns the full non-streaming ASK response as one
 tool result.
 
 ### Insert a Row

@@ -55,7 +55,10 @@ ASK $1::text STRICT OFF LIMIT 5
 ```
 
 The PG listener returns `ASK` as a normal non-streaming, single-row result set.
-Streaming `ASK ... STREAM` is available through HTTP/SSE, not PG-wire.
+Streaming `ASK ... STREAM` is available through HTTP/SSE, not PG-wire. The
+`sources_flat` / `citations` / `validation` contract is
+[ADR 0013](../adr/0013-ask-grounding-citations.md), created from
+[#392](https://github.com/reddb-io/reddb/issues/392).
 
 ## From a driver
 

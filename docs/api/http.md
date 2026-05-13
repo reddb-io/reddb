@@ -667,7 +667,12 @@ curl -X POST http://127.0.0.1:8080/ai/prompt \
 
 ### ASK
 
-`POST /ai/ask` is a convenience endpoint that sends a natural-language question to a provider and returns the answer. It is the HTTP equivalent of the `ASK` SQL command.
+`POST /ai/ask` is a convenience endpoint that sends a natural-language question
+to a provider and returns the canonical non-streaming ASK envelope. New clients
+should consume `sources_flat`, `citations`, and `validation`; `[^N]` markers in
+`answer` map to `sources_flat[N-1].urn`. The grounding contract is defined in
+[ADR 0013](../adr/0013-ask-grounding-citations.md), from
+[#392](https://github.com/reddb-io/reddb/issues/392).
 
 ```bash
 curl -X POST http://127.0.0.1:8080/ai/ask \
@@ -703,6 +708,46 @@ curl -X POST http://127.0.0.1:8080/ai/ask \
     "credential": "prod"
   }'
 ```
+
+Response shape:
+
+```json
+{
+  "answer": "The last deployment failed after the API pod hit a missing secret[^1].",
+  "sources_flat": [
+    {
+      "kind": "table",
+      "urn": "reddb:deploy_events/42",
+      "content": "{\"service\":\"api\",\"error\":\"missing secret\"}",
+      "score": 0.94
+    }
+  ],
+  "citations": [
+    { "marker": 1, "span": [69, 73], "urn": "reddb:deploy_events/42" }
+  ],
+  "validation": { "ok": true, "warnings": [], "errors": [] },
+  "cache_hit": false,
+  "provider": "groq",
+  "model": "llama-3.3-70b-versatile",
+  "prompt_tokens": 512,
+  "completion_tokens": 24,
+  "cost_usd": 0.0012,
+  "mode": "strict",
+  "retry_count": 0
+}
+```
+
+For SQL-style controls such as `STRICT`, `USING`, `CACHE TTL`, `NOCACHE`,
+`TEMPERATURE`, `SEED`, `LIMIT`, `MIN_SCORE`, and `DEPTH`, use `/query`:
+
+```bash
+curl -N -X POST http://127.0.0.1:8080/query \
+  -H 'content-type: application/json' \
+  -d '{"query": "ASK '\''why did deploy fail?'\'' USING '\''groq,openai'\'' STRICT ON STREAM CACHE TTL '\''5m'\'' LIMIT 5"}'
+```
+
+When `STREAM` is present, `/query` returns `text/event-stream` frames in this
+order: `sources`, zero or more `answer_token`, then `validation`.
 
 ### Environment Configuration
 

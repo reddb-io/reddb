@@ -370,20 +370,41 @@ Expected response:
 ```json
 {
   "ok": true,
-  "answer": "Host 10.0.0.5 experienced three security incidents of escalating severity:\n\n1. **SSH Brute Force (high)**: 500 failed SSH login attempts from 192.168.1.100 in 5 minutes, targeting the root account.\n2. **Malware Detected (critical)**: Trojan.GenericKD found in /tmp/payload.exe. The process attempted outbound communication to 203.0.113.50:4444, indicating possible C2 activity.\n3. **Data Exfiltration Attempt (critical)**: 2.3 GB transferred to 198.51.100.77 via DNS tunnel in 30 minutes.\n\nThis host is severely compromised. The pattern suggests an attacker gained initial access via SSH brute force, deployed malware with C2 capability, and began exfiltrating data. Immediate isolation and forensic analysis are recommended.",
+  "answer": "Host 10.0.0.5 experienced SSH brute force activity[^1], then a malware callback to 203.0.113.50:4444[^2], followed by DNS-tunnel exfiltration of 2.3 GB[^3]. Treat it as critical and isolate the host before forensic collection.",
+  "sources_flat": [
+    {
+      "kind": "table",
+      "urn": "reddb:incidents/1",
+      "content": "{\"title\":\"SSH Brute Force\",\"host\":\"10.0.0.5\",\"severity\":\"high\"}",
+      "score": 0.93
+    },
+    {
+      "kind": "table",
+      "urn": "reddb:incidents/2",
+      "content": "{\"title\":\"Malware Detected\",\"host\":\"10.0.0.5\",\"severity\":\"critical\"}",
+      "score": 0.91
+    },
+    {
+      "kind": "table",
+      "urn": "reddb:incidents/3",
+      "content": "{\"title\":\"Data Exfiltration Attempt\",\"host\":\"10.0.0.5\",\"severity\":\"critical\"}",
+      "score": 0.9
+    }
+  ],
+  "citations": [
+    { "marker": 1, "span": [45, 49], "urn": "reddb:incidents/1" },
+    { "marker": 2, "span": [97, 101], "urn": "reddb:incidents/2" },
+    { "marker": 3, "span": [146, 150], "urn": "reddb:incidents/3" }
+  ],
+  "validation": { "ok": true, "warnings": [], "errors": [] },
+  "cache_hit": false,
   "provider": "groq",
   "model": "llama-3.3-70b-versatile",
   "prompt_tokens": 1847,
-  "completion_tokens": 195,
-  "sources": {
-    "tables": [ "..." ],
-    "graph": { "nodes": [], "edges": [] },
-    "vectors": [],
-    "documents": [],
-    "key_values": [],
-    "connections": [],
-    "summary": { "total_hits": 3, "tables": 3 }
-  }
+  "completion_tokens": 42,
+  "cost_usd": 0.0042,
+  "mode": "strict",
+  "retry_count": 0
 }
 ```
 
@@ -391,41 +412,56 @@ The response contains:
 
 | Field | Description |
 |:------|:------------|
-| `answer` | Natural-language answer grounded in your data |
-| `sources` | The context search results the LLM used as evidence |
+| `answer` | Natural-language answer grounded in your data, with inline `[^N]` markers |
+| `sources_flat` | Flat evidence list. `[^1]` maps to `sources_flat[0]`, `[^2]` maps to `sources_flat[1]`, and so on |
+| `citations` | Parsed citation markers with answer spans and source URNs |
+| `validation` | Strict citation validation result, warnings, and errors |
+| `cache_hit` | Whether the answer came from the ASK cache |
 | `provider` | Which AI provider generated the answer |
 | `model` | Which model was used |
 | `prompt_tokens` | Tokens consumed by the context + question |
 | `completion_tokens` | Tokens in the generated answer |
+| `cost_usd` | Estimated provider cost |
 
-### Inline citations (`[^N]`)
+### Grounding and citations
 
-Since RedDB 0.x (issue #393), every ASK answer is grounded with inline `[^N]` citation markers and the SQL ASK result carries two new columns:
+ASK returns inline, server-validated citations by default. The contract is
+defined in [ADR 0013](../adr/0013-ask-grounding-citations.md), created from
+GitHub issue [#392](https://github.com/reddb-io/reddb/issues/392), and is the
+core AI-native wedge from [PRD #391](https://github.com/reddb-io/reddb/issues/391).
 
-| Column | Description |
+| Field | Description |
 |:-------|:------------|
-| `citations` | JSON array of `{ marker, span: [start, end], source_index }` parsed out of the `answer` string. `marker` is 1-indexed (as it appears in the text); `source_index = marker - 1` for indexing into the flat sources list. `span` is the byte range of the literal `[^N]` substring inside `answer`. |
-| `validation` | JSON object `{ ok, warnings: [...] }`. `ok` is true when every cited marker resolves to a real source. Warnings have `kind = "malformed" \| "out_of_range"`, a `span`, and a human-readable `detail`. Surfaced without a retry — strict-mode retry lands in a later slice. |
+| `sources_flat` | Ordered source rows with `kind`, `urn`, `content`, and `score`. |
+| `citations` | JSON array of `{ marker, span: [start, end], urn }` parsed out of `answer`. |
+| `validation` | JSON object `{ ok, warnings, errors }`. Strict mode retries once on structural citation failure, then returns a validation error if the answer is still malformed. |
 
 Sample SQL ASK row with citations:
 
 ```json
 {
   "answer": "Host 10.0.0.5 was hit by SSH brute force[^1] then a malware drop[^2].",
+  "sources_flat": [
+    { "kind": "table", "urn": "reddb:incidents/1", "content": "...", "score": 0.93 },
+    { "kind": "table", "urn": "reddb:incidents/2", "content": "...", "score": 0.91 }
+  ],
+  "citations": [
+    { "marker": 1, "span": [46, 50], "urn": "reddb:incidents/1" },
+    { "marker": 2, "span": [71, 75], "urn": "reddb:incidents/2" }
+  ],
+  "validation": { "ok": true, "warnings": [], "errors": [] },
+  "cache_hit": false,
   "provider": "groq",
   "model": "llama-3.3-70b-versatile",
   "prompt_tokens": 1847,
   "completion_tokens": 28,
-  "sources_count": 3,
-  "citations": [
-    { "marker": 1, "span": [38, 42], "source_index": 0 },
-    { "marker": 2, "span": [67, 71], "source_index": 1 }
-  ],
-  "validation": { "ok": true, "warnings": [] }
+  "cost_usd": 0.0042
 }
 ```
 
-The legacy `sources` bucket layout on the `/ai/ask` HTTP endpoint is unchanged in this slice (it stays the canonical evidence list); a flat `sources_flat` array with first-class URN navigation lands in the next slice (#394).
+New clients should consume `sources_flat` and `citations`. The older bucketed
+view can be derived from source `kind`, but it is no longer the primary ASK
+shape shown in docs.
 
 ### Via SQL
 
@@ -440,6 +476,24 @@ Or specify the provider and model inline:
 ```sql
 ASK 'what is the most likely attack chain across all hosts?' USING groq MODEL 'llama-3.3-70b-versatile' DEPTH 2
 ```
+
+Use the production controls inline when you need a strict, cacheable, streamed
+answer from a specific provider:
+
+```sql
+ASK 'what is the most likely attack chain across all hosts?'
+  USING 'groq,openai'
+  MODEL 'llama-3.3-70b-versatile'
+  STRICT ON
+  STREAM
+  CACHE TTL '5m'
+  LIMIT 5
+  DEPTH 2
+```
+
+`STREAM` sends `sources_flat` first, then answer-token frames, then the final
+`validation` frame over HTTP/SSE. Postgres-wire always returns the non-streaming
+single-row result.
 
 Run it through the query endpoint:
 
@@ -504,14 +558,13 @@ Here is what each command does internally, so you understand the machinery behin
 
 ```
 ASK 'question'
-  ├─ SEARCH CONTEXT 'question'        ← find relevant data across all models
-  │    ├─ Field-value index lookup     ← O(1) if a context index exists
-  │    ├─ Token index scan             ← fallback: tokenized keyword matching
-  │    ├─ Global scan                  ← last resort: scan all collections
-  │    ├─ Graph expansion              ← follow edges from matched nodes
-  │    └─ Cross-reference resolution   ← follow links between entities
-  ├─ Build prompt with context JSON    ← serialize results as LLM context
-  └─ Call LLM provider                 ← send to Groq/OpenAI/Anthropic/etc.
+  ├─ Retrieve context                  ← BM25 + vector + graph, RLS-aware
+  ├─ Fuse and prune                     ← RRF ordering, LIMIT source budget
+  ├─ Build sources_flat                 ← stable URNs for every source
+  ├─ Prompt with sandboxed sources      ← source text is data, not instructions
+  ├─ Call LLM provider                  ← Groq/OpenAI/Anthropic/Ollama/etc.
+  ├─ Validate citations                 ← `[^N]` must resolve to sources_flat
+  └─ Audit + optional cache             ← red_ask_audit, CACHE TTL / NOCACHE
 ```
 
 ### SEARCH CONTEXT = 3-Tier Strategy
