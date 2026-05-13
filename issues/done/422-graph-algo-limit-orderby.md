@@ -29,10 +29,10 @@ Today: parse error. `GRAPH CENTRALITY` returns implicit top-100 with no way to c
 
 ## Acceptance criteria
 
-- [ ] `LIMIT N` parses and applies to every documented `GRAPH <algorithm>` clause.
-- [ ] `ORDER BY` with the algorithm's natural metric works (e.g. centrality_score, component_size).
-- [ ] Default top-K is documented; removed implicit truncation surfaces correctly.
-- [ ] Tests for limit cap, order direction, and combined `ORDER BY ... LIMIT`.
+- [x] `LIMIT N` parses and applies to every documented `GRAPH <algorithm>` clause.
+- [x] `ORDER BY` with the algorithm's natural metric works (e.g. centrality_score, component_size).
+- [x] Default top-K is documented; removed implicit truncation surfaces correctly.
+- [x] Tests for limit cap, order direction, and combined `ORDER BY ... LIMIT`.
 
 ## Progress
 
@@ -60,13 +60,7 @@ Verification:
 - `cargo test -p reddb-io-server --test graph_dsl_parser graph_components_limit_parses`
 - `cargo test -p reddb-io-server --test runtime_query_behavior graph_components_limit_caps_returned_rows`
 
-Remaining slices:
-
-- `LIMIT` for community, shortest path, and any other documented `GRAPH <algorithm>` command.
-- `ORDER BY <metric> [ASC|DESC]` support and tests.
-- Docs for default top-K behavior and explicit limit/order examples.
-
-Slice 3 code complete, verification pending:
+Slice 3 complete:
 
 - Parser accepts `ORDER BY <metric> [ASC|DESC]` and `LIMIT N` for
   `GRAPH CENTRALITY`, `GRAPH COMMUNITY`, `GRAPH COMPONENTS`, and
@@ -79,5 +73,10 @@ Slice 3 code complete, verification pending:
   limit is supplied.
 - `docs/query/graph-commands.md` documents the default cap and examples for
   combined `ORDER BY ... LIMIT`.
-- Added focused parser/runtime tests; final verification is deferred to the
-  end-of-cycle test pass per operator instruction.
+- Added focused parser/runtime tests.
+
+Final verification:
+
+- `cargo test -p reddb-io-server --test graph_dsl_parser`
+- `cargo test -p reddb-io-server --test runtime_query_behavior graph_`
+- `cargo check -p reddb-io-server -p reddb-io-client -p reddb-io-client-connector`
