@@ -225,6 +225,10 @@ jobs:
       - uses: dart-lang/setup-dart@v1
         with:
           sdk: stable
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: curl, hash, json, openssl
       - name: JS RedWire parameter fixtures
         working-directory: drivers/js
         run: node --test test/redwire.params.test.mjs
@@ -242,6 +246,9 @@ jobs:
       - name: Dart RedWire parameter fixtures
         working-directory: drivers/dart
         run: dart test test/value_codec_test.dart
+      - name: PHP RedWire parameter fixtures
+        working-directory: drivers/php
+        run: composer install --no-interaction --no-progress && vendor/bin/phpunit --filter ValueCodecTest
       - name: C++ RedWire parameter fixtures configure
         run: cmake -S drivers/cpp -B /tmp/reddb-cpp-param-conformance -DCMAKE_BUILD_TYPE=Release
       - name: C++ RedWire parameter fixtures build
