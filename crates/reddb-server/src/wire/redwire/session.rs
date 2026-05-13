@@ -692,9 +692,9 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     };
 
     if let Some(rows) = obj.get("payloads").and_then(|x| x.as_array()) {
-        let mut affected: u64 = 0;
+        let mut objects = Vec::with_capacity(rows.len());
         for entry in rows {
-            let row = match entry.as_object() {
+            objects.push(match entry.as_object() {
                 Some(o) => o,
                 None => {
                     return error_frame(
@@ -702,15 +702,36 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
                         "Insert: each payload must be a JSON object",
                     )
                 }
+            });
+        }
+
+        if crate::rpc_stdio::should_bulk_insert_graph(runtime, collection, &objects) {
+            return match crate::rpc_stdio::bulk_insert_graph(runtime, collection, &objects) {
+                Ok(body) => {
+                    let payload = serde_json::to_vec(&body).unwrap_or_default();
+                    build_dispatch_reply(frame.correlation_id, MessageKind::BulkOk, payload)
+                }
+                Err(err) => error_frame(frame.correlation_id, &err.to_string()),
             };
+        }
+
+        let mut affected: u64 = 0;
+        let mut ids = Vec::with_capacity(objects.len());
+        for row in objects {
             let sql = crate::rpc_stdio::build_insert_sql(collection, row.iter());
             match runtime.execute_query(&sql) {
-                Ok(qr) => affected += qr.affected_rows,
+                Ok(qr) => {
+                    affected += qr.affected_rows;
+                    if let Some(id) = crate::rpc_stdio::insert_result_to_json(&qr).get("id") {
+                        ids.push(id.clone());
+                    }
+                }
                 Err(err) => return error_frame(frame.correlation_id, &err.to_string()),
             }
         }
         let mut out = crate::serde_json::Map::new();
         out.insert("affected".to_string(), JsonValue::Number(affected as f64));
+        out.insert("ids".to_string(), JsonValue::Array(ids));
         let payload = serde_json::to_vec(&JsonValue::Object(out)).unwrap_or_default();
         return build_dispatch_reply(frame.correlation_id, MessageKind::BulkOk, payload);
     }
@@ -933,6 +954,51 @@ mod tests {
     #[test]
     fn magic_byte_is_0xfe() {
         assert_eq!(REDWIRE_MAGIC, 0xFE);
+    }
+
+    #[test]
+    fn redwire_bulk_insert_graph_rows_returns_ids() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("CREATE GRAPH network")
+            .expect("create graph collection");
+
+        let nodes = Frame::new(
+            MessageKind::BulkInsert,
+            7,
+            br#"{"collection":"network","payloads":[{"label":"Host","name":"app"},{"label":"Host","name":"db"}]}"#.to_vec(),
+        );
+        let nodes_reply = run_insert_dispatch(&runtime, &nodes);
+        assert_eq!(nodes_reply.kind, MessageKind::BulkOk);
+        let node_body: JsonValue = serde_json::from_slice(&nodes_reply.payload).expect("nodes json");
+        assert_eq!(node_body.get("affected").and_then(JsonValue::as_u64), Some(2));
+        let ids = node_body
+            .get("ids")
+            .and_then(JsonValue::as_array)
+            .expect("node ids");
+        assert_eq!(ids.len(), 2);
+
+        let from = ids[0].as_u64().expect("from id");
+        let to = ids[1].as_u64().expect("to id");
+        let edges = Frame::new(
+            MessageKind::BulkInsert,
+            8,
+            format!(
+                r#"{{"collection":"network","payloads":[{{"label":"connects","from":{from},"to":{to},"role":"primary"}}]}}"#
+            )
+            .into_bytes(),
+        );
+        let edges_reply = run_insert_dispatch(&runtime, &edges);
+        assert_eq!(edges_reply.kind, MessageKind::BulkOk);
+        let edge_body: JsonValue = serde_json::from_slice(&edges_reply.payload).expect("edges json");
+        assert_eq!(edge_body.get("affected").and_then(JsonValue::as_u64), Some(1));
+        assert_eq!(
+            edge_body
+                .get("ids")
+                .and_then(JsonValue::as_array)
+                .map(|ids| ids.len()),
+            Some(1)
+        );
     }
 
     /// Read a full RedWire frame off the client side of the duplex.

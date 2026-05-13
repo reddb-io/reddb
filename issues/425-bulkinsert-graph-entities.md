@@ -27,3 +27,25 @@ Today: 1741 single-row graph INSERTs take ~15s over stdio. Mostly JSON-RPC hands
 - [ ] Returns `{affected, ids: [...]}` matching #E1.
 - [ ] Bench: 1000 graph inserts in <2s via stdio (vs ~9s today).
 - [ ] Parity across drivers (JS, Python, Go, Rust at minimum).
+
+## Progress
+
+Slice 1 code complete, verification pending:
+
+- Stdio `bulk_insert` now detects graph-shaped payloads only when the target
+  collection is declared `GRAPH` or `MIXED`, preserving table-row semantics for
+  ordinary collections with a `label` field.
+- Graph bulk insert normalizes flat node rows like `{label, name}` and edge
+  rows like `{label, from, to, role}` into the existing entity create payloads.
+- Stdio and RedWire server paths return `{affected, ids}` for graph rows and
+  also include `ids` when the row insert path exposes inserted IDs.
+- Added focused stdio and RedWire server tests for graph NODE and EDGE rows.
+- JS/TS type surfaces now allow `ids` on `BulkInsertResult`.
+
+Remaining before close:
+
+- Final test pass, including the focused bulk graph tests and `cargo check`.
+- Driver parity audit for Rust, Python, and Go client APIs. Several non-JS
+  APIs still expose bulk insert as `u64`/`error` and may discard server-returned
+  IDs even though the server response now includes them.
+- Stdio benchmark/evidence for the 1000-row target.

@@ -96,6 +96,8 @@ export interface InsertResult {
 
 export interface BulkInsertResult {
   affected: number
+  /** Present when the server surfaces inserted entity ids for the batch. */
+  ids?: Array<string | number>
 }
 
 export interface GetResult {
