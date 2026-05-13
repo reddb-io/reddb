@@ -406,6 +406,93 @@ fn create_vector_declares_dimension_and_metric() {
 }
 
 #[test]
+fn native_vector_collection_validates_inserts_and_searches_by_metric() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("CREATE VECTOR v DIM 2 METRIC cosine")
+        .expect("create vector collection");
+
+    for (name, x, y) in [
+        ("a", 1.0, 0.0),
+        ("b", 0.9, 0.1),
+        ("c", 0.8, 0.2),
+        ("d", 0.0, 1.0),
+        ("e", 0.1, 0.9),
+        ("f", 0.1, 0.4),
+        ("g", 0.2, 0.2),
+        ("h", 2.0, 0.0),
+        ("i", 0.0, 2.0),
+        ("j", 0.4, 0.4),
+    ] {
+        rt.execute_query(&format!(
+            "INSERT INTO v VECTOR (embedding, content) VALUES ([{x}, {y}], '{name}')"
+        ))
+        .unwrap_or_else(|err| panic!("insert {name}: {err:?}"));
+    }
+
+    let wrong_dim = rt
+        .execute_query("INSERT INTO v VECTOR (embedding, content) VALUES ([1.0, 2.0, 3.0], 'bad')")
+        .expect_err("wrong vector dimension rejected");
+    let wrong_dim = wrong_dim.to_string();
+    assert!(wrong_dim.contains("expected 2"), "{wrong_dim}");
+    assert!(wrong_dim.contains("got 3"), "{wrong_dim}");
+
+    let cosine = rt
+        .execute_query("VECTOR SEARCH v SIMILAR TO [1.0, 0.0] LIMIT 3")
+        .expect("cosine search");
+    assert_eq!(
+        (0..cosine.result.len())
+            .map(|row| text_at(&cosine, row, "content").to_string())
+            .collect::<Vec<_>>(),
+        vec!["a", "h", "b"]
+    );
+    let query = [1.0_f32, 0.0];
+    let cosine_fixture = [
+        ("a", [1.0_f32, 0.0]),
+        ("h", [2.0_f32, 0.0]),
+        ("b", [0.9_f32, 0.1]),
+    ];
+    for (row, (_, vector)) in cosine_fixture.iter().enumerate() {
+        let expected = 1.0
+            - reddb_server::storage::engine::distance::distance(
+                &query,
+                vector,
+                reddb_server::storage::engine::distance::DistanceMetric::Cosine,
+            ) as f64;
+        let actual = match cosine.result.records[row].get("score") {
+            Some(Value::Float(value)) => *value,
+            other => panic!("expected cosine score, got {other:?}"),
+        };
+        assert_eq!(actual.to_bits(), expected.to_bits());
+    }
+
+    let l2 = rt
+        .execute_query("VECTOR SEARCH v SIMILAR TO [0.0, 0.0] METRIC l2 LIMIT 3")
+        .expect("l2 search");
+    assert_eq!(
+        (0..l2.result.len())
+            .map(|row| text_at(&l2, row, "content").to_string())
+            .collect::<Vec<_>>(),
+        vec!["g", "f", "j"]
+    );
+
+    let inner_product = rt
+        .execute_query("VECTOR SEARCH v SIMILAR TO [1.0, 0.0] METRIC inner_product LIMIT 3")
+        .expect("inner product search");
+    assert_eq!(
+        (0..inner_product.result.len())
+            .map(|row| text_at(&inner_product, row, "content").to_string())
+            .collect::<Vec<_>>(),
+        vec!["h", "a", "b"]
+    );
+
+    let threshold = rt
+        .execute_query("VECTOR SEARCH v SIMILAR TO [0.0, 0.0] METRIC l2 THRESHOLD 0.1 LIMIT 10")
+        .expect("l2 threshold search");
+    assert_eq!(threshold.result.len(), 1);
+    assert_eq!(text_at(&threshold, 0, "content"), "g");
+}
+
+#[test]
 fn create_document_reaches_executor_not_yet_supported() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
     let err = rt
