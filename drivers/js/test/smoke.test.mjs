@@ -167,6 +167,32 @@ await test('queue client round trips push pop peek len purge over stdio', async 
   await db.close()
 })
 
+await test('db helpers exist list and from round trip over stdio', async () => {
+  const db = await connect('memory://', { binary: BINARY })
+  await db.query('CREATE TABLE users (id INTEGER, name TEXT)')
+  await db.insert('users', { id: 1, name: 'Alice' })
+  await db.insert('users', { id: 2, name: 'Bob' })
+
+  assertEqual(await db.exists('users'), true, 'users exists')
+  assertEqual(await db.exists('missing_users'), false, 'missing collection does not exist')
+
+  const collections = await db.list()
+  const users = collections.find((collection) => collection.name === 'users')
+  assert(users, 'users is listed')
+  assertEqual(users.model, 'table', 'users model')
+  assert(Array.isArray(users.capabilities), 'capabilities array')
+
+  const rows = await db
+    .from('users')
+    .select('id', 'name')
+    .where('id = $1', 2)
+    .run()
+  assertEqual(rows.length, 1, 'builder row count')
+  assertEqual(rows[0].name, 'Bob', 'builder row value')
+
+  await db.close()
+})
+
 await test('parameterized query: $N int + text + null bindings', async () => {
   const db = await connect('memory://', { binary: BINARY })
   await db.query('CREATE TABLE u (id INTEGER, name TEXT, nickname TEXT)')
