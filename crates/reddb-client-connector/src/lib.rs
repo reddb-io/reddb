@@ -44,6 +44,7 @@ pub struct CreatedEntity {
 pub struct BulkCreateStatus {
     pub ok: bool,
     pub count: u64,
+    pub ids: Vec<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -227,6 +228,7 @@ impl RedDBClient {
         Ok(BulkCreateStatus {
             ok: reply.ok,
             count: reply.count,
+            ids: reply.items.into_iter().map(|item| item.id).collect(),
         })
     }
 

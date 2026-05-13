@@ -1076,12 +1076,12 @@ pub(crate) fn should_bulk_insert_graph(
 
     matches!(
         runtime
-        .db()
-        .catalog_model_snapshot()
-        .collections
-        .iter()
-        .find(|descriptor| descriptor.name == collection)
-        .map(|descriptor| descriptor.declared_model.unwrap_or(descriptor.model)),
+            .db()
+            .catalog_model_snapshot()
+            .collections
+            .iter()
+            .find(|descriptor| descriptor.name == collection)
+            .map(|descriptor| descriptor.declared_model.unwrap_or(descriptor.model)),
         Some(crate::catalog::CollectionModel::Graph | crate::catalog::CollectionModel::Mixed)
     )
 }
@@ -1099,11 +1099,17 @@ pub(crate) fn bulk_insert_graph(
         let input_payload = normalize_flat_graph_payload(payload);
         let id = if payload.contains_key("from") || payload.contains_key("to") {
             runtime
-                .create_edge(parse_create_edge_input(collection.to_string(), &input_payload)?)?
+                .create_edge(parse_create_edge_input(
+                    collection.to_string(),
+                    &input_payload,
+                )?)?
                 .id
         } else {
             runtime
-                .create_node(parse_create_node_input(collection.to_string(), &input_payload)?)?
+                .create_node(parse_create_node_input(
+                    collection.to_string(),
+                    &input_payload,
+                )?)?
                 .id
         };
         ids.push(Value::Number(id.raw() as f64));
@@ -1602,17 +1608,28 @@ fn dispatch_method_remote(
                 }
                 encoded.push(entry.to_string_compact());
             }
-            let total = tokio_rt
+            let status = tokio_rt
                 .block_on(async {
                     let mut guard = client.lock().await;
                     guard.bulk_create_rows(collection, encoded).await
                 })
-                .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?
-                .count;
+                .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
             Ok(Value::Object(
-                [("affected".to_string(), Value::Number(total as f64))]
-                    .into_iter()
-                    .collect(),
+                [
+                    ("affected".to_string(), Value::Number(status.count as f64)),
+                    (
+                        "ids".to_string(),
+                        Value::Array(
+                            status
+                                .ids
+                                .into_iter()
+                                .map(|id| Value::Number(id as f64))
+                                .collect(),
+                        ),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
             ))
         }
 
@@ -1689,6 +1706,35 @@ mod tests {
 
     fn make_runtime() -> RedDBRuntime {
         RedDBRuntime::in_memory().expect("in-memory runtime")
+    }
+
+    fn create_graph_collection(rt: &RedDBRuntime, name: &str) {
+        let db = rt.db();
+        db.store()
+            .create_collection(name)
+            .expect("create collection");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        db.save_collection_contract(crate::physical::CollectionContract {
+            name: name.to_string(),
+            declared_model: crate::catalog::CollectionModel::Graph,
+            schema_mode: crate::catalog::SchemaMode::Dynamic,
+            origin: crate::physical::ContractOrigin::Explicit,
+            version: 1,
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+            default_ttl_ms: None,
+            context_index_fields: Vec::new(),
+            declared_columns: Vec::new(),
+            table_def: None,
+            timestamps_enabled: false,
+            context_index_enabled: false,
+            append_only: false,
+            subscriptions: Vec::new(),
+        })
+        .expect("save graph contract");
     }
 
     fn handle(rt: &RedDBRuntime, line: &str) -> String {
@@ -2074,10 +2120,7 @@ mod tests {
     #[test]
     fn bulk_insert_graph_nodes_accepts_flat_rows_and_returns_ids() {
         let rt = make_runtime();
-        let _ = handle(
-            &rt,
-            r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{"sql":"CREATE GRAPH social"}}"#,
-        );
+        create_graph_collection(&rt, "social");
 
         let resp = handle(
             &rt,
@@ -2105,10 +2148,7 @@ mod tests {
     #[test]
     fn bulk_insert_graph_edges_accepts_flat_rows_and_returns_ids() {
         let rt = make_runtime();
-        let _ = handle(
-            &rt,
-            r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{"sql":"CREATE GRAPH network"}}"#,
-        );
+        create_graph_collection(&rt, "network");
         let nodes = handle(
             &rt,
             r#"{"jsonrpc":"2.0","id":2,"method":"bulk_insert","params":{"collection":"network","payloads":[{"label":"Host","name":"app"},{"label":"Host","name":"db"}]}}"#,

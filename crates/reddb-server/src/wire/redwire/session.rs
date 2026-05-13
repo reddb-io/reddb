@@ -951,6 +951,35 @@ mod tests {
     use crate::runtime::RedDBRuntime;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    fn create_graph_collection(runtime: &RedDBRuntime, name: &str) {
+        let db = runtime.db();
+        db.store()
+            .create_collection(name)
+            .expect("create collection");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        db.save_collection_contract(crate::physical::CollectionContract {
+            name: name.to_string(),
+            declared_model: crate::catalog::CollectionModel::Graph,
+            schema_mode: crate::catalog::SchemaMode::Dynamic,
+            origin: crate::physical::ContractOrigin::Explicit,
+            version: 1,
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+            default_ttl_ms: None,
+            context_index_fields: Vec::new(),
+            declared_columns: Vec::new(),
+            table_def: None,
+            timestamps_enabled: false,
+            context_index_enabled: false,
+            append_only: false,
+            subscriptions: Vec::new(),
+        })
+        .expect("save graph contract");
+    }
+
     #[test]
     fn magic_byte_is_0xfe() {
         assert_eq!(REDWIRE_MAGIC, 0xFE);
@@ -959,9 +988,7 @@ mod tests {
     #[test]
     fn redwire_bulk_insert_graph_rows_returns_ids() {
         let runtime = RedDBRuntime::in_memory().expect("runtime");
-        runtime
-            .execute_query("CREATE GRAPH network")
-            .expect("create graph collection");
+        create_graph_collection(&runtime, "network");
 
         let nodes = Frame::new(
             MessageKind::BulkInsert,
@@ -970,8 +997,12 @@ mod tests {
         );
         let nodes_reply = run_insert_dispatch(&runtime, &nodes);
         assert_eq!(nodes_reply.kind, MessageKind::BulkOk);
-        let node_body: JsonValue = serde_json::from_slice(&nodes_reply.payload).expect("nodes json");
-        assert_eq!(node_body.get("affected").and_then(JsonValue::as_u64), Some(2));
+        let node_body: JsonValue =
+            serde_json::from_slice(&nodes_reply.payload).expect("nodes json");
+        assert_eq!(
+            node_body.get("affected").and_then(JsonValue::as_u64),
+            Some(2)
+        );
         let ids = node_body
             .get("ids")
             .and_then(JsonValue::as_array)
@@ -990,8 +1021,12 @@ mod tests {
         );
         let edges_reply = run_insert_dispatch(&runtime, &edges);
         assert_eq!(edges_reply.kind, MessageKind::BulkOk);
-        let edge_body: JsonValue = serde_json::from_slice(&edges_reply.payload).expect("edges json");
-        assert_eq!(edge_body.get("affected").and_then(JsonValue::as_u64), Some(1));
+        let edge_body: JsonValue =
+            serde_json::from_slice(&edges_reply.payload).expect("edges json");
+        assert_eq!(
+            edge_body.get("affected").and_then(JsonValue::as_u64),
+            Some(1)
+        );
         assert_eq!(
             edge_body
                 .get("ids")

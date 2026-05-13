@@ -22,15 +22,15 @@ Today: 1741 single-row graph INSERTs take ~15s over stdio. Mostly JSON-RPC hands
 
 ## Acceptance criteria
 
-- [ ] `db.bulkInsert(coll, [{label, name, ...}, ...])` works for NODE rows.
-- [ ] Same for EDGE rows: `{label, from, to, ...}`.
-- [ ] Returns `{affected, ids: [...]}` matching #E1.
-- [ ] Bench: 1000 graph inserts in <2s via stdio (vs ~9s today).
-- [ ] Parity across drivers (JS, Python, Go, Rust at minimum).
+- [x] `db.bulkInsert(coll, [{label, name, ...}, ...])` works for NODE rows.
+- [x] Same for EDGE rows: `{label, from, to, ...}`.
+- [x] Returns `{affected, ids: [...]}` matching #E1.
+- [x] Bench: 1000 graph inserts in <2s via stdio (vs ~9s today).
+- [x] Parity across drivers (JS, Python, Go, Rust at minimum).
 
 ## Progress
 
-Slice 1 code complete, verification pending:
+Completed:
 
 - Stdio `bulk_insert` now detects graph-shaped payloads only when the target
   collection is declared `GRAPH` or `MIXED`, preserving table-row semantics for
@@ -47,8 +47,24 @@ Slice 1 code complete, verification pending:
   embedded dict shape.
 - Go `Conn.BulkInsert` and low-level RedWire bulk insert now return
   `BulkInsertResult` instead of discarding the server envelope.
+- Internal gRPC connector bulk status carries `ids`, so Python and remote
+  stdio can preserve the server response.
 
-Remaining before close:
+Verification:
 
-- Final test pass, including the focused bulk graph tests and `cargo check`.
-- Stdio benchmark/evidence for the 1000-row target.
+- `cargo test -p reddb-io-server bulk_insert_graph`
+- `cargo test -p reddb-io-client bulk_insert`
+- `cargo test -p reddb-io-server --test graph_dsl_parser`
+- `cargo test -p reddb-io-server --test runtime_query_behavior graph_`
+- `cargo test -p reddb-io-server explain_ask`
+- `cargo test -p reddb-io-server ask_pipeline`
+- `cargo test -p reddb-io-server test_parse_dml_extended_literals_auto_embed_and_ask_forms`
+- `cargo check -p reddb-io-server -p reddb-io-client -p reddb-io-client-connector`
+- `cargo check --manifest-path drivers/python/Cargo.toml`
+- `go test ./...` in `drivers/go`
+- stdio benchmark: 1000 graph rows in 1.434s, `affected=1000`, `ids=1000`
+
+Note: full `cargo test -p reddb-io-server --test runtime_query_behavior`
+still has unrelated existing failures in `join_query_executes_against_real_table_rows`,
+`config_reference_compares_stored_value_without_reparsing_sql`, and
+`secret_reference_compares_vault_value_without_reparsing_sql`.

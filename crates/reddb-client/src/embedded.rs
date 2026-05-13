@@ -12,7 +12,6 @@ use reddb_server::api::RedDBOptions;
 use reddb_server::runtime::RedDBRuntime;
 use reddb_server::storage::query::unified::UnifiedRecord;
 use reddb_server::storage::schema::Value as SchemaValue;
-use reddb_server::RuntimeEntityPort;
 
 use crate::error::{ClientError, ErrorCode, Result};
 use crate::types::{BulkInsertResult, InsertResult, JsonValue, QueryResult, ValueOut};
