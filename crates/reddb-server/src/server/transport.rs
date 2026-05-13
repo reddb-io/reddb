@@ -195,6 +195,27 @@ pub(crate) fn json_error(status: u16, message: impl Into<String>) -> HttpRespons
     json_response(status, JsonValue::Object(object))
 }
 
+pub(crate) fn json_error_code(
+    status: u16,
+    code: impl Into<String>,
+    message: impl Into<String>,
+) -> HttpResponse {
+    let code = code.into();
+    let message = message.into();
+    let mut object = Map::new();
+    object.insert("ok".to_string(), JsonValue::Bool(false));
+    object.insert("code".to_string(), JsonValue::String(code));
+    object.insert(
+        "error".to_string(),
+        crate::json_field::SerializedJsonField::tainted(&message),
+    );
+    object.insert(
+        "message".to_string(),
+        crate::json_field::SerializedJsonField::tainted(&message),
+    );
+    json_response(status, JsonValue::Object(object))
+}
+
 pub(crate) fn json_response(status: u16, value: JsonValue) -> HttpResponse {
     HttpResponse {
         status,

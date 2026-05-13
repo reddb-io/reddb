@@ -58,7 +58,11 @@ fn parse_params_field(json: &JsonValue) -> Result<Option<Vec<Value>>, HttpRespon
                 .map(crate::rpc_stdio::json_value_to_schema_value)
                 .collect(),
         )),
-        Some(_) => Err(json_error(400, "'params' must be a JSON array")),
+        Some(_) => Err(json_error_code(
+            400,
+            "INVALID_PARAMS",
+            "'params' must be a JSON array",
+        )),
     }
 }
 
