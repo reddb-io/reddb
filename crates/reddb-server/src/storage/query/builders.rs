@@ -257,6 +257,7 @@ impl JoinQueryBuilder {
             | QueryExpr::Update(_)
             | QueryExpr::Delete(_)
             | QueryExpr::CreateTable(_)
+            | QueryExpr::CreateCollection(_)
             | QueryExpr::DropTable(_)
             | QueryExpr::DropGraph(_)
             | QueryExpr::DropVector(_)

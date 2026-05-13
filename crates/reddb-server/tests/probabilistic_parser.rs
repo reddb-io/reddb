@@ -197,9 +197,11 @@ fn happy_create_hll_bare_parses() {
     match q {
         QueryExpr::ProbabilisticCommand(ProbabilisticCommand::CreateHll {
             name,
+            precision,
             if_not_exists,
         }) => {
             assert_eq!(name, "visitors");
+            assert_eq!(precision, 14);
             assert!(!if_not_exists);
         }
         other => panic!("expected CreateHll, got {other:?}"),
@@ -213,6 +215,23 @@ fn happy_create_hll_if_not_exists_parses() {
         QueryExpr::ProbabilisticCommand(ProbabilisticCommand::CreateHll {
             if_not_exists, ..
         }) => assert!(if_not_exists),
+        other => panic!("expected CreateHll, got {other:?}"),
+    }
+}
+
+#[test]
+fn happy_create_hll_precision_parses() {
+    let q = parse_query("CREATE HLL visitors PRECISION 14");
+    match q {
+        QueryExpr::ProbabilisticCommand(ProbabilisticCommand::CreateHll {
+            name,
+            precision,
+            if_not_exists,
+        }) => {
+            assert_eq!(name, "visitors");
+            assert_eq!(precision, 14);
+            assert!(!if_not_exists);
+        }
         other => panic!("expected CreateHll, got {other:?}"),
     }
 }

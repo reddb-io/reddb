@@ -176,9 +176,15 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 let if_not_exists = self.match_if_not_exists()?;
                 let name = self.expect_ident()?;
+                let precision = if self.consume_ident_ci("PRECISION")? {
+                    self.parse_positive_integer("PRECISION")? as u8
+                } else {
+                    14
+                };
                 Ok(QueryExpr::ProbabilisticCommand(
                     ProbabilisticCommand::CreateHll {
                         name,
+                        precision,
                         if_not_exists,
                     },
                 ))

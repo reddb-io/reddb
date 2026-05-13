@@ -573,6 +573,7 @@ fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::Update(_) => "update",
         QueryExpr::Delete(_) => "delete",
         QueryExpr::CreateTable(_) => "create_table",
+        QueryExpr::CreateCollection(_) => "create_collection",
         QueryExpr::DropTable(_) => "drop_table",
         QueryExpr::DropGraph(_) => "drop_graph",
         QueryExpr::DropVector(_) => "drop_vector",

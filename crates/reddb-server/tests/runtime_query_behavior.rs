@@ -11,6 +11,14 @@ fn int_at(result: &RuntimeQueryResult, row: usize, column: &str) -> i64 {
     }
 }
 
+fn uint_at(result: &RuntimeQueryResult, row: usize, column: &str) -> u64 {
+    match result.result.records[row].get(column) {
+        Some(Value::UnsignedInteger(value)) => *value,
+        Some(Value::Integer(value)) => *value as u64,
+        other => panic!("expected unsigned integer at row {row} column {column}, got {other:?}"),
+    }
+}
+
 fn number_at_any(result: &RuntimeQueryResult, row: usize, columns: &[&str]) -> f64 {
     let value = columns
         .iter()
@@ -29,6 +37,15 @@ fn text_at<'a>(result: &'a RuntimeQueryResult, row: usize, column: &str) -> &'a 
         Some(Value::Text(value)) => value.as_ref(),
         other => panic!("expected text at row {row} column {column}, got {other:?}"),
     }
+}
+
+fn collection_model(rt: &RedDBRuntime, name: &str) -> Option<reddb_server::CollectionModel> {
+    rt.db()
+        .catalog_model_snapshot()
+        .collections
+        .into_iter()
+        .find(|collection| collection.name == name)
+        .map(|collection| collection.model)
 }
 
 fn insert_graph_node(rt: &RedDBRuntime, label: &str, name: &str) -> u64 {
@@ -335,6 +352,74 @@ fn select_star_returns_graph_entities_inserted_into_collection() {
     );
     assert_eq!(text_at(&filtered, 0, "label"), "cinderella");
     assert_eq!(text_at(&filtered, 0, "name"), "Cinderella");
+}
+
+#[test]
+fn create_graph_declares_collection_before_node_insert() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("CREATE GRAPH g").expect("create graph");
+    assert_eq!(
+        collection_model(&rt, "g"),
+        Some(reddb_server::CollectionModel::Graph)
+    );
+
+    rt.execute_query("INSERT INTO g NODE (label, name) VALUES ('hero', 'Ada')")
+        .expect("insert node into declared graph");
+    let rows = rt
+        .execute_query("SELECT label, name FROM g")
+        .expect("select graph rows");
+    assert_eq!(rows.result.len(), 1);
+    assert_eq!(text_at(&rows, 0, "label"), "hero");
+}
+
+#[test]
+fn create_document_reaches_executor_not_yet_supported() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    let err = rt
+        .execute_query("CREATE DOCUMENT docs")
+        .expect_err("document executor rejects unsupported storage");
+    let msg = err.to_string();
+    assert!(msg.contains("NOT_YET_SUPPORTED"), "{msg}");
+    assert!(msg.contains("auto-created table"), "{msg}");
+}
+
+#[test]
+fn create_collection_kind_graph_matches_create_graph() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("CREATE COLLECTION cg KIND graph")
+        .expect("create graph collection");
+    assert_eq!(
+        collection_model(&rt, "cg"),
+        Some(reddb_server::CollectionModel::Graph)
+    );
+
+    rt.execute_query("INSERT INTO cg NODE (label, name) VALUES ('hero', 'Ada')")
+        .expect("insert node into graph collection");
+    let rows = rt
+        .execute_query("SELECT label, name FROM cg")
+        .expect("select graph collection rows");
+    assert_eq!(rows.result.len(), 1);
+    assert_eq!(text_at(&rows, 0, "name"), "Ada");
+}
+
+#[test]
+fn create_collection_unknown_kind_is_executor_not_yet_supported() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    let err = rt
+        .execute_query("CREATE COLLECTION c KIND mystery")
+        .expect_err("unknown collection kind rejected by executor");
+    let msg = err.to_string();
+    assert!(msg.contains("NOT_YET_SUPPORTED"), "{msg}");
+    assert!(msg.contains("mystery"), "{msg}");
+}
+
+#[test]
+fn create_hll_precision_is_reflected_in_hll_info() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("CREATE HLL h PRECISION 14")
+        .expect("create hll with precision");
+    let info = rt.execute_query("HLL INFO h").expect("hll info");
+    assert_eq!(uint_at(&info, 0, "precision"), 14);
 }
 
 #[test]
