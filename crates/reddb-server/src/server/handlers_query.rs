@@ -1332,15 +1332,35 @@ mod tests {
             .expect("set groq api key");
 
         let r = server.handle_query(
-            br#"{"query": "ASK 'why did login fail?' USING 'groq,openai'"}"#.to_vec(),
+            br#"{"query": "ASK 'why did login fail?' USING 'groq,openai' TEMPERATURE 0.7 SEED 42"}"#.to_vec(),
         );
 
         assert_eq!(r.status, 200, "{}", body_str(&r));
         assert_eq!(groq.request_count(), 1);
         assert_eq!(openai.request_count(), 1);
+        for body in [groq.request_body(0), openai.request_body(0)] {
+            let payload = body.split("\r\n\r\n").nth(1).expect("request payload");
+            let parsed: crate::json::Value =
+                crate::json::from_str(payload).expect("request payload json");
+            let temperature = parsed
+                .get("temperature")
+                .and_then(crate::json::Value::as_f64)
+                .expect("temperature");
+            assert!((temperature - 0.7).abs() < 0.000_001, "{body}");
+            assert_eq!(
+                parsed.get("seed").and_then(crate::json::Value::as_u64),
+                Some(42)
+            );
+        }
         let text = body_str(&r);
         assert!(text.contains("openai answered"), "{text}");
         assert!(text.contains(r#""provider":"openai""#), "{text}");
+        let rows = ask_audit_rows(&server);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["provider"], crate::json!("openai"));
+        let audit_temperature = rows[0]["temperature"].as_f64().expect("audit temperature");
+        assert!((audit_temperature - 0.7).abs() < 0.000_001);
+        assert_eq!(rows[0]["seed"], crate::json!(42));
     }
 
     #[test]
@@ -1798,9 +1818,32 @@ mod tests {
     }
 
     fn read_stub_request(stream: &mut TcpStream) {
+        let _ = read_stub_request_text(stream);
+    }
+
+    fn read_stub_request_text(stream: &mut TcpStream) -> String {
         let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
-        let mut buffer = [0_u8; 1024];
-        let _ = stream.read(&mut buffer);
+        let mut out = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    out.extend_from_slice(&buffer[..n]);
+                    if out.len() > 256 * 1024 {
+                        break;
+                    }
+                }
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::WouldBlock
+                        || err.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break
+                }
+                Err(_) => break,
+            }
+        }
+        String::from_utf8_lossy(&out).to_string()
     }
 
     fn write_openai_response(stream: &mut TcpStream, completion_tokens: u64) {
@@ -2045,6 +2088,7 @@ mod tests {
         addr: SocketAddr,
         shutdown: Arc<AtomicBool>,
         requests: Arc<std::sync::atomic::AtomicUsize>,
+        request_bodies: Arc<Mutex<Vec<String>>>,
         handle: Option<JoinHandle<()>>,
     }
 
@@ -2057,14 +2101,20 @@ mod tests {
             let addr = listener.local_addr().expect("local addr");
             let shutdown = Arc::new(AtomicBool::new(false));
             let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let request_bodies = Arc::new(Mutex::new(Vec::new()));
             let server_shutdown = Arc::clone(&shutdown);
             let server_requests = Arc::clone(&requests);
+            let server_request_bodies = Arc::clone(&request_bodies);
             let handle = thread::spawn(move || {
                 while !server_shutdown.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
-                            read_stub_request(&mut stream);
+                            let request_body = read_stub_request_text(&mut stream);
                             server_requests.fetch_add(1, Ordering::Relaxed);
+                            server_request_bodies
+                                .lock()
+                                .expect("request bodies lock")
+                                .push(request_body);
                             if let Some(output) = output {
                                 write_openai_text_response(&mut stream, output);
                             } else {
@@ -2083,6 +2133,7 @@ mod tests {
                 addr,
                 shutdown,
                 requests,
+                request_bodies,
                 handle: Some(handle),
             }
         }
@@ -2093,6 +2144,15 @@ mod tests {
 
         fn request_count(&self) -> usize {
             self.requests.load(Ordering::Relaxed)
+        }
+
+        fn request_body(&self, index: usize) -> String {
+            self.request_bodies
+                .lock()
+                .expect("request bodies lock")
+                .get(index)
+                .cloned()
+                .unwrap_or_default()
         }
     }
 
