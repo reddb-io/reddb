@@ -10,28 +10,56 @@
 ## Install
 
 ```bash
-bun add @reddb-io/client-bun
+bun add @reddb-io/sdk @reddb-io/client-bun
 ```
 
 ## Quickstart
 
 ```ts
-import { connect } from '@reddb-io/client-bun'
+import { connect as connectSdk } from '@reddb-io/sdk'
+import { connect as connectNative } from '@reddb-io/client-bun'
 
-const conn = await connect('127.0.0.1:5050')
+const db = await connectSdk('memory://')
 
+const rows = await db.query(
+  'SELECT * FROM users WHERE name = $1',
+  ['Alice'],
+)
+console.log(rows.rows)
+
+await db.close()
+
+const conn = await connectNative('127.0.0.1:5050')
 const json = await conn.query('SELECT * FROM users LIMIT 10')
 console.log(JSON.parse(json))
-
-await conn.bulkInsert('users', [
-  JSON.stringify({ name: 'Alice' }),
-  JSON.stringify({ name: 'Bob' }),
-])
 
 conn.close()
 ```
 
 `query()` returns the raw JSON string from the server — call `JSON.parse` (or use `queryParsed()`) yourself.
+
+## Safe parameter binding
+
+Use the shared `@reddb-io/sdk` under Bun for positional `$N` bind values. The
+native TCP preview is intentionally narrow and keeps `query(sql)` as a raw SQL
+string fast path; do not compose user input into that string. The cross-driver
+contract is tracked in [ADR #352](https://github.com/reddb-io/reddb/issues/352).
+
+```ts
+import { connect } from '@reddb-io/sdk'
+
+const db = await connect('memory://')
+
+const rows = await db.query(
+  'SELECT id, name FROM users WHERE id = $1 AND tenant = $2',
+  [42, 'acme'],
+)
+
+const hits = await db.query(
+  'SEARCH SIMILAR $1 IN embeddings K 5',
+  [Float32Array.from([0.1, 0.2, 0.3])],
+)
+```
 
 ## TLS
 

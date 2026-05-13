@@ -74,7 +74,9 @@ interface Reddb\Conn
 ## Safe parameter binding
 
 `query()` accepts positional `$N` bind values in the optional `$params` array.
-Use it for any user-supplied value — concatenation is a SQL-injection footgun:
+Use it for any user-supplied value — concatenation is a SQL-injection footgun.
+The cross-driver contract is tracked in
+[ADR #352](https://github.com/reddb-io/reddb/issues/352):
 
 ```php
 // Scalar params: int / text / null

@@ -22,8 +22,12 @@ import asyncio
 from reddb_asyncio import connect
 
 async def main():
-    async with await connect("red://localhost:5050") as db:
-        print(await db.query("SELECT 1"))
+    async with await connect("http://localhost:8080") as db:
+        rows = await db.query(
+            "SELECT * FROM users WHERE name = $1",
+            ["alice"],
+        )
+        print(rows)
         await db.insert("users", {"name": "alice", "age": 30})
         print(await db.get("users", "alice"))
         await db.delete("users", "alice")
@@ -80,7 +84,7 @@ from reddb_asyncio import (
 `Reddb` exposes:
 
 ```python
-await db.query(sql)
+await db.query(sql, params=None)
 await db.insert(collection, payload)
 await db.bulk_insert(collection, payloads)
 await db.get(collection, id)
@@ -89,6 +93,32 @@ await db.ping()
 await db.close()
 async with await connect(uri) as db: ...
 ```
+
+## Safe parameter binding
+
+`await db.query(sql, params)` binds positional `$N` placeholders over the HTTP
+transport. Use it for any user-supplied value — string concatenation is a
+SQL-injection footgun. The cross-driver contract is tracked in
+[ADR #352](https://github.com/reddb-io/reddb/issues/352).
+
+```python
+# Scalar params: int / text / null
+rows = await db.query(
+    "SELECT id, name FROM users WHERE id = $1 AND tenant = $2 AND deleted_at IS $3",
+    [42, "acme", None],
+)
+
+# Vector param (HNSW / IVF similarity search)
+hits = await db.query(
+    "SEARCH SIMILAR $1 IN embeddings K 5",
+    [[0.1, 0.2, 0.3]],
+)
+```
+
+HTTP sends the `params` array directly to `/query`, where numeric arrays bind
+as vectors and objects bind as JSON. Non-empty params over the RedWire preview
+raise `PARAMS_UNSUPPORTED` until the binary `QueryWithParams` frame lands
+there; use `http://` / `https://` for safe binding with `reddb-asyncio` today.
 
 ## Production checklist
 

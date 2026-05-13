@@ -111,7 +111,9 @@ Full API: [docs.rs/reddb-io-client](https://docs.rs/reddb-io-client).
 ## Safe parameter binding
 
 `query_with(sql, &[params])` binds positional `$N` placeholders. Use it for any
-user-supplied value — concatenation is a SQL-injection footgun:
+user-supplied value — concatenation is a SQL-injection footgun. The
+cross-driver contract is tracked in
+[ADR #352](https://github.com/reddb-io/reddb/issues/352):
 
 ```rust
 use reddb_client::{Reddb, Value};

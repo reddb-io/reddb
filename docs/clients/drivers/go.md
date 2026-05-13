@@ -41,7 +41,11 @@ func main() {
         log.Fatal(err)
     }
 
-    body, err := c.Query(ctx, "SELECT name FROM users")
+    body, err := c.Query(
+        ctx,
+        "SELECT name FROM users WHERE name = $1",
+        "alice",
+    )
     if err != nil {
         log.Fatal(err)
     }
@@ -66,7 +70,9 @@ URI-carried auth: `red://user:pass@host` (SCRAM / `/auth/login`), `red://host?to
 ## Safe parameter binding
 
 `Query` accepts positional `$N` bind values as variadic `any`. Use it for any
-user-supplied value — concatenation is a SQL-injection footgun:
+user-supplied value — concatenation is a SQL-injection footgun. The
+cross-driver contract is tracked in
+[ADR #352](https://github.com/reddb-io/reddb/issues/352):
 
 ```go
 // Scalar params: int / text / null

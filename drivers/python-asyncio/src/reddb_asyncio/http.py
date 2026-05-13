@@ -12,7 +12,7 @@ The primary endpoint mapping matches what the JS driver speaks
 ==========================  =================================================
 Method                      Endpoint
 ==========================  =================================================
-``query``                   ``POST /query`` (body ``{"query": sql}``)
+``query``                   ``POST /query`` (body ``{"query": sql, "params": [...]}``)
 ``insert``                  ``POST /collections/{name}/rows``
 ``bulk_insert``             ``POST /collections/{name}/bulk/rows``
 ``scan``                    ``GET  /collections/{name}/scan?limit=...``
@@ -90,8 +90,11 @@ class HttpClient:
 
     # ------------------------------------------------------------------ ops
 
-    async def query(self, sql: str) -> dict[str, Any]:
-        return await self._post_json("/query", {"query": sql})
+    async def query(self, sql: str, params: list[Any] | None = None) -> dict[str, Any]:
+        body: dict[str, Any] = {"query": sql}
+        if params is not None:
+            body["params"] = params
+        return await self._post_json("/query", body)
 
     async def insert(self, collection: str, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._post_json(f"/collections/{quote(collection)}/rows", payload)

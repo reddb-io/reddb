@@ -126,7 +126,10 @@ const db = await connect('memory://')
 await db.insert('users', { name: 'Alice', age: 30 })
 await db.bulkInsert('users', [{ name: 'Bob' }, { name: 'Carol' }])
 
-const result = await db.query('SELECT * FROM users')
+const result = await db.query(
+  'SELECT * FROM users WHERE age >= $1',
+  [30],
+)
 console.log(result.rows)
 
 await db.close()
@@ -147,7 +150,8 @@ Available methods:
 
 `db.query` accepts positional `$N` bind values as a second argument. Use it
 for any user-supplied value — string concatenation is a SQL-injection
-footgun:
+footgun. The cross-driver contract is tracked in
+[ADR #352](https://github.com/reddb-io/reddb/issues/352):
 
 ```ts
 import { connect } from '@reddb-io/sdk'
