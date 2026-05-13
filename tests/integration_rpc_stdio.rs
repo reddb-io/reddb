@@ -8,6 +8,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+use serde_json::Value;
+
 fn red_binary() -> PathBuf {
     // CARGO_BIN_EXE_red is set by Cargo when running integration tests
     // for a crate that has [[bin]] name = "red".
@@ -160,11 +162,49 @@ fn insert_then_query_round_trip() {
         r#"{"jsonrpc":"2.0","id":1,"method":"insert","params":{"collection":"users","payload":{"name":"Alice","age":30}}}"#,
     );
     assert!(r1.contains("\"affected\":1"), "got: {r1}");
+    let inserted: Value = serde_json::from_str(&r1).expect("insert response json");
+    let id = inserted
+        .get("result")
+        .and_then(|result| result.get("id"))
+        .and_then(Value::as_str)
+        .expect("insert response includes id");
 
-    let r2 = s.send(
-        r#"{"jsonrpc":"2.0","id":2,"method":"query","params":{"sql":"SELECT * FROM users"}}"#,
-    );
-    assert!(r2.contains("\"result\""), "got: {r2}");
+    let r2 = s.send(&format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"get","params":{{"collection":"users","id":"{id}"}}}}"#
+    ));
     assert!(r2.contains("Alice"), "got: {r2}");
+
+    let r3 = s.send(
+        r#"{"jsonrpc":"2.0","id":3,"method":"query","params":{"sql":"SELECT * FROM users"}}"#,
+    );
+    assert!(r3.contains("\"result\""), "got: {r3}");
+    assert!(r3.contains("Alice"), "got: {r3}");
+    s.close();
+}
+
+#[test]
+fn bulk_insert_returns_ordered_ids_that_round_trip_with_get() {
+    let mut s = StdioSession::spawn();
+    let r1 = s.send(
+        r#"{"jsonrpc":"2.0","id":1,"method":"bulk_insert","params":{"collection":"items","payloads":[{"name":"a"},{"name":"b"},{"name":"c"}]}}"#,
+    );
+    assert!(r1.contains("\"affected\":3"), "got: {r1}");
+    let inserted: Value = serde_json::from_str(&r1).expect("bulk response json");
+    let ids = inserted
+        .get("result")
+        .and_then(|result| result.get("ids"))
+        .and_then(Value::as_array)
+        .expect("bulk response includes ids");
+    assert_eq!(ids.len(), 3, "got: {r1}");
+
+    for (index, expected_name) in ["a", "b", "c"].into_iter().enumerate() {
+        let id = ids[index].as_str().expect("id is string");
+        let response = s.send(&format!(
+            r#"{{"jsonrpc":"2.0","id":{},"method":"get","params":{{"collection":"items","id":"{}"}}}}"#,
+            index + 2,
+            id
+        ));
+        assert!(response.contains(expected_name), "got: {response}");
+    }
     s.close();
 }
