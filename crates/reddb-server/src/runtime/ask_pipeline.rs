@@ -42,8 +42,9 @@ use super::ai::ner::{
 use super::statement_frame::{EffectiveScope, ReadFrame};
 use super::RedDBRuntime;
 use crate::api::{RedDBError, RedDBResult};
+use crate::application::SearchContextInput;
 use crate::storage::schema::Value;
-use crate::storage::unified::entity::{EntityData, UnifiedEntity};
+use crate::storage::unified::entity::{EntityData, EntityKind, UnifiedEntity};
 
 /// Default cap for Stage 4 row output. Override per-call via
 /// [`AskPipeline::execute_with_limit`].
@@ -88,6 +89,22 @@ pub struct VectorHit {
     pub score: f32,
 }
 
+/// One graph traversal hit for the ASK graph retrieval bucket.
+#[derive(Debug, Clone)]
+pub struct GraphHit {
+    pub collection: String,
+    pub entity_id: u64,
+    pub score: f32,
+    pub depth: usize,
+    pub kind: GraphHitKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphHitKind {
+    Node,
+    Edge,
+}
+
 /// Stage 4 output: rows that match a literal filter.
 #[derive(Debug, Clone)]
 pub struct FilteredRow {
@@ -105,6 +122,7 @@ pub struct StageTimings {
     pub extract_us: u64,
     pub schema_us: u64,
     pub vector_us: u64,
+    pub graph_us: u64,
     pub filter_us: u64,
 }
 
@@ -117,6 +135,7 @@ pub struct AskContext {
     pub tokens: TokenSet,
     pub candidates: CandidateCollections,
     pub vector_hits: Vec<VectorHit>,
+    pub graph_hits: Vec<GraphHit>,
     pub filtered_rows: Vec<FilteredRow>,
     pub source_limit: usize,
     pub timings: StageTimings,
@@ -129,6 +148,7 @@ impl Default for AskContext {
             tokens: TokenSet::default(),
             candidates: CandidateCollections::default(),
             vector_hits: Vec::new(),
+            graph_hits: Vec::new(),
             filtered_rows: Vec::new(),
             source_limit: DEFAULT_ROW_CAP,
             timings: StageTimings::default(),
@@ -141,6 +161,7 @@ impl Default for AskContext {
 pub enum FusedSourceRef {
     FilteredRow(usize),
     VectorHit(usize),
+    GraphHit(usize),
 }
 
 /// One fused source reference plus its RRF score.
@@ -172,7 +193,7 @@ impl AskPipeline {
         question: &str,
         row_cap: usize,
     ) -> RedDBResult<AskContext> {
-        Self::execute_with_limit_and_min_score(runtime, scope, question, row_cap, None)
+        Self::execute_with_limit_and_min_score(runtime, scope, question, row_cap, None, None)
     }
 
     /// Run all four stages with a configurable row cap and per-bucket
@@ -183,6 +204,7 @@ impl AskPipeline {
         question: &str,
         row_cap: usize,
         min_score: Option<f32>,
+        graph_depth: Option<usize>,
     ) -> RedDBResult<AskContext> {
         let span = info_span!(
             "ask_pipeline.execute",
@@ -190,6 +212,7 @@ impl AskPipeline {
             question_len = question.len(),
             row_cap = row_cap,
             min_score = ?min_score,
+            graph_depth = ?graph_depth,
         );
         let _enter = span.enter();
 
@@ -245,6 +268,26 @@ impl AskPipeline {
             "stage 3 done"
         );
 
+        // Stage 3b.
+        let stage3b = Instant::now();
+        let graph_hits = graph_search_scoped(
+            runtime,
+            scope,
+            question,
+            &candidates,
+            row_cap,
+            min_score,
+            graph_depth,
+        );
+        let graph_us = stage3b.elapsed().as_micros() as u64;
+        debug!(
+            target: "ask_pipeline",
+            stage = "graph_search_scoped",
+            hits = graph_hits.len(),
+            elapsed_us = graph_us,
+            "stage 3b done"
+        );
+
         // Stage 4.
         let stage4 = Instant::now();
         let filtered_rows = filter_values(runtime, scope, &candidates, &tokens, row_cap);
@@ -262,12 +305,14 @@ impl AskPipeline {
             tokens,
             candidates,
             vector_hits,
+            graph_hits,
             filtered_rows,
             source_limit: row_cap,
             timings: StageTimings {
                 extract_us,
                 schema_us,
                 vector_us,
+                graph_us,
                 filter_us,
             },
         })
@@ -288,7 +333,9 @@ pub fn fused_source_order(ctx: &AskContext) -> Vec<FusedSourceRef> {
 pub fn fused_sources(ctx: &AskContext) -> Vec<FusedSource> {
     use super::ai::rrf_fuser::{fuse, Bucket, Candidate, RRF_K_DEFAULT};
 
-    if ctx.source_limit == 0 || (ctx.filtered_rows.is_empty() && ctx.vector_hits.is_empty()) {
+    if ctx.source_limit == 0
+        || (ctx.filtered_rows.is_empty() && ctx.vector_hits.is_empty() && ctx.graph_hits.is_empty())
+    {
         return Vec::new();
     }
 
@@ -324,9 +371,26 @@ pub fn fused_sources(ctx: &AskContext) -> Vec<FusedSource> {
             .collect(),
         min_score: None,
     };
+    let graph_bucket = Bucket {
+        candidates: ctx
+            .graph_hits
+            .iter()
+            .enumerate()
+            .map(|(idx, hit)| {
+                let id = source_identity(&hit.collection, hit.entity_id);
+                refs.entry(id.clone())
+                    .or_insert(FusedSourceRef::GraphHit(idx));
+                Candidate {
+                    id,
+                    score: hit.score as f64,
+                }
+            })
+            .collect(),
+        min_score: None,
+    };
 
     fuse(
-        &[row_bucket, vector_bucket],
+        &[row_bucket, vector_bucket, graph_bucket],
         RRF_K_DEFAULT,
         ctx.source_limit,
     )
@@ -711,6 +775,89 @@ pub fn vector_search_scoped(
     hits
 }
 
+// ---------------------------------------------------------------------------
+// Stage 3b — graph traversal scoped to candidate collections.
+// ---------------------------------------------------------------------------
+
+/// Run context search with graph expansion enabled and keep only
+/// graph-traversal hits. `ASK ... DEPTH N` controls the traversal
+/// horizon; absent depth follows the existing ASK tool default.
+pub fn graph_search_scoped(
+    runtime: &RedDBRuntime,
+    scope: &EffectiveScope,
+    question: &str,
+    candidates: &CandidateCollections,
+    top_k: usize,
+    min_score: Option<f32>,
+    graph_depth: Option<usize>,
+) -> Vec<GraphHit> {
+    if candidates.collections.is_empty() || top_k == 0 {
+        return Vec::new();
+    }
+    let depth = graph_depth
+        .unwrap_or(crate::runtime::ai::mcp_ask_tool::DEPTH_DEFAULT as usize)
+        .max(1);
+    let result = match runtime.search_context(SearchContextInput {
+        query: question.to_string(),
+        field: None,
+        vector: None,
+        collections: Some(candidates.collections.clone()),
+        graph_depth: Some(depth),
+        graph_max_edges: None,
+        max_cross_refs: Some(0),
+        follow_cross_refs: Some(false),
+        expand_graph: Some(true),
+        global_scan: Some(true),
+        reindex: Some(false),
+        limit: Some(top_k),
+        min_score,
+    }) {
+        Ok(result) => result,
+        Err(err) => {
+            debug!(
+                target: "ask_pipeline",
+                err = %err,
+                "graph_search_scoped: context search skipped"
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut hits = Vec::new();
+    for entity in result
+        .graph
+        .nodes
+        .into_iter()
+        .chain(result.graph.edges.into_iter())
+    {
+        let crate::runtime::DiscoveryMethod::GraphTraversal { depth, .. } = entity.discovery else {
+            continue;
+        };
+        let kind = match entity.entity.kind {
+            EntityKind::GraphNode(_) => GraphHitKind::Node,
+            EntityKind::GraphEdge(_) => GraphHitKind::Edge,
+            _ => continue,
+        };
+        hits.push(GraphHit {
+            collection: entity.collection,
+            entity_id: entity.entity.id.raw(),
+            score: entity.score,
+            depth,
+            kind,
+        });
+    }
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.depth.cmp(&b.depth))
+            .then_with(|| a.collection.cmp(&b.collection))
+            .then_with(|| a.entity_id.cmp(&b.entity_id))
+    });
+    hits.truncate(top_k);
+    hits
+}
+
 /// Best-effort embedding. Returns `None` when no embedding provider
 /// is configured (the unit-test fixture path) — the caller treats
 /// `None` as "Stage 3 yielded zero hits" and continues.
@@ -976,6 +1123,16 @@ mod tests {
         }
     }
 
+    fn test_graph_hit(collection: &str, id: u64, score: f32, depth: usize) -> GraphHit {
+        GraphHit {
+            collection: collection.to_string(),
+            entity_id: id,
+            score,
+            depth,
+            kind: GraphHitKind::Node,
+        }
+    }
+
     #[test]
     fn fused_source_order_uses_rrf_and_total_limit() {
         let ctx = AskContext {
@@ -1004,6 +1161,75 @@ mod tests {
                 FusedSourceRef::FilteredRow(1),
                 FusedSourceRef::FilteredRow(0)
             ]
+        );
+    }
+
+    #[test]
+    fn fused_source_order_includes_graph_bucket() {
+        let ctx = AskContext {
+            source_limit: 3,
+            filtered_rows: vec![test_row("incidents", 1)],
+            vector_hits: vec![
+                VectorHit {
+                    collection: "incidents".to_string(),
+                    entity_id: 1,
+                    score: 0.91,
+                },
+                VectorHit {
+                    collection: "docs".to_string(),
+                    entity_id: 9,
+                    score: 0.88,
+                },
+            ],
+            graph_hits: vec![test_graph_hit("topology", 7, 0.80, 1)],
+            ..AskContext::default()
+        };
+
+        let order = fused_source_order(&ctx);
+
+        assert_eq!(
+            order,
+            vec![
+                FusedSourceRef::FilteredRow(0),
+                FusedSourceRef::GraphHit(0),
+                FusedSourceRef::VectorHit(1),
+            ]
+        );
+    }
+
+    #[test]
+    fn graph_search_scoped_honors_depth() {
+        let rt = fresh_runtime();
+        rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('alice', 'Alice')")
+            .expect("insert alice");
+        rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('bob', 'Bob')")
+            .expect("insert bob");
+        rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('carol', 'Carol')")
+            .expect("insert carol");
+        rt.execute_query(
+            "INSERT INTO tales EDGE (label, from, to) VALUES ('knows', 'alice', 'bob')",
+        )
+        .expect("insert alice-bob edge");
+        rt.execute_query(
+            "INSERT INTO tales EDGE (label, from, to) VALUES ('knows', 'bob', 'carol')",
+        )
+        .expect("insert bob-carol edge");
+
+        let scope = make_scope(["tales".to_string()].into_iter().collect());
+        let candidates = CandidateCollections {
+            collections: vec!["tales".to_string()],
+            columns_by_collection: HashMap::new(),
+        };
+        let depth1 = graph_search_scoped(&rt, &scope, "alice", &candidates, 10, None, Some(1));
+        let depth2 = graph_search_scoped(&rt, &scope, "alice", &candidates, 10, None, Some(2));
+
+        assert!(
+            depth1.iter().all(|hit| hit.depth <= 1),
+            "DEPTH 1 returned hits beyond one hop: {depth1:?}"
+        );
+        assert!(
+            depth2.iter().any(|hit| hit.depth == 2),
+            "DEPTH 2 should include the second-hop graph hit: {depth2:?}"
         );
     }
 

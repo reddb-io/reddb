@@ -1154,6 +1154,7 @@ impl RedDBRuntime {
                 &ask.question,
                 row_cap,
                 ask.min_score,
+                ask.depth,
             )?;
 
         let full_prompt = render_prompt(&ask_context, &ask.question);
@@ -2098,6 +2099,17 @@ fn format_fused_source_line(
                 hit.collection, hit.entity_id, hit.score
             )
         }
+        crate::runtime::ask_pipeline::FusedSourceRef::GraphHit(idx) => {
+            let hit = &ctx.graph_hits[idx];
+            let kind = match hit.kind {
+                crate::runtime::ask_pipeline::GraphHitKind::Node => "graph node",
+                crate::runtime::ask_pipeline::GraphHitKind::Edge => "graph edge",
+            };
+            format!(
+                "{} #{} ({} depth={} score={:.3})",
+                hit.collection, hit.entity_id, kind, hit.depth, hit.score
+            )
+        }
     }
 }
 
@@ -2112,7 +2124,7 @@ fn build_sources_flat(
     use crate::runtime::ai::urn_codec::{encode, Urn};
     let mut arr: Vec<crate::json::Value> = Vec::with_capacity(
         ctx.source_limit
-            .min(ctx.filtered_rows.len() + ctx.vector_hits.len()),
+            .min(ctx.filtered_rows.len() + ctx.vector_hits.len() + ctx.graph_hits.len()),
     );
     let mut urns: Vec<String> = Vec::with_capacity(arr.capacity());
     for source in crate::runtime::ask_pipeline::fused_source_order(ctx) {
@@ -2175,6 +2187,47 @@ fn build_sources_flat(
                 arr.push(crate::json::Value::Object(obj));
                 urns.push(urn);
             }
+            crate::runtime::ask_pipeline::FusedSourceRef::GraphHit(idx) => {
+                let hit = &ctx.graph_hits[idx];
+                let urn = match hit.kind {
+                    crate::runtime::ask_pipeline::GraphHitKind::Node => encode(&Urn::graph_node(
+                        hit.collection.clone(),
+                        hit.entity_id.to_string(),
+                    )),
+                    crate::runtime::ask_pipeline::GraphHitKind::Edge => encode(&Urn::graph_edge(
+                        hit.collection.clone(),
+                        hit.entity_id.to_string(),
+                        hit.entity_id.to_string(),
+                    )),
+                };
+                let mut obj: crate::json::Map<String, crate::json::Value> = Default::default();
+                obj.insert(
+                    "kind".to_string(),
+                    crate::json::Value::String(match hit.kind {
+                        crate::runtime::ask_pipeline::GraphHitKind::Node => "graph_node".into(),
+                        crate::runtime::ask_pipeline::GraphHitKind::Edge => "graph_edge".into(),
+                    }),
+                );
+                obj.insert("urn".to_string(), crate::json::Value::String(urn.clone()));
+                obj.insert(
+                    "collection".to_string(),
+                    crate::json::Value::String(hit.collection.clone()),
+                );
+                obj.insert(
+                    "id".to_string(),
+                    crate::json::Value::String(hit.entity_id.to_string()),
+                );
+                obj.insert(
+                    "score".to_string(),
+                    crate::json::Value::Number(hit.score as f64),
+                );
+                obj.insert(
+                    "depth".to_string(),
+                    crate::json::Value::Number(hit.depth as f64),
+                );
+                arr.push(crate::json::Value::Object(obj));
+                urns.push(urn);
+            }
         }
     }
     (crate::json::Value::Array(arr), urns)
@@ -2227,6 +2280,21 @@ fn explain_planned_sources(
                         hit.entity_id.to_string(),
                         hit.score,
                     ))
+                }
+                crate::runtime::ask_pipeline::FusedSourceRef::GraphHit(idx) => {
+                    let hit = &ctx.graph_hits[idx];
+                    match hit.kind {
+                        crate::runtime::ask_pipeline::GraphHitKind::Node => encode(
+                            &Urn::graph_node(hit.collection.clone(), hit.entity_id.to_string()),
+                        ),
+                        crate::runtime::ask_pipeline::GraphHitKind::Edge => {
+                            encode(&Urn::graph_edge(
+                                hit.collection.clone(),
+                                hit.entity_id.to_string(),
+                                hit.entity_id.to_string(),
+                            ))
+                        }
+                    }
                 }
             };
             crate::runtime::ai::explain_plan_builder::PlannedSource {
@@ -2399,6 +2467,7 @@ mod render_prompt_tests {
                 columns_by_collection: HashMap::new(),
             },
             vector_hits: Vec::new(),
+            graph_hits: Vec::new(),
             filtered_rows: filtered,
             source_limit: crate::runtime::ask_pipeline::DEFAULT_ROW_CAP,
             timings: StageTimings::default(),
@@ -2622,7 +2691,8 @@ mod citation_wedge_tests {
     fn build_sources_flat_orders_rows_before_vectors_with_urns() {
         use crate::runtime::ai::urn_codec::{decode, KindHint, UrnKind};
         use crate::runtime::ask_pipeline::{
-            AskContext, CandidateCollections, FilteredRow, StageTimings, TokenSet, VectorHit,
+            AskContext, CandidateCollections, FilteredRow, GraphHit, GraphHitKind, StageTimings,
+            TokenSet, VectorHit,
         };
         use crate::storage::schema::Value;
         use crate::storage::unified::entity::{
@@ -2658,6 +2728,13 @@ mod citation_wedge_tests {
             entity_id: 9,
             score: 0.5,
         };
+        let graph_hit = GraphHit {
+            collection: "topology".to_string(),
+            entity_id: 7,
+            score: 0.7,
+            depth: 1,
+            kind: GraphHitKind::Node,
+        };
         let ctx = AskContext {
             question: "q?".to_string(),
             tokens: TokenSet {
@@ -2669,19 +2746,21 @@ mod citation_wedge_tests {
                 columns_by_collection: HashMap::new(),
             },
             vector_hits: vec![hit],
+            graph_hits: vec![graph_hit],
             filtered_rows: vec![row],
             source_limit: crate::runtime::ask_pipeline::DEFAULT_ROW_CAP,
             timings: StageTimings::default(),
         };
         let (sources_flat, urns) = build_sources_flat(&ctx);
 
-        assert_eq!(urns.len(), 2);
+        assert_eq!(urns.len(), 3);
         assert_eq!(urns[0], "reddb:docs/9#0.5");
         assert_eq!(urns[1], "reddb:incidents/42");
+        assert_eq!(urns[2], "reddb:topology/7");
         // RRF source order: same one-bucket contribution, then
         // deterministic source-id tie-break.
         let arr = sources_flat.as_array().expect("arr");
-        assert_eq!(arr.len(), 2);
+        assert_eq!(arr.len(), 3);
         let first = arr[0].as_object().expect("obj");
         assert_eq!(
             first.get("kind").and_then(|v| v.as_str()),
@@ -2693,6 +2772,11 @@ mod citation_wedge_tests {
         );
         let second = arr[1].as_object().expect("obj");
         assert_eq!(second.get("kind").and_then(|v| v.as_str()), Some("row"));
+        let third = arr[2].as_object().expect("obj");
+        assert_eq!(
+            third.get("kind").and_then(|v| v.as_str()),
+            Some("graph_node")
+        );
         // URN round-trips: every kind decodes back without error.
         let dec = decode(&urns[0], KindHint::VectorHit).unwrap();
         match dec.kind {
@@ -2700,6 +2784,10 @@ mod citation_wedge_tests {
             _ => panic!("vector_hit kind expected"),
         }
         assert_eq!(decode(&urns[1], KindHint::Row).unwrap().kind, UrnKind::Row);
+        assert_eq!(
+            decode(&urns[2], KindHint::GraphNode).unwrap().kind,
+            UrnKind::GraphNode
+        );
     }
 
     /// Issue #394: citations attach the URN of the source they cite,
@@ -2782,6 +2870,7 @@ mod citation_wedge_tests {
                 columns_by_collection: HashMap::new(),
             },
             vector_hits: Vec::new(),
+            graph_hits: Vec::new(),
             filtered_rows: Vec::new(),
             source_limit: crate::runtime::ask_pipeline::DEFAULT_ROW_CAP,
             timings: StageTimings::default(),
