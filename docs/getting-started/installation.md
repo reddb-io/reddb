@@ -188,6 +188,16 @@ reddb-io = { version = "1.0", features = ["backend-s3", "otel"] }
 
 ## Docker
 
+Prebuilt images are published to GHCR. If the package is private in your
+environment, authenticate before pulling:
+
+```bash
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_USER" --password-stdin
+docker pull ghcr.io/reddb-io/reddb:latest
+```
+
+If you do not have GHCR access, build locally from the checkout instead.
+
 Build the image locally:
 
 ```bash

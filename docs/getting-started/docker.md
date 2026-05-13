@@ -4,6 +4,18 @@ RedDB ships as a single static binary in a minimal container image. This
 page covers two paths: a one-liner for local development, and a
 production-secure pattern using Docker secrets + the encrypted vault.
 
+> [!NOTE]
+> Prebuilt images are published to GitHub Container Registry under
+> `ghcr.io/reddb-io/*`. If `docker pull ghcr.io/reddb-io/reddb:latest`
+> returns `unauthorized`, authenticate to GHCR first:
+>
+> ```bash
+> echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_USER" --password-stdin
+> ```
+>
+> The Compose files in `examples/` use `build:` from your checkout and do not
+> require GHCR access.
+
 For deployment to Kubernetes, ECS, App Runner, Cloud Run, or any other
 orchestrator, see the platform-specific manifests in [`examples/`](../../examples/)
 and the secret-management patterns in
@@ -13,9 +25,18 @@ and the secret-management patterns in
 
 ## 1. Quickstart (no auth, dev only)
 
+Using the prebuilt GHCR image:
+
 ```bash
 docker run --rm -p 8080:8080 \
   ghcr.io/reddb-io/reddb:latest
+```
+
+If you do not have GHCR access, build locally instead:
+
+```bash
+docker build -t reddb .
+docker run --rm -p 8080:8080 reddb
 ```
 
 That's it. RedDB binds HTTP on `0.0.0.0:8080`, gRPC on `0.0.0.0:50051`,
@@ -278,6 +299,7 @@ http: listening on 0.0.0.0:8080
 1. Pull the new image:
 
    ```bash
+   echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_USER" --password-stdin
    docker compose -f examples/docker-compose.vault.yml pull
    ```
 
