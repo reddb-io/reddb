@@ -128,13 +128,13 @@ public class ValueCodecTests
 
         Assert.True(parameters[0] is null);
         Assert.True((bool)parameters[1]!);
-        Assert.Equal(42, (int)parameters[2]!);
+        Assert.Equal(42L, (long)parameters[2]!);
         Assert.Equal(1.5d, (double)parameters[3]!);
         Assert.Equal("txt", (string)parameters[4]!);
         Assert.Equal("aGk=", (string)parameters[5]!["$bytes"]!);
         Assert.Equal(1.0d, (double)parameters[6]![0]!);
-        Assert.Equal(1, (int)parameters[7]!["a"]!);
-        Assert.Equal(2, (int)parameters[7]!["b"]!);
+        Assert.Equal(1L, (long)parameters[7]!["a"]!);
+        Assert.Equal(2L, (long)parameters[7]!["b"]!);
         Assert.Equal(1_700_000_000L, (long)parameters[8]!["$ts"]!);
         Assert.Equal(1_700_000_001L, (long)parameters[9]!["$ts"]!);
         Assert.Equal("00112233-4455-6677-8899-aabbccddeeff", (string)parameters[10]!["$uuid"]!);

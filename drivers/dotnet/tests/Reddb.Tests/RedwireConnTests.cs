@@ -381,24 +381,15 @@ public class RedwireConnTests
                 await WriteServerFrameAsync(server, Frame.Kind.AuthOk, resp.CorrelationId, Json(ok));
 
                 Frame q = await ReadClientFrameAsync(server);
-                Assert.Equal(Frame.Kind.QueryWithParams, q.MessageKind);
-                Assert.Equal("SELECT $1, $2, $3, $4",
-                    Encoding.UTF8.GetString(q.Payload.AsSpan(4, 23)));
-                Assert.Equal(4, BinaryPrimitives.ReadInt32LittleEndian(q.Payload.AsSpan(27, 4)));
-                Assert.Equal(ValueCodec.TagInt, q.Payload[31]);
-                Assert.Equal(42L, BinaryPrimitives.ReadInt64LittleEndian(q.Payload.AsSpan(32, 8)));
-                Assert.Equal(ValueCodec.TagText, q.Payload[40]);
-                Assert.Equal(5, BinaryPrimitives.ReadInt32LittleEndian(q.Payload.AsSpan(41, 4)));
-                Assert.Equal("alice", Encoding.UTF8.GetString(q.Payload.AsSpan(45, 5)));
-                Assert.Equal(ValueCodec.TagNull, q.Payload[50]);
-                Assert.Equal(ValueCodec.TagVector, q.Payload[51]);
-                Assert.Equal(3, BinaryPrimitives.ReadInt32LittleEndian(q.Payload.AsSpan(52, 4)));
-                Assert.Equal(1.0f, BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(q.Payload.AsSpan(56, 4))));
-                Assert.Equal(2.0f, BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(q.Payload.AsSpan(60, 4))));
-                Assert.Equal(3.0f, BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(q.Payload.AsSpan(64, 4))));
-
                 var result = new JsonObject { ["ok"] = true };
                 await WriteServerFrameAsync(server, Frame.Kind.Result, q.CorrelationId, Json(result));
+
+                Assert.Equal(Frame.Kind.QueryWithParams, q.MessageKind);
+                Assert.Equal(
+                    ValueCodec.EncodeQueryWithParams(
+                        "SELECT $1, $2, $3, $4",
+                        new object?[] { 42, "alice", null, new float[] { 1, 2, 3 } }),
+                    q.Payload);
 
                 await ReadClientFrameAsync(server);
             }
