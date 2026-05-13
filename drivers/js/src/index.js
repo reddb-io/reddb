@@ -85,7 +85,7 @@ export async function connect(uri, options = {}) {
     const child = await spawnRed(binary, args)
     const client = new RpcClient(child)
     await client.call('version', {})
-    return new RedDB(client)
+    return new RedDB(client, { transport: 'embedded' })
   }
 
   // HTTP / HTTPS: speak directly to the server via fetch().
@@ -103,7 +103,7 @@ export async function connect(uri, options = {}) {
     const client = new HttpRpcClient({ baseUrl, token })
     // Sanity check before returning the handle.
     await client.call('health', {})
-    return new RedDB(client)
+    return new RedDB(client, { transport: parsed.kind })
   }
 
   // gRPC / gRPCs / RedWire (default for grpc-shaped URIs):
@@ -135,7 +135,7 @@ export async function connect(uri, options = {}) {
       const child = await spawnRed(binary, args)
       const legacy = new RpcClient(child)
       await legacy.call('version', {})
-      return new RedDB(legacy)
+      return new RedDB(legacy, { transport: parsed.kind })
     }
 
     const auth = token ? { kind: 'bearer', token } : { kind: 'anonymous' }
@@ -146,7 +146,7 @@ export async function connect(uri, options = {}) {
       auth,
       ...(tls ? { tls } : {}),
     })
-    return new RedDB(client)
+    return new RedDB(client, { transport: parsed.kind })
   }
 
   // Postgres wire: not yet wired in the driver. Document the gap
@@ -340,10 +340,17 @@ export function uriToArgs(uri, auth = null) {
  * Connection handle. Methods map 1:1 to JSON-RPC methods on the binary.
  */
 export class RedDB {
-  /** @param {RpcClient} client */
-  constructor(client) {
+  /**
+   * @param {RpcClient} client
+   * @param {object} [opts]
+   * @param {string} [opts.transport] Underlying transport label
+   *   (e.g. 'http', 'grpc', 'embedded'). Used to gate calls that
+   *   only some transports serve, like `cache.*`.
+   */
+  constructor(client, opts = {}) {
     this.client = client
-    this.cache = new CacheClient(client)
+    this.transport = opts.transport ?? null
+    this.cache = new CacheClient(client, this.transport)
     const defaultKv = new KvClient(client)
     this.kv = Object.assign((collection = 'kv_default') => new KvClient(client, collection), {
       put: defaultKv.put.bind(defaultKv),
