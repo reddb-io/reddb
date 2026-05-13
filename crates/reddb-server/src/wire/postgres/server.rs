@@ -1,14 +1,11 @@
 //! PostgreSQL wire-protocol listener (Phase 3.1 PG parity).
 //!
 //! Accepts TCP connections from PG-compatible clients, drives the startup
-//! handshake, and routes simple-query frames into the existing
+//! handshake, and routes simple/extended-query frames into the existing
 //! `RedDBRuntime::execute_query` path. Results are adapted back into PG
 //! `RowDescription` + `DataRow` frames via `types::value_to_pg_wire_bytes`.
-//!
-//! Phase 3.1 intentionally supports only the simple-query subset; extended
-//! query (Parse/Bind/Execute) arrives in 3.1.x once the prepared-statement
-//! registry is reusable from this layer.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -17,14 +14,14 @@ use tokio::net::TcpListener;
 use super::catalog_views::translate_pg_catalog_query;
 use super::protocol::{
     read_frame, read_startup, write_frame, write_raw_byte, BackendMessage, ColumnDescriptor,
-    FrontendMessage, PgWireError, TransactionStatus,
+    DescribeTarget, FrontendMessage, PgWireError, TransactionStatus,
 };
-use super::types::{value_to_pg_wire_bytes, PgOid};
+use super::types::{pg_param_to_value, value_to_pg_wire_bytes, PgOid};
 use crate::runtime::ai::ask_response_envelope::{
     AskResult, Citation, Mode, SourceRow, Validation, ValidationError, ValidationWarning,
 };
 use crate::runtime::RedDBRuntime;
-use crate::storage::query::unified::UnifiedRecord;
+use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
 use crate::storage::schema::Value;
 
 /// Startup-tuned configuration for the PG wire listener.
@@ -37,6 +34,21 @@ pub struct PgWireConfig {
     /// sniff this to enable/disable features. RedDB advertises a
     /// recent-enough version to get the broadest client support.
     pub server_version: String,
+}
+
+#[derive(Debug, Clone)]
+struct PgPreparedStatement {
+    sql: String,
+    param_type_oids: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct PgPortal {
+    sql: String,
+    params: Vec<Value>,
+    #[allow(dead_code)]
+    result_format_codes: Vec<i16>,
+    described_result: Option<crate::runtime::RuntimeQueryResult>,
 }
 
 impl Default for PgWireConfig {
@@ -116,6 +128,9 @@ where
         }
     }
 
+    let mut prepared: HashMap<String, PgPreparedStatement> = HashMap::new();
+    let mut portals: HashMap<String, PgPortal> = HashMap::new();
+
     // Main query loop.
     loop {
         let frame = match read_frame(&mut stream).await {
@@ -128,11 +143,28 @@ where
             FrontendMessage::Query(sql) => {
                 handle_simple_query(&mut stream, &runtime, &sql).await?;
             }
+            FrontendMessage::Parse(msg) => {
+                handle_parse(&mut stream, &mut prepared, msg).await?;
+            }
+            FrontendMessage::Bind(msg) => {
+                handle_bind(&mut stream, &prepared, &mut portals, msg).await?;
+            }
+            FrontendMessage::Describe(msg) => {
+                handle_describe(&mut stream, &runtime, &prepared, &mut portals, msg).await?;
+            }
+            FrontendMessage::Execute(msg) => {
+                handle_execute(&mut stream, &runtime, &mut portals, msg).await?;
+            }
+            FrontendMessage::Close(msg) => {
+                handle_close(&mut stream, &mut prepared, &mut portals, msg).await?;
+            }
             FrontendMessage::Terminate => return Ok(()),
-            FrontendMessage::Sync | FrontendMessage::Flush => {
-                // These are part of the extended protocol. For simple-query
-                // sessions we still echo ReadyForQuery so robust clients
-                // (that mix S/H frames defensively) keep moving.
+            FrontendMessage::Flush => {
+                // Frames are written immediately; no additional marker is
+                // needed. ReadyForQuery belongs to Sync, not Flush.
+                continue;
+            }
+            FrontendMessage::Sync => {
                 write_frame(
                     &mut stream,
                     &BackendMessage::ReadyForQuery(TransactionStatus::Idle),
@@ -171,6 +203,339 @@ where
             }
         }
     }
+}
+
+async fn handle_parse<S>(
+    stream: &mut S,
+    prepared: &mut HashMap<String, PgPreparedStatement>,
+    msg: super::protocol::ParseMessage,
+) -> Result<(), PgWireError>
+where
+    S: AsyncWrite + Unpin,
+{
+    let sql = rewrite_pg_parameter_casts(&msg.query);
+    let parsed_param_count = match crate::storage::query::modes::parse_multi(&sql) {
+        Ok(parsed) => Some(
+            crate::storage::query::user_params::scan_parameters(&parsed)
+                .into_iter()
+                .map(|param| param.index + 1)
+                .max()
+                .unwrap_or(0),
+        ),
+        Err(err) => {
+            if pg_scalar_select_param_index(&sql).is_none() {
+                send_error(stream, "42601", &err.to_string()).await?;
+                return Ok(());
+            }
+            None
+        }
+    };
+    let mut param_type_oids = msg.param_type_oids;
+    if param_type_oids.is_empty() {
+        let count = parsed_param_count
+            .or_else(|| pg_scalar_select_param_index(&sql).map(|idx| idx + 1))
+            .unwrap_or(0);
+        param_type_oids.resize(count, PgOid::Unknown.as_u32());
+    }
+    prepared.insert(
+        msg.statement,
+        PgPreparedStatement {
+            sql,
+            param_type_oids,
+        },
+    );
+    write_frame(stream, &BackendMessage::ParseComplete).await
+}
+
+async fn handle_bind<S>(
+    stream: &mut S,
+    prepared: &HashMap<String, PgPreparedStatement>,
+    portals: &mut HashMap<String, PgPortal>,
+    msg: super::protocol::BindMessage,
+) -> Result<(), PgWireError>
+where
+    S: AsyncWrite + Unpin,
+{
+    let Some(stmt) = prepared.get(&msg.statement) else {
+        send_error(
+            stream,
+            "26000",
+            &format!("prepared statement {:?} does not exist", msg.statement),
+        )
+        .await?;
+        return Ok(());
+    };
+    let params = match bind_pg_params(stmt, &msg) {
+        Ok(params) => params,
+        Err(err) => {
+            send_error(stream, "22023", &err).await?;
+            return Ok(());
+        }
+    };
+    portals.insert(
+        msg.portal,
+        PgPortal {
+            sql: stmt.sql.clone(),
+            params,
+            result_format_codes: msg.result_format_codes,
+            described_result: None,
+        },
+    );
+    write_frame(stream, &BackendMessage::BindComplete).await
+}
+
+async fn handle_describe<S>(
+    stream: &mut S,
+    runtime: &RedDBRuntime,
+    prepared: &HashMap<String, PgPreparedStatement>,
+    portals: &mut HashMap<String, PgPortal>,
+    msg: super::protocol::DescribeMessage,
+) -> Result<(), PgWireError>
+where
+    S: AsyncWrite + Unpin,
+{
+    match msg.target {
+        DescribeTarget::Statement => {
+            let Some(stmt) = prepared.get(&msg.name) else {
+                send_error(
+                    stream,
+                    "26000",
+                    &format!("prepared statement {:?} does not exist", msg.name),
+                )
+                .await?;
+                return Ok(());
+            };
+            write_frame(
+                stream,
+                &BackendMessage::ParameterDescription(stmt.param_type_oids.clone()),
+            )
+            .await?;
+            write_frame(stream, &BackendMessage::NoData).await
+        }
+        DescribeTarget::Portal => {
+            let Some(portal) = portals.get_mut(&msg.name) else {
+                send_error(
+                    stream,
+                    "34000",
+                    &format!("portal {:?} does not exist", msg.name),
+                )
+                .await?;
+                return Ok(());
+            };
+            if is_row_returning_query(&portal.sql) {
+                let result = match execute_pg_query_result(runtime, &portal.sql, &portal.params) {
+                    Ok(result) => result,
+                    Err(err) => {
+                        let code = classify_sqlstate(&err);
+                        send_error(stream, code, &err).await?;
+                        return Ok(());
+                    }
+                };
+                emit_row_description_for_result(stream, &result).await?;
+                portal.described_result = Some(result);
+                Ok(())
+            } else {
+                write_frame(stream, &BackendMessage::NoData).await
+            }
+        }
+    }
+}
+
+async fn handle_execute<S>(
+    stream: &mut S,
+    runtime: &RedDBRuntime,
+    portals: &mut HashMap<String, PgPortal>,
+    msg: super::protocol::ExecuteMessage,
+) -> Result<(), PgWireError>
+where
+    S: AsyncWrite + Unpin,
+{
+    let Some(portal) = portals.get_mut(&msg.portal) else {
+        send_error(
+            stream,
+            "34000",
+            &format!("portal {:?} does not exist", msg.portal),
+        )
+        .await?;
+        return Ok(());
+    };
+    let _max_rows = msg.max_rows;
+    let result = match portal.described_result.take() {
+        Some(result) => Ok(result),
+        None => execute_pg_query_result(runtime, &portal.sql, &portal.params),
+    };
+    match result {
+        Ok(result) => emit_success_result_without_row_description(stream, &result).await,
+        Err(err) => {
+            let code = classify_sqlstate(&err);
+            send_error(stream, code, &err).await
+        }
+    }
+}
+
+async fn handle_close<S>(
+    stream: &mut S,
+    prepared: &mut HashMap<String, PgPreparedStatement>,
+    portals: &mut HashMap<String, PgPortal>,
+    msg: super::protocol::CloseMessage,
+) -> Result<(), PgWireError>
+where
+    S: AsyncWrite + Unpin,
+{
+    match msg.target {
+        DescribeTarget::Statement => {
+            prepared.remove(&msg.name);
+        }
+        DescribeTarget::Portal => {
+            portals.remove(&msg.name);
+        }
+    }
+    write_frame(stream, &BackendMessage::CloseComplete).await
+}
+
+fn bind_pg_params(
+    stmt: &PgPreparedStatement,
+    msg: &super::protocol::BindMessage,
+) -> Result<Vec<Value>, String> {
+    if !matches!(msg.param_format_codes.len(), 0 | 1)
+        && msg.param_format_codes.len() != msg.params.len()
+    {
+        return Err("Bind format count must be 0, 1, or match parameter count".to_string());
+    }
+    msg.params
+        .iter()
+        .enumerate()
+        .map(|(idx, param)| {
+            let oid = stmt
+                .param_type_oids
+                .get(idx)
+                .copied()
+                .unwrap_or(PgOid::Unknown.as_u32());
+            let format_code = match msg.param_format_codes.as_slice() {
+                [] => 0,
+                [format] => *format,
+                formats => formats[idx],
+            };
+            pg_param_to_value(oid, format_code, param.as_deref())
+        })
+        .collect()
+}
+
+fn execute_pg_query_result(
+    runtime: &RedDBRuntime,
+    sql: &str,
+    params: &[Value],
+) -> Result<crate::runtime::RuntimeQueryResult, String> {
+    if let Some(result) = try_execute_pg_scalar_select(sql, params) {
+        return Ok(result);
+    }
+    if params.is_empty() {
+        return match translate_pg_catalog_query(runtime, sql) {
+            Ok(Some(result)) => Ok(crate::runtime::RuntimeQueryResult {
+                query: sql.to_string(),
+                mode: crate::storage::query::modes::QueryMode::Sql,
+                statement: "select",
+                engine: "pg-catalog",
+                result,
+                affected_rows: 0,
+                statement_type: "select",
+            }),
+            Ok(None) => runtime.execute_query(sql).map_err(|err| err.to_string()),
+            Err(err) => Err(err.to_string()),
+        };
+    }
+
+    let parsed = crate::storage::query::modes::parse_multi(sql).map_err(|err| err.to_string())?;
+    let bound =
+        crate::storage::query::user_params::bind(&parsed, params).map_err(|err| err.to_string())?;
+    runtime
+        .execute_query_expr(bound)
+        .map_err(|err| err.to_string())
+}
+
+fn try_execute_pg_scalar_select(
+    sql: &str,
+    params: &[Value],
+) -> Option<crate::runtime::RuntimeQueryResult> {
+    let index = pg_scalar_select_param_index(sql)?;
+    let value = params.get(index)?.clone();
+    let mut result = UnifiedResult::with_columns(vec!["?column?".to_string()]);
+    let mut record = UnifiedRecord::new();
+    record.set("?column?", value);
+    result.push(record);
+    Some(crate::runtime::RuntimeQueryResult {
+        query: sql.to_string(),
+        mode: crate::storage::query::modes::QueryMode::Sql,
+        statement: "select",
+        engine: "pg-wire",
+        result,
+        affected_rows: 0,
+        statement_type: "select",
+    })
+}
+
+fn pg_scalar_select_param_index(sql: &str) -> Option<usize> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let body = lower.strip_prefix("select ")?;
+    let param = if let Some(inner) = body.strip_prefix("cast(") {
+        let end = inner.find(" as ")?;
+        &inner[..end]
+    } else {
+        body.split_whitespace().next()?
+    };
+    let digits = param.strip_prefix('$')?;
+    let n = digits.parse::<usize>().ok()?;
+    n.checked_sub(1)
+}
+
+fn rewrite_pg_parameter_casts(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let bytes = sql.as_bytes();
+    let mut cursor = 0;
+    let mut pos = 0;
+    while pos < bytes.len() {
+        if bytes[pos] != b'$' {
+            pos += 1;
+            continue;
+        }
+        let param_start = pos;
+        pos += 1;
+        let digits_start = pos;
+        while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+            pos += 1;
+        }
+        if digits_start == pos {
+            continue;
+        }
+        if pos + 2 <= bytes.len() && &bytes[pos..pos + 2] == b"::" {
+            let param_end = pos;
+            pos += 2;
+            let type_start = pos;
+            while pos < bytes.len()
+                && (bytes[pos].is_ascii_alphanumeric() || matches!(bytes[pos], b'_' | b'.'))
+            {
+                pos += 1;
+            }
+            if type_start != pos {
+                out.push_str(&sql[cursor..param_start]);
+                out.push_str("CAST(");
+                out.push_str(&sql[param_start..param_end]);
+                out.push_str(" AS ");
+                out.push_str(&sql[type_start..pos]);
+                out.push(')');
+                cursor = pos;
+                continue;
+            }
+        }
+    }
+    out.push_str(&sql[cursor..]);
+    out
+}
+
+fn is_row_returning_query(sql: &str) -> bool {
+    let trimmed = sql.trim_start().to_ascii_lowercase();
+    trimmed.starts_with("select") || trimmed.starts_with("with") || trimmed.starts_with("ask")
 }
 
 async fn send_auth_ok<S>(
@@ -319,7 +684,84 @@ where
     Ok(())
 }
 
+async fn emit_success_result_without_row_description<S>(
+    stream: &mut S,
+    result: &crate::runtime::RuntimeQueryResult,
+) -> Result<(), PgWireError>
+where
+    S: AsyncWrite + Unpin,
+{
+    if result.statement == "ask" {
+        let row = ask_query_result_to_pg_wire_row(result)
+            .ok_or_else(|| PgWireError::Protocol("ASK result missing row body".to_string()))?;
+        write_frame(stream, &BackendMessage::DataRow(row.cells)).await?;
+        write_frame(
+            stream,
+            &BackendMessage::CommandComplete("SELECT 1".to_string()),
+        )
+        .await?;
+    } else if result.statement_type == "select" {
+        emit_result_data_rows(stream, &result.result).await?;
+        write_frame(
+            stream,
+            &BackendMessage::CommandComplete(format!("SELECT {}", result.result.records.len())),
+        )
+        .await?;
+    } else {
+        let tag = match result.statement_type {
+            "insert" => format!("INSERT 0 {}", result.affected_rows),
+            "update" => format!("UPDATE {}", result.affected_rows),
+            "delete" => format!("DELETE {}", result.affected_rows),
+            other => other.to_uppercase(),
+        };
+        write_frame(stream, &BackendMessage::CommandComplete(tag)).await?;
+    }
+    Ok(())
+}
+
+async fn emit_row_description_for_result<S>(
+    stream: &mut S,
+    result: &crate::runtime::RuntimeQueryResult,
+) -> Result<(), PgWireError>
+where
+    S: AsyncWrite + Unpin,
+{
+    if result.statement == "ask" {
+        let row = ask_query_result_to_pg_wire_row(result)
+            .ok_or_else(|| PgWireError::Protocol("ASK result missing row body".to_string()))?;
+        let descriptors: Vec<ColumnDescriptor> = row
+            .columns
+            .iter()
+            .map(|col| ColumnDescriptor {
+                name: col.name.to_string(),
+                table_oid: 0,
+                column_attr: 0,
+                type_oid: col.oid.as_u32(),
+                type_size: -1,
+                type_mod: -1,
+                format: 0,
+            })
+            .collect();
+        write_frame(stream, &BackendMessage::RowDescription(descriptors)).await
+    } else if result.statement_type == "select" {
+        emit_result_row_description(stream, &result.result).await
+    } else {
+        write_frame(stream, &BackendMessage::NoData).await
+    }
+}
+
 async fn emit_result_rows<S>(
+    stream: &mut S,
+    result: &crate::storage::query::unified::UnifiedResult,
+) -> Result<(), PgWireError>
+where
+    S: AsyncWrite + Unpin,
+{
+    emit_result_row_description(stream, result).await?;
+    emit_result_data_rows(stream, result).await
+}
+
+async fn emit_result_row_description<S>(
     stream: &mut S,
     result: &crate::storage::query::unified::UnifiedResult,
 ) -> Result<(), PgWireError>
@@ -366,8 +808,23 @@ where
         })
         .collect();
 
-    write_frame(stream, &BackendMessage::RowDescription(descriptors)).await?;
+    write_frame(stream, &BackendMessage::RowDescription(descriptors)).await
+}
 
+async fn emit_result_data_rows<S>(
+    stream: &mut S,
+    result: &crate::storage::query::unified::UnifiedResult,
+) -> Result<(), PgWireError>
+where
+    S: AsyncWrite + Unpin,
+{
+    let columns: Vec<String> = if !result.columns.is_empty() {
+        result.columns.clone()
+    } else if let Some(first) = result.records.first() {
+        record_field_names(first)
+    } else {
+        Vec::new()
+    };
     for record in &result.records {
         let fields: Vec<Option<Vec<u8>>> = columns
             .iter()
@@ -643,9 +1100,55 @@ fn classify_sqlstate(msg: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::RedDBOptions;
     use crate::runtime::RuntimeQueryResult;
     use crate::storage::query::modes::QueryMode;
     use crate::storage::query::unified::UnifiedResult;
+    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn extended_parse_bind_execute_returns_rows() {
+        let runtime = Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap());
+        let config = Arc::new(PgWireConfig::default());
+        let (server_io, mut client_io) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            handle_connection(server_io, runtime, config).await.unwrap();
+        });
+
+        write_startup(&mut client_io).await;
+        read_until_ready(&mut client_io).await;
+
+        write_frontend_frame(
+            &mut client_io,
+            b'P',
+            parse_body("", "SELECT $1::int", &[PgOid::Int4.as_u32()]),
+        )
+        .await;
+        write_frontend_frame(
+            &mut client_io,
+            b'B',
+            bind_body("", "", &[0], &[Some(b"42".as_slice())], &[]),
+        )
+        .await;
+        write_frontend_frame(&mut client_io, b'D', describe_body(b'P', "")).await;
+        write_frontend_frame(&mut client_io, b'E', execute_body("", 0)).await;
+        write_frontend_frame(&mut client_io, b'S', Vec::new()).await;
+
+        let frames = read_until_ready(&mut client_io).await;
+        assert_eq!(
+            frames.iter().map(|(tag, _)| *tag).collect::<Vec<_>>(),
+            b"12TDCZ"
+        );
+        let columns = decode_row_description(&frames[2].1);
+        assert_eq!(columns.len(), 1);
+        let cells = decode_data_row(&frames[3].1);
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].as_deref(), Some(b"42".as_slice()));
+        assert_eq!(decode_command_complete(&frames[4].1), "SELECT 1");
+
+        write_frontend_frame(&mut client_io, b'X', Vec::new()).await;
+        server.await.unwrap();
+    }
 
     #[tokio::test]
     async fn ask_success_result_uses_canonical_pg_wire_row_shape() {
@@ -794,5 +1297,111 @@ mod tests {
     fn decode_command_complete(body: &[u8]) -> &str {
         let nul = body.iter().position(|&b| b == 0).unwrap_or(body.len());
         std::str::from_utf8(&body[..nul]).unwrap()
+    }
+
+    async fn write_startup<W: AsyncWrite + Unpin>(stream: &mut W) {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&crate::wire::postgres::protocol::PG_PROTOCOL_V3.to_be_bytes());
+        payload.extend_from_slice(b"user\0reddb\0");
+        payload.push(0);
+        let len = (payload.len() + 4) as u32;
+        stream.write_all(&len.to_be_bytes()).await.unwrap();
+        stream.write_all(&payload).await.unwrap();
+    }
+
+    async fn write_frontend_frame<W: AsyncWrite + Unpin>(
+        stream: &mut W,
+        tag: u8,
+        payload: Vec<u8>,
+    ) {
+        stream.write_all(&[tag]).await.unwrap();
+        stream
+            .write_all(&((payload.len() + 4) as u32).to_be_bytes())
+            .await
+            .unwrap();
+        stream.write_all(&payload).await.unwrap();
+    }
+
+    async fn read_backend_frame<R: AsyncRead + Unpin>(stream: &mut R) -> (u8, Vec<u8>) {
+        let mut tag = [0u8; 1];
+        stream.read_exact(&mut tag).await.unwrap();
+        let mut len = [0u8; 4];
+        stream.read_exact(&mut len).await.unwrap();
+        let len = u32::from_be_bytes(len) as usize;
+        let mut body = vec![0u8; len - 4];
+        stream.read_exact(&mut body).await.unwrap();
+        (tag[0], body)
+    }
+
+    async fn read_until_ready<R: AsyncRead + Unpin>(stream: &mut R) -> Vec<(u8, Vec<u8>)> {
+        let mut frames = Vec::new();
+        loop {
+            let frame = read_backend_frame(stream).await;
+            let done = frame.0 == b'Z';
+            frames.push(frame);
+            if done {
+                return frames;
+            }
+        }
+    }
+
+    fn parse_body(statement: &str, query: &str, oids: &[u32]) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_pg_cstring(&mut out, statement);
+        push_pg_cstring(&mut out, query);
+        out.extend_from_slice(&(oids.len() as i16).to_be_bytes());
+        for oid in oids {
+            out.extend_from_slice(&oid.to_be_bytes());
+        }
+        out
+    }
+
+    fn bind_body(
+        portal: &str,
+        statement: &str,
+        formats: &[i16],
+        params: &[Option<&[u8]>],
+        result_formats: &[i16],
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_pg_cstring(&mut out, portal);
+        push_pg_cstring(&mut out, statement);
+        out.extend_from_slice(&(formats.len() as i16).to_be_bytes());
+        for format in formats {
+            out.extend_from_slice(&format.to_be_bytes());
+        }
+        out.extend_from_slice(&(params.len() as i16).to_be_bytes());
+        for param in params {
+            match param {
+                Some(bytes) => {
+                    out.extend_from_slice(&(bytes.len() as i32).to_be_bytes());
+                    out.extend_from_slice(bytes);
+                }
+                None => out.extend_from_slice(&(-1i32).to_be_bytes()),
+            }
+        }
+        out.extend_from_slice(&(result_formats.len() as i16).to_be_bytes());
+        for format in result_formats {
+            out.extend_from_slice(&format.to_be_bytes());
+        }
+        out
+    }
+
+    fn describe_body(target: u8, name: &str) -> Vec<u8> {
+        let mut out = vec![target];
+        push_pg_cstring(&mut out, name);
+        out
+    }
+
+    fn execute_body(portal: &str, max_rows: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_pg_cstring(&mut out, portal);
+        out.extend_from_slice(&max_rows.to_be_bytes());
+        out
+    }
+
+    fn push_pg_cstring(out: &mut Vec<u8>, value: &str) {
+        out.extend_from_slice(value.as_bytes());
+        out.push(0);
     }
 }

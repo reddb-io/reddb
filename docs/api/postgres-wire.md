@@ -41,18 +41,17 @@ COMMIT;
 
 ## Safe Parameter Binding Status
 
-The PG listener currently supports the simple-query (`Q`) path. PostgreSQL
-driver bind parameters use the extended protocol (`Parse` / `Bind` /
-`Execute`), which is still planned for this adapter. Do not concatenate
-user-supplied values into PG-wire SQL strings; use HTTP, gRPC, RedWire, or the
-embedded client facade with `db.query(sql, params)` / `query_with` until the
-extended-protocol work lands. The cross-driver binding contract is tracked in
+The PG listener supports PostgreSQL's extended protocol (`Parse` / `Bind` /
+`Describe` / `Execute`) for `$N` placeholders. PostgreSQL drivers that send
+prepared/parameterized statements can bind numeric, text, bool, bytea, JSON,
+UUID, and timestamp parameters without string concatenation. The cross-driver
+binding contract is tracked in
 [ADR #352](https://github.com/reddb-io/reddb/issues/352).
 
 ## From a driver
 
-The examples below are simple-query connectivity checks with static SQL.
-Parameter binding in PostgreSQL drivers depends on extended protocol support.
+The examples below use normal driver APIs. Static SQL may use the simple-query
+path; parameterized calls use the extended protocol.
 
 ### Rust (`tokio-postgres` / `sqlx`)
 
@@ -63,8 +62,8 @@ let (client, conn) = tokio_postgres::connect(
 ).await?;
 tokio::spawn(async move { conn.await.unwrap() });
 
-let messages = client
-    .simple_query("SELECT id, email FROM users LIMIT 10")
+let rows = client
+    .query("SELECT id, email FROM users WHERE id = $1", &[&42i32])
     .await?;
 ```
 
@@ -72,7 +71,7 @@ let messages = client
 
 ```go
 conn, err := pgx.Connect(ctx, "postgres://reddb@localhost:5432/reddb")
-rows, err := conn.Query(ctx, "SELECT id, email FROM users LIMIT 10")
+rows, err := conn.Query(ctx, "SELECT id, email FROM users WHERE id = $1", 42)
 ```
 
 ### Python (`psycopg`)
@@ -81,7 +80,7 @@ rows, err := conn.Query(ctx, "SELECT id, email FROM users LIMIT 10")
 import psycopg
 with psycopg.connect("host=localhost port=5432 user=reddb") as conn:
     with conn.cursor() as cur:
-        cur.execute("SELECT id, email FROM users LIMIT 10")
+        cur.execute("SELECT id, email FROM users WHERE id = %s", (42,))
         for row in cur.fetchall():
             print(row)
 ```
@@ -97,7 +96,7 @@ with psycopg.connect("host=localhost port=5432 user=reddb") as conn:
 | ErrorResponse (`E`) | ✅ |
 | Cleartext password auth | ✅ |
 | SSL request (rejected with `N`) | ✅ |
-| Extended query (Parse / Bind / Describe / Execute) | 🟡 Planned |
+| Extended query (Parse / Bind / Describe / Execute) | ✅ |
 | SCRAM-SHA-256 auth | 🟡 Planned |
 | TLS-wrapped connection | 🟡 Planned |
 | COPY protocol | 🟡 Use `COPY FROM 'file'` instead |
@@ -117,6 +116,19 @@ RedDB values are returned in PG text format under the following OIDs:
 | Date | 1082 (date) | Unix days → YYYY-MM-DD |
 | Vector / NodeRef / EdgeRef | 25 (text) | Serialised string |
 | Null | — | NULL bytes |
+
+Inbound bind parameters accept the following PostgreSQL OIDs:
+
+| PG OID | RedDB Value |
+|--------|-------------|
+| 16 (`bool`) | Boolean |
+| 17 (`bytea`) | Blob |
+| 20/21/23/26 (`int8`/`int2`/`int4`/`oid`) | Integer |
+| 700/701/1700 (`float4`/`float8`/`numeric`) | Float |
+| 25/1043/705 (`text`/`varchar`/`unknown`) | Text |
+| 114/3802 (`json`/`jsonb`) | Json |
+| 1114/1184 (`timestamp`/`timestamptz`) | Timestamp |
+| 2950 (`uuid`) | Uuid |
 
 ## Catalog compatibility
 
@@ -151,9 +163,6 @@ state isolated per connection:
 
 ## Limitations
 
-- Extended query protocol (prepared statements via `Parse`/`Bind`) is
-  not wired yet. Clients that use prepared statements should fall
-  back to simple query mode or use gRPC.
 - Binary format output is not yet emitted — everything returns in
   text format.
 - No TLS termination on the PG listener itself; put a TLS proxy in
