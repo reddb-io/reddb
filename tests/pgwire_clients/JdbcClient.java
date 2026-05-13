@@ -2,6 +2,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.Statement;
 
 public final class JdbcClient {
@@ -43,6 +44,42 @@ public final class JdbcClient {
                 try (ResultSet rs = ps.executeQuery()) {
                     if (!rs.next()) {
                         throw new AssertionError("vector row missing");
+                    }
+                }
+            }
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "ASK ?::text STRICT OFF LIMIT 1")) {
+                ps.setString(1, "why did incident FDD-12313 fail?");
+                try (ResultSet rs = ps.executeQuery()) {
+                    ResultSetMetaData md = rs.getMetaData();
+                    String[] expected = {
+                            "answer",
+                            "cache_hit",
+                            "citations",
+                            "completion_tokens",
+                            "cost_usd",
+                            "mode",
+                            "model",
+                            "prompt_tokens",
+                            "provider",
+                            "retry_count",
+                            "sources_flat",
+                            "validation"
+                    };
+                    if (md.getColumnCount() != expected.length) {
+                        throw new AssertionError("ASK column count mismatch");
+                    }
+                    for (int i = 0; i < expected.length; i++) {
+                        if (!expected[i].equals(md.getColumnName(i + 1))) {
+                            throw new AssertionError("ASK column mismatch at " + (i + 1));
+                        }
+                    }
+                    if (!rs.next()
+                            || !"mock response".equals(rs.getString("answer"))
+                            || !"openai".equals(rs.getString("provider"))
+                            || rs.getString("sources_flat") == null
+                            || rs.getString("validation") == null) {
+                        throw new AssertionError("ASK row mismatch");
                     }
                 }
             }

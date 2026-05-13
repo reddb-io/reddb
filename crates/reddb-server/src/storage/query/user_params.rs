@@ -321,6 +321,11 @@ fn collect_non_expr_indices(expr: &QueryExpr, out: &mut Vec<usize>) {
                 out.push(idx);
             }
         }
+        QueryExpr::Ask(q) => {
+            if let Some(idx) = q.question_param {
+                out.push(idx);
+            }
+        }
         _ => {}
     }
 }
@@ -892,6 +897,29 @@ pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamEr
         return Ok(QueryExpr::Delete(bound));
     }
 
+    if let QueryExpr::Ask(ask) = expr {
+        let Some(idx) = ask.question_param else {
+            return Ok(QueryExpr::Ask(ask.clone()));
+        };
+        let value = params.get(idx).ok_or(UserParamError::Arity {
+            expected: idx + 1,
+            got: params.len(),
+        })?;
+        let question = match value {
+            Value::Text(s) => s.to_string(),
+            other => {
+                return Err(UserParamError::TypeMismatch {
+                    slot: "ASK question parameter",
+                    got: value_variant_name(other),
+                });
+            }
+        };
+        let mut bound = ask.clone();
+        bound.question = question;
+        bound.question_param = None;
+        return Ok(QueryExpr::Ask(bound));
+    }
+
     // SELECT LIMIT / OFFSET $N — the planner's Expr-tree binder doesn't
     // see these slots (they live on TableQuery, not inside any Expr).
     // Run the Expr-tree bind first, then substitute the non-Expr slots
@@ -1301,6 +1329,31 @@ mod tests {
         assert_eq!(vector_param, None);
         assert_eq!(limit_param, None);
         assert_eq!(min_score_param, None);
+    }
+
+    #[test]
+    fn bind_ask_question_param() {
+        let q = parse("ASK $1 USING openai LIMIT 1");
+        let bound = bind(&q, &[Value::text("why did incident FDD-12313 fail?")]).unwrap();
+        let QueryExpr::Ask(ask) = bound else {
+            panic!("expected Ask");
+        };
+        assert_eq!(ask.question, "why did incident FDD-12313 fail?");
+        assert_eq!(ask.question_param, None);
+        assert_eq!(ask.provider.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn bind_ask_question_param_rejects_non_text() {
+        let q = parse("ASK $1 USING openai LIMIT 1");
+        let err = bind(&q, &[Value::Integer(42)]).unwrap_err();
+        assert!(matches!(
+            err,
+            UserParamError::TypeMismatch {
+                slot: "ASK question parameter",
+                got: "integer"
+            }
+        ));
     }
 
     #[test]

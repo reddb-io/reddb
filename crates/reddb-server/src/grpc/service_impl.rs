@@ -70,6 +70,7 @@ fn ask_query_from_request(
     Ok(crate::storage::query::ast::AskQuery {
         explain: false,
         question: request.question,
+        question_param: None,
         provider: request.provider,
         model: request.model,
         depth: request.depth.map(|v| v as usize),
@@ -3423,9 +3424,7 @@ mod tests {
         record.set("sources_count", Value::Integer(1));
         record.set(
             "sources_flat",
-            Value::Json(
-                br#"[{"payload":"{\"body\":\"login\"}","urn":"urn:incident:1"}]"#.to_vec(),
-            ),
+            Value::Json(br#"[{"payload":"{\"body\":\"login\"}","urn":"urn:incident:1"}]"#.to_vec()),
         );
         record.set(
             "citations",

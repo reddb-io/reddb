@@ -1550,6 +1550,14 @@ fn test_parse_dml_extended_literals_auto_embed_and_ask_forms() {
     };
     assert_eq!(ask.provider.as_deref(), Some("groq,openai"));
 
+    let query = parse("ASK $1 USING openai LIMIT 1").unwrap();
+    let QueryExpr::Ask(ask) = query else {
+        panic!("Expected AskQuery");
+    };
+    assert_eq!(ask.question_param, Some(0));
+    assert!(ask.question.is_empty());
+    assert_eq!(ask.provider.as_deref(), Some("openai"));
+
     // Issue #395: strict citation validation is on by default and can
     // be disabled per ASK.
     let query = parse("ASK 'q' STRICT OFF").unwrap();

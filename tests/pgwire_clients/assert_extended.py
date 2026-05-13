@@ -8,16 +8,19 @@ APP_QUERIES = {
         "INSERT INTO psy_items",
         "SELECT name FROM psy_items",
         "SEARCH SIMILAR",
+        "ASK",
     ],
     "pgwire360-pgx": [
         "INSERT INTO pgx_items",
         "SELECT name FROM pgx_items",
         "SEARCH SIMILAR",
+        "ASK",
     ],
     "pgwire360-jdbc": [
         "INSERT INTO jdbc_items",
         "SELECT name FROM jdbc_items",
         "SEARCH SIMILAR",
+        "ASK",
     ],
 }
 

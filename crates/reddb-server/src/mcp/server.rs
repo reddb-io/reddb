@@ -325,6 +325,7 @@ impl McpServer {
         let ask = crate::storage::query::ast::AskQuery {
             explain: false,
             question: invocation.question,
+            question_param: None,
             provider: invocation.using,
             model: invocation.model,
             depth: invocation.depth.map(|v| v as usize),
@@ -1706,10 +1707,8 @@ mod tests {
     #[test]
     fn tool_query_param_arity_mismatch_surfaces_error() {
         let srv = make_server();
-        srv.tool_query(&parse_json(
-            r#"{"sql":"CREATE TABLE mcpa (id INTEGER)"}"#,
-        ))
-        .expect("ddl ok");
+        srv.tool_query(&parse_json(r#"{"sql":"CREATE TABLE mcpa (id INTEGER)"}"#))
+            .expect("ddl ok");
         let err = srv
             .tool_query(&parse_json(
                 r#"{"sql":"SELECT * FROM mcpa WHERE id = $1","params":[1,2]}"#,
@@ -1724,10 +1723,9 @@ mod tests {
     #[test]
     fn tool_query_vector_param_binds_into_search_similar() {
         let srv = make_server();
-        let out = srv
-            .tool_query(&parse_json(
-                r#"{"sql":"SEARCH SIMILAR $1 COLLECTION mcpv LIMIT 5","params":[[0.1,0.2,0.3]]}"#,
-            ));
+        let out = srv.tool_query(&parse_json(
+            r#"{"sql":"SEARCH SIMILAR $1 COLLECTION mcpv LIMIT 5","params":[[0.1,0.2,0.3]]}"#,
+        ));
         // The collection doesn't exist; we only need to confirm the
         // param-bind path runs (i.e. the error reflects runtime semantics,
         // not a `$N` placeholder being unresolved).

@@ -30,4 +30,29 @@ cur.execute(
 )
 rows = cur.fetchall()
 assert rows
+cur.execute(
+    "ASK %s::text STRICT OFF LIMIT 1",
+    ("why did incident FDD-12313 fail?",),
+    prepare=True,
+)
+ask_row = cur.fetchone()
+ask_columns = [col.name for col in cur.description]
+assert ask_columns == [
+    "answer",
+    "cache_hit",
+    "citations",
+    "completion_tokens",
+    "cost_usd",
+    "mode",
+    "model",
+    "prompt_tokens",
+    "provider",
+    "retry_count",
+    "sources_flat",
+    "validation",
+]
+assert ask_row[0] == "mock response"
+assert ask_row[8] == "openai"
+assert ask_row[10] is not None
+assert ask_row[11] is not None
 conn.close()
