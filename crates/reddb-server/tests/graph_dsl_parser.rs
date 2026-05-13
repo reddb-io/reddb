@@ -296,10 +296,33 @@ fn graph_neighborhood_command_parses() {
             source,
             depth,
             direction,
+            edge_labels,
         }) => {
             assert_eq!(source, "alice");
             assert_eq!(depth, 2);
             assert_eq!(direction, "outgoing");
+            assert_eq!(edge_labels, None);
+        }
+        other => panic!("expected Neighborhood, got {other:?}"),
+    }
+}
+
+#[test]
+fn graph_neighborhood_edges_in_filter_parses() {
+    let q = parse_query("GRAPH NEIGHBORHOOD 'alice' EDGES IN ('EATS', 'KILLS') DEPTH 2");
+    match q {
+        QueryExpr::GraphCommand(GraphCommand::Neighborhood {
+            source,
+            depth,
+            edge_labels,
+            ..
+        }) => {
+            assert_eq!(source, "alice");
+            assert_eq!(depth, 2);
+            assert_eq!(
+                edge_labels,
+                Some(vec!["EATS".to_string(), "KILLS".to_string()])
+            );
         }
         other => panic!("expected Neighborhood, got {other:?}"),
     }
@@ -331,11 +354,33 @@ fn graph_traverse_command_parses() {
             source,
             strategy,
             depth,
+            edge_labels,
             ..
         }) => {
             assert_eq!(source, "alice");
             assert_eq!(strategy, "bfs");
             assert_eq!(depth, 3);
+            assert_eq!(edge_labels, None);
+        }
+        other => panic!("expected Traverse, got {other:?}"),
+    }
+}
+
+#[test]
+fn graph_traverse_edges_in_filter_parses() {
+    let q = parse_query("GRAPH TRAVERSE FROM 'alice' STRATEGY bfs EDGES IN ('EATS') MAX_DEPTH 3");
+    match q {
+        QueryExpr::GraphCommand(GraphCommand::Traverse {
+            source,
+            strategy,
+            depth,
+            edge_labels,
+            ..
+        }) => {
+            assert_eq!(source, "alice");
+            assert_eq!(strategy, "bfs");
+            assert_eq!(depth, 3);
+            assert_eq!(edge_labels, Some(vec!["EATS".to_string()]));
         }
         other => panic!("expected Traverse, got {other:?}"),
     }
@@ -352,6 +397,7 @@ fn graph_traverse_from_strategy_max_depth_form_parses() {
             strategy,
             depth,
             direction,
+            ..
         }) => {
             assert_eq!(source, "alice");
             assert_eq!(strategy, "bfs");
@@ -423,11 +469,7 @@ fn graph_community_order_by_size_limit_parses() {
             algorithm,
             max_iterations,
             limit,
-            order_by:
-                Some(GraphCommandOrderBy {
-                    metric,
-                    ascending,
-                }),
+            order_by: Some(GraphCommandOrderBy { metric, ascending }),
         }) => {
             assert_eq!(algorithm, "louvain");
             assert_eq!(max_iterations, 100);
@@ -446,18 +488,16 @@ fn graph_components_order_by_component_size_asc_limit_parses() {
         QueryExpr::GraphCommand(GraphCommand::Components {
             mode,
             limit,
-            order_by:
-                Some(GraphCommandOrderBy {
-                    metric,
-                    ascending,
-                }),
+            order_by: Some(GraphCommandOrderBy { metric, ascending }),
         }) => {
             assert_eq!(mode, "weak");
             assert_eq!(metric, "component_size");
             assert!(ascending);
             assert_eq!(limit, Some(2));
         }
-        other => panic!("expected Components with ORDER BY component_size ASC LIMIT 2, got {other:?}"),
+        other => {
+            panic!("expected Components with ORDER BY component_size ASC LIMIT 2, got {other:?}")
+        }
     }
 }
 

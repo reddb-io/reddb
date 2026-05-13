@@ -2796,11 +2796,13 @@ fn test_parse_graph_neighborhood_defaults() {
         source,
         depth,
         direction,
+        edge_labels,
     }) = query
     {
         assert_eq!(source, "node_1");
         assert_eq!(depth, 3);
         assert_eq!(direction, "outgoing");
+        assert_eq!(edge_labels, None);
     } else {
         panic!("Expected GraphCommand::Neighborhood");
     }
@@ -2813,11 +2815,35 @@ fn test_parse_graph_neighborhood_with_options() {
         source,
         depth,
         direction,
+        edge_labels,
     }) = query
     {
         assert_eq!(source, "node_a");
         assert_eq!(depth, 5);
         assert!(direction.eq_ignore_ascii_case("both"));
+        assert_eq!(edge_labels, None);
+    } else {
+        panic!("Expected GraphCommand::Neighborhood");
+    }
+}
+
+#[test]
+fn test_parse_graph_neighborhood_edges_in() {
+    let query = parse("GRAPH NEIGHBORHOOD 'node_a' DEPTH 5 EDGES IN ('EATS', 'KILLS')").unwrap();
+    if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Neighborhood {
+        source,
+        depth,
+        direction,
+        edge_labels,
+    }) = query
+    {
+        assert_eq!(source, "node_a");
+        assert_eq!(depth, 5);
+        assert_eq!(direction, "outgoing");
+        assert_eq!(
+            edge_labels,
+            Some(vec!["EATS".to_string(), "KILLS".to_string()])
+        );
     } else {
         panic!("Expected GraphCommand::Neighborhood");
     }
@@ -2879,12 +2905,14 @@ fn test_parse_graph_traverse() {
         strategy,
         depth,
         direction,
+        edge_labels,
     }) = query
     {
         assert_eq!(source, "root");
         assert_eq!(strategy, "dfs");
         assert_eq!(depth, 10);
         assert!(direction.eq_ignore_ascii_case("incoming"));
+        assert_eq!(edge_labels, None);
     } else {
         panic!("Expected GraphCommand::Traverse");
     }
@@ -2901,12 +2929,36 @@ fn test_parse_graph_traverse_docs_form() {
         strategy,
         depth,
         direction,
+        edge_labels,
     }) = query
     {
         assert_eq!(source, "alice");
         assert_eq!(strategy, "bfs");
         assert_eq!(depth, 3);
         assert!(direction.eq_ignore_ascii_case("outgoing"));
+        assert_eq!(edge_labels, None);
+    } else {
+        panic!("Expected GraphCommand::Traverse");
+    }
+}
+
+#[test]
+fn test_parse_graph_traverse_edges_in() {
+    let query =
+        parse("GRAPH TRAVERSE FROM 'alice' EDGES IN ('EATS') STRATEGY bfs MAX_DEPTH 3").unwrap();
+    if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Traverse {
+        source,
+        strategy,
+        depth,
+        direction,
+        edge_labels,
+    }) = query
+    {
+        assert_eq!(source, "alice");
+        assert_eq!(strategy, "bfs");
+        assert_eq!(depth, 3);
+        assert_eq!(direction, "outgoing");
+        assert_eq!(edge_labels, Some(vec!["EATS".to_string()]));
     } else {
         panic!("Expected GraphCommand::Traverse");
     }

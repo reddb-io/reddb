@@ -20,9 +20,16 @@ impl RedDBRuntime {
                 source,
                 depth,
                 direction,
+                edge_labels,
             } => {
                 let dir = parse_direction(direction)?;
-                let res = self.graph_neighborhood(source, dir, *depth as usize, None, None)?;
+                let res = self.graph_neighborhood(
+                    source,
+                    dir,
+                    *depth as usize,
+                    edge_labels.clone(),
+                    None,
+                )?;
                 let mut result = UnifiedResult::with_columns(vec![
                     "node_id".into(),
                     "label".into(),
@@ -183,10 +190,18 @@ impl RedDBRuntime {
                 strategy,
                 depth,
                 direction,
+                edge_labels,
             } => {
                 let dir = parse_direction(direction)?;
                 let strat = parse_traversal_strategy(strategy)?;
-                let res = self.graph_traverse(source, dir, *depth as usize, strat, None, None)?;
+                let res = self.graph_traverse(
+                    source,
+                    dir,
+                    *depth as usize,
+                    strat,
+                    edge_labels.clone(),
+                    None,
+                )?;
                 let mut result = UnifiedResult::with_columns(vec![
                     "node_id".into(),
                     "label".into(),

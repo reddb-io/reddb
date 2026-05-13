@@ -822,6 +822,37 @@ fn graph_neighborhood_resolves_label_to_node_id() {
 }
 
 #[test]
+fn graph_neighborhood_edges_in_filters_edge_labels() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('alice', 'Alice')")
+        .expect("alice");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('bob', 'Bob')")
+        .expect("bob");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('carol', 'Carol')")
+        .expect("carol");
+    rt.execute_query("INSERT INTO tales EDGE (label, from, to) VALUES ('EATS', 'alice', 'bob')")
+        .expect("eats edge");
+    rt.execute_query("INSERT INTO tales EDGE (label, from, to) VALUES ('KILLS', 'alice', 'carol')")
+        .expect("kills edge");
+
+    let res = rt
+        .execute_query("GRAPH NEIGHBORHOOD 'alice' EDGES IN ('EATS') DEPTH 1")
+        .expect("filtered neighborhood");
+    let labels: Vec<String> = res
+        .result
+        .records
+        .iter()
+        .map(|record| first_text(record.get("label")))
+        .collect();
+    assert!(labels.iter().any(|label| label == "alice"), "{labels:?}");
+    assert!(labels.iter().any(|label| label == "bob"), "{labels:?}");
+    assert!(
+        !labels.iter().any(|label| label == "carol"),
+        "KILLS edge must be filtered out: {labels:?}"
+    );
+}
+
+#[test]
 fn graph_traverse_ambiguous_label_errors() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
     rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('hero', 'A')")
@@ -831,6 +862,24 @@ fn graph_traverse_ambiguous_label_errors() {
 
     let err = rt
         .execute_query("GRAPH TRAVERSE 'hero'")
+        .expect_err("ambiguous label must error");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("ambiguous"),
+        "error should mention ambiguity, got: {msg}"
+    );
+}
+
+#[test]
+fn graph_neighborhood_ambiguous_label_errors() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('hero', 'A')")
+        .expect("insert a");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('hero', 'B')")
+        .expect("insert b");
+
+    let err = rt
+        .execute_query("GRAPH NEIGHBORHOOD 'hero'")
         .expect_err("ambiguous label must error");
     let msg = format!("{err}");
     assert!(
@@ -918,6 +967,48 @@ fn edge_insert_resolves_labels_in_from_to() {
     assert!(
         labels.iter().any(|l| l == "bob"),
         "edge alice→bob should make 'bob' reachable; got {labels:?}"
+    );
+}
+
+#[test]
+fn graph_traverse_edges_in_filters_every_hop() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('alice', 'Alice')")
+        .expect("alice");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('bob', 'Bob')")
+        .expect("bob");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('carol', 'Carol')")
+        .expect("carol");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('dan', 'Dan')")
+        .expect("dan");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('eve', 'Eve')")
+        .expect("eve");
+    rt.execute_query("INSERT INTO tales EDGE (label, from, to) VALUES ('EATS', 'alice', 'bob')")
+        .expect("alice eats bob");
+    rt.execute_query("INSERT INTO tales EDGE (label, from, to) VALUES ('KILLS', 'alice', 'carol')")
+        .expect("alice kills carol");
+    rt.execute_query("INSERT INTO tales EDGE (label, from, to) VALUES ('KILLS', 'bob', 'dan')")
+        .expect("bob kills dan");
+    rt.execute_query("INSERT INTO tales EDGE (label, from, to) VALUES ('EATS', 'bob', 'eve')")
+        .expect("bob eats eve");
+
+    let res = rt
+        .execute_query("GRAPH TRAVERSE FROM 'alice' EDGES IN ('EATS') DEPTH 2")
+        .expect("filtered traverse");
+    let labels: Vec<String> = res
+        .result
+        .records
+        .iter()
+        .map(|record| first_text(record.get("label")))
+        .collect();
+    assert!(labels.iter().any(|label| label == "alice"), "{labels:?}");
+    assert!(labels.iter().any(|label| label == "bob"), "{labels:?}");
+    assert!(labels.iter().any(|label| label == "eve"), "{labels:?}");
+    assert!(
+        !labels
+            .iter()
+            .any(|label| label == "carol" || label == "dan"),
+        "KILLS edges must be filtered at every hop: {labels:?}"
     );
 }
 
