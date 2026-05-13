@@ -2603,6 +2603,7 @@ fn test_parse_graph_shortest_path() {
         target,
         algorithm,
         direction,
+        ..
     }) = query
     {
         assert_eq!(source, "a");
@@ -2708,6 +2709,7 @@ fn test_parse_graph_centrality() {
     if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Centrality {
         algorithm,
         limit,
+        ..
     }) = query
     {
         assert_eq!(algorithm, "pagerank");
@@ -2723,6 +2725,7 @@ fn test_parse_graph_centrality_default() {
     if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Centrality {
         algorithm,
         limit,
+        ..
     }) = query
     {
         assert_eq!(algorithm, "degree");
@@ -2738,6 +2741,7 @@ fn test_parse_graph_centrality_with_limit() {
     if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Centrality {
         algorithm,
         limit,
+        ..
     }) = query
     {
         assert_eq!(algorithm, "degree");
@@ -2750,6 +2754,7 @@ fn test_parse_graph_centrality_with_limit() {
     if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Centrality {
         algorithm,
         limit,
+        ..
     }) = query
     {
         assert_eq!(algorithm, "pagerank");
@@ -2787,6 +2792,7 @@ fn test_parse_graph_community() {
     if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Community {
         algorithm,
         max_iterations,
+        ..
     }) = query
     {
         assert_eq!(algorithm, "louvain");
@@ -2802,6 +2808,7 @@ fn test_parse_graph_components() {
     if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Components {
         mode,
         limit,
+        ..
     }) = query
     {
         assert_eq!(mode, "strong");

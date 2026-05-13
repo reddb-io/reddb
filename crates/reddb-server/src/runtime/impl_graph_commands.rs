@@ -5,6 +5,8 @@
 //! `RuntimeQueryResult`.
 
 use super::*;
+use crate::storage::query::ast::GraphCommandOrderBy;
+use std::cmp::Ordering;
 
 impl RedDBRuntime {
     /// Execute a GRAPH analytics command.
@@ -50,6 +52,8 @@ impl RedDBRuntime {
                 target,
                 algorithm,
                 direction,
+                limit,
+                order_by,
             } => {
                 let dir = parse_direction(direction)?;
                 let alg = parse_path_algorithm(algorithm)?;
@@ -81,6 +85,12 @@ impl RedDBRuntime {
                     record.set("total_weight", Value::Null);
                 }
                 result.push(record);
+                apply_graph_order_and_limit(
+                    &mut result,
+                    "graph_shortest_path",
+                    order_by.as_ref(),
+                    limit.map(|n| n as usize),
+                )?;
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
                     mode: QueryMode::Sql,
@@ -201,42 +211,50 @@ impl RedDBRuntime {
                     statement_type: "select",
                 })
             }
-            GraphCommand::Centrality { algorithm, limit } => {
+            GraphCommand::Centrality {
+                algorithm,
+                limit,
+                order_by,
+            } => {
                 let alg = parse_centrality_algorithm(algorithm)?;
                 // `limit = None` keeps historical implicit top-100 cap.
                 // `Some(0)` returns zero rows (standard SQL LIMIT 0 semantics).
                 let limit_usize = limit.map(|n| n as usize);
-                let top_k = limit_usize.unwrap_or(100).max(1);
+                let order_needs_full_set = order_by
+                    .as_ref()
+                    .map(|order| order.ascending)
+                    .unwrap_or(false);
+                let top_k = if order_needs_full_set {
+                    usize::MAX
+                } else {
+                    limit_usize.unwrap_or(100).max(1)
+                };
                 let res = self.graph_centrality(alg, top_k, false, None, None, None, None)?;
                 let mut result = UnifiedResult::with_columns(vec![
                     "node_id".into(),
                     "label".into(),
                     "score".into(),
                 ]);
-                let cap = limit_usize.unwrap_or(usize::MAX);
-                let mut emitted: usize = 0;
                 for score in &res.scores {
-                    if emitted >= cap {
-                        break;
-                    }
                     let mut record = UnifiedRecord::new();
                     record.set("node_id", Value::text(score.node.id.clone()));
                     record.set("label", Value::text(score.node.label.clone()));
                     record.set("score", Value::Float(score.score));
                     result.push(record);
-                    emitted += 1;
                 }
                 for ds in &res.degree_scores {
-                    if emitted >= cap {
-                        break;
-                    }
                     let mut record = UnifiedRecord::new();
                     record.set("node_id", Value::text(ds.node.id.clone()));
                     record.set("label", Value::text(ds.node.label.clone()));
                     record.set("score", Value::Float(ds.total_degree as f64));
                     result.push(record);
-                    emitted += 1;
                 }
+                apply_graph_order_and_limit(
+                    &mut result,
+                    "graph_centrality",
+                    order_by.as_ref(),
+                    Some(limit_usize.unwrap_or(100)),
+                )?;
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
                     mode: QueryMode::Sql,
@@ -250,6 +268,8 @@ impl RedDBRuntime {
             GraphCommand::Community {
                 algorithm,
                 max_iterations,
+                limit,
+                order_by,
             } => {
                 let alg = parse_community_algorithm(algorithm)?;
                 let res =
@@ -262,6 +282,12 @@ impl RedDBRuntime {
                     record.set("size", Value::Integer(community.size as i64));
                     result.push(record);
                 }
+                apply_graph_order_and_limit(
+                    &mut result,
+                    "graph_community",
+                    order_by.as_ref(),
+                    limit.map(|n| n as usize),
+                )?;
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
                     mode: QueryMode::Sql,
@@ -272,21 +298,27 @@ impl RedDBRuntime {
                     statement_type: "select",
                 })
             }
-            GraphCommand::Components { mode, limit } => {
+            GraphCommand::Components {
+                mode,
+                limit,
+                order_by,
+            } => {
                 let m = parse_components_mode(mode)?;
                 let res = self.graph_components(m, 1, None)?;
                 let mut result =
                     UnifiedResult::with_columns(vec!["component_id".into(), "size".into()]);
-                let cap = limit.map(|n| n as usize).unwrap_or(usize::MAX);
                 for component in &res.components {
-                    if result.records.len() >= cap {
-                        break;
-                    }
                     let mut record = UnifiedRecord::new();
                     record.set("component_id", Value::text(component.id.clone()));
                     record.set("size", Value::Integer(component.size as i64));
                     result.push(record);
                 }
+                apply_graph_order_and_limit(
+                    &mut result,
+                    "graph_components",
+                    order_by.as_ref(),
+                    limit.map(|n| n as usize),
+                )?;
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
                     mode: QueryMode::Sql,
@@ -889,6 +921,101 @@ impl RedDBRuntime {
                 })
             }
         }
+    }
+}
+
+fn apply_graph_order_and_limit(
+    result: &mut UnifiedResult,
+    statement: &str,
+    order_by: Option<&GraphCommandOrderBy>,
+    limit: Option<usize>,
+) -> RedDBResult<()> {
+    if let Some(order) = order_by {
+        let column = graph_order_metric_column(statement, &order.metric)?;
+        let columns = result.columns.clone();
+        result.records.sort_by(|left, right| {
+            let cmp = compare_graph_values(left.get(column), right.get(column));
+            let cmp = if order.ascending { cmp } else { cmp.reverse() };
+            if cmp == Ordering::Equal {
+                compare_graph_rows(left, right, &columns)
+            } else {
+                cmp
+            }
+        });
+    }
+    if let Some(limit) = limit {
+        result.records.truncate(limit);
+    }
+    Ok(())
+}
+
+fn graph_order_metric_column(statement: &str, metric: &str) -> RedDBResult<&'static str> {
+    let metric = metric.to_ascii_lowercase();
+    match (statement, metric.as_str()) {
+        ("graph_centrality", "score" | "centrality_score") => Ok("score"),
+        ("graph_community", "size" | "community_size") => Ok("size"),
+        ("graph_components", "size" | "component_size") => Ok("size"),
+        ("graph_shortest_path", "hop_count" | "total_weight" | "nodes_visited") => {
+            Ok(match metric.as_str() {
+                "total_weight" => "total_weight",
+                "nodes_visited" => "nodes_visited",
+                _ => "hop_count",
+            })
+        }
+        _ => Err(RedDBError::Query(format!(
+            "unsupported ORDER BY metric '{metric}' for GRAPH {}",
+            statement.trim_start_matches("graph_")
+        ))),
+    }
+}
+
+fn compare_graph_rows(left: &UnifiedRecord, right: &UnifiedRecord, columns: &[String]) -> Ordering {
+    for column in columns {
+        let cmp = compare_graph_values(left.get(column), right.get(column));
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+    }
+    Ordering::Equal
+}
+
+fn compare_graph_values(left: Option<&Value>, right: Option<&Value>) -> Ordering {
+    match (left, right) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (Some(Value::Null), Some(Value::Null)) => Ordering::Equal,
+        (Some(Value::Null), Some(_)) => Ordering::Less,
+        (Some(_), Some(Value::Null)) => Ordering::Greater,
+        (Some(Value::Integer(left)), Some(Value::Integer(right))) => left.cmp(right),
+        (Some(Value::UnsignedInteger(left)), Some(Value::UnsignedInteger(right))) => {
+            left.cmp(right)
+        }
+        (Some(Value::Float(left)), Some(Value::Float(right))) => {
+            left.partial_cmp(right).unwrap_or(Ordering::Equal)
+        }
+        (Some(Value::Integer(left)), Some(Value::Float(right))) => {
+            (*left as f64).partial_cmp(right).unwrap_or(Ordering::Equal)
+        }
+        (Some(Value::Float(left)), Some(Value::Integer(right))) => {
+            left.partial_cmp(&(*right as f64)).unwrap_or(Ordering::Equal)
+        }
+        (Some(Value::UnsignedInteger(left)), Some(Value::Float(right))) => {
+            (*left as f64).partial_cmp(right).unwrap_or(Ordering::Equal)
+        }
+        (Some(Value::Float(left)), Some(Value::UnsignedInteger(right))) => {
+            left.partial_cmp(&(*right as f64)).unwrap_or(Ordering::Equal)
+        }
+        (Some(Value::Integer(left)), Some(Value::UnsignedInteger(right))) => {
+            (*left as i128).cmp(&(*right as i128))
+        }
+        (Some(Value::UnsignedInteger(left)), Some(Value::Integer(right))) => {
+            (*left as i128).cmp(&(*right as i128))
+        }
+        (Some(Value::Timestamp(left)), Some(Value::Timestamp(right))) => left.cmp(right),
+        (Some(Value::Text(left)), Some(Value::Text(right))) => left.cmp(right),
+        (Some(Value::Boolean(left)), Some(Value::Boolean(right))) => left.cmp(right),
+        (Some(left), Some(right)) => format!("{left:?}").cmp(&format!("{right:?}")),
     }
 }
 
