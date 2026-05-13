@@ -33,6 +33,8 @@ pub enum QueryExpr {
     CreateTable(CreateTableQuery),
     /// CREATE COLLECTION name KIND kind
     CreateCollection(CreateCollectionQuery),
+    /// CREATE VECTOR name DIM n [METRIC metric]
+    CreateVector(CreateVectorQuery),
     /// DROP TABLE name
     DropTable(DropTableQuery),
     /// DROP GRAPH name
@@ -1784,6 +1786,15 @@ pub struct CreateTableQuery {
 pub struct CreateCollectionQuery {
     pub name: String,
     pub kind: String,
+    pub if_not_exists: bool,
+}
+
+/// CREATE VECTOR name DIM n [METRIC metric]
+#[derive(Debug, Clone)]
+pub struct CreateVectorQuery {
+    pub name: String,
+    pub dimension: usize,
+    pub metric: DistanceMetric,
     pub if_not_exists: bool,
 }
 

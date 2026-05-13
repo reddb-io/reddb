@@ -610,6 +610,7 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
         | QueryExpr::Delete(_)
         | QueryExpr::CreateTable(_)
         | QueryExpr::CreateCollection(_)
+        | QueryExpr::CreateVector(_)
         | QueryExpr::DropTable(_)
         | QueryExpr::DropGraph(_)
         | QueryExpr::DropVector(_)

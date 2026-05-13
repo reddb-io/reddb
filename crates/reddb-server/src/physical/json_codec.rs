@@ -319,6 +319,20 @@ pub(super) fn collection_contract_to_json(contract: &CollectionContract) -> Json
             .unwrap_or(JsonValue::Null),
     );
     object.insert(
+        "vector_dimension".to_string(),
+        contract
+            .vector_dimension
+            .map(|dimension| JsonValue::Number(dimension as f64))
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
+        "vector_metric".to_string(),
+        contract
+            .vector_metric
+            .map(|metric| JsonValue::String(distance_metric_as_str(metric).to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
         "context_index_fields".to_string(),
         JsonValue::Array(
             contract
@@ -408,6 +422,16 @@ pub(super) fn collection_contract_from_json(value: &JsonValue) -> io::Result<Col
         default_ttl_ms: match object.get("default_ttl_ms") {
             Some(JsonValue::Null) | None => None,
             Some(value) => Some(json_u64_value(value)?),
+        },
+        vector_dimension: match object.get("vector_dimension") {
+            Some(JsonValue::Null) | None => None,
+            Some(value) => Some(json_usize_value(value)?),
+        },
+        vector_metric: match object.get("vector_metric") {
+            Some(JsonValue::Null) | None => None,
+            Some(value) => Some(distance_metric_from_str(value.as_str().ok_or_else(
+                || invalid_data("collection_contract.vector_metric must be a string".to_string()),
+            )?)?),
         },
         context_index_fields: object
             .get("context_index_fields")
@@ -826,6 +850,31 @@ fn collection_model_from_str(value: &str) -> io::Result<crate::catalog::Collecti
         "queue" => Ok(crate::catalog::CollectionModel::Queue),
         other => Err(invalid_data(format!(
             "unsupported collection contract model: {other}"
+        ))),
+    }
+}
+
+fn distance_metric_as_str(
+    metric: crate::storage::engine::distance::DistanceMetric,
+) -> &'static str {
+    match metric {
+        crate::storage::engine::distance::DistanceMetric::L2 => "l2",
+        crate::storage::engine::distance::DistanceMetric::Cosine => "cosine",
+        crate::storage::engine::distance::DistanceMetric::InnerProduct => "inner_product",
+    }
+}
+
+fn distance_metric_from_str(
+    value: &str,
+) -> io::Result<crate::storage::engine::distance::DistanceMetric> {
+    match value {
+        "l2" | "L2" => Ok(crate::storage::engine::distance::DistanceMetric::L2),
+        "cosine" | "COSINE" => Ok(crate::storage::engine::distance::DistanceMetric::Cosine),
+        "inner_product" | "INNER_PRODUCT" => {
+            Ok(crate::storage::engine::distance::DistanceMetric::InnerProduct)
+        }
+        other => Err(invalid_data(format!(
+            "unsupported collection contract vector_metric: {other}"
         ))),
     }
 }

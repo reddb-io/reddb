@@ -681,6 +681,20 @@ pub(crate) fn collection_descriptor_json(descriptor: &CollectionDescriptor) -> J
         JsonValue::String(collection_model_str(descriptor.observed_model).to_string()),
     );
     object.insert(
+        "vector_dimension".to_string(),
+        descriptor
+            .vector_dimension
+            .map(|dimension| JsonValue::Number(dimension as f64))
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
+        "vector_metric".to_string(),
+        descriptor
+            .vector_metric
+            .map(|metric| JsonValue::String(distance_metric_str(metric).to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
         "declared_schema_mode".to_string(),
         descriptor
             .declared_schema_mode
@@ -1046,6 +1060,14 @@ fn collection_model_str(model: CollectionModel) -> &'static str {
         CollectionModel::Mixed => "mixed",
         CollectionModel::TimeSeries => "timeseries",
         CollectionModel::Queue => "queue",
+    }
+}
+
+fn distance_metric_str(metric: crate::storage::engine::distance::DistanceMetric) -> &'static str {
+    match metric {
+        crate::storage::engine::distance::DistanceMetric::L2 => "l2",
+        crate::storage::engine::distance::DistanceMetric::Cosine => "cosine",
+        crate::storage::engine::distance::DistanceMetric::InnerProduct => "inner_product",
     }
 }
 

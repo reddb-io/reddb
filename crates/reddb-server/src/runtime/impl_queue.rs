@@ -2064,6 +2064,8 @@ fn queue_collection_contract(
         created_at_unix_ms: now,
         updated_at_unix_ms: now,
         default_ttl_ms: ttl_ms,
+        vector_dimension: None,
+        vector_metric: None,
         context_index_fields,
         declared_columns: Vec::new(),
         table_def: None,

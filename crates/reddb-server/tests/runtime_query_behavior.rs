@@ -373,6 +373,39 @@ fn create_graph_declares_collection_before_node_insert() {
 }
 
 #[test]
+fn create_vector_declares_dimension_and_metric() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("CREATE VECTOR embeddings DIM 4")
+        .expect("create vector");
+    rt.execute_query("CREATE VECTOR vec_rerank DIM 8 METRIC cosine")
+        .expect("create vector with metric");
+
+    let snapshot = rt.db().catalog_model_snapshot();
+    let embeddings = snapshot
+        .collections
+        .iter()
+        .find(|collection| collection.name == "embeddings")
+        .expect("embeddings collection");
+    assert_eq!(embeddings.model, reddb_server::CollectionModel::Vector);
+    assert_eq!(embeddings.vector_dimension, Some(4));
+    assert_eq!(
+        embeddings.vector_metric,
+        Some(reddb_server::storage::engine::distance::DistanceMetric::Cosine)
+    );
+
+    let rows = rt
+        .execute_query("SHOW COLLECTIONS WHERE name IN ('embeddings', 'vec_rerank') ORDER BY name")
+        .expect("show vector collections");
+    assert_eq!(rows.result.len(), 2);
+    assert_eq!(text_at(&rows, 0, "name"), "embeddings");
+    assert_eq!(uint_at(&rows, 0, "dimension"), 4);
+    assert_eq!(text_at(&rows, 0, "metric"), "cosine");
+    assert_eq!(text_at(&rows, 1, "name"), "vec_rerank");
+    assert_eq!(uint_at(&rows, 1, "dimension"), 8);
+    assert_eq!(text_at(&rows, 1, "metric"), "cosine");
+}
+
+#[test]
 fn create_document_reaches_executor_not_yet_supported() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
     let err = rt

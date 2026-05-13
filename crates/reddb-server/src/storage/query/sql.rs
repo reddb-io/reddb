@@ -4,14 +4,14 @@ use crate::storage::query::ast::{
     CompareOp, ConfigCommand, CopyFormat, CopyFromQuery, CreateCollectionQuery,
     CreateForeignTableQuery, CreateIndexQuery, CreateMigrationQuery, CreatePolicyQuery,
     CreateQueueQuery, CreateSchemaQuery, CreateSequenceQuery, CreateServerQuery, CreateTableQuery,
-    CreateTimeSeriesQuery, CreateTreeQuery, CreateViewQuery, DeleteQuery, DropCollectionQuery,
-    DropDocumentQuery, DropForeignTableQuery, DropGraphQuery, DropIndexQuery, DropKvQuery,
-    DropPolicyQuery, DropQueueQuery, DropSchemaQuery, DropSequenceQuery, DropServerQuery,
-    DropTableQuery, DropTimeSeriesQuery, DropTreeQuery, DropVectorQuery, DropViewQuery,
-    EventsBackfillQuery, ExplainAlterQuery, ExplainMigrationQuery, Expr, FieldRef, Filter,
-    ForeignColumnDef, GrantStmt, GraphCommand, GraphQuery, HybridQuery, InsertQuery, JoinQuery,
-    KvCommand, MaintenanceCommand, PathQuery, PolicyAction, ProbabilisticCommand, QueryExpr,
-    QueueCommand, QueueSelectQuery, RefreshMaterializedViewQuery, RevokeStmt,
+    CreateTimeSeriesQuery, CreateTreeQuery, CreateVectorQuery, CreateViewQuery, DeleteQuery,
+    DropCollectionQuery, DropDocumentQuery, DropForeignTableQuery, DropGraphQuery, DropIndexQuery,
+    DropKvQuery, DropPolicyQuery, DropQueueQuery, DropSchemaQuery, DropSequenceQuery,
+    DropServerQuery, DropTableQuery, DropTimeSeriesQuery, DropTreeQuery, DropVectorQuery,
+    DropViewQuery, EventsBackfillQuery, ExplainAlterQuery, ExplainMigrationQuery, Expr, FieldRef,
+    Filter, ForeignColumnDef, GrantStmt, GraphCommand, GraphQuery, HybridQuery, InsertQuery,
+    JoinQuery, KvCommand, MaintenanceCommand, PathQuery, PolicyAction, ProbabilisticCommand,
+    QueryExpr, QueueCommand, QueueSelectQuery, RefreshMaterializedViewQuery, RevokeStmt,
     RollbackMigrationQuery, SearchCommand, Span, TableQuery, TreeCommand, TruncateQuery,
     TxnControl, UpdateQuery, VectorQuery,
 };
@@ -63,6 +63,7 @@ pub enum SqlCommand {
     ExplainAlter(ExplainAlterQuery),
     CreateTable(CreateTableQuery),
     CreateCollection(CreateCollectionQuery),
+    CreateVector(CreateVectorQuery),
     DropTable(DropTableQuery),
     DropGraph(DropGraphQuery),
     DropVector(DropVectorQuery),
@@ -179,6 +180,7 @@ pub enum SqlSchemaCommand {
     ExplainAlter(ExplainAlterQuery),
     CreateTable(CreateTableQuery),
     CreateCollection(CreateCollectionQuery),
+    CreateVector(CreateVectorQuery),
     DropTable(DropTableQuery),
     DropGraph(DropGraphQuery),
     DropVector(DropVectorQuery),
@@ -251,6 +253,9 @@ impl SqlStatement {
             }
             SqlStatement::Schema(SqlSchemaCommand::CreateCollection(query)) => {
                 SqlCommand::CreateCollection(query)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::CreateVector(query)) => {
+                SqlCommand::CreateVector(query)
             }
             SqlStatement::Schema(SqlSchemaCommand::DropTable(query)) => {
                 SqlCommand::DropTable(query)
@@ -421,6 +426,7 @@ impl SqlCommand {
             SqlCommand::ExplainAlter(query) => QueryExpr::ExplainAlter(query),
             SqlCommand::CreateTable(query) => QueryExpr::CreateTable(query),
             SqlCommand::CreateCollection(query) => QueryExpr::CreateCollection(query),
+            SqlCommand::CreateVector(query) => QueryExpr::CreateVector(query),
             SqlCommand::DropTable(query) => QueryExpr::DropTable(query),
             SqlCommand::DropGraph(query) => QueryExpr::DropGraph(query),
             SqlCommand::DropVector(query) => QueryExpr::DropVector(query),
@@ -488,6 +494,9 @@ impl SqlCommand {
             }
             SqlCommand::CreateCollection(query) => {
                 SqlStatement::Schema(SqlSchemaCommand::CreateCollection(query))
+            }
+            SqlCommand::CreateVector(query) => {
+                SqlStatement::Schema(SqlSchemaCommand::CreateVector(query))
             }
             SqlCommand::DropTable(query) => {
                 SqlStatement::Schema(SqlSchemaCommand::DropTable(query))
@@ -1367,6 +1376,15 @@ impl<'a> Parser<'a> {
                         QueryExpr::CreateTable(query) => Ok(SqlCommand::CreateTable(query)),
                         other => Err(ParseError::new(
                             format!("internal: CREATE DOCUMENT produced unexpected kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                } else if self.check(&Token::Vector) {
+                    self.advance()?;
+                    match self.parse_create_vector_body()? {
+                        QueryExpr::CreateVector(query) => Ok(SqlCommand::CreateVector(query)),
+                        other => Err(ParseError::new(
+                            format!("internal: CREATE VECTOR produced unexpected kind {other:?}"),
                             self.position(),
                         )),
                     }

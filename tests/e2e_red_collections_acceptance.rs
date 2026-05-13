@@ -15,7 +15,7 @@ use reddb::storage::query::unified::UnifiedRecord;
 use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
 
-const COLLECTION_COLUMNS: [&str; 11] = [
+const COLLECTION_COLUMNS: [&str; 13] = [
     "name",
     "model",
     "schema_mode",
@@ -27,6 +27,8 @@ const COLLECTION_COLUMNS: [&str; 11] = [
     "internal",
     "tenant_id",
     "queue_mode",
+    "dimension",
+    "metric",
 ];
 
 fn open_runtime() -> RedDBRuntime {
