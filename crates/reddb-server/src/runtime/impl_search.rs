@@ -1220,12 +1220,13 @@ impl RedDBRuntime {
             self.ask_provider_failover_names(ask.provider.as_deref(), &default_provider)?;
         let provider_refs: Vec<&str> = provider_names.iter().map(String::as_str).collect();
         let transport = crate::runtime::ai::transport::AiTransport::from_runtime(self);
+        let cache_settings = self.ask_answer_cache_settings();
+        let cache_mode = ask_cache_mode(&ask.cache)?;
+        let source_dependencies = ask_source_dependencies(&ask_context);
 
         let attempt_provider = |provider_name: &str| -> RedDBResult<AskLlmAttempt> {
             let provider = parse_provider(provider_name)?;
-            let api_key = resolve_api_key_from_runtime(&provider, None, self)?;
             let model = ask.model.clone().unwrap_or_else(|| default_model.clone());
-            let api_base = provider.resolve_api_base();
 
             let requested_mode = if ask.strict {
                 crate::runtime::ai::strict_validator::Mode::Strict
@@ -1255,10 +1256,47 @@ impl RedDBRuntime {
                     default_temperature: self.config_f64("ask.default_temperature", 0.0) as f32,
                 },
             );
+            let cache_write =
+                match crate::runtime::ai::answer_cache_key::decide(cache_mode, cache_settings) {
+                    crate::runtime::ai::answer_cache_key::Decision::Bypass => None,
+                    crate::runtime::ai::answer_cache_key::Decision::Use { ttl } => {
+                        let key = crate::runtime::ai::answer_cache_key::derive_key(
+                            crate::runtime::ai::answer_cache_key::Scope {
+                                tenant: scope.tenant.as_deref().unwrap_or(""),
+                                user: scope
+                                    .identity
+                                    .as_ref()
+                                    .map(|(user, _)| user.as_str())
+                                    .unwrap_or(""),
+                            },
+                            crate::runtime::ai::answer_cache_key::Inputs {
+                                question: &ask.question,
+                                provider: &provider_token,
+                                model: &model,
+                                temperature: determinism.temperature,
+                                seed: determinism.seed,
+                                sources_fingerprint: &sources_fingerprint,
+                            },
+                        );
+                        if let Some(cached) = self.get_ask_answer_cache_attempt(
+                            &key,
+                            effective_mode,
+                            mode_warning.clone(),
+                            determinism.temperature,
+                            determinism.seed,
+                            sources_count,
+                        ) {
+                            return Ok(cached);
+                        }
+                        Some((key, ttl))
+                    }
+                };
 
             let mut attempt = crate::runtime::ai::strict_validator::Attempt::First;
             let mut retry_count = 0_u32;
             let mut prompt_for_call = full_prompt.clone();
+            let api_key = resolve_api_key_from_runtime(&provider, None, self)?;
+            let api_base = provider.resolve_api_base();
             let (answer, prompt_tokens, completion_tokens, cost_usd, citation_result) = loop {
                 let provider_started = std::time::Instant::now();
                 let prompt_response = call_ask_llm(
@@ -1347,7 +1385,7 @@ impl RedDBRuntime {
                 }
             };
 
-            Ok(AskLlmAttempt {
+            let ask_attempt = AskLlmAttempt {
                 answer,
                 provider_token,
                 model,
@@ -1360,7 +1398,18 @@ impl RedDBRuntime {
                 completion_tokens,
                 cost_usd,
                 citation_result,
-            })
+                cache_hit: false,
+            };
+            if let Some((cache_key, ttl)) = cache_write {
+                self.put_ask_answer_cache_attempt(
+                    &cache_key,
+                    ttl,
+                    cache_settings.max_entries,
+                    &source_dependencies,
+                    &ask_attempt,
+                );
+            }
+            Ok(ask_attempt)
         };
 
         let mut failed_attempts = Vec::new();
@@ -1414,7 +1463,7 @@ impl RedDBRuntime {
             cost_usd: ask_attempt.cost_usd,
             answer: &ask_attempt.answer,
             citations: &citation_markers,
-            cache_hit: false,
+            cache_hit: ask_attempt.cache_hit,
             effective_mode: ask_attempt.effective_mode,
             temperature: ask_attempt.temperature,
             seed: ask_attempt.seed,
@@ -1432,6 +1481,8 @@ impl RedDBRuntime {
             "retry_count".into(),
             "prompt_tokens".into(),
             "completion_tokens".into(),
+            "cost_usd".into(),
+            "cache_hit".into(),
             "sources_count".into(),
             "sources_flat".into(),
             "citations".into(),
@@ -1457,6 +1508,8 @@ impl RedDBRuntime {
             "completion_tokens",
             Value::Integer(ask_attempt.completion_tokens as i64),
         );
+        record.set("cost_usd", Value::Float(ask_attempt.cost_usd));
+        record.set("cache_hit", Value::Boolean(ask_attempt.cache_hit));
         record.set("sources_count", Value::Integer(sources_count as i64));
         record.set("sources_flat", Value::Json(sources_flat_bytes));
         record.set("citations", Value::Json(citations_bytes));
@@ -1664,6 +1717,109 @@ impl RedDBRuntime {
 
     fn ask_audit_retention_days(&self) -> u64 {
         self.config_u64("ask.audit.retention_days", 90)
+    }
+
+    fn ask_answer_cache_settings(&self) -> crate::runtime::ai::answer_cache_key::Settings {
+        let default_ttl = self.config_string("ask.cache.default_ttl", "");
+        let default_ttl = default_ttl.trim();
+        crate::runtime::ai::answer_cache_key::Settings {
+            enabled: self.config_bool("ask.cache.enabled", false),
+            default_ttl: default_ttl.is_empty().then_some(None).unwrap_or_else(|| {
+                crate::runtime::ai::answer_cache_key::parse_ttl(default_ttl).ok()
+            }),
+            max_entries: self
+                .config_u64("ask.cache.max_entries", 1024)
+                .min(usize::MAX as u64) as usize,
+        }
+    }
+
+    fn get_ask_answer_cache_attempt(
+        &self,
+        key: &str,
+        effective_mode: crate::runtime::ai::strict_validator::Mode,
+        mode_warning: Option<crate::runtime::ai::provider_capabilities::ModeWarning>,
+        temperature: Option<f32>,
+        seed: Option<u64>,
+        sources_count: usize,
+    ) -> Option<AskLlmAttempt> {
+        let hit = self
+            .inner
+            .result_blob_cache
+            .get(ASK_ANSWER_CACHE_NAMESPACE, key)?;
+        let payload = decode_ask_answer_cache_payload(hit.value())?;
+        let citation_result =
+            crate::runtime::ai::citation_parser::parse_citations(&payload.answer, sources_count);
+        if !matches!(
+            crate::runtime::ai::strict_validator::validate(
+                &citation_result,
+                effective_mode,
+                crate::runtime::ai::strict_validator::Attempt::First,
+            ),
+            crate::runtime::ai::strict_validator::Decision::Ok
+        ) {
+            return None;
+        }
+        Some(AskLlmAttempt {
+            answer: payload.answer,
+            provider_token: payload.provider_token,
+            model: payload.model,
+            effective_mode,
+            mode_warning,
+            temperature,
+            seed,
+            retry_count: payload.retry_count,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cost_usd: 0.0,
+            citation_result,
+            cache_hit: true,
+        })
+    }
+
+    fn put_ask_answer_cache_attempt(
+        &self,
+        key: &str,
+        ttl: std::time::Duration,
+        max_entries: usize,
+        source_dependencies: &HashSet<String>,
+        attempt: &AskLlmAttempt,
+    ) {
+        if max_entries == 0 {
+            return;
+        }
+        let ttl_ms = ttl.as_millis().min(u64::MAX as u128) as u64;
+        let bytes = encode_ask_answer_cache_payload(attempt);
+        let put = crate::storage::cache::BlobCachePut::new(bytes)
+            .with_dependencies(source_dependencies.iter().cloned().collect::<Vec<_>>())
+            .with_policy(
+                crate::storage::cache::BlobCachePolicy::default()
+                    .ttl_ms(ttl_ms)
+                    .priority(220),
+            );
+        if self
+            .inner
+            .result_blob_cache
+            .put(ASK_ANSWER_CACHE_NAMESPACE, key, put)
+            .is_err()
+        {
+            return;
+        }
+
+        let mut entries = self.inner.ask_answer_cache_entries.write();
+        let (ref mut keys, ref mut order) = *entries;
+        if keys.insert(key.to_string()) {
+            order.push_back(key.to_string());
+        }
+        while keys.len() > max_entries {
+            let Some(old_key) = order.pop_front() else {
+                break;
+            };
+            if keys.remove(&old_key) {
+                self.inner
+                    .result_blob_cache
+                    .invalidate_key(ASK_ANSWER_CACHE_NAMESPACE, &old_key);
+            }
+        }
     }
 
     fn record_ask_audit(&self, input: AskAuditInput<'_>) -> RedDBResult<()> {
@@ -1882,6 +2038,14 @@ struct AskLlmAttempt {
     completion_tokens: u64,
     cost_usd: f64,
     citation_result: crate::runtime::ai::citation_parser::CitationParseResult,
+    cache_hit: bool,
+}
+
+struct AskAnswerCachePayload {
+    answer: String,
+    provider_token: String,
+    model: String,
+    retry_count: u32,
 }
 
 struct AskAuditInput<'a> {
@@ -1902,6 +2066,105 @@ struct AskAuditInput<'a> {
     validation_ok: bool,
     retry_count: u32,
     errors: &'a [crate::runtime::ai::strict_validator::ValidationError],
+}
+
+fn ask_cache_mode(
+    clause: &crate::storage::query::ast::AskCacheClause,
+) -> RedDBResult<crate::runtime::ai::answer_cache_key::Mode> {
+    match clause {
+        crate::storage::query::ast::AskCacheClause::Default => {
+            Ok(crate::runtime::ai::answer_cache_key::Mode::Default)
+        }
+        crate::storage::query::ast::AskCacheClause::NoCache => {
+            Ok(crate::runtime::ai::answer_cache_key::Mode::NoCache)
+        }
+        crate::storage::query::ast::AskCacheClause::CacheTtl(ttl) => {
+            let duration = crate::runtime::ai::answer_cache_key::parse_ttl(ttl).map_err(|err| {
+                RedDBError::Query(format!(
+                    "invalid ASK CACHE TTL '{}': {}",
+                    ttl,
+                    ask_cache_ttl_error(err)
+                ))
+            })?;
+            Ok(crate::runtime::ai::answer_cache_key::Mode::Cache(duration))
+        }
+    }
+}
+
+fn ask_cache_ttl_error(err: crate::runtime::ai::answer_cache_key::TtlParseError) -> &'static str {
+    match err {
+        crate::runtime::ai::answer_cache_key::TtlParseError::Empty => "empty TTL",
+        crate::runtime::ai::answer_cache_key::TtlParseError::MissingNumber => "missing number",
+        crate::runtime::ai::answer_cache_key::TtlParseError::MissingUnit => "missing unit",
+        crate::runtime::ai::answer_cache_key::TtlParseError::InvalidNumber => "invalid number",
+        crate::runtime::ai::answer_cache_key::TtlParseError::UnknownUnit => "unknown unit",
+        crate::runtime::ai::answer_cache_key::TtlParseError::ZeroTtl => "zero TTL",
+        crate::runtime::ai::answer_cache_key::TtlParseError::Overflow => "TTL overflow",
+    }
+}
+
+fn encode_ask_answer_cache_payload(attempt: &AskLlmAttempt) -> Vec<u8> {
+    let mut obj: crate::json::Map<String, crate::json::Value> = Default::default();
+    obj.insert(
+        "answer".to_string(),
+        crate::json::Value::String(attempt.answer.clone()),
+    );
+    obj.insert(
+        "provider".to_string(),
+        crate::json::Value::String(attempt.provider_token.clone()),
+    );
+    obj.insert(
+        "model".to_string(),
+        crate::json::Value::String(attempt.model.clone()),
+    );
+    obj.insert(
+        "mode".to_string(),
+        crate::json::Value::String(strict_mode_label(attempt.effective_mode).to_string()),
+    );
+    obj.insert(
+        "retry_count".to_string(),
+        crate::json::Value::Number(attempt.retry_count as f64),
+    );
+    obj.insert(
+        "prompt_tokens".to_string(),
+        crate::json::Value::Number(attempt.prompt_tokens as f64),
+    );
+    obj.insert(
+        "completion_tokens".to_string(),
+        crate::json::Value::Number(attempt.completion_tokens as f64),
+    );
+    obj.insert(
+        "cost_usd".to_string(),
+        crate::json::Value::Number(attempt.cost_usd),
+    );
+    crate::json::Value::Object(obj)
+        .to_string_compact()
+        .into_bytes()
+}
+
+fn decode_ask_answer_cache_payload(bytes: &[u8]) -> Option<AskAnswerCachePayload> {
+    let value: crate::json::Value = crate::json::from_slice(bytes).ok()?;
+    let obj = value.as_object()?;
+    Some(AskAnswerCachePayload {
+        answer: obj.get("answer")?.as_str()?.to_string(),
+        provider_token: obj.get("provider")?.as_str()?.to_string(),
+        model: obj.get("model")?.as_str()?.to_string(),
+        retry_count: obj
+            .get("retry_count")
+            .and_then(crate::json::Value::as_u64)
+            .unwrap_or(0)
+            .min(u32::MAX as u64) as u32,
+    })
+}
+
+fn ask_source_dependencies(ctx: &crate::runtime::ask_pipeline::AskContext) -> HashSet<String> {
+    let mut deps = HashSet::new();
+    deps.extend(ctx.candidates.collections.iter().cloned());
+    deps.extend(ctx.filtered_rows.iter().map(|row| row.collection.clone()));
+    deps.extend(ctx.text_hits.iter().map(|hit| hit.collection.clone()));
+    deps.extend(ctx.vector_hits.iter().map(|hit| hit.collection.clone()));
+    deps.extend(ctx.graph_hits.iter().map(|hit| hit.collection.clone()));
+    deps
 }
 
 fn provider_list_from_storage_value(value: &crate::storage::schema::Value) -> Option<Vec<String>> {

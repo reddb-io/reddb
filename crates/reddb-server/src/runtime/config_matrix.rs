@@ -87,6 +87,21 @@ pub const MATRIX: &[ConfigDefault] = &[
         tier: Tier::Optional,
         default: || num(90.0),
     },
+    ConfigDefault {
+        key: "ask.cache.enabled",
+        tier: Tier::Optional,
+        default: || JsonValue::Bool(false),
+    },
+    ConfigDefault {
+        key: "ask.cache.default_ttl",
+        tier: Tier::Optional,
+        default: || text(""),
+    },
+    ConfigDefault {
+        key: "ask.cache.max_entries",
+        tier: Tier::Optional,
+        default: || num(1024.0),
+    },
     // cache.blob.*
     ConfigDefault {
         key: "cache.blob.l1_bytes_max",
