@@ -24,9 +24,11 @@ impl RedDBServer {
                 match parse_multi(&query) {
                     Ok(parsed) => match user_params::bind(&parsed, &binds) {
                         Ok(bound) => self.runtime.execute_query_expr(bound),
-                        Err(err) => return json_error(400, err.to_string()),
+                        Err(err) => {
+                            return json_error_code(400, "INVALID_PARAMS", err.to_string());
+                        }
                     },
-                    Err(err) => return json_error(400, err.to_string()),
+                    Err(err) => return json_error_code(400, "QUERY_ERROR", err.to_string()),
                 }
             }
             None => self.query_use_cases().execute(ExecuteQueryInput { query }),
@@ -607,6 +609,31 @@ mod tests {
     }
 
     #[test]
+    fn http_query_params_typed_json_values_round_trip() {
+        let server = make_server();
+        let ddl = br#"{"query": "CREATE TABLE value_params (ok BOOLEAN, score FLOAT, payload BLOB, body JSON, seen_at TIMESTAMP, ident UUID)"}"#;
+        let r = server.handle_query(ddl.to_vec());
+        assert_eq!(r.status, 200, "ddl: {}", body_str(&r));
+
+        let insert = br#"{"query": "INSERT INTO value_params (ok, score, payload, body, seen_at, ident) VALUES ($1, $2, $3, $4, $5, $6)", "params": [true, 1.5, {"$bytes":"3q2+7w=="}, {"z":[1,{"a":true}],"a":null}, {"$ts":"1700000000"}, {"$uuid":"00112233-4455-6677-8899-aabbccddeeff"}]}"#;
+        let r = server.handle_query(insert.to_vec());
+        assert_eq!(r.status, 200, "insert: {}", body_str(&r));
+
+        let r = server.handle_query(br#"{"query": "SELECT * FROM value_params"}"#.to_vec());
+        assert_eq!(r.status, 200, "select: {}", body_str(&r));
+        let text = body_str(&r);
+        assert!(text.contains("true"), "bool missing: {text}");
+        assert!(text.contains("1.5"), "float missing: {text}");
+        assert!(text.contains("deadbeef"), "blob missing: {text}");
+        assert!(text.contains("\"a\":null"), "json missing: {text}");
+        assert!(text.contains("1700000000"), "timestamp missing: {text}");
+        assert!(
+            text.contains("00112233445566778899aabbccddeeff"),
+            "uuid missing: {text}"
+        );
+    }
+
+    #[test]
     fn http_query_params_arity_mismatch_returns_400() {
         let server = make_server();
         let ddl = br#"{"query": "CREATE TABLE pa (id INTEGER)"}"#;
@@ -616,6 +643,7 @@ mod tests {
         let r = server.handle_query(body.to_vec());
         assert_eq!(r.status, 400, "body: {}", body_str(&r));
         let text = body_str(&r).to_lowercase();
+        assert!(text.contains(r#""code":"invalid_params""#), "got: {text}");
         assert!(
             text.contains("param") || text.contains("arity"),
             "got: {text}"
@@ -628,7 +656,9 @@ mod tests {
         let body = br#"{"query": "SELECT 1", "params": "not-an-array"}"#;
         let r = server.handle_query(body.to_vec());
         assert_eq!(r.status, 400);
-        assert!(body_str(&r).contains("params"));
+        let text = body_str(&r);
+        assert!(text.contains(r#""code":"INVALID_PARAMS""#), "got: {text}");
+        assert!(text.contains("params"), "got: {text}");
     }
 
     #[test]
