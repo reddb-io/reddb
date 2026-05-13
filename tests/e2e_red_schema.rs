@@ -201,6 +201,8 @@ fn red_schema_introspection_is_stable_across_virtual_tables() {
                 "internal",
                 "tenant_id",
                 "queue_mode",
+                "dimension",
+                "metric",
             ],
         ),
         (
