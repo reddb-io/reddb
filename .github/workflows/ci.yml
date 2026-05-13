@@ -219,6 +219,12 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
       - name: JS RedWire parameter fixtures
         working-directory: drivers/js
         run: node --test test/redwire.params.test.mjs
@@ -228,6 +234,14 @@ jobs:
       - name: Java RedWire parameter fixtures
         working-directory: drivers/java
         run: ./gradlew test --tests dev.reddb.ValueCodecTest
+      - name: Kotlin RedWire parameter fixtures
+        working-directory: drivers/kotlin
+        run: ./gradlew test --tests dev.reddb.ValueCodecTest
+      - name: .NET RedWire parameter fixtures
+        run: dotnet test drivers/dotnet/tests/Reddb.Tests/Reddb.Tests.csproj --filter FullyQualifiedName~ValueCodecTests
+      - name: Dart RedWire parameter fixtures
+        working-directory: drivers/dart
+        run: dart test test/value_codec_test.dart
       - name: C++ RedWire parameter fixtures configure
         run: cmake -S drivers/cpp -B /tmp/reddb-cpp-param-conformance -DCMAKE_BUILD_TYPE=Release
       - name: C++ RedWire parameter fixtures build

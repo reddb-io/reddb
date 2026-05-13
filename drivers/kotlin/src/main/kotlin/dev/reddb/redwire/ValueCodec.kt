@@ -36,6 +36,8 @@ public object ValueCodec {
 
     private val mapper: ObjectMapper = jacksonObjectMapper()
 
+    public data class Timestamp(public val seconds: Long)
+
     public fun encodeQueryWithParams(sql: String, params: Array<out Any?>?): ByteArray {
         val values = params ?: emptyArray()
         require(values.size <= MAX_PARAM_COUNT) {
@@ -80,6 +82,7 @@ public object ValueCodec {
             is ByteArray -> encodeLenPrefixed(TAG_BYTES, value)
             is FloatArray -> encodeVector(value)
             is Instant -> encodeI64(value.epochSecond, TAG_TIMESTAMP)
+            is Timestamp -> encodeI64(value.seconds, TAG_TIMESTAMP)
             is UUID -> encodeUuid(value)
             is JsonNode -> encodeJson(value)
             is Map<*, *> -> encodeJson(value)
@@ -122,6 +125,9 @@ public object ValueCodec {
             is FloatArray -> vectorNode(value)
             is Instant -> JsonNodeFactory.instance.objectNode().apply {
                 put("\$ts", value.epochSecond)
+            }
+            is Timestamp -> JsonNodeFactory.instance.objectNode().apply {
+                put("\$ts", value.seconds)
             }
             is UUID -> JsonNodeFactory.instance.objectNode().apply {
                 put("\$uuid", value.toString())

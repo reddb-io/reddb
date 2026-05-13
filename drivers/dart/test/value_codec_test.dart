@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:reddb/reddb.dart';
@@ -152,5 +153,89 @@ void main() {
         {'\$uuid': '00112233-4455-6677-8899-aabbccddeeff'},
       ]);
     });
+
+    test('shared parameter fixtures match manifest', () {
+      final manifest = jsonDecode(
+        File('../../crates/reddb-wire/tests/fixtures/params/manifest.json')
+            .readAsStringSync(),
+      ) as Map<String, dynamic>;
+
+      for (final fixture in manifest['values'] as List<dynamic>) {
+        final item = fixture as Map<String, dynamic>;
+        expect(
+          _hex(ValueCodec.encodeValue(_fixtureValue(item['name'] as String))),
+          item['redwire_hex'],
+          reason: item['name'] as String,
+        );
+      }
+
+      final query = (manifest['queries'] as List<dynamic>).first as Map<String, dynamic>;
+      final params = [
+        for (final name in query['params'] as List<dynamic>) _fixtureValue(name as String),
+      ];
+      expect(
+        _hex(ValueCodec.encodeQueryWithParams(query['sql'] as String, params)),
+        query['redwire_hex'],
+        reason: query['name'] as String,
+      );
+    });
   });
 }
+
+Object? _fixtureValue(String name) {
+  switch (name) {
+    case 'null':
+      return null;
+    case 'bool_true':
+      return true;
+    case 'bool_false':
+      return false;
+    case 'int_min':
+      return -0x8000000000000000;
+    case 'int_max':
+      return 0x7fffffffffffffff;
+    case 'int_42':
+      return 42;
+    case 'float_nan':
+      return _doubleFromBits(0x7ff8000000000000);
+    case 'float_pos_inf':
+      return double.infinity;
+    case 'float_neg_inf':
+      return double.negativeInfinity;
+    case 'float_subnormal_min':
+      return _doubleFromBits(1);
+    case 'text_unicode':
+      return 'h\u00e9llo';
+    case 'text_x':
+      return 'x';
+    case 'bytes_empty':
+      return Uint8List(0);
+    case 'bytes_deadbeef':
+      return Uint8List.fromList([0xde, 0xad, 0xbe, 0xef]);
+    case 'json_nested':
+      return Value.json({
+        'z': [1, {'deep': [true, false]}],
+        'a': null,
+      });
+    case 'timestamp_zero':
+      return Value.timestamp(0);
+    case 'timestamp_max':
+      return Value.timestamp(0x7fffffffffffffff);
+    case 'uuid_001122':
+      return Value.uuid('00112233-4455-6677-8899-aabbccddeeff');
+    case 'vector_empty':
+      return Float32List(0);
+    case 'vector_three':
+      return Float32List.fromList([1.0, 2.0, -0.5]);
+    default:
+      throw ArgumentError('unknown fixture $name');
+  }
+}
+
+double _doubleFromBits(int bits) {
+  final bytes = ByteData(8)..setUint64(0, bits, Endian.host);
+  return bytes.getFloat64(0, Endian.host);
+}
+
+String _hex(Uint8List bytes) =>
+    bytes.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();

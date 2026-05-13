@@ -30,6 +30,8 @@ public static class ValueCodec
     public const int MaxParamCount = 65_536;
     public const int MaxValuePayloadLen = Frame.MaxFrameSize;
 
+    public readonly record struct Timestamp(long Seconds);
+
     public static byte[] EncodeQueryWithParams(string sql, object?[]? parameters)
     {
         object?[] values = parameters ?? Array.Empty<object?>();
@@ -82,6 +84,7 @@ public static class ValueCodec
         if (value is float[] vector) return EncodeVector(vector);
         if (value is ReadOnlyMemory<float> memory) return EncodeVector(memory.Span);
         if (value is DateTimeOffset dto) return EncodeI64(TagTimestamp, dto.ToUnixTimeSeconds());
+        if (value is Timestamp ts) return EncodeI64(TagTimestamp, ts.Seconds);
         if (value is Guid guid) return EncodeUuid(guid);
         if (IsJsonParam(value))
         {
@@ -126,6 +129,10 @@ public static class ValueCodec
         if (value is DateTimeOffset dto)
         {
             return new JsonObject { ["$ts"] = dto.ToUnixTimeSeconds() };
+        }
+        if (value is Timestamp ts)
+        {
+            return new JsonObject { ["$ts"] = ts.Seconds };
         }
         if (value is Guid guid)
         {
