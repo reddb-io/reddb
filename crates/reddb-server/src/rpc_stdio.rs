@@ -854,13 +854,17 @@ fn dispatch_method(
                 "missing 'payloads' array".to_string(),
             ))?;
 
+            let mut objects = Vec::with_capacity(payloads.len());
+            for entry in payloads {
+                objects.push(entry.as_object().ok_or((
+                    error_code::INVALID_PARAMS,
+                    "each payload must be a JSON object".to_string(),
+                ))?);
+            }
+
             if let Some(tx) = session.current_tx_mut() {
                 let mut buffered: u64 = 0;
-                for entry in payloads {
-                    let obj = entry.as_object().ok_or((
-                        error_code::INVALID_PARAMS,
-                        "each payload must be a JSON object".to_string(),
-                    ))?;
+                for obj in &objects {
                     let sql = build_insert_sql(collection, obj.iter());
                     tx.write_set.push(PendingSql::Insert(sql));
                     buffered += 1;
@@ -878,23 +882,27 @@ fn dispatch_method(
                 ));
             }
 
+            if should_bulk_insert_graph(runtime, collection, &objects) {
+                return bulk_insert_graph(runtime, collection, &objects)
+                    .map_err(|e| (error_code::QUERY_ERROR, e.to_string()));
+            }
+
             let mut total_affected: u64 = 0;
-            for entry in payloads {
-                let obj = entry.as_object().ok_or((
-                    error_code::INVALID_PARAMS,
-                    "each payload must be a JSON object".to_string(),
-                ))?;
+            let mut ids = Vec::with_capacity(objects.len());
+            for obj in objects {
                 let sql = build_insert_sql(collection, obj.iter());
                 let qr = runtime
                     .execute_query(&sql)
                     .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
                 total_affected += qr.affected_rows;
+                if let Some(id) = insert_result_to_json(&qr).get("id") {
+                    ids.push(id.clone());
+                }
             }
-            Ok(Value::Object(
-                [("affected".to_string(), Value::Number(total_affected as f64))]
-                    .into_iter()
-                    .collect(),
-            ))
+            let mut out = json::Map::new();
+            out.insert("affected".to_string(), Value::Number(total_affected as f64));
+            out.insert("ids".to_string(), Value::Array(ids));
+            Ok(Value::Object(out))
         }
 
         "get" => {
@@ -1052,6 +1060,105 @@ where
         cols.join(", "),
         vals.join(", "),
     )
+}
+
+pub(crate) fn should_bulk_insert_graph(
+    runtime: &RedDBRuntime,
+    collection: &str,
+    payloads: &[&json::Map<String, Value>],
+) -> bool {
+    let graph_shaped = payloads
+        .iter()
+        .all(|payload| payload.get("label").and_then(Value::as_str).is_some());
+    if !graph_shaped {
+        return false;
+    }
+
+    matches!(
+        runtime
+        .db()
+        .catalog_model_snapshot()
+        .collections
+        .iter()
+        .find(|descriptor| descriptor.name == collection)
+        .map(|descriptor| descriptor.declared_model.unwrap_or(descriptor.model)),
+        Some(crate::catalog::CollectionModel::Graph | crate::catalog::CollectionModel::Mixed)
+    )
+}
+
+pub(crate) fn bulk_insert_graph(
+    runtime: &RedDBRuntime,
+    collection: &str,
+    payloads: &[&json::Map<String, Value>],
+) -> crate::RedDBResult<Value> {
+    use crate::application::entity_payload::{parse_create_edge_input, parse_create_node_input};
+    use crate::application::ports::RuntimeEntityPort;
+
+    let mut ids = Vec::with_capacity(payloads.len());
+    for payload in payloads {
+        let input_payload = normalize_flat_graph_payload(payload);
+        let id = if payload.contains_key("from") || payload.contains_key("to") {
+            runtime
+                .create_edge(parse_create_edge_input(collection.to_string(), &input_payload)?)?
+                .id
+        } else {
+            runtime
+                .create_node(parse_create_node_input(collection.to_string(), &input_payload)?)?
+                .id
+        };
+        ids.push(Value::Number(id.raw() as f64));
+    }
+
+    let mut out = json::Map::new();
+    out.insert("affected".to_string(), Value::Number(ids.len() as f64));
+    out.insert("ids".to_string(), Value::Array(ids));
+    Ok(Value::Object(out))
+}
+
+fn normalize_flat_graph_payload(payload: &json::Map<String, Value>) -> Value {
+    if payload.contains_key("properties") || payload.contains_key("fields") {
+        return Value::Object(payload.clone());
+    }
+
+    let is_edge = payload.contains_key("from") || payload.contains_key("to");
+    let mut normalized = payload.clone();
+    let mut properties = json::Map::new();
+    for (key, value) in payload {
+        let reserved = if is_edge {
+            matches!(
+                key.as_str(),
+                "label"
+                    | "from"
+                    | "to"
+                    | "weight"
+                    | "metadata"
+                    | "properties"
+                    | "fields"
+                    | "_ttl_ms"
+                    | "_expires_at"
+            )
+        } else {
+            matches!(
+                key.as_str(),
+                "label"
+                    | "node_type"
+                    | "metadata"
+                    | "links"
+                    | "embeddings"
+                    | "properties"
+                    | "fields"
+                    | "_ttl_ms"
+                    | "_expires_at"
+            )
+        };
+        if !reserved {
+            properties.insert(key.clone(), value.clone());
+        }
+    }
+    if !properties.is_empty() {
+        normalized.insert("properties".to_string(), Value::Object(properties));
+    }
+    Value::Object(normalized)
 }
 
 pub(crate) fn value_to_sql_literal(v: &Value) -> String {
@@ -1962,6 +2069,75 @@ mod tests {
             let commit = call(r#"{"jsonrpc":"2.0","id":3,"method":"tx.commit","params":null}"#);
             assert!(commit.contains("\"ops_replayed\":3"));
         });
+    }
+
+    #[test]
+    fn bulk_insert_graph_nodes_accepts_flat_rows_and_returns_ids() {
+        let rt = make_runtime();
+        let _ = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{"sql":"CREATE GRAPH social"}}"#,
+        );
+
+        let resp = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":2,"method":"bulk_insert","params":{"collection":"social","payloads":[{"label":"User","name":"alice"},{"label":"User","name":"bob"}]}}"#,
+        );
+        let envelope: Value = json::from_str(&resp).expect("json response");
+        let result = envelope.get("result").expect("result");
+        assert_eq!(result.get("affected").and_then(Value::as_u64), Some(2));
+        assert_eq!(
+            result
+                .get("ids")
+                .and_then(Value::as_array)
+                .map(|ids| ids.len()),
+            Some(2)
+        );
+
+        let query = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":3,"method":"query","params":{"sql":"MATCH (n:User) RETURN n.name"}}"#,
+        );
+        assert!(query.contains("\"alice\""), "got: {query}");
+        assert!(query.contains("\"bob\""), "got: {query}");
+    }
+
+    #[test]
+    fn bulk_insert_graph_edges_accepts_flat_rows_and_returns_ids() {
+        let rt = make_runtime();
+        let _ = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{"sql":"CREATE GRAPH network"}}"#,
+        );
+        let nodes = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":2,"method":"bulk_insert","params":{"collection":"network","payloads":[{"label":"Host","name":"app"},{"label":"Host","name":"db"}]}}"#,
+        );
+        let envelope: Value = json::from_str(&nodes).expect("node response");
+        let ids = envelope
+            .get("result")
+            .and_then(|r| r.get("ids"))
+            .and_then(Value::as_array)
+            .expect("node ids");
+        let from = ids[0].as_u64().expect("from id");
+        let to = ids[1].as_u64().expect("to id");
+
+        let resp = handle(
+            &rt,
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":3,"method":"bulk_insert","params":{{"collection":"network","payloads":[{{"label":"connects","from":{from},"to":{to},"weight":0.5,"role":"primary"}}]}}}}"#
+            ),
+        );
+        let envelope: Value = json::from_str(&resp).expect("edge response");
+        let result = envelope.get("result").expect("result");
+        assert_eq!(result.get("affected").and_then(Value::as_u64), Some(1));
+        assert_eq!(
+            result
+                .get("ids")
+                .and_then(Value::as_array)
+                .map(|ids| ids.len()),
+            Some(1)
+        );
     }
 
     #[test]

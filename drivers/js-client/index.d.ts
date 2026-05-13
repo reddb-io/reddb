@@ -31,7 +31,7 @@ export interface QueryResult {
 }
 
 export interface InsertResult { affected: number; id?: string | number }
-export interface BulkInsertResult { affected: number }
+export interface BulkInsertResult { affected: number; ids?: Array<string | number> }
 export interface GetResult { entity: Record<string, unknown> | null }
 export interface DeleteResult { affected: number }
 export interface HealthResult { ok: boolean; version: string }
