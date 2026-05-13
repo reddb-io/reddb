@@ -226,6 +226,8 @@ export class KvClient {
     value: unknown,
     options?: { collection?: string; expireMs?: number; tags?: string[] },
   ): Promise<QueryResult>
+  get(key: string, options?: { collection?: string }): Promise<unknown | null>
+  getMany(keys: string[], options?: { collection?: string }): Promise<Array<unknown | null>>
   invalidateTags(tags: string[], options?: { collection?: string }): Promise<number>
   watch(
     key: string,
