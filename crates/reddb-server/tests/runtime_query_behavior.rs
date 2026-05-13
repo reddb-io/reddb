@@ -18,6 +18,33 @@ fn text_at<'a>(result: &'a RuntimeQueryResult, row: usize, column: &str) -> &'a 
     }
 }
 
+fn insert_graph_node(rt: &RedDBRuntime, label: &str, name: &str) -> u64 {
+    let res = rt
+        .execute_query(&format!(
+            "INSERT INTO tales NODE (label, name) VALUES ('{label}', '{name}') RETURNING *"
+        ))
+        .expect("insert graph node");
+    match res.result.records[0].get("red_entity_id") {
+        Some(Value::UnsignedInteger(value)) => *value,
+        Some(Value::Integer(value)) => *value as u64,
+        other => panic!("expected graph node id, got {other:?}"),
+    }
+}
+
+fn sorted_text_column(result: &RuntimeQueryResult, column: &str) -> Vec<String> {
+    let mut values: Vec<String> = result
+        .result
+        .records
+        .iter()
+        .map(|record| match record.get(column) {
+            Some(Value::Text(value)) => value.as_ref().to_string(),
+            other => panic!("expected text column {column}, got {other:?}"),
+        })
+        .collect();
+    values.sort();
+    values
+}
+
 #[test]
 fn join_query_executes_against_real_table_rows() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
@@ -626,6 +653,86 @@ fn match_return_whole_node_surfaces_property_bag() {
         })
         .expect("RETURN n must surface property 'name'");
     assert_eq!(name, "Cinderella");
+}
+
+#[test]
+fn match_edge_expansion_honors_label_and_direction() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    let alice = insert_graph_node(&rt, "alice", "Alice");
+    let bob = insert_graph_node(&rt, "bob", "Bob");
+    let clara = insert_graph_node(&rt, "clara", "Clara");
+    let dave = insert_graph_node(&rt, "dave", "Dave");
+
+    rt.execute_query(&format!(
+        "INSERT INTO tales EDGE (label, from, to) VALUES \
+         ('likes', {alice}, {bob}), ('likes', {clara}, {alice}), ('hates', {alice}, {dave})"
+    ))
+    .expect("insert graph edges");
+
+    let outgoing = rt
+        .execute_query("MATCH (a)-[:likes]->(b) WHERE a.name = 'Alice' RETURN b.name")
+        .expect("outgoing MATCH executes");
+    assert_eq!(sorted_text_column(&outgoing, "b.name"), vec!["Bob"]);
+
+    let incoming = rt
+        .execute_query("MATCH (a)<-[:likes]-(b) WHERE a.name = 'Alice' RETURN b.name")
+        .expect("incoming MATCH executes");
+    assert_eq!(sorted_text_column(&incoming, "b.name"), vec!["Clara"]);
+
+    let undirected = rt
+        .execute_query("MATCH (a)-[:likes]-(b) WHERE a.name = 'Alice' RETURN b.name")
+        .expect("undirected MATCH executes");
+    assert_eq!(
+        sorted_text_column(&undirected, "b.name"),
+        vec!["Bob", "Clara"]
+    );
+}
+
+#[test]
+fn match_unlabeled_edge_returns_all_direct_pairs() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    let alice = insert_graph_node(&rt, "alice", "Alice");
+    let bob = insert_graph_node(&rt, "bob", "Bob");
+    let clara = insert_graph_node(&rt, "clara", "Clara");
+
+    rt.execute_query(&format!(
+        "INSERT INTO tales EDGE (label, from, to) VALUES \
+         ('likes', {alice}, {bob}), ('hates', {alice}, {clara})"
+    ))
+    .expect("insert graph edges");
+
+    let res = rt
+        .execute_query("MATCH (a)-[]->(b) WHERE a.name = 'Alice' RETURN b.name")
+        .expect("unlabeled MATCH executes");
+    assert_eq!(sorted_text_column(&res, "b.name"), vec!["Bob", "Clara"]);
+}
+
+#[test]
+fn match_return_edge_alias_projects_edge_properties() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    let alice = insert_graph_node(&rt, "alice", "Alice");
+    let bob = insert_graph_node(&rt, "bob", "Bob");
+
+    rt.execute_query(&format!(
+        "INSERT INTO tales EDGE (label, from, to) VALUES ('likes', {alice}, {bob})"
+    ))
+    .expect("insert graph edge");
+
+    let props = rt
+        .execute_query("MATCH (a)-[r:likes]->(b) RETURN r.label, r.source, r.target")
+        .expect("edge property projection executes");
+    assert_eq!(props.result.len(), 1);
+    assert_eq!(text_at(&props, 0, "r.label"), "likes");
+    assert_eq!(text_at(&props, 0, "r.source"), alice.to_string());
+    assert_eq!(text_at(&props, 0, "r.target"), bob.to_string());
+
+    let whole = rt
+        .execute_query("MATCH (a)-[r:likes]->(b) RETURN r")
+        .expect("whole edge projection executes");
+    assert_eq!(whole.result.len(), 1);
+    assert_eq!(text_at(&whole, 0, "r.label"), "likes");
+    assert_eq!(text_at(&whole, 0, "r.from"), alice.to_string());
+    assert_eq!(text_at(&whole, 0, "r.to"), bob.to_string());
 }
 
 // ── Issue #419: INSERT surfaces the engine-assigned entity id ───────────────
