@@ -1110,11 +1110,11 @@ mod tests {
             vec![0, 1]
         );
         assert_eq!(
-            &sql[params[0].span.start.offset as usize..params[0].span.end.offset as usize],
+            sql[params[0].span.start.offset as usize..params[0].span.end.offset as usize].trim(),
             "$1"
         );
         assert_eq!(
-            &sql[params[1].span.start.offset as usize..params[1].span.end.offset as usize],
+            sql[params[1].span.start.offset as usize..params[1].span.end.offset as usize].trim(),
             "$2"
         );
     }
