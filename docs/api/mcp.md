@@ -1,6 +1,6 @@
 # MCP (AI Agent Integration)
 
-RedDB includes a built-in [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that exposes 29 tools for AI agents. This allows LLMs and agent frameworks to interact with RedDB directly.
+RedDB includes a built-in [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that exposes 30 tools for AI agents. This allows LLMs and agent frameworks to interact with RedDB directly.
 
 ## Starting the MCP Server
 
@@ -40,6 +40,7 @@ The MCP server communicates over stdio using the MCP protocol, compatible with C
 
 | Tool | Description |
 |:-----|:------------|
+| `reddb.ask` | Grounded question-answering with citation markers and `sources_flat` URNs |
 | `reddb_search_vector` | Similarity search by vector |
 | `reddb_search_text` | Full-text search across collections |
 
@@ -115,6 +116,54 @@ Vector binding for similarity search:
 `params` accepts a JSON array of `null`, booleans, numbers, strings, and
 number arrays (which bind as vectors). Indices are 1-based in SQL (`$1`)
 and 0-based in the array. Arity and gap errors surface as MCP tool errors.
+
+### Grounded ASK
+
+Use `reddb.ask` when an agent needs an answer grounded in RedDB data. The
+tool returns the canonical ASK envelope: `answer`, `sources_flat`,
+`citations`, `validation`, `cache_hit`, provider/model metadata, token counts,
+and `cost_usd`. Every factual claim in `answer` is expected to cite a marker
+like `[^1]`; that marker maps to `sources_flat[0].urn`.
+
+```json
+{
+  "tool": "reddb.ask",
+  "arguments": {
+    "question": "Which incident mentions passport PT-002?",
+    "options": {
+      "strict": true,
+      "limit": 5,
+      "min_score": 0.2,
+      "depth": 1
+    }
+  }
+}
+```
+
+Provider, model, determinism, and cache controls mirror the SQL ASK clauses:
+
+```json
+{
+  "tool": "reddb.ask",
+  "arguments": {
+    "question": "Summarize source-backed escalations for FDD-12313",
+    "options": {
+      "using": "ollama",
+      "model": "mock-ask",
+      "temperature": 0,
+      "seed": 42,
+      "cache": { "ttl": "5m" }
+    }
+  }
+}
+```
+
+`cache` and `"nocache": true` are accepted and validated for API parity, and
+they are mutually exclusive. The current MCP transport preserves the runtime's
+conservative non-cache behavior (`cache_hit: false`) until the dedicated ASK
+cache backend wiring lands. MCP progressive-response streaming is not enabled
+yet; `reddb.ask` currently returns the full non-streaming ASK response as one
+tool result.
 
 ### Insert a Row
 
