@@ -272,6 +272,13 @@ impl SnapshotManager {
         self.state.read().active.iter().copied().min()
     }
 
+    /// Oldest externally pinned xid. Pinned snapshots behave like active
+    /// snapshots for VACUUM: any tuple visible to that xid must survive even
+    /// when no SQL transaction is currently active.
+    pub fn oldest_pinned_xid(&self) -> Option<Xid> {
+        self.state.read().pinned.keys().copied().min()
+    }
+
     /// Return the next xid that would be allocated. Useful for diagnostics
     /// and for VACUUM to know the upper bound of aborted-xid retention.
     pub fn peek_next_xid(&self) -> Xid {

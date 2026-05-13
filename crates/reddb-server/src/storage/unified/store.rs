@@ -213,6 +213,29 @@ pub struct NativeCatalogSummary {
     pub collections: Vec<NativeCatalogCollectionSummary>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MvccVacuumStats {
+    pub scanned_versions: u64,
+    pub retained_versions: u64,
+    pub reclaimed_versions: u64,
+    pub retained_history_versions: u64,
+    pub reclaimed_history_versions: u64,
+    pub retained_tombstones: u64,
+    pub reclaimed_tombstones: u64,
+}
+
+impl MvccVacuumStats {
+    pub fn add(&mut self, other: &Self) {
+        self.scanned_versions += other.scanned_versions;
+        self.retained_versions += other.retained_versions;
+        self.reclaimed_versions += other.reclaimed_versions;
+        self.retained_history_versions += other.retained_history_versions;
+        self.reclaimed_history_versions += other.reclaimed_history_versions;
+        self.retained_tombstones += other.retained_tombstones;
+        self.reclaimed_tombstones += other.reclaimed_tombstones;
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeMetadataStateSummary {
     pub protocol_version: String,
