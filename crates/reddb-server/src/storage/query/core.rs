@@ -751,7 +751,7 @@ pub struct DropIndexQuery {
 }
 
 /// ASK 'question' [USING provider] [MODEL 'model'] [DEPTH n] [LIMIT n] [MIN_SCORE x]
-///                [COLLECTION col] [TEMPERATURE x] [SEED n] [STRICT ON|OFF]
+///                [COLLECTION col] [TEMPERATURE x] [SEED n] [STRICT ON|OFF] [STREAM]
 ///
 /// `temperature` and `seed` are per-query overrides resolved by the
 /// `DeterminismDecider` (issue #400). The parser merely surfaces the
@@ -774,6 +774,8 @@ pub struct AskQuery {
     /// Strict citation validation is on by default. `STRICT OFF` keeps
     /// citation diagnostics as warnings and skips retry/error handling.
     pub strict: bool,
+    /// HTTP-only SSE response requested via `ASK '...' STREAM`.
+    pub stream: bool,
 }
 
 impl QueryExpr {
