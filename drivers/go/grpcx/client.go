@@ -87,6 +87,14 @@ func (c *Client) Ask(ctx context.Context, req *pb.AskRequest) (*pb.AskReply, err
 	return c.client.Ask(ctx, req)
 }
 
+func (c *Client) AskStream(ctx context.Context, req *pb.AskRequest) (pb.RedDb_AskStreamClient, error) {
+	if req == nil {
+		req = &pb.AskRequest{}
+	}
+	ctx = c.authContext(ctx)
+	return c.client.AskStream(ctx, req)
+}
+
 func (c *Client) Ping(ctx context.Context) error {
 	ctx = c.authContext(ctx)
 	_, err := c.client.Health(ctx, &pb.Empty{})

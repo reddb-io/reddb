@@ -8,6 +8,7 @@ service RedDb {
   rpc Health(Empty) returns (HealthReply);
   rpc Query(QueryRequest) returns (QueryReply);
   rpc Ask(AskRequest) returns (AskReply);
+  rpc AskStream(AskRequest) returns (stream AskStreamEvent);
 }
 
 message Empty {}
@@ -82,6 +83,28 @@ message AskReply {
   bool cache_hit = 10;
   string mode = 11;
   uint32 retry_count = 12;
+}
+
+message AskStreamEvent {
+  oneof event {
+    AskSources sources = 1;
+    AskAnswerToken answer_token = 2;
+    Validation validation = 3;
+    AskStreamError error = 4;
+  }
+}
+
+message AskSources {
+  string sources_flat_json = 1;
+}
+
+message AskAnswerToken {
+  string text = 1;
+}
+
+message AskStreamError {
+  uint32 code = 1;
+  string message = 2;
 }
 
 message Citation {
