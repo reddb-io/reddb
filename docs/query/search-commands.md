@@ -224,7 +224,11 @@ Each field in the response carries a specific role:
 
 ## ASK
 
-Ask natural-language questions against your data. RedDB retrieves relevant context from all collections and generates an answer using the configured LLM provider.
+Ask natural-language questions against your data. RedDB retrieves relevant
+context from all collections and generates an answer with inline `[^N]`
+citations. Markers map to the flat `sources_flat` array by position and carry
+stable URNs for UI deep-links. See
+[ADR 0013](../adr/0013-ask-grounding-citations.md) for the grounding contract.
 
 ```sql
 ASK 'what happened on host 10.0.0.1?' USING groq
@@ -241,7 +245,12 @@ ASK 'list all users with admin access' USING ollama MODEL 'llama3'
 | `MODEL 'name'` | No | Specific model to use (provider-dependent) |
 | `DEPTH n` | No | Graph traversal depth for context retrieval (default from config) |
 | `LIMIT n` | No | Maximum context results per structure type |
+| `MIN_SCORE x` | No | Minimum retrieval score before fusion |
 | `COLLECTION col` | No | Scope context retrieval to a specific collection |
+| `STRICT ON\|OFF` | No | Strict citation validation, on by default |
+| `STREAM` | No | HTTP/SSE token stream; transports without SSE return non-streaming rows |
+| `CACHE TTL '5m'` | No | Cache this answer for the supplied TTL |
+| `NOCACHE` | No | Bypass the global ASK cache default |
 
 ### Examples
 
@@ -256,7 +265,7 @@ ASK 'summarize all vulnerabilities' USING anthropic MODEL 'claude-sonnet-4-20250
 ASK 'what changed today?' COLLECTION audit_logs LIMIT 50
 
 -- All optional clauses combined
-ASK 'explain the network topology' USING ollama MODEL 'llama3' DEPTH 3 LIMIT 100 COLLECTION network
+ASK 'explain the network topology' USING ollama MODEL 'llama3' STRICT ON CACHE TTL '5m' DEPTH 3 LIMIT 100 COLLECTION network
 ```
 
 > [!TIP]
@@ -273,7 +282,7 @@ ASK executes a three-phase pipeline:
    - Matched entities grouped by type
    - Graph edges and cross-references between found entities
 
-3. **LLM Synthesis** — Sends the context + your question to the configured AI provider. The LLM generates a natural language answer citing which collections and entities its answer is based on.
+3. **LLM Synthesis** — Sends the context + your question to the configured AI provider. The LLM generates a natural-language answer with inline `[^N]` markers, and RedDB validates those markers against `sources_flat`.
 
 If no provider is configured, ASK returns an error. Configure one with:
 

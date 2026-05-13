@@ -1,16 +1,16 @@
 # RAG in 20 lines
 
 Retrieval-augmented generation against RedDB — ingest, embed, retrieve,
-and serve answers through the semantic cache, using only SQL. No
-Python, no LangChain, no separate vector database.
+and serve source-cited answers through `ASK`, using only SQL. No Python,
+no LangChain, no separate vector database.
 
 ## The pitch
 
 - **Ingest** text documents into a RedDB collection
 - **Embed** their contents via a configured provider (OpenAI, Ollama, …)
-- **Search** the closest documents for a user question
-- **Cache** the answer so the next identical question doesn't pay the
-  provider bill
+- **Ask** a natural-language question and get inline `[^N]` citations
+- **Cache** the answer with `CACHE TTL` so repeated questions do not pay
+  the provider bill
 
 Every step is a single SQL statement.
 
@@ -46,43 +46,56 @@ INSERT INTO kb (id, title, body, embedding)
 SELECT id, title, body, EMBED(body)
 FROM   ingest_staging;
 
--- 3. retrieve + answer
-WITH q AS (
-  SELECT EMBED('What does RedDB do?') AS emb
-)
-SELECT ML_CLASSIFY('answer_relevance', kb.embedding) AS relevant,
-       kb.title,
-       kb.body
-FROM   kb, q
-ORDER BY VECTOR_DISTANCE(kb.embedding, q.emb)
-LIMIT 3;
+-- 3. retrieve + answer with grounding
+ASK 'What does RedDB do?'
+  USING openai
+  STRICT ON
+  CACHE TTL '5m'
+  LIMIT 3;
 ```
 
-That's it. Three statements, end-to-end retrieval over your own data.
+That's it. Three statements, end-to-end retrieval over your own data. The ASK
+row contains `answer`, `sources_flat`, `citations`, `validation`, provider/model
+metadata, token counts, `cost_usd`, and `cache_hit`.
+
+Example shape:
+
+```json
+{
+  "answer": "RedDB is a multi-model database with native vectors and SQL access[^1].",
+  "sources_flat": [
+    {
+      "kind": "table",
+      "urn": "reddb:kb/1",
+      "content": "{\"title\":\"RedDB overview\",\"body\":\"...\"}",
+      "score": 0.92
+    }
+  ],
+  "citations": [
+    { "marker": 1, "span": [69, 73], "urn": "reddb:kb/1" }
+  ],
+  "validation": { "ok": true, "warnings": [], "errors": [] },
+  "provider": "openai",
+  "cache_hit": false
+}
+```
+
+See [ADR 0013](../adr/0013-ask-grounding-citations.md), from tracker
+[#392](https://github.com/reddb-io/reddb/issues/392), for the citation and URN
+contract behind this shape.
 
 ## Caching the answer
 
-`SEMANTIC_CACHE_GET` returns a previously cached response when the
-incoming question is close enough (cosine similarity above the
-configured threshold). `SEMANTIC_CACHE_PUT` writes one. Together they
-give you a semantic-deduplicated answer cache without touching Redis
-or a Python side-car:
+`ASK ... CACHE TTL` stores the grounded answer under a deterministic key that
+includes the question, provider, model, source fingerprint, temperature, seed,
+and tenant. Repeating the same question over stable data can return
+`cache_hit: true` without touching the provider:
 
 ```sql
--- miss → NULL, hit → the cached text
-SELECT SEMANTIC_CACHE_GET('qa-default', EMBED('What does RedDB do?')) AS cached;
-
--- populate after a successful LLM call
-SELECT SEMANTIC_CACHE_PUT(
-  'qa-default',
-  'What does RedDB do?',
-  'RedDB is an AI-first multi-model database …',
-  EMBED('What does RedDB do?')
-);
+ASK 'What does RedDB do?' USING openai STRICT ON CACHE TTL '5m' LIMIT 3;
 ```
 
-Next time the same (or near-identical) question arrives, the cache
-short-circuits the embed → retrieve → generate loop.
+Use `NOCACHE` to bypass a global cache default for a single call.
 
 ## Bringing your own model
 
@@ -111,11 +124,11 @@ every version when you're done.
 | You don't have to | Because |
 |-------------------|---------|
 | Stand up a vector DB | RedDB speaks vector search natively |
-| Wire a separate cache | `SEMANTIC_CACHE_*` is built in |
+| Wire a separate cache | `ASK ... CACHE TTL` is built in |
 | Pre-compute embeddings in Python | `EMBED()` is a SQL scalar |
 | Manage model state | `ML_CLASSIFY` / `ML_PREDICT_PROBA` read from
   the built-in model registry |
-| Deal with two data stores | The answer, the embeddings, and the cache
+| Deal with two data stores | The answer, citations, embeddings, and cache
   live in the same transaction domain |
 
 ## Gotchas

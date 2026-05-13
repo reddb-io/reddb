@@ -121,10 +121,25 @@ let hits = db
     )
     .await?;
 
+let ask = db
+    .query_with(
+        "ASK $1 USING openai STRICT ON CACHE TTL '5m' LIMIT 5",
+        &[Value::Text("why did deploy fail?".into())],
+    )
+    .await?;
+
 println!("{} rows, {} vector hits", rows.rows.len(), hits.rows.len());
 # Ok(())
 # }
 ```
+
+`ASK` returns the same grounded envelope in embedded mode as it does over HTTP,
+gRPC, MCP, and Postgres-wire: `answer`, `sources_flat`, `citations`,
+`validation`, `cache_hit`, provider/model metadata, token counts, and
+`cost_usd`. Inline `[^N]` markers in `answer` map to `sources_flat[N-1].urn`.
+See [ADR 0013](../adr/0013-ask-grounding-citations.md), created from
+[#392](https://github.com/reddb-io/reddb/issues/392), for the citation and URN
+contract.
 
 ### Vector similarity search
 
