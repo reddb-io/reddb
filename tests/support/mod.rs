@@ -1313,12 +1313,18 @@ fn normalized_row_collection(
                 .collect::<BTreeMap<_, _>>()
         })
         .collect::<Vec<_>>();
-    rows.sort_by_key(|row| {
-        row.get("id")
-            .cloned()
-            .or_else(|| row.get("key").cloned())
-            .or_else(|| row.get("series").cloned())
-            .unwrap_or_else(|| format!("{row:?}"))
+    rows.sort_by(|left, right| {
+        let left_key = left
+            .get("id")
+            .or_else(|| left.get("key"))
+            .or_else(|| left.get("series"));
+        let right_key = right
+            .get("id")
+            .or_else(|| right.get("key"))
+            .or_else(|| right.get("series"));
+        left_key
+            .cmp(&right_key)
+            .then_with(|| format!("{left:?}").cmp(&format!("{right:?}")))
     });
     rows
 }
@@ -1358,7 +1364,7 @@ fn normalized_kv_collection(rt: &RedDBRuntime, collection: &str) -> Vec<(String,
             (key, value)
         })
         .collect::<Vec<_>>();
-    items.sort_by(|left, right| left.0.cmp(&right.0));
+    items.sort();
     items
 }
 
