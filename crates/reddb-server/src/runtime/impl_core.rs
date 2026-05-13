@@ -1659,10 +1659,13 @@ fn strip_explain_prefix(sql: &str) -> Option<&str> {
     if rest.is_empty() {
         return None;
     }
-    // Peek the next token — if ALTER, defer to the existing
-    // EXPLAIN ALTER FOR path.
+    // Peek the next token — if ALTER or ASK, defer to the normal parser.
+    // `EXPLAIN ASK` is an executable read path: it runs retrieval and
+    // provider selection, then short-circuits before the LLM call.
     let next_head_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
-    if rest[..next_head_end].eq_ignore_ascii_case("ALTER") {
+    if rest[..next_head_end].eq_ignore_ascii_case("ALTER")
+        || rest[..next_head_end].eq_ignore_ascii_case("ASK")
+    {
         return None;
     }
     Some(rest)

@@ -192,7 +192,9 @@ proptest! {
 // surface as a test failure (with the exact AST shape printed),
 // not a runtime regression three layers deep.
 
-use reddb_server::storage::query::ast::{EdgeDirection, GraphCommand, NodeSelector, QueryExpr};
+use reddb_server::storage::query::ast::{
+    EdgeDirection, GraphCommand, GraphCommandOrderBy, NodeSelector, QueryExpr,
+};
 
 fn parse_query(input: &str) -> QueryExpr {
     parser::parse(input)
@@ -379,14 +381,83 @@ fn graph_shortest_path_from_to_form_parses() {
 }
 
 #[test]
+fn graph_shortest_path_limit_parses() {
+    let q = parse_query("GRAPH SHORTEST_PATH FROM 'a' TO 'b' LIMIT 0");
+    match q {
+        QueryExpr::GraphCommand(GraphCommand::ShortestPath {
+            source,
+            target,
+            limit,
+            ..
+        }) => {
+            assert_eq!(source, "a");
+            assert_eq!(target, "b");
+            assert_eq!(limit, Some(0));
+        }
+        other => panic!("expected ShortestPath, got {other:?}"),
+    }
+}
+
+#[test]
 fn graph_components_limit_parses() {
     let q = parse_query("GRAPH COMPONENTS MODE weak LIMIT 2");
     match q {
-        QueryExpr::GraphCommand(GraphCommand::Components { mode, limit }) => {
+        QueryExpr::GraphCommand(GraphCommand::Components {
+            mode,
+            limit,
+            order_by,
+        }) => {
             assert_eq!(mode, "weak");
             assert_eq!(limit, Some(2));
+            assert!(order_by.is_none());
         }
         other => panic!("expected Components, got {other:?}"),
+    }
+}
+
+#[test]
+fn graph_community_order_by_size_limit_parses() {
+    let q = parse_query("GRAPH COMMUNITY ALGORITHM louvain ORDER BY size DESC LIMIT 5");
+    match q {
+        QueryExpr::GraphCommand(GraphCommand::Community {
+            algorithm,
+            max_iterations,
+            limit,
+            order_by:
+                Some(GraphCommandOrderBy {
+                    metric,
+                    ascending,
+                }),
+        }) => {
+            assert_eq!(algorithm, "louvain");
+            assert_eq!(max_iterations, 100);
+            assert_eq!(metric, "size");
+            assert!(!ascending);
+            assert_eq!(limit, Some(5));
+        }
+        other => panic!("expected Community with ORDER BY size DESC LIMIT 5, got {other:?}"),
+    }
+}
+
+#[test]
+fn graph_components_order_by_component_size_asc_limit_parses() {
+    let q = parse_query("GRAPH COMPONENTS MODE weak ORDER BY component_size ASC LIMIT 2");
+    match q {
+        QueryExpr::GraphCommand(GraphCommand::Components {
+            mode,
+            limit,
+            order_by:
+                Some(GraphCommandOrderBy {
+                    metric,
+                    ascending,
+                }),
+        }) => {
+            assert_eq!(mode, "weak");
+            assert_eq!(metric, "component_size");
+            assert!(ascending);
+            assert_eq!(limit, Some(2));
+        }
+        other => panic!("expected Components with ORDER BY component_size ASC LIMIT 2, got {other:?}"),
     }
 }
 

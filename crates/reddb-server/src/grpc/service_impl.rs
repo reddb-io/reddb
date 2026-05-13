@@ -2352,6 +2352,7 @@ impl RedDb for GrpcRuntime {
             .ok_or_else(|| Status::invalid_argument("field 'question' must be a string"))?;
 
         let ask_query = crate::storage::query::ast::AskQuery {
+            explain: false,
             question: question.to_string(),
             provider: payload
                 .get("provider")

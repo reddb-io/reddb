@@ -440,6 +440,23 @@ impl<'a> Parser<'a> {
     /// Parse: ASK 'question' [USING provider] [MODEL 'model'] [DEPTH n]
     /// [LIMIT n] [MIN_SCORE x] [COLLECTION col]
     pub fn parse_ask_query(&mut self) -> Result<QueryExpr, ParseError> {
+        self.parse_ask_query_with_explain(false)
+    }
+
+    /// Parse: EXPLAIN ASK 'question' ...
+    pub fn parse_explain_ask_query(&mut self) -> Result<QueryExpr, ParseError> {
+        self.advance()?; // consume EXPLAIN
+        if !matches!(self.peek(), Token::Ident(name) if name.eq_ignore_ascii_case("ASK")) {
+            return Err(ParseError::expected(
+                vec!["ASK"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        self.parse_ask_query_with_explain(true)
+    }
+
+    fn parse_ask_query_with_explain(&mut self, explain: bool) -> Result<QueryExpr, ParseError> {
         self.advance()?; // consume ASK
 
         let question = self.parse_string()?;
@@ -497,6 +514,7 @@ impl<'a> Parser<'a> {
         }
 
         Ok(QueryExpr::Ask(AskQuery {
+            explain,
             question,
             provider,
             model,

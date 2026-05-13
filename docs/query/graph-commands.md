@@ -59,6 +59,7 @@ Find the shortest path between two nodes:
 
 ```sql
 GRAPH SHORTEST_PATH FROM 'alice' TO 'charlie' ALGORITHM dijkstra
+GRAPH SHORTEST_PATH FROM 'alice' TO 'charlie' ORDER BY hop_count ASC LIMIT 1
 ```
 
 Algorithms:
@@ -67,15 +68,22 @@ Algorithms:
 - `astar`: heuristic-guided search; the generic runtime currently uses a null heuristic
 - `bellman_ford`: supports negative weights and detects negative cycles
 
+Ordering metrics: `hop_count`, `total_weight`, `nodes_visited`.
+
 ## GRAPH CENTRALITY
 
 Compute centrality scores:
 
 ```sql
 GRAPH CENTRALITY ALGORITHM pagerank
+GRAPH CENTRALITY ALGORITHM pagerank ORDER BY centrality_score DESC LIMIT 10
 ```
 
 Algorithms: `degree`, `closeness`, `betweenness`, `eigenvector`, `pagerank`.
+
+`GRAPH CENTRALITY` keeps the historical implicit top-100 cap when `LIMIT`
+is omitted. Use `LIMIT N` to choose a different cap, or `LIMIT 0` to return
+no rows. Ordering metrics: `score`, `centrality_score`.
 
 ## GRAPH COMMUNITY
 
@@ -83,9 +91,12 @@ Detect communities in the graph:
 
 ```sql
 GRAPH COMMUNITY ALGORITHM louvain MAX_ITERATIONS 100
+GRAPH COMMUNITY ALGORITHM louvain ORDER BY size DESC LIMIT 5
 ```
 
 Algorithms: `louvain`, `label_propagation`.
+
+Ordering metrics: `size`, `community_size`.
 
 ## GRAPH COMPONENTS
 
@@ -93,9 +104,12 @@ Find connected components:
 
 ```sql
 GRAPH COMPONENTS MODE weakly_connected
+GRAPH COMPONENTS MODE weakly_connected ORDER BY component_size DESC LIMIT 20
 ```
 
 Modes: `weakly_connected`, `strongly_connected`.
+
+Ordering metrics: `size`, `component_size`.
 
 ## GRAPH CYCLES
 

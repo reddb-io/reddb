@@ -221,6 +221,60 @@ test('cache.flushNamespace POSTs to /admin/blob_cache/flush_namespace', async ()
   }
 })
 
+test('cache methods throw UNSUPPORTED_TRANSPORT on embedded transport', async () => {
+  const { CacheClient } = await import('../src/cache.js')
+  const calls = []
+  const fakeClient = {
+    call(method, params) {
+      calls.push({ method, params })
+      return Promise.resolve(null)
+    },
+  }
+  const cache = new CacheClient(fakeClient, 'embedded')
+  const methods = [
+    () => cache.get('ns', 'k'),
+    () => cache.put('ns', 'k', 'v'),
+    () => cache.exists('ns', 'k'),
+    () => cache.invalidate('ns', 'k'),
+    () => cache.invalidatePrefix('ns', 'p'),
+    () => cache.invalidateTags('ns', ['t']),
+    () => cache.flushNamespace('ns'),
+  ]
+  for (const fn of methods) {
+    await assert.rejects(fn(), (err) => {
+      assert.equal(err.name, 'RedDBError')
+      assert.equal(err.code, 'UNSUPPORTED_TRANSPORT')
+      assert.match(err.message, /embedded/)
+      return true
+    })
+  }
+  assert.equal(calls.length, 0, 'no RPC calls should be issued')
+})
+
+test('cache methods pass through on http transport (no guard)', async () => {
+  const { CacheClient } = await import('../src/cache.js')
+  const calls = []
+  const fakeClient = {
+    call(method, params) {
+      calls.push({ method, params })
+      if (method === 'cache.get') return Promise.resolve({ value: null })
+      if (method === 'cache.exists') return Promise.resolve({ status: 'absent' })
+      if (method === 'cache.invalidate_prefix') return Promise.resolve({ removed: 0 })
+      if (method === 'cache.invalidate_tags') return Promise.resolve({ removed: 0 })
+      return Promise.resolve(null)
+    },
+  }
+  const cache = new CacheClient(fakeClient, 'http')
+  await cache.get('ns', 'k')
+  await cache.put('ns', 'k', 'v')
+  await cache.exists('ns', 'k')
+  await cache.invalidate('ns', 'k')
+  await cache.invalidatePrefix('ns', 'p')
+  await cache.invalidateTags('ns', ['t'])
+  await cache.flushNamespace('ns')
+  assert.equal(calls.length, 7)
+})
+
 test('db.cache is a CacheClient instance', async () => {
   const { CacheClient } = await import('../src/cache.js')
   const stub = await startMockServer({

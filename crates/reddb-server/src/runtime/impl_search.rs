@@ -1166,6 +1166,17 @@ impl RedDBRuntime {
         let sources_count = source_urns.len();
 
         let settings = self.ask_cost_guard_settings();
+        if ask.explain {
+            return self.execute_explain_ask(
+                raw_query,
+                ask,
+                &ask_context,
+                &full_prompt,
+                &source_urns,
+                &settings,
+            );
+        }
+
         let usage = crate::runtime::ai::cost_guard::Usage {
             prompt_tokens: estimate_prompt_tokens(&full_prompt),
             sources_bytes: saturating_u32(sources_flat_bytes.len()),
@@ -1375,6 +1386,110 @@ impl RedDBRuntime {
             query: raw_query.to_string(),
             mode: QueryMode::Sql,
             statement: "ask",
+            engine: "runtime-ai",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+        })
+    }
+
+    fn execute_explain_ask(
+        &self,
+        raw_query: &str,
+        ask: &crate::storage::query::ast::AskQuery,
+        ask_context: &crate::runtime::ask_pipeline::AskContext,
+        full_prompt: &str,
+        source_urns: &[String],
+        settings: &crate::runtime::ai::cost_guard::Settings,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self);
+        let provider_names =
+            self.ask_provider_failover_names(ask.provider.as_deref(), &default_provider)?;
+        let provider_name = provider_names
+            .first()
+            .ok_or_else(|| RedDBError::Query("ASK provider list is empty".to_string()))?;
+        let provider = crate::ai::parse_provider(provider_name)?;
+        let provider_token = provider.token().to_string();
+        let model = ask.model.clone().unwrap_or(default_model);
+        let registry = self.ask_provider_capability_registry(&provider_token);
+        let capabilities = registry.capabilities(&provider_token);
+        let requested_mode = if ask.strict {
+            crate::runtime::ai::strict_validator::Mode::Strict
+        } else {
+            crate::runtime::ai::strict_validator::Mode::Lenient
+        };
+        let effective_mode = registry
+            .evaluate_mode(&provider_token, requested_mode)
+            .effective();
+
+        let source_versions: Vec<crate::runtime::ai::sources_fingerprint::Source<'_>> = source_urns
+            .iter()
+            .map(|urn| crate::runtime::ai::sources_fingerprint::Source {
+                urn,
+                content_version: explain_source_version(ask_context, urn),
+            })
+            .collect();
+        let sources_fingerprint =
+            crate::runtime::ai::sources_fingerprint::fingerprint(&source_versions);
+        let determinism = crate::runtime::ai::determinism_decider::decide(
+            crate::runtime::ai::determinism_decider::Inputs {
+                question: &ask.question,
+                sources_fingerprint: &sources_fingerprint,
+            },
+            capabilities,
+            crate::runtime::ai::determinism_decider::Overrides {
+                temperature: ask.temperature,
+                seed: ask.seed,
+            },
+            crate::runtime::ai::determinism_decider::Settings {
+                default_temperature: self.config_f64("ask.default_temperature", 0.0) as f32,
+            },
+        );
+
+        let row_cap = ask
+            .limit
+            .unwrap_or(crate::runtime::ask_pipeline::DEFAULT_ROW_CAP);
+        let retrieval = explain_retrieval_plan(row_cap, ask.min_score);
+        let planned_sources = explain_planned_sources(ask_context);
+        let provider = crate::runtime::ai::explain_plan_builder::ProviderSelection {
+            name: provider_token,
+            model,
+            supports_citations: capabilities.supports_citations,
+            supports_seed: capabilities.supports_seed,
+        };
+        let plan = crate::runtime::ai::explain_plan_builder::build(
+            &crate::runtime::ai::explain_plan_builder::Inputs {
+                question: &ask.question,
+                mode: explain_mode(effective_mode),
+                retrieval: &retrieval,
+                fusion_limit: row_cap.min(u32::MAX as usize) as u32,
+                fusion_k_constant: crate::runtime::ai::rrf_fuser::RRF_K_DEFAULT,
+                depth: ask
+                    .depth
+                    .unwrap_or(crate::runtime::ai::mcp_ask_tool::DEPTH_DEFAULT as usize)
+                    .min(u32::MAX as usize) as u32,
+                sources: &planned_sources,
+                provider: &provider,
+                determinism: crate::runtime::ai::explain_plan_builder::Determinism {
+                    temperature: determinism.temperature,
+                    seed: determinism.seed,
+                },
+                estimated_cost: crate::runtime::ai::explain_plan_builder::EstimatedCost {
+                    prompt_tokens: estimate_prompt_tokens(full_prompt),
+                    max_completion_tokens: settings.max_completion_tokens,
+                },
+            },
+        );
+
+        let mut result = UnifiedResult::with_columns(vec!["plan".into()]);
+        let mut record = UnifiedRecord::new();
+        record.set("plan", Value::Json(plan.to_string_compact().into_bytes()));
+        result.push(record);
+
+        Ok(RuntimeQueryResult {
+            query: raw_query.to_string(),
+            mode: QueryMode::Sql,
+            statement: "explain_ask",
             engine: "runtime-ai",
             result,
             affected_rows: 0,
@@ -2063,6 +2178,80 @@ fn build_sources_flat(
         }
     }
     (crate::json::Value::Array(arr), urns)
+}
+
+fn explain_retrieval_plan(
+    row_cap: usize,
+    min_score: Option<f32>,
+) -> Vec<crate::runtime::ai::explain_plan_builder::BucketPlan> {
+    let top_k = row_cap.min(u32::MAX as usize) as u32;
+    vec![
+        crate::runtime::ai::explain_plan_builder::BucketPlan {
+            bucket: "bm25".to_string(),
+            top_k,
+            min_score: 0.0,
+        },
+        crate::runtime::ai::explain_plan_builder::BucketPlan {
+            bucket: "vector".to_string(),
+            top_k,
+            min_score: min_score.unwrap_or(0.0),
+        },
+        crate::runtime::ai::explain_plan_builder::BucketPlan {
+            bucket: "graph".to_string(),
+            top_k,
+            min_score: 0.0,
+        },
+    ]
+}
+
+fn explain_planned_sources(
+    ctx: &crate::runtime::ask_pipeline::AskContext,
+) -> Vec<crate::runtime::ai::explain_plan_builder::PlannedSource> {
+    use crate::runtime::ai::urn_codec::{encode, Urn};
+
+    crate::runtime::ask_pipeline::fused_sources(ctx)
+        .into_iter()
+        .map(|fused| {
+            let urn = match fused.source {
+                crate::runtime::ask_pipeline::FusedSourceRef::FilteredRow(idx) => {
+                    let row = &ctx.filtered_rows[idx];
+                    encode(&Urn::row(
+                        row.collection.clone(),
+                        row.entity.id.raw().to_string(),
+                    ))
+                }
+                crate::runtime::ask_pipeline::FusedSourceRef::VectorHit(idx) => {
+                    let hit = &ctx.vector_hits[idx];
+                    encode(&Urn::vector_hit(
+                        hit.collection.clone(),
+                        hit.entity_id.to_string(),
+                        hit.score,
+                    ))
+                }
+            };
+            crate::runtime::ai::explain_plan_builder::PlannedSource {
+                urn,
+                rrf_score: fused.rrf_score,
+            }
+        })
+        .collect()
+}
+
+fn explain_source_version(_ctx: &crate::runtime::ask_pipeline::AskContext, _urn: &str) -> u64 {
+    0
+}
+
+fn explain_mode(
+    mode: crate::runtime::ai::strict_validator::Mode,
+) -> crate::runtime::ai::explain_plan_builder::Mode {
+    match mode {
+        crate::runtime::ai::strict_validator::Mode::Strict => {
+            crate::runtime::ai::explain_plan_builder::Mode::Strict
+        }
+        crate::runtime::ai::strict_validator::Mode::Lenient => {
+            crate::runtime::ai::explain_plan_builder::Mode::Lenient
+        }
+    }
 }
 
 /// Issue #393/#395: serialize structural citation validation as

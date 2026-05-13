@@ -6,13 +6,37 @@
  * flushNamespace routes to the existing POST /admin/blob_cache/flush_namespace.
  * All others target endpoints planned for a future server release.
  *
+ * Requires an HTTP or gRPC transport. On embedded (stdio JSON-RPC), every
+ * method throws `UNSUPPORTED_TRANSPORT` before issuing the RPC call —
+ * the engine's stdio handler doesn't implement `cache.*`.
+ *
  * Values are base64-encoded in transit so binary payloads survive JSON.
  */
 
+import { RedDBError } from './protocol.js'
+
+const UNSUPPORTED_TRANSPORTS = new Set(['embedded'])
+
 export class CacheClient {
-  /** @param {{ call: Function }} client */
-  constructor(client) {
+  /**
+   * @param {{ call: Function }} client
+   * @param {string} [transport] Underlying transport label (e.g. 'http',
+   *   'grpc', 'embedded'). When the transport doesn't serve `cache.*`,
+   *   every method throws `UNSUPPORTED_TRANSPORT` before any RPC call.
+   */
+  constructor(client, transport) {
     this._client = client
+    this._transport = transport ?? null
+  }
+
+  _guard(method) {
+    if (this._transport && UNSUPPORTED_TRANSPORTS.has(this._transport)) {
+      throw new RedDBError(
+        'UNSUPPORTED_TRANSPORT',
+        `cache.${method} is not available on '${this._transport}' transport; `
+          + `connect via http(s)://, grpc(s):// or redwire(s):// instead.`,
+      )
+    }
   }
 
   /**
@@ -22,6 +46,7 @@ export class CacheClient {
    * @returns {Promise<Uint8Array | null>}
    */
   async get(namespace, key) {
+    this._guard('get')
     const result = await this._client.call('cache.get', { namespace, key })
     if (result == null || result.value == null) return null
     return base64ToBytes(result.value)
@@ -39,6 +64,7 @@ export class CacheClient {
    * @returns {Promise<void>}
    */
   async put(namespace, key, value, opts = {}) {
+    this._guard('put')
     const encoded = bytesToBase64(value)
     await this._client.call('cache.put', {
       namespace,
@@ -55,6 +81,7 @@ export class CacheClient {
    * @returns {Promise<'present' | 'absent' | 'maybe'>}
    */
   async exists(namespace, key) {
+    this._guard('exists')
     const result = await this._client.call('cache.exists', { namespace, key })
     return result?.status ?? 'maybe'
   }
@@ -66,6 +93,7 @@ export class CacheClient {
    * @returns {Promise<void>}
    */
   async invalidate(namespace, key) {
+    this._guard('invalidate')
     await this._client.call('cache.invalidate', { namespace, key })
   }
 
@@ -76,6 +104,7 @@ export class CacheClient {
    * @returns {Promise<number>} Number of entries removed.
    */
   async invalidatePrefix(namespace, prefix) {
+    this._guard('invalidatePrefix')
     const result = await this._client.call('cache.invalidate_prefix', { namespace, prefix })
     return result?.removed ?? 0
   }
@@ -87,6 +116,7 @@ export class CacheClient {
    * @returns {Promise<number>} Number of entries removed.
    */
   async invalidateTags(namespace, tags) {
+    this._guard('invalidateTags')
     const result = await this._client.call('cache.invalidate_tags', { namespace, tags })
     return result?.removed ?? 0
   }
@@ -98,6 +128,7 @@ export class CacheClient {
    * @returns {Promise<void>}
    */
   async flushNamespace(namespace) {
+    this._guard('flushNamespace')
     await this._client.call('cache.flush_namespace', { namespace })
   }
 }

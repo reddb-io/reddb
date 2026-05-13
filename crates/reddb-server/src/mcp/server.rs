@@ -323,6 +323,7 @@ impl McpServer {
         let invocation =
             crate::runtime::ai::mcp_ask_tool::parse(args).map_err(format_mcp_ask_parse_error)?;
         let ask = crate::storage::query::ast::AskQuery {
+            explain: false,
             question: invocation.question,
             provider: invocation.using,
             model: invocation.model,
