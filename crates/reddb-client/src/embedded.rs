@@ -15,7 +15,7 @@ use reddb_server::storage::schema::Value as SchemaValue;
 use reddb_server::RuntimeEntityPort;
 
 use crate::error::{ClientError, ErrorCode, Result};
-use crate::types::{InsertResult, JsonValue, QueryResult, ValueOut};
+use crate::types::{BulkInsertResult, InsertResult, JsonValue, QueryResult, ValueOut};
 
 /// In-process handle to a RedDB engine.
 pub struct EmbeddedClient {
@@ -122,9 +122,16 @@ impl EmbeddedClient {
     /// Heterogeneous payloads (rows with differing key sets) fall back to
     /// the per-row `execute_query` path so existing semantics are preserved
     /// for callers that mix shapes.
-    pub fn bulk_insert(&self, collection: &str, payloads: &[JsonValue]) -> Result<u64> {
+    pub fn bulk_insert(
+        &self,
+        collection: &str,
+        payloads: &[JsonValue],
+    ) -> Result<BulkInsertResult> {
         if payloads.is_empty() {
-            return Ok(0);
+            return Ok(BulkInsertResult {
+                affected: 0,
+                ids: Vec::new(),
+            });
         }
 
         // Validate every payload is a JSON object up-front. Mirrors the
@@ -156,25 +163,36 @@ impl EmbeddedClient {
                 }
                 rows.push(values);
             }
-            let count = self
-                .runtime
-                .create_rows_batch_columnar(collection.to_string(), Arc::new(column_names), rows)
-                .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
-            return Ok(count as u64);
+            let outputs = reddb_server::RuntimeEntityPort::create_rows_batch_columnar_with_outputs(
+                self.runtime.as_ref(),
+                collection.to_string(),
+                Arc::new(column_names),
+                rows,
+            )
+            .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
+            let ids = outputs
+                .iter()
+                .map(|output| output.id.raw().to_string())
+                .collect();
+            return Ok(BulkInsertResult {
+                affected: outputs.len() as u64,
+                ids,
+            });
         }
 
-        // Fallback: heterogeneous shapes. Per-row `execute_query` retains
-        // the old behaviour for mixed-key payloads.
-        let mut total = 0u64;
+        // Fallback: heterogeneous shapes. Per-row inserts retain existing
+        // semantics for mixed-key payloads while still surfacing generated ids.
+        let mut affected = 0u64;
+        let mut ids = Vec::with_capacity(objects.len());
         for object in &objects {
-            let sql = build_insert_sql(collection, object);
-            let qr = self
-                .runtime
-                .execute_query(&sql)
-                .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
-            total += qr.affected_rows;
+            let payload = JsonValue::Object(object.to_vec());
+            let result = self.insert(collection, &payload)?;
+            affected += result.affected;
+            if let Some(id) = result.id {
+                ids.push(id);
+            }
         }
-        Ok(total)
+        Ok(BulkInsertResult { affected, ids })
     }
 
     pub fn delete(&self, collection: &str, id: &str) -> Result<u64> {
@@ -241,38 +259,6 @@ fn json_value_to_schema_value(v: &JsonValue) -> SchemaValue {
         JsonValue::String(s) => SchemaValue::Text(std::sync::Arc::from(s.as_str())),
         JsonValue::Array(_) | JsonValue::Object(_) => {
             SchemaValue::Text(std::sync::Arc::from(v.to_json_string()))
-        }
-    }
-}
-
-fn build_insert_sql(collection: &str, object: &[(String, JsonValue)]) -> String {
-    let mut cols = Vec::new();
-    let mut vals = Vec::new();
-    for (k, v) in object {
-        cols.push(k.clone());
-        vals.push(value_to_sql_literal(v));
-    }
-    format!(
-        "INSERT INTO {collection} ({}) VALUES ({})",
-        cols.join(", "),
-        vals.join(", "),
-    )
-}
-
-fn value_to_sql_literal(v: &JsonValue) -> String {
-    match v {
-        JsonValue::Null => "NULL".to_string(),
-        JsonValue::Bool(b) => b.to_string(),
-        JsonValue::Number(n) => {
-            if n.fract() == 0.0 {
-                format!("{}", *n as i64)
-            } else {
-                n.to_string()
-            }
-        }
-        JsonValue::String(s) => format!("'{}'", s.replace('\'', "''")),
-        JsonValue::Array(_) | JsonValue::Object(_) => {
-            format!("'{}'", v.to_json_string().replace('\'', "''"))
         }
     }
 }

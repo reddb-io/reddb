@@ -93,11 +93,12 @@ async fn insert_dispatch_round_trip() {
         r.insert("age".into(), serde_json::Value::Number((20 + n).into()));
         rows.push(serde_json::Value::Object(r));
     }
-    let affected = client
+    let result = client
         .bulk_insert("smoke_users", rows)
         .await
         .expect("bulk_insert");
-    assert!(affected >= 3, "bulk insert affected at least 3 rows");
+    assert!(result.affected >= 3, "bulk insert affected at least 3 rows");
+    assert_eq!(result.ids.len(), 3, "bulk insert returned ids");
 
     client.close().await.expect("close");
 }

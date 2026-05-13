@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -78,6 +79,12 @@ type Conn struct {
 	username  string
 	role      string
 	features  uint32
+}
+
+// BulkInsertResult is the parsed BulkOk envelope returned by the server.
+type BulkInsertResult struct {
+	Affected uint64   `json:"affected"`
+	IDs      []string `json:"ids,omitempty"`
 }
 
 // Dial opens a TCP (or TLS) connection, performs the handshake, and returns a
@@ -572,43 +579,80 @@ func (c *Conn) Insert(ctx context.Context, collection string, payload any) error
 	if err != nil {
 		return fmt.Errorf("redwire: encode insert: %w", err)
 	}
-	return c.bulkInsertJSON(ctx, body)
+	_, err = c.bulkInsertJSON(ctx, body)
+	return err
 }
 
 // BulkInsert delivers a batch of rows.
-func (c *Conn) BulkInsert(ctx context.Context, collection string, rows []any) error {
+func (c *Conn) BulkInsert(ctx context.Context, collection string, rows []any) (*BulkInsertResult, error) {
 	body, err := json.Marshal(map[string]any{
 		"collection": collection,
 		"payloads":   rows,
 	})
 	if err != nil {
-		return fmt.Errorf("redwire: encode bulk_insert: %w", err)
+		return nil, fmt.Errorf("redwire: encode bulk_insert: %w", err)
 	}
 	return c.bulkInsertJSON(ctx, body)
 }
 
-func (c *Conn) bulkInsertJSON(ctx context.Context, body []byte) error {
+func (c *Conn) bulkInsertJSON(ctx context.Context, body []byte) (*BulkInsertResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed.Load() {
-		return errors.New("redwire: connection closed")
+		return nil, errors.New("redwire: connection closed")
 	}
 	cleanup := c.applyDeadline(ctx)
 	defer cleanup()
 	if err := c.writeFrame(NewFrame(KindBulkInsert, c.nextCorr(), body)); err != nil {
-		return err
+		return nil, err
 	}
 	resp, err := c.readFrame()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	switch resp.Kind {
 	case KindBulkOk:
-		return nil
+		result, err := parseBulkInsertResult(resp.Payload)
+		if err != nil {
+			return nil, fmt.Errorf("redwire: decode bulk_ok: %w", err)
+		}
+		return result, nil
 	case KindError:
-		return fmt.Errorf("redwire: bulk_insert: %s", string(resp.Payload))
+		return nil, fmt.Errorf("redwire: bulk_insert: %s", string(resp.Payload))
 	}
-	return fmt.Errorf("redwire: bulk_insert: unexpected kind 0x%02x", resp.Kind)
+	return nil, fmt.Errorf("redwire: bulk_insert: unexpected kind 0x%02x", resp.Kind)
+}
+
+func parseBulkInsertResult(payload []byte) (*BulkInsertResult, error) {
+	if len(payload) == 0 {
+		return &BulkInsertResult{}, nil
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(payload, &obj); err != nil {
+		return nil, err
+	}
+	result := &BulkInsertResult{}
+	switch v := obj["affected"].(type) {
+	case float64:
+		result.Affected = uint64(v)
+	case json.Number:
+		n, _ := v.Int64()
+		result.Affected = uint64(n)
+	}
+	if rawIDs, ok := obj["ids"].([]any); ok {
+		result.IDs = make([]string, 0, len(rawIDs))
+		for _, raw := range rawIDs {
+			switch id := raw.(type) {
+			case string:
+				result.IDs = append(result.IDs, id)
+			case float64:
+				result.IDs = append(result.IDs, strconv.FormatUint(uint64(id), 10))
+			case json.Number:
+				result.IDs = append(result.IDs, id.String())
+			}
+		}
+	}
+	return result, nil
 }
 
 // Get fetches one row by id. Returns the raw envelope bytes (`{ok, found, ...}`).

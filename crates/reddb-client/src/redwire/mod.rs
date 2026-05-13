@@ -38,7 +38,7 @@ pub(crate) trait AsyncReadWrite: AsyncRead + AsyncWrite {}
 impl<T: AsyncRead + AsyncWrite + ?Sized> AsyncReadWrite for T {}
 
 use crate::error::{ClientError, ErrorCode, Result};
-use crate::types::QueryResult;
+use crate::types::{BulkInsertResult, QueryResult};
 
 use codec::{decode_frame, encode_frame};
 use frame::FRAME_HEADER_SIZE;
@@ -265,7 +265,9 @@ impl RedWireClient {
             serde_json::Value::String(collection.to_string()),
         );
         obj.insert("payload".into(), payload);
-        self.send_insert_frame(serde_json::Value::Object(obj)).await
+        self.send_insert_frame(serde_json::Value::Object(obj))
+            .await
+            .map(|result| result.affected)
     }
 
     /// Bulk insert. Each entry in `payloads` is a JSON object.
@@ -273,7 +275,7 @@ impl RedWireClient {
         &mut self,
         collection: &str,
         payloads: Vec<serde_json::Value>,
-    ) -> Result<u64> {
+    ) -> Result<BulkInsertResult> {
         let mut obj = serde_json::Map::new();
         obj.insert(
             "collection".into(),
@@ -283,7 +285,7 @@ impl RedWireClient {
         self.send_insert_frame(serde_json::Value::Object(obj)).await
     }
 
-    async fn send_insert_frame(&mut self, body: serde_json::Value) -> Result<u64> {
+    async fn send_insert_frame(&mut self, body: serde_json::Value) -> Result<BulkInsertResult> {
         let bytes = serde_json::to_vec(&body)
             .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("encode insert: {e}")))?;
         let corr = self.next_corr();
@@ -298,12 +300,7 @@ impl RedWireClient {
                 let v: serde_json::Value = serde_json::from_slice(&resp.payload).map_err(|e| {
                     ClientError::new(ErrorCode::Protocol, format!("decode bulk_ok: {e}"))
                 })?;
-                let affected = v
-                    .as_object()
-                    .and_then(|o| o.get("affected"))
-                    .and_then(|x| x.as_u64())
-                    .unwrap_or(0);
-                Ok(affected)
+                Ok(bulk_insert_result_from_json(v))
             }
             MessageKind::Error => {
                 let msg = String::from_utf8_lossy(&resp.payload).to_string();
@@ -517,4 +514,28 @@ impl RedWireClient {
 
 fn io_err(err: io::Error) -> ClientError {
     ClientError::new(ErrorCode::Network, err.to_string())
+}
+
+fn bulk_insert_result_from_json(value: serde_json::Value) -> BulkInsertResult {
+    let affected = value
+        .as_object()
+        .and_then(|o| o.get("affected"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let ids = value
+        .as_object()
+        .and_then(|o| o.get("ids"))
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    item.as_str()
+                        .map(String::from)
+                        .or_else(|| item.as_u64().map(|n| n.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    BulkInsertResult { affected, ids }
 }
