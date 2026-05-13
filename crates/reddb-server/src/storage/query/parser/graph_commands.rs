@@ -39,18 +39,21 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse: GRAPH NEIGHBORHOOD 'source' [DEPTH n] [DIRECTION outgoing|incoming|both]
+    /// Parse: GRAPH NEIGHBORHOOD 'source' [DEPTH n] [DIRECTION outgoing|incoming|both] [EDGES IN ('label', ...)]
     fn parse_graph_neighborhood(&mut self) -> Result<QueryExpr, ParseError> {
         self.advance()?; // consume NEIGHBORHOOD
         let source = self.parse_string()?;
         let mut depth = 3;
         let mut direction = "outgoing".to_string();
+        let mut edge_labels = None;
 
         loop {
             if self.consume(&Token::Depth)? {
                 depth = self.parse_integer()? as u32;
             } else if self.consume(&Token::Direction)? {
                 direction = self.expect_ident_or_keyword()?;
+            } else if self.consume_ident_ci("EDGES")? {
+                edge_labels = Some(self.parse_graph_edge_label_list()?);
             } else {
                 break;
             }
@@ -60,6 +63,7 @@ impl<'a> Parser<'a> {
             source,
             depth,
             direction,
+            edge_labels,
         }))
     }
 
@@ -98,7 +102,7 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parse: GRAPH TRAVERSE [FROM] 'source' [STRATEGY bfs|dfs] [DEPTH n | MAX_DEPTH n] [DIRECTION dir]
+    /// Parse: GRAPH TRAVERSE [FROM] 'source' [STRATEGY bfs|dfs] [DEPTH n | MAX_DEPTH n] [DIRECTION dir] [EDGES IN ('label', ...)]
     fn parse_graph_traverse(&mut self) -> Result<QueryExpr, ParseError> {
         self.advance()?; // consume TRAVERSE
         let _ = self.consume(&Token::From)?; // optional FROM (docs syntax)
@@ -106,6 +110,7 @@ impl<'a> Parser<'a> {
         let mut strategy = "bfs".to_string();
         let mut depth: u32 = 5;
         let mut direction = "outgoing".to_string();
+        let mut edge_labels = None;
         loop {
             if self.consume(&Token::Strategy)? {
                 strategy = self.expect_ident_or_keyword()?;
@@ -113,6 +118,8 @@ impl<'a> Parser<'a> {
                 depth = self.parse_integer()? as u32;
             } else if self.consume(&Token::Direction)? {
                 direction = self.expect_ident_or_keyword()?;
+            } else if self.consume_ident_ci("EDGES")? {
+                edge_labels = Some(self.parse_graph_edge_label_list()?);
             } else {
                 break;
             }
@@ -122,7 +129,22 @@ impl<'a> Parser<'a> {
             strategy,
             depth,
             direction,
+            edge_labels,
         }))
+    }
+
+    fn parse_graph_edge_label_list(&mut self) -> Result<Vec<String>, ParseError> {
+        self.expect(Token::In)?;
+        self.expect(Token::LParen)?;
+        let mut labels = Vec::new();
+        loop {
+            labels.push(self.parse_string()?);
+            if !self.consume(&Token::Comma)? {
+                break;
+            }
+        }
+        self.expect(Token::RParen)?;
+        Ok(labels)
     }
 
     /// Parse: GRAPH CENTRALITY [ALGORITHM degree|closeness|betweenness|eigenvector|pagerank] [ORDER BY metric [ASC|DESC]] [LIMIT n]
