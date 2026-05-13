@@ -201,6 +201,27 @@ jobs:
         if: always()
         run: sccache --show-stats
 
+  driver-param-conformance:
+    name: Driver Param Conformance
+    needs: gate
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25'
+          cache-dependency-path: drivers/go/go.sum
+      - name: JS RedWire parameter fixtures
+        working-directory: drivers/js
+        run: node --test test/redwire.params.test.mjs
+      - name: Go RedWire parameter fixtures
+        working-directory: drivers/go
+        run: go test ./redwire
+
   publish-dry-run:
     # Catches crates.io packaging issues (missing include paths, stale
     # path-only deps, license mismatch) before they bite at release

@@ -44,6 +44,10 @@ var ErrUnsupportedParam = errors.New("redwire: unsupported param type")
 // with `TagUUID` rather than as Bytes/Text.
 type UUID [16]byte
 
+// Timestamp is the typed wrapper callers pass when they need the full i64
+// timestamp domain. time.Time remains the ergonomic mapping for normal dates.
+type Timestamp int64
+
 // UUIDFromString parses a canonical RFC 4122 hyphenated UUID. Hyphens
 // elsewhere are tolerated; case is folded.
 func UUIDFromString(s string) (UUID, error) {
@@ -144,6 +148,8 @@ func EncodeValue(v any) ([]byte, error) {
 		return encodeVector(f32)
 	case time.Time:
 		return encodeTimestamp(x.Unix()), nil
+	case Timestamp:
+		return encodeTimestamp(int64(x)), nil
 	case UUID:
 		out := make([]byte, 1+16)
 		out[0] = byte(TagUUID)

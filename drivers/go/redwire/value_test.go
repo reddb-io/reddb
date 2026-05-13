@@ -3,8 +3,12 @@ package redwire
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -204,9 +208,9 @@ func TestUUIDFromString_BadInputs(t *testing.T) {
 	cases := []string{
 		"",
 		"not-a-uuid",
-		"550e8400-e29b-41d4-a716-44665544",            // too short
-		"550e8400-e29b-41d4-a716-446655440000-extra",  // too long
-		"550e8400-e29b-41d4-a716-44665544000Z",        // non-hex char
+		"550e8400-e29b-41d4-a716-44665544", // too short
+		"550e8400-e29b-41d4-a716-446655440000-extra", // too long
+		"550e8400-e29b-41d4-a716-44665544000Z",       // non-hex char
 	}
 	for _, c := range cases {
 		if _, err := UUIDFromString(c); err == nil {
@@ -263,6 +267,41 @@ func TestEncodeValue_Unsupported(t *testing.T) {
 	}
 }
 
+func TestParamFixtureManifest(t *testing.T) {
+	manifest := loadParamFixtures(t)
+	for _, fixture := range manifest.Values {
+		got, err := EncodeValue(goFixtureValue(t, fixture.Name))
+		if err != nil {
+			t.Fatalf("%s: encode: %v", fixture.Name, err)
+		}
+		want, err := hex.DecodeString(fixture.RedwireHex)
+		if err != nil {
+			t.Fatalf("%s: fixture hex: %v", fixture.Name, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("%s: got %x want %x", fixture.Name, got, want)
+		}
+	}
+
+	for _, fixture := range manifest.Queries {
+		params := make([]any, len(fixture.Params))
+		for i, name := range fixture.Params {
+			params[i] = goFixtureValue(t, name)
+		}
+		got, err := EncodeQueryWithParams(fixture.SQL, params)
+		if err != nil {
+			t.Fatalf("%s: encode query: %v", fixture.Name, err)
+		}
+		want, err := hex.DecodeString(fixture.RedwireHex)
+		if err != nil {
+			t.Fatalf("%s: fixture hex: %v", fixture.Name, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("%s: got %x want %x", fixture.Name, got, want)
+		}
+	}
+}
+
 func TestEncodeQueryWithParams_Empty(t *testing.T) {
 	got, err := EncodeQueryWithParams("SELECT 1", nil)
 	if err != nil {
@@ -276,6 +315,90 @@ func TestEncodeQueryWithParams_Empty(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Errorf("got % x want % x", got, want)
+	}
+}
+
+type paramFixtureManifest struct {
+	Values  []paramValueFixture `json:"values"`
+	Queries []paramQueryFixture `json:"queries"`
+}
+
+type paramValueFixture struct {
+	Name       string `json:"name"`
+	RedwireHex string `json:"redwire_hex"`
+}
+
+type paramQueryFixture struct {
+	Name       string   `json:"name"`
+	SQL        string   `json:"sql"`
+	Params     []string `json:"params"`
+	RedwireHex string   `json:"redwire_hex"`
+}
+
+func loadParamFixtures(t *testing.T) paramFixtureManifest {
+	t.Helper()
+	path := filepath.Join("..", "..", "..", "crates", "reddb-wire", "tests", "fixtures", "params", "manifest.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest paramFixtureManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	return manifest
+}
+
+func goFixtureValue(t *testing.T, name string) any {
+	t.Helper()
+	switch name {
+	case "null":
+		return nil
+	case "bool_true":
+		return true
+	case "bool_false":
+		return false
+	case "int_min":
+		return int64(math.MinInt64)
+	case "int_max":
+		return int64(math.MaxInt64)
+	case "int_42":
+		return int64(42)
+	case "float_nan":
+		return math.Float64frombits(0x7ff8000000000000)
+	case "float_pos_inf":
+		return math.Inf(1)
+	case "float_neg_inf":
+		return math.Inf(-1)
+	case "float_subnormal_min":
+		return math.SmallestNonzeroFloat64
+	case "text_unicode":
+		return "héllo"
+	case "text_x":
+		return "x"
+	case "bytes_empty":
+		return []byte{}
+	case "bytes_deadbeef":
+		return []byte{0xde, 0xad, 0xbe, 0xef}
+	case "json_nested":
+		return map[string]any{"z": []any{float64(1), map[string]any{"deep": []any{true, false}}}, "a": nil}
+	case "timestamp_zero":
+		return Timestamp(0)
+	case "timestamp_max":
+		return Timestamp(math.MaxInt64)
+	case "uuid_001122":
+		uuid, err := UUIDFromString("00112233-4455-6677-8899-aabbccddeeff")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return uuid
+	case "vector_empty":
+		return []float32{}
+	case "vector_three":
+		return []float32{1, 2, -0.5}
+	default:
+		t.Fatalf("unknown fixture %s", name)
+		return nil
 	}
 }
 

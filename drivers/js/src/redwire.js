@@ -843,10 +843,14 @@ export function encodeValue(v) {
       if (k === '$bytes' && typeof v.$bytes === 'string') {
         return encodeLenPrefixed(ValueTag.Bytes, base64ToBytes(v.$bytes))
       }
-      if (k === '$ts' && typeof v.$ts === 'number' && Number.isFinite(v.$ts)) {
+      if (k === '$ts' && (
+        (typeof v.$ts === 'number' && Number.isFinite(v.$ts))
+        || typeof v.$ts === 'string'
+      )) {
         const out = new Uint8Array(1 + 8)
         out[0] = ValueTag.Timestamp
-        new DataView(out.buffer).setBigInt64(1, BigInt(Math.trunc(v.$ts)), true)
+        const raw = typeof v.$ts === 'string' ? BigInt(v.$ts) : BigInt(Math.trunc(v.$ts))
+        new DataView(out.buffer).setBigInt64(1, raw, true)
         return out
       }
       if (k === '$uuid' && typeof v.$uuid === 'string') {

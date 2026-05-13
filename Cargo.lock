@@ -2344,6 +2344,7 @@ dependencies = [
  "insta",
  "proptest",
  "regex",
+ "serde_json",
  "url",
  "zstd",
 ]

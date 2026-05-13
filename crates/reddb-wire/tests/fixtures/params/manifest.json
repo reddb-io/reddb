@@ -1,0 +1,118 @@
+{
+  "version": 1,
+  "layout": "redwire-query-with-params-v1",
+  "values": [
+    {
+      "name": "null",
+      "kind": "null",
+      "redwire_hex": "00"
+    },
+    {
+      "name": "bool_true",
+      "kind": "bool",
+      "redwire_hex": "0101"
+    },
+    {
+      "name": "bool_false",
+      "kind": "bool",
+      "redwire_hex": "0100"
+    },
+    {
+      "name": "int_min",
+      "kind": "int",
+      "redwire_hex": "020000000000000080"
+    },
+    {
+      "name": "int_max",
+      "kind": "int",
+      "redwire_hex": "02ffffffffffffff7f"
+    },
+    {
+      "name": "int_42",
+      "kind": "int",
+      "redwire_hex": "022a00000000000000"
+    },
+    {
+      "name": "float_nan",
+      "kind": "float",
+      "redwire_hex": "03000000000000f87f"
+    },
+    {
+      "name": "float_pos_inf",
+      "kind": "float",
+      "redwire_hex": "03000000000000f07f"
+    },
+    {
+      "name": "float_neg_inf",
+      "kind": "float",
+      "redwire_hex": "03000000000000f0ff"
+    },
+    {
+      "name": "float_subnormal_min",
+      "kind": "float",
+      "redwire_hex": "030100000000000000"
+    },
+    {
+      "name": "text_unicode",
+      "kind": "text",
+      "redwire_hex": "040600000068c3a96c6c6f"
+    },
+    {
+      "name": "text_x",
+      "kind": "text",
+      "redwire_hex": "040100000078"
+    },
+    {
+      "name": "bytes_empty",
+      "kind": "bytes",
+      "redwire_hex": "0500000000"
+    },
+    {
+      "name": "bytes_deadbeef",
+      "kind": "bytes",
+      "redwire_hex": "0504000000deadbeef"
+    },
+    {
+      "name": "json_nested",
+      "kind": "json",
+      "redwire_hex": "07280000007b2261223a6e756c6c2c227a223a5b312c7b2264656570223a5b747275652c66616c73655d7d5d7d"
+    },
+    {
+      "name": "timestamp_zero",
+      "kind": "timestamp",
+      "redwire_hex": "080000000000000000"
+    },
+    {
+      "name": "timestamp_max",
+      "kind": "timestamp",
+      "redwire_hex": "08ffffffffffffff7f"
+    },
+    {
+      "name": "uuid_001122",
+      "kind": "uuid",
+      "redwire_hex": "0900112233445566778899aabbccddeeff"
+    },
+    {
+      "name": "vector_empty",
+      "kind": "vector",
+      "redwire_hex": "0600000000"
+    },
+    {
+      "name": "vector_three",
+      "kind": "vector",
+      "redwire_hex": "06030000000000803f00000040000000bf"
+    }
+  ],
+  "queries": [
+    {
+      "name": "select_one_mixed",
+      "sql": "SELECT $1",
+      "params": [
+        "int_42",
+        "text_x",
+        "null"
+      ],
+      "redwire_hex": "0900000053454c45435420243103000000022a0000000000000004010000007800"
+    }
+  ]
+}

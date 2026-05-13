@@ -9,6 +9,9 @@
  */
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
   Features,
@@ -17,6 +20,12 @@ import {
   encodeValue,
   encodeQueryWithParams,
 } from '../src/redwire.js'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const PARAM_FIXTURES = JSON.parse(readFileSync(
+  resolve(HERE, '../../../crates/reddb-wire/tests/fixtures/params/manifest.json'),
+  'utf8',
+))
 
 let passed = 0
 let failed = 0
@@ -50,6 +59,23 @@ test('catalog: ValueTag table pinned', () => {
     Null: 0x00, Bool: 0x01, Int: 0x02, Float: 0x03, Text: 0x04,
     Bytes: 0x05, Vector: 0x06, Json: 0x07, Timestamp: 0x08, Uuid: 0x09,
   }))
+})
+
+test('fixtures: manifest value encodings match JS RedWire codec', () => {
+  for (const fixture of PARAM_FIXTURES.values) {
+    const input = jsFixtureValue(fixture.name)
+    assert.equal(hex(encodeValue(input)), fixture.redwire_hex, fixture.name)
+  }
+})
+
+test('fixtures: manifest query encodings match JS RedWire codec', () => {
+  for (const fixture of PARAM_FIXTURES.queries) {
+    assert.equal(
+      hex(encodeQueryWithParams(fixture.sql, fixture.params.map(jsFixtureValue))),
+      fixture.redwire_hex,
+      fixture.name,
+    )
+  }
 })
 
 test('encodeValue: null → tag-only', () => {
@@ -212,3 +238,54 @@ test('encodeQueryWithParams: rejects non-array params', () => {
 test('encodeQueryWithParams: rejects non-string sql', () => {
   assert.throws(() => encodeQueryWithParams(42, []), /TypeError/)
 })
+
+function hex(bytes) {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+function jsFixtureValue(name) {
+  switch (name) {
+    case 'null':
+      return null
+    case 'bool_true':
+      return true
+    case 'bool_false':
+      return false
+    case 'int_min':
+      return -(1n << 63n)
+    case 'int_max':
+      return (1n << 63n) - 1n
+    case 'int_42':
+      return 42
+    case 'float_nan':
+      return Number.NaN
+    case 'float_pos_inf':
+      return Number.POSITIVE_INFINITY
+    case 'float_neg_inf':
+      return Number.NEGATIVE_INFINITY
+    case 'float_subnormal_min':
+      return Number.MIN_VALUE
+    case 'text_unicode':
+      return 'héllo'
+    case 'text_x':
+      return 'x'
+    case 'bytes_empty':
+      return new Uint8Array()
+    case 'bytes_deadbeef':
+      return new Uint8Array([0xde, 0xad, 0xbe, 0xef])
+    case 'json_nested':
+      return { z: [1, { deep: [true, false] }], a: null }
+    case 'timestamp_zero':
+      return { $ts: 0 }
+    case 'timestamp_max':
+      return { $ts: '9223372036854775807' }
+    case 'uuid_001122':
+      return { $uuid: '00112233-4455-6677-8899-aabbccddeeff' }
+    case 'vector_empty':
+      return []
+    case 'vector_three':
+      return [1, 2, -0.5]
+    default:
+      throw new Error(`unknown fixture ${name}`)
+  }
+}
