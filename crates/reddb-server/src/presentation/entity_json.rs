@@ -84,8 +84,7 @@ pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
                 .map(|entry| JsonValue::Number(*entry as f64))
                 .collect(),
         ),
-        Value::Json(value) => json_from_slice::<JsonValue>(value)
-            .unwrap_or_else(|_| JsonValue::String(hex::encode(value))),
+        Value::Json(value) => storage_json_bytes_to_json(value),
         Value::Uuid(value) => JsonValue::String(hex::encode(value)),
         Value::NodeRef(value) => JsonValue::String(value.clone()),
         Value::EdgeRef(value) => JsonValue::String(value.clone()),
@@ -203,6 +202,22 @@ pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
         Value::Secret(_) => JsonValue::String("***".to_string()),
         Value::Password(_) => JsonValue::String("***".to_string()),
     }
+}
+
+pub(crate) fn storage_json_bytes_to_json(bytes: &[u8]) -> JsonValue {
+    json_from_slice::<JsonValue>(bytes).unwrap_or_else(|_| {
+        JsonValue::Object(
+            [
+                (
+                    "code".to_string(),
+                    JsonValue::String("INVALID_JSON".to_string()),
+                ),
+                ("hex".to_string(), JsonValue::String(hex::encode(bytes))),
+            ]
+            .into_iter()
+            .collect(),
+        )
+    })
 }
 
 fn base_entity_object(entity: &UnifiedEntity) -> Map<String, JsonValue> {
