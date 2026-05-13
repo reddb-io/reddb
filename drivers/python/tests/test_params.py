@@ -12,6 +12,8 @@ Or, with no pytest:
 """
 
 import datetime
+import importlib.util
+from pathlib import Path
 import sys
 import uuid
 
@@ -96,6 +98,24 @@ def test_params_kwarg_matches_variadic_form():
         assert a == b
 
 
+def test_params_kwarg_accepts_tuple_dbapi_style():
+    with reddb.connect("memory://") as db:
+        db.query("CREATE TABLE t (id INT, name TEXT)")
+        db.insert("t", {"id": 1, "name": "Ada"})
+
+        rows = db.query("SELECT * FROM t WHERE id = $1", params=(1,))["rows"]
+        assert len(rows) == 1
+        assert rows[0]["name"] == "Ada"
+
+
+def test_typing_metadata_installed():
+    spec = importlib.util.find_spec("reddb")
+    assert spec is not None and spec.origin is not None
+    package_dir = Path(spec.origin).parent
+    assert (package_dir / "__init__.pyi").exists()
+    assert (package_dir / "py.typed").exists()
+
+
 def test_execute_accepts_params_keyword():
     with reddb.connect("memory://") as db:
         db.query("CREATE TABLE exec_params (id INT, name TEXT)")
@@ -143,14 +163,14 @@ def test_unsupported_param_type_raises():
             raise AssertionError("expected ValueError on unsupported type")
 
 
-def test_params_kw_must_be_list():
+def test_params_kw_must_be_list_or_tuple():
     with reddb.connect("memory://") as db:
         try:
             db.query("SELECT 1", params="not a list")
         except ValueError as e:
             assert "INVALID_PARAMS" in str(e)
         else:
-            raise AssertionError("expected ValueError when params= is not a list")
+            raise AssertionError("expected ValueError when params= is not a list or tuple")
 
 
 # ---------------------------------------------------------------------------
