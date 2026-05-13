@@ -193,3 +193,10 @@ pub struct InsertResult {
     /// Present when the engine surfaces an inserted entity id.
     pub id: Option<String>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BulkInsertResult {
+    pub affected: u64,
+    /// Present when the engine surfaces inserted entity ids for the batch.
+    pub ids: Vec<String>,
+}

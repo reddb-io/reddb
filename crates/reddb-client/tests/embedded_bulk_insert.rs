@@ -69,7 +69,15 @@ fn bulk_insert_emits_one_wal_record_per_batch() {
     let bulk_size = {
         let db = EmbeddedClient::open(bulk_path.clone()).expect("open bulk db");
         let inserted = db.bulk_insert("users", &rows(N)).expect("bulk insert");
-        assert_eq!(inserted, N as u64, "bulk_insert returned wrong count");
+        assert_eq!(
+            inserted.affected, N as u64,
+            "bulk_insert returned wrong count"
+        );
+        assert_eq!(
+            inserted.ids.len(),
+            N,
+            "bulk_insert returned wrong ids count"
+        );
         let after = wal_size(&bulk_path);
         drop(db);
         after
@@ -163,7 +171,8 @@ fn bulk_insert_round_trip() {
             ],
         )
         .expect("bulk insert");
-    assert_eq!(inserted, 3);
+    assert_eq!(inserted.affected, 3);
+    assert_eq!(inserted.ids.len(), 3);
 
     let result = db
         .query("SELECT sku, qty FROM items")
@@ -195,7 +204,8 @@ fn bulk_insert_heterogeneous_payloads_still_work() {
             ],
         )
         .expect("bulk insert hetero");
-    assert_eq!(inserted, 2);
+    assert_eq!(inserted.affected, 2);
+    assert_eq!(inserted.ids.len(), 2);
 
     let result = db.query("SELECT kind FROM events").expect("select hetero");
     assert_eq!(result.rows.len(), 2);
@@ -208,7 +218,9 @@ fn bulk_insert_heterogeneous_payloads_still_work() {
 fn bulk_insert_empty_is_noop() {
     let path = unique_db_path("empty");
     let db = EmbeddedClient::open(path.clone()).expect("open db");
-    assert_eq!(db.bulk_insert("anything", &[]).expect("empty bulk"), 0);
+    let inserted = db.bulk_insert("anything", &[]).expect("empty bulk");
+    assert_eq!(inserted.affected, 0);
+    assert!(inserted.ids.is_empty());
     drop(db);
     cleanup_db(&path);
 }
@@ -257,7 +269,8 @@ fn insert_emits_one_wal_record_per_call() {
                 ])],
             )
             .expect("bulk insert one");
-        assert_eq!(inserted, 1);
+        assert_eq!(inserted.affected, 1);
+        assert_eq!(inserted.ids.len(), 1);
         let after = wal_size(&bulk_path);
         drop(db);
         after

@@ -72,7 +72,7 @@ pub mod http;
 
 pub use error::{ClientError, ErrorCode, Result};
 pub use params::{IntoValue, Value};
-pub use types::{InsertResult, JsonValue, KvWatchEvent, QueryResult, ValueOut};
+pub use types::{BulkInsertResult, InsertResult, JsonValue, KvWatchEvent, QueryResult, ValueOut};
 
 // Back-compat re-exports for the previous `reddb-client-internal`
 // crate. Workspace consumers (`reddb-server::rpc_stdio`, the `red`
@@ -233,7 +233,11 @@ impl Reddb {
         }
     }
 
-    pub async fn bulk_insert(&self, collection: &str, payloads: &[JsonValue]) -> Result<u64> {
+    pub async fn bulk_insert(
+        &self,
+        collection: &str,
+        payloads: &[JsonValue],
+    ) -> Result<BulkInsertResult> {
         match self {
             #[cfg(feature = "embedded")]
             Reddb::Embedded(c) => c.bulk_insert(collection, payloads),

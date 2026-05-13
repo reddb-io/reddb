@@ -21,7 +21,7 @@ use reqwest::{Client, ClientBuilder, Method, StatusCode};
 use serde_json::Value;
 
 use crate::error::{ClientError, ErrorCode, Result};
-use crate::types::{InsertResult, JsonValue, KvWatchEvent, QueryResult};
+use crate::types::{BulkInsertResult, InsertResult, JsonValue, KvWatchEvent, QueryResult};
 
 /// HTTP/HTTPS client. Talks the REST surface at the configured
 /// `base_url`. `Authorization: Bearer <token>` set when the user
@@ -163,17 +163,17 @@ impl HttpClient {
         Ok(InsertResult { affected, id })
     }
 
-    pub async fn bulk_insert(&self, collection: &str, payloads: &[JsonValue]) -> Result<u64> {
+    pub async fn bulk_insert(
+        &self,
+        collection: &str,
+        payloads: &[JsonValue],
+    ) -> Result<BulkInsertResult> {
         let url_path = format!("/collections/{}/bulk/rows", urlencoded(collection),);
         let body = serde_json::json!({
             "rows": payloads.iter().map(json_value_to_serde).collect::<Vec<_>>(),
         });
         let value = self.send_json(Method::POST, &url_path, &body).await?;
-        Ok(value
-            .as_object()
-            .and_then(|o| o.get("affected"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0))
+        Ok(bulk_insert_result_from_json(value))
     }
 
     pub async fn delete(&self, collection: &str, id: &str) -> Result<u64> {
@@ -379,4 +379,28 @@ fn json_value_to_serde(v: &JsonValue) -> Value {
         Ok(v) => v,
         Err(_) => Value::Null,
     }
+}
+
+fn bulk_insert_result_from_json(value: Value) -> BulkInsertResult {
+    let affected = value
+        .as_object()
+        .and_then(|o| o.get("affected"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let ids = value
+        .as_object()
+        .and_then(|o| o.get("ids"))
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    item.as_str()
+                        .map(String::from)
+                        .or_else(|| item.as_u64().map(|n| n.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    BulkInsertResult { affected, ids }
 }

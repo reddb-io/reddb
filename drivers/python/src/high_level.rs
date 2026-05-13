@@ -207,15 +207,20 @@ impl RedDb {
                         .map_err(|_| err("INVALID_PARAMS", "bulk_insert payloads must be dicts"))?;
                     encoded.push(pydict_to_json_str(dict)?);
                 }
-                let total = crate::get_runtime()
+                let reply = crate::get_runtime()
                     .block_on(async {
                         let mut guard = client.lock().expect("client poisoned");
                         guard.bulk_create_rows(collection, encoded).await
                     })
-                    .map_err(|e| err("QUERY_ERROR", e.to_string()))?
-                    .count;
+                    .map_err(|e| err("QUERY_ERROR", e.to_string()))?;
                 let out = PyDict::new(py);
-                out.set_item("affected", total)?;
+                out.set_item("affected", reply.count)?;
+                let ids: Vec<String> = reply
+                    .items
+                    .into_iter()
+                    .map(|item| item.id.to_string())
+                    .collect();
+                out.set_item("ids", ids)?;
                 Ok(out)
             }
         }

@@ -49,8 +49,9 @@ async fn bulk_insert_returns_total_affected() {
         JsonValue::object([("name", JsonValue::string("b"))]),
         JsonValue::object([("name", JsonValue::string("c"))]),
     ];
-    let n = db.bulk_insert("items", &payloads).await.expect("bulk");
-    assert_eq!(n, 3);
+    let result = db.bulk_insert("items", &payloads).await.expect("bulk");
+    assert_eq!(result.affected, 3);
+    assert_eq!(result.ids.len(), 3);
 }
 
 #[tokio::test]

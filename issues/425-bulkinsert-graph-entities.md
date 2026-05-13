@@ -41,11 +41,14 @@ Slice 1 code complete, verification pending:
   also include `ids` when the row insert path exposes inserted IDs.
 - Added focused stdio and RedWire server tests for graph NODE and EDGE rows.
 - JS/TS type surfaces now allow `ids` on `BulkInsertResult`.
+- Rust `Reddb::bulk_insert` now returns `BulkInsertResult { affected, ids }`
+  across embedded, HTTP, gRPC, and low-level RedWire paths.
+- Python high-level gRPC bulk insert now includes `ids`, matching the existing
+  embedded dict shape.
+- Go `Conn.BulkInsert` and low-level RedWire bulk insert now return
+  `BulkInsertResult` instead of discarding the server envelope.
 
 Remaining before close:
 
 - Final test pass, including the focused bulk graph tests and `cargo check`.
-- Driver parity audit for Rust, Python, and Go client APIs. Several non-JS
-  APIs still expose bulk insert as `u64`/`error` and may discard server-returned
-  IDs even though the server response now includes them.
 - Stdio benchmark/evidence for the 1000-row target.

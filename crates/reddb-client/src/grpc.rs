@@ -21,7 +21,7 @@ use crate::connector::RedDBClient;
 use crate::error::{ClientError, ErrorCode, Result};
 use crate::params::Value as ParamValue;
 use crate::router::{ClusterMembership, HealthAwareRouter, Outcome};
-use crate::types::{InsertResult, JsonValue, QueryResult, ValueOut};
+use crate::types::{BulkInsertResult, InsertResult, JsonValue, QueryResult, ValueOut};
 
 /// Default per-endpoint pool size when callers don't specify one.
 /// Each pooled `RedDBClient` is a clone of the same tonic channel,
@@ -393,7 +393,11 @@ impl GrpcClient {
         })
     }
 
-    pub async fn bulk_insert(&self, collection: &str, payloads: &[JsonValue]) -> Result<u64> {
+    pub async fn bulk_insert(
+        &self,
+        collection: &str,
+        payloads: &[JsonValue],
+    ) -> Result<BulkInsertResult> {
         let mut encoded = Vec::with_capacity(payloads.len());
         for payload in payloads {
             if payload.as_object().is_none() {
@@ -409,7 +413,14 @@ impl GrpcClient {
             .bulk_create_rows(collection, encoded)
             .await
             .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
-        Ok(reply.count)
+        Ok(BulkInsertResult {
+            affected: reply.count,
+            ids: reply
+                .items
+                .into_iter()
+                .map(|item| item.id.to_string())
+                .collect(),
+        })
     }
 
     pub async fn delete(&self, collection: &str, id: &str) -> Result<u64> {

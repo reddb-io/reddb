@@ -45,7 +45,7 @@ type Conn interface {
 	// Insert delivers a single row.
 	Insert(ctx context.Context, collection string, payload any) error
 	// BulkInsert delivers a batch of rows.
-	BulkInsert(ctx context.Context, collection string, rows []any) error
+	BulkInsert(ctx context.Context, collection string, rows []any) (*BulkInsertResult, error)
 	// Get fetches one row by id and returns the raw envelope bytes.
 	Get(ctx context.Context, collection, id string) ([]byte, error)
 	// Delete removes one row by id.
@@ -56,6 +56,13 @@ type Conn interface {
 	// Close releases the underlying socket / connection pool. Safe to call
 	// multiple times; subsequent calls return nil.
 	Close() error
+}
+
+// BulkInsertResult is returned by bulk row inserts when the transport exposes
+// the server envelope.
+type BulkInsertResult struct {
+	Affected uint64   `json:"affected"`
+	IDs      []string `json:"ids,omitempty"`
 }
 
 // Options tweaks the Connect behaviour.
@@ -237,8 +244,12 @@ func (r *redwireFacade) Query(ctx context.Context, sql string, params ...any) ([
 func (r *redwireFacade) Insert(ctx context.Context, collection string, payload any) error {
 	return r.conn.Insert(ctx, collection, payload)
 }
-func (r *redwireFacade) BulkInsert(ctx context.Context, collection string, rows []any) error {
-	return r.conn.BulkInsert(ctx, collection, rows)
+func (r *redwireFacade) BulkInsert(ctx context.Context, collection string, rows []any) (*BulkInsertResult, error) {
+	result, err := r.conn.BulkInsert(ctx, collection, rows)
+	if err != nil {
+		return nil, err
+	}
+	return &BulkInsertResult{Affected: result.Affected, IDs: result.IDs}, nil
 }
 func (r *redwireFacade) Get(ctx context.Context, collection, id string) ([]byte, error) {
 	return r.conn.Get(ctx, collection, id)
@@ -308,9 +319,12 @@ func (h *httpFacade) Insert(ctx context.Context, collection string, payload any)
 	_, err := h.c.Insert(ctx, collection, payload)
 	return err
 }
-func (h *httpFacade) BulkInsert(ctx context.Context, collection string, rows []any) error {
-	_, err := h.c.BulkInsert(ctx, collection, rows)
-	return err
+func (h *httpFacade) BulkInsert(ctx context.Context, collection string, rows []any) (*BulkInsertResult, error) {
+	out, err := h.c.BulkInsert(ctx, collection, rows)
+	if err != nil {
+		return nil, err
+	}
+	return parseBulkInsertResult(out)
 }
 func (h *httpFacade) Get(ctx context.Context, collection, id string) ([]byte, error) {
 	out, err := h.c.Get(ctx, collection, id)
@@ -337,6 +351,44 @@ func jsonBytes(v any) ([]byte, error) {
 		return bs, nil
 	}
 	return json.Marshal(v)
+}
+
+func parseBulkInsertResult(v any) (*BulkInsertResult, error) {
+	obj, ok := v.(map[string]any)
+	if !ok {
+		bs, err := jsonBytes(v)
+		if err != nil {
+			return nil, err
+		}
+		if len(bs) == 0 {
+			return &BulkInsertResult{}, nil
+		}
+		if err := json.Unmarshal(bs, &obj); err != nil {
+			return nil, err
+		}
+	}
+	result := &BulkInsertResult{}
+	switch affected := obj["affected"].(type) {
+	case float64:
+		result.Affected = uint64(affected)
+	case json.Number:
+		n, _ := affected.Int64()
+		result.Affected = uint64(n)
+	}
+	if rawIDs, ok := obj["ids"].([]any); ok {
+		result.IDs = make([]string, 0, len(rawIDs))
+		for _, raw := range rawIDs {
+			switch id := raw.(type) {
+			case string:
+				result.IDs = append(result.IDs, id)
+			case float64:
+				result.IDs = append(result.IDs, strconv.FormatUint(uint64(id), 10))
+			case json.Number:
+				result.IDs = append(result.IDs, id.String())
+			}
+		}
+	}
+	return result, nil
 }
 
 // --- gRPC facade ------------------------------------------------------
@@ -372,8 +424,8 @@ func (g *grpcFacade) Insert(context.Context, string, any) error {
 	return NewError(CodeProtocol, "grpc Insert is not implemented in the Go driver")
 }
 
-func (g *grpcFacade) BulkInsert(context.Context, string, []any) error {
-	return NewError(CodeProtocol, "grpc BulkInsert is not implemented in the Go driver")
+func (g *grpcFacade) BulkInsert(context.Context, string, []any) (*BulkInsertResult, error) {
+	return nil, NewError(CodeProtocol, "grpc BulkInsert is not implemented in the Go driver")
 }
 
 func (g *grpcFacade) Get(context.Context, string, string) ([]byte, error) {
