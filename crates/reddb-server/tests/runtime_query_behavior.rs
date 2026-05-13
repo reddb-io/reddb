@@ -735,6 +735,56 @@ fn match_return_edge_alias_projects_edge_properties() {
     assert_eq!(text_at(&whole, 0, "r.to"), bob.to_string());
 }
 
+#[test]
+fn match_limit_caps_projected_rows_after_filtering() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    insert_graph_node(&rt, "hero", "Alice");
+    insert_graph_node(&rt, "hero", "Bob");
+    insert_graph_node(&rt, "villain", "Clara");
+
+    let res = rt
+        .execute_query("MATCH (n) WHERE n.label = 'hero' RETURN n.name LIMIT 1")
+        .expect("MATCH LIMIT executes");
+    assert_eq!(res.result.len(), 1, "LIMIT 1 must cap filtered MATCH rows");
+    assert!(
+        matches!(res.result.records[0].get("n.name"), Some(Value::Text(_))),
+        "LIMIT applies after projection, so projected n.name must exist"
+    );
+}
+
+#[test]
+fn match_limit_zero_returns_no_rows() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    insert_graph_node(&rt, "hero", "Alice");
+    insert_graph_node(&rt, "hero", "Bob");
+
+    let res = rt
+        .execute_query("MATCH (n) RETURN n.name LIMIT 0")
+        .expect("MATCH LIMIT 0 executes");
+    assert_eq!(res.result.len(), 0, "LIMIT 0 returns zero MATCH rows");
+}
+
+#[test]
+fn match_limit_caps_edge_expansion_rows() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    let alice = insert_graph_node(&rt, "alice", "Alice");
+    let bob = insert_graph_node(&rt, "bob", "Bob");
+    let clara = insert_graph_node(&rt, "clara", "Clara");
+
+    rt.execute_query(&format!(
+        "INSERT INTO tales EDGE (label, from, to) VALUES \
+         ('likes', {alice}, {bob}), ('likes', {alice}, {clara})"
+    ))
+    .expect("insert graph edges");
+
+    let res = rt
+        .execute_query(
+            "MATCH (a)-[:likes]->(b) WHERE a.name = 'Alice' RETURN a.name, b.name LIMIT 1",
+        )
+        .expect("MATCH edge LIMIT executes");
+    assert_eq!(res.result.len(), 1, "LIMIT 1 must cap edge MATCH rows");
+}
+
 // ── Issue #419: INSERT surfaces the engine-assigned entity id ───────────────
 
 fn u64_at(result: &RuntimeQueryResult, row: usize, column: &str) -> u64 {
@@ -1163,7 +1213,11 @@ fn graph_components_order_by_size_asc_then_limit() {
         .expect("components order+limit parses+executes");
     assert_eq!(res.result.records.len(), 2, "LIMIT 2 must cap output rows");
     assert_eq!(int_at(&res, 0, "size"), 1, "smallest component first");
-    assert_eq!(int_at(&res, 1, "size"), 2, "second-smallest component second");
+    assert_eq!(
+        int_at(&res, 1, "size"),
+        2,
+        "second-smallest component second"
+    );
 }
 
 #[test]
