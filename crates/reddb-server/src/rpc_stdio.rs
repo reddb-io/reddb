@@ -1454,8 +1454,9 @@ fn schema_value_to_json(v: &SchemaValue) -> Value {
         SchemaValue::Blob(bytes) => {
             single_key_object("$bytes", Value::String(base64_encode(bytes)))
         }
-        SchemaValue::Json(bytes) => json::from_slice::<Value>(bytes)
-            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(bytes).to_string())),
+        SchemaValue::Json(bytes) => {
+            crate::presentation::entity_json::storage_json_bytes_to_json(bytes)
+        }
         SchemaValue::Uuid(bytes) => single_key_object("$uuid", Value::String(format_uuid(bytes))),
         SchemaValue::Email(s)
         | SchemaValue::Url(s)
@@ -1906,6 +1907,18 @@ mod tests {
         handle_line(&Backend::Local(rt), &mut session, line)
     }
 
+    fn query_request(id: u64, sql: &str) -> String {
+        let mut params = json::Map::new();
+        params.insert("sql".to_string(), Value::String(sql.to_string()));
+
+        let mut request = json::Map::new();
+        request.insert("jsonrpc".to_string(), Value::String("2.0".to_string()));
+        request.insert("id".to_string(), Value::Number(id as f64));
+        request.insert("method".to_string(), Value::String("query".to_string()));
+        request.insert("params".to_string(), Value::Object(params));
+        Value::Object(request).to_string_compact()
+    }
+
     /// Stateful helper: keeps the same `Session` across multiple calls so
     /// tests can exercise multi-step transaction flows in a single closure.
     fn with_session<F>(rt: &RedDBRuntime, f: F)
@@ -2064,6 +2077,100 @@ mod tests {
         assert!(
             selected.contains("\"$uuid\":\"00112233-4455-6677-8899-aabbccddeeff\""),
             "got: {selected}"
+        );
+    }
+
+    #[test]
+    fn select_timeseries_tags_decodes_json_payload() {
+        let rt = make_runtime();
+        let create = handle(&rt, &query_request(1, "CREATE TIMESERIES ts1"));
+        assert!(!create.contains("\"error\""), "got: {create}");
+
+        let insert = handle(
+            &rt,
+            &query_request(
+                2,
+                r#"INSERT INTO ts1 (metric, value, tags, timestamp) VALUES ('cpu', 85, '{"host":"a"}', 1000)"#,
+            ),
+        );
+        assert!(insert.contains("\"affected\":1"), "got: {insert}");
+
+        let selected = handle(&rt, &query_request(3, "SELECT tags FROM ts1"));
+        assert!(!selected.contains("<json"), "got: {selected}");
+        let response = json::from_str::<Value>(&selected).expect("response json");
+        let tags = response
+            .get("result")
+            .and_then(|result| result.get("rows"))
+            .and_then(Value::as_array)
+            .and_then(|rows| rows.first())
+            .and_then(|row| row.get("tags"))
+            .expect("tags field");
+        assert_eq!(tags, &json!({"host": "a"}));
+    }
+
+    #[test]
+    fn select_table_json_column_round_trips_after_single_parse() {
+        let rt = make_runtime();
+        let create = handle(&rt, &query_request(1, "CREATE TABLE docs (payload JSON)"));
+        assert!(!create.contains("\"error\""), "got: {create}");
+
+        let original = r#"{"nested":{"items":[1,true,"x"],"object":{"k":"v"}}}"#;
+        let insert_sql = format!("INSERT INTO docs (payload) VALUES ({original})");
+        let insert = handle(&rt, &query_request(2, &insert_sql));
+        assert!(insert.contains("\"affected\":1"), "got: {insert}");
+
+        let selected = handle(&rt, &query_request(3, "SELECT payload FROM docs"));
+        assert!(!selected.contains("<json"), "got: {selected}");
+        let response = json::from_str::<Value>(&selected).expect("response json");
+        let payload = response
+            .get("result")
+            .and_then(|result| result.get("rows"))
+            .and_then(Value::as_array)
+            .and_then(|rows| rows.first())
+            .and_then(|row| row.get("payload"))
+            .expect("payload field");
+        let expected = json::from_str::<Value>(original).expect("expected json");
+        assert_eq!(payload, &expected);
+
+        let payload_text = payload.to_string_compact();
+        assert_eq!(
+            json::from_str::<Value>(&payload_text).expect("single parse"),
+            expected
+        );
+    }
+
+    #[test]
+    fn select_json_corruption_falls_back_to_code_and_hex() {
+        use crate::storage::query::unified::UnifiedResult;
+
+        let mut result = UnifiedResult::with_columns(vec!["payload".into()]);
+        let mut record = UnifiedRecord::new();
+        record.set("payload", SchemaValue::Json(b"{not json".to_vec()));
+        result.push(record);
+
+        let json = query_result_to_json(&RuntimeQueryResult {
+            query: "SELECT payload FROM docs".to_string(),
+            mode: crate::storage::query::modes::QueryMode::Sql,
+            statement: "select",
+            engine: "runtime-table",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+        });
+
+        let payload = json
+            .get("rows")
+            .and_then(Value::as_array)
+            .and_then(|rows| rows.first())
+            .and_then(|row| row.get("payload"))
+            .expect("payload field");
+        assert_eq!(
+            payload.get("code").and_then(Value::as_str),
+            Some("INVALID_JSON")
+        );
+        assert_eq!(
+            payload.get("hex").and_then(Value::as_str),
+            Some("7b6e6f74206a736f6e")
         );
     }
 
