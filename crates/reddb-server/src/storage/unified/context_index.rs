@@ -340,6 +340,104 @@ impl ContextIndex {
         results
     }
 
+    /// Search by tokens using BM25-style sparse ranking.
+    ///
+    /// The index stores one posting per unique entity token, so term
+    /// frequency is binary. IDF and document-length normalization
+    /// still give ASK/text retrieval a real sparse ranker instead of
+    /// the legacy overlap fraction.
+    pub fn search_bm25(
+        &self,
+        query: &str,
+        limit: usize,
+        allowed_collections: Option<&BTreeSet<String>>,
+    ) -> Vec<ContextSearchHit> {
+        let query_tokens = tokenize_query(query);
+        if query_tokens.is_empty() {
+            return Vec::new();
+        }
+
+        const K1: f32 = 1.2;
+        const B: f32 = 0.75;
+
+        let token_index = self.tokens.read();
+        let reverse = self.reverse.read();
+        if reverse.is_empty() {
+            return Vec::new();
+        }
+        let doc_count = reverse.len() as f32;
+        let avg_doc_len = (reverse
+            .values()
+            .map(|keys| keys.token_keys.len().max(1) as f32)
+            .sum::<f32>()
+            / doc_count)
+            .max(1.0);
+
+        let mut scored: HashMap<u64, (String, f32, usize)> = HashMap::new();
+
+        for token in &query_tokens {
+            let Some(postings) = token_index.get(token) else {
+                continue;
+            };
+            let filtered: Vec<&ContextPosting> = postings
+                .iter()
+                .filter(|posting| {
+                    allowed_collections
+                        .as_ref()
+                        .is_none_or(|allowed| allowed.contains(&posting.collection))
+                })
+                .collect();
+            if filtered.is_empty() {
+                continue;
+            }
+
+            let df = filtered
+                .iter()
+                .map(|posting| posting.entity_id.raw())
+                .collect::<HashSet<_>>()
+                .len() as f32;
+            let idf = ((doc_count - df + 0.5) / (df + 0.5) + 1.0).ln();
+
+            for posting in filtered {
+                let doc_len = reverse
+                    .get(&posting.entity_id.raw())
+                    .map(|keys| keys.token_keys.len().max(1) as f32)
+                    .unwrap_or(1.0);
+                let tf = 1.0;
+                let tf_component =
+                    (tf * (K1 + 1.0)) / (tf + K1 * (1.0 - B + B * doc_len / avg_doc_len));
+                let entry = scored
+                    .entry(posting.entity_id.raw())
+                    .or_insert_with(|| (posting.collection.clone(), 0.0, 0));
+                entry.1 += idf * tf_component;
+                entry.2 += 1;
+            }
+        }
+
+        let total_tokens = query_tokens.len();
+        let mut results: Vec<ContextSearchHit> = scored
+            .into_iter()
+            .map(
+                |(entity_id, (collection, score, matched_tokens))| ContextSearchHit {
+                    entity_id: EntityId::new(entity_id),
+                    collection,
+                    score,
+                    matched_tokens,
+                    total_tokens,
+                },
+            )
+            .collect();
+
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.entity_id.raw().cmp(&b.entity_id.raw()))
+        });
+        results.truncate(limit.max(1));
+        results
+    }
+
     /// Search by field:value — direct lookup in the field-value index.
     pub fn search_field(
         &self,
@@ -778,6 +876,55 @@ mod tests {
         let filtered = index.search("alice", 10, Some(&allowed));
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].collection, "col_a");
+    }
+
+    #[test]
+    fn test_bm25_search_ranks_more_specific_document_first() {
+        let index = ContextIndex::new();
+        index.set_collection_enabled("docs", true);
+        let specific = make_row_entity(
+            1,
+            "docs",
+            vec![("body", Value::text("passport renewal".to_string()))],
+        );
+        let broad = make_row_entity(
+            2,
+            "docs",
+            vec![(
+                "body",
+                Value::text(
+                    "passport renewal travel hotel airline visa luggage itinerary".to_string(),
+                ),
+            )],
+        );
+        index.index_entity("docs", &specific);
+        index.index_entity("docs", &broad);
+
+        let results = index.search_bm25("passport renewal", 10, None);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].entity_id, EntityId::new(1));
+        assert!(
+            results[0].score > results[1].score,
+            "shorter exact document should outrank broader match: {results:?}"
+        );
+    }
+
+    #[test]
+    fn test_bm25_search_respects_collection_filter() {
+        let index = ContextIndex::new();
+        index.set_collection_enabled("visible", true);
+        index.set_collection_enabled("hidden", true);
+        let visible = make_row_entity(1, "visible", vec![("body", Value::text("alice"))]);
+        let hidden = make_row_entity(2, "hidden", vec![("body", Value::text("alice"))]);
+        index.index_entity("visible", &visible);
+        index.index_entity("hidden", &hidden);
+
+        let allowed: BTreeSet<String> = ["visible".to_string()].into();
+        let filtered = index.search_bm25("alice", 10, Some(&allowed));
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].collection, "visible");
     }
 
     #[test]

@@ -80,6 +80,14 @@ pub struct CandidateCollections {
     pub columns_by_collection: HashMap<String, Vec<String>>,
 }
 
+/// One Stage 3 BM25 text hit from the context index.
+#[derive(Debug, Clone)]
+pub struct TextHit {
+    pub collection: String,
+    pub entity_id: u64,
+    pub score: f32,
+}
+
 /// One Stage 3 vector hit, kept thin so the pipeline doesn't pull
 /// the full `ScoredMatch` shape from `dsl::QueryResult` through.
 #[derive(Debug, Clone)]
@@ -121,6 +129,7 @@ pub struct FilteredRow {
 pub struct StageTimings {
     pub extract_us: u64,
     pub schema_us: u64,
+    pub text_us: u64,
     pub vector_us: u64,
     pub graph_us: u64,
     pub filter_us: u64,
@@ -134,6 +143,7 @@ pub struct AskContext {
     pub question: String,
     pub tokens: TokenSet,
     pub candidates: CandidateCollections,
+    pub text_hits: Vec<TextHit>,
     pub vector_hits: Vec<VectorHit>,
     pub graph_hits: Vec<GraphHit>,
     pub filtered_rows: Vec<FilteredRow>,
@@ -147,6 +157,7 @@ impl Default for AskContext {
             question: String::new(),
             tokens: TokenSet::default(),
             candidates: CandidateCollections::default(),
+            text_hits: Vec::new(),
             vector_hits: Vec::new(),
             graph_hits: Vec::new(),
             filtered_rows: Vec::new(),
@@ -160,6 +171,7 @@ impl Default for AskContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FusedSourceRef {
     FilteredRow(usize),
+    TextHit(usize),
     VectorHit(usize),
     GraphHit(usize),
 }
@@ -257,19 +269,31 @@ impl AskPipeline {
 
         // Stage 3.
         let stage3 = Instant::now();
-        let vector_hits =
-            vector_search_scoped(runtime, scope, question, &candidates, row_cap, min_score);
-        let vector_us = stage3.elapsed().as_micros() as u64;
+        let text_hits = text_search_bm25_scoped(runtime, scope, question, &candidates, row_cap);
+        let text_us = stage3.elapsed().as_micros() as u64;
         debug!(
             target: "ask_pipeline",
-            stage = "vector_search_scoped",
-            hits = vector_hits.len(),
-            elapsed_us = vector_us,
+            stage = "text_search_bm25_scoped",
+            hits = text_hits.len(),
+            elapsed_us = text_us,
             "stage 3 done"
         );
 
         // Stage 3b.
         let stage3b = Instant::now();
+        let vector_hits =
+            vector_search_scoped(runtime, scope, question, &candidates, row_cap, min_score);
+        let vector_us = stage3b.elapsed().as_micros() as u64;
+        debug!(
+            target: "ask_pipeline",
+            stage = "vector_search_scoped",
+            hits = vector_hits.len(),
+            elapsed_us = vector_us,
+            "stage 3b done"
+        );
+
+        // Stage 3c.
+        let stage3c = Instant::now();
         let graph_hits = graph_search_scoped(
             runtime,
             scope,
@@ -279,13 +303,13 @@ impl AskPipeline {
             min_score,
             graph_depth,
         );
-        let graph_us = stage3b.elapsed().as_micros() as u64;
+        let graph_us = stage3c.elapsed().as_micros() as u64;
         debug!(
             target: "ask_pipeline",
             stage = "graph_search_scoped",
             hits = graph_hits.len(),
             elapsed_us = graph_us,
-            "stage 3b done"
+            "stage 3c done"
         );
 
         // Stage 4.
@@ -304,6 +328,7 @@ impl AskPipeline {
             question: question.to_string(),
             tokens,
             candidates,
+            text_hits,
             vector_hits,
             graph_hits,
             filtered_rows,
@@ -311,6 +336,7 @@ impl AskPipeline {
             timings: StageTimings {
                 extract_us,
                 schema_us,
+                text_us,
                 vector_us,
                 graph_us,
                 filter_us,
@@ -334,7 +360,10 @@ pub fn fused_sources(ctx: &AskContext) -> Vec<FusedSource> {
     use super::ai::rrf_fuser::{fuse, Bucket, Candidate, RRF_K_DEFAULT};
 
     if ctx.source_limit == 0
-        || (ctx.filtered_rows.is_empty() && ctx.vector_hits.is_empty() && ctx.graph_hits.is_empty())
+        || (ctx.filtered_rows.is_empty()
+            && ctx.text_hits.is_empty()
+            && ctx.vector_hits.is_empty()
+            && ctx.graph_hits.is_empty())
     {
         return Vec::new();
     }
@@ -350,6 +379,23 @@ pub fn fused_sources(ctx: &AskContext) -> Vec<FusedSource> {
                 refs.entry(id.clone())
                     .or_insert(FusedSourceRef::FilteredRow(idx));
                 Candidate { id, score: 1.0 }
+            })
+            .collect(),
+        min_score: None,
+    };
+    let text_bucket = Bucket {
+        candidates: ctx
+            .text_hits
+            .iter()
+            .enumerate()
+            .map(|(idx, hit)| {
+                let id = source_identity(&hit.collection, hit.entity_id);
+                refs.entry(id.clone())
+                    .or_insert(FusedSourceRef::TextHit(idx));
+                Candidate {
+                    id,
+                    score: hit.score as f64,
+                }
             })
             .collect(),
         min_score: None,
@@ -390,7 +436,7 @@ pub fn fused_sources(ctx: &AskContext) -> Vec<FusedSource> {
     };
 
     fuse(
-        &[row_bucket, vector_bucket, graph_bucket],
+        &[row_bucket, text_bucket, vector_bucket, graph_bucket],
         RRF_K_DEFAULT,
         ctx.source_limit,
     )
@@ -406,6 +452,50 @@ pub fn fused_sources(ctx: &AskContext) -> Vec<FusedSource> {
 
 fn source_identity(collection: &str, entity_id: u64) -> String {
     format!("{collection}/{entity_id}")
+}
+
+// ---------------------------------------------------------------------------
+// Stage 3 — BM25 text search scoped to the candidate collections.
+// ---------------------------------------------------------------------------
+
+/// Run the context index's sparse BM25 ranker over the candidate
+/// collections. This is the ASK text bucket used by RRF; literal row
+/// filtering remains as a separate high-precision bucket.
+pub fn text_search_bm25_scoped(
+    runtime: &RedDBRuntime,
+    scope: &EffectiveScope,
+    question: &str,
+    candidates: &CandidateCollections,
+    top_k: usize,
+) -> Vec<TextHit> {
+    if candidates.collections.is_empty() || top_k == 0 {
+        return Vec::new();
+    }
+
+    let visible = scope.visible_collections();
+    let allowed: BTreeSet<String> = candidates
+        .collections
+        .iter()
+        .filter(|collection| visible.is_none_or(|set| set.contains(*collection)))
+        .cloned()
+        .collect();
+    if allowed.is_empty() {
+        return Vec::new();
+    }
+
+    runtime
+        .inner
+        .db
+        .store()
+        .context_index()
+        .search_bm25(question, top_k, Some(&allowed))
+        .into_iter()
+        .map(|hit| TextHit {
+            collection: hit.collection,
+            entity_id: hit.entity_id.raw(),
+            score: hit.score,
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1133,6 +1223,14 @@ mod tests {
         }
     }
 
+    fn test_text_hit(collection: &str, id: u64, score: f32) -> TextHit {
+        TextHit {
+            collection: collection.to_string(),
+            entity_id: id,
+            score,
+        }
+    }
+
     #[test]
     fn fused_source_order_uses_rrf_and_total_limit() {
         let ctx = AskContext {
@@ -1167,8 +1265,9 @@ mod tests {
     #[test]
     fn fused_source_order_includes_graph_bucket() {
         let ctx = AskContext {
-            source_limit: 3,
+            source_limit: 4,
             filtered_rows: vec![test_row("incidents", 1)],
+            text_hits: vec![test_text_hit("articles", 5, 1.2)],
             vector_hits: vec![
                 VectorHit {
                     collection: "incidents".to_string(),
@@ -1191,10 +1290,80 @@ mod tests {
             order,
             vec![
                 FusedSourceRef::FilteredRow(0),
+                FusedSourceRef::TextHit(0),
                 FusedSourceRef::GraphHit(0),
                 FusedSourceRef::VectorHit(1),
             ]
         );
+    }
+
+    #[test]
+    fn text_search_bm25_scoped_ranks_specific_document_first() {
+        let rt = fresh_runtime();
+        rt.execute_query("CREATE TABLE docs (body TEXT) WITH CONTEXT INDEX ON (body)")
+            .expect("create docs");
+        rt.execute_query("INSERT INTO docs (body) VALUES ('passport renewal')")
+            .expect("insert specific doc");
+        rt.execute_query(
+            "INSERT INTO docs (body) VALUES ('passport renewal travel hotel airline visa luggage itinerary')",
+        )
+        .expect("insert broad doc");
+
+        let scope = make_scope(["docs".to_string()].into_iter().collect());
+        let candidates = CandidateCollections {
+            collections: vec!["docs".to_string()],
+            columns_by_collection: HashMap::new(),
+        };
+        let hits = text_search_bm25_scoped(&rt, &scope, "passport renewal", &candidates, 10);
+
+        assert_eq!(hits.len(), 2);
+        assert!(
+            hits[0].score > hits[1].score,
+            "BM25 text bucket should prefer the shorter exact match: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn execute_pipeline_retrieves_known_good_bm25_source_order() {
+        let rt = fresh_runtime();
+        rt.execute_query("CREATE TABLE docs (body TEXT) WITH CONTEXT INDEX ON (body)")
+            .expect("create docs");
+        rt.execute_query("INSERT INTO docs (body) VALUES ('passport renewal')")
+            .expect("insert specific doc");
+        rt.execute_query(
+            "INSERT INTO docs (body) VALUES ('passport renewal travel hotel airline visa luggage itinerary')",
+        )
+        .expect("insert broad doc");
+        rt.schema_vocabulary_apply(
+            crate::runtime::schema_vocabulary::DdlEvent::CreateCollection {
+                collection: "docs".to_string(),
+                columns: vec!["body".into()],
+                type_tags: Vec::new(),
+                description: None,
+            },
+        );
+
+        let scope = make_scope(["docs".to_string()].into_iter().collect());
+        let ctx = AskPipeline::execute_with_limit_and_min_score(
+            &rt,
+            &scope,
+            "body passport renewal",
+            2,
+            None,
+            Some(1),
+        )
+        .expect("pipeline executes");
+
+        assert_eq!(ctx.text_hits.len(), 2);
+        assert!(
+            ctx.text_hits[0].score > ctx.text_hits[1].score,
+            "BM25 source order should prefer the shorter exact match: {:?}",
+            ctx.text_hits
+        );
+        assert!(matches!(
+            fused_source_order(&ctx).first(),
+            Some(FusedSourceRef::TextHit(0))
+        ));
     }
 
     #[test]

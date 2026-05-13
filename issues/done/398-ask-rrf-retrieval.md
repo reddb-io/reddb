@@ -184,3 +184,34 @@ Deferred to follow-up slices:
   retrieval.
 - Add a full end-to-end known-good ASK ranking fixture once the text
   bucket is real.
+
+Slice 5: the ASK text side is now a real sparse BM25 bucket. The
+context index exposes `search_bm25`, using IDF and document-length
+normalization over the existing per-entity token postings. The ASK
+pipeline calls it as `text_search_bm25_scoped`, fuses `TextHit` rows
+with row-filter, vector, and graph buckets via RRF, and threads text
+hits through prompt source rendering, `sources_flat`, citation URN
+alignment, and EXPLAIN planned sources.
+
+Tests added/updated:
+
+- `storage::unified::context_index::tests::test_bm25_search_ranks_more_specific_document_first`
+  pins BM25 ranking against a broader same-token document.
+- `storage::unified::context_index::tests::test_bm25_search_respects_collection_filter`
+  pins candidate-collection scoping.
+- `runtime::ask_pipeline::tests::text_search_bm25_scoped_ranks_specific_document_first`
+  verifies the ASK text bucket uses BM25.
+- `runtime::ask_pipeline::tests::execute_pipeline_retrieves_known_good_bm25_source_order`
+  runs the ASK pipeline end-to-end for a known-good question and pins
+  the ranked text source order.
+- `runtime::impl_search::citation_wedge_tests::build_sources_flat_orders_rows_before_vectors_with_urns`
+  now includes text, vector, row, and graph source URNs in fused order.
+
+Verification for this slice:
+
+- `env CARGO_INCREMENTAL=0 cargo test -p reddb-io-server --lib -- context_index::tests::test_bm25_search_ranks_more_specific_document_first context_index::tests::test_bm25_search_respects_collection_filter ask_pipeline::tests::text_search_bm25_scoped_ranks_specific_document_first ask_pipeline::tests::fused_source_order_includes_graph_bucket citation_wedge_tests::build_sources_flat_orders_rows_before_vectors_with_urns`
+- `env CARGO_INCREMENTAL=0 cargo test -p reddb-io-server --lib -- ask_pipeline::tests::execute_pipeline_retrieves_known_good_bm25_source_order ask_pipeline::tests::text_search_bm25_scoped_ranks_specific_document_first context_index::tests::test_bm25_search_ranks_more_specific_document_first citation_wedge_tests::build_sources_flat_orders_rows_before_vectors_with_urns`
+- `env CARGO_INCREMENTAL=0 cargo check -p reddb-io-server --lib`
+- `git diff --check`
+
+All acceptance criteria are now covered by the landed slices.
