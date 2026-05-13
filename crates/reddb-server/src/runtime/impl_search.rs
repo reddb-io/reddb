@@ -2092,6 +2092,13 @@ fn format_fused_source_line(
                     .unwrap_or_default(),
             )
         }
+        crate::runtime::ask_pipeline::FusedSourceRef::TextHit(idx) => {
+            let hit = &ctx.text_hits[idx];
+            format!(
+                "{} #{} (bm25={:.3})",
+                hit.collection, hit.entity_id, hit.score
+            )
+        }
         crate::runtime::ask_pipeline::FusedSourceRef::VectorHit(idx) => {
             let hit = &ctx.vector_hits[idx];
             format!(
@@ -2122,10 +2129,12 @@ fn build_sources_flat(
     ctx: &crate::runtime::ask_pipeline::AskContext,
 ) -> (crate::json::Value, Vec<String>) {
     use crate::runtime::ai::urn_codec::{encode, Urn};
-    let mut arr: Vec<crate::json::Value> = Vec::with_capacity(
-        ctx.source_limit
-            .min(ctx.filtered_rows.len() + ctx.vector_hits.len() + ctx.graph_hits.len()),
-    );
+    let mut arr: Vec<crate::json::Value> = Vec::with_capacity(ctx.source_limit.min(
+        ctx.filtered_rows.len()
+            + ctx.text_hits.len()
+            + ctx.vector_hits.len()
+            + ctx.graph_hits.len(),
+    ));
     let mut urns: Vec<String> = Vec::with_capacity(arr.capacity());
     for source in crate::runtime::ask_pipeline::fused_source_order(ctx) {
         match source {
@@ -2156,6 +2165,30 @@ fn build_sources_flat(
                         crate::json::Value::String(col.clone()),
                     );
                 }
+                arr.push(crate::json::Value::Object(obj));
+                urns.push(urn);
+            }
+            crate::runtime::ask_pipeline::FusedSourceRef::TextHit(idx) => {
+                let hit = &ctx.text_hits[idx];
+                let urn = encode(&Urn::row(hit.collection.clone(), hit.entity_id.to_string()));
+                let mut obj: crate::json::Map<String, crate::json::Value> = Default::default();
+                obj.insert(
+                    "kind".to_string(),
+                    crate::json::Value::String("text_hit".into()),
+                );
+                obj.insert("urn".to_string(), crate::json::Value::String(urn.clone()));
+                obj.insert(
+                    "collection".to_string(),
+                    crate::json::Value::String(hit.collection.clone()),
+                );
+                obj.insert(
+                    "id".to_string(),
+                    crate::json::Value::String(hit.entity_id.to_string()),
+                );
+                obj.insert(
+                    "score".to_string(),
+                    crate::json::Value::Number(hit.score as f64),
+                );
                 arr.push(crate::json::Value::Object(obj));
                 urns.push(urn);
             }
@@ -2272,6 +2305,10 @@ fn explain_planned_sources(
                         row.collection.clone(),
                         row.entity.id.raw().to_string(),
                     ))
+                }
+                crate::runtime::ask_pipeline::FusedSourceRef::TextHit(idx) => {
+                    let hit = &ctx.text_hits[idx];
+                    encode(&Urn::row(hit.collection.clone(), hit.entity_id.to_string()))
                 }
                 crate::runtime::ask_pipeline::FusedSourceRef::VectorHit(idx) => {
                     let hit = &ctx.vector_hits[idx];
@@ -2466,6 +2503,7 @@ mod render_prompt_tests {
                 collections: vec!["travel".to_string()],
                 columns_by_collection: HashMap::new(),
             },
+            text_hits: Vec::new(),
             vector_hits: Vec::new(),
             graph_hits: Vec::new(),
             filtered_rows: filtered,
@@ -2692,7 +2730,7 @@ mod citation_wedge_tests {
         use crate::runtime::ai::urn_codec::{decode, KindHint, UrnKind};
         use crate::runtime::ask_pipeline::{
             AskContext, CandidateCollections, FilteredRow, GraphHit, GraphHitKind, StageTimings,
-            TokenSet, VectorHit,
+            TextHit, TokenSet, VectorHit,
         };
         use crate::storage::schema::Value;
         use crate::storage::unified::entity::{
@@ -2728,6 +2766,11 @@ mod citation_wedge_tests {
             entity_id: 9,
             score: 0.5,
         };
+        let text_hit = TextHit {
+            collection: "articles".to_string(),
+            entity_id: 5,
+            score: 1.2,
+        };
         let graph_hit = GraphHit {
             collection: "topology".to_string(),
             entity_id: 7,
@@ -2745,6 +2788,7 @@ mod citation_wedge_tests {
                 collections: vec!["incidents".to_string(), "docs".to_string()],
                 columns_by_collection: HashMap::new(),
             },
+            text_hits: vec![text_hit],
             vector_hits: vec![hit],
             graph_hits: vec![graph_hit],
             filtered_rows: vec![row],
@@ -2753,39 +2797,43 @@ mod citation_wedge_tests {
         };
         let (sources_flat, urns) = build_sources_flat(&ctx);
 
-        assert_eq!(urns.len(), 3);
-        assert_eq!(urns[0], "reddb:docs/9#0.5");
-        assert_eq!(urns[1], "reddb:incidents/42");
-        assert_eq!(urns[2], "reddb:topology/7");
+        assert_eq!(urns.len(), 4);
+        assert_eq!(urns[0], "reddb:articles/5");
+        assert_eq!(urns[1], "reddb:docs/9#0.5");
+        assert_eq!(urns[2], "reddb:incidents/42");
+        assert_eq!(urns[3], "reddb:topology/7");
         // RRF source order: same one-bucket contribution, then
         // deterministic source-id tie-break.
         let arr = sources_flat.as_array().expect("arr");
-        assert_eq!(arr.len(), 3);
+        assert_eq!(arr.len(), 4);
         let first = arr[0].as_object().expect("obj");
-        assert_eq!(
-            first.get("kind").and_then(|v| v.as_str()),
-            Some("vector_hit")
-        );
+        assert_eq!(first.get("kind").and_then(|v| v.as_str()), Some("text_hit"));
         assert_eq!(
             first.get("urn").and_then(|v| v.as_str()),
             Some(urns[0].as_str())
         );
         let second = arr[1].as_object().expect("obj");
-        assert_eq!(second.get("kind").and_then(|v| v.as_str()), Some("row"));
-        let third = arr[2].as_object().expect("obj");
         assert_eq!(
-            third.get("kind").and_then(|v| v.as_str()),
+            second.get("kind").and_then(|v| v.as_str()),
+            Some("vector_hit")
+        );
+        let third = arr[2].as_object().expect("obj");
+        assert_eq!(third.get("kind").and_then(|v| v.as_str()), Some("row"));
+        let fourth = arr[3].as_object().expect("obj");
+        assert_eq!(
+            fourth.get("kind").and_then(|v| v.as_str()),
             Some("graph_node")
         );
         // URN round-trips: every kind decodes back without error.
-        let dec = decode(&urns[0], KindHint::VectorHit).unwrap();
+        assert_eq!(decode(&urns[0], KindHint::Row).unwrap().kind, UrnKind::Row);
+        let dec = decode(&urns[1], KindHint::VectorHit).unwrap();
         match dec.kind {
             UrnKind::VectorHit { score } => assert!((score - 0.5).abs() < 1e-5),
             _ => panic!("vector_hit kind expected"),
         }
-        assert_eq!(decode(&urns[1], KindHint::Row).unwrap().kind, UrnKind::Row);
+        assert_eq!(decode(&urns[2], KindHint::Row).unwrap().kind, UrnKind::Row);
         assert_eq!(
-            decode(&urns[2], KindHint::GraphNode).unwrap().kind,
+            decode(&urns[3], KindHint::GraphNode).unwrap().kind,
             UrnKind::GraphNode
         );
     }
@@ -2869,6 +2917,7 @@ mod citation_wedge_tests {
                 collections: vec!["users".to_string()],
                 columns_by_collection: HashMap::new(),
             },
+            text_hits: Vec::new(),
             vector_hits: Vec::new(),
             graph_hits: Vec::new(),
             filtered_rows: Vec::new(),
