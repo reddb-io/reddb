@@ -54,3 +54,29 @@ the ASK path.
 Leaving runtime code unchanged and keeping this issue blocked until the
 primary-sync RPC contract/harness exists. Acceptance items requiring a
 1-primary + 2-replica harness remain unverified.
+
+## Progress note (2026-05-13, primary-sync slice)
+
+Added the first primary-sync contract slice:
+
+- `SubmitAskSideEffects` gRPC endpoint on primaries.
+- Replica ASK cost accounting forwards `ask.side_effects.v1` usage to the
+  primary synchronously.
+- Replica ASK audit rows forward to the primary synchronously before the
+  answer returns.
+- Primary-sync unavailability maps to HTTP 503 / gRPC unavailable.
+- gRPC `Ask` runs the synchronous runtime path from a blocking task so the
+  forwarding call does not block the async reactor.
+
+Verified with:
+
+- `cargo check --locked -p reddb-io-server`
+- `cargo test --locked -p reddb-io-server primary_ask_side_effects`
+- `cargo test --locked -p reddb-io-server ask_audit_retention_purge_deletes_rows_older_than_setting`
+
+Still not done:
+
+- Full 1-primary + 2-replica integration harness coverage.
+- Cache async-propagate behavior is still unverified/not implemented here.
+- The issue should remain open until the remaining acceptance criteria are
+  covered.
