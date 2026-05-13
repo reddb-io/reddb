@@ -45,7 +45,7 @@ async fn main() -> reddb_client::Result<()> {
     let result = db
         .query_with(
             "SELECT * FROM users WHERE name = $1 LIMIT $2",
-            &[Value::Text("Alice".into()), Value::Int(10)],
+            &[Value::Text("Alice".into()), Value::Int64(10)],
         )
         .await?;
     println!("{} rows", result.rows.len());
@@ -53,7 +53,7 @@ async fn main() -> reddb_client::Result<()> {
     let _hits = db
         .query_with(
             "SEARCH SIMILAR $1 IN embeddings K $2",
-            &[Value::Vector(vec![0.1, 0.2, 0.3]), Value::Int(5)],
+            &[Value::Vector(vec![0.1, 0.2, 0.3]), Value::Int64(5)],
         )
         .await?;
 
@@ -77,6 +77,26 @@ let db = Reddb::connect_with("red://reddb.example.com:5050", opts).await?;
 ```
 
 Credentials can also ride in the URI: `red://user:pass@host`, `red://host?token=...`.
+
+For the native RedWire transport, construct the RedWire client directly:
+
+```rust
+use reddb_client::redwire::{Auth, ConnectOptions, RedWireClient};
+use reddb_client::Value;
+
+# async fn run() -> reddb_client::Result<()> {
+let mut client = RedWireClient::connect(
+    ConnectOptions::new("127.0.0.1", 5050).with_auth(Auth::Anonymous),
+)
+.await?;
+
+let rows = client
+    .query_with("SELECT $1", &[Value::Int64(42)])
+    .await?;
+# let _ = rows;
+# Ok(())
+# }
+```
 
 ## Connection strings
 
@@ -123,7 +143,7 @@ use reddb_client::{Reddb, Value};
 let rows = db
     .query_with(
         "SELECT id, name FROM users WHERE id = $1 AND tenant = $2 AND deleted_at IS $3",
-        &[Value::Int(42), Value::Text("acme".into()), Value::Null],
+        &[Value::Int64(42), Value::Text("acme".into()), Value::Null],
     )
     .await?;
 
@@ -131,7 +151,7 @@ let rows = db
 let hits = db
     .query_with(
         "SEARCH SIMILAR $1 IN embeddings K $2",
-        &[Value::Vector(vec![0.1, 0.2, 0.3]), Value::Int(5)],
+        &[Value::Vector(vec![0.1, 0.2, 0.3]), Value::Int64(5)],
     )
     .await?;
 # let _ = (rows, hits);
@@ -146,6 +166,7 @@ Native Rust → engine type mapping (see `reddb_client::params::IntoValue`):
 | `Option<T>::None` | Null |
 | `bool` | Bool |
 | `i8..i64`, `u8..u32` | Int |
+| `Value::Int64(n)` | Int |
 | `f32`, `f64` | Float |
 | `&str`, `String` | Text |
 | `Vec<u8>`, `&[u8]` | Bytes |
@@ -154,8 +175,9 @@ Native Rust → engine type mapping (see `reddb_client::params::IntoValue`):
 | `Value::Timestamp(seconds)` | Timestamp |
 | `Value::Uuid(bytes)` | Uuid |
 
-The embedded, HTTP, and gRPC transports carry params end-to-end. Empty params
-are equivalent to `query(sql)` and stay on the legacy no-params path.
+The embedded, HTTP, gRPC, and native RedWire transports carry params
+end-to-end. Empty params are equivalent to `query(sql)` and stay on the legacy
+no-params path.
 
 ## Embedded mode
 

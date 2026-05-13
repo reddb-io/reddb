@@ -1,3 +1,5 @@
+#![cfg(feature = "embedded")]
+
 //! Integration coverage for `EmbeddedClient::query_with` (#364).
 //!
 //! Exercises int/text/null/vector params end-to-end through the

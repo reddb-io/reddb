@@ -1,3 +1,5 @@
+#![cfg(feature = "embedded")]
+
 //! Pins the contract that `EmbeddedClient::bulk_insert` routes
 //! through the columnar `create_rows_batch_columnar` port (#110).
 //!
