@@ -168,12 +168,79 @@ export async function connect(uri, options = {}) {
 }
 
 // Coerce a JS query parameter to a JSON-serializable shape the server
-// understands. The tracer scope (#355) lifts vector params: `Float32Array`
-// and `Float64Array` round-trip as plain JSON arrays of numbers, which
-// the embedded stdio handler maps to `Value::Vector`.
+// understands. Values JSON cannot represent losslessly use the
+// stdio/HTTP query parameter envelopes.
 function serializeParam(value) {
   if (value instanceof Float32Array || value instanceof Float64Array) {
     return Array.from(value)
+  }
+  if (value instanceof Date) {
+    return { $ts: String(BigInt(value.getTime()) * 1_000_000n) }
+  }
+  if (value instanceof Uint8Array || (typeof Buffer !== 'undefined' && value instanceof Buffer)) {
+    return { $bytes: bytesToBase64(value) }
+  }
+  if (typeof value === 'number' && !Number.isFinite(value)) {
+    if (Number.isNaN(value)) return { $float: 'NaN' }
+    return { $float: value > 0 ? 'Infinity' : '-Infinity' }
+  }
+  if (typeof value === 'string' && isUuidString(value)) {
+    return { $uuid: value }
+  }
+  return value
+}
+
+function bytesToBase64(value) {
+  const bytes = value instanceof Uint8Array
+    ? value
+    : new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64')
+  }
+  let text = ''
+  for (const byte of bytes) text += String.fromCharCode(byte)
+  // eslint-disable-next-line no-undef
+  return btoa(text)
+}
+
+function base64ToBytes(value) {
+  if (typeof Buffer !== 'undefined') {
+    const buf = Buffer.from(value, 'base64')
+    return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength)
+  }
+  // eslint-disable-next-line no-undef
+  const text = atob(value)
+  const out = new Uint8Array(text.length)
+  for (let i = 0; i < text.length; i++) out[i] = text.charCodeAt(i)
+  return out
+}
+
+function isUuidString(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+}
+
+function normalizeResult(value) {
+  if (Array.isArray(value)) return value.map(normalizeResult)
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value)
+    if (keys.length === 1) {
+      if (typeof value.$bytes === 'string') return base64ToBytes(value.$bytes)
+      if (typeof value.$uuid === 'string') return value.$uuid
+      if (typeof value.$float === 'string') {
+        if (value.$float === 'NaN') return Number.NaN
+        if (value.$float === 'Infinity' || value.$float === '+Infinity') return Infinity
+        if (value.$float === '-Infinity') return -Infinity
+      }
+      if (typeof value.$ts === 'string' || typeof value.$ts === 'number') {
+        const raw = typeof value.$ts === 'string'
+          ? BigInt(value.$ts)
+          : BigInt(Math.trunc(value.$ts))
+        return new Date(Number(raw / 1_000_000n))
+      }
+    }
+    const out = {}
+    for (const [key, item] of Object.entries(value)) out[key] = normalizeResult(item)
+    return out
   }
   return value
 }
@@ -376,13 +443,13 @@ export class RedDB {
    */
   query(sql, params) {
     if (params === undefined) {
-      return this.client.call('query', { sql })
+      return this.client.call('query', { sql }).then(normalizeResult)
     }
     if (!Array.isArray(params)) {
       throw new TypeError('query: `params` must be an array')
     }
     const wireParams = params.map(serializeParam)
-    return this.client.call('query', { sql, params: wireParams })
+    return this.client.call('query', { sql, params: wireParams }).then(normalizeResult)
   }
 
   /** Insert one row. Returns `{ affected, id? }`. */
