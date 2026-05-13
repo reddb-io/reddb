@@ -638,17 +638,20 @@ impl RedDBRuntime {
     ///   matching policy's `USING` predicate evaluates to false
     ///   against this entity.
     ///
-    /// `rls_cache` memoises the per-collection compiled filter so
-    /// each collection is resolved at most once per search call.
-    fn search_entity_allowed(
+    /// `rls_cache` memoises the per-collection/per-kind compiled filter
+    /// so each policy set is resolved at most once per search call.
+    pub(crate) fn search_entity_allowed(
         &self,
         collection: &str,
         entity: &UnifiedEntity,
         snap_ctx: Option<&crate::runtime::impl_core::SnapshotContext>,
         rls_cache: &mut HashMap<String, Option<crate::storage::query::ast::Filter>>,
     ) -> bool {
-        use crate::runtime::impl_core::{entity_visible_with_context, rls_policy_filter};
-        use crate::storage::query::ast::PolicyAction;
+        use crate::runtime::impl_core::{
+            entity_visible_with_context, rls_policy_filter, rls_policy_filter_for_kind,
+        };
+        use crate::storage::query::ast::{PolicyAction, PolicyTargetKind};
+        use crate::storage::unified::entity::EntityKind;
 
         // 1. MVCC visibility (Phase 1).
         if !entity_visible_with_context(snap_ctx, entity) {
@@ -659,9 +662,21 @@ impl RedDBRuntime {
         if !self.is_rls_enabled(collection) {
             return true;
         }
-        let filter = rls_cache
-            .entry(collection.to_string())
-            .or_insert_with(|| rls_policy_filter(self, collection, PolicyAction::Select));
+        let kind = match &entity.kind {
+            EntityKind::GraphNode(_) => PolicyTargetKind::Nodes,
+            EntityKind::GraphEdge(_) => PolicyTargetKind::Edges,
+            EntityKind::Vector { .. } => PolicyTargetKind::Vectors,
+            EntityKind::TimeSeriesPoint(_) => PolicyTargetKind::Points,
+            EntityKind::QueueMessage { .. } => PolicyTargetKind::Messages,
+            EntityKind::TableRow { .. } => PolicyTargetKind::Table,
+        };
+        let cache_key = format!("{}\0{}", collection, kind.as_ident());
+        let filter = rls_cache.entry(cache_key).or_insert_with(|| {
+            if kind == PolicyTargetKind::Table {
+                return rls_policy_filter(self, collection, PolicyAction::Select);
+            }
+            rls_policy_filter_for_kind(self, collection, PolicyAction::Select, kind)
+        });
         let Some(filter) = filter else {
             // RLS on but no policy matches this role/action ⇒ deny.
             return false;
