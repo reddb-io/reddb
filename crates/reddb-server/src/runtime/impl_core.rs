@@ -756,6 +756,28 @@ pub fn entity_visible_with_context(
     }
 }
 
+fn table_row_index_fields(
+    entity: &crate::storage::unified::entity::UnifiedEntity,
+) -> Vec<(String, crate::storage::schema::Value)> {
+    let crate::storage::EntityData::Row(row) = &entity.data else {
+        return Vec::new();
+    };
+    if let Some(named) = &row.named {
+        return named
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+    }
+    if let Some(schema) = &row.schema {
+        return schema
+            .iter()
+            .zip(row.columns.iter())
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+    }
+    Vec::new()
+}
+
 #[inline]
 fn visibility_check(ctx: &SnapshotContext, xmin: u64, xmax: u64) -> bool {
     // Writer aborted → tuple never existed from any future reader's view.
@@ -5771,6 +5793,21 @@ impl RedDBRuntime {
                             Some(t) => vec![t.clone()],
                             None => store.list_collections(),
                         };
+                        let cutoff_xid = self.mvcc_vacuum_cutoff_xid();
+                        let mut vacuum_stats =
+                            crate::storage::unified::store::MvccVacuumStats::default();
+                        for t in &targets {
+                            let stats = store.vacuum_mvcc_history(t, cutoff_xid).map_err(|e| {
+                                RedDBError::Internal(format!(
+                                    "VACUUM MVCC history failed for {t}: {e}"
+                                ))
+                            })?;
+                            if stats.reclaimed_versions > 0 {
+                                self.rebuild_runtime_indexes_for_table(t)?;
+                            }
+                            vacuum_stats.add(&stats);
+                        }
+                        self.inner.snapshot_manager.prune_aborted(cutoff_xid);
                         // Stats refresh covers every target (same as ANALYZE).
                         for t in &targets {
                             self.refresh_table_planner_stats(t);
@@ -5795,9 +5832,16 @@ impl RedDBRuntime {
                         (
                             "vacuum",
                             format!(
-                                "VACUUM{} processed {} table(s){}",
+                                "VACUUM{} processed {} table(s): scanned_versions={}, retained_versions={}, reclaimed_versions={}, retained_history_versions={}, reclaimed_history_versions={}, retained_tombstones={}, reclaimed_tombstones={}{}",
                                 if *full { " FULL" } else { "" },
                                 targets.len(),
+                                vacuum_stats.scanned_versions,
+                                vacuum_stats.retained_versions,
+                                vacuum_stats.reclaimed_versions,
+                                vacuum_stats.retained_history_versions,
+                                vacuum_stats.reclaimed_history_versions,
+                                vacuum_stats.retained_tombstones,
+                                vacuum_stats.reclaimed_tombstones,
                                 if persisted {
                                     " (pages flushed to disk)"
                                 } else {
@@ -7613,6 +7657,57 @@ impl RedDBRuntime {
     /// the oldest-active xid when reclaiming dead tuples.
     pub fn snapshot_manager(&self) -> Arc<crate::storage::transaction::snapshot::SnapshotManager> {
         Arc::clone(&self.inner.snapshot_manager)
+    }
+
+    fn mvcc_vacuum_cutoff_xid(&self) -> crate::storage::transaction::snapshot::Xid {
+        let manager = &self.inner.snapshot_manager;
+        let next_xid = manager.peek_next_xid();
+        let mut cutoff = next_xid;
+        if let Some(oldest_active) = manager.oldest_active_xid() {
+            cutoff = cutoff.min(oldest_active);
+        }
+        if let Some(oldest_pinned) = manager.oldest_pinned_xid() {
+            cutoff = cutoff.min(oldest_pinned);
+        }
+        let retention_xids = self.config_u64("runtime.mvcc.vacuum_retention_xids", 0);
+        if retention_xids > 0 {
+            cutoff = cutoff.min(next_xid.saturating_sub(retention_xids));
+        }
+        cutoff
+    }
+
+    fn rebuild_runtime_indexes_for_table(&self, table: &str) -> RedDBResult<()> {
+        let registered = self.inner.index_store.list_indices(table);
+        if registered.is_empty() {
+            return Ok(());
+        }
+        let store = self.inner.db.store();
+        let Some(manager) = store.get_collection(table) else {
+            return Ok(());
+        };
+        let entity_fields = manager
+            .query_all(|entity| matches!(entity.kind, crate::storage::EntityKind::TableRow { .. }))
+            .into_iter()
+            .map(|entity| (entity.id, table_row_index_fields(&entity)))
+            .collect::<Vec<_>>();
+
+        for index in registered {
+            self.inner.index_store.drop_index(&index.name, table);
+            self.inner
+                .index_store
+                .create_index(
+                    &index.name,
+                    table,
+                    &index.columns,
+                    index.method,
+                    index.unique,
+                    &entity_fields,
+                )
+                .map_err(RedDBError::Internal)?;
+            self.inner.index_store.register(index);
+        }
+        self.invalidate_plan_cache();
+        Ok(())
     }
 
     /// Own-tx xids (parent + open/released savepoints) for the current
