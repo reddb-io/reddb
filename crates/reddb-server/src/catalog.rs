@@ -19,6 +19,9 @@ pub enum CollectionModel {
     Document,
     Graph,
     Vector,
+    Hll,
+    Sketch,
+    Filter,
     Kv,
     Config,
     Vault,
@@ -529,6 +532,9 @@ fn infer_schema_mode(model: CollectionModel) -> SchemaMode {
         CollectionModel::Table => SchemaMode::Strict,
         CollectionModel::Graph | CollectionModel::Vector => SchemaMode::SemiStructured,
         CollectionModel::Document
+        | CollectionModel::Hll
+        | CollectionModel::Sketch
+        | CollectionModel::Filter
         | CollectionModel::Kv
         | CollectionModel::Config
         | CollectionModel::Vault

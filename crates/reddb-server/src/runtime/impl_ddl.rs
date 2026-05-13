@@ -584,6 +584,27 @@ impl RedDBRuntime {
                     model: CollectionModel::Vault,
                 },
             ),
+            CollectionModel::Hll => self.execute_probabilistic_command(
+                raw_query,
+                &ProbabilisticCommand::DropHll {
+                    name: query.name.clone(),
+                    if_exists: query.if_exists,
+                },
+            ),
+            CollectionModel::Sketch => self.execute_probabilistic_command(
+                raw_query,
+                &ProbabilisticCommand::DropSketch {
+                    name: query.name.clone(),
+                    if_exists: query.if_exists,
+                },
+            ),
+            CollectionModel::Filter => self.execute_probabilistic_command(
+                raw_query,
+                &ProbabilisticCommand::DropFilter {
+                    name: query.name.clone(),
+                    if_exists: query.if_exists,
+                },
+            ),
             CollectionModel::Mixed => self.execute_drop_typed_collection(
                 raw_query,
                 &query.name,
