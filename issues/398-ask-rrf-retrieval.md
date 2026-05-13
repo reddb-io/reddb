@@ -105,3 +105,50 @@ Deferred to follow-up slices:
 - Thread `ASK '...' DEPTH N` into graph traversal retrieval.
 - Add the final known-good ranked-URN integration test after the fused
   source-list wiring lands.
+
+Slice 3: ASK prompt/source assembly now consumes an RRF-fused source
+order instead of preserving the previous filtered-rows-then-vector
+concatenation. `AskContext` carries the total `source_limit` selected
+from `ASK ... LIMIT N` or the default row cap, and
+`fused_source_order` converts Stage 4 row-filter hits plus Stage 3
+vector hits into `RrfFuser` buckets capped by that total. Duplicate
+row/vector hits for the same collection/entity fuse to one source
+reference, preferring the row payload while still receiving both RRF
+contributions.
+
+The prompt formatter and `sources_flat` builder both walk the fused
+order, so `[^N]` citation markers and response URNs now share the same
+post-RRF ordering. Equal RRF scores use the fuser's deterministic
+source-id tie-break.
+
+Tests added/updated:
+
+- `runtime::ask_pipeline::tests::fused_source_order_uses_rrf_and_total_limit`
+  covers duplicate row/vector fusion and total source limiting.
+- `runtime::impl_search::citation_wedge_tests::build_sources_flat_orders_rows_before_vectors_with_urns`
+  now pins deterministic RRF ordering instead of legacy row-first
+  ordering.
+
+Verification for this slice:
+
+- Red check: focused prompt/source test failed on the old row-first
+  `sources_flat` expectation.
+- Green checks:
+  - `env CARGO_INCREMENTAL=0 cargo test -p reddb-io-server --lib -- ask_pipeline::tests::fused_source_order_uses_rrf_and_total_limit`
+  - `env CARGO_INCREMENTAL=0 cargo test -p reddb-io-server --lib -- render_prompt_tests citation_wedge_tests::build_sources_flat_orders_rows_before_vectors_with_urns citation_wedge_tests::system_prompt_carries_citation_directive`
+  - `env CARGO_INCREMENTAL=0 cargo check -p reddb-io-server --lib`
+  - `rustfmt --check crates/reddb-server/src/runtime/ask_pipeline.rs crates/reddb-server/src/runtime/impl_search.rs`
+  - `git diff --check`
+  - `pnpm test` exited 0 after skipping because
+    `target/debug/red` is not built.
+  - `pnpm typecheck` exited 1 after reporting
+    `TypeScript: No errors found`, matching the known wrapper behavior.
+
+Deferred to follow-up slices:
+
+- Add true BM25/text and graph traversal buckets to the fused source
+  list; this slice fuses the currently materialized row-filter and
+  vector buckets.
+- Thread `ASK '...' DEPTH N` into graph traversal retrieval.
+- Add the final known-good ranked-URN integration test once graph/text
+  buckets participate in the fused list.

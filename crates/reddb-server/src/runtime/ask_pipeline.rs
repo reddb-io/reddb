@@ -111,14 +111,36 @@ pub struct StageTimings {
 /// Typed context handed back to the ASK caller. Carries all four
 /// stage outputs so the LLM-formatting helper (slice #122) can pick
 /// what it needs without re-running the funnel.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AskContext {
     pub question: String,
     pub tokens: TokenSet,
     pub candidates: CandidateCollections,
     pub vector_hits: Vec<VectorHit>,
     pub filtered_rows: Vec<FilteredRow>,
+    pub source_limit: usize,
     pub timings: StageTimings,
+}
+
+impl Default for AskContext {
+    fn default() -> Self {
+        Self {
+            question: String::new(),
+            tokens: TokenSet::default(),
+            candidates: CandidateCollections::default(),
+            vector_hits: Vec::new(),
+            filtered_rows: Vec::new(),
+            source_limit: DEFAULT_ROW_CAP,
+            timings: StageTimings::default(),
+        }
+    }
+}
+
+/// One fused source reference in the final ASK context order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FusedSourceRef {
+    FilteredRow(usize),
+    VectorHit(usize),
 }
 
 /// Pipeline entry point. Instances are stateless — kept as an empty
@@ -234,6 +256,7 @@ impl AskPipeline {
             candidates,
             vector_hits,
             filtered_rows,
+            source_limit: row_cap,
             timings: StageTimings {
                 extract_us,
                 schema_us,
@@ -242,6 +265,62 @@ impl AskPipeline {
             },
         })
     }
+}
+
+/// Fuse row-filter and vector buckets into the single ranked source
+/// order used by prompt rendering and `sources_flat`.
+pub fn fused_source_order(ctx: &AskContext) -> Vec<FusedSourceRef> {
+    use super::ai::rrf_fuser::{fuse, Bucket, Candidate, RRF_K_DEFAULT};
+
+    if ctx.source_limit == 0 || (ctx.filtered_rows.is_empty() && ctx.vector_hits.is_empty()) {
+        return Vec::new();
+    }
+
+    let mut refs: HashMap<String, FusedSourceRef> = HashMap::new();
+    let row_bucket = Bucket {
+        candidates: ctx
+            .filtered_rows
+            .iter()
+            .enumerate()
+            .map(|(idx, row)| {
+                let id = source_identity(&row.collection, row.entity.id.raw());
+                refs.entry(id.clone())
+                    .or_insert(FusedSourceRef::FilteredRow(idx));
+                Candidate { id, score: 1.0 }
+            })
+            .collect(),
+        min_score: None,
+    };
+    let vector_bucket = Bucket {
+        candidates: ctx
+            .vector_hits
+            .iter()
+            .enumerate()
+            .map(|(idx, hit)| {
+                let id = source_identity(&hit.collection, hit.entity_id);
+                refs.entry(id.clone())
+                    .or_insert(FusedSourceRef::VectorHit(idx));
+                Candidate {
+                    id,
+                    score: hit.score as f64,
+                }
+            })
+            .collect(),
+        min_score: None,
+    };
+
+    fuse(
+        &[row_bucket, vector_bucket],
+        RRF_K_DEFAULT,
+        ctx.source_limit,
+    )
+    .into_iter()
+    .filter_map(|item| refs.get(&item.id).copied())
+    .collect()
+}
+
+fn source_identity(collection: &str, entity_id: u64) -> String {
+    format!("{collection}/{entity_id}")
 }
 
 // ---------------------------------------------------------------------------
@@ -829,7 +908,12 @@ mod tests {
     use crate::auth::Role;
     use crate::runtime::statement_frame::EffectiveScope;
     use crate::runtime::RedDBRuntime;
+    use crate::storage::schema::Value;
     use crate::storage::transaction::snapshot::Snapshot;
+    use crate::storage::unified::entity::{
+        EntityData, EntityId, EntityKind, RowData, UnifiedEntity,
+    };
+    use std::sync::Arc;
 
     fn make_scope(visible: HashSet<String>) -> EffectiveScope {
         EffectiveScope {
@@ -845,6 +929,61 @@ mod tests {
 
     fn fresh_runtime() -> RedDBRuntime {
         RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots")
+    }
+
+    fn test_row(collection: &str, id: u64) -> FilteredRow {
+        FilteredRow {
+            collection: collection.to_string(),
+            entity: UnifiedEntity::new(
+                EntityId::new(id),
+                EntityKind::TableRow {
+                    table: Arc::from(collection),
+                    row_id: id,
+                },
+                EntityData::Row(RowData {
+                    columns: Vec::new(),
+                    named: Some(
+                        [("body".to_string(), Value::text("ticket FDD-1".to_string()))]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    schema: None,
+                }),
+            ),
+            matched_literal: "FDD-1".to_string(),
+            matched_column: Some("body".to_string()),
+        }
+    }
+
+    #[test]
+    fn fused_source_order_uses_rrf_and_total_limit() {
+        let ctx = AskContext {
+            source_limit: 2,
+            filtered_rows: vec![test_row("incidents", 2), test_row("incidents", 1)],
+            vector_hits: vec![
+                VectorHit {
+                    collection: "incidents".to_string(),
+                    entity_id: 1,
+                    score: 0.91,
+                },
+                VectorHit {
+                    collection: "docs".to_string(),
+                    entity_id: 9,
+                    score: 0.88,
+                },
+            ],
+            ..AskContext::default()
+        };
+
+        let order = fused_source_order(&ctx);
+
+        assert_eq!(
+            order,
+            vec![
+                FusedSourceRef::FilteredRow(1),
+                FusedSourceRef::FilteredRow(0)
+            ]
+        );
     }
 
     /// Empty token sets short-circuit with a structured error before
