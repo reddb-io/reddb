@@ -1770,6 +1770,14 @@ pub(super) fn query_has_volatile_builtin(sql: &str) -> bool {
     VOLATILE_TOKENS.iter().any(|t| lowered.contains(t))
 }
 
+pub(super) fn query_is_ask_statement(sql: &str) -> bool {
+    let trimmed = sql.trim_start();
+    let head_end = trimmed
+        .find(|c: char| c.is_whitespace() || c == '(' || c == ';')
+        .unwrap_or(trimmed.len());
+    trimmed[..head_end].eq_ignore_ascii_case("ASK")
+}
+
 /// Pick the `(global_mode, collection_mode)` pair for an expression,
 /// or `None` for variants that opt out of intent-locking entirely
 /// (admin statements like `SHOW CONFIG`, transaction control, tenant

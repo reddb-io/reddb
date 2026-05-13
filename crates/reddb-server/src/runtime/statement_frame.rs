@@ -4,8 +4,8 @@ use std::sync::Arc;
 use super::impl_core::{
     collections_referenced, current_auth_identity, current_connection_id, current_tenant,
     has_with_prefix, intent_lock_modes_for, peek_top_level_as_of_with_table,
-    query_has_volatile_builtin, ConfigSnapshotGuard, CurrentSnapshotGuard, SecretStoreGuard,
-    SnapshotContext, TxLocalTenantGuard,
+    query_has_volatile_builtin, query_is_ask_statement, ConfigSnapshotGuard, CurrentSnapshotGuard,
+    SecretStoreGuard, SnapshotContext, TxLocalTenantGuard,
 };
 use super::{RedDBRuntime, RuntimeQueryResult, RuntimeResultCacheEntry};
 use crate::api::{RedDBError, RedDBResult};
@@ -284,7 +284,7 @@ impl StatementExecutionFrame {
         let requires_index_fallback =
             as_of_floor.is_some() || runtime.inner.tx_contexts.read().contains_key(&conn_id);
         let cache_key = result_cache_key(query);
-        let is_volatile_query = query_has_volatile_builtin(query);
+        let is_volatile_query = query_has_volatile_builtin(query) || query_is_ask_statement(query);
         let cache_safe = runtime.result_cache_safe(conn_id);
         // Capture identity + effective scope under the same
         // thread-local view that the cache key was built from, so
