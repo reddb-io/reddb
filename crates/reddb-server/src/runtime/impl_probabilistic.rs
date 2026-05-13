@@ -42,6 +42,7 @@ impl RedDBRuntime {
             // ── HyperLogLog ──────────────────────────────────────────
             ProbabilisticCommand::CreateHll {
                 name,
+                precision,
                 if_not_exists,
             } => {
                 let mut hlls =
@@ -56,10 +57,15 @@ impl RedDBRuntime {
                     }
                     return Err(RedDBError::Query(format!("HLL '{}' already exists", name)));
                 }
-                hlls.insert(
-                    name.clone(),
-                    crate::storage::primitives::hyperloglog::HyperLogLog::new(),
-                );
+                let hll = crate::storage::primitives::hyperloglog::HyperLogLog::with_precision(
+                    *precision,
+                )
+                .ok_or_else(|| {
+                    RedDBError::Query(format!(
+                        "HLL precision must be between 4 and 18, got {precision}"
+                    ))
+                })?;
+                hlls.insert(name.clone(), hll);
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
                     &format!("HLL '{}' created", name),
@@ -156,11 +162,13 @@ impl RedDBRuntime {
                     .ok_or_else(|| RedDBError::NotFound(format!("HLL '{}' not found", name)))?;
                 let mut result = UnifiedResult::with_columns(vec![
                     "name".into(),
+                    "precision".into(),
                     "count".into(),
                     "memory_bytes".into(),
                 ]);
                 let mut record = UnifiedRecord::new();
                 record.set("name", Value::text(name.clone()));
+                record.set("precision", Value::UnsignedInteger(hll.precision() as u64));
                 record.set("count", Value::UnsignedInteger(hll.count()));
                 record.set(
                     "memory_bytes",

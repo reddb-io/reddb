@@ -13,16 +13,14 @@
 //! assert!(hll.count() >= 2); // approximately 2
 //! ```
 
-/// Number of registers (2^14 = 16384) — standard HLL precision
-const NUM_REGISTERS: usize = 16384;
-/// Bits used for bucket index (14 bits → 16384 buckets)
-const P: u32 = 14;
-/// Alpha constant for bias correction with m=16384
-const ALPHA: f64 = 0.7213 / (1.0 + 1.079 / NUM_REGISTERS as f64);
+const DEFAULT_PRECISION: u8 = 14;
+const MIN_PRECISION: u8 = 4;
+const MAX_PRECISION: u8 = 18;
 
 /// HyperLogLog cardinality estimator
 #[derive(Debug, Clone)]
 pub struct HyperLogLog {
+    precision: u8,
     /// Registers storing max leading zeros + 1
     registers: Vec<u8>,
 }
@@ -30,16 +28,29 @@ pub struct HyperLogLog {
 impl HyperLogLog {
     /// Create a new HLL with 16384 registers (~16KB memory)
     pub fn new() -> Self {
-        Self {
-            registers: vec![0u8; NUM_REGISTERS],
+        Self::with_precision(DEFAULT_PRECISION).expect("default HLL precision is valid")
+    }
+
+    pub fn with_precision(precision: u8) -> Option<Self> {
+        if !(MIN_PRECISION..=MAX_PRECISION).contains(&precision) {
+            return None;
         }
+        Some(Self {
+            precision,
+            registers: vec![0u8; 1usize << precision],
+        })
+    }
+
+    pub fn precision(&self) -> u8 {
+        self.precision
     }
 
     /// Add an element to the HLL
     pub fn add(&mut self, data: &[u8]) {
         let hash = Self::hash(data);
-        let index = (hash >> (64 - P)) as usize;
-        let remaining = (hash << P) | (1 << (P - 1)); // ensure non-zero
+        let precision = self.precision as u32;
+        let index = (hash >> (64 - precision)) as usize;
+        let remaining = (hash << precision) | (1 << (precision - 1)); // ensure non-zero
         let rho = remaining.leading_zeros() as u8 + 1;
         if rho > self.registers[index] {
             self.registers[index] = rho;
@@ -48,7 +59,8 @@ impl HyperLogLog {
 
     /// Estimate the cardinality (number of distinct elements)
     pub fn count(&self) -> u64 {
-        let m = NUM_REGISTERS as f64;
+        let m = self.registers.len() as f64;
+        let alpha = 0.7213 / (1.0 + 1.079 / m);
 
         // Harmonic mean of 2^(-register[i])
         let mut sum = 0.0f64;
@@ -60,7 +72,7 @@ impl HyperLogLog {
             }
         }
 
-        let raw_estimate = ALPHA * m * m / sum;
+        let raw_estimate = alpha * m * m / sum;
 
         // Small range correction (linear counting)
         if raw_estimate <= 2.5 * m && zeros > 0 {
@@ -80,6 +92,9 @@ impl HyperLogLog {
 
     /// Merge another HLL into this one (union)
     pub fn merge(&mut self, other: &HyperLogLog) {
+        if self.precision != other.precision {
+            return;
+        }
         for (i, &other_reg) in other.registers.iter().enumerate() {
             if other_reg > self.registers[i] {
                 self.registers[i] = other_reg;
@@ -89,8 +104,11 @@ impl HyperLogLog {
 
     /// Create a merged HLL from two HLLs without modifying either
     pub fn merged(a: &HyperLogLog, b: &HyperLogLog) -> HyperLogLog {
-        let mut result = HyperLogLog::new();
-        for i in 0..NUM_REGISTERS {
+        let mut result = HyperLogLog::with_precision(a.precision).unwrap_or_default();
+        if a.precision != b.precision {
+            return result;
+        }
+        for i in 0..a.registers.len() {
             result.registers[i] = a.registers[i].max(b.registers[i]);
         }
         result
@@ -115,10 +133,16 @@ impl HyperLogLog {
 
     /// Deserialize from bytes
     pub fn from_bytes(bytes: Vec<u8>) -> Option<Self> {
-        if bytes.len() != NUM_REGISTERS {
+        let precision = bytes.len().checked_ilog2()? as u8;
+        if 1usize << precision != bytes.len()
+            || !(MIN_PRECISION..=MAX_PRECISION).contains(&precision)
+        {
             return None;
         }
-        Some(Self { registers: bytes })
+        Some(Self {
+            precision,
+            registers: bytes,
+        })
     }
 
     /// FNV-1a hash producing a 64-bit value

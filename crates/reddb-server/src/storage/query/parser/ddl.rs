@@ -1,9 +1,10 @@
 //! DDL SQL Parser: CREATE TABLE, DROP TABLE, ALTER TABLE
 
 use super::super::ast::{
-    AlterOperation, AlterTableQuery, CreateColumnDef, CreateTableQuery, DropCollectionQuery,
-    DropDocumentQuery, DropGraphQuery, DropKvQuery, DropTableQuery, DropVectorQuery,
-    ExplainAlterQuery, ExplainFormat, PartitionKind, PartitionSpec, QueryExpr, TruncateQuery,
+    AlterOperation, AlterTableQuery, CreateCollectionQuery, CreateColumnDef, CreateTableQuery,
+    DropCollectionQuery, DropDocumentQuery, DropGraphQuery, DropKvQuery, DropTableQuery,
+    DropVectorQuery, ExplainAlterQuery, ExplainFormat, PartitionKind, PartitionSpec, QueryExpr,
+    TruncateQuery,
 };
 use super::super::lexer::Token;
 use super::error::ParseError;
@@ -383,6 +384,31 @@ impl<'a> Parser<'a> {
             append_only: false,
             subscriptions: Vec::new(),
             vault_own_master_key,
+        }))
+    }
+
+    pub fn parse_create_collection_model_body(
+        &mut self,
+        model: CollectionModel,
+    ) -> Result<QueryExpr, ParseError> {
+        self.parse_create_keyed_body(model)
+    }
+
+    pub fn parse_create_collection_body(&mut self) -> Result<QueryExpr, ParseError> {
+        let if_not_exists = self.match_if_not_exists()?;
+        let name = self.parse_drop_collection_name()?;
+        if !self.consume_ident_ci("KIND")? {
+            return Err(ParseError::expected(
+                vec!["KIND"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        let kind = self.expect_ident_or_keyword()?.to_ascii_lowercase();
+        Ok(QueryExpr::CreateCollection(CreateCollectionQuery {
+            name,
+            kind,
+            if_not_exists,
         }))
     }
 

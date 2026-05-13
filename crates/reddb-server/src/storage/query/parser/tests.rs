@@ -49,14 +49,58 @@ fn assert_unsupported_token(input: &str, token: &str) {
 
 #[test]
 fn test_parse_create_unsupported_recognized_tokens_use_clear_error() {
-    for (input, token) in [
-        ("CREATE VECTOR vt", "VECTOR"),
-        ("CREATE DOCUMENT docs", "DOCUMENT"),
-        ("CREATE GRAPH g", "GRAPH"),
-        ("CREATE COLLECTION c", "COLLECTION"),
-    ] {
+    for (input, token) in [("CREATE VECTOR vt", "VECTOR")] {
         assert_unsupported_token(input, token);
     }
+}
+
+#[test]
+fn test_parse_create_graph_document_and_collection_forms() {
+    let graph = parse("CREATE GRAPH g").unwrap();
+    let QueryExpr::CreateTable(graph) = graph else {
+        panic!("Expected CreateTableQuery");
+    };
+    assert_eq!(graph.name, "g");
+    assert_eq!(
+        graph.collection_model,
+        crate::catalog::CollectionModel::Graph
+    );
+
+    let document = parse("CREATE DOCUMENT docs").unwrap();
+    let QueryExpr::CreateTable(document) = document else {
+        panic!("Expected CreateTableQuery");
+    };
+    assert_eq!(document.name, "docs");
+    assert_eq!(
+        document.collection_model,
+        crate::catalog::CollectionModel::Document
+    );
+
+    let collection = parse("CREATE COLLECTION c KIND graph").unwrap();
+    let QueryExpr::CreateCollection(collection) = collection else {
+        panic!("Expected CreateCollectionQuery");
+    };
+    assert_eq!(collection.name, "c");
+    assert_eq!(collection.kind, "graph");
+    assert!(!collection.if_not_exists);
+
+    let unknown = parse("CREATE COLLECTION c KIND mystery").unwrap();
+    let QueryExpr::CreateCollection(unknown) = unknown else {
+        panic!("Expected CreateCollectionQuery");
+    };
+    assert_eq!(unknown.kind, "mystery");
+
+    let hll = parse("CREATE HLL h PRECISION 14").unwrap();
+    let QueryExpr::ProbabilisticCommand(
+        crate::storage::query::ast::ProbabilisticCommand::CreateHll {
+            name, precision, ..
+        },
+    ) = hll
+    else {
+        panic!("Expected CreateHll");
+    };
+    assert_eq!(name, "h");
+    assert_eq!(precision, 14);
 }
 
 #[test]
@@ -4549,6 +4593,7 @@ fn test_parse_probabilistic_command_matrix() {
         QueryExpr::ProbabilisticCommand(ProbabilisticCommand::CreateHll {
             ref name,
             if_not_exists: true,
+            ..
         }) if name == "visitors"
     ));
 
@@ -4716,6 +4761,7 @@ fn test_parse_probabilistic_command_matrix() {
         QueryExpr::ProbabilisticCommand(ProbabilisticCommand::CreateHll {
             ref name,
             if_not_exists: false,
+            ..
         }) if name == "visitors2"
     ));
 
