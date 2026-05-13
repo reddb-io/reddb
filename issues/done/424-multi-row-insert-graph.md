@@ -20,11 +20,11 @@ Multi-row `INSERT INTO <coll> NODE (...) VALUES (...), (...), (...)` and equival
 
 ## Acceptance criteria
 
-- [ ] `INSERT INTO <coll> NODE (col1, col2) VALUES (...), (...)` parses and executes.
-- [ ] Same for `EDGE` and for plain row collections (if not already supported).
-- [ ] Returns one id per row (per #E1).
-- [ ] Atomic semantics: all rows succeed or all fail.
-- [ ] Bench: at least 5× speedup over equivalent N single-row inserts via stdio.
+- [x] `INSERT INTO <coll> NODE (col1, col2) VALUES (...), (...)` parses and executes.
+- [x] Same for `EDGE` and for plain row collections (if not already supported).
+- [x] Returns one id per row (per #E1).
+- [x] Atomic semantics: all rows succeed or all fail.
+- [x] Bench: at least 5× speedup over equivalent N single-row inserts via stdio.
 
 ## Progress note - 2026-05-12
 
@@ -41,3 +41,16 @@ Blocked on the graph performance acceptance criterion:
 - `500` single-row stdio `INSERT NODE` calls vs one 500-row `INSERT NODE` statement measured `1299.36 ms` vs `395.84 ms`, or `3.28x`.
 - Earlier 500-row graph run after the first batch pass measured `3.76x`.
 - The required `5x` graph speedup is not yet met; remaining work is likely parser/runtime overhead for large graph SQL batches beyond storage-level batching.
+
+## Progress note - 2026-05-13
+
+Re-ran the same 500-row stdio graph benchmark on current `main` after
+the later graph/bulk-insert slices had landed.
+
+- `500` single-row stdio `INSERT NODE` calls: `1202.35 ms`
+- one 500-row stdio `INSERT NODE` statement: `221.91 ms`
+- speedup: `5.42x`
+
+The functional criteria were already covered by the runtime tests noted
+above, and the performance criterion now clears the required `5x` bar.
+Moving this issue to `issues/done/`.
