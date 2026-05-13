@@ -37,6 +37,12 @@ fn probabilistic_collection_contract(
     }
 }
 
+enum ProbabilisticReadProjection {
+    Cardinality { label: String },
+    Freq { element: String, label: String },
+    Contains { element: String, label: String },
+}
+
 impl RedDBRuntime {
     fn create_probabilistic_catalog_entry(
         &self,
@@ -82,6 +88,63 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         self.invalidate_result_cache();
         Ok(())
+    }
+
+    pub(crate) fn execute_probabilistic_select(
+        &self,
+        query: &TableQuery,
+    ) -> RedDBResult<Option<UnifiedResult>> {
+        let projections = crate::storage::query::sql_lowering::effective_table_projections(query);
+        let mut read_projections = Vec::new();
+        for projection in &projections {
+            if let Some(read_projection) =
+                parse_probabilistic_read_projection(projection, read_projections.len())?
+            {
+                read_projections.push(read_projection);
+            }
+        }
+
+        let Some(actual_model) = self
+            .inner
+            .db
+            .collection_contract(&query.table)
+            .map(|contract| contract.declared_model)
+        else {
+            return if read_projections.is_empty() {
+                Ok(None)
+            } else {
+                Err(RedDBError::NotFound(format!(
+                    "probabilistic collection '{}' not found",
+                    query.table
+                )))
+            };
+        };
+
+        let is_probabilistic_model = matches!(
+            actual_model,
+            crate::catalog::CollectionModel::Hll
+                | crate::catalog::CollectionModel::Sketch
+                | crate::catalog::CollectionModel::Filter
+        );
+        if read_projections.is_empty() {
+            return if is_probabilistic_model {
+                Err(RedDBError::Query(format!(
+                    "probabilistic collection '{}' supports SELECT CARDINALITY, FREQ(...), or CONTAINS(...) read forms",
+                    query.table
+                )))
+            } else {
+                Ok(None)
+            };
+        }
+
+        validate_probabilistic_read_model(&query.table, actual_model, &read_projections)?;
+        let (columns, record) =
+            self.materialize_probabilistic_select_row(&query.table, &read_projections)?;
+        let mut result = UnifiedResult::with_columns(columns);
+        if probabilistic_select_row_visible(self, query, &record) {
+            result.push(record);
+        }
+        Ok(Some(result))
     }
 
     pub fn execute_probabilistic_command(
@@ -633,5 +696,203 @@ impl RedDBRuntime {
                 ))
             }
         }
+    }
+}
+
+fn parse_probabilistic_read_projection(
+    projection: &Projection,
+    index: usize,
+) -> RedDBResult<Option<ProbabilisticReadProjection>> {
+    if let Some(column) = projection_unqualified_column(projection) {
+        if column.eq_ignore_ascii_case("CARDINALITY") {
+            return Ok(Some(ProbabilisticReadProjection::Cardinality {
+                label: probabilistic_projection_label(projection, "cardinality", index),
+            }));
+        }
+    }
+
+    let Some((function, args)) = projection_function(projection) else {
+        return Ok(None);
+    };
+    if function.eq_ignore_ascii_case("FREQ") {
+        let element = projection_single_text_arg(function, args)?;
+        return Ok(Some(ProbabilisticReadProjection::Freq {
+            element,
+            label: probabilistic_projection_label(projection, "freq", index),
+        }));
+    }
+    if function.eq_ignore_ascii_case("CONTAINS") {
+        let element = projection_single_text_arg(function, args)?;
+        return Ok(Some(ProbabilisticReadProjection::Contains {
+            element,
+            label: probabilistic_projection_label(projection, "contains", index),
+        }));
+    }
+
+    Ok(None)
+}
+
+fn validate_probabilistic_read_model(
+    collection: &str,
+    actual_model: crate::catalog::CollectionModel,
+    projections: &[ProbabilisticReadProjection],
+) -> RedDBResult<()> {
+    for projection in projections {
+        let expected_model = match projection {
+            ProbabilisticReadProjection::Cardinality { .. } => crate::catalog::CollectionModel::Hll,
+            ProbabilisticReadProjection::Freq { .. } => crate::catalog::CollectionModel::Sketch,
+            ProbabilisticReadProjection::Contains { .. } => crate::catalog::CollectionModel::Filter,
+        };
+        if actual_model != expected_model {
+            return Err(RedDBError::Query(format!(
+                "{} is only supported for {} collections; '{}' is {}",
+                probabilistic_projection_form(projection),
+                crate::runtime::ddl::polymorphic_resolver::model_name(expected_model),
+                collection,
+                crate::runtime::ddl::polymorphic_resolver::model_name(actual_model)
+            )));
+        }
+    }
+    Ok(())
+}
+
+impl RedDBRuntime {
+    fn materialize_probabilistic_select_row(
+        &self,
+        collection: &str,
+        projections: &[ProbabilisticReadProjection],
+    ) -> RedDBResult<(Vec<String>, UnifiedRecord)> {
+        let mut columns = Vec::with_capacity(projections.len());
+        let mut record = UnifiedRecord::new();
+        for projection in projections {
+            match projection {
+                ProbabilisticReadProjection::Cardinality { label } => {
+                    let hlls = probabilistic_read(
+                        &self.inner.probabilistic.hlls,
+                        "probabilistic HLL store",
+                    );
+                    let hll = hlls.get(collection).ok_or_else(|| {
+                        RedDBError::NotFound(format!("HLL '{}' not found", collection))
+                    })?;
+                    columns.push(label.clone());
+                    record.set(label, Value::UnsignedInteger(hll.count()));
+                }
+                ProbabilisticReadProjection::Freq { element, label } => {
+                    let sketches = probabilistic_read(
+                        &self.inner.probabilistic.sketches,
+                        "probabilistic sketch store",
+                    );
+                    let sketch = sketches.get(collection).ok_or_else(|| {
+                        RedDBError::NotFound(format!("SKETCH '{}' not found", collection))
+                    })?;
+                    columns.push(label.clone());
+                    record.set(
+                        label,
+                        Value::UnsignedInteger(sketch.estimate(element.as_bytes())),
+                    );
+                }
+                ProbabilisticReadProjection::Contains { element, label } => {
+                    let filters = probabilistic_read(
+                        &self.inner.probabilistic.filters,
+                        "probabilistic filter store",
+                    );
+                    let filter = filters.get(collection).ok_or_else(|| {
+                        RedDBError::NotFound(format!("FILTER '{}' not found", collection))
+                    })?;
+                    columns.push(label.clone());
+                    record.set(label, Value::Boolean(filter.contains(element.as_bytes())));
+                }
+            }
+        }
+        Ok((columns, record))
+    }
+}
+
+fn probabilistic_select_row_visible(
+    runtime: &RedDBRuntime,
+    query: &TableQuery,
+    record: &UnifiedRecord,
+) -> bool {
+    if query.limit == Some(0) || query.offset.is_some_and(|offset| offset > 0) {
+        return false;
+    }
+    let table_name = query.table.as_str();
+    let table_alias = query.alias.as_deref().unwrap_or(table_name);
+    crate::storage::query::sql_lowering::effective_table_filter(query).is_none_or(|filter| {
+        super::join_filter::evaluate_runtime_filter_with_db(
+            Some(&runtime.inner.db),
+            record,
+            &filter,
+            Some(table_name),
+            Some(table_alias),
+        )
+    })
+}
+
+fn projection_unqualified_column(projection: &Projection) -> Option<&str> {
+    match projection {
+        Projection::Field(FieldRef::TableColumn { table, column }, _) if table.is_empty() => {
+            Some(column.as_str())
+        }
+        Projection::Column(column) => Some(column.as_str()),
+        Projection::Alias(column, _) => Some(column.as_str()),
+        _ => None,
+    }
+}
+
+fn projection_function(projection: &Projection) -> Option<(&str, &[Projection])> {
+    match projection {
+        Projection::Function(name, args) => {
+            let function = name.split_once(':').map(|(name, _)| name).unwrap_or(name);
+            Some((function, args.as_slice()))
+        }
+        _ => None,
+    }
+}
+
+fn projection_single_text_arg(function: &str, args: &[Projection]) -> RedDBResult<String> {
+    if args.len() != 1 {
+        return Err(RedDBError::Query(format!(
+            "{function}(...) expects exactly one string literal"
+        )));
+    }
+    match &args[0] {
+        Projection::Column(column) => column
+            .strip_prefix("LIT:")
+            .map(ToString::to_string)
+            .ok_or_else(|| {
+                RedDBError::Query(format!("{function}(...) expects a string literal argument"))
+            }),
+        _ => Err(RedDBError::Query(format!(
+            "{function}(...) expects a string literal argument"
+        ))),
+    }
+}
+
+fn probabilistic_projection_label(projection: &Projection, base: &str, index: usize) -> String {
+    match projection {
+        Projection::Field(_, Some(alias)) => alias.clone(),
+        Projection::Alias(_, alias) => alias.clone(),
+        Projection::Function(name, _) => name
+            .split_once(':')
+            .map(|(_, alias)| alias.to_string())
+            .unwrap_or_else(|| numbered_probabilistic_label(base, index)),
+        _ => numbered_probabilistic_label(base, index),
+    }
+}
+
+fn numbered_probabilistic_label(base: &str, index: usize) -> String {
+    if index == 0 {
+        base.to_string()
+    } else {
+        format!("{base}_{}", index + 1)
+    }
+}
+
+fn probabilistic_projection_form(projection: &ProbabilisticReadProjection) -> &'static str {
+    match projection {
+        ProbabilisticReadProjection::Cardinality { .. } => "SELECT CARDINALITY",
+        ProbabilisticReadProjection::Freq { .. } => "FREQ(...)",
+        ProbabilisticReadProjection::Contains { .. } => "CONTAINS(...)",
     }
 }

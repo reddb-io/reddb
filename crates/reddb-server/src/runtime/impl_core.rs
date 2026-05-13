@@ -4650,6 +4650,18 @@ impl RedDBRuntime {
                     });
                 }
 
+                if let Some(result) = self.execute_probabilistic_select(&table)? {
+                    return Ok(RuntimeQueryResult {
+                        query: query.to_string(),
+                        mode,
+                        statement,
+                        engine: "runtime-probabilistic",
+                        result,
+                        affected_rows: 0,
+                        statement_type: "select",
+                    });
+                }
+
                 // Foreign-table intercept (Phase 3.2.2 PG parity).
                 //
                 // When the referenced table matches a `CREATE FOREIGN TABLE`

@@ -39,6 +39,13 @@ fn text_at<'a>(result: &'a RuntimeQueryResult, row: usize, column: &str) -> &'a 
     }
 }
 
+fn bool_at(result: &RuntimeQueryResult, row: usize, column: &str) -> bool {
+    match result.result.records[row].get(column) {
+        Some(Value::Boolean(value)) => *value,
+        other => panic!("expected bool at row {row} column {column}, got {other:?}"),
+    }
+}
+
 fn collection_model(rt: &RedDBRuntime, name: &str) -> Option<reddb_server::CollectionModel> {
     rt.db()
         .catalog_model_snapshot()
@@ -458,6 +465,84 @@ fn show_collections_reports_declared_models_for_probabilistic_collections() {
             "unexpected model for {name}",
         );
     }
+}
+
+#[test]
+fn probabilistic_sql_read_forms_match_command_results() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+
+    rt.execute_query("CREATE HLL h_visitors")
+        .expect("create hll");
+    rt.execute_query("HLL ADD h_visitors 'alice' 'bob' 'carol'")
+        .expect("add hll elements");
+    let hll_command = rt
+        .execute_query("HLL COUNT h_visitors")
+        .expect("command hll count");
+    let hll_sql = rt
+        .execute_query("SELECT CARDINALITY FROM h_visitors")
+        .expect("sql hll count");
+    assert_eq!(hll_sql.result.len(), 1);
+    assert_eq!(
+        uint_at(&hll_sql, 0, "cardinality"),
+        uint_at(&hll_command, 0, "count")
+    );
+
+    rt.execute_query("CREATE SKETCH s_freqs")
+        .expect("create sketch");
+    rt.execute_query("SKETCH ADD s_freqs 'red' 3")
+        .expect("add sketch red");
+    rt.execute_query("SKETCH ADD s_freqs 'blue' 1")
+        .expect("add sketch blue");
+    let sketch_command = rt
+        .execute_query("SKETCH COUNT s_freqs 'red'")
+        .expect("command sketch count");
+    let sketch_sql = rt
+        .execute_query("SELECT FREQ('red') AS red_count, FREQ('blue') FROM s_freqs")
+        .expect("sql sketch count");
+    assert_eq!(sketch_sql.result.len(), 1);
+    assert_eq!(
+        uint_at(&sketch_sql, 0, "red_count"),
+        uint_at(&sketch_command, 0, "estimate")
+    );
+    assert_eq!(uint_at(&sketch_sql, 0, "freq_2"), 1);
+
+    rt.execute_query("CREATE FILTER f_seen")
+        .expect("create filter");
+    rt.execute_query("FILTER ADD f_seen 'alice'")
+        .expect("add filter element");
+    let filter_command = rt
+        .execute_query("FILTER CHECK f_seen 'alice'")
+        .expect("command filter check");
+    let filter_sql = rt
+        .execute_query("SELECT CONTAINS('alice') AS hit FROM f_seen WHERE hit = true")
+        .expect("sql filter check");
+    assert_eq!(filter_sql.result.len(), 1);
+    assert_eq!(
+        bool_at(&filter_sql, 0, "hit"),
+        bool_at(&filter_command, 0, "exists")
+    );
+
+    let filtered_out = rt
+        .execute_query("SELECT CONTAINS('missing') AS hit FROM f_seen WHERE hit = true")
+        .expect("where applies to synthetic probabilistic row");
+    assert_eq!(filtered_out.result.len(), 0);
+}
+
+#[test]
+fn probabilistic_sql_read_forms_reject_wrong_collection_kind() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("CREATE SKETCH s_freqs")
+        .expect("create sketch");
+
+    let err = rt
+        .execute_query("SELECT CARDINALITY FROM s_freqs")
+        .expect_err("hll read form must reject sketch collections");
+    let message = err.to_string();
+    assert!(
+        message.contains("only supported for hll collections"),
+        "{message}"
+    );
+    assert!(message.contains("'s_freqs' is sketch"), "{message}");
 }
 
 #[test]
