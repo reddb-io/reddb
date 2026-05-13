@@ -214,3 +214,38 @@ Verification (slice 4):
 - `cargo check -q` passed.
 - `cargo test -q -p reddb-io-server --lib http_query_ask_stream -- --test-threads=1`
   → 3 passed.
+
+Slice 5: provider-body streaming receiver + mid-stream guard landed.
+
+What changed:
+
+- Socket-level `POST /query` for `ASK ... STREAM` now executes through a
+  live SSE path instead of constructing the full SSE body after
+  `execute_ask` returns.
+- The streaming path writes HTTP SSE headers first, emits the `sources`
+  frame after retrieval/pre-call guards, forwards each OpenAI-compatible
+  `delta.content` as an `answer_token` frame while the provider body is
+  still being read, and emits the terminal `validation` frame only after
+  validation and audit recording complete.
+- Added a blocking OpenAI-compatible streaming prompt reader for the live
+  socket path. It parses provider `data:` lines incrementally and keeps
+  the accumulated response/usage shape compatible with the existing
+  non-streaming ASK result.
+- The in-flight cost guard now checks emitted completion size and elapsed
+  time before each forwarded token. If it trips after partial output, the
+  client receives an SSE `error` frame and no terminal `validation` frame.
+- Cached/non-live providers still fall back to result-derived
+  `answer_token` frames, preserving the existing response shape.
+- Added socket tests with a delayed provider stream to prove the first
+  token reaches the client before the provider completes, plus a
+  mid-stream cost-guard test that emits one token then terminates with an
+  error frame.
+
+Verification (slice 5):
+
+- `cargo check -q -p reddb-io-server` passed.
+- `cargo test -q -p reddb-io-server --lib http_query_ask_stream -- --test-threads=1`
+  → 5 passed.
+- `cargo test -q -p reddb-io-server --lib openai_streaming_prompt_response_collects_delta_chunks -- --test-threads=1`
+  → 1 passed (with pre-existing serde_json macro warnings).
+- `git diff --check` passed.

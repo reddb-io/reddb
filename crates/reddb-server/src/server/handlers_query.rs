@@ -384,8 +384,82 @@ impl RedDBServer {
         body: Vec<u8>,
         writer: &mut W,
     ) -> io::Result<()> {
-        let response = self.handle_query(body);
-        write_sse_http_response(&response, writer)
+        let request = match extract_query_request(&body) {
+            Ok(request) => request,
+            Err(response) => return write_sse_http_response(&response, writer),
+        };
+        let ParsedQueryRequest { query, params, .. } = request;
+        if params.is_some() {
+            let response = self.handle_query(body);
+            return write_sse_http_response(&response, writer);
+        }
+
+        let ask = match crate::storage::query::modes::parse_multi(&query) {
+            Ok(crate::storage::query::ast::QueryExpr::Ask(ask)) if ask.stream => ask,
+            Ok(_) => {
+                let response = json_error(400, "query is not ASK ... STREAM");
+                return write_sse_http_response(&response, writer);
+            }
+            Err(err) => {
+                let response = json_error(400, err.to_string());
+                return write_sse_http_response(&response, writer);
+            }
+        };
+
+        write_sse_response_header(200, writer)?;
+        let emitted_answer_tokens = std::cell::Cell::new(0_usize);
+        let mut emit =
+            |frame: crate::runtime::ai::sse_frame_encoder::Frame| -> crate::RedDBResult<()> {
+                if matches!(
+                    frame,
+                    crate::runtime::ai::sse_frame_encoder::Frame::AnswerToken { .. }
+                ) {
+                    emitted_answer_tokens.set(emitted_answer_tokens.get().saturating_add(1));
+                }
+                let encoded = crate::runtime::ai::sse_frame_encoder::encode(&frame);
+                writer
+                    .write_all(encoded.as_bytes())
+                    .and_then(|_| writer.flush())
+                    .map_err(|err| crate::api::RedDBError::Query(err.to_string()))
+            };
+
+        match self
+            .runtime
+            .execute_ask_streaming_frames(&query, &ask, &mut emit)
+        {
+            Ok(result) => {
+                if emitted_answer_tokens.get() == 0 {
+                    if let Some(row) = result.result.records.first() {
+                        for token in ask_answer_tokens(row).unwrap_or_else(|| {
+                            vec![schema_text_field(row, "answer").unwrap_or_default()]
+                        }) {
+                            emit(crate::runtime::ai::sse_frame_encoder::Frame::AnswerToken {
+                                text: token,
+                            })
+                            .map_err(reddb_error_to_io)?;
+                        }
+                    }
+                }
+                if let Some(frame) = ask_sse_validation_frame(&result) {
+                    emit(frame).map_err(reddb_error_to_io)?;
+                } else {
+                    emit(crate::runtime::ai::sse_frame_encoder::Frame::Error {
+                        code: 500,
+                        message: "ASK STREAM result missing ASK row".to_string(),
+                    })
+                    .map_err(reddb_error_to_io)?;
+                }
+            }
+            Err(err) => {
+                let (code, message) = match &err {
+                    crate::api::RedDBError::Validation { message, .. } => (422, message.clone()),
+                    _ => map_runtime_error(&err),
+                };
+                emit(crate::runtime::ai::sse_frame_encoder::Frame::Error { code, message })
+                    .map_err(reddb_error_to_io)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -429,9 +503,22 @@ fn write_sse_http_response<W: std::io::Write>(
     flush_sse_frames(&response.body, writer)
 }
 
+fn write_sse_response_header<W: std::io::Write>(status: u16, writer: &mut W) -> io::Result<()> {
+    let header = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+        status,
+        status_text(status),
+    );
+    writer.write_all(header.as_bytes())?;
+    writer.flush()
+}
+
 fn flush_sse_frames<W: std::io::Write>(body: &[u8], writer: &mut W) -> io::Result<()> {
     let mut start = 0;
-    while let Some(offset) = body[start..].windows(2).position(|window| window == b"\n\n") {
+    while let Some(offset) = body[start..]
+        .windows(2)
+        .position(|window| window == b"\n\n")
+    {
         let end = start + offset + 2;
         writer.write_all(&body[start..end])?;
         writer.flush()?;
@@ -552,6 +639,54 @@ fn ask_sse_body(result: &crate::runtime::RuntimeQueryResult) -> Option<String> {
         audit,
     }));
     Some(body)
+}
+
+fn ask_sse_validation_frame(
+    result: &crate::runtime::RuntimeQueryResult,
+) -> Option<crate::runtime::ai::sse_frame_encoder::Frame> {
+    use crate::runtime::ai::sse_frame_encoder::{AuditSummary, Frame, ValidationWarning};
+
+    if result.statement != "ask" {
+        return None;
+    }
+    let row = result.result.records.first()?;
+    let validation_json =
+        schema_json_field(row, "validation").unwrap_or(JsonValue::Object(Map::new()));
+    let warnings = validation_json
+        .get("warnings")
+        .and_then(JsonValue::as_array)
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|warning| {
+            Some(ValidationWarning {
+                kind: warning.get("kind").and_then(JsonValue::as_str)?.to_string(),
+                detail: warning
+                    .get("detail")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            })
+        })
+        .collect();
+    let audit = AuditSummary {
+        provider: schema_text_field(row, "provider").unwrap_or_default(),
+        model: schema_text_field(row, "model").unwrap_or_default(),
+        prompt_tokens: schema_u32_field(row, "prompt_tokens").unwrap_or(0),
+        completion_tokens: schema_u32_field(row, "completion_tokens").unwrap_or(0),
+        cache_hit: schema_bool_field(row, "cache_hit").unwrap_or(false),
+    };
+    Some(Frame::Validation {
+        ok: validation_json
+            .get("ok")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(true),
+        warnings,
+        audit,
+    })
+}
+
+fn reddb_error_to_io(err: crate::api::RedDBError) -> io::Error {
+    io::Error::new(io::ErrorKind::Other, err.to_string())
 }
 
 fn ask_answer_tokens(
@@ -1311,6 +1446,7 @@ mod tests {
         assert!(text.contains(r#""audit":{"cache_hit":false"#), "{text}");
         assert!(text.contains(r#""ok":true"#), "{text}");
         assert!(!text.contains("event: error\n"), "{text}");
+        assert_eq!(ask_audit_rows(&server).len(), 1);
     }
 
     #[test]
@@ -1337,15 +1473,11 @@ mod tests {
             std::str::from_utf8(body).expect("utf8 body")
         );
         let mut client = TcpStream::connect(addr).expect("connect server");
-        client
-            .write_all(request.as_bytes())
-            .expect("write request");
+        client.write_all(request.as_bytes()).expect("write request");
         client.shutdown(Shutdown::Write).expect("shutdown request");
 
         let mut response = String::new();
-        client
-            .read_to_string(&mut response)
-            .expect("read response");
+        client.read_to_string(&mut response).expect("read response");
         handle.join().expect("server thread");
 
         assert_eq!(stub.request_count(), 1);
@@ -1365,6 +1497,119 @@ mod tests {
         assert!(body.contains(r#"data: {"text":"answer"}"#), "{body}");
         assert_eq!(body.matches("event: answer_token\n").count(), 2, "{body}");
         assert_eq!(body.matches("event: validation\n").count(), 1, "{body}");
+    }
+
+    #[test]
+    fn http_query_ask_stream_socket_flushes_provider_tokens_before_completion() {
+        let _guard = ASK_ENV_LOCK.lock().expect("env lock");
+        let stub = StreamingOpenAiStub::start_delayed(
+            vec!["streamed ", "answer"],
+            Duration::from_millis(250),
+        );
+        let _api_base =
+            EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
+        let _api_key = EnvVarGuard::unset("REDDB_OPENAI_API_KEY");
+
+        let server = make_server();
+        configure_ask_stub_runtime(&server);
+        let audit_server = server.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("server bind");
+        let addr = listener.local_addr().expect("server addr");
+        let handle = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept request");
+            server.handle_connection(stream).expect("handle request");
+        });
+
+        let body = br#"{"query": "ASK 'why did login fail?' STREAM STRICT OFF"}"#;
+        let request = format!(
+            "POST /query HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).expect("utf8 body")
+        );
+        let mut client = TcpStream::connect(addr).expect("connect server");
+        client.write_all(request.as_bytes()).expect("write request");
+        client.shutdown(Shutdown::Write).expect("shutdown request");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set read timeout");
+
+        let mut response = String::new();
+        read_until_contains(&mut client, &mut response, r#"data: {"text":"streamed "}"#);
+        assert!(response.contains("event: sources\n"), "{response}");
+        assert!(
+            response.contains(r#"data: {"text":"streamed "}"#),
+            "{response}"
+        );
+        assert!(
+            !response.contains(r#"data: {"text":"answer"}"#),
+            "{response}"
+        );
+        assert!(!response.contains("event: validation\n"), "{response}");
+
+        client.read_to_string(&mut response).expect("read response");
+        handle.join().expect("server thread");
+
+        assert_eq!(stub.request_count(), 1);
+        assert!(
+            response.contains(r#"data: {"text":"answer"}"#),
+            "{response}"
+        );
+        assert_eq!(
+            response.matches("event: answer_token\n").count(),
+            2,
+            "{response}"
+        );
+        assert_eq!(
+            response.matches("event: validation\n").count(),
+            1,
+            "{response}"
+        );
+        assert_eq!(ask_audit_rows(&audit_server).len(), 1);
+    }
+
+    #[test]
+    fn http_query_ask_stream_midstream_cost_guard_emits_error_after_partial_token() {
+        let _guard = ASK_ENV_LOCK.lock().expect("env lock");
+        let stub = StreamingOpenAiStub::start(vec!["abcd", "efgh"]);
+        let _api_base =
+            EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
+        let _api_key = EnvVarGuard::unset("REDDB_OPENAI_API_KEY");
+
+        let server = make_server();
+        configure_ask_stub_runtime(&server);
+        server
+            .runtime
+            .execute_query("SET CONFIG ask.max_completion_tokens = 1")
+            .expect("set completion guard");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("server bind");
+        let addr = listener.local_addr().expect("server addr");
+        let handle = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept request");
+            server.handle_connection(stream).expect("handle request");
+        });
+
+        let body = br#"{"query": "ASK 'why did login fail?' STREAM STRICT OFF"}"#;
+        let request = format!(
+            "POST /query HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).expect("utf8 body")
+        );
+        let mut client = TcpStream::connect(addr).expect("connect server");
+        client.write_all(request.as_bytes()).expect("write request");
+        client.shutdown(Shutdown::Write).expect("shutdown request");
+
+        let mut response = String::new();
+        client.read_to_string(&mut response).expect("read response");
+        handle.join().expect("server thread");
+
+        assert_eq!(stub.request_count(), 1);
+        assert!(response.contains("event: sources\n"), "{response}");
+        assert!(response.contains(r#"data: {"text":"abcd"}"#), "{response}");
+        assert!(!response.contains(r#"data: {"text":"efgh"}"#), "{response}");
+        assert!(response.contains("event: error\n"), "{response}");
+        assert!(response.contains(r#""code":413"#), "{response}");
+        assert!(response.contains("max_completion_tokens"), "{response}");
+        assert!(!response.contains("event: validation\n"), "{response}");
     }
 
     #[test]
@@ -1572,6 +1817,15 @@ mod tests {
             .expect("write stub response");
     }
 
+    fn read_until_contains(stream: &mut TcpStream, out: &mut String, needle: &str) {
+        let mut buffer = [0_u8; 256];
+        while !out.contains(needle) {
+            let read = stream.read(&mut buffer).expect("read response chunk");
+            assert!(read > 0, "connection closed before {needle}: {out}");
+            out.push_str(std::str::from_utf8(&buffer[..read]).expect("utf8 response"));
+        }
+    }
+
     struct SequenceOpenAiStub {
         addr: SocketAddr,
         shutdown: Arc<AtomicBool>,
@@ -1647,6 +1901,17 @@ mod tests {
 
     impl StreamingOpenAiStub {
         fn start(chunks: Vec<&'static str>) -> Self {
+            Self::start_with_delay(chunks, None)
+        }
+
+        fn start_delayed(chunks: Vec<&'static str>, delay_between_chunks: Duration) -> Self {
+            Self::start_with_delay(chunks, Some(delay_between_chunks))
+        }
+
+        fn start_with_delay(
+            chunks: Vec<&'static str>,
+            delay_between_chunks: Option<Duration>,
+        ) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").expect("stub bind");
             listener
                 .set_nonblocking(true)
@@ -1662,7 +1927,11 @@ mod tests {
                         Ok((mut stream, _)) => {
                             read_stub_request(&mut stream);
                             server_requests.fetch_add(1, Ordering::Relaxed);
-                            write_openai_streaming_response(&mut stream, &chunks);
+                            write_openai_streaming_response(
+                                &mut stream,
+                                &chunks,
+                                delay_between_chunks,
+                            );
                         }
                         Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                             thread::sleep(Duration::from_millis(1));
@@ -1713,7 +1982,42 @@ mod tests {
             .expect("write stub response");
     }
 
-    fn write_openai_streaming_response(stream: &mut TcpStream, chunks: &[&str]) {
+    fn write_openai_streaming_response(
+        stream: &mut TcpStream,
+        chunks: &[&str],
+        delay_between_chunks: Option<Duration>,
+    ) {
+        if let Some(delay) = delay_between_chunks {
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+                )
+                .expect("write stub streaming headers");
+            for chunk in chunks {
+                let escaped = chunk.replace('\\', "\\\\").replace('"', "\\\"");
+                let frame = format!(
+                    r#"data: {{"model":"test-model","choices":[{{"delta":{{"content":"{escaped}"}},"finish_reason":null}}]}}"#
+                );
+                stream
+                    .write_all(frame.as_bytes())
+                    .and_then(|_| stream.write_all(b"\n\n"))
+                    .and_then(|_| stream.flush())
+                    .expect("write delayed provider chunk");
+                thread::sleep(delay);
+            }
+            let usage = format!(
+                r#"data: {{"model":"test-model","choices":[{{"delta":{{}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":12,"completion_tokens":{},"total_tokens":{}}}}}"#,
+                chunks.len(),
+                12 + chunks.len()
+            );
+            stream
+                .write_all(usage.as_bytes())
+                .and_then(|_| stream.write_all(b"\n\ndata: [DONE]\n\n"))
+                .and_then(|_| stream.flush())
+                .expect("write delayed provider terminal chunk");
+            return;
+        }
+
         let mut body = String::new();
         for chunk in chunks {
             let escaped = chunk.replace('\\', "\\\\").replace('"', "\\\"");
