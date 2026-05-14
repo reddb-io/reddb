@@ -197,12 +197,37 @@ impl RedDBRuntime {
                 &crate::serde_json::Value::String("sealed".to_string()),
             );
         }
+        if query.collection_model == CollectionModel::Metrics {
+            if let Some(raw_retention_ms) = query.default_ttl_ms {
+                self.inner
+                    .db
+                    .set_collection_default_ttl_ms(&query.name, raw_retention_ms);
+                store.set_config_tree(
+                    &format!("red.metrics.{}.raw_retention_ms", query.name),
+                    &crate::serde_json::Value::Number(raw_retention_ms as f64),
+                );
+            }
+            let tenant_identity = query
+                .tenant_by
+                .clone()
+                .unwrap_or_else(|| "current_tenant".to_string());
+            store.set_config_tree(
+                &format!("red.metrics.{}.tenant_identity", query.name),
+                &crate::serde_json::Value::String(tenant_identity),
+            );
+            store.set_config_tree(
+                &format!("red.metrics.{}.namespace", query.name),
+                &crate::serde_json::Value::String("default".to_string()),
+            );
+        }
+        let contract = if query.collection_model == CollectionModel::Metrics {
+            metrics_collection_contract(query)
+        } else {
+            keyed_collection_contract(&query.name, query.collection_model)
+        };
         self.inner
             .db
-            .save_collection_contract(keyed_collection_contract(
-                &query.name,
-                query.collection_model,
-            ))
+            .save_collection_contract(contract)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         if let Some(tenant_id) = crate::runtime::impl_core::current_tenant() {
             store.set_config_tree(
@@ -231,6 +256,7 @@ impl RedDBRuntime {
         let model = match query.kind.as_str() {
             "graph" => CollectionModel::Graph,
             "document" => CollectionModel::Document,
+            "metrics" => CollectionModel::Metrics,
             other => {
                 return Err(RedDBError::Query(format!(
                     "NOT_YET_SUPPORTED: CREATE COLLECTION KIND {other} is not implemented"
@@ -512,7 +538,13 @@ impl RedDBRuntime {
             )));
         }
 
-        match polymorphic_resolver::resolve(&query.name, &self.inner.db.catalog_model_snapshot())? {
+        let actual =
+            polymorphic_resolver::resolve(&query.name, &self.inner.db.catalog_model_snapshot())?;
+        if let Some(expected) = query.model {
+            polymorphic_resolver::ensure_model_match(expected, actual)?;
+        }
+
+        match actual {
             CollectionModel::Table => self.execute_drop_table(
                 raw_query,
                 &DropTableQuery {
@@ -599,6 +631,13 @@ impl RedDBRuntime {
                     name: query.name.clone(),
                     if_exists: query.if_exists,
                 },
+            ),
+            CollectionModel::Metrics => self.execute_drop_typed_collection(
+                raw_query,
+                &query.name,
+                query.if_exists,
+                CollectionModel::Metrics,
+                "metrics",
             ),
             CollectionModel::Mixed => self.execute_drop_typed_collection(
                 raw_query,
@@ -1368,6 +1407,9 @@ fn collection_contract_from_create_table(
         timestamps_enabled: query.timestamps,
         context_index_enabled: query.context_index_enabled
             || !query.context_index_fields.is_empty(),
+        metrics_raw_retention_ms: None,
+        metrics_tenant_identity: None,
+        metrics_namespace: None,
         append_only: query.append_only,
         subscriptions: query.subscriptions.clone(),
     })
@@ -1393,6 +1435,9 @@ fn default_collection_contract_for_existing_table(
         table_def: Some(crate::storage::schema::TableDef::new(name.to_string())),
         timestamps_enabled: false,
         context_index_enabled: false,
+        metrics_raw_retention_ms: None,
+        metrics_tenant_identity: None,
+        metrics_namespace: None,
         append_only: false,
         subscriptions: Vec::new(),
     }
@@ -1419,7 +1464,41 @@ fn keyed_collection_contract(
         table_def: None,
         timestamps_enabled: false,
         context_index_enabled: false,
+        metrics_raw_retention_ms: None,
+        metrics_tenant_identity: None,
+        metrics_namespace: None,
         append_only: false,
+        subscriptions: Vec::new(),
+    }
+}
+
+fn metrics_collection_contract(query: &CreateTableQuery) -> crate::physical::CollectionContract {
+    let now = current_unix_ms();
+    crate::physical::CollectionContract {
+        name: query.name.clone(),
+        declared_model: crate::catalog::CollectionModel::Metrics,
+        schema_mode: crate::catalog::SchemaMode::SemiStructured,
+        origin: crate::physical::ContractOrigin::Explicit,
+        version: 1,
+        created_at_unix_ms: now,
+        updated_at_unix_ms: now,
+        default_ttl_ms: query.default_ttl_ms,
+        vector_dimension: None,
+        vector_metric: None,
+        context_index_fields: Vec::new(),
+        declared_columns: Vec::new(),
+        table_def: None,
+        timestamps_enabled: false,
+        context_index_enabled: false,
+        metrics_raw_retention_ms: query.default_ttl_ms,
+        metrics_tenant_identity: Some(
+            query
+                .tenant_by
+                .clone()
+                .unwrap_or_else(|| "current_tenant".to_string()),
+        ),
+        metrics_namespace: Some("default".to_string()),
+        append_only: true,
         subscriptions: Vec::new(),
     }
 }
@@ -1442,6 +1521,9 @@ fn vector_collection_contract(query: &CreateVectorQuery) -> crate::physical::Col
         table_def: None,
         timestamps_enabled: false,
         context_index_enabled: false,
+        metrics_raw_retention_ms: None,
+        metrics_tenant_identity: None,
+        metrics_namespace: None,
         append_only: false,
         subscriptions: Vec::new(),
     }
@@ -1937,6 +2019,9 @@ fn event_queue_collection_contract(queue: &str) -> crate::physical::CollectionCo
         table_def: None,
         timestamps_enabled: false,
         context_index_enabled: false,
+        metrics_raw_retention_ms: None,
+        metrics_tenant_identity: None,
+        metrics_namespace: None,
         append_only: true,
         subscriptions: Vec::new(),
     }

@@ -28,6 +28,7 @@ pub enum CollectionModel {
     Mixed,
     TimeSeries,
     Queue,
+    Metrics,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -539,7 +540,7 @@ fn infer_schema_mode(model: CollectionModel) -> SchemaMode {
         | CollectionModel::Config
         | CollectionModel::Vault
         | CollectionModel::Mixed => SchemaMode::Dynamic,
-        CollectionModel::TimeSeries => SchemaMode::SemiStructured,
+        CollectionModel::TimeSeries | CollectionModel::Metrics => SchemaMode::SemiStructured,
         CollectionModel::Queue => SchemaMode::Dynamic,
     }
 }

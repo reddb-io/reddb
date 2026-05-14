@@ -1,9 +1,12 @@
 //! Parser for CREATE/DROP TIMESERIES
 
-use super::super::ast::{CreateTimeSeriesQuery, DropTimeSeriesQuery, HypertableDdl, QueryExpr};
+use super::super::ast::{
+    CreateTableQuery, CreateTimeSeriesQuery, DropTimeSeriesQuery, HypertableDdl, QueryExpr,
+};
 use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
+use crate::catalog::CollectionModel;
 
 impl<'a> Parser<'a> {
     /// Parse CREATE TIMESERIES body (after CREATE TIMESERIES consumed)
@@ -40,6 +43,54 @@ impl<'a> Parser<'a> {
             downsample_policies,
             if_not_exists,
             hypertable: None,
+        }))
+    }
+
+    /// Parse CREATE METRICS body (after CREATE METRICS consumed).
+    ///
+    /// v0 intentionally establishes only the collection contract. Ingestion,
+    /// series registry, and Prometheus adapter slices build on this metadata.
+    pub fn parse_create_metrics_body(&mut self) -> Result<QueryExpr, ParseError> {
+        let if_not_exists = self.match_if_not_exists()?;
+        let name = self.expect_ident()?;
+
+        let mut raw_retention_ms = None;
+        let mut tenant_by = None;
+
+        loop {
+            if self.consume(&Token::Retention)? {
+                let value = self.parse_float()?;
+                let unit = self.parse_duration_unit()?;
+                raw_retention_ms = Some((value * unit) as u64);
+            } else if tenant_by.is_none() && self.consume_ident_ci("TENANT")? {
+                self.expect(Token::By)?;
+                self.expect(Token::LParen)?;
+                let mut path = self.expect_ident_or_keyword()?;
+                while self.consume(&Token::Dot)? {
+                    let next = self.expect_ident_or_keyword()?;
+                    path = format!("{path}.{next}");
+                }
+                self.expect(Token::RParen)?;
+                tenant_by = Some(path);
+            } else {
+                break;
+            }
+        }
+
+        Ok(QueryExpr::CreateTable(CreateTableQuery {
+            collection_model: CollectionModel::Metrics,
+            name,
+            columns: Vec::new(),
+            if_not_exists,
+            default_ttl_ms: raw_retention_ms,
+            context_index_fields: Vec::new(),
+            context_index_enabled: false,
+            timestamps: false,
+            partition_by: None,
+            tenant_by,
+            append_only: true,
+            subscriptions: Vec::new(),
+            vault_own_master_key: false,
         }))
     }
 

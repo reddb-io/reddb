@@ -1933,6 +1933,9 @@ mod tests {
             table_def: None,
             timestamps_enabled: false,
             context_index_enabled: false,
+            metrics_raw_retention_ms: None,
+            metrics_tenant_identity: None,
+            metrics_namespace: None,
             append_only: false,
             subscriptions: Vec::new(),
         })
