@@ -200,9 +200,11 @@ hold the cluster event-subscribe capability.
 
 ## Backpressure And DLQ
 
-Default delivery uses the outbox path: the source mutation commits, then the
-event drain pushes payloads to the target queue. This keeps ordinary writes from
-blocking on a slow consumer.
+Current delivery writes the source mutation first and then enqueues the event
+payload to the target queue. These writes are separate store WAL batches in
+autocommit mode, so a crash between them can leave a durable row without its
+event. See [ADR 0015](../adr/0015-events-dual-write-window.md). The intended
+direction is a true internal outbox or same-batch queue write.
 
 If the target queue is full or the outbox exceeds configured pressure limits,
 RedDB routes the payload to `<queue>_outbox_dlq`, emits an operator event, and

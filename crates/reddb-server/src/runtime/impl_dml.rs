@@ -2885,7 +2885,67 @@ fn merge_dotted_tenant(current: Value, tail: &str, tenant_id: &str) -> RedDBResu
 #[cfg(test)]
 mod tests {
     use crate::storage::schema::Value;
+    use crate::storage::wal::{WalReader, WalRecord};
     use crate::{RedDBOptions, RedDBRuntime};
+    use std::path::Path;
+
+    fn store_commit_batches(wal_path: &Path) -> Vec<Vec<Vec<u8>>> {
+        WalReader::open(wal_path)
+            .expect("wal opens")
+            .iter()
+            .map(|record| record.expect("wal record decodes").1)
+            .filter_map(|record| match record {
+                WalRecord::TxCommitBatch { actions, .. } => Some(actions),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn action_contains_text(action: &[u8], needle: &str) -> bool {
+        action
+            .windows(needle.len())
+            .any(|window| window == needle.as_bytes())
+    }
+
+    #[test]
+    fn with_events_autocommit_currently_splits_mutation_and_event_wal_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("events_dual_write.rdb");
+        let wal_path = db_path.with_extension("rdb-uwal");
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&db_path)).unwrap();
+
+        rt.execute_query("CREATE TABLE users (id INT, email TEXT) WITH EVENTS")
+            .unwrap();
+        let before_insert_batches = store_commit_batches(&wal_path).len();
+
+        rt.execute_query("INSERT INTO users (id, email) VALUES (1, 'a@example.test')")
+            .unwrap();
+
+        let batches = store_commit_batches(&wal_path);
+        let insert_batches = &batches[before_insert_batches..];
+        let source_batch = insert_batches
+            .iter()
+            .position(|actions| {
+                actions.iter().any(|action| {
+                    action_contains_text(action, "users")
+                        && !action_contains_text(action, "users_events")
+                })
+            })
+            .expect("source table write batch is present");
+        let event_batch = insert_batches
+            .iter()
+            .position(|actions| {
+                actions
+                    .iter()
+                    .any(|action| action_contains_text(action, "users_events"))
+            })
+            .expect("event queue write batch is present");
+
+        assert_ne!(
+            source_batch, event_batch,
+            "WITH EVENTS currently writes the row and queue event in separate WAL batches"
+        );
+    }
 
     #[test]
     fn update_where_id_in_with_hash_index_updates_expected_rows() {
