@@ -423,11 +423,7 @@ fn apply_binop(op: BinOp, a: Value, b: Value) -> Option<Value> {
     use crate::storage::query::ast::CompareOp;
     match op {
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => arith(op, a, b),
-        BinOp::Concat => Some(Value::text(format!(
-            "{}{}",
-            a.display_string(),
-            b.display_string()
-        ))),
+        BinOp::Concat => Some(Value::text(format!("{}{}", a.plain_text(), b.plain_text()))),
         BinOp::Eq => Some(Value::Boolean(compare_runtime_values(
             &a,
             &b,
@@ -1324,7 +1320,7 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
         "CONCAT" => Some(Value::text(
             args.iter()
                 .filter(|value| !matches!(value, Value::Null))
-                .map(Value::display_string)
+                .map(Value::plain_text)
                 .collect::<String>(),
         )),
         "CONCAT_WS" => {

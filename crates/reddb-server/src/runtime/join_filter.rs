@@ -2122,7 +2122,7 @@ fn evaluate_scalar_function_legacy(
                 if matches!(value, Value::Null) {
                     continue;
                 }
-                out.push_str(&value.display_string());
+                out.push_str(&value.plain_text());
             }
             Some(Value::text(out))
         }

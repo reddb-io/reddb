@@ -312,6 +312,55 @@ fn subquery_expr_correlated_subquery_errors() {
     );
 }
 
+fn seed_concat_tables(rt: &RedDBRuntime) {
+    rt.execute_query("CREATE TABLE concat_t (id INT, name TEXT, other TEXT)")
+        .expect("create concat_t");
+    rt.execute_query("INSERT INTO concat_t (id, name, other) VALUES (7, 'alice', 'smith')")
+        .expect("insert concat_t");
+}
+
+#[test]
+fn concat_operator_literal_column_and_mixed_values_return_plain_text() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    seed_concat_tables(&rt);
+
+    let literal = rt
+        .execute_query("SELECT 'a' || 'b' AS v")
+        .expect("literal concat executes");
+    assert_eq!(text_at(&literal, 0, "v"), "ab");
+
+    let column_literal = rt
+        .execute_query("SELECT name || '!' AS v FROM concat_t LIMIT 1")
+        .expect("column literal concat executes");
+    assert_eq!(text_at(&column_literal, 0, "v"), "alice!");
+
+    let column_column = rt
+        .execute_query("SELECT name || other AS v FROM concat_t LIMIT 1")
+        .expect("column column concat executes");
+    assert_eq!(text_at(&column_column, 0, "v"), "alicesmith");
+
+    let mixed = rt
+        .execute_query("SELECT name || ' (' || id || ')' AS v FROM concat_t LIMIT 1")
+        .expect("mixed concat executes");
+    assert_eq!(text_at(&mixed, 0, "v"), "alice (7)");
+}
+
+#[test]
+fn concat_function_uses_same_plain_text_coercion_as_operator() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    seed_concat_tables(&rt);
+
+    let literal = rt
+        .execute_query("SELECT CONCAT('a', 'b') AS v")
+        .expect("literal CONCAT executes");
+    assert_eq!(text_at(&literal, 0, "v"), "ab");
+
+    let column_literal = rt
+        .execute_query("SELECT CONCAT(name, '!') AS v FROM concat_t LIMIT 1")
+        .expect("column literal CONCAT executes");
+    assert_eq!(text_at(&column_literal, 0, "v"), "alice!");
+}
+
 #[test]
 fn config_reference_compares_stored_value_without_reparsing_sql() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
