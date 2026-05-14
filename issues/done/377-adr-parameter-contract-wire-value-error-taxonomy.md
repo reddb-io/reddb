@@ -26,10 +26,10 @@ ADR 0015 exists at `docs/adr/0015-parameterized-query-contract.md` and records
 the parameter value taxonomy, placeholder syntax, transport encoding, driver
 surfaces, compatibility policy, and error taxonomy.
 
-The remaining gate is human review. The ADR currently says:
+The human review gate has been completed. The ADR now says:
 
 ```text
-Status: Draft (open for human review)
+Status: Accepted
 ```
 
 ## Acceptance criteria
@@ -38,8 +38,8 @@ Status: Draft (open for human review)
 - [x] ADR records the chosen placeholder syntax and how each driver surfaces it.
 - [x] ADR records the error taxonomy with code/message shape.
 - [x] ADR records which transports carry typed values vs JSON-encoded values.
-- [ ] Team has reviewed and accepted the ADR (HITL gate).
+- [x] Team has reviewed and accepted the ADR (HITL gate).
 
-## Blocked by
+## Completion
 
-Human acceptance of ADR 0015.
+Accepted during human review on 2026-05-14. ADR 0015 is now `Accepted`.

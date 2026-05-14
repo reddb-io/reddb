@@ -1,6 +1,6 @@
 # ADR 0015 - Parameterized query contract
 
-**Status:** Draft (open for human review)
+**Status:** Accepted
 **Date:** 2026-05-13
 **Supersedes:** -
 **Superseded by:** -
@@ -26,8 +26,7 @@ The existing implementation already has a shared engine binder
 current contract so future parameter and prepared-statement work extends one
 surface instead of creating transport-specific dialects.
 
-This ADR remains Draft until the human HITL gates on issues #352 and #377
-accept it.
+This ADR was accepted through the human HITL gates on issues #352 and #377.
 
 ## Decision
 
@@ -179,5 +178,4 @@ drivers.
   distinctions.
 - Named parameters and full PostgreSQL extended-protocol parity are explicitly
   future work, not implicit behavior in the current contract.
-- Issues #352 and #377 can be closed only after human review changes this ADR
-  status from Draft to Accepted or records an equivalent acceptance decision.
+- Issues #352 and #377 are closed by this accepted ADR.
