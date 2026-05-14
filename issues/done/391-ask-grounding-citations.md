@@ -11,7 +11,7 @@ GitHub issue number: #391
 All known technical child issues for this PRD are closed on GitHub:
 #392 through #412, including #410 for replica ASK audit primary-sync.
 
-This parent remains open only for human/product acceptance of the ASK PRD.
+This parent was accepted during human/product review on 2026-05-14.
 No additional AFK child issue is currently open for this PRD.
 
 ## Problem Statement
