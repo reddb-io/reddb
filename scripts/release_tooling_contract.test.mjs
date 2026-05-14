@@ -40,6 +40,7 @@ test("red_client container release contract uses the thin client Dockerfile and 
 
 test("Docker release images publish from GitHub Actions under reddb-io GHCR only", () => {
   const releaseWorkflow = read(".github/workflows/release.yml");
+  const releaseDockerfile = read("Dockerfile.release");
   const dockerHubHost = new RegExp(["docker", "io"].join("\\."));
   const dockerHubSecretPrefix = new RegExp(["DOCKER", "HUB_"].join(""));
   const legacyPersonalNamespace = new RegExp(["foratt", "ini"].join(""), "i");
@@ -47,9 +48,16 @@ test("Docker release images publish from GitHub Actions under reddb-io GHCR only
   assert.match(releaseWorkflow, /publish-docker:/);
   assert.match(releaseWorkflow, /ghcr\.io\/\$\{\{ github\.repository \}\}/);
   assert.match(releaseWorkflow, /ghcr\.io\/\$\{\{ github\.repository \}\}-client/);
+  assert.match(releaseDockerfile, /COPY .*docker-bin\/\$\{TARGETARCH\}\/red \/usr\/local\/bin\/red/);
+  assert.doesNotMatch(releaseDockerfile, /cargo build/);
   assert.doesNotMatch(releaseWorkflow, dockerHubHost);
   assert.doesNotMatch(releaseWorkflow, dockerHubSecretPrefix);
   assert.doesNotMatch(releaseWorkflow, legacyPersonalNamespace);
+
+  const publishDocker = releaseWorkflow.match(/publish-docker:[\s\S]*?(?=\n  publish-client-image:)/)?.[0] ?? "";
+  assert.match(publishDocker, /actions\/download-artifact@v8[\s\S]*name: linux-x86_64/);
+  assert.match(publishDocker, /actions\/download-artifact@v8[\s\S]*name: linux-aarch64/);
+  assert.match(publishDocker, /file: Dockerfile\.release/);
 });
 
 test("release workflow uses runnable toolchain and pack commands", () => {

@@ -594,6 +594,14 @@ jobs:
     if: needs.plan.outputs.should_skip != 'true'
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-x86_64
+          path: release/linux-x86_64
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-aarch64
+          path: release/linux-aarch64
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
@@ -603,6 +611,14 @@ jobs:
           node -e "const fs=require('fs');const p=require('./package.json');p.version='${VERSION}';fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')"
           node scripts/sync-version.js
           bash scripts/check-versions.sh
+
+      - name: Prepare release binaries for Docker
+        run: |
+          set -euo pipefail
+          mkdir -p docker-bin/amd64 docker-bin/arm64
+          cp release/linux-x86_64/red-linux-x86_64 docker-bin/amd64/red
+          cp release/linux-aarch64/red-linux-aarch64 docker-bin/arm64/red
+          chmod 755 docker-bin/amd64/red docker-bin/arm64/red
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -637,6 +653,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
+          file: Dockerfile.release
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
