@@ -410,6 +410,45 @@ fn concat_function_uses_same_plain_text_coercion_as_operator() {
 }
 
 #[test]
+fn unaliased_expression_columns_use_source_text_labels() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("CREATE TABLE expr_label_t (id INT, name TEXT)")
+        .expect("create expr_label_t");
+    rt.execute_query("INSERT INTO expr_label_t (id, name) VALUES (8, 'alice')")
+        .expect("insert expr_label_t");
+
+    let upper = rt
+        .execute_query("SELECT UPPER(name) FROM expr_label_t LIMIT 1")
+        .expect("UPPER projection executes");
+    assert_eq!(upper.result.columns, vec!["UPPER(name)"]);
+    assert_eq!(text_at(&upper, 0, "UPPER(name)"), "ALICE");
+
+    let mul = rt
+        .execute_query("SELECT id * 2 FROM expr_label_t LIMIT 1")
+        .expect("multiply projection executes");
+    assert_eq!(mul.result.columns, vec!["id * 2"]);
+    assert_eq!(int_at(&mul, 0, "id * 2"), 16);
+
+    let concat = rt
+        .execute_query("SELECT name || '!' FROM expr_label_t LIMIT 1")
+        .expect("concat projection executes");
+    assert_eq!(concat.result.columns, vec!["name || '!'"]);
+    assert_eq!(text_at(&concat, 0, "name || '!'"), "alice!");
+
+    let coalesce = rt
+        .execute_query("SELECT COALESCE(name, 'fb') FROM expr_label_t LIMIT 1")
+        .expect("COALESCE projection executes");
+    assert_eq!(coalesce.result.columns, vec!["COALESCE(name, 'fb')"]);
+    assert_eq!(text_at(&coalesce, 0, "COALESCE(name, 'fb')"), "alice");
+
+    let aliased = rt
+        .execute_query("SELECT UPPER(name) AS upn FROM expr_label_t LIMIT 1")
+        .expect("aliased UPPER projection executes");
+    assert_eq!(aliased.result.columns, vec!["upn"]);
+    assert_eq!(text_at(&aliased, 0, "upn"), "ALICE");
+}
+
+#[test]
 fn current_time_bare_builtins_are_single_row_scalars_and_work_in_expressions() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
 

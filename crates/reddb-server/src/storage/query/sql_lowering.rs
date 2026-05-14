@@ -80,10 +80,8 @@ pub fn select_item_to_projection(item: &SelectItem) -> Option<Projection> {
         SelectItem::Wildcard => Some(Projection::All),
         SelectItem::Expr { expr, alias } => {
             let projection = expr_to_projection(expr)?;
-            Some(match alias {
-                Some(alias) => attach_projection_alias(projection, Some(alias.clone())),
-                None => projection,
-            })
+            let output_name = alias.clone().or_else(|| Some(render_expr_label(expr)));
+            Some(attach_projection_alias(projection, output_name))
         }
     }
 }
@@ -619,6 +617,152 @@ fn projection_binop_name(op: BinOp) -> &'static str {
         | BinOp::Or => {
             unreachable!("boolean operators are lowered through Projection::Expression")
         }
+    }
+}
+
+fn render_expr_label(expr: &Expr) -> String {
+    render_expr_label_prec(expr, 0)
+}
+
+fn render_expr_label_prec(expr: &Expr, parent_prec: u8) -> String {
+    match expr {
+        Expr::Literal { value, .. } => render_sql_literal_label(value),
+        Expr::Column { field, .. } => render_field_label(field),
+        Expr::Parameter { index, .. } => format!("${index}"),
+        Expr::BinaryOp { op, lhs, rhs, .. } => {
+            let prec = op.precedence();
+            let rendered = format!(
+                "{} {} {}",
+                render_expr_label_prec(lhs, prec),
+                render_binop_label(*op),
+                render_expr_label_prec(rhs, prec + 1)
+            );
+            if prec < parent_prec {
+                format!("({rendered})")
+            } else {
+                rendered
+            }
+        }
+        Expr::UnaryOp { op, operand, .. } => match op {
+            UnaryOp::Neg => format!("-{}", render_expr_label_prec(operand, u8::MAX)),
+            UnaryOp::Not => format!("NOT {}", render_expr_label_prec(operand, u8::MAX)),
+        },
+        Expr::Cast { inner, target, .. } => {
+            format!("CAST({} AS {target})", render_expr_label(inner))
+        }
+        Expr::FunctionCall { name, args, .. } => {
+            let args = args
+                .iter()
+                .map(render_expr_label)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{name}({args})")
+        }
+        Expr::Case {
+            branches, else_, ..
+        } => {
+            let mut out = String::from("CASE");
+            for (condition, value) in branches {
+                out.push_str(" WHEN ");
+                out.push_str(&render_expr_label(condition));
+                out.push_str(" THEN ");
+                out.push_str(&render_expr_label(value));
+            }
+            if let Some(else_expr) = else_ {
+                out.push_str(" ELSE ");
+                out.push_str(&render_expr_label(else_expr));
+            }
+            out.push_str(" END");
+            out
+        }
+        Expr::IsNull {
+            operand, negated, ..
+        } => {
+            let op = if *negated { "IS NOT NULL" } else { "IS NULL" };
+            format!("{} {op}", render_expr_label_prec(operand, u8::MAX))
+        }
+        Expr::InList {
+            target,
+            values,
+            negated,
+            ..
+        } => {
+            let op = if *negated { "NOT IN" } else { "IN" };
+            let values = values
+                .iter()
+                .map(render_expr_label)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{} {op} ({values})", render_expr_label(target))
+        }
+        Expr::Between {
+            target,
+            low,
+            high,
+            negated,
+            ..
+        } => {
+            let op = if *negated { "NOT BETWEEN" } else { "BETWEEN" };
+            format!(
+                "{} {op} {} AND {}",
+                render_expr_label(target),
+                render_expr_label(low),
+                render_expr_label(high)
+            )
+        }
+        Expr::Subquery { .. } => "subquery".to_string(),
+    }
+}
+
+fn render_binop_label(op: BinOp) -> &'static str {
+    match op {
+        BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Mul => "*",
+        BinOp::Div => "/",
+        BinOp::Mod => "%",
+        BinOp::Concat => "||",
+        BinOp::Eq => "=",
+        BinOp::Ne => "!=",
+        BinOp::Lt => "<",
+        BinOp::Le => "<=",
+        BinOp::Gt => ">",
+        BinOp::Ge => ">=",
+        BinOp::And => "AND",
+        BinOp::Or => "OR",
+    }
+}
+
+fn render_field_label(field: &FieldRef) -> String {
+    match field {
+        FieldRef::TableColumn { table, column } => {
+            if table.is_empty() {
+                column.clone()
+            } else {
+                format!("{table}.{column}")
+            }
+        }
+        FieldRef::NodeProperty { alias, property } => format!("{alias}.{property}"),
+        FieldRef::EdgeProperty { alias, property } => format!("{alias}.{property}"),
+        FieldRef::NodeId { alias } => format!("{alias}.id"),
+    }
+}
+
+fn render_sql_literal_label(value: &Value) -> String {
+    match value {
+        Value::Null => "NULL".to_string(),
+        Value::Text(value) => format!("'{}'", value.replace('\'', "''")),
+        Value::Boolean(value) => value.to_string(),
+        Value::Integer(value) => value.to_string(),
+        Value::UnsignedInteger(value) => value.to_string(),
+        Value::Float(value) => {
+            if value.fract().abs() < f64::EPSILON {
+                (*value as i64).to_string()
+            } else {
+                value.to_string()
+            }
+        }
+        other => other.to_string(),
     }
 }
 

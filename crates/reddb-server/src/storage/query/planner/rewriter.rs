@@ -555,8 +555,13 @@ fn projection_name(proj: &Projection) -> String {
         Projection::All => "*".to_string(),
         Projection::Column(name) => name.clone(),
         Projection::Alias(_, alias) => alias.clone(),
-        Projection::Function(name, _) => name.clone(),
-        Projection::Expression(expr, _) => format!("{:?}", expr),
+        Projection::Function(name, _) => name
+            .split_once(':')
+            .map(|(_, alias)| alias.to_string())
+            .unwrap_or_else(|| name.clone()),
+        Projection::Expression(expr, alias) => {
+            alias.clone().unwrap_or_else(|| format!("{:?}", expr))
+        }
         Projection::Field(field, alias) => alias.clone().unwrap_or_else(|| format!("{:?}", field)),
     }
 }

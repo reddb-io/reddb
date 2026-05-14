@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Breaking Changes
+
+- Unaliased expression projections now use the rendered source expression as the
+  result column name instead of the internal operator/function tag. For example,
+  `SELECT UPPER(name)` now returns `UPPER(name)` and `SELECT id * 2` now returns
+  `id * 2`, while explicit `AS <alias>` names still take precedence.
+
 ## 1.1.0
 
 ### Minor Changes

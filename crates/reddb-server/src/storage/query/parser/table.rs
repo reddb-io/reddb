@@ -6,7 +6,9 @@ use super::super::ast::{
 };
 use super::super::lexer::Token;
 use super::error::ParseError;
-use crate::storage::query::sql_lowering::{expr_to_projection, filter_to_expr};
+use crate::storage::query::sql_lowering::{
+    expr_to_projection, filter_to_expr, select_item_to_projection,
+};
 use crate::storage::schema::Value;
 
 fn is_scalar_function(name: &str) -> bool {
@@ -272,15 +274,12 @@ impl<'a> Parser<'a> {
             expr: expr.clone(),
             alias: alias.clone(),
         };
-        let projection = attach_projection_alias(
-            expr_to_projection(&expr).ok_or_else(|| {
-                ParseError::new(
-                    "projection cannot yet be lowered to legacy runtime representation".to_string(),
-                    self.position(),
-                )
-            })?,
-            alias,
-        );
+        let projection = select_item_to_projection(&select_item).ok_or_else(|| {
+            ParseError::new(
+                "projection cannot yet be lowered to legacy runtime representation".to_string(),
+                self.position(),
+            )
+        })?;
         Ok((select_item, projection))
     }
 }
