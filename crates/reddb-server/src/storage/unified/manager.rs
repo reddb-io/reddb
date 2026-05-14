@@ -175,6 +175,16 @@ impl SegmentManager {
         self.column_schema.read().clone()
     }
 
+    pub(crate) fn set_column_schema_if_empty(&self, columns: Vec<String>) {
+        if columns.is_empty() {
+            return;
+        }
+        let mut schema = self.column_schema.write();
+        if schema.is_none() {
+            *schema = Some(Arc::new(columns));
+        }
+    }
+
     /// Get collection name
     pub fn collection(&self) -> &str {
         &self.collection

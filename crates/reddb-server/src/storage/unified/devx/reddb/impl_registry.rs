@@ -152,6 +152,14 @@ impl RedDB {
         self.store()
             .context_index()
             .set_collection_enabled(&contract.name, contract.context_index_enabled);
+        if let Some(manager) = self.store().get_collection(&contract.name) {
+            let columns = contract
+                .declared_columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect();
+            manager.set_column_schema_if_empty(columns);
+        }
 
         self.invalidate_collection_contract_cache();
 

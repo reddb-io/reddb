@@ -2208,6 +2208,7 @@ impl RedDBRuntime {
         runtime.inner.cdc.set_current_lsn(restored_cdc_lsn);
         runtime.rehydrate_snapshot_xid_floor();
         runtime.bootstrap_system_keyed_collections()?;
+        runtime.rehydrate_declared_column_schemas();
 
         // Phase 2.5.4: replay `tenant_tables.{table}.column` markers so
         // tables declared via `TENANT BY (col)` survive restart. Each
@@ -7102,6 +7103,21 @@ impl RedDBRuntime {
                 }
                 _ => {}
             }
+        }
+    }
+
+    pub(crate) fn rehydrate_declared_column_schemas(&self) {
+        let store = self.inner.db.store();
+        for contract in self.inner.db.collection_contracts() {
+            let columns: Vec<String> = contract
+                .declared_columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect();
+            let Some(manager) = store.get_collection(&contract.name) else {
+                continue;
+            };
+            manager.set_column_schema_if_empty(columns);
         }
     }
 

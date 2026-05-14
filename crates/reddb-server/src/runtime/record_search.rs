@@ -96,6 +96,7 @@ pub(super) fn scan_runtime_table_source_records_limited(
     let sequential_cap = limit.unwrap_or(usize::MAX);
     let go_parallel = entity_count >= MIN_PARALLEL_ROWS && sequential_cap >= MIN_PARALLEL_ROWS;
     if go_parallel {
+        let schema = manager.column_schema();
         let mut entities: Vec<crate::storage::unified::entity::UnifiedEntity> =
             Vec::with_capacity(entity_count);
         manager.for_each_entity(|e| {
@@ -106,10 +107,12 @@ pub(super) fn scan_runtime_table_source_records_limited(
         });
         let mut records = crate::storage::query::executors::parallel_scan::parallel_scan_default(
             &entities,
-            |chunk| {
+            move |chunk| {
                 chunk
                     .iter()
-                    .filter_map(|e| runtime_table_record_from_entity(e.clone()))
+                    .filter_map(|e| {
+                        runtime_table_record_from_entity_ref_with_schema(e, schema.as_ref())
+                    })
                     .collect()
             },
         );
@@ -130,7 +133,10 @@ pub(super) fn scan_runtime_table_source_records_limited(
         if !entity_visible_under_current_snapshot(entity) {
             return true;
         }
-        if let Some(record) = runtime_table_record_from_entity(entity.clone()) {
+        if let Some(record) = runtime_table_record_from_entity_ref_with_schema(
+            entity,
+            manager.column_schema().as_ref(),
+        ) {
             records.push(record);
             if let Some(n) = limit {
                 if records.len() >= n {
@@ -394,6 +400,13 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
 pub(super) fn runtime_table_record_from_entity_ref(
     entity: &UnifiedEntity,
 ) -> Option<UnifiedRecord> {
+    runtime_table_record_from_entity_ref_with_schema(entity, None)
+}
+
+pub(super) fn runtime_table_record_from_entity_ref_with_schema(
+    entity: &UnifiedEntity,
+    fallback_schema: Option<&std::sync::Arc<Vec<String>>>,
+) -> Option<UnifiedRecord> {
     // Issue #414: surface graph/vector/queue/etc. entities in SELECT scans.
     if !matches!(&entity.data, EntityData::Row(_) | EntityData::TimeSeries(_)) {
         return runtime_any_record_from_entity_ref(entity);
@@ -451,7 +464,7 @@ pub(super) fn runtime_table_record_from_entity_ref(
                 for (key, value) in named {
                     record.set(key, value.clone());
                 }
-            } else if let Some(schema) = &row.schema {
+            } else if let Some(schema) = row.schema.as_ref().or(fallback_schema) {
                 for (name, value) in schema.iter().zip(row.columns.iter()) {
                     record.set(name, value.clone());
                 }
@@ -604,8 +617,10 @@ pub(super) fn runtime_table_record_with_col_indices(
         return None;
     }
     let row = entity.data.as_row()?;
-    // Only applies to columnar entities (row.schema is Some, row.named is None)
-    if row.named.is_some() || row.schema.is_none() {
+    // Applies to columnar entities. After a persistent reopen, rows written in
+    // compact positional form may not carry row.schema; callers can still pass
+    // an idx_map derived from the persisted collection contract.
+    if row.named.is_some() || row.columns.is_empty() {
         return None;
     }
     let mut record = UnifiedRecord::with_capacity(1 + idx_map.len());
