@@ -272,6 +272,7 @@ fn parameterize_expr(expr: &Expr, next_index: &mut usize) -> Expr {
             negated: *negated,
             span: *span,
         },
+        Expr::Subquery { .. } => expr.clone(),
     }
 }
 
@@ -1279,6 +1280,7 @@ fn bind_expr(expr: &Expr, binds: &[Value]) -> Option<Expr> {
             negated: *negated,
             span: *span,
         }),
+        Expr::Subquery { .. } => Some(expr.clone()),
     }
 }
 

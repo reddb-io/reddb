@@ -4634,6 +4634,10 @@ impl RedDBRuntime {
                 })
             }
             QueryExpr::Table(table) => {
+                let table = self.resolve_table_expr_subqueries(
+                    table,
+                    &frame as &dyn super::statement_frame::ReadFrame,
+                )?;
                 if super::red_schema::is_virtual_table(&table.table) {
                     return Ok(RuntimeQueryResult {
                         query: query.to_string(),
@@ -6377,6 +6381,216 @@ impl RedDBRuntime {
             .unwrap_or_default())
     }
 
+    fn resolve_table_expr_subqueries(
+        &self,
+        mut table: TableQuery,
+        frame: &dyn super::statement_frame::ReadFrame,
+    ) -> RedDBResult<TableQuery> {
+        if let Some(TableSource::Subquery(inner)) = table.source.take() {
+            let inner = self.resolve_select_expr_subqueries(*inner, frame)?;
+            table.source = Some(TableSource::Subquery(Box::new(inner)));
+        }
+
+        let outer_scopes = relation_scopes_for_query(&QueryExpr::Table(table.clone()));
+        for item in &mut table.select_items {
+            if let crate::storage::query::ast::SelectItem::Expr { expr, .. } = item {
+                *expr = self.resolve_expr_subqueries(expr.clone(), &outer_scopes, frame)?;
+            }
+        }
+        if let Some(where_expr) = table.where_expr.take() {
+            table.where_expr =
+                Some(self.resolve_expr_subqueries(where_expr, &outer_scopes, frame)?);
+            table.filter = None;
+        }
+        if let Some(having_expr) = table.having_expr.take() {
+            table.having_expr =
+                Some(self.resolve_expr_subqueries(having_expr, &outer_scopes, frame)?);
+            table.having = None;
+        }
+        for expr in &mut table.group_by_exprs {
+            *expr = self.resolve_expr_subqueries(expr.clone(), &outer_scopes, frame)?;
+        }
+        for clause in &mut table.order_by {
+            if let Some(expr) = clause.expr.take() {
+                clause.expr = Some(self.resolve_expr_subqueries(expr, &outer_scopes, frame)?);
+            }
+        }
+        Ok(table)
+    }
+
+    fn resolve_select_expr_subqueries(
+        &self,
+        expr: QueryExpr,
+        frame: &dyn super::statement_frame::ReadFrame,
+    ) -> RedDBResult<QueryExpr> {
+        match expr {
+            QueryExpr::Table(table) => self
+                .resolve_table_expr_subqueries(table, frame)
+                .map(QueryExpr::Table),
+            QueryExpr::Join(mut join) => {
+                join.left = Box::new(self.resolve_select_expr_subqueries(*join.left, frame)?);
+                join.right = Box::new(self.resolve_select_expr_subqueries(*join.right, frame)?);
+                Ok(QueryExpr::Join(join))
+            }
+            other => Ok(other),
+        }
+    }
+
+    fn resolve_expr_subqueries(
+        &self,
+        expr: crate::storage::query::ast::Expr,
+        outer_scopes: &[String],
+        frame: &dyn super::statement_frame::ReadFrame,
+    ) -> RedDBResult<crate::storage::query::ast::Expr> {
+        use crate::storage::query::ast::Expr;
+
+        match expr {
+            Expr::Subquery { query, span } => {
+                let values = self.execute_expr_subquery_values(query, outer_scopes, frame)?;
+                if values.len() > 1 {
+                    return Err(RedDBError::Query(
+                        "scalar subquery returned more than one row".to_string(),
+                    ));
+                }
+                Ok(Expr::Literal {
+                    value: values.into_iter().next().unwrap_or(Value::Null),
+                    span,
+                })
+            }
+            Expr::BinaryOp { op, lhs, rhs, span } => Ok(Expr::BinaryOp {
+                op,
+                lhs: Box::new(self.resolve_expr_subqueries(*lhs, outer_scopes, frame)?),
+                rhs: Box::new(self.resolve_expr_subqueries(*rhs, outer_scopes, frame)?),
+                span,
+            }),
+            Expr::UnaryOp { op, operand, span } => Ok(Expr::UnaryOp {
+                op,
+                operand: Box::new(self.resolve_expr_subqueries(*operand, outer_scopes, frame)?),
+                span,
+            }),
+            Expr::Cast {
+                inner,
+                target,
+                span,
+            } => Ok(Expr::Cast {
+                inner: Box::new(self.resolve_expr_subqueries(*inner, outer_scopes, frame)?),
+                target,
+                span,
+            }),
+            Expr::FunctionCall { name, args, span } => {
+                let args = args
+                    .into_iter()
+                    .map(|arg| self.resolve_expr_subqueries(arg, outer_scopes, frame))
+                    .collect::<RedDBResult<Vec<_>>>()?;
+                Ok(Expr::FunctionCall { name, args, span })
+            }
+            Expr::Case {
+                branches,
+                else_,
+                span,
+            } => {
+                let branches = branches
+                    .into_iter()
+                    .map(|(cond, value)| {
+                        Ok((
+                            self.resolve_expr_subqueries(cond, outer_scopes, frame)?,
+                            self.resolve_expr_subqueries(value, outer_scopes, frame)?,
+                        ))
+                    })
+                    .collect::<RedDBResult<Vec<_>>>()?;
+                let else_ = else_
+                    .map(|expr| self.resolve_expr_subqueries(*expr, outer_scopes, frame))
+                    .transpose()?
+                    .map(Box::new);
+                Ok(Expr::Case {
+                    branches,
+                    else_,
+                    span,
+                })
+            }
+            Expr::IsNull {
+                operand,
+                negated,
+                span,
+            } => Ok(Expr::IsNull {
+                operand: Box::new(self.resolve_expr_subqueries(*operand, outer_scopes, frame)?),
+                negated,
+                span,
+            }),
+            Expr::InList {
+                target,
+                values,
+                negated,
+                span,
+            } => {
+                let target =
+                    Box::new(self.resolve_expr_subqueries(*target, outer_scopes, frame)?);
+                let mut resolved = Vec::new();
+                for value in values {
+                    if let Expr::Subquery { query, .. } = value {
+                        resolved.extend(
+                            self.execute_expr_subquery_values(query, outer_scopes, frame)?
+                                .into_iter()
+                                .map(Expr::lit),
+                        );
+                    } else {
+                        resolved.push(self.resolve_expr_subqueries(value, outer_scopes, frame)?);
+                    }
+                }
+                Ok(Expr::InList {
+                    target,
+                    values: resolved,
+                    negated,
+                    span,
+                })
+            }
+            Expr::Between {
+                target,
+                low,
+                high,
+                negated,
+                span,
+            } => Ok(Expr::Between {
+                target: Box::new(self.resolve_expr_subqueries(*target, outer_scopes, frame)?),
+                low: Box::new(self.resolve_expr_subqueries(*low, outer_scopes, frame)?),
+                high: Box::new(self.resolve_expr_subqueries(*high, outer_scopes, frame)?),
+                negated,
+                span,
+            }),
+            other => Ok(other),
+        }
+    }
+
+    fn execute_expr_subquery_values(
+        &self,
+        subquery: crate::storage::query::ast::ExprSubquery,
+        outer_scopes: &[String],
+        frame: &dyn super::statement_frame::ReadFrame,
+    ) -> RedDBResult<Vec<Value>> {
+        let query = *subquery.query;
+        if query_references_outer_scope(&query, outer_scopes) {
+            return Err(RedDBError::Query(
+                "NOT_YET_SUPPORTED: correlated subqueries are not supported yet; track follow-up issue #470-correlated-subqueries".to_string(),
+            ));
+        }
+        let query = self.rewrite_view_refs(query);
+        let query = self.resolve_select_expr_subqueries(query, frame)?;
+        let query = self.authorize_relational_select_expr(query, frame)?;
+        let result = match query {
+            QueryExpr::Table(table) => {
+                execute_runtime_table_query(&self.inner.db, &table, Some(&self.inner.index_store))?
+            }
+            QueryExpr::Join(join) => execute_runtime_join_query(&self.inner.db, &join)?,
+            other => {
+                return Err(RedDBError::Query(format!(
+                    "expression subquery must be a SELECT query, got {}",
+                    query_expr_name(&other)
+                )))
+            }
+        };
+        first_column_values(result)
+    }
+
     fn dispatch_expr(
         &self,
         expr: QueryExpr,
@@ -6393,6 +6607,10 @@ impl RedDBRuntime {
             }
             QueryExpr::Table(table) => {
                 let scope = self.ai_scope();
+                let table = self.resolve_table_expr_subqueries(
+                    table,
+                    &scope as &dyn super::statement_frame::ReadFrame,
+                )?;
                 if super::red_schema::is_virtual_table(&table.table) {
                     return Ok(RuntimeQueryResult {
                         query: query_str.to_string(),
@@ -9458,6 +9676,7 @@ fn collect_expr_columns(
             collect_expr_columns(low, table_name, table_alias, columns);
             collect_expr_columns(high, table_name, table_alias, columns);
         }
+        Expr::Subquery { .. } => {}
     }
 }
 
@@ -9794,6 +10013,211 @@ pub(crate) fn decision_to_strings(
         Decision::DefaultDeny => ("default_deny".into(), None, None),
         Decision::AdminBypass => ("admin_bypass".into(), None, None),
     }
+}
+
+fn relation_scopes_for_query(query: &QueryExpr) -> Vec<String> {
+    let mut scopes = Vec::new();
+    collect_relation_scopes(query, &mut scopes);
+    scopes.sort();
+    scopes.dedup();
+    scopes
+}
+
+fn collect_relation_scopes(query: &QueryExpr, scopes: &mut Vec<String>) {
+    match query {
+        QueryExpr::Table(table) => {
+            if !table.table.is_empty() {
+                scopes.push(table.table.clone());
+            }
+            if let Some(alias) = &table.alias {
+                scopes.push(alias.clone());
+            }
+        }
+        QueryExpr::Join(join) => {
+            collect_relation_scopes(&join.left, scopes);
+            collect_relation_scopes(&join.right, scopes);
+        }
+        _ => {}
+    }
+}
+
+fn query_references_outer_scope(query: &QueryExpr, outer_scopes: &[String]) -> bool {
+    let inner_scopes = relation_scopes_for_query(query);
+    query_expr_references_outer_scope(query, outer_scopes, &inner_scopes)
+}
+
+fn query_expr_references_outer_scope(
+    query: &QueryExpr,
+    outer_scopes: &[String],
+    inner_scopes: &[String],
+) -> bool {
+    match query {
+        QueryExpr::Table(table) => {
+            table.select_items.iter().any(|item| match item {
+                crate::storage::query::ast::SelectItem::Wildcard => false,
+                crate::storage::query::ast::SelectItem::Expr { expr, .. } => {
+                    expr_references_outer_scope(expr, outer_scopes, inner_scopes)
+                }
+            }) || table
+                .where_expr
+                .as_ref()
+                .is_some_and(|expr| expr_references_outer_scope(expr, outer_scopes, inner_scopes))
+                || table.filter.as_ref().is_some_and(|filter| {
+                    filter_references_outer_scope(filter, outer_scopes, inner_scopes)
+                })
+                || table.having_expr.as_ref().is_some_and(|expr| {
+                    expr_references_outer_scope(expr, outer_scopes, inner_scopes)
+                })
+                || table.having.as_ref().is_some_and(|filter| {
+                    filter_references_outer_scope(filter, outer_scopes, inner_scopes)
+                })
+                || table
+                    .group_by_exprs
+                    .iter()
+                    .any(|expr| expr_references_outer_scope(expr, outer_scopes, inner_scopes))
+                || table.order_by.iter().any(|clause| {
+                    clause.expr.as_ref().is_some_and(|expr| {
+                        expr_references_outer_scope(expr, outer_scopes, inner_scopes)
+                    })
+                })
+        }
+        QueryExpr::Join(join) => {
+            query_expr_references_outer_scope(&join.left, outer_scopes, inner_scopes)
+                || query_expr_references_outer_scope(&join.right, outer_scopes, inner_scopes)
+                || join.filter.as_ref().is_some_and(|filter| {
+                    filter_references_outer_scope(filter, outer_scopes, inner_scopes)
+                })
+                || join.return_items.iter().any(|item| match item {
+                    crate::storage::query::ast::SelectItem::Wildcard => false,
+                    crate::storage::query::ast::SelectItem::Expr { expr, .. } => {
+                        expr_references_outer_scope(expr, outer_scopes, inner_scopes)
+                    }
+                })
+        }
+        _ => false,
+    }
+}
+
+fn filter_references_outer_scope(
+    filter: &crate::storage::query::ast::Filter,
+    outer_scopes: &[String],
+    inner_scopes: &[String],
+) -> bool {
+    use crate::storage::query::ast::Filter;
+    match filter {
+        Filter::Compare { field, .. }
+        | Filter::IsNull(field)
+        | Filter::IsNotNull(field)
+        | Filter::In { field, .. }
+        | Filter::Between { field, .. }
+        | Filter::Like { field, .. }
+        | Filter::StartsWith { field, .. }
+        | Filter::EndsWith { field, .. }
+        | Filter::Contains { field, .. } => {
+            field_ref_references_outer_scope(field, outer_scopes, inner_scopes)
+        }
+        Filter::CompareFields { left, right, .. } => {
+            field_ref_references_outer_scope(left, outer_scopes, inner_scopes)
+                || field_ref_references_outer_scope(right, outer_scopes, inner_scopes)
+        }
+        Filter::CompareExpr { lhs, rhs, .. } => {
+            expr_references_outer_scope(lhs, outer_scopes, inner_scopes)
+                || expr_references_outer_scope(rhs, outer_scopes, inner_scopes)
+        }
+        Filter::And(left, right) | Filter::Or(left, right) => {
+            filter_references_outer_scope(left, outer_scopes, inner_scopes)
+                || filter_references_outer_scope(right, outer_scopes, inner_scopes)
+        }
+        Filter::Not(inner) => filter_references_outer_scope(inner, outer_scopes, inner_scopes),
+    }
+}
+
+fn expr_references_outer_scope(
+    expr: &crate::storage::query::ast::Expr,
+    outer_scopes: &[String],
+    inner_scopes: &[String],
+) -> bool {
+    use crate::storage::query::ast::Expr;
+    match expr {
+        Expr::Column { field, .. } => {
+            field_ref_references_outer_scope(field, outer_scopes, inner_scopes)
+        }
+        Expr::BinaryOp { lhs, rhs, .. } => {
+            expr_references_outer_scope(lhs, outer_scopes, inner_scopes)
+                || expr_references_outer_scope(rhs, outer_scopes, inner_scopes)
+        }
+        Expr::UnaryOp { operand, .. }
+        | Expr::Cast { inner: operand, .. }
+        | Expr::IsNull { operand, .. } => {
+            expr_references_outer_scope(operand, outer_scopes, inner_scopes)
+        }
+        Expr::FunctionCall { args, .. } => args
+            .iter()
+            .any(|arg| expr_references_outer_scope(arg, outer_scopes, inner_scopes)),
+        Expr::Case {
+            branches, else_, ..
+        } => {
+            branches.iter().any(|(cond, value)| {
+                expr_references_outer_scope(cond, outer_scopes, inner_scopes)
+                    || expr_references_outer_scope(value, outer_scopes, inner_scopes)
+            }) || else_
+                .as_ref()
+                .is_some_and(|expr| expr_references_outer_scope(expr, outer_scopes, inner_scopes))
+        }
+        Expr::InList { target, values, .. } => {
+            expr_references_outer_scope(target, outer_scopes, inner_scopes)
+                || values
+                    .iter()
+                    .any(|value| expr_references_outer_scope(value, outer_scopes, inner_scopes))
+        }
+        Expr::Between {
+            target, low, high, ..
+        } => {
+            expr_references_outer_scope(target, outer_scopes, inner_scopes)
+                || expr_references_outer_scope(low, outer_scopes, inner_scopes)
+                || expr_references_outer_scope(high, outer_scopes, inner_scopes)
+        }
+        Expr::Subquery { query, .. } => query_references_outer_scope(&query.query, inner_scopes),
+        Expr::Literal { .. } | Expr::Parameter { .. } => false,
+    }
+}
+
+fn field_ref_references_outer_scope(
+    field: &crate::storage::query::ast::FieldRef,
+    outer_scopes: &[String],
+    inner_scopes: &[String],
+) -> bool {
+    match field {
+        crate::storage::query::ast::FieldRef::TableColumn { table, .. } if !table.is_empty() => {
+            outer_scopes.iter().any(|scope| scope == table)
+                && !inner_scopes.iter().any(|scope| scope == table)
+        }
+        _ => false,
+    }
+}
+
+fn first_column_values(
+    result: crate::storage::query::unified::UnifiedResult,
+) -> RedDBResult<Vec<Value>> {
+    if result.columns.len() > 1 {
+        return Err(RedDBError::Query(
+            "expression subquery must return exactly one column".to_string(),
+        ));
+    }
+    let fallback_column = result
+        .records
+        .first()
+        .and_then(|record| record.column_names().into_iter().next())
+        .map(|name| name.to_string());
+    let column = result.columns.first().cloned().or(fallback_column);
+    let Some(column) = column else {
+        return Ok(Vec::new());
+    };
+    Ok(result
+        .records
+        .iter()
+        .map(|record| record.get(column.as_str()).cloned().unwrap_or(Value::Null))
+        .collect())
 }
 
 fn parse_timestamp_to_ms(s: &str) -> Option<u128> {

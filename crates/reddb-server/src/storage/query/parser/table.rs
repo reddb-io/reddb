@@ -315,7 +315,10 @@ fn contains_nested_aggregate(expr: &Expr) -> bool {
                 || contains_nested_aggregate(low)
                 || contains_nested_aggregate(high)
         }
-        Expr::Literal { .. } | Expr::Column { .. } | Expr::Parameter { .. } => false,
+        Expr::Literal { .. }
+        | Expr::Column { .. }
+        | Expr::Parameter { .. }
+        | Expr::Subquery { .. } => false,
     }
 }
 

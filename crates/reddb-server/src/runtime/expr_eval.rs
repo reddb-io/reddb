@@ -296,6 +296,8 @@ pub(super) fn evaluate_runtime_expr_with_db(
                     && compare_runtime_values(&t, &hi, crate::storage::query::ast::CompareOp::Le);
             Some(Value::Boolean(if *negated { !in_range } else { in_range }))
         }
+
+        Expr::Subquery { .. } => None,
     }
 }
 

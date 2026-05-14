@@ -395,6 +395,7 @@ fn compile_expr(expr: &Expr, scope: &dyn Scope) -> Result<CompiledScalar, Compil
         Expr::IsNull { .. } => Err(CompileError::Unsupported("IS NULL")),
         Expr::InList { .. } => Err(CompileError::Unsupported("IN list")),
         Expr::Between { .. } => Err(CompileError::Unsupported("BETWEEN")),
+        Expr::Subquery { .. } => Err(CompileError::Unsupported("subquery")),
     }
 }
 

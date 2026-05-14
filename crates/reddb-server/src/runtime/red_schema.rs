@@ -860,6 +860,7 @@ fn render_expr_for_catalog(expr: &Expr) -> String {
             render_expr_for_catalog(low),
             render_expr_for_catalog(high)
         ),
+        Expr::Subquery { .. } => "(SELECT ...)".to_string(),
     }
 }
 
