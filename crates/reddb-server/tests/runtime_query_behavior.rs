@@ -1460,6 +1460,33 @@ fn graph_shortest_path_resolves_labels_for_both_endpoints() {
     assert_eq!(text_at(&by_id, 0, "target"), target_id);
 }
 
+#[test]
+fn grimms_showcase_graph_commands_resolve_labels() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    let hansel = insert_graph_node(&rt, "hansel", "Hansel");
+    let gretel = insert_graph_node(&rt, "gretel", "Gretel");
+    rt.execute_query(&format!(
+        "INSERT INTO tales EDGE (label, from, to, evidence) VALUES \
+         ('HAS_TRAIT', {hansel}, {gretel}, 'siblings in the forest')"
+    ))
+    .expect("insert trait edge");
+
+    let path = rt
+        .execute_query("GRAPH SHORTEST_PATH 'hansel' TO 'gretel' ALGORITHM dijkstra")
+        .expect("showcase shortest path resolves labels");
+    assert_eq!(uint_at(&path, 0, "hop_count"), 1);
+
+    let props = rt
+        .execute_query("GRAPH PROPERTIES 'hansel'")
+        .expect("showcase properties resolves label");
+    assert_eq!(text_at(&props, 0, "name"), "Hansel");
+
+    let centrality = rt
+        .execute_query("GRAPH CENTRALITY LIMIT 2")
+        .expect("showcase centrality limit executes");
+    assert_eq!(centrality.result.len(), 2);
+}
+
 // ── Issue #420: EDGE insert accepts node labels in from/to ─────────────────
 
 fn first_text(rec_field: Option<&Value>) -> String {
@@ -1772,6 +1799,31 @@ fn match_return_edge_alias_projects_edge_properties() {
     assert_eq!(text_at(&whole, 0, "r.label"), "likes");
     assert_eq!(text_at(&whole, 0, "r.from"), alice.to_string());
     assert_eq!(text_at(&whole, 0, "r.to"), bob.to_string());
+}
+
+#[test]
+fn grimms_showcase_match_projects_trait_evidence() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    let hansel = insert_graph_node(&rt, "hansel", "Hansel");
+    let gretel = insert_graph_node(&rt, "gretel", "Gretel");
+
+    rt.execute_query(&format!(
+        "INSERT INTO tales EDGE (label, from, to, evidence) VALUES \
+         ('HAS_TRAIT', {hansel}, {gretel}, 'siblings in the forest')"
+    ))
+    .expect("insert trait edge");
+
+    let res = rt
+        .execute_query(
+            "MATCH (a)-[r:HAS_TRAIT]->(b) \
+             WHERE a.label = 'hansel' \
+             RETURN a.name, b.name, r.evidence",
+        )
+        .expect("showcase MATCH executes");
+    assert_eq!(res.result.len(), 1);
+    assert_eq!(text_at(&res, 0, "a.name"), "Hansel");
+    assert_eq!(text_at(&res, 0, "b.name"), "Gretel");
+    assert_eq!(text_at(&res, 0, "r.evidence"), "siblings in the forest");
 }
 
 #[test]

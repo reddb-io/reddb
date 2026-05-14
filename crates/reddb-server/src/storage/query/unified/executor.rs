@@ -15,6 +15,8 @@ use crate::storage::query::sql_lowering::{
 };
 use crate::storage::schema::Value;
 
+pub type EdgeProperties = HashMap<(String, String, String), HashMap<String, Value>>;
+
 pub struct UnifiedExecutor {
     /// Graph storage
     graph: Arc<GraphStore>,
@@ -22,6 +24,9 @@ pub struct UnifiedExecutor {
     index: Arc<GraphTableIndex>,
     /// Optional node properties loaded from the unified entity store
     node_properties: Arc<HashMap<String, HashMap<String, Value>>>,
+    /// Optional edge properties loaded from the unified entity store, keyed by
+    /// `(from, canonical_label, to)` because GraphStore adjacency omits edge ids.
+    edge_properties: Arc<EdgeProperties>,
 }
 
 impl UnifiedExecutor {
@@ -36,10 +41,20 @@ impl UnifiedExecutor {
         index: Arc<GraphTableIndex>,
         node_properties: HashMap<String, HashMap<String, Value>>,
     ) -> Self {
+        Self::new_with_graph_properties(graph, index, node_properties, HashMap::new())
+    }
+
+    pub fn new_with_graph_properties(
+        graph: Arc<GraphStore>,
+        index: Arc<GraphTableIndex>,
+        node_properties: HashMap<String, HashMap<String, Value>>,
+        edge_properties: EdgeProperties,
+    ) -> Self {
         Self {
             graph,
             index,
             node_properties: Arc::new(node_properties),
+            edge_properties: Arc::new(edge_properties),
         }
     }
 
@@ -49,6 +64,24 @@ impl UnifiedExecutor {
             node.properties = properties.clone();
         }
         node
+    }
+
+    fn matched_edge(
+        &self,
+        source: &str,
+        edge_label: &str,
+        target: &str,
+        weight: f32,
+    ) -> MatchedEdge {
+        let mut edge = MatchedEdge::from_tuple(source, edge_label, target, weight);
+        if let Some(properties) = self.edge_properties.get(&(
+            source.to_string(),
+            edge_label.to_string(),
+            target.to_string(),
+        )) {
+            edge.properties = properties.clone();
+        }
+        edge
     }
 
     fn node_stored_property_value(node: &StoredNode, property: &str) -> Option<Value> {
@@ -109,10 +142,20 @@ impl UnifiedExecutor {
         query: &QueryExpr,
         node_properties: HashMap<String, HashMap<String, Value>>,
     ) -> Result<UnifiedResult, ExecutionError> {
-        let temp = Self::new_with_node_properties(
+        Self::execute_on_with_graph_properties(graph, query, node_properties, HashMap::new())
+    }
+
+    pub fn execute_on_with_graph_properties(
+        graph: &GraphStore,
+        query: &QueryExpr,
+        node_properties: HashMap<String, HashMap<String, Value>>,
+        edge_properties: EdgeProperties,
+    ) -> Result<UnifiedResult, ExecutionError> {
+        let temp = Self::new_with_graph_properties(
             Arc::new(GraphStore::new()),
             Arc::new(GraphTableIndex::new()),
             node_properties,
+            edge_properties,
         );
 
         match query {
@@ -661,9 +704,9 @@ impl UnifiedExecutor {
                         if let Some(ref alias) = edge_pattern.alias {
                             // Create edge with proper from/to direction
                             let edge = if is_outgoing {
-                                MatchedEdge::from_tuple(&source_node.id, etype, target_id, weight)
+                                self.matched_edge(&source_node.id, &etype, target_id, weight)
                             } else {
-                                MatchedEdge::from_tuple(target_id, etype, &source_node.id, weight)
+                                self.matched_edge(target_id, &etype, &source_node.id, weight)
                             };
                             new_pm.edges.insert(alias.clone(), edge);
                         }
@@ -857,7 +900,7 @@ impl UnifiedExecutor {
             "from" | "source" => Some(Value::text(edge.from.clone())),
             "to" | "target" => Some(Value::text(edge.to.clone())),
             "label" | "type" | "edge_type" => Some(Value::text(edge.edge_label.clone())),
-            _ => None,
+            other => edge.properties.get(other).cloned(),
         }
     }
 
@@ -886,9 +929,10 @@ impl UnifiedExecutor {
                     .get(alias)
                     .and_then(|e| match property.as_str() {
                         "weight" => Some(Value::Float(e.weight as f64)),
-                        "from" => Some(Value::text(e.from.clone())),
-                        "to" => Some(Value::text(e.to.clone())),
-                        _ => None,
+                        "from" | "source" => Some(Value::text(e.from.clone())),
+                        "to" | "target" => Some(Value::text(e.to.clone())),
+                        "label" | "type" | "edge_type" => Some(Value::text(e.edge_label.clone())),
+                        other => e.properties.get(other).cloned(),
                     })
             }
         }
@@ -940,6 +984,9 @@ impl UnifiedExecutor {
                                 &format!("{}.weight", node_alias),
                                 Value::Float(edge.weight as f64),
                             );
+                            for (k, v) in &edge.properties {
+                                record.set(&format!("{}.{}", node_alias, k), v.clone());
+                            }
                             continue;
                         }
                     }
