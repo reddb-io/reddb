@@ -150,7 +150,7 @@ jobs:
           # of cross-compiling from x86_64. Removes the gcc-aarch64-linux-gnu
           # cross toolchain install + linker env vars + the QEMU smoke test
           # for this target.
-          - { os: blacksmith-arm64-2404, target: aarch64-unknown-linux-gnu, asset_name: linux-aarch64, cross: false }
+          - { os: blacksmith-8vcpu-ubuntu-2404-arm, target: aarch64-unknown-linux-gnu, asset_name: linux-aarch64, cross: false }
           # aarch64-musl keeps the Docker cross-compile path (musl
           # toolchain inside messense/rust-musl-cross) — still on a
           # Blacksmith x86_64 runner so the docker spawn is unchanged.
