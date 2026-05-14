@@ -1,6 +1,6 @@
 [package]
 name = "reddb-io-wire"
-version = "1.0.8"
+version = "1.1.0"
 edition = "2021"
 authors = ["RedDB.io <hello@reddb.io>"]
 description = "RedDB wire protocol vocabulary: connection-string parser and (later) RedWire frame types. Shared by reddb-server, reddb-client, and the official drivers."

@@ -10,7 +10,7 @@ resolver = "2"
 
 [package]
 name = "reddb-io"
-version = "1.0.8"
+version = "1.1.0"
 edition = "2021"
 authors = ["RedDB.io <hello@reddb.io>"]
 description = "Unified multi-model database: tables, documents, graphs, vectors, and key-value in one engine. Umbrella crate that hosts the `red` binary and re-exports the workspace."

@@ -1,5 +1,11 @@
 # @reddb-io/client-bun
 
+## 1.1.0
+
+### Minor Changes
+
+- [`9bef862`](https://github.com/reddb-io/reddb/commit/9bef862babe56cfbc75850c94c2b8f863a6fd8de) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Prepare the 1.1 line with parameterized query coverage across engine, transports, and drivers; ASK citation, streaming, cache, failover, audit, and gRPC/MCP surfaces; MVCC transaction recovery improvements; graph/vector/probabilistic query fixes; SDK helper APIs; and release asset hardening.
+
 ## 1.0.8
 
 ### Patch Changes
