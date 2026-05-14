@@ -2051,6 +2051,7 @@ impl RedDBRuntime {
                 result_cache_shadow_divergences: std::sync::atomic::AtomicU64::new(0),
                 ask_daily_spend: parking_lot::RwLock::new(HashMap::new()),
                 queue_message_locks: parking_lot::RwLock::new(HashMap::new()),
+                rmw_locks: RmwLockTable::new(),
                 planner_dirty_tables: parking_lot::RwLock::new(HashSet::new()),
                 ec_registry: Arc::new(crate::ec::config::EcRegistry::new()),
                 ec_worker: crate::ec::worker::EcWorker::new(),
