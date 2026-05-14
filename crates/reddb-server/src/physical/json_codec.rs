@@ -361,6 +361,29 @@ pub(super) fn collection_contract_to_json(contract: &CollectionContract) -> Json
         JsonValue::Bool(contract.context_index_enabled),
     );
     object.insert(
+        "metrics_raw_retention_ms".to_string(),
+        contract
+            .metrics_raw_retention_ms
+            .map(json_u64)
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
+        "metrics_tenant_identity".to_string(),
+        contract
+            .metrics_tenant_identity
+            .as_ref()
+            .map(|identity| JsonValue::String(identity.clone()))
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
+        "metrics_namespace".to_string(),
+        contract
+            .metrics_namespace
+            .as_ref()
+            .map(|namespace| JsonValue::String(namespace.clone()))
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
         "append_only".to_string(),
         JsonValue::Bool(contract.append_only),
     );
@@ -466,6 +489,18 @@ pub(super) fn collection_contract_from_json(value: &JsonValue) -> io::Result<Col
             .get("context_index_enabled")
             .and_then(JsonValue::as_bool)
             .unwrap_or(true),
+        metrics_raw_retention_ms: match object.get("metrics_raw_retention_ms") {
+            Some(JsonValue::Null) | None => None,
+            Some(value) => Some(json_u64_value(value)?),
+        },
+        metrics_tenant_identity: object
+            .get("metrics_tenant_identity")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string),
+        metrics_namespace: object
+            .get("metrics_namespace")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string),
         // Legacy sidecars lack the append_only flag — default false
         // (pre-feature behaviour: tables were always mutable).
         append_only: object
@@ -836,6 +871,7 @@ fn collection_model_as_str(model: crate::catalog::CollectionModel) -> &'static s
         crate::catalog::CollectionModel::Mixed => "mixed",
         crate::catalog::CollectionModel::TimeSeries => "timeseries",
         crate::catalog::CollectionModel::Queue => "queue",
+        crate::catalog::CollectionModel::Metrics => "metrics",
     }
 }
 
@@ -854,6 +890,7 @@ fn collection_model_from_str(value: &str) -> io::Result<crate::catalog::Collecti
         "mixed" => Ok(crate::catalog::CollectionModel::Mixed),
         "timeseries" => Ok(crate::catalog::CollectionModel::TimeSeries),
         "queue" => Ok(crate::catalog::CollectionModel::Queue),
+        "metrics" => Ok(crate::catalog::CollectionModel::Metrics),
         other => Err(invalid_data(format!(
             "unsupported collection contract model: {other}"
         ))),

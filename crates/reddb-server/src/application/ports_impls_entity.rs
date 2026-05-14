@@ -116,6 +116,9 @@ fn ensure_collection_model_contract(
             .then(|| crate::storage::schema::TableDef::new(collection.to_string())),
         timestamps_enabled: false,
         context_index_enabled: false,
+        metrics_raw_retention_ms: None,
+        metrics_tenant_identity: None,
+        metrics_namespace: None,
         // Implicit contracts are created on first write — mutability
         // is the default until the operator runs explicit DDL.
         append_only: false,

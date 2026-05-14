@@ -25,6 +25,7 @@ pub(crate) fn model_name(model: CollectionModel) -> &'static str {
         CollectionModel::Mixed => "mixed",
         CollectionModel::TimeSeries => "timeseries",
         CollectionModel::Queue => "queue",
+        CollectionModel::Metrics => "metrics",
     }
 }
 

@@ -109,6 +109,9 @@ fn system_keyed_collection_contract(
         table_def: None,
         timestamps_enabled: false,
         context_index_enabled: false,
+        metrics_raw_retention_ms: None,
+        metrics_tenant_identity: None,
+        metrics_namespace: None,
         append_only: false,
         subscriptions: Vec::new(),
     }
@@ -6016,6 +6019,7 @@ impl RedDBRuntime {
             QueryExpr::DropVector(q) => Some((q.name.as_str(), CollectionModel::Vector)),
             QueryExpr::DropDocument(q) => Some((q.name.as_str(), CollectionModel::Document)),
             QueryExpr::DropKv(q) => Some((q.name.as_str(), q.model)),
+            QueryExpr::DropCollection(q) => q.model.map(|model| (q.name.as_str(), model)),
             QueryExpr::Truncate(q) => q.model.map(|model| (q.name.as_str(), model)),
             QueryExpr::KvCommand(cmd) => {
                 let (collection, model) = match cmd {

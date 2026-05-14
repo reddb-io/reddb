@@ -2071,6 +2071,9 @@ fn queue_collection_contract(
         table_def: None,
         timestamps_enabled: false,
         context_index_enabled: false,
+        metrics_raw_retention_ms: None,
+        metrics_tenant_identity: None,
+        metrics_namespace: None,
         // Queues manipulate messages via push/pop/ack — the row DML
         // paths never apply. Flag it as append_only so inadvertent
         // `UPDATE/DELETE FROM queue_name` statements fail loudly.
