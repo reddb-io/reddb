@@ -132,6 +132,7 @@
   - [Scheduled Backups](/api/http.md#backups)
   - [WAL Archiving](/getting-started/configuration.md#backup--recovery-redbackup)
   - [Remote Backends](/deployment/backends.md)
+  - [Metrics Compatibility](/operations/metrics-compatibility.md)
 
 - **Native Migrations**
   - [Overview](/migrations/overview.md)

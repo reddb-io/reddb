@@ -157,3 +157,4 @@ retry, backpressure, and DLQ. They are not the public metrics ingestion API.
 - [Events](./events.md)
 - [Queues](./queues.md)
 - [Prometheus and Grafana adapters ADR](../adr/0017-prometheus-grafana-adapters-for-metrics.md)
+- [Prometheus/Grafana compatibility matrix](../operations/metrics-compatibility.md)

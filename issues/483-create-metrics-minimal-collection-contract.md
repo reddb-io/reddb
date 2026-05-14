@@ -24,4 +24,6 @@ Add the minimal RedDB-native metrics collection contract. A user can declare a m
 
 ## Blocked by
 
-- issues/hitl/482-metrics-prometheus-grafana-compatibility-matrix.md
+None - compatibility matrix resolved in
+issues/done/482-metrics-prometheus-grafana-compatibility-matrix.md and
+docs/operations/metrics-compatibility.md.
