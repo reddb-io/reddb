@@ -831,6 +831,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     // UnifiedRecord for every entity in the collection.
     // Excludes universal entity sources (e.g. "any") which span all collections.
     if effective_filter.is_some()
+        && !effective_filter
+            .as_ref()
+            .is_some_and(|filter| runtime_filter_uses_document_path(filter, query))
         && effective_group_by.is_empty()
         && effective_having.is_none()
         && query.expand.is_none()
@@ -1189,6 +1192,9 @@ pub(crate) fn execute_runtime_canonical_table_node(
             // creating UnifiedRecord for entities that match the filter.
             // Skip for universal sources ("any") which need cross-collection scanning.
             if effective_filter.is_some()
+                && !effective_filter.as_ref().is_some_and(|filter| {
+                    runtime_filter_uses_document_path(filter, context.query)
+                })
                 && !effective_table_projections(context.query)
                     .iter()
                     .any(|p| {
@@ -1456,4 +1462,40 @@ pub(crate) fn execute_runtime_canonical_table_child(
         ))
     })?;
     execute_runtime_canonical_table_node(db, child, context)
+}
+
+fn runtime_filter_uses_document_path(filter: &Filter, query: &TableQuery) -> bool {
+    match filter {
+        Filter::Compare { field, .. }
+        | Filter::IsNull(field)
+        | Filter::IsNotNull(field)
+        | Filter::In { field, .. }
+        | Filter::Between { field, .. }
+        | Filter::Like { field, .. }
+        | Filter::StartsWith { field, .. }
+        | Filter::EndsWith { field, .. }
+        | Filter::Contains { field, .. } => runtime_field_ref_uses_document_path(field, query),
+        Filter::CompareFields { left, right, .. } => {
+            runtime_field_ref_uses_document_path(left, query)
+                || runtime_field_ref_uses_document_path(right, query)
+        }
+        Filter::CompareExpr { .. } => true,
+        Filter::And(left, right) | Filter::Or(left, right) => {
+            runtime_filter_uses_document_path(left, query)
+                || runtime_filter_uses_document_path(right, query)
+        }
+        Filter::Not(inner) => runtime_filter_uses_document_path(inner, query),
+    }
+}
+
+fn runtime_field_ref_uses_document_path(field: &FieldRef, query: &TableQuery) -> bool {
+    match field {
+        FieldRef::TableColumn { table, column } => {
+            column.contains('.')
+                || (!table.is_empty()
+                    && table != &query.table
+                    && query.alias.as_deref() != Some(table.as_str()))
+        }
+        _ => false,
+    }
 }

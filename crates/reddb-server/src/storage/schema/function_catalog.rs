@@ -132,6 +132,9 @@ const ARGS_JSON_TEXT: &[DataType] = &[DataType::Text];
 const ARGS_JSON_JSON: &[DataType] = &[DataType::Json];
 const ARGS_JSON_EXTRACT_TEXT: &[DataType] = &[DataType::Text, DataType::Text];
 const ARGS_JSON_EXTRACT_JSON: &[DataType] = &[DataType::Json, DataType::Text];
+const ARGS_CONTAINS_TEXT: &[DataType] = &[DataType::Text, DataType::Text];
+const ARGS_CONTAINS_JSON: &[DataType] = &[DataType::Json, DataType::Text];
+const ARGS_CONTAINS_ARRAY: &[DataType] = &[DataType::Array, DataType::Text];
 // JSON_SET takes (json, path, value). Value type is Unknown — the evaluator
 // coerces any scalar at runtime (int, float, bool, text, or another json).
 const ARGS_JSON_SET_TEXT: &[DataType] = &[DataType::Text, DataType::Text, DataType::Unknown];
@@ -713,6 +716,27 @@ pub const FUNCTION_CATALOG: &[FunctionEntry] = &[
         "JSON_EXTRACT_TEXT",
         ARGS_JSON_EXTRACT_JSON,
         DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "CONTAINS",
+        ARGS_CONTAINS_TEXT,
+        DataType::Boolean,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "CONTAINS",
+        ARGS_CONTAINS_JSON,
+        DataType::Boolean,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "CONTAINS",
+        ARGS_CONTAINS_ARRAY,
+        DataType::Boolean,
         FunctionKind::Scalar,
         false,
     ),

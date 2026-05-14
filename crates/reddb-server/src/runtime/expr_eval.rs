@@ -1268,6 +1268,14 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
             Value::Array(a) => Some(Value::Integer(a.len() as i64)),
             _ => Some(Value::Null),
         },
+        "CONTAINS" => {
+            let haystack = args.first()?;
+            let needle = match args.get(1)? {
+                Value::Text(text) => text.as_ref(),
+                _ => return Some(Value::Null),
+            };
+            Some(Value::Boolean(value_contains(haystack, needle)))
+        }
         "OCTET_LENGTH" => match args.first()? {
             Value::Text(s) => Some(Value::Integer(s.len() as i64)),
             Value::Blob(b) => Some(Value::Integer(b.len() as i64)),
@@ -1612,6 +1620,29 @@ fn value_to_json(value: &Value) -> Option<crate::serde_json::Value> {
         }
         Value::Text(s) => crate::serde_json::from_str(s).ok(),
         _ => None,
+    }
+}
+
+fn value_contains(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::Array(values) => values.iter().any(|value| value_contains(value, needle)),
+        Value::Json(_) => value_to_json(value)
+            .as_ref()
+            .is_some_and(|json| json_value_contains(json, needle)),
+        Value::Text(text) => text.contains(needle),
+        other => other.display_string().contains(needle),
+    }
+}
+
+fn json_value_contains(value: &crate::serde_json::Value, needle: &str) -> bool {
+    match value {
+        crate::serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| json_value_contains(value, needle)),
+        crate::serde_json::Value::String(value) => value == needle,
+        crate::serde_json::Value::Number(value) => value.to_string() == needle,
+        crate::serde_json::Value::Bool(value) => value.to_string() == needle,
+        crate::serde_json::Value::Null | crate::serde_json::Value::Object(_) => false,
     }
 }
 

@@ -15,7 +15,7 @@ use super::filter_compiled::{classify_field, EntityColumnResolver};
 use crate::api::{RedDBError, RedDBResult};
 use crate::runtime::join_filter::{
     eval_projection_value_with_db, evaluate_runtime_filter_with_db, field_ref_name,
-    projection_name, runtime_partial_cmp, sort_records_by_order_by_with_db,
+    projection_name, resolve_runtime_field, runtime_partial_cmp, sort_records_by_order_by_with_db,
 };
 use crate::runtime::runtime_table_record_from_entity_ref;
 use crate::storage::query::ast::{
@@ -276,20 +276,13 @@ pub(crate) fn execute_aggregate_query(
         if !crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
             return true;
         }
-        if let Some(c) = compiled_filter.as_ref() {
-            if !c.evaluate(entity) {
-                return true;
-            }
-        }
 
         // ── Lazy record materialisation ──────────────────────────────────
         // We defer `runtime_table_record_from_entity` until we actually
-        // need it (complex GROUP BY exprs or aggregate args that can't be
-        // read directly from the entity).  For the common case — plain
-        // column GROUP BY + single-column agg args — we never build it.
+        // need it (complex filters, GROUP BY exprs or aggregate args that
+        // can't be read directly from the entity).
         let mut record_cache: Option<UnifiedRecord> = None;
 
-        // Helper: materialise the record exactly once if not yet done.
         macro_rules! get_or_make_record {
             () => {{
                 if record_cache.is_none() {
@@ -297,6 +290,28 @@ pub(crate) fn execute_aggregate_query(
                 }
                 record_cache.as_ref()
             }};
+        }
+
+        if let Some(c) = compiled_filter.as_ref() {
+            if !c.evaluate(entity) {
+                return true;
+            }
+            if c.has_fallback() {
+                let Some(record) = get_or_make_record!() else {
+                    return true;
+                };
+                if let Some(filter) = effective_filter.as_ref() {
+                    if !evaluate_runtime_filter_with_db(
+                        Some(db),
+                        record,
+                        filter,
+                        Some(table_name),
+                        Some(table_alias),
+                    ) {
+                        return true;
+                    }
+                }
+            }
         }
 
         let group_values = if has_group_by {
@@ -1411,6 +1426,7 @@ fn projection_group_key(projection: &Projection) -> Option<String> {
         Projection::Field(FieldRef::TableColumn { table, column }, _) if table.is_empty() => {
             Some(column.clone())
         }
+        Projection::Field(field, _) => Some(field_ref_name(field)),
         Projection::Function(name, args) if base_function_name(name) == "TIME_BUCKET" => {
             render_time_bucket_group_expr(args)
         }
@@ -1452,7 +1468,7 @@ fn resolve_group_by_value(db: &RedDB, group_expr: &Expr, record: &UnifiedRecord)
     }
 
     match group_expr {
-        Expr::Column { field, .. } => record.get(&field_ref_name(field)).cloned(),
+        Expr::Column { field, .. } => resolve_runtime_field(record, field, None, None),
         _ => {
             let projection = projection_from_expr(group_expr)?;
             eval_projection_value_with_db(Some(db), &projection, record)
