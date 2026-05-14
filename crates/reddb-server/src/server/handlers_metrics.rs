@@ -64,6 +64,25 @@ struct PromVectorSample {
     value: f64,
 }
 
+#[derive(Debug, Clone)]
+struct PromRangeSeries {
+    labels: BTreeMap<String, String>,
+    values: Vec<PromRangeValue>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PromRangeValue {
+    timestamp_ns: u64,
+    value: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PromQueryRange {
+    start_ns: u64,
+    end_ns: u64,
+    step_ns: u64,
+}
+
 impl RedDBServer {
     pub(crate) fn handle_prometheus_query(
         &self,
@@ -81,6 +100,30 @@ impl RedDBServer {
 
         match self.prometheus_instant_vector(selector) {
             Ok(samples) => prometheus_vector_response(samples),
+            Err(err) => prometheus_error_response(500, "internal", err.to_string()),
+        }
+    }
+
+    pub(crate) fn handle_prometheus_query_range(
+        &self,
+        query: &BTreeMap<String, String>,
+        body: Option<Vec<u8>>,
+    ) -> HttpResponse {
+        let raw_query = match prometheus_required_param(query, body.as_deref(), "query") {
+            Ok(query) => query,
+            Err(err) => return prometheus_error_response(400, "bad_data", err),
+        };
+        let selector = match parse_prom_selector(&raw_query) {
+            Ok(selector) => selector,
+            Err(err) => return prometheus_error_response(422, "bad_data", err),
+        };
+        let range = match parse_prom_query_range(query, body.as_deref()) {
+            Ok(range) => range,
+            Err(err) => return prometheus_error_response(400, "bad_data", err),
+        };
+
+        match self.prometheus_range_matrix(selector, range) {
+            Ok(series) => prometheus_matrix_response(series),
             Err(err) => prometheus_error_response(500, "internal", err.to_string()),
         }
     }
@@ -208,27 +251,166 @@ impl RedDBServer {
 
         Ok(latest_by_series.into_values().collect())
     }
+
+    fn prometheus_range_matrix(
+        &self,
+        selector: PromSelector,
+        range: PromQueryRange,
+    ) -> RedDBResult<Vec<PromRangeSeries>> {
+        let mut samples_by_series: BTreeMap<Vec<(String, String)>, PromRangeSeries> =
+            BTreeMap::new();
+        let store = self.runtime.db().store();
+        for contract in self
+            .runtime
+            .db()
+            .collection_contracts()
+            .into_iter()
+            .filter(|contract| contract.declared_model == CollectionModel::Metrics)
+        {
+            let Some(manager) = store.get_collection(&contract.name) else {
+                continue;
+            };
+            let entities =
+                manager.query_all(|entity| matches!(entity.data, EntityData::TimeSeries(_)));
+            for entity in entities {
+                let EntityData::TimeSeries(point) = entity.data else {
+                    continue;
+                };
+                if point.metric != selector.metric {
+                    continue;
+                }
+                if point.timestamp_ns < range.start_ns || point.timestamp_ns > range.end_ns {
+                    continue;
+                }
+                let labels = prometheus_labels_for_point(&point);
+                if !selector_matches(&selector, &labels) {
+                    continue;
+                }
+                let series_key = labels
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect::<Vec<_>>();
+                samples_by_series
+                    .entry(series_key)
+                    .or_insert_with(|| PromRangeSeries {
+                        labels,
+                        values: Vec::new(),
+                    })
+                    .values
+                    .push(PromRangeValue {
+                        timestamp_ns: point.timestamp_ns,
+                        value: point.value,
+                    });
+            }
+        }
+
+        let mut matrix = Vec::new();
+        for mut series in samples_by_series.into_values() {
+            series.values.sort_by_key(|sample| sample.timestamp_ns);
+            series.values = align_range_values_to_steps(&series.values, range);
+            if !series.values.is_empty() {
+                matrix.push(series);
+            }
+        }
+        Ok(matrix)
+    }
 }
 
 fn prometheus_query_param(
     query: &BTreeMap<String, String>,
     body: Option<&[u8]>,
 ) -> Result<String, String> {
+    prometheus_required_param(query, body, "query")
+}
+
+fn prometheus_required_param(
+    query: &BTreeMap<String, String>,
+    body: Option<&[u8]>,
+    name: &str,
+) -> Result<String, String> {
     if let Some(value) = query.get("query") {
-        return percent_decode(value).map_err(|err| format!("invalid query parameter: {err}"));
+        if name == "query" {
+            return percent_decode(value).map_err(|err| format!("invalid {name} parameter: {err}"));
+        }
+    }
+    if let Some(value) = query.get(name) {
+        return percent_decode(value).map_err(|err| format!("invalid {name} parameter: {err}"));
     }
     if let Some(body) = body {
         let body = std::str::from_utf8(body)
             .map_err(|err| format!("invalid form body encoding: {err}"))?;
         for pair in body.split('&') {
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-            if key == "query" {
+            if key == name {
                 return percent_decode(value)
-                    .map_err(|err| format!("invalid query form field: {err}"));
+                    .map_err(|err| format!("invalid {name} form field: {err}"));
             }
         }
     }
-    Err("missing required query parameter 'query'".to_string())
+    Err(format!("missing required query parameter '{name}'"))
+}
+
+fn parse_prom_query_range(
+    query: &BTreeMap<String, String>,
+    body: Option<&[u8]>,
+) -> Result<PromQueryRange, String> {
+    let start_ns = parse_prom_timestamp_ns(&prometheus_required_param(query, body, "start")?)?;
+    let end_ns = parse_prom_timestamp_ns(&prometheus_required_param(query, body, "end")?)?;
+    let step_ns = parse_prom_step_ns(&prometheus_required_param(query, body, "step")?)?;
+    if end_ns < start_ns {
+        return Err("invalid query_range: end must be greater than or equal to start".to_string());
+    }
+    if step_ns == 0 {
+        return Err("invalid query_range: step must be positive".to_string());
+    }
+    let steps = ((end_ns - start_ns) / step_ns) + 1;
+    if steps > 11_000 {
+        return Err("invalid query_range: too many points; increase step".to_string());
+    }
+    Ok(PromQueryRange {
+        start_ns,
+        end_ns,
+        step_ns,
+    })
+}
+
+fn parse_prom_timestamp_ns(input: &str) -> Result<u64, String> {
+    let seconds = input
+        .parse::<f64>()
+        .map_err(|_| format!("invalid query_range timestamp '{input}'"))?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(format!("invalid query_range timestamp '{input}'"));
+    }
+    Ok((seconds * 1_000_000_000.0).round() as u64)
+}
+
+fn parse_prom_step_ns(input: &str) -> Result<u64, String> {
+    if let Ok(seconds) = input.parse::<f64>() {
+        if seconds.is_finite() && seconds > 0.0 {
+            return Ok((seconds * 1_000_000_000.0).round() as u64);
+        }
+        return Err("invalid query_range step: step must be positive".to_string());
+    }
+
+    let split = input
+        .find(|ch: char| !ch.is_ascii_digit() && ch != '.')
+        .ok_or_else(|| format!("invalid query_range step '{input}'"))?;
+    let amount = input[..split]
+        .parse::<f64>()
+        .map_err(|_| format!("invalid query_range step '{input}'"))?;
+    if !amount.is_finite() || amount <= 0.0 {
+        return Err("invalid query_range step: step must be positive".to_string());
+    }
+    let unit = &input[split..];
+    let seconds = match unit {
+        "ms" => amount / 1_000.0,
+        "s" => amount,
+        "m" => amount * 60.0,
+        "h" => amount * 3_600.0,
+        "d" => amount * 86_400.0,
+        _ => return Err(format!("invalid query_range step unit '{unit}'")),
+    };
+    Ok((seconds * 1_000_000_000.0).round() as u64)
 }
 
 fn parse_prom_selector(input: &str) -> Result<PromSelector, String> {
@@ -391,6 +573,74 @@ fn prometheus_vector_response(samples: Vec<PromVectorSample>) -> HttpResponse {
     data.insert(
         "resultType".to_string(),
         JsonValue::String("vector".to_string()),
+    );
+    data.insert("result".to_string(), JsonValue::Array(result));
+
+    let mut root = Map::new();
+    root.insert(
+        "status".to_string(),
+        JsonValue::String("success".to_string()),
+    );
+    root.insert("data".to_string(), JsonValue::Object(data));
+    json_response(200, JsonValue::Object(root))
+}
+
+fn align_range_values_to_steps(
+    samples: &[PromRangeValue],
+    range: PromQueryRange,
+) -> Vec<PromRangeValue> {
+    let mut aligned = Vec::new();
+    let mut sample_index = 0;
+    let mut latest = None;
+    let mut step = range.start_ns;
+    while step <= range.end_ns {
+        while sample_index < samples.len() && samples[sample_index].timestamp_ns <= step {
+            latest = Some(samples[sample_index]);
+            sample_index += 1;
+        }
+        if let Some(sample) = latest {
+            aligned.push(PromRangeValue {
+                timestamp_ns: step,
+                value: sample.value,
+            });
+        }
+        match step.checked_add(range.step_ns) {
+            Some(next) if next > step => step = next,
+            _ => break,
+        }
+    }
+    aligned
+}
+
+fn prometheus_matrix_response(series: Vec<PromRangeSeries>) -> HttpResponse {
+    let result = series
+        .into_iter()
+        .map(|series| {
+            let mut object = Map::new();
+            object.insert("metric".to_string(), string_map_json(series.labels));
+            object.insert(
+                "values".to_string(),
+                JsonValue::Array(
+                    series
+                        .values
+                        .into_iter()
+                        .map(|value| {
+                            JsonValue::Array(vec![
+                                crate::json!(value.timestamp_ns as f64 / 1_000_000_000.0),
+                                JsonValue::String(format_prometheus_value(value.value)),
+                            ])
+                        })
+                        .collect(),
+                ),
+            );
+            JsonValue::Object(object)
+        })
+        .collect::<Vec<_>>();
+
+    let mut data = Map::new();
+    data.insert(
+        "resultType".to_string(),
+        JsonValue::String("matrix".to_string()),
     );
     data.insert("result".to_string(), JsonValue::Array(result));
 
