@@ -26,6 +26,20 @@ from a batch and rejects new over-budget series without dropping labels or
 merging series. Rejections increment
 `reddb_metrics_remote_write_series_rejected_by_reason_total{reason="cardinality_budget"}`.
 
+Metrics collections can declare raw retention and rollup tiers:
+
+```sql
+CREATE METRICS sre RETENTION 1 h DOWNSAMPLE 60s:raw:avg
+```
+
+The v0 rollup policy syntax is `target:raw:aggregation`. Supported
+aggregations are `avg`, `sum`, `min`, `max`, and `count`. `remote_write`
+materializes rollup samples into internal collections while preserving the
+original label set. `apply_retention_policy` removes expired raw samples from
+the metrics collection according to `RETENTION` and leaves rollup data in place.
+`query_range` reads the coarsest rollup tier whose target resolution is less
+than or equal to the requested `step`; otherwise it reads raw samples.
+
 ## AI Provider Path
 
 The AI embedding path emits process-local counters and histograms. Labels never contain request bodies, prompts, API keys, or authorization headers.

@@ -368,6 +368,16 @@ pub(super) fn collection_contract_to_json(contract: &CollectionContract) -> Json
             .unwrap_or(JsonValue::Null),
     );
     object.insert(
+        "metrics_rollup_policies".to_string(),
+        JsonValue::Array(
+            contract
+                .metrics_rollup_policies
+                .iter()
+                .map(|policy| JsonValue::String(policy.clone()))
+                .collect(),
+        ),
+    );
+    object.insert(
         "metrics_tenant_identity".to_string(),
         contract
             .metrics_tenant_identity
@@ -493,6 +503,16 @@ pub(super) fn collection_contract_from_json(value: &JsonValue) -> io::Result<Col
             Some(JsonValue::Null) | None => None,
             Some(value) => Some(json_u64_value(value)?),
         },
+        metrics_rollup_policies: object
+            .get("metrics_rollup_policies")
+            .and_then(JsonValue::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
         metrics_tenant_identity: object
             .get("metrics_tenant_identity")
             .and_then(JsonValue::as_str)

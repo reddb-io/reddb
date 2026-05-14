@@ -234,6 +234,8 @@ pub struct CollectionContract {
     /// Metrics collections are backed by time-series storage but carry a
     /// metrics-specific raw sample retention contract.
     pub metrics_raw_retention_ms: Option<u64>,
+    /// Metrics rollup tiers declared by `CREATE METRICS ... DOWNSAMPLE`.
+    pub metrics_rollup_policies: Vec<String>,
     /// Metrics tenant identity source. Defaults to current tenant context and
     /// can be declared as a stable identity path for future ingestion slices.
     pub metrics_tenant_identity: Option<String>,

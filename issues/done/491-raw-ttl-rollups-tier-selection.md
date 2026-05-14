@@ -16,11 +16,11 @@ Add layered retention to metrics collections: raw samples expire on their raw TT
 
 ## Acceptance criteria
 
-- [ ] Metrics collections can declare raw TTL plus at least one rollup tier.
-- [ ] Rollups are materialized from ingested samples and survive after raw samples expire.
-- [ ] Retention removes expired raw data without removing still-valid rollup data.
-- [ ] `query_range` selects raw or rollup data based on requested range/step according to documented rules.
-- [ ] Tests cover raw-only, rollup-selected, and expired-raw query behavior.
+- [x] Metrics collections can declare raw TTL plus at least one rollup tier.
+- [x] Rollups are materialized from ingested samples and survive after raw samples expire.
+- [x] Retention removes expired raw data without removing still-valid rollup data.
+- [x] `query_range` selects raw or rollup data based on requested range/step according to documented rules.
+- [x] Tests cover raw-only, rollup-selected, and expired-raw query behavior.
 
 ## Blocked by
 
