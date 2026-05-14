@@ -19,6 +19,13 @@ handled by treating a lower value as a reset to zero and adding the post-reset
 value to the increase. RedDB does not extrapolate to the full window and does
 not emit Prometheus stale markers in v0.
 
+Cardinality admission can be capped with
+`REDDB_METRICS_MAX_SERIES_PER_METRIC`. The v0 budget is enforced per
+tenant/namespace/metric during `remote_write`. RedDB accepts in-budget series
+from a batch and rejects new over-budget series without dropping labels or
+merging series. Rejections increment
+`reddb_metrics_remote_write_series_rejected_by_reason_total{reason="cardinality_budget"}`.
+
 ## AI Provider Path
 
 The AI embedding path emits process-local counters and histograms. Labels never contain request bodies, prompts, API keys, or authorization headers.

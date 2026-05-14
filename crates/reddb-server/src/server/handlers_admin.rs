@@ -1124,6 +1124,19 @@ impl RedDBServer {
             "reddb_metrics_remote_write_series_rejected_total {}",
             metrics_ingest.series_rejected
         );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_metrics_remote_write_series_rejected_by_reason_total Metrics remote-write series rejected since process start by reason."
+        );
+        let _ = writeln!(
+            body,
+            "# TYPE reddb_metrics_remote_write_series_rejected_by_reason_total counter"
+        );
+        let _ = writeln!(
+            body,
+            "reddb_metrics_remote_write_series_rejected_by_reason_total{{reason=\"cardinality_budget\"}} {}",
+            metrics_ingest.series_rejected_cardinality_budget
+        );
 
         // PLAN.md Phase 11.4 — per-replica lag visibility. Emitted
         // when this primary has registered replicas; replicas that
