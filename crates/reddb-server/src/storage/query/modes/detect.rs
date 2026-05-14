@@ -78,6 +78,8 @@ pub fn detect_mode(input: &str) -> QueryMode {
             | "simulate"
             | "apply"
             | "events"
+            | "describe"
+            | "desc"
     ) {
         return QueryMode::Sql;
     }
@@ -145,6 +147,8 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("show tenant")
         || lower.starts_with("show policies")
         || lower.starts_with("show effective ")
+        || lower.starts_with("describe ")
+        || lower.starts_with("desc ")
     {
         // But check if it's SPARQL-style SELECT with ?variable.
         // Bare SQL placeholders (`?`) and numbered placeholders (`?1`)
@@ -324,6 +328,8 @@ mod tests {
         assert_eq!(detect_mode("SHOW CONFIGS"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW VAULTS"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW SCHEMA users"), QueryMode::Sql);
+        assert_eq!(detect_mode("DESCRIBE users"), QueryMode::Sql);
+        assert_eq!(detect_mode("DESC users"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW INDICES"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW STATS users"), QueryMode::Sql);
     }

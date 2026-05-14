@@ -781,6 +781,12 @@ impl<'a> Parser<'a> {
             Token::Ident(name) if name.eq_ignore_ascii_case("SHOW") => {
                 self.parse_sql_statement().map(FrontendStatement::Sql)
             }
+            Token::Desc => self.parse_sql_statement().map(FrontendStatement::Sql),
+            Token::Ident(name)
+                if name.eq_ignore_ascii_case("DESCRIBE") || name.eq_ignore_ascii_case("DESC") =>
+            {
+                self.parse_sql_statement().map(FrontendStatement::Sql)
+            }
             Token::Ident(name)
                 if name.eq_ignore_ascii_case("GRANT")
                     || name.eq_ignore_ascii_case("REVOKE")
@@ -1159,6 +1165,7 @@ impl<'a> Parser<'a> {
                     "SELECT", "MATCH", "PATH", "FROM", "VECTOR", "HYBRID", "INSERT", "UPDATE",
                     "DELETE", "TRUNCATE", "CREATE", "DROP", "ALTER", "GRAPH", "SEARCH", "ASK",
                     "QUEUE", "EVENTS", "KV", "HLL", "TREE", "SKETCH", "FILTER", "SET", "SHOW",
+                    "DESCRIBE", "DESC",
                 ],
                 other,
                 self.position(),
@@ -2140,6 +2147,30 @@ impl<'a> Parser<'a> {
                     ))
                 }
             }
+            Token::Ident(name)
+                if name.eq_ignore_ascii_case("DESCRIBE") || name.eq_ignore_ascii_case("DESC") =>
+            {
+                self.advance()?;
+                let collection = self.parse_dotted_admin_path(false)?;
+                let mut query = TableQuery::new("red.describe");
+                query.filter = Some(Filter::compare(
+                    FieldRef::column("", "collection"),
+                    CompareOp::Eq,
+                    Value::text(collection),
+                ));
+                Ok(SqlCommand::Select(query))
+            }
+            Token::Desc => {
+                self.advance()?;
+                let collection = self.parse_dotted_admin_path(false)?;
+                let mut query = TableQuery::new("red.describe");
+                query.filter = Some(Filter::compare(
+                    FieldRef::column("", "collection"),
+                    CompareOp::Eq,
+                    Value::text(collection),
+                ));
+                Ok(SqlCommand::Select(query))
+            }
             Token::Ident(name) if name.eq_ignore_ascii_case("SHOW") => {
                 self.advance()?;
                 if self.consume_ident_ci("CONFIG")? {
@@ -2620,6 +2651,8 @@ impl<'a> Parser<'a> {
                     "ANALYZE",
                     "COPY",
                     "REFRESH",
+                    "DESCRIBE",
+                    "DESC",
                 ],
                 other,
                 self.position(),

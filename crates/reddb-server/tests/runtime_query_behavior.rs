@@ -430,6 +430,74 @@ fn current_time_bare_builtins_are_single_row_scalars_and_work_in_expressions() {
 }
 
 #[test]
+fn describe_table_returns_declared_columns_and_index_flags() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query(
+        "CREATE TABLE describe_users (\
+         id INT PRIMARY KEY, \
+         email TEXT NOT NULL, \
+         name TEXT DEFAULT = 'unknown', \
+         age INT\
+         )",
+    )
+    .expect("create describe_users");
+    rt.execute_query("CREATE INDEX idx_describe_users_email ON describe_users (email) USING HASH")
+        .expect("create email index");
+
+    let described = rt
+        .execute_query("DESCRIBE describe_users")
+        .expect("DESCRIBE executes");
+    assert_eq!(
+        described.result.columns,
+        vec!["name", "type", "nullable", "default", "indexed"]
+    );
+    assert_eq!(described.result.records.len(), 4);
+    assert_eq!(
+        sorted_text_column(&described, "name"),
+        vec!["age", "email", "id", "name"]
+    );
+
+    let row_named = |name: &str| {
+        described
+            .result
+            .records
+            .iter()
+            .position(|record| {
+                matches!(record.get("name"), Some(Value::Text(value)) if value.as_ref() == name)
+            })
+            .unwrap_or_else(|| panic!("missing DESCRIBE row for {name}"))
+    };
+
+    let id = row_named("id");
+    assert_eq!(text_at(&described, id, "type"), "INT");
+    assert!(!bool_at(&described, id, "nullable"));
+
+    let email = row_named("email");
+    assert_eq!(text_at(&described, email, "type"), "TEXT");
+    assert!(!bool_at(&described, email, "nullable"));
+    assert!(bool_at(&described, email, "indexed"));
+
+    let name = row_named("name");
+    assert!(bool_at(&described, name, "nullable"));
+    assert_eq!(text_at(&described, name, "default"), "unknown");
+
+    let age = row_named("age");
+    assert!(bool_at(&described, age, "nullable"));
+    assert!(is_null_at(&described, age, "default"));
+    assert!(!bool_at(&described, age, "indexed"));
+}
+
+#[test]
+fn describe_unknown_collection_reports_clear_error() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    let err = rt
+        .execute_query("DESCRIBE missing_collection")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("COLLECTION_NOT_FOUND"), "{err}");
+}
+
+#[test]
 fn config_reference_compares_stored_value_without_reparsing_sql() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
     rt.execute_query("CREATE TABLE tokens (id INT, token TEXT)")

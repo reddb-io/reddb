@@ -2,8 +2,8 @@
 //!
 //! The SQL parser does not currently accept schema-qualified table
 //! identifiers in `FROM`, so the runtime rewrites the small virtual
-//! surface it owns (`red.collections`, `red.columns`, `red.indices`,
-//! `red.policies`, `red.stats`, `red.subscriptions`) to internal identifiers before normal parsing.
+//! surface it owns (`red.collections`, `red.columns`, `red.describe`,
+//! `red.indices`, `red.policies`, `red.stats`, `red.subscriptions`) to internal identifiers before normal parsing.
 //! Execution then intercepts that identifier and materializes rows from the live catalog snapshot.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -12,7 +12,7 @@ use std::sync::Arc;
 use super::*;
 use crate::auth::policies::{ActionPattern, Effect, Policy, ResourcePattern, Statement};
 use crate::catalog::{CollectionModel, SchemaMode};
-use crate::storage::query::ast::{Expr, FieldRef, Filter, PolicyAction, UnaryOp};
+use crate::storage::query::ast::{CompareOp, Expr, FieldRef, Filter, PolicyAction, UnaryOp};
 use crate::storage::query::sql_lowering::{effective_table_filter, effective_table_projections};
 use crate::storage::schema::DataType;
 use crate::storage::unified::EntityData;
@@ -22,6 +22,8 @@ pub(super) const COLLECTIONS: &str = "red.collections";
 pub(super) const COLLECTIONS_INTERNAL: &str = "__red_schema_collections";
 pub(super) const COLUMNS: &str = "red.columns";
 pub(super) const COLUMNS_INTERNAL: &str = "__red_schema_columns";
+pub(super) const DESCRIBE: &str = "red.describe";
+pub(super) const DESCRIBE_INTERNAL: &str = "__red_schema_describe";
 pub(super) const INDICES: &str = "red.indices";
 pub(super) const INDICES_INTERNAL: &str = "__red_schema_indices";
 pub(super) const POLICIES: &str = "red.policies";
@@ -57,6 +59,8 @@ const COLUMN_COLUMNS: [&str; 7] = [
     "is_primary_key",
     "is_unique",
 ];
+
+const DESCRIBE_COLUMNS: [&str; 5] = ["name", "type", "nullable", "default", "indexed"];
 
 const INDEX_COLUMNS: [&str; 10] = [
     "collection",
@@ -116,6 +120,7 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
     for (public, internal) in [
         (COLLECTIONS, COLLECTIONS_INTERNAL),
         (COLUMNS, COLUMNS_INTERNAL),
+        (DESCRIBE, DESCRIBE_INTERNAL),
         (INDICES, INDICES_INTERNAL),
         (POLICIES, POLICIES_INTERNAL),
         (STATS, STATS_INTERNAL),
@@ -149,6 +154,8 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(COLLECTIONS)
         || table.eq_ignore_ascii_case(COLUMNS_INTERNAL)
         || table.eq_ignore_ascii_case(COLUMNS)
+        || table.eq_ignore_ascii_case(DESCRIBE_INTERNAL)
+        || table.eq_ignore_ascii_case(DESCRIBE)
         || table.eq_ignore_ascii_case(INDICES_INTERNAL)
         || table.eq_ignore_ascii_case(INDICES)
         || table.eq_ignore_ascii_case(POLICIES_INTERNAL)
@@ -191,6 +198,7 @@ pub(super) fn red_query(
     let mut records = match virtual_kind {
         VirtualTableKind::Collections => collections_snapshot(runtime, tenant, visible_collections),
         VirtualTableKind::Columns => columns_snapshot(runtime, visible_collections),
+        VirtualTableKind::Describe => describe_snapshot(runtime, visible_collections, query)?,
         VirtualTableKind::Indices => indices_snapshot(runtime, visible_collections),
         VirtualTableKind::Policies => policies_snapshot(runtime, tenant, visible_collections),
         VirtualTableKind::Stats => stats_snapshot(runtime, visible_collections),
@@ -199,16 +207,18 @@ pub(super) fn red_query(
 
     let table_name = query.table.as_str();
     let table_alias = query.alias.as_deref();
-    if let Some(filter) = effective_table_filter(query) {
-        records.retain(|record| {
-            super::join_filter::evaluate_runtime_filter_with_db(
-                Some(db.as_ref()),
-                record,
-                &filter,
-                Some(table_name),
-                table_alias,
-            )
-        });
+    if !matches!(virtual_kind, VirtualTableKind::Describe) {
+        if let Some(filter) = effective_table_filter(query) {
+            records.retain(|record| {
+                super::join_filter::evaluate_runtime_filter_with_db(
+                    Some(db.as_ref()),
+                    record,
+                    &filter,
+                    Some(table_name),
+                    table_alias,
+                )
+            });
+        }
     }
 
     if !query.order_by.is_empty() {
@@ -284,6 +294,7 @@ pub(super) fn red_query(
 enum VirtualTableKind {
     Collections,
     Columns,
+    Describe,
     Indices,
     Policies,
     Stats,
@@ -295,6 +306,7 @@ impl VirtualTableKind {
         match self {
             Self::Collections => &COLLECTION_COLUMNS,
             Self::Columns => &COLUMN_COLUMNS,
+            Self::Describe => &DESCRIBE_COLUMNS,
             Self::Indices => &INDEX_COLUMNS,
             Self::Policies => &POLICY_COLUMNS,
             Self::Stats => &STATS_COLUMNS,
@@ -306,6 +318,7 @@ impl VirtualTableKind {
         match self {
             Self::Collections => COLLECTIONS,
             Self::Columns => COLUMNS,
+            Self::Describe => DESCRIBE,
             Self::Indices => INDICES,
             Self::Policies => POLICIES,
             Self::Stats => STATS,
@@ -320,6 +333,9 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
     }
     if name.eq_ignore_ascii_case(COLUMNS_INTERNAL) || name.eq_ignore_ascii_case(COLUMNS) {
         return Ok(VirtualTableKind::Columns);
+    }
+    if name.eq_ignore_ascii_case(DESCRIBE_INTERNAL) || name.eq_ignore_ascii_case(DESCRIBE) {
+        return Ok(VirtualTableKind::Describe);
     }
     if name.eq_ignore_ascii_case(INDICES_INTERNAL) || name.eq_ignore_ascii_case(INDICES) {
         return Ok(VirtualTableKind::Indices);
@@ -519,6 +535,87 @@ fn index_method_kind_name(kind: super::index_store::IndexMethodKind) -> &'static
         super::index_store::IndexMethodKind::BTree => "btree",
         super::index_store::IndexMethodKind::Bitmap => "bitmap",
         super::index_store::IndexMethodKind::Spatial => "spatial.rtree",
+    }
+}
+
+fn describe_snapshot(
+    runtime: &RedDBRuntime,
+    visible_collections: Option<&HashSet<String>>,
+    query: &TableQuery,
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    let collection = describe_target_collection(query)?;
+    let db = runtime.db();
+    let exists = db
+        .catalog_model_snapshot()
+        .collections
+        .into_iter()
+        .any(|entry| entry.name == collection);
+    if !exists || !collection_is_visible(&collection, visible_collections) {
+        return Err(RedDBError::Query(format!(
+            "COLLECTION_NOT_FOUND: {collection}"
+        )));
+    }
+
+    let contracts = db.collection_contracts();
+    let Some(contract) = contracts
+        .iter()
+        .find(|contract| contract.name == collection)
+    else {
+        return Err(RedDBError::Query(format!(
+            "NOT_APPLICABLE: DESCRIBE {collection} has no declared column schema"
+        )));
+    };
+    if contract.declared_columns.is_empty() {
+        return Err(RedDBError::Query(format!(
+            "NOT_APPLICABLE: DESCRIBE {collection} has no declared column schema"
+        )));
+    }
+
+    let schema = Arc::new(
+        DESCRIBE_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let indexed_columns = runtime.index_store_ref().indexed_columns_set(&collection);
+    Ok(contract
+        .declared_columns
+        .iter()
+        .map(|column| {
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(column.name.clone()),
+                    Value::text(
+                        column
+                            .sql_type
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| column.data_type.clone()),
+                    ),
+                    Value::Boolean(!(column.not_null || column.primary_key)),
+                    column
+                        .default
+                        .as_deref()
+                        .map(Value::text)
+                        .unwrap_or(Value::Null),
+                    Value::Boolean(indexed_columns.contains(&column.name)),
+                ],
+            )
+        })
+        .collect())
+}
+
+fn describe_target_collection(query: &TableQuery) -> RedDBResult<String> {
+    match query.filter.as_ref() {
+        Some(Filter::Compare {
+            field: FieldRef::TableColumn { column, .. },
+            op: CompareOp::Eq,
+            value: Value::Text(collection),
+        }) if column == "collection" => Ok(collection.to_string()),
+        _ => Err(RedDBError::Query(
+            "DESCRIBE requires a collection name".to_string(),
+        )),
     }
 }
 
