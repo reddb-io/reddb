@@ -74,6 +74,8 @@ trybuild = "1"
 # tests pure-Rust (no system C deps), matching the rest of the dev tree.
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 serde_json = "1"
+prost = "0.14"
+snap = "1"
 # HTTP smoke tests (REST endpoints) and AI-live comment-clustering
 # integration probes use ureq directly.
 ureq = { version = "3.3", default-features = false, features = ["rustls"] }

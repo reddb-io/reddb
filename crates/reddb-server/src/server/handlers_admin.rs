@@ -934,6 +934,7 @@ impl RedDBServer {
         let runtime_stats = self.runtime.stats();
         let result_blob_stats = runtime_stats.result_blob_cache;
         let kv_stats = runtime_stats.kv;
+        let metrics_ingest = runtime_stats.metrics_ingest;
 
         let mut body = String::with_capacity(1024);
         let _ = writeln!(
@@ -1070,6 +1071,59 @@ impl RedDBServer {
         );
         let _ = writeln!(body, "# TYPE reddb_wal_archive_lag_records gauge");
         let _ = writeln!(body, "reddb_wal_archive_lag_records {}", lag);
+
+        let _ = writeln!(
+            body,
+            "# HELP reddb_metrics_remote_write_samples_accepted_total Metrics remote-write samples accepted since process start."
+        );
+        let _ = writeln!(
+            body,
+            "# TYPE reddb_metrics_remote_write_samples_accepted_total counter"
+        );
+        let _ = writeln!(
+            body,
+            "reddb_metrics_remote_write_samples_accepted_total {}",
+            metrics_ingest.samples_accepted
+        );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_metrics_remote_write_series_accepted_total Metrics remote-write series accepted since process start."
+        );
+        let _ = writeln!(
+            body,
+            "# TYPE reddb_metrics_remote_write_series_accepted_total counter"
+        );
+        let _ = writeln!(
+            body,
+            "reddb_metrics_remote_write_series_accepted_total {}",
+            metrics_ingest.series_accepted
+        );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_metrics_remote_write_samples_rejected_total Metrics remote-write samples rejected since process start."
+        );
+        let _ = writeln!(
+            body,
+            "# TYPE reddb_metrics_remote_write_samples_rejected_total counter"
+        );
+        let _ = writeln!(
+            body,
+            "reddb_metrics_remote_write_samples_rejected_total {}",
+            metrics_ingest.samples_rejected
+        );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_metrics_remote_write_series_rejected_total Metrics remote-write series rejected since process start."
+        );
+        let _ = writeln!(
+            body,
+            "# TYPE reddb_metrics_remote_write_series_rejected_total counter"
+        );
+        let _ = writeln!(
+            body,
+            "reddb_metrics_remote_write_series_rejected_total {}",
+            metrics_ingest.series_rejected
+        );
 
         // PLAN.md Phase 11.4 — per-replica lag visibility. Emitted
         // when this primary has registered replicas; replicas that

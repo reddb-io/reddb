@@ -181,6 +181,51 @@ pub struct RuntimeStats {
     pub system: SystemInfo,
     pub result_blob_cache: crate::storage::cache::BlobCacheStats,
     pub kv: KvStats,
+    pub metrics_ingest: MetricsIngestStats,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MetricsIngestStats {
+    pub samples_accepted: u64,
+    pub series_accepted: u64,
+    pub samples_rejected: u64,
+    pub series_rejected: u64,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct MetricsIngestCounters {
+    samples_accepted: AtomicU64,
+    series_accepted: AtomicU64,
+    samples_rejected: AtomicU64,
+    series_rejected: AtomicU64,
+}
+
+impl MetricsIngestCounters {
+    pub(crate) fn record(
+        &self,
+        accepted_samples: u64,
+        accepted_series: u64,
+        rejected_samples: u64,
+        rejected_series: u64,
+    ) {
+        self.samples_accepted
+            .fetch_add(accepted_samples, AtomicOrdering::Relaxed);
+        self.series_accepted
+            .fetch_add(accepted_series, AtomicOrdering::Relaxed);
+        self.samples_rejected
+            .fetch_add(rejected_samples, AtomicOrdering::Relaxed);
+        self.series_rejected
+            .fetch_add(rejected_series, AtomicOrdering::Relaxed);
+    }
+
+    pub(crate) fn snapshot(&self) -> MetricsIngestStats {
+        MetricsIngestStats {
+            samples_accepted: self.samples_accepted.load(AtomicOrdering::Relaxed),
+            series_accepted: self.series_accepted.load(AtomicOrdering::Relaxed),
+            samples_rejected: self.samples_rejected.load(AtomicOrdering::Relaxed),
+            series_rejected: self.series_rejected.load(AtomicOrdering::Relaxed),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1061,6 +1106,7 @@ struct RuntimeInner {
     /// Process-local normal-KV operation counters. These are intentionally
     /// runtime-local; persistent accounting belongs in catalog stats.
     kv_stats: KvStatsCounters,
+    metrics_ingest_stats: MetricsIngestCounters,
     /// Process-local normal-KV tag index used by `INVALIDATE TAGS`.
     kv_tag_index: KvTagIndex,
 }
