@@ -1619,6 +1619,7 @@ fn collection_model_name(model: CollectionModel) -> &'static str {
         CollectionModel::Mixed => "mixed",
         CollectionModel::TimeSeries => "time_series",
         CollectionModel::Queue => "queue",
+        CollectionModel::Metrics => "metrics",
     }
 }
 
