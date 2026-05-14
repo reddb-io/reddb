@@ -679,6 +679,9 @@ pub(super) fn resolve_runtime_projection_value(
     document_projection: bool,
     entity_projection: bool,
 ) -> Option<Value> {
+    if column.starts_with("LIT:") {
+        return eval_projection_value(&Projection::Column(column.to_string()), source);
+    }
     source.get(column).cloned().or_else(|| {
         if document_projection || entity_projection {
             let field = FieldRef::TableColumn {

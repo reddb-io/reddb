@@ -1070,6 +1070,7 @@ fn render_expr_signature(expr: &Expr) -> Option<String> {
             render_expr_signature(low)?,
             render_expr_signature(high)?
         )),
+        Expr::Subquery { .. } => None,
     }
 }
 

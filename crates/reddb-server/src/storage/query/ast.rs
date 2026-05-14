@@ -213,11 +213,19 @@ pub enum Expr {
         negated: bool,
         span: Span,
     },
-    // NOTE: Subquery variants (scalar / value-list / EXISTS) land in
-    // Fase 2 Week 3. QueryExpr does not derive PartialEq today and
-    // adding it would cascade into half the planner state — out of
-    // scope for the Week 1 foundation commit. The parser falls back
-    // to the legacy Filter::Compare paths until then.
+    /// Parenthesized SELECT used in an expression context.
+    Subquery { query: ExprSubquery, span: Span },
+}
+
+#[derive(Debug, Clone)]
+pub struct ExprSubquery {
+    pub query: Box<QueryExpr>,
+}
+
+impl PartialEq for ExprSubquery {
+    fn eq(&self, other: &Self) -> bool {
+        format!("{:?}", self.query) == format!("{:?}", other.query)
+    }
 }
 
 impl Expr {
@@ -236,7 +244,8 @@ impl Expr {
             | Expr::Case { span, .. }
             | Expr::IsNull { span, .. }
             | Expr::InList { span, .. }
-            | Expr::Between { span, .. } => *span,
+            | Expr::Between { span, .. }
+            | Expr::Subquery { span, .. } => *span,
         }
     }
 

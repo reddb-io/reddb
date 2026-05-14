@@ -68,9 +68,10 @@ pub fn expr_to_projection(expr: &Expr) -> Option<Projection> {
             }
             Some(Projection::Function("CASE".to_string(), args))
         }
-        Expr::IsNull { .. } | Expr::InList { .. } | Expr::Between { .. } => {
-            Some(boolean_expr_projection(expr.clone()))
-        }
+        Expr::IsNull { .. }
+        | Expr::InList { .. }
+        | Expr::Between { .. }
+        | Expr::Subquery { .. } => Some(boolean_expr_projection(expr.clone())),
     }
 }
 
@@ -347,6 +348,11 @@ pub fn expr_to_filter(expr: &Expr) -> Filter {
                 op: CompareOp::Eq,
                 rhs: Expr::lit(Value::Boolean(true)),
             },
+        },
+        Expr::Subquery { .. } => Filter::CompareExpr {
+            lhs: expr.clone(),
+            op: CompareOp::Eq,
+            rhs: Expr::lit(Value::Boolean(true)),
         },
         _ => Filter::CompareExpr {
             lhs: expr.clone(),

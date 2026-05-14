@@ -250,6 +250,7 @@ fn expr_is_source_free(expr: &Expr) -> bool {
         Expr::Between {
             target, low, high, ..
         } => expr_is_source_free(target) && expr_is_source_free(low) && expr_is_source_free(high),
+        Expr::Subquery { .. } => false,
     }
 }
 

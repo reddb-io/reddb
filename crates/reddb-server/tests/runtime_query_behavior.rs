@@ -217,6 +217,101 @@ fn select_led_multiple_table_joins_execute() {
     assert_eq!(text_at(&result, 1, "region_name"), "EU");
 }
 
+fn seed_subquery_expression_tables(rt: &RedDBRuntime) {
+    rt.execute_query("CREATE TABLE t (id INT, name TEXT)")
+        .expect("create t");
+    rt.execute_query("CREATE TABLE other (id INT, name TEXT, value INT)")
+        .expect("create other");
+    rt.execute_query("INSERT INTO t (id, name) VALUES (1, 'one'), (2, 'two'), (3, 'three')")
+        .expect("insert t");
+    rt.execute_query(
+        "INSERT INTO other (id, name, value) \
+         VALUES (1, 'x', 10), (2, 'y', 20), (3, 'x', 30)",
+    )
+    .expect("insert other");
+}
+
+#[test]
+fn subquery_expr_in_predicate_executes_uncorrelated_select() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    seed_subquery_expression_tables(&rt);
+
+    let result = rt
+        .execute_query(
+            "SELECT id, name FROM t \
+             WHERE id IN (SELECT id FROM other WHERE name = 'x') ORDER BY id",
+        )
+        .expect("IN subquery executes");
+
+    assert_eq!(result.result.len(), 2);
+    assert_eq!(int_at(&result, 0, "id"), 1);
+    assert_eq!(text_at(&result, 0, "name"), "one");
+    assert_eq!(int_at(&result, 1, "id"), 3);
+}
+
+#[test]
+fn subquery_expr_scalar_comparison_executes() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    seed_subquery_expression_tables(&rt);
+
+    let result = rt
+        .execute_query("SELECT id, name FROM t WHERE id = (SELECT MAX(id) FROM other)")
+        .expect("scalar subquery executes");
+
+    assert_eq!(result.result.len(), 1);
+    assert_eq!(int_at(&result, 0, "id"), 3);
+    assert_eq!(text_at(&result, 0, "name"), "three");
+}
+
+#[test]
+fn subquery_expr_scalar_projection_executes() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    seed_subquery_expression_tables(&rt);
+
+    let result = rt
+        .execute_query("SELECT name, (SELECT COUNT(*) FROM other) AS n FROM t ORDER BY id LIMIT 1")
+        .expect("projection scalar subquery executes");
+
+    assert_eq!(result.result.len(), 1);
+    assert_eq!(text_at(&result, 0, "name"), "one");
+    assert_eq!(int_at(&result, 0, "n"), 3);
+}
+
+#[test]
+fn subquery_expr_scalar_multi_row_errors() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    seed_subquery_expression_tables(&rt);
+
+    let err = rt
+        .execute_query("SELECT id FROM t WHERE id = (SELECT id FROM other)")
+        .expect_err("multi-row scalar subquery must error");
+
+    assert!(
+        err.to_string()
+            .contains("scalar subquery returned more than one row"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn subquery_expr_correlated_subquery_errors() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    seed_subquery_expression_tables(&rt);
+
+    let err = rt
+        .execute_query(
+            "SELECT id FROM t \
+             WHERE id = (SELECT id FROM other WHERE other.id = t.id)",
+        )
+        .expect_err("correlated subquery must error");
+
+    assert!(
+        err.to_string().contains("NOT_YET_SUPPORTED")
+            && err.to_string().contains("correlated subqueries"),
+        "unexpected error: {err}"
+    );
+}
+
 #[test]
 fn config_reference_compares_stored_value_without_reparsing_sql() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");

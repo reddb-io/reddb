@@ -24,7 +24,7 @@ mod support {
     pub mod parser_hardening;
 }
 
-use reddb_server::storage::query::ast::QueryExpr;
+use reddb_server::storage::query::ast::{Expr, Filter, QueryExpr};
 use reddb_server::storage::query::parser;
 use support::parser_hardening::secret_redactor;
 
@@ -63,10 +63,6 @@ macro_rules! snap_redacted {
 // the snapshot text below changes and the diff forces a happy-path
 // upgrade.
 
-snap_redacted!(
-    subq_in_basic_subquery,
-    "SELECT * FROM t WHERE id IN (SELECT id FROM u)"
-);
 snap_redacted!(subq_in_eof_after_lparen, "SELECT * FROM t WHERE id IN (");
 snap_redacted!(
     subq_in_unterminated_inner,
@@ -108,14 +104,6 @@ snap_redacted!(
 // expression — the bare `SELECT` keyword is not a valid atom and
 // surfaces a Syntax error.
 
-snap_redacted!(
-    subq_scalar_eq_subquery,
-    "SELECT * FROM t WHERE x = (SELECT MAX(y) FROM u)"
-);
-snap_redacted!(
-    subq_scalar_lt_subquery,
-    "SELECT * FROM t WHERE x < (SELECT MAX(y) FROM u)"
-);
 snap_redacted!(
     subq_scalar_eq_unterminated,
     "SELECT * FROM t WHERE x = (SELECT"
@@ -178,6 +166,74 @@ fn parse_query(input: &str) -> QueryExpr {
     parser::parse(input)
         .unwrap_or_else(|e| panic!("expected ok for {input:?}, got error: {e}"))
         .query
+}
+
+fn expr_contains_subquery(expr: &Expr) -> bool {
+    match expr {
+        Expr::Subquery { .. } => true,
+        Expr::BinaryOp { lhs, rhs, .. } => {
+            expr_contains_subquery(lhs) || expr_contains_subquery(rhs)
+        }
+        Expr::UnaryOp { operand, .. } | Expr::Cast { inner: operand, .. } => {
+            expr_contains_subquery(operand)
+        }
+        Expr::FunctionCall { args, .. } => args.iter().any(expr_contains_subquery),
+        Expr::Case {
+            branches, else_, ..
+        } => {
+            branches.iter().any(|(condition, value)| {
+                expr_contains_subquery(condition) || expr_contains_subquery(value)
+            }) || else_.as_deref().is_some_and(expr_contains_subquery)
+        }
+        Expr::IsNull { operand, .. } => expr_contains_subquery(operand),
+        Expr::InList { target, values, .. } => {
+            expr_contains_subquery(target) || values.iter().any(expr_contains_subquery)
+        }
+        Expr::Between {
+            target, low, high, ..
+        } => {
+            expr_contains_subquery(target)
+                || expr_contains_subquery(low)
+                || expr_contains_subquery(high)
+        }
+        Expr::Literal { .. } | Expr::Column { .. } | Expr::Parameter { .. } => false,
+    }
+}
+
+fn filter_contains_subquery(filter: &Filter) -> bool {
+    match filter {
+        Filter::CompareExpr { lhs, rhs, .. } => {
+            expr_contains_subquery(lhs) || expr_contains_subquery(rhs)
+        }
+        Filter::And(left, right) | Filter::Or(left, right) => {
+            filter_contains_subquery(left) || filter_contains_subquery(right)
+        }
+        Filter::Not(inner) => filter_contains_subquery(inner),
+        Filter::Compare { .. }
+        | Filter::CompareFields { .. }
+        | Filter::IsNull(_)
+        | Filter::IsNotNull(_)
+        | Filter::In { .. }
+        | Filter::Between { .. }
+        | Filter::Like { .. }
+        | Filter::StartsWith { .. }
+        | Filter::EndsWith { .. }
+        | Filter::Contains { .. } => false,
+    }
+}
+
+fn assert_table_where_contains_subquery(input: &str) {
+    match parse_query(input) {
+        QueryExpr::Table(t) => {
+            let where_has_subquery = t.where_expr.as_ref().is_some_and(expr_contains_subquery)
+                || t.filter.as_ref().is_some_and(filter_contains_subquery);
+            assert!(
+                where_has_subquery,
+                "WHERE clause must preserve a Subquery expression for {input:?}"
+            );
+        }
+        other => panic!("expected QueryExpr::Table, got {other:?}"),
+    }
 }
 
 #[test]
@@ -266,17 +322,9 @@ fn happy_from_aliased_subquery_with_outer_limit() {
     }
 }
 
-// FIXME: bug — fix when AST `Subquery` variant lands (ast.rs L216,
-// scheduled for Fase 2 Week 3). When the parser starts accepting
-// `WHERE x IN (SELECT …)`, drop `#[ignore]` and assert the
-// `Expr::Subquery` AST shape. The test body documents the expected
-// post-fix behaviour so the fix can land with confidence.
 #[test]
-#[ignore = "blocked: WHERE x IN (SELECT …) needs the AST Subquery variant from ast.rs L216"]
 fn happy_where_in_subquery_after_subquery_ast_lands() {
-    let _q = parse_query("SELECT * FROM t WHERE id IN (SELECT id FROM u)");
-    // Post-fix: assert the WHERE filter contains a Subquery-typed
-    // InList values entry.
+    assert_table_where_contains_subquery("SELECT * FROM t WHERE id IN (SELECT id FROM u)");
 }
 
 // FIXME: bug — same gating as the IN-subquery happy path. Drop
@@ -288,10 +336,12 @@ fn happy_where_exists_subquery_after_subquery_ast_lands() {
     let _q = parse_query("SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u)");
 }
 
-// FIXME: bug — same gating as the IN-subquery happy path. Drop
-// `#[ignore]` once `<expr> = (SELECT …)` parses cleanly.
 #[test]
-#[ignore = "blocked: scalar subquery RHS needs the AST Subquery variant"]
 fn happy_scalar_subquery_after_subquery_ast_lands() {
-    let _q = parse_query("SELECT * FROM t WHERE x = (SELECT MAX(y) FROM u)");
+    assert_table_where_contains_subquery("SELECT * FROM t WHERE x = (SELECT MAX(y) FROM u)");
+}
+
+#[test]
+fn happy_scalar_lt_subquery_after_subquery_ast_lands() {
+    assert_table_where_contains_subquery("SELECT * FROM t WHERE x < (SELECT MAX(y) FROM u)");
 }

@@ -1095,9 +1095,10 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     // Skipped when the projection list contains scalar function calls
     // (e.g. VERIFY_PASSWORD(...), UPPER(...)), since the fast path
     // returns raw records without running project_runtime_record.
-    let has_scalar_function = effective_projections
-        .iter()
-        .any(|p| matches!(p, Projection::Function(_, _) | Projection::Expression(_, _)));
+    let has_scalar_function = effective_projections.iter().any(|p| {
+        matches!(p, Projection::Function(_, _) | Projection::Expression(_, _))
+            || matches!(p, Projection::Column(column) | Projection::Alias(column, _) if column.starts_with("LIT:"))
+    });
     if effective_filter.is_none()
         && effective_group_by.is_empty()
         && effective_having.is_none()
@@ -1190,7 +1191,10 @@ pub(crate) fn execute_runtime_canonical_table_node(
             if effective_filter.is_some()
                 && !effective_table_projections(context.query)
                     .iter()
-                    .any(|p| matches!(p, Projection::Function(_, _) | Projection::Expression(_, _)))
+                    .any(|p| {
+                        matches!(p, Projection::Function(_, _) | Projection::Expression(_, _))
+                            || matches!(p, Projection::Column(column) | Projection::Alias(column, _) if column.starts_with("LIT:"))
+                    })
                 && !is_universal_query_source(context.query.table.as_str())
             {
                 let manager = db

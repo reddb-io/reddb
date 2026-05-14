@@ -237,7 +237,9 @@ pub(crate) fn extract_select_column_names(projections: &[Projection]) -> Vec<Str
     projections
         .iter()
         .filter_map(|p| match p {
-            Projection::Column(c) | Projection::Alias(c, _) => Some(c.clone()),
+            Projection::Column(c) | Projection::Alias(c, _) if !c.starts_with("LIT:") => {
+                Some(c.clone())
+            }
             Projection::Field(FieldRef::TableColumn { column: c, .. }, _) => Some(c.clone()),
             _ => None,
         })
