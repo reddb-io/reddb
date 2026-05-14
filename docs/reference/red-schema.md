@@ -16,7 +16,8 @@ Implemented relations:
 |-------------------|---------------------------|
 | `red.collections` | `SHOW COLLECTIONS`, `SHOW TABLES`, `SHOW QUEUES`, `SHOW VECTORS`, `SHOW DOCUMENTS`, `SHOW TIMESERIES`, `SHOW GRAPHS`, `SHOW KV` |
 | `red.columns`     | `SHOW SCHEMA <collection>` |
-| `red.indices`     | `SHOW INDICES`, `SHOW INDICES ON <collection>` |
+| `red.show_indexes` | `SHOW INDEXES`, `SHOW INDICES`, `SHOW INDEXES ON <collection>`, `SHOW INDICES ON <collection>` |
+| `red.indices`     | Full index status metadata |
 | `red.policies`    | `SHOW POLICIES`, `SHOW POLICIES ON <collection>` |
 | `red.stats`       | `SHOW STATS`, `SHOW STATS <collection>` |
 | `red.subscriptions` | `EVENTS STATUS`, `EVENTS STATUS <collection>` |
@@ -132,22 +133,32 @@ top-level fields when RedDB can inspect flattened document fields; fields missin
 from at least one observed document are reported as nullable. Schemaless table
 contracts with no stored schema return no rows.
 
+## `red.show_indexes`
+
+`red.show_indexes` exposes the operator-facing index summary used by `SHOW
+INDEXES` and `SHOW INDICES`.
+
+`SHOW INDEXES ON <collection>` filters by table:
+
+```sql
+SELECT * FROM red.show_indexes WHERE table = '<collection>';
+```
+
+Current columns:
+
+| Column            | Description |
+|-------------------|-------------|
+| `name`            | Index name |
+| `table`           | Indexed table/collection |
+| `columns`         | Ordered array of indexed columns |
+| `kind`            | Index method (`HASH`, `BTREE`, `BITMAP`, `RTREE`) |
+| `unique`          | Whether the index was declared unique |
+| `entries_indexed` | Number of live entries in the index backing store |
+
 ## `red.indices`
 
 `red.indices` exposes visible index metadata from the live catalog and local
 runtime index store.
-
-`SHOW INDICES` is syntax sugar for:
-
-```sql
-SELECT * FROM red.indices;
-```
-
-`SHOW INDICES ON <collection>` filters by collection:
-
-```sql
-SELECT * FROM red.indices WHERE collection = '<collection>';
-```
 
 Current columns:
 

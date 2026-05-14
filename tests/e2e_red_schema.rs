@@ -21,6 +21,15 @@ const INDEX_COLUMNS: [&str; 10] = [
     "requires_rebuild",
 ];
 
+const SHOW_INDEX_COLUMNS: [&str; 6] = [
+    "name",
+    "table",
+    "columns",
+    "kind",
+    "unique",
+    "entries_indexed",
+];
+
 const POLICY_COLUMNS: [&str; 8] = [
     "name",
     "collection",
@@ -122,6 +131,29 @@ fn text_field<'a>(
     match record.get(field) {
         Some(Value::Text(value)) => value.as_ref(),
         other => panic!("expected text field {field}, got {other:?}"),
+    }
+}
+
+fn text_array_field(
+    record: &reddb::storage::query::unified::UnifiedRecord,
+    field: &str,
+) -> Vec<String> {
+    match record.get(field) {
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| match value {
+                Value::Text(text) => text.to_string(),
+                other => panic!("expected text array item in {field}, got {other:?}"),
+            })
+            .collect(),
+        other => panic!("expected array field {field}, got {other:?}"),
+    }
+}
+
+fn uint_field(record: &reddb::storage::query::unified::UnifiedRecord, field: &str) -> u64 {
+    match record.get(field) {
+        Some(Value::UnsignedInteger(value)) => *value,
+        other => panic!("expected unsigned integer field {field}, got {other:?}"),
     }
 }
 
@@ -261,10 +293,6 @@ fn show_commands_match_red_schema_queries_for_stable_introspection() {
         (
             "SHOW SCHEMA users",
             "SELECT * FROM red.columns WHERE collection = 'users'",
-        ),
-        (
-            "SHOW INDICES ON users ORDER BY name",
-            "SELECT * FROM red.indices WHERE collection = 'users' ORDER BY name",
         ),
         (
             "SHOW POLICIES ON users ORDER BY name",
@@ -524,14 +552,25 @@ fn show_indices_lists_all_and_show_indices_on_filters_collection() {
     exec(&rt, "CREATE TABLE orders (id INT, total INT)");
     exec(
         &rt,
+        "INSERT INTO users (id, email) VALUES (1, 'a@example.com')",
+    );
+    exec(
+        &rt,
+        "INSERT INTO users (id, email) VALUES (2, 'b@example.com')",
+    );
+    exec(&rt, "INSERT INTO orders (id, total) VALUES (1, 10)");
+    exec(&rt, "INSERT INTO orders (id, total) VALUES (2, 20)");
+    exec(
+        &rt,
         "CREATE INDEX users_email_idx ON users (email) USING HASH",
     );
     exec(
         &rt,
-        "CREATE INDEX orders_total_idx ON orders (total) USING BTREE",
+        "CREATE UNIQUE INDEX orders_total_idx ON orders (total) USING BTREE",
     );
 
-    let all = rt.execute_query("SHOW INDICES").expect("SHOW INDICES");
+    let all = rt.execute_query("SHOW INDEXES").expect("SHOW INDEXES");
+    assert_eq!(all.result.columns, SHOW_INDEX_COLUMNS.map(str::to_string));
     let all_names: Vec<String> = all
         .result
         .records
@@ -540,11 +579,49 @@ fn show_indices_lists_all_and_show_indices_on_filters_collection() {
         .collect();
     assert!(all_names.iter().any(|name| name == "users_email_idx"));
     assert!(all_names.iter().any(|name| name == "orders_total_idx"));
+    let aliases = rt.execute_query("SHOW INDICES").expect("SHOW INDICES");
+    assert_eq!(
+        query_snapshot(&rt, "SHOW INDEXES ORDER BY name"),
+        query_snapshot(&rt, "SHOW INDICES ORDER BY name")
+    );
+
+    let users_idx = all
+        .result
+        .records
+        .iter()
+        .find(|record| text_field(record, "name") == "users_email_idx")
+        .expect("users_email_idx row");
+    assert_eq!(text_field(users_idx, "table"), "users");
+    assert_eq!(
+        text_array_field(users_idx, "columns"),
+        vec!["email".to_string()]
+    );
+    assert_eq!(text_field(users_idx, "kind"), "HASH");
+    assert!(!bool_field(users_idx, "unique"));
+    assert_eq!(uint_field(users_idx, "entries_indexed"), 2);
+
+    let orders_idx = aliases
+        .result
+        .records
+        .iter()
+        .find(|record| text_field(record, "name") == "orders_total_idx")
+        .expect("orders_total_idx row");
+    assert_eq!(text_field(orders_idx, "table"), "orders");
+    assert_eq!(
+        text_array_field(orders_idx, "columns"),
+        vec!["total".to_string()]
+    );
+    assert_eq!(text_field(orders_idx, "kind"), "BTREE");
+    assert!(bool_field(orders_idx, "unique"));
+    assert_eq!(uint_field(orders_idx, "entries_indexed"), 2);
 
     let filtered = rt
-        .execute_query("SHOW INDICES ON users")
-        .expect("SHOW INDICES ON users");
-    assert_eq!(filtered.result.columns, INDEX_COLUMNS.map(str::to_string));
+        .execute_query("SHOW INDEXES ON users")
+        .expect("SHOW INDEXES ON users");
+    assert_eq!(
+        filtered.result.columns,
+        SHOW_INDEX_COLUMNS.map(str::to_string)
+    );
     assert!(filtered
         .result
         .records
@@ -554,7 +631,32 @@ fn show_indices_lists_all_and_show_indices_on_filters_collection() {
         .result
         .records
         .iter()
-        .all(|record| text_field(record, "collection") == "users"));
+        .all(|record| text_field(record, "table") == "users"));
+    assert_eq!(
+        query_snapshot(&rt, "SHOW INDEXES ON users ORDER BY name"),
+        query_snapshot(
+            &rt,
+            "SELECT * FROM red.show_indexes WHERE table = 'users' ORDER BY name"
+        )
+    );
+
+    let explain = rt
+        .execute_query("EXPLAIN SELECT * FROM users WHERE email = 'a@example.com'")
+        .expect("EXPLAIN SELECT with index");
+    let plan_text = explain
+        .result
+        .records
+        .iter()
+        .filter_map(|record| match record.get("op") {
+            Some(Value::Text(op)) => Some(op.to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    assert!(
+        plan_text.contains("index_seek") || plan_text.contains("hash_index"),
+        "expected indexed query path, got plan ops: {plan_text}"
+    );
 
     cleanup_scope();
 }

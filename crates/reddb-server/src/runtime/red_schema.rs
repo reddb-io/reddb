@@ -3,7 +3,8 @@
 //! The SQL parser does not currently accept schema-qualified table
 //! identifiers in `FROM`, so the runtime rewrites the small virtual
 //! surface it owns (`red.collections`, `red.columns`, `red.describe`,
-//! `red.show_create`, `red.indices`, `red.policies`, `red.stats`, `red.subscriptions`) to internal identifiers before normal parsing.
+//! `red.show_create`, `red.show_indexes`, `red.indices`, `red.policies`,
+//! `red.stats`, `red.subscriptions`) to internal identifiers before normal parsing.
 //! Execution then intercepts that identifier and materializes rows from the live catalog snapshot.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -26,6 +27,8 @@ pub(super) const DESCRIBE: &str = "red.describe";
 pub(super) const DESCRIBE_INTERNAL: &str = "__red_schema_describe";
 pub(super) const SHOW_CREATE: &str = "red.show_create";
 pub(super) const SHOW_CREATE_INTERNAL: &str = "__red_schema_show_create";
+pub(super) const SHOW_INDEXES: &str = "red.show_indexes";
+pub(super) const SHOW_INDEXES_INTERNAL: &str = "__red_schema_show_indexes";
 pub(super) const INDICES: &str = "red.indices";
 pub(super) const INDICES_INTERNAL: &str = "__red_schema_indices";
 pub(super) const POLICIES: &str = "red.policies";
@@ -65,6 +68,15 @@ const COLUMN_COLUMNS: [&str; 7] = [
 const DESCRIBE_COLUMNS: [&str; 5] = ["name", "type", "nullable", "default", "indexed"];
 
 const SHOW_CREATE_COLUMNS: [&str; 1] = ["ddl"];
+
+const SHOW_INDEX_COLUMNS: [&str; 6] = [
+    "name",
+    "table",
+    "columns",
+    "kind",
+    "unique",
+    "entries_indexed",
+];
 
 const INDEX_COLUMNS: [&str; 10] = [
     "collection",
@@ -126,6 +138,7 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
         (COLUMNS, COLUMNS_INTERNAL),
         (DESCRIBE, DESCRIBE_INTERNAL),
         (SHOW_CREATE, SHOW_CREATE_INTERNAL),
+        (SHOW_INDEXES, SHOW_INDEXES_INTERNAL),
         (INDICES, INDICES_INTERNAL),
         (POLICIES, POLICIES_INTERNAL),
         (STATS, STATS_INTERNAL),
@@ -163,6 +176,8 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(DESCRIBE)
         || table.eq_ignore_ascii_case(SHOW_CREATE_INTERNAL)
         || table.eq_ignore_ascii_case(SHOW_CREATE)
+        || table.eq_ignore_ascii_case(SHOW_INDEXES_INTERNAL)
+        || table.eq_ignore_ascii_case(SHOW_INDEXES)
         || table.eq_ignore_ascii_case(INDICES_INTERNAL)
         || table.eq_ignore_ascii_case(INDICES)
         || table.eq_ignore_ascii_case(POLICIES_INTERNAL)
@@ -207,6 +222,7 @@ pub(super) fn red_query(
         VirtualTableKind::Columns => columns_snapshot(runtime, visible_collections),
         VirtualTableKind::Describe => describe_snapshot(runtime, visible_collections, query)?,
         VirtualTableKind::ShowCreate => show_create_snapshot(runtime, visible_collections, query)?,
+        VirtualTableKind::ShowIndexes => show_indexes_snapshot(runtime, visible_collections),
         VirtualTableKind::Indices => indices_snapshot(runtime, visible_collections),
         VirtualTableKind::Policies => policies_snapshot(runtime, tenant, visible_collections),
         VirtualTableKind::Stats => stats_snapshot(runtime, visible_collections),
@@ -307,6 +323,7 @@ enum VirtualTableKind {
     Columns,
     Describe,
     ShowCreate,
+    ShowIndexes,
     Indices,
     Policies,
     Stats,
@@ -320,6 +337,7 @@ impl VirtualTableKind {
             Self::Columns => &COLUMN_COLUMNS,
             Self::Describe => &DESCRIBE_COLUMNS,
             Self::ShowCreate => &SHOW_CREATE_COLUMNS,
+            Self::ShowIndexes => &SHOW_INDEX_COLUMNS,
             Self::Indices => &INDEX_COLUMNS,
             Self::Policies => &POLICY_COLUMNS,
             Self::Stats => &STATS_COLUMNS,
@@ -333,6 +351,7 @@ impl VirtualTableKind {
             Self::Columns => COLUMNS,
             Self::Describe => DESCRIBE,
             Self::ShowCreate => SHOW_CREATE,
+            Self::ShowIndexes => SHOW_INDEXES,
             Self::Indices => INDICES,
             Self::Policies => POLICIES,
             Self::Stats => STATS,
@@ -353,6 +372,9 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
     }
     if name.eq_ignore_ascii_case(SHOW_CREATE_INTERNAL) || name.eq_ignore_ascii_case(SHOW_CREATE) {
         return Ok(VirtualTableKind::ShowCreate);
+    }
+    if name.eq_ignore_ascii_case(SHOW_INDEXES_INTERNAL) || name.eq_ignore_ascii_case(SHOW_INDEXES) {
+        return Ok(VirtualTableKind::ShowIndexes);
     }
     if name.eq_ignore_ascii_case(INDICES_INTERNAL) || name.eq_ignore_ascii_case(INDICES) {
         return Ok(VirtualTableKind::Indices);
@@ -509,6 +531,42 @@ fn indices_snapshot(
                     Value::Boolean(true),
                     Value::Boolean(true),
                     Value::Boolean(false),
+                ],
+            ));
+        }
+    }
+
+    rows
+}
+
+fn show_indexes_snapshot(
+    runtime: &RedDBRuntime,
+    visible_collections: Option<&std::collections::HashSet<String>>,
+) -> Vec<UnifiedRecord> {
+    let snapshot = runtime.db().catalog_model_snapshot();
+    let schema = Arc::new(
+        SHOW_INDEX_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let mut rows = Vec::new();
+
+    for collection in snapshot.collections {
+        if !collection_is_visible(&collection.name, visible_collections) {
+            continue;
+        }
+        for index in runtime.index_store_ref().list_indices(&collection.name) {
+            let entries_indexed = runtime.index_store_ref().entries_indexed(&index);
+            rows.push(UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(index.name),
+                    Value::text(index.collection),
+                    Value::Array(index.columns.into_iter().map(Value::text).collect()),
+                    Value::text(render_index_method_for_ddl(index.method)),
+                    Value::Boolean(index.unique),
+                    Value::UnsignedInteger(entries_indexed),
                 ],
             ));
         }
