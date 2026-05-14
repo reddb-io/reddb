@@ -146,7 +146,7 @@ fn prometheus_query_range_filters_labels_and_rejects_bad_ranges() {
 
     let (status, response) = query_range(
         &rt,
-        "sum(http_requests_total)",
+        "histogram_quantile(0.99, http_requests_total)",
         "1704067200",
         "1704067220",
         "10",

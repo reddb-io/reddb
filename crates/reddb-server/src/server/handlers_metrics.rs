@@ -46,11 +46,22 @@ struct PromSelector {
 
 #[derive(Debug)]
 enum PromExpression {
+    Scalar(f64),
     Selector(PromSelector),
     CounterFunction {
         function: PromCounterFunction,
         selector: PromSelector,
         window_ns: u64,
+    },
+    Aggregate {
+        op: PromAggregateOp,
+        grouping: PromGrouping,
+        expression: Box<PromExpression>,
+    },
+    Arithmetic {
+        op: PromArithmeticOp,
+        left: Box<PromExpression>,
+        right: Box<PromExpression>,
     },
 }
 
@@ -59,6 +70,40 @@ enum PromCounterFunction {
     Rate,
     IRate,
     Increase,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PromAggregateOp {
+    Sum,
+    Avg,
+    Min,
+    Max,
+    Count,
+}
+
+#[derive(Debug)]
+enum PromGrouping {
+    None,
+    By(Vec<String>),
+    Without(Vec<String>),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PromArithmeticOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+enum PromInstantEval {
+    Scalar(f64),
+    Vector(Vec<PromVectorSample>),
+}
+
+enum PromRangeEval {
+    Scalar(f64),
+    Matrix(Vec<PromRangeSeries>),
 }
 
 #[derive(Debug)]
@@ -115,27 +160,18 @@ impl RedDBServer {
             Err(err) => return prometheus_error_response(422, "bad_data", err),
         };
 
-        let result = match expression {
-            PromExpression::Selector(selector) => self.prometheus_instant_vector(selector),
-            PromExpression::CounterFunction {
-                function,
-                selector,
-                window_ns,
-            } => {
-                let eval_time_ns = match prometheus_optional_param(query, body.as_deref(), "time") {
-                    Ok(Some(raw)) => match parse_prom_timestamp_ns(&raw) {
-                        Ok(time) => Some(time),
-                        Err(err) => return prometheus_error_response(400, "bad_data", err),
-                    },
-                    Ok(None) => None,
-                    Err(err) => return prometheus_error_response(400, "bad_data", err),
-                };
-                self.prometheus_counter_function_vector(function, selector, window_ns, eval_time_ns)
-            }
+        let eval_time_ns = match prometheus_optional_param(query, body.as_deref(), "time") {
+            Ok(Some(raw)) => match parse_prom_timestamp_ns(&raw) {
+                Ok(time) => Some(time),
+                Err(err) => return prometheus_error_response(400, "bad_data", err),
+            },
+            Ok(None) => None,
+            Err(err) => return prometheus_error_response(400, "bad_data", err),
         };
-        match result {
-            Ok(samples) => prometheus_vector_response(samples),
-            Err(err) => prometheus_error_response(500, "internal", err.to_string()),
+        match self.prometheus_eval_instant(expression, eval_time_ns) {
+            Ok(PromInstantEval::Vector(samples)) => prometheus_vector_response(samples),
+            Ok(PromInstantEval::Scalar(value)) => prometheus_scalar_response(value),
+            Err(err) => prometheus_query_error_response(err),
         }
     }
 
@@ -157,17 +193,10 @@ impl RedDBServer {
             Err(err) => return prometheus_error_response(400, "bad_data", err),
         };
 
-        let result = match expression {
-            PromExpression::Selector(selector) => self.prometheus_range_matrix(selector, range),
-            PromExpression::CounterFunction {
-                function,
-                selector,
-                window_ns,
-            } => self.prometheus_counter_function_matrix(function, selector, window_ns, range),
-        };
-        match result {
-            Ok(series) => prometheus_matrix_response(series),
-            Err(err) => prometheus_error_response(500, "internal", err.to_string()),
+        match self.prometheus_eval_range(expression, range) {
+            Ok(PromRangeEval::Matrix(series)) => prometheus_matrix_response(series),
+            Ok(PromRangeEval::Scalar(value)) => prometheus_scalar_response(value),
+            Err(err) => prometheus_query_error_response(err),
         }
     }
 
@@ -356,6 +385,80 @@ impl RedDBServer {
             }
         }
         Ok(matrix)
+    }
+
+    fn prometheus_eval_instant(
+        &self,
+        expression: PromExpression,
+        eval_time_ns: Option<u64>,
+    ) -> RedDBResult<PromInstantEval> {
+        match expression {
+            PromExpression::Scalar(value) => Ok(PromInstantEval::Scalar(value)),
+            PromExpression::Selector(selector) => self
+                .prometheus_instant_vector(selector)
+                .map(PromInstantEval::Vector),
+            PromExpression::CounterFunction {
+                function,
+                selector,
+                window_ns,
+            } => self
+                .prometheus_counter_function_vector(function, selector, window_ns, eval_time_ns)
+                .map(PromInstantEval::Vector),
+            PromExpression::Aggregate {
+                op,
+                grouping,
+                expression,
+            } => match self.prometheus_eval_instant(*expression, eval_time_ns)? {
+                PromInstantEval::Vector(samples) => Ok(PromInstantEval::Vector(aggregate_vector(
+                    samples, op, grouping,
+                ))),
+                PromInstantEval::Scalar(_) => Err(RedDBError::Query(
+                    "unsupported PromQL aggregation over scalar".to_string(),
+                )),
+            },
+            PromExpression::Arithmetic { op, left, right } => {
+                let left = self.prometheus_eval_instant(*left, eval_time_ns)?;
+                let right = self.prometheus_eval_instant(*right, eval_time_ns)?;
+                apply_instant_arithmetic(left, right, op)
+            }
+        }
+    }
+
+    fn prometheus_eval_range(
+        &self,
+        expression: PromExpression,
+        range: PromQueryRange,
+    ) -> RedDBResult<PromRangeEval> {
+        match expression {
+            PromExpression::Scalar(value) => Ok(PromRangeEval::Scalar(value)),
+            PromExpression::Selector(selector) => self
+                .prometheus_range_matrix(selector, range)
+                .map(PromRangeEval::Matrix),
+            PromExpression::CounterFunction {
+                function,
+                selector,
+                window_ns,
+            } => self
+                .prometheus_counter_function_matrix(function, selector, window_ns, range)
+                .map(PromRangeEval::Matrix),
+            PromExpression::Aggregate {
+                op,
+                grouping,
+                expression,
+            } => match self.prometheus_eval_range(*expression, range)? {
+                PromRangeEval::Matrix(series) => Ok(PromRangeEval::Matrix(aggregate_matrix(
+                    series, op, grouping,
+                ))),
+                PromRangeEval::Scalar(_) => Err(RedDBError::Query(
+                    "unsupported PromQL aggregation over scalar".to_string(),
+                )),
+            },
+            PromExpression::Arithmetic { op, left, right } => {
+                let left = self.prometheus_eval_range(*left, range)?;
+                let right = self.prometheus_eval_range(*right, range)?;
+                apply_range_arithmetic(left, right, op)
+            }
+        }
     }
 
     fn prometheus_counter_function_vector(
@@ -611,6 +714,28 @@ fn parse_prom_step_ns(input: &str) -> Result<u64, String> {
 
 fn parse_prom_expression(input: &str) -> Result<PromExpression, String> {
     let input = input.trim();
+    if let Some((left, op, right)) = split_top_level_arithmetic(input, &['+', '-']) {
+        return Ok(PromExpression::Arithmetic {
+            op,
+            left: Box::new(parse_prom_expression(left)?),
+            right: Box::new(parse_prom_expression(right)?),
+        });
+    }
+    if let Some((left, op, right)) = split_top_level_arithmetic(input, &['*', '/']) {
+        return Ok(PromExpression::Arithmetic {
+            op,
+            left: Box::new(parse_prom_expression(left)?),
+            right: Box::new(parse_prom_expression(right)?),
+        });
+    }
+    if let Ok(value) = input.parse::<f64>() {
+        if value.is_finite() {
+            return Ok(PromExpression::Scalar(value));
+        }
+    }
+    if let Some(aggregate) = parse_prom_aggregate(input)? {
+        return Ok(aggregate);
+    }
     for (name, function) in [
         ("rate", PromCounterFunction::Rate),
         ("irate", PromCounterFunction::IRate),
@@ -638,6 +763,158 @@ fn parse_prom_expression(input: &str) -> Result<PromExpression, String> {
         ));
     }
     parse_prom_selector(input).map(PromExpression::Selector)
+}
+
+fn split_top_level_arithmetic<'a>(
+    input: &'a str,
+    ops: &[char],
+) -> Option<(&'a str, PromArithmeticOp, &'a str)> {
+    let mut paren_depth = 0_i32;
+    let mut bracket_depth = 0_i32;
+    let mut brace_depth = 0_i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    let chars = input.char_indices().collect::<Vec<_>>();
+    for (idx, ch) in chars.into_iter().rev() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            ')' => paren_depth += 1,
+            '(' => paren_depth -= 1,
+            ']' => bracket_depth += 1,
+            '[' => bracket_depth -= 1,
+            '}' => brace_depth += 1,
+            '{' => brace_depth -= 1,
+            op if paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0
+                && ops.contains(&op) =>
+            {
+                if idx == 0 {
+                    continue;
+                }
+                let left = input[..idx].trim();
+                let right = input[idx + ch.len_utf8()..].trim();
+                if left.is_empty() || right.is_empty() {
+                    continue;
+                }
+                let op = match op {
+                    '+' => PromArithmeticOp::Add,
+                    '-' => PromArithmeticOp::Sub,
+                    '*' => PromArithmeticOp::Mul,
+                    '/' => PromArithmeticOp::Div,
+                    _ => return None,
+                };
+                return Some((left, op, right));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_prom_aggregate(input: &str) -> Result<Option<PromExpression>, String> {
+    for (name, op) in [
+        ("sum", PromAggregateOp::Sum),
+        ("avg", PromAggregateOp::Avg),
+        ("min", PromAggregateOp::Min),
+        ("max", PromAggregateOp::Max),
+        ("count", PromAggregateOp::Count),
+    ] {
+        let Some(rest) = input.strip_prefix(name) else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        if rest.starts_with('(') {
+            let (inner, after) = parse_parenthesized(rest)?;
+            if !after.trim().is_empty() {
+                return Err(format!("unsupported PromQL aggregate '{input}'"));
+            }
+            return Ok(Some(PromExpression::Aggregate {
+                op,
+                grouping: PromGrouping::None,
+                expression: Box::new(parse_prom_expression(inner)?),
+            }));
+        }
+
+        let (grouping, rest) = if let Some(after) = rest.strip_prefix("by") {
+            let (labels, after) = parse_grouping_labels(after.trim_start())?;
+            (PromGrouping::By(labels), after)
+        } else if let Some(after) = rest.strip_prefix("without") {
+            let (labels, after) = parse_grouping_labels(after.trim_start())?;
+            (PromGrouping::Without(labels), after)
+        } else {
+            continue;
+        };
+        let (inner, after) = parse_parenthesized(rest.trim_start())?;
+        if !after.trim().is_empty() {
+            return Err(format!("unsupported PromQL aggregate '{input}'"));
+        }
+        return Ok(Some(PromExpression::Aggregate {
+            op,
+            grouping,
+            expression: Box::new(parse_prom_expression(inner)?),
+        }));
+    }
+    Ok(None)
+}
+
+fn parse_grouping_labels(input: &str) -> Result<(Vec<String>, &str), String> {
+    let (inner, after) = parse_parenthesized(input)?;
+    let mut labels = Vec::new();
+    for raw in inner.split(',') {
+        let label = raw.trim();
+        if label.is_empty() {
+            continue;
+        }
+        if !valid_label_name(label) {
+            return Err(format!("unsupported PromQL grouping label '{label}'"));
+        }
+        labels.push(label.to_string());
+    }
+    Ok((labels, after))
+}
+
+fn parse_parenthesized(input: &str) -> Result<(&str, &str), String> {
+    if !input.starts_with('(') {
+        return Err("unsupported PromQL: expected parenthesized expression".to_string());
+    }
+    let mut depth = 0_i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (idx, ch) in input.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok((&input[1..idx], &input[idx + ch.len_utf8()..]));
+                }
+            }
+            _ => {}
+        }
+    }
+    Err("unsupported PromQL: unbalanced parentheses".to_string())
 }
 
 fn parse_range_vector_inner(input: &str) -> Result<(&str, &str), String> {
@@ -942,6 +1219,229 @@ fn counter_increase(samples: &[PromRangeValue]) -> f64 {
         .sum()
 }
 
+fn aggregate_vector(
+    samples: Vec<PromVectorSample>,
+    op: PromAggregateOp,
+    grouping: PromGrouping,
+) -> Vec<PromVectorSample> {
+    let mut groups: BTreeMap<Vec<(String, String)>, (BTreeMap<String, String>, Vec<f64>, u64)> =
+        BTreeMap::new();
+    for sample in samples {
+        let labels = aggregate_labels(&sample.labels, &grouping);
+        let key = labels
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        let timestamp = sample.timestamp_ns;
+        let entry = groups
+            .entry(key)
+            .or_insert_with(|| (labels, Vec::new(), timestamp));
+        entry.1.push(sample.value);
+        entry.2 = entry.2.max(timestamp);
+    }
+
+    groups
+        .into_values()
+        .filter_map(|(labels, values, timestamp_ns)| {
+            aggregate_values(&values, op).map(|value| PromVectorSample {
+                labels,
+                timestamp_ns,
+                value,
+            })
+        })
+        .collect()
+}
+
+fn aggregate_matrix(
+    series: Vec<PromRangeSeries>,
+    op: PromAggregateOp,
+    grouping: PromGrouping,
+) -> Vec<PromRangeSeries> {
+    let mut groups: BTreeMap<
+        Vec<(String, String)>,
+        (BTreeMap<String, String>, BTreeMap<u64, Vec<f64>>),
+    > = BTreeMap::new();
+    for item in series {
+        let labels = aggregate_labels(&item.labels, &grouping);
+        let key = labels
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        let entry = groups
+            .entry(key)
+            .or_insert_with(|| (labels, BTreeMap::new()));
+        for value in item.values {
+            entry
+                .1
+                .entry(value.timestamp_ns)
+                .or_default()
+                .push(value.value);
+        }
+    }
+
+    groups
+        .into_values()
+        .map(|(labels, by_timestamp)| PromRangeSeries {
+            labels,
+            values: by_timestamp
+                .into_iter()
+                .filter_map(|(timestamp_ns, values)| {
+                    aggregate_values(&values, op).map(|value| PromRangeValue {
+                        timestamp_ns,
+                        value,
+                    })
+                })
+                .collect(),
+        })
+        .filter(|series| !series.values.is_empty())
+        .collect()
+}
+
+fn aggregate_labels(
+    labels: &BTreeMap<String, String>,
+    grouping: &PromGrouping,
+) -> BTreeMap<String, String> {
+    match grouping {
+        PromGrouping::None => BTreeMap::new(),
+        PromGrouping::By(names) => names
+            .iter()
+            .filter_map(|name| labels.get(name).map(|value| (name.clone(), value.clone())))
+            .collect(),
+        PromGrouping::Without(names) => labels
+            .iter()
+            .filter(|(name, _)| name.as_str() != "__name__" && !names.contains(name))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect(),
+    }
+}
+
+fn aggregate_values(values: &[f64], op: PromAggregateOp) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    match op {
+        PromAggregateOp::Sum => Some(values.iter().sum()),
+        PromAggregateOp::Avg => Some(values.iter().sum::<f64>() / values.len() as f64),
+        PromAggregateOp::Min => values.iter().copied().reduce(f64::min),
+        PromAggregateOp::Max => values.iter().copied().reduce(f64::max),
+        PromAggregateOp::Count => Some(values.len() as f64),
+    }
+}
+
+fn apply_instant_arithmetic(
+    left: PromInstantEval,
+    right: PromInstantEval,
+    op: PromArithmeticOp,
+) -> RedDBResult<PromInstantEval> {
+    match (left, right) {
+        (PromInstantEval::Scalar(left), PromInstantEval::Scalar(right)) => {
+            arithmetic_values(left, right, op).map(PromInstantEval::Scalar)
+        }
+        (PromInstantEval::Vector(samples), PromInstantEval::Scalar(scalar)) => Ok(
+            PromInstantEval::Vector(apply_vector_scalar(samples, scalar, op, false)),
+        ),
+        (PromInstantEval::Scalar(scalar), PromInstantEval::Vector(samples)) => Ok(
+            PromInstantEval::Vector(apply_vector_scalar(samples, scalar, op, true)),
+        ),
+        (PromInstantEval::Vector(_), PromInstantEval::Vector(_)) => Err(RedDBError::Query(
+            "unsupported PromQL vector matching: only vector-scalar arithmetic is supported"
+                .to_string(),
+        )),
+    }
+}
+
+fn apply_range_arithmetic(
+    left: PromRangeEval,
+    right: PromRangeEval,
+    op: PromArithmeticOp,
+) -> RedDBResult<PromRangeEval> {
+    match (left, right) {
+        (PromRangeEval::Scalar(left), PromRangeEval::Scalar(right)) => {
+            arithmetic_values(left, right, op).map(PromRangeEval::Scalar)
+        }
+        (PromRangeEval::Matrix(series), PromRangeEval::Scalar(scalar)) => Ok(
+            PromRangeEval::Matrix(apply_matrix_scalar(series, scalar, op, false)),
+        ),
+        (PromRangeEval::Scalar(scalar), PromRangeEval::Matrix(series)) => Ok(
+            PromRangeEval::Matrix(apply_matrix_scalar(series, scalar, op, true)),
+        ),
+        (PromRangeEval::Matrix(_), PromRangeEval::Matrix(_)) => Err(RedDBError::Query(
+            "unsupported PromQL vector matching: only vector-scalar arithmetic is supported"
+                .to_string(),
+        )),
+    }
+}
+
+fn apply_vector_scalar(
+    samples: Vec<PromVectorSample>,
+    scalar: f64,
+    op: PromArithmeticOp,
+    scalar_on_left: bool,
+) -> Vec<PromVectorSample> {
+    samples
+        .into_iter()
+        .filter_map(|mut sample| {
+            let value = if scalar_on_left {
+                arithmetic_values(scalar, sample.value, op).ok()?
+            } else {
+                arithmetic_values(sample.value, scalar, op).ok()?
+            };
+            sample.value = value;
+            Some(sample)
+        })
+        .collect()
+}
+
+fn apply_matrix_scalar(
+    series: Vec<PromRangeSeries>,
+    scalar: f64,
+    op: PromArithmeticOp,
+    scalar_on_left: bool,
+) -> Vec<PromRangeSeries> {
+    series
+        .into_iter()
+        .map(|mut item| {
+            item.values = item
+                .values
+                .into_iter()
+                .filter_map(|mut value| {
+                    value.value = if scalar_on_left {
+                        arithmetic_values(scalar, value.value, op).ok()?
+                    } else {
+                        arithmetic_values(value.value, scalar, op).ok()?
+                    };
+                    Some(value)
+                })
+                .collect();
+            item
+        })
+        .filter(|item| !item.values.is_empty())
+        .collect()
+}
+
+fn arithmetic_values(left: f64, right: f64, op: PromArithmeticOp) -> RedDBResult<f64> {
+    let value = match op {
+        PromArithmeticOp::Add => left + right,
+        PromArithmeticOp::Sub => left - right,
+        PromArithmeticOp::Mul => left * right,
+        PromArithmeticOp::Div => {
+            if right == 0.0 {
+                return Err(RedDBError::Query(
+                    "unsupported PromQL arithmetic: division by zero".to_string(),
+                ));
+            }
+            left / right
+        }
+    };
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(RedDBError::Query(
+            "unsupported PromQL arithmetic produced a non-finite value".to_string(),
+        ))
+    }
+}
+
 fn prometheus_matrix_response(series: Vec<PromRangeSeries>) -> HttpResponse {
     let result = series
         .into_iter()
@@ -981,6 +1481,36 @@ fn prometheus_matrix_response(series: Vec<PromRangeSeries>) -> HttpResponse {
     );
     root.insert("data".to_string(), JsonValue::Object(data));
     json_response(200, JsonValue::Object(root))
+}
+
+fn prometheus_scalar_response(value: f64) -> HttpResponse {
+    let mut data = Map::new();
+    data.insert(
+        "resultType".to_string(),
+        JsonValue::String("scalar".to_string()),
+    );
+    data.insert(
+        "result".to_string(),
+        JsonValue::Array(vec![
+            crate::json!(0.0),
+            JsonValue::String(format_prometheus_value(value)),
+        ]),
+    );
+
+    let mut root = Map::new();
+    root.insert(
+        "status".to_string(),
+        JsonValue::String("success".to_string()),
+    );
+    root.insert("data".to_string(), JsonValue::Object(data));
+    json_response(200, JsonValue::Object(root))
+}
+
+fn prometheus_query_error_response(err: RedDBError) -> HttpResponse {
+    match err {
+        RedDBError::Query(message) => prometheus_error_response(422, "bad_data", message),
+        other => prometheus_error_response(500, "internal", other.to_string()),
+    }
 }
 
 fn prometheus_error_response(
