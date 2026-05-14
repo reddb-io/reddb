@@ -11,6 +11,27 @@ fn int_at(result: &RuntimeQueryResult, row: usize, column: &str) -> i64 {
     }
 }
 
+fn timestamp_ms_at(result: &RuntimeQueryResult, row: usize, column: &str) -> i64 {
+    match result.result.records[row].get(column) {
+        Some(Value::TimestampMs(value)) => *value,
+        other => panic!("expected timestamp_ms at row {row} column {column}, got {other:?}"),
+    }
+}
+
+fn display_at(result: &RuntimeQueryResult, row: usize, column: &str) -> String {
+    result.result.records[row]
+        .get(column)
+        .unwrap_or_else(|| panic!("missing column {column} at row {row}"))
+        .display_string()
+}
+
+fn bool_at(result: &RuntimeQueryResult, row: usize, column: &str) -> bool {
+    match result.result.records[row].get(column) {
+        Some(Value::Boolean(value)) => *value,
+        other => panic!("expected bool at row {row} column {column}, got {other:?}"),
+    }
+}
+
 fn uint_at(result: &RuntimeQueryResult, row: usize, column: &str) -> u64 {
     match result.result.records[row].get(column) {
         Some(Value::UnsignedInteger(value)) => *value,
@@ -36,13 +57,6 @@ fn text_at<'a>(result: &'a RuntimeQueryResult, row: usize, column: &str) -> &'a 
     match result.result.records[row].get(column) {
         Some(Value::Text(value)) => value.as_ref(),
         other => panic!("expected text at row {row} column {column}, got {other:?}"),
-    }
-}
-
-fn bool_at(result: &RuntimeQueryResult, row: usize, column: &str) -> bool {
-    match result.result.records[row].get(column) {
-        Some(Value::Boolean(value)) => *value,
-        other => panic!("expected bool at row {row} column {column}, got {other:?}"),
     }
 }
 
@@ -359,6 +373,60 @@ fn concat_function_uses_same_plain_text_coercion_as_operator() {
         .execute_query("SELECT CONCAT(name, '!') AS v FROM concat_t LIMIT 1")
         .expect("column literal CONCAT executes");
     assert_eq!(text_at(&column_literal, 0, "v"), "alice!");
+}
+
+#[test]
+fn current_time_bare_builtins_are_single_row_scalars_and_work_in_expressions() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+
+    let current_timestamp = rt
+        .execute_query("SELECT CURRENT_TIMESTAMP AS ts")
+        .expect("CURRENT_TIMESTAMP executes");
+    assert_eq!(current_timestamp.result.records.len(), 1);
+    let ts = timestamp_ms_at(&current_timestamp, 0, "ts");
+
+    let now = rt
+        .execute_query("SELECT NOW() AS ts")
+        .expect("NOW executes");
+    assert_eq!(now.result.records.len(), 1);
+    let now_ts = timestamp_ms_at(&now, 0, "ts");
+    assert!(
+        (ts - now_ts).abs() <= 1_000,
+        "CURRENT_TIMESTAMP {ts} should be close to NOW() {now_ts}"
+    );
+
+    let current_date = rt
+        .execute_query("SELECT CURRENT_DATE AS d")
+        .expect("CURRENT_DATE executes");
+    assert_eq!(current_date.result.records.len(), 1);
+    let date = display_at(&current_date, 0, "d");
+    assert_eq!(date.len(), 10);
+    assert_eq!(date.as_bytes()[4], b'-');
+    assert_eq!(date.as_bytes()[7], b'-');
+
+    let current_time = rt
+        .execute_query("SELECT CURRENT_TIME AS t")
+        .expect("CURRENT_TIME executes");
+    assert_eq!(current_time.result.records.len(), 1);
+    let time = display_at(&current_time, 0, "t");
+    assert_eq!(time.len(), 8);
+    assert_eq!(time.as_bytes()[2], b':');
+    assert_eq!(time.as_bytes()[5], b':');
+
+    rt.execute_query("CREATE TABLE time_t (created_at TIMESTAMP_MS, name TEXT)")
+        .expect("create time_t");
+    rt.execute_query("INSERT INTO time_t (created_at, name) VALUES (32503680000000, 'future')")
+        .expect("insert time_t");
+    let projected = rt
+        .execute_query("SELECT created_at >= CURRENT_TIMESTAMP - 86400000 AS keep_row FROM time_t")
+        .expect("CURRENT_TIMESTAMP expression projects");
+    assert_eq!(projected.result.records.len(), 1);
+    assert!(bool_at(&projected, 0, "keep_row"));
+    let filtered = rt
+        .execute_query("SELECT name FROM time_t WHERE created_at >= CURRENT_TIMESTAMP - 86400000")
+        .expect("CURRENT_TIMESTAMP works in WHERE expression");
+    assert_eq!(filtered.result.records.len(), 1);
+    assert_eq!(text_at(&filtered, 0, "name"), "future");
 }
 
 #[test]

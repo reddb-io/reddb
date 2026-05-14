@@ -1590,6 +1590,15 @@ pub(super) fn runtime_partial_cmp(left: &Value, right: &Value) -> Option<Orderin
         return left.partial_cmp(&right);
     }
 
+    match (left, right) {
+        (Value::Timestamp(left), Value::Timestamp(right)) => return Some(left.cmp(right)),
+        (Value::TimestampMs(left), Value::TimestampMs(right)) => return Some(left.cmp(right)),
+        (Value::Date(left), Value::Date(right)) => return Some(left.cmp(right)),
+        (Value::Time(left), Value::Time(right)) => return Some(left.cmp(right)),
+        (Value::Duration(left), Value::Duration(right)) => return Some(left.cmp(right)),
+        _ => {}
+    }
+
     // Fast text path: borrow the string slice when possible (avoids two
     // String clones), then compare abbreviated 8-byte keys first — full
     // str::cmp only if the first 8 bytes are equal.
@@ -2483,6 +2492,13 @@ fn evaluate_scalar_function_legacy(
                 .unwrap_or(0);
             Some(Value::Date((ms / 86_400_000) as i32))
         }
+        "CURRENT_TIME" => {
+            let ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            Some(Value::Time(ms.rem_euclid(86_400_000) as u32))
+        }
         _ => Some(Value::Null),
     }
 }
@@ -2535,6 +2551,10 @@ fn money_arg_text(value: Value) -> Option<String> {
 /// — SQL-style "erroring on bad arithmetic" is the job of the type
 /// system v2 (Fase 3), not Fase 1.3.
 fn arith_binop(op: &str, a: Value, b: Value) -> Value {
+    if let Some(value) = timestamp_ms_arith(op, &a, &b) {
+        return value;
+    }
+
     let (lhs, rhs) = match (value_as_number(&a), value_as_number(&b)) {
         (Some(l), Some(r)) => (l, r),
         _ => return Value::Null,
@@ -2565,6 +2585,29 @@ fn arith_binop(op: &str, a: Value, b: Value) -> Value {
         Value::Float(out)
     } else {
         Value::Integer(out as i64)
+    }
+}
+
+fn timestamp_ms_arith(op: &str, a: &Value, b: &Value) -> Option<Value> {
+    match (op, a, b) {
+        ("ADD", Value::TimestampMs(ts), rhs) => Some(Value::TimestampMs(
+            ts.checked_add(duration_ms_operand(rhs)?)?,
+        )),
+        ("ADD", lhs, Value::TimestampMs(ts)) => Some(Value::TimestampMs(
+            ts.checked_add(duration_ms_operand(lhs)?)?,
+        )),
+        ("SUB", Value::TimestampMs(ts), rhs) => Some(Value::TimestampMs(
+            ts.checked_sub(duration_ms_operand(rhs)?)?,
+        )),
+        _ => None,
+    }
+}
+
+fn duration_ms_operand(value: &Value) -> Option<i64> {
+    match value {
+        Value::Integer(value) | Value::BigInt(value) | Value::Duration(value) => Some(*value),
+        Value::UnsignedInteger(value) => i64::try_from(*value).ok(),
+        _ => None,
     }
 }
 

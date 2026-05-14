@@ -147,6 +147,7 @@ Session-scoped scalars that policies and views use:
 | `CURRENT_TENANT()` | Session tenant id |
 | `NOW()` / `CURRENT_TIMESTAMP` | Current UTC timestamp |
 | `CURRENT_DATE` | Current UTC date |
+| `CURRENT_TIME` | Current UTC time as a `TIME` value: milliseconds since midnight, displayed as `HH:MM:SS` |
 
 All are marked `Volatile` in the function catalog — the planner does
 not constant-fold them across rows.

@@ -4,9 +4,9 @@ use super::*;
 use crate::catalog::SubscriptionOperation;
 use crate::storage::engine::vector_metadata::MetadataValue;
 use crate::storage::query::ast::{
-    CompareOp, ConfigCommand, ConfigValueType, DistanceMetric, EdgeDirection, FieldRef, Filter,
-    FusionStrategy, JoinType, KvCommand, MetadataFilter, Projection, QueueCommand, TableQuery,
-    TreeCommand, TreePosition, VectorSource,
+    CompareOp, ConfigCommand, ConfigValueType, DistanceMetric, EdgeDirection, Expr, FieldRef,
+    Filter, FusionStrategy, JoinType, KvCommand, MetadataFilter, Projection, QueueCommand,
+    TableQuery, TreeCommand, TreePosition, VectorSource,
 };
 
 /// Test helper that returns the legacy `QueryExpr` shape. The
@@ -395,6 +395,26 @@ fn test_parse_compare_rhs_column_expression_stays_compare_expr() {
         matches!(tq.filter, Some(Filter::CompareExpr { .. })),
         "column arithmetic rhs must stay on CompareExpr"
     );
+}
+
+#[test]
+fn test_parse_compare_rhs_current_timestamp_expression_stays_compare_expr() {
+    let query =
+        parse("SELECT * FROM sensors WHERE created_at >= CURRENT_TIMESTAMP - 86400000").unwrap();
+    let QueryExpr::Table(tq) = query else {
+        panic!("Expected TableQuery");
+    };
+    let Some(Filter::CompareExpr { rhs, .. }) = tq.filter else {
+        panic!("Expected CompareExpr, got {:?}", tq.filter);
+    };
+    let Expr::BinaryOp { lhs, .. } = rhs else {
+        panic!("Expected binary timestamp expression");
+    };
+    let Expr::FunctionCall { name, args, .. } = *lhs else {
+        panic!("Expected CURRENT_TIMESTAMP function call");
+    };
+    assert_eq!(name, "CURRENT_TIMESTAMP");
+    assert!(args.is_empty());
 }
 
 #[test]

@@ -95,6 +95,15 @@ fn keyword_function_name(token: &Token) -> Option<&'static str> {
     }
 }
 
+fn bare_zero_arg_function_name(name: &str) -> Option<&'static str> {
+    match name.to_ascii_uppercase().as_str() {
+        "CURRENT_TIMESTAMP" => Some("CURRENT_TIMESTAMP"),
+        "CURRENT_DATE" => Some("CURRENT_DATE"),
+        "CURRENT_TIME" => Some("CURRENT_TIME"),
+        _ => None,
+    }
+}
+
 impl<'a> Parser<'a> {
     /// Parse a complete expression at the lowest precedence level.
     /// Entry point for every caller that wants an `Expr` tree.
@@ -389,6 +398,15 @@ impl<'a> Parser<'a> {
             // Function call / CAST: IDENT (
             if matches!(self.peek(), Token::LParen) {
                 return self.parse_function_call_expr_with_name(start, saved_name);
+            }
+
+            if let Some(function_name) = bare_zero_arg_function_name(&saved_name) {
+                let end = self.position();
+                return Ok(Expr::FunctionCall {
+                    name: function_name.to_string(),
+                    args: Vec::new(),
+                    span: Span::new(start, end),
+                });
             }
 
             // Qualified column: IDENT.IDENT[.IDENT …]

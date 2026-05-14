@@ -459,6 +459,10 @@ fn apply_binop(op: BinOp, a: Value, b: Value) -> Option<Value> {
 }
 
 fn arith(op: BinOp, a: Value, b: Value) -> Option<Value> {
+    if let Some(value) = timestamp_ms_arith(op, &a, &b) {
+        return Some(value);
+    }
+
     let (la, lb) = (value_as_number(&a)?, value_as_number(&b)?);
     let force_float = matches!(op, BinOp::Div) || la.1 || lb.1;
     let out = match op {
@@ -484,6 +488,29 @@ fn arith(op: BinOp, a: Value, b: Value) -> Option<Value> {
     } else {
         Value::Integer(out as i64)
     })
+}
+
+fn timestamp_ms_arith(op: BinOp, a: &Value, b: &Value) -> Option<Value> {
+    match (op, a, b) {
+        (BinOp::Add, Value::TimestampMs(ts), rhs) => Some(Value::TimestampMs(
+            ts.checked_add(duration_ms_operand(rhs)?)?,
+        )),
+        (BinOp::Add, lhs, Value::TimestampMs(ts)) => Some(Value::TimestampMs(
+            ts.checked_add(duration_ms_operand(lhs)?)?,
+        )),
+        (BinOp::Sub, Value::TimestampMs(ts), rhs) => Some(Value::TimestampMs(
+            ts.checked_sub(duration_ms_operand(rhs)?)?,
+        )),
+        _ => None,
+    }
+}
+
+fn duration_ms_operand(value: &Value) -> Option<i64> {
+    match value {
+        Value::Integer(value) | Value::BigInt(value) | Value::Duration(value) => Some(*value),
+        Value::UnsignedInteger(value) => i64::try_from(*value).ok(),
+        _ => None,
+    }
 }
 
 /// Tuple `(f64 value, is_float_literally)`. The second element lets
@@ -1421,6 +1448,7 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
         }
         "NOW" | "CURRENT_TIMESTAMP" => Some(Value::TimestampMs(current_unix_ms())),
         "CURRENT_DATE" => Some(Value::Date((current_unix_ms() / 86_400_000) as i32)),
+        "CURRENT_TIME" => Some(Value::Time(current_time_ms_since_midnight())),
         // Phase 2.5.3 multi-tenancy: reads the thread-local session
         // tenant installed by `SET TENANT 'id'` or transport
         // middleware. Returns NULL when no tenant is bound so RLS
@@ -1814,6 +1842,10 @@ fn current_unix_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or(0)
+}
+
+fn current_time_ms_since_midnight() -> u32 {
+    current_unix_ms().rem_euclid(86_400_000) as u32
 }
 
 fn time_bucket_duration(value: &Value) -> Option<u64> {

@@ -618,6 +618,10 @@ fn apply_binop(op: BinOp, a: Value, b: Value) -> Option<Value> {
 }
 
 fn arith(op: BinOp, a: Value, b: Value) -> Option<Value> {
+    if let Some(value) = timestamp_ms_arith(op, &a, &b) {
+        return Some(value);
+    }
+
     let (la, l_is_float) = value_as_number(&a)?;
     let (lb, r_is_float) = value_as_number(&b)?;
     let force_float = matches!(op, BinOp::Div) || l_is_float || r_is_float;
@@ -644,6 +648,29 @@ fn arith(op: BinOp, a: Value, b: Value) -> Option<Value> {
     } else {
         Value::Integer(out as i64)
     })
+}
+
+fn timestamp_ms_arith(op: BinOp, a: &Value, b: &Value) -> Option<Value> {
+    match (op, a, b) {
+        (BinOp::Add, Value::TimestampMs(ts), rhs) => Some(Value::TimestampMs(
+            ts.checked_add(duration_ms_operand(rhs)?)?,
+        )),
+        (BinOp::Add, lhs, Value::TimestampMs(ts)) => Some(Value::TimestampMs(
+            ts.checked_add(duration_ms_operand(lhs)?)?,
+        )),
+        (BinOp::Sub, Value::TimestampMs(ts), rhs) => Some(Value::TimestampMs(
+            ts.checked_sub(duration_ms_operand(rhs)?)?,
+        )),
+        _ => None,
+    }
+}
+
+fn duration_ms_operand(value: &Value) -> Option<i64> {
+    match value {
+        Value::Integer(value) | Value::BigInt(value) | Value::Duration(value) => Some(*value),
+        Value::UnsignedInteger(value) => i64::try_from(*value).ok(),
+        _ => None,
+    }
 }
 
 fn value_as_number(v: &Value) -> Option<(f64, bool)> {

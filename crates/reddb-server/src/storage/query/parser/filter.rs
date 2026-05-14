@@ -39,6 +39,16 @@ fn token_can_start_field_ref(token: &Token) -> bool {
     )
 }
 
+fn token_is_bare_zero_arg_function(token: &Token) -> bool {
+    match token {
+        Token::Ident(name) => matches!(
+            name.to_ascii_uppercase().as_str(),
+            "CURRENT_TIMESTAMP" | "CURRENT_DATE" | "CURRENT_TIME"
+        ),
+        _ => false,
+    }
+}
+
 impl<'a> Parser<'a> {
     /// Parse a filter expression (WHERE condition)
     pub fn parse_filter(&mut self) -> Result<Filter, ParseError> {
@@ -402,6 +412,7 @@ impl<'a> Parser<'a> {
     fn rhs_looks_like_bare_field_ref(&mut self) -> Result<bool, ParseError> {
         match self.peek() {
             Token::Dollar | Token::Question => Ok(false),
+            token if token_is_bare_zero_arg_function(token) => Ok(false),
             token if token_can_start_field_ref(token) => {
                 Ok(!matches!(self.peek_next()?, Token::LParen))
             }
