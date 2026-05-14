@@ -266,7 +266,7 @@ impl<'a> Parser<'a> {
             ));
         }
         let alias = if self.consume(&Token::As)? {
-            Some(self.expect_ident()?)
+            Some(self.expect_column_ident()?)
         } else {
             None
         };

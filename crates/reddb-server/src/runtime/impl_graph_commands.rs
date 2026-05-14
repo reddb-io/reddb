@@ -119,6 +119,25 @@ impl RedDBRuntime {
                     let stored = graph
                         .get_node(&resolved)
                         .ok_or_else(|| RedDBError::NotFound(node_ref.to_string()))?;
+                    let node_type = self
+                        .inner
+                        .db
+                        .store()
+                        .query_all(|entity| {
+                            entity.id.raw().to_string() == resolved
+                                && matches!(
+                                    entity.kind,
+                                    crate::storage::unified::EntityKind::GraphNode(_)
+                                )
+                        })
+                        .into_iter()
+                        .find_map(|(_, entity)| match entity.kind {
+                            crate::storage::unified::EntityKind::GraphNode(node) => {
+                                Some(node.node_type)
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| stored.node_type.clone());
                     let all_props =
                         materialize_graph_node_properties(self.inner.db.store().as_ref())?;
                     let props = all_props.get(&resolved).cloned().unwrap_or_default();
@@ -138,7 +157,7 @@ impl RedDBRuntime {
                     let mut record = UnifiedRecord::new();
                     record.set("node_id", Value::text(stored.id.clone()));
                     record.set("label", Value::text(stored.label.clone()));
-                    record.set("node_type", Value::text(stored.node_type.clone()));
+                    record.set("node_type", Value::text(node_type));
                     for k in &prop_keys {
                         if let Some(v) = props.get(*k) {
                             record.set(k.as_str(), v.clone());

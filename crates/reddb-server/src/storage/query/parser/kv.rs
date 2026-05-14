@@ -390,20 +390,29 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parse a key that may be bare (`name`) or dotted (`collection.key`).
+    /// Parse a key that may be bare (`name`), dotted (`collection.key`), or
+    /// colon-qualified (`collection:key`).
     /// Returns `(collection, key)`.
     pub(crate) fn parse_kv_key(
         &mut self,
         model: CollectionModel,
     ) -> Result<(String, String), ParseError> {
-        let first = self.expect_ident()?;
+        let first = self.parse_kv_key_part()?;
+        if self.consume(&Token::Colon)? {
+            let mut segments = vec![self.parse_kv_key_part()?];
+            while self.consume(&Token::Colon)? {
+                segments.push(self.parse_kv_key_part()?);
+            }
+            return Ok((first, segments.join(":")));
+        }
+
         if !self.consume(&Token::Dot)? {
             return Ok((KV_DEFAULT_COLLECTION.to_string(), first));
         }
 
-        let mut segments = vec![first, self.expect_ident_or_keyword()?];
+        let mut segments = vec![first, self.parse_kv_key_part()?];
         while self.consume(&Token::Dot)? {
-            segments.push(self.expect_ident_or_keyword()?);
+            segments.push(self.parse_kv_key_part()?);
         }
 
         if model == CollectionModel::Vault {
@@ -429,6 +438,17 @@ impl<'a> Parser<'a> {
         }
 
         Ok((segments.remove(0), segments.join(".")))
+    }
+
+    fn parse_kv_key_part(&mut self) -> Result<String, ParseError> {
+        match self.peek().clone() {
+            Token::String(value) => {
+                self.advance()?;
+                Ok(value)
+            }
+            Token::Ident(_) => self.expect_ident(),
+            _ => self.expect_ident_or_keyword(),
+        }
     }
 
     fn parse_keyed_list(&mut self, model: CollectionModel) -> Result<QueryExpr, ParseError> {
