@@ -1,6 +1,6 @@
 [package]
 name = "reddb-io-server"
-version = "1.1.1"
+version = "1.1.2"
 edition = "2021"
 authors = ["RedDB.io <hello@reddb.io>"]
 description = "RedDB server-side engine: storage, runtime, replication, MCP, AI, and the gRPC/HTTP/RedWire/PG-wire dispatchers. Re-exported by the umbrella `reddb` crate."

@@ -1,6 +1,6 @@
 {
   "name": "@reddb-io/cli",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "CLI launcher for RedDB. The JS/TS app driver is published as @reddb-io/sdk.",
   "type": "commonjs",
   "bin": {

@@ -1,6 +1,6 @@
 {
   "name": "@reddb-io/sdk",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Official embedded RedDB SDK — launches a local red binary over stdio JSON-RPC. Use @reddb-io/client for remote HTTP, gRPC, and RedWire.",
   "type": "module",
   "main": "src/index.js",

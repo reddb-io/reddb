@@ -1,6 +1,6 @@
 {
   "name": "@reddb-io/client",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Thin remote-only RedDB driver. Downloads the `red_client` binary on install. Speaks RedWire/gRPC/HTTP. Embedded URIs (memory://, file://, red:///path) are rejected — use @reddb-io/sdk for those.",
   "type": "module",
   "main": "src/index.js",
