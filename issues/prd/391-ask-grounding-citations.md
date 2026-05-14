@@ -6,6 +6,14 @@ GitHub: https://github.com/reddb-io/reddb/issues/391
 
 GitHub issue number: #391
 
+## Current state
+
+All known technical child issues for this PRD are closed on GitHub:
+#392 through #412, including #410 for replica ASK audit primary-sync.
+
+This parent remains open only for human/product acceptance of the ASK PRD.
+No additional AFK child issue is currently open for this PRD.
+
 ## Problem Statement
 
 Developers building AI-native applications (RAG, agents, semantic search over operational data) today reach for Postgres + pgvector + LangChain/LlamaIndex by default. They get vector search but no grounding guarantees — the LLM produces an answer, and they have to bolt on their own citation/attribution layer to know which source backed each claim. Building that layer correctly is non-trivial: handling adversarial content in sources, validating citations, applying per-user RLS to retrieval, accounting cost, auditing for compliance, and making the whole thing deterministic enough to test.
