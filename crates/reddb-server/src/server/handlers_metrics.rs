@@ -158,12 +158,61 @@ struct PromQueryRange {
     step_ns: u64,
 }
 
+#[derive(Debug, Clone)]
+struct MetricsRequestScope {
+    tenant: String,
+    namespace: String,
+}
+
 impl RedDBServer {
+    fn metrics_request_scope(
+        &self,
+        headers: &BTreeMap<String, String>,
+        default_namespace: &str,
+    ) -> MetricsRequestScope {
+        let tenant = headers
+            .get("x-reddb-tenant")
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| value.trim().to_string())
+            .or_else(|| self.metrics_tenant_from_bearer(headers))
+            .or_else(crate::runtime::impl_core::current_tenant)
+            .unwrap_or_else(|| "default".to_string());
+        let namespace = headers
+            .get("x-reddb-namespace")
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| value.trim().to_string())
+            .unwrap_or_else(|| default_namespace.to_string());
+        MetricsRequestScope { tenant, namespace }
+    }
+
+    fn metrics_tenant_from_bearer(&self, headers: &BTreeMap<String, String>) -> Option<String> {
+        let token = headers
+            .get("authorization")
+            .and_then(|value| value.strip_prefix("Bearer "))?;
+        if super::routing::looks_like_jwt(token) {
+            if let Some(validator) = self.runtime.oauth_validator() {
+                if let Ok((tenant, _username, _role)) =
+                    crate::wire::redwire::auth::validate_oauth_jwt_full(&validator, token)
+                {
+                    return tenant;
+                }
+            }
+        }
+        let auth_store = self.auth_store.as_ref()?;
+        auth_store
+            .validate_token_full(token)
+            .and_then(|(id, _role)| id.tenant)
+    }
+
     pub(crate) fn handle_prometheus_query(
         &self,
+        headers: &BTreeMap<String, String>,
         query: &BTreeMap<String, String>,
         body: Option<Vec<u8>>,
     ) -> HttpResponse {
+        let scope = self.metrics_request_scope(headers, "default");
+        self.runtime
+            .record_metrics_tenant_activity(&scope.tenant, &scope.namespace, "query");
         let raw_query = match prometheus_query_param(query, body.as_deref()) {
             Ok(query) => query,
             Err(err) => return prometheus_error_response(400, "bad_data", err),
@@ -181,7 +230,7 @@ impl RedDBServer {
             Ok(None) => None,
             Err(err) => return prometheus_error_response(400, "bad_data", err),
         };
-        match self.prometheus_eval_instant(expression, eval_time_ns) {
+        match self.prometheus_eval_instant(expression, eval_time_ns, &scope) {
             Ok(PromInstantEval::Vector(samples)) => prometheus_vector_response(samples),
             Ok(PromInstantEval::Scalar(value)) => prometheus_scalar_response(value),
             Err(err) => prometheus_query_error_response(err),
@@ -190,9 +239,13 @@ impl RedDBServer {
 
     pub(crate) fn handle_prometheus_query_range(
         &self,
+        headers: &BTreeMap<String, String>,
         query: &BTreeMap<String, String>,
         body: Option<Vec<u8>>,
     ) -> HttpResponse {
+        let scope = self.metrics_request_scope(headers, "default");
+        self.runtime
+            .record_metrics_tenant_activity(&scope.tenant, &scope.namespace, "query_range");
         let raw_query = match prometheus_required_param(query, body.as_deref(), "query") {
             Ok(query) => query,
             Err(err) => return prometheus_error_response(400, "bad_data", err),
@@ -206,7 +259,7 @@ impl RedDBServer {
             Err(err) => return prometheus_error_response(400, "bad_data", err),
         };
 
-        match self.prometheus_eval_range(expression, range) {
+        match self.prometheus_eval_range(expression, range, &scope) {
             Ok(PromRangeEval::Matrix(series)) => prometheus_matrix_response(series),
             Ok(PromRangeEval::Scalar(value)) => prometheus_scalar_response(value),
             Err(err) => prometheus_query_error_response(err),
@@ -251,6 +304,8 @@ impl RedDBServer {
                 "collection '{collection}' is not a metrics collection"
             )));
         }
+        let default_namespace = contract.metrics_namespace.as_deref().unwrap_or("default");
+        let scope = self.metrics_request_scope(headers, default_namespace);
 
         let decoded = snap::raw::Decoder::new()
             .decompress_vec(body)
@@ -264,7 +319,7 @@ impl RedDBServer {
             .map(|series| series.samples.len() as u64)
             .sum::<u64>();
         let rejected_series = request.timeseries.len() as u64;
-        let batch = match decode_metric_batch(&self.runtime, &collection, &contract, request) {
+        let batch = match decode_metric_batch(&self.runtime, &collection, &scope, request) {
             Ok(batch) => batch,
             Err(err) => {
                 self.runtime
@@ -272,6 +327,8 @@ impl RedDBServer {
                 return Err(err);
             }
         };
+        self.runtime
+            .record_metrics_tenant_activity(&scope.tenant, &scope.namespace, "ingest");
         if !batch.entities.is_empty() {
             self.runtime
                 .db()
@@ -297,6 +354,7 @@ impl RedDBServer {
     fn prometheus_instant_vector(
         &self,
         selector: PromSelector,
+        scope: &MetricsRequestScope,
     ) -> RedDBResult<Vec<PromVectorSample>> {
         let mut latest_by_series: BTreeMap<Vec<(String, String)>, PromVectorSample> =
             BTreeMap::new();
@@ -318,6 +376,9 @@ impl RedDBServer {
                     continue;
                 };
                 if point.metric != selector.metric {
+                    continue;
+                }
+                if !point_in_metrics_scope(&point, scope) {
                     continue;
                 }
                 let labels = prometheus_labels_for_point(&point);
@@ -349,6 +410,7 @@ impl RedDBServer {
         &self,
         selector: PromSelector,
         range: PromQueryRange,
+        scope: &MetricsRequestScope,
     ) -> RedDBResult<Vec<PromRangeSeries>> {
         let mut samples_by_series: BTreeMap<Vec<(String, String)>, PromRangeSeries> =
             BTreeMap::new();
@@ -375,6 +437,9 @@ impl RedDBServer {
                     continue;
                 }
                 if point.timestamp_ns < range.start_ns || point.timestamp_ns > range.end_ns {
+                    continue;
+                }
+                if !point_in_metrics_scope(&point, scope) {
                     continue;
                 }
                 let labels = prometheus_labels_for_point(&point);
@@ -414,24 +479,31 @@ impl RedDBServer {
         &self,
         expression: PromExpression,
         eval_time_ns: Option<u64>,
+        scope: &MetricsRequestScope,
     ) -> RedDBResult<PromInstantEval> {
         match expression {
             PromExpression::Scalar(value) => Ok(PromInstantEval::Scalar(value)),
             PromExpression::Selector(selector) => self
-                .prometheus_instant_vector(selector)
+                .prometheus_instant_vector(selector, scope)
                 .map(PromInstantEval::Vector),
             PromExpression::CounterFunction {
                 function,
                 selector,
                 window_ns,
             } => self
-                .prometheus_counter_function_vector(function, selector, window_ns, eval_time_ns)
+                .prometheus_counter_function_vector(
+                    function,
+                    selector,
+                    window_ns,
+                    eval_time_ns,
+                    scope,
+                )
                 .map(PromInstantEval::Vector),
             PromExpression::Aggregate {
                 op,
                 grouping,
                 expression,
-            } => match self.prometheus_eval_instant(*expression, eval_time_ns)? {
+            } => match self.prometheus_eval_instant(*expression, eval_time_ns, scope)? {
                 PromInstantEval::Vector(samples) => Ok(PromInstantEval::Vector(aggregate_vector(
                     samples, op, grouping,
                 ))),
@@ -442,7 +514,7 @@ impl RedDBServer {
             PromExpression::HistogramQuantile {
                 quantile,
                 expression,
-            } => match self.prometheus_eval_instant(*expression, eval_time_ns)? {
+            } => match self.prometheus_eval_instant(*expression, eval_time_ns, scope)? {
                 PromInstantEval::Vector(samples) => Ok(PromInstantEval::Vector(
                     histogram_quantile_vector(quantile, samples),
                 )),
@@ -451,8 +523,8 @@ impl RedDBServer {
                 )),
             },
             PromExpression::Arithmetic { op, left, right } => {
-                let left = self.prometheus_eval_instant(*left, eval_time_ns)?;
-                let right = self.prometheus_eval_instant(*right, eval_time_ns)?;
+                let left = self.prometheus_eval_instant(*left, eval_time_ns, scope)?;
+                let right = self.prometheus_eval_instant(*right, eval_time_ns, scope)?;
                 apply_instant_arithmetic(left, right, op)
             }
         }
@@ -462,24 +534,25 @@ impl RedDBServer {
         &self,
         expression: PromExpression,
         range: PromQueryRange,
+        scope: &MetricsRequestScope,
     ) -> RedDBResult<PromRangeEval> {
         match expression {
             PromExpression::Scalar(value) => Ok(PromRangeEval::Scalar(value)),
             PromExpression::Selector(selector) => self
-                .prometheus_range_matrix(selector, range)
+                .prometheus_range_matrix(selector, range, scope)
                 .map(PromRangeEval::Matrix),
             PromExpression::CounterFunction {
                 function,
                 selector,
                 window_ns,
             } => self
-                .prometheus_counter_function_matrix(function, selector, window_ns, range)
+                .prometheus_counter_function_matrix(function, selector, window_ns, range, scope)
                 .map(PromRangeEval::Matrix),
             PromExpression::Aggregate {
                 op,
                 grouping,
                 expression,
-            } => match self.prometheus_eval_range(*expression, range)? {
+            } => match self.prometheus_eval_range(*expression, range, scope)? {
                 PromRangeEval::Matrix(series) => Ok(PromRangeEval::Matrix(aggregate_matrix(
                     series, op, grouping,
                 ))),
@@ -490,7 +563,7 @@ impl RedDBServer {
             PromExpression::HistogramQuantile {
                 quantile,
                 expression,
-            } => match self.prometheus_eval_range(*expression, range)? {
+            } => match self.prometheus_eval_range(*expression, range, scope)? {
                 PromRangeEval::Matrix(series) => Ok(PromRangeEval::Matrix(
                     histogram_quantile_matrix(quantile, series),
                 )),
@@ -499,8 +572,8 @@ impl RedDBServer {
                 )),
             },
             PromExpression::Arithmetic { op, left, right } => {
-                let left = self.prometheus_eval_range(*left, range)?;
-                let right = self.prometheus_eval_range(*right, range)?;
+                let left = self.prometheus_eval_range(*left, range, scope)?;
+                let right = self.prometheus_eval_range(*right, range, scope)?;
                 apply_range_arithmetic(left, right, op)
             }
         }
@@ -512,17 +585,18 @@ impl RedDBServer {
         selector: PromSelector,
         window_ns: u64,
         eval_time_ns: Option<u64>,
+        scope: &MetricsRequestScope,
     ) -> RedDBResult<Vec<PromVectorSample>> {
         let eval_time_ns = match eval_time_ns {
             Some(time) => time,
-            None => match self.latest_timestamp_for_selector(&selector)? {
+            None => match self.latest_timestamp_for_selector(&selector, scope)? {
                 Some(time) => time,
                 None => return Ok(Vec::new()),
             },
         };
         let window_start_ns = eval_time_ns.saturating_sub(window_ns);
         let samples_by_series =
-            self.prometheus_samples_by_series(&selector, window_start_ns, eval_time_ns)?;
+            self.prometheus_samples_by_series(&selector, window_start_ns, eval_time_ns, scope)?;
         let mut vector = Vec::new();
         for mut series in samples_by_series.into_values() {
             series.values.sort_by_key(|sample| sample.timestamp_ns);
@@ -545,10 +619,11 @@ impl RedDBServer {
         selector: PromSelector,
         window_ns: u64,
         range: PromQueryRange,
+        scope: &MetricsRequestScope,
     ) -> RedDBResult<Vec<PromRangeSeries>> {
         let fetch_start_ns = range.start_ns.saturating_sub(window_ns);
         let samples_by_series =
-            self.prometheus_samples_by_series(&selector, fetch_start_ns, range.end_ns)?;
+            self.prometheus_samples_by_series(&selector, fetch_start_ns, range.end_ns, scope)?;
         let mut matrix = Vec::new();
         for mut series in samples_by_series.into_values() {
             series.values.sort_by_key(|sample| sample.timestamp_ns);
@@ -577,10 +652,14 @@ impl RedDBServer {
         Ok(matrix)
     }
 
-    fn latest_timestamp_for_selector(&self, selector: &PromSelector) -> RedDBResult<Option<u64>> {
+    fn latest_timestamp_for_selector(
+        &self,
+        selector: &PromSelector,
+        scope: &MetricsRequestScope,
+    ) -> RedDBResult<Option<u64>> {
         let mut latest = None;
         for series in self
-            .prometheus_samples_by_series(selector, 0, u64::MAX)?
+            .prometheus_samples_by_series(selector, 0, u64::MAX, scope)?
             .into_values()
         {
             for sample in series.values {
@@ -597,6 +676,7 @@ impl RedDBServer {
         selector: &PromSelector,
         start_ns: u64,
         end_ns: u64,
+        scope: &MetricsRequestScope,
     ) -> RedDBResult<BTreeMap<Vec<(String, String)>, PromRangeSeries>> {
         let mut samples_by_series: BTreeMap<Vec<(String, String)>, PromRangeSeries> =
             BTreeMap::new();
@@ -621,6 +701,9 @@ impl RedDBServer {
                     continue;
                 }
                 if point.timestamp_ns < start_ns || point.timestamp_ns > end_ns {
+                    continue;
+                }
+                if !point_in_metrics_scope(&point, scope) {
                     continue;
                 }
                 let labels = prometheus_labels_for_point(&point);
@@ -1180,6 +1263,20 @@ fn selector_matches(selector: &PromSelector, labels: &BTreeMap<String, String>) 
             .get(&matcher.name)
             .is_none_or(|value| value != &matcher.value),
     })
+}
+
+fn point_in_metrics_scope(
+    point: &crate::storage::TimeSeriesData,
+    scope: &MetricsRequestScope,
+) -> bool {
+    point
+        .tags
+        .get("__tenant_id")
+        .is_some_and(|tenant| tenant == &scope.tenant)
+        && point
+            .tags
+            .get("__namespace")
+            .is_some_and(|namespace| namespace == &scope.namespace)
 }
 
 fn prometheus_labels_for_point(point: &crate::storage::TimeSeriesData) -> BTreeMap<String, String> {
@@ -1890,14 +1987,11 @@ fn resolve_metrics_collection(
 fn decode_metric_batch(
     runtime: &RedDBRuntime,
     collection: &str,
-    contract: &crate::physical::CollectionContract,
+    scope: &MetricsRequestScope,
     request: PromWriteRequest,
 ) -> RedDBResult<DecodedMetricBatch> {
-    let tenant = crate::runtime::impl_core::current_tenant().unwrap_or_else(|| "default".into());
-    let namespace = contract
-        .metrics_namespace
-        .clone()
-        .unwrap_or_else(|| "default".to_string());
+    let tenant = &scope.tenant;
+    let namespace = &scope.namespace;
     let mut entities = Vec::new();
     let mut accepted_series = 0_u64;
     let mut accepted_samples = 0_u64;

@@ -2160,6 +2160,8 @@ impl RedDBRuntime {
                 },
                 kv_stats: crate::runtime::KvStatsCounters::default(),
                 metrics_ingest_stats: crate::runtime::MetricsIngestCounters::default(),
+                metrics_tenant_activity_stats:
+                    crate::runtime::MetricsTenantActivityCounters::default(),
                 kv_tag_index: crate::runtime::KvTagIndex::default(),
             }),
         };
@@ -4441,6 +4443,23 @@ impl RedDBRuntime {
         self.inner
             .metrics_ingest_stats
             .record_cardinality_budget_rejections(rejected_series);
+    }
+
+    pub(crate) fn record_metrics_tenant_activity(
+        &self,
+        tenant: &str,
+        namespace: &str,
+        operation: &str,
+    ) {
+        self.inner
+            .metrics_tenant_activity_stats
+            .record(tenant, namespace, operation);
+    }
+
+    pub(crate) fn metrics_tenant_activity_snapshot(
+        &self,
+    ) -> Vec<crate::runtime::MetricsTenantActivityStats> {
+        self.inner.metrics_tenant_activity_stats.snapshot()
     }
 
     /// Execute a query under a typed scope override without embedding

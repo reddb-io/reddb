@@ -184,6 +184,14 @@ pub struct RuntimeStats {
     pub metrics_ingest: MetricsIngestStats,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetricsTenantActivityStats {
+    pub tenant: String,
+    pub namespace: String,
+    pub operation: String,
+    pub count: u64,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MetricsIngestStats {
     pub samples_accepted: u64,
@@ -235,6 +243,44 @@ impl MetricsIngestCounters {
                 .series_rejected_cardinality_budget
                 .load(AtomicOrdering::Relaxed),
         }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct MetricsTenantActivityCounters {
+    inner: Mutex<BTreeMap<(String, String, String), u64>>,
+}
+
+impl MetricsTenantActivityCounters {
+    pub(crate) fn record(&self, tenant: &str, namespace: &str, operation: &str) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let key = (
+            tenant.to_string(),
+            namespace.to_string(),
+            operation.to_string(),
+        );
+        *inner.entry(key).or_insert(0) += 1;
+    }
+
+    pub(crate) fn snapshot(&self) -> Vec<MetricsTenantActivityStats> {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        inner
+            .iter()
+            .map(
+                |((tenant, namespace, operation), count)| MetricsTenantActivityStats {
+                    tenant: tenant.clone(),
+                    namespace: namespace.clone(),
+                    operation: operation.clone(),
+                    count: *count,
+                },
+            )
+            .collect()
     }
 }
 
@@ -1117,6 +1163,7 @@ struct RuntimeInner {
     /// runtime-local; persistent accounting belongs in catalog stats.
     kv_stats: KvStatsCounters,
     metrics_ingest_stats: MetricsIngestCounters,
+    metrics_tenant_activity_stats: MetricsTenantActivityCounters,
     /// Process-local normal-KV tag index used by `INVALIDATE TAGS`.
     kv_tag_index: KvTagIndex,
 }
