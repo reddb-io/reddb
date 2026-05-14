@@ -1,0 +1,12 @@
+# syntax=docker/dockerfile:1
+
+# Release client image: use binaries already produced by the release build
+# matrix. This keeps GHCR publishing from recompiling red_client inside Docker.
+
+FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
+
+COPY --chown=nonroot:nonroot --chmod=755 docker-bin/amd64/red_client /usr/local/bin/red_client
+
+USER nonroot:nonroot
+
+ENTRYPOINT ["/usr/local/bin/red_client"]

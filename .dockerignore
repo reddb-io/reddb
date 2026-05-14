@@ -6,6 +6,8 @@
 !rustfmt.toml
 !Dockerfile
 !Dockerfile.client
+!Dockerfile.release
+!Dockerfile.client.release
 !README.md
 !crates/
 !crates/**
@@ -13,6 +15,8 @@
 !src/**
 !docker/
 !docker/**
+!docker-bin/
+!docker-bin/**
 !docs/
 !docs/spec/
 !docs/spec/**

@@ -664,7 +664,8 @@ jobs:
 
   publish-client-image:
     # ADR 0004 — thin red_client container, parallel to publish-docker.
-    # Built from Dockerfile.client (fully-static musl + distroless/static).
+    # Built from the release matrix artifact so Docker publishing does not
+    # recompile Rust inside the container.
     # Pushed to GHCR under reddb-io; Docker Hub mirroring is intentionally off.
     name: Docker image — red_client (GHCR)
     needs: [plan, build]
@@ -675,6 +676,10 @@ jobs:
     if: needs.plan.outputs.should_skip != 'true'
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-x86_64
+          path: release/linux-x86_64
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
@@ -685,8 +690,12 @@ jobs:
           node scripts/sync-version.js
           bash scripts/check-versions.sh
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+      - name: Prepare release binary for Docker
+        run: |
+          set -euo pipefail
+          mkdir -p docker-bin/amd64
+          cp release/linux-x86_64/red_client-linux-x86_64 docker-bin/amd64/red_client
+          chmod 755 docker-bin/amd64/red_client
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -711,24 +720,21 @@ jobs:
             type=raw,value=next,enable=${{ needs.plan.outputs.release_channel == 'next' }}
           labels: |
             org.opencontainers.image.title=RedDB thin client
-            org.opencontainers.image.description=Minimal `red_client` binary on distroless/static
+            org.opencontainers.image.description=Minimal `red_client` binary on distroless/cc
             org.opencontainers.image.version=${{ needs.plan.outputs.package_version }}
 
       - name: Build and push
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: Dockerfile.client
+          file: Dockerfile.client.release
           push: true
-          # Only linux/amd64 for now — Dockerfile.client uses
-          # messense/rust-musl-cross:x86_64-musl, which is single-arch.
-          # Adding linux/arm64 needs a parallel job with the aarch64
-          # variant of rust-musl-cross; defer to a follow-up.
+          # Only linux/amd64 for now because the published client image tracks
+          # the existing linux-x86_64 release artifact.
           platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           provenance: false
-          cache-from: type=gha,scope=client
 
   # ===========================================================================
   # publish-python — Build and upload reddb wheels to PyPI.
