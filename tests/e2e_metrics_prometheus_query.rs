@@ -123,13 +123,9 @@ fn prometheus_query_supports_negative_matchers_and_prometheus_error_shape() {
     assert_eq!(results[0]["value"][1], "5");
 
     let (status, response) = prom_query(&rt, "sum(http_requests_total)");
-    assert_eq!(status, 422, "response={response}");
-    assert_eq!(response["status"], "error");
-    assert_eq!(response["errorType"], "bad_data");
-    assert!(
-        response["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("expected selector or rate/irate/increase")),
-        "clear unsupported PromQL error expected: {response}"
-    );
+    assert_eq!(status, 200, "response={response}");
+    let results = vector_results(&response);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["metric"], serde_json::json!({}));
+    assert_eq!(results[0]["value"][1], "16");
 }

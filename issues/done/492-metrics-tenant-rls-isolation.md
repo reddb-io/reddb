@@ -16,11 +16,11 @@ Make tenant and namespace part of metrics series identity and enforce that bound
 
 ## Acceptance criteria
 
-- [ ] Ingestion resolves tenant/namespace from request/auth context and stores it as part of series identity.
-- [ ] Queries apply tenant/RLS filters before returning any series.
-- [ ] A caller cannot read another tenant's series by guessing metric names or labels.
-- [ ] Audit or equivalent observability records metrics ingest/query activity at tenant/namespace granularity.
-- [ ] Tests cover same-label series in different tenants and denied cross-tenant query attempts.
+- [x] Ingestion resolves tenant/namespace from request/auth context and stores it as part of series identity.
+- [x] Queries apply tenant/RLS filters before returning any series.
+- [x] A caller cannot read another tenant's series by guessing metric names or labels.
+- [x] Audit or equivalent observability records metrics ingest/query activity at tenant/namespace granularity.
+- [x] Tests cover same-label series in different tenants and denied cross-tenant query attempts.
 
 ## Blocked by
 

@@ -219,11 +219,13 @@ impl RedDBServer {
             ("POST", "/admin/failover/promote") => self.handle_admin_failover_promote(body),
             // PLAN.md Phase 5.1 / 5.4 — observability endpoints.
             ("GET", "/metrics") => self.handle_metrics(),
-            ("GET", "/api/v1/query") => self.handle_prometheus_query(&query, None),
-            ("POST", "/api/v1/query") => self.handle_prometheus_query(&query, Some(body)),
-            ("GET", "/api/v1/query_range") => self.handle_prometheus_query_range(&query, None),
+            ("GET", "/api/v1/query") => self.handle_prometheus_query(&headers, &query, None),
+            ("POST", "/api/v1/query") => self.handle_prometheus_query(&headers, &query, Some(body)),
+            ("GET", "/api/v1/query_range") => {
+                self.handle_prometheus_query_range(&headers, &query, None)
+            }
             ("POST", "/api/v1/query_range") => {
-                self.handle_prometheus_query_range(&query, Some(body))
+                self.handle_prometheus_query_range(&headers, &query, Some(body))
             }
             ("POST", "/api/v1/write") => {
                 self.handle_prometheus_remote_write(&query, &headers, body)

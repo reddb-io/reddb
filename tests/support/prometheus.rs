@@ -53,6 +53,15 @@ pub fn post_remote_write(
     collection: &str,
     request: &WriteRequest,
 ) -> (u16, String) {
+    post_remote_write_with_headers(rt, collection, request, &[])
+}
+
+pub fn post_remote_write_with_headers(
+    rt: RedDBRuntime,
+    collection: &str,
+    request: &WriteRequest,
+    headers: &[(&str, &str)],
+) -> (u16, String) {
     let mut protobuf = Vec::new();
     request
         .encode(&mut protobuf)
@@ -68,21 +77,31 @@ pub fn post_remote_write(
              Content-Type: application/x-protobuf\r\n\
              X-Prometheus-Remote-Write-Version: 0.1.0\r\n\
              Content-Length: {}\r\n\
-             Connection: close\r\n\
-             \r\n",
+             Connection: close\r\n",
             body.len()
         )
         .into_bytes();
+        for (name, value) in headers {
+            request.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
+        }
+        request.extend_from_slice(b"\r\n");
         request.extend_from_slice(&body);
         http_request(addr, request)
     })
 }
 
 pub fn get(rt: RedDBRuntime, path: &str) -> (u16, String) {
+    get_with_headers(rt, path, &[])
+}
+
+pub fn get_with_headers(rt: RedDBRuntime, path: &str, headers: &[(&str, &str)]) -> (u16, String) {
     with_one_request_server(rt, |addr| {
-        let request =
-            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-                .into_bytes();
+        let mut request =
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n").into_bytes();
+        for (name, value) in headers {
+            request.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
+        }
+        request.extend_from_slice(b"\r\n");
         http_request(addr, request)
     })
 }

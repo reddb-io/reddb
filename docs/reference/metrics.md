@@ -40,6 +40,15 @@ the metrics collection according to `RETENTION` and leaves rollup data in place.
 `query_range` reads the coarsest rollup tier whose target resolution is less
 than or equal to the requested `step`; otherwise it reads raw samples.
 
+Metrics tenant and namespace are internal series identity dimensions, not
+ordinary Prometheus labels. HTTP callers can provide `X-RedDB-Tenant` and
+`X-RedDB-Namespace`; otherwise RedDB falls back to the authenticated bearer
+tenant, the current runtime tenant, and finally `default`. Query endpoints apply
+the same effective scope before returning series, so guessing metric names or
+internal labels cannot read another tenant's data. `/metrics` exposes
+`reddb_metrics_tenant_activity_total{tenant,namespace,operation}` for ingest and
+query activity.
+
 ## AI Provider Path
 
 The AI embedding path emits process-local counters and histograms. Labels never contain request bodies, prompts, API keys, or authorization headers.
