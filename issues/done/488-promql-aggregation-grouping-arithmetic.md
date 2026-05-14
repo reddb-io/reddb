@@ -16,11 +16,11 @@ Extend the PromQL adapter and metrics executor to support common dashboard aggre
 
 ## Acceptance criteria
 
-- [ ] `sum`, `avg`, `min`, `max`, and `count` work over instant and range contexts covered by the v0 matrix.
-- [ ] `by (...)` and `without (...)` grouping produce correct label sets.
-- [ ] Simple arithmetic supported by the v0 matrix works over compatible vectors/scalars.
-- [ ] Unsupported vector matching or advanced operators fail clearly.
-- [ ] Golden tests cover representative Grafana dashboard queries.
+- [x] `sum`, `avg`, `min`, `max`, and `count` work over instant and range contexts covered by the v0 matrix.
+- [x] `by (...)` and `without (...)` grouping produce correct label sets.
+- [x] Simple arithmetic supported by the v0 matrix works over compatible vectors/scalars.
+- [x] Unsupported vector matching or advanced operators fail clearly.
+- [x] Golden tests cover representative Grafana dashboard queries.
 
 ## Blocked by
 
