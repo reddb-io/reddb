@@ -619,8 +619,34 @@ pub(crate) fn evaluate_entity_filter_with_db(
         Filter::Contains { field, substring } => {
             resolve_entity_field(entity, field, table_name, table_alias)
                 .as_ref()
-                .and_then(|v| runtime_value_text_cow(v.as_ref()))
-                .is_some_and(|value| value.contains(substring.as_str()))
+                .is_some_and(|value| runtime_value_contains(value.as_ref(), substring))
         }
+    }
+}
+
+fn runtime_value_contains(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .any(|value| runtime_value_contains(value, needle)),
+        Value::Json(bytes) => {
+            crate::serde_json::from_slice::<crate::serde_json::Value>(bytes)
+                .ok()
+                .is_some_and(|json| json_value_contains(&json, needle))
+                || String::from_utf8_lossy(bytes).contains(needle)
+        }
+        other => runtime_value_text_cow(other).is_some_and(|value| value.contains(needle)),
+    }
+}
+
+fn json_value_contains(value: &crate::serde_json::Value, needle: &str) -> bool {
+    match value {
+        crate::serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| json_value_contains(value, needle)),
+        crate::serde_json::Value::String(value) => value == needle,
+        crate::serde_json::Value::Number(value) => value.to_string() == needle,
+        crate::serde_json::Value::Bool(value) => value.to_string() == needle,
+        crate::serde_json::Value::Null | crate::serde_json::Value::Object(_) => false,
     }
 }

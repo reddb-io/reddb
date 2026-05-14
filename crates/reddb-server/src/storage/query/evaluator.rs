@@ -687,6 +687,9 @@ fn dispatch_function(name: &str, args: &[Value]) -> Result<Value, EvalError> {
                 args: vec![other.data_type()],
             }),
         },
+        "JSON_EXTRACT" => Ok(json_extract_value(&args[0], &args[1], false)),
+        "JSON_EXTRACT_TEXT" => Ok(json_extract_value(&args[0], &args[1], true)),
+        "CONTAINS" => Ok(contains_value(&args[0], &args[1])),
         "ABS" => match &args[0] {
             Value::Integer(n) => n
                 .checked_abs()
@@ -716,6 +719,138 @@ fn dispatch_function(name: &str, args: &[Value]) -> Result<Value, EvalError> {
             args: args.iter().map(|v| v.data_type()).collect(),
         }),
     }
+}
+
+fn json_extract_value(input: &Value, path: &Value, as_text: bool) -> Value {
+    let Value::Text(path) = path else {
+        return Value::Null;
+    };
+    let Some(json) = value_to_json(input) else {
+        return Value::Null;
+    };
+    let Some(steps) = parse_json_path(path) else {
+        return Value::Null;
+    };
+    let Some(target) = json_path_get(&json, &steps) else {
+        return Value::Null;
+    };
+
+    if as_text {
+        match target {
+            crate::serde_json::Value::String(value) => Value::text(value.clone()),
+            crate::serde_json::Value::Null => Value::Null,
+            crate::serde_json::Value::Bool(value) => Value::text(value.to_string()),
+            crate::serde_json::Value::Number(value) => Value::text(value.to_string()),
+            other => Value::text(other.to_string_compact()),
+        }
+    } else {
+        Value::text(target.to_string_compact())
+    }
+}
+
+fn contains_value(input: &Value, needle: &Value) -> Value {
+    let Value::Text(needle) = needle else {
+        return Value::Null;
+    };
+    Value::Boolean(value_contains(input, needle))
+}
+
+fn value_contains(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::Array(values) => values.iter().any(|value| value_contains(value, needle)),
+        Value::Json(_) => value_to_json(value)
+            .as_ref()
+            .is_some_and(|json| json_value_contains(json, needle)),
+        Value::Text(value) => value.contains(needle),
+        other => other.display_string().contains(needle),
+    }
+}
+
+fn json_value_contains(value: &crate::serde_json::Value, needle: &str) -> bool {
+    match value {
+        crate::serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| json_value_contains(value, needle)),
+        crate::serde_json::Value::String(value) => value == needle,
+        crate::serde_json::Value::Number(value) => value.to_string() == needle,
+        crate::serde_json::Value::Bool(value) => value.to_string() == needle,
+        crate::serde_json::Value::Null | crate::serde_json::Value::Object(_) => false,
+    }
+}
+
+fn value_to_json(value: &Value) -> Option<crate::serde_json::Value> {
+    match value {
+        Value::Null => Some(crate::serde_json::Value::Null),
+        Value::Json(bytes) => crate::serde_json::from_slice(bytes).ok(),
+        Value::Text(value) => crate::serde_json::from_str(value).ok(),
+        _ => None,
+    }
+}
+
+enum JsonPathStep<'a> {
+    Field(&'a str),
+    Index(usize),
+}
+
+fn parse_json_path(path: &str) -> Option<Vec<JsonPathStep<'_>>> {
+    let path = path.trim();
+    let rest = path.strip_prefix('$').unwrap_or(path);
+    let mut steps = Vec::new();
+    let bytes = rest.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'.' => {
+                index += 1;
+                let start = index;
+                while index < bytes.len() && bytes[index] != b'.' && bytes[index] != b'[' {
+                    index += 1;
+                }
+                if start == index {
+                    return None;
+                }
+                steps.push(JsonPathStep::Field(
+                    std::str::from_utf8(&bytes[start..index]).ok()?,
+                ));
+            }
+            b'[' => {
+                index += 1;
+                let start = index;
+                while index < bytes.len() && bytes[index] != b']' {
+                    index += 1;
+                }
+                if index >= bytes.len() {
+                    return None;
+                }
+                steps.push(JsonPathStep::Index(
+                    std::str::from_utf8(&bytes[start..index])
+                        .ok()?
+                        .parse()
+                        .ok()?,
+                ));
+                index += 1;
+            }
+            _ => return None,
+        }
+    }
+    Some(steps)
+}
+
+fn json_path_get<'a>(
+    root: &'a crate::serde_json::Value,
+    steps: &[JsonPathStep<'_>],
+) -> Option<&'a crate::serde_json::Value> {
+    let mut current = root;
+    for step in steps {
+        current = match (step, current) {
+            (JsonPathStep::Field(name), crate::serde_json::Value::Object(map)) => map.get(*name)?,
+            (JsonPathStep::Index(index), crate::serde_json::Value::Array(values)) => {
+                values.get(*index)?
+            }
+            _ => return None,
+        };
+    }
+    Some(current)
 }
 
 fn eval_case(
