@@ -158,11 +158,6 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &CreateTableQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
-        if query.collection_model == CollectionModel::Document {
-            return Err(RedDBError::Query(
-                "NOT_YET_SUPPORTED: CREATE DOCUMENT is not implemented yet; use an auto-created table by inserting JSON rows into a normal table as a workaround".to_string(),
-            ));
-        }
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         if is_system_schema_name(&query.name) {
             return Err(RedDBError::Query("system schema is read-only".to_string()));

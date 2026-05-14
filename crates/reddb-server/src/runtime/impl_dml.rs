@@ -804,9 +804,6 @@ impl RedDBRuntime {
                                 .map_err(|e| {
                                     RedDBError::Query(format!("invalid JSON body: {e}"))
                                 })?;
-                            if query.returning.is_some() {
-                                returning_field_snaps.push(document_values.clone());
-                            }
                             let input = CreateDocumentInput {
                                 collection: query.table.clone(),
                                 body,
@@ -814,7 +811,17 @@ impl RedDBRuntime {
                                 node_links: Vec::new(),
                                 vector_links: Vec::new(),
                             };
-                            entity_outputs.push(self.create_document(input)?);
+                            let output = self.create_document(input)?;
+                            if query.returning.is_some() {
+                                let fields = output
+                                    .entity
+                                    .as_ref()
+                                    .map(entity_row_fields_snapshot)
+                                    .filter(|fields| !fields.is_empty())
+                                    .unwrap_or(document_values);
+                                returning_field_snaps.push(fields);
+                            }
+                            entity_outputs.push(output);
                         }
                         InsertEntityType::Kv => {
                             let (kv_values, mut metadata) =
