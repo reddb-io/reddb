@@ -138,3 +138,10 @@ minimum acceptable proof is:
 - `transport smoke`: parity check for the advertised transport or server mode.
 - `SDK`: driver-level test against local RedDB behavior, not only mocked client
   serialization.
+
+## Focused Regression Packs
+
+- `tests/e2e_feedback_regression_pack.rs` covers the #451 feedback regressions
+  for PSC-003, PSC-005, PSC-006, PSC-011, and PSC-013: probabilistic SQL-read
+  forms, `COUNT(*) AS count`, quoted KV colon keys, timeseries JSON tags, and
+  `GRAPH PROPERTIES` `node_type` preservation.
