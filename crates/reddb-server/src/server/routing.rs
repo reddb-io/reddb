@@ -219,6 +219,9 @@ impl RedDBServer {
             ("POST", "/admin/failover/promote") => self.handle_admin_failover_promote(body),
             // PLAN.md Phase 5.1 / 5.4 — observability endpoints.
             ("GET", "/metrics") => self.handle_metrics(),
+            ("POST", "/api/v1/write") => {
+                self.handle_prometheus_remote_write(&query, &headers, body)
+            }
             ("GET", "/admin/status") => self.handle_admin_status(),
             // SOC 2 / HIPAA structured audit query — JSONL/JSON over
             // the active `.audit.log` plus rotated archives.
@@ -1454,7 +1457,10 @@ impl RedDBServer {
                     || path == "/health"
             }
             crate::server::ServerSurface::MetricsOnly => {
-                path == "/metrics" || path.starts_with("/health/") || path == "/health"
+                path == "/metrics"
+                    || path == "/api/v1/write"
+                    || path.starts_with("/health/")
+                    || path == "/health"
             }
         }
     }

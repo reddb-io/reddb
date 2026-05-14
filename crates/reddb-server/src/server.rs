@@ -62,6 +62,7 @@ mod handlers_geo;
 mod handlers_graph;
 mod handlers_keyed;
 mod handlers_log;
+mod handlers_metrics;
 mod handlers_ops;
 mod handlers_query;
 mod handlers_replication;
@@ -81,6 +82,7 @@ use self::handlers_ai::*;
 use self::handlers_entity::*;
 use self::handlers_graph::*;
 use self::handlers_keyed::*;
+use self::handlers_metrics::*;
 use self::handlers_ops::*;
 use self::handlers_query::*;
 use self::patch_support::*;
@@ -280,6 +282,11 @@ impl RedDBServer {
             }
         }
         Ok(())
+    }
+
+    pub fn serve_one_on(&self, listener: TcpListener) -> io::Result<()> {
+        let (stream, _) = listener.accept()?;
+        self.handle_connection(stream)
     }
 
     pub fn serve_in_background(&self) -> thread::JoinHandle<io::Result<()>> {
