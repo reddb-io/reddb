@@ -14,7 +14,12 @@ struct PromTimeSeries {
     labels: Vec<PromLabel>,
     #[prost(message, repeated, tag = "2")]
     samples: Vec<PromSample>,
+    #[prost(message, repeated, tag = "4")]
+    histograms: Vec<PromNativeHistogram>,
 }
+
+#[derive(Clone, PartialEq, Message)]
+struct PromNativeHistogram {}
 
 #[derive(Clone, PartialEq, Message)]
 struct PromLabel {
@@ -56,6 +61,10 @@ enum PromExpression {
     Aggregate {
         op: PromAggregateOp,
         grouping: PromGrouping,
+        expression: Box<PromExpression>,
+    },
+    HistogramQuantile {
+        quantile: f64,
         expression: Box<PromExpression>,
     },
     Arithmetic {
@@ -416,6 +425,17 @@ impl RedDBServer {
                     "unsupported PromQL aggregation over scalar".to_string(),
                 )),
             },
+            PromExpression::HistogramQuantile {
+                quantile,
+                expression,
+            } => match self.prometheus_eval_instant(*expression, eval_time_ns)? {
+                PromInstantEval::Vector(samples) => Ok(PromInstantEval::Vector(
+                    histogram_quantile_vector(quantile, samples),
+                )),
+                PromInstantEval::Scalar(_) => Err(RedDBError::Query(
+                    "unsupported histogram_quantile over scalar".to_string(),
+                )),
+            },
             PromExpression::Arithmetic { op, left, right } => {
                 let left = self.prometheus_eval_instant(*left, eval_time_ns)?;
                 let right = self.prometheus_eval_instant(*right, eval_time_ns)?;
@@ -451,6 +471,17 @@ impl RedDBServer {
                 ))),
                 PromRangeEval::Scalar(_) => Err(RedDBError::Query(
                     "unsupported PromQL aggregation over scalar".to_string(),
+                )),
+            },
+            PromExpression::HistogramQuantile {
+                quantile,
+                expression,
+            } => match self.prometheus_eval_range(*expression, range)? {
+                PromRangeEval::Matrix(series) => Ok(PromRangeEval::Matrix(
+                    histogram_quantile_matrix(quantile, series),
+                )),
+                PromRangeEval::Scalar(_) => Err(RedDBError::Query(
+                    "unsupported histogram_quantile over scalar".to_string(),
                 )),
             },
             PromExpression::Arithmetic { op, left, right } => {
@@ -733,6 +764,23 @@ fn parse_prom_expression(input: &str) -> Result<PromExpression, String> {
             return Ok(PromExpression::Scalar(value));
         }
     }
+    if let Some(inner) = input
+        .strip_prefix("histogram_quantile(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        let (quantile_text, expression_text) = split_histogram_quantile_args(inner)?;
+        let quantile = quantile_text
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| format!("invalid histogram_quantile quantile '{quantile_text}'"))?;
+        if !quantile.is_finite() || !(0.0..=1.0).contains(&quantile) {
+            return Err("invalid histogram_quantile quantile: expected 0 <= q <= 1".to_string());
+        }
+        return Ok(PromExpression::HistogramQuantile {
+            quantile,
+            expression: Box::new(parse_prom_expression(expression_text)?),
+        });
+    }
     if let Some(aggregate) = parse_prom_aggregate(input)? {
         return Ok(aggregate);
     }
@@ -763,6 +811,45 @@ fn parse_prom_expression(input: &str) -> Result<PromExpression, String> {
         ));
     }
     parse_prom_selector(input).map(PromExpression::Selector)
+}
+
+fn split_histogram_quantile_args(input: &str) -> Result<(&str, &str), String> {
+    let mut paren_depth = 0_i32;
+    let mut bracket_depth = 0_i32;
+    let mut brace_depth = 0_i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (idx, ch) in input.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '(' => paren_depth += 1,
+            ')' => paren_depth -= 1,
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth -= 1,
+            '{' => brace_depth += 1,
+            '}' => brace_depth -= 1,
+            ',' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                let left = input[..idx].trim();
+                let right = input[idx + ch.len_utf8()..].trim();
+                if left.is_empty() || right.is_empty() {
+                    break;
+                }
+                return Ok((left, right));
+            }
+            _ => {}
+        }
+    }
+    Err("unsupported histogram_quantile shape: expected histogram_quantile(q, expr)".to_string())
 }
 
 fn split_top_level_arithmetic<'a>(
@@ -1328,6 +1415,147 @@ fn aggregate_values(values: &[f64], op: PromAggregateOp) -> Option<f64> {
     }
 }
 
+fn histogram_quantile_vector(
+    quantile: f64,
+    samples: Vec<PromVectorSample>,
+) -> Vec<PromVectorSample> {
+    let mut groups: BTreeMap<
+        Vec<(String, String)>,
+        (BTreeMap<String, String>, Vec<(f64, f64)>, u64),
+    > = BTreeMap::new();
+    for sample in samples {
+        let Some(le) = sample
+            .labels
+            .get("le")
+            .and_then(|value| parse_histogram_le(value))
+        else {
+            continue;
+        };
+        let labels = histogram_output_labels(&sample.labels);
+        let key = labels
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        let timestamp = sample.timestamp_ns;
+        let entry = groups
+            .entry(key)
+            .or_insert_with(|| (labels, Vec::new(), timestamp));
+        entry.1.push((le, sample.value));
+        entry.2 = entry.2.max(timestamp);
+    }
+
+    groups
+        .into_values()
+        .filter_map(|(labels, mut buckets, timestamp_ns)| {
+            histogram_quantile(quantile, &mut buckets).map(|value| PromVectorSample {
+                labels,
+                timestamp_ns,
+                value,
+            })
+        })
+        .collect()
+}
+
+fn histogram_quantile_matrix(quantile: f64, series: Vec<PromRangeSeries>) -> Vec<PromRangeSeries> {
+    let mut groups: BTreeMap<
+        Vec<(String, String)>,
+        (BTreeMap<String, String>, BTreeMap<u64, Vec<(f64, f64)>>),
+    > = BTreeMap::new();
+    for item in series {
+        let Some(le) = item
+            .labels
+            .get("le")
+            .and_then(|value| parse_histogram_le(value))
+        else {
+            continue;
+        };
+        let labels = histogram_output_labels(&item.labels);
+        let key = labels
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        let entry = groups
+            .entry(key)
+            .or_insert_with(|| (labels, BTreeMap::new()));
+        for value in item.values {
+            entry
+                .1
+                .entry(value.timestamp_ns)
+                .or_default()
+                .push((le, value.value));
+        }
+    }
+
+    groups
+        .into_values()
+        .map(|(labels, by_timestamp)| PromRangeSeries {
+            labels,
+            values: by_timestamp
+                .into_iter()
+                .filter_map(|(timestamp_ns, mut buckets)| {
+                    histogram_quantile(quantile, &mut buckets).map(|value| PromRangeValue {
+                        timestamp_ns,
+                        value,
+                    })
+                })
+                .collect(),
+        })
+        .filter(|series| !series.values.is_empty())
+        .collect()
+}
+
+fn histogram_output_labels(labels: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    labels
+        .iter()
+        .filter(|(name, _)| name.as_str() != "__name__" && name.as_str() != "le")
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
+fn parse_histogram_le(value: &str) -> Option<f64> {
+    if value.eq_ignore_ascii_case("+inf") || value.eq_ignore_ascii_case("inf") {
+        Some(f64::INFINITY)
+    } else {
+        value.parse::<f64>().ok().filter(|v| v.is_finite())
+    }
+}
+
+fn histogram_quantile(quantile: f64, buckets: &mut Vec<(f64, f64)>) -> Option<f64> {
+    if buckets.is_empty() {
+        return None;
+    }
+    buckets.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let total = buckets.last()?.1;
+    if total <= 0.0 {
+        return None;
+    }
+    let rank = quantile * total;
+    let mut previous_bound = 0.0;
+    let mut previous_count = 0.0;
+    for (bound, count) in buckets.iter().copied() {
+        if count < rank {
+            if bound.is_finite() {
+                previous_bound = bound;
+            }
+            previous_count = count;
+            continue;
+        }
+        if !bound.is_finite() {
+            return Some(previous_bound);
+        }
+        let bucket_count = count - previous_count;
+        if bucket_count <= 0.0 {
+            return Some(bound);
+        }
+        let fraction = (rank - previous_count) / bucket_count;
+        return Some(previous_bound + (bound - previous_bound) * fraction.clamp(0.0, 1.0));
+    }
+    buckets
+        .iter()
+        .rev()
+        .find_map(|(bound, _)| bound.is_finite().then_some(*bound))
+}
+
 fn apply_instant_arithmetic(
     left: PromInstantEval,
     right: PromInstantEval,
@@ -1660,10 +1888,19 @@ fn decode_metric_batch(
     let mut accepted_samples = 0_u64;
 
     for series in request.timeseries {
+        if !series.histograms.is_empty() {
+            return Err(RedDBError::Query(
+                "remote_write native histograms are not supported in metrics v0".to_string(),
+            ));
+        }
         let (metric, mut tags) = decode_labels(series.labels)?;
         tags.insert("__tenant_id".to_string(), tenant.clone());
         tags.insert("__namespace".to_string(), namespace.clone());
-        let kind = if metric.ends_with("_total") {
+        let kind = if metric.ends_with("_total")
+            || metric.ends_with("_bucket")
+            || metric.ends_with("_sum")
+            || metric.ends_with("_count")
+        {
             "counter"
         } else {
             "gauge"
