@@ -542,7 +542,6 @@ fn infer_schema_mode(model: CollectionModel) -> SchemaMode {
         | CollectionModel::Mixed => SchemaMode::Dynamic,
         CollectionModel::TimeSeries | CollectionModel::Metrics => SchemaMode::SemiStructured,
         CollectionModel::Queue => SchemaMode::Dynamic,
-        CollectionModel::Metrics => SchemaMode::SemiStructured,
     }
 }
 
