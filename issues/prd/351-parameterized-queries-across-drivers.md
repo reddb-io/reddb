@@ -196,7 +196,7 @@ Each driver maps its native types to engine `Value` (deep module per driver: par
 
 **Backwards compatibility.** Original `query(sql)` signature stays. No params = no binding overhead. Old wire `Query` frame stays. Capability negotiation per ADR 0001 + 0010 (wire adapters translate, never duplicate). Old client + new server: works (uses old frame). New client + old server: degrades to string-concat with deprecation warning, OR errors loudly — to be decided in the ADR.
 
-**ADR.** A new ADR `00XX-parameterized-queries.md` codifies: placeholder syntax, `Value` enum surface, wire frame layout, capability negotiation, error taxonomy, and the deprecation policy for unsafe string-concat patterns in docs and examples.
+**ADR.** ADR 0015 (`docs/adr/0015-parameterized-query-contract.md`) codifies: placeholder syntax, `Value` enum surface, wire frame layout, capability negotiation, error taxonomy, and the deprecation policy for unsafe string-concat patterns in docs and examples. It remains Draft until the human gates in #352 and #377 accept it.
 
 **Documentation.** Every vector / SEARCH / INSERT example in `docs/data-models/`, `docs/vectors/`, `docs/query/`, and every driver guide in `docs/clients/` and `docs/guides/` is updated so the parameterized form is the default shown to new users.
 
@@ -242,4 +242,5 @@ Each driver maps its native types to engine `Value` (deep module per driver: par
 - Aligns with ADR 0010 (`wire-adapters-translate-never-duplicate`): the new `Value` enum and binder are the single canonical representation; HTTP, gRPC, RedWire, Postgres-wire, and embedded stdio all translate to/from it without duplicating logic.
 - The `$N` + `?` dual-syntax decision adds parser surface but matches the "users come from Postgres or SQLite" reality.
 - All twelve official drivers ship the new API in the same release. The deep modules (placeholder parser, binder, wire Value codec) live in the engine and are the single source of truth — drivers only own the language-side type mapping.
+- ADR 0015 is the recorded contract for this PRD and links the remaining human gates #352 and #377.
 - A child PRD handles documentation sweep across `docs/` so the parameterized form becomes the default in every example.

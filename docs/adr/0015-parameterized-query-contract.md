@@ -6,7 +6,8 @@
 **Superseded by:** -
 **Related ADRs:** [0001 - Redwire TCP protocol](0001-redwire-tcp-protocol.md),
 [0010 - serialization boundary discipline](0010-serialization-boundary-discipline.md)
-**Related issue:** [#377 - ADR: parameter contract, wire Value enum, error taxonomy](https://github.com/reddb-io/reddb/issues/377)
+**Related issues:** [#352 - ADR: parameterized queries](https://github.com/reddb-io/reddb/issues/352),
+[#377 - ADR: parameter contract, wire Value enum, error taxonomy](https://github.com/reddb-io/reddb/issues/377)
 **Parent issue:** [#351 - PRD: Parameterized queries and prepared statements](https://github.com/reddb-io/reddb/issues/351)
 
 ## Context
@@ -25,7 +26,8 @@ The existing implementation already has a shared engine binder
 current contract so future parameter and prepared-statement work extends one
 surface instead of creating transport-specific dialects.
 
-This ADR remains Draft until the human HITL gate on issue #377 accepts it.
+This ADR remains Draft until the human HITL gates on issues #352 and #377
+accept it.
 
 ## Decision
 
@@ -177,5 +179,5 @@ drivers.
   distinctions.
 - Named parameters and full PostgreSQL extended-protocol parity are explicitly
   future work, not implicit behavior in the current contract.
-- Issue #377 can be closed only after human review changes this ADR status from
-  Draft to Accepted or records an equivalent acceptance decision.
+- Issues #352 and #377 can be closed only after human review changes this ADR
+  status from Draft to Accepted or records an equivalent acceptance decision.
