@@ -219,6 +219,8 @@ impl RedDBServer {
             ("POST", "/admin/failover/promote") => self.handle_admin_failover_promote(body),
             // PLAN.md Phase 5.1 / 5.4 — observability endpoints.
             ("GET", "/metrics") => self.handle_metrics(),
+            ("GET", "/api/v1/query") => self.handle_prometheus_query(&query, None),
+            ("POST", "/api/v1/query") => self.handle_prometheus_query(&query, Some(body)),
             ("POST", "/api/v1/write") => {
                 self.handle_prometheus_remote_write(&query, &headers, body)
             }
@@ -1458,6 +1460,7 @@ impl RedDBServer {
             }
             crate::server::ServerSurface::MetricsOnly => {
                 path == "/metrics"
+                    || path == "/api/v1/query"
                     || path == "/api/v1/write"
                     || path.starts_with("/health/")
                     || path == "/health"

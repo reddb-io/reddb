@@ -16,11 +16,11 @@ Expose a Prometheus-compatible instant query endpoint for simple metric selector
 
 ## Acceptance criteria
 
-- [ ] `/api/v1/query` accepts simple selectors such as `metric_name` and `metric_name{label="value"}`.
-- [ ] Equality and negative label matchers supported by the v0 matrix return correct series.
-- [ ] Responses follow Prometheus `status/data/resultType/result` envelope shape for vectors.
-- [ ] Unsupported PromQL returns a clear Prometheus-shaped error instead of panicking or returning wrong data.
-- [ ] Tests ingest fixture samples via remote-write and query them through the HTTP API.
+- [x] `/api/v1/query` accepts simple selectors such as `metric_name` and `metric_name{label="value"}`.
+- [x] Equality and negative label matchers supported by the v0 matrix return correct series.
+- [x] Responses follow Prometheus `status/data/resultType/result` envelope shape for vectors.
+- [x] Unsupported PromQL returns a clear Prometheus-shaped error instead of panicking or returning wrong data.
+- [x] Tests ingest fixture samples via remote-write and query them through the HTTP API.
 
 ## Blocked by
 

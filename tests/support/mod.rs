@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub mod mock_ai_provider;
+pub mod prometheus;
 
 use reddb::api::REDDB_FORMAT_VERSION;
 use reddb::application::{
