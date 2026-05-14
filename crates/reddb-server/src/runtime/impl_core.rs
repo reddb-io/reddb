@@ -4616,12 +4616,14 @@ impl RedDBRuntime {
                 // admit it. Edges are pruned automatically because the
                 // graph builder skips edges whose endpoints aren't in
                 // `allowed_nodes`.
-                let (graph, node_properties) = self.materialize_graph_with_rls()?;
+                let (graph, node_properties, edge_properties) =
+                    self.materialize_graph_with_rls()?;
                 let result =
-                    crate::storage::query::unified::UnifiedExecutor::execute_on_with_node_properties(
+                    crate::storage::query::unified::UnifiedExecutor::execute_on_with_graph_properties(
                         &graph,
                         &expr,
                         node_properties,
+                        edge_properties,
                     )
                         .map_err(|err| RedDBError::Query(err.to_string()))?;
 
@@ -7775,6 +7777,7 @@ impl RedDBRuntime {
             String,
             std::collections::HashMap<String, crate::storage::schema::Value>,
         >,
+        crate::storage::query::unified::EdgeProperties,
     )> {
         use crate::storage::engine::GraphStore;
         use crate::storage::query::ast::{PolicyAction, PolicyTargetKind};
@@ -7788,6 +7791,7 @@ impl RedDBRuntime {
         let graph = GraphStore::new();
         let mut node_properties: HashMap<String, HashMap<String, crate::storage::schema::Value>> =
             HashMap::new();
+        let mut edge_properties: crate::storage::query::unified::EdgeProperties = HashMap::new();
         let mut allowed_nodes: HashSet<String> = HashSet::new();
 
         // Per-collection cached compiled filters — Nodes-kind for
@@ -7858,14 +7862,16 @@ impl RedDBRuntime {
                     EntityData::Edge(e) => e.weight,
                     _ => edge.weight as f32 / 1000.0,
                 };
+                let edge_label = super::graph_edge_label(&edge.label);
                 graph
-                    .add_edge_with_label(
-                        &edge.from_node,
-                        &edge.to_node,
-                        &super::graph_edge_label(&edge.label),
-                        weight,
-                    )
+                    .add_edge_with_label(&edge.from_node, &edge.to_node, &edge_label, weight)
                     .map_err(|err| RedDBError::Query(err.to_string()))?;
+                if let EntityData::Edge(edge_data) = &entity.data {
+                    edge_properties.insert(
+                        (edge.from_node.clone(), edge_label, edge.to_node.clone()),
+                        edge_data.properties.clone(),
+                    );
+                }
             }
         }
 
@@ -7874,7 +7880,7 @@ impl RedDBRuntime {
         // declared at the bottom of this file.
         let _ = (PolicyAction::Select, PolicyTargetKind::Nodes);
 
-        Ok((graph, node_properties))
+        Ok((graph, node_properties, edge_properties))
     }
 
     /// Phase 1.1 MVCC universal: post-save hook that stamps `xmin` on a

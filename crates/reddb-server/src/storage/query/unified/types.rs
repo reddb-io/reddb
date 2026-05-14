@@ -475,6 +475,7 @@ pub struct MatchedEdge {
     /// Category label string for the edge.
     pub edge_label: String,
     pub weight: f32,
+    pub properties: HashMap<String, Value>,
 }
 
 impl MatchedEdge {
@@ -491,6 +492,7 @@ impl MatchedEdge {
             to: target.to_string(),
             edge_label: edge_label.into(),
             weight,
+            properties: HashMap::new(),
         }
     }
 }

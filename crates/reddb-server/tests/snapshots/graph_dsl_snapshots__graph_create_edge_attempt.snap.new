@@ -4,5 +4,5 @@ assertion_line: 110
 expression: "fmt_parse_error(\"CREATE EDGE (a)-[:KNOWS]->(b)\")"
 ---
 input: "CREATE EDGE (a)-[:KNOWS]->(b)"
-kind:  Syntax
-error: Parse error at 1:1: Unexpected token: EDGE (expected: TABLE, GRAPH, VECTOR, DOCUMENT, KV, COLLECTION, INDEX, UNIQUE, TIMESERIES, QUEUE, TREE, HLL, SKETCH, FILTER, SCHEMA, SEQUENCE, MIGRATION)
+kind:  UnsupportedToken { token: "EDGE" }
+error: Parse error at 1:8: token EDGE is recognized but not supported in this position

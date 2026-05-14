@@ -149,6 +149,7 @@ fn test_graph_path() {
         to: "node:2".to_string(),
         edge_label: "connects_to".to_string(),
         weight: 1.5,
+        properties: HashMap::new(),
     };
 
     let extended = path.extend(edge, "node:2");

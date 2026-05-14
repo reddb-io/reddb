@@ -213,6 +213,29 @@ pub(super) fn materialize_graph_node_properties(
     Ok(node_properties)
 }
 
+pub(super) fn materialize_graph_edge_properties(
+    store: &UnifiedStore,
+) -> RedDBResult<crate::storage::query::unified::EdgeProperties> {
+    let mut edge_properties = HashMap::new();
+
+    for (_, entity) in store.query_all(|_| true) {
+        if let (EntityKind::GraphEdge(edge), EntityData::Edge(edge_data)) =
+            (&entity.kind, &entity.data)
+        {
+            edge_properties.insert(
+                (
+                    edge.from_node.clone(),
+                    graph_edge_label(&edge.label),
+                    edge.to_node.clone(),
+                ),
+                edge_data.properties.clone(),
+            );
+        }
+    }
+
+    Ok(edge_properties)
+}
+
 pub(super) fn normalize_token_filter_list(values: Option<Vec<String>>) -> Option<BTreeSet<String>> {
     values
         .map(|values| {
@@ -805,7 +828,7 @@ pub(super) fn graph_edge_label(input: &str) -> String {
         "relatedto" | "related" => "related_to".to_string(),
         "hasuser" => "has_user".to_string(),
         "hascert" | "hascertificate" => "has_cert".to_string(),
-        _ if !token.is_empty() => token,
+        _ if !token.is_empty() => input.trim().to_ascii_lowercase(),
         _ => "related_to".to_string(),
     }
 }
