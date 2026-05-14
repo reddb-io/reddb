@@ -23,13 +23,17 @@ on:
       - 'CHANGELOG**'
       - 'LICENSE**'
   workflow_dispatch:
+    inputs:
+      full_ci:
+        description: Run expensive cross-platform and release-adjacent jobs
+        type: boolean
+        default: false
 
-# Cost guard: a fresh push to a PR cancels the previous run. Devs
-# iterating on a branch don't double-pay 16 jobs per push.
-# Pushes to main/develop don't cancel — those are release-grade.
+# Cost guard: new pushes cancel older runs on the same ref. Release-grade
+# validation lives in release.yml; CI push runs should stay quick.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -133,6 +137,7 @@ jobs:
     # operators may select for release artifacts.
     name: Feature Matrix (${{ matrix.features.label }})
     needs: gate
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     strategy:
@@ -204,6 +209,7 @@ jobs:
   driver-param-conformance:
     name: Driver Param Conformance
     needs: gate
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
@@ -212,7 +218,7 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.25'
           cache-dependency-path: drivers/go/go.sum
@@ -272,6 +278,7 @@ jobs:
     # tarball, so this also exercises the include manifest end-to-end.
     name: Publish Dry-Run (crates.io)
     needs: gate
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
     env:
@@ -300,6 +307,7 @@ jobs:
   containers:
     name: Container Stack
     needs: gate
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
     steps:
@@ -341,6 +349,7 @@ jobs:
     # tests/chaos_*.rs and tests/drill_*.rs. Failure is a release blocker.
     name: Chaos & Drill Suite
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: github.event_name == 'workflow_dispatch' && inputs.full_ci
     timeout-minutes: 25
     needs: tests
     env:
@@ -369,6 +378,7 @@ jobs:
     # backend-specific failure modes.
     name: Chaos Suite (MinIO S3 backend)
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: github.event_name == 'workflow_dispatch' && inputs.full_ci
     timeout-minutes: 25
     needs: tests
     services:
@@ -414,6 +424,7 @@ jobs:
     # (systemd install, mmap, Unix sockets) via cfg gates in the source.
     name: Windows (build + unit tests)
     needs: gate
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
     runs-on: blacksmith-8vcpu-windows-2025
     timeout-minutes: 30
     steps:
@@ -438,6 +449,7 @@ jobs:
     # story complete. Same scope — library build + unit tests.
     name: macOS (build + unit tests)
     needs: gate
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
     runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 30
     steps:
@@ -461,6 +473,7 @@ jobs:
     # nightly run lives in a separate scheduled workflow.
     name: Fuzz Parsers
     needs: gate
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     env:
@@ -511,6 +524,7 @@ jobs:
   package:
     name: cargo package dry-run
     needs: gate
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.full_ci)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
