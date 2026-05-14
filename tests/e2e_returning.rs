@@ -62,6 +62,50 @@ fn returning_column_list_projects_subset() {
 }
 
 #[test]
+fn returning_surfaces_column_defaults() {
+    let rt = rt();
+    let q = QueryUseCases::new(&rt);
+    q.execute(ExecuteQueryInput {
+        query: "CREATE TABLE users (id INT, name TEXT DEFAULT = 'unknown', active BOOLEAN DEFAULT = true)".into(),
+    })
+    .expect("create users with defaults");
+
+    let result = q
+        .execute(ExecuteQueryInput {
+            query: "INSERT INTO users (id) VALUES (1) RETURNING id, name, active".into(),
+        })
+        .expect("insert returning defaults");
+
+    assert_eq!(result.affected_rows, 1);
+    assert_eq!(
+        result.result.columns,
+        vec!["id".to_string(), "name".to_string(), "active".to_string()]
+    );
+    let rec = &result.result.records[0];
+    assert!(matches!(rec.get("id"), Some(Value::Integer(1))));
+    assert!(matches!(rec.get("name"), Some(Value::Text(s)) if s.as_ref() == "unknown"));
+    assert!(matches!(rec.get("active"), Some(Value::Boolean(true))));
+}
+
+#[test]
+fn returning_expression_reports_not_yet_supported() {
+    let rt = rt();
+    let q = QueryUseCases::new(&rt);
+    q.execute(ExecuteQueryInput {
+        query: "INSERT INTO users (id, name) VALUES (1, 'a')".into(),
+    })
+    .expect("seed users");
+
+    let err = q
+        .execute(ExecuteQueryInput {
+            query: "UPDATE users SET name = 'b' RETURNING UPPER(name)".into(),
+        })
+        .expect_err("RETURNING expression should be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("NOT_YET_SUPPORTED"), "{msg}");
+}
+
+#[test]
 fn returning_multi_row_insert_returns_all_rows() {
     let rt = rt();
     let q = QueryUseCases::new(&rt);
