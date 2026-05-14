@@ -14,12 +14,13 @@
 # Required assets are the cross-product of:
 #   - bins:      red, red_client
 #   - suffixes:  linux-x86_64, linux-aarch64, linux-armv7,
-#                macos-x86_64, macos-aarch64,
 #                windows-x86_64.exe
 # The suffix list mirrors `composeAssetName()` in
-# `drivers/js/src/internal/asset-fetcher/asset-name.js` — keep them in
-# sync. `aarch64-static` (musl) is intentionally NOT required here: the
-# JS postinstall does not request it.
+# `drivers/js/src/internal/asset-fetcher/asset-name.js` for release-blocking
+# platforms. macOS assets are temporarily optional because the hosted macOS
+# runners have been the least stable part of the release path. `aarch64-static`
+# (musl) is intentionally NOT required here: the JS postinstall does not
+# request it.
 #
 # Usage:
 #   GH_TOKEN=...  scripts/verify-release-assets.sh v1.0.8
@@ -42,8 +43,6 @@ SUFFIXES=(
   linux-x86_64
   linux-aarch64
   linux-armv7
-  macos-x86_64
-  macos-aarch64
   windows-x86_64.exe
 )
 

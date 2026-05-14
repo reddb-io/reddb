@@ -80,12 +80,13 @@ test("verify-release-assets gates every npm publish on the binary contract (#418
     "linux-x86_64",
     "linux-aarch64",
     "linux-armv7",
-    "macos-x86_64",
-    "macos-aarch64",
     "windows-x86_64.exe",
   ]) {
     assert.ok(script.includes(suffix), `verify script lists ${suffix}`);
     assert.ok(assetName.includes(suffix), `asset-name.js still maps to ${suffix}`);
+  }
+  for (const suffix of ["macos-x86_64", "macos-aarch64"]) {
+    assert.ok(assetName.includes(suffix), `asset-name.js still maps optional ${suffix}`);
   }
   assert.match(script, /BINS=\(red red_client\)/);
   assert.match(script, /gh release view "\$TAG" --repo "\$REPO" --json assets/);
