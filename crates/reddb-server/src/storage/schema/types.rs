@@ -1280,6 +1280,20 @@ impl Value {
             other => format!("{}", other),
         }
     }
+
+    /// Plain text coercion for string-producing SQL operators.
+    ///
+    /// Unlike `Display`, this does not render `Text` as a SQL literal.
+    pub fn plain_text(&self) -> String {
+        match self {
+            Value::Text(text) => text.to_string(),
+            Value::Array(elems) => {
+                let items: Vec<String> = elems.iter().map(Value::plain_text).collect();
+                format!("[{}]", items.join(", "))
+            }
+            other => other.display_string(),
+        }
+    }
 }
 
 fn format_scaled_i64(value: i64, scale: u8) -> String {
@@ -1659,6 +1673,8 @@ impl IntoIterator for Row {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[test]
     fn test_datatype_roundtrip() {
@@ -1738,6 +1754,96 @@ mod tests {
         let (recovered, size) = Value::from_bytes(&bytes).unwrap();
         assert_eq!(value, recovered);
         assert_eq!(size, bytes.len());
+    }
+
+    #[test]
+    fn plain_text_does_not_sql_quote_text() {
+        assert_eq!(Value::text("alice").plain_text(), "alice");
+        assert_eq!(
+            Value::Array(vec![Value::text("alice"), Value::Integer(7)]).plain_text(),
+            "[alice, 7]"
+        );
+    }
+
+    fn short_text() -> impl Strategy<Value = String> {
+        "[a-zA-Z0-9_ ./:-]{0,16}".prop_map(|text| text)
+    }
+
+    fn arb_value() -> impl Strategy<Value = Value> {
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<i64>().prop_map(Value::Integer),
+            any::<u64>().prop_map(Value::UnsignedInteger),
+            any::<f64>().prop_map(Value::Float),
+            short_text().prop_map(Value::text),
+            proptest::collection::vec(any::<u8>(), 0..8).prop_map(Value::Blob),
+            any::<bool>().prop_map(Value::Boolean),
+            any::<i64>().prop_map(Value::Timestamp),
+            any::<i64>().prop_map(Value::Duration),
+            any::<u32>().prop_map(|ip| Value::IpAddr(IpAddr::V4(Ipv4Addr::from(ip)))),
+            any::<[u8; 16]>().prop_map(|ip| Value::IpAddr(IpAddr::V6(Ipv6Addr::from(ip)))),
+            any::<[u8; 6]>().prop_map(Value::MacAddr),
+            proptest::collection::vec(any::<f32>(), 0..4).prop_map(Value::Vector),
+            proptest::collection::vec(any::<u8>(), 0..8).prop_map(Value::Json),
+            any::<[u8; 16]>().prop_map(Value::Uuid),
+            short_text().prop_map(Value::NodeRef),
+            short_text().prop_map(Value::EdgeRef),
+            (short_text(), any::<u64>())
+                .prop_map(|(collection, id)| Value::VectorRef(collection, id)),
+            (short_text(), any::<u64>()).prop_map(|(table, id)| Value::RowRef(table, id)),
+            any::<[u8; 3]>().prop_map(Value::Color),
+            short_text().prop_map(Value::Email),
+            short_text().prop_map(Value::Url),
+            any::<u64>().prop_map(Value::Phone),
+            any::<u32>().prop_map(Value::Semver),
+            (any::<u32>(), 0u8..=32).prop_map(|(ip, prefix)| Value::Cidr(ip, prefix)),
+            any::<i32>().prop_map(Value::Date),
+            any::<u32>().prop_map(Value::Time),
+            any::<i64>().prop_map(Value::Decimal),
+            any::<u8>().prop_map(Value::EnumValue),
+            any::<i64>().prop_map(Value::TimestampMs),
+            any::<u32>().prop_map(Value::Ipv4),
+            any::<[u8; 16]>().prop_map(Value::Ipv6),
+            (any::<u32>(), any::<u32>()).prop_map(|(ip, mask)| Value::Subnet(ip, mask)),
+            any::<u16>().prop_map(Value::Port),
+            any::<i32>().prop_map(Value::Latitude),
+            any::<i32>().prop_map(Value::Longitude),
+            (any::<i32>(), any::<i32>()).prop_map(|(lat, lon)| Value::GeoPoint(lat, lon)),
+            any::<[u8; 2]>().prop_map(Value::Country2),
+            any::<[u8; 3]>().prop_map(Value::Country3),
+            any::<[u8; 2]>().prop_map(Value::Lang2),
+            any::<[u8; 5]>().prop_map(Value::Lang5),
+            any::<[u8; 3]>().prop_map(Value::Currency),
+            short_text().prop_map(Value::AssetCode),
+            (short_text(), any::<i64>(), 0u8..=9).prop_map(|(asset_code, minor_units, scale)| {
+                Value::Money {
+                    asset_code,
+                    minor_units,
+                    scale,
+                }
+            }),
+            any::<[u8; 4]>().prop_map(Value::ColorAlpha),
+            any::<i64>().prop_map(Value::BigInt),
+            (short_text(), short_text())
+                .prop_map(|(collection, key)| Value::KeyRef(collection, key)),
+            (short_text(), any::<u64>()).prop_map(|(collection, id)| Value::DocRef(collection, id)),
+            short_text().prop_map(Value::TableRef),
+            any::<u32>().prop_map(Value::PageRef),
+            proptest::collection::vec(any::<u8>(), 0..8).prop_map(Value::Secret),
+            short_text().prop_map(Value::Password),
+        ];
+
+        leaf.prop_recursive(2, 16, 4, |inner| {
+            proptest::collection::vec(inner, 0..4).prop_map(Value::Array)
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn plain_text_is_deterministic_for_every_value_variant(value in arb_value()) {
+            let first = value.plain_text();
+            prop_assert_eq!(first, value.plain_text());
+        }
     }
 
     #[test]
