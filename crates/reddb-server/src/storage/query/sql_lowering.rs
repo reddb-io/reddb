@@ -196,26 +196,10 @@ pub fn projection_to_expr(projection: &Projection) -> Option<(Expr, Option<Strin
             },
             None,
         )),
-        Projection::Column(column) => Some((
-            Expr::Column {
-                field: FieldRef::TableColumn {
-                    table: String::new(),
-                    column: column.clone(),
-                },
-                span: Span::synthetic(),
-            },
-            None,
-        )),
-        Projection::Alias(column, alias) => Some((
-            Expr::Column {
-                field: FieldRef::TableColumn {
-                    table: String::new(),
-                    column: column.clone(),
-                },
-                span: Span::synthetic(),
-            },
-            Some(alias.clone()),
-        )),
+        Projection::Column(column) => Some((projection_column_to_expr(column), None)),
+        Projection::Alias(column, alias) => {
+            Some((projection_column_to_expr(column), Some(alias.clone())))
+        }
         Projection::Function(name, args) => {
             let (name, alias) = split_projection_function_alias(name);
             let args = args
@@ -243,6 +227,37 @@ pub fn projection_to_expr(projection: &Projection) -> Option<(Expr, Option<Strin
             alias.clone(),
         )),
     }
+}
+
+fn projection_column_to_expr(column: &str) -> Expr {
+    if let Some(value) = projection_literal_value(column) {
+        return Expr::Literal {
+            value,
+            span: Span::synthetic(),
+        };
+    }
+
+    Expr::Column {
+        field: FieldRef::TableColumn {
+            table: String::new(),
+            column: column.to_string(),
+        },
+        span: Span::synthetic(),
+    }
+}
+
+fn projection_literal_value(column: &str) -> Option<Value> {
+    let literal = column.strip_prefix("LIT:")?;
+    if literal.is_empty() {
+        return Some(Value::Null);
+    }
+    if let Ok(value) = literal.parse::<i64>() {
+        return Some(Value::Integer(value));
+    }
+    if let Ok(value) = literal.parse::<f64>() {
+        return Some(Value::Float(value));
+    }
+    Some(Value::text(literal.to_string()))
 }
 
 pub fn projection_to_select_item(projection: &Projection) -> Option<SelectItem> {

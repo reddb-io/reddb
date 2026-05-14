@@ -966,9 +966,35 @@ pub(super) fn evaluate_runtime_filter_with_db(
         Filter::Contains { field, substring } => {
             resolve_runtime_field(record, field, table_name, table_alias)
                 .as_ref()
-                .and_then(runtime_value_text)
-                .is_some_and(|value| value.contains(substring))
+                .is_some_and(|value| runtime_value_contains(value, substring))
         }
+    }
+}
+
+fn runtime_value_contains(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .any(|value| runtime_value_contains(value, needle)),
+        Value::Json(bytes) => {
+            crate::serde_json::from_slice::<JsonValue>(bytes)
+                .ok()
+                .is_some_and(|json| json_value_contains(&json, needle))
+                || String::from_utf8_lossy(bytes).contains(needle)
+        }
+        other => runtime_value_text(other).is_some_and(|value| value.contains(needle)),
+    }
+}
+
+fn json_value_contains(value: &JsonValue, needle: &str) -> bool {
+    match value {
+        JsonValue::Array(values) => values
+            .iter()
+            .any(|value| json_value_contains(value, needle)),
+        JsonValue::String(value) => value == needle,
+        JsonValue::Number(value) => value.to_string() == needle,
+        JsonValue::Bool(value) => value.to_string() == needle,
+        JsonValue::Null | JsonValue::Object(_) => false,
     }
 }
 
@@ -1431,8 +1457,15 @@ pub(super) fn resolve_runtime_document_path(record: &UnifiedRecord, path: &str) 
     // early exit based on the capability flag.
     let segments = parse_runtime_document_path(path);
     let (root, tail) = segments.split_first()?;
-    let root_value = record.get(root.as_str())?;
-    resolve_runtime_document_path_from_value(root_value, tail)
+    if let Some(root_value) = record.get(root.as_str()) {
+        return resolve_runtime_document_path_from_value(root_value, tail);
+    }
+    let (flattened_root, flattened_tail) = tail.split_first()?;
+    if let Some(value) = record.get(&tail.join(".")) {
+        return Some(value.clone());
+    }
+    let flattened_value = record.get(flattened_root.as_str())?;
+    resolve_runtime_document_path_from_value(flattened_value, flattened_tail)
 }
 
 pub(super) fn resolve_runtime_document_path_from_value(
@@ -1473,17 +1506,14 @@ pub(super) fn resolve_runtime_document_json_path(
     let mut current = value;
     for segment in path {
         current = match current {
-            JsonValue::Object(entries) => {
-                entries.iter().find_map(
-                    |(key, value)| {
-                        if key == segment {
-                            Some(value)
-                        } else {
-                            None
-                        }
-                    },
-                )?
-            }
+            JsonValue::Object(entries) => entries
+                .iter()
+                .find_map(|(key, value)| (key == segment).then_some(value))
+                .or_else(|| {
+                    entries
+                        .iter()
+                        .find_map(|(key, value)| key.eq_ignore_ascii_case(segment).then_some(value))
+                })?,
             JsonValue::Array(items) => {
                 let index = segment.parse::<usize>().ok()?;
                 items.get(index)?
@@ -1491,16 +1521,22 @@ pub(super) fn resolve_runtime_document_json_path(
             _ => return None,
         };
     }
-    runtime_json_scalar_to_value(current)
+    runtime_json_value_to_runtime_value(current)
 }
 
-pub(super) fn runtime_json_scalar_to_value(value: &JsonValue) -> Option<Value> {
+pub(super) fn runtime_json_value_to_runtime_value(value: &JsonValue) -> Option<Value> {
     match value {
         JsonValue::Null => Some(Value::Null),
         JsonValue::Bool(value) => Some(Value::Boolean(*value)),
         JsonValue::Number(value) => Some(Value::Float(*value)),
         JsonValue::String(value) => Some(Value::text(value.clone())),
-        JsonValue::Array(_) | JsonValue::Object(_) => None,
+        JsonValue::Array(values) => Some(Value::Array(
+            values
+                .iter()
+                .map(|value| runtime_json_value_to_runtime_value(value).unwrap_or(Value::Null))
+                .collect(),
+        )),
+        JsonValue::Object(_) => Some(Value::Json(value.to_string_compact().into_bytes())),
     }
 }
 
@@ -1684,7 +1720,8 @@ pub(super) fn runtime_value_text(value: &Value) -> Option<String> {
         Value::Timestamp(value) => Some(value.to_string()),
         Value::Duration(value) => Some(value.to_string()),
         Value::Null => None,
-        Value::Blob(_) | Value::Vector(_) | Value::Json(_) => None,
+        Value::Json(bytes) => String::from_utf8(bytes.clone()).ok(),
+        Value::Blob(_) | Value::Vector(_) => None,
         Value::Color([r, g, b]) => Some(format!("#{:02X}{:02X}{:02X}", r, g, b)),
         Value::Email(s) => Some(s.clone()),
         Value::Url(s) => Some(s.clone()),
