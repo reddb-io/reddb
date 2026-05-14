@@ -1735,6 +1735,9 @@ pub struct CreateTableQuery {
     pub if_not_exists: bool,
     /// Optional default TTL applied to newly inserted items in this collection.
     pub default_ttl_ms: Option<u64>,
+    /// Metrics rollup tiers declared by `CREATE METRICS ... DOWNSAMPLE`.
+    /// Uses the existing time-series policy spelling: target:source:aggregation.
+    pub metrics_rollup_policies: Vec<String>,
     /// Fields to prioritize in the context index (WITH CONTEXT INDEX ON (f1, f2))
     pub context_index_fields: Vec<String>,
     /// Enables the global context index for this table

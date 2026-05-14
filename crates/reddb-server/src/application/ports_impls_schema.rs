@@ -64,6 +64,7 @@ impl RuntimeSchemaPort for RedDBRuntime {
             columns: columns.into_iter().map(to_create_column_def).collect(),
             if_not_exists,
             default_ttl_ms,
+            metrics_rollup_policies: Vec::new(),
             context_index_fields: context_index_fields.clone(),
             context_index_enabled: !context_index_fields.is_empty(),
             timestamps,

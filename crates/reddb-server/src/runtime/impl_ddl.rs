@@ -198,6 +198,27 @@ impl RedDBRuntime {
             );
         }
         if query.collection_model == CollectionModel::Metrics {
+            for spec in &query.metrics_rollup_policies {
+                let policy = crate::storage::timeseries::retention::DownsamplePolicy::parse(spec)
+                    .ok_or_else(|| {
+                    RedDBError::Query(format!("invalid metrics rollup policy '{}'", spec))
+                })?;
+                if policy.source != "raw" {
+                    return Err(RedDBError::Query(format!(
+                        "invalid metrics rollup policy '{}': metrics v0 rollups must use raw as source",
+                        spec
+                    )));
+                }
+                if !matches!(
+                    policy.aggregation.as_str(),
+                    "avg" | "sum" | "min" | "max" | "count"
+                ) {
+                    return Err(RedDBError::Query(format!(
+                        "invalid metrics rollup policy '{}': supported aggregations are avg, sum, min, max, count",
+                        spec
+                    )));
+                }
+            }
             if let Some(raw_retention_ms) = query.default_ttl_ms {
                 self.inner
                     .db
@@ -219,6 +240,19 @@ impl RedDBRuntime {
                 &format!("red.metrics.{}.namespace", query.name),
                 &crate::serde_json::Value::String("default".to_string()),
             );
+            if !query.metrics_rollup_policies.is_empty() {
+                store.set_config_tree(
+                    &format!("red.metrics.{}.rollup_policies", query.name),
+                    &crate::serde_json::Value::Array(
+                        query
+                            .metrics_rollup_policies
+                            .iter()
+                            .cloned()
+                            .map(crate::serde_json::Value::String)
+                            .collect(),
+                    ),
+                );
+            }
         }
         let contract = if query.collection_model == CollectionModel::Metrics {
             metrics_collection_contract(query)
@@ -269,6 +303,7 @@ impl RedDBRuntime {
             columns: Vec::new(),
             if_not_exists: query.if_not_exists,
             default_ttl_ms: None,
+            metrics_rollup_policies: Vec::new(),
             context_index_fields: Vec::new(),
             context_index_enabled: false,
             timestamps: false,
@@ -1408,6 +1443,7 @@ fn collection_contract_from_create_table(
         context_index_enabled: query.context_index_enabled
             || !query.context_index_fields.is_empty(),
         metrics_raw_retention_ms: None,
+        metrics_rollup_policies: Vec::new(),
         metrics_tenant_identity: None,
         metrics_namespace: None,
         append_only: query.append_only,
@@ -1436,6 +1472,7 @@ fn default_collection_contract_for_existing_table(
         timestamps_enabled: false,
         context_index_enabled: false,
         metrics_raw_retention_ms: None,
+        metrics_rollup_policies: Vec::new(),
         metrics_tenant_identity: None,
         metrics_namespace: None,
         append_only: false,
@@ -1465,6 +1502,7 @@ fn keyed_collection_contract(
         timestamps_enabled: false,
         context_index_enabled: false,
         metrics_raw_retention_ms: None,
+        metrics_rollup_policies: Vec::new(),
         metrics_tenant_identity: None,
         metrics_namespace: None,
         append_only: false,
@@ -1491,6 +1529,7 @@ fn metrics_collection_contract(query: &CreateTableQuery) -> crate::physical::Col
         timestamps_enabled: false,
         context_index_enabled: false,
         metrics_raw_retention_ms: query.default_ttl_ms,
+        metrics_rollup_policies: query.metrics_rollup_policies.clone(),
         metrics_tenant_identity: Some(
             query
                 .tenant_by
@@ -1522,6 +1561,7 @@ fn vector_collection_contract(query: &CreateVectorQuery) -> crate::physical::Col
         timestamps_enabled: false,
         context_index_enabled: false,
         metrics_raw_retention_ms: None,
+        metrics_rollup_policies: Vec::new(),
         metrics_tenant_identity: None,
         metrics_namespace: None,
         append_only: false,
@@ -2020,6 +2060,7 @@ fn event_queue_collection_contract(queue: &str) -> crate::physical::CollectionCo
         timestamps_enabled: false,
         context_index_enabled: false,
         metrics_raw_retention_ms: None,
+        metrics_rollup_policies: Vec::new(),
         metrics_tenant_identity: None,
         metrics_namespace: None,
         append_only: true,

@@ -56,12 +56,18 @@ impl<'a> Parser<'a> {
 
         let mut raw_retention_ms = None;
         let mut tenant_by = None;
+        let mut downsample_policies = Vec::new();
 
         loop {
             if self.consume(&Token::Retention)? {
                 let value = self.parse_float()?;
                 let unit = self.parse_duration_unit()?;
                 raw_retention_ms = Some((value * unit) as u64);
+            } else if self.consume_ident_ci("DOWNSAMPLE")? {
+                downsample_policies.push(self.parse_downsample_policy_spec()?);
+                while self.consume(&Token::Comma)? {
+                    downsample_policies.push(self.parse_downsample_policy_spec()?);
+                }
             } else if tenant_by.is_none() && self.consume_ident_ci("TENANT")? {
                 self.expect(Token::By)?;
                 self.expect(Token::LParen)?;
@@ -83,6 +89,7 @@ impl<'a> Parser<'a> {
             columns: Vec::new(),
             if_not_exists,
             default_ttl_ms: raw_retention_ms,
+            metrics_rollup_policies: downsample_policies,
             context_index_fields: Vec::new(),
             context_index_enabled: false,
             timestamps: false,
