@@ -4436,6 +4436,12 @@ impl RedDBRuntime {
         );
     }
 
+    pub(crate) fn record_metrics_cardinality_budget_rejections(&self, rejected_series: u64) {
+        self.inner
+            .metrics_ingest_stats
+            .record_cardinality_budget_rejections(rejected_series);
+    }
+
     /// Execute a query under a typed scope override without embedding
     /// the tenant / user / role values into the SQL string. Use this
     /// from transport middleware (HTTP / gRPC / worker loops) where the

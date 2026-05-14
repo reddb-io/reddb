@@ -16,11 +16,11 @@ Enforce cardinality budgets during metrics ingestion. When a remote-write batch 
 
 ## Acceptance criteria
 
-- [ ] Series admission enforces configured budgets per tenant/namespace/metric according to the v0 contract.
-- [ ] Remote-write batches can partially accept valid samples while rejecting or quarantining over-budget series.
-- [ ] Rejections are observable through counters/admin output with reason and top offending labels/metrics where safe.
-- [ ] RedDB never silently drops labels to reduce cardinality.
-- [ ] Tests cover in-budget admission, over-budget rejection, partial batch behavior, and reopen stability of budget metadata.
+- [x] Series admission enforces configured budgets per tenant/namespace/metric according to the v0 contract.
+- [x] Remote-write batches can partially accept valid samples while rejecting or quarantining over-budget series.
+- [x] Rejections are observable through counters/admin output with reason and top offending labels/metrics where safe.
+- [x] RedDB never silently drops labels to reduce cardinality.
+- [x] Tests cover in-budget admission, over-budget rejection, partial batch behavior, and reopen stability of budget metadata.
 
 ## Blocked by
 

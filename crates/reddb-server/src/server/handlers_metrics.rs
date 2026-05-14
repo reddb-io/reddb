@@ -41,6 +41,9 @@ struct DecodedMetricBatch {
     entities: Vec<UnifiedEntity>,
     accepted_series: u64,
     accepted_samples: u64,
+    rejected_series: u64,
+    rejected_samples: u64,
+    cardinality_budget_rejected_series: u64,
 }
 
 #[derive(Debug)]
@@ -260,7 +263,7 @@ impl RedDBServer {
             .map(|series| series.samples.len() as u64)
             .sum::<u64>();
         let rejected_series = request.timeseries.len() as u64;
-        let batch = match decode_metric_batch(&collection, &contract, request) {
+        let batch = match decode_metric_batch(&self.runtime, &collection, &contract, request) {
             Ok(batch) => batch,
             Err(err) => {
                 self.runtime
@@ -268,17 +271,24 @@ impl RedDBServer {
                 return Err(err);
             }
         };
-        if batch.entities.is_empty() {
-            return Ok(());
+        if !batch.entities.is_empty() {
+            self.runtime
+                .db()
+                .store()
+                .bulk_insert(&collection, batch.entities)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
         }
-
-        self.runtime
-            .db()
-            .store()
-            .bulk_insert(&collection, batch.entities)
-            .map_err(|err| RedDBError::Internal(err.to_string()))?;
-        self.runtime
-            .record_metrics_ingest(batch.accepted_samples, batch.accepted_series, 0, 0);
+        self.runtime.record_metrics_ingest(
+            batch.accepted_samples,
+            batch.accepted_series,
+            batch.rejected_samples,
+            batch.rejected_series,
+        );
+        if batch.cardinality_budget_rejected_series > 0 {
+            self.runtime.record_metrics_cardinality_budget_rejections(
+                batch.cardinality_budget_rejected_series,
+            );
+        }
         Ok(())
     }
 
@@ -1874,6 +1884,7 @@ fn resolve_metrics_collection(
 }
 
 fn decode_metric_batch(
+    runtime: &RedDBRuntime,
     collection: &str,
     contract: &crate::physical::CollectionContract,
     request: PromWriteRequest,
@@ -1886,6 +1897,12 @@ fn decode_metric_batch(
     let mut entities = Vec::new();
     let mut accepted_series = 0_u64;
     let mut accepted_samples = 0_u64;
+    let mut rejected_series = 0_u64;
+    let mut rejected_samples = 0_u64;
+    let mut cardinality_budget_rejected_series = 0_u64;
+    let series_budget = metrics_series_budget_per_metric();
+    let mut admitted_counts: HashMap<String, usize> = HashMap::new();
+    let mut known_series = existing_metrics_series_keys(runtime, collection);
 
     for series in request.timeseries {
         if !series.histograms.is_empty() {
@@ -1906,6 +1923,36 @@ fn decode_metric_batch(
             "gauge"
         };
         tags.insert("__reddb_kind".to_string(), kind.to_string());
+
+        let series_key = metrics_series_key(&metric, &tags);
+        let budget_key = format!("{tenant}\n{namespace}\n{metric}");
+        let is_new_series = !known_series.contains(&series_key);
+        if is_new_series && series_budget.is_some() {
+            let current = match admitted_counts.get(&budget_key).copied() {
+                Some(count) => count,
+                None => {
+                    let count = known_series
+                        .iter()
+                        .filter(|key| {
+                            key.starts_with(&format!("{metric}\n"))
+                                && key.contains(&format!("__tenant_id={tenant}"))
+                                && key.contains(&format!("__namespace={namespace}"))
+                        })
+                        .count();
+                    admitted_counts.insert(budget_key.clone(), count);
+                    count
+                }
+            };
+            let budget = series_budget.expect("checked is_some");
+            if current >= budget {
+                rejected_series += 1;
+                rejected_samples += series.samples.len() as u64;
+                cardinality_budget_rejected_series += 1;
+                continue;
+            }
+            admitted_counts.insert(budget_key, current + 1);
+            known_series.insert(series_key);
+        }
 
         if !series.samples.is_empty() {
             accepted_series += 1;
@@ -1950,7 +1997,40 @@ fn decode_metric_batch(
         entities,
         accepted_series,
         accepted_samples,
+        rejected_series,
+        rejected_samples,
+        cardinality_budget_rejected_series,
     })
+}
+
+fn metrics_series_budget_per_metric() -> Option<usize> {
+    std::env::var("REDDB_METRICS_MAX_SERIES_PER_METRIC")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+}
+
+fn existing_metrics_series_keys(runtime: &RedDBRuntime, collection: &str) -> HashSet<String> {
+    let Some(manager) = runtime.db().store().get_collection(collection) else {
+        return HashSet::new();
+    };
+    manager
+        .query_all(|entity| matches!(entity.data, EntityData::TimeSeries(_)))
+        .into_iter()
+        .filter_map(|entity| match entity.data {
+            EntityData::TimeSeries(point) => Some(metrics_series_key(&point.metric, &point.tags)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn metrics_series_key(metric: &str, tags: &HashMap<String, String>) -> String {
+    let mut parts = tags
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>();
+    parts.sort();
+    format!("{metric}\n{}", parts.join("\n"))
 }
 
 fn decode_labels(labels: Vec<PromLabel>) -> RedDBResult<(String, HashMap<String, String>)> {
