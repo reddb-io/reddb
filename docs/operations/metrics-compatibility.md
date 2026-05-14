@@ -54,11 +54,11 @@ with Prometheus-compatible ingest and query adapters.
 | `/api/v1/write` | `POST` | Required | Prometheus remote-write 1.0 receiver for counters, gauges, and classic histogram series |
 | `/api/v1/query` | `GET`, `POST` | Required | Instant Prometheus query API for supported PromQL subset |
 | `/api/v1/query_range` | `GET`, `POST` | Required | Range Prometheus query API for Grafana time-series panels |
-| `/api/v1/labels` | `GET`, `POST` | Required | Label-name discovery for Grafana variables and autocomplete |
-| `/api/v1/label/{name}/values` | `GET`, `POST` | Required | Label-value discovery for Grafana variables and query builder |
-| `/api/v1/series` | `GET`, `POST` | Required | Series discovery for Grafana metrics browser and smoke tests |
-| `/api/v1/metadata` | `GET` | Best effort | Metadata autocomplete when metric type/help is available; empty success is allowed |
-| `/api/v1/status/buildinfo` | `GET` | Best effort | Health/probe compatibility; may return RedDB build metadata in Prometheus envelope |
+| `/api/v1/labels` | `GET`, `POST` | Out of scope in current v0 | Label-name discovery for Grafana variables and autocomplete is tracked after panel rendering |
+| `/api/v1/label/{name}/values` | `GET`, `POST` | Out of scope in current v0 | Label-value discovery for Grafana variables and query builder is tracked after panel rendering |
+| `/api/v1/series` | `GET`, `POST` | Out of scope in current v0 | Series discovery for Grafana metrics browser is tracked after panel rendering |
+| `/api/v1/metadata` | `GET` | Out of scope in current v0 | Metadata autocomplete when metric type/help is available |
+| `/api/v1/status/buildinfo` | `GET` | Out of scope in current v0 | Health/probe compatibility; may return RedDB build metadata in Prometheus envelope |
 | `/metrics` | `GET` | Existing | RedDB operator self-metrics; not customer metrics query API |
 | Prometheus scraping APIs | mixed | Out of scope | RedDB v0 does not scrape targets or manage service discovery |
 | Remote read | `POST` | Out of scope | Grafana path uses HTTP query API, not remote read |
@@ -142,7 +142,7 @@ silently rewritten results that look correct.
 
 | Area | Supported in v0 | Explicitly out of scope in v0 |
 |---|---|---|
-| Selectors | Instant-vector selectors, range-vector selectors, metric names, `{label="value"}`, `{label!="value"}`, regex matchers `{label=~"re"}` and `{label!~"re"}` | Subqueries, `@` modifiers, broad compatibility with every Prometheus grammar edge |
+| Selectors | Instant-vector selectors, range-vector selectors, metric names, `{label="value"}`, `{label!="value"}` | Regex matchers `{label=~"re"}` and `{label!~"re"}`, subqueries, `@` modifiers, broad compatibility with every Prometheus grammar edge |
 | Time windows | Range selectors like `[1m]`, `[5m]`, `[1h]` | Prometheus engine lookback tuning as a public knob |
 | Counter functions | `rate`, `irate`, `increase` with reset handling | Full native-histogram function behavior |
 | Histogram functions | `histogram_quantile` over classic histogram buckets | Native histogram query support |
@@ -151,7 +151,7 @@ silently rewritten results that look correct.
 | Arithmetic | Scalar/scalar and vector/scalar `+`, `-`, `*`, `/` | Vector/vector matching, `on`, `ignoring`, `group_left`, `group_right`, `%`, `^` |
 | Comparisons/logical ops | Out of scope except where needed internally for future filters | Full comparison, `and`, `or`, `unless` |
 | Label functions | Out of scope | `label_replace`, `label_join`, and metadata-heavy label transforms |
-| Staleness | Ingest stale markers and stop extending dead series | Full Prometheus staleness/lookback compatibility in every edge case |
+| Staleness | Strict range-window behavior for counter functions; missing samples omit the series | Prometheus stale markers and full lookback compatibility in every edge case |
 
 ## Histogram Contract
 
@@ -180,10 +180,7 @@ Expected to work:
 
 - Time series panels backed by `/api/v1/query_range`.
 - Stat/gauge/table panels backed by `/api/v1/query`.
-- Template variables using label names and label values.
 - Query editor code mode for the supported PromQL subset.
-- Query builder and metrics browser for metric/label discovery when backed by
-  `/labels`, `/label/{name}/values`, `/series`, and optional `/metadata`.
 - Grafana alert rules that query supported PromQL through the datasource.
 
 Not promised in v0:
@@ -192,6 +189,8 @@ Not promised in v0:
 - Annotations sourced from Prometheus APIs.
 - Native histograms.
 - Full autocomplete fidelity for every Prometheus metadata endpoint.
+- Template variables, query builder autocomplete, and metrics browser discovery
+  that require `/labels`, `/label/{name}/values`, `/series`, or `/metadata`.
 - Grafana datasource settings that assume Prometheus-only admin APIs.
 - A custom RedDB datasource plugin.
 
@@ -223,9 +222,29 @@ Grafana query fixtures:
 
 ## Smoke-Dashboard Acceptance
 
-The v0 Grafana smoke test should provision Grafana with a Prometheus datasource
-whose URL points at RedDB, load a dashboard, and verify that these panels render
-non-empty data:
+The automated contract smoke is:
+
+```bash
+cargo test --test e2e_metrics_grafana_compat_smoke -- --nocapture
+```
+
+It maps panel failures to the responsible implementation slice:
+
+| Smoke area | Covered by | Responsible slice |
+|---|---|---|
+| Selector/stat panel | `process_resident_memory_bytes{service="checkout"}` | #485 |
+| Range panel | `http_requests_total{service="checkout"}` via `query_range` | #486 |
+| Counter function panel | `rate(http_requests_total[20s])` | #487 |
+| Aggregation panel | `sum by (service) (...)` | #488 |
+| Classic histogram p95 | `histogram_quantile(0.95, rate(..._bucket[10s]))` | #489 |
+| Cardinality rejection visibility | `/metrics` reason-labelled rejection counter | #490 |
+| Rollup-backed long range | `DOWNSAMPLE 60s:raw:avg` selected by `step=60s` | #491 |
+| Tenant isolation | Same labels under `X-RedDB-Tenant: acme` and `globex` | #492 |
+| Unsupported PromQL failure | vector/vector arithmetic returns a clear `422` | #488 |
+
+The manual Grafana smoke procedure should provision Grafana with a Prometheus
+datasource whose URL points at RedDB, load a dashboard, and verify that these
+panels render non-empty data:
 
 1. Request rate by service.
 2. Error rate by service.
@@ -233,8 +252,10 @@ non-empty data:
 4. p95 request latency from classic histogram buckets.
 5. A `$service` template variable populated from RedDB label values.
 
-The smoke test should also verify one unsupported PromQL query returns a
-Prometheus-shaped `422` error instead of a silent empty graph.
+The manual smoke steps and provisioning snippets live in
+[Metrics Grafana smoke](metrics-grafana-smoke.md). Migration setup for
+Prometheus, Grafana Alloy, and OpenTelemetry Collector lives in
+[Metrics migration](metrics-migration.md).
 
 ## Implementation Guardrails
 

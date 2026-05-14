@@ -16,11 +16,11 @@ Create the capstone compatibility check for RedDB Metrics Backend v0. A Grafana 
 
 ## Acceptance criteria
 
-- [ ] A documented smoke procedure or CI job starts RedDB, ingests fixture metrics, configures Grafana's Prometheus datasource, and renders representative panels.
-- [ ] Smoke coverage includes selectors, range queries, counter functions, aggregations, classic histogram quantiles, cardinality rejection visibility, tenant isolation, and rollup-backed long ranges.
-- [ ] Migration docs explain remote-write setup through Prometheus, Grafana Alloy, or OpenTelemetry Collector.
-- [ ] Compatibility docs list supported PromQL/features and explicit v0 limitations.
-- [ ] Failures point to the responsible implementation slice.
+- [x] A documented smoke procedure or CI job starts RedDB, ingests fixture metrics, configures Grafana's Prometheus datasource, and renders representative panels.
+- [x] Smoke coverage includes selectors, range queries, counter functions, aggregations, classic histogram quantiles, cardinality rejection visibility, tenant isolation, and rollup-backed long ranges.
+- [x] Migration docs explain remote-write setup through Prometheus, Grafana Alloy, or OpenTelemetry Collector.
+- [x] Compatibility docs list supported PromQL/features and explicit v0 limitations.
+- [x] Failures point to the responsible implementation slice.
 
 ## Blocked by
 
