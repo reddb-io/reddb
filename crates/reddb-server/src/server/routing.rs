@@ -1102,6 +1102,9 @@ impl RedDBServer {
                     if let Some(collection) = collection_from_scan_path(&path) {
                         return self.handle_scan(collection, &query);
                     }
+                    if let Some((collection, id)) = collection_entity_path(&path) {
+                        return self.handle_get_entity(collection, id);
+                    }
                     if let Some(collection) = collection_from_native_vector_artifact_path(&path) {
                         return match self.native_use_cases().inspect_vector_artifact(
                             InspectNativeArtifactInput {

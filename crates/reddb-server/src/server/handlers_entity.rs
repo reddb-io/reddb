@@ -586,13 +586,17 @@ impl RedDBServer {
             .get("body")
             .cloned()
             .unwrap_or_else(|| payload.clone());
+        let metadata = match payload.get("metadata").map(parse_tree_metadata).transpose() {
+            Ok(metadata) => metadata.unwrap_or_default(),
+            Err(err) => return json_error(400, err),
+        };
 
         match self
             .entity_use_cases()
             .create_document(CreateDocumentInput {
                 collection: collection.to_string(),
                 body: body_value,
-                metadata: Vec::new(),
+                metadata,
                 node_links: Vec::new(),
                 vector_links: Vec::new(),
             }) {
@@ -601,6 +605,15 @@ impl RedDBServer {
                 crate::presentation::entity_json::created_entity_output_json(&output),
             ),
             Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
+    pub(crate) fn handle_get_entity(&self, collection: &str, id: u64) -> HttpResponse {
+        match self.runtime.db().store().get(collection, EntityId::new(id)) {
+            Some(entity) => {
+                json_response(200, crate::presentation::entity_json::entity_json(&entity))
+            }
+            None => json_error(404, format!("entity not found: {id}")),
         }
     }
 
