@@ -804,6 +804,35 @@ struct RuntimeResultCacheEntry {
 
 pub const METRIC_CACHE_SHADOW_DIVERGENCE_TOTAL: &str = "cache_shadow_divergence_total";
 pub(crate) const ASK_ANSWER_CACHE_NAMESPACE: &str = "runtime.ask_answer_cache";
+const RMW_LOCK_SHARDS: usize = 64;
+
+struct RmwLockTable {
+    shards: Vec<parking_lot::Mutex<HashMap<String, Arc<parking_lot::Mutex<()>>>>>,
+}
+
+impl RmwLockTable {
+    fn new() -> Self {
+        let shards = (0..RMW_LOCK_SHARDS)
+            .map(|_| parking_lot::Mutex::new(HashMap::new()))
+            .collect();
+        Self { shards }
+    }
+
+    fn lock_for(&self, collection: &str, key: &str) -> Arc<parking_lot::Mutex<()>> {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        collection.hash(&mut hasher);
+        key.hash(&mut hasher);
+        let shard_idx = (hasher.finish() as usize) % self.shards.len();
+        let map_key = format!("{collection}\u{1f}{key}");
+        let mut shard = self.shards[shard_idx].lock();
+        shard
+            .entry(map_key)
+            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
+            .clone()
+    }
+}
 
 struct RuntimeInner {
     db: Arc<RedDB>,
@@ -834,6 +863,10 @@ struct RuntimeInner {
     /// Process-local queue message locks used to emulate `SKIP LOCKED`-style
     /// claim semantics for concurrent queue consumers inside this runtime.
     queue_message_locks: parking_lot::RwLock<HashMap<String, Arc<parking_lot::Mutex<()>>>>,
+    /// Process-local read-modify-write locks. The table is sharded by
+    /// `(collection, key)` and each entry has its own mutex, so unrelated keys
+    /// in the same collection do not serialize behind one global lock.
+    rmw_locks: RmwLockTable,
     planner_dirty_tables: parking_lot::RwLock<HashSet<String>>,
     ec_registry: Arc<crate::ec::config::EcRegistry>,
     ec_worker: crate::ec::worker::EcWorker,

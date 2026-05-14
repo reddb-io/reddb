@@ -326,8 +326,9 @@ impl<'a> KvAtomicOps<'a> {
                 "VAULT INCR is not supported for sealed secrets".to_string(),
             ));
         }
+        let rmw_lock = self.runtime.inner.rmw_locks.lock_for(collection, key);
+        let _rmw_guard = rmw_lock.lock();
         self.ensure_kv_collection(collection)?;
-
         let existing = self.runtime.get_kv(collection, key)?;
         let current: i64 = match existing.as_ref() {
             None => 0,
@@ -409,8 +410,9 @@ impl<'a> KvAtomicOps<'a> {
                 "VAULT CAS is not supported for sealed secrets".to_string(),
             ));
         }
+        let rmw_lock = self.runtime.inner.rmw_locks.lock_for(collection, key);
+        let _rmw_guard = rmw_lock.lock();
         self.ensure_kv_collection(collection)?;
-
         let current = self.runtime.get_kv(collection, key)?.map(|(v, _)| v);
 
         let matches = match (&current, expected) {
@@ -2320,6 +2322,42 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_incr_single_key_is_atomic() {
+        const THREADS: usize = 8;
+        const ITERS: usize = 1000;
+
+        let runtime = std::sync::Arc::new(rt());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+        let mut handles = Vec::new();
+
+        for _ in 0..THREADS {
+            let runtime = std::sync::Arc::clone(&runtime);
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let ops = super::KvAtomicOps::new(&runtime);
+                barrier.wait();
+                for _ in 0..ITERS {
+                    ops.incr(CollectionModel::Kv, "kv_default", "counter", 1, None)
+                        .unwrap();
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("worker should finish");
+        }
+
+        let ops = super::KvAtomicOps::new(&runtime);
+        assert_eq!(
+            ops.get(CollectionModel::Kv, "kv_default", "counter")
+                .unwrap(),
+            Some(crate::storage::schema::Value::Integer(
+                (THREADS * ITERS) as i64
+            ))
+        );
+    }
+
+    #[test]
     fn incr_on_string_value_returns_error() {
         let r = rt();
         let ops = super::KvAtomicOps::new(&r);
@@ -2369,6 +2407,67 @@ mod tests {
         assert_eq!(
             ops.get(CollectionModel::Kv, "kv_default", "lock").unwrap(),
             Some(crate::storage::schema::Value::text("held"))
+        );
+    }
+
+    #[test]
+    fn concurrent_cas_allows_one_success_per_round() {
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 100;
+
+        let runtime = std::sync::Arc::new(rt());
+        let ops = super::KvAtomicOps::new(&runtime);
+        ops.set(
+            CollectionModel::Kv,
+            "kv_default",
+            "cas_counter",
+            crate::storage::schema::Value::Integer(0),
+            None,
+            false,
+        )
+        .unwrap();
+
+        let start_round = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+        let finish_round = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+        let successes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut handles = Vec::new();
+
+        for _ in 0..THREADS {
+            let runtime = std::sync::Arc::clone(&runtime);
+            let start_round = std::sync::Arc::clone(&start_round);
+            let finish_round = std::sync::Arc::clone(&finish_round);
+            let successes = std::sync::Arc::clone(&successes);
+            handles.push(std::thread::spawn(move || {
+                let ops = super::KvAtomicOps::new(&runtime);
+                for round in 0..ROUNDS {
+                    start_round.wait();
+                    let (ok, _) = ops
+                        .cas(
+                            CollectionModel::Kv,
+                            "kv_default",
+                            "cas_counter",
+                            Some(&crate::storage::schema::Value::Integer(round as i64)),
+                            crate::storage::schema::Value::Integer((round + 1) as i64),
+                            None,
+                        )
+                        .unwrap();
+                    if ok {
+                        successes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    finish_round.wait();
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("worker should finish");
+        }
+
+        assert_eq!(successes.load(std::sync::atomic::Ordering::SeqCst), ROUNDS);
+        assert_eq!(
+            ops.get(CollectionModel::Kv, "kv_default", "cas_counter")
+                .unwrap(),
+            Some(crate::storage::schema::Value::Integer(ROUNDS as i64))
         );
     }
 
@@ -2518,6 +2617,49 @@ mod tests {
         assert_eq!(
             row2.get("value"),
             Some(&crate::storage::schema::Value::Integer(5))
+        );
+    }
+
+    #[test]
+    fn concurrent_self_referential_update_is_atomic() {
+        const THREADS: usize = 8;
+        const ITERS: usize = 100;
+
+        let runtime = std::sync::Arc::new(rt());
+        runtime
+            .execute_query("CREATE TABLE counters (id INT, n INT)")
+            .unwrap();
+        runtime
+            .execute_query("INSERT INTO counters (id, n) VALUES (1, 0)")
+            .unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+        let mut handles = Vec::new();
+        for _ in 0..THREADS {
+            let runtime = std::sync::Arc::clone(&runtime);
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..ITERS {
+                    runtime
+                        .execute_query("UPDATE counters SET n = n + 1 WHERE id = 1")
+                        .unwrap();
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("worker should finish");
+        }
+
+        let selected = runtime
+            .execute_query("SELECT n FROM counters WHERE id = 1")
+            .unwrap();
+        assert_eq!(
+            selected.result.records[0].get("n"),
+            Some(&crate::storage::schema::Value::Integer(
+                (THREADS * ITERS) as i64
+            ))
         );
     }
 

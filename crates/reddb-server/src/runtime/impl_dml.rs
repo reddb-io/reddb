@@ -19,7 +19,7 @@ use crate::application::ports::{
 };
 use crate::application::ttl_payload::has_internal_ttl_metadata;
 use crate::presentation::entity_json::storage_value_to_json;
-use crate::storage::query::ast::{Expr, ReturningItem};
+use crate::storage::query::ast::{Expr, FieldRef, ReturningItem};
 use crate::storage::query::sql_lowering::{
     effective_delete_filter, effective_insert_rows, effective_update_filter, fold_expr_to_value,
 };
@@ -1195,6 +1195,16 @@ impl RedDBRuntime {
         )
         .find_target_ids()?;
 
+        if update_needs_rmw_lock(query) {
+            return self.execute_update_inner_tracked_locked(
+                raw_query,
+                query,
+                &compiled_plan,
+                &ids_to_update,
+                effective_filter.as_ref(),
+            );
+        }
+
         let mut affected: u64 = 0;
         for chunk in ids_to_update.chunks(UPDATE_APPLY_CHUNK_SIZE) {
             let mut applied_chunk = Vec::with_capacity(chunk.len());
@@ -1216,6 +1226,76 @@ impl RedDBRuntime {
             if !query.suppress_events {
                 self.emit_update_events_for_collection(&query.table, &applied_chunk, &lsns)?;
             }
+        }
+
+        if affected > 0 {
+            self.note_table_write(&query.table);
+        }
+
+        Ok((
+            RuntimeQueryResult::dml_result(
+                raw_query.to_string(),
+                affected,
+                "update",
+                "runtime-dml",
+            ),
+            touched_ids,
+        ))
+    }
+
+    fn execute_update_inner_tracked_locked(
+        &self,
+        raw_query: &str,
+        query: &UpdateQuery,
+        compiled_plan: &CompiledUpdatePlan,
+        ids_to_update: &[EntityId],
+        effective_filter: Option<&Filter>,
+    ) -> RedDBResult<(RuntimeQueryResult, Vec<EntityId>)> {
+        let store = self.inner.db.store();
+        let mut touched_ids = Vec::new();
+        let mut affected = 0;
+
+        for id in ids_to_update {
+            let Some(candidate) = store.get(&query.table, *id) else {
+                continue;
+            };
+            let logical_id = candidate.logical_id();
+            let lock_key = format!("row:{}", logical_id.raw());
+            let rmw_lock = self.inner.rmw_locks.lock_for(&query.table, &lock_key);
+            let _rmw_guard = rmw_lock.lock();
+
+            let Some(entity) = resolve_update_row_by_logical_id(self, &query.table, logical_id)
+            else {
+                continue;
+            };
+            if let Some(filter) = effective_filter {
+                if !crate::runtime::query_exec::evaluate_entity_filter_with_db(
+                    Some(self.inner.db.as_ref()),
+                    &entity,
+                    filter,
+                    &query.table,
+                    &query.table,
+                ) {
+                    continue;
+                }
+            }
+
+            let assignments =
+                self.materialize_update_assignments_for_entity(query, &entity, compiled_plan)?;
+            let applied = self.apply_materialized_update_for_entity(
+                query.table.clone(),
+                entity,
+                compiled_plan,
+                assignments,
+            )?;
+            let applied_chunk = [applied];
+            self.persist_update_chunk(&applied_chunk)?;
+            let lsns = self.flush_update_chunk(&applied_chunk)?;
+            if !query.suppress_events {
+                self.emit_update_events_for_collection(&query.table, &applied_chunk, &lsns)?;
+            }
+            touched_ids.push(applied_chunk[0].id);
+            affected += 1;
         }
 
         if affected > 0 {
@@ -1811,6 +1891,83 @@ fn ensure_graph_insert_contract(runtime: &RedDBRuntime, collection: &str) -> Red
     })
     .map(|_| ())
     .map_err(|err| RedDBError::Internal(err.to_string()))
+}
+
+fn update_needs_rmw_lock(query: &UpdateQuery) -> bool {
+    query
+        .assignment_exprs
+        .iter()
+        .any(|(column, expr)| expr_references_update_column(expr, &query.table, column))
+}
+
+fn expr_references_update_column(expr: &Expr, table_name: &str, target_column: &str) -> bool {
+    match expr {
+        Expr::Literal { .. } | Expr::Parameter { .. } | Expr::Subquery { .. } => false,
+        Expr::Column { field, .. } => {
+            field_ref_matches_update_column(field, table_name, target_column)
+        }
+        Expr::BinaryOp { lhs, rhs, .. } => {
+            expr_references_update_column(lhs, table_name, target_column)
+                || expr_references_update_column(rhs, table_name, target_column)
+        }
+        Expr::UnaryOp { operand, .. } | Expr::Cast { inner: operand, .. } => {
+            expr_references_update_column(operand, table_name, target_column)
+        }
+        Expr::FunctionCall { args, .. } => args
+            .iter()
+            .any(|arg| expr_references_update_column(arg, table_name, target_column)),
+        Expr::Case {
+            branches, else_, ..
+        } => {
+            branches.iter().any(|(cond, value)| {
+                expr_references_update_column(cond, table_name, target_column)
+                    || expr_references_update_column(value, table_name, target_column)
+            }) || else_
+                .as_deref()
+                .is_some_and(|expr| expr_references_update_column(expr, table_name, target_column))
+        }
+        Expr::IsNull { operand, .. } => {
+            expr_references_update_column(operand, table_name, target_column)
+        }
+        Expr::InList { target, values, .. } => {
+            expr_references_update_column(target, table_name, target_column)
+                || values
+                    .iter()
+                    .any(|value| expr_references_update_column(value, table_name, target_column))
+        }
+        Expr::Between {
+            target, low, high, ..
+        } => {
+            expr_references_update_column(target, table_name, target_column)
+                || expr_references_update_column(low, table_name, target_column)
+                || expr_references_update_column(high, table_name, target_column)
+        }
+    }
+}
+
+fn field_ref_matches_update_column(
+    field: &FieldRef,
+    table_name: &str,
+    target_column: &str,
+) -> bool {
+    match field {
+        FieldRef::TableColumn { table, column } => {
+            column.eq_ignore_ascii_case(target_column)
+                && (table.is_empty() || table.eq_ignore_ascii_case(table_name))
+        }
+        FieldRef::NodeProperty { .. } | FieldRef::EdgeProperty { .. } | FieldRef::NodeId { .. } => {
+            false
+        }
+    }
+}
+
+fn resolve_update_row_by_logical_id(
+    runtime: &RedDBRuntime,
+    table: &str,
+    logical_id: EntityId,
+) -> Option<UnifiedEntity> {
+    let store = runtime.inner.db.store();
+    store.get_table_row_by_logical_id(table, logical_id)
 }
 
 fn dedupe_update_columns(mut columns: Vec<String>) -> Vec<String> {
