@@ -1413,6 +1413,21 @@ fn test_parse_insert_bare_returning_errors() {
 }
 
 #[test]
+fn test_parse_returning_expression_reports_not_yet_supported() {
+    for sql in [
+        "INSERT INTO hosts (id) VALUES (1) RETURNING id + 1",
+        "UPDATE hosts SET id = 1 RETURNING UPPER(name)",
+        "DELETE FROM hosts RETURNING name || '!'",
+    ] {
+        let err = parse(sql).expect_err(sql);
+        assert!(
+            err.to_string().contains("NOT_YET_SUPPORTED"),
+            "{sql} got {err:?}"
+        );
+    }
+}
+
+#[test]
 fn test_parse_update_returning_star() {
     let query = parse("UPDATE hosts SET hostname = 'x' WHERE ip = '10.0.0.1' RETURNING *").unwrap();
     if let QueryExpr::Update(uq) = query {

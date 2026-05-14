@@ -7,9 +7,10 @@
 //! applied.
 
 use crate::application::entity::{
-    metadata_from_json, AppliedEntityMutation, CreateDocumentInput, CreateEdgeInput, CreateKvInput,
-    CreateNodeInput, CreateRowInput, CreateRowsBatchInput, CreateVectorInput, DeleteEntityInput,
-    PatchEntityOperation, PatchEntityOperationType, RowUpdateColumnRule, RowUpdateContractPlan,
+    metadata_from_json, AppliedEntityMutation, CreateDocumentInput, CreateEdgeInput,
+    CreateEntityOutput, CreateKvInput, CreateNodeInput, CreateRowInput, CreateRowsBatchInput,
+    CreateVectorInput, DeleteEntityInput, PatchEntityOperation, PatchEntityOperationType,
+    RowUpdateColumnRule, RowUpdateContractPlan,
 };
 use crate::application::ports::{
     build_row_update_contract_plan, entity_row_fields_snapshot,
@@ -537,6 +538,7 @@ impl RedDBRuntime {
             if let (Some(items), Some(snaps)) =
                 (query.returning.as_ref(), returning_snapshots.take())
             {
+                let snaps = row_insert_returning_snapshots(&outputs, snaps);
                 returning_result = Some(build_returning_result(items, &snaps, Some(&outputs)));
             }
         } else {
@@ -1683,7 +1685,7 @@ fn find_top_level_keyword(haystack: &str, needle: &str) -> Option<usize> {
 fn build_returning_result(
     items: &[ReturningItem],
     snapshots: &[Vec<(String, Value)>],
-    outputs: Option<&[crate::application::entity::CreateEntityOutput]>,
+    outputs: Option<&[CreateEntityOutput]>,
 ) -> UnifiedResult {
     let project_all = items.iter().any(|it| matches!(it, ReturningItem::All));
 
@@ -1741,6 +1743,23 @@ fn build_returning_result(
         stats: Default::default(),
         pre_serialized_json: None,
     }
+}
+
+fn row_insert_returning_snapshots(
+    outputs: &[CreateEntityOutput],
+    fallback: Vec<Vec<(String, Value)>>,
+) -> Vec<Vec<(String, Value)>> {
+    outputs
+        .iter()
+        .enumerate()
+        .map(|(idx, out)| {
+            out.entity
+                .as_ref()
+                .map(entity_row_fields_snapshot)
+                .filter(|snap| !snap.is_empty())
+                .unwrap_or_else(|| fallback.get(idx).cloned().unwrap_or_default())
+        })
+        .collect()
 }
 
 fn ensure_graph_insert_contract(runtime: &RedDBRuntime, collection: &str) -> RedDBResult<()> {

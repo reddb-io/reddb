@@ -421,8 +421,14 @@ impl<'a> Parser<'a> {
         }
         let mut items = Vec::new();
         loop {
+            if returning_expr_start(self.peek()) {
+                return Err(returning_expr_not_supported(self.position()));
+            }
             let col = self.expect_ident_or_keyword()?;
             items.push(ReturningItem::Column(col));
+            if returning_expr_tail(self.peek()) {
+                return Err(returning_expr_not_supported(self.position()));
+            }
             if !self.consume(&Token::Comma)? {
                 break;
             }
@@ -814,6 +820,52 @@ impl<'a> Parser<'a> {
             )),
         }
     }
+}
+
+fn returning_expr_start(token: &Token) -> bool {
+    matches!(
+        token,
+        Token::Integer(_)
+            | Token::Float(_)
+            | Token::String(_)
+            | Token::JsonLiteral(_)
+            | Token::Null
+            | Token::True
+            | Token::False
+            | Token::LParen
+            | Token::Minus
+            | Token::Question
+            | Token::Dollar
+    )
+}
+
+fn returning_expr_tail(token: &Token) -> bool {
+    matches!(
+        token,
+        Token::LParen
+            | Token::Plus
+            | Token::Minus
+            | Token::Star
+            | Token::Slash
+            | Token::Percent
+            | Token::DoublePipe
+            | Token::Pipe
+            | Token::Eq
+            | Token::Ne
+            | Token::Lt
+            | Token::Le
+            | Token::Gt
+            | Token::Ge
+            | Token::Dot
+            | Token::Colon
+    )
+}
+
+fn returning_expr_not_supported(position: super::super::lexer::Position) -> ParseError {
+    ParseError::new(
+        "NOT_YET_SUPPORTED: RETURNING expressions are not supported yet; use RETURNING * or named columns. Track a follow-up issue for RETURNING <expr>.",
+        position,
+    )
 }
 
 fn secret_ref_value(store: &str, collection: &str, key: &str) -> Value {
