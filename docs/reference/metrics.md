@@ -2,6 +2,23 @@
 
 RedDB exposes Prometheus text format at `GET /metrics`.
 
+## Prometheus Metrics Adapter
+
+The metrics adapter exposes the v0 Prometheus HTTP API surface for Grafana:
+
+| Endpoint | Supported v0 shape |
+|----------|--------------------|
+| `POST /api/v1/write` | Prometheus `remote_write` snappy protobuf samples for counters and gauges. |
+| `GET /api/v1/query` | Instant selectors such as `metric_name`, `metric_name{label="value"}`, and counter functions `rate(metric[window])`, `irate(metric[window])`, `increase(metric[window])`. |
+| `GET /api/v1/query_range` | Range selectors and the same counter functions with `start`, `end`, and `step`. |
+
+Counter functions use strict v0 window semantics. RedDB evaluates only samples
+inside `[evaluation_time - window, evaluation_time]`; if fewer than two samples
+exist in that window, the series is absent from the result. Counter resets are
+handled by treating a lower value as a reset to zero and adding the post-reset
+value to the increase. RedDB does not extrapolate to the full window and does
+not emit Prometheus stale markers in v0.
+
 ## AI Provider Path
 
 The AI embedding path emits process-local counters and histograms. Labels never contain request bodies, prompts, API keys, or authorization headers.

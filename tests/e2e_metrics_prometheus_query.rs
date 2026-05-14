@@ -129,7 +129,7 @@ fn prometheus_query_supports_negative_matchers_and_prometheus_error_shape() {
     assert!(
         response["error"]
             .as_str()
-            .is_some_and(|error| error.contains("only instant metric selectors are supported")),
+            .is_some_and(|error| error.contains("expected selector or rate/irate/increase")),
         "clear unsupported PromQL error expected: {response}"
     );
 }

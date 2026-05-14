@@ -45,6 +45,23 @@ struct PromSelector {
 }
 
 #[derive(Debug)]
+enum PromExpression {
+    Selector(PromSelector),
+    CounterFunction {
+        function: PromCounterFunction,
+        selector: PromSelector,
+        window_ns: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PromCounterFunction {
+    Rate,
+    IRate,
+    Increase,
+}
+
+#[derive(Debug)]
 struct PromLabelMatcher {
     name: String,
     op: PromLabelMatcherOp,
@@ -93,12 +110,30 @@ impl RedDBServer {
             Ok(query) => query,
             Err(err) => return prometheus_error_response(400, "bad_data", err),
         };
-        let selector = match parse_prom_selector(&raw_query) {
-            Ok(selector) => selector,
+        let expression = match parse_prom_expression(&raw_query) {
+            Ok(expression) => expression,
             Err(err) => return prometheus_error_response(422, "bad_data", err),
         };
 
-        match self.prometheus_instant_vector(selector) {
+        let result = match expression {
+            PromExpression::Selector(selector) => self.prometheus_instant_vector(selector),
+            PromExpression::CounterFunction {
+                function,
+                selector,
+                window_ns,
+            } => {
+                let eval_time_ns = match prometheus_optional_param(query, body.as_deref(), "time") {
+                    Ok(Some(raw)) => match parse_prom_timestamp_ns(&raw) {
+                        Ok(time) => Some(time),
+                        Err(err) => return prometheus_error_response(400, "bad_data", err),
+                    },
+                    Ok(None) => None,
+                    Err(err) => return prometheus_error_response(400, "bad_data", err),
+                };
+                self.prometheus_counter_function_vector(function, selector, window_ns, eval_time_ns)
+            }
+        };
+        match result {
             Ok(samples) => prometheus_vector_response(samples),
             Err(err) => prometheus_error_response(500, "internal", err.to_string()),
         }
@@ -113,8 +148,8 @@ impl RedDBServer {
             Ok(query) => query,
             Err(err) => return prometheus_error_response(400, "bad_data", err),
         };
-        let selector = match parse_prom_selector(&raw_query) {
-            Ok(selector) => selector,
+        let expression = match parse_prom_expression(&raw_query) {
+            Ok(expression) => expression,
             Err(err) => return prometheus_error_response(422, "bad_data", err),
         };
         let range = match parse_prom_query_range(query, body.as_deref()) {
@@ -122,7 +157,15 @@ impl RedDBServer {
             Err(err) => return prometheus_error_response(400, "bad_data", err),
         };
 
-        match self.prometheus_range_matrix(selector, range) {
+        let result = match expression {
+            PromExpression::Selector(selector) => self.prometheus_range_matrix(selector, range),
+            PromExpression::CounterFunction {
+                function,
+                selector,
+                window_ns,
+            } => self.prometheus_counter_function_matrix(function, selector, window_ns, range),
+        };
+        match result {
             Ok(series) => prometheus_matrix_response(series),
             Err(err) => prometheus_error_response(500, "internal", err.to_string()),
         }
@@ -314,6 +357,147 @@ impl RedDBServer {
         }
         Ok(matrix)
     }
+
+    fn prometheus_counter_function_vector(
+        &self,
+        function: PromCounterFunction,
+        selector: PromSelector,
+        window_ns: u64,
+        eval_time_ns: Option<u64>,
+    ) -> RedDBResult<Vec<PromVectorSample>> {
+        let eval_time_ns = match eval_time_ns {
+            Some(time) => time,
+            None => match self.latest_timestamp_for_selector(&selector)? {
+                Some(time) => time,
+                None => return Ok(Vec::new()),
+            },
+        };
+        let window_start_ns = eval_time_ns.saturating_sub(window_ns);
+        let samples_by_series =
+            self.prometheus_samples_by_series(&selector, window_start_ns, eval_time_ns)?;
+        let mut vector = Vec::new();
+        for mut series in samples_by_series.into_values() {
+            series.values.sort_by_key(|sample| sample.timestamp_ns);
+            if let Some(value) =
+                evaluate_counter_function(function, &series.values, window_start_ns, eval_time_ns)
+            {
+                vector.push(PromVectorSample {
+                    labels: series.labels,
+                    timestamp_ns: eval_time_ns,
+                    value,
+                });
+            }
+        }
+        Ok(vector)
+    }
+
+    fn prometheus_counter_function_matrix(
+        &self,
+        function: PromCounterFunction,
+        selector: PromSelector,
+        window_ns: u64,
+        range: PromQueryRange,
+    ) -> RedDBResult<Vec<PromRangeSeries>> {
+        let fetch_start_ns = range.start_ns.saturating_sub(window_ns);
+        let samples_by_series =
+            self.prometheus_samples_by_series(&selector, fetch_start_ns, range.end_ns)?;
+        let mut matrix = Vec::new();
+        for mut series in samples_by_series.into_values() {
+            series.values.sort_by_key(|sample| sample.timestamp_ns);
+            let mut values = Vec::new();
+            let mut step = range.start_ns;
+            while step <= range.end_ns {
+                let window_start_ns = step.saturating_sub(window_ns);
+                if let Some(value) =
+                    evaluate_counter_function(function, &series.values, window_start_ns, step)
+                {
+                    values.push(PromRangeValue {
+                        timestamp_ns: step,
+                        value,
+                    });
+                }
+                match step.checked_add(range.step_ns) {
+                    Some(next) if next > step => step = next,
+                    _ => break,
+                }
+            }
+            if !values.is_empty() {
+                series.values = values;
+                matrix.push(series);
+            }
+        }
+        Ok(matrix)
+    }
+
+    fn latest_timestamp_for_selector(&self, selector: &PromSelector) -> RedDBResult<Option<u64>> {
+        let mut latest = None;
+        for series in self
+            .prometheus_samples_by_series(selector, 0, u64::MAX)?
+            .into_values()
+        {
+            for sample in series.values {
+                if latest.is_none_or(|current| sample.timestamp_ns > current) {
+                    latest = Some(sample.timestamp_ns);
+                }
+            }
+        }
+        Ok(latest)
+    }
+
+    fn prometheus_samples_by_series(
+        &self,
+        selector: &PromSelector,
+        start_ns: u64,
+        end_ns: u64,
+    ) -> RedDBResult<BTreeMap<Vec<(String, String)>, PromRangeSeries>> {
+        let mut samples_by_series: BTreeMap<Vec<(String, String)>, PromRangeSeries> =
+            BTreeMap::new();
+        let store = self.runtime.db().store();
+        for contract in self
+            .runtime
+            .db()
+            .collection_contracts()
+            .into_iter()
+            .filter(|contract| contract.declared_model == CollectionModel::Metrics)
+        {
+            let Some(manager) = store.get_collection(&contract.name) else {
+                continue;
+            };
+            let entities =
+                manager.query_all(|entity| matches!(entity.data, EntityData::TimeSeries(_)));
+            for entity in entities {
+                let EntityData::TimeSeries(point) = entity.data else {
+                    continue;
+                };
+                if point.metric != selector.metric {
+                    continue;
+                }
+                if point.timestamp_ns < start_ns || point.timestamp_ns > end_ns {
+                    continue;
+                }
+                let labels = prometheus_labels_for_point(&point);
+                if !selector_matches(selector, &labels) {
+                    continue;
+                }
+                let series_key = labels
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect::<Vec<_>>();
+                samples_by_series
+                    .entry(series_key)
+                    .or_insert_with(|| PromRangeSeries {
+                        labels,
+                        values: Vec::new(),
+                    })
+                    .values
+                    .push(PromRangeValue {
+                        timestamp_ns: point.timestamp_ns,
+                        value: point.value,
+                    });
+            }
+        }
+        Ok(samples_by_series)
+    }
 }
 
 fn prometheus_query_param(
@@ -348,6 +532,18 @@ fn prometheus_required_param(
         }
     }
     Err(format!("missing required query parameter '{name}'"))
+}
+
+fn prometheus_optional_param(
+    query: &BTreeMap<String, String>,
+    body: Option<&[u8]>,
+    name: &str,
+) -> Result<Option<String>, String> {
+    match prometheus_required_param(query, body, name) {
+        Ok(value) => Ok(Some(value)),
+        Err(err) if err == format!("missing required query parameter '{name}'") => Ok(None),
+        Err(err) => Err(err),
+    }
 }
 
 fn parse_prom_query_range(
@@ -409,6 +605,77 @@ fn parse_prom_step_ns(input: &str) -> Result<u64, String> {
         "h" => amount * 3_600.0,
         "d" => amount * 86_400.0,
         _ => return Err(format!("invalid query_range step unit '{unit}'")),
+    };
+    Ok((seconds * 1_000_000_000.0).round() as u64)
+}
+
+fn parse_prom_expression(input: &str) -> Result<PromExpression, String> {
+    let input = input.trim();
+    for (name, function) in [
+        ("rate", PromCounterFunction::Rate),
+        ("irate", PromCounterFunction::IRate),
+        ("increase", PromCounterFunction::Increase),
+    ] {
+        let prefix = format!("{name}(");
+        if let Some(inner) = input
+            .strip_prefix(&prefix)
+            .and_then(|rest| rest.strip_suffix(')'))
+        {
+            let (selector_text, window_text) = parse_range_vector_inner(inner)?;
+            let selector = parse_prom_selector(selector_text)?;
+            let window_ns = parse_prom_duration_ns(window_text)?;
+            return Ok(PromExpression::CounterFunction {
+                function,
+                selector,
+                window_ns,
+            });
+        }
+    }
+
+    if input.contains('(') || input.contains(')') || input.contains('[') || input.contains(']') {
+        return Err(format!(
+            "unsupported PromQL '{input}': expected selector or rate/irate/increase(selector[window])"
+        ));
+    }
+    parse_prom_selector(input).map(PromExpression::Selector)
+}
+
+fn parse_range_vector_inner(input: &str) -> Result<(&str, &str), String> {
+    let close = input
+        .rfind(']')
+        .ok_or_else(|| "unsupported function shape: missing range window".to_string())?;
+    if close != input.len() - 1 {
+        return Err("unsupported function shape: range window must end the argument".to_string());
+    }
+    let open = input[..close]
+        .rfind('[')
+        .ok_or_else(|| "unsupported function shape: missing range window".to_string())?;
+    let selector = input[..open].trim();
+    let window = input[open + 1..close].trim();
+    if selector.is_empty() || window.is_empty() {
+        return Err("unsupported function shape: selector and window are required".to_string());
+    }
+    Ok((selector, window))
+}
+
+fn parse_prom_duration_ns(input: &str) -> Result<u64, String> {
+    let split = input
+        .find(|ch: char| !ch.is_ascii_digit() && ch != '.')
+        .ok_or_else(|| format!("invalid PromQL duration '{input}'"))?;
+    let amount = input[..split]
+        .parse::<f64>()
+        .map_err(|_| format!("invalid PromQL duration '{input}'"))?;
+    if !amount.is_finite() || amount <= 0.0 {
+        return Err("invalid PromQL duration: duration must be positive".to_string());
+    }
+    let unit = &input[split..];
+    let seconds = match unit {
+        "ms" => amount / 1_000.0,
+        "s" => amount,
+        "m" => amount * 60.0,
+        "h" => amount * 3_600.0,
+        "d" => amount * 86_400.0,
+        _ => return Err(format!("invalid PromQL duration unit '{unit}'")),
     };
     Ok((seconds * 1_000_000_000.0).round() as u64)
 }
@@ -610,6 +877,69 @@ fn align_range_values_to_steps(
         }
     }
     aligned
+}
+
+fn evaluate_counter_function(
+    function: PromCounterFunction,
+    samples: &[PromRangeValue],
+    window_start_ns: u64,
+    eval_time_ns: u64,
+) -> Option<f64> {
+    let window = samples
+        .iter()
+        .copied()
+        .filter(|sample| {
+            sample.timestamp_ns >= window_start_ns && sample.timestamp_ns <= eval_time_ns
+        })
+        .collect::<Vec<_>>();
+    if window.len() < 2 {
+        return None;
+    }
+
+    match function {
+        PromCounterFunction::Increase => Some(counter_increase(&window)),
+        PromCounterFunction::Rate => {
+            let first = window.first()?;
+            let last = window.last()?;
+            let elapsed =
+                (last.timestamp_ns.checked_sub(first.timestamp_ns)? as f64) / 1_000_000_000.0;
+            if elapsed <= 0.0 {
+                None
+            } else {
+                Some(counter_increase(&window) / elapsed)
+            }
+        }
+        PromCounterFunction::IRate => {
+            let previous = window[window.len() - 2];
+            let last = window[window.len() - 1];
+            let elapsed =
+                (last.timestamp_ns.checked_sub(previous.timestamp_ns)? as f64) / 1_000_000_000.0;
+            if elapsed <= 0.0 {
+                return None;
+            }
+            let delta = if last.value >= previous.value {
+                last.value - previous.value
+            } else {
+                last.value
+            };
+            Some(delta / elapsed)
+        }
+    }
+}
+
+fn counter_increase(samples: &[PromRangeValue]) -> f64 {
+    samples
+        .windows(2)
+        .map(|pair| {
+            let previous = pair[0].value;
+            let current = pair[1].value;
+            if current >= previous {
+                current - previous
+            } else {
+                current
+            }
+        })
+        .sum()
 }
 
 fn prometheus_matrix_response(series: Vec<PromRangeSeries>) -> HttpResponse {
