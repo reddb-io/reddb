@@ -16,11 +16,11 @@ Support the first operational PromQL functions over counters: `rate`, `irate`, a
 
 ## Acceptance criteria
 
-- [ ] `rate(counter[window])`, `irate(counter[window])`, and `increase(counter[window])` work through `/api/v1/query` and `/api/v1/query_range`.
-- [ ] Counter reset fixtures produce sane rates/increases after a reset.
-- [ ] Lookback/staleness behavior is documented and covered by tests.
-- [ ] Grafana-shaped query_range fixtures using counter functions return stable matrix outputs.
-- [ ] Unsupported function shapes fail clearly.
+- [x] `rate(counter[window])`, `irate(counter[window])`, and `increase(counter[window])` work through `/api/v1/query` and `/api/v1/query_range`.
+- [x] Counter reset fixtures produce sane rates/increases after a reset.
+- [x] Lookback/staleness behavior is documented and covered by tests.
+- [x] Grafana-shaped query_range fixtures using counter functions return stable matrix outputs.
+- [x] Unsupported function shapes fail clearly.
 
 ## Blocked by
 
