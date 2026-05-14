@@ -2,13 +2,12 @@
 
 ## Status
 
-Accepted as current-risk documentation. Follow-up fix required:
-<https://github.com/reddb-io/reddb/issues/448>.
+Resolved by <https://github.com/reddb-io/reddb/issues/448>.
 
 ## Context
 
-`WITH EVENTS` currently emits mutation events by writing the data mutation first
-and then enqueueing the event payload into the target queue.
+Before issue #448, `WITH EVENTS` emitted mutation events by writing the data
+mutation first and then enqueueing the event payload into the target queue.
 
 The relevant write path is:
 
@@ -27,14 +26,19 @@ The relevant write path is:
   `StoreCommitCoordinator::append_actions`, producing its own
   `WalRecord::TxCommitBatch` and durability wait.
 
-Therefore, in autocommit mode, the source-row write and the queue-message write
-are separate store WAL commit batches. The queue write can share neither the
-same `TxCommitBatch` nor the same caller-level atomic commit decision as the
-source mutation.
+Therefore, in the old autocommit path, the source-row write and the
+queue-message write were separate store WAL commit batches. The queue write
+could share neither the same `TxCommitBatch` nor the same caller-level atomic
+commit decision as the source mutation.
 
 ## Decision
 
-A dual-write crash window exists for autocommit `WITH EVENTS` mutations:
+Autocommit DML statements that may emit `WITH EVENTS` payloads now defer store
+WAL actions until the statement finishes, then append the source mutation and
+event queue write in one `TxCommitBatch`. That makes recovery observe both the
+source mutation and its event, or neither, at the store WAL boundary.
+
+The fixed design closes this historical crash window:
 
 1. The source mutation may become durable.
 2. The process may crash before the event queue message is appended and made
@@ -47,22 +51,21 @@ independent WAL appends for a single logical mutation event.
 
 ## Evidence
 
-`runtime::impl_dml::tests::with_events_autocommit_currently_splits_mutation_and_event_wal_batches`
-is a WAL characterization test. It creates a persistent `WITH EVENTS` table,
-executes one autocommit `INSERT`, reads the store WAL, and asserts that the
-source table write and the event queue write appear in different
-`WalRecord::TxCommitBatch` records.
+`runtime::impl_dml::tests::with_events_autocommit_persists_mutation_and_event_in_one_wal_batch`
+is a WAL invariant test. It creates a persistent `WITH EVENTS` table, executes
+one autocommit `INSERT`, reads the store WAL, and asserts that the source table
+write and the event queue write appear in the same `WalRecord::TxCommitBatch`.
 
-This is a deterministic proxy for the crash-injection scenario: if a crash lands
-after the first batch is durable and before the second batch is durable, recovery
-can observe the source mutation without the corresponding queue event.
+This is a deterministic proxy for the crash-injection scenario: there is no
+store-WAL position where the source row action is durable but the event queue
+action is absent.
 
 ## Consequences
 
-- Documentation must not claim that current `WITH EVENTS` delivery is an
-  already-atomic internal outbox.
+- Documentation may describe autocommit `WITH EVENTS` source/event persistence
+  as store-WAL atomic.
 - Consumers should continue deduplicating by `event_id`, but deduplication does
   not repair a missing event.
-- The fix should fold event queue payloads into the same store WAL batch as the
-  source mutation, or introduce a real internal outbox record written in the
-  same batch and drained afterward.
+- Backpressure and DLQ routing still happen before the statement's store WAL
+  batch is appended, so a successfully routed event or DLQ record is persisted
+  with the source mutation.
