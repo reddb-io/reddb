@@ -151,7 +151,7 @@ fn prometheus_query_range_filters_labels_and_rejects_bad_ranges() {
         "1704067220",
         "10",
     );
-    assert_eq!(status, 422, "response={response}");
-    assert_eq!(response["status"], "error");
-    assert_eq!(response["errorType"], "bad_data");
+    assert_eq!(status, 200, "response={response}");
+    let results = matrix_results(&response);
+    assert!(results.is_empty(), "non-bucket input has no quantiles");
 }

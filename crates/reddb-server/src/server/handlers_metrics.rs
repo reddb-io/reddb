@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::timeseries::retention::DownsamplePolicy;
 use prost::Message;
 use std::collections::{HashMap, HashSet};
 
@@ -277,6 +278,7 @@ impl RedDBServer {
                 .store()
                 .bulk_insert(&collection, batch.entities)
                 .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            materialize_metrics_rollups(&self.runtime, &collection, &contract)?;
         }
         self.runtime.record_metrics_ingest(
             batch.accepted_samples,
@@ -358,7 +360,9 @@ impl RedDBServer {
             .into_iter()
             .filter(|contract| contract.declared_model == CollectionModel::Metrics)
         {
-            let Some(manager) = store.get_collection(&contract.name) else {
+            let source_collection =
+                select_metrics_range_collection(store.as_ref(), &contract, range);
+            let Some(manager) = store.get_collection(&source_collection) else {
                 continue;
             };
             let entities =
@@ -2022,6 +2026,198 @@ fn existing_metrics_series_keys(runtime: &RedDBRuntime, collection: &str) -> Has
             _ => None,
         })
         .collect()
+}
+
+#[derive(Debug, Clone)]
+struct MetricsRollupPolicy {
+    target: String,
+    aggregation: String,
+    bucket_ns: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct RollupKey {
+    metric: String,
+    bucket_ns: u64,
+    tags: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
+struct RollupAccumulator {
+    count: u64,
+    sum: f64,
+    min: f64,
+    max: f64,
+}
+
+impl RollupAccumulator {
+    fn new(value: f64) -> Self {
+        Self {
+            count: 1,
+            sum: value,
+            min: value,
+            max: value,
+        }
+    }
+
+    fn push(&mut self, value: f64) {
+        self.count = self.count.saturating_add(1);
+        self.sum += value;
+        self.min = self.min.min(value);
+        self.max = self.max.max(value);
+    }
+
+    fn value(&self, aggregation: &str) -> f64 {
+        match aggregation {
+            "sum" => self.sum,
+            "min" => self.min,
+            "max" => self.max,
+            "count" => self.count as f64,
+            _ => self.sum / self.count.max(1) as f64,
+        }
+    }
+}
+
+fn materialize_metrics_rollups(
+    runtime: &RedDBRuntime,
+    raw_collection: &str,
+    contract: &crate::physical::CollectionContract,
+) -> RedDBResult<()> {
+    let policies = metrics_rollup_policies(contract);
+    if policies.is_empty() {
+        return Ok(());
+    }
+
+    let store = runtime.db().store();
+    let Some(raw_manager) = store.get_collection(raw_collection) else {
+        return Ok(());
+    };
+    let raw_points =
+        raw_manager.query_all(|entity| matches!(entity.data, EntityData::TimeSeries(_)));
+
+    for policy in policies {
+        let rollup_collection = metrics_rollup_collection(raw_collection, &policy.target);
+        if store.get_collection(&rollup_collection).is_none() {
+            store
+                .create_collection(&rollup_collection)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        }
+        if let Some(manager) = store.get_collection(&rollup_collection) {
+            for entity in manager.query_all(|_| true) {
+                store
+                    .delete(&rollup_collection, entity.id)
+                    .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            }
+        }
+
+        let mut buckets = BTreeMap::<RollupKey, RollupAccumulator>::new();
+        for entity in &raw_points {
+            let EntityData::TimeSeries(point) = &entity.data else {
+                continue;
+            };
+            let bucket_ns = (point.timestamp_ns / policy.bucket_ns) * policy.bucket_ns;
+            let mut tags = point
+                .tags
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect::<Vec<_>>();
+            tags.sort();
+            let key = RollupKey {
+                metric: point.metric.clone(),
+                bucket_ns,
+                tags,
+            };
+            buckets
+                .entry(key)
+                .and_modify(|acc| acc.push(point.value))
+                .or_insert_with(|| RollupAccumulator::new(point.value));
+        }
+
+        let mut entities = Vec::new();
+        for (key, accumulator) in buckets {
+            let tags = key.tags.into_iter().collect::<HashMap<_, _>>();
+            entities.push(UnifiedEntity::new(
+                EntityId::new(0),
+                EntityKind::TimeSeriesPoint(Box::new(crate::storage::TimeSeriesPointKind {
+                    series: rollup_collection.clone(),
+                    metric: key.metric.clone(),
+                })),
+                EntityData::TimeSeries(crate::storage::TimeSeriesData {
+                    metric: key.metric,
+                    timestamp_ns: key.bucket_ns,
+                    value: accumulator.value(&policy.aggregation),
+                    tags,
+                }),
+            ));
+        }
+        if !entities.is_empty() {
+            store
+                .bulk_insert(&rollup_collection, entities)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn select_metrics_range_collection(
+    store: &crate::storage::unified::UnifiedStore,
+    contract: &crate::physical::CollectionContract,
+    range: PromQueryRange,
+) -> String {
+    let Some(policy) = metrics_rollup_policies(contract)
+        .into_iter()
+        .filter(|policy| policy.bucket_ns <= range.step_ns)
+        .max_by_key(|policy| policy.bucket_ns)
+    else {
+        return contract.name.clone();
+    };
+    let rollup_collection = metrics_rollup_collection(&contract.name, &policy.target);
+    if store.get_collection(&rollup_collection).is_some() {
+        rollup_collection
+    } else {
+        contract.name.clone()
+    }
+}
+
+fn metrics_rollup_policies(
+    contract: &crate::physical::CollectionContract,
+) -> Vec<MetricsRollupPolicy> {
+    contract
+        .metrics_rollup_policies
+        .iter()
+        .filter_map(|spec| {
+            let parsed = DownsamplePolicy::parse(spec)?;
+            if parsed.source != "raw"
+                || !is_supported_metrics_rollup_aggregation(&parsed.aggregation)
+            {
+                return None;
+            }
+            Some(MetricsRollupPolicy {
+                target: parsed.target,
+                aggregation: parsed.aggregation,
+                bucket_ns: parsed.bucket_ns,
+            })
+        })
+        .collect()
+}
+
+fn is_supported_metrics_rollup_aggregation(aggregation: &str) -> bool {
+    matches!(aggregation, "avg" | "sum" | "min" | "max" | "count")
+}
+
+fn metrics_rollup_collection(raw_collection: &str, target: &str) -> String {
+    let sanitized = target
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("red_metrics_rollup_{raw_collection}_{sanitized}")
 }
 
 fn metrics_series_key(metric: &str, tags: &HashMap<String, String>) -> String {

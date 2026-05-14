@@ -2072,6 +2072,7 @@ fn queue_collection_contract(
         timestamps_enabled: false,
         context_index_enabled: false,
         metrics_raw_retention_ms: None,
+        metrics_rollup_policies: Vec::new(),
         metrics_tenant_identity: None,
         metrics_namespace: None,
         // Queues manipulate messages via push/pop/ack — the row DML

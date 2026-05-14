@@ -277,7 +277,44 @@ impl RedDBRuntime {
             .db
             .enforce_retention_policy()
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.enforce_metrics_raw_retention()?;
         self.invalidate_result_cache();
+        Ok(())
+    }
+
+    fn enforce_metrics_raw_retention(&self) -> RedDBResult<()> {
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64;
+        let store = self.inner.db.store();
+
+        for contract in self
+            .inner
+            .db
+            .collection_contracts()
+            .into_iter()
+            .filter(|contract| contract.declared_model == crate::catalog::CollectionModel::Metrics)
+        {
+            let Some(raw_retention_ms) = contract.metrics_raw_retention_ms else {
+                continue;
+            };
+            let cutoff_ns = now_ns.saturating_sub(raw_retention_ms.saturating_mul(1_000_000));
+            let Some(manager) = store.get_collection(&contract.name) else {
+                continue;
+            };
+            let expired = manager.query_all(|entity| match &entity.data {
+                crate::storage::EntityData::TimeSeries(point) => point.timestamp_ns < cutoff_ns,
+                _ => false,
+            });
+            for entity in expired {
+                store
+                    .delete(&contract.name, entity.id)
+                    .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            }
+        }
+
         Ok(())
     }
 
