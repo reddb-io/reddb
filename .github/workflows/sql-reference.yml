@@ -1,0 +1,28 @@
+name: SQL Reference
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'docs/reference/sql-1-0-x.md'
+      - 'scripts/check-sql-reference.py'
+      - 'crates/reddb-server/src/storage/query/lexer.rs'
+      - 'crates/reddb-server/src/storage/query/sql.rs'
+      - '.github/workflows/sql-reference.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'docs/reference/sql-1-0-x.md'
+      - 'scripts/check-sql-reference.py'
+      - 'crates/reddb-server/src/storage/query/lexer.rs'
+      - 'crates/reddb-server/src/storage/query/sql.rs'
+      - '.github/workflows/sql-reference.yml'
+
+jobs:
+  check:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check generated SQL reference blocks
+        run: python3 scripts/check-sql-reference.py

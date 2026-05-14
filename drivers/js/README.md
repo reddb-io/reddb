@@ -71,6 +71,9 @@ try {
 await db.close()
 ```
 
+For the SQL/RQL grammar that `db.query()` accepts, see
+[`docs/reference/sql-1-0-x.md`](../../docs/reference/sql-1-0-x.md).
+
 ## Transactions
 
 Use `db.transaction()` when a group of writes must commit or roll back together.
