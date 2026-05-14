@@ -2158,6 +2158,7 @@ impl RedDBRuntime {
                     )
                 },
                 kv_stats: crate::runtime::KvStatsCounters::default(),
+                metrics_ingest_stats: crate::runtime::MetricsIngestCounters::default(),
                 kv_tag_index: crate::runtime::KvTagIndex::default(),
             }),
         };
@@ -4416,7 +4417,23 @@ impl RedDBRuntime {
             system: SystemInfo::collect(),
             result_blob_cache: self.inner.result_blob_cache.stats(),
             kv: self.inner.kv_stats.snapshot(),
+            metrics_ingest: self.inner.metrics_ingest_stats.snapshot(),
         }
+    }
+
+    pub(crate) fn record_metrics_ingest(
+        &self,
+        accepted_samples: u64,
+        accepted_series: u64,
+        rejected_samples: u64,
+        rejected_series: u64,
+    ) {
+        self.inner.metrics_ingest_stats.record(
+            accepted_samples,
+            accepted_series,
+            rejected_samples,
+            rejected_series,
+        );
     }
 
     /// Execute a query under a typed scope override without embedding

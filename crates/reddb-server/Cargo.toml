@@ -36,6 +36,7 @@ tokio-stream = { version = "0.1", features = ["net", "sync"] }
 tonic = { version = "0.14", features = ["transport", "gzip", "zstd", "tls-ring"] }
 tonic-prost = "0.14"
 prost = "0.14"
+snap = "1"
 ureq = { version = "3.3", default-features = false, features = ["rustls"] }
 roaring = "0.11"
 parking_lot = "0.12"

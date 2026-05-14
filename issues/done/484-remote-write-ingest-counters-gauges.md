@@ -16,11 +16,11 @@ Accept Prometheus `remote_write` requests for counter and gauge samples, decode 
 
 ## Acceptance criteria
 
-- [ ] A Prometheus-compatible remote-write endpoint accepts fixture payloads for counters and gauges.
-- [ ] Samples are stored through a metrics-native batch path, not by generating one SQL row per sample.
-- [ ] Accepted sample/series counts and rejected sample/series counts are observable through RedDB metrics/admin surfaces.
-- [ ] WAL/reopen tests prove ingested samples survive restart.
-- [ ] Invalid payloads fail clearly without corrupting already accepted data.
+- [x] A Prometheus-compatible remote-write endpoint accepts fixture payloads for counters and gauges.
+- [x] Samples are stored through a metrics-native batch path, not by generating one SQL row per sample.
+- [x] Accepted sample/series counts and rejected sample/series counts are observable through RedDB metrics/admin surfaces.
+- [x] WAL/reopen tests prove ingested samples survive restart.
+- [x] Invalid payloads fail clearly without corrupting already accepted data.
 
 ## Blocked by
 
