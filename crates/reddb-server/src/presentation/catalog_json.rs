@@ -859,6 +859,29 @@ pub(crate) fn collection_contract_json(
         ),
     );
     object.insert(
+        "metrics_raw_retention_ms".to_string(),
+        contract
+            .metrics_raw_retention_ms
+            .map(|ttl_ms| JsonValue::Number(ttl_ms as f64))
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
+        "metrics_tenant_identity".to_string(),
+        contract
+            .metrics_tenant_identity
+            .as_ref()
+            .map(|identity| JsonValue::String(identity.clone()))
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
+        "metrics_namespace".to_string(),
+        contract
+            .metrics_namespace
+            .as_ref()
+            .map(|namespace| JsonValue::String(namespace.clone()))
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
         "columns".to_string(),
         JsonValue::Array(contract_columns_json(contract)),
     );
@@ -1063,6 +1086,7 @@ fn collection_model_str(model: CollectionModel) -> &'static str {
         CollectionModel::Mixed => "mixed",
         CollectionModel::TimeSeries => "timeseries",
         CollectionModel::Queue => "queue",
+        CollectionModel::Metrics => "metrics",
     }
 }
 

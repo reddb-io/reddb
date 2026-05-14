@@ -290,6 +290,9 @@ fn hypertable_collection_contract(
         table_def: None,
         timestamps_enabled: false,
         context_index_enabled: false,
+        metrics_raw_retention_ms: None,
+        metrics_tenant_identity: None,
+        metrics_namespace: None,
         // Hypertable data is conceptually immutable once the chunk
         // seals. Reject UPDATE / DELETE at parse time and give the
         // operator a clear message instead of silent coalescing.
@@ -318,6 +321,9 @@ fn timeseries_collection_contract(
         table_def: None,
         timestamps_enabled: false,
         context_index_enabled: false,
+        metrics_raw_retention_ms: None,
+        metrics_tenant_identity: None,
+        metrics_namespace: None,
         // Time-series collections are append-only by nature — the
         // storage model forbids in-place UPDATE already, so the flag
         // makes the catalog honest rather than changing semantics.

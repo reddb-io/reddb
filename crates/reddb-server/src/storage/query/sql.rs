@@ -1253,6 +1253,8 @@ impl<'a> Parser<'a> {
                     Some(CollectionModel::Document)
                 } else if self.consume(&Token::Timeseries)? {
                     Some(CollectionModel::TimeSeries)
+                } else if self.consume_ident_ci("METRICS")? {
+                    Some(CollectionModel::Metrics)
                 } else if self.consume(&Token::Kv)? {
                     Some(CollectionModel::Kv)
                 } else if self.consume(&Token::Queue)? {
@@ -1267,6 +1269,7 @@ impl<'a> Parser<'a> {
                             "VECTOR",
                             "DOCUMENT",
                             "TIMESERIES",
+                            "METRICS",
                             "KV",
                             "QUEUE",
                             "COLLECTION",
@@ -1447,6 +1450,14 @@ impl<'a> Parser<'a> {
                             format!(
                                 "internal: CREATE TIMESERIES produced unexpected kind {other:?}"
                             ),
+                            self.position(),
+                        )),
+                    }
+                } else if self.consume_ident_ci("METRICS")? {
+                    match self.parse_create_metrics_body()? {
+                        QueryExpr::CreateTable(query) => Ok(SqlCommand::CreateTable(query)),
+                        other => Err(ParseError::new(
+                            format!("internal: CREATE METRICS produced unexpected kind {other:?}"),
                             self.position(),
                         )),
                     }
@@ -1840,6 +1851,14 @@ impl<'a> Parser<'a> {
                         QueryExpr::DropTimeSeries(query) => Ok(SqlCommand::DropTimeSeries(query)),
                         other => Err(ParseError::new(
                             format!("internal: DROP TIMESERIES produced unexpected kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                } else if self.consume_ident_ci("METRICS")? {
+                    match self.parse_drop_collection_model_body(Some(CollectionModel::Metrics))? {
+                        QueryExpr::DropCollection(query) => Ok(SqlCommand::DropCollection(query)),
+                        other => Err(ParseError::new(
+                            format!("internal: DROP METRICS produced unexpected kind {other:?}"),
                             self.position(),
                         )),
                     }

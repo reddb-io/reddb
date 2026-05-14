@@ -460,11 +460,19 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse_drop_collection_body(&mut self) -> Result<QueryExpr, ParseError> {
+        self.parse_drop_collection_model_body(None)
+    }
+
+    pub fn parse_drop_collection_model_body(
+        &mut self,
+        model: Option<CollectionModel>,
+    ) -> Result<QueryExpr, ParseError> {
         let if_exists = self.match_if_exists()?;
         let name = self.parse_drop_collection_name()?;
         Ok(QueryExpr::DropCollection(DropCollectionQuery {
             name,
             if_exists,
+            model,
         }))
     }
 

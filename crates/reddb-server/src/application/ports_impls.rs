@@ -38,6 +38,7 @@ pub(super) fn collection_model_name_shared(model: crate::catalog::CollectionMode
         crate::catalog::CollectionModel::Mixed => "mixed",
         crate::catalog::CollectionModel::TimeSeries => "timeseries",
         crate::catalog::CollectionModel::Queue => "queue",
+        crate::catalog::CollectionModel::Metrics => "metrics",
     }
 }
 

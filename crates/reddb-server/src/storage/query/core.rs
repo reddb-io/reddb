@@ -1888,6 +1888,7 @@ pub struct DropKvQuery {
 pub struct DropCollectionQuery {
     pub name: String,
     pub if_exists: bool,
+    pub model: Option<CollectionModel>,
 }
 
 /// TRUNCATE {TABLE|GRAPH|VECTOR|DOCUMENT|TIMESERIES|KV|QUEUE|COLLECTION} [IF EXISTS] name

@@ -231,6 +231,15 @@ pub struct CollectionContract {
     /// pay zero indexing tax; search-oriented tables (articles, docs)
     /// flip the switch at CREATE time.
     pub context_index_enabled: bool,
+    /// Metrics collections are backed by time-series storage but carry a
+    /// metrics-specific raw sample retention contract.
+    pub metrics_raw_retention_ms: Option<u64>,
+    /// Metrics tenant identity source. Defaults to current tenant context and
+    /// can be declared as a stable identity path for future ingestion slices.
+    pub metrics_tenant_identity: Option<String>,
+    /// Metrics namespace identity. v0 starts with a default namespace so
+    /// series identity is namespace-aware before Prometheus ingestion exists.
+    pub metrics_namespace: Option<String>,
     /// Enabled by `CREATE TABLE ... APPEND ONLY` or `WITH
     /// (append_only = true)`. When true, the runtime rejects
     /// `UPDATE` and `DELETE` against this collection at parse time
