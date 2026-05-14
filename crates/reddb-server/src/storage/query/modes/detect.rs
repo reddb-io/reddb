@@ -127,6 +127,7 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("set config ")
         || lower.starts_with("set secret ")
         || lower.starts_with("set tenant")
+        || lower.starts_with("show create ")
         || lower.starts_with("show config")
         || lower.starts_with("show collections")
         || lower.starts_with("show tables")
@@ -328,6 +329,7 @@ mod tests {
         assert_eq!(detect_mode("SHOW CONFIGS"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW VAULTS"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW SCHEMA users"), QueryMode::Sql);
+        assert_eq!(detect_mode("SHOW CREATE TABLE users"), QueryMode::Sql);
         assert_eq!(detect_mode("DESCRIBE users"), QueryMode::Sql);
         assert_eq!(detect_mode("DESC users"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW INDICES"), QueryMode::Sql);

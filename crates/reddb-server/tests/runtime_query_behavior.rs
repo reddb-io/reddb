@@ -100,6 +100,40 @@ fn sorted_text_column(result: &RuntimeQueryResult, column: &str) -> Vec<String> 
     values
 }
 
+fn describe_signature(
+    result: &RuntimeQueryResult,
+) -> Vec<(String, String, bool, Option<String>, bool)> {
+    let mut rows = result
+        .result
+        .records
+        .iter()
+        .map(|record| {
+            let text = |column: &str| match record.get(column) {
+                Some(Value::Text(value)) => value.as_ref().to_string(),
+                other => panic!("expected text column {column}, got {other:?}"),
+            };
+            let bool_value = |column: &str| match record.get(column) {
+                Some(Value::Boolean(value)) => *value,
+                other => panic!("expected bool column {column}, got {other:?}"),
+            };
+            let default = match record.get("default") {
+                Some(Value::Text(value)) => Some(value.as_ref().to_string()),
+                Some(Value::Null) => None,
+                other => panic!("expected default text/null, got {other:?}"),
+            };
+            (
+                text("name"),
+                text("type"),
+                bool_value("nullable"),
+                default,
+                bool_value("indexed"),
+            )
+        })
+        .collect::<Vec<_>>();
+    rows.sort();
+    rows
+}
+
 #[test]
 fn join_query_executes_against_real_table_rows() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
@@ -492,6 +526,73 @@ fn describe_unknown_collection_reports_clear_error() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
     let err = rt
         .execute_query("DESCRIBE missing_collection")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("COLLECTION_NOT_FOUND"), "{err}");
+}
+
+#[test]
+fn show_create_table_round_trips_declared_schema_and_indexes() {
+    let original = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    original
+        .execute_query(
+            "CREATE TABLE show_create_users (\
+             id INT PRIMARY KEY, \
+             email TEXT NOT NULL UNIQUE, \
+             name TEXT DEFAULT = 'unknown', \
+             active BOOLEAN DEFAULT = true, \
+             score FLOAT DEFAULT = 1.5\
+             )",
+        )
+        .expect("create original table");
+    original
+        .execute_query(
+            "CREATE INDEX idx_show_create_users_email ON show_create_users (email) USING HASH",
+        )
+        .expect("create email index");
+
+    let shown = original
+        .execute_query("SHOW CREATE TABLE show_create_users")
+        .expect("SHOW CREATE TABLE executes");
+    assert_eq!(shown.result.columns, vec!["ddl"]);
+    assert_eq!(shown.result.records.len(), 1);
+    let ddl = text_at(&shown, 0, "ddl");
+    assert!(ddl.contains("CREATE TABLE show_create_users"), "{ddl}");
+    assert!(
+        ddl.contains(
+            "CREATE INDEX idx_show_create_users_email ON show_create_users (email) USING HASH"
+        ),
+        "{ddl}"
+    );
+
+    let fresh = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("fresh runtime boots");
+    for statement in ddl
+        .split(';')
+        .map(str::trim)
+        .filter(|stmt| !stmt.is_empty())
+    {
+        fresh
+            .execute_query(statement)
+            .unwrap_or_else(|err| panic!("DDL statement failed: {statement}\n{err}"));
+    }
+
+    let original_describe = original
+        .execute_query("DESCRIBE show_create_users")
+        .expect("describe original");
+    let fresh_describe = fresh
+        .execute_query("DESCRIBE show_create_users")
+        .expect("describe fresh");
+    assert_eq!(
+        describe_signature(&fresh_describe),
+        describe_signature(&original_describe)
+    );
+}
+
+#[test]
+fn show_create_unknown_collection_reports_clear_error() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    let err = rt
+        .execute_query("SHOW CREATE TABLE missing_collection")
         .unwrap_err()
         .to_string();
     assert!(err.contains("COLLECTION_NOT_FOUND"), "{err}");

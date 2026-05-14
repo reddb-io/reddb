@@ -2007,6 +2007,24 @@ fn test_parse_describe_desugars_to_red_describe_select() {
 }
 
 #[test]
+fn test_parse_show_create_table_desugars_to_red_show_create_select() {
+    let query = parse("SHOW CREATE TABLE users").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.show_create");
+        assert!(matches!(
+            tq.filter,
+            Some(Filter::Compare {
+                field: FieldRef::TableColumn { ref column, .. },
+                op: CompareOp::Eq,
+                value: crate::storage::schema::Value::Text(ref value),
+            }) if column == "collection" && value.as_ref() == "users"
+        ));
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
 fn test_parse_show_indices_desugars_to_red_indices_select() {
     let query = parse("SHOW INDICES").unwrap();
     if let QueryExpr::Table(tq) = query {

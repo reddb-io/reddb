@@ -2173,7 +2173,23 @@ impl<'a> Parser<'a> {
             }
             Token::Ident(name) if name.eq_ignore_ascii_case("SHOW") => {
                 self.advance()?;
-                if self.consume_ident_ci("CONFIG")? {
+                if self.consume(&Token::Create)? || self.consume_ident_ci("CREATE")? {
+                    if !(self.consume(&Token::Table)? || self.consume_ident_ci("TABLE")?) {
+                        return Err(ParseError::expected(
+                            vec!["TABLE"],
+                            self.peek(),
+                            self.position(),
+                        ));
+                    }
+                    let collection = self.parse_dotted_admin_path(false)?;
+                    let mut query = TableQuery::new("red.show_create");
+                    query.filter = Some(Filter::compare(
+                        FieldRef::column("", "collection"),
+                        CompareOp::Eq,
+                        Value::text(collection),
+                    ));
+                    Ok(SqlCommand::Select(query))
+                } else if self.consume_ident_ci("CONFIG")? {
                     // Accept dotted prefixes the same way SET CONFIG does
                     // (`SHOW CONFIG durability.mode`), and empty prefix
                     // (`SHOW CONFIG`) for a catalog-wide listing.

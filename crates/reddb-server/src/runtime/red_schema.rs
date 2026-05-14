@@ -3,7 +3,7 @@
 //! The SQL parser does not currently accept schema-qualified table
 //! identifiers in `FROM`, so the runtime rewrites the small virtual
 //! surface it owns (`red.collections`, `red.columns`, `red.describe`,
-//! `red.indices`, `red.policies`, `red.stats`, `red.subscriptions`) to internal identifiers before normal parsing.
+//! `red.show_create`, `red.indices`, `red.policies`, `red.stats`, `red.subscriptions`) to internal identifiers before normal parsing.
 //! Execution then intercepts that identifier and materializes rows from the live catalog snapshot.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -24,6 +24,8 @@ pub(super) const COLUMNS: &str = "red.columns";
 pub(super) const COLUMNS_INTERNAL: &str = "__red_schema_columns";
 pub(super) const DESCRIBE: &str = "red.describe";
 pub(super) const DESCRIBE_INTERNAL: &str = "__red_schema_describe";
+pub(super) const SHOW_CREATE: &str = "red.show_create";
+pub(super) const SHOW_CREATE_INTERNAL: &str = "__red_schema_show_create";
 pub(super) const INDICES: &str = "red.indices";
 pub(super) const INDICES_INTERNAL: &str = "__red_schema_indices";
 pub(super) const POLICIES: &str = "red.policies";
@@ -61,6 +63,8 @@ const COLUMN_COLUMNS: [&str; 7] = [
 ];
 
 const DESCRIBE_COLUMNS: [&str; 5] = ["name", "type", "nullable", "default", "indexed"];
+
+const SHOW_CREATE_COLUMNS: [&str; 1] = ["ddl"];
 
 const INDEX_COLUMNS: [&str; 10] = [
     "collection",
@@ -121,6 +125,7 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
         (COLLECTIONS, COLLECTIONS_INTERNAL),
         (COLUMNS, COLUMNS_INTERNAL),
         (DESCRIBE, DESCRIBE_INTERNAL),
+        (SHOW_CREATE, SHOW_CREATE_INTERNAL),
         (INDICES, INDICES_INTERNAL),
         (POLICIES, POLICIES_INTERNAL),
         (STATS, STATS_INTERNAL),
@@ -156,6 +161,8 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(COLUMNS)
         || table.eq_ignore_ascii_case(DESCRIBE_INTERNAL)
         || table.eq_ignore_ascii_case(DESCRIBE)
+        || table.eq_ignore_ascii_case(SHOW_CREATE_INTERNAL)
+        || table.eq_ignore_ascii_case(SHOW_CREATE)
         || table.eq_ignore_ascii_case(INDICES_INTERNAL)
         || table.eq_ignore_ascii_case(INDICES)
         || table.eq_ignore_ascii_case(POLICIES_INTERNAL)
@@ -199,6 +206,7 @@ pub(super) fn red_query(
         VirtualTableKind::Collections => collections_snapshot(runtime, tenant, visible_collections),
         VirtualTableKind::Columns => columns_snapshot(runtime, visible_collections),
         VirtualTableKind::Describe => describe_snapshot(runtime, visible_collections, query)?,
+        VirtualTableKind::ShowCreate => show_create_snapshot(runtime, visible_collections, query)?,
         VirtualTableKind::Indices => indices_snapshot(runtime, visible_collections),
         VirtualTableKind::Policies => policies_snapshot(runtime, tenant, visible_collections),
         VirtualTableKind::Stats => stats_snapshot(runtime, visible_collections),
@@ -207,7 +215,10 @@ pub(super) fn red_query(
 
     let table_name = query.table.as_str();
     let table_alias = query.alias.as_deref();
-    if !matches!(virtual_kind, VirtualTableKind::Describe) {
+    if !matches!(
+        virtual_kind,
+        VirtualTableKind::Describe | VirtualTableKind::ShowCreate
+    ) {
         if let Some(filter) = effective_table_filter(query) {
             records.retain(|record| {
                 super::join_filter::evaluate_runtime_filter_with_db(
@@ -295,6 +306,7 @@ enum VirtualTableKind {
     Collections,
     Columns,
     Describe,
+    ShowCreate,
     Indices,
     Policies,
     Stats,
@@ -307,6 +319,7 @@ impl VirtualTableKind {
             Self::Collections => &COLLECTION_COLUMNS,
             Self::Columns => &COLUMN_COLUMNS,
             Self::Describe => &DESCRIBE_COLUMNS,
+            Self::ShowCreate => &SHOW_CREATE_COLUMNS,
             Self::Indices => &INDEX_COLUMNS,
             Self::Policies => &POLICY_COLUMNS,
             Self::Stats => &STATS_COLUMNS,
@@ -319,6 +332,7 @@ impl VirtualTableKind {
             Self::Collections => COLLECTIONS,
             Self::Columns => COLUMNS,
             Self::Describe => DESCRIBE,
+            Self::ShowCreate => SHOW_CREATE,
             Self::Indices => INDICES,
             Self::Policies => POLICIES,
             Self::Stats => STATS,
@@ -336,6 +350,9 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
     }
     if name.eq_ignore_ascii_case(DESCRIBE_INTERNAL) || name.eq_ignore_ascii_case(DESCRIBE) {
         return Ok(VirtualTableKind::Describe);
+    }
+    if name.eq_ignore_ascii_case(SHOW_CREATE_INTERNAL) || name.eq_ignore_ascii_case(SHOW_CREATE) {
+        return Ok(VirtualTableKind::ShowCreate);
     }
     if name.eq_ignore_ascii_case(INDICES_INTERNAL) || name.eq_ignore_ascii_case(INDICES) {
         return Ok(VirtualTableKind::Indices);
@@ -617,6 +634,183 @@ fn describe_target_collection(query: &TableQuery) -> RedDBResult<String> {
             "DESCRIBE requires a collection name".to_string(),
         )),
     }
+}
+
+fn show_create_snapshot(
+    runtime: &RedDBRuntime,
+    visible_collections: Option<&HashSet<String>>,
+    query: &TableQuery,
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    let collection = show_create_target_collection(query)?;
+    let db = runtime.db();
+    let catalog_entry = db
+        .catalog_model_snapshot()
+        .collections
+        .into_iter()
+        .find(|entry| entry.name == collection);
+    let Some(catalog_entry) = catalog_entry else {
+        return Err(RedDBError::Query(format!(
+            "COLLECTION_NOT_FOUND: {collection}"
+        )));
+    };
+    if !collection_is_visible(&collection, visible_collections) {
+        return Err(RedDBError::Query(format!(
+            "COLLECTION_NOT_FOUND: {collection}"
+        )));
+    }
+    if catalog_entry.model != CollectionModel::Table {
+        return Err(RedDBError::Query(format!(
+            "NOT_APPLICABLE: SHOW CREATE TABLE {collection} is only supported for table collections"
+        )));
+    }
+
+    let contracts = db.collection_contracts();
+    let Some(contract) = contracts
+        .iter()
+        .find(|contract| contract.name == collection)
+    else {
+        return Err(RedDBError::Query(format!(
+            "NOT_APPLICABLE: SHOW CREATE TABLE {collection} has no declared column schema"
+        )));
+    };
+    if contract.declared_columns.is_empty() {
+        return Err(RedDBError::Query(format!(
+            "NOT_APPLICABLE: SHOW CREATE TABLE {collection} has no declared column schema"
+        )));
+    }
+
+    let ddl = render_show_create_table_ddl(
+        contract,
+        runtime.index_store_ref().list_indices(&collection),
+    );
+    let schema = Arc::new(
+        SHOW_CREATE_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    Ok(vec![UnifiedRecord::with_schema(
+        schema,
+        vec![Value::text(ddl)],
+    )])
+}
+
+fn show_create_target_collection(query: &TableQuery) -> RedDBResult<String> {
+    match query.filter.as_ref() {
+        Some(Filter::Compare {
+            field: FieldRef::TableColumn { column, .. },
+            op: CompareOp::Eq,
+            value: Value::Text(collection),
+        }) if column == "collection" => Ok(collection.to_string()),
+        _ => Err(RedDBError::Query(
+            "SHOW CREATE TABLE requires a table name".to_string(),
+        )),
+    }
+}
+
+fn render_show_create_table_ddl(
+    contract: &crate::physical::CollectionContract,
+    mut indices: Vec<super::index_store::RegisteredIndex>,
+) -> String {
+    let columns = contract
+        .declared_columns
+        .iter()
+        .map(render_show_create_column)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut statements = vec![format!(
+        "CREATE TABLE {} ({columns})",
+        render_sql_identifier(&contract.name)
+    )];
+
+    indices.sort_by(|left, right| left.name.cmp(&right.name));
+    for index in indices {
+        let unique = if index.unique { "UNIQUE " } else { "" };
+        let columns = index
+            .columns
+            .iter()
+            .map(|column| render_sql_identifier(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        statements.push(format!(
+            "CREATE {unique}INDEX {} ON {} ({columns}) USING {}",
+            render_sql_identifier(&index.name),
+            render_sql_identifier(&contract.name),
+            render_index_method_for_ddl(index.method)
+        ));
+    }
+
+    format!("{};", statements.join(";\n"))
+}
+
+fn render_show_create_column(column: &crate::physical::DeclaredColumnContract) -> String {
+    let mut parts = vec![
+        render_sql_identifier(&column.name),
+        column
+            .sql_type
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| column.data_type.clone()),
+    ];
+
+    if column.not_null && !column.primary_key {
+        parts.push("NOT NULL".to_string());
+    }
+    if let Some(default) = column.default.as_deref() {
+        parts.push(format!(
+            "DEFAULT = {}",
+            render_show_create_default(column, default)
+        ));
+    }
+    if let Some(compress) = column.compress {
+        parts.push(format!("COMPRESS:{compress}"));
+    }
+    if column.unique {
+        parts.push("UNIQUE".to_string());
+    }
+    if column.primary_key {
+        parts.push("PRIMARY KEY".to_string());
+    }
+
+    parts.join(" ")
+}
+
+fn render_show_create_default(
+    column: &crate::physical::DeclaredColumnContract,
+    default: &str,
+) -> String {
+    if default.eq_ignore_ascii_case("null") {
+        return "NULL".to_string();
+    }
+    if show_create_default_needs_quotes(column) {
+        return format!("'{}'", default.replace('\'', "''"));
+    }
+    default.to_string()
+}
+
+fn show_create_default_needs_quotes(column: &crate::physical::DeclaredColumnContract) -> bool {
+    let base = column
+        .sql_type
+        .as_ref()
+        .map(|sql_type| sql_type.base_name())
+        .unwrap_or_else(|| column.data_type.to_ascii_uppercase());
+    matches!(
+        base.as_str(),
+        "TEXT" | "STRING" | "EMAIL" | "UUID" | "IPADDR" | "MACADDR" | "ENUM"
+    )
+}
+
+fn render_index_method_for_ddl(method: super::index_store::IndexMethodKind) -> &'static str {
+    match method {
+        super::index_store::IndexMethodKind::Hash => "HASH",
+        super::index_store::IndexMethodKind::BTree => "BTREE",
+        super::index_store::IndexMethodKind::Bitmap => "BITMAP",
+        super::index_store::IndexMethodKind::Spatial => "RTREE",
+    }
+}
+
+fn render_sql_identifier(identifier: &str) -> String {
+    identifier.to_string()
 }
 
 fn policies_snapshot(
