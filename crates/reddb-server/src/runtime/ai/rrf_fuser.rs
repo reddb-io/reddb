@@ -322,10 +322,8 @@ mod tests {
 
     #[test]
     fn all_empty_buckets_returns_empty() {
-        let buckets: Vec<Bucket<&'static str>> = vec![
-            bucket_no_floor(vec![]),
-            bucket_no_floor(vec![]),
-        ];
+        let buckets: Vec<Bucket<&'static str>> =
+            vec![bucket_no_floor(vec![]), bucket_no_floor(vec![])];
         let out = fuse(&buckets, 60, 10);
         assert!(out.is_empty());
     }

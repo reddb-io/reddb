@@ -1989,7 +1989,10 @@ impl RedDBRuntime {
         }
 
         let mut cache_entry = crate::json::Map::new();
-        cache_entry.insert("key".to_string(), crate::json::Value::String(key.to_string()));
+        cache_entry.insert(
+            "key".to_string(),
+            crate::json::Value::String(key.to_string()),
+        );
         cache_entry.insert(
             "ttl_ms".to_string(),
             crate::json::Value::Number(ttl.as_millis().min(u64::MAX as u128) as f64),
@@ -2116,7 +2119,9 @@ impl RedDBRuntime {
         let key = cache_entry
             .get("key")
             .and_then(crate::json::Value::as_str)
-            .ok_or_else(|| RedDBError::Query("ask.cache_put.v1 key must be a string".to_string()))?;
+            .ok_or_else(|| {
+                RedDBError::Query("ask.cache_put.v1 key must be a string".to_string())
+            })?;
         let ttl_ms = cache_entry
             .get("ttl_ms")
             .and_then(crate::json::Value::as_u64)
@@ -4123,10 +4128,7 @@ mod citation_wedge_tests {
         cache_payload.insert("mode".into(), crate::json::Value::String("lenient".into()));
         cache_payload.insert("retry_count".into(), crate::json::Value::Number(0.0));
         cache_payload.insert("prompt_tokens".into(), crate::json::Value::Number(1.0));
-        cache_payload.insert(
-            "completion_tokens".into(),
-            crate::json::Value::Number(1.0),
-        );
+        cache_payload.insert("completion_tokens".into(), crate::json::Value::Number(1.0));
         cache_payload.insert("cost_usd".into(), crate::json::Value::Number(0.000002));
 
         let mut cache_entry = crate::json::Map::new();
@@ -4140,10 +4142,7 @@ mod citation_wedge_tests {
             "source_dependencies".into(),
             crate::json::Value::Array(vec![crate::json::Value::String("incidents".into())]),
         );
-        cache_entry.insert(
-            "payload".into(),
-            crate::json::Value::Object(cache_payload),
-        );
+        cache_entry.insert("payload".into(), crate::json::Value::Object(cache_payload));
 
         let mut payload = crate::json::Map::new();
         payload.insert(

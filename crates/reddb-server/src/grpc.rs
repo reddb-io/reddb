@@ -52,9 +52,9 @@ pub use reddb_grpc_proto as proto;
 use proto::red_db_server::{RedDb, RedDbServer};
 use proto::{
     ask_stream_event, AskAnswerToken, AskReply, AskRequest, AskSources, AskStreamEvent,
-    BatchQueryReply, BatchQueryRequest, BulkEntityReply, Citation,
-    CollectionRequest, CollectionsReply, DeleteEntityRequest, DeploymentProfileRequest, Empty,
-    EntityReply, ExecutePreparedRequest, ExportRequest, GraphProjectionUpsertRequest, HealthReply,
+    BatchQueryReply, BatchQueryRequest, BulkEntityReply, Citation, CollectionRequest,
+    CollectionsReply, DeleteEntityRequest, DeploymentProfileRequest, Empty, EntityReply,
+    ExecutePreparedRequest, ExportRequest, GraphProjectionUpsertRequest, HealthReply,
     IndexNameRequest, IndexToggleRequest, JsonBulkCreateRequest, JsonCreateRequest,
     JsonPayloadRequest, KvWatchEvent, KvWatchRequest, ManifestRequest, OperationReply,
     PayloadReply, PrepareQueryReply, PrepareQueryRequest, QueryReply, QueryRequest, QueryValue,

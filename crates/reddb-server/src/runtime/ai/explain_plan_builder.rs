@@ -197,7 +197,10 @@ fn determinism_value(d: Determinism) -> Value {
 
 fn cost_value(c: EstimatedCost) -> Value {
     obj(vec![
-        ("max_completion_tokens", Value::Number(c.max_completion_tokens as f64)),
+        (
+            "max_completion_tokens",
+            Value::Number(c.max_completion_tokens as f64),
+        ),
         ("prompt_tokens", Value::Number(c.prompt_tokens as f64)),
     ])
 }
@@ -449,10 +452,7 @@ mod tests {
         // an epsilon rather than pinning the widened bit pattern.
         assert!((v_score - 0.7).abs() < 1e-6, "got {v_score}");
         let bm25 = &buckets[0];
-        assert_eq!(
-            bm25.get("min_score").and_then(|x| x.as_f64()),
-            Some(0.0)
-        );
+        assert_eq!(bm25.get("min_score").and_then(|x| x.as_f64()), Some(0.0));
     }
 
     #[test]
@@ -569,10 +569,7 @@ mod tests {
         let c = v.get("estimated_cost").and_then(|x| x.as_object()).unwrap();
         let keys: Vec<&str> = c.keys().map(|k| k.as_str()).collect();
         assert_eq!(keys, vec!["max_completion_tokens", "prompt_tokens"]);
-        assert_eq!(
-            c.get("prompt_tokens").and_then(|x| x.as_u64()),
-            Some(1500)
-        );
+        assert_eq!(c.get("prompt_tokens").and_then(|x| x.as_u64()), Some(1500));
         assert_eq!(
             c.get("max_completion_tokens").and_then(|x| x.as_u64()),
             Some(1024)

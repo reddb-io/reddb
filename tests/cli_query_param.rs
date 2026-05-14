@@ -48,11 +48,7 @@ fn run_query(path: &PathBuf, sql: &str, extra: &[&str]) -> (String, String, i32)
 }
 
 fn seed(path: &PathBuf) {
-    let (_o, e, c) = run_query(
-        path,
-        "CREATE TABLE t (id INTEGER, name TEXT)",
-        &["--json"],
-    );
+    let (_o, e, c) = run_query(path, "CREATE TABLE t (id INTEGER, name TEXT)", &["--json"]);
     assert_eq!(c, 0, "create: {e}");
     for (id, name) in [(1, "alice"), (2, "bob"), (3, "carol")] {
         let sql = format!("INSERT INTO t (id, name) VALUES ({id}, '{name}')");
@@ -130,7 +126,10 @@ fn param_type_text_keeps_numeric_string_as_text() {
         &["--param", "42", "--param-type", "text", "--json"],
     );
     assert_eq!(code, 0, "stderr={stderr}");
-    assert!(stdout.contains("\"42\""), "expected text bind row: {stdout}");
+    assert!(
+        stdout.contains("\"42\""),
+        "expected text bind row: {stdout}"
+    );
 }
 
 #[test]

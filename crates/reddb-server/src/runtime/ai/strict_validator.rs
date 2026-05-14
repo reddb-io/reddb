@@ -40,7 +40,9 @@
 //! lets the unit tests pin the exact phrasing, and keeps the
 //! `execute_ask` glue code tiny.
 
-use crate::runtime::ai::citation_parser::{CitationParseResult, CitationWarning, CitationWarningKind};
+use crate::runtime::ai::citation_parser::{
+    CitationParseResult, CitationWarning, CitationWarningKind,
+};
 
 /// Whether the caller wants strict validation or lenient warn-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -403,14 +405,8 @@ mod tests {
     #[test]
     fn empty_parse_is_ok_in_either_mode() {
         let empty = CitationParseResult::default();
-        assert_eq!(
-            validate(&empty, Mode::Strict, Attempt::First),
-            Decision::Ok
-        );
-        assert_eq!(
-            validate(&empty, Mode::Strict, Attempt::Retry),
-            Decision::Ok
-        );
+        assert_eq!(validate(&empty, Mode::Strict, Attempt::First), Decision::Ok);
+        assert_eq!(validate(&empty, Mode::Strict, Attempt::Retry), Decision::Ok);
         assert_eq!(
             validate(&empty, Mode::Lenient, Attempt::First),
             Decision::Ok

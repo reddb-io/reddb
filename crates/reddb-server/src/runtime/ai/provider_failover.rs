@@ -139,7 +139,10 @@ impl fmt::Display for FailoverExhausted {
 /// Empty `providers` returns `Err(FailoverExhausted { attempts: [] })`.
 /// The HTTP layer should treat that as a config error, not a 503; the
 /// kernel does not encode that distinction.
-pub fn run<R, F>(providers: &[&str], mut attempt: F) -> Result<FailoverSuccess<R>, FailoverExhausted>
+pub fn run<R, F>(
+    providers: &[&str],
+    mut attempt: F,
+) -> Result<FailoverSuccess<R>, FailoverExhausted>
 where
     F: FnMut(&str) -> Result<R, AttemptError>,
 {
@@ -185,7 +188,11 @@ pub fn parse_using_clause(raw: &str) -> Option<Vec<String>> {
             out.push(name.to_string());
         }
     }
-    if out.is_empty() { None } else { Some(out) }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 #[cfg(test)]
@@ -202,13 +209,11 @@ mod tests {
 
     #[test]
     fn status_5xx_is_retryable() {
-        assert!(
-            AttemptError::Status5xx {
-                code: 502,
-                body: "bad gateway".into()
-            }
-            .is_retryable()
-        );
+        assert!(AttemptError::Status5xx {
+            code: 502,
+            body: "bad gateway".into()
+        }
+        .is_retryable());
     }
 
     #[test]
@@ -226,7 +231,9 @@ mod tests {
     #[test]
     fn first_provider_succeeds_no_prior_errors() {
         let providers = ["groq", "openai", "anthropic"];
-        let result = run(&providers, |p| Ok::<_, AttemptError>(format!("answer from {p}")));
+        let result = run(&providers, |p| {
+            Ok::<_, AttemptError>(format!("answer from {p}"))
+        });
         let ok = result.expect("should succeed");
         assert_eq!(ok.provider, "groq");
         assert_eq!(ok.response, "answer from groq");

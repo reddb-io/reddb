@@ -134,7 +134,9 @@ mod tests {
     fn output_is_64_lowercase_hex_chars() {
         let out = fp(&[("urn:doc:a", 1)]);
         assert_eq!(out.len(), 64);
-        assert!(out.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(out
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 
     #[test]

@@ -143,14 +143,20 @@ pub fn build(result: &AskResult) -> Value {
         Value::Number(result.completion_tokens as f64),
     );
     m.insert("cost_usd".into(), Value::Number(result.cost_usd));
-    m.insert("mode".into(), Value::String(result.effective_mode.as_str().into()));
+    m.insert(
+        "mode".into(),
+        Value::String(result.effective_mode.as_str().into()),
+    );
     m.insert("model".into(), Value::String(result.model.clone()));
     m.insert(
         "prompt_tokens".into(),
         Value::Number(result.prompt_tokens as f64),
     );
     m.insert("provider".into(), Value::String(result.provider.clone()));
-    m.insert("retry_count".into(), Value::Number(result.retry_count as f64));
+    m.insert(
+        "retry_count".into(),
+        Value::Number(result.retry_count as f64),
+    );
     m.insert("sources_flat".into(), sources_value(&result.sources_flat));
     m.insert("validation".into(), validation_value(&result.validation));
     Value::Object(m)
@@ -275,7 +281,10 @@ mod tests {
     #[test]
     fn answer_text_preserved_with_inline_markers() {
         let v = build(&fixture());
-        assert_eq!(v.get("answer").and_then(|x| x.as_str()), Some("X is 42 [^1]."));
+        assert_eq!(
+            v.get("answer").and_then(|x| x.as_str()),
+            Some("X is 42 [^1].")
+        );
     }
 
     #[test]
@@ -329,14 +338,8 @@ mod tests {
         ];
         let v = build(&r);
         let arr = v.get("sources_flat").and_then(|x| x.as_array()).unwrap();
-        assert_eq!(
-            arr[0].get("urn").and_then(|x| x.as_str()),
-            Some("urn:z")
-        );
-        assert_eq!(
-            arr[1].get("urn").and_then(|x| x.as_str()),
-            Some("urn:a")
-        );
+        assert_eq!(arr[0].get("urn").and_then(|x| x.as_str()), Some("urn:z"));
+        assert_eq!(arr[1].get("urn").and_then(|x| x.as_str()), Some("urn:a"));
     }
 
     #[test]
@@ -354,8 +357,17 @@ mod tests {
         let v = build(&fixture());
         let val = v.get("validation").unwrap();
         assert_eq!(val.get("ok").and_then(|x| x.as_bool()), Some(true));
-        assert_eq!(val.get("warnings").and_then(|x| x.as_array()).unwrap().len(), 0);
-        assert_eq!(val.get("errors").and_then(|x| x.as_array()).unwrap().len(), 0);
+        assert_eq!(
+            val.get("warnings")
+                .and_then(|x| x.as_array())
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            val.get("errors").and_then(|x| x.as_array()).unwrap().len(),
+            0
+        );
     }
 
     #[test]
@@ -376,19 +388,34 @@ mod tests {
         let val = v.get("validation").unwrap();
         assert_eq!(val.get("ok").and_then(|x| x.as_bool()), Some(false));
         let warns = val.get("warnings").and_then(|x| x.as_array()).unwrap();
-        assert_eq!(warns[0].get("kind").and_then(|x| x.as_str()), Some("mode_fallback"));
-        assert_eq!(warns[0].get("detail").and_then(|x| x.as_str()), Some("ollama"));
+        assert_eq!(
+            warns[0].get("kind").and_then(|x| x.as_str()),
+            Some("mode_fallback")
+        );
+        assert_eq!(
+            warns[0].get("detail").and_then(|x| x.as_str()),
+            Some("ollama")
+        );
         let errs = val.get("errors").and_then(|x| x.as_array()).unwrap();
-        assert_eq!(errs[0].get("kind").and_then(|x| x.as_str()), Some("out_of_range"));
+        assert_eq!(
+            errs[0].get("kind").and_then(|x| x.as_str()),
+            Some("out_of_range")
+        );
     }
 
     #[test]
     fn mode_serializes_as_strict_or_lenient() {
         let mut r = fixture();
         r.effective_mode = Mode::Strict;
-        assert_eq!(build(&r).get("mode").and_then(|x| x.as_str()), Some("strict"));
+        assert_eq!(
+            build(&r).get("mode").and_then(|x| x.as_str()),
+            Some("strict")
+        );
         r.effective_mode = Mode::Lenient;
-        assert_eq!(build(&r).get("mode").and_then(|x| x.as_str()), Some("lenient"));
+        assert_eq!(
+            build(&r).get("mode").and_then(|x| x.as_str()),
+            Some("lenient")
+        );
     }
 
     #[test]
@@ -398,7 +425,10 @@ mod tests {
         // and SDK to re-shape.
         let v = build(&fixture());
         assert_eq!(v.get("prompt_tokens").and_then(|x| x.as_u64()), Some(123));
-        assert_eq!(v.get("completion_tokens").and_then(|x| x.as_u64()), Some(45));
+        assert_eq!(
+            v.get("completion_tokens").and_then(|x| x.as_u64()),
+            Some(45)
+        );
         assert!(v.get("cost_usd").is_some());
     }
 
@@ -447,8 +477,16 @@ mod tests {
         r.sources_flat = vec![];
         r.citations = vec![];
         let v = build(&r);
-        assert!(v.get("sources_flat").and_then(|x| x.as_array()).unwrap().is_empty());
-        assert!(v.get("citations").and_then(|x| x.as_array()).unwrap().is_empty());
+        assert!(v
+            .get("sources_flat")
+            .and_then(|x| x.as_array())
+            .unwrap()
+            .is_empty());
+        assert!(v
+            .get("citations")
+            .and_then(|x| x.as_array())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -472,7 +510,10 @@ mod tests {
     fn build_is_deterministic_across_clone_inputs() {
         let r1 = fixture();
         let r2 = r1.clone();
-        assert_eq!(build(&r1).to_string_compact(), build(&r2).to_string_compact());
+        assert_eq!(
+            build(&r1).to_string_compact(),
+            build(&r2).to_string_compact()
+        );
     }
 
     #[test]
@@ -510,7 +551,13 @@ mod tests {
         ];
         let v = build(&r);
         let arr = v.get("citations").and_then(|x| x.as_array()).unwrap();
-        assert_eq!(arr[0].get("urn").and_then(|x| x.as_str()), Some("urn:first"));
-        assert_eq!(arr[1].get("urn").and_then(|x| x.as_str()), Some("urn:second"));
+        assert_eq!(
+            arr[0].get("urn").and_then(|x| x.as_str()),
+            Some("urn:first")
+        );
+        assert_eq!(
+            arr[1].get("urn").and_then(|x| x.as_str()),
+            Some("urn:second")
+        );
     }
 }

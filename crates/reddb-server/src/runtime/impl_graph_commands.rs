@@ -113,17 +113,14 @@ impl RedDBRuntime {
                     // Per-node property lookup (#423). Uses the same label
                     // resolution as NEIGHBORHOOD/TRAVERSE so '<label>' and
                     // '<numeric id>' both work.
-                    let graph = materialize_graph_with_projection(
-                        self.inner.db.store().as_ref(),
-                        None,
-                    )?;
+                    let graph =
+                        materialize_graph_with_projection(self.inner.db.store().as_ref(), None)?;
                     let resolved = resolve_graph_node_id(&graph, node_ref)?;
-                    let stored = graph.get_node(&resolved).ok_or_else(|| {
-                        RedDBError::NotFound(node_ref.to_string())
-                    })?;
-                    let all_props = materialize_graph_node_properties(
-                        self.inner.db.store().as_ref(),
-                    )?;
+                    let stored = graph
+                        .get_node(&resolved)
+                        .ok_or_else(|| RedDBError::NotFound(node_ref.to_string()))?;
+                    let all_props =
+                        materialize_graph_node_properties(self.inner.db.store().as_ref())?;
                     let props = all_props.get(&resolved).cloned().unwrap_or_default();
 
                     // Fixed columns first, then property keys in sorted order so
@@ -1012,15 +1009,15 @@ fn compare_graph_values(left: Option<&Value>, right: Option<&Value>) -> Ordering
         (Some(Value::Integer(left)), Some(Value::Float(right))) => {
             (*left as f64).partial_cmp(right).unwrap_or(Ordering::Equal)
         }
-        (Some(Value::Float(left)), Some(Value::Integer(right))) => {
-            left.partial_cmp(&(*right as f64)).unwrap_or(Ordering::Equal)
-        }
+        (Some(Value::Float(left)), Some(Value::Integer(right))) => left
+            .partial_cmp(&(*right as f64))
+            .unwrap_or(Ordering::Equal),
         (Some(Value::UnsignedInteger(left)), Some(Value::Float(right))) => {
             (*left as f64).partial_cmp(right).unwrap_or(Ordering::Equal)
         }
-        (Some(Value::Float(left)), Some(Value::UnsignedInteger(right))) => {
-            left.partial_cmp(&(*right as f64)).unwrap_or(Ordering::Equal)
-        }
+        (Some(Value::Float(left)), Some(Value::UnsignedInteger(right))) => left
+            .partial_cmp(&(*right as f64))
+            .unwrap_or(Ordering::Equal),
         (Some(Value::Integer(left)), Some(Value::UnsignedInteger(right))) => {
             (*left as i128).cmp(&(*right as i128))
         }

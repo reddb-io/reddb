@@ -59,8 +59,10 @@ impl RedDBServer {
         request: &HttpRequest,
         writer: &mut W,
     ) -> io::Result<bool> {
-        if !matches!((request.method.as_str(), request.path.as_str()), ("POST", "/query"))
-            || !is_stream_ask_query_body(&request.body)
+        if !matches!(
+            (request.method.as_str(), request.path.as_str()),
+            ("POST", "/query")
+        ) || !is_stream_ask_query_body(&request.body)
         {
             return Ok(false);
         }
