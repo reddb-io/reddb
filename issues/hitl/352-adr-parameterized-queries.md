@@ -16,7 +16,10 @@ Implement this issue as a focused vertical slice. Preserve behavior with tests/c
 
 ## What to build
 
-ADR `00XX-parameterized-queries.md` codifying the design decisions for parameterized queries across the engine, wire protocols, and all official drivers. This is the contract that every subsequent slice implements against.
+ADR 0015 (`docs/adr/0015-parameterized-query-contract.md`) codifying the
+design decisions for parameterized queries across the engine, wire protocols,
+and all official drivers. This is the contract that every subsequent slice
+implements against.
 
 The ADR must decide and document:
 
