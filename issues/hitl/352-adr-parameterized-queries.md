@@ -32,11 +32,11 @@ The ADR must decide and document:
 
 ## Acceptance criteria
 
-- [ ] ADR file added under `docs/adr/` with the next sequential number.
-- [ ] All decisions above are explicitly stated (not deferred).
+- [x] ADR file added under `docs/adr/` with the next sequential number.
+- [x] All decisions above are explicitly stated (not deferred).
 - [ ] ADR is reviewed and accepted (status: Accepted).
-- [ ] PRD #351 references the ADR number.
+- [x] PRD #351 references the ADR number.
 
 ## Blocked by
 
-None - can start immediately.
+Human acceptance of ADR 0015.
