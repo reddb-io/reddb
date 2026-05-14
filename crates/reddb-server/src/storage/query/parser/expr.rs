@@ -44,7 +44,7 @@
 //! any infix operator whose precedence is ≥ `min`, recursing with
 //! `prec + 1` on the right-hand side for left-associativity.
 
-use super::super::ast::{BinOp, Expr, FieldRef, Span, UnaryOp};
+use super::super::ast::{BinOp, Expr, ExprSubquery, FieldRef, Span, UnaryOp};
 use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
@@ -202,6 +202,16 @@ impl<'a> Parser<'a> {
 
         // Parenthesised subexpression: `( expr )`
         if self.consume(&Token::LParen)? {
+            if self.check(&Token::Select) {
+                let query = self.parse_select_query()?;
+                self.expect(Token::RParen)?;
+                return Ok(Expr::Subquery {
+                    query: ExprSubquery {
+                        query: Box::new(query),
+                    },
+                    span: Span::new(start, self.position()),
+                });
+            }
             let inner = self.parse_expr_prec(0)?;
             self.expect(Token::RParen)?;
             return Ok(inner);
@@ -734,7 +744,15 @@ impl<'a> Parser<'a> {
         if self.consume(&Token::In)? {
             self.expect(Token::LParen)?;
             let mut values = Vec::new();
-            if !self.check(&Token::RParen) {
+            if self.check(&Token::Select) {
+                let query = self.parse_select_query()?;
+                values.push(Expr::Subquery {
+                    query: ExprSubquery {
+                        query: Box::new(query),
+                    },
+                    span: Span::new(self.span_start_of(left), self.position()),
+                });
+            } else if !self.check(&Token::RParen) {
                 loop {
                     values.push(self.parse_expr_prec(0)?);
                     if !self.consume(&Token::Comma)? {

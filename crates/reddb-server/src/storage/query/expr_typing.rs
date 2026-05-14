@@ -373,6 +373,10 @@ pub fn type_expr(expr: &Expr, scope: &dyn Scope) -> Result<TypedExpr, TypeError>
                 },
             })
         }
+        Expr::Subquery { .. } => Ok(TypedExpr {
+            ty: DataType::Nullable,
+            kind: TypedExprKind::Literal(Value::Null),
+        }),
     }
 }
 

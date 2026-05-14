@@ -52,6 +52,7 @@ pub fn expr_contains_parameter(expr: &Expr) -> bool {
                 || expr_contains_parameter(low)
                 || expr_contains_parameter(high)
         }
+        Expr::Subquery { .. } => false,
     }
 }
 
@@ -162,6 +163,7 @@ fn substitute_params_in_expr(expr: Expr, params: &[Value]) -> Result<Expr, UserP
             negated,
             span,
         }),
+        Expr::Subquery { .. } => Ok(expr),
     }
 }
 
@@ -1108,6 +1110,7 @@ fn visit_expr<F: FnMut(&Expr)>(expr: &Expr, visit: &mut F) {
             visit_expr(low, visit);
             visit_expr(high, visit);
         }
+        Expr::Subquery { .. } => {}
     }
 }
 

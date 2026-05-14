@@ -194,6 +194,28 @@ impl<'a> Parser<'a> {
         if self.consume(&Token::In)? {
             if let Some(field) = lhs_field.clone() {
                 self.expect(Token::LParen)?;
+                if self.check(&Token::Select) {
+                    let query = self.parse_select_query()?;
+                    self.expect(Token::RParen)?;
+                    return Ok(Filter::CompareExpr {
+                        lhs: Expr::InList {
+                            target: Box::new(lhs),
+                            values: vec![Expr::Subquery {
+                                query: crate::storage::query::ast::ExprSubquery {
+                                    query: Box::new(query),
+                                },
+                                span: Span::synthetic(),
+                            }],
+                            negated: false,
+                            span: Span::synthetic(),
+                        },
+                        op: CompareOp::Eq,
+                        rhs: Expr::Literal {
+                            value: Value::Boolean(true),
+                            span: Span::synthetic(),
+                        },
+                    });
+                }
                 let values = self.parse_value_list()?;
                 self.expect(Token::RParen)?;
                 return Ok(Filter::In { field, values });

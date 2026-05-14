@@ -214,6 +214,10 @@ pub fn evaluate(expr: &Expr, row: &dyn Row) -> Result<Value, EvalError> {
             negated,
             ..
         } => eval_between(target, low, high, *negated, row),
+        Expr::Subquery { .. } => Err(EvalError::UnknownFunction {
+            name: "SUBQUERY".to_string(),
+            args: Vec::new(),
+        }),
     }
 }
 
