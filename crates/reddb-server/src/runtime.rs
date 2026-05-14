@@ -190,6 +190,7 @@ pub struct MetricsIngestStats {
     pub series_accepted: u64,
     pub samples_rejected: u64,
     pub series_rejected: u64,
+    pub series_rejected_cardinality_budget: u64,
 }
 
 #[derive(Debug, Default)]
@@ -198,6 +199,7 @@ pub(crate) struct MetricsIngestCounters {
     series_accepted: AtomicU64,
     samples_rejected: AtomicU64,
     series_rejected: AtomicU64,
+    series_rejected_cardinality_budget: AtomicU64,
 }
 
 impl MetricsIngestCounters {
@@ -218,12 +220,20 @@ impl MetricsIngestCounters {
             .fetch_add(rejected_series, AtomicOrdering::Relaxed);
     }
 
+    pub(crate) fn record_cardinality_budget_rejections(&self, rejected_series: u64) {
+        self.series_rejected_cardinality_budget
+            .fetch_add(rejected_series, AtomicOrdering::Relaxed);
+    }
+
     pub(crate) fn snapshot(&self) -> MetricsIngestStats {
         MetricsIngestStats {
             samples_accepted: self.samples_accepted.load(AtomicOrdering::Relaxed),
             series_accepted: self.series_accepted.load(AtomicOrdering::Relaxed),
             samples_rejected: self.samples_rejected.load(AtomicOrdering::Relaxed),
             series_rejected: self.series_rejected.load(AtomicOrdering::Relaxed),
+            series_rejected_cardinality_budget: self
+                .series_rejected_cardinality_budget
+                .load(AtomicOrdering::Relaxed),
         }
     }
 }
