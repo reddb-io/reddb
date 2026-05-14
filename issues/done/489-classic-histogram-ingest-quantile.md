@@ -16,11 +16,11 @@ Support classic Prometheus histograms as a first-class metrics workload. RedDB s
 
 ## Acceptance criteria
 
-- [ ] Remote-write fixtures with classic histogram series ingest successfully.
-- [ ] Histogram bucket, sum, and count series preserve labels and tenant/namespace identity.
-- [ ] `histogram_quantile()` returns expected values for p50, p95, and p99 fixtures.
-- [ ] Query API responses remain Prometheus/Grafana-compatible.
-- [ ] Prometheus native histograms remain explicitly unsupported unless covered by the compatibility matrix.
+- [x] Remote-write fixtures with classic histogram series ingest successfully.
+- [x] Histogram bucket, sum, and count series preserve labels and tenant/namespace identity.
+- [x] `histogram_quantile()` returns expected values for p50, p95, and p99 fixtures.
+- [x] Query API responses remain Prometheus/Grafana-compatible.
+- [x] Prometheus native histograms remain explicitly unsupported unless covered by the compatibility matrix.
 
 ## Blocked by
 
