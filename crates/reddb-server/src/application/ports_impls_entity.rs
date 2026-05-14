@@ -173,6 +173,7 @@ fn collection_model_name(model: crate::catalog::CollectionModel) -> &'static str
         crate::catalog::CollectionModel::Mixed => "mixed",
         crate::catalog::CollectionModel::TimeSeries => "timeseries",
         crate::catalog::CollectionModel::Queue => "queue",
+        crate::catalog::CollectionModel::Metrics => "metrics",
     }
 }
 
