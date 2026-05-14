@@ -2286,12 +2286,12 @@ impl<'a> Parser<'a> {
                         Value::text(collection),
                     ));
                     Ok(SqlCommand::Select(query))
-                } else if self.consume_ident_ci("INDICES")? {
-                    let mut query = TableQuery::new("red.indices");
+                } else if self.consume_ident_ci("INDICES")? || self.consume_ident_ci("INDEXES")? {
+                    let mut query = TableQuery::new("red.show_indexes");
                     if self.consume(&Token::On)? {
                         let collection = self.expect_ident_or_keyword()?;
                         let filter = Filter::Compare {
-                            field: FieldRef::column("red.indices", "collection"),
+                            field: FieldRef::column("", "table"),
                             op: CompareOp::Eq,
                             value: Value::text(collection),
                         };
@@ -2400,6 +2400,7 @@ impl<'a> Parser<'a> {
                             "KV",
                             "SCHEMA",
                             "INDICES",
+                            "INDEXES",
                             "SAMPLE",
                             "POLICIES",
                             "STATS",

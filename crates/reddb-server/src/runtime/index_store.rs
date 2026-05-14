@@ -669,6 +669,21 @@ impl SortedIndexManager {
         count
     }
 
+    pub fn entry_count(&self, collection: &str, columns: &[String]) -> Option<usize> {
+        if columns.len() > 1 {
+            let guard = read_unpoisoned(&self.composite);
+            return guard
+                .get(&(collection.to_string(), columns.to_vec()))
+                .map(SortedCompositeIndex::len);
+        }
+
+        let column = columns.first()?;
+        let guard = read_unpoisoned(&self.indices);
+        guard
+            .get(&(collection.to_string(), column.clone()))
+            .map(SortedColumnIndex::len)
+    }
+
     /// Range lookup.
     pub(crate) fn range_lookup(
         &self,
@@ -1330,6 +1345,32 @@ impl IndexStore {
             .filter(|idx| idx.collection == collection)
             .cloned()
             .collect()
+    }
+
+    pub fn entries_indexed(&self, index: &RegisteredIndex) -> u64 {
+        match index.method {
+            IndexMethodKind::Hash => self
+                .hash
+                .index_stats(&index.collection, &index.name)
+                .map(|stats| stats.total_entries as u64)
+                .unwrap_or(0),
+            IndexMethodKind::BTree => self
+                .sorted
+                .entry_count(&index.collection, &index.columns)
+                .unwrap_or(0) as u64,
+            IndexMethodKind::Bitmap => index
+                .columns
+                .first()
+                .and_then(|column| self.bitmap.index_stats(&index.collection, column).ok())
+                .map(|stats| stats.entity_count as u64)
+                .unwrap_or(0),
+            IndexMethodKind::Spatial => index
+                .columns
+                .first()
+                .and_then(|column| self.spatial.index_stats(&index.collection, column).ok())
+                .map(|stats| stats.point_count as u64)
+                .unwrap_or(0),
+        }
     }
 
     /// Collect the column-name set covered by any index on `collection`

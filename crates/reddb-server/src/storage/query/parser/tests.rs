@@ -2026,32 +2026,36 @@ fn test_parse_show_create_table_desugars_to_red_show_create_select() {
 
 #[test]
 fn test_parse_show_indices_desugars_to_red_indices_select() {
-    let query = parse("SHOW INDICES").unwrap();
-    if let QueryExpr::Table(tq) = query {
-        assert_eq!(tq.table, "red.indices");
-        assert!(tq.columns.is_empty());
-        assert!(tq.select_items.is_empty());
-        assert!(tq.filter.is_none());
-    } else {
-        panic!("Expected Table");
+    for sql in ["SHOW INDICES", "SHOW INDEXES"] {
+        let query = parse(sql).unwrap();
+        if let QueryExpr::Table(tq) = query {
+            assert_eq!(tq.table, "red.show_indexes");
+            assert!(tq.columns.is_empty());
+            assert!(tq.select_items.is_empty());
+            assert!(tq.filter.is_none());
+        } else {
+            panic!("Expected Table");
+        }
     }
 }
 
 #[test]
 fn test_parse_show_indices_on_desugars_with_collection_filter() {
-    let query = parse("SHOW INDICES ON users").unwrap();
-    if let QueryExpr::Table(tq) = query {
-        assert_eq!(tq.table, "red.indices");
-        assert!(matches!(
-            tq.filter,
-            Some(Filter::Compare {
-                field: FieldRef::TableColumn { ref column, .. },
-                op: CompareOp::Eq,
-                value: crate::storage::schema::Value::Text(ref value),
-            }) if column == "collection" && value.as_ref() == "users"
-        ));
-    } else {
-        panic!("Expected Table");
+    for sql in ["SHOW INDICES ON users", "SHOW INDEXES ON users"] {
+        let query = parse(sql).unwrap();
+        if let QueryExpr::Table(tq) = query {
+            assert_eq!(tq.table, "red.show_indexes");
+            assert!(matches!(
+                tq.filter,
+                Some(Filter::Compare {
+                    field: FieldRef::TableColumn { ref column, .. },
+                    op: CompareOp::Eq,
+                    value: crate::storage::schema::Value::Text(ref value),
+                }) if column == "table" && value.as_ref() == "users"
+            ));
+        } else {
+            panic!("Expected Table");
+        }
     }
 }
 

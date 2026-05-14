@@ -142,6 +142,7 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("show vaults")
         || lower.starts_with("show schema")
         || lower.starts_with("show indices")
+        || lower.starts_with("show indexes")
         || lower.starts_with("show sample ")
         || lower.starts_with("show secret")
         || lower.starts_with("show stats")
@@ -333,6 +334,7 @@ mod tests {
         assert_eq!(detect_mode("DESCRIBE users"), QueryMode::Sql);
         assert_eq!(detect_mode("DESC users"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW INDICES"), QueryMode::Sql);
+        assert_eq!(detect_mode("SHOW INDEXES"), QueryMode::Sql);
         assert_eq!(detect_mode("SHOW STATS users"), QueryMode::Sql);
     }
 
