@@ -200,11 +200,11 @@ hold the cluster event-subscribe capability.
 
 ## Backpressure And DLQ
 
-Current delivery writes the source mutation first and then enqueues the event
-payload to the target queue. These writes are separate store WAL batches in
-autocommit mode, so a crash between them can leave a durable row without its
-event. See [ADR 0015](../adr/0015-events-dual-write-window.md). The intended
-direction is a true internal outbox or same-batch queue write.
+Autocommit `WITH EVENTS` mutations persist the source mutation and the event
+queue payload in the same store WAL batch. Recovery therefore observes the row
+and its event together at the store WAL boundary. See
+[ADR 0015](../adr/0015-events-dual-write-window.md) for the historical
+dual-write window that this same-batch path closed.
 
 If the target queue is full or the outbox exceeds configured pressure limits,
 RedDB routes the payload to `<queue>_outbox_dlq`, emits an operator event, and

@@ -2907,8 +2907,45 @@ mod tests {
             .any(|window| window == needle.as_bytes())
     }
 
+    fn assert_statement_writes_collections_in_one_new_wal_batch(
+        rt: &RedDBRuntime,
+        wal_path: &Path,
+        statement: &str,
+        source: &str,
+        event_queue: &str,
+    ) {
+        let before_batches = store_commit_batches(wal_path).len();
+
+        rt.execute_query(statement).unwrap();
+
+        let batches = store_commit_batches(wal_path);
+        let statement_batches = &batches[before_batches..];
+        let source_batch = statement_batches
+            .iter()
+            .position(|actions| {
+                actions.iter().any(|action| {
+                    action_contains_text(action, source)
+                        && !action_contains_text(action, event_queue)
+                })
+            })
+            .expect("source collection write batch is present");
+        let event_batch = statement_batches
+            .iter()
+            .position(|actions| {
+                actions
+                    .iter()
+                    .any(|action| action_contains_text(action, event_queue))
+            })
+            .expect("event queue write batch is present");
+
+        assert_eq!(
+            source_batch, event_batch,
+            "WITH EVENTS must persist the source write and queue event in the same WAL batch"
+        );
+    }
+
     #[test]
-    fn with_events_autocommit_currently_splits_mutation_and_event_wal_batches() {
+    fn with_events_autocommit_persists_mutation_and_event_in_one_wal_batch() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("events_dual_write.rdb");
         let wal_path = db_path.with_extension("rdb-uwal");
@@ -2916,34 +2953,58 @@ mod tests {
 
         rt.execute_query("CREATE TABLE users (id INT, email TEXT) WITH EVENTS")
             .unwrap();
-        let before_insert_batches = store_commit_batches(&wal_path).len();
+        assert_statement_writes_collections_in_one_new_wal_batch(
+            &rt,
+            &wal_path,
+            "INSERT INTO users (id, email) VALUES (1, 'a@example.test')",
+            "users",
+            "users_events",
+        );
+    }
 
+    #[test]
+    fn with_events_autocommit_update_persists_mutation_and_event_in_one_wal_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("events_update_atomic.rdb");
+        let wal_path = db_path.with_extension("rdb-uwal");
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&db_path)).unwrap();
+
+        rt.execute_query(
+            "CREATE TABLE users (id INT, email TEXT) WITH EVENTS (UPDATE) TO user_updates",
+        )
+        .unwrap();
         rt.execute_query("INSERT INTO users (id, email) VALUES (1, 'a@example.test')")
             .unwrap();
 
-        let batches = store_commit_batches(&wal_path);
-        let insert_batches = &batches[before_insert_batches..];
-        let source_batch = insert_batches
-            .iter()
-            .position(|actions| {
-                actions.iter().any(|action| {
-                    action_contains_text(action, "users")
-                        && !action_contains_text(action, "users_events")
-                })
-            })
-            .expect("source table write batch is present");
-        let event_batch = insert_batches
-            .iter()
-            .position(|actions| {
-                actions
-                    .iter()
-                    .any(|action| action_contains_text(action, "users_events"))
-            })
-            .expect("event queue write batch is present");
+        assert_statement_writes_collections_in_one_new_wal_batch(
+            &rt,
+            &wal_path,
+            "UPDATE users SET email = 'b@example.test' WHERE id = 1",
+            "users",
+            "user_updates",
+        );
+    }
 
-        assert_ne!(
-            source_batch, event_batch,
-            "WITH EVENTS currently writes the row and queue event in separate WAL batches"
+    #[test]
+    fn with_events_autocommit_delete_persists_mutation_and_event_in_one_wal_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("events_delete_atomic.rdb");
+        let wal_path = db_path.with_extension("rdb-uwal");
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&db_path)).unwrap();
+
+        rt.execute_query(
+            "CREATE TABLE users (id INT, email TEXT) WITH EVENTS (DELETE) TO user_deletes",
+        )
+        .unwrap();
+        rt.execute_query("INSERT INTO users (id, email) VALUES (1, 'a@example.test')")
+            .unwrap();
+
+        assert_statement_writes_collections_in_one_new_wal_batch(
+            &rt,
+            &wal_path,
+            "DELETE FROM users WHERE id = 1",
+            "users",
+            "user_deletes",
         );
     }
 

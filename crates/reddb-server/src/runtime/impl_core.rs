@@ -4809,15 +4809,18 @@ impl RedDBRuntime {
                     super::red_schema::READ_ONLY_ERROR.to_string(),
                 ))
             }
-            QueryExpr::Insert(ref insert) => {
-                self.with_deferred_store_wal_if_transaction(|| self.execute_insert(query, insert))
-            }
-            QueryExpr::Update(ref update) => {
-                self.with_deferred_store_wal_if_transaction(|| self.execute_update(query, update))
-            }
-            QueryExpr::Delete(ref delete) => {
-                self.with_deferred_store_wal_if_transaction(|| self.execute_delete(query, delete))
-            }
+            QueryExpr::Insert(ref insert) => self
+                .with_deferred_store_wal_for_dml(self.insert_may_emit_events(insert), || {
+                    self.execute_insert(query, insert)
+                }),
+            QueryExpr::Update(ref update) => self
+                .with_deferred_store_wal_for_dml(self.update_may_emit_events(update), || {
+                    self.execute_update(query, update)
+                }),
+            QueryExpr::Delete(ref delete) => self
+                .with_deferred_store_wal_for_dml(self.delete_may_emit_events(delete), || {
+                    self.execute_delete(query, delete)
+                }),
             // DDL execution
             QueryExpr::CreateTable(ref create) => self.execute_create_table(query, create),
             QueryExpr::CreateCollection(ref create) => {
@@ -6718,11 +6721,17 @@ impl RedDBRuntime {
                 ))
             }
             QueryExpr::Insert(ref insert) => self
-                .with_deferred_store_wal_if_transaction(|| self.execute_insert(query_str, insert)),
+                .with_deferred_store_wal_for_dml(self.insert_may_emit_events(insert), || {
+                    self.execute_insert(query_str, insert)
+                }),
             QueryExpr::Update(ref update) => self
-                .with_deferred_store_wal_if_transaction(|| self.execute_update(query_str, update)),
+                .with_deferred_store_wal_for_dml(self.update_may_emit_events(update), || {
+                    self.execute_update(query_str, update)
+                }),
             QueryExpr::Delete(ref delete) => self
-                .with_deferred_store_wal_if_transaction(|| self.execute_delete(query_str, delete)),
+                .with_deferred_store_wal_for_dml(self.delete_may_emit_events(delete), || {
+                    self.execute_delete(query_str, delete)
+                }),
             QueryExpr::SearchCommand(ref cmd) => self.execute_search_command(query_str, cmd),
             QueryExpr::Ask(ref ask) => self.execute_ask(query_str, ask),
             _ => Err(RedDBError::Query(format!(
@@ -7351,6 +7360,69 @@ impl RedDBRuntime {
             }
             Err(err) => Err(err),
         }
+    }
+
+    fn with_deferred_store_wal_for_dml<T>(
+        &self,
+        capture_autocommit_events: bool,
+        f: impl FnOnce() -> RedDBResult<T>,
+    ) -> RedDBResult<T> {
+        let conn_id = current_connection_id();
+        if self.inner.tx_contexts.read().contains_key(&conn_id) {
+            return self.with_deferred_store_wal_if_transaction(f);
+        }
+        if !capture_autocommit_events {
+            return f();
+        }
+
+        crate::storage::UnifiedStore::begin_deferred_store_wal_capture();
+        let result = f();
+        let captured = crate::storage::UnifiedStore::take_deferred_store_wal_capture();
+        self.inner
+            .db
+            .store()
+            .append_deferred_store_wal_actions(captured)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        result
+    }
+
+    fn insert_may_emit_events(&self, query: &InsertQuery) -> bool {
+        !query.suppress_events
+            && self.collection_has_event_subscriptions_for_operation(
+                &query.table,
+                crate::catalog::SubscriptionOperation::Insert,
+            )
+    }
+
+    fn update_may_emit_events(&self, query: &UpdateQuery) -> bool {
+        !query.suppress_events
+            && self.collection_has_event_subscriptions_for_operation(
+                &query.table,
+                crate::catalog::SubscriptionOperation::Update,
+            )
+    }
+
+    fn delete_may_emit_events(&self, query: &DeleteQuery) -> bool {
+        !query.suppress_events
+            && self.collection_has_event_subscriptions_for_operation(
+                &query.table,
+                crate::catalog::SubscriptionOperation::Delete,
+            )
+    }
+
+    fn collection_has_event_subscriptions_for_operation(
+        &self,
+        collection: &str,
+        operation: crate::catalog::SubscriptionOperation,
+    ) -> bool {
+        let Some(contract) = self.db().collection_contract_arc(collection) else {
+            return false;
+        };
+        contract.subscriptions.iter().any(|subscription| {
+            subscription.enabled
+                && (subscription.ops_filter.is_empty()
+                    || subscription.ops_filter.contains(&operation))
+        })
     }
 
     fn record_pending_store_wal_actions(
