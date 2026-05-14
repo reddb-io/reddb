@@ -42,6 +42,7 @@ export const EMBEDDED_ONLY_MESSAGE =
   'remote URIs are not supported in @reddb-io/sdk; install @reddb-io/client for grpc/http/red transports'
 
 const MIN_INSERT_ID_ENGINE_VERSION = '1.0.9'
+const NESTED_TX_NOT_SUPPORTED = 'NESTED_TX_NOT_SUPPORTED'
 
 /**
  * Connect to a RedDB instance.
@@ -275,6 +276,32 @@ function rejectRemoteUri(parsed) {
 /**
  * Connection handle. Methods map 1:1 to JSON-RPC methods on the binary.
  */
+class TransactionHandle {
+  constructor(db) {
+    this.db = db
+  }
+
+  query(sql, ...params) {
+    return this.db.query(sql, ...params)
+  }
+
+  execute(sql, ...params) {
+    return this.db.execute(sql, ...params)
+  }
+
+  insert(collection, payload) {
+    return this.db.insert(collection, payload)
+  }
+
+  bulkInsert(collection, payloads) {
+    return this.db.bulkInsert(collection, payloads)
+  }
+
+  async transaction() {
+    throw nestedTransactionError()
+  }
+}
+
 export class RedDB {
   /**
    * @param {RpcClient} client
@@ -297,6 +324,7 @@ export class RedDB {
     })
     this.config = (collection = 'red.config') => new ConfigClient(client, collection)
     this.vault = (collection = 'red.vault') => new VaultClient(client, collection)
+    this.inTransaction = false
   }
 
   /**
@@ -332,6 +360,36 @@ export class RedDB {
   async bulkInsert(collection, payloads) {
     const result = await this.client.call('bulk_insert', { collection, payloads })
     return requireInsertIds(result, payloads.length)
+  }
+
+  async transaction(callback) {
+    if (this.inTransaction) {
+      throw nestedTransactionError()
+    }
+    if (typeof callback !== 'function') {
+      throw new TypeError('transaction(callback) requires a function')
+    }
+
+    this.inTransaction = true
+    let began = false
+    try {
+      await this.query('BEGIN')
+      began = true
+      const result = await callback(new TransactionHandle(this))
+      await this.query('COMMIT')
+      return result
+    } catch (err) {
+      if (began) {
+        try {
+          await this.query('ROLLBACK')
+        } catch (rollbackErr) {
+          attachRollbackError(err, rollbackErr)
+        }
+      }
+      throw err
+    } finally {
+      this.inTransaction = false
+    }
   }
 
   /** Return true when a collection is visible in the catalog. */
@@ -414,6 +472,23 @@ export class RedDB {
   /** Close the connection and wait for the binary to exit. */
   close() {
     return this.client.close()
+  }
+}
+
+function nestedTransactionError() {
+  return new RedDBError(
+    NESTED_TX_NOT_SUPPORTED,
+    `${NESTED_TX_NOT_SUPPORTED}: nested transactions are not supported on one connection`,
+  )
+}
+
+function attachRollbackError(err, rollbackErr) {
+  if (err && typeof err === 'object') {
+    try {
+      err.rollbackError = rollbackErr
+    } catch {
+      // Preserve the original callback/query error even for frozen errors.
+    }
   }
 }
 

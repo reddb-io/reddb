@@ -61,6 +61,25 @@ For `http://` and `https://` connections, `connect()` verifies readiness with
 a lightweight `SELECT 1` round-trip. `/health` states such as `degraded` are
 transient during boot and are not fatal as long as queries succeed.
 
+## Transactions
+
+Use `db.transaction()` when a group of writes must commit or roll back together.
+The callback receives a transaction handle with the same `query`, `insert`, and
+`bulkInsert` methods as `db`.
+
+```js
+const userId = await db.transaction(async (tx) => {
+  const inserted = await tx.insert('users', { name: 'Ada' })
+  await tx.query('INSERT INTO audit (action) VALUES ($1)', 'created user')
+  return inserted.id
+})
+```
+
+The wrapper sends `BEGIN`, commits when the callback resolves, and rolls back
+when the callback or a `tx.query()` / `tx.insert()` call throws. Nested
+transactions on the same connection are rejected with `NESTED_TX_NOT_SUPPORTED`;
+open another `connect()` handle for independent concurrent transactions.
+
 ## Accepted URI schemes
 
 | Scheme         | Transport                     | Default port |
