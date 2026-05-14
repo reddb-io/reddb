@@ -1987,6 +1987,26 @@ fn test_parse_show_schema_desugars_to_red_columns_select() {
 }
 
 #[test]
+fn test_parse_describe_desugars_to_red_describe_select() {
+    for input in ["DESCRIBE users", "DESC users"] {
+        let query = parse(input).unwrap();
+        if let QueryExpr::Table(tq) = query {
+            assert_eq!(tq.table, "red.describe");
+            assert!(matches!(
+                tq.filter,
+                Some(Filter::Compare {
+                    field: FieldRef::TableColumn { ref column, .. },
+                    op: CompareOp::Eq,
+                    value: crate::storage::schema::Value::Text(ref value),
+                }) if column == "collection" && value.as_ref() == "users"
+            ));
+        } else {
+            panic!("Expected Table for {input}");
+        }
+    }
+}
+
+#[test]
 fn test_parse_show_indices_desugars_to_red_indices_select() {
     let query = parse("SHOW INDICES").unwrap();
     if let QueryExpr::Table(tq) = query {
