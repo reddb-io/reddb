@@ -156,13 +156,11 @@ jobs:
           # Blacksmith x86_64 runner so the docker spawn is unchanged.
           - { os: blacksmith-8vcpu-ubuntu-2404, target: aarch64-unknown-linux-musl, asset_name: linux-aarch64-static, cross: true }
           - { os: macos-14,       target: aarch64-apple-darwin,          asset_name: macos-aarch64,       cross: false }
-          # Intel macOS re-enabled. If the macos-13 pool stays saturated
-          # the matrix entry will queue without blocking the rest of the
-          # release — every other publish job runs after the build matrix
-          # finishes, but is not on the macos-13 critical path. If we hit
-          # the same > 1h queue we saw on v1.0.7, fall back to commenting
-          # this line out and ship without an Intel Mac asset.
-          - { os: macos-13,       target: x86_64-apple-darwin,           asset_name: macos-x86_64,        cross: false }
+          # Build Intel macOS on the ARM macOS pool. The macos-13 Intel pool
+          # frequently queues long enough to block publishing; cross-building
+          # from macos-14 still produces the x86_64-apple-darwin asset, but we
+          # cannot rely on Rosetta being available for a local smoke test.
+          - { os: macos-14,       target: x86_64-apple-darwin,           asset_name: macos-x86_64,        cross: false, smoke: false }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, asset_name: windows-x86_64, cross: false }
     steps:
       - uses: actions/checkout@v6
@@ -255,7 +253,7 @@ jobs:
           done
 
       - name: Smoke test
-        if: "!matrix.cross"
+        if: "!matrix.cross && matrix.smoke != false"
         shell: bash
         run: |
           EXT=""; [[ "${{ matrix.target }}" == *windows* ]] && EXT=".exe"
