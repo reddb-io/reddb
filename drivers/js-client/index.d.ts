@@ -204,6 +204,23 @@ export const EMBEDDED_REJECTION_MESSAGE: string
 /** Returns true when `uri` selects the embedded engine. */
 export function isEmbeddedUri(uri: string): boolean
 
+export interface RedDBTransaction {
+  query(sql: string): Promise<QueryResult>
+  query(sql: string, params: QueryParam[]): Promise<QueryResult>
+  query(sql: string, ...params: QueryParam[]): Promise<QueryResult>
+  execute(sql: string): Promise<QueryResult>
+  execute(sql: string, params: QueryParam[]): Promise<QueryResult>
+  execute(sql: string, ...params: QueryParam[]): Promise<QueryResult>
+  insert(collection: string, payload: Record<string, unknown>): Promise<InsertResult>
+  bulkInsert(
+    collection: string,
+    payloads: Array<Record<string, unknown>>,
+  ): Promise<BulkInsertResult>
+  transaction<T>(
+    callback: (tx: RedDBTransaction) => T | Promise<T>,
+  ): Promise<T>
+}
+
 export class RedDB {
   readonly cache: CacheClient
   readonly queue: QueueClient
@@ -222,6 +239,9 @@ export class RedDB {
     collection: string,
     payloads: Array<Record<string, unknown>>,
   ): Promise<BulkInsertResult>
+  transaction<T>(
+    callback: (tx: RedDBTransaction) => T | Promise<T>,
+  ): Promise<T>
   exists(collection: string): Promise<boolean>
   list(): Promise<CollectionMeta[]>
   /**

@@ -134,6 +134,33 @@ await test('bulkInsert affects N rows', async () => {
   await db.close()
 })
 
+await test('transaction commits success and rolls back thrown callback', async () => {
+  const db = await connect('memory://', { binary: BINARY })
+  await db.query('CREATE TABLE users (id INTEGER, name TEXT)')
+
+  const committed = await db.transaction(async (tx) => {
+    await tx.insert('users', { id: 1, name: 'Ada' })
+    return 'committed'
+  })
+  assertEqual(committed, 'committed', 'return value passthrough')
+
+  try {
+    await db.transaction(async (tx) => {
+      await tx.insert('users', { id: 2, name: 'Grace' })
+      throw new Error('boom')
+    })
+    throw new Error('expected transaction to throw')
+  } catch (err) {
+    assertEqual(err.message, 'boom', 'original error rethrown')
+  }
+
+  const result = await db.query('SELECT * FROM users')
+  assertEqual(result.rows.length, 1, 'rolled-back row is not visible')
+  assertEqual(result.rows[0].name, 'Ada', 'committed row remains visible')
+
+  await db.close()
+})
+
 await test('queue client round trips push pop peek len purge over stdio', async () => {
   const db = await connect('memory://', { binary: BINARY })
   assert(typeof db.queue.push === 'function', 'queue.push exists')

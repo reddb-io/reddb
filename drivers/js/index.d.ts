@@ -294,6 +294,24 @@ export class VaultClient {
   unseal(key: string, options?: { collection?: string }): Promise<QueryResult>
 }
 
+export interface RedDBTransaction {
+  query(sql: `ASK ${string}`): Promise<AskQueryResult>
+  query(sql: string): Promise<QueryResult>
+  query(sql: string, params: QueryParam[]): Promise<QueryResult>
+  query(sql: string, ...params: QueryParam[]): Promise<QueryResult>
+  execute(sql: string): Promise<QueryResult>
+  execute(sql: string, params: QueryParam[]): Promise<QueryResult>
+  execute(sql: string, ...params: QueryParam[]): Promise<QueryResult>
+  insert(collection: string, payload: Record<string, unknown>): Promise<InsertResult>
+  bulkInsert(
+    collection: string,
+    payloads: Array<Record<string, unknown>>,
+  ): Promise<BulkInsertResult>
+  transaction<T>(
+    callback: (tx: RedDBTransaction) => T | Promise<T>,
+  ): Promise<T>
+}
+
 export class RedDB {
   /** Underlying transport label. connect() returns 'embedded'. */
   readonly transport: string | null
@@ -315,6 +333,9 @@ export class RedDB {
     collection: string,
     payloads: Array<Record<string, unknown>>,
   ): Promise<BulkInsertResult>
+  transaction<T>(
+    callback: (tx: RedDBTransaction) => T | Promise<T>,
+  ): Promise<T>
   exists(collection: string): Promise<boolean>
   list(): Promise<CollectionMeta[]>
   /**
