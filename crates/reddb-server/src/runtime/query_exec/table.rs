@@ -36,6 +36,15 @@ pub(crate) struct RuntimeTableExecutionContext<'a> {
     pub(crate) table_alias: &'a str,
 }
 
+fn resolve_table_row_by_logical_id(
+    db: &RedDB,
+    table: &str,
+    logical_id: EntityId,
+) -> Option<UnifiedEntity> {
+    let store = db.store();
+    TableRowMvccReadResolver::current_statement().resolve_logical_id(&store, table, logical_id)
+}
+
 pub(crate) fn execute_runtime_canonical_table_query_indexed(
     db: &RedDB,
     query: &TableQuery,
@@ -128,14 +137,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
 
     // ── ULTRA-FAST PATH: entity_id lookup bypasses planner entirely ──
     if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
-        let store = db.store();
-        let entity = store
-            .get_table_row_by_logical_id(&query.table, EntityId::new(entity_id))
-            .or_else(|| store.get(&query.table, EntityId::new(entity_id)));
+        let entity = resolve_table_row_by_logical_id(db, &query.table, EntityId::new(entity_id));
         if let Some(entity) = entity {
-            if !crate::runtime::impl_core::entity_visible_under_current_snapshot(&entity) {
-                return Ok(Vec::new());
-            }
             return Ok(
                 super::super::record_search::runtime_table_record_lean_in_collection(
                     entity,
@@ -1014,14 +1017,12 @@ pub(crate) fn execute_runtime_canonical_table_node(
         "table_scan" | "index_seek" | "entity_scan" | "document_path_index_seek" => {
             // ── FAST PATH 1: Direct entity_id lookup (O(1) instead of full scan) ──
             if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
-                let store = db.store();
-                let entity = store
-                    .get_table_row_by_logical_id(&context.query.table, EntityId::new(entity_id))
-                    .or_else(|| store.get(&context.query.table, EntityId::new(entity_id)));
+                let entity = resolve_table_row_by_logical_id(
+                    db,
+                    &context.query.table,
+                    EntityId::new(entity_id),
+                );
                 if let Some(entity) = entity {
-                    if !crate::runtime::impl_core::entity_visible_under_current_snapshot(&entity) {
-                        return Ok(Vec::new());
-                    }
                     return Ok(
                         super::super::record_search::runtime_table_record_lean_in_collection(
                             entity,
@@ -1177,14 +1178,12 @@ pub(crate) fn execute_runtime_canonical_table_node(
         "filter" | "entity_filter" => {
             // ── FAST PATH: Direct entity_id lookup (O(1)) ──
             if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
-                let store = db.store();
-                let entity = store
-                    .get_table_row_by_logical_id(&context.query.table, EntityId::new(entity_id))
-                    .or_else(|| store.get(&context.query.table, EntityId::new(entity_id)));
+                let entity = resolve_table_row_by_logical_id(
+                    db,
+                    &context.query.table,
+                    EntityId::new(entity_id),
+                );
                 if let Some(entity) = entity {
-                    if !crate::runtime::impl_core::entity_visible_under_current_snapshot(&entity) {
-                        return Ok(Vec::new());
-                    }
                     return Ok(
                         super::super::record_search::runtime_table_record_lean_in_collection(
                             entity,
