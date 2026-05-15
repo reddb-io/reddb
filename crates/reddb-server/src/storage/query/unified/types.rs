@@ -153,9 +153,29 @@ pub struct ColumnarRow<'a> {
 /// these keys used to allocate 13.5k fresh `String`s per query; now
 /// the pool of three stays resident and each record pays only an
 /// atomic refcount bump.
+pub fn sys_key_rid() -> Arc<str> {
+    static KEY: std::sync::OnceLock<Arc<str>> = std::sync::OnceLock::new();
+    Arc::clone(KEY.get_or_init(|| Arc::from("rid")))
+}
+
 pub fn sys_key_red_entity_id() -> Arc<str> {
     static KEY: std::sync::OnceLock<Arc<str>> = std::sync::OnceLock::new();
     Arc::clone(KEY.get_or_init(|| Arc::from("red_entity_id")))
+}
+
+pub fn sys_key_collection() -> Arc<str> {
+    static KEY: std::sync::OnceLock<Arc<str>> = std::sync::OnceLock::new();
+    Arc::clone(KEY.get_or_init(|| Arc::from("collection")))
+}
+
+pub fn sys_key_kind() -> Arc<str> {
+    static KEY: std::sync::OnceLock<Arc<str>> = std::sync::OnceLock::new();
+    Arc::clone(KEY.get_or_init(|| Arc::from("kind")))
+}
+
+pub fn sys_key_tenant() -> Arc<str> {
+    static KEY: std::sync::OnceLock<Arc<str>> = std::sync::OnceLock::new();
+    Arc::clone(KEY.get_or_init(|| Arc::from("tenant")))
 }
 
 pub fn sys_key_created_at() -> Arc<str> {

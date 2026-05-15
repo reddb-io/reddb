@@ -23,7 +23,10 @@ use crate::storage::query::ast::{Expr, FieldRef, ReturningItem};
 use crate::storage::query::sql_lowering::{
     effective_delete_filter, effective_insert_rows, effective_update_filter, fold_expr_to_value,
 };
-use crate::storage::query::unified::{sys_key_red_entity_id, UnifiedRecord, UnifiedResult};
+use crate::storage::query::unified::{
+    sys_key_collection, sys_key_created_at, sys_key_kind, sys_key_red_entity_id, sys_key_rid,
+    sys_key_tenant, sys_key_updated_at, UnifiedRecord, UnifiedResult,
+};
 use crate::storage::unified::MetadataValue;
 use crate::storage::Metadata;
 use std::collections::HashMap;
@@ -1768,17 +1771,35 @@ fn find_top_level_keyword(haystack: &str, needle: &str) -> Option<usize> {
 /// for one affected row; `outputs`, when provided, supplies the engine-
 /// assigned entity id for the same row (INSERT path). Projection honours
 /// the RETURNING items: `*` expands to every snapshot column plus
-/// `red_entity_id` when available.
+/// the public row envelope when available.
 fn build_returning_result(
     items: &[ReturningItem],
     snapshots: &[Vec<(String, Value)>],
     outputs: Option<&[CreateEntityOutput]>,
 ) -> UnifiedResult {
     let project_all = items.iter().any(|it| matches!(it, ReturningItem::All));
+    let public_row_outputs = outputs.is_some_and(|outs| {
+        outs.first()
+            .and_then(|out| out.entity.as_ref())
+            .is_some_and(|entity| entity.data.as_row().is_some())
+    });
 
     let mut columns: Vec<String> = if project_all {
         let mut cols: Vec<String> = Vec::new();
-        if outputs.is_some() {
+        if public_row_outputs {
+            cols.extend(
+                [
+                    "rid",
+                    "collection",
+                    "kind",
+                    "tenant",
+                    "created_at",
+                    "updated_at",
+                ]
+                .into_iter()
+                .map(str::to_string),
+            );
+        } else if outputs.is_some() {
             cols.push("red_entity_id".to_string());
         }
         if let Some(first) = snapshots.first() {
@@ -1802,17 +1823,51 @@ fn build_returning_result(
         columns.retain(|c| seen.insert(c.clone()));
     }
 
-    let id_key = sys_key_red_entity_id();
     let mut records: Vec<UnifiedRecord> = Vec::with_capacity(snapshots.len());
     for (idx, snap) in snapshots.iter().enumerate() {
         let mut values: HashMap<Arc<str>, Value> = HashMap::with_capacity(columns.len());
         if let Some(outs) = outputs {
             if let Some(out) = outs.get(idx) {
-                values.insert(Arc::clone(&id_key), Value::Integer(out.id.raw() as i64));
+                if let Some(entity) = out
+                    .entity
+                    .as_ref()
+                    .filter(|entity| entity.data.as_row().is_some())
+                {
+                    values.insert(
+                        Arc::clone(&sys_key_rid()),
+                        Value::UnsignedInteger(out.id.raw()),
+                    );
+                    values.insert(
+                        Arc::clone(&sys_key_red_entity_id()),
+                        Value::UnsignedInteger(out.id.raw()),
+                    );
+                    values.insert(
+                        Arc::clone(&sys_key_collection()),
+                        Value::text(entity.kind.collection().to_string()),
+                    );
+                    values.insert(Arc::clone(&sys_key_kind()), Value::text("row".to_string()));
+                    values.insert(
+                        Arc::clone(&sys_key_created_at()),
+                        Value::UnsignedInteger(entity.created_at),
+                    );
+                    values.insert(
+                        Arc::clone(&sys_key_updated_at()),
+                        Value::UnsignedInteger(entity.updated_at),
+                    );
+                } else {
+                    values.insert(
+                        Arc::clone(&sys_key_red_entity_id()),
+                        Value::Integer(out.id.raw() as i64),
+                    );
+                }
             }
         }
         for (name, val) in snap {
             values.insert(Arc::from(name.as_str()), val.clone());
+        }
+        if !values.contains_key("tenant") {
+            let tenant = values.get("tenant_id").cloned().unwrap_or(Value::Null);
+            values.insert(Arc::clone(&sys_key_tenant()), tenant);
         }
         let mut rec = UnifiedRecord::default();
         // Only keep projected columns on the record.

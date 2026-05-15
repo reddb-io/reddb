@@ -38,7 +38,7 @@ pub(crate) fn extract_equality_prefilter(filter: &Filter) -> Option<(String, Val
     }
 }
 
-/// Extract entity_id from `WHERE _entity_id = N` for O(1) direct lookup.
+/// Extract entity_id from `WHERE rid = N` for O(1) direct lookup.
 pub(crate) fn extract_entity_id_from_filter(
     filter: &Option<crate::storage::query::ast::Filter>,
 ) -> Option<u64> {
@@ -50,7 +50,7 @@ pub(crate) fn extract_entity_id_from_filter(
                 FieldRef::TableColumn { column, .. } => column.as_str(),
                 _ => return None,
             };
-            if field_name != "red_entity_id" && field_name != "entity_id" {
+            if field_name != "rid" && field_name != "red_entity_id" && field_name != "entity_id" {
                 return None;
             }
             match value {
@@ -89,7 +89,7 @@ pub(crate) fn extract_bloom_key_for_pk(
                 FieldRef::TableColumn { column, .. } => column.as_str(),
                 _ => return None,
             };
-            if field_name != "red_entity_id" {
+            if field_name != "rid" && field_name != "red_entity_id" {
                 return None;
             }
             let key = match value {
@@ -195,7 +195,8 @@ pub(crate) fn extract_zone_predicates(
                 _ => return,
             };
             // Skip system fields — they live outside named HashMap
-            if col.starts_with('_') || col == "red_entity_id" || col == "entity_id" {
+            if col.starts_with('_') || col == "rid" || col == "red_entity_id" || col == "entity_id"
+            {
                 return;
             }
             let kind = match op {
@@ -213,7 +214,8 @@ pub(crate) fn extract_zone_predicates(
                 FieldRef::TableColumn { column, .. } => column.as_str(),
                 _ => return,
             };
-            if col.starts_with('_') || col == "red_entity_id" || col == "entity_id" {
+            if col.starts_with('_') || col == "rid" || col == "red_entity_id" || col == "entity_id"
+            {
                 return;
             }
             out.push((col.to_string(), low.clone(), ZoneColPredKind::Gte));
@@ -288,7 +290,7 @@ pub(crate) fn resolve_entity_field<'a>(
 
     // System fields — accessed directly from entity struct fields
     match column {
-        "red_entity_id" | "entity_id" => {
+        "rid" | "red_entity_id" | "entity_id" => {
             return Some(Cow::Owned(Value::UnsignedInteger(
                 entity.logical_id().raw(),
             )));

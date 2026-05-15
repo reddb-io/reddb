@@ -129,9 +129,12 @@ UPDATE users SET name = $1 WHERE id = $2 WITH METADATA (role = 'admin')
   "ok": true,
   "id": 1,
   "entity": {
-    "_entity_id": 1,
-    "_collection": "users",
-    "_kind": "row",
+    "rid": 1,
+    "collection": "users",
+    "kind": "row",
+    "tenant": null,
+    "created_at": 1760000000000,
+    "updated_at": 1760000001000,
     "name": "Alice",
     "age": 31,
     "active": true

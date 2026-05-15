@@ -33,12 +33,12 @@ fn returning_star_on_insert_returns_inserted_row() {
     );
     assert!(matches!(age, Value::Integer(30)), "got {age:?}");
     assert!(
-        rec.get("red_entity_id").is_some(),
-        "RETURNING * on INSERT should include red_entity_id"
+        rec.get("rid").is_some(),
+        "RETURNING * on INSERT should include rid"
     );
     assert!(
-        result.result.columns.iter().any(|c| c == "red_entity_id"),
-        "columns should list red_entity_id"
+        result.result.columns.iter().any(|c| c == "rid"),
+        "columns should list rid"
     );
 }
 

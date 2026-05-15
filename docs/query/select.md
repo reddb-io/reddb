@@ -118,7 +118,7 @@ Every query returns a standard envelope:
   "mode": "sql",
   "statement": "SELECT * FROM users WHERE age > 21",
   "engine": "table",
-  "columns": ["_entity_id", "_collection", "_kind", "name", "email", "age"],
+  "columns": ["rid", "collection", "kind", "tenant", "created_at", "updated_at", "name", "email", "age"],
   "record_count": 3,
   "records": [...]
 }
@@ -240,4 +240,6 @@ grpcurl -plaintext \
 ```
 
 > [!NOTE]
-> Envelope fields prefixed with `_` (like `_entity_id`, `_collection`, `_kind`) are always included in results for entity identification.
+> Row results include the public RedDB ID envelope fields `rid`, `collection`,
+> `kind`, `tenant`, `created_at`, and `updated_at`. For ordinary table rows,
+> `kind` is `row`.

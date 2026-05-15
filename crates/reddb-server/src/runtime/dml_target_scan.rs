@@ -252,8 +252,8 @@ impl<'a> DmlTargetScan<'a> {
 fn entity_row_snapshot(entity: &crate::storage::UnifiedEntity) -> Option<Vec<(String, Value)>> {
     match &entity.data {
         EntityData::Row(row) => {
-            if let Some(named) = &row.named {
-                Some(named.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            let mut snapshot: Vec<(String, Value)> = if let Some(named) = &row.named {
+                named.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
             } else {
                 row.schema.as_ref().map(|schema| {
                     schema
@@ -261,8 +261,30 @@ fn entity_row_snapshot(entity: &crate::storage::UnifiedEntity) -> Option<Vec<(St
                         .cloned()
                         .zip(row.columns.iter().cloned())
                         .collect()
-                })
-            }
+                })?
+            };
+            let tenant = row.get_field("tenant_id").cloned().unwrap_or(Value::Null);
+            snapshot.extend([
+                (
+                    "rid".to_string(),
+                    Value::UnsignedInteger(entity.logical_id().raw()),
+                ),
+                (
+                    "collection".to_string(),
+                    Value::text(entity.kind.collection().to_string()),
+                ),
+                ("kind".to_string(), Value::text("row".to_string())),
+                ("tenant".to_string(), tenant),
+                (
+                    "created_at".to_string(),
+                    Value::UnsignedInteger(entity.created_at),
+                ),
+                (
+                    "updated_at".to_string(),
+                    Value::UnsignedInteger(entity.updated_at),
+                ),
+            ]);
+            Some(snapshot)
         }
         _ => None,
     }
