@@ -40,6 +40,20 @@ fn label_for(rt: &RedDBRuntime, table: &str, red_entity_id: u64) -> Option<Strin
         })
 }
 
+fn scanned_ids(rt: &RedDBRuntime, table: &str) -> Vec<i64> {
+    rt.execute_query(&format!("SELECT id FROM {table} ORDER BY id"))
+        .expect("scan ids")
+        .result
+        .records
+        .iter()
+        .map(|record| match record.get("id") {
+            Some(Value::Integer(id)) => *id,
+            Some(Value::UnsignedInteger(id)) => *id as i64,
+            other => panic!("expected id, got {other:?}"),
+        })
+        .collect()
+}
+
 #[test]
 fn delete_tombstone_preserves_old_snapshot_and_hides_new_snapshot() {
     let rt = rt();
@@ -74,6 +88,34 @@ fn delete_tombstone_preserves_old_snapshot_and_hides_new_snapshot() {
 
     set_current_connection_id(43803);
     assert_eq!(label_for(&rt, "mvcc_delete_snap", eid), None);
+
+    clear_current_connection_id();
+}
+
+#[test]
+fn table_scan_preserves_snapshot_visibility_for_tombstoned_rows() {
+    let rt = rt();
+    set_current_connection_id(43831);
+
+    exec(&rt, "CREATE TABLE mvcc_scan_resolver (id INT, label TEXT)");
+    exec(
+        &rt,
+        "INSERT INTO mvcc_scan_resolver (id, label) VALUES (1, 'keep'), (2, 'delete')",
+    );
+
+    exec(&rt, "BEGIN");
+    assert_eq!(scanned_ids(&rt, "mvcc_scan_resolver"), vec![1, 2]);
+
+    set_current_connection_id(43832);
+    exec(&rt, "DELETE FROM mvcc_scan_resolver WHERE id = 2");
+    assert_eq!(scanned_ids(&rt, "mvcc_scan_resolver"), vec![1]);
+
+    set_current_connection_id(43831);
+    assert_eq!(scanned_ids(&rt, "mvcc_scan_resolver"), vec![1, 2]);
+    exec(&rt, "COMMIT");
+
+    set_current_connection_id(43833);
+    assert_eq!(scanned_ids(&rt, "mvcc_scan_resolver"), vec![1]);
 
     clear_current_connection_id();
 }
