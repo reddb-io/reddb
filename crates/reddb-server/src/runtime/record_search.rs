@@ -80,6 +80,34 @@ fn set_public_row_envelope(
     );
 }
 
+fn set_public_graph_envelope(record: &mut UnifiedRecord, entity: &UnifiedEntity, kind: &str) {
+    record.set_arc(
+        sys_key_rid(),
+        Value::UnsignedInteger(entity.logical_id().raw()),
+    );
+    record.set_arc(
+        sys_key_collection(),
+        Value::text(entity.kind.collection().to_string()),
+    );
+    record.set_arc(sys_key_kind(), Value::text(kind.to_string()));
+    record.set_arc(sys_key_tenant(), Value::Null);
+    record.set_arc(
+        sys_key_created_at(),
+        Value::UnsignedInteger(entity.created_at),
+    );
+    record.set_arc(
+        sys_key_updated_at(),
+        Value::UnsignedInteger(entity.updated_at),
+    );
+}
+
+fn graph_endpoint_rid_value(endpoint: &str) -> Value {
+    endpoint
+        .parse::<u64>()
+        .map(Value::UnsignedInteger)
+        .unwrap_or_else(|_| Value::text(endpoint.to_string()))
+}
+
 fn public_row_kind(row: &crate::storage::RowData) -> &'static str {
     if runtime_row_is_kv(row) {
         "kv"
@@ -94,6 +122,10 @@ fn set_legacy_row_id_if_requested(record: &mut UnifiedRecord, columns: &[String]
     if columns.iter().any(|column| column == "red_entity_id") {
         record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(rid));
     }
+}
+
+fn set_source_collection(record: &mut UnifiedRecord, collection: &str) {
+    record.set_arc(sys_key_collection(), Value::text(collection.to_string()));
 }
 
 #[inline(never)]
@@ -128,7 +160,11 @@ pub(super) fn scan_runtime_table_source_records_limited(
             .store()
             .query_all(move |e| entity_visible_with_context(snap_ctx.as_ref(), e))
             .into_iter()
-            .filter_map(|(_, entity)| runtime_any_record_from_entity(entity))
+            .filter_map(|(collection, entity)| {
+                let mut record = runtime_any_record_from_entity(entity)?;
+                set_source_collection(&mut record, &collection);
+                Some(record)
+            })
             .collect();
         let records = match limit {
             Some(n) if records.len() > n => records.into_iter().take(n).collect(),
@@ -153,6 +189,7 @@ pub(super) fn scan_runtime_table_source_records_limited(
     let go_parallel = entity_count >= MIN_PARALLEL_ROWS && sequential_cap >= MIN_PARALLEL_ROWS;
     if go_parallel {
         let schema = manager.column_schema();
+        let table_name = table.to_string();
         let mut entities: Vec<crate::storage::unified::entity::UnifiedEntity> =
             Vec::with_capacity(entity_count);
         manager.for_each_entity(|e| {
@@ -167,7 +204,10 @@ pub(super) fn scan_runtime_table_source_records_limited(
                 chunk
                     .iter()
                     .filter_map(|e| {
-                        runtime_table_record_from_entity_ref_with_schema(e, schema.as_ref())
+                        let mut record =
+                            runtime_table_record_from_entity_ref_with_schema(e, schema.as_ref())?;
+                        set_source_collection(&mut record, &table_name);
+                        Some(record)
                     })
                     .collect()
             },
@@ -189,10 +229,11 @@ pub(super) fn scan_runtime_table_source_records_limited(
         if !entity_visible_under_current_snapshot(entity) {
             return true;
         }
-        if let Some(record) = runtime_table_record_from_entity_ref_with_schema(
+        if let Some(mut record) = runtime_table_record_from_entity_ref_with_schema(
             entity,
             manager.column_schema().as_ref(),
         ) {
+            set_source_collection(&mut record, table);
             records.push(record);
             if let Some(n) = limit {
                 if records.len() >= n {
@@ -223,7 +264,11 @@ pub(super) fn scan_runtime_table_with_bloom_hint(
     let records = entities
         .into_iter()
         .filter(entity_visible_under_current_snapshot)
-        .filter_map(runtime_table_record_from_entity)
+        .filter_map(|entity| {
+            let mut record = runtime_table_record_from_entity(entity)?;
+            set_source_collection(&mut record, table);
+            Some(record)
+        })
         .collect();
     Ok((records, pruned))
 }
@@ -343,6 +388,18 @@ pub(super) fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<Unified
         record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
         Some(record)
     }
+}
+
+pub(super) fn runtime_table_record_lean_in_collection(
+    entity: UnifiedEntity,
+    collection: &str,
+) -> Option<UnifiedRecord> {
+    let is_graph = matches!(entity.data, EntityData::Node(_) | EntityData::Edge(_));
+    let mut record = runtime_table_record_lean(entity)?;
+    if is_graph {
+        record.set_arc(sys_key_collection(), Value::text(collection.to_string()));
+    }
+    Some(record)
 }
 
 #[inline(never)]
@@ -725,12 +782,12 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
         }
         (EntityKind::GraphNode(node), EntityData::Node(node_data)) => {
             let mut record = UnifiedRecord::new();
-            record.set("id", Value::UnsignedInteger(entity_id));
             record.set("label", Value::text(node.label));
             record.set("node_type", Value::text(node.node_type));
             for (key, value) in node_data.properties {
                 record.set(&key, value);
             }
+            set_public_graph_envelope(&mut record, &identity_entity, "node");
             (
                 "graph_node",
                 runtime_record_capability_list(["graph", "graph_node"]),
@@ -740,12 +797,13 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
         (EntityKind::GraphEdge(edge_kind), EntityData::Edge(edge)) => {
             let mut record = UnifiedRecord::new();
             record.set("label", Value::text(edge_kind.label));
-            record.set("from", Value::NodeRef(edge_kind.from_node.clone()));
-            record.set("to", Value::NodeRef(edge_kind.to_node.clone()));
+            record.set("from_rid", graph_endpoint_rid_value(&edge_kind.from_node));
+            record.set("to_rid", graph_endpoint_rid_value(&edge_kind.to_node));
             record.set("weight", Value::Float(edge.weight as f64));
             for (key, value) in edge.properties {
                 record.set(&key, value);
             }
+            set_public_graph_envelope(&mut record, &identity_entity, "edge");
             (
                 "graph_edge",
                 runtime_record_capability_list(["graph", "graph_edge"]),
@@ -801,6 +859,12 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
 
     if let EntityData::Row(row) = &identity_entity.data {
         set_public_row_envelope(&mut record, &identity_entity, row);
+    } else if matches!(
+        identity_entity.data,
+        EntityData::Node(_) | EntityData::Edge(_)
+    ) {
+        set_runtime_entity_metadata(&mut record, entity_type, capabilities);
+        apply_runtime_identity_hints(&mut record, &identity_entity);
     } else {
         record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity_id));
         record.set_arc(sys_key_red_collection(), Value::text(collection));
@@ -850,12 +914,12 @@ pub(super) fn runtime_any_record_from_entity_ref(entity: &UnifiedEntity) -> Opti
         }
         (EntityKind::GraphNode(node), EntityData::Node(node_data)) => {
             let mut record = UnifiedRecord::new();
-            record.set("id", Value::UnsignedInteger(entity_id));
             record.set("label", Value::text(node.label.clone()));
             record.set("node_type", Value::text(node.node_type.clone()));
             for (key, value) in &node_data.properties {
                 record.set(key, value.clone());
             }
+            set_public_graph_envelope(&mut record, entity, "node");
             (
                 "graph_node",
                 runtime_record_capability_list(["graph", "graph_node"]),
@@ -865,12 +929,13 @@ pub(super) fn runtime_any_record_from_entity_ref(entity: &UnifiedEntity) -> Opti
         (EntityKind::GraphEdge(edge_kind), EntityData::Edge(edge)) => {
             let mut record = UnifiedRecord::new();
             record.set("label", Value::text(edge_kind.label.clone()));
-            record.set("from", Value::NodeRef(edge_kind.from_node.clone()));
-            record.set("to", Value::NodeRef(edge_kind.to_node.clone()));
+            record.set("from_rid", graph_endpoint_rid_value(&edge_kind.from_node));
+            record.set("to_rid", graph_endpoint_rid_value(&edge_kind.to_node));
             record.set("weight", Value::Float(edge.weight as f64));
             for (key, value) in &edge.properties {
                 record.set(key, value.clone());
             }
+            set_public_graph_envelope(&mut record, entity, "edge");
             (
                 "graph_edge",
                 runtime_record_capability_list(["graph", "graph_edge"]),
@@ -906,6 +971,9 @@ pub(super) fn runtime_any_record_from_entity_ref(entity: &UnifiedEntity) -> Opti
 
     if let EntityData::Row(row) = &entity.data {
         set_public_row_envelope(&mut record, entity, row);
+    } else if matches!(entity.data, EntityData::Node(_) | EntityData::Edge(_)) {
+        set_runtime_entity_metadata(&mut record, entity_type, capabilities);
+        apply_runtime_identity_hints(&mut record, entity);
     } else {
         record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity_id));
         record.set_arc(sys_key_red_collection(), Value::text(collection));
