@@ -344,7 +344,7 @@ impl RedDBRuntime {
                 crate::replication::cdc::ChangeOperation::Update,
                 &item.collection,
                 &item.entity,
-                "entity",
+                update_cdc_item_kind(self, &item.collection, &item.entity),
                 item.metadata.as_ref(),
                 false,
             );
@@ -2477,6 +2477,29 @@ fn resolve_update_entity_by_logical_id(
     store
         .get_table_row_by_logical_id(table, logical_id)
         .or_else(|| store.get(table, logical_id))
+}
+
+fn update_cdc_item_kind(
+    runtime: &RedDBRuntime,
+    collection: &str,
+    entity: &UnifiedEntity,
+) -> &'static str {
+    match &entity.data {
+        EntityData::Node(_) => return "node",
+        EntityData::Edge(_) => return "edge",
+        _ => {}
+    }
+
+    match runtime
+        .db()
+        .collection_contract(collection)
+        .map(|contract| contract.declared_model)
+    {
+        Some(crate::catalog::CollectionModel::Document) => "document",
+        Some(crate::catalog::CollectionModel::Kv)
+        | Some(crate::catalog::CollectionModel::Vault) => "kv",
+        _ => "row",
+    }
 }
 
 fn ordered_update_target_ids(

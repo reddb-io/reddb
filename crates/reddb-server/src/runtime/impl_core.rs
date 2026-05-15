@@ -3406,10 +3406,11 @@ impl RedDBRuntime {
             self.invalidate_result_cache();
         }
 
+        let public_id = entity.logical_id().raw();
         let lsn = self.inner.cdc.emit_with_columns(
             operation,
             collection,
-            entity.id.raw(),
+            public_id,
             entity_kind,
             changed_columns,
         );
@@ -8634,6 +8635,24 @@ impl RedDBRuntime {
                         ));
                     }
                 }
+
+                if let Some(columns) = update_returning_columns_for_policy(self, update) {
+                    let request = column_access_request_for_table_select(&update.table, columns);
+                    let outcome =
+                        auth_store.check_column_projection_authz(&principal_id, &request, &iam_ctx);
+                    if let Some(denied) = outcome.first_denied_column() {
+                        return Err(format!(
+                            "principal=`{}` action=`select` resource=`{}:{}` denied by IAM column policy",
+                            username, denied.resource.kind, denied.resource.name
+                        ));
+                    }
+                    if !outcome.allowed() {
+                        return Err(format!(
+                            "principal=`{}` action=`select` resource=`{}:{}` denied by IAM policy",
+                            username, outcome.table_resource.kind, outcome.table_resource.name
+                        ));
+                    }
+                }
             }
 
             Ok(())
@@ -9665,6 +9684,160 @@ fn column_access_request_for_table_update(
                 .with_schema(schema.to_string())
         }
         None => crate::auth::ColumnAccessRequest::update(table_name.to_string(), columns),
+    }
+}
+
+fn column_access_request_for_table_select(
+    table_name: &str,
+    columns: Vec<String>,
+) -> crate::auth::ColumnAccessRequest {
+    match table_name.split_once('.') {
+        Some((schema, table)) => {
+            crate::auth::ColumnAccessRequest::select(table.to_string(), columns)
+                .with_schema(schema.to_string())
+        }
+        None => crate::auth::ColumnAccessRequest::select(table_name.to_string(), columns),
+    }
+}
+
+fn update_returning_columns_for_policy(
+    runtime: &RedDBRuntime,
+    query: &crate::storage::query::ast::UpdateQuery,
+) -> Option<Vec<String>> {
+    let items = query.returning.as_ref()?;
+    let mut columns = Vec::new();
+    let project_all = items
+        .iter()
+        .any(|item| matches!(item, crate::storage::query::ast::ReturningItem::All));
+    if project_all {
+        collect_returning_star_columns(runtime, query, &mut columns);
+    } else {
+        for item in items {
+            let crate::storage::query::ast::ReturningItem::Column(column) = item else {
+                continue;
+            };
+            push_returning_policy_column(&mut columns, column);
+        }
+    }
+    (!columns.is_empty()).then_some(columns)
+}
+
+fn collect_returning_star_columns(
+    runtime: &RedDBRuntime,
+    query: &crate::storage::query::ast::UpdateQuery,
+    columns: &mut Vec<String>,
+) {
+    let store = runtime.db().store();
+    let Some(manager) = store.get_collection(&query.table) else {
+        return;
+    };
+    if let Some(schema) = manager.column_schema() {
+        for column in schema.iter() {
+            push_returning_policy_column(columns, column);
+        }
+    }
+    for entity in manager.query_all(|_| true) {
+        if !returning_entity_matches_update_target(&entity, query.target) {
+            continue;
+        }
+        match &entity.data {
+            crate::storage::EntityData::Row(row) => {
+                for (column, _) in row.iter_fields() {
+                    push_returning_policy_column(columns, column);
+                }
+            }
+            crate::storage::EntityData::Node(node) => {
+                push_returning_policy_column(columns, "label");
+                push_returning_policy_column(columns, "node_type");
+                for column in node.properties.keys() {
+                    push_returning_policy_column(columns, column);
+                }
+            }
+            crate::storage::EntityData::Edge(edge) => {
+                push_returning_policy_column(columns, "label");
+                push_returning_policy_column(columns, "from_rid");
+                push_returning_policy_column(columns, "to_rid");
+                push_returning_policy_column(columns, "weight");
+                for column in edge.properties.keys() {
+                    push_returning_policy_column(columns, column);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn push_returning_policy_column(columns: &mut Vec<String>, column: &str) {
+    if returning_public_envelope_column(column) {
+        return;
+    }
+    if !columns.iter().any(|seen| seen == column) {
+        columns.push(column.to_string());
+    }
+}
+
+fn returning_public_envelope_column(column: &str) -> bool {
+    matches!(
+        column.to_ascii_lowercase().as_str(),
+        "rid" | "collection" | "kind" | "tenant" | "created_at" | "updated_at" | "red_entity_id"
+    )
+}
+
+fn returning_entity_matches_update_target(
+    entity: &crate::storage::UnifiedEntity,
+    target: crate::storage::query::ast::UpdateTarget,
+) -> bool {
+    use crate::storage::query::ast::UpdateTarget;
+    match target {
+        UpdateTarget::Rows => {
+            matches!(returning_row_item_kind(entity), Some(ReturningRowKind::Row))
+        }
+        UpdateTarget::Documents => {
+            matches!(
+                returning_row_item_kind(entity),
+                Some(ReturningRowKind::Document)
+            )
+        }
+        UpdateTarget::Kv => matches!(returning_row_item_kind(entity), Some(ReturningRowKind::Kv)),
+        UpdateTarget::Nodes => matches!(
+            (&entity.kind, &entity.data),
+            (
+                crate::storage::EntityKind::GraphNode(_),
+                crate::storage::EntityData::Node(_)
+            )
+        ),
+        UpdateTarget::Edges => matches!(
+            (&entity.kind, &entity.data),
+            (
+                crate::storage::EntityKind::GraphEdge(_),
+                crate::storage::EntityData::Edge(_)
+            )
+        ),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReturningRowKind {
+    Row,
+    Document,
+    Kv,
+}
+
+fn returning_row_item_kind(entity: &crate::storage::UnifiedEntity) -> Option<ReturningRowKind> {
+    let row = entity.data.as_row()?;
+    let is_kv = row.iter_fields().all(|(column, _)| {
+        column.eq_ignore_ascii_case("key") || column.eq_ignore_ascii_case("value")
+    });
+    if is_kv {
+        return Some(ReturningRowKind::Kv);
+    }
+    let is_document = row
+        .iter_fields()
+        .any(|(_, value)| matches!(value, crate::storage::schema::Value::Json(_)));
+    if is_document {
+        Some(ReturningRowKind::Document)
+    } else {
+        Some(ReturningRowKind::Row)
     }
 }
 
