@@ -1,6 +1,7 @@
 # DELETE
 
-The `DELETE` statement removes rows from a table.
+The `DELETE` statement removes items from a collection. For SQL row deletes,
+filter by the public RedDB ID `rid` when deleting one known item.
 
 Prefer positional parameters for runtime values:
 
@@ -16,7 +17,7 @@ The parameterized-query design is tracked in
 ## Syntax
 
 ```sql
-DELETE FROM table_name [WHERE condition]
+DELETE FROM table_name [WHERE condition] [RETURNING * | field [, field ...]]
 ```
 
 ## Examples
@@ -25,6 +26,10 @@ DELETE FROM table_name [WHERE condition]
 
 ```sql
 DELETE FROM users WHERE name = $1
+```
+
+```sql
+DELETE FROM users WHERE rid = $1 RETURNING rid, name
 ```
 
 ### Delete by Condition
@@ -44,10 +49,10 @@ DELETE FROM temp_data
 
 ## Via HTTP
 
-### By Entity ID
+### By RedDB ID
 
 ```bash
-curl -X DELETE http://127.0.0.1:8080/collections/users/entities/1
+curl -X DELETE http://127.0.0.1:8080/collections/users/entities/102
 ```
 
 ### Via Query
@@ -62,9 +67,12 @@ curl -X POST http://127.0.0.1:8080/query \
 
 ```bash
 grpcurl -plaintext \
-  -d '{"collection": "users", "id": 1}' \
+  -d '{"collection": "users", "id": 102}' \
   127.0.0.1:50051 reddb.v1.RedDb/DeleteEntity
 ```
+
+`DeleteEntityRequest.id` is the retained protobuf field name. Treat its value
+as the public RedDB ID `rid`.
 
 ## Via MCP
 
@@ -73,7 +81,7 @@ grpcurl -plaintext \
   "tool": "reddb_delete",
   "arguments": {
     "collection": "users",
-    "id": 1
+    "rid": 102
   }
 }
 ```

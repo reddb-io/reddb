@@ -89,8 +89,8 @@ from reddb_asyncio import (
 * `await db.execute(sql, params=None)`
 * `await db.insert(collection, payload)`
 * `await db.bulk_insert(collection, payloads)`
-* `await db.get(collection, id)`
-* `await db.delete(collection, id)`
+* `await db.get(collection, rid)`
+* `await db.delete(collection, rid)`
 * `await db.ping()`
 * `await db.close()`
 * `async with await connect(uri) as db: ...`

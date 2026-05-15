@@ -157,13 +157,13 @@ client yet. Use the HTTP streaming API for incremental ASK frames; stdio
 currently supports materialised cursor batching through `query.open` /
 `query.next`, which is separate from ASK token streaming.
 
-### `db.insert(collection, payload) → Promise<{ affected, id? }>`
+### `db.insert(collection, payload) → Promise<{ affected, rid? }>`
 
 ### `db.bulkInsert(collection, payloads) → Promise<{ affected }>`
 
-### `db.get(collection, id) → Promise<{ entity }>`
+### `db.get(collection, rid) → Promise<{ entity }>`
 
-### `db.delete(collection, id) → Promise<{ affected }>`
+### `db.delete(collection, rid) → Promise<{ affected }>`
 
 ### `db.health() → Promise<{ ok, version }>`
 

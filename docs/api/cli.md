@@ -222,7 +222,7 @@ curl -X POST http://127.0.0.1:8080/collections/users/rows \
 Get command scaffold (`not yet wired`).
 
 ```bash
-red get <collection> <id>
+red get <collection> <rid>
 ```
 
 ## red delete
@@ -230,7 +230,7 @@ red get <collection> <id>
 Delete command scaffold (`not yet wired`).
 
 ```bash
-red delete <collection> <id>
+red delete <collection> <rid>
 ```
 
 ## red health

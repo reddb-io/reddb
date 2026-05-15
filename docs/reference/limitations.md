@@ -33,7 +33,7 @@ RedDB v0.1 (Beta) has the following known limitations:
 
 | Scenario | Recommendation |
 |:---------|:---------------|
-| `FROM ANY` on large databases | Always use `LIMIT`; filter by `_collection` |
+| `FROM ANY` on large databases | Always use `LIMIT`; filter by `collection` |
 | Vector search > 1M vectors | Use IVF with `n_probes` tuning |
 | Graph analytics on large graphs | Use projections to scope the subgraph |
 | Bulk insert > 100K entities | Use bulk endpoints, not individual inserts |

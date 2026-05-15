@@ -31,6 +31,25 @@ Top-level SQL dispatch:
 | Path | Starts with `PATH` | `PATH FROM a TO b VIA follows` | supported |
 | Natural | Free-form text that is not recognized as another mode | `find recent logs about auth failures` | partial |
 
+## Items and RedDB IDs
+
+Query results expose RedDB items with a public envelope. `rid` is the RedDB ID
+for the item; it replaces older public aliases such as `_entity_id`,
+`red_entity_id`, and `entity_id`.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `rid` | `u64` | RedDB ID for the item |
+| `collection` | `string` | Source collection |
+| `kind` | `string` | Item kind: `row`, `document`, `kv`, `node`, `edge`, or `vector` |
+| `tenant` | `string` / `null` | Tenant visible to the statement |
+| `created_at` | timestamp/integer millis | Creation timestamp |
+| `updated_at` | timestamp/integer millis | Last update timestamp |
+
+The public envelope field names are reserved system fields. Do not define user
+columns or top-level document, KV, node, or edge properties named `rid`,
+`collection`, `kind`, `tenant`, `created_at`, or `updated_at`.
+
 ## SELECT
 
 | Syntax | Example | Status |
@@ -65,11 +84,15 @@ Top-level SQL dispatch:
 | Multi-row `INSERT` | `INSERT INTO users (id) VALUES (1), (2)` | supported |
 | Parameterized `INSERT` | `INSERT INTO users (id, name) VALUES ($1, $2)` | supported |
 | `INSERT ... RETURNING *` | `INSERT INTO users (name) VALUES ('Ada') RETURNING *` | supported |
-| `INSERT ... RETURNING col, ...` | `INSERT INTO users (name) VALUES ('Ada') RETURNING id, name` | supported |
-| `UPDATE ... SET ... WHERE ...` | `UPDATE users SET active = true WHERE id = $1` | supported |
-| `UPDATE ... RETURNING * / cols` | `UPDATE users SET name = 'Ada' RETURNING id, name` | supported |
-| `DELETE FROM ... WHERE ...` | `DELETE FROM users WHERE id = $1` | supported |
-| `DELETE ... RETURNING * / cols` | `DELETE FROM users WHERE id = $1 RETURNING *` | supported |
+| `INSERT ... RETURNING col, ...` | `INSERT INTO users (name) VALUES ('Ada') RETURNING rid, name` | supported |
+| `UPDATE ... SET ... WHERE ...` | `UPDATE users SET active = true WHERE rid = $1` | supported |
+| Explicit update targets | `UPDATE users ROWS SET active = true WHERE rid = $1` | supported |
+| Multi-model update targets | `UPDATE docs DOCUMENTS SET score += 1`; `UPDATE settings KV SET value += 1`; `UPDATE social NODES SET score += 1`; `UPDATE social EDGES SET weight += 0.5` | supported |
+| Compound assignment | `UPDATE users SET score += 5, attempts %= 3 WHERE rid = $1` | supported |
+| Ordered update batches | `UPDATE users ROWS SET touched = true ORDER BY priority DESC LIMIT 10` | supported; `ORDER BY` requires `LIMIT` |
+| `UPDATE ... RETURNING * / cols` | `UPDATE users SET name = 'Ada' WHERE rid = $1 RETURNING rid, name` | supported |
+| `DELETE FROM ... WHERE ...` | `DELETE FROM users WHERE rid = $1` | supported |
+| `DELETE ... RETURNING * / cols` | `DELETE FROM users WHERE rid = $1 RETURNING *` | supported |
 | `RETURNING <expr>` | `INSERT INTO users (id) VALUES (1) RETURNING id + 1` | not yet: `NOT_YET_SUPPORTED` |
 | `TRUNCATE <model> <name>` | `TRUNCATE TABLE users` | supported |
 
@@ -134,6 +157,8 @@ Top-level SQL dispatch:
 | `COUNT` | `COUNT(*)`, `COUNT(expr)` | `SELECT COUNT(*) FROM users` | integer | supported |
 | `SUM` / `AVG` | numeric expression | `SELECT AVG(score) FROM runs` | numeric | supported |
 | `MIN` / `MAX` | comparable expression | `SELECT MAX(created_at) FROM users` | input type | supported |
+| PostgreSQL math functions | `SQRT`, `POWER`, `EXP`, `LN`, `LOG`, `LOG10`, `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`, `ATAN`, `ATAN2`, `COT`, `DEGREES`, `RADIANS`, `PI` | `SELECT SQRT(score) FROM runs` | float | supported |
+| PostgreSQL math aliases | `POW`, `ARCSIN`, `ARCCOS`, `ARCTAN` | `SELECT POW(2, 4)` | float | supported |
 | `EMBED` | `EMBED(text)` | `SELECT EMBED(body) FROM docs` | vector | partial: provider configuration required |
 | ML/cache scalars | `ML_CLASSIFY(model, features)`, `SEMANTIC_CACHE_GET(key)` | `SELECT ML_CLASSIFY('m', payload) FROM events` | JSON/value | partial |
 | Continuous aggregate helpers | `CA_LIST()`, `CA_REFRESH(name)` | `SELECT CA_LIST()` | JSON/value | partial |
@@ -144,7 +169,8 @@ Top-level SQL dispatch:
 | Syntax | Example | Status |
 | --- | --- | --- |
 | `CREATE GRAPH` / `DROP GRAPH` | `CREATE GRAPH social` | supported |
-| `INSERT INTO <graph> NODE/EDGE (...) VALUES (...)` | `INSERT INTO social NODE (id, label) VALUES ('a', 'User')` | supported |
+| `INSERT INTO <graph> NODE (...) VALUES (...)` | `INSERT INTO social NODE (label, node_type) VALUES ('alice', 'User') RETURNING rid` | supported |
+| `INSERT INTO <graph> EDGE (...) VALUES (...)` | `INSERT INTO social EDGE (label, from_rid, to_rid) VALUES ('knows', $1, $2)` | supported |
 | `MATCH ... RETURN ...` | `MATCH (a)-[:FOLLOWS]->(b) RETURN b` | partial |
 | `GRAPH NEIGHBORHOOD` | `GRAPH NEIGHBORHOOD social FROM 'a' DEPTH 2` | supported |
 | `GRAPH SHORTEST_PATH` | `GRAPH SHORTEST_PATH social FROM 'a' TO 'b'` | supported |

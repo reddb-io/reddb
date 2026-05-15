@@ -34,7 +34,7 @@ Across collections, you can also use the universal envelope:
 
 ```sql
 FROM ANY
-WHERE _kind = 'kv' AND _collection = 'config'
+WHERE kind = 'kv' AND collection = 'config'
 ORDER BY key
 LIMIT 50
 ```
@@ -139,10 +139,14 @@ Universal query form:
 
 ```sql
 FROM ANY
-WHERE _kind = 'kv'
-  AND _collection = 'config'
+WHERE kind = 'kv'
+  AND collection = 'config'
 LIMIT 100
 ```
+
+KV query results include the public item envelope: `rid`, `collection`, `kind`,
+`tenant`, `created_at`, and `updated_at`, with `kind = 'kv'`. Those envelope
+names are reserved and cannot be used as top-level KV payload fields.
 
 ## Deleting a Key
 
