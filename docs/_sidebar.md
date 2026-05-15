@@ -94,6 +94,7 @@
 
 - **PRDs**
   - [Deepen Correctness Seams](/prd/deepen-correctness-seams.md)
+  - [MVCC Read Resolver](/prd/mvcc-read-resolver-table-row-visibility.md)
 
 - **ADRs**
   - [0001 — RedWire TCP Protocol](/adr/0001-redwire-tcp-protocol.md)
