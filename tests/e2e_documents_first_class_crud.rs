@@ -4,9 +4,15 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
+use reddb::application::{
+    CreateDocumentInput, ExecuteQueryInput, PatchEntityInput, PatchEntityOperation,
+    PatchEntityOperationType,
+};
+use reddb::json::Value as RedJsonValue;
 use reddb::server::RedDBServer;
 use reddb::storage::schema::Value;
 use reddb::RedDBRuntime;
+use reddb::{EntityUseCases, QueryUseCases};
 use serde_json::{json, Value as JsonValue};
 use support::{checkpoint_and_reopen, PersistentDbPath};
 
@@ -26,6 +32,14 @@ fn number_field(row: &reddb::storage::query::UnifiedRecord, field: &str) -> f64 
         Some(Value::Integer(value)) => *value as f64,
         Some(Value::Float(value)) => *value,
         other => panic!("expected {field} number, got {other:?} in {row:?}"),
+    }
+}
+
+fn json_field<'a>(row: &'a reddb::storage::query::UnifiedRecord, field: &str) -> JsonValue {
+    match row.get(field) {
+        Some(Value::Json(value)) => serde_json::from_slice(value)
+            .unwrap_or_else(|err| panic!("expected {field} JSON to decode: {err}")),
+        other => panic!("expected {field} JSON, got {other:?} in {row:?}"),
     }
 }
 
@@ -97,7 +111,7 @@ fn create_document_insert_returning_select_and_reopen() {
     assert_eq!(inserted.affected_rows, 1);
     assert_eq!(inserted.result.records.len(), 1);
     assert!(
-        inserted.result.records[0].get("red_entity_id").is_some(),
+        inserted.result.records[0].get("rid").is_some(),
         "RETURNING * should expose stable document identity"
     );
     assert_eq!(
@@ -176,6 +190,83 @@ fn http_document_insert_get_scan_and_delete() {
         json!("ops")
     );
 
+    let patch = json!({
+        "operations": [
+            { "op": "set", "path": "/body/details/reviewed", "value": true },
+            { "op": "set", "path": "/body/preferences/notifications/email", "value": "weekly" },
+            { "op": "unset", "path": "/body/details/agent" },
+            { "op": "unset", "path": "/body/details/missing" }
+        ]
+    });
+    let (status, patched) = http_request(
+        &addr,
+        "PATCH",
+        &format!("/collections/events/entities/{id}"),
+        Some(patch),
+    );
+    assert_eq!(status, 200, "patched={patched}");
+    assert_eq!(
+        patched["entity"]["data"]["named"]["body"]["details"]["reviewed"],
+        json!(true)
+    );
+    assert_eq!(
+        patched["entity"]["data"]["named"]["body"]["preferences"]["notifications"]["email"],
+        json!("weekly")
+    );
+    assert!(
+        patched["entity"]["data"]["named"]["body"]["details"]
+            .get("agent")
+            .is_none(),
+        "unset should remove nested agent: {patched}"
+    );
+
+    let array_patch = json!({
+        "operations": [
+            { "op": "set", "path": "/body/roles/0", "value": "owner" }
+        ]
+    });
+    let (status, array_error) = http_request(
+        &addr,
+        "PATCH",
+        &format!("/collections/events/entities/{id}"),
+        Some(array_patch),
+    );
+    assert_eq!(status, 400, "array_error={array_error}");
+    assert!(
+        array_error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("array positional document patch paths")),
+        "array positional error should be helpful: {array_error}"
+    );
+
+    let replacement = json!({
+        "body": {
+            "event_type": "replaced",
+            "details": { "ip": "127.0.0.1" }
+        }
+    });
+    let (status, replaced) = http_request(
+        &addr,
+        "PATCH",
+        &format!("/collections/events/entities/{id}"),
+        Some(replacement),
+    );
+    assert_eq!(status, 200, "replaced={replaced}");
+    assert_eq!(
+        replaced["entity"]["data"]["named"]["body"]["event_type"],
+        json!("replaced")
+    );
+    assert!(
+        replaced["entity"]["data"]["named"]["body"]
+            .get("roles")
+            .is_none(),
+        "full body replacement should remove old document fields: {replaced}"
+    );
+    assert_eq!(
+        replaced["entity"]["data"]["named"]["event_type"],
+        json!("replaced")
+    );
+
     let (status, deleted) = http_request(
         &addr,
         "DELETE",
@@ -192,4 +283,100 @@ fn http_document_insert_get_scan_and_delete() {
         None,
     );
     assert_eq!(status, 404, "after_delete={after_delete}");
+}
+
+#[test]
+fn runtime_document_patch_updates_nested_body_and_survives_reopen() {
+    let path = PersistentDbPath::new("document_patch_runtime");
+    let rt = path.open_runtime();
+    let entity = EntityUseCases::new(&rt);
+
+    rt.execute_query("CREATE DOCUMENT profiles")
+        .expect("CREATE DOCUMENT should succeed");
+    let created = entity
+        .create_document(CreateDocumentInput {
+            collection: "profiles".into(),
+            body: reddb::json::from_str(
+                r#"{
+                    "name": "Ada",
+                    "contact": { "email": "ada@example.test", "phone": "555-0100" },
+                    "settings": { "theme": "dark" }
+                }"#,
+            )
+            .expect("document body JSON"),
+            metadata: Vec::new(),
+            node_links: Vec::new(),
+            vector_links: Vec::new(),
+        })
+        .expect("create document");
+
+    let patched = entity
+        .patch(PatchEntityInput {
+            collection: "profiles".into(),
+            id: created.id,
+            payload: RedJsonValue::Object(Default::default()),
+            operations: vec![
+                PatchEntityOperation {
+                    op: PatchEntityOperationType::Set,
+                    path: vec!["body".into(), "contact".into(), "verified".into()],
+                    value: Some(RedJsonValue::Bool(true)),
+                },
+                PatchEntityOperation {
+                    op: PatchEntityOperationType::Set,
+                    path: vec![
+                        "body".into(),
+                        "preferences".into(),
+                        "notifications".into(),
+                        "email".into(),
+                    ],
+                    value: Some(RedJsonValue::String("weekly".into())),
+                },
+                PatchEntityOperation {
+                    op: PatchEntityOperationType::Unset,
+                    path: vec!["body".into(), "contact".into(), "phone".into()],
+                    value: None,
+                },
+                PatchEntityOperation {
+                    op: PatchEntityOperationType::Unset,
+                    path: vec!["body".into(), "contact".into(), "missing".into()],
+                    value: None,
+                },
+            ],
+        })
+        .expect("patch document body");
+    let patched_body = patched
+        .entity
+        .as_ref()
+        .and_then(|entity| match &entity.data {
+            reddb::storage::EntityData::Row(row) => row.named.as_ref(),
+            _ => None,
+        })
+        .and_then(|named| named.get("body"))
+        .and_then(|value| match value {
+            Value::Json(bytes) => serde_json::from_slice::<JsonValue>(bytes).ok(),
+            _ => None,
+        })
+        .expect("patched document body");
+    assert_eq!(patched_body["contact"]["verified"], json!(true));
+    assert_eq!(
+        patched_body["preferences"]["notifications"]["email"],
+        json!("weekly")
+    );
+    assert!(patched_body["contact"].get("phone").is_none());
+
+    let reopened = checkpoint_and_reopen(&path, rt);
+    let query = QueryUseCases::new(&reopened);
+    let after = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT name, body FROM profiles WHERE name = 'Ada'".into(),
+        })
+        .expect("select patched document");
+    assert_eq!(after.result.records.len(), 1);
+    let body = json_field(&after.result.records[0], "body");
+    assert_eq!(body["contact"]["verified"], json!(true));
+    assert_eq!(
+        body["preferences"]["notifications"]["email"],
+        json!("weekly")
+    );
+    assert!(body["contact"].get("phone").is_none());
 }
