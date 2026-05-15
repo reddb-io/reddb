@@ -323,7 +323,7 @@ impl<'a> Parser<'a> {
         let mut assignment_exprs = Vec::new();
         let mut compound_assignment_ops = Vec::new();
         loop {
-            let col = self.expect_ident()?;
+            let col = self.expect_column_ident()?;
             let compound_op = if self.consume(&Token::Eq)? {
                 None
             } else {
@@ -497,7 +497,7 @@ impl<'a> Parser<'a> {
             if returning_expr_start(self.peek()) {
                 return Err(returning_expr_not_supported(self.position()));
             }
-            let col = self.expect_ident_or_keyword()?;
+            let col = self.expect_update_returning_column()?;
             items.push(ReturningItem::Column(col));
             if returning_expr_tail(self.peek()) {
                 return Err(returning_expr_not_supported(self.position()));
@@ -514,6 +514,13 @@ impl<'a> Parser<'a> {
             ));
         }
         Ok(Some(items))
+    }
+
+    fn expect_update_returning_column(&mut self) -> Result<String, ParseError> {
+        if self.consume(&Token::Weight)? {
+            return Ok("weight".to_string());
+        }
+        self.expect_ident_or_keyword()
     }
 
     /// Parse: ASK 'question' [USING provider] [MODEL 'model'] [DEPTH n]
