@@ -56,7 +56,7 @@ with reddb.connect("memory://") as db:
 db.query(sql: str)                                # → {"statement", "affected", "columns", "rows"}
 db.insert(collection, payload: dict)              # → {"affected"}
 db.bulk_insert(collection, payloads: list[dict])  # → {"affected"}
-db.delete(collection, id: str)                    # → {"affected"}
+db.delete(collection, rid: str)                   # → {"affected"}
 db.health()                                       # → {"ok": True, "version": str}
 db.version()                                      # → {"version": str, "protocol": "1.0"}
 db.close()

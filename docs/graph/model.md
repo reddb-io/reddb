@@ -33,8 +33,8 @@ An edge represents a directed relationship between two nodes:
 | Field | Required | Description |
 |:------|:---------|:------------|
 | `label` | Yes | Relationship type (e.g., `"FOLLOWS"`, `"REPORTS_TO"`) |
-| `from` | Yes | Source node entity ID |
-| `to` | Yes | Target node entity ID |
+| `from_rid` | Yes | Source node RedDB ID |
+| `to_rid` | Yes | Target node RedDB ID |
 | `weight` | No | Numeric weight (default `1.0`) |
 | `properties` | No | Arbitrary key-value properties |
 | `metadata` | No | Operational metadata |
@@ -44,8 +44,8 @@ curl -X POST http://127.0.0.1:8080/collections/social/edges \
   -H 'content-type: application/json' \
   -d '{
     "label": "FOLLOWS",
-    "from": 1,
-    "to": 2,
+    "from_rid": 102,
+    "to_rid": 103,
     "weight": 1.0,
     "properties": {"since": "2024-01-01"}
   }'
@@ -76,6 +76,8 @@ flowchart LR
 
 Graph entities from different collections can be queried together using graph projections. A projection defines which collections, node types, and edge labels to include.
 
-## Entity ID Referencing
+## RedDB ID Referencing
 
-Edges reference nodes by their entity ID (`_entity_id`), which is a globally unique u64. This means edges can connect nodes across collections when using projections.
+Edges reference nodes by RedDB ID (`rid`), which is a globally unique u64.
+Use `from_rid` for the source endpoint and `to_rid` for the target endpoint.
+This means edges can connect nodes across collections when using projections.

@@ -50,8 +50,11 @@ grpcurl -plaintext 127.0.0.1:5055 reddb.v1.RedDb/Collections
 | `CreateKv` | `JsonCreateRequest` | Create a key-value pair |
 | `BulkCreateDocuments` | `JsonBulkCreateRequest` | Bulk create documents |
 | `BulkInsertBinary` | `BinaryBulkInsertRequest` | Binary bulk insert -- zero JSON overhead |
-| `PatchEntity` | `UpdateEntityRequest` | Update an entity by ID |
-| `DeleteEntity` | `DeleteEntityRequest` | Delete an entity by ID |
+| `PatchEntity` | `UpdateEntityRequest` | Update an item by RedDB ID |
+| `DeleteEntity` | `DeleteEntityRequest` | Delete an item by RedDB ID |
+
+Some protobuf field names remain `id` for wire compatibility. Public docs and
+SDKs treat those values as the RedDB ID `rid`.
 
 ### TTL over gRPC
 
@@ -69,7 +72,7 @@ grpcurl -plaintext \
   127.0.0.1:5055 reddb.v1.RedDb/CreateRow
 
 grpcurl -plaintext \
-  -d '{"collection":"sessions","id":1,"payloadJson":"{\"ttl\":\"30m\"}"}' \
+  -d '{"collection":"sessions","id":102,"payloadJson":"{\"ttl\":\"30m\"}"}' \
   127.0.0.1:5055 reddb.v1.RedDb/PatchEntity
 ```
 

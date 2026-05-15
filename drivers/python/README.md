@@ -128,7 +128,7 @@ db.execute(sql: str, *params)                    -> {"statement", "affected", "c
 db.execute(sql: str, params=[...] | (...))       -> {"statement", "affected", "columns", "rows"}
 db.insert(collection: str, payload: dict)        -> {"affected"}
 db.bulk_insert(collection: str, payloads: list[dict]) -> {"affected"}
-db.delete(collection: str, id: str)              -> {"affected"}
+db.delete(collection: str, rid: str)             -> {"affected"}
 db.health()                                      -> {"ok": True, "version": str}
 db.version()                                     -> {"version": str, "protocol": "1.0"}
 db.close()                                       -> None

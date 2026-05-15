@@ -86,8 +86,8 @@ curl -X POST http://127.0.0.1:8080/collections/graph/edges \
   -H 'content-type: application/json' \
   -d '{
     "label": "FOLLOWS",
-    "from": 1,
-    "to": 2,
+    "from_rid": 102,
+    "to_rid": 103,
     "weight": 1.0
   }'
 ```

@@ -1,11 +1,13 @@
 # Universal Query (FROM ANY)
 
-The universal query is one of RedDB's most powerful features. It searches across **all entity types and all collections** in a single query, returning results in a unified envelope.
+The universal query is one of RedDB's most powerful features. It searches across
+all item kinds and all collections in a single query, returning results in the
+public item envelope.
 
 Prefer positional parameters for filter values and result caps:
 
 ```ts
-const sql = "FROM ANY WHERE _collection = $1 ORDER BY _score DESC LIMIT $2";
+const sql = "FROM ANY WHERE collection = $1 ORDER BY rid DESC LIMIT $2";
 const params = ["hosts", 20];
 const rows = await db.query(sql, params);
 ```
@@ -21,35 +23,35 @@ FROM ANY [WHERE condition] [ORDER BY field [ASC|DESC]] [LIMIT n] [OFFSET n]
 
 ## Basic Usage
 
-### All Entities
+### All Items
 
 ```sql
-FROM ANY ORDER BY _score DESC LIMIT 10
+FROM ANY ORDER BY rid DESC LIMIT 10
 ```
 
-### Filter by Entity Kind
+### Filter by Item Kind
 
 ```sql
-FROM ANY WHERE _kind = $1 LIMIT $2
+FROM ANY WHERE kind = $1 LIMIT $2
 ```
 
 ```sql
-FROM ANY WHERE _kind = $1 OR _kind = $2 LIMIT $3
+FROM ANY WHERE kind = $1 OR kind = $2 LIMIT $3
 ```
 
 ### Filter by Collection
 
 ```sql
-FROM ANY WHERE _collection = $1 LIMIT $2
+FROM ANY WHERE collection = $1 LIMIT $2
 ```
 
 ### Combined Filters
 
 ```sql
-FROM ANY WHERE _kind = $1 AND _collection = $2 ORDER BY _entity_id DESC LIMIT $3
+FROM ANY WHERE kind = $1 AND collection = $2 ORDER BY rid DESC LIMIT $3
 ```
 
-## Entity Kinds
+## Item Kinds
 
 | Kind | Description |
 |:-----|:------------|
@@ -62,16 +64,16 @@ FROM ANY WHERE _kind = $1 AND _collection = $2 ORDER BY _entity_id DESC LIMIT $3
 
 ## Unified Envelope
 
-Every entity returned by a universal query includes standard fields:
+Every item returned by a universal query includes standard fields:
 
 ```json
 {
-  "_entity_id": 42,
-  "_collection": "hosts",
-  "_kind": "row",
-  "_entity_type": "row",
-  "_capabilities": ["read", "write", "delete"],
-  "_score": 1.0,
+  "rid": 42,
+  "collection": "hosts",
+  "kind": "row",
+  "tenant": null,
+  "created_at": 1760000000000,
+  "updated_at": 1760000001000,
   "ip": "10.0.0.1",
   "os": "linux"
 }
@@ -79,12 +81,12 @@ Every entity returned by a universal query includes standard fields:
 
 | Field | Type | Description |
 |:------|:-----|:------------|
-| `_entity_id` | `u64` | Unique entity identifier |
-| `_collection` | `string` | Source collection name |
-| `_kind` | `string` | Entity kind (row, node, edge, vector, document, kv) |
-| `_entity_type` | `string` | Entity type classification |
-| `_capabilities` | `string[]` | Operations supported on this entity |
-| `_score` | `f64` | Relevance score |
+| `rid` | `u64` | RedDB ID for the item |
+| `collection` | `string` | Source collection name |
+| `kind` | `string` | Item kind (`row`, `node`, `edge`, `vector`, `document`, `kv`) |
+| `tenant` | `string` / `null` | Tenant visible to the statement |
+| `created_at` | timestamp/integer millis | Creation timestamp |
+| `updated_at` | timestamp/integer millis | Last update timestamp |
 
 ## Example: Cross-Model Query
 
@@ -106,26 +108,23 @@ Response:
   "record_count": 3,
   "records": [
     {
-      "_entity_id": 1,
-      "_collection": "hosts",
-      "_kind": "row",
-      "_score": 1.0,
+      "rid": 102,
+      "collection": "hosts",
+      "kind": "row",
       "ip": "10.0.0.1",
       "os": "linux"
     },
     {
-      "_entity_id": 2,
-      "_collection": "network",
-      "_kind": "node",
-      "_score": 0.95,
+      "rid": 103,
+      "collection": "network",
+      "kind": "node",
       "label": "web-server-01",
       "node_type": "host"
     },
     {
-      "_entity_id": 3,
-      "_collection": "embeddings",
-      "_kind": "vector",
-      "_score": 0.88,
+      "rid": 104,
+      "collection": "embeddings",
+      "kind": "vector",
       "content": "host 10.0.0.1 running ssh"
     }
   ]
@@ -159,4 +158,4 @@ flowchart LR
 ```
 
 > [!WARNING]
-> Universal queries scan all collections. For large databases, always use `LIMIT` to bound the result set. Target specific collections with `WHERE _collection = '...'` when possible.
+> Universal queries scan all collections. For large databases, always use `LIMIT` to bound the result set. Target specific collections with `WHERE collection = '...'` when possible.

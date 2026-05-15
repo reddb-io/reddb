@@ -53,7 +53,7 @@ And if you just want to inspect stored vectors:
 
 ```sql
 FROM ANY
-WHERE _kind = 'vector' AND _collection = 'docs'
+WHERE kind = 'vector' AND collection = 'docs'
 LIMIT 20
 ```
 
@@ -229,8 +229,8 @@ Use universal queries when you want the vector entities themselves instead of a 
 
 ```sql
 FROM ANY
-WHERE _kind = 'vector' AND _collection = 'docs'
-ORDER BY _entity_id DESC
+WHERE kind = 'vector' AND collection = 'docs'
+ORDER BY rid DESC
 LIMIT 20
 ```
 

@@ -68,8 +68,8 @@ interface Reddb\Conn
     public function query(string $sql, array $params = []): string;
     public function insert(string $collection, array|object $payload): void;
     public function bulkInsert(string $collection, iterable $rows): void;
-    public function get(string $collection, string $id): string;
-    public function delete(string $collection, string $id): void;
+    public function get(string $collection, string $rid): string;
+    public function delete(string $collection, string $rid): void;
     public function ping(): void;
     public function close(): void;
 }

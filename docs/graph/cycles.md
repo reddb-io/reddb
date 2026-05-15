@@ -30,9 +30,9 @@ curl -X POST http://127.0.0.1:8080/graph/analytics/cycles \
       "nodes": ["alice", "bob", "charlie", "alice"],
       "length": 3,
       "edges": [
-        {"from": "alice", "to": "bob", "label": "FOLLOWS"},
-        {"from": "bob", "to": "charlie", "label": "FOLLOWS"},
-        {"from": "charlie", "to": "alice", "label": "FOLLOWS"}
+        {"from_rid": 102, "to_rid": 103, "label": "FOLLOWS"},
+        {"from_rid": 103, "to_rid": 104, "label": "FOLLOWS"},
+        {"from_rid": 104, "to_rid": 102, "label": "FOLLOWS"}
       ]
     }
   ],
