@@ -2620,12 +2620,20 @@ impl RuntimeEntityPort for RedDBRuntime {
 
     fn create_node(&self, input: CreateNodeInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        crate::reserved_fields::ensure_no_reserved_public_item_fields(
+            input.properties.iter().map(|(key, _)| key.as_str()),
+            &format!("node '{}'", input.collection),
+        )?;
         ensure_non_tree_reserved_metadata_entries(&input.metadata)?;
         self.create_node_unchecked(input)
     }
 
     fn create_edge(&self, input: CreateEdgeInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        crate::reserved_fields::ensure_no_reserved_public_item_fields(
+            input.properties.iter().map(|(key, _)| key.as_str()),
+            &format!("edge '{}'", input.collection),
+        )?;
         ensure_non_tree_structural_edge_label(&input.label)?;
         ensure_non_tree_reserved_metadata_entries(&input.metadata)?;
         self.create_edge_unchecked(input)
@@ -2679,6 +2687,13 @@ impl RuntimeEntityPort for RedDBRuntime {
         let db = self.db();
         let contract = CollectionContractWriteEnforcer::new(&db, &input.collection);
         contract.ensure_model(crate::catalog::CollectionModel::Document)?;
+
+        if let JsonValue::Object(ref map) = input.body {
+            crate::reserved_fields::ensure_no_reserved_public_item_fields(
+                map.keys().map(String::as_str),
+                &format!("document '{}'", input.collection),
+            )?;
+        }
 
         // Serialize the full body as Value::Json for the "body" field
         let body_bytes = json_to_vec(&input.body).map_err(|err| {
