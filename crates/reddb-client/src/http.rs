@@ -155,12 +155,16 @@ impl HttpClient {
                     .map(|_| 1)
                     .unwrap_or(0)
             });
+        let rid = value
+            .as_object()
+            .and_then(|o| o.get("rid").or_else(|| o.get("id")))
+            .and_then(json_id_to_string);
         let id = value
             .as_object()
             .and_then(|o| o.get("id"))
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        Ok(InsertResult { affected, id })
+            .and_then(json_id_to_string)
+            .or_else(|| rid.clone());
+        Ok(InsertResult { affected, rid, id })
     }
 
     pub async fn bulk_insert(
@@ -387,20 +391,28 @@ fn bulk_insert_result_from_json(value: Value) -> BulkInsertResult {
         .and_then(|o| o.get("affected"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
+    let rids: Vec<String> = value
+        .as_object()
+        .and_then(|o| o.get("rids").or_else(|| o.get("ids")))
+        .and_then(|v| v.as_array())
+        .map(|items| items.iter().filter_map(json_id_to_string).collect())
+        .unwrap_or_default();
     let ids = value
         .as_object()
         .and_then(|o| o.get("ids"))
         .and_then(|v| v.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| {
-                    item.as_str()
-                        .map(String::from)
-                        .or_else(|| item.as_u64().map(|n| n.to_string()))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    BulkInsertResult { affected, ids }
+        .map(|items| items.iter().filter_map(json_id_to_string).collect())
+        .unwrap_or_else(|| rids.clone());
+    BulkInsertResult {
+        affected,
+        rids,
+        ids,
+    }
+}
+
+fn json_id_to_string(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(String::from)
+        .or_else(|| value.as_u64().map(|n| n.to_string()))
 }

@@ -71,7 +71,7 @@ The callback receives a transaction handle with the same `query`, `insert`, and
 const userId = await db.transaction(async (tx) => {
   const inserted = await tx.insert('users', { name: 'Ada' })
   await tx.query('INSERT INTO audit (action) VALUES ($1)', 'created user')
-  return inserted.id
+  return inserted.rid
 })
 ```
 

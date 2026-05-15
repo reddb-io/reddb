@@ -11,6 +11,7 @@ use crate::storage::{CrossRef, EntityData, EntityKind, UnifiedEntity};
 pub(crate) fn created_entity_output_json(output: &CreateEntityOutput) -> JsonValue {
     let mut object = Map::new();
     object.insert("ok".to_string(), JsonValue::Bool(true));
+    object.insert("rid".to_string(), JsonValue::Number(output.id.raw() as f64));
     object.insert("id".to_string(), JsonValue::Number(output.id.raw() as f64));
     object.insert(
         "entity".to_string(),

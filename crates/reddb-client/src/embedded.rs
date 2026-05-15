@@ -114,9 +114,11 @@ impl EmbeddedClient {
             vec![row],
         )
         .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
+        let rid = outputs.first().map(|output| output.id.raw().to_string());
         Ok(InsertResult {
             affected: outputs.len() as u64,
-            id: outputs.first().map(|output| output.id.raw().to_string()),
+            rid: rid.clone(),
+            id: rid,
         })
     }
 
@@ -138,6 +140,7 @@ impl EmbeddedClient {
         if payloads.is_empty() {
             return Ok(BulkInsertResult {
                 affected: 0,
+                rids: Vec::new(),
                 ids: Vec::new(),
             });
         }
@@ -178,13 +181,14 @@ impl EmbeddedClient {
                 rows,
             )
             .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
-            let ids = outputs
+            let rids: Vec<String> = outputs
                 .iter()
                 .map(|output| output.id.raw().to_string())
                 .collect();
             return Ok(BulkInsertResult {
                 affected: outputs.len() as u64,
-                ids,
+                rids: rids.clone(),
+                ids: rids,
             });
         }
 
@@ -200,7 +204,11 @@ impl EmbeddedClient {
                 ids.push(id);
             }
         }
-        Ok(BulkInsertResult { affected, ids })
+        Ok(BulkInsertResult {
+            affected,
+            rids: ids.clone(),
+            ids,
+        })
     }
 
     pub fn delete(&self, collection: &str, id: &str) -> Result<u64> {

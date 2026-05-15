@@ -93,7 +93,8 @@ Each queue message stores the event payload as JSON:
   "event_id": "opaque-deterministic-id",
   "op": "update",
   "collection": "users",
-  "id": 42,
+  "rid": 42,
+  "kind": "row",
   "ts": 1715200000000,
   "lsn": 98234,
   "tenant": "acme",
@@ -107,10 +108,11 @@ Fields:
 
 | Field | Meaning |
 |---|---|
-| `event_id` | Deterministic id for consumer deduplication. It is derived from `collection`, `id`, `lsn`, and `op`; treat it as opaque. |
+| `event_id` | Deterministic id for consumer deduplication. It is derived from `collection`, RedDB ID, `lsn`, and `op`; treat it as opaque. |
 | `op` | `insert`, `update`, `delete`, `truncate`, or `collection_dropped`. |
 | `collection` | Source collection name. |
-| `id` | User primary key when available, otherwise RedDB's synthetic entity id. |
+| `rid` | RedDB ID for the changed item. |
+| `kind` | Item kind, such as `row`, `document`, `kv`, `node`, or `edge`. |
 | `ts` | Server timestamp in Unix milliseconds. |
 | `lsn` | Per-collection ordering key from the mutation log. |
 | `tenant` | Active tenant id, or `null` for unscoped/admin execution. |

@@ -138,8 +138,8 @@ await db.close()
 Available methods:
 
 - `db.query(sql)`, `db.query(sql, params)` (see [Safe parameter binding](#4-safe-parameter-binding))
-- `db.insert(collection, payload)`
-- `db.bulkInsert(collection, payloads)`
+- `db.insert(collection, payload)` -> `{ affected, rid }`
+- `db.bulkInsert(collection, payloads)` -> `{ affected, rids }`
 - `db.get(collection, id)`
 - `db.delete(collection, id)`
 - `db.health()`
