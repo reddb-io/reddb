@@ -1,8 +1,8 @@
 //! DML SQL Parser: INSERT, UPDATE, DELETE
 
 use super::super::ast::{
-    AskCacheClause, AskQuery, BinOp, DeleteQuery, Expr, Filter, InsertEntityType, InsertQuery,
-    QueryExpr, ReturningItem, UpdateQuery,
+    AskCacheClause, AskQuery, BinOp, DeleteQuery, Expr, FieldRef, Filter, InsertEntityType,
+    InsertQuery, OrderByClause, QueryExpr, ReturningItem, UpdateQuery,
 };
 use super::super::lexer::Token;
 use super::error::ParseError;
@@ -367,6 +367,15 @@ impl<'a> Parser<'a> {
 
         let (ttl_ms, expires_at_ms, with_metadata, _auto_embed) = self.parse_with_clauses()?;
 
+        let mut order_by = if self.consume(&Token::Order)? {
+            self.expect(Token::By)?;
+            let clauses = self.parse_order_by_list()?;
+            validate_row_update_order_by(&clauses, self.position())?;
+            clauses
+        } else {
+            Vec::new()
+        };
+
         // Optional `LIMIT N` — used by `BATCH N ROWS` data migrations
         // to cap a single batch. Must come after WHERE / WITH because
         // those have their own keyword tokens that the LIMIT branch
@@ -376,6 +385,23 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        if !order_by.is_empty() && limit.is_none() {
+            return Err(ParseError::new(
+                "row UPDATE ORDER BY requires LIMIT",
+                self.position(),
+            ));
+        }
+        if !order_by.is_empty() && !row_update_order_by_mentions_rid(&order_by) {
+            order_by.push(OrderByClause {
+                field: FieldRef::TableColumn {
+                    table: String::new(),
+                    column: "rid".to_string(),
+                },
+                expr: None,
+                ascending: true,
+                nulls_first: false,
+            });
+        }
 
         let returning = self.parse_returning_clause()?;
 
@@ -397,6 +423,7 @@ impl<'a> Parser<'a> {
             expires_at_ms,
             with_metadata,
             returning,
+            order_by,
             limit,
             suppress_events,
         }))
@@ -884,6 +911,41 @@ fn returning_expr_tail(token: &Token) -> bool {
             | Token::Dot
             | Token::Colon
     )
+}
+
+fn validate_row_update_order_by(
+    clauses: &[OrderByClause],
+    position: super::super::lexer::Position,
+) -> Result<(), ParseError> {
+    for clause in clauses {
+        if clause.expr.is_some() {
+            return Err(ParseError::new(
+                "row UPDATE ORDER BY only supports top-level fields",
+                position,
+            ));
+        }
+        match &clause.field {
+            FieldRef::TableColumn { table, column }
+                if table.is_empty() && !column.contains('.') => {}
+            _ => {
+                return Err(ParseError::new(
+                    "row UPDATE ORDER BY only supports top-level fields",
+                    position,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn row_update_order_by_mentions_rid(clauses: &[OrderByClause]) -> bool {
+    clauses.iter().any(|clause| {
+        matches!(
+            &clause.field,
+            FieldRef::TableColumn { table, column }
+                if table.is_empty() && column.eq_ignore_ascii_case("rid")
+        )
+    })
 }
 
 fn returning_expr_not_supported(position: super::super::lexer::Position) -> ParseError {
