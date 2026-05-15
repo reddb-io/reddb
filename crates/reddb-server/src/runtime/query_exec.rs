@@ -76,7 +76,7 @@ pub(super) fn execute_runtime_table_query(
                 &query.select_items,
                 &effective_projections,
                 &source,
-            )]
+            )?]
         } else {
             Vec::new()
         };
@@ -269,7 +269,7 @@ fn project_scalar_via_evaluator(
     items: &[SelectItem],
     projections: &[Projection],
     source: &UnifiedRecord,
-) -> UnifiedRecord {
+) -> RedDBResult<UnifiedRecord> {
     let empty_row: &dyn evaluator::Row = &|_: &FieldRef| -> Option<Value> { None };
     let mut record = UnifiedRecord::new();
     for (item, proj) in items.iter().zip(projections.iter()) {
@@ -281,22 +281,25 @@ fn project_scalar_via_evaluator(
             Ok(v) => v,
             // Fall back for CONFIG, KV, ML_* and any other special-cased
             // functions the evaluator does not cover yet.
-            Err(_) => super::join_filter::project_runtime_record_with_db(
-                db,
-                source,
-                std::slice::from_ref(proj),
-                None,
-                None,
-                false,
-                false,
-            )
-            .get(col_name.as_str())
-            .cloned()
-            .unwrap_or(Value::Null),
+            Err(evaluator::EvalError::UnknownFunction { .. }) => {
+                super::join_filter::project_runtime_record_with_db(
+                    db,
+                    source,
+                    std::slice::from_ref(proj),
+                    None,
+                    None,
+                    false,
+                    false,
+                )
+                .get(col_name.as_str())
+                .cloned()
+                .unwrap_or(Value::Null)
+            }
+            Err(err) => return Err(RedDBError::Query(err.to_string())),
         };
         record.set(&col_name, value);
     }
-    record
+    Ok(record)
 }
 
 pub(super) fn evaluate_runtime_document_filter(
