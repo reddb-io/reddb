@@ -65,11 +65,15 @@ pub(crate) mod unified;
 // Per-collection disk usage accounting for runtime catalog views.
 pub(crate) mod disk_accountant;
 
+// Pure tiered storage layout derivation.
+pub mod layout;
+
 // Public surface re-used by the rest of the codebase.
 pub use backend::{BackendError, LocalBackend, RemoteBackend};
 pub use keyring::{
     clear_keyring, has_keyring_password, resolve_password, save_to_keyring, PasswordSource,
 };
+pub use layout::{LayoutOverrides, LayoutToggles, StorageLayout, TieredLayoutPaths};
 pub use unified::RedDB;
 
 // =============================================================================
