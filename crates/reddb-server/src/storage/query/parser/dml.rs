@@ -371,7 +371,7 @@ impl<'a> Parser<'a> {
         let mut order_by = if self.consume(&Token::Order)? {
             self.expect(Token::By)?;
             let clauses = self.parse_order_by_list()?;
-            validate_row_update_order_by(&clauses, self.position())?;
+            validate_update_order_by(&clauses, self.position())?;
             clauses
         } else {
             Vec::new()
@@ -388,11 +388,11 @@ impl<'a> Parser<'a> {
         };
         if !order_by.is_empty() && limit.is_none() {
             return Err(ParseError::new(
-                "row UPDATE ORDER BY requires LIMIT",
+                "UPDATE ORDER BY requires LIMIT",
                 self.position(),
             ));
         }
-        if !order_by.is_empty() && !row_update_order_by_mentions_rid(&order_by) {
+        if !order_by.is_empty() && !update_order_by_mentions_rid(&order_by) {
             order_by.push(OrderByClause {
                 field: FieldRef::TableColumn {
                     table: String::new(),
@@ -941,14 +941,14 @@ fn returning_expr_tail(token: &Token) -> bool {
     )
 }
 
-fn validate_row_update_order_by(
+fn validate_update_order_by(
     clauses: &[OrderByClause],
     position: super::super::lexer::Position,
 ) -> Result<(), ParseError> {
     for clause in clauses {
         if clause.expr.is_some() {
             return Err(ParseError::new(
-                "row UPDATE ORDER BY only supports top-level fields",
+                "UPDATE ORDER BY only supports top-level fields",
                 position,
             ));
         }
@@ -957,7 +957,7 @@ fn validate_row_update_order_by(
                 if table.is_empty() && !column.contains('.') => {}
             _ => {
                 return Err(ParseError::new(
-                    "row UPDATE ORDER BY only supports top-level fields",
+                    "UPDATE ORDER BY only supports top-level fields",
                     position,
                 ));
             }
@@ -966,7 +966,7 @@ fn validate_row_update_order_by(
     Ok(())
 }
 
-fn row_update_order_by_mentions_rid(clauses: &[OrderByClause]) -> bool {
+fn update_order_by_mentions_rid(clauses: &[OrderByClause]) -> bool {
     clauses.iter().any(|clause| {
         matches!(
             &clause.field,
