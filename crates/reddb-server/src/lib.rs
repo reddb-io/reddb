@@ -34,6 +34,7 @@ pub mod physical;
 pub(crate) mod presentation;
 pub mod regress;
 pub mod replication;
+pub(crate) mod reserved_fields;
 pub mod rpc_stdio;
 pub mod runtime;
 pub mod serde_json;

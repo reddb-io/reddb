@@ -33,6 +33,10 @@ impl RedDBRuntime {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         let store = self.inner.db.store();
         analyze_create_table(query).map_err(|err| RedDBError::Query(err.to_string()))?;
+        crate::reserved_fields::ensure_no_reserved_public_item_fields(
+            query.columns.iter().map(|column| column.name.as_str()),
+            &format!("table '{}'", query.name),
+        )?;
         // Check if the collection already exists.
         let exists = store.get_collection(&query.name).is_some();
         if exists {
