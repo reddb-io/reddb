@@ -1279,6 +1279,8 @@ impl RedDBRuntime {
         let mut metadata_changed = false;
         let mut modified_columns: Vec<String> = Vec::new();
         let mut context_index_dirty = false;
+        let mut graph_node_type: Option<String> = None;
+        let mut graph_edge_weight: Option<f32> = None;
 
         let row_contract_timestamps = db
             .collection_contract(&collection)
@@ -1441,6 +1443,7 @@ impl RedDBRuntime {
             crate::storage::EntityData::Node(node) => {
                 let mut field_ops = Vec::new();
                 let mut metadata_ops = Vec::new();
+                let mut node_type_ops = Vec::new();
 
                 for mut op in operations {
                     let Some(root) = op.path.first().map(String::as_str) else {
@@ -1468,10 +1471,43 @@ impl RedDBRuntime {
                             op.path.remove(0);
                             metadata_ops.push(op);
                         }
+                        "node_type" => {
+                            if op.path.len() != 1 {
+                                return Err(crate::RedDBError::Query(
+                                    "patch path 'node_type' does not allow nested keys".to_string(),
+                                ));
+                            }
+                            op.path.clear();
+                            node_type_ops.push(op);
+                        }
                         _ => {
                             return Err(crate::RedDBError::Query(format!(
-                                "unsupported patch target '{root}' for graph nodes. Use fields/*, properties/*, or metadata/*"
+                                "unsupported patch target '{root}' for graph nodes. Use fields/*, properties/*, node_type, or metadata/*"
                             )));
+                        }
+                    }
+                }
+
+                for op in node_type_ops {
+                    context_index_dirty = true;
+                    let value = op.value.ok_or_else(|| {
+                        crate::RedDBError::Query("node_type operations require a value".to_string())
+                    })?;
+
+                    match op.op {
+                        PatchEntityOperationType::Unset => {
+                            return Err(crate::RedDBError::Query(
+                                "node_type cannot be unset through patch operations".to_string(),
+                            ));
+                        }
+                        PatchEntityOperationType::Set | PatchEntityOperationType::Replace => {
+                            let Some(node_type) = value.as_str() else {
+                                return Err(crate::RedDBError::Query(
+                                    "node_type operation requires a text value".to_string(),
+                                ));
+                            };
+                            graph_node_type = Some(node_type.to_string());
+                            modified_columns.push("node_type".to_string());
                         }
                     }
                 }
@@ -1575,7 +1611,9 @@ impl RedDBRuntime {
                                     "weight operation requires a numeric value".to_string(),
                                 ));
                             };
+                            graph_edge_weight = Some(weight as f32);
                             edge.weight = weight as f32;
+                            modified_columns.push("weight".to_string());
                         }
                     }
                 }
@@ -1704,6 +1742,17 @@ impl RedDBRuntime {
                     "patch operations are not supported for TimeSeries or QueueMessage entities"
                         .to_string(),
                 ));
+            }
+        }
+
+        if let Some(node_type) = graph_node_type {
+            if let crate::storage::EntityKind::GraphNode(node) = &mut entity.kind {
+                node.node_type = node_type;
+            }
+        }
+        if let Some(weight) = graph_edge_weight {
+            if let crate::storage::EntityKind::GraphEdge(edge) = &mut entity.kind {
+                edge.weight = (weight * 1000.0) as u32;
             }
         }
 

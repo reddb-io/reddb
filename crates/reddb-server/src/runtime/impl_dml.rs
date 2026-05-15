@@ -1176,13 +1176,15 @@ impl RedDBRuntime {
             let (mut response, touched_ids) =
                 self.execute_update_inner_tracked(raw_query, &inner_query)?;
 
-            let snapshots = super::dml_target_scan::DmlTargetScan::new(
-                self,
-                &effective_query.table,
-                None,
-                None,
-            )
-            .row_snapshots(&touched_ids);
+            let snapshots = if matches!(
+                effective_query.target,
+                UpdateTarget::Nodes | UpdateTarget::Edges
+            ) {
+                graph_update_returning_snapshots(self, &effective_query.table, &touched_ids)
+            } else {
+                super::dml_target_scan::DmlTargetScan::new(self, &effective_query.table, None, None)
+                    .row_snapshots(&touched_ids)
+            };
 
             response.result = build_returning_result(&items, &snapshots, None);
             response.engine = "runtime-dml-returning";
@@ -1310,7 +1312,7 @@ impl RedDBRuntime {
 
         let mut applied_chunk = Vec::new();
         for (_, logical_id, _) in &lock_entries {
-            let Some(entity) = resolve_update_row_by_logical_id(self, &query.table, *logical_id)
+            let Some(entity) = resolve_update_entity_by_logical_id(self, &query.table, *logical_id)
             else {
                 continue;
             };
@@ -1482,9 +1484,14 @@ impl RedDBRuntime {
         let mut record: Option<UnifiedRecord> = None;
 
         for assignment in &compiled_plan.dynamic_assignments {
-            if assignment.compound_op.is_some() && !matches!(entity.data, EntityData::Row(_)) {
+            if assignment.compound_op.is_some()
+                && !matches!(
+                    entity.data,
+                    EntityData::Row(_) | EntityData::Node(_) | EntityData::Edge(_)
+                )
+            {
                 return Err(RedDBError::Query(format!(
-                    "compound assignment is only supported for row UPDATE column '{}'",
+                    "compound assignment is only supported for row or graph UPDATE column '{}'",
                     assignment.column
                 )));
             }
@@ -1562,11 +1569,16 @@ impl RedDBRuntime {
 
         ensure_graph_identity_update_allowed(&entity, compiled_plan, &assignments)?;
 
+        let operations = build_patch_operations_from_materialized_assignments(
+            &entity,
+            compiled_plan,
+            assignments,
+        );
         self.apply_loaded_patch_entity_core(
             collection,
             entity,
             crate::json::Value::Null,
-            build_patch_operations_from_materialized_assignments(compiled_plan, assignments),
+            operations,
         )
     }
 
@@ -1753,6 +1765,7 @@ fn is_immutable_graph_identity_field(column: &str) -> bool {
 }
 
 fn build_patch_operations_from_materialized_assignments(
+    entity: &UnifiedEntity,
     compiled_plan: &CompiledUpdatePlan,
     assignments: MaterializedUpdateAssignments,
 ) -> Vec<PatchEntityOperation> {
@@ -1766,7 +1779,7 @@ fn build_patch_operations_from_materialized_assignments(
     for (column, value) in &compiled_plan.static_field_assignments {
         operations.push(PatchEntityOperation {
             op: PatchEntityOperationType::Set,
-            path: vec!["fields".to_string(), column.clone()],
+            path: update_patch_path_for_entity(entity, column),
             value: Some(storage_value_to_json(value)),
         });
     }
@@ -1774,7 +1787,7 @@ fn build_patch_operations_from_materialized_assignments(
     for (column, value) in assignments.dynamic_field_assignments {
         operations.push(PatchEntityOperation {
             op: PatchEntityOperationType::Set,
-            path: vec!["fields".to_string(), column],
+            path: update_patch_path_for_entity(entity, &column),
             value: Some(storage_value_to_json(&value)),
         });
     }
@@ -1796,6 +1809,30 @@ fn build_patch_operations_from_materialized_assignments(
     }
 
     operations
+}
+
+fn update_patch_path_for_entity(entity: &UnifiedEntity, column: &str) -> Vec<String> {
+    if matches!(
+        (&entity.kind, &entity.data),
+        (
+            crate::storage::EntityKind::GraphNode(_),
+            EntityData::Node(_)
+        )
+    ) && column.eq_ignore_ascii_case("node_type")
+    {
+        return vec!["node_type".to_string()];
+    }
+    if matches!(
+        (&entity.kind, &entity.data),
+        (
+            crate::storage::EntityKind::GraphEdge(_),
+            EntityData::Edge(_)
+        )
+    ) && column.eq_ignore_ascii_case("weight")
+    {
+        return vec!["weight".to_string()];
+    }
+    vec!["fields".to_string(), column.to_string()]
 }
 
 /// Rewrite `DELETE FROM <table> [WHERE …] [RETURNING …]` as
@@ -2053,6 +2090,30 @@ fn graph_insert_returning_snapshots(
             record.set_arc(sys_key_collection(), Value::text(collection.to_string()));
             Some(record)
         })
+        .map(|record| {
+            record
+                .iter_fields()
+                .map(|(key, value)| (key.as_ref().to_string(), value.clone()))
+                .collect()
+        })
+        .collect()
+}
+
+fn graph_update_returning_snapshots(
+    runtime: &RedDBRuntime,
+    collection: &str,
+    ids: &[EntityId],
+) -> Vec<Vec<(String, Value)>> {
+    let store = runtime.db().store();
+    let Some(manager) = store.get_collection(collection) else {
+        return Vec::new();
+    };
+
+    manager
+        .get_many(ids)
+        .into_iter()
+        .flatten()
+        .filter_map(|entity| runtime_any_record_from_entity_ref(&entity))
         .map(|record| {
             record
                 .iter_fields()
@@ -2407,13 +2468,15 @@ fn field_ref_matches_update_column(
     }
 }
 
-fn resolve_update_row_by_logical_id(
+fn resolve_update_entity_by_logical_id(
     runtime: &RedDBRuntime,
     table: &str,
     logical_id: EntityId,
 ) -> Option<UnifiedEntity> {
     let store = runtime.inner.db.store();
-    store.get_table_row_by_logical_id(table, logical_id)
+    store
+        .get_table_row_by_logical_id(table, logical_id)
+        .or_else(|| store.get(table, logical_id))
 }
 
 fn ordered_update_target_ids(
