@@ -1,4 +1,4 @@
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
@@ -67,7 +67,9 @@ impl ServerTransport {
 pub struct ServerCommandConfig {
     pub path: Option<PathBuf>,
     pub router_bind_addr: Option<String>,
+    pub router_bind_explicit: bool,
     pub grpc_bind_addr: Option<String>,
+    pub grpc_bind_explicit: bool,
     /// TLS-encrypted gRPC bind address. Can run side-by-side with
     /// `grpc_bind_addr` (e.g. `:50051` plain + `:50052` TLS) or
     /// stand alone for TLS-only deploys. Defaults to `None`.
@@ -87,6 +89,7 @@ pub struct ServerCommandConfig {
     /// mutual TLS. When unset, one-way TLS only.
     pub grpc_tls_client_ca: Option<PathBuf>,
     pub http_bind_addr: Option<String>,
+    pub http_bind_explicit: bool,
     /// HTTPS bind address. When set, the HTTP server also serves a
     /// TLS-terminated listener on this addr. Plain HTTP and HTTPS can
     /// run side by side (e.g. 8080 plain + 8443 TLS).
@@ -102,6 +105,7 @@ pub struct ServerCommandConfig {
     /// bundle (mTLS). When unset, plain server-side TLS only.
     pub http_tls_client_ca: Option<PathBuf>,
     pub wire_bind_addr: Option<String>,
+    pub wire_bind_explicit: bool,
     /// TLS-encrypted wire protocol bind address
     pub wire_tls_bind_addr: Option<String>,
     /// Path to TLS cert PEM (if None + wire_tls_bind, auto-generate)
@@ -122,6 +126,46 @@ pub struct ServerCommandConfig {
     /// Telemetry config (Phase 6 logging). `None` falls back to the
     /// built-in default derived from `path` + stderr-only.
     pub telemetry: Option<crate::telemetry::TelemetryConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransportListenerState {
+    pub transport: String,
+    pub bind_addr: String,
+    pub explicit: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransportListenerFailure {
+    pub transport: String,
+    pub bind_addr: String,
+    pub explicit: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TransportReadiness {
+    pub active: Vec<TransportListenerState>,
+    pub failed: Vec<TransportListenerFailure>,
+}
+
+impl TransportReadiness {
+    fn active(&mut self, transport: &str, bind_addr: &str, explicit: bool) {
+        self.active.push(TransportListenerState {
+            transport: transport.to_string(),
+            bind_addr: bind_addr.to_string(),
+            explicit,
+        });
+    }
+
+    fn failed(&mut self, transport: &str, bind_addr: &str, explicit: bool, reason: String) {
+        self.failed.push(TransportListenerFailure {
+            transport: transport.to_string(),
+            bind_addr: bind_addr.to_string(),
+            explicit,
+            reason,
+        });
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -762,6 +806,41 @@ fn run_configured_servers(config: ServerCommandConfig) -> Result<(), String> {
     }
 }
 
+fn bind_listener_for_startup(
+    readiness: &mut TransportReadiness,
+    transport: &str,
+    bind_addr: &str,
+    explicit: bool,
+) -> Result<Option<TcpListener>, String> {
+    match TcpListener::bind(bind_addr) {
+        Ok(listener) => {
+            readiness.active(transport, bind_addr, explicit);
+            Ok(Some(listener))
+        }
+        Err(err) => {
+            let reason = format!("{transport} listener bind {bind_addr}: {err}");
+            readiness.failed(transport, bind_addr, explicit, reason.clone());
+            if explicit {
+                tracing::error!(
+                    transport,
+                    bind = %bind_addr,
+                    error = %err,
+                    "fatal explicit bind failure"
+                );
+                Err(format!("explicit {reason}"))
+            } else {
+                tracing::warn!(
+                    transport,
+                    bind = %bind_addr,
+                    error = %err,
+                    "non-fatal implicit bind failure; listener degraded"
+                );
+                Ok(None)
+            }
+        }
+    }
+}
+
 /// Wire SIGTERM and SIGINT to `RedDBRuntime::graceful_shutdown`.
 ///
 /// PLAN.md Phase 1.1 — orchestrators (K8s preStop, Fly autostop, ECS
@@ -1037,16 +1116,21 @@ fn run_routed_server(config: ServerCommandConfig, router_bind_addr: String) -> R
 }
 
 /// Spawn RedWire listeners (plaintext + TLS) as background tokio tasks.
-fn spawn_wire_listeners(config: &ServerCommandConfig, runtime: &RedDBRuntime) {
+async fn spawn_wire_listeners(
+    config: &ServerCommandConfig,
+    runtime: &RedDBRuntime,
+    readiness: &mut TransportReadiness,
+) -> Result<(), String> {
     // Plaintext RedWire — TCP or Unix socket
     if let Some(wire_addr) = config.wire_bind_addr.clone() {
         let wire_rt = Arc::new(runtime.clone());
-        tokio::spawn(async move {
-            // Address starting with `unix://` or an absolute filesystem path
-            // switches to Unix domain sockets.
-            #[cfg(unix)]
-            {
-                if wire_addr.starts_with("unix://") || wire_addr.starts_with('/') {
+        // Address starting with `unix://` or an absolute filesystem path
+        // switches to Unix domain sockets.
+        #[cfg(unix)]
+        {
+            if wire_addr.starts_with("unix://") || wire_addr.starts_with('/') {
+                readiness.active("wire", &wire_addr, config.wire_bind_explicit);
+                tokio::spawn(async move {
                     if let Err(e) = crate::wire::redwire::listener::start_redwire_unix_listener(
                         &wire_addr, wire_rt,
                     )
@@ -1054,18 +1138,47 @@ fn spawn_wire_listeners(config: &ServerCommandConfig, runtime: &RedDBRuntime) {
                     {
                         tracing::error!(err = %e, "redwire unix listener error");
                     }
-                    return;
+                });
+                return Ok(());
+            }
+        }
+        match tokio::net::TcpListener::bind(&wire_addr).await {
+            Ok(listener) => {
+                readiness.active("wire", &wire_addr, config.wire_bind_explicit);
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        crate::wire::redwire::listener::start_redwire_listener_on(listener, wire_rt)
+                            .await
+                    {
+                        tracing::error!(err = %e, "redwire listener error");
+                    }
+                });
+            }
+            Err(err) => {
+                let reason = format!("wire listener bind {wire_addr}: {err}");
+                readiness.failed(
+                    "wire",
+                    &wire_addr,
+                    config.wire_bind_explicit,
+                    reason.clone(),
+                );
+                if config.wire_bind_explicit {
+                    tracing::error!(
+                        transport = "wire",
+                        bind = %wire_addr,
+                        error = %err,
+                        "fatal explicit bind failure"
+                    );
+                    return Err(format!("explicit {reason}"));
                 }
+                tracing::warn!(
+                    transport = "wire",
+                    bind = %wire_addr,
+                    error = %err,
+                    "non-fatal implicit bind failure; listener degraded"
+                );
             }
-            let cfg = crate::wire::RedWireConfig {
-                bind_addr: wire_addr,
-                auth_store: None,
-                oauth: None,
-            };
-            if let Err(e) = crate::wire::start_redwire_listener(cfg, wire_rt).await {
-                tracing::error!(err = %e, "redwire listener error");
-            }
-        });
+        }
     }
 
     // RedWire over TLS
@@ -1086,6 +1199,7 @@ fn spawn_wire_listeners(config: &ServerCommandConfig, runtime: &RedDBRuntime) {
             Err(e) => tracing::error!(err = %e, "redwire TLS config error"),
         }
     }
+    Ok(())
 }
 
 /// Spawn the PostgreSQL wire-protocol listener (Phase 3.1 PG parity).
@@ -1301,6 +1415,7 @@ fn run_wire_only_server(config: ServerCommandConfig, wire_addr: String) -> Resul
     let workers = config.workers.unwrap_or(rt_config.suggested_workers);
     let cli_telemetry = config.telemetry.clone();
     let db_options = config.to_db_options();
+    let mut transport_readiness = TransportReadiness::default();
 
     let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -1319,12 +1434,24 @@ fn run_wire_only_server(config: ServerCommandConfig, wire_addr: String) -> Resul
         spawn_lifecycle_signal_handler(signal_runtime).await;
         spawn_pg_listener(&config, &runtime);
         let wire_rt = Arc::new(runtime);
-        let cfg = crate::wire::RedWireConfig {
-            bind_addr: wire_addr,
-            auth_store: None,
-            oauth: None,
-        };
-        crate::wire::start_redwire_listener(cfg, wire_rt)
+        let listener = tokio::net::TcpListener::bind(&wire_addr)
+            .await
+            .map_err(|err| {
+                let reason = format!("wire listener bind {wire_addr}: {err}");
+                transport_readiness.failed(
+                    "wire",
+                    &wire_addr,
+                    config.wire_bind_explicit,
+                    reason.clone(),
+                );
+                if config.wire_bind_explicit {
+                    format!("explicit {reason}")
+                } else {
+                    reason
+                }
+            })?;
+        transport_readiness.active("wire", &wire_addr, config.wire_bind_explicit);
+        crate::wire::redwire::listener::start_redwire_listener_on(listener, wire_rt)
             .await
             .map_err(|e| e.to_string())
     })
@@ -1644,10 +1771,26 @@ fn build_http_server(
     auth_store: Arc<AuthStore>,
     bind_addr: String,
 ) -> RedDBServer {
+    build_http_server_with_transport_readiness(
+        runtime,
+        auth_store,
+        bind_addr,
+        TransportReadiness::default(),
+    )
+}
+
+#[inline(never)]
+fn build_http_server_with_transport_readiness(
+    runtime: RedDBRuntime,
+    auth_store: Arc<AuthStore>,
+    bind_addr: String,
+    transport_readiness: TransportReadiness,
+) -> RedDBServer {
     RedDBServer::with_options(
         runtime,
         ServerOptions {
             bind_addr,
+            transport_readiness,
             ..ServerOptions::default()
         },
     )
@@ -1713,13 +1856,31 @@ fn spawn_admin_metrics_listeners(runtime: &RedDBRuntime, auth_store: &Arc<AuthSt
 #[inline(never)]
 fn run_http_server(config: ServerCommandConfig, bind_addr: String) -> Result<(), String> {
     let cli_telemetry = config.telemetry.clone();
+    let mut transport_readiness = TransportReadiness::default();
+    let Some(listener) = bind_listener_for_startup(
+        &mut transport_readiness,
+        "http",
+        &bind_addr,
+        config.http_bind_explicit,
+    )?
+    else {
+        return Err(format!(
+            "no HTTP listener started; implicit bind {} failed",
+            bind_addr
+        ));
+    };
     let (runtime, auth_store, _telemetry_guard) =
         build_runtime_and_auth_store(config.to_db_options(), cli_telemetry)?;
     spawn_admin_metrics_listeners(&runtime, &auth_store);
     spawn_http_tls_listener(&config, &runtime, &auth_store)?;
-    let server = build_http_server(runtime, auth_store, bind_addr.clone());
+    let server = build_http_server_with_transport_readiness(
+        runtime,
+        auth_store,
+        bind_addr.clone(),
+        transport_readiness,
+    );
     tracing::info!(transport = "http", bind = %bind_addr, "listener online");
-    server.serve().map_err(|err| err.to_string())
+    server.serve_on(listener).map_err(|err| err.to_string())
 }
 
 /// PLAN.md HTTP TLS — when `http_tls_bind_addr` is set, spawn a
@@ -1786,6 +1947,19 @@ fn run_grpc_server(config: ServerCommandConfig, bind_addr: String) -> Result<(),
     let cli_telemetry = config.telemetry.clone();
     let db_options = config.to_db_options();
     let rt_config = detect_runtime_config();
+    let mut transport_readiness = TransportReadiness::default();
+    let Some(grpc_listener) = bind_listener_for_startup(
+        &mut transport_readiness,
+        "grpc",
+        &bind_addr,
+        config.grpc_bind_explicit,
+    )?
+    else {
+        return Err(format!(
+            "no gRPC listener started; implicit bind {} failed",
+            bind_addr
+        ));
+    };
 
     let worker_threads = workers.unwrap_or(rt_config.suggested_workers);
 
@@ -1803,7 +1977,7 @@ fn run_grpc_server(config: ServerCommandConfig, bind_addr: String) -> Result<(),
     tokio_runtime.block_on(async move {
         spawn_lifecycle_signal_handler(signal_runtime).await;
         // Start wire protocol listeners (plaintext + TLS)
-        spawn_wire_listeners(&config, &runtime);
+        spawn_wire_listeners(&config, &runtime, &mut transport_readiness).await?;
 
         // Start PostgreSQL wire listener when --pg-bind is configured.
         spawn_pg_listener(&config, &runtime);
@@ -1829,7 +2003,10 @@ fn run_grpc_server(config: ServerCommandConfig, bind_addr: String) -> Result<(),
             workers = worker_threads,
             "listener online"
         );
-        server.serve().await.map_err(|err| err.to_string())
+        server
+            .serve_on(grpc_listener)
+            .await
+            .map_err(|err| err.to_string())
     })
 }
 
@@ -1840,29 +2017,66 @@ fn run_dual_server(
     http_bind_addr: String,
 ) -> Result<(), String> {
     let workers = config.workers;
-    let wire_bind_addr = config.wire_bind_addr.clone();
     let cli_telemetry = config.telemetry.clone();
     let db_options = config.to_db_options();
     let rt_config = detect_runtime_config();
     let worker_threads = workers.unwrap_or(rt_config.suggested_workers);
+    let mut transport_readiness = TransportReadiness::default();
+    let http_listener = bind_listener_for_startup(
+        &mut transport_readiness,
+        "http",
+        &http_bind_addr,
+        config.http_bind_explicit,
+    )?;
+    let grpc_listener = bind_listener_for_startup(
+        &mut transport_readiness,
+        "grpc",
+        &grpc_bind_addr,
+        config.grpc_bind_explicit,
+    )?;
+    if http_listener.is_none() && grpc_listener.is_none() {
+        return Err("no listener started; implicit HTTP and gRPC binds failed".to_string());
+    }
     let (runtime, auth_store, _telemetry_guard) =
         build_runtime_and_auth_store(db_options, cli_telemetry)?;
 
     spawn_admin_metrics_listeners(&runtime, &auth_store);
     spawn_http_tls_listener(&config, &runtime, &auth_store)?;
 
-    let http_server =
-        build_http_server(runtime.clone(), auth_store.clone(), http_bind_addr.clone());
-    let http_handle = http_server.serve_in_background();
+    let http_handle = if let Some(listener) = http_listener {
+        let http_server = build_http_server_with_transport_readiness(
+            runtime.clone(),
+            auth_store.clone(),
+            http_bind_addr.clone(),
+            transport_readiness.clone(),
+        );
+        Some(http_server.serve_in_background_on(listener))
+    } else {
+        None
+    };
 
     thread::sleep(Duration::from_millis(150));
-    if http_handle.is_finished() {
-        return match http_handle.join() {
+    if let Some(handle) = http_handle.as_ref() {
+        if handle.is_finished() {
+            let handle = http_handle.unwrap();
+            return match handle.join() {
+                Ok(Ok(())) => Err("HTTP server exited unexpectedly".to_string()),
+                Ok(Err(err)) => Err(err.to_string()),
+                Err(_) => Err("HTTP server thread panicked".to_string()),
+            };
+        }
+    }
+    if grpc_listener.is_none() {
+        let Some(handle) = http_handle else {
+            return Err("no listener started".to_string());
+        };
+        return match handle.join() {
             Ok(Ok(())) => Err("HTTP server exited unexpectedly".to_string()),
             Ok(Err(err)) => Err(err.to_string()),
             Err(_) => Err("HTTP server thread panicked".to_string()),
         };
     }
+    let grpc_listener = grpc_listener.expect("checked above");
 
     let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -1875,7 +2089,7 @@ fn run_dual_server(
     tokio_runtime.block_on(async move {
         spawn_lifecycle_signal_handler(signal_runtime).await;
         // Start wire protocol listeners (plaintext + TLS)
-        spawn_wire_listeners(&config, &runtime);
+        spawn_wire_listeners(&config, &runtime, &mut transport_readiness).await?;
 
         // Start PostgreSQL wire listener when --pg-bind is configured.
         spawn_pg_listener(&config, &runtime);
@@ -1900,7 +2114,10 @@ fn run_dual_server(
             workers = worker_threads,
             "listener online"
         );
-        server.serve().await.map_err(|err| err.to_string())
+        server
+            .serve_on(grpc_listener)
+            .await
+            .map_err(|err| err.to_string())
     })
 }
 
@@ -1981,5 +2198,36 @@ mod tests {
         assert!(unit.contains("--bind 127.0.0.1:5050"));
         assert!(!unit.contains("--grpc-bind"));
         assert!(!unit.contains("--http-bind"));
+    }
+
+    #[test]
+    fn explicit_bind_collision_is_fatal() {
+        let held = TcpListener::bind("127.0.0.1:0").expect("hold test port");
+        let addr = held.local_addr().expect("held addr").to_string();
+        let mut readiness = TransportReadiness::default();
+
+        let error = bind_listener_for_startup(&mut readiness, "http", &addr, true).unwrap_err();
+
+        assert!(error.contains("explicit http listener bind"));
+        assert_eq!(readiness.active.len(), 0);
+        assert_eq!(readiness.failed.len(), 1);
+        assert!(readiness.failed[0].explicit);
+        assert_eq!(readiness.failed[0].bind_addr, addr);
+    }
+
+    #[test]
+    fn implicit_bind_collision_degrades() {
+        let held = TcpListener::bind("127.0.0.1:0").expect("hold test port");
+        let addr = held.local_addr().expect("held addr").to_string();
+        let mut readiness = TransportReadiness::default();
+
+        let listener =
+            bind_listener_for_startup(&mut readiness, "http", &addr, false).expect("nonfatal");
+
+        assert!(listener.is_none());
+        assert_eq!(readiness.active.len(), 0);
+        assert_eq!(readiness.failed.len(), 1);
+        assert!(!readiness.failed[0].explicit);
+        assert_eq!(readiness.failed[0].bind_addr, addr);
     }
 }

@@ -48,6 +48,53 @@ fn analytics_job_json(job: &crate::PhysicalAnalyticsJob) -> JsonValue {
     crate::presentation::admin_json::analytics_job_json(job)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::RedDBOptions;
+    use crate::health::HealthReport;
+    use crate::service_cli::{
+        TransportListenerFailure, TransportListenerState, TransportReadiness,
+    };
+
+    #[test]
+    fn health_json_reports_transport_listeners() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let mut options = ServerOptions::default();
+        options.transport_readiness = TransportReadiness {
+            active: vec![TransportListenerState {
+                transport: "grpc".to_string(),
+                bind_addr: "127.0.0.1:50051".to_string(),
+                explicit: true,
+            }],
+            failed: vec![TransportListenerFailure {
+                transport: "http".to_string(),
+                bind_addr: "127.0.0.1:5055".to_string(),
+                explicit: false,
+                reason: "http listener bind 127.0.0.1:5055: address in use".to_string(),
+            }],
+        };
+        let server = RedDBServer::with_options(runtime, options);
+
+        let payload = server.health_json_with_transport(&HealthReport::healthy());
+        let JsonValue::Object(root) = payload else {
+            panic!("health payload should be an object");
+        };
+        let Some(JsonValue::Object(listeners)) = root.get("transport_listeners") else {
+            panic!("health payload should include transport_listeners");
+        };
+        let Some(JsonValue::Array(active)) = listeners.get("active") else {
+            panic!("transport_listeners.active should be an array");
+        };
+        let Some(JsonValue::Array(failed)) = listeners.get("failed") else {
+            panic!("transport_listeners.failed should be an array");
+        };
+
+        assert_eq!(active.len(), 1);
+        assert_eq!(failed.len(), 1);
+    }
+}
+
 fn graph_projection_json(projection: &crate::PhysicalGraphProjection) -> JsonValue {
     crate::presentation::admin_json::graph_projection_json(projection)
 }
@@ -121,6 +168,7 @@ pub struct ServerOptions {
     /// `Public`. Set to `AdminOnly` / `MetricsOnly` for dedicated
     /// admin / scrape ports (PLAN.md Phase 6.2).
     pub surface: ServerSurface,
+    pub transport_readiness: crate::service_cli::TransportReadiness,
 }
 
 impl Default for ServerOptions {
@@ -132,6 +180,7 @@ impl Default for ServerOptions {
             write_timeout_ms: 5_000,
             max_scan_limit: 1_000,
             surface: ServerSurface::Public,
+            transport_readiness: crate::service_cli::TransportReadiness::default(),
         }
     }
 }
@@ -261,6 +310,67 @@ impl RedDBServer {
 
     fn tree_use_cases(&self) -> TreeUseCases<'_, RedDBRuntime> {
         TreeUseCases::new(&self.runtime)
+    }
+
+    fn transport_readiness_json(&self) -> JsonValue {
+        let active = self
+            .options
+            .transport_readiness
+            .active
+            .iter()
+            .map(|listener| {
+                let mut object = Map::new();
+                object.insert(
+                    "transport".to_string(),
+                    JsonValue::String(listener.transport.clone()),
+                );
+                object.insert(
+                    "bind_addr".to_string(),
+                    JsonValue::String(listener.bind_addr.clone()),
+                );
+                object.insert("explicit".to_string(), JsonValue::Bool(listener.explicit));
+                JsonValue::Object(object)
+            })
+            .collect();
+        let failed = self
+            .options
+            .transport_readiness
+            .failed
+            .iter()
+            .map(|listener| {
+                let mut object = Map::new();
+                object.insert(
+                    "transport".to_string(),
+                    JsonValue::String(listener.transport.clone()),
+                );
+                object.insert(
+                    "bind_addr".to_string(),
+                    JsonValue::String(listener.bind_addr.clone()),
+                );
+                object.insert("explicit".to_string(), JsonValue::Bool(listener.explicit));
+                object.insert(
+                    "reason".to_string(),
+                    JsonValue::String(listener.reason.clone()),
+                );
+                JsonValue::Object(object)
+            })
+            .collect();
+
+        let mut object = Map::new();
+        object.insert("active".to_string(), JsonValue::Array(active));
+        object.insert("failed".to_string(), JsonValue::Array(failed));
+        JsonValue::Object(object)
+    }
+
+    fn health_json_with_transport(&self, report: &HealthReport) -> JsonValue {
+        let mut value = crate::presentation::ops_json::health_json(report);
+        if let JsonValue::Object(ref mut object) = value {
+            object.insert(
+                "transport_listeners".to_string(),
+                self.transport_readiness_json(),
+            );
+        }
+        value
     }
 
     pub fn serve(&self) -> io::Result<()> {

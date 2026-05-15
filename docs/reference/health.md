@@ -20,6 +20,30 @@ Response:
 
 Returns HTTP 200 when healthy, 503 when degraded.
 
+When RedDB is started with HTTP enabled, health responses include transport
+listener readiness:
+
+```json
+{
+  "transport_listeners": {
+    "active": [
+      { "transport": "grpc", "bind_addr": "127.0.0.1:50051", "explicit": true }
+    ],
+    "failed": [
+      {
+        "transport": "http",
+        "bind_addr": "127.0.0.1:5055",
+        "explicit": false,
+        "reason": "http listener bind 127.0.0.1:5055: address already in use"
+      }
+    ]
+  }
+}
+```
+
+Explicit bind addresses fail startup. Implicit/default listener failures are
+reported here when another requested listener remains active.
+
 ## Readiness Probes
 
 | Endpoint | Purpose |

@@ -2672,12 +2672,24 @@ fn build_server_config(
 ) -> Result<ServerCommandConfig, String> {
     let grpc_flag = flag_bool(flags, "grpc");
     let http_flag = flag_bool(flags, "http");
-    let explicit_grpc_bind = flag_string(flags, "grpc-bind")
-        .filter(|value| !value.is_empty())
-        .or_else(|| env_string("REDDB_GRPC_BIND_ADDR"));
-    let explicit_http_bind = flag_string(flags, "http-bind")
-        .filter(|value| !value.is_empty())
-        .or_else(|| env_string("REDDB_HTTP_BIND_ADDR"));
+    let explicit_grpc_bind_from_flag =
+        flag_string(flags, "grpc-bind").filter(|value| !value.is_empty());
+    let explicit_grpc_bind_from_env = env_string("REDDB_GRPC_BIND_ADDR");
+    let explicit_grpc_bind = explicit_grpc_bind_from_flag
+        .clone()
+        .or(explicit_grpc_bind_from_env.clone());
+    let explicit_http_bind_from_flag =
+        flag_string(flags, "http-bind").filter(|value| !value.is_empty());
+    let explicit_http_bind_from_env = env_string("REDDB_HTTP_BIND_ADDR");
+    let explicit_http_bind = explicit_http_bind_from_flag
+        .clone()
+        .or(explicit_http_bind_from_env.clone());
+    let legacy_bind_from_flag = flag_string(flags, "bind").filter(|value| !value.is_empty());
+    let legacy_bind_from_env = if explicit_grpc_bind.is_none() && explicit_http_bind.is_none() {
+        env_string("REDDB_BIND_ADDR")
+    } else {
+        None
+    };
     let legacy_bind = flag_string(flags, "bind")
         .filter(|value| !value.is_empty())
         .or_else(|| {
@@ -2718,6 +2730,13 @@ fn build_server_config(
     } else {
         (None, None)
     };
+    let legacy_bind_explicit = legacy_bind_from_flag.is_some() || legacy_bind_from_env.is_some();
+    let grpc_bind_explicit = explicit_grpc_bind_from_flag.is_some()
+        || explicit_grpc_bind_from_env.is_some()
+        || (legacy_bind_explicit && grpc_bind_addr.is_some() && http_bind_addr.is_none());
+    let http_bind_explicit = explicit_http_bind_from_flag.is_some()
+        || explicit_http_bind_from_env.is_some()
+        || (legacy_bind_explicit && http_bind_addr.is_some() && grpc_bind_addr.is_none());
     let path = resolve_server_path(flags).map(PathBuf::from);
     let role = forced_role
         .map(|value| value.to_string())
@@ -2796,17 +2815,23 @@ fn build_server_config(
     Ok(ServerCommandConfig {
         path,
         router_bind_addr,
+        router_bind_explicit: legacy_bind_explicit,
         grpc_bind_addr,
+        grpc_bind_explicit,
         grpc_tls_bind_addr,
         grpc_tls_cert,
         grpc_tls_key,
         grpc_tls_client_ca,
         http_bind_addr,
+        http_bind_explicit,
         http_tls_bind_addr,
         http_tls_cert,
         http_tls_key,
         http_tls_client_ca,
         wire_bind_addr,
+        wire_bind_explicit: flag_string(flags, "wire-bind")
+            .filter(|value| !value.is_empty())
+            .is_some(),
         wire_tls_bind_addr,
         wire_tls_cert,
         wire_tls_key,

@@ -238,7 +238,7 @@ impl RedDBServer {
             ("GET", "/health") => {
                 let report = self.native_use_cases().health();
                 let status = if report.is_healthy() { 200 } else { 503 };
-                json_response(status, crate::presentation::ops_json::health_json(&report))
+                json_response(status, self.health_json_with_transport(&report))
             }
             ("GET", "/ready/query") => {
                 let ready = self.native_use_cases().readiness().query;
@@ -311,7 +311,7 @@ impl RedDBServer {
             ("GET", "/ready") => {
                 let report = self.native_use_cases().health();
                 let status = if report.is_healthy() { 200 } else { 503 };
-                json_response(status, crate::presentation::ops_json::health_json(&report))
+                json_response(status, self.health_json_with_transport(&report))
             }
             ("GET", "/deployment/profiles") => {
                 let profile = query
