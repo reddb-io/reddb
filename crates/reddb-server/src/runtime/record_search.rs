@@ -65,7 +65,10 @@ fn set_public_row_envelope(
         sys_key_collection(),
         Value::text(entity.kind.collection().to_string()),
     );
-    record.set_arc(sys_key_kind(), Value::text("row".to_string()));
+    record.set_arc(
+        sys_key_kind(),
+        Value::text(public_row_kind(row).to_string()),
+    );
     record.set_arc(sys_key_tenant(), runtime_row_tenant_value(row));
     record.set_arc(
         sys_key_created_at(),
@@ -75,6 +78,16 @@ fn set_public_row_envelope(
         sys_key_updated_at(),
         Value::UnsignedInteger(entity.updated_at),
     );
+}
+
+fn public_row_kind(row: &crate::storage::RowData) -> &'static str {
+    if runtime_row_is_kv(row) {
+        "kv"
+    } else if runtime_row_has_document_capability(row) {
+        "document"
+    } else {
+        "row"
+    }
 }
 
 fn set_legacy_row_id_if_requested(record: &mut UnifiedRecord, columns: &[String], rid: u64) {
@@ -259,7 +272,7 @@ pub(super) fn runtime_table_record_lean_ref(entity: &UnifiedEntity) -> Option<Un
         values.extend(row.columns.iter().cloned());
         values.push(Value::UnsignedInteger(entity.logical_id().raw()));
         values.push(Value::text(entity.kind.collection().to_string()));
-        values.push(Value::text("row".to_string()));
+        values.push(Value::text(public_row_kind(row).to_string()));
         values.push(runtime_row_tenant_value(row));
         values.push(Value::UnsignedInteger(created_at));
         values.push(Value::UnsignedInteger(updated_at));
@@ -289,6 +302,7 @@ pub(super) fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<Unified
     };
     let collection = entity.kind.collection().to_string();
     let tenant = runtime_row_tenant_value(&row);
+    let kind = public_row_kind(&row).to_string();
     if let Some(named) = row.named {
         let mut record = UnifiedRecord::with_capacity(6 + named.len());
         // `set_owned` consumes the already-heap-allocated String key
@@ -299,7 +313,7 @@ pub(super) fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<Unified
         }
         record.set_arc(sys_key_rid(), Value::UnsignedInteger(logical_id));
         record.set_arc(sys_key_collection(), Value::text(collection));
-        record.set_arc(sys_key_kind(), Value::text("row".to_string()));
+        record.set_arc(sys_key_kind(), Value::text(kind));
         record.set_arc(sys_key_tenant(), tenant);
         record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
         record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
@@ -311,7 +325,7 @@ pub(super) fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<Unified
         }
         record.set_arc(sys_key_rid(), Value::UnsignedInteger(logical_id));
         record.set_arc(sys_key_collection(), Value::text(collection));
-        record.set_arc(sys_key_kind(), Value::text("row".to_string()));
+        record.set_arc(sys_key_kind(), Value::text(kind));
         record.set_arc(sys_key_tenant(), tenant);
         record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
         record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
@@ -323,7 +337,7 @@ pub(super) fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<Unified
         }
         record.set_arc(sys_key_rid(), Value::UnsignedInteger(logical_id));
         record.set_arc(sys_key_collection(), Value::text(collection));
-        record.set_arc(sys_key_kind(), Value::text("row".to_string()));
+        record.set_arc(sys_key_kind(), Value::text(kind));
         record.set_arc(sys_key_tenant(), tenant);
         record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
         record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
@@ -349,6 +363,7 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
             let mut record = UnifiedRecord::with_capacity(6 + user_field_count);
             let collection = entity.kind.collection().to_string();
             let tenant = runtime_row_tenant_value(&row);
+            let kind = public_row_kind(&row).to_string();
 
             if let Some(named) = row.named {
                 for (key, value) in named {
@@ -366,7 +381,7 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
             }
             record.set_arc(sys_key_rid(), Value::UnsignedInteger(logical_id));
             record.set_arc(sys_key_collection(), Value::text(collection));
-            record.set_arc(sys_key_kind(), Value::text("row".to_string()));
+            record.set_arc(sys_key_kind(), Value::text(kind));
             record.set_arc(sys_key_tenant(), tenant);
             record.set_arc(
                 sys_key_created_at(),
@@ -524,6 +539,7 @@ pub(super) fn runtime_table_record_from_entity_projected(
             let mut record = UnifiedRecord::with_capacity(6 + columns.len());
             let collection = entity.kind.collection().to_string();
             let tenant = runtime_row_tenant_value(&row);
+            let kind = public_row_kind(&row).to_string();
 
             if let Some(named) = row.named {
                 // Named path (single-insert entities): O(1) HashMap lookup per column.
@@ -555,7 +571,7 @@ pub(super) fn runtime_table_record_from_entity_projected(
             }
             record.set_arc(sys_key_rid(), Value::UnsignedInteger(logical_id));
             record.set_arc(sys_key_collection(), Value::text(collection));
-            record.set_arc(sys_key_kind(), Value::text("row".to_string()));
+            record.set_arc(sys_key_kind(), Value::text(kind));
             record.set_arc(sys_key_tenant(), tenant);
             record.set_arc(
                 sys_key_created_at(),
