@@ -1199,6 +1199,60 @@ fn dedupe_modified_columns(mut modified_columns: Vec<String>) -> Vec<String> {
     unique
 }
 
+fn reject_document_array_position_path(path: &[String]) -> RedDBResult<()> {
+    if path.iter().any(|segment| segment.parse::<usize>().is_ok()) {
+        return Err(crate::RedDBError::Query(
+            "array positional document patch paths are unsupported; replace the array or full document body instead"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn document_body_from_named(fields: &HashMap<String, Value>) -> RedDBResult<JsonValue> {
+    match fields.get("body") {
+        Some(Value::Json(bytes)) => crate::json::from_slice(bytes).map_err(|err| {
+            crate::RedDBError::Query(format!("failed to decode document body: {err}"))
+        }),
+        Some(_) => Err(crate::RedDBError::Query(
+            "document body field must contain JSON".to_string(),
+        )),
+        None => Ok(JsonValue::Object(Default::default())),
+    }
+}
+
+fn replace_document_row_body(
+    fields: &mut HashMap<String, Value>,
+    body: JsonValue,
+    modified_columns: &mut Vec<String>,
+) -> RedDBResult<()> {
+    modified_columns.push("body".to_string());
+
+    let old_keys: Vec<String> = fields
+        .keys()
+        .filter(|key| key.as_str() != "body")
+        .cloned()
+        .collect();
+    for key in old_keys {
+        fields.remove(&key);
+        modified_columns.push(key);
+    }
+
+    let body_bytes = json_to_vec(&body).map_err(|err| {
+        crate::RedDBError::Query(format!("failed to serialize document body: {err}"))
+    })?;
+    fields.insert("body".to_string(), Value::Json(body_bytes));
+
+    if let JsonValue::Object(map) = &body {
+        for (key, value) in map {
+            fields.insert(key.clone(), json_to_storage_value(value)?);
+            modified_columns.push(key.clone());
+        }
+    }
+
+    Ok(())
+}
+
 impl RedDBRuntime {
     pub(crate) fn apply_loaded_patch_entity_core(
         &self,
@@ -1233,8 +1287,15 @@ impl RedDBRuntime {
 
         match &mut entity.data {
             crate::storage::EntityData::Row(row) => {
+                let is_document_collection = db
+                    .collection_contract(&collection)
+                    .map(|contract| {
+                        contract.declared_model == crate::catalog::CollectionModel::Document
+                    })
+                    .unwrap_or(false);
                 let mut field_ops = Vec::new();
                 let mut metadata_ops = Vec::new();
+                let mut document_body_ops = Vec::new();
 
                 for mut op in operations {
                     let Some(root) = op.path.first().map(String::as_str) else {
@@ -1244,6 +1305,17 @@ impl RedDBRuntime {
                     };
 
                     match root {
+                        "body" if is_document_collection => {
+                            if op.path.len() < 2 {
+                                return Err(crate::RedDBError::Query(
+                                    "document body patch paths require a nested key; use payload.body for full replacement"
+                                        .to_string(),
+                                ));
+                            }
+                            op.path.remove(0);
+                            reject_document_array_position_path(&op.path)?;
+                            document_body_ops.push(op);
+                        }
                         "fields" | "named" => {
                             if op.path.len() < 2 {
                                 return Err(crate::RedDBError::Query(
@@ -1277,6 +1349,23 @@ impl RedDBRuntime {
                                 "unsupported patch target '{root}' for table rows. Use fields/*, metadata/*, or weight"
                             )));
                         }
+                    }
+                }
+
+                if !document_body_ops.is_empty() {
+                    context_index_dirty = true;
+                    let named = row.named.get_or_insert_with(Default::default);
+                    let mut body = document_body_from_named(named)?;
+                    apply_patch_operations_to_json(&mut body, &document_body_ops)
+                        .map_err(crate::RedDBError::Query)?;
+                    replace_document_row_body(named, body, &mut modified_columns)?;
+                }
+
+                if is_document_collection {
+                    if let Some(body) = payload.get("body") {
+                        context_index_dirty = true;
+                        let named = row.named.get_or_insert_with(Default::default);
+                        replace_document_row_body(named, body.clone(), &mut modified_columns)?;
                     }
                 }
 
