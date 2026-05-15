@@ -63,11 +63,18 @@ class KvClient:
 
 
 def _kv_path(collection: str, key: str) -> str:
-    return f"{_kv_identifier(collection)}.{_kv_identifier(key)}"
+    return f"{_kv_identifier(collection)}.{_kv_key_segment(key)}"
 
 
 def _kv_identifier(value: Any) -> str:
     return "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in str(value))
+
+
+def _kv_key_segment(value: Any) -> str:
+    key = str(value)
+    if key.replace("_", "").isalnum():
+        return key
+    return "'" + key.replace("'", "''") + "'"
 
 
 def _kv_value_literal(value: Any) -> str:

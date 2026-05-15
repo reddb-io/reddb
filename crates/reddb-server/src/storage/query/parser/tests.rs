@@ -5906,6 +5906,20 @@ fn test_parse_kv_put_dotted_key() {
 }
 
 #[test]
+fn test_parse_kv_unquoted_colon_key_suggests_quoting() {
+    let err = parse("KV GET characters:hansel").expect_err("unquoted colon key should fail");
+    let message = err.to_string();
+    assert!(
+        message.contains("quote"),
+        "expected quoting guidance, got {message}"
+    );
+    assert!(
+        message.contains("'characters:hansel'"),
+        "expected exact quoted key suggestion, got {message}"
+    );
+}
+
+#[test]
 fn test_parse_kv_put_with_expire() {
     let q = parse("KV PUT token = 'jwt-xyz' EXPIRE 30 s").unwrap();
     assert!(matches!(
