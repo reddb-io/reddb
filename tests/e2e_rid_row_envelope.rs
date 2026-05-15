@@ -38,15 +38,19 @@ fn uint_field(record: &UnifiedRecord, field: &str) -> u64 {
 }
 
 fn assert_row_envelope(record: &UnifiedRecord, collection: &str) -> u64 {
+    assert_public_envelope(record, collection, "row")
+}
+
+fn assert_public_envelope(record: &UnifiedRecord, collection: &str, kind: &str) -> u64 {
     let rid = uint_field(record, "rid");
     assert_eq!(text_field(record, "collection"), collection);
-    assert_eq!(text_field(record, "kind"), "row");
+    assert_eq!(text_field(record, "kind"), kind);
     assert_eq!(record.get("tenant"), Some(&Value::Null));
     assert!(record.get("created_at").is_some(), "missing created_at");
     assert!(record.get("updated_at").is_some(), "missing updated_at");
     assert!(
         record.get("red_entity_id").is_none(),
-        "public row envelope should not expose red_entity_id: {record:?}"
+        "public item envelope should not expose red_entity_id: {record:?}"
     );
     rid
 }
@@ -139,4 +143,40 @@ fn http_query_json_uses_rid_for_row_identity() {
     assert_eq!(values["kind"], "row");
     assert_eq!(values["tenant"], serde_json::Value::Null);
     assert!(values.get("red_entity_id").is_none(), "body = {body}");
+}
+
+#[test]
+fn document_and_kv_reads_expose_public_rid_envelope() {
+    let rt = runtime();
+    exec(&rt, "CREATE DOCUMENT doc_items");
+
+    let inserted_doc = exec(
+        &rt,
+        r#"INSERT INTO doc_items DOCUMENT (body) VALUES ('{"name":"alpha","score":7}') RETURNING *"#,
+    );
+    let doc_rid = assert_public_envelope(only_record(&inserted_doc), "doc_items", "document");
+
+    let selected_doc = exec(&rt, "SELECT * FROM doc_items WHERE name = 'alpha'");
+    assert_eq!(
+        assert_public_envelope(only_record(&selected_doc), "doc_items", "document"),
+        doc_rid
+    );
+
+    let inserted_kv = exec(
+        &rt,
+        "INSERT INTO kv_items KV (key, value) VALUES ('feature', 'enabled') RETURNING *",
+    );
+    let kv_rid = assert_public_envelope(only_record(&inserted_kv), "kv_items", "kv");
+
+    let selected_kv = exec(&rt, "SELECT * FROM kv_items WHERE key = 'feature'");
+    assert_eq!(
+        assert_public_envelope(only_record(&selected_kv), "kv_items", "kv"),
+        kv_rid
+    );
+
+    let kv_get = exec(&rt, "KV GET kv_items.feature");
+    assert_eq!(
+        assert_public_envelope(only_record(&kv_get), "kv_items", "kv"),
+        kv_rid
+    );
 }
