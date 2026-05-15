@@ -11,6 +11,7 @@ use reddb::application::{
     AsOfSpec, Author, CheckoutInput, CheckoutTarget, CreateBranchInput, CreateCommitInput,
     VcsUseCases,
 };
+use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn rt() -> Arc<RedDBRuntime> {
@@ -40,6 +41,17 @@ fn commit(rt: &RedDBRuntime, conn: u64, msg: &str) -> String {
         })
         .expect("commit")
         .hash
+}
+
+fn single_text(rt: &RedDBRuntime, sql: &str, column: &str) -> String {
+    let result = rt
+        .execute_query(sql)
+        .unwrap_or_else(|err| panic!("{sql}: {err:?}"));
+    assert_eq!(result.result.records.len(), 1, "{sql}");
+    match result.result.records[0].get(column) {
+        Some(Value::Text(value)) => value.to_string(),
+        other => panic!("expected text {column}, got {other:?}"),
+    }
 }
 
 #[test]
@@ -108,6 +120,35 @@ fn as_of_snapshot_does_not_error_on_valid_xid() {
     let _ = rt
         .execute_query("SELECT * FROM red_commits AS OF SNAPSHOT 1")
         .expect("snapshot xid executes");
+}
+
+#[test]
+fn as_of_commit_table_scan_reads_snapshot_visible_row_version() {
+    let rt = rt();
+    rt.execute_query("CREATE TABLE asof_accounts (id INT, status TEXT, marker TEXT)")
+        .unwrap();
+    rt.execute_query("ALTER TABLE asof_accounts SET VERSIONED = true")
+        .unwrap();
+    rt.execute_query("INSERT INTO asof_accounts (id, status, marker) VALUES (1, 'old', 'stable')")
+        .unwrap();
+    let before_update = commit(&rt, 51301, "before update");
+
+    rt.execute_query("UPDATE asof_accounts SET status = 'new' WHERE id = 1")
+        .unwrap();
+
+    assert_eq!(
+        single_text(
+            &rt,
+            "SELECT status FROM asof_accounts WHERE marker = 'stable'",
+            "status"
+        ),
+        "new"
+    );
+    let as_of_sql = format!(
+        "SELECT status FROM asof_accounts AS OF COMMIT '{}' WHERE marker = 'stable'",
+        before_update
+    );
+    assert_eq!(single_text(&rt, &as_of_sql, "status"), "old");
 }
 
 #[test]
