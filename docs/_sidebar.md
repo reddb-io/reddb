@@ -91,6 +91,7 @@
   - [Collection Contract (ADR)](/architecture/collection-contract-adr.md)
   - [Competitive Positioning](/architecture/competitive-positioning.md)
   - [Distributed Roadmap](/architecture/distributed-roadmap.md)
+  - [MVCC Read Resolver Seam](/architecture/mvcc-read-resolver.md)
 
 - **PRDs**
   - [Deepen Correctness Seams](/prd/deepen-correctness-seams.md)
