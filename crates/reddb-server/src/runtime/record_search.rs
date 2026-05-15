@@ -150,15 +150,23 @@ pub(super) fn scan_runtime_table_source_records_limited(
         capture_current_snapshot, entity_visible_under_current_snapshot,
         entity_visible_with_context,
     };
+    use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
+    use crate::storage::unified::entity::EntityKind;
 
     if is_universal_entity_source(table) {
         // Cross-collection scan runs inside std::thread::scope — capture
         // the snapshot so worker threads see the same MVCC view instead
         // of defaulting to "no snapshot" (every row visible).
         let snap_ctx = capture_current_snapshot();
+        let table_row_resolver = TableRowMvccReadResolver::captured(snap_ctx.clone());
         let records: Vec<UnifiedRecord> = db
             .store()
-            .query_all(move |e| entity_visible_with_context(snap_ctx.as_ref(), e))
+            .query_all(move |e| {
+                if matches!(e.kind, EntityKind::TableRow { .. }) {
+                    return table_row_resolver.resolve_candidate(e).is_some();
+                }
+                entity_visible_with_context(snap_ctx.as_ref(), e)
+            })
             .into_iter()
             .filter_map(|(collection, entity)| {
                 let mut record = runtime_any_record_from_entity(entity)?;
@@ -190,10 +198,16 @@ pub(super) fn scan_runtime_table_source_records_limited(
     if go_parallel {
         let schema = manager.column_schema();
         let table_name = table.to_string();
+        let table_row_resolver = TableRowMvccReadResolver::current_statement();
         let mut entities: Vec<crate::storage::unified::entity::UnifiedEntity> =
             Vec::with_capacity(entity_count);
         manager.for_each_entity(|e| {
-            if entity_visible_under_current_snapshot(e) {
+            let visible = if matches!(e.kind, EntityKind::TableRow { .. }) {
+                table_row_resolver.resolve_candidate(e).is_some()
+            } else {
+                entity_visible_under_current_snapshot(e)
+            };
+            if visible {
                 entities.push(e.clone());
             }
             true
@@ -225,8 +239,14 @@ pub(super) fn scan_runtime_table_source_records_limited(
         Some(n) => Vec::with_capacity(n),
         None => Vec::new(),
     };
+    let table_row_resolver = TableRowMvccReadResolver::current_statement();
     manager.for_each_entity(|entity| {
-        if !entity_visible_under_current_snapshot(entity) {
+        let visible = if matches!(entity.kind, EntityKind::TableRow { .. }) {
+            table_row_resolver.resolve_candidate(entity).is_some()
+        } else {
+            entity_visible_under_current_snapshot(entity)
+        };
+        if !visible {
             return true;
         }
         if let Some(mut record) = runtime_table_record_from_entity_ref_with_schema(
