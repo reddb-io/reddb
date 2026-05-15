@@ -165,19 +165,23 @@ function normalizeQueryReply(reply) {
 }
 
 function normalizeEntityReply(reply) {
+  const rid = safeBigIntToJs(reply.id)
   return {
     ok: reply.ok,
     affected: reply.ok ? 1 : 0,
-    id: safeBigIntToJs(reply.id),
+    rid,
+    id: rid,
     entity: parseJsonOrNull(reply.entity_json),
   }
 }
 
 function normalizeBulkEntityReply(reply) {
+  const rids = reply.items.map((item) => safeBigIntToJs(item.id))
   return {
     ok: reply.ok,
     affected: safeBigIntToJs(reply.count),
-    ids: reply.items.map((item) => safeBigIntToJs(item.id)),
+    rids,
+    ids: rids,
   }
 }
 

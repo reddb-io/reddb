@@ -393,3 +393,6 @@ message StatsReply {
   uint64 started_at_unix_ms = 9;
 }
 ```
+
+`EntityReply.id` is the protobuf field retained for wire compatibility; public
+docs and SDKs surface the value as the RedDB ID `rid`.

@@ -782,14 +782,16 @@ Response:
 {
   "ok": true,
   "events": [
-    {"lsn": 1, "timestamp": 1744329600000, "operation": "insert", "collection": "users", "entity_id": 42, "entity_kind": "table"},
-    {"lsn": 2, "operation": "update", "collection": "users", "entity_id": 42, "entity_kind": "entity"}
+    {"lsn": 1, "timestamp": 1744329600000, "operation": "insert", "collection": "users", "rid": 42, "kind": "row"},
+    {"lsn": 2, "operation": "update", "collection": "config", "rid": 7, "kind": "kv"}
   ],
   "next_lsn": 2
 }
 ```
 
-Operations: `insert`, `update`, `delete`. Use `next_lsn` as the `since_lsn` value in your next request to consume events incrementally.
+Operations: `insert`, `update`, `delete`. CDC events identify changed items with
+RedDB ID `rid`, source `collection`, and item `kind`. Use `next_lsn` as the
+`since_lsn` value in your next request to consume events incrementally.
 
 ### Backups
 

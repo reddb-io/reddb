@@ -412,21 +412,21 @@ export class RedDB {
     return this.query(sql, ...params)
   }
 
-  /** Insert one row. Returns `{ affected, id }`. */
+  /** Insert one row. Returns `{ affected, rid, id }`; `id` is a legacy alias for `rid`. */
   async insert(collection, payload) {
     let result = await this.client.call('insert', { collection, payload })
     if (
       result &&
       typeof result === 'object' &&
       !('affected' in result) &&
-      'id' in result
+      ('rid' in result || 'id' in result)
     ) {
       result = { ...result, affected: 1 }
     }
     return requireInsertId(result, 'insert')
   }
 
-  /** Insert many rows in one call. Returns `{ affected, ids }`. */
+  /** Insert many rows in one call. Returns `{ affected, rids, ids }`; `ids` is a legacy alias. */
   async bulkInsert(collection, payloads) {
     const result = await this.client.call('bulk_insert', { collection, payloads })
     return requireInsertIds(result, payloads.length)
@@ -549,26 +549,34 @@ function attachRollbackError(err, rollbackErr) {
 }
 
 function requireInsertId(result, method) {
-  if (!result || typeof result !== 'object' || result.id == null) {
+  if (!result || typeof result !== 'object' || (result.rid == null && result.id == null)) {
     throw new RedDBError(
       'ENGINE_TOO_OLD',
       `${method}() requires RedDB engine >= ${MIN_INSERT_ID_ENGINE_VERSION} with insert id support`,
     )
   }
+  if (result.rid == null) result.rid = result.id
+  if (result.id == null) result.id = result.rid
   return result
 }
 
 function requireInsertIds(result, expected) {
-  if (!result || typeof result !== 'object' || !Array.isArray(result.ids)) {
+  if (
+    !result ||
+    typeof result !== 'object' ||
+    (!Array.isArray(result.rids) && !Array.isArray(result.ids))
+  ) {
     throw new RedDBError(
       'ENGINE_TOO_OLD',
       `bulkInsert() requires RedDB engine >= ${MIN_INSERT_ID_ENGINE_VERSION} with bulk insert id support`,
     )
   }
-  if (result.ids.length !== expected) {
+  if (!Array.isArray(result.rids)) result.rids = result.ids
+  if (!Array.isArray(result.ids)) result.ids = result.rids
+  if (result.rids.length !== expected) {
     throw new RedDBError(
       'INVALID_RESPONSE',
-      `bulkInsert() expected ${expected} ids, got ${result.ids.length}`,
+      `bulkInsert() expected ${expected} rids, got ${result.rids.length}`,
     )
   }
   return result
