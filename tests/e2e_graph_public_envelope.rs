@@ -114,10 +114,10 @@ fn graph_identity_and_topology_fields_are_immutable_in_sql_update() {
     );
 
     let statements = vec![
-        "UPDATE immutable_graph SET rid = 999 WHERE label = 'alice'".to_string(),
-        format!("UPDATE immutable_graph SET label = 'mallory' WHERE rid = {alice_rid}"),
-        "UPDATE immutable_graph SET from_rid = 999 WHERE label = 'knows'".to_string(),
-        "UPDATE immutable_graph SET to_rid = 999 WHERE label = 'knows'".to_string(),
+        "UPDATE immutable_graph NODES SET rid = 999 WHERE label = 'alice'".to_string(),
+        format!("UPDATE immutable_graph NODES SET label = 'mallory' WHERE rid = {alice_rid}"),
+        "UPDATE immutable_graph EDGES SET from_rid = 999 WHERE label = 'knows'".to_string(),
+        "UPDATE immutable_graph EDGES SET to_rid = 999 WHERE label = 'knows'".to_string(),
     ];
 
     for sql in statements {
