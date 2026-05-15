@@ -146,27 +146,17 @@ pub(super) fn scan_runtime_table_source_records_limited(
     table: &str,
     limit: Option<usize>,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
-    use crate::runtime::impl_core::{
-        capture_current_snapshot, entity_visible_under_current_snapshot,
-        entity_visible_with_context,
-    };
+    use crate::runtime::impl_core::capture_current_snapshot;
     use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
-    use crate::storage::unified::entity::EntityKind;
 
     if is_universal_entity_source(table) {
         // Cross-collection scan runs inside std::thread::scope — capture
         // the snapshot so worker threads see the same MVCC view instead
         // of defaulting to "no snapshot" (every row visible).
-        let snap_ctx = capture_current_snapshot();
-        let table_row_resolver = TableRowMvccReadResolver::captured(snap_ctx.clone());
+        let table_row_resolver = TableRowMvccReadResolver::captured(capture_current_snapshot());
         let records: Vec<UnifiedRecord> = db
             .store()
-            .query_all(move |e| {
-                if matches!(e.kind, EntityKind::TableRow { .. }) {
-                    return table_row_resolver.resolve_candidate(e).is_some();
-                }
-                entity_visible_with_context(snap_ctx.as_ref(), e)
-            })
+            .query_all(move |e| table_row_resolver.resolve_read_candidate(e).is_some())
             .into_iter()
             .filter_map(|(collection, entity)| {
                 let mut record = runtime_any_record_from_entity(entity)?;
@@ -202,12 +192,7 @@ pub(super) fn scan_runtime_table_source_records_limited(
         let mut entities: Vec<crate::storage::unified::entity::UnifiedEntity> =
             Vec::with_capacity(entity_count);
         manager.for_each_entity(|e| {
-            let visible = if matches!(e.kind, EntityKind::TableRow { .. }) {
-                table_row_resolver.resolve_candidate(e).is_some()
-            } else {
-                entity_visible_under_current_snapshot(e)
-            };
-            if visible {
+            if table_row_resolver.resolve_read_candidate(e).is_some() {
                 entities.push(e.clone());
             }
             true
@@ -241,12 +226,7 @@ pub(super) fn scan_runtime_table_source_records_limited(
     };
     let table_row_resolver = TableRowMvccReadResolver::current_statement();
     manager.for_each_entity(|entity| {
-        let visible = if matches!(entity.kind, EntityKind::TableRow { .. }) {
-            table_row_resolver.resolve_candidate(entity).is_some()
-        } else {
-            entity_visible_under_current_snapshot(entity)
-        };
-        if !visible {
+        if table_row_resolver.resolve_read_candidate(entity).is_none() {
             return true;
         }
         if let Some(mut record) = runtime_table_record_from_entity_ref_with_schema(
@@ -273,7 +253,7 @@ pub(super) fn scan_runtime_table_with_bloom_hint(
     table: &str,
     key_hint: Option<&[u8]>,
 ) -> RedDBResult<(Vec<UnifiedRecord>, bool)> {
-    use crate::runtime::impl_core::entity_visible_under_current_snapshot;
+    use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
 
     let manager = db
         .store()
@@ -281,9 +261,10 @@ pub(super) fn scan_runtime_table_with_bloom_hint(
         .ok_or_else(|| RedDBError::NotFound(table.to_string()))?;
 
     let (entities, pruned) = manager.query_with_bloom_hint(key_hint, |_| true);
+    let table_row_resolver = TableRowMvccReadResolver::current_statement();
     let records = entities
         .into_iter()
-        .filter(entity_visible_under_current_snapshot)
+        .filter(|entity| table_row_resolver.resolve_read_candidate(entity).is_some())
         .filter_map(|entity| {
             let mut record = runtime_table_record_from_entity(entity)?;
             set_source_collection(&mut record, table);

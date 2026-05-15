@@ -18,6 +18,7 @@ use crate::runtime::join_filter::{
     projection_name, resolve_runtime_field, runtime_partial_cmp, sort_records_by_order_by_with_db,
 };
 use crate::runtime::runtime_table_record_from_entity_ref;
+use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
 use crate::storage::query::ast::{
     BinOp, CompareOp, Expr, FieldRef, Filter, OrderByClause, Projection, Span, UnaryOp,
 };
@@ -272,8 +273,9 @@ pub(crate) fn execute_aggregate_query(
     >::new(spill_dir, WORK_MEM_BYTES, ESTIMATED_ENTRY_BYTES);
     let mut spill_err: Option<String> = None;
 
+    let table_row_resolver = TableRowMvccReadResolver::current_statement();
     manager.for_each_entity(|entity| {
-        if !crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
+        if table_row_resolver.resolve_read_candidate(entity).is_none() {
             return true;
         }
 
@@ -2882,6 +2884,8 @@ fn try_execute_parallel_single_col_numeric_aggs(
         return Ok(None);
     };
 
+    let table_row_resolver =
+        TableRowMvccReadResolver::captured(crate::runtime::impl_core::capture_current_snapshot());
     let acc = manager.fold_entities_parallel(
         || FastNumericGroupAccumulator {
             groups: std::collections::HashMap::new(),
@@ -2891,7 +2895,7 @@ fn try_execute_parallel_single_col_numeric_aggs(
             if local.unsupported_value {
                 return local;
             }
-            if !crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
+            if table_row_resolver.resolve_read_candidate(entity).is_none() {
                 return local;
             }
 
