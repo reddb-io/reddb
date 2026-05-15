@@ -1,4 +1,5 @@
-use crate::storage::unified::entity::{EntityKind, UnifiedEntity};
+use crate::storage::unified::entity::{EntityId, EntityKind, UnifiedEntity};
+use crate::storage::unified::UnifiedStore;
 
 /// Table-row-only MVCC read resolver for the current statement.
 ///
@@ -39,6 +40,34 @@ impl TableRowMvccReadResolver {
             Some(candidate)
         } else {
             None
+        }
+    }
+
+    pub(crate) fn resolve_logical_id(
+        &self,
+        store: &UnifiedStore,
+        collection: &str,
+        logical_id: EntityId,
+    ) -> Option<UnifiedEntity> {
+        if self.needs_version_selection() {
+            return store
+                .table_row_versions_by_logical_id(collection, logical_id)
+                .into_iter()
+                .filter(|entity| self.resolve_candidate(entity).is_some())
+                .max_by_key(|entity| entity.xmin);
+        }
+
+        store
+            .get_table_row_by_logical_id(collection, logical_id)
+            .filter(|entity| self.resolve_candidate(entity).is_some())
+    }
+
+    fn needs_version_selection(&self) -> bool {
+        match &self.snapshot {
+            TableRowReadSnapshot::CurrentThread => {
+                super::impl_core::capture_current_snapshot().is_some()
+            }
+            TableRowReadSnapshot::Captured(snapshot) => snapshot.is_some(),
         }
     }
 
