@@ -290,6 +290,16 @@ pub(crate) fn resolve_kind<'a>(
                     "label" => {
                         return Some(Cow::Owned(Value::text(ge.label.to_string())));
                     }
+                    "from_rid" => {
+                        if let Ok(id) = ge.from_node.parse::<u64>() {
+                            return Some(Cow::Owned(Value::UnsignedInteger(id)));
+                        }
+                    }
+                    "to_rid" => {
+                        if let Ok(id) = ge.to_node.parse::<u64>() {
+                            return Some(Cow::Owned(Value::UnsignedInteger(id)));
+                        }
+                    }
                     "from_node" => {
                         return Some(Cow::Owned(Value::text(ge.from_node.to_string())));
                     }

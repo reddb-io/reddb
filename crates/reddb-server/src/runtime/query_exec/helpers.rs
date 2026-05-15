@@ -89,7 +89,7 @@ pub(crate) fn extract_bloom_key_for_pk(
                 FieldRef::TableColumn { column, .. } => column.as_str(),
                 _ => return None,
             };
-            if field_name != "rid" && field_name != "red_entity_id" {
+            if field_name != "red_entity_id" {
                 return None;
             }
             let key = match value {
@@ -388,6 +388,16 @@ pub(crate) fn resolve_entity_field<'a>(
         },
         EntityKind::GraphEdge(ref ge) => match column {
             "label" => return Some(Cow::Owned(Value::text(ge.label.to_string()))),
+            "from_rid" => {
+                if let Ok(id) = ge.from_node.parse::<u64>() {
+                    return Some(Cow::Owned(Value::UnsignedInteger(id)));
+                }
+            }
+            "to_rid" => {
+                if let Ok(id) = ge.to_node.parse::<u64>() {
+                    return Some(Cow::Owned(Value::UnsignedInteger(id)));
+                }
+            }
             "from_node" => return Some(Cow::Owned(Value::text(ge.from_node.to_string()))),
             "to_node" => return Some(Cow::Owned(Value::text(ge.to_node.to_string()))),
             _ => {}
