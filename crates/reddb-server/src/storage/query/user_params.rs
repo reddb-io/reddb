@@ -869,7 +869,11 @@ pub fn bind(expr: &QueryExpr, params: &[Value]) -> Result<QueryExpr, UserParamEr
             .collect::<Result<Vec<_>, UserParamError>>()?;
         let assignments = assignment_exprs
             .iter()
-            .filter_map(|(column, expr)| {
+            .zip(bound.compound_assignment_ops.iter())
+            .filter_map(|((column, expr), compound_op)| {
+                if compound_op.is_some() {
+                    return None;
+                }
                 fold_expr_to_value(expr.clone())
                     .ok()
                     .map(|value| (column.clone(), value))
