@@ -5,29 +5,18 @@
 //! DELETE path into a small testable module. The same Interface will
 //! be reused by UPDATE in a follow-up; this commit covers DELETE only.
 //!
-//! Behaviour preservation
-//! ----------------------
-//! The scan is a faithful refactor of the previous inline logic in
-//! `execute_delete_inner`. In particular, the **visibility filtering**
-//! semantics are preserved exactly:
-//!
-//! * `_entity_id = N` fast path: no visibility check (the row was
-//!   named directly).
-//! * Hash / sorted index fast paths: no visibility check (the index
-//!   only ever points at rows that should be reachable).
-//! * Zoned scan and full-table scan: visibility is enforced through
-//!   `entity_visible_under_current_snapshot` so AS OF / RLS continue
-//!   to work as before.
-//!
-//! The Interface is intentionally tiny: a constructor plus
-//! `find_target_ids`. UPDATE (#52) will consume the same shape.
+//! Candidate discovery stays with each scan path. Table-row visibility
+//! is centralized through `TableRowMvccReadResolver` before any
+//! candidate id is returned to UPDATE or DELETE.
 
 use std::collections::HashMap;
 
 use super::{query_exec, RedDBRuntime};
 use crate::api::{RedDBError, RedDBResult};
+use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
 use crate::storage::query::ast::{Filter, UpdateTarget};
 use crate::storage::schema::Value;
+use crate::storage::unified::entity::EntityKind;
 use crate::storage::{EntityData, EntityId};
 
 pub(super) struct DmlTargetScan<'a> {
@@ -36,6 +25,7 @@ pub(super) struct DmlTargetScan<'a> {
     filter: Option<&'a Filter>,
     limit: Option<usize>,
     target: Option<UpdateTarget>,
+    table_row_resolver: TableRowMvccReadResolver,
 }
 
 impl<'a> DmlTargetScan<'a> {
@@ -51,6 +41,7 @@ impl<'a> DmlTargetScan<'a> {
             filter,
             limit,
             target: None,
+            table_row_resolver: TableRowMvccReadResolver::current_statement(),
         }
     }
 
@@ -67,6 +58,7 @@ impl<'a> DmlTargetScan<'a> {
             filter,
             limit,
             target: Some(target),
+            table_row_resolver: TableRowMvccReadResolver::current_statement(),
         }
     }
 
@@ -84,35 +76,37 @@ impl<'a> DmlTargetScan<'a> {
             .ok_or_else(|| RedDBError::NotFound(self.table.to_string()))?;
         let compiled_filter = self.compiled_filter();
 
-        // Fast path: WHERE _entity_id = N. Mirrors the inline DELETE
-        // behaviour, which skips snapshot visibility filtering on this
-        // direct-lookup path (the row was named explicitly).
+        // Fast path: WHERE _entity_id = N. The resolver maps stable
+        // table-row identity to the version visible to this statement.
         if let Some(entity_id) = query_exec::extract_entity_id_from_filter(&self.filter.cloned()) {
-            if let Some(entity) =
-                store.get_table_row_by_logical_id(self.table, EntityId::new(entity_id))
-            {
-                return Ok(self.target_ids_from_entities([entity]));
-            }
-            if let Some(entity) = store.get(self.table, EntityId::new(entity_id)) {
+            if let Some(entity) = self.table_row_resolver.resolve_logical_id(
+                &store,
+                self.table,
+                EntityId::new(entity_id),
+            ) {
                 return Ok(self.target_ids_from_entities([entity]));
             }
             return Ok(Vec::new());
         }
 
-        if let Some(filter) = self.filter {
-            if let Some(ids) =
-                query_exec::try_hash_eq_lookup(filter, self.table, self.runtime.index_store_ref())
-            {
-                return Ok(self.recheck_index_candidates(ids, compiled_filter.as_ref()));
-            }
+        if !crate::runtime::impl_core::current_snapshot_requires_index_fallback() {
+            if let Some(filter) = self.filter {
+                if let Some(ids) = query_exec::try_hash_eq_lookup(
+                    filter,
+                    self.table,
+                    self.runtime.index_store_ref(),
+                ) {
+                    return Ok(self.recheck_index_candidates(ids, compiled_filter.as_ref()));
+                }
 
-            if let Some(ids) = query_exec::try_sorted_index_lookup(
-                filter,
-                self.table,
-                self.runtime.index_store_ref(),
-                None,
-            ) {
-                return Ok(self.recheck_index_candidates(ids, compiled_filter.as_ref()));
+                if let Some(ids) = query_exec::try_sorted_index_lookup(
+                    filter,
+                    self.table,
+                    self.runtime.index_store_ref(),
+                    None,
+                ) {
+                    return Ok(self.recheck_index_candidates(ids, compiled_filter.as_ref()));
+                }
             }
         }
 
@@ -147,7 +141,7 @@ impl<'a> DmlTargetScan<'a> {
                 .collect();
 
             manager.for_each_entity_zoned(&zone_preds, |entity| {
-                if !crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
+                if !self.visible_candidate(entity) {
                     return true;
                 }
                 if self.matches_update_target(entity)
@@ -162,9 +156,7 @@ impl<'a> DmlTargetScan<'a> {
             });
         } else {
             manager.for_each_entity(|entity| {
-                if crate::runtime::impl_core::entity_visible_under_current_snapshot(entity)
-                    && self.matches_update_target(entity)
-                {
+                if self.visible_candidate(entity) && self.matches_update_target(entity) {
                     ids.push(entity.id);
                     if self.limit.map(|limit| ids.len() >= limit).unwrap_or(false) {
                         return false;
@@ -238,13 +230,11 @@ impl<'a> DmlTargetScan<'a> {
             return Vec::new();
         };
 
-        // Note: the inline DELETE path did not apply
-        // `entity_visible_under_current_snapshot` to candidates that
-        // came from an index lookup, so we don't either. Preserves
-        // existing AS-OF semantics on indexed predicates.
         let mut ids = Vec::with_capacity(entity_ids.len());
         for entity in manager.get_many(&entity_ids).into_iter().flatten() {
-            if self.matches_update_target(&entity) && self.matches_filter(&entity, compiled_filter)
+            if self.visible_candidate(&entity)
+                && self.matches_update_target(&entity)
+                && self.matches_filter(&entity, compiled_filter)
             {
                 ids.push(entity.id);
                 if self.limit.map(|limit| ids.len() >= limit).unwrap_or(false) {
@@ -261,9 +251,17 @@ impl<'a> DmlTargetScan<'a> {
     {
         entities
             .into_iter()
+            .filter(|entity| self.visible_candidate(entity))
             .filter(|entity| self.matches_update_target(entity))
             .map(|entity| entity.id)
             .collect()
+    }
+
+    fn visible_candidate(&self, entity: &crate::storage::UnifiedEntity) -> bool {
+        if matches!(entity.kind, EntityKind::TableRow { .. }) {
+            return self.table_row_resolver.resolve_candidate(entity).is_some();
+        }
+        crate::runtime::impl_core::entity_visible_under_current_snapshot(entity)
     }
 
     fn matches_update_target(&self, entity: &crate::storage::UnifiedEntity) -> bool {
