@@ -570,10 +570,8 @@ impl McpServer {
                 obj.insert("found".to_string(), JsonValue::Bool(true));
                 obj.insert("key".to_string(), JsonValue::String(key.to_string()));
                 obj.insert("value".to_string(), storage_value_to_json(&value));
-                obj.insert(
-                    "entity_id".to_string(),
-                    JsonValue::Number(entity_id.raw() as f64),
-                );
+                obj.insert("rid".to_string(), JsonValue::Number(entity_id.raw() as f64));
+                obj.insert("kind".to_string(), JsonValue::String("kv".to_string()));
                 json_to_string(&JsonValue::Object(obj))
                     .map_err(|e| format!("serialization error: {}", e))
             }
@@ -611,7 +609,8 @@ impl McpServer {
 
         let mut obj = Map::new();
         obj.insert("ok".to_string(), JsonValue::Bool(true));
-        obj.insert("entity_id".to_string(), JsonValue::Number(id.raw() as f64));
+        obj.insert("rid".to_string(), JsonValue::Number(id.raw() as f64));
+        obj.insert("kind".to_string(), JsonValue::String("kv".to_string()));
         obj.insert(
             "tags".to_string(),
             JsonValue::Array(tags.into_iter().map(JsonValue::String).collect()),
@@ -784,9 +783,10 @@ impl McpServer {
             .map(|r| {
                 let mut obj = Map::new();
                 obj.insert(
-                    "entity_id".to_string(),
+                    "rid".to_string(),
                     JsonValue::Number(r.entity_id.raw() as f64),
                 );
+                obj.insert("kind".to_string(), JsonValue::String("vector".to_string()));
                 obj.insert("score".to_string(), JsonValue::Number(r.score as f64));
                 obj.insert("distance".to_string(), JsonValue::Number(r.distance as f64));
                 JsonValue::Object(obj)
@@ -838,12 +838,12 @@ impl McpServer {
             .map(|m| {
                 let mut obj = Map::new();
                 obj.insert(
-                    "entity_id".to_string(),
+                    "rid".to_string(),
                     JsonValue::Number(m.entity.id.raw() as f64),
                 );
                 obj.insert(
                     "kind".to_string(),
-                    JsonValue::String(format!("{:?}", m.entity.kind)),
+                    JsonValue::String(m.entity.kind.storage_type().to_string()),
                 );
                 obj.insert("score".to_string(), JsonValue::Number(m.score as f64));
                 JsonValue::Object(obj)

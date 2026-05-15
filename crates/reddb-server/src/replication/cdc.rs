@@ -63,6 +63,16 @@ pub struct ChangeEvent {
     pub kv: Option<KvWatchEvent>,
 }
 
+impl ChangeEvent {
+    pub fn rid(&self) -> u64 {
+        self.entity_id
+    }
+
+    pub fn kind(&self) -> &'static str {
+        public_item_kind(&self.entity_kind)
+    }
+}
+
 /// A committed single-key KV change surfaced by WATCH.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KvWatchEvent {
@@ -164,13 +174,10 @@ impl ChangeRecord {
             "collection".to_string(),
             JsonValue::String(self.collection.clone()),
         );
+        object.insert("rid".to_string(), JsonValue::Number(self.entity_id as f64));
         object.insert(
-            "entity_id".to_string(),
-            JsonValue::Number(self.entity_id as f64),
-        );
-        object.insert(
-            "entity_kind".to_string(),
-            JsonValue::String(self.entity_kind.clone()),
+            "kind".to_string(),
+            JsonValue::String(public_item_kind(&self.entity_kind).to_string()),
         );
         if let Some(bytes) = &self.entity_bytes {
             object.insert(
@@ -218,17 +225,34 @@ impl ChangeRecord {
                 .unwrap_or_default()
                 .to_string(),
             entity_id: value
-                .get("entity_id")
+                .get("rid")
+                .or_else(|| value.get("entity_id"))
                 .and_then(JsonValue::as_u64)
                 .unwrap_or(0),
             entity_kind: value
-                .get("entity_kind")
+                .get("kind")
+                .or_else(|| value.get("entity_kind"))
                 .and_then(JsonValue::as_str)
                 .unwrap_or("entity")
                 .to_string(),
             entity_bytes,
             metadata: value.get("metadata").cloned(),
         })
+    }
+}
+
+pub fn public_item_kind(entity_kind: &str) -> &'static str {
+    match entity_kind {
+        "table" | "entity" | "row" => "row",
+        "graph_node" | "node" => "node",
+        "graph_edge" | "edge" => "edge",
+        "kv" => "kv",
+        "document" => "document",
+        "vector" => "vector",
+        other if other.contains("kv") => "kv",
+        other if other.contains("document") => "document",
+        other if other.contains("vector") => "vector",
+        _ => "item",
     }
 }
 

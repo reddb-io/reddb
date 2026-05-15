@@ -271,13 +271,17 @@ fn json_to_value_out(value: &serde_json::Value) -> ValueOut {
 #[derive(Debug, Clone)]
 pub struct InsertResult {
     pub affected: u64,
-    /// Present when the engine surfaces an inserted entity id.
+    /// Present when the engine surfaces an inserted RedDB ID.
+    pub rid: Option<String>,
+    /// Legacy alias for `rid`.
     pub id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BulkInsertResult {
     pub affected: u64,
-    /// Present when the engine surfaces inserted entity ids for the batch.
+    /// Present when the engine surfaces inserted RedDB IDs for the batch.
+    pub rids: Vec<String>,
+    /// Legacy alias for `rids`.
     pub ids: Vec<String>,
 }

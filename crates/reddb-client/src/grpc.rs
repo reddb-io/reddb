@@ -389,6 +389,7 @@ impl GrpcClient {
             .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
         Ok(InsertResult {
             affected: 1,
+            rid: Some(reply.id.to_string()),
             id: Some(reply.id.to_string()),
         })
     }
@@ -413,9 +414,15 @@ impl GrpcClient {
             .bulk_create_rows(collection, encoded)
             .await
             .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
+        let rids = reply
+            .ids
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>();
         Ok(BulkInsertResult {
             affected: reply.count,
-            ids: reply.ids.into_iter().map(|id| id.to_string()).collect(),
+            rids: rids.clone(),
+            ids: rids,
         })
     }
 
