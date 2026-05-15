@@ -2557,6 +2557,8 @@ fn update_order_value(entity: &UnifiedEntity, field: &FieldRef) -> Option<Value>
     }
     match &entity.data {
         EntityData::Row(row) => row.get_field(column).cloned(),
+        EntityData::Node(_) | EntityData::Edge(_) => runtime_any_record_from_entity_ref(entity)
+            .and_then(|record| record.get(column).cloned()),
         _ => None,
     }
 }
