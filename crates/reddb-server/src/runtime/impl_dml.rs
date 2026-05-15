@@ -234,6 +234,8 @@ impl RedDBRuntime {
         let mut tombstoned_ids = Vec::new();
         let mut tombstoned_entities = Vec::new();
         let mut physical_delete_ids = Vec::new();
+        let table_row_resolver =
+            crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::current_statement();
 
         for &id in ids {
             let Some(mut entity) = manager.get(id) else {
@@ -241,9 +243,11 @@ impl RedDBRuntime {
             };
             if matches!(entity.data, EntityData::Row(_)) {
                 let previous_xmax = entity.xmax;
-                // Skip if this tuple was already tombstoned by a prior
-                // statement in the same txn — idempotent DELETE.
-                if entity.xmax != 0 {
+                if matches!(entity.kind, crate::storage::EntityKind::TableRow { .. }) {
+                    if table_row_resolver.resolve_candidate(&entity).is_none() {
+                        continue;
+                    }
+                } else if entity.xmax != 0 {
                     continue;
                 }
 
@@ -2474,9 +2478,8 @@ fn resolve_update_entity_by_logical_id(
     logical_id: EntityId,
 ) -> Option<UnifiedEntity> {
     let store = runtime.inner.db.store();
-    store
-        .get_table_row_by_logical_id(table, logical_id)
-        .or_else(|| store.get(table, logical_id))
+    crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::current_statement()
+        .resolve_logical_id(&store, table, logical_id)
 }
 
 fn update_cdc_item_kind(
