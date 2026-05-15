@@ -92,6 +92,9 @@
   - [Competitive Positioning](/architecture/competitive-positioning.md)
   - [Distributed Roadmap](/architecture/distributed-roadmap.md)
 
+- **PRDs**
+  - [Deepen Correctness Seams](/prd/deepen-correctness-seams.md)
+
 - **ADRs**
   - [0001 — RedWire TCP Protocol](/adr/0001-redwire-tcp-protocol.md)
   - [0006 — Tiered Blob Cache](/adr/0006-tiered-blob-cache.md)
