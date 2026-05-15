@@ -128,13 +128,21 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     // ── ULTRA-FAST PATH: entity_id lookup bypasses planner entirely ──
     if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
         let store = db.store();
-        if let Some(entity) = store.get(&query.table, EntityId::new(entity_id)) {
+        let entity = store
+            .get_table_row_by_logical_id(&query.table, EntityId::new(entity_id))
+            .or_else(|| store.get(&query.table, EntityId::new(entity_id)));
+        if let Some(entity) = entity {
             if !crate::runtime::impl_core::entity_visible_under_current_snapshot(&entity) {
                 return Ok(Vec::new());
             }
-            return Ok(runtime_table_record_from_entity(entity)
+            return Ok(
+                super::super::record_search::runtime_table_record_lean_in_collection(
+                    entity,
+                    &query.table,
+                )
                 .into_iter()
-                .collect());
+                .collect(),
+            );
         }
         return Ok(Vec::new());
     }
@@ -470,8 +478,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                     .is_none_or(|cf| cf.evaluate(&entity_opt))
                                 {
                                     let record_opt = if lean {
-                                        super::super::record_search::runtime_table_record_lean(
+                                        super::super::record_search::runtime_table_record_lean_in_collection(
                                             entity_opt,
+                                            &query.table,
                                         )
                                     } else {
                                         runtime_table_record_from_entity_projected(
@@ -637,7 +646,10 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 }
                 if compiled_filter.evaluate(&entity_opt) {
                     let record_opt = if lean {
-                        super::super::record_search::runtime_table_record_lean(entity_opt)
+                        super::super::record_search::runtime_table_record_lean_in_collection(
+                            entity_opt,
+                            &query.table,
+                        )
                     } else {
                         runtime_table_record_from_entity_projected(entity_opt, &explicit_cols)
                     };
@@ -805,8 +817,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                 .is_none_or(|cf| cf.evaluate(&entity_opt))
                             {
                                 let record_opt = if lean {
-                                    super::super::record_search::runtime_table_record_lean(
+                                    super::super::record_search::runtime_table_record_lean_in_collection(
                                         entity_opt,
+                                        &query.table,
                                     )
                                 } else {
                                     runtime_table_record_from_entity_projected(
@@ -983,7 +996,10 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         })
                     }
                 } else if lean_select_star {
-                    super::super::record_search::runtime_table_record_lean(entity.clone())
+                    super::super::record_search::runtime_table_record_lean_in_collection(
+                        entity.clone(),
+                        &query.table,
+                    )
                 } else {
                     runtime_table_record_from_entity(entity.clone())
                 };
@@ -1040,7 +1056,10 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                             })
                         }
                     } else if lean_select_star {
-                        super::super::record_search::runtime_table_record_lean(entity.clone())
+                        super::super::record_search::runtime_table_record_lean_in_collection(
+                            entity.clone(),
+                            &query.table,
+                        )
                         } else {
                             runtime_table_record_from_entity(entity.clone())
                         };
@@ -1176,13 +1195,21 @@ pub(crate) fn execute_runtime_canonical_table_node(
             // ── FAST PATH 1: Direct entity_id lookup (O(1) instead of full scan) ──
             if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
                 let store = db.store();
-                if let Some(entity) = store.get(&context.query.table, EntityId::new(entity_id)) {
+                let entity = store
+                    .get_table_row_by_logical_id(&context.query.table, EntityId::new(entity_id))
+                    .or_else(|| store.get(&context.query.table, EntityId::new(entity_id)));
+                if let Some(entity) = entity {
                     if !crate::runtime::impl_core::entity_visible_under_current_snapshot(&entity) {
                         return Ok(Vec::new());
                     }
-                    return Ok(runtime_table_record_from_entity(entity)
+                    return Ok(
+                        super::super::record_search::runtime_table_record_lean_in_collection(
+                            entity,
+                            &context.query.table,
+                        )
                         .into_iter()
-                        .collect());
+                        .collect(),
+                    );
                 }
                 return Ok(Vec::new());
             }
@@ -1331,13 +1358,21 @@ pub(crate) fn execute_runtime_canonical_table_node(
             // ── FAST PATH: Direct entity_id lookup (O(1)) ──
             if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
                 let store = db.store();
-                if let Some(entity) = store.get(&context.query.table, EntityId::new(entity_id)) {
+                let entity = store
+                    .get_table_row_by_logical_id(&context.query.table, EntityId::new(entity_id))
+                    .or_else(|| store.get(&context.query.table, EntityId::new(entity_id)));
+                if let Some(entity) = entity {
                     if !crate::runtime::impl_core::entity_visible_under_current_snapshot(&entity) {
                         return Ok(Vec::new());
                     }
-                    return Ok(runtime_table_record_from_entity(entity)
+                    return Ok(
+                        super::super::record_search::runtime_table_record_lean_in_collection(
+                            entity,
+                            &context.query.table,
+                        )
                         .into_iter()
-                        .collect());
+                        .collect(),
+                    );
                 }
                 return Ok(Vec::new());
             }
