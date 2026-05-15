@@ -36,6 +36,10 @@ The MCP server communicates over stdio using the MCP protocol, compatible with C
 | `reddb_update` | Update entities matching a filter |
 | `reddb_delete` | Delete an entity by ID |
 
+Entity and search tool results use the public item identity vocabulary: `rid`
+is the RedDB ID and `kind` is the item kind such as `row`, `document`, `kv`,
+`node`, `edge`, or `vector`.
+
 ### Search
 
 | Tool | Description |

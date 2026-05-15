@@ -37,14 +37,8 @@ impl RedDBServer {
                             "collection".to_string(),
                             JsonValue::String(e.collection.clone()),
                         );
-                        ev.insert(
-                            "entity_id".to_string(),
-                            JsonValue::Number(e.entity_id as f64),
-                        );
-                        ev.insert(
-                            "entity_kind".to_string(),
-                            JsonValue::String(e.entity_kind.clone()),
-                        );
+                        ev.insert("rid".to_string(), JsonValue::Number(e.rid() as f64));
+                        ev.insert("kind".to_string(), JsonValue::String(e.kind().to_string()));
                         JsonValue::Object(ev)
                     })
                     .collect(),

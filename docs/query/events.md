@@ -39,6 +39,10 @@ clause, and follow the active tenant scope. `EVENTS BACKFILL STATUS <collection>
 is reserved for the status slice and currently returns an explicit
 not-implemented error.
 
+Event payloads identify changed items with the public item envelope vocabulary:
+`rid` is the RedDB ID, `collection` is the source collection, and `kind` is the
+item kind such as `row`, `document`, `kv`, `node`, or `edge`.
+
 Inspect subscriptions with `EVENTS STATUS`:
 
 ```sql

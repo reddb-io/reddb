@@ -159,11 +159,13 @@ impl<'rt> MutationEngine<'rt> {
             .map_err(RedDBError::Internal)?;
 
         // CDC + cache invalidation (once)
+        let cdc_item_kind =
+            self.collection_cdc_item_kind_for_fields(&collection, Some(row.fields.as_slice()));
         let lsn = self.runtime.cdc_emit(
             crate::replication::cdc::ChangeOperation::Insert,
             &collection,
             id.raw(),
-            "table",
+            cdc_item_kind,
         );
         if !self.suppress_events {
             self.runtime
@@ -247,6 +249,10 @@ impl<'rt> MutationEngine<'rt> {
             .iter()
             .any(|r| !r.node_links.is_empty() || !r.vector_links.is_empty());
         let needs_entity_fetch = ci_enabled || any_xrefs;
+        let cdc_item_kind = self.collection_cdc_item_kind_for_fields(
+            &collection,
+            rows.first().map(|row| row.fields.as_slice()),
+        );
 
         // Build the `Arc<str>` for the collection name once and clone
         // it cheaply per row. Before this the per-row path did
@@ -335,15 +341,46 @@ impl<'rt> MutationEngine<'rt> {
         // Previous code called cdc_emit() per row which triggered
         // invalidate_result_cache() N times — one write-lock acquisition per row.
         self.runtime.invalidate_result_cache();
-        let lsns =
-            self.runtime
-                .cdc_emit_insert_batch_no_cache_invalidate(&collection, &ids, "table");
+        let lsns = self.runtime.cdc_emit_insert_batch_no_cache_invalidate(
+            &collection,
+            &ids,
+            cdc_item_kind,
+        );
         if !self.suppress_events {
             self.runtime
                 .emit_insert_events_for_collection(&collection, &ids, &lsns)?;
         }
 
         Ok(MutationResult { ids })
+    }
+
+    fn collection_cdc_item_kind_for_fields(
+        &self,
+        collection: &str,
+        fields: Option<&[(String, Value)]>,
+    ) -> &'static str {
+        match self
+            .runtime
+            .db()
+            .collection_contract(collection)
+            .map(|contract| contract.declared_model)
+        {
+            Some(crate::catalog::CollectionModel::Kv)
+            | Some(crate::catalog::CollectionModel::Vault) => "kv",
+            Some(crate::catalog::CollectionModel::Document) => "document",
+            _ if fields.is_some_and(Self::row_fields_are_kv) => "kv",
+            _ => "row",
+        }
+    }
+
+    fn row_fields_are_kv(fields: &[(String, Value)]) -> bool {
+        fields.len() == 2
+            && fields
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("key"))
+            && fields
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("value"))
     }
 
     // ── Implicit primary-key index (#112) ────────────────────────────────
@@ -657,6 +694,7 @@ pub(crate) fn backfill_event_payload(
         "collection".to_string(),
         JsonValue::String(collection.to_string()),
     );
+    insert_event_item_identity(&mut object, raw_entity_id);
     object.insert("id".to_string(), subject_id);
     object.insert(
         "ts".to_string(),
@@ -707,6 +745,7 @@ fn insert_event_payload(
         "collection".to_string(),
         JsonValue::String(collection.to_string()),
     );
+    insert_event_item_identity(&mut object, id);
     object.insert("id".to_string(), subject_id);
     object.insert(
         "ts".to_string(),
@@ -737,6 +776,11 @@ fn deterministic_event_id(collection: &str, id: &str, lsn: u64, op: &str) -> Str
     hasher.update(&lsn.to_le_bytes());
     hasher.update(op.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+fn insert_event_item_identity(object: &mut JsonMap<String, JsonValue>, rid: u64) {
+    object.insert("rid".to_string(), JsonValue::Number(rid as f64));
+    object.insert("kind".to_string(), JsonValue::String("row".to_string()));
 }
 
 fn json_id_for_hash(value: &JsonValue) -> String {
@@ -966,6 +1010,7 @@ fn update_event_payload(
         "collection".to_string(),
         JsonValue::String(collection.to_string()),
     );
+    insert_event_item_identity(&mut object, id);
     object.insert("id".to_string(), id_json);
     object.insert(
         "ts".to_string(),
@@ -1295,6 +1340,7 @@ fn delete_event_payload(
         "collection".to_string(),
         JsonValue::String(collection.to_string()),
     );
+    insert_event_item_identity(&mut object, id);
     object.insert("id".to_string(), id_json);
     object.insert(
         "ts".to_string(),

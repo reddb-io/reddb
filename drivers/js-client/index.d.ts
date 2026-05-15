@@ -43,8 +43,12 @@ export type QueryParam =
   | number[]
   | Record<string, unknown>
 
-export interface InsertResult { affected: number; id: string | number }
-export interface BulkInsertResult { affected: number; ids: Array<string | number> }
+export interface InsertResult { affected: number; rid: string | number; id: string | number }
+export interface BulkInsertResult {
+  affected: number
+  rids: Array<string | number>
+  ids: Array<string | number>
+}
 export interface GetResult { entity: Record<string, unknown> | null }
 export interface DeleteResult { affected: number }
 export interface CollectionMeta {
