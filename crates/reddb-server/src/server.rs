@@ -214,6 +214,41 @@ enum DeploymentProfile {
     Serverless,
 }
 
+fn percent_decode_path_segment(input: &str) -> Result<String, String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' => {
+                if index + 2 >= bytes.len() {
+                    return Err("truncated percent escape".to_string());
+                }
+                let high = hex_value(bytes[index + 1])
+                    .ok_or_else(|| "invalid percent escape".to_string())?;
+                let low = hex_value(bytes[index + 2])
+                    .ok_or_else(|| "invalid percent escape".to_string())?;
+                out.push((high << 4) | low);
+                index += 3;
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(out).map_err(|_| "path segment is not valid UTF-8".to_string())
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ParsedQueryRequest {
     query: String,

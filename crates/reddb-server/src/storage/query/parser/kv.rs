@@ -17,6 +17,7 @@
 //! Key forms:
 //! - Bare:   `name`          → collection = "kv_default", key = "name"
 //! - Dotted: `sessions.abc`  → collection = "sessions", key = "abc"
+//! - Quoted: `'a:b'` or `sessions.'a:b'` for keys with special characters
 
 use super::super::ast::{KvCommand, QueryExpr};
 use super::super::lexer::Token;
@@ -390,8 +391,8 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parse a key that may be bare (`name`), dotted (`collection.key`), or
-    /// colon-qualified (`collection:key`).
+    /// Parse a key that may be bare (`name`) or dotted (`collection.key`).
+    /// Keys with punctuation must be quoted as a string literal.
     /// Returns `(collection, key)`.
     pub(crate) fn parse_kv_key(
         &mut self,
@@ -399,11 +400,8 @@ impl<'a> Parser<'a> {
     ) -> Result<(String, String), ParseError> {
         let first = self.parse_kv_key_part()?;
         if self.consume(&Token::Colon)? {
-            let mut segments = vec![self.parse_kv_key_part()?];
-            while self.consume(&Token::Colon)? {
-                segments.push(self.parse_kv_key_part()?);
-            }
-            return Ok((first, segments.join(":")));
+            let second = self.parse_kv_key_part()?;
+            return Err(self.unquoted_kv_special_key_error(format!("'{first}:{second}'")));
         }
 
         if !self.consume(&Token::Dot)? {
@@ -413,6 +411,13 @@ impl<'a> Parser<'a> {
         let mut segments = vec![first, self.parse_kv_key_part()?];
         while self.consume(&Token::Dot)? {
             segments.push(self.parse_kv_key_part()?);
+        }
+        if self.consume(&Token::Colon)? {
+            let next = self.parse_kv_key_part()?;
+            let mut key = segments[1..].join(".");
+            key.push(':');
+            key.push_str(&next);
+            return Err(self.unquoted_kv_special_key_error(format!("{}.'{}'", segments[0], key)));
         }
 
         if model == CollectionModel::Vault {
@@ -438,6 +443,13 @@ impl<'a> Parser<'a> {
         }
 
         Ok((segments.remove(0), segments.join(".")))
+    }
+
+    fn unquoted_kv_special_key_error(&self, suggestion: String) -> ParseError {
+        ParseError::new(
+            format!("KV keys containing ':' must be quoted as string literals; use {suggestion}"),
+            self.position(),
+        )
     }
 
     fn parse_kv_key_part(&mut self) -> Result<String, ParseError> {
