@@ -18,9 +18,10 @@ use super::helpers::{
 };
 use super::indexed_scan::{
     extract_cross_index_predicates, find_range_predicate_with_sorted_index,
-    try_covered_sorted_index_query, try_sorted_index_filtered_by_set, try_sorted_index_lookup,
+    try_sorted_index_filtered_by_set, try_sorted_index_lookup,
 };
 use super::*;
+use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
 use crate::storage::query::sql_lowering::{
     effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
     effective_table_projections,
@@ -192,40 +193,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             );
         }
         if let Some(entity_ids) = sorted_res {
-            // ── COVERED QUERY: skip heap fetch when projection ⊆ indexed column ──
-            //
-            // `SELECT age FROM t WHERE age > 30` — the BTree key IS the value.
-            // Return directly from index without touching flat_entities.
-            // Only valid when: single column projection matching the indexed column,
-            // no GROUP BY, no HAVING, no ORDER BY (those need entity data).
+            // Even covered projections must fetch the candidate row so MVCC
+            // can reject stale or tombstoned index IDs before materialization.
             let explicit_cols = extract_select_column_names(&effective_projections);
-            let is_covered_candidate = !explicit_cols.is_empty()
-                && effective_group_by.is_empty()
-                && effective_having.is_none()
-                && query.order_by.is_empty();
-
-            if is_covered_candidate {
-                let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
-                if let Some(values) = super::indexed_scan::try_covered_sorted_index_query(
-                    filter,
-                    &query.table,
-                    idx_store,
-                    &explicit_cols,
-                    limit,
-                ) {
-                    // Each value becomes a single-field UnifiedRecord
-                    let col_name = &explicit_cols[0];
-                    let records = values
-                        .into_iter()
-                        .map(|v| {
-                            let mut rec = UnifiedRecord::new();
-                            rec.set(col_name, v);
-                            rec
-                        })
-                        .collect();
-                    return Ok(records);
-                }
-            }
 
             // Re-apply the full filter — when the filter is a compound AND, the
             // sorted lookup used only the range predicate to narrow candidates.
@@ -291,6 +261,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 let mut records: Vec<UnifiedRecord> =
                     Vec::with_capacity(entity_ids.len().min(limit));
                 let mut stop = false;
+                let table_row_resolver = TableRowMvccReadResolver::current_statement();
                 manager.for_each_id(&entity_ids, |_idx, entity| {
                     if stop {
                         return;
@@ -299,7 +270,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         stop = true;
                         return;
                     }
-                    if !crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
+                    if table_row_resolver.resolve_candidate(entity).is_none() {
                         return;
                     }
                     if let Some(cf) = compiled_filter.as_ref() {
@@ -319,11 +290,12 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             // Projection path (explicit columns): keep owned-entity flow.
             let entities = store.get_batch(&query.table, &entity_ids);
             let mut records = Vec::with_capacity(entity_ids.len().min(limit));
+            let table_row_resolver = TableRowMvccReadResolver::current_statement();
             for entity_opt in entities.into_iter().flatten() {
                 if records.len() >= limit {
                     break;
                 }
-                if !crate::runtime::impl_core::entity_visible_under_current_snapshot(&entity_opt) {
+                if table_row_resolver.resolve_candidate(&entity_opt).is_none() {
                     continue;
                 }
                 if let Some(cf) = compiled_filter.as_ref() {
@@ -398,79 +370,17 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                     ),
                                 });
                             let explicit_cols = extract_select_column_names(&effective_projections);
-                            // ── COVERED QUERY: cross-index bitmap path ───────────
-                            // If every projected column is the eq_col whose value we
-                            // already have from the filter predicate, skip entity fetch.
-                            let is_covered = !explicit_cols.is_empty()
-                                && effective_group_by.is_empty()
-                                && effective_having.is_none()
-                                && query.order_by.is_empty()
-                                && explicit_cols.iter().all(|c| c == &eq_col);
-                            if is_covered {
-                                use crate::storage::query::ast::Filter;
-                                let eq_value = match filter {
-                                    Filter::And(_, _) => {
-                                        // Find the eq_col value in the original filter
-                                        let mut v = None;
-                                        let f = filter;
-                                        match f {
-                                            Filter::Compare {
-                                                field:
-                                                    crate::storage::query::ast::FieldRef::TableColumn {
-                                                        column,
-                                                        ..
-                                                    },
-                                                op: crate::storage::query::ast::CompareOp::Eq,
-                                                value,
-                                            } if column == &eq_col => {
-                                                v = Some(value.clone());
-                                            }
-                                            Filter::And(l, r) => {
-                                                // Walk left first, then right
-                                                let mut stk = vec![l.as_ref(), r.as_ref()];
-                                                while let Some(node) = stk.pop() {
-                                                    match node {
-                                                            Filter::Compare {
-                                                                field: crate::storage::query::ast::FieldRef::TableColumn { column, .. },
-                                                                op: crate::storage::query::ast::CompareOp::Eq,
-                                                                value,
-                                                            } if column == &eq_col => { v = Some(value.clone()); break; }
-                                                            Filter::And(a, b) => { stk.push(a); stk.push(b); }
-                                                            _ => {}
-                                                        }
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                        v
-                                    }
-                                    _ => None,
-                                };
-                                if let Some(val) = eq_value {
-                                    let records = intersection_ids
-                                        .iter()
-                                        .take(limit)
-                                        .map(|_| {
-                                            let mut rec = UnifiedRecord::with_capacity(1);
-                                            rec.set(&eq_col, val.clone());
-                                            rec
-                                        })
-                                        .collect();
-                                    return Ok(records);
-                                }
-                            }
 
                             let store = db.store();
                             let entities = store.get_batch(&query.table, &intersection_ids);
                             let lean = explicit_cols.is_empty();
                             let mut records = Vec::with_capacity(intersection_ids.len().min(limit));
+                            let table_row_resolver = TableRowMvccReadResolver::current_statement();
                             for entity_opt in entities.into_iter().flatten() {
                                 if records.len() >= limit {
                                     break;
                                 }
-                                if !crate::runtime::impl_core::entity_visible_under_current_snapshot(
-                                    &entity_opt,
-                                ) {
+                                if table_row_resolver.resolve_candidate(&entity_opt).is_none() {
                                     continue;
                                 }
                                 if compiled_filter
@@ -572,37 +482,6 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
 
             let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
             let explicit_cols = extract_select_column_names(&effective_projections);
-
-            // ── COVERED QUERY: TID bitmap path ───────────────────────────────
-            // When every projected column is an equality column whose value
-            // is available from the filter predicate, skip entity fetch entirely.
-            // e.g. `SELECT city FROM t WHERE city='NYC' AND status='active'`
-            // returns {city:'NYC'} for every matching entity ID without a heap read.
-            let is_covered = !explicit_cols.is_empty()
-                && effective_group_by.is_empty()
-                && effective_having.is_none()
-                && query.order_by.is_empty()
-                && explicit_cols.iter().all(|proj_col| {
-                    eq_candidates
-                        .iter()
-                        .any(|(eq_col, _, _)| eq_col == proj_col)
-                });
-            if is_covered {
-                // Build a single template record from eq_candidates values.
-                // All result rows are identical (same equality predicates).
-                let mut template = UnifiedRecord::with_capacity(explicit_cols.len());
-                for proj_col in &explicit_cols {
-                    if let Some((_, _, val)) = eq_candidates.iter().find(|(c, _, _)| c == proj_col)
-                    {
-                        template.set(proj_col, val.clone());
-                    }
-                }
-                // Count surviving IDs after optional range narrowing — we still need
-                // to know how many rows match, but we don't touch the entity heap.
-                let count = intersection.len().min(limit);
-                return Ok(vec![template; count]);
-            }
-
             let lean = explicit_cols.is_empty();
 
             // Optional: narrow via sorted range index filtered by the eq-intersection set.
@@ -637,11 +516,12 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             let store = db.store();
             let entities = store.get_batch(&query.table, &entity_ids);
             let mut records = Vec::with_capacity(entity_ids.len().min(limit));
+            let table_row_resolver = TableRowMvccReadResolver::current_statement();
             for entity_opt in entities.into_iter().flatten() {
                 if records.len() >= limit {
                     break;
                 }
-                if !crate::runtime::impl_core::entity_visible_under_current_snapshot(&entity_opt) {
+                if table_row_resolver.resolve_candidate(&entity_opt).is_none() {
                     continue;
                 }
                 if compiled_filter.evaluate(&entity_opt) {
@@ -668,65 +548,6 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     {
         if let Some((column, value_bytes)) = extract_index_candidate(filter) {
             if let Some(idx) = idx_store.find_index_for_column(&query.table, &column) {
-                // ── INDEX-ONLY SCAN CHECK ──────────────────────────────────────
-                // When the query projects only the indexed column (SELECT col FROM t WHERE col = ?)
-                // and the collection has sealed (all-visible) data, skip the entity heap fetch.
-                // The value we need is the equality predicate value itself — no entity scan needed.
-                let projected_cols = extract_select_column_names(&effective_projections);
-                let index_only_eligible = !projected_cols.is_empty()
-                    && projected_cols.iter().all(|c| c == &column)
-                    && effective_group_by.is_empty()
-                    && effective_having.is_none()
-                    && query.order_by.is_empty();
-
-                if index_only_eligible {
-                    let manager_opt = db.store().get_collection(query.table.as_str());
-                    let vis_fraction = manager_opt
-                        .as_ref()
-                        .map(|m| m.all_visible_fraction())
-                        .unwrap_or(0.0);
-
-                    use crate::storage::query::planner::index_only::{
-                        decide, CoveringIndex, IndexOnlyDecision,
-                    };
-                    let covering = CoveringIndex {
-                        name: idx.name.clone(),
-                        covered_columns: vec![column.clone()],
-                    };
-                    let filter_cols = vec![column.clone()];
-                    let decision = decide(&projected_cols, &filter_cols, &covering, vis_fraction);
-
-                    if decision == IndexOnlyDecision::FullCover {
-                        // Return the equality value directly — no entity fetch
-                        use crate::storage::schema::Value as SchemaValue;
-                        let value = match filter {
-                            crate::storage::query::ast::Filter::Compare { value, .. } => {
-                                value.clone()
-                            }
-                            _ => SchemaValue::Null,
-                        };
-                        // Each matching entity_id = one result row with {column: value}
-                        let entity_ids = idx_store
-                            .hash_lookup(
-                                &query.table,
-                                idx.hash_lookup_name().as_ref(),
-                                &value_bytes,
-                            )
-                            .map_err(|err| {
-                                RedDBError::Internal(format!("hash index lookup failed: {err}"))
-                            })?;
-                        let records = entity_ids
-                            .iter()
-                            .map(|_eid| {
-                                let mut rec = UnifiedRecord::with_capacity(1);
-                                rec.set(&column, value.clone());
-                                rec
-                            })
-                            .collect::<Vec<_>>();
-                        return Ok(records);
-                    }
-                }
-
                 let mut entity_ids = idx_store
                     .hash_lookup(&query.table, idx.hash_lookup_name().as_ref(), &value_bytes)
                     .map_err(|err| {
@@ -803,13 +624,12 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         let explicit_cols = extract_select_column_names(&effective_projections);
                         let lean = explicit_cols.is_empty();
                         let mut records = Vec::with_capacity(entity_ids.len().min(limit));
+                        let table_row_resolver = TableRowMvccReadResolver::current_statement();
                         for entity_opt in entities.into_iter().flatten() {
                             if records.len() >= limit {
                                 break;
                             }
-                            if !crate::runtime::impl_core::entity_visible_under_current_snapshot(
-                                &entity_opt,
-                            ) {
+                            if table_row_resolver.resolve_candidate(&entity_opt).is_none() {
                                 continue;
                             }
                             if compiled_filter
@@ -1532,5 +1352,92 @@ fn runtime_field_ref_uses_document_path(field: &FieldRef, query: &TableQuery) ->
                     && query.alias.as_deref() != Some(table.as_str()))
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+    use crate::storage::schema::Value;
+    use crate::storage::unified::EntityId;
+    use crate::{RedDBOptions, RedDBRuntime};
+
+    fn rt() -> RedDBRuntime {
+        RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime")
+    }
+
+    fn exec(rt: &RedDBRuntime, sql: &str) {
+        rt.execute_query(sql)
+            .unwrap_or_else(|err| panic!("{sql}: {err:?}"));
+    }
+
+    fn red_entity_id(rt: &RedDBRuntime, table: &str, id: i64) -> u64 {
+        let result = rt
+            .execute_query(&format!(
+                "SELECT red_entity_id FROM {table} WHERE id = {id}"
+            ))
+            .unwrap_or_else(|err| panic!("select red_entity_id from {table}: {err:?}"));
+        match result.result.records[0].get("red_entity_id") {
+            Some(Value::UnsignedInteger(id)) => *id,
+            Some(Value::Integer(id)) => *id as u64,
+            other => panic!("expected red_entity_id, got {other:?}"),
+        }
+    }
+
+    fn text_values(rt: &RedDBRuntime, sql: &str, column: &str) -> Vec<String> {
+        let result = rt
+            .execute_query(sql)
+            .unwrap_or_else(|err| panic!("{sql}: {err:?}"));
+        result
+            .result
+            .records
+            .iter()
+            .map(|record| match record.get(column) {
+                Some(Value::Text(value)) => value.to_string(),
+                other => panic!("expected text column {column}, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn covered_sorted_index_rejects_tombstoned_stale_candidate() {
+        let rt = rt();
+        set_current_connection_id(51001);
+        exec(
+            &rt,
+            "CREATE TABLE mvcc_idx_stale (id INT, status TEXT, marker TEXT)",
+        );
+        exec(
+            &rt,
+            "INSERT INTO mvcc_idx_stale (id, status, marker) VALUES (1, 'gone', 'stable')",
+        );
+        exec(
+            &rt,
+            "CREATE INDEX idx_mvcc_stale_status ON mvcc_idx_stale (status) USING BTREE",
+        );
+        let stale_id = red_entity_id(&rt, "mvcc_idx_stale", 1);
+
+        exec(&rt, "DELETE FROM mvcc_idx_stale WHERE id = 1");
+        rt.index_store_ref()
+            .index_entity_insert(
+                "mvcc_idx_stale",
+                EntityId::new(stale_id),
+                &[("status".to_string(), Value::text("gone".to_string()))],
+            )
+            .expect("force stale index entry");
+
+        let indexed = text_values(
+            &rt,
+            "SELECT status FROM mvcc_idx_stale WHERE status IN ('gone')",
+            "status",
+        );
+        let scanned = text_values(
+            &rt,
+            "SELECT status FROM mvcc_idx_stale WHERE marker = 'stable'",
+            "status",
+        );
+        assert_eq!(indexed, scanned);
+        assert!(indexed.is_empty());
+        clear_current_connection_id();
     }
 }
