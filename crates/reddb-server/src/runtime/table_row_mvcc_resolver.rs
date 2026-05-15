@@ -43,6 +43,20 @@ impl TableRowMvccReadResolver {
         }
     }
 
+    pub(crate) fn resolve_read_candidate<'a>(
+        &self,
+        candidate: &'a UnifiedEntity,
+    ) -> Option<&'a UnifiedEntity> {
+        if matches!(candidate.kind, EntityKind::TableRow { .. }) {
+            return self.resolve_candidate(candidate);
+        }
+        if self.visible(candidate) {
+            Some(candidate)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn resolve_logical_id(
         &self,
         store: &UnifiedStore,
@@ -139,5 +153,17 @@ mod tests {
         assert!(resolver.resolve_candidate(&row_with_xids(11, 0)).is_none());
         assert!(resolver.resolve_candidate(&row_with_xids(5, 9)).is_none());
         assert!(resolver.resolve_candidate(&row_with_xids(5, 11)).is_some());
+    }
+
+    #[test]
+    fn read_candidate_uses_same_snapshot_gate_for_table_rows() {
+        let resolver = TableRowMvccReadResolver::captured(Some(snapshot_context(10)));
+
+        assert!(resolver
+            .resolve_read_candidate(&row_with_xids(5, 11))
+            .is_some());
+        assert!(resolver
+            .resolve_read_candidate(&row_with_xids(11, 0))
+            .is_none());
     }
 }
