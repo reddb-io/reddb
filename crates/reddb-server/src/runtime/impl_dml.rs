@@ -645,25 +645,25 @@ impl RedDBRuntime {
                             let (columns, values) = pairwise_columns_values(&edge_values);
                             let label = find_column_value_string(&columns, &values, "label")?;
                             ensure_non_tree_structural_edge_label(&label)?;
-                            let from_id = resolve_edge_endpoint(
+                            let from_id = resolve_edge_endpoint_any(
                                 self.inner.db.store().as_ref(),
                                 &query.table,
                                 &columns,
                                 &values,
-                                "from",
+                                &["from_rid", "from"],
                             )?;
-                            let to_id = resolve_edge_endpoint(
+                            let to_id = resolve_edge_endpoint_any(
                                 self.inner.db.store().as_ref(),
                                 &query.table,
                                 &columns,
                                 &values,
-                                "to",
+                                &["to_rid", "to"],
                             )?;
                             let weight = find_column_value_f32_opt(&columns, &values, "weight");
                             let properties = extract_remaining_properties(
                                 &columns,
                                 &values,
-                                &["label", "from", "to", "weight"],
+                                &["label", "from_rid", "to_rid", "from", "to", "weight"],
                             );
                             crate::reserved_fields::ensure_no_reserved_public_item_fields(
                                 properties.iter().map(|(key, _)| key.as_str()),
@@ -730,11 +730,19 @@ impl RedDBRuntime {
                 for id in &ids {
                     self.stamp_xmin_if_in_txn(&query.table, *id);
                 }
+                if query.returning.is_some() {
+                    returning_field_snaps = graph_insert_returning_snapshots(
+                        self.inner.db.store().as_ref(),
+                        &query.table,
+                        &ids,
+                    );
+                }
                 self.cdc_emit_insert_batch_no_cache_invalidate(&query.table, &ids, entity_kind);
+                let store = self.inner.db.store();
                 entity_outputs.extend(ids.iter().map(|id| {
                     crate::application::entity::CreateEntityOutput {
                         id: *id,
-                        entity: None,
+                        entity: store.get(&query.table, *id),
                     }
                 }));
                 inserted_count = ids.len() as u64;
@@ -1508,6 +1516,8 @@ impl RedDBRuntime {
             );
         }
 
+        ensure_graph_identity_update_allowed(&entity, compiled_plan, &assignments)?;
+
         self.apply_loaded_patch_entity_core(
             collection,
             entity,
@@ -1668,6 +1678,36 @@ impl RedDBRuntime {
     }
 }
 
+fn ensure_graph_identity_update_allowed(
+    entity: &UnifiedEntity,
+    compiled_plan: &CompiledUpdatePlan,
+    assignments: &MaterializedUpdateAssignments,
+) -> RedDBResult<()> {
+    if !matches!(entity.data, EntityData::Node(_) | EntityData::Edge(_)) {
+        return Ok(());
+    }
+
+    for (column, _) in compiled_plan
+        .static_field_assignments
+        .iter()
+        .chain(assignments.dynamic_field_assignments.iter())
+    {
+        if is_immutable_graph_identity_field(column) {
+            return Err(RedDBError::Query(format!(
+                "immutable graph field '{column}' cannot be updated"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn is_immutable_graph_identity_field(column: &str) -> bool {
+    ["rid", "label", "from_rid", "to_rid", "from", "to"]
+        .iter()
+        .any(|reserved| column.eq_ignore_ascii_case(reserved))
+}
+
 fn build_patch_operations_from_materialized_assignments(
     compiled_plan: &CompiledUpdatePlan,
     assignments: MaterializedUpdateAssignments,
@@ -1786,15 +1826,15 @@ fn build_returning_result(
     outputs: Option<&[CreateEntityOutput]>,
 ) -> UnifiedResult {
     let project_all = items.iter().any(|it| matches!(it, ReturningItem::All));
-    let public_row_outputs = outputs.is_some_and(|outs| {
+    let public_item_outputs = outputs.is_some_and(|outs| {
         outs.first()
             .and_then(|out| out.entity.as_ref())
-            .is_some_and(|entity| entity.data.as_row().is_some())
+            .is_some_and(|entity| public_returning_item_kind(entity).is_some())
     });
 
     let mut columns: Vec<String> = if project_all {
         let mut cols: Vec<String> = Vec::new();
-        if public_row_outputs {
+        if public_item_outputs {
             cols.extend(
                 [
                     "rid",
@@ -1836,35 +1876,31 @@ fn build_returning_result(
         let mut values: HashMap<Arc<str>, Value> = HashMap::with_capacity(columns.len());
         if let Some(outs) = outputs {
             if let Some(out) = outs.get(idx) {
-                if let Some(entity) = out
-                    .entity
-                    .as_ref()
-                    .filter(|entity| entity.data.as_row().is_some())
-                {
-                    values.insert(
-                        Arc::clone(&sys_key_rid()),
-                        Value::UnsignedInteger(out.id.raw()),
-                    );
-                    values.insert(
-                        Arc::clone(&sys_key_red_entity_id()),
-                        Value::UnsignedInteger(out.id.raw()),
-                    );
-                    values.insert(
-                        Arc::clone(&sys_key_collection()),
-                        Value::text(entity.kind.collection().to_string()),
-                    );
-                    values.insert(
-                        Arc::clone(&sys_key_kind()),
-                        Value::text(public_returning_row_kind(entity).to_string()),
-                    );
-                    values.insert(
-                        Arc::clone(&sys_key_created_at()),
-                        Value::UnsignedInteger(entity.created_at),
-                    );
-                    values.insert(
-                        Arc::clone(&sys_key_updated_at()),
-                        Value::UnsignedInteger(entity.updated_at),
-                    );
+                if let Some(entity) = out.entity.as_ref() {
+                    if let Some(kind) = public_returning_item_kind(entity) {
+                        values.insert(
+                            Arc::clone(&sys_key_rid()),
+                            Value::UnsignedInteger(out.id.raw()),
+                        );
+                        values.insert(
+                            Arc::clone(&sys_key_collection()),
+                            Value::text(entity.kind.collection().to_string()),
+                        );
+                        values.insert(Arc::clone(&sys_key_kind()), Value::text(kind.to_string()));
+                        values.insert(
+                            Arc::clone(&sys_key_created_at()),
+                            Value::UnsignedInteger(entity.created_at),
+                        );
+                        values.insert(
+                            Arc::clone(&sys_key_updated_at()),
+                            Value::UnsignedInteger(entity.updated_at),
+                        );
+                    } else {
+                        values.insert(
+                            Arc::clone(&sys_key_red_entity_id()),
+                            Value::Integer(out.id.raw() as i64),
+                        );
+                    }
                 } else {
                     values.insert(
                         Arc::clone(&sys_key_red_entity_id()),
@@ -1895,6 +1931,19 @@ fn build_returning_result(
         records,
         stats: Default::default(),
         pre_serialized_json: None,
+    }
+}
+
+fn public_returning_item_kind(entity: &crate::storage::UnifiedEntity) -> Option<&'static str> {
+    match (&entity.kind, &entity.data) {
+        (crate::storage::EntityKind::GraphNode(_), crate::storage::EntityData::Node(_)) => {
+            Some("node")
+        }
+        (crate::storage::EntityKind::GraphEdge(_), crate::storage::EntityData::Edge(_)) => {
+            Some("edge")
+        }
+        (_, crate::storage::EntityData::Row(_)) => Some(public_returning_row_kind(entity)),
+        _ => None,
     }
 }
 
@@ -1940,6 +1989,31 @@ fn row_insert_returning_snapshots(
                 .map(entity_row_fields_snapshot)
                 .filter(|snap| !snap.is_empty())
                 .unwrap_or_else(|| fallback.get(idx).cloned().unwrap_or_default())
+        })
+        .collect()
+}
+
+fn graph_insert_returning_snapshots(
+    store: &crate::storage::unified::UnifiedStore,
+    collection: &str,
+    ids: &[EntityId],
+) -> Vec<Vec<(String, Value)>> {
+    let Some(manager) = store.get_collection(collection) else {
+        return Vec::new();
+    };
+
+    ids.iter()
+        .filter_map(|id| manager.get(*id))
+        .filter_map(|entity| {
+            let mut record = runtime_any_record_from_entity_ref(&entity)?;
+            record.set_arc(sys_key_collection(), Value::text(collection.to_string()));
+            Some(record)
+        })
+        .map(|record| {
+            record
+                .iter_fields()
+                .map(|(key, value)| (key.as_ref().to_string(), value.clone()))
+                .collect()
         })
         .collect()
 }
@@ -2463,6 +2537,28 @@ fn resolve_edge_endpoint(
             "column '{name}' expected integer or node label, got {other:?}"
         ))),
     }
+}
+
+fn resolve_edge_endpoint_any(
+    store: &crate::storage::unified::UnifiedStore,
+    collection: &str,
+    columns: &[String],
+    values: &[Value],
+    names: &[&str],
+) -> RedDBResult<u64> {
+    for name in names {
+        if columns
+            .iter()
+            .any(|column| column.eq_ignore_ascii_case(name))
+        {
+            return resolve_edge_endpoint(store, collection, columns, values, name);
+        }
+    }
+
+    Err(RedDBError::Query(format!(
+        "required column '{}' not found in INSERT",
+        names.first().copied().unwrap_or("from_rid")
+    )))
 }
 
 /// Find a required column value and coerce to u64.
