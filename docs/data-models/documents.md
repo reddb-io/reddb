@@ -160,13 +160,32 @@ curl -X POST http://127.0.0.1:8080/query \
 
 ## Updating Documents
 
-Patch specific fields in a document:
+Patch specific nested fields in a document with JSON-pointer-style paths under `body`:
+
+```bash
+curl -X PATCH http://127.0.0.1:8080/collections/events/entities/42 \
+  -H 'content-type: application/json' \
+  -d '{
+    "operations": [
+      { "op": "set", "path": "/body/details/reviewed", "value": true },
+      { "op": "set", "path": "/body/details/reviewed_by", "value": "admin" },
+      { "op": "unset", "path": "/body/details/queued_for_review" }
+    ]
+  }'
+```
+
+`set` creates missing intermediate objects. `unset` on an absent field is a no-op.
+Array positional paths such as `/body/tags/0` are not supported; replace the array or the full
+document body instead.
+
+Full document body replacement remains available through `body` without `operations`:
 
 ```bash
 curl -X PATCH http://127.0.0.1:8080/collections/events/entities/42 \
   -H 'content-type: application/json' \
   -d '{
     "body": {
+      "event_type": "reviewed",
       "details": {
         "reviewed": true,
         "reviewed_by": "admin"
