@@ -137,6 +137,9 @@ pub enum EvalError {
     ArithmeticOverflow { op: BinOp },
     /// `n / 0` or `n % 0`.
     DivisionByZero,
+    /// Numeric scalar evaluation produced an undefined or non-finite
+    /// float result (domain error, overflow, NaN, or infinity).
+    InvalidNumericResult { function: String, reason: String },
     /// `IN (...)` against an empty value list — preserves the legacy
     /// "always false" semantic but recorded explicitly so the
     /// optimiser can fold it.
@@ -169,6 +172,9 @@ impl std::fmt::Display for EvalError {
                 write!(f, "arithmetic overflow in {op:?}")
             }
             EvalError::DivisionByZero => write!(f, "division by zero"),
+            EvalError::InvalidNumericResult { function, reason } => {
+                write!(f, "invalid numeric result in {function}: {reason}")
+            }
             EvalError::EmptyInList => write!(f, "IN list is empty"),
         }
     }
@@ -345,7 +351,7 @@ fn arith_add(entry: &OperatorEntry, l: Value, r: Value) -> Result<Value, EvalErr
                 .ok_or(EvalError::ArithmeticOverflow { op: BinOp::Add }),
             _ => unreachable_after_coercion("Add", DataType::BigInt),
         },
-        DataType::Float => Ok(Value::Float(as_f64(&l) + as_f64(&r))),
+        DataType::Float => checked_float_binop(BinOp::Add, as_f64(&l) + as_f64(&r)),
         DataType::Decimal => match (l, r) {
             (Value::Decimal(a), Value::Decimal(b)) => a
                 .checked_add(b)
@@ -377,7 +383,7 @@ fn arith_sub(entry: &OperatorEntry, l: Value, r: Value) -> Result<Value, EvalErr
                 .ok_or(EvalError::ArithmeticOverflow { op: BinOp::Sub }),
             _ => unreachable_after_coercion("Sub", DataType::BigInt),
         },
-        DataType::Float => Ok(Value::Float(as_f64(&l) - as_f64(&r))),
+        DataType::Float => checked_float_binop(BinOp::Sub, as_f64(&l) - as_f64(&r)),
         DataType::Decimal => match (l, r) {
             (Value::Decimal(a), Value::Decimal(b)) => a
                 .checked_sub(b)
@@ -409,7 +415,7 @@ fn arith_mul(entry: &OperatorEntry, l: Value, r: Value) -> Result<Value, EvalErr
                 .ok_or(EvalError::ArithmeticOverflow { op: BinOp::Mul }),
             _ => unreachable_after_coercion("Mul", DataType::BigInt),
         },
-        DataType::Float => Ok(Value::Float(as_f64(&l) * as_f64(&r))),
+        DataType::Float => checked_float_binop(BinOp::Mul, as_f64(&l) * as_f64(&r)),
         other => Err(EvalError::OperatorMismatch {
             op: BinOp::Mul,
             lhs: other,
@@ -427,7 +433,7 @@ fn arith_div(entry: &OperatorEntry, l: Value, r: Value) -> Result<Value, EvalErr
             if denom == 0.0 {
                 return Err(EvalError::DivisionByZero);
             }
-            Ok(Value::Float(as_f64(&l) / denom))
+            checked_float_binop(BinOp::Div, as_f64(&l) / denom)
         }
         other => Err(EvalError::OperatorMismatch {
             op: BinOp::Div,
@@ -476,6 +482,17 @@ fn unreachable_after_coercion(op: &'static str, expected: DataType) -> Result<Va
         lhs: expected,
         rhs: expected,
     })
+}
+
+fn checked_float_binop(op: BinOp, value: f64) -> Result<Value, EvalError> {
+    if value.is_finite() {
+        Ok(Value::Float(value))
+    } else {
+        Err(EvalError::InvalidNumericResult {
+            function: format!("{op:?}"),
+            reason: "result is NaN or infinite".to_string(),
+        })
+    }
 }
 
 fn as_f64(v: &Value) -> f64 {
@@ -709,15 +726,131 @@ fn dispatch_function(name: &str, args: &[Value]) -> Result<Value, EvalError> {
                 args: vec![other.data_type()],
             }),
         },
+        "SQRT" => unary_math(name, args, |x| {
+            if x < 0.0 {
+                return Err("input must be greater than or equal to zero");
+            }
+            Ok(x.sqrt())
+        }),
+        "POWER" | "POW" => binary_math(name, args, |base, exp| Ok(base.powf(exp))),
+        "EXP" => unary_math(name, args, |x| Ok(x.exp())),
+        "LN" => unary_math(name, args, |x| {
+            if x <= 0.0 {
+                return Err("input must be greater than zero");
+            }
+            Ok(x.ln())
+        }),
+        "LOG" if args.len() == 1 => unary_math(name, args, |x| {
+            if x <= 0.0 {
+                return Err("input must be greater than zero");
+            }
+            Ok(x.log10())
+        }),
+        "LOG" => binary_math(name, args, |base, x| {
+            if base <= 0.0 {
+                return Err("base must be greater than zero");
+            }
+            if base == 1.0 {
+                return Err("base must not equal one");
+            }
+            if x <= 0.0 {
+                return Err("input must be greater than zero");
+            }
+            Ok(x.log(base))
+        }),
+        "LOG10" => unary_math(name, args, |x| {
+            if x <= 0.0 {
+                return Err("input must be greater than zero");
+            }
+            Ok(x.log10())
+        }),
+        "SIN" => unary_math(name, args, |x| Ok(x.sin())),
+        "COS" => unary_math(name, args, |x| Ok(x.cos())),
+        "TAN" => unary_math(name, args, |x| Ok(x.tan())),
+        "ASIN" | "ARCSIN" => unary_math(name, args, |x| {
+            if !(-1.0..=1.0).contains(&x) {
+                return Err("input must be between -1 and 1");
+            }
+            Ok(x.asin())
+        }),
+        "ACOS" | "ARCCOS" => unary_math(name, args, |x| {
+            if !(-1.0..=1.0).contains(&x) {
+                return Err("input must be between -1 and 1");
+            }
+            Ok(x.acos())
+        }),
+        "ATAN" | "ARCTAN" => unary_math(name, args, |x| Ok(x.atan())),
+        "ATAN2" => binary_math(name, args, |y, x| Ok(y.atan2(x))),
+        "COT" => unary_math(name, args, |x| {
+            let tan = x.tan();
+            if tan == 0.0 {
+                return Err("input must not produce zero tangent");
+            }
+            Ok(1.0 / tan)
+        }),
+        "DEGREES" => unary_math(name, args, |x| Ok(x.to_degrees())),
+        "RADIANS" => unary_math(name, args, |x| Ok(x.to_radians())),
+        "PI" => checked_math_result(name, std::f64::consts::PI),
         // Functions whose runtime body the slice doesn't yet cover
         // surface as UnknownFunction with the resolved arg types so
         // callers can see the catalog matched but the dispatch
-        // didn't. Subsequent slices fill in ROUND, FLOOR, CEIL,
-        // CONCAT, UPPER/LOWER edge cases, time functions, …
+        // didn't. Subsequent slices fill in CONCAT, time functions, …
         other => Err(EvalError::UnknownFunction {
             name: other.to_string(),
             args: args.iter().map(|v| v.data_type()).collect(),
         }),
+    }
+}
+
+fn unary_math<F>(name: &str, args: &[Value], op: F) -> Result<Value, EvalError>
+where
+    F: FnOnce(f64) -> Result<f64, &'static str>,
+{
+    let input = math_arg(name, args.first(), 0)?;
+    let value = op(input).map_err(|reason| EvalError::InvalidNumericResult {
+        function: name.to_string(),
+        reason: reason.to_string(),
+    })?;
+    checked_math_result(name, value)
+}
+
+fn binary_math<F>(name: &str, args: &[Value], op: F) -> Result<Value, EvalError>
+where
+    F: FnOnce(f64, f64) -> Result<f64, &'static str>,
+{
+    let left = math_arg(name, args.first(), 0)?;
+    let right = math_arg(name, args.get(1), 1)?;
+    let value = op(left, right).map_err(|reason| EvalError::InvalidNumericResult {
+        function: name.to_string(),
+        reason: reason.to_string(),
+    })?;
+    checked_math_result(name, value)
+}
+
+fn math_arg(name: &str, value: Option<&Value>, index: usize) -> Result<f64, EvalError> {
+    let value = value.ok_or_else(|| EvalError::UnknownFunction {
+        name: name.to_string(),
+        args: Vec::new(),
+    })?;
+    let numeric = as_f64(value);
+    if numeric.is_finite() {
+        Ok(numeric)
+    } else {
+        Err(EvalError::InvalidNumericResult {
+            function: name.to_string(),
+            reason: format!("argument {index} is NaN or infinite"),
+        })
+    }
+}
+
+fn checked_math_result(name: &str, value: f64) -> Result<Value, EvalError> {
+    if value.is_finite() {
+        Ok(Value::Float(value))
+    } else {
+        Err(EvalError::InvalidNumericResult {
+            function: name.to_string(),
+            reason: "result is NaN or infinite".to_string(),
+        })
     }
 }
 
