@@ -502,13 +502,15 @@ impl crate::RedDBRuntime {
                 continue;
             };
             let after = table_row_after_json(&entity);
+            let item_kind = event_item_kind_for_entity(self, collection, &entity);
             for subscription in &subscriptions {
                 if !entity_passes_where_filter(subscription, &entity, collection) {
                     continue;
                 }
                 let payload = insert_event_payload(
                     collection,
-                    id.raw(),
+                    entity.logical_id().raw(),
+                    item_kind,
                     lsn,
                     &after,
                     subscription.redact_fields.as_slice(),
@@ -570,13 +572,15 @@ impl crate::RedDBRuntime {
         for (mutation, &lsn) in applied.iter().zip(lsns) {
             let before = build_update_before_json(mutation);
             let after = build_update_after_json(mutation);
+            let item_kind = event_item_kind_for_entity(self, collection, &mutation.entity);
             for subscription in &subscriptions {
                 if !entity_passes_where_filter(subscription, &mutation.entity, collection) {
                     continue;
                 }
                 let payload = update_event_payload(
                     collection,
-                    mutation.id.raw(),
+                    mutation.entity.logical_id().raw(),
+                    item_kind,
                     lsn,
                     &before,
                     &after,
@@ -694,7 +698,7 @@ pub(crate) fn backfill_event_payload(
         "collection".to_string(),
         JsonValue::String(collection.to_string()),
     );
-    insert_event_item_identity(&mut object, raw_entity_id);
+    insert_event_item_identity(&mut object, raw_entity_id, "row");
     object.insert("id".to_string(), subject_id);
     object.insert(
         "ts".to_string(),
@@ -721,6 +725,7 @@ pub(crate) fn backfill_event_payload(
 fn insert_event_payload(
     collection: &str,
     id: u64,
+    kind: &str,
     lsn: u64,
     after: &JsonValue,
     redact_fields: &[String],
@@ -745,7 +750,7 @@ fn insert_event_payload(
         "collection".to_string(),
         JsonValue::String(collection.to_string()),
     );
-    insert_event_item_identity(&mut object, id);
+    insert_event_item_identity(&mut object, id, kind);
     object.insert("id".to_string(), subject_id);
     object.insert(
         "ts".to_string(),
@@ -778,9 +783,32 @@ fn deterministic_event_id(collection: &str, id: &str, lsn: u64, op: &str) -> Str
     hex::encode(hasher.finalize())
 }
 
-fn insert_event_item_identity(object: &mut JsonMap<String, JsonValue>, rid: u64) {
+fn insert_event_item_identity(object: &mut JsonMap<String, JsonValue>, rid: u64, kind: &str) {
     object.insert("rid".to_string(), JsonValue::Number(rid as f64));
-    object.insert("kind".to_string(), JsonValue::String("row".to_string()));
+    object.insert("kind".to_string(), JsonValue::String(kind.to_string()));
+}
+
+fn event_item_kind_for_entity(
+    runtime: &crate::RedDBRuntime,
+    collection: &str,
+    entity: &UnifiedEntity,
+) -> &'static str {
+    match &entity.data {
+        EntityData::Node(_) => return "node",
+        EntityData::Edge(_) => return "edge",
+        _ => {}
+    }
+
+    match runtime
+        .db()
+        .collection_contract(collection)
+        .map(|contract| contract.declared_model)
+    {
+        Some(crate::catalog::CollectionModel::Document) => "document",
+        Some(crate::catalog::CollectionModel::Kv)
+        | Some(crate::catalog::CollectionModel::Vault) => "kv",
+        _ => "row",
+    }
 }
 
 fn json_id_for_hash(value: &JsonValue) -> String {
@@ -988,6 +1016,7 @@ fn build_update_after_json(
 fn update_event_payload(
     collection: &str,
     id: u64,
+    kind: &str,
     lsn: u64,
     before: &JsonValue,
     after: &JsonValue,
@@ -1010,7 +1039,7 @@ fn update_event_payload(
         "collection".to_string(),
         JsonValue::String(collection.to_string()),
     );
-    insert_event_item_identity(&mut object, id);
+    insert_event_item_identity(&mut object, id, kind);
     object.insert("id".to_string(), id_json);
     object.insert(
         "ts".to_string(),
@@ -1340,7 +1369,7 @@ fn delete_event_payload(
         "collection".to_string(),
         JsonValue::String(collection.to_string()),
     );
-    insert_event_item_identity(&mut object, id);
+    insert_event_item_identity(&mut object, id, "row");
     object.insert("id".to_string(), id_json);
     object.insert(
         "ts".to_string(),
