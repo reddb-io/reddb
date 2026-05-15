@@ -568,6 +568,18 @@ impl<'a> KvAtomicOps<'a> {
         collection: &str,
         key: &str,
     ) -> RedDBResult<Option<(crate::storage::schema::Value, crate::storage::EntityId)>> {
+        let Some(entity) = self.get_entity(model, collection, key)? else {
+            return Ok(None);
+        };
+        Ok(kv_value_from_entity(&entity).map(|value| (value, entity.id)))
+    }
+
+    fn get_entity(
+        &self,
+        model: crate::catalog::CollectionModel,
+        collection: &str,
+        key: &str,
+    ) -> RedDBResult<Option<crate::storage::UnifiedEntity>> {
         self.ensure_declared_model(model, collection)?;
         let store = self.runtime.inner.db.store();
         let Some(manager) = store.get_collection(collection) else {
@@ -579,11 +591,7 @@ impl<'a> KvAtomicOps<'a> {
                 if let Some(ref named) = row.named {
                     if let Some(crate::storage::schema::Value::Text(ref k)) = named.get("key") {
                         if &**k == key {
-                            let value = named
-                                .get("value")
-                                .cloned()
-                                .unwrap_or(crate::storage::schema::Value::Null);
-                            return Ok(Some((value, entity.id)));
+                            return Ok(Some(entity));
                         }
                     }
                 }
@@ -1401,15 +1409,35 @@ impl RedDBRuntime {
                     });
                 }
 
-                let value = ops.get(*model, collection, key)?;
+                let entity = ops.get_entity(*model, collection, key)?;
+                let value = entity.as_ref().and_then(kv_value_from_entity);
+                if *model == crate::catalog::CollectionModel::Kv {
+                    self.inner.kv_stats.incr_gets();
+                }
                 let mut result = UnifiedResult::with_columns(vec![
+                    "rid".into(),
                     "collection".into(),
+                    "kind".into(),
+                    "tenant".into(),
+                    "created_at".into(),
+                    "updated_at".into(),
                     "key".into(),
                     "value".into(),
                     "tags".into(),
                 ]);
                 let mut record = UnifiedRecord::new();
+                if let Some(entity) = entity.as_ref() {
+                    record.set("rid", Value::UnsignedInteger(entity.id.raw()));
+                    record.set("created_at", Value::UnsignedInteger(entity.created_at));
+                    record.set("updated_at", Value::UnsignedInteger(entity.updated_at));
+                } else {
+                    record.set("rid", Value::Null);
+                    record.set("created_at", Value::Null);
+                    record.set("updated_at", Value::Null);
+                }
                 record.set("collection", Value::text(collection.clone()));
+                record.set("kind", Value::text(keyed_model_name(*model).to_string()));
+                record.set("tenant", Value::Null);
                 record.set("key", Value::text(key.clone()));
                 record.set(
                     "value",

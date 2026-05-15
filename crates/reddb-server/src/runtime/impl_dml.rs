@@ -1853,7 +1853,10 @@ fn build_returning_result(
                         Arc::clone(&sys_key_collection()),
                         Value::text(entity.kind.collection().to_string()),
                     );
-                    values.insert(Arc::clone(&sys_key_kind()), Value::text("row".to_string()));
+                    values.insert(
+                        Arc::clone(&sys_key_kind()),
+                        Value::text(public_returning_row_kind(entity).to_string()),
+                    );
                     values.insert(
                         Arc::clone(&sys_key_created_at()),
                         Value::UnsignedInteger(entity.created_at),
@@ -1893,6 +1896,35 @@ fn build_returning_result(
         stats: Default::default(),
         pre_serialized_json: None,
     }
+}
+
+fn public_returning_row_kind(entity: &crate::storage::UnifiedEntity) -> &'static str {
+    let Some(row) = entity.data.as_row() else {
+        return "row";
+    };
+
+    let is_kv = row.named.as_ref().is_some_and(|named| {
+        (named.len() == 2 && named.contains_key("key") && named.contains_key("value"))
+            || (named.len() == 1 && (named.contains_key("key") || named.contains_key("value")))
+    });
+    if is_kv {
+        return "kv";
+    }
+
+    let is_document = row
+        .named
+        .as_ref()
+        .is_some_and(|named| named.values().any(runtime_returning_documentish_value))
+        || row.columns.iter().any(runtime_returning_documentish_value);
+    if is_document {
+        "document"
+    } else {
+        "row"
+    }
+}
+
+fn runtime_returning_documentish_value(value: &Value) -> bool {
+    matches!(value, Value::Json(_) | Value::Blob(_))
 }
 
 fn row_insert_returning_snapshots(
