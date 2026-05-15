@@ -19,7 +19,7 @@ use crate::application::ports::{
 };
 use crate::application::ttl_payload::has_internal_ttl_metadata;
 use crate::presentation::entity_json::storage_value_to_json;
-use crate::storage::query::ast::{Expr, FieldRef, ReturningItem};
+use crate::storage::query::ast::{BinOp, Expr, FieldRef, ReturningItem};
 use crate::storage::query::sql_lowering::{
     effective_delete_filter, effective_insert_rows, effective_update_filter, fold_expr_to_value,
 };
@@ -42,6 +42,7 @@ const TREE_METADATA_PREFIX: &str = "red.tree.";
 struct CompiledUpdateAssignment {
     column: String,
     expr: Expr,
+    compound_op: Option<BinOp>,
     metadata_key: Option<&'static str>,
     row_rule: Option<RowUpdateColumnRule>,
 }
@@ -1346,33 +1347,43 @@ impl RedDBRuntime {
         let row_contract_plan = build_row_update_contract_plan(&self.db(), &query.table)?;
         let mut row_modified_columns = Vec::new();
 
-        for (column, expr) in &query.assignment_exprs {
+        for (idx, (column, expr)) in query.assignment_exprs.iter().enumerate() {
+            let compound_op = query.compound_assignment_ops.get(idx).copied().flatten();
             let metadata_key = resolve_sql_ttl_metadata_key(column);
-            if let Ok(value) = fold_expr_to_value(expr.clone()) {
-                if let Some(metadata_key) = metadata_key {
-                    let raw_value = sql_literal_to_metadata_value(metadata_key, &value)?;
-                    let (canonical_key, canonical_value) =
-                        canonicalize_sql_ttl_metadata(metadata_key, raw_value);
-                    static_metadata_assignments.push((canonical_key.to_string(), canonical_value));
-                } else {
-                    let value = self.resolve_crypto_sentinel(value)?;
-                    static_field_assignments.push((
-                        column.clone(),
-                        normalize_row_update_assignment_with_plan(
-                            &query.table,
-                            column,
-                            value,
-                            row_contract_plan.as_ref(),
-                        )?,
-                    ));
-                    row_modified_columns.push(column.clone());
+            if compound_op.is_some() && metadata_key.is_some() {
+                return Err(RedDBError::Query(format!(
+                    "compound assignment is only supported for row fields: {column}"
+                )));
+            }
+            if compound_op.is_none() {
+                if let Ok(value) = fold_expr_to_value(expr.clone()) {
+                    if let Some(metadata_key) = metadata_key {
+                        let raw_value = sql_literal_to_metadata_value(metadata_key, &value)?;
+                        let (canonical_key, canonical_value) =
+                            canonicalize_sql_ttl_metadata(metadata_key, raw_value);
+                        static_metadata_assignments
+                            .push((canonical_key.to_string(), canonical_value));
+                    } else {
+                        let value = self.resolve_crypto_sentinel(value)?;
+                        static_field_assignments.push((
+                            column.clone(),
+                            normalize_row_update_assignment_with_plan(
+                                &query.table,
+                                column,
+                                value,
+                                row_contract_plan.as_ref(),
+                            )?,
+                        ));
+                        row_modified_columns.push(column.clone());
+                    }
+                    continue;
                 }
-                continue;
             }
 
             dynamic_assignments.push(CompiledUpdateAssignment {
                 column: column.clone(),
                 expr: expr.clone(),
+                compound_op,
                 metadata_key,
                 row_rule: if metadata_key.is_none() {
                     if let Some(plan) = row_contract_plan.as_ref() {
@@ -1449,6 +1460,12 @@ impl RedDBRuntime {
         let mut record: Option<UnifiedRecord> = None;
 
         for assignment in &compiled_plan.dynamic_assignments {
+            if assignment.compound_op.is_some() && !matches!(entity.data, EntityData::Row(_)) {
+                return Err(RedDBError::Query(format!(
+                    "compound assignment is only supported for row UPDATE column '{}'",
+                    assignment.column
+                )));
+            }
             if record.is_none() {
                 record = runtime_any_record_from_entity_ref(entity);
             }
@@ -1459,7 +1476,7 @@ impl RedDBRuntime {
                     query.table
                 )));
             };
-            let value = super::expr_eval::evaluate_runtime_expr_with_db(
+            let rhs = super::expr_eval::evaluate_runtime_expr_with_db(
                 Some(self.inner.db.as_ref()),
                 &assignment.expr,
                 record,
@@ -1472,6 +1489,11 @@ impl RedDBRuntime {
                     assignment.column
                 ))
             })?;
+            let value = if let Some(op) = assignment.compound_op {
+                evaluate_compound_update_assignment(&assignment.column, record, op, rhs)?
+            } else {
+                rhs
+            };
 
             if let Some(metadata_key) = assignment.metadata_key {
                 let raw_value = sql_literal_to_metadata_value(metadata_key, &value)?;
@@ -2077,7 +2099,163 @@ fn update_needs_rmw_lock(query: &UpdateQuery) -> bool {
     query
         .assignment_exprs
         .iter()
-        .any(|(column, expr)| expr_references_update_column(expr, &query.table, column))
+        .enumerate()
+        .any(|(idx, (column, expr))| {
+            query
+                .compound_assignment_ops
+                .get(idx)
+                .is_some_and(|op| op.is_some())
+                || expr_references_update_column(expr, &query.table, column)
+        })
+}
+
+fn evaluate_compound_update_assignment(
+    column: &str,
+    record: &UnifiedRecord,
+    op: BinOp,
+    rhs: Value,
+) -> RedDBResult<Value> {
+    let lhs = record.get(column).ok_or_else(|| {
+        RedDBError::Query(format!(
+            "compound assignment requires existing numeric field '{column}'"
+        ))
+    })?;
+    if matches!(lhs, Value::Null) {
+        return Err(RedDBError::Query(format!(
+            "compound assignment requires non-null numeric field '{column}'"
+        )));
+    }
+    apply_compound_numeric_op(column, op, lhs, &rhs)
+}
+
+fn apply_compound_numeric_op(
+    column: &str,
+    op: BinOp,
+    lhs: &Value,
+    rhs: &Value,
+) -> RedDBResult<Value> {
+    let Some(lhs_number) = CompoundNumber::from_value(lhs) else {
+        return Err(RedDBError::Query(format!(
+            "compound assignment requires numeric field '{column}'"
+        )));
+    };
+    let Some(rhs_number) = CompoundNumber::from_value(rhs) else {
+        return Err(RedDBError::Query(format!(
+            "compound assignment requires numeric right-hand value for field '{column}'"
+        )));
+    };
+
+    if lhs_number.is_float() || rhs_number.is_float() || matches!(op, BinOp::Div) {
+        let a = lhs_number.as_f64();
+        let b = rhs_number.as_f64();
+        let out = match op {
+            BinOp::Add => a + b,
+            BinOp::Sub => a - b,
+            BinOp::Mul => a * b,
+            BinOp::Div => {
+                if b == 0.0 {
+                    return Err(RedDBError::Query(format!(
+                        "division by zero in compound assignment for field '{column}'"
+                    )));
+                }
+                a / b
+            }
+            BinOp::Mod => {
+                if b == 0.0 {
+                    return Err(RedDBError::Query(format!(
+                        "modulo by zero in compound assignment for field '{column}'"
+                    )));
+                }
+                a % b
+            }
+            _ => {
+                return Err(RedDBError::Query(format!(
+                    "unsupported compound assignment operator for field '{column}'"
+                )));
+            }
+        };
+        if !out.is_finite() {
+            return Err(RedDBError::Query(format!(
+                "numeric overflow in compound assignment for field '{column}'"
+            )));
+        }
+        return Ok(Value::Float(out));
+    }
+
+    let a = lhs_number.as_i128();
+    let b = rhs_number.as_i128();
+    let out = match op {
+        BinOp::Add => a.checked_add(b),
+        BinOp::Sub => a.checked_sub(b),
+        BinOp::Mul => a.checked_mul(b),
+        BinOp::Mod => {
+            if b == 0 {
+                return Err(RedDBError::Query(format!(
+                    "modulo by zero in compound assignment for field '{column}'"
+                )));
+            }
+            a.checked_rem(b)
+        }
+        BinOp::Div => unreachable!("integer division is handled by the float branch"),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        RedDBError::Query(format!(
+            "numeric overflow in compound assignment for field '{column}'"
+        ))
+    })?;
+
+    if matches!(lhs, Value::UnsignedInteger(_)) {
+        let value = u64::try_from(out).map_err(|_| {
+            RedDBError::Query(format!(
+                "numeric overflow in compound assignment for field '{column}'"
+            ))
+        })?;
+        Ok(Value::UnsignedInteger(value))
+    } else {
+        let value = i64::try_from(out).map_err(|_| {
+            RedDBError::Query(format!(
+                "numeric overflow in compound assignment for field '{column}'"
+            ))
+        })?;
+        Ok(Value::Integer(value))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CompoundNumber {
+    Integer(i128),
+    Float(f64),
+}
+
+impl CompoundNumber {
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::Integer(value) | Value::BigInt(value) => Some(Self::Integer(*value as i128)),
+            Value::UnsignedInteger(value) => Some(Self::Integer(*value as i128)),
+            Value::Float(value) => value.is_finite().then_some(Self::Float(*value)),
+            Value::Decimal(value) => Some(Self::Float(*value as f64 / 10_000.0)),
+            _ => None,
+        }
+    }
+
+    fn is_float(self) -> bool {
+        matches!(self, Self::Float(_))
+    }
+
+    fn as_f64(self) -> f64 {
+        match self {
+            Self::Integer(value) => value as f64,
+            Self::Float(value) => value,
+        }
+    }
+
+    fn as_i128(self) -> i128 {
+        match self {
+            Self::Integer(value) => value,
+            Self::Float(_) => unreachable!("float compound number used as integer"),
+        }
+    }
 }
 
 fn expr_references_update_column(expr: &Expr, table_name: &str, target_column: &str) -> bool {
