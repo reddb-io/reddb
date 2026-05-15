@@ -132,6 +132,52 @@ impl CuckooFilter {
         self.count = 0;
     }
 
+    /// Serialize to bytes: [bucket_count:8][count:8][bucket fingerprints...]
+    pub fn as_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(16 + self.num_buckets * BUCKET_SIZE);
+        buf.extend_from_slice(&(self.num_buckets as u64).to_le_bytes());
+        buf.extend_from_slice(&(self.count as u64).to_le_bytes());
+        for bucket in &self.buckets {
+            buf.extend_from_slice(bucket);
+        }
+        buf
+    }
+
+    /// Deserialize from bytes written by [`CuckooFilter::as_bytes`].
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 16 {
+            return None;
+        }
+        let num_buckets = u64::from_le_bytes(bytes[0..8].try_into().ok()?) as usize;
+        let count = u64::from_le_bytes(bytes[8..16].try_into().ok()?) as usize;
+        if num_buckets == 0 || !num_buckets.is_power_of_two() {
+            return None;
+        }
+        let expected_len = 16 + num_buckets.checked_mul(BUCKET_SIZE)?;
+        if bytes.len() != expected_len || count > num_buckets * BUCKET_SIZE {
+            return None;
+        }
+        let mut buckets = vec![[0u8; BUCKET_SIZE]; num_buckets];
+        let mut offset = 16;
+        let mut occupied = 0usize;
+        for bucket in &mut buckets {
+            bucket.copy_from_slice(&bytes[offset..offset + BUCKET_SIZE]);
+            occupied += bucket
+                .iter()
+                .filter(|fingerprint| **fingerprint != 0)
+                .count();
+            offset += BUCKET_SIZE;
+        }
+        if occupied != count {
+            return None;
+        }
+        Some(Self {
+            buckets,
+            num_buckets,
+            count,
+        })
+    }
+
     // ── Internal helpers ─────────────────────────────────────────
 
     /// Generate a 1-byte fingerprint (non-zero) from key
