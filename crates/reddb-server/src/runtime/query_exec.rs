@@ -164,17 +164,8 @@ fn resolve_table_row_by_logical_id(
 ) -> Option<UnifiedEntity> {
     let store = db.store();
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
-    if let Some(snapshot) = snapshot.as_ref() {
-        return store
-            .table_row_versions_by_logical_id(table, logical_id)
-            .into_iter()
-            .filter(|entity| {
-                crate::runtime::impl_core::entity_visible_with_context(Some(snapshot), entity)
-            })
-            .max_by_key(|entity| entity.xmin);
-    }
-
-    store.get_table_row_by_logical_id(table, logical_id)
+    crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::captured(snapshot)
+        .resolve_logical_id(&store, table, logical_id)
 }
 
 pub(super) fn runtime_record_has_document_capability(record: &UnifiedRecord) -> bool {
