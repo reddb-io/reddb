@@ -1292,7 +1292,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<(RuntimeQueryResult, Vec<EntityId>)> {
         let store = self.inner.db.store();
         let mut touched_ids = Vec::new();
-        let mut affected = 0;
+        let mut lock_entries = Vec::new();
 
         for id in ids_to_update {
             let Some(candidate) = store.get(&query.table, *id) else {
@@ -1301,9 +1301,16 @@ impl RedDBRuntime {
             let logical_id = candidate.logical_id();
             let lock_key = format!("row:{}", logical_id.raw());
             let rmw_lock = self.inner.rmw_locks.lock_for(&query.table, &lock_key);
-            let _rmw_guard = rmw_lock.lock();
+            lock_entries.push((lock_key, logical_id, rmw_lock));
+        }
 
-            let Some(entity) = resolve_update_row_by_logical_id(self, &query.table, logical_id)
+        lock_entries.sort_by(|left, right| left.0.cmp(&right.0));
+        lock_entries.dedup_by(|left, right| left.0 == right.0);
+        let _rmw_guards: Vec<_> = lock_entries.iter().map(|entry| entry.2.lock()).collect();
+
+        let mut applied_chunk = Vec::new();
+        for (_, logical_id, _) in &lock_entries {
+            let Some(entity) = resolve_update_row_by_logical_id(self, &query.table, *logical_id)
             else {
                 continue;
             };
@@ -1327,14 +1334,17 @@ impl RedDBRuntime {
                 compiled_plan,
                 assignments,
             )?;
-            let applied_chunk = [applied];
+            touched_ids.push(applied.id);
+            applied_chunk.push(applied);
+        }
+
+        let affected = applied_chunk.len() as u64;
+        if !applied_chunk.is_empty() {
             self.persist_update_chunk(&applied_chunk)?;
             let lsns = self.flush_update_chunk(&applied_chunk)?;
             if !query.suppress_events {
                 self.emit_update_events_for_collection(&query.table, &applied_chunk, &lsns)?;
             }
-            touched_ids.push(applied_chunk[0].id);
-            affected += 1;
         }
 
         if affected > 0 {
