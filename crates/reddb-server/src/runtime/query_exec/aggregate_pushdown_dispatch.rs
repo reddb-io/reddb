@@ -24,6 +24,7 @@ use super::aggregate_planner::{
 };
 use super::filter_compiled::{classify_field, resolve_kind, CompiledEntityFilter, EntityFieldKind};
 use crate::api::{RedDBError, RedDBResult};
+use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
 use crate::storage::query::ast::{Expr, FieldRef, Projection};
 use crate::storage::query::sql_lowering::{
     effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
@@ -136,8 +137,9 @@ pub(super) fn try_execute_pushdown_aggregate(
         .map(|f| CompiledEntityFilter::compile(f, table_name, table_alias));
 
     let mut rows: Vec<ScanRow> = Vec::new();
+    let table_row_resolver = TableRowMvccReadResolver::current_statement();
     manager.for_each_entity(|entity| {
-        if !crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
+        if table_row_resolver.resolve_read_candidate(entity).is_none() {
             return true;
         }
         if let Some(f) = compiled_filter.as_ref() {

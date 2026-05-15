@@ -273,7 +273,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         stop = true;
                         return;
                     }
-                    if table_row_resolver.resolve_candidate(entity).is_none() {
+                    if table_row_resolver.resolve_read_candidate(entity).is_none() {
                         return;
                     }
                     if let Some(cf) = compiled_filter.as_ref() {
@@ -298,7 +298,10 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 if records.len() >= limit {
                     break;
                 }
-                if table_row_resolver.resolve_candidate(&entity_opt).is_none() {
+                if table_row_resolver
+                    .resolve_read_candidate(&entity_opt)
+                    .is_none()
+                {
                     continue;
                 }
                 if let Some(cf) = compiled_filter.as_ref() {
@@ -383,7 +386,10 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                 if records.len() >= limit {
                                     break;
                                 }
-                                if table_row_resolver.resolve_candidate(&entity_opt).is_none() {
+                                if table_row_resolver
+                                    .resolve_read_candidate(&entity_opt)
+                                    .is_none()
+                                {
                                     continue;
                                 }
                                 if compiled_filter
@@ -524,7 +530,10 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 if records.len() >= limit {
                     break;
                 }
-                if table_row_resolver.resolve_candidate(&entity_opt).is_none() {
+                if table_row_resolver
+                    .resolve_read_candidate(&entity_opt)
+                    .is_none()
+                {
                     continue;
                 }
                 if compiled_filter.evaluate(&entity_opt) {
@@ -632,7 +641,10 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                             if records.len() >= limit {
                                 break;
                             }
-                            if table_row_resolver.resolve_candidate(&entity_opt).is_none() {
+                            if table_row_resolver
+                                .resolve_read_candidate(&entity_opt)
+                                .is_none()
+                            {
                                 continue;
                             }
                             if compiled_filter
@@ -791,8 +803,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             // context here so each closure invocation (on any thread) runs
             // the same MVCC visibility gate.
             let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
+            let table_row_resolver = TableRowMvccReadResolver::captured(snap_ctx);
             let matching = manager.query_all_zoned(&zone_preds, |entity| {
-                crate::runtime::impl_core::entity_visible_with_context(snap_ctx.as_ref(), entity)
+                table_row_resolver.resolve_read_candidate(entity).is_some()
                     && compiled.evaluate(entity)
             });
             for entity in &matching {
@@ -847,11 +860,12 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 }
             }
         } else {
+            let table_row_resolver = TableRowMvccReadResolver::current_statement();
             manager.for_each_entity_zoned(&zone_preds, |entity| {
                 if records.len() >= limit {
                     return false; // stop iteration
                 }
-                if !crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
+                if table_row_resolver.resolve_read_candidate(entity).is_none() {
                     return true; // skip hidden tuple, keep scanning
                 }
                 if compiled.evaluate(entity) {
@@ -1101,11 +1115,12 @@ pub(crate) fn execute_runtime_canonical_table_node(
                 };
 
                 let mut records: Vec<UnifiedRecord> = Vec::new();
+                let table_row_resolver = TableRowMvccReadResolver::current_statement();
                 manager.for_each_entity(|entity| {
                     if records.len() >= limit {
                         return false;
                     }
-                    if !crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
+                    if table_row_resolver.resolve_read_candidate(entity).is_none() {
                         return true;
                     }
                     if compiled.evaluate(entity) {
