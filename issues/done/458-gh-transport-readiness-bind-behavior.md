@@ -18,14 +18,13 @@ Make server startup behavior predictable when HTTP, gRPC, RedWire, or other list
 
 ## Acceptance criteria
 
-- [ ] Explicit `--http-bind`, `--grpc-bind`, or `--wire-bind` failure exits/fails startup with a clear error.
-- [ ] Implicit/default listener bind failure does not kill a successfully requested transport.
-- [ ] Health/readiness exposes active listeners and failed listener reasons.
-- [ ] Logs clearly distinguish fatal explicit bind failure from non-fatal implicit bind degradation.
-- [ ] Tests simulate port collision and verify both explicit-fatal and implicit-degrade behavior.
-- [ ] Docs describe the startup contract.
+- [x] Explicit `--http-bind`, `--grpc-bind`, or `--wire-bind` failure exits/fails startup with a clear error.
+- [x] Implicit/default listener bind failure does not kill a successfully requested transport.
+- [x] Health/readiness exposes active listeners and failed listener reasons.
+- [x] Logs clearly distinguish fatal explicit bind failure from non-fatal implicit bind degradation.
+- [x] Tests simulate port collision and verify both explicit-fatal and implicit-degrade behavior.
+- [x] Docs describe the startup contract.
 
 ## Blocked by
 
 None - can start immediately
-

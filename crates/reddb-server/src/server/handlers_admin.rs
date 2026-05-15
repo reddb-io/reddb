@@ -2192,6 +2192,10 @@ impl RedDBServer {
         let mut object = Map::new();
         object.insert("probe".to_string(), JsonValue::String(probe.to_string()));
         object.insert(
+            "transport_listeners".to_string(),
+            self.transport_readiness_json(),
+        );
+        object.insert(
             "phase".to_string(),
             JsonValue::String(phase.as_str().to_string()),
         );

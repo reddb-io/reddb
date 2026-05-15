@@ -34,6 +34,19 @@ red server --path ./data/reddb.rdb --wire-bind 0.0.0.0:5051
 | Persistence | File-backed with WAL |
 | Auth | Optional vault-based auth |
 
+## Bind Failure Contract
+
+Bind addresses passed explicitly with `--http-bind`, `--grpc-bind`, or
+`--wire-bind` are required. If one is already in use or cannot be opened,
+startup fails with an explicit bind error.
+
+Default listeners are best effort when another requested transport can still
+serve traffic. If an implicit/default listener cannot bind, RedDB logs a
+non-fatal degradation and keeps the successfully bound requested listener
+running. HTTP health and readiness responses include `transport_listeners`
+with `active` and `failed` entries so operators can see which listener
+degraded and why.
+
 ## Production Checklist
 
 - [ ] Use `--path` for persistent storage
