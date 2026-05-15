@@ -1214,13 +1214,23 @@ impl RedDBRuntime {
         let manager = store
             .get_collection(&query.table)
             .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
+        let scan_limit = if query.order_by.is_empty() {
+            limit_cap
+        } else {
+            None
+        };
         let ids_to_update = super::dml_target_scan::DmlTargetScan::new(
             self,
             &query.table,
             effective_filter.as_ref(),
-            limit_cap,
+            scan_limit,
         )
         .find_target_ids()?;
+        let ids_to_update = if query.order_by.is_empty() {
+            ids_to_update
+        } else {
+            ordered_update_target_ids(&manager, &ids_to_update, &query.order_by, limit_cap)
+        };
 
         if update_needs_rmw_lock(query) {
             return self.execute_update_inner_tracked_locked(
@@ -2326,6 +2336,88 @@ fn resolve_update_row_by_logical_id(
 ) -> Option<UnifiedEntity> {
     let store = runtime.inner.db.store();
     store.get_table_row_by_logical_id(table, logical_id)
+}
+
+fn ordered_update_target_ids(
+    manager: &Arc<crate::storage::SegmentManager>,
+    entity_ids: &[EntityId],
+    order_by: &[OrderByClause],
+    limit: Option<usize>,
+) -> Vec<EntityId> {
+    let mut entities: Vec<UnifiedEntity> =
+        manager.get_many(entity_ids).into_iter().flatten().collect();
+    entities.sort_by(|left, right| compare_update_order(left, right, order_by));
+    if let Some(limit) = limit {
+        entities.truncate(limit);
+    }
+    entities.into_iter().map(|entity| entity.id).collect()
+}
+
+fn compare_update_order(
+    left: &UnifiedEntity,
+    right: &UnifiedEntity,
+    order_by: &[OrderByClause],
+) -> Ordering {
+    for clause in order_by {
+        let left_value = update_order_value(left, &clause.field);
+        let right_value = update_order_value(right, &clause.field);
+        let ordering = compare_update_order_values(
+            left_value.as_ref(),
+            right_value.as_ref(),
+            clause.nulls_first,
+        );
+        if ordering != Ordering::Equal {
+            return if clause.ascending {
+                ordering
+            } else {
+                ordering.reverse()
+            };
+        }
+    }
+    left.logical_id().raw().cmp(&right.logical_id().raw())
+}
+
+fn compare_update_order_values(
+    left: Option<&Value>,
+    right: Option<&Value>,
+    nulls_first: bool,
+) -> Ordering {
+    match (left, right) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => {
+            if nulls_first {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            }
+        }
+        (Some(_), None) => {
+            if nulls_first {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            }
+        }
+        (Some(left), Some(right)) => {
+            crate::storage::query::value_compare::total_compare_values(left, right)
+        }
+    }
+}
+
+fn update_order_value(entity: &UnifiedEntity, field: &FieldRef) -> Option<Value> {
+    let FieldRef::TableColumn { table, column } = field else {
+        return None;
+    };
+    if !table.is_empty() {
+        return None;
+    }
+    if column.eq_ignore_ascii_case("rid") {
+        return Some(Value::UnsignedInteger(entity.logical_id().raw()));
+    }
+    match &entity.data {
+        EntityData::Row(row) => row.get_field(column).cloned(),
+        _ => None,
+    }
 }
 
 fn dedupe_update_columns(mut columns: Vec<String>) -> Vec<String> {

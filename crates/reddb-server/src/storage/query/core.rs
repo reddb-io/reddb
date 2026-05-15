@@ -1701,6 +1701,8 @@ pub struct UpdateQuery {
     pub with_metadata: Vec<(String, Value)>,
     /// Optional RETURNING clause items.
     pub returning: Option<Vec<ReturningItem>>,
+    /// Optional deterministic row ordering for limited UPDATE batches.
+    pub order_by: Vec<OrderByClause>,
     /// Optional `LIMIT N` cap. Caps the number of rows the executor
     /// will mutate in a single statement. Required by `BATCH N ROWS`
     /// data migrations (#37) which run the same UPDATE body in a
