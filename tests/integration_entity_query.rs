@@ -1904,7 +1904,8 @@ fn test_sql_update_ttl_on_node_after_insert() {
     );
 
     let updated = query.execute(ExecuteQueryInput {
-        query: "UPDATE ttl_node_updates SET _ttl = 0 WHERE label = 'node-update-target'".into(),
+        query: "UPDATE ttl_node_updates NODES SET _ttl = 0 WHERE label = 'node-update-target'"
+            .into(),
     });
     assert!(
         updated.is_ok(),

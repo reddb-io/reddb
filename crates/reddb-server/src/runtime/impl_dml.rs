@@ -19,7 +19,7 @@ use crate::application::ports::{
 };
 use crate::application::ttl_payload::has_internal_ttl_metadata;
 use crate::presentation::entity_json::storage_value_to_json;
-use crate::storage::query::ast::{BinOp, Expr, FieldRef, ReturningItem};
+use crate::storage::query::ast::{BinOp, Expr, FieldRef, ReturningItem, UpdateTarget};
 use crate::storage::query::sql_lowering::{
     effective_delete_filter, effective_insert_rows, effective_update_filter, fold_expr_to_value,
 };
@@ -1124,6 +1124,7 @@ impl RedDBRuntime {
             &query.table,
             crate::runtime::collection_contract::MutationKind::Update,
         )?;
+        ensure_update_target_contract(self, &query.table, query.target)?;
 
         // Apply RLS augmentation first so every downstream path — plain
         // UPDATE, UPDATE...RETURNING, the inner scan — observes the
@@ -1219,11 +1220,12 @@ impl RedDBRuntime {
         } else {
             None
         };
-        let ids_to_update = super::dml_target_scan::DmlTargetScan::new(
+        let ids_to_update = super::dml_target_scan::DmlTargetScan::with_update_target(
             self,
             &query.table,
             effective_filter.as_ref(),
             scan_limit,
+            query.target,
         )
         .find_target_ids()?;
         let ids_to_update = if query.order_by.is_empty() {
@@ -2048,6 +2050,72 @@ fn graph_insert_returning_snapshots(
                 .collect()
         })
         .collect()
+}
+
+fn ensure_update_target_contract(
+    runtime: &RedDBRuntime,
+    collection: &str,
+    target: UpdateTarget,
+) -> RedDBResult<()> {
+    let Some(contract) = runtime.db().collection_contract(collection) else {
+        return Ok(());
+    };
+    if update_target_contract_is_advisory(&contract)
+        || update_target_allows_model(contract.declared_model, update_target_model(target))
+    {
+        return Ok(());
+    }
+    Err(RedDBError::InvalidOperation(format!(
+        "collection '{}' is declared as '{}' and does not allow '{}' updates",
+        collection,
+        update_model_name(contract.declared_model),
+        update_model_name(update_target_model(target))
+    )))
+}
+
+fn update_target_contract_is_advisory(contract: &crate::physical::CollectionContract) -> bool {
+    matches!(
+        (&contract.origin, &contract.schema_mode),
+        (
+            crate::physical::ContractOrigin::Implicit,
+            crate::catalog::SchemaMode::Dynamic,
+        )
+    )
+}
+
+fn update_target_model(target: UpdateTarget) -> crate::catalog::CollectionModel {
+    match target {
+        UpdateTarget::Rows => crate::catalog::CollectionModel::Table,
+        UpdateTarget::Documents => crate::catalog::CollectionModel::Document,
+        UpdateTarget::Kv => crate::catalog::CollectionModel::Kv,
+        UpdateTarget::Nodes | UpdateTarget::Edges => crate::catalog::CollectionModel::Graph,
+    }
+}
+
+fn update_target_allows_model(
+    declared_model: crate::catalog::CollectionModel,
+    requested_model: crate::catalog::CollectionModel,
+) -> bool {
+    declared_model == requested_model || declared_model == crate::catalog::CollectionModel::Mixed
+}
+
+fn update_model_name(model: crate::catalog::CollectionModel) -> &'static str {
+    match model {
+        crate::catalog::CollectionModel::Table => "table",
+        crate::catalog::CollectionModel::Document => "document",
+        crate::catalog::CollectionModel::Graph => "graph",
+        crate::catalog::CollectionModel::Vector => "vector",
+        crate::catalog::CollectionModel::Hll => "hll",
+        crate::catalog::CollectionModel::Sketch => "sketch",
+        crate::catalog::CollectionModel::Filter => "filter",
+        crate::catalog::CollectionModel::Kv => "kv",
+        crate::catalog::CollectionModel::Config => "config",
+        crate::catalog::CollectionModel::Vault => "vault",
+        crate::catalog::CollectionModel::Mixed => "mixed",
+        crate::catalog::CollectionModel::TimeSeries => "timeseries",
+        crate::catalog::CollectionModel::Queue => "queue",
+        crate::catalog::CollectionModel::Metrics => "metrics",
+    }
 }
 
 fn ensure_graph_insert_contract(runtime: &RedDBRuntime, collection: &str) -> RedDBResult<()> {
