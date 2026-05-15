@@ -27,22 +27,20 @@ GRAPH CENTRALITY ALGORITHM pagerank
 PATH FROM 'web-01' TO 'db-01' ALGORITHM bfs DIRECTION both
 ```
 
-## Entity IDs
+## RedDB IDs
 
-Every graph node and edge is assigned a unique, monotonically increasing
-`_entity_id` (also surfaced as `red_entity_id` in `RETURNING *` row output).
+Every graph node and edge is an item with a unique RedDB ID exposed as `rid`.
+Graph edges use `from_rid` and `to_rid` for their endpoints.
 
-> **First user-inserted entity gets `_entity_id = 102`.** The first 101 ids
+> **First user-inserted item gets `rid = 102`.** The first 101 ids
 > in every new database are reserved for internal collection-descriptor
 > records that the engine writes during bootstrap. Stable across in-memory
 > and on-disk databases — do not hardcode lower ids, and do not assume `1`
-> in tests or migrations. If you need the assigned id for application use,
-> read it back from `INSERT ... RETURNING *` (issue #419) rather than
+> in tests or migrations. If you need the assigned RedDB ID for application use,
+> read it back from `INSERT ... RETURNING rid` or `INSERT ... RETURNING *` rather than
 > guessing.
 >
-> This offset is regression-pinned by
-> `first_user_entity_id_is_one_hundred_and_two` in
-> `crates/reddb-server/tests/runtime_query_behavior.rs` — see
+> This offset is regression-pinned by the first-user-id allocation test — see
 > [docs/engine/file-format.md](../engine/file-format.md) for the
 > descriptor-allocation rationale.
 
@@ -80,7 +78,7 @@ grpcurl -plaintext \
 #### **Rust (Embedded)**
 
 ```rust
-let node_id = db.node("social", "alice")
+let node_rid = db.node("social", "alice")
     .node_type("person")
     .property("name", "Alice Johnson")
     .property("department", "engineering")
@@ -98,8 +96,8 @@ curl -X POST http://127.0.0.1:8080/collections/social/edges \
   -H 'content-type: application/json' \
   -d '{
     "label": "REPORTS_TO",
-    "from": 1,
-    "to": 2,
+    "from_rid": 102,
+    "to_rid": 103,
     "weight": 1.0,
     "properties": {
       "since": "2023-06-01"
@@ -112,8 +110,8 @@ curl -X POST http://127.0.0.1:8080/collections/social/edges \
 | Field | Required | Description |
 |:------|:---------|:------------|
 | `label` | Yes | Relationship type (e.g. `REPORTS_TO`, `FOLLOWS`) |
-| `from` | Yes | Source node entity ID |
-| `to` | Yes | Target node entity ID |
+| `from_rid` | Yes | Source node RedDB ID |
+| `to_rid` | Yes | Target node RedDB ID |
 | `weight` | No | Numeric weight (default `1.0`) |
 | `properties` | No | Arbitrary key-value properties |
 | `metadata` | No | Operational metadata |
@@ -311,11 +309,11 @@ RETURN svc.name, dep.name
 You can also inspect graph entities through the universal envelope:
 
 ```sql
-FROM ANY WHERE _kind = 'node' AND _collection = 'social' LIMIT 20
+FROM ANY WHERE kind = 'node' AND collection = 'social' LIMIT 20
 ```
 
 ```sql
-FROM ANY WHERE _kind = 'edge' AND _collection = 'social' LIMIT 20
+FROM ANY WHERE kind = 'edge' AND collection = 'social' LIMIT 20
 ```
 
 See [Graph Commands](/query/graph-commands.md) for the full graph query syntax.

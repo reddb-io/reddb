@@ -33,7 +33,8 @@ You can also reuse a stored vector directly as the query source:
 VECTOR SEARCH embeddings SIMILAR TO (embeddings, 42) LIMIT 5
 ```
 
-Or derive the query vector from another query. The first subquery row is used, and it must resolve to a vector value, vector reference, or vector entity id:
+Or derive the query vector from another query. The first subquery row is used,
+and it must resolve to a vector value, vector reference, or vector item `rid`:
 
 ```sql
 VECTOR SEARCH embeddings
@@ -190,7 +191,7 @@ Results are grouped by structure type. The response includes a `connections` lis
   "documents": [ /* matching documents */ ],
   "key_values": [ /* matching key-value pairs */ ],
   "connections": [
-    { "from": "entity:42", "to": "entity:17", "rel": "KNOWS" }
+    { "from_rid": 42, "to_rid": 17, "rel": "KNOWS" }
   ],
   "summary": {
     "total_hits": 12,
@@ -210,13 +211,13 @@ Each field in the response carries a specific role:
 
 | Field | Type | Description |
 |:------|:-----|:------------|
-| `tables` | array | Table rows that matched the query. Each entry contains the row fields, entity ID, collection name, relevance score, and how it was discovered (indexed lookup, global scan, or graph traversal). |
+| `tables` | array | Table rows that matched the query. Each entry contains the row fields, `rid`, collection name, relevance score, and how it was discovered (indexed lookup, global scan, or graph traversal). |
 | `graph.nodes` | array | Graph nodes found during the search or added during graph expansion. Includes node label, type, properties, and the collection they belong to. |
-| `graph.edges` | array | Edges that connect found nodes. Each edge carries its label (e.g. `REPORTS_TO`), source and target node IDs, weight, and any edge properties. |
+| `graph.edges` | array | Edges that connect found nodes. Each edge carries its label (e.g. `REPORTS_TO`), `from_rid`, `to_rid`, weight, and any edge properties. |
 | `vectors` | array | Vector entries whose content or metadata matched the query. Includes the similarity score when discovered via vector search. |
 | `documents` | array | Document entities that matched by content or metadata fields. |
 | `key_values` | array | Key-value pairs where the key or value matched the search term. |
-| `connections` | array | Links between found entities across structures. Each connection has a `from_id`, `to_id`, a `connection_type` (`CrossRef`, `GraphEdge`, or `VectorSimilarity`), and a `weight` indicating relevance. |
+| `connections` | array | Links between found items across structures. Each connection has `from_rid`, `to_rid`, a `connection_type` (`CrossRef`, `GraphEdge`, or `VectorSimilarity`), and a `weight` indicating relevance. |
 | `summary` | object | Aggregated hit counts and execution metadata. Contains `total_entities`, `direct_matches`, `expanded_via_graph`, `expanded_via_cross_refs`, `expanded_via_vector_query`, `collections_searched`, `execution_time_us`, `tiers_used` (which search tiers fired: `index`, `token`, `scan`), and `entities_reindexed`. |
 
 > [!TIP]
@@ -430,18 +431,18 @@ Search results include similarity scores:
   "ok": true,
   "results": [
     {
-      "_entity_id": 42,
-      "_collection": "docs",
-      "_kind": "vector",
-      "_score": 0.956,
+      "rid": 42,
+      "collection": "docs",
+      "kind": "vector",
+      "score": 0.956,
       "content": "Introduction to neural network architectures",
       "metadata": {"topic": "deep-learning"}
     },
     {
-      "_entity_id": 17,
-      "_collection": "docs",
-      "_kind": "vector",
-      "_score": 0.891,
+      "rid": 17,
+      "collection": "docs",
+      "kind": "vector",
+      "score": 0.891,
       "content": "Machine learning fundamentals and applications"
     }
   ]

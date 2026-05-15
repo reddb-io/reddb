@@ -1,6 +1,8 @@
 # UPDATE
 
-The `UPDATE` statement modifies existing rows in a table.
+The `UPDATE` statement modifies RedDB items in a collection. The default target
+is table rows; use an explicit target for documents, KV pairs, graph nodes, or
+graph edges.
 
 Prefer positional parameters for values in `SET` and `WHERE`:
 
@@ -16,38 +18,138 @@ The parameterized-query design is tracked in
 ## Syntax
 
 ```sql
-UPDATE table_name SET column1 = value1 [, column2 = value2, ...] [WHERE condition]
+UPDATE collection_name [ROWS|DOCUMENTS|KV|NODES|EDGES]
+SET field1 = value1 [, field2 += value2, ...]
+[WHERE condition]
+[ORDER BY field [ASC|DESC] LIMIT n]
+[RETURNING * | field [, field ...]]
 ```
+
+Target meanings:
+
+| Target | Item kind | Notes |
+|:-------|:----------|:------|
+| omitted / `ROWS` | `row` | Default table-row update path |
+| `DOCUMENTS` | `document` | Updates top-level document body fields |
+| `KV` | `kv` | Updates `key`, `value`, and mutable KV fields |
+| `NODES` | `node` | Updates mutable graph node properties |
+| `EDGES` | `edge` | Updates mutable graph edge properties; `from_rid` and `to_rid` are immutable |
 
 ## Examples
 
-### Update a Single Field
+### Update Rows
 
 ```sql
 UPDATE users SET age = $1 WHERE name = $2
 ```
 
-### Update Multiple Fields
-
 ```sql
-UPDATE hosts SET os = $1, critical = $2 WHERE ip = $3
+UPDATE users ROWS
+SET active = true
+WHERE rid = $1
+RETURNING rid, name, active
 ```
 
-### Update All Rows
+### Update Documents, KV, and Graph Items
 
 ```sql
-UPDATE users SET active = false
+UPDATE events DOCUMENTS
+SET reviewed = true, attempts += 1
+WHERE event_type = 'login'
+RETURNING rid, kind, reviewed, attempts
+```
+
+```sql
+UPDATE config KV
+SET value += 1
+WHERE key = 'feature.rollout_percent'
+RETURNING rid, key, value
+```
+
+```sql
+UPDATE social NODES
+SET score += 5
+WHERE node_type = 'person'
+RETURNING rid, label, score
+```
+
+```sql
+UPDATE social EDGES
+SET weight += 0.25
+WHERE from_rid = $1
+RETURNING rid, from_rid, to_rid, weight
 ```
 
 > [!WARNING]
-> Without a `WHERE` clause, all rows in the table are updated.
+> Without a `WHERE` clause, all items in the selected target are updated.
+
+### Compound Assignment
+
+Compound assignment is equivalent to assigning from the pre-image field value.
+All right-hand sides in the same statement read the item state before the
+update starts.
+
+```sql
+UPDATE accounts ROWS
+SET balance += 25, retries %= 3
+WHERE rid = $1
+RETURNING rid, balance, retries
+```
+
+Supported numeric operators are `+=`, `-=`, `*=`, `/=`, and `%=`.
+
+### Math Functions
+
+Math functions can appear anywhere ordinary SQL expressions are accepted,
+including `SET` and `RETURNING` projections:
+
+```sql
+UPDATE metrics ROWS
+SET root_score = SQRT(score), score = POWER(score, 2)
+WHERE score >= 0
+RETURNING rid, root_score, score
+```
+
+PostgreSQL-compatible math functions include `SQRT`, `POWER`/`POW`, `EXP`,
+`LN`, `LOG`, `LOG10`, `SIN`, `COS`, `TAN`, `ASIN`/`ARCSIN`,
+`ACOS`/`ARCCOS`, `ATAN`/`ARCTAN`, `ATAN2`, `COT`, `DEGREES`, `RADIANS`,
+and `PI`.
+
+### Ordered Update Batches
+
+`ORDER BY ... LIMIT` selects a deterministic batch before applying updates.
+`ORDER BY` without `LIMIT` is rejected. Ties are broken by implicit `rid ASC`
+when `rid` is not already part of the ordering.
+
+```sql
+UPDATE jobs ROWS
+SET claimed = true
+WHERE claimed = false
+ORDER BY priority DESC
+LIMIT 25
+RETURNING rid, priority, claimed
+```
+
+For `DOCUMENTS`, `KV`, `NODES`, and `EDGES`, ordered batches accept top-level
+fields only. Nested paths and computed `ORDER BY` expressions are rejected for
+multi-model updates.
+
+### Atomic Failure Behavior
+
+Each `UPDATE` statement validates the selected item batch before committing
+the mutation. If any matched item would fail a compound assignment, immutable
+field check, RLS/column-policy check, arithmetic check, or type check, the
+statement fails and none of the selected items are written.
+
+Immutable public identity/topology fields cannot be mutated. `rid`, graph node
+`label`, and graph edge `from_rid` / `to_rid` are rejected in `SET`.
 
 ## Via HTTP
 
-### PATCH (by entity ID)
+### PATCH (by RedDB ID)
 
 ```bash
-curl -X PATCH http://127.0.0.1:8080/collections/users/entities/1 \
+curl -X PATCH http://127.0.0.1:8080/collections/users/entities/102 \
   -H 'content-type: application/json' \
   -d '{"fields": {"age": 31, "active": true}}'
 ```
@@ -57,7 +159,7 @@ curl -X PATCH http://127.0.0.1:8080/collections/users/entities/1 \
 ```bash
 curl -X POST http://127.0.0.1:8080/query \
   -H 'content-type: application/json' \
-  -d '{"query": "UPDATE users SET age = $1 WHERE name = $2", "params": [31, "Alice"]}'
+  -d '{"query": "UPDATE users ROWS SET age = $1 WHERE rid = $2 RETURNING rid, age", "params": [31, 102]}'
 ```
 
 ## Via gRPC
@@ -66,11 +168,14 @@ curl -X POST http://127.0.0.1:8080/query \
 grpcurl -plaintext \
   -d '{
     "collection": "users",
-    "id": 1,
+    "id": 102,
     "payloadJson": "{\"fields\":{\"age\":31}}"
   }' \
   127.0.0.1:50051 reddb.v1.RedDb/PatchEntity
 ```
+
+`UpdateEntityRequest.id` is the retained protobuf field name. Treat its value
+as the public RedDB ID `rid`.
 
 ## Via MCP
 
@@ -80,7 +185,7 @@ grpcurl -plaintext \
   "arguments": {
     "collection": "users",
     "set": {"age": 31, "active": true},
-    "where_filter": "name = 'Alice'"
+    "where_filter": "rid = 102"
   }
 }
 ```

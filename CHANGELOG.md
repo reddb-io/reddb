@@ -4,6 +4,19 @@
 
 ### Breaking Changes
 
+- Public item identity now uses the canonical RedDB ID field `rid` across
+  rows, documents, KV, graph nodes, graph edges, vectors, events, CDC,
+  HTTP/gRPC/MCP, and SDK-visible query results. Older public aliases such as
+  `_entity_id`, `red_entity_id`, and `entity_id` are removed from public
+  envelopes; graph edge endpoints are `from_rid` and `to_rid`.
+- The item envelope fields `rid`, `collection`, `kind`, `tenant`,
+  `created_at`, and `updated_at` are reserved system fields. New table schemas
+  and supported top-level document, KV, node, and edge payloads that define
+  those names fail with a reserved-field error.
+- Multi-model updates are now explicit through `ROWS`, `DOCUMENTS`, `KV`,
+  `NODES`, and `EDGES` targets. Compound assignment, `RETURNING`, and ordered
+  `ORDER BY ... LIMIT` batches are documented as the canonical update surface;
+  failed multi-item updates abort atomically without partial writes.
 - Unaliased expression projections now use the rendered source expression as the
   result column name instead of the internal operator/function tag. For example,
   `SELECT UPPER(name)` now returns `UPPER(name)` and `SELECT id * 2` now returns

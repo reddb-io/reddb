@@ -41,35 +41,35 @@ use reddb::storage::schema::Value;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = RedDB::open("./data/reddb.rdb")?;
 
-    let user_id = db.row("users", vec![
+    let user_rid = db.row("users", vec![
         ("name", Value::Text("Alice".into())),
         ("age", Value::Integer(30)),
         ("active", Value::Boolean(true)),
     ]).save()?;
 
-    let host_id = db.node("network", "host")
+    let host_rid = db.node("network", "host")
         .node_type("machine")
         .property("hostname", "web-01")
         .property("owner", "platform")
         .save()?;
 
-    let vector_id = db.vector("embeddings")
+    let vector_rid = db.vector("embeddings")
         .dense(vec![0.12, 0.91, 0.44])
         .content("web-01 runs nginx and ssh")
         .metadata("source", "inventory")
         .save()?;
 
-    let doc_id = db.doc("events")
+    let doc_rid = db.doc("events")
         .field("kind", "login")
         .field("user", "alice")
         .field("success", true)
         .save()?;
 
-    let cfg_id = db.kv("config", "theme", Value::Text("dark".into()))
+    let cfg_rid = db.kv("config", "theme", Value::Text("dark".into()))
         .metadata("updated_by", "admin")
         .save()?;
 
-    println!("{user_id} {host_id} {vector_id} {doc_id} {cfg_id}");
+    println!("{user_rid} {host_rid} {vector_rid} {doc_rid} {cfg_rid}");
     db.flush()?;
     Ok(())
 }

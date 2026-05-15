@@ -120,8 +120,13 @@ Deprecated granular catalog endpoints return `Deprecation: 2026-08-08` and `Suns
 | `GET` | `/collections/{name}/kvs/{key}` | Read a key-value pair by key |
 | `PUT` | `/collections/{name}/kvs/{key}` | Create or update a key-value pair |
 | `DELETE` | `/collections/{name}/kvs/{key}` | Delete a key-value pair by key |
-| `PATCH` | `/collections/{name}/entities/{id}` | Update an entity |
-| `DELETE` | `/collections/{name}/entities/{id}` | Delete an entity |
+| `PATCH` | `/collections/{name}/entities/{rid}` | Update an item by RedDB ID |
+| `DELETE` | `/collections/{name}/entities/{rid}` | Delete an item by RedDB ID |
+
+HTTP item results use the public envelope: `rid` is the RedDB ID, `collection`
+is the source collection, and `kind` is one of `row`, `document`, `kv`, `node`,
+`edge`, or `vector`. Older public identifier names such as `_entity_id`,
+`red_entity_id`, and `entity_id` are not part of the public response shape.
 
 ### Bulk Insert Performance
 

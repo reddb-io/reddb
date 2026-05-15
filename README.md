@@ -44,7 +44,7 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@co.com')
 INSERT INTO logs DOCUMENT (body) VALUES ({"level":"info","msg":"login"})
 
 -- Graph edges
-INSERT INTO network EDGE (label, from, to) VALUES ('CONNECTS', 1, 2)
+INSERT INTO network EDGE (label, from_rid, to_rid) VALUES ('CONNECTS', 102, 103)
 
 -- Vector similarity search
 SEARCH SIMILAR TEXT 'anomaly detected' COLLECTION events
@@ -372,7 +372,7 @@ Same storage format across all three. Start embedded, scale to server, expose to
 RedDB uses multiple optimization techniques for fast queries at scale:
 
 - **Result Cache** -- identical SELECT queries return in <1ms; auto-invalidated on INSERT/UPDATE/DELETE (30s TTL, max 1000 entries)
-- **Hot Entity Cache** -- `get_any(id)` lookups served from an LRU cache (10K entries), O(1) instead of scanning all collections
+- **Hot Item Cache** -- `get_any(rid)` lookups served from an LRU cache (10K entries), O(1) instead of scanning all collections
 - **Binary Bulk Insert** -- gRPC `BulkInsertBinary` with zero JSON overhead, protobuf native types -- 241K ops/sec
 - **Concurrent HTTP** -- thread-per-connection model; each request handled in its own OS thread
 - **Parallel Segment Scanning** -- sealed segments scanned in parallel via `std::thread::scope`; auto-detects single-core and skips parallelism

@@ -44,7 +44,9 @@ curl -X POST http://127.0.0.1:8080/collections/company/rows \
   -d '{"fields":{"name":"Frank Yao","email":"frank@co.com","department":"Engineering","title":"Staff Engineer"}}'
 ```
 
-Each call returns the new entity ID. The IDs used below assume sequential assignment starting at `1`.
+Each call returns the new item `rid`. The values used below are examples;
+retrieve real RedDB IDs with `RETURNING rid` or from the HTTP response rather
+than assuming sequential assignment.
 
 ## Step 2: Create Graph Relationships
 
@@ -64,27 +66,27 @@ Dan (Product Manager) ── reports to Alice
 # Bob reports to Alice
 curl -X POST http://127.0.0.1:8080/collections/company/edges \
   -H 'content-type: application/json' \
-  -d '{"label":"REPORTS_TO","from":"2","to":"1","properties":{"since":"2024-01"}}'
+  -d '{"label":"REPORTS_TO","from_rid":103,"to_rid":102,"properties":{"since":"2024-01"}}'
 
 # Carol reports to Alice
 curl -X POST http://127.0.0.1:8080/collections/company/edges \
   -H 'content-type: application/json' \
-  -d '{"label":"REPORTS_TO","from":"3","to":"1","properties":{"since":"2024-03"}}'
+  -d '{"label":"REPORTS_TO","from_rid":104,"to_rid":102,"properties":{"since":"2024-03"}}'
 
 # Dan reports to Alice
 curl -X POST http://127.0.0.1:8080/collections/company/edges \
   -H 'content-type: application/json' \
-  -d '{"label":"REPORTS_TO","from":"4","to":"1","properties":{"since":"2024-06"}}'
+  -d '{"label":"REPORTS_TO","from_rid":105,"to_rid":102,"properties":{"since":"2024-06"}}'
 
 # Eva reports to Bob
 curl -X POST http://127.0.0.1:8080/collections/company/edges \
   -H 'content-type: application/json' \
-  -d '{"label":"REPORTS_TO","from":"5","to":"2","properties":{"since":"2024-09"}}'
+  -d '{"label":"REPORTS_TO","from_rid":106,"to_rid":103,"properties":{"since":"2024-09"}}'
 
 # Frank reports to Alice
 curl -X POST http://127.0.0.1:8080/collections/company/edges \
   -H 'content-type: application/json' \
-  -d '{"label":"REPORTS_TO","from":"6","to":"1","properties":{"since":"2024-02"}}'
+  -d '{"label":"REPORTS_TO","from_rid":107,"to_rid":102,"properties":{"since":"2024-02"}}'
 ```
 
 ## Step 3: Auto-Embed Job Descriptions

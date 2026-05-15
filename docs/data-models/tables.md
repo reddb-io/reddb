@@ -113,7 +113,7 @@ curl -X POST http://127.0.0.1:8080/query \
 ## Updating Rows
 
 ```bash
-curl -X PATCH http://127.0.0.1:8080/collections/users/entities/1 \
+curl -X PATCH http://127.0.0.1:8080/collections/users/entities/102 \
   -H 'content-type: application/json' \
   -d '{"fields": {"age": 31}}'
 ```
@@ -121,25 +121,29 @@ curl -X PATCH http://127.0.0.1:8080/collections/users/entities/1 \
 Or via SQL:
 
 ```sql
-UPDATE users SET age = 31 WHERE name = 'Alice'
+UPDATE users ROWS
+SET age = 31
+WHERE name = 'Alice'
+RETURNING rid, age
 ```
 
 ```sql
-UPDATE users
-SET active = false, age = 32
-WHERE email = 'alice@example.com'
+UPDATE users ROWS
+SET active = false, age += 1
+WHERE rid = 102
+RETURNING rid, active, age
 ```
 
 ## Deleting Rows
 
 ```bash
-curl -X DELETE http://127.0.0.1:8080/collections/users/entities/1
+curl -X DELETE http://127.0.0.1:8080/collections/users/entities/102
 ```
 
 Or via SQL:
 
 ```sql
-DELETE FROM users WHERE name = 'Alice'
+DELETE FROM users WHERE rid = 102
 ```
 
 ```sql
@@ -208,7 +212,7 @@ curl "http://127.0.0.1:8080/collections/users/scan?offset=0&limit=50"
 If you prefer staying in SQL:
 
 ```sql
-SELECT * FROM users ORDER BY _entity_id ASC LIMIT 50 OFFSET 0
+SELECT * FROM users ORDER BY rid ASC LIMIT 50 OFFSET 0
 ```
 
 ## Row Envelope
@@ -217,12 +221,15 @@ Every row returned by the query engine includes standard envelope fields:
 
 | Field | Type | Description |
 |:------|:-----|:------------|
-| `_entity_id` | `u64` | Unique entity identifier |
-| `_collection` | `string` | Collection name |
-| `_kind` | `string` | Always `"row"` for table rows |
-| `_entity_type` | `string` | Entity type classification |
-| `_capabilities` | `string[]` | Supported operations |
-| `_score` | `f64` | Relevance score (for ranked queries) |
+| `rid` | `u64` | RedDB ID for the row item |
+| `collection` | `string` | Collection name |
+| `kind` | `string` | Always `"row"` for table rows |
+| `tenant` | `string` / `null` | Tenant visible to the statement |
+| `created_at` | timestamp/integer millis | Creation timestamp |
+| `updated_at` | timestamp/integer millis | Last update timestamp |
+
+`rid`, `collection`, `kind`, `tenant`, `created_at`, and `updated_at` are
+reserved system fields. Do not use them as table column names.
 
 ## Column Types
 

@@ -39,12 +39,12 @@ curl -X POST http://127.0.0.1:8080/query \
   -d '{"query": "SELECT * FROM users WHERE role = '\''admin'\'' ORDER BY name LIMIT 20"}'
 ```
 
-### Get by ID
+### Get by RedDB ID
 
 ```bash
 curl -X POST http://127.0.0.1:8080/query \
   -H 'content-type: application/json' \
-  -d '{"query": "SELECT * FROM users WHERE _entity_id = 1"}'
+  -d '{"query": "SELECT * FROM users WHERE rid = 102"}'
 ```
 
 ### Create
@@ -58,7 +58,7 @@ curl -X POST http://127.0.0.1:8080/collections/users/rows \
 ### Update
 
 ```bash
-curl -X PATCH http://127.0.0.1:8080/collections/users/entities/1 \
+curl -X PATCH http://127.0.0.1:8080/collections/users/entities/102 \
   -H 'content-type: application/json' \
   -d '{"fields": {"role": "superadmin"}}'
 ```
@@ -66,7 +66,7 @@ curl -X PATCH http://127.0.0.1:8080/collections/users/entities/1 \
 ### Delete
 
 ```bash
-curl -X DELETE http://127.0.0.1:8080/collections/users/entities/3
+curl -X DELETE http://127.0.0.1:8080/collections/users/entities/104
 ```
 
 ## Adding Related Data
@@ -82,7 +82,7 @@ curl -X POST http://127.0.0.1:8080/collections/projects/nodes \
 # Link user to project
 curl -X POST http://127.0.0.1:8080/collections/projects/edges \
   -H 'content-type: application/json' \
-  -d '{"label": "MEMBER_OF", "from": 1, "to": 3, "properties": {"role": "maintainer"}}'
+  -d '{"label": "MEMBER_OF", "from_rid": 102, "to_rid": 104, "properties": {"role": "maintainer"}}'
 ```
 
 ## Query Across Models
@@ -90,7 +90,7 @@ curl -X POST http://127.0.0.1:8080/collections/projects/edges \
 ```bash
 curl -X POST http://127.0.0.1:8080/query \
   -H 'content-type: application/json' \
-  -d '{"query": "FROM ANY WHERE _collection = '\''users'\'' OR _collection = '\''projects'\'' ORDER BY _score DESC LIMIT 50"}'
+  -d '{"query": "FROM ANY WHERE collection = '\''users'\'' OR collection = '\''projects'\'' ORDER BY rid DESC LIMIT 50"}'
 ```
 
 ## Enable Auth

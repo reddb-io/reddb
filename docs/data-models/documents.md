@@ -29,7 +29,7 @@ LIMIT 20
 SELECT title, category
 FROM articles
 WHERE published = true
-ORDER BY _entity_id DESC
+ORDER BY rid DESC
 LIMIT 10
 ```
 
@@ -37,8 +37,8 @@ If you want to search documents across collections, use the universal envelope:
 
 ```sql
 FROM ANY
-WHERE _kind = 'document' AND _collection = 'events'
-ORDER BY _entity_id DESC
+WHERE kind = 'document' AND collection = 'events'
+ORDER BY rid DESC
 LIMIT 20
 ```
 
@@ -110,6 +110,11 @@ A document entity consists of:
 | `body` | Yes | The JSON document content (any valid JSON object) |
 | `metadata` | No | Key-value pairs for classification and filtering |
 
+Returned document items also include the public envelope fields `rid`,
+`collection`, `kind`, `tenant`, `created_at`, and `updated_at`, with
+`kind = 'document'`. Those envelope names are reserved; top-level document body
+fields cannot use them.
+
 ## Querying Documents
 
 Documents are queryable both as collection-scoped SQL reads and through the universal query engine.
@@ -137,13 +142,13 @@ ORDER BY index DESC
 Universal examples:
 
 ```sql
-FROM ANY WHERE _kind = 'document' AND _collection = 'events' LIMIT 20
+FROM ANY WHERE kind = 'document' AND collection = 'events' LIMIT 20
 ```
 
 ```sql
 FROM ANY
-WHERE _kind = 'document'
-  AND _collection = 'events'
+WHERE kind = 'document'
+  AND collection = 'events'
   AND event_type = 'login'
 LIMIT 20
 ```
@@ -163,7 +168,7 @@ curl -X POST http://127.0.0.1:8080/query \
 Patch specific nested fields in a document with JSON-pointer-style paths under `body`:
 
 ```bash
-curl -X PATCH http://127.0.0.1:8080/collections/events/entities/42 \
+curl -X PATCH http://127.0.0.1:8080/collections/events/entities/102 \
   -H 'content-type: application/json' \
   -d '{
     "operations": [
@@ -181,7 +186,7 @@ document body instead.
 Full document body replacement remains available through `body` without `operations`:
 
 ```bash
-curl -X PATCH http://127.0.0.1:8080/collections/events/entities/42 \
+curl -X PATCH http://127.0.0.1:8080/collections/events/entities/102 \
   -H 'content-type: application/json' \
   -d '{
     "body": {
@@ -197,7 +202,7 @@ curl -X PATCH http://127.0.0.1:8080/collections/events/entities/42 \
 ## Deleting Documents
 
 ```bash
-curl -X DELETE http://127.0.0.1:8080/collections/events/entities/42
+curl -X DELETE http://127.0.0.1:8080/collections/events/entities/102
 ```
 
 ## Use Cases

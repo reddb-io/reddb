@@ -46,6 +46,11 @@ For engine work, compatibility checks, and storage refactors, it also matters to
 the **native persisted entity kinds** in the unified storage core and from **supporting engine structures** such as
 indexes and probabilistic sketches.
 
+Public query and API results describe every stored value as an **item**. Each
+item has a RedDB ID, exposed as `rid`, plus the standard envelope fields
+`collection`, `kind`, `tenant`, `created_at`, and `updated_at`. The public item
+`kind` values are `row`, `document`, `kv`, `node`, `edge`, and `vector`.
+
 ## The Three Layers
 
 | Layer | What it means | Examples |
@@ -77,7 +82,7 @@ These are the main structures most users mean when they ask "what can I build in
 | Documents | `INSERT INTO logs DOCUMENT (body) VALUES (...)` | `SELECT`, `FROM ANY`, field projections | Flexible JSON payloads | User-facing model over the unified collection path |
 | Key-Value | `INSERT INTO config KV (key, value) VALUES (...)` or KV HTTP API | KV API, `SELECT key, value FROM config` | Config, sessions, flags, cache-like lookups | User-facing model over the unified collection path |
 | Cache | Internal Blob Cache Interface first; public API later | Exact key lookup, existence check, invalidation APIs | Arbitrary cached blobs with rich TTL and durable L2 | Proposed supporting engine structure |
-| Graphs | `INSERT INTO network NODE ...`, `INSERT INTO network EDGE ...` | `MATCH`, `GRAPH ...`, `PATH ...` | Relationships, traversals, analytics | Native `GraphNode` and `GraphEdge` |
+| Graphs | `INSERT INTO network NODE ...`, `INSERT INTO network EDGE (label, from_rid, to_rid) ...` | `MATCH`, `GRAPH ...`, `PATH ...` | Relationships, traversals, analytics | Native `GraphNode` and `GraphEdge` |
 | Vectors | `INSERT INTO embeddings VECTOR (...)` | `VECTOR SEARCH`, `HYBRID ... VECTOR SEARCH` | Embeddings, semantic retrieval, RAG | Native `Vector` |
 | Metrics | `CREATE METRICS` (planned), Prometheus `remote_write` | Prometheus query API subset, native metrics plans, SQL follow-up | SRE dashboards, Prometheus/Grafana backend, retained rollups | Planned model over time-series internals |
 | Time-Series | `CREATE TIMESERIES`, `INSERT INTO cpu_metrics (...)` | `SELECT`, `time_bucket(...)`, range filters | Metrics, telemetry, sensor data | Native `TimeSeriesPoint` |

@@ -29,7 +29,7 @@ Returns results sorted by distance ascending:
 
 | Column | Description |
 |:-------|:------------|
-| `entity_id` | Entity ID of the matching point |
+| `rid` | RedDB ID of the matching point |
 | `distance_km` | Haversine distance in kilometers |
 
 ## Bounding Box Search
