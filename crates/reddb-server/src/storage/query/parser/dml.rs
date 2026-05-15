@@ -1,8 +1,8 @@
 //! DML SQL Parser: INSERT, UPDATE, DELETE
 
 use super::super::ast::{
-    AskCacheClause, AskQuery, DeleteQuery, Expr, Filter, InsertEntityType, InsertQuery, QueryExpr,
-    ReturningItem, UpdateQuery,
+    AskCacheClause, AskQuery, BinOp, DeleteQuery, Expr, Filter, InsertEntityType, InsertQuery,
+    QueryExpr, ReturningItem, UpdateQuery,
 };
 use super::super::lexer::Token;
 use super::error::ParseError;
@@ -320,14 +320,38 @@ impl<'a> Parser<'a> {
 
         let mut assignments = Vec::new();
         let mut assignment_exprs = Vec::new();
+        let mut compound_assignment_ops = Vec::new();
         loop {
             let col = self.expect_ident()?;
-            self.expect(Token::Eq)?;
+            let compound_op = if self.consume(&Token::Eq)? {
+                None
+            } else {
+                let op = match self.peek() {
+                    Token::Plus => BinOp::Add,
+                    Token::Dash | Token::Minus => BinOp::Sub,
+                    Token::Star => BinOp::Mul,
+                    Token::Slash => BinOp::Div,
+                    Token::Percent => BinOp::Mod,
+                    _ => {
+                        return Err(ParseError::expected(
+                            vec!["=", "+=", "-=", "*=", "/=", "%="],
+                            self.peek(),
+                            self.position(),
+                        ));
+                    }
+                };
+                self.advance()?;
+                self.expect(Token::Eq)?;
+                Some(op)
+            };
             let expr = self.parse_expr()?;
             let folded = fold_expr_to_value(expr.clone()).ok();
             assignment_exprs.push((col.clone(), expr));
-            if let Some(val) = folded {
-                assignments.push((col.clone(), val));
+            compound_assignment_ops.push(compound_op);
+            if compound_op.is_none() {
+                if let Some(val) = folded {
+                    assignments.push((col.clone(), val));
+                }
             }
             if !self.consume(&Token::Comma)? {
                 break;
@@ -365,6 +389,7 @@ impl<'a> Parser<'a> {
         Ok(QueryExpr::Update(UpdateQuery {
             table,
             assignment_exprs,
+            compound_assignment_ops,
             assignments,
             where_expr,
             filter,

@@ -1682,6 +1682,9 @@ pub struct UpdateQuery {
     pub table: String,
     /// Canonical SQL assignments.
     pub assignment_exprs: Vec<(String, super::Expr)>,
+    /// Per-assignment compound operator for `SET col += expr` forms.
+    /// `None` means ordinary `SET col = expr`.
+    pub compound_assignment_ops: Vec<Option<super::BinOp>>,
     /// Best-effort literal-only cache of assignments. Non-foldable expressions
     /// are preserved exclusively in `assignment_exprs` and evaluated later
     /// against the row pre-image by the runtime.
