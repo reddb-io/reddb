@@ -100,6 +100,7 @@
 - **ADRs**
   - [0001 — RedWire TCP Protocol](/adr/0001-redwire-tcp-protocol.md)
   - [0006 — Tiered Blob Cache](/adr/0006-tiered-blob-cache.md)
+  - [0019 — Rid and Multi-Model Update Surface](/adr/0019-rid-and-multimodel-update-surface.md)
 
 - **Vector Engine**
   - [HNSW Index](/vectors/hnsw.md)
