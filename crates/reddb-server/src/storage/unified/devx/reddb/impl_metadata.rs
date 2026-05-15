@@ -316,9 +316,12 @@ impl RedDB {
     }
 
     pub(crate) fn with_initialized_metadata(self) -> Result<Self, Box<dyn std::error::Error>> {
-        if self.options.mode == StorageMode::Persistent && !self.options.read_only {
+        if self.options.mode == StorageMode::Persistent {
             // Load metadata without persisting (avoids blocking catalog snapshot on boot)
-            let _ = self.load_or_bootstrap_physical_metadata(false);
+            if let Ok(metadata) = self.load_or_bootstrap_physical_metadata(false) {
+                crate::reserved_fields::validate_physical_metadata_contracts(&metadata)
+                    .map_err(|err| err.to_string())?;
+            }
             // Skip repair on boot — deferred to first explicit persist_metadata() call.
             // This avoids the recursive catalog_model_snapshot → physical_metadata loop
             // that caused stack overflow / 12-second hang on startup.

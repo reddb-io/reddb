@@ -609,6 +609,10 @@ impl RedDBRuntime {
                                 &values,
                                 &["label", "node_type"],
                             );
+                            crate::reserved_fields::ensure_no_reserved_public_item_fields(
+                                properties.iter().map(|(key, _)| key.as_str()),
+                                &format!("node '{}'", query.table),
+                            )?;
                             prepared.push(PreparedGraphInsert::Node {
                                 fields: node_values,
                                 input: CreateNodeInput {
@@ -661,6 +665,10 @@ impl RedDBRuntime {
                                 &values,
                                 &["label", "from", "to", "weight"],
                             );
+                            crate::reserved_fields::ensure_no_reserved_public_item_fields(
+                                properties.iter().map(|(key, _)| key.as_str()),
+                                &format!("edge '{}'", query.table),
+                            )?;
                             prepared.push(PreparedGraphInsert::Edge {
                                 fields: edge_values,
                                 input: CreateEdgeInput {
