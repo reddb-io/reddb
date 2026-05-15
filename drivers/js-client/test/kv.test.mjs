@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { KvClient, RedDBError } from '../src/index.js'
+import { KvClient } from '../src/index.js'
 
 function fakeKv(responder) {
   const calls = []
@@ -14,18 +14,11 @@ function fakeKv(responder) {
   return { kv: new KvClient(client), calls }
 }
 
-test('kv.put rejects unsupported key characters without rewriting', () => {
+test('kv.put quotes namespaced keys without rewriting', async () => {
   const { kv, calls } = fakeKv()
-  assert.throws(
-    () => kv.put('corpus:version', '1.0.0'),
-    (err) => {
-      assert.ok(err instanceof RedDBError)
-      assert.equal(err.code, 'INVALID_KV_KEY')
-      assert.match(err.message, /:/)
-      return true
-    },
-  )
-  assert.equal(calls.length, 0)
+  await kv.put('corpus:version', '1.0.0')
+  assert.equal(calls[0].method, 'query')
+  assert.equal(calls[0].params.sql, "KV PUT kv_default.'corpus:version' = '1.0.0'")
 })
 
 test('kv.put preserves supported keys in generated SQL', async () => {
@@ -45,6 +38,14 @@ test('kv.get returns stored value and null on miss', async () => {
   assert.deepEqual(calls.map((call) => call.params.sql), [
     'KV GET kv_default.corpus_version',
     'KV GET kv_default.missing',
+  ])
+})
+
+test('kv.get quotes namespaced keys without rewriting', async () => {
+  const { kv, calls } = fakeKv(() => ({ rows: [{ value: '1.0.0' }] }))
+  assert.equal(await kv.get('corpus:version'), '1.0.0')
+  assert.deepEqual(calls.map((call) => call.params.sql), [
+    "KV GET kv_default.'corpus:version'",
   ])
 })
 

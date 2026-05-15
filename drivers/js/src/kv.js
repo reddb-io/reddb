@@ -66,7 +66,7 @@ export class KvClient {
 }
 
 function kvPath(collection, key) {
-  return `${kvIdentifier(collection)}.${kvIdentifier(key)}`
+  return `${kvIdentifier(collection)}.${kvKeySegment(key)}`
 }
 
 function kvIdentifier(value) {
@@ -79,6 +79,12 @@ function kvIdentifier(value) {
     )
   }
   return ident
+}
+
+function kvKeySegment(value) {
+  const key = String(value)
+  if (/^[A-Za-z0-9_]+$/.test(key)) return key
+  return `'${key.replace(/'/g, "''")}'`
 }
 
 function kvValueLiteral(value) {
