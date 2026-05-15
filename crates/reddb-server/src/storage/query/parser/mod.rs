@@ -226,6 +226,7 @@ impl<'a> Parser<'a> {
             Token::Avg => "avg".to_string(),
             Token::Min => "min".to_string(),
             Token::Max => "max".to_string(),
+            Token::Weight => "weight".to_string(),
             other => {
                 return Err(ParseError::expected(
                     vec!["identifier"],
