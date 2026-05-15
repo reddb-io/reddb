@@ -2216,6 +2216,7 @@ impl RedDBRuntime {
         runtime.rehydrate_snapshot_xid_floor();
         runtime.bootstrap_system_keyed_collections()?;
         runtime.rehydrate_declared_column_schemas();
+        runtime.load_probabilistic_state()?;
 
         // Phase 2.5.4: replay `tenant_tables.{table}.column` markers so
         // tables declared via `TENANT BY (col)` survive restart. Each

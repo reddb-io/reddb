@@ -3,6 +3,10 @@
 use super::*;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+const PROB_HLL_STATE_PREFIX: &str = "red.probabilistic.hll.";
+const PROB_SKETCH_STATE_PREFIX: &str = "red.probabilistic.sketch.";
+const PROB_FILTER_STATE_PREFIX: &str = "red.probabilistic.filter.";
+
 fn probabilistic_read<'a, T>(lock: &'a RwLock<T>, _name: &str) -> RwLockReadGuard<'a, T> {
     lock.read()
 }
@@ -48,6 +52,142 @@ enum ProbabilisticReadProjection {
 }
 
 impl RedDBRuntime {
+    pub(crate) fn load_probabilistic_state(&self) -> RedDBResult<()> {
+        {
+            let entries = self.latest_probabilistic_state_entries(PROB_HLL_STATE_PREFIX);
+            let mut hlls =
+                probabilistic_write(&self.inner.probabilistic.hlls, "probabilistic HLL store");
+            for (name, data_hex) in entries {
+                let bytes = hex::decode(&data_hex).map_err(|err| {
+                    RedDBError::Internal(format!("invalid persisted HLL state for '{name}': {err}"))
+                })?;
+                let Some(hll) =
+                    crate::storage::primitives::hyperloglog::HyperLogLog::from_bytes(bytes)
+                else {
+                    return Err(RedDBError::Internal(format!(
+                        "invalid persisted HLL state for '{name}'"
+                    )));
+                };
+                hlls.insert(name, hll);
+            }
+        }
+
+        {
+            let entries = self.latest_probabilistic_state_entries(PROB_SKETCH_STATE_PREFIX);
+            let mut sketches = probabilistic_write(
+                &self.inner.probabilistic.sketches,
+                "probabilistic sketch store",
+            );
+            for (name, data_hex) in entries {
+                let bytes = hex::decode(&data_hex).map_err(|err| {
+                    RedDBError::Internal(format!(
+                        "invalid persisted SKETCH state for '{name}': {err}"
+                    ))
+                })?;
+                let sketch =
+                    crate::storage::primitives::count_min_sketch::CountMinSketch::from_bytes(
+                        &bytes,
+                    )
+                    .ok_or_else(|| {
+                        RedDBError::Internal(format!("invalid persisted SKETCH state for '{name}'"))
+                    })?;
+                sketches.insert(name, sketch);
+            }
+        }
+
+        {
+            let entries = self.latest_probabilistic_state_entries(PROB_FILTER_STATE_PREFIX);
+            let mut filters = probabilistic_write(
+                &self.inner.probabilistic.filters,
+                "probabilistic filter store",
+            );
+            for (name, data_hex) in entries {
+                let bytes = hex::decode(&data_hex).map_err(|err| {
+                    RedDBError::Internal(format!(
+                        "invalid persisted FILTER state for '{name}': {err}"
+                    ))
+                })?;
+                let filter =
+                    crate::storage::primitives::cuckoo_filter::CuckooFilter::from_bytes(&bytes)
+                        .ok_or_else(|| {
+                            RedDBError::Internal(format!(
+                                "invalid persisted FILTER state for '{name}'"
+                            ))
+                        })?;
+                filters.insert(name, filter);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn latest_probabilistic_state_entries(&self, prefix: &str) -> Vec<(String, String)> {
+        let Some(manager) = self.inner.db.store().get_collection("red_config") else {
+            return Vec::new();
+        };
+        let mut latest: std::collections::HashMap<String, (u64, Option<String>)> =
+            std::collections::HashMap::new();
+        for entity in manager.query_all(|_| true) {
+            let EntityData::Row(row) = &entity.data else {
+                continue;
+            };
+            let Some(named) = &row.named else {
+                continue;
+            };
+            let Some(Value::Text(key)) = named.get("key") else {
+                continue;
+            };
+            let Some(encoded_name) = key.strip_prefix(prefix) else {
+                continue;
+            };
+            let value = match named.get("value") {
+                Some(Value::Text(value)) => Some(value.to_string()),
+                Some(Value::Null) => None,
+                _ => continue,
+            };
+            let entity_id = entity.id.raw();
+            match latest.get(encoded_name) {
+                Some((existing_id, _)) if *existing_id > entity_id => {}
+                _ => {
+                    latest.insert(encoded_name.to_string(), (entity_id, value));
+                }
+            }
+        }
+
+        latest
+            .into_iter()
+            .filter_map(|(encoded_name, (_, value))| {
+                let value = value?;
+                let bytes = hex::decode(encoded_name).ok()?;
+                let name = String::from_utf8(bytes).ok()?;
+                Some((name, value))
+            })
+            .collect()
+    }
+
+    fn persist_probabilistic_blob(
+        &self,
+        prefix: &str,
+        name: &str,
+        bytes: &[u8],
+    ) -> RedDBResult<()> {
+        let key = format!("{prefix}{}", hex::encode(name.as_bytes()));
+        self.inner
+            .db
+            .store()
+            .set_config_tree(&key, &crate::serde_json::Value::String(hex::encode(bytes)));
+        Ok(())
+    }
+
+    fn delete_probabilistic_blob(&self, prefix: &str, name: &str) -> RedDBResult<()> {
+        let key = format!("{prefix}{}", hex::encode(name.as_bytes()));
+        self.inner
+            .db
+            .store()
+            .set_config_tree(&key, &crate::serde_json::Value::Null);
+        Ok(())
+    }
+
     fn create_probabilistic_catalog_entry(
         &self,
         name: &str,
@@ -208,6 +348,7 @@ impl RedDBRuntime {
                     name,
                     crate::catalog::CollectionModel::Hll,
                 )?;
+                self.persist_probabilistic_blob(PROB_HLL_STATE_PREFIX, name, hll.as_bytes())?;
                 hlls.insert(name.clone(), hll);
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
@@ -224,6 +365,7 @@ impl RedDBRuntime {
                 for elem in elements {
                     hll.add(elem.as_bytes());
                 }
+                self.persist_probabilistic_blob(PROB_HLL_STATE_PREFIX, name, hll.as_bytes())?;
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
                     &format!("{} element(s) added to HLL '{}'", elements.len(), name),
@@ -286,6 +428,7 @@ impl RedDBRuntime {
                         .ok_or_else(|| RedDBError::NotFound(format!("HLL '{}' not found", src)))?;
                     merged.merge(hll);
                 }
+                self.persist_probabilistic_blob(PROB_HLL_STATE_PREFIX, dest, merged.as_bytes())?;
                 hlls.insert(dest.clone(), merged);
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
@@ -342,6 +485,7 @@ impl RedDBRuntime {
                     return Err(RedDBError::NotFound(format!("HLL '{}' not found", name)));
                 }
                 self.drop_probabilistic_catalog_entry(name)?;
+                self.delete_probabilistic_blob(PROB_HLL_STATE_PREFIX, name)?;
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
                     &format!("HLL '{}' dropped", name),
@@ -377,12 +521,15 @@ impl RedDBRuntime {
                     name,
                     crate::catalog::CollectionModel::Sketch,
                 )?;
-                sketches.insert(
-                    name.clone(),
-                    crate::storage::primitives::count_min_sketch::CountMinSketch::new(
-                        *width, *depth,
-                    ),
+                let sketch = crate::storage::primitives::count_min_sketch::CountMinSketch::new(
+                    *width, *depth,
                 );
+                self.persist_probabilistic_blob(
+                    PROB_SKETCH_STATE_PREFIX,
+                    name,
+                    &sketch.as_bytes(),
+                )?;
+                sketches.insert(name.clone(), sketch);
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
                     &format!(
@@ -405,6 +552,11 @@ impl RedDBRuntime {
                     .get_mut(name)
                     .ok_or_else(|| RedDBError::NotFound(format!("SKETCH '{}' not found", name)))?;
                 sketch.add(element.as_bytes(), *count);
+                self.persist_probabilistic_blob(
+                    PROB_SKETCH_STATE_PREFIX,
+                    name,
+                    &sketch.as_bytes(),
+                )?;
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
                     &format!("added {} to SKETCH '{}'", count, name),
@@ -457,6 +609,11 @@ impl RedDBRuntime {
                         )));
                     }
                 }
+                self.persist_probabilistic_blob(
+                    PROB_SKETCH_STATE_PREFIX,
+                    dest,
+                    &merged.as_bytes(),
+                )?;
                 sketches.insert(dest.clone(), merged);
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
@@ -519,6 +676,7 @@ impl RedDBRuntime {
                     return Err(RedDBError::NotFound(format!("SKETCH '{}' not found", name)));
                 }
                 self.drop_probabilistic_catalog_entry(name)?;
+                self.delete_probabilistic_blob(PROB_SKETCH_STATE_PREFIX, name)?;
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
                     &format!("SKETCH '{}' dropped", name),
@@ -553,10 +711,14 @@ impl RedDBRuntime {
                     name,
                     crate::catalog::CollectionModel::Filter,
                 )?;
-                filters.insert(
-                    name.clone(),
-                    crate::storage::primitives::cuckoo_filter::CuckooFilter::new(*capacity),
-                );
+                let filter =
+                    crate::storage::primitives::cuckoo_filter::CuckooFilter::new(*capacity);
+                self.persist_probabilistic_blob(
+                    PROB_FILTER_STATE_PREFIX,
+                    name,
+                    &filter.as_bytes(),
+                )?;
+                filters.insert(name.clone(), filter);
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
                     &format!("FILTER '{}' created (capacity={})", name, capacity),
@@ -574,6 +736,11 @@ impl RedDBRuntime {
                 if !filter.insert(element.as_bytes()) {
                     return Err(RedDBError::Query(format!("FILTER '{}' is full", name)));
                 }
+                self.persist_probabilistic_blob(
+                    PROB_FILTER_STATE_PREFIX,
+                    name,
+                    &filter.as_bytes(),
+                )?;
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
                     &format!("element added to FILTER '{}'", name),
@@ -612,6 +779,11 @@ impl RedDBRuntime {
                     .get_mut(name)
                     .ok_or_else(|| RedDBError::NotFound(format!("FILTER '{}' not found", name)))?;
                 let removed = filter.delete(element.as_bytes());
+                self.persist_probabilistic_blob(
+                    PROB_FILTER_STATE_PREFIX,
+                    name,
+                    &filter.as_bytes(),
+                )?;
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
                     &format!(
@@ -693,6 +865,7 @@ impl RedDBRuntime {
                     return Err(RedDBError::NotFound(format!("FILTER '{}' not found", name)));
                 }
                 self.drop_probabilistic_catalog_entry(name)?;
+                self.delete_probabilistic_blob(PROB_FILTER_STATE_PREFIX, name)?;
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
                     &format!("FILTER '{}' dropped", name),
@@ -875,14 +1048,35 @@ fn projection_single_text_arg(function: &str, args: &[Projection]) -> RedDBResul
 
 fn probabilistic_projection_label(projection: &Projection, base: &str, index: usize) -> String {
     match projection {
+        Projection::Field(FieldRef::TableColumn { column, .. }, Some(alias))
+            if alias.eq_ignore_ascii_case(column) =>
+        {
+            numbered_probabilistic_label(base, index)
+        }
         Projection::Field(_, Some(alias)) => alias.clone(),
+        Projection::Alias(column, alias) if column.eq_ignore_ascii_case(alias) => {
+            numbered_probabilistic_label(base, index)
+        }
         Projection::Alias(_, alias) => alias.clone(),
         Projection::Function(name, _) => name
             .split_once(':')
-            .map(|(_, alias)| alias.to_string())
+            .map(|(_, alias)| {
+                if is_generated_probabilistic_function_label(alias, base) {
+                    numbered_probabilistic_label(base, index)
+                } else {
+                    alias.to_string()
+                }
+            })
             .unwrap_or_else(|| numbered_probabilistic_label(base, index)),
         _ => numbered_probabilistic_label(base, index),
     }
+}
+
+fn is_generated_probabilistic_function_label(alias: &str, base: &str) -> bool {
+    alias
+        .get(..base.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(base))
+        && alias[base.len()..].starts_with('(')
 }
 
 fn numbered_probabilistic_label(base: &str, index: usize) -> String {
