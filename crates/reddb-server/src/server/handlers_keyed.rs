@@ -34,7 +34,10 @@ impl RedDBServer {
                 _ => json_error(405, "method not allowed for KV tag invalidation endpoint"),
             },
             [collection, key, "watch"] => match method {
-                "GET" => self.handle_watch_kv(collection, key, query),
+                "GET" => match decoded_http_kv_target(collection, key) {
+                    Ok((collection, key)) => self.handle_watch_kv(&collection, &key, query),
+                    Err(response) => response,
+                },
                 _ => json_error(405, "method not allowed for KV watch endpoint"),
             },
             [collection, key, "incr"] => match method {
@@ -58,9 +61,15 @@ impl RedDBServer {
                 _ => json_error(405, "method not allowed for KV counter endpoint"),
             },
             [collection, key] => match method {
-                "GET" => self.handle_get_kv(collection, key),
+                "GET" => match decoded_http_kv_target(collection, key) {
+                    Ok((collection, key)) => self.handle_get_kv(&collection, &key),
+                    Err(response) => response,
+                },
                 "PUT" => self.handle_v1_kv_put(collection, key, body),
-                "DELETE" => self.handle_delete_kv(collection, key),
+                "DELETE" => match decoded_http_kv_target(collection, key) {
+                    Ok((collection, key)) => self.handle_delete_kv(&collection, &key),
+                    Err(response) => response,
+                },
                 _ => json_error(405, "method not allowed for KV endpoint"),
             },
             _ => json_error(404, "route not found under /v1/kv"),
@@ -303,21 +312,42 @@ fn path_parts(rest: &str) -> Vec<&str> {
 }
 
 fn keyed_path(collection: &str, key: &str) -> Result<String, HttpResponse> {
-    let (collection, key) = keyed_target(collection, key)?;
-    Ok(format!("{collection}.{key}"))
-}
-
-fn keyed_target(collection: &str, key: &str) -> Result<(String, String), HttpResponse> {
-    if !valid_keyed_ident(collection) {
+    let collection = decode_keyed_segment(collection, "collection")?;
+    let key = decode_keyed_segment(key, "key")?;
+    if !valid_keyed_ident(&collection) {
         return Err(json_error(
             400,
             "collection contains unsupported characters",
         ));
     }
-    if !valid_keyed_ident(key) {
+    if key.is_empty() {
         return Err(json_error(400, "key contains unsupported characters"));
     }
-    Ok((collection.to_string(), key.to_string()))
+    Ok(format!("{collection}.{}", keyed_key_sql_segment(&key)))
+}
+
+fn decoded_http_kv_target(collection: &str, key: &str) -> Result<(String, String), HttpResponse> {
+    let collection = decode_keyed_segment(collection, "collection")?;
+    let key = decode_keyed_segment(key, "key")?;
+    if collection.is_empty() || key.is_empty() {
+        return Err(json_error(400, "collection and key are required"));
+    }
+    Ok((collection, key))
+}
+
+fn keyed_target(collection: &str, key: &str) -> Result<(String, String), HttpResponse> {
+    let collection = decode_keyed_segment(collection, "collection")?;
+    let key = decode_keyed_segment(key, "key")?;
+    if !valid_keyed_ident(&collection) {
+        return Err(json_error(
+            400,
+            "collection contains unsupported characters",
+        ));
+    }
+    if !valid_keyed_ident(&key) {
+        return Err(json_error(400, "key contains unsupported characters"));
+    }
+    Ok((collection, key))
 }
 
 fn valid_keyed_ident(value: &str) -> bool {
@@ -325,6 +355,18 @@ fn valid_keyed_ident(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
+}
+
+fn decode_keyed_segment(segment: &str, name: &str) -> Result<String, HttpResponse> {
+    percent_decode_path_segment(segment)
+        .map_err(|err| json_error(400, format!("invalid {name} path segment: {err}")))
+}
+
+fn keyed_key_sql_segment(key: &str) -> String {
+    if valid_keyed_ident(key) {
+        return key.to_string();
+    }
+    format!("'{}'", key.replace('\'', "''"))
 }
 
 fn list_sql(domain: &str, collection: &str, query: &BTreeMap<String, String>) -> String {
