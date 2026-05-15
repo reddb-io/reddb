@@ -1789,12 +1789,51 @@ fn test_parse_update_with_where() {
     let query = parse("UPDATE hosts SET hostname = 'new-name' WHERE ip = '10.0.0.1'").unwrap();
     if let QueryExpr::Update(uq) = query {
         assert_eq!(uq.table, "hosts");
+        assert_eq!(uq.target, crate::storage::query::ast::UpdateTarget::Rows);
         assert_eq!(uq.assignments.len(), 1);
         assert_eq!(uq.assignments[0].0, "hostname");
         assert!(uq.filter.is_some());
     } else {
         panic!("Expected UpdateQuery");
     }
+}
+
+#[test]
+fn test_parse_update_explicit_item_targets() {
+    for (sql, expected) in [
+        (
+            "UPDATE hosts ROWS SET status = 'active'",
+            crate::storage::query::ast::UpdateTarget::Rows,
+        ),
+        (
+            "UPDATE docs DOCUMENTS SET status = 'published'",
+            crate::storage::query::ast::UpdateTarget::Documents,
+        ),
+        (
+            "UPDATE settings KV SET value = 'on'",
+            crate::storage::query::ast::UpdateTarget::Kv,
+        ),
+        (
+            "UPDATE social NODES SET status = 'seen'",
+            crate::storage::query::ast::UpdateTarget::Nodes,
+        ),
+        (
+            "UPDATE social EDGES SET status = 'linked'",
+            crate::storage::query::ast::UpdateTarget::Edges,
+        ),
+    ] {
+        let query = parse(sql).unwrap();
+        let QueryExpr::Update(update) = query else {
+            panic!("Expected UpdateQuery");
+        };
+        assert_eq!(update.target, expected, "{sql}");
+    }
+}
+
+#[test]
+fn test_parse_update_from_any_remains_rejected() {
+    let err = parse("UPDATE FROM ANY SET status = 'bad'").unwrap_err();
+    assert!(err.to_string().contains("expected: identifier"));
 }
 
 #[test]

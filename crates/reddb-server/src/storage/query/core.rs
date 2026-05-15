@@ -1619,6 +1619,22 @@ pub enum InsertEntityType {
     Kv,
 }
 
+/// Explicit item-kind qualifier for UPDATE statements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UpdateTarget {
+    /// Default: table/document/KV row-shaped items.
+    #[default]
+    Rows,
+    /// UPDATE t DOCUMENTS SET ...
+    Documents,
+    /// UPDATE t KV SET ...
+    Kv,
+    /// UPDATE t NODES SET ...
+    Nodes,
+    /// UPDATE t EDGES SET ...
+    Edges,
+}
+
 /// An item in a RETURNING clause: either `*` (all columns) or a named column.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReturningItem {
@@ -1680,6 +1696,8 @@ pub struct EventsBackfillQuery {
 pub struct UpdateQuery {
     /// Target table name
     pub table: String,
+    /// Explicit item-kind target. Omitted targets default to rows.
+    pub target: UpdateTarget,
     /// Canonical SQL assignments.
     pub assignment_exprs: Vec<(String, super::Expr)>,
     /// Per-assignment compound operator for `SET col += expr` forms.

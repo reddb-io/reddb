@@ -26,7 +26,7 @@ use std::collections::HashMap;
 
 use super::{query_exec, RedDBRuntime};
 use crate::api::{RedDBError, RedDBResult};
-use crate::storage::query::ast::Filter;
+use crate::storage::query::ast::{Filter, UpdateTarget};
 use crate::storage::schema::Value;
 use crate::storage::{EntityData, EntityId};
 
@@ -35,6 +35,7 @@ pub(super) struct DmlTargetScan<'a> {
     table: &'a str,
     filter: Option<&'a Filter>,
     limit: Option<usize>,
+    target: Option<UpdateTarget>,
 }
 
 impl<'a> DmlTargetScan<'a> {
@@ -49,6 +50,23 @@ impl<'a> DmlTargetScan<'a> {
             table,
             filter,
             limit,
+            target: None,
+        }
+    }
+
+    pub(super) fn with_update_target(
+        runtime: &'a RedDBRuntime,
+        table: &'a str,
+        filter: Option<&'a Filter>,
+        limit: Option<usize>,
+        target: UpdateTarget,
+    ) -> Self {
+        Self {
+            runtime,
+            table,
+            filter,
+            limit,
+            target: Some(target),
         }
     }
 
@@ -73,10 +91,10 @@ impl<'a> DmlTargetScan<'a> {
             if let Some(entity) =
                 store.get_table_row_by_logical_id(self.table, EntityId::new(entity_id))
             {
-                return Ok(vec![entity.id]);
+                return Ok(self.target_ids_from_entities([entity]));
             }
             if let Some(entity) = store.get(self.table, EntityId::new(entity_id)) {
-                return Ok(vec![entity.id]);
+                return Ok(self.target_ids_from_entities([entity]));
             }
             return Ok(Vec::new());
         }
@@ -132,7 +150,9 @@ impl<'a> DmlTargetScan<'a> {
                 if !crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
                     return true;
                 }
-                if self.matches_filter(entity, compiled_filter.as_ref()) {
+                if self.matches_update_target(entity)
+                    && self.matches_filter(entity, compiled_filter.as_ref())
+                {
                     ids.push(entity.id);
                     if self.limit.map(|limit| ids.len() >= limit).unwrap_or(false) {
                         return false;
@@ -142,7 +162,9 @@ impl<'a> DmlTargetScan<'a> {
             });
         } else {
             manager.for_each_entity(|entity| {
-                if crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
+                if crate::runtime::impl_core::entity_visible_under_current_snapshot(entity)
+                    && self.matches_update_target(entity)
+                {
                     ids.push(entity.id);
                     if self.limit.map(|limit| ids.len() >= limit).unwrap_or(false) {
                         return false;
@@ -207,13 +229,9 @@ impl<'a> DmlTargetScan<'a> {
 
     fn recheck_index_candidates(
         &self,
-        mut entity_ids: Vec<EntityId>,
+        entity_ids: Vec<EntityId>,
         compiled_filter: Option<&query_exec::CompiledEntityFilter>,
     ) -> Vec<EntityId> {
-        if let Some(limit) = self.limit {
-            entity_ids.truncate(limit);
-        }
-
         let db = self.runtime.db();
         let store = db.store();
         let Some(manager) = store.get_collection(self.table) else {
@@ -226,11 +244,55 @@ impl<'a> DmlTargetScan<'a> {
         // existing AS-OF semantics on indexed predicates.
         let mut ids = Vec::with_capacity(entity_ids.len());
         for entity in manager.get_many(&entity_ids).into_iter().flatten() {
-            if self.matches_filter(&entity, compiled_filter) {
+            if self.matches_update_target(&entity) && self.matches_filter(&entity, compiled_filter)
+            {
                 ids.push(entity.id);
+                if self.limit.map(|limit| ids.len() >= limit).unwrap_or(false) {
+                    break;
+                }
             }
         }
         ids
+    }
+
+    fn target_ids_from_entities<I>(&self, entities: I) -> Vec<EntityId>
+    where
+        I: IntoIterator<Item = crate::storage::UnifiedEntity>,
+    {
+        entities
+            .into_iter()
+            .filter(|entity| self.matches_update_target(entity))
+            .map(|entity| entity.id)
+            .collect()
+    }
+
+    fn matches_update_target(&self, entity: &crate::storage::UnifiedEntity) -> bool {
+        let Some(target) = self.target else {
+            return true;
+        };
+        match target {
+            UpdateTarget::Rows => matches!(row_item_kind(entity), Some(RowItemKind::Row)),
+            UpdateTarget::Documents => matches!(row_item_kind(entity), Some(RowItemKind::Document)),
+            UpdateTarget::Kv => matches!(row_item_kind(entity), Some(RowItemKind::Kv)),
+            UpdateTarget::Nodes => {
+                matches!(
+                    (&entity.kind, &entity.data),
+                    (
+                        crate::storage::EntityKind::GraphNode(_),
+                        crate::storage::EntityData::Node(_)
+                    )
+                )
+            }
+            UpdateTarget::Edges => {
+                matches!(
+                    (&entity.kind, &entity.data),
+                    (
+                        crate::storage::EntityKind::GraphEdge(_),
+                        crate::storage::EntityData::Edge(_)
+                    )
+                )
+            }
+        }
     }
 
     fn matches_filter(
@@ -250,6 +312,38 @@ impl<'a> DmlTargetScan<'a> {
             (None, None) => true,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowItemKind {
+    Row,
+    Document,
+    Kv,
+}
+
+fn row_item_kind(entity: &crate::storage::UnifiedEntity) -> Option<RowItemKind> {
+    let row = entity.data.as_row()?;
+    let is_kv = row.named.as_ref().is_some_and(|named| {
+        (named.len() == 2 && named.contains_key("key") && named.contains_key("value"))
+            || (named.len() == 1 && (named.contains_key("key") || named.contains_key("value")))
+    });
+    if is_kv {
+        return Some(RowItemKind::Kv);
+    }
+    let is_document = row
+        .named
+        .as_ref()
+        .is_some_and(|named| named.values().any(row_value_is_documentish))
+        || row.columns.iter().any(row_value_is_documentish);
+    if is_document {
+        Some(RowItemKind::Document)
+    } else {
+        Some(RowItemKind::Row)
+    }
+}
+
+fn row_value_is_documentish(value: &Value) -> bool {
+    matches!(value, Value::Json(_) | Value::Blob(_))
 }
 
 fn entity_row_snapshot(entity: &crate::storage::UnifiedEntity) -> Option<Vec<(String, Value)>> {

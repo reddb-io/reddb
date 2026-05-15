@@ -2,7 +2,7 @@
 
 use super::super::ast::{
     AskCacheClause, AskQuery, BinOp, DeleteQuery, Expr, FieldRef, Filter, InsertEntityType,
-    InsertQuery, OrderByClause, QueryExpr, ReturningItem, UpdateQuery,
+    InsertQuery, OrderByClause, QueryExpr, ReturningItem, UpdateQuery, UpdateTarget,
 };
 use super::super::lexer::Token;
 use super::error::ParseError;
@@ -316,6 +316,7 @@ impl<'a> Parser<'a> {
     pub fn parse_update_query(&mut self) -> Result<QueryExpr, ParseError> {
         self.expect(Token::Update)?;
         let table = self.expect_ident()?;
+        let target = self.parse_update_target()?;
         self.expect(Token::Set)?;
 
         let mut assignments = Vec::new();
@@ -414,6 +415,7 @@ impl<'a> Parser<'a> {
 
         Ok(QueryExpr::Update(UpdateQuery {
             table,
+            target,
             assignment_exprs,
             compound_assignment_ops,
             assignments,
@@ -427,6 +429,25 @@ impl<'a> Parser<'a> {
             limit,
             suppress_events,
         }))
+    }
+
+    fn parse_update_target(&mut self) -> Result<UpdateTarget, ParseError> {
+        if self.consume(&Token::Kv)? {
+            return Ok(UpdateTarget::Kv);
+        }
+        if self.consume_ident_ci("ROWS")? {
+            return Ok(UpdateTarget::Rows);
+        }
+        if self.consume_ident_ci("DOCUMENTS")? {
+            return Ok(UpdateTarget::Documents);
+        }
+        if self.consume_ident_ci("NODES")? {
+            return Ok(UpdateTarget::Nodes);
+        }
+        if self.consume_ident_ci("EDGES")? {
+            return Ok(UpdateTarget::Edges);
+        }
+        Ok(UpdateTarget::Rows)
     }
 
     /// Parse: DELETE FROM table [WHERE filter]
