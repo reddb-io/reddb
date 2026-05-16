@@ -11,84 +11,23 @@ from __future__ import annotations
 
 from typing import Any
 
+from .documents import DocumentClient
 from .errors import RedDBError, UnsupportedScheme
 from .http import HttpClient
+from .kv import (
+    KvClient,
+    kv_identifier as _kv_identifier,
+    kv_key_segment as _kv_key_segment,
+    kv_path as _kv_path,
+    kv_tag_literal as _kv_tag_literal,
+    kv_value_literal as _kv_value_literal,
+)
 from .params import normalize_params
+from .queue import QueueClient
 from .redwire import RedwireClient, RedwireOptions
 from .url import ParsedUri, parse_uri
 
-__all__ = ["connect", "Reddb"]
-
-
-class KvClient:
-    def __init__(self, transport: Any, collection: str = "kv_default") -> None:
-        self._t = transport
-        self.collection = collection
-
-    def watch(self, key: str, **opts: Any):
-        collection = opts.pop("collection", self.collection)
-        if not hasattr(self._t, "kv_watch"):
-            raise RedDBError("kv.watch requires the HTTP transport")
-        return self._t.kv_watch(key, collection=collection, **opts)
-
-    def watch_prefix(self, prefix: str, **opts: Any):
-        collection = opts.pop("collection", self.collection)
-        if not hasattr(self._t, "kv_watch_prefix"):
-            raise RedDBError("kv.watch_prefix requires the HTTP transport")
-        return self._t.kv_watch_prefix(prefix, collection=collection, **opts)
-
-    async def put(self, key: str, value: Any, **opts: Any) -> dict[str, Any]:
-        collection = opts.pop("collection", self.collection)
-        tags = opts.pop("tags", None) or []
-        expire_ms = opts.pop("expire_ms", None)
-        expire = f" EXPIRE {int(expire_ms)} ms" if expire_ms is not None else ""
-        tag_clause = (
-            " TAGS [" + ", ".join(_kv_tag_literal(tag) for tag in tags) + "]" if tags else ""
-        )
-        sql = f"KV PUT {_kv_path(collection, key)} = {_kv_value_literal(value)}{expire}{tag_clause}"
-        return await self._t.query(sql)
-
-    async def invalidate_tags(self, tags: list[str], **opts: Any) -> int:
-        collection = opts.pop("collection", self.collection)
-        sql = (
-            "INVALIDATE TAGS ["
-            + ", ".join(_kv_tag_literal(tag) for tag in tags)
-            + f"] FROM {_kv_identifier(collection)}"
-        )
-        result = await self._t.query(sql)
-        rows = result.get("rows") if isinstance(result, dict) else None
-        if rows:
-            return int(rows[0].get("invalidated", 0))
-        return int(result.get("affected", 0)) if isinstance(result, dict) else 0
-
-
-def _kv_path(collection: str, key: str) -> str:
-    return f"{_kv_identifier(collection)}.{_kv_key_segment(key)}"
-
-
-def _kv_identifier(value: Any) -> str:
-    return "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in str(value))
-
-
-def _kv_key_segment(value: Any) -> str:
-    key = str(value)
-    if key.replace("_", "").isalnum():
-        return key
-    return "'" + key.replace("'", "''") + "'"
-
-
-def _kv_value_literal(value: Any) -> str:
-    if value is None:
-        return "NULL"
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return str(value)
-    return "'" + str(value).replace("'", "''") + "'"
-
-
-def _kv_tag_literal(value: Any) -> str:
-    return "'" + str(value).replace("'", "''") + "'"
+__all__ = ["connect", "Reddb", "KvClient", "DocumentClient", "QueueClient"]
 
 
 async def connect(uri: str, **opts: Any) -> "Reddb":
@@ -236,6 +175,8 @@ class Reddb:
     def __init__(self, transport: Any) -> None:
         self._t = transport
         self.kv = KvClient(transport)
+        self.documents = DocumentClient(self)
+        self.queue = QueueClient(transport)
 
     async def __aenter__(self) -> "Reddb":
         return self
@@ -259,10 +200,48 @@ class Reddb:
         return await self.query(sql, params)
 
     async def insert(self, collection: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return await self._t.insert(collection, payload)
+        result = await self._t.insert(collection, payload)
+        return _normalize_insert(result)
 
     async def bulk_insert(self, collection: str, payloads: list[dict[str, Any]]) -> dict[str, Any]:
-        return await self._t.bulk_insert(collection, payloads)
+        if not payloads:
+            raise RedDBError(
+                "bulk_insert requires at least one payload",
+                code="INVALID_ARGUMENT",
+            )
+        result = await self._t.bulk_insert(collection, payloads)
+        return _normalize_bulk_insert(result, len(payloads))
+
+    async def exists(self, collection: str, rid: Any) -> dict[str, bool]:
+        try:
+            result = await self._t.get(collection, str(rid))
+        except Exception as exc:
+            code = getattr(exc, "code", "") or ""
+            if "NOT_FOUND" in code or getattr(exc, "status", None) == 404:
+                return {"exists": False}
+            raise
+        if isinstance(result, dict):
+            entity = result.get("entity", result)
+            return {"exists": entity is not None and entity != {}}
+        return {"exists": result is not None}
+
+    async def transaction(self, callback: Any) -> Any:
+        if not callable(callback):
+            raise RedDBError(
+                "transaction(callback) requires a callable",
+                code="INVALID_ARGUMENT",
+            )
+        await self.query("BEGIN")
+        try:
+            outcome = await callback(self)
+            await self.query("COMMIT")
+            return outcome
+        except BaseException:
+            try:
+                await self.query("ROLLBACK")
+            except Exception:
+                pass
+            raise
 
     async def get(self, collection: str, doc_id: str) -> dict[str, Any]:
         return await self._t.get(collection, doc_id)
@@ -280,3 +259,48 @@ class Reddb:
     def transport(self) -> Any:
         """Underlying transport handle (RedwireClient / HttpClient)."""
         return self._t
+
+
+def _normalize_insert(result: Any) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        raise RedDBError(
+            "insert() expected a dict response with rid",
+            code="INVALID_RESPONSE",
+        )
+    rid = result.get("rid") if result.get("rid") is not None else result.get("id")
+    if rid is None:
+        raise RedDBError(
+            "insert() response missing rid (engine too old?)",
+            code="INVALID_RESPONSE",
+        )
+    out = dict(result)
+    out["rid"] = rid
+    out.setdefault("id", rid)
+    out.setdefault("affected", 1)
+    return out
+
+
+def _normalize_bulk_insert(result: Any, expected: int) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        raise RedDBError(
+            "bulk_insert() expected a dict response with rids",
+            code="INVALID_RESPONSE",
+        )
+    rids = result.get("rids")
+    if rids is None:
+        rids = result.get("ids")
+    if not isinstance(rids, list):
+        raise RedDBError(
+            "bulk_insert() response missing rids (engine too old?)",
+            code="INVALID_RESPONSE",
+        )
+    if len(rids) != expected:
+        raise RedDBError(
+            f"bulk_insert() expected {expected} rids, got {len(rids)}",
+            code="INVALID_RESPONSE",
+        )
+    out = dict(result)
+    out["rids"] = list(rids)
+    out["ids"] = list(rids)
+    out.setdefault("affected", expected)
+    return out

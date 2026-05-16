@@ -4,7 +4,7 @@
 [workspace]
 
 [package]
-name = "reddb-python"
+name = "reddb-io-python"
 version = "1.2.0"
 edition = "2021"
 description = "Native Python driver for RedDB (compiled Rust via pyo3)"
