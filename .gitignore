@@ -1,5 +1,6 @@
 .study
 target/
+.target-*/
 # cargo-fuzz workspace artifacts (issue #87). Fuzz target sources
 # live in fuzz/fuzz_targets/; build output / discovered crashes /
 # evolved corpus stay out of the tree.
