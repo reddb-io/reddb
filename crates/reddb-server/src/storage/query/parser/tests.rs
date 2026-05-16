@@ -83,12 +83,36 @@ fn test_parse_create_graph_document_and_collection_forms() {
     assert_eq!(collection.name, "c");
     assert_eq!(collection.kind, "graph");
     assert!(!collection.if_not_exists);
+    assert!(collection.allowed_signers.is_empty());
 
     let unknown = parse("CREATE COLLECTION c KIND mystery").unwrap();
     let QueryExpr::CreateCollection(unknown) = unknown else {
         panic!("Expected CreateCollectionQuery");
     };
     assert_eq!(unknown.kind, "mystery");
+
+    // Signed Writes (issue #520): CREATE COLLECTION ... SIGNED_BY (...)
+    let pk_a = "11".repeat(32);
+    let pk_b = "22".repeat(32);
+    let sql = format!("CREATE COLLECTION sc KIND graph SIGNED_BY ('{pk_a}', '{pk_b}')");
+    let signed = parse(&sql).unwrap();
+    let QueryExpr::CreateCollection(signed) = signed else {
+        panic!("Expected CreateCollectionQuery");
+    };
+    assert_eq!(signed.name, "sc");
+    assert_eq!(signed.allowed_signers.len(), 2);
+    assert_eq!(signed.allowed_signers[0], [0x11u8; 32]);
+    assert_eq!(signed.allowed_signers[1], [0x22u8; 32]);
+
+    // Empty SIGNED_BY list is rejected
+    assert!(parse("CREATE COLLECTION sc KIND graph SIGNED_BY ()").is_err());
+
+    // Bad hex (wrong length) is rejected at parse-time
+    assert!(parse("CREATE COLLECTION sc KIND graph SIGNED_BY ('deadbeef')").is_err());
+
+    // Non-hex char is rejected at parse-time
+    let bad = format!("CREATE COLLECTION sc KIND graph SIGNED_BY ('{}')", "g".repeat(64));
+    assert!(parse(&bad).is_err());
 
     let hll = parse("CREATE HLL h PRECISION 14").unwrap();
     let QueryExpr::ProbabilisticCommand(
