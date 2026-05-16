@@ -97,6 +97,47 @@ Auth shorthands the URI carries:
 - `red://host?token=...` — pre-issued bearer.
 - `red://host?apiKey=...` — alias for `token` in the URI.
 
+## SDK Helper Spec
+
+The driver exposes the rich helper surface defined in
+[`docs/clients/sdk-helper-spec.md`](../../docs/clients/sdk-helper-spec.md) via
+`reddb.NewHelpers(conn)`:
+
+```go
+h := reddb.NewHelpers(conn)
+
+// Documents
+ins, err := h.Documents().Insert(ctx, "people", map[string]any{"name": "Ada"})
+got, err := h.Documents().Get(ctx, "people", ins.RID)
+out, err := h.Documents().List(ctx, "people", reddb.ListOptions{Limit: 20})
+upd, err := h.Documents().Patch(ctx, "people", ins.RID, map[string]any{"name": "Grace"})
+del, err := h.Documents().Delete(ctx, "people", ins.RID)
+
+// KV (defaults to collection "kv_default")
+err  = h.KV().Set(ctx, "characters:hansel", "ok")
+val, err := h.KV().Get(ctx, "characters:hansel")
+ex,  err := h.KV().Exists(ctx, "characters:hansel")
+lst, err := h.KV().List(ctx, reddb.KVListOptions{Prefix: "characters:"})
+ttl  := reddb.SetOptions{ExpireMs: 60_000, Tags: []string{"corpus"}}
+err  = h.KV().Put(ctx, "k", "v", ttl)
+
+// Queue
+p := 5
+_, err = h.Queue().Push(ctx, "jobs", map[string]any{"id": 1}, reddb.PushOptions{Priority: &p})
+peek,_ := h.Queue().Peek(ctx, "jobs", 1)
+pop, _ := h.Queue().Pop(ctx, "jobs", 1)
+n,   _ := h.Queue().Len(ctx, "jobs")
+_, err  = h.Queue().Purge(ctx, "jobs")
+```
+
+Envelope structs are stable (`InsertResult`, `DeleteResult`, `ExistsResult`,
+`ListResult`, `QueuePushResult`) — see
+[`helpers.go`](helpers.go) for fields. Validation errors raise
+`reddb.CodeInvalidArgument` before any wire call; missing items raise
+`reddb.CodeNotFound`. Transactions are not yet wired in the Go driver — call
+`Conn.Exec(ctx, "BEGIN" | "COMMIT" | "ROLLBACK")` directly until that helper
+ships.
+
 ## Auth options
 
 ```go

@@ -7,6 +7,19 @@ library;
 
 export 'src/conn.dart' show Conn;
 export 'src/errors.dart';
+export 'src/helpers.dart'
+    show
+        Helpers,
+        Querier,
+        DocumentClient,
+        KvClient,
+        QueueClient,
+        InsertResult,
+        DeleteResult,
+        ExistsResult,
+        ListResult,
+        QueuePushResult,
+        kvPath;
 export 'src/options.dart';
 export 'src/reddb_base.dart' show Reddb, connect;
 export 'src/url.dart' show ParsedUri, parseUri, defaultPortFor, deriveLoginUrl;

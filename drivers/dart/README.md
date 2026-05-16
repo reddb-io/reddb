@@ -88,6 +88,7 @@ lib/
       conn.dart               Socket + SecureSocket Conn
     http/
       client.dart             HTTP transport (package:http)
+    helpers.dart                rich SDK Helper namespaces
 test/
   url_test.dart
   scram_test.dart
@@ -95,8 +96,41 @@ test/
   value_codec_test.dart
   http_client_test.dart
   redwire_conn_test.dart
+  helpers_test.dart           SDK Helper Spec conformance (fake Querier)
   smoke_test.dart             gated on RED_SMOKE=1
 ```
+
+## SDK Helper Spec
+
+The driver exposes the rich namespaces from
+[`docs/clients/sdk-helper-spec.md`](../../docs/clients/sdk-helper-spec.md)
+via `Reddb.helpers`:
+
+```dart
+final db = await connect('http://localhost:8080');
+final h = db.helpers;
+
+// Documents
+final res = await h.documents.insert('people', {'name': 'alice'});
+final row = await h.documents.get('people', res.rid);
+await h.documents.patch('people', res.rid, {'name': 'bob'});
+
+// KV (default collection: kv_default)
+await h.kv.set('characters:hansel', 'baker');
+final v = await h.kv.get('characters:hansel');
+final page = await h.kv.list(prefix: 'characters:');
+
+// Queue
+await h.queue.push('jobs', {'id': 1}, priority: 5);
+final n = await h.queue.len('jobs');
+final next = await h.queue.pop('jobs', count: 1);
+```
+
+Errors are typed (`InvalidArgument`, `NotFound`, `InvalidResponse`) and
+match the wording used by the Go / Python / JS drivers.
+
+Transactions are not yet wired — `Conn` has no transaction helper. Use
+`db.query('BEGIN' | 'COMMIT' | 'ROLLBACK')` as an escape hatch.
 
 ## Limitations
 
