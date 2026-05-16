@@ -10,7 +10,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::storage::blockchain::{compute_block_hash, GENESIS_PREV_HASH};
+use crate::storage::blockchain::{compute_block_hash, verify_chain, Block, GENESIS_PREV_HASH, VerifyReport};
 use crate::storage::schema::Value;
 use crate::storage::unified::UnifiedStore;
 
@@ -252,6 +252,138 @@ pub fn make_block_reserved_fields(
         (COL_HASH.to_string(), Value::Blob(hash.to_vec())),
     ];
     (fields, hash)
+}
+
+/// Issue #525 — walk a chain collection in `block_height` order and rebuild the
+/// `Block` list expected by [`verify_chain`]. Genesis is identified by
+/// `block_height == 0`.  Returns `None` when the collection is absent or not a
+/// chain.  Reserved-column extraction and canonical payload encoding mirror
+/// what the engine writes at INSERT time — this is the alignment of the two
+/// encoders referenced in #524.
+pub fn collect_blocks(store: &UnifiedStore, collection: &str) -> Option<Vec<Block>> {
+    if !is_chain(store, collection) {
+        return None;
+    }
+    let manager = store.get_collection(collection)?;
+    let mut blocks: Vec<Block> = Vec::new();
+    for entity in manager.query_all(|_| true) {
+        let crate::storage::unified::EntityData::Row(row) = &entity.data else {
+            continue;
+        };
+        let Some(named) = &row.named else { continue };
+        let height = match named.get(COL_BLOCK_HEIGHT) {
+            Some(Value::UnsignedInteger(v)) => *v,
+            Some(Value::Integer(v)) if *v >= 0 => *v as u64,
+            _ => continue,
+        };
+        let prev_hash = match named.get(COL_PREV_HASH) {
+            Some(Value::Blob(b)) if b.len() == 32 => {
+                let mut out = [0u8; 32];
+                out.copy_from_slice(b);
+                out
+            }
+            _ => continue,
+        };
+        let timestamp_ms = match named.get(COL_TIMESTAMP) {
+            Some(Value::UnsignedInteger(v)) => *v,
+            Some(Value::Integer(v)) if *v >= 0 => *v as u64,
+            _ => continue,
+        };
+        let hash = match named.get(COL_HASH) {
+            Some(Value::Blob(b)) if b.len() == 32 => {
+                let mut out = [0u8; 32];
+                out.copy_from_slice(b);
+                out
+            }
+            _ => continue,
+        };
+        let user_fields: Vec<(String, Value)> = named
+            .iter()
+            .filter(|(k, _)| !RESERVED_COLUMNS.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let payload = canonical_payload(&user_fields);
+        blocks.push(Block {
+            block_height: height,
+            prev_hash,
+            timestamp_ms,
+            payload,
+            signed: None,
+            hash,
+        });
+    }
+    blocks.sort_by_key(|b| b.block_height);
+    Some(blocks)
+}
+
+/// Outcome of `POST /collections/:name/verify-chain`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifyChainOutcome {
+    pub checked: u64,
+    pub ok: bool,
+    pub first_bad_height: Option<u64>,
+}
+
+/// Walk the chain end-to-end. Returns `(outcome, _)`.  Mismatches are detected
+/// via [`verify_chain`].  Callers persist the integrity flag on `ok == false`.
+pub fn verify_chain_outcome(store: &UnifiedStore, collection: &str) -> Option<VerifyChainOutcome> {
+    let blocks = collect_blocks(store, collection)?;
+    let checked = blocks.len() as u64;
+    match verify_chain(&blocks) {
+        VerifyReport::Ok => Some(VerifyChainOutcome {
+            checked,
+            ok: true,
+            first_bad_height: None,
+        }),
+        VerifyReport::Inconsistent { block_height, .. } => Some(VerifyChainOutcome {
+            checked,
+            ok: false,
+            first_bad_height: Some(block_height),
+        }),
+    }
+}
+
+fn integrity_key(collection: &str) -> String {
+    format!("red.collection.{collection}.integrity")
+}
+
+const INTEGRITY_BROKEN: &str = "broken";
+const INTEGRITY_OK: &str = "ok";
+
+/// Persist a chain's integrity flag in `red_config`. Append-only — readers use
+/// [`is_integrity_broken_persisted`] which picks the latest matching row by id.
+pub fn persist_integrity_flag(store: &UnifiedStore, collection: &str, broken: bool) {
+    let tag = if broken { INTEGRITY_BROKEN } else { INTEGRITY_OK };
+    store.set_config_tree(
+        &integrity_key(collection),
+        &crate::serde_json::Value::String(tag.to_string()),
+    );
+}
+
+/// Scan `red_config` for the latest persisted integrity flag for `collection`.
+/// `None` means no record (treated as ok).
+pub fn is_integrity_broken_persisted(store: &UnifiedStore, collection: &str) -> Option<bool> {
+    let manager = store.get_collection("red_config")?;
+    let key = integrity_key(collection);
+    let mut latest: Option<(u64, String)> = None;
+    for entity in manager.query_all(|_| true) {
+        let crate::storage::unified::EntityData::Row(row) = &entity.data else {
+            continue;
+        };
+        let Some(named) = &row.named else { continue };
+        let k_match = matches!(named.get("key"), Some(Value::Text(s)) if s.as_ref() == key.as_str());
+        if !k_match {
+            continue;
+        }
+        let Some(Value::Text(v)) = named.get("value") else {
+            continue;
+        };
+        let id = entity.id.raw();
+        if latest.as_ref().map(|(prev, _)| id > *prev).unwrap_or(true) {
+            latest = Some((id, v.as_ref().to_string()));
+        }
+    }
+    latest.map(|(_, tag)| tag == INTEGRITY_BROKEN)
 }
 
 /// Convenience: produce the genesis row's full field list. Genesis carries

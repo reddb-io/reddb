@@ -2176,6 +2176,7 @@ impl RedDBRuntime {
                     crate::runtime::MetricsTenantActivityCounters::default(),
                 kv_tag_index: crate::runtime::KvTagIndex::default(),
                 chain_tip_cache: parking_lot::Mutex::new(HashMap::new()),
+                chain_integrity_broken: parking_lot::Mutex::new(HashMap::new()),
             }),
         };
 
