@@ -124,8 +124,9 @@ pub use crate::index::{
     IndexStats,
 };
 pub use crate::physical::{
-    meta_json_sidecar_enabled, provision_shm, read_shm_header, seqn_journal_enabled,
-    seqn_journal_retention, set_meta_json_sidecar_enabled, set_seqn_journal_enabled,
+    fold_pager_meta_enabled, meta_json_sidecar_enabled, provision_shm, read_shm_header,
+    seqn_journal_enabled, seqn_journal_retention, set_fold_pager_meta_enabled,
+    set_meta_json_sidecar_enabled, set_seqn_journal_enabled,
     set_seqn_journal_retention, set_shm_provisioning_enabled, shm_path_for,
     shm_provisioning_enabled, ArtifactState, BlockReference, CompactionPolicy, ExportDescriptor,
     GridLayout, ManifestEvent, ManifestEventKind, ManifestPointers, PhysicalAnalyticsJob,

@@ -4,6 +4,187 @@ use parking_lot::RwLock;
 
 const ENTITY_RECORD_MAGIC: &[u8; 4] = b"RER1";
 
+// ── Pager-meta overflow chain (gh-477) ──────────────────────────────────────
+// When the serialized collection registry + cross-refs exceed a single page,
+// page 1 carries a "RDM3" wrapper header pointing at an overflow chain of
+// `PageType::Overflow` pages. Single-page metadata keeps the historical
+// bit-identical layout (`METADATA_MAGIC = "RDM2"` written directly at the
+// content offset).
+//
+// Page 1 (overflow form), starting at `HEADER_SIZE`:
+//   [0..4]   magic = "RDM3"
+//   [4..8]   format_version (u32, mirrors inner payload version for debug)
+//   [8..12]  total_payload_bytes (u32)
+//   [12..16] next_overflow_page_id (u32, > 0)
+//   [16..]   first payload chunk (up to META_V3_FIRST_PAYLOAD_CAP bytes)
+//
+// Overflow continuation page, starting at `HEADER_SIZE`:
+//   [0..4]   next_overflow_page_id (u32, 0 if last)
+//   [4..8]   chunk_bytes (u32)
+//   [8..]    chunk payload (up to META_V3_OVERFLOW_PAYLOAD_CAP bytes)
+const METADATA_OVERFLOW_MAGIC: &[u8; 4] = b"RDM3";
+const META_PAGE_CONTENT_CAP: usize =
+    crate::storage::engine::PAGE_SIZE - crate::storage::engine::HEADER_SIZE;
+const META_V3_PAGE1_HEADER: usize = 16;
+const META_V3_OVERFLOW_HEADER: usize = 8;
+const META_V3_FIRST_PAYLOAD_CAP: usize = META_PAGE_CONTENT_CAP - META_V3_PAGE1_HEADER;
+const META_V3_OVERFLOW_PAYLOAD_CAP: usize = META_PAGE_CONTENT_CAP - META_V3_OVERFLOW_HEADER;
+
+fn free_existing_overflow_chain(pager: &Pager) -> Result<(), PagerError> {
+    let cs = crate::storage::engine::HEADER_SIZE;
+    let page = match pager.read_page(1) {
+        Ok(p) => p,
+        Err(_) => return Ok(()),
+    };
+    let bytes = page.as_bytes();
+    if bytes.len() < cs + META_V3_PAGE1_HEADER {
+        return Ok(());
+    }
+    if &bytes[cs..cs + 4] != METADATA_OVERFLOW_MAGIC {
+        return Ok(());
+    }
+    let mut next = u32::from_le_bytes([
+        bytes[cs + 12],
+        bytes[cs + 13],
+        bytes[cs + 14],
+        bytes[cs + 15],
+    ]);
+    while next != 0 {
+        let ov = match pager.read_page(next) {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+        let ob = ov.as_bytes();
+        let nn = u32::from_le_bytes([ob[cs], ob[cs + 1], ob[cs + 2], ob[cs + 3]]);
+        let _ = pager.free_page(next);
+        next = nn;
+    }
+    Ok(())
+}
+
+fn build_meta_page1_with_overflow(
+    pager: &Pager,
+    meta_data: &[u8],
+) -> Result<crate::storage::engine::Page, PagerError> {
+    use crate::storage::engine::{Page, PageType, HEADER_SIZE};
+    free_existing_overflow_chain(pager)?;
+
+    let mut page1 = Page::new(PageType::Header, 1);
+    let cs = HEADER_SIZE;
+
+    if meta_data.len() <= META_PAGE_CONTENT_CAP {
+        // Single-page: bit-identical to the historical layout.
+        let buf = page1.as_bytes_mut();
+        buf[cs..cs + meta_data.len()].copy_from_slice(meta_data);
+        return Ok(page1);
+    }
+
+    // Multi-page overflow form. Split the inner payload into the first chunk
+    // (held on page 1) followed by zero-or-more continuation chunks chained
+    // through `PageType::Overflow` pages.
+    let first_chunk = &meta_data[..META_V3_FIRST_PAYLOAD_CAP];
+    let mut tail = &meta_data[META_V3_FIRST_PAYLOAD_CAP..];
+    let mut chunks: Vec<&[u8]> = Vec::new();
+    while !tail.is_empty() {
+        let take = tail.len().min(META_V3_OVERFLOW_PAYLOAD_CAP);
+        chunks.push(&tail[..take]);
+        tail = &tail[take..];
+    }
+
+    let mut overflow_pages: Vec<Page> = Vec::with_capacity(chunks.len());
+    let mut overflow_ids: Vec<u32> = Vec::with_capacity(chunks.len());
+    for _ in 0..chunks.len() {
+        let pg = pager.allocate_page(PageType::Overflow)?;
+        overflow_ids.push(pg.page_id());
+        overflow_pages.push(pg);
+    }
+
+    for i in 0..chunks.len() {
+        let next = if i + 1 < chunks.len() {
+            overflow_ids[i + 1]
+        } else {
+            0u32
+        };
+        let len = chunks[i].len() as u32;
+        let buf = overflow_pages[i].as_bytes_mut();
+        buf[cs..cs + 4].copy_from_slice(&next.to_le_bytes());
+        buf[cs + 4..cs + 8].copy_from_slice(&len.to_le_bytes());
+        buf[cs + 8..cs + 8 + chunks[i].len()].copy_from_slice(chunks[i]);
+    }
+    for (idx, page) in overflow_pages.into_iter().enumerate() {
+        let id = overflow_ids[idx];
+        pager.write_page(id, page)?;
+    }
+
+    // Mirror the inner format_version for debug-friendly hex dumps.
+    let format_version = if meta_data.len() >= 8 && &meta_data[0..4] == METADATA_MAGIC {
+        u32::from_le_bytes([meta_data[4], meta_data[5], meta_data[6], meta_data[7]])
+    } else {
+        0
+    };
+
+    let buf = page1.as_bytes_mut();
+    buf[cs..cs + 4].copy_from_slice(METADATA_OVERFLOW_MAGIC);
+    buf[cs + 4..cs + 8].copy_from_slice(&format_version.to_le_bytes());
+    buf[cs + 8..cs + 12].copy_from_slice(&(meta_data.len() as u32).to_le_bytes());
+    buf[cs + 12..cs + 16].copy_from_slice(&overflow_ids[0].to_le_bytes());
+    buf[cs + META_V3_PAGE1_HEADER..cs + META_V3_PAGE1_HEADER + first_chunk.len()]
+        .copy_from_slice(first_chunk);
+
+    Ok(page1)
+}
+
+/// Assemble the full metadata payload from page 1 (plus its overflow chain
+/// when the `RDM3` wrapper is present). Returns the bytes that the metadata
+/// parser would see starting from the content offset of page 1. Single-page
+/// metadata returns the raw page content (including trailing zero-pad), so
+/// the legacy parser sees the same bytes it always saw.
+fn read_meta_payload(pager: &Pager) -> Option<Vec<u8>> {
+    let cs = crate::storage::engine::HEADER_SIZE;
+    let meta_page = pager
+        .read_page(1)
+        .or_else(|_| pager.recover_meta_from_shadow())
+        .ok()?;
+    let bytes = meta_page.as_bytes();
+    if bytes.len() < cs + 4 {
+        return Some(bytes.get(cs..).unwrap_or(&[]).to_vec());
+    }
+    if &bytes[cs..cs + 4] != METADATA_OVERFLOW_MAGIC {
+        return Some(bytes[cs..].to_vec());
+    }
+    if bytes.len() < cs + META_V3_PAGE1_HEADER {
+        return None;
+    }
+    let total =
+        u32::from_le_bytes([bytes[cs + 8], bytes[cs + 9], bytes[cs + 10], bytes[cs + 11]]) as usize;
+    let mut next = u32::from_le_bytes([
+        bytes[cs + 12],
+        bytes[cs + 13],
+        bytes[cs + 14],
+        bytes[cs + 15],
+    ]);
+    let mut payload: Vec<u8> = Vec::with_capacity(total);
+    let first_take = total.min(META_V3_FIRST_PAYLOAD_CAP);
+    payload.extend_from_slice(
+        &bytes[cs + META_V3_PAGE1_HEADER..cs + META_V3_PAGE1_HEADER + first_take],
+    );
+    while next != 0 && payload.len() < total {
+        let ov = pager.read_page(next).ok()?;
+        let ob = ov.as_bytes();
+        if ob.len() < cs + META_V3_OVERFLOW_HEADER {
+            return None;
+        }
+        let nn = u32::from_le_bytes([ob[cs], ob[cs + 1], ob[cs + 2], ob[cs + 3]]);
+        let len =
+            u32::from_le_bytes([ob[cs + 4], ob[cs + 5], ob[cs + 6], ob[cs + 7]]) as usize;
+        let remaining = total - payload.len();
+        let take = len.min(remaining).min(META_V3_OVERFLOW_PAYLOAD_CAP);
+        payload.extend_from_slice(&ob[cs + META_V3_OVERFLOW_HEADER..cs + META_V3_OVERFLOW_HEADER + take]);
+        next = nn;
+    }
+    Some(payload)
+}
+
 impl UnifiedStore {
     pub(crate) fn mark_paged_registry_dirty(&self) {
         self.paged_registry_dirty.store(true, Ordering::Release);
@@ -101,12 +282,8 @@ impl UnifiedStore {
             }
         }
 
-        let mut meta_page =
-            crate::storage::engine::Page::new(crate::storage::engine::PageType::Header, 1);
-        let page_data = meta_page.as_bytes_mut();
-        let content_start = crate::storage::engine::HEADER_SIZE;
-        let copy_len = meta_data.len().min(page_data.len() - content_start);
-        page_data[content_start..content_start + copy_len].copy_from_slice(&meta_data[..copy_len]);
+        let meta_page = build_meta_page1_with_overflow(pager, &meta_data)
+            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
 
         pager
             .write_meta_shadow(&meta_page)
@@ -254,15 +431,12 @@ impl UnifiedStore {
             return Ok(());
         }
 
-        // Read metadata from page 1 (collections registry)
-        // Falls back to metadata shadow if page 1 is corrupted
-        let meta_page_result = pager
-            .read_page(1)
-            .or_else(|_| pager.recover_meta_from_shadow());
-        if let Ok(meta_page) = meta_page_result {
-            let data = meta_page.as_bytes();
-            // Skip header (32 bytes), read content area
-            let content = &data[crate::storage::engine::HEADER_SIZE..];
+        // Read metadata starting from page 1 (collections registry). The
+        // helper transparently follows the `RDM3` overflow chain when the
+        // metadata blob spans multiple pages and falls back to the legacy
+        // `<data>-meta` shadow when page 1 itself is corrupted.
+        if let Some(content_vec) = read_meta_payload(pager) {
+            let content: &[u8] = &content_vec;
             if content.len() >= 4 {
                 let mut pos = 0;
                 let mut format_version = STORE_VERSION_V1;
@@ -728,18 +902,12 @@ impl UnifiedStore {
             }
         }
 
-        // Create metadata page with Header type
-        let mut meta_page = crate::storage::engine::Page::new(
-            crate::storage::engine::PageType::Header,
-            1, // page_id = 1
-        );
-        // Copy metadata into page content area (after header)
-        let page_data = meta_page.as_bytes_mut();
-        let content_start = crate::storage::engine::HEADER_SIZE;
-        let copy_len = meta_data.len().min(page_data.len() - content_start);
-        page_data[content_start..content_start + copy_len].copy_from_slice(&meta_data[..copy_len]);
+        // Build page 1 (+ overflow chain when needed) for the metadata blob.
+        let meta_page = build_meta_page1_with_overflow(pager, &meta_data)
+            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
 
-        // Write metadata shadow FIRST (intact copy in case main write fails)
+        // Write metadata shadow FIRST (intact copy in case main write fails).
+        // The shadow is a no-op when `fold_pager_meta` is enabled.
         pager
             .write_meta_shadow(&meta_page)
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
