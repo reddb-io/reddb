@@ -408,11 +408,59 @@ impl<'a> Parser<'a> {
             ));
         }
         let kind = self.expect_ident_or_keyword()?.to_ascii_lowercase();
+        let allowed_signers = if self.consume_ident_ci("SIGNED_BY")? {
+            self.parse_signed_by_list()?
+        } else {
+            Vec::new()
+        };
         Ok(QueryExpr::CreateCollection(CreateCollectionQuery {
             name,
             kind,
             if_not_exists,
+            allowed_signers,
         }))
+    }
+
+    /// Parse `( 'hex32', 'hex32', ... )` — Ed25519 pubkey list. Each entry
+    /// must decode to exactly 32 bytes. Used by both `CREATE COLLECTION ...
+    /// SIGNED_BY (...)` and (in a later iteration) `ALTER COLLECTION` signer
+    /// mutations. Issue #520.
+    fn parse_signed_by_list(&mut self) -> Result<Vec<[u8; 32]>, ParseError> {
+        self.expect(Token::LParen)?;
+        let mut out = Vec::new();
+        loop {
+            let hex = match self.peek().clone() {
+                Token::String(s) => {
+                    self.advance()?;
+                    s
+                }
+                _ => {
+                    return Err(ParseError::expected(
+                        vec!["string literal (ed25519 pubkey hex)"],
+                        self.peek(),
+                        self.position(),
+                    ));
+                }
+            };
+            let bytes = decode_hex_32(&hex).map_err(|msg| {
+                ParseError::new(
+                    format!("SIGNED_BY pubkey '{hex}' invalid: {msg}"),
+                    self.position(),
+                )
+            })?;
+            out.push(bytes);
+            if !self.consume(&Token::Comma)? {
+                break;
+            }
+        }
+        self.expect(Token::RParen)?;
+        if out.is_empty() {
+            return Err(ParseError::new(
+                "SIGNED_BY list must contain at least one pubkey".to_string(),
+                self.position(),
+            ));
+        }
+        Ok(out)
     }
 
     pub fn parse_create_vector_body(&mut self) -> Result<QueryExpr, ParseError> {
@@ -1045,5 +1093,32 @@ impl<'a> Parser<'a> {
         } else {
             Ok(false)
         }
+    }
+}
+
+/// Decode a 64-char lowercase/uppercase hex string into a 32-byte array.
+/// Returns a human-readable error message on length or character violations.
+/// Used by `SIGNED_BY` clause parsing (issue #520) to surface bad pubkeys
+/// at parse-time rather than downstream in the engine.
+fn decode_hex_32(s: &str) -> Result<[u8; 32], String> {
+    if s.len() != 64 {
+        return Err(format!("expected 64 hex chars, got {}", s.len()));
+    }
+    let mut out = [0u8; 32];
+    let bytes = s.as_bytes();
+    for i in 0..32 {
+        let hi = hex_nibble(bytes[i * 2])?;
+        let lo = hex_nibble(bytes[i * 2 + 1])?;
+        out[i] = (hi << 4) | lo;
+    }
+    Ok(out)
+}
+
+fn hex_nibble(c: u8) -> Result<u8, String> {
+    match c {
+        b'0'..=b'9' => Ok(c - b'0'),
+        b'a'..=b'f' => Ok(c - b'a' + 10),
+        b'A'..=b'F' => Ok(c - b'A' + 10),
+        _ => Err(format!("non-hex char: {:?}", c as char)),
     }
 }
