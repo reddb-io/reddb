@@ -214,6 +214,20 @@ pub struct RedDBOptions {
     /// `false` to opt out per workload (e.g. ingest pipelines that
     /// don't need point-lookups by `id`).
     pub auto_index_id: bool,
+    /// Tiered storage layout preset. Drives the defaults of the six
+    /// tier-flag toggles (`.meta.json` sidecar, seq-N catalog journal,
+    /// `-shm` provisioning, audit/slow log destinations, `fold_pager_meta`,
+    /// `fold_dwb_into_wal`). Explicit per-feature setters still win over
+    /// the tier default. See `crate::storage::layout::StorageLayout`.
+    pub layout: crate::storage::layout::StorageLayout,
+    /// Per-feature overrides applied on top of the resolved layout preset.
+    pub layout_overrides: crate::storage::layout::LayoutOverrides,
+    /// True only when the caller explicitly selected a layout via
+    /// `with_layout`. When false, `apply_tier_defaults` short-circuits so
+    /// pre-existing process-global toggles (set by tests / env hatches
+    /// before opening a runtime) are not clobbered by the implicit
+    /// `Standard` default. The new tier-driven behavior is opt-in.
+    pub layout_explicit: bool,
 }
 
 impl fmt::Debug for RedDBOptions {
@@ -238,6 +252,8 @@ impl fmt::Debug for RedDBOptions {
             .field("remote_key", &self.remote_key)
             .field("replication", &self.replication)
             .field("auth", &self.auth)
+            .field("layout", &self.layout)
+            .field("layout_overrides", &self.layout_overrides)
             .finish()
     }
 }
@@ -265,6 +281,9 @@ impl Clone for RedDBOptions {
             replication: self.replication.clone(),
             auth: self.auth.clone(),
             auto_index_id: self.auto_index_id,
+            layout: self.layout,
+            layout_overrides: self.layout_overrides.clone(),
+            layout_explicit: self.layout_explicit,
         }
     }
 }
@@ -300,6 +319,9 @@ impl Default for RedDBOptions {
             replication: ReplicationConfig::standalone(),
             auth: AuthConfig::default(),
             auto_index_id: true,
+            layout: crate::storage::layout::StorageLayout::default(),
+            layout_overrides: crate::storage::layout::LayoutOverrides::default(),
+            layout_explicit: false,
         }
     }
 }
@@ -504,6 +526,134 @@ impl RedDBOptions {
 
     pub fn has_capability(&self, capability: Capability) -> bool {
         self.feature_gates.has(capability)
+    }
+
+    /// Select the active storage-layout preset. Drives tier defaults for
+    /// the six tier-flag toggles. Per-feature setters still win.
+    pub fn with_layout(mut self, layout: crate::storage::layout::StorageLayout) -> Self {
+        self.layout = layout;
+        self.layout_explicit = true;
+        self
+    }
+
+    /// Override individual layout knobs (dedicated dirs + log routing) on
+    /// top of the active preset.
+    pub fn with_layout_overrides(
+        mut self,
+        overrides: crate::storage::layout::LayoutOverrides,
+    ) -> Self {
+        self.layout_overrides = overrides;
+        self
+    }
+
+    /// Resolve `(data_path, TieredLayoutPaths)` for this options bundle.
+    /// Returns `None` when `data_path` is unset (in-memory ephemeral
+    /// instances don't materialise a support tree).
+    pub fn resolve_tiered_layout(
+        &self,
+    ) -> Option<(PathBuf, crate::storage::layout::TieredLayoutPaths)> {
+        let data_path = self.data_path.clone()?;
+        let paths = crate::storage::layout::TieredLayoutPaths::new(
+            &data_path,
+            self.layout,
+            self.layout_overrides.clone(),
+        );
+        Some((data_path, paths))
+    }
+
+    /// Flip the process-global tier-flag toggles to match this options
+    /// bundle's layout, and stash the resolved [`TieredLayoutPaths`] for
+    /// status surfaces. Idempotent. Per-feature env escape hatches
+    /// (`REDDB_META_JSON_SIDECAR=...` and friends) still override what
+    /// this method sets — they are read inside the per-toggle getter, not
+    /// here.
+    ///
+    /// Tier defaults:
+    ///
+    /// | toggle                     | minimal | standard | performance | max |
+    /// |----------------------------|:-------:|:--------:|:-----------:|:---:|
+    /// | `.meta.json` sidecar       |   off   |    off   |     off     |  on |
+    /// | seq-N catalog journal      |   off   |    off   |     off     |  on |
+    /// | `-shm` provisioning        |   off   | **on**   |   **on**    |  on |
+    /// | `fold_pager_meta`          |   off   |    off   |     off     |  on |
+    /// | `fold_dwb_into_wal`        |   off   |    off   |     off     |  on |
+    /// | audit/slow log destination | stderr  |  stderr  |  file       | file|
+    ///
+    /// Retention for the seq-N journal: 32 at `Max`, 4 when the operator
+    /// opts in on a lower tier via `REDDB_SEQN_JOURNAL=1`.
+    pub fn apply_tier_defaults(&self) {
+        use crate::storage::layout::StorageLayout;
+
+        // Opt-in: only flip the process-global toggles when the operator
+        // explicitly chose a layout via `with_layout`. Tests and env
+        // hatches that pre-set toggles before opening a runtime must not
+        // be silently overridden by the implicit `Standard` default.
+        if !self.layout_explicit {
+            if let Some((_, paths)) = self.resolve_tiered_layout() {
+                tier_wiring::stash_layout_paths(paths);
+            }
+            return;
+        }
+
+        let layout = self.layout;
+        // .meta.json sidecar — Max only.
+        crate::physical::set_meta_json_sidecar_enabled(matches!(layout, StorageLayout::Max));
+
+        // Seq-N catalog journal — Max only. Retention = 32 for Max,
+        // OPT_IN baseline (4) for lower tiers (the value is consulted
+        // when an env hatch flips the toggle on outside Max).
+        crate::physical::set_seqn_journal_enabled(matches!(layout, StorageLayout::Max));
+        crate::physical::set_seqn_journal_retention(match layout {
+            StorageLayout::Max => crate::physical::DEFAULT_METADATA_JOURNAL_RETENTION,
+            _ => crate::physical::OPT_IN_METADATA_JOURNAL_RETENTION,
+        });
+
+        // `-shm` provisioning — anything ≥ Standard (gh-475 acceptance).
+        crate::physical::set_shm_provisioning_enabled(matches!(
+            layout,
+            StorageLayout::Standard | StorageLayout::Performance | StorageLayout::Max
+        ));
+
+        // Fold pager meta + fold DWB into WAL — Max only (single
+        // datafile + single recovery substrate is the Max story).
+        crate::physical::set_fold_pager_meta_enabled(matches!(layout, StorageLayout::Max));
+        crate::physical::set_fold_dwb_into_wal_enabled(matches!(layout, StorageLayout::Max));
+
+        // Cache resolved layout paths for `red status` / diagnostics.
+        if let Some((_, paths)) = self.resolve_tiered_layout() {
+            tier_wiring::stash_layout_paths(paths);
+        }
+    }
+}
+
+/// Process-global cache of the most recently applied [`TieredLayoutPaths`].
+/// Read by `red status` to surface resolved log destinations. Written by
+/// `RedDBOptions::apply_tier_defaults` after each open.
+pub mod tier_wiring {
+    use std::sync::Mutex;
+
+    use crate::storage::layout::{LogDestination, TieredLayoutPaths};
+
+    static CURRENT_LAYOUT_PATHS: Mutex<Option<TieredLayoutPaths>> = Mutex::new(None);
+
+    pub fn stash_layout_paths(paths: TieredLayoutPaths) {
+        if let Ok(mut slot) = CURRENT_LAYOUT_PATHS.lock() {
+            *slot = Some(paths);
+        }
+    }
+
+    pub fn current_layout_paths() -> Option<TieredLayoutPaths> {
+        CURRENT_LAYOUT_PATHS.lock().ok().and_then(|slot| slot.clone())
+    }
+
+    /// `(audit_log, slow_log)` destinations resolved from the active
+    /// layout. Falls back to `(Stderr, Stderr)` when no layout has been
+    /// applied yet (e.g. ephemeral in-memory paths).
+    pub fn current_log_destinations() -> (LogDestination, LogDestination) {
+        match current_layout_paths() {
+            Some(p) => (p.audit_log_destination, p.slow_log_destination),
+            None => (LogDestination::Stderr, LogDestination::Stderr),
+        }
     }
 }
 

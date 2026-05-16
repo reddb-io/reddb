@@ -175,6 +175,23 @@ impl RedDB {
 
     /// Open using the crate-level runtime options.
     pub fn open_with_options(options: &RedDBOptions) -> Result<Self, Box<dyn std::error::Error>> {
+        // Tier wiring: flip the six tier-flag global toggles from the
+        // resolved StorageLayout, then materialise the support
+        // directories the layout demands (logs/wal/snapshots/etc).
+        // Must run before any physical-layer call site reads the
+        // toggles, so it sits at the top of open_with_options.
+        options.apply_tier_defaults();
+        if let Some((_, paths)) = options.resolve_tiered_layout() {
+            if let Err(err) = paths.ensure_dirs() {
+                tracing::warn!(
+                    target: "reddb::tier_wiring",
+                    error = %err,
+                    support_dir = %paths.support_dir.display(),
+                    "failed to ensure tier support directories; continuing with degraded layout"
+                );
+            }
+        }
+
         if let ReplicationRole::Replica { primary_addr } = &options.replication.role {
             let local_path = options.resolved_path("data.rdb");
             if !local_path.exists() {
