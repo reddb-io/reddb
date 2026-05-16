@@ -609,6 +609,9 @@ impl StoreCommitCoordinator {
                     data,
                 } => pending.push((tx_id, data)),
                 WalRecord::Checkpoint { .. } => {}
+                WalRecord::FullPageImage { .. } => {
+                    // Pager-level FPI (gh-478); store replay ignores.
+                }
             }
         }
 

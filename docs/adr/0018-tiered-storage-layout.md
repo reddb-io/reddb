@@ -221,3 +221,67 @@ chain — there is no static cap. The existing
 `freelist::tests::test_trunk_chain` covers > 2000 freed pages and the new
 `tests/e2e_fold_pager_meta_policy.rs::freelist_trunk_chain_handles_many_pages`
 extends coverage to multi-page reload.
+
+## Fold DWB into WAL — full-page-image records (gh-478)
+
+The legacy `<data>-dwb` sidecar exists solely to recover torn page
+writes: pages flush through a staging buffer that is fsync'd before
+the in-place write, so a crash mid-write can be healed by replaying
+the staging copy. The sidecar costs a second random write per
+checkpoint and a third file in the per-database artifact set.
+
+The `fold_dwb_into_wal` process-global policy (off by default, env
+escape hatch `REDDB_FOLD_DWB_INTO_WAL=1`) collapses that recovery
+contract into the WAL via a new **FullPageImage (FPI)** record. When
+ON:
+
+- The pager does not open `<data>-dwb`. Any pre-existing sidecar is
+  removed at open time so a flipped flag does not leave a stale
+  artifact on disk.
+- Recovery applies FPI records before normal redo: every page id
+  with an FPI in the active WAL prefix is overwritten with the
+  recorded image, then `PageWrite` / `PageWriteCompressed` redo
+  proceeds. A torn page that received only part of its bytes is
+  therefore healed by the FPI that preceded the first modification
+  in the active checkpoint cycle.
+
+### WAL record format (v2, type byte `8`)
+
+```text
+[Type: 1 = FullPageImage]
+[TxID: 8]
+[PageID: 4]
+[CkptEpoch: 8]
+[DataLen: 4]
+[Data: N]            (typically PAGE_SIZE = 4096 bytes)
+[CRC: 4]
+```
+
+`CkptEpoch` is the checkpoint cycle counter at the time the image
+was captured. Recovery resolves duplicate FPIs per page id by
+preferring the highest LSN observed; the epoch field is reserved
+for future "FPI required" semantics where checkpoint advancement
+retires older images.
+
+### Scope of this slice (gh-478)
+
+This slice lands:
+
+- record format + encode/decode + roundtrip tests
+  (`crates/reddb-server/src/storage/wal/record.rs`);
+- `WalReader::collect_full_page_images` recovery helper
+  (`crates/reddb-server/src/storage/wal/reader.rs`);
+- `fold_dwb_into_wal` toggle + `-dwb` suppression in the pager
+  (`crates/reddb-server/src/physical.rs`,
+  `crates/reddb-server/src/storage/engine/pager/impl.rs`);
+- `tests/e2e_fold_dwb_into_wal_policy.rs` covering OFF default,
+  ON-flip removes the sidecar, and FPI roundtrip via WAL file.
+
+Deferred (tracked alongside #471/#472/#473/#475/#477):
+
+- automatic FPI emission on first page modification per checkpoint
+  cycle inside the pager flush path (currently `write_pages_through_dwb`
+  is the FPI emission point and stays unchanged until tier wiring
+  picks a single path);
+- tier-driven auto-enable from `RuntimeOptions`;
+- benchmark gate documenting OLTP overhead.

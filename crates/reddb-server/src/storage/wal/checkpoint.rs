@@ -193,6 +193,11 @@ impl Checkpointer {
                     // Store-level logical commit batches are replayed by
                     // UnifiedStore, not by the pager page checkpoint path.
                 }
+                WalRecord::FullPageImage { .. } => {
+                    // FPI records (gh-478) are consumed by the pager
+                    // recovery path before redo, not by checkpoint
+                    // accounting.
+                }
             }
         }
 

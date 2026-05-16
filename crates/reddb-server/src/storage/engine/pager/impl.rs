@@ -42,11 +42,20 @@ impl Pager {
             }
         };
 
-        // Open double-write buffer file
-        let dwb_file = if config.double_write && !config.read_only {
+        // Open double-write buffer file.
+        //
+        // gh-478: when `fold_dwb_into_wal` is enabled the DWB sidecar is
+        // suppressed — torn pages are healed by replaying FullPageImage WAL
+        // records during recovery. Any pre-existing `-dwb` is removed so a
+        // flipped flag cannot leave a stale sidecar on disk.
+        let fold_dwb = crate::physical::fold_dwb_into_wal_enabled();
+        let dwb_file = if config.double_write && !config.read_only && !fold_dwb {
             let f = Self::open_dwb_file(&path)?;
             Some(Mutex::new(f))
         } else {
+            if fold_dwb && !config.read_only {
+                let _ = std::fs::remove_file(Self::dwb_path(&path));
+            }
             None
         };
 
