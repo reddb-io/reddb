@@ -1166,6 +1166,14 @@ struct RuntimeInner {
     metrics_tenant_activity_stats: MetricsTenantActivityCounters,
     /// Process-local normal-KV tag index used by `INVALIDATE TAGS`.
     kv_tag_index: KvTagIndex,
+    /// Issue #524 — in-memory chain-tip cache per collection. Populated lazily
+    /// by the first INSERT or `GET /chain-tip` call after restart and updated
+    /// atomically with each chain INSERT. Backed by a single mutex so a chain
+    /// INSERT serialises against concurrent submitters — the loser observes
+    /// the advanced tip and surfaces `BlockchainConflict` to its caller.
+    chain_tip_cache: parking_lot::Mutex<
+        HashMap<String, crate::runtime::blockchain_kind::ChainTipFull>,
+    >,
 }
 
 #[derive(Clone)]
@@ -1183,7 +1191,7 @@ pub mod ask_pipeline;
 pub mod audit_log;
 pub mod audit_query;
 pub mod authorized_search;
-pub(crate) mod blockchain_kind;
+pub mod blockchain_kind;
 mod collection_contract;
 pub mod config_matrix;
 pub mod config_overlay;
