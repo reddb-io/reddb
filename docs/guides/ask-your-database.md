@@ -260,24 +260,27 @@ Expected response (abbreviated):
   "ok": true,
   "tables": [
     {
-      "_entity_id": 1,
-      "_collection": "incidents",
+      "rid": 1,
+      "collection": "incidents",
+      "kind": "row",
       "title": "SSH Brute Force",
       "severity": "high",
       "host": "10.0.0.5",
       "description": "Multiple failed SSH login attempts from 192.168.1.100..."
     },
     {
-      "_entity_id": 2,
-      "_collection": "incidents",
+      "rid": 2,
+      "collection": "incidents",
+      "kind": "row",
       "title": "Malware Detected",
       "severity": "critical",
       "host": "10.0.0.5",
       "description": "Trojan.GenericKD detected in /tmp/payload.exe..."
     },
     {
-      "_entity_id": 5,
-      "_collection": "incidents",
+      "rid": 5,
+      "collection": "incidents",
+      "kind": "row",
       "title": "Data Exfiltration Attempt",
       "severity": "critical",
       "host": "10.0.0.5",
@@ -328,17 +331,17 @@ Expected response:
   "ok": true,
   "results": [
     {
-      "_entity_id": 1,
-      "_collection": "incidents",
-      "_kind": "vector",
-      "_score": 0.87,
+      "rid": 1,
+      "collection": "incidents",
+      "kind": "vector",
+      "score": 0.87,
       "content": "Multiple failed SSH login attempts from 192.168.1.100. 500 attempts in 5 minutes targeting root account."
     },
     {
-      "_entity_id": 3,
-      "_collection": "incidents",
-      "_kind": "vector",
-      "_score": 0.82,
+      "rid": 3,
+      "collection": "incidents",
+      "kind": "vector",
+      "score": 0.82,
       "content": "User jdoe escalated to root via sudo exploit CVE-2023-22809. Unauthorized crontab entry created."
     }
   ]

@@ -183,6 +183,33 @@ curl -X PATCH http://127.0.0.1:8080/collections/events/entities/102 \
 Array positional paths such as `/body/tags/0` are not supported; replace the array or the full
 document body instead.
 
+### SQL UPDATE on documents
+
+Document updates use the explicit `DOCUMENTS` target. Compound assignment,
+`RETURNING`, `LIMIT`, and `ORDER BY ... LIMIT` work the same as for rows:
+
+```sql
+UPDATE events DOCUMENTS
+SET retries += 1
+WHERE event_type = 'login' AND retries < 5
+RETURNING rid, retries
+```
+
+```sql
+UPDATE events DOCUMENTS
+SET attempts += 1, last_seen = NOW()
+WHERE status = 'pending'
+ORDER BY created_at ASC
+LIMIT 100
+RETURNING rid
+```
+
+`WHERE` and `SET` see top-level body fields plus the public envelope. Nested
+paths (e.g. `body.details.x`) are not part of the first multi-model update
+version — use the JSON-patch endpoint above for those. Compound assignment
+requires an existing, non-null numeric field; missing, null, non-numeric, or
+arithmetic errors abort the whole statement.
+
 Full document body replacement remains available through `body` without `operations`:
 
 ```bash
