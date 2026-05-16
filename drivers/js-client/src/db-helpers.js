@@ -50,7 +50,7 @@ export class TypedQueryBuilder {
       ? '*'
       : this.columns.map(sqlIdentifierPath).join(', ')
     const where = this.whereClauses.length > 0
-      ? ` WHERE ${this.whereClauses.map((clause) => `(${clause})`).join(' AND ')}`
+      ? ` WHERE ${this.whereClauses.join(' AND ')}`
       : ''
     const sql = `SELECT ${projection} FROM ${sqlIdentifierPath(this.collection)}${where}`
     const result = this.params.length > 0

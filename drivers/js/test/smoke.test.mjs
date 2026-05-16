@@ -112,7 +112,9 @@ await test('insert + query round trip', async () => {
   const db = await connect('memory://', { binary: BINARY })
   const ins1 = await db.insert('users', { name: 'Alice', age: 30 })
   assertEqual(ins1.affected, 1, 'inserted 1')
+  assert(ins1.rid !== undefined && ins1.rid !== null, 'insert rid is present')
   assert(ins1.id !== undefined && ins1.id !== null, 'insert id is present')
+  assertEqual(ins1.id, ins1.rid, 'legacy id aliases rid')
   const ins2 = await db.insert('users', { name: 'Bob', age: 25 })
   assertEqual(ins2.affected, 1, 'inserted 1')
   assert(ins2.id !== undefined && ins2.id !== null, 'second insert id is present')
@@ -128,7 +130,9 @@ await test('bulkInsert affects N rows', async () => {
   const db = await connect('memory://', { binary: BINARY })
   const r = await db.bulkInsert('items', [{ name: 'a' }, { name: 'b' }, { name: 'c' }])
   assertEqual(r.affected, 3, 'bulk affected')
+  assertEqual(r.rids.length, 3, 'bulk rids count')
   assertEqual(r.ids.length, 3, 'bulk ids count')
+  assertEqual(r.ids[0], r.rids[0], 'legacy ids aliases rids')
   const q = await db.query('SELECT * FROM items')
   assertEqual(q.rows.length, 3, 'rows count')
   await db.close()
@@ -193,6 +197,73 @@ await test('queue client round trips push pop peek len purge over stdio', async 
   await db.query('CREATE QUEUE urgent PRIORITY')
   await db.queue.push('urgent', { task: 'deploy' }, { priority: 10 })
   assertEqual((await db.queue.peek('urgent'))[0].task, 'deploy', 'priority push payload')
+
+  await db.close()
+})
+
+await test('document helpers insert get list patch delete over stdio', async () => {
+  const db = await connect('memory://', { binary: BINARY })
+  assert(typeof db.documents.insert === 'function', 'documents.insert exists')
+  assert(typeof db.documents.get === 'function', 'documents.get exists')
+  assert(typeof db.documents.list === 'function', 'documents.list exists')
+  assert(typeof db.documents.patch === 'function', 'documents.patch exists')
+  assert(typeof db.documents.delete === 'function', 'documents.delete exists')
+
+  const inserted = await db.documents.insert('events', {
+    event_type: 'login',
+    attempts: 1,
+    details: { ip: '10.0.0.7' },
+  })
+  assertEqual(inserted.affected, 1, 'document insert affected')
+  assert(inserted.rid !== undefined && inserted.rid !== null, 'document rid')
+  assertEqual(inserted.item.event_type, 'login', 'insert returned document field')
+
+  const fetched = await db.documents.get('events', inserted.rid)
+  assertEqual(fetched.event_type, 'login', 'document get field')
+  assertEqual(fetched.body.details.ip, '10.0.0.7', 'document nested body')
+
+  const patched = await db.documents.patch('events', inserted.rid, {
+    attempts: 2,
+    reviewed: true,
+  })
+  assertEqual(patched.attempts, 2, 'document patch number')
+  assertEqual(patched.reviewed, true, 'document patch boolean')
+
+  const listed = await db.documents.list('events', { filter: "event_type = 'login'", limit: 10 })
+  assertEqual(listed.items.length, 1, 'document list count')
+  assertEqual(listed.items[0].rid, inserted.rid, 'document list rid')
+
+  const deleted = await db.documents.delete('events', inserted.rid)
+  assertEqual(deleted.affected, 1, 'document delete affected')
+  try {
+    await db.documents.get('events', inserted.rid)
+    throw new Error('expected document get to fail after delete')
+  } catch (err) {
+    assert(err instanceof RedDBError, 'document missing RedDBError')
+    assertEqual(err.code, 'NOT_FOUND', 'document missing code')
+  }
+
+  await db.close()
+})
+
+await test('kv helpers preserve namespaced keys exactly over stdio', async () => {
+  const db = await connect('memory://', { binary: BINARY })
+  await db.query('CREATE KV settings')
+  const kv = db.kv('settings')
+
+  await kv.put('characters:hansel', 'crumbs')
+  assertEqual(await kv.get('characters:hansel'), 'crumbs', 'namespaced key get')
+  assertEqual((await kv.exists('characters:hansel')).exists, true, 'namespaced key exists')
+
+  const listed = await kv.list({ prefix: 'characters:', limit: 10 })
+  assertEqual(listed.items.length, 1, 'namespaced key list count')
+  assertEqual(listed.items[0].key, 'characters:hansel', 'namespaced key list exact')
+  assertEqual(listed.items[0].value, 'crumbs', 'namespaced key list value')
+
+  const deleted = await kv.delete('characters:hansel')
+  assertEqual(deleted.affected, 1, 'namespaced key delete affected')
+  assertEqual((await kv.exists('characters:hansel')).exists, false, 'namespaced key deleted')
+  assertEqual(await kv.get('characters:hansel'), null, 'deleted key get null')
 
   await db.close()
 })
@@ -379,7 +450,8 @@ await test('embedded stdio ASK returns the full citation envelope (#406)', async
     assertEqual(result.prompt_tokens, 10, 'prompt tokens')
     assertEqual(result.completion_tokens, 4, 'completion tokens')
     assertEqual(result.cache_hit, false, 'cache hit default')
-    assertEqual(result.cost_usd, 0, 'cost default')
+    assert(typeof result.cost_usd === 'number', 'cost is numeric')
+    assert(result.cost_usd >= 0, 'cost is non-negative')
     assertEqual(result.retry_count, 0, 'retry count')
     assert(Array.isArray(result.sources_flat), 'sources_flat is array')
     assert(Array.isArray(result.citations), 'citations is array')

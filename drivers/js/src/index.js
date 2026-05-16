@@ -25,6 +25,7 @@ import { parseUri } from './url.js'
 import { CacheClient } from './cache.js'
 import { KvClient } from './kv.js'
 import { QueueClient } from './queue.js'
+import { DocumentClient } from './documents.js'
 import { ConfigClient } from './config.js'
 import { VaultClient } from './vault.js'
 import { TypedQueryBuilder, collectionExists, listCollections } from './db-helpers.js'
@@ -33,6 +34,7 @@ export { RedDBError }
 export { CacheClient } from './cache.js'
 export { KvClient } from './kv.js'
 export { QueueClient } from './queue.js'
+export { DocumentClient } from './documents.js'
 export { ConfigClient } from './config.js'
 export { VaultClient } from './vault.js'
 export { TypedQueryBuilder } from './db-helpers.js'
@@ -315,6 +317,7 @@ export class RedDB {
     this.transport = opts.transport ?? null
     this.cache = new CacheClient(client, this.transport)
     this.queue = new QueueClient(client)
+    this.documents = new DocumentClient(this)
     const defaultKv = new KvClient(client)
     this.kv = Object.assign((collection = 'kv_default') => new KvClient(client, collection), {
       put: defaultKv.put.bind(defaultKv),
@@ -350,13 +353,13 @@ export class RedDB {
     return this.query(sql, ...params)
   }
 
-  /** Insert one row. Returns `{ affected, id }`. */
+  /** Insert one row. Returns `{ affected, rid, id }`; `id` is a legacy alias. */
   async insert(collection, payload) {
     const result = await this.client.call('insert', { collection, payload })
     return requireInsertId(result, 'insert')
   }
 
-  /** Insert many rows in one call. Returns `{ affected, ids }`. */
+  /** Insert many rows in one call. Returns `{ affected, rids, ids }`; `ids` is a legacy alias. */
   async bulkInsert(collection, payloads) {
     const result = await this.client.call('bulk_insert', { collection, payloads })
     return requireInsertIds(result, payloads.length)
@@ -493,26 +496,34 @@ function attachRollbackError(err, rollbackErr) {
 }
 
 function requireInsertId(result, method) {
-  if (!result || typeof result !== 'object' || result.id == null) {
+  if (!result || typeof result !== 'object' || (result.rid == null && result.id == null)) {
     throw new RedDBError(
       'ENGINE_TOO_OLD',
       `${method}() requires RedDB engine >= ${MIN_INSERT_ID_ENGINE_VERSION} with insert id support`,
     )
   }
+  if (result.rid == null) result.rid = result.id
+  if (result.id == null) result.id = result.rid
   return result
 }
 
 function requireInsertIds(result, expected) {
-  if (!result || typeof result !== 'object' || !Array.isArray(result.ids)) {
+  if (
+    !result ||
+    typeof result !== 'object' ||
+    (!Array.isArray(result.rids) && !Array.isArray(result.ids))
+  ) {
     throw new RedDBError(
       'ENGINE_TOO_OLD',
       `bulkInsert() requires RedDB engine >= ${MIN_INSERT_ID_ENGINE_VERSION} with bulk insert id support`,
     )
   }
-  if (result.ids.length !== expected) {
+  if (!Array.isArray(result.rids)) result.rids = result.ids
+  if (!Array.isArray(result.ids)) result.ids = result.rids
+  if (result.rids.length !== expected) {
     throw new RedDBError(
       'INVALID_RESPONSE',
-      `bulkInsert() expected ${expected} ids, got ${result.ids.length}`,
+      `bulkInsert() expected ${expected} rids, got ${result.rids.length}`,
     )
   }
   return result
