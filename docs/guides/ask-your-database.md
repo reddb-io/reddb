@@ -593,6 +593,30 @@ After matching, it expands results by traversing graph edges and following cross
 
 Every write operation (INSERT, UPDATE, DELETE) appends an event to the CDC buffer with a monotonically increasing LSN (Log Sequence Number). Consumers poll `/changes?since_lsn=N` to read events incrementally.
 
+### Retrieval grounding vs. deterministic analytics
+
+`ASK` and `SEARCH CONTEXT` are *retrieval-grounded* commands: every answer is
+synthesised from rows the engine actually returned, and the LLM is sandboxed
+behind `sources_flat`. Deterministic calculations &mdash; counts, sums,
+percentiles, joins, time-bucketed rollups &mdash; stay on the SQL / engine
+paths. The provider boundary is enforced as follows:
+
+| Concern | Routed through | Why |
+|:--------|:----------------|:----|
+| `SELECT … COUNT/SUM/AVG/MIN/MAX(…)` | SQL planner + executor | Exact, reproducible, no network call. |
+| `SEARCH CONTEXT 'term'` | Multi-tier index (field → token → scan) | Returns table rows, documents, KV entries, graph nodes/edges, and vectors when each backing collection exists. Empty result set when nothing matches &mdash; the contract is "ground or fall silent". |
+| `ASK '…'` | `AskPipeline` funnel + LLM synthesis | Pipeline grounds first (Stage 4 literal filter / Stage 3 BM25 + vector / Stage 3c graph), then the LLM rewrites the grounded rows into a citation-bearing sentence. |
+| Missing or unsupported analytics inside an `ASK` question | Pipeline short-circuits with a structured error OR returns an answer that openly cites "no matching sources" | The LLM never invents a number; it can only quote what `sources_flat` contains. |
+
+A practical rule: if the question is a calculation (`how many incidents are
+open?`, `what is the p95 of cpu.usage in the last hour?`), use SQL &mdash; the
+engine is deterministic, RLS-aware, and cheaper. Reserve `ASK` for
+"summarise / explain / correlate" prompts that need to weave grounded rows
+into natural language. The conformance test
+[`tests/e2e_ask_search_conformance.rs`](https://github.com/reddb-io/reddb/blob/main/tests/e2e_ask_search_conformance.rs)
+pins this boundary against a mock provider in CI so future changes cannot
+silently hand calculations off to the LLM.
+
 ---
 
 ## Next Steps
