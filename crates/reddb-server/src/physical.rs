@@ -87,6 +87,35 @@ pub fn seqn_journal_enabled() -> bool {
     }
 }
 
+// Pager-meta sidecar policy (#477). 0 = unset (consult env, default off — keep
+// `<data>-meta` shadow), 1 = enabled (fold meta into page 1 + overflow chain;
+// no `-meta` sidecar), 2 = disabled (current behavior). Tier wiring (deferred)
+// flips this on for tiers that prefer a single datafile artifact. Escape hatch:
+// `REDDB_FOLD_PAGER_META=1`.
+static FOLD_PAGER_META_POLICY: AtomicU8 = AtomicU8::new(0);
+
+/// Process-wide opt-in for folding pager metadata (page 1) into the datafile
+/// without an adjacent `<data>-meta` shadow. When enabled, the corruption-
+/// recovery shadow at `<data>-meta` is not written; readers trust page 1
+/// (plus its overflow chain) as the single source of truth. Defaults off.
+pub fn set_fold_pager_meta_enabled(enabled: bool) {
+    FOLD_PAGER_META_POLICY.store(if enabled { 1 } else { 2 }, Ordering::Relaxed);
+}
+
+/// Whether the pager should fold metadata into page 1 only and skip the
+/// `<data>-meta` sidecar shadow. Reads still tolerate the sidecar so existing
+/// databases keep working through the flag flip.
+pub fn fold_pager_meta_enabled() -> bool {
+    match FOLD_PAGER_META_POLICY.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => std::env::var("REDDB_FOLD_PAGER_META")
+            .ok()
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+            .unwrap_or(false),
+    }
+}
+
 /// Process-wide retention for the seq-N catalog journal. Tier wiring should
 /// call this with `DEFAULT_METADATA_JOURNAL_RETENTION` (32) for `Max` and
 /// `OPT_IN_METADATA_JOURNAL_RETENTION` (4) for opt-in non-`Max` use.

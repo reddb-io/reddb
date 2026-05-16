@@ -1238,12 +1238,26 @@ impl Pager {
         Ok(page)
     }
 
-    /// Write a shadow copy of the metadata page to .rdb-meta
+    /// Write a shadow copy of the metadata page to .rdb-meta.
+    ///
+    /// When the process-global `fold_pager_meta` policy is enabled (see
+    /// [`crate::physical::fold_pager_meta_enabled`]) the shadow is suppressed:
+    /// metadata is sourced exclusively from page 1 (plus its overflow chain).
+    /// Any pre-existing `<data>-meta` file is also removed so a flipped flag
+    /// cannot leave a stale shadow on disk. Reads still tolerate the sidecar
+    /// when present so databases written before the flag flipped remain
+    /// loadable.
     pub fn write_meta_shadow(&self, page: &Page) -> Result<(), PagerError> {
         if self.config.read_only {
             return Ok(());
         }
         let shadow = Self::meta_shadow_path(&self.path);
+        if crate::physical::fold_pager_meta_enabled() {
+            // Best-effort cleanup of any prior shadow — a missing file is not
+            // an error condition here.
+            let _ = std::fs::remove_file(&shadow);
+            return Ok(());
+        }
         let mut f = File::create(&shadow)?;
         f.write_all(page.as_bytes())?;
         f.sync_all()?;
