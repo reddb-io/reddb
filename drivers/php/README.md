@@ -96,6 +96,38 @@ same typed values as the `/query` JSON `params` array.
 `query` and `get` return raw JSON — pick your own decoder
 (`json_decode`, `JsonMachine`, ...).
 
+## Rich helpers (SDK Helper Spec v0.1)
+
+`Reddb\Helpers\Helpers` wraps a `Conn` with three namespaces —
+`documents()`, `kv()`, `queue()` — mirroring the Go / Dart / Python
+helpers.
+
+```php
+use Reddb\Helpers\Helpers;
+
+$helpers = Helpers::for($conn);
+
+// Documents
+$ins = $helpers->documents()->insert('people', ['name' => 'alice']);
+$row = $helpers->documents()->get('people', $ins->rid);
+
+// KV (default collection: kv_default)
+$helpers->kv()->set('characters:hansel', 'ok');
+$v = $helpers->kv()->get('characters:hansel');
+$list = $helpers->kv()->list(['prefix' => 'characters:']);
+
+// Queue
+$push = $helpers->queue()->push('jobs', ['id' => 1], ['priority' => 5]);
+$len  = $helpers->queue()->len('jobs');
+$jobs = $helpers->queue()->pop('jobs', 10);
+```
+
+Typed errors: `Reddb\Helpers\InvalidArgument`,
+`Reddb\Helpers\NotFound`, `Reddb\Helpers\InvalidResponse`.
+
+Transactions aren't surfaced through helpers yet — call
+`$conn->query('BEGIN' / 'COMMIT' / 'ROLLBACK')` directly.
+
 ## Errors
 
 All exceptions extend `Reddb\RedDBException`:

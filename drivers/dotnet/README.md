@@ -64,6 +64,41 @@ Native mappings:
 | `DateTime`, `DateTimeOffset`                    | timestamp        |
 | `Guid`                                          | uuid             |
 
+## Rich helpers (SDK Helper Spec v0.1)
+
+`Reddb.Helpers.Helpers` wraps an `IConn` with three namespaces —
+`Documents()`, `Kv()`, `Queue()` — mirroring the Go / Dart / Python
+helpers.
+
+```csharp
+using Reddb.Helpers;
+
+var helpers = Helpers.For(conn);
+
+// Documents
+var ins = await helpers.Documents().InsertAsync("people",
+    new Dictionary<string, object?> { ["name"] = "alice" });
+var row = await helpers.Documents().GetAsync("people", ins.Rid);
+
+// KV (default collection: kv_default)
+await helpers.Kv().SetAsync("characters:hansel", "ok");
+object? v = await helpers.Kv().GetAsync("characters:hansel");
+var list = await helpers.Kv().ListAsync(new KvClient.ListOpts { Prefix = "characters:" });
+
+// Queue
+var push = await helpers.Queue().PushAsync("jobs",
+    new Dictionary<string, object?> { ["id"] = 1 },
+    new QueueClient.PushOptions { Priority = 5 });
+long len = await helpers.Queue().LenAsync("jobs");
+var jobs = await helpers.Queue().PopAsync("jobs", 10);
+```
+
+Typed errors: `HelperException.InvalidArgument`,
+`HelperException.NotFound`, `HelperException.InvalidResponse`.
+
+Transactions aren't surfaced through helpers yet — call
+`conn.QueryAsync("BEGIN" / "COMMIT" / "ROLLBACK")` directly.
+
 ## Supported URIs
 
 One URI string covers every transport:
