@@ -524,6 +524,13 @@ pub struct PhysicalMetadataFile {
 mod helpers;
 mod json_codec;
 mod metadata_file;
+pub mod shm;
+
+pub use self::shm::{
+    provision_shm, read_shm_header, set_shm_provisioning_enabled, shm_path_for,
+    shm_provisioning_enabled, ShmHandle, ShmHeader, ShmProvisionState, SHM_FILE_SIZE,
+    SHM_HEADER_SIZE, SHM_MAGIC, SHM_VERSION,
+};
 
 use self::helpers::*;
 use self::json_codec::*;
