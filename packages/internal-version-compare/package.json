@@ -1,6 +1,6 @@
 {
   "name": "@reddb-io/internal-version-compare",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "private": true,
   "description": "Workspace-only deep module: compare a package version against an installed `red --version`, return install/upgrade/skip verdict for the CLI postinstall.",
   "type": "module",

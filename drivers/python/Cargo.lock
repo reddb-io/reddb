@@ -1703,7 +1703,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io"
-version = "1.1.2"
+version = "1.2.0"
 dependencies = [
  "reddb-io-client",
  "reddb-io-grpc-proto",
@@ -1714,7 +1714,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client"
-version = "1.0.8"
+version = "1.2.0"
 dependencies = [
  "reddb-io-client-connector",
  "reddb-io-grpc-proto",
@@ -1728,7 +1728,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client-connector"
-version = "1.0.8"
+version = "1.2.0"
 dependencies = [
  "reddb-io-grpc-proto",
  "tonic 0.14.5",
@@ -1736,7 +1736,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-grpc-proto"
-version = "1.0.8"
+version = "1.2.0"
 dependencies = [
  "prost 0.14.3",
  "reddb-io-wire",
@@ -1748,7 +1748,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-server"
-version = "1.0.8"
+version = "1.2.0"
 dependencies = [
  "aes-gcm",
  "blake3",
@@ -1773,7 +1773,9 @@ dependencies = [
  "rstar",
  "rustls",
  "rustls-pemfile",
+ "serde",
  "sha2",
+ "snap",
  "strsim",
  "tokio",
  "tokio-rustls",
@@ -1789,7 +1791,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-wire"
-version = "1.0.8"
+version = "1.2.0"
 dependencies = [
  "url",
  "zstd",
@@ -1797,7 +1799,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-python"
-version = "1.1.2"
+version = "1.2.0"
 dependencies = [
  "prost 0.13.5",
  "pyo3",
@@ -1975,6 +1977,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
+ "serde_derive",
 ]
 
 [[package]]
@@ -2063,6 +2066,12 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+
+[[package]]
+name = "snap"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b6b67fb9a61334225b5b790716f609cd58395f895b3fe8b328786812a40bc3b"
 
 [[package]]
 name = "socket2"

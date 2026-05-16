@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.0 - 2026-05-15
+
+### Fixed
+
+- Server and client Docker images now use `gcr.io/distroless/cc-debian13`
+  so the glibc 2.39 binaries produced by the Ubuntu 24.04 release builders
+  run on the runtime base. Prior 1.1.x images failed at startup with
+  `version 'GLIBC_2.39' not found`.
+
 ### Breaking Changes
 
 - Public item identity now uses the canonical RedDB ID field `rid` across

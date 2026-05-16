@@ -1,6 +1,6 @@
 [package]
 name = "reddb-io-client-connector"
-version = "1.1.2"
+version = "1.2.0"
 edition = "2021"
 authors = ["RedDB.io <hello@reddb.io>"]
 description = "Workspace-internal gRPC connector used by `reddb-server` (rpc_stdio) and `reddb-client`. Splitting it out of `reddb-client` breaks the otherwise-circular path dependency between `reddb-client[embedded]` (which pulls `reddb-server`) and `reddb-server` (which needs the connector)."
