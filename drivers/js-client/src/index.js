@@ -40,6 +40,7 @@ import {
 import { CacheClient } from './cache.js'
 import { KvClient } from './kv.js'
 import { QueueClient } from './queue.js'
+import { DocumentClient } from './documents.js'
 import { ConfigClient } from './config.js'
 import { VaultClient } from './vault.js'
 import { TypedQueryBuilder, collectionExists, listCollections } from './db-helpers.js'
@@ -48,6 +49,7 @@ export { RedDBError, EmbeddedNotSupported, EMBEDDED_REJECTION_MESSAGE, isEmbedde
 export { CacheClient } from './cache.js'
 export { KvClient } from './kv.js'
 export { QueueClient } from './queue.js'
+export { DocumentClient } from './documents.js'
 export { ConfigClient } from './config.js'
 export { VaultClient } from './vault.js'
 export { TypedQueryBuilder } from './db-helpers.js'
@@ -386,6 +388,7 @@ export class RedDB {
     this.client = client
     this.cache = new CacheClient(client)
     this.queue = new QueueClient(client)
+    this.documents = new DocumentClient(this)
     const defaultKv = new KvClient(client)
     this.kv = Object.assign((collection = 'kv_default') => new KvClient(client, collection), {
       put: defaultKv.put.bind(defaultKv),

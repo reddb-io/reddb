@@ -130,6 +130,11 @@ export class KvClient {
   ): Promise<QueryResult>
   get(key: string, options?: { collection?: string }): Promise<unknown | null>
   getMany(keys: string[], options?: { collection?: string }): Promise<Array<unknown | null>>
+  exists(key: string, options?: { collection?: string }): Promise<{ exists: boolean }>
+  delete(key: string, options?: { collection?: string }): Promise<DeleteResult>
+  list(options?: { collection?: string; prefix?: string; limit?: number }): Promise<{
+    items: Array<{ key: string; value: unknown }>
+  }>
   invalidateTags(tags: string[], options?: { collection?: string }): Promise<number>
   watch(
     key: string,
@@ -139,6 +144,33 @@ export class KvClient {
     prefix: string,
     options?: { collection?: string; sinceLsn?: number; limit?: number },
   ): AsyncIterable<KvWatchEvent>
+}
+
+export interface DocumentInsertResult<T extends Record<string, unknown> = Record<string, unknown>> {
+  affected: number
+  rid: string | number
+  item: T & { rid: string | number }
+}
+
+export class DocumentClient {
+  insert<T extends Record<string, unknown> = Record<string, unknown>>(
+    collection: string,
+    document: Record<string, unknown>,
+  ): Promise<DocumentInsertResult<T>>
+  get<T extends Record<string, unknown> = Record<string, unknown>>(
+    collection: string,
+    rid: string | number,
+  ): Promise<T & { rid: string | number }>
+  list<T extends Record<string, unknown> = Record<string, unknown>>(
+    collection: string,
+    options?: { filter?: string; orderBy?: string; order_by?: string; limit?: number },
+  ): Promise<{ items: Array<T & { rid: string | number }> }>
+  patch<T extends Record<string, unknown> = Record<string, unknown>>(
+    collection: string,
+    rid: string | number,
+    patch: Record<string, unknown>,
+  ): Promise<T & { rid: string | number }>
+  delete(collection: string, rid: string | number): Promise<DeleteResult>
 }
 
 export class QueueClient {
@@ -228,6 +260,7 @@ export interface RedDBTransaction {
 export class RedDB {
   readonly cache: CacheClient
   readonly queue: QueueClient
+  readonly documents: DocumentClient
   readonly kv: KvClient & ((collection?: string) => KvClient)
   readonly config: (collection?: string) => ConfigClient
   readonly vault: (collection?: string) => VaultClient

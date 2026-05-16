@@ -50,6 +50,14 @@ await db.insert('users', { name: 'Alice' })
 const result = await db.query('SELECT * FROM users WHERE name = $1', 'Alice')
 console.log(result.rows)
 
+const doc = await db.documents.insert('events', { event_type: 'login' })
+await db.documents.patch('events', doc.rid, { reviewed: true })
+
+await db.query('CREATE KV settings')
+const kv = db.kv('settings')
+await kv.put('characters:hansel', 'crumbs')
+console.log(await kv.get('characters:hansel'))
+
 await db.close()
 ```
 
@@ -79,6 +87,21 @@ The wrapper sends `BEGIN`, commits when the callback resolves, and rolls back
 when the callback or a `tx.query()` / `tx.insert()` call throws. Nested
 transactions on the same connection are rejected with `NESTED_TX_NOT_SUPPORTED`;
 open another `connect()` handle for independent concurrent transactions.
+
+## Rich Helpers
+
+The client follows the SDK Helper Spec for the shared JS/TS surface:
+
+- `db.insert(collection, payload)` returns `{ affected, rid, id }`; `id` is a
+  legacy alias for `rid`.
+- `db.bulkInsert(collection, payloads)` returns `{ affected, rids, ids }`; `ids`
+  is a legacy alias for `rids`.
+- `db.documents.insert/get/list/patch/delete` covers document CRUD. Insert
+  creates the document collection when needed; patch currently accepts top-level
+  fields.
+- `db.kv(collection?)` preserves exact keys, including namespaced keys such as
+  `characters:hansel`, and exposes `put/get/exists/delete/list`.
+- `db.queue` exposes `push/pop/peek/len/purge`.
 
 ## Accepted URI schemes
 

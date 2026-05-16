@@ -31,6 +31,35 @@ export class KvClient {
     return values
   }
 
+  async exists(key, options = {}) {
+    return { exists: (await this.get(key, options)) !== null }
+  }
+
+  async delete(key, options = {}) {
+    const collection = options.collection ?? this.collection
+    const result = await this.client.call('query', {
+      sql: `KV DELETE ${kvPath(collection, key)}`,
+    })
+    return { affected: result.affected ?? result.affected_rows ?? 0 }
+  }
+
+  async list(options = {}) {
+    const collection = options.collection ?? this.collection
+    const limit = options.limit == null ? 100 : Number(options.limit)
+    if (!Number.isInteger(limit) || limit <= 0) {
+      throw new RedDBError('INVALID_ARGUMENT', 'kv.list limit must be a positive integer')
+    }
+    const prefix = options.prefix == null ? '' : String(options.prefix)
+    const result = await this.client.call('query', {
+      sql: `SELECT key, value FROM ${kvIdentifier(collection)} ORDER BY key ASC LIMIT ${limit}`,
+    })
+    const rows = result.rows ?? []
+    const items = prefix.length > 0
+      ? rows.filter((row) => String(row.key).startsWith(prefix))
+      : rows
+    return { items }
+  }
+
   async invalidateTags(tags, options = {}) {
     const collection = options.collection ?? this.collection
     const result = await this.client.call('query', {
@@ -90,6 +119,7 @@ function kvKeySegment(value) {
 function kvValueLiteral(value) {
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
   if (value == null) return 'NULL'
+  if (typeof value === 'object') return `'${JSON.stringify(value).replace(/'/g, "''")}'`
   return `'${String(value).replace(/'/g, "''")}'`
 }
 

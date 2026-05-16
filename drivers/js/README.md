@@ -49,6 +49,17 @@ await db.bulkInsert('users', [{ name: 'Bob' }, { name: 'Carol' }])
 const result = await db.query('SELECT * FROM users')
 console.log(result.rows)
 
+const doc = await db.documents.insert('events', {
+  event_type: 'login',
+  attempts: 1,
+})
+await db.documents.patch('events', doc.rid, { reviewed: true })
+
+await db.query('CREATE KV settings')
+const kv = db.kv('settings')
+await kv.put('characters:hansel', 'crumbs')
+console.log(await kv.get('characters:hansel'))
+
 await db.close()
 ```
 
@@ -84,7 +95,7 @@ The callback receives a transaction handle with the same `query`, `insert`, and
 const userId = await db.transaction(async (tx) => {
   const inserted = await tx.insert('users', { name: 'Ada' })
   await tx.query('INSERT INTO audit (action) VALUES ($1)', 'created user')
-  return inserted.id
+  return inserted.rid
 })
 ```
 
@@ -157,13 +168,69 @@ client yet. Use the HTTP streaming API for incremental ASK frames; stdio
 currently supports materialised cursor batching through `query.open` /
 `query.next`, which is separate from ASK token streaming.
 
-### `db.insert(collection, payload) → Promise<{ affected, rid? }>`
+### `db.insert(collection, payload) → Promise<{ affected, rid, id }>`
 
-### `db.bulkInsert(collection, payloads) → Promise<{ affected }>`
+`id` is a legacy alias for `rid`.
+
+### `db.bulkInsert(collection, payloads) → Promise<{ affected, rids, ids }>`
+
+`ids` is a legacy alias for `rids`.
 
 ### `db.get(collection, rid) → Promise<{ entity }>`
 
 ### `db.delete(collection, rid) → Promise<{ affected }>`
+
+### `db.documents`
+
+Document helpers follow the SDK Helper Spec:
+
+```js
+const inserted = await db.documents.insert('events', {
+  event_type: 'login',
+  details: { ip: '10.0.0.7' },
+})
+
+const event = await db.documents.get('events', inserted.rid)
+const page = await db.documents.list('events', {
+  filter: "event_type = 'login'",
+  limit: 10,
+})
+const updated = await db.documents.patch('events', inserted.rid, {
+  reviewed: true,
+})
+await db.documents.delete('events', inserted.rid)
+```
+
+`documents.insert()` creates the document collection when needed. Patch support
+currently accepts top-level document fields.
+
+### `db.kv(collection?)`
+
+KV helpers preserve exact keys, including namespaced keys with `:`.
+
+```js
+await db.query('CREATE KV settings')
+const kv = db.kv('settings')
+
+await kv.put('characters:hansel', 'crumbs')
+await kv.get('characters:hansel')        // 'crumbs'
+await kv.exists('characters:hansel')     // { exists: true }
+await kv.list({ prefix: 'characters:' }) // { items: [{ key, value }] }
+await kv.delete('characters:hansel')     // { affected }
+```
+
+### `db.queue`
+
+Queue helpers cover the embedded FIFO workflow:
+
+```js
+await db.query('CREATE QUEUE jobs')
+await db.queue.push('jobs', { task: 'ship' })
+await db.queue.peek('jobs')
+await db.queue.pop('jobs')
+await db.queue.len('jobs')
+await db.queue.purge('jobs')
+```
 
 ### `db.health() → Promise<{ ok, version }>`
 
