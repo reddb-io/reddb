@@ -954,15 +954,19 @@ fn main() {
                 .map(|d| d.as_millis())
                 .unwrap_or(0);
             let uptime_ms = now_ms.saturating_sub(stats.started_at_unix_ms);
+            let journal_enabled = reddb::seqn_journal_enabled();
+            let journal_retention = reddb::seqn_journal_retention();
             if json_mode {
                 json_ok(
                     "status",
                     &format!(
-                        "{{\"uptime_ms\":{},\"collections\":{},\"entities\":{},\"pid\":{}}}",
+                        "{{\"uptime_ms\":{},\"collections\":{},\"entities\":{},\"pid\":{},\"seqn_journal\":{{\"enabled\":{},\"retention\":{}}}}}",
                         uptime_ms,
                         stats.store.collection_count,
                         stats.store.total_entities,
                         stats.system.pid,
+                        journal_enabled,
+                        journal_retention,
                     ),
                 );
             } else {
@@ -972,6 +976,11 @@ fn main() {
                 println!("pid:         {}", stats.system.pid);
                 println!("hostname:    {}", stats.system.hostname);
                 println!("os/arch:     {}/{}", stats.system.os, stats.system.arch);
+                println!(
+                    "seqn_journal: {} (retention={})",
+                    if journal_enabled { "enabled" } else { "disabled" },
+                    journal_retention,
+                );
             }
         }
 

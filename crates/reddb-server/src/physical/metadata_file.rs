@@ -171,7 +171,7 @@ impl PhysicalMetadataFile {
 
     pub fn save_for_data_path(&self, data_path: &Path) -> io::Result<PathBuf> {
         let binary_path = Self::metadata_binary_path_for(data_path);
-        if binary_path.exists() {
+        if binary_path.exists() && super::seqn_journal_enabled() {
             let sequence = Self::load_from_binary_path(&binary_path)
                 .map(|metadata| metadata.superblock.sequence)
                 .unwrap_or(self.superblock.sequence);
@@ -251,11 +251,12 @@ impl PhysicalMetadataFile {
     }
 
     pub fn prune_journal_for_data_path(&self, data_path: &Path) -> io::Result<()> {
+        let retention = super::seqn_journal_retention();
         let mut paths = Self::journal_paths_for_data_path(data_path)?;
-        if paths.len() <= DEFAULT_METADATA_JOURNAL_RETENTION {
+        if paths.len() <= retention {
             return Ok(());
         }
-        let delete_count = paths.len() - DEFAULT_METADATA_JOURNAL_RETENTION;
+        let delete_count = paths.len() - retention;
         for path in paths.drain(0..delete_count) {
             let _ = fs::remove_file(path);
         }
