@@ -140,7 +140,7 @@ impl Connection {
 /// Usage:
 ///   import reddb_python
 ///   conn = reddb_python.connect("127.0.0.1:50051")
-///   result = conn.query("SELECT * FROM users WHERE _entity_id = 1")
+///   result = conn.query("SELECT * FROM users WHERE rid = 1")
 ///   conn.bulk_insert("users", ['{"fields":{"name":"Alice"}}'])
 #[pyfunction]
 #[pyo3(name = "legacy_grpc_connect")]
@@ -492,7 +492,7 @@ fn decode_wire_result_to_py(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
 ///
 /// Usage:
 ///   conn = reddb_python.wire_connect("127.0.0.1:5050")
-///   rows = conn.query("SELECT * FROM users WHERE _entity_id = 1")
+///   rows = conn.query("SELECT * FROM users WHERE rid = 1")
 #[pyfunction]
 fn wire_connect(addr: &str) -> PyResult<WireConnection> {
     let stream = TcpStream::connect(addr)
@@ -634,6 +634,8 @@ fn reddb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<high_level::RedDb>()?;
     m.add_class::<high_level::RedDbError>()?;
     m.add_class::<high_level::CacheClient>()?;
+    m.add_class::<high_level::DocumentClient>()?;
+    m.add_class::<high_level::KvClient>()?;
 
     // Legacy: keep the existing classes available for power users.
     m.add_function(wrap_pyfunction!(legacy_grpc_connect, m)?)?;

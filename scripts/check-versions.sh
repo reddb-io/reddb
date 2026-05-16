@@ -54,7 +54,7 @@ check "Cargo.lock reddb-io-client-connector" "$(lock_version Cargo.lock reddb-io
 check "drivers/python"      "$(grep -m1 '^version'  drivers/python/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 check "drivers/python (py)" "$(grep -m1 '^version' drivers/python/pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 check "drivers/python/Cargo.lock reddb-io" "$(lock_version drivers/python/Cargo.lock reddb-io)"
-check "drivers/python/Cargo.lock reddb-python" "$(lock_version drivers/python/Cargo.lock reddb-python)"
+check "drivers/python/Cargo.lock reddb-io-python" "$(lock_version drivers/python/Cargo.lock reddb-io-python)"
 check "drivers/js (@reddb-io/sdk)"  "$(grep -m1 '"version"' drivers/js/package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"
 check "drivers/bun (@reddb-io/client-bun)"  "$(grep -m1 '"version"' drivers/bun/package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"
 check "packages/internal-asset-fetcher" "$(grep -m1 '"version"' packages/internal-asset-fetcher/package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"

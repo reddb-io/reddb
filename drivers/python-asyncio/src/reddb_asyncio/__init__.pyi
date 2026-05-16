@@ -1,6 +1,11 @@
 from typing import Any
 
-from .client import KvClient as KvClient, Reddb as Reddb
+from .client import (
+    DocumentClient as DocumentClient,
+    KvClient as KvClient,
+    QueueClient as QueueClient,
+    Reddb as Reddb,
+)
 from .errors import (
     AuthRefused as AuthRefused,
     CompressedButNoZstd as CompressedButNoZstd,
