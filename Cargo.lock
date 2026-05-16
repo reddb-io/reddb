@@ -2297,6 +2297,7 @@ dependencies = [
  "blake3",
  "criterion",
  "crossbeam-queue",
+ "ed25519-dalek",
  "fs2",
  "hex",
  "hmac 0.13.0",

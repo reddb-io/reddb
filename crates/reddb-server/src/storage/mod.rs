@@ -72,6 +72,13 @@ pub mod layout;
 // Storage/wire integration tracked in issue #521.
 pub mod blockchain;
 
+// Signed Writes: ed25519 signer registry + insert verification logic
+// for `CREATE COLLECTION ... SIGNED_BY (...)` (issues #520, #522).
+// Runtime wiring (insert path, reserved-column injection, REST error
+// codes) lands in follow-up slices; this module ships the pure
+// primitives the wiring will call into.
+pub mod signed_writes;
+
 // Public surface re-used by the rest of the codebase.
 pub use backend::{BackendError, LocalBackend, RemoteBackend};
 pub use keyring::{
