@@ -116,6 +116,35 @@ pub fn fold_pager_meta_enabled() -> bool {
     }
 }
 
+// Fold-DWB-into-WAL policy (#478). 0 = unset (consult env, default off — keep
+// `-dwb` sidecar), 1 = enabled (emit FullPageImage WAL records before first
+// page modification per checkpoint cycle; no `-dwb` sidecar), 2 = disabled.
+// Tier wiring (deferred) flips this on for tiers that prefer a single WAL-
+// rooted recovery path. Escape hatch: `REDDB_FOLD_DWB_INTO_WAL=1`.
+static FOLD_DWB_INTO_WAL_POLICY: AtomicU8 = AtomicU8::new(0);
+
+/// Process-wide opt-in for folding the double-write buffer into the WAL via
+/// full-page-image (FPI) records. When enabled, the pager does not open or
+/// write `<data>-dwb`; recovery rebuilds torn pages from FPI records replayed
+/// before normal redo. Defaults off.
+pub fn set_fold_dwb_into_wal_enabled(enabled: bool) {
+    FOLD_DWB_INTO_WAL_POLICY.store(if enabled { 1 } else { 2 }, Ordering::Relaxed);
+}
+
+/// Whether the pager should fold DWB into WAL (no `<data>-dwb` sidecar).
+/// Reads still tolerate the legacy sidecar so existing databases keep
+/// working through the flag flip.
+pub fn fold_dwb_into_wal_enabled() -> bool {
+    match FOLD_DWB_INTO_WAL_POLICY.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => std::env::var("REDDB_FOLD_DWB_INTO_WAL")
+            .ok()
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+            .unwrap_or(false),
+    }
+}
+
 /// Process-wide retention for the seq-N catalog journal. Tier wiring should
 /// call this with `DEFAULT_METADATA_JOURNAL_RETENTION` (32) for `Max` and
 /// `OPT_IN_METADATA_JOURNAL_RETENTION` (4) for opt-in non-`Max` use.
