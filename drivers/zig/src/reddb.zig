@@ -15,6 +15,7 @@ const Allocator = std.mem.Allocator;
 
 pub const url = @import("url.zig");
 pub const errors = @import("errors.zig");
+pub const helpers = @import("helpers.zig");
 pub const Error = errors.Error;
 pub const build_options = @import("build_options");
 
