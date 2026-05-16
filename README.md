@@ -630,6 +630,7 @@ RedDB from another Rust project.
 - [npm CLI launcher](https://www.npmjs.com/package/@reddb-io/cli)
 - [Releases](https://github.com/reddb-io/reddb/releases)
 - [Workspace migration guide](./docs/migration/workspace-split.md)
+- [Public Contract Matrix](./docs/reference/contract-matrix.md) — every doc'd promise mapped to a test or a planned-status note
 
 ---
 
