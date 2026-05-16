@@ -228,8 +228,18 @@ pub fn default_telemetry_for_path(
     }
 }
 
+/// Metadata key used to thread the parsed backup config from
+/// `to_db_options` down to runner threads. The runner reads it back
+/// (via `runner_backup_intervals`) to spawn the periodic checkpointer
+/// + WAL-flush tasks. Threading through `metadata` avoids extending
+/// `RedDBOptions` with a public field that has no meaning for
+/// library consumers.
+const BACKUP_INTERVAL_META_CHECKPOINT: &str = "red.boot.backup.checkpoint_interval_secs";
+const BACKUP_INTERVAL_META_WAL_FLUSH: &str = "red.boot.backup.wal_flush_interval_secs";
+const BACKUP_KIND_META: &str = "red.boot.backup.backend_kind";
+
 impl ServerCommandConfig {
-    fn to_db_options(&self) -> RedDBOptions {
+    fn to_db_options(&self) -> Result<RedDBOptions, String> {
         let mut options = match &self.path {
             Some(path) => RedDBOptions::persistent(path),
             None => RedDBOptions::in_memory(),
@@ -277,9 +287,23 @@ impl ServerCommandConfig {
             options.auth.vault_enabled = true;
         }
 
-        configure_remote_backend_from_env(&mut options);
+        // Issue #517 — canonical `REDDB_BACKUP_*` contract takes
+        // precedence. On Err, surface the partial-config message so
+        // boot exits non-zero with a clear operator message. On
+        // Ok(None), fall through to the legacy backend-from-env path.
+        match crate::backup_bootstrap::from_env(|k| std::env::var(k).ok()) {
+            Err(msg) => {
+                return Err(format!("backup bootstrap: {msg}"));
+            }
+            Ok(Some(cfg)) => {
+                apply_backup_config(&mut options, &cfg);
+            }
+            Ok(None) => {
+                configure_remote_backend_from_env(&mut options);
+            }
+        }
 
-        options
+        Ok(options)
     }
 
     pub fn enabled_transports(&self) -> Vec<ServerTransport> {
@@ -309,6 +333,176 @@ fn env_truthy(name: &str) -> bool {
     env_nonempty(name)
         .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)
+}
+
+/// Apply a parsed [`BackupConfig`] to `options`. Wires the S3
+/// backend via `with_remote_backend` + `with_atomic_remote_backend`
+/// when the `backend-s3` feature is on, stashes intervals + backend
+/// kind in `metadata` so the runner can spawn the periodic tasks,
+/// and emits the startup INFO log required by #517.
+fn apply_backup_config(options: &mut RedDBOptions, cfg: &crate::backup_bootstrap::BackupConfig) {
+    let endpoint_host = endpoint_host(&cfg.endpoint);
+
+    options.metadata.insert(
+        BACKUP_INTERVAL_META_CHECKPOINT.to_string(),
+        cfg.checkpoint_interval_secs.to_string(),
+    );
+    options.metadata.insert(
+        BACKUP_INTERVAL_META_WAL_FLUSH.to_string(),
+        cfg.wal_flush_interval_secs.to_string(),
+    );
+    options
+        .metadata
+        .insert(BACKUP_KIND_META.to_string(), "s3".to_string());
+
+    #[cfg(feature = "backend-s3")]
+    {
+        let s3_cfg = crate::storage::backend::S3Config {
+            endpoint: cfg.endpoint.clone(),
+            bucket: cfg.bucket.clone(),
+            key_prefix: cfg.prefix.clone(),
+            access_key: cfg.access_key_id.clone(),
+            secret_key: cfg.secret_access_key.clone(),
+            region: cfg.region.clone(),
+            path_style: true,
+        };
+        let backend = Arc::new(crate::storage::backend::S3Backend::new(s3_cfg));
+        options.remote_backend = Some(backend.clone());
+        options.remote_backend_atomic = Some(backend);
+        // Use the operator-supplied prefix as the snapshot key root.
+        // The existing helpers (`default_snapshot_prefix`,
+        // `default_wal_archive_prefix`) derive sub-prefixes from the
+        // parent of `remote_key`.
+        let trimmed = cfg.prefix.trim_end_matches('/');
+        options.remote_key = Some(format!("{}/data.rdb", trimmed));
+
+        tracing::info!(
+            backend = "s3",
+            endpoint = %endpoint_host,
+            bucket = %cfg.bucket,
+            prefix = %cfg.prefix,
+            checkpoint_interval_secs = cfg.checkpoint_interval_secs,
+            wal_flush_interval_secs = cfg.wal_flush_interval_secs,
+            "backup backend configured from REDDB_BACKUP_* env"
+        );
+    }
+
+    #[cfg(not(feature = "backend-s3"))]
+    {
+        tracing::warn!(
+            backend = "s3",
+            endpoint = %endpoint_host,
+            bucket = %cfg.bucket,
+            prefix = %cfg.prefix,
+            "REDDB_BACKUP_S3_* configured but binary built without `backend-s3` feature; \
+             backend wiring skipped (archiver/checkpointer also disabled)"
+        );
+    }
+}
+
+fn endpoint_host(endpoint: &str) -> &str {
+    let after_scheme = endpoint.split_once("://").map(|(_, r)| r).unwrap_or(endpoint);
+    after_scheme.split('/').next().unwrap_or(after_scheme)
+}
+
+/// If `options` carry backup-task intervals threaded in via
+/// [`apply_backup_config`], spawn periodic checkpointer + WAL-flush
+/// tasks against `runtime`. Returns a `BackupTasksHandle` that
+/// stops the tasks when dropped; runners keep it alive for the
+/// server lifetime.
+fn spawn_backup_tasks_if_configured(
+    options: &RedDBOptions,
+    runtime: &RedDBRuntime,
+) -> Option<BackupTasksHandle> {
+    let checkpoint_secs: u64 = options
+        .metadata
+        .get(BACKUP_INTERVAL_META_CHECKPOINT)?
+        .parse()
+        .ok()?;
+    let wal_secs: u64 = options
+        .metadata
+        .get(BACKUP_INTERVAL_META_WAL_FLUSH)?
+        .parse()
+        .ok()?;
+    if options.remote_backend.is_none() {
+        return None;
+    }
+
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let checkpoint_handle = {
+        let stop = Arc::clone(&stop);
+        let runtime = runtime.clone();
+        let interval = Duration::from_secs(checkpoint_secs);
+        thread::Builder::new()
+            .name("red-checkpointer".into())
+            .spawn(move || periodic_loop(stop, interval, move || {
+                if let Err(err) = runtime.checkpoint() {
+                    tracing::warn!(error = %err, "periodic checkpoint failed");
+                }
+            }))
+            .ok()
+    };
+
+    let archiver_handle = {
+        let stop = Arc::clone(&stop);
+        let runtime = runtime.clone();
+        let interval = Duration::from_secs(wal_secs);
+        thread::Builder::new()
+            .name("red-wal-archiver".into())
+            .spawn(move || periodic_loop(stop, interval, move || {
+                if let Err(err) = runtime.trigger_backup() {
+                    tracing::warn!(error = %err, "periodic WAL archive/backup failed");
+                }
+            }))
+            .ok()
+    };
+
+    tracing::info!(
+        checkpoint_interval_secs = checkpoint_secs,
+        wal_flush_interval_secs = wal_secs,
+        "backup tasks spawned (checkpointer + WAL archiver)"
+    );
+
+    Some(BackupTasksHandle {
+        stop,
+        _checkpoint_handle: checkpoint_handle,
+        _archiver_handle: archiver_handle,
+    })
+}
+
+/// Shutdown handle for the periodic checkpointer + archiver tasks.
+/// Drop signals both loops to exit on their next wake.
+pub struct BackupTasksHandle {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    _checkpoint_handle: Option<thread::JoinHandle<()>>,
+    _archiver_handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for BackupTasksHandle {
+    fn drop(&mut self) {
+        self.stop
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+fn periodic_loop<F: FnMut()>(
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    interval: Duration,
+    mut tick: F,
+) {
+    // Wake on a short cadence so shutdown is responsive even when the
+    // operator-configured interval is large (e.g. 1h checkpoint).
+    let wake = Duration::from_secs(1);
+    let mut elapsed = Duration::ZERO;
+    while !stop.load(std::sync::atomic::Ordering::Acquire) {
+        thread::sleep(wake);
+        elapsed += wake;
+        if elapsed >= interval {
+            tick();
+            elapsed = Duration::ZERO;
+        }
+    }
 }
 
 fn configure_remote_backend_from_env(options: &mut RedDBOptions) {
@@ -1024,11 +1218,12 @@ fn handle_sighup_reload(runtime: &RedDBRuntime) {
 fn run_routed_server(config: ServerCommandConfig, router_bind_addr: String) -> Result<(), String> {
     let workers = config.workers;
     let cli_telemetry = config.telemetry.clone();
-    let db_options = config.to_db_options();
+    let db_options = config.to_db_options()?;
     let rt_config = detect_runtime_config();
     let worker_threads = workers.unwrap_or(rt_config.suggested_workers);
     let (runtime, auth_store, _telemetry_guard) =
-        build_runtime_and_auth_store(db_options, cli_telemetry)?;
+        build_runtime_and_auth_store(db_options.clone(), cli_telemetry)?;
+    let _backup_tasks = spawn_backup_tasks_if_configured(&db_options, &runtime);
 
     spawn_admin_metrics_listeners(&runtime, &auth_store);
 
@@ -1414,7 +1609,7 @@ fn run_wire_only_server(config: ServerCommandConfig, wire_addr: String) -> Resul
     let rt_config = detect_runtime_config();
     let workers = config.workers.unwrap_or(rt_config.suggested_workers);
     let cli_telemetry = config.telemetry.clone();
-    let db_options = config.to_db_options();
+    let db_options = config.to_db_options()?;
     let mut transport_readiness = TransportReadiness::default();
 
     let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
@@ -1428,7 +1623,8 @@ fn run_wire_only_server(config: ServerCommandConfig, wire_addr: String) -> Resul
     // tokio runtime — dropping it only after the listener returns
     // flushes the file log writer.
     let (runtime, _auth_store, _telemetry_guard) =
-        build_runtime_and_auth_store(db_options, cli_telemetry)?;
+        build_runtime_and_auth_store(db_options.clone(), cli_telemetry)?;
+    let _backup_tasks = spawn_backup_tasks_if_configured(&db_options, &runtime);
     let signal_runtime = runtime.clone();
     tokio_runtime.block_on(async move {
         spawn_lifecycle_signal_handler(signal_runtime).await;
@@ -1462,7 +1658,7 @@ fn run_pg_only_server(config: ServerCommandConfig, pg_addr: String) -> Result<()
     let rt_config = detect_runtime_config();
     let workers = config.workers.unwrap_or(rt_config.suggested_workers);
     let cli_telemetry = config.telemetry.clone();
-    let db_options = config.to_db_options();
+    let db_options = config.to_db_options()?;
 
     let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -1472,7 +1668,8 @@ fn run_pg_only_server(config: ServerCommandConfig, pg_addr: String) -> Result<()
         .map_err(|err| format!("tokio runtime: {err}"))?;
 
     let (runtime, _auth_store, _telemetry_guard) =
-        build_runtime_and_auth_store(db_options, cli_telemetry)?;
+        build_runtime_and_auth_store(db_options.clone(), cli_telemetry)?;
+    let _backup_tasks = spawn_backup_tasks_if_configured(&db_options, &runtime);
     let signal_runtime = runtime.clone();
     tokio_runtime.block_on(async move {
         spawn_lifecycle_signal_handler(signal_runtime).await;
@@ -1869,8 +2066,10 @@ fn run_http_server(config: ServerCommandConfig, bind_addr: String) -> Result<(),
             bind_addr
         ));
     };
+    let db_options = config.to_db_options()?;
     let (runtime, auth_store, _telemetry_guard) =
-        build_runtime_and_auth_store(config.to_db_options(), cli_telemetry)?;
+        build_runtime_and_auth_store(db_options.clone(), cli_telemetry)?;
+    let _backup_tasks = spawn_backup_tasks_if_configured(&db_options, &runtime);
     spawn_admin_metrics_listeners(&runtime, &auth_store);
     spawn_http_tls_listener(&config, &runtime, &auth_store)?;
     let server = build_http_server_with_transport_readiness(
@@ -1945,7 +2144,7 @@ fn resolve_http_tls_config(
 fn run_grpc_server(config: ServerCommandConfig, bind_addr: String) -> Result<(), String> {
     let workers = config.workers;
     let cli_telemetry = config.telemetry.clone();
-    let db_options = config.to_db_options();
+    let db_options = config.to_db_options()?;
     let rt_config = detect_runtime_config();
     let mut transport_readiness = TransportReadiness::default();
     let Some(grpc_listener) = bind_listener_for_startup(
@@ -1972,7 +2171,8 @@ fn run_grpc_server(config: ServerCommandConfig, bind_addr: String) -> Result<(),
 
     // Guard lives on the outer stack so it outlives the tokio runtime.
     let (runtime, auth_store, _telemetry_guard) =
-        build_runtime_and_auth_store(db_options, cli_telemetry)?;
+        build_runtime_and_auth_store(db_options.clone(), cli_telemetry)?;
+    let _backup_tasks = spawn_backup_tasks_if_configured(&db_options, &runtime);
     let signal_runtime = runtime.clone();
     tokio_runtime.block_on(async move {
         spawn_lifecycle_signal_handler(signal_runtime).await;
@@ -2018,7 +2218,7 @@ fn run_dual_server(
 ) -> Result<(), String> {
     let workers = config.workers;
     let cli_telemetry = config.telemetry.clone();
-    let db_options = config.to_db_options();
+    let db_options = config.to_db_options()?;
     let rt_config = detect_runtime_config();
     let worker_threads = workers.unwrap_or(rt_config.suggested_workers);
     let mut transport_readiness = TransportReadiness::default();
@@ -2038,7 +2238,8 @@ fn run_dual_server(
         return Err("no listener started; implicit HTTP and gRPC binds failed".to_string());
     }
     let (runtime, auth_store, _telemetry_guard) =
-        build_runtime_and_auth_store(db_options, cli_telemetry)?;
+        build_runtime_and_auth_store(db_options.clone(), cli_telemetry)?;
+    let _backup_tasks = spawn_backup_tasks_if_configured(&db_options, &runtime);
 
     spawn_admin_metrics_listeners(&runtime, &auth_store);
     spawn_http_tls_listener(&config, &runtime, &auth_store)?;
