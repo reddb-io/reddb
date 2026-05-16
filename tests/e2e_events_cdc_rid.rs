@@ -95,6 +95,35 @@ fn row_event_payload_uses_public_item_identity() {
 }
 
 #[test]
+fn row_delete_event_payload_uses_public_item_identity() {
+    let rt = runtime();
+    exec(&rt, "CREATE TABLE users (id INT, email TEXT) WITH EVENTS");
+    exec(&rt, "QUEUE GROUP CREATE users_events evt_readers");
+
+    let inserted = exec(
+        &rt,
+        "INSERT INTO users (id, email) VALUES (7, 'del@example.com') RETURNING rid",
+    );
+    let rid = match inserted.result.records[0].get("rid") {
+        Some(Value::UnsignedInteger(value)) => *value,
+        Some(Value::Integer(value)) if *value >= 0 => *value as u64,
+        other => panic!("expected rid field, got {other:?}"),
+    };
+    // drain insert event
+    let _ = read_event_payload(&rt, "users_events");
+
+    exec(&rt, "DELETE FROM users WHERE id = 7");
+    let payload = read_event_payload(&rt, "users_events");
+
+    assert_eq!(payload["op"], "delete");
+    assert_eq!(payload["collection"], "users");
+    assert_eq!(payload["kind"], "row");
+    assert_eq!(payload["rid"].as_u64(), Some(rid));
+    assert!(payload.get("entity_id").is_none(), "payload = {payload}");
+    assert!(payload.get("entity_kind").is_none(), "payload = {payload}");
+}
+
+#[test]
 fn cdc_changes_payload_uses_public_item_identity_for_kv() {
     let rt = runtime();
     let inserted = exec(
