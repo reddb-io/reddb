@@ -6,7 +6,18 @@ the expanded guide when you want the why.
 
 ## 1. Declare the hypertable
 
+> **Status note:** the column-list + `CODEC(...)` form below is **planned**
+> (see [hypertables.md](../data-models/hypertables.md#extended-column-syntax-planned)).
+> The shipped form takes no column list:
+>
+> ```sql
+> CREATE TABLE logs (ts BIGINT, service TEXT, severity INT, message TEXT, trace_id TEXT);
+> CREATE HYPERTABLE logs TIME_COLUMN ts CHUNK_INTERVAL '1d' TTL '30d';
+> CREATE INDEX logs_service_ts ON logs (service, ts);
+> ```
+
 ```sql
+-- Planned future form (single DDL with column list + per-column codecs):
 CREATE HYPERTABLE logs (
   ts         BIGINT,
   service    TEXT    CODEC(Dict, LZ4),
@@ -14,8 +25,6 @@ CREATE HYPERTABLE logs (
   message    TEXT    CODEC(ZSTD(6)),
   trace_id   TEXT    CODEC(LZ4)
 ) CHUNK_INTERVAL '1d';
-
-CREATE INDEX logs_service_ts ON logs (service, ts);
 ```
 
 ## 2. Ingest (batched)
@@ -62,10 +71,10 @@ disappear once their newest row passes the TTL — O(1) metadata
 drop.
 
 ```sql
--- Either at creation:
-CREATE HYPERTABLE logs (...) CHUNK_INTERVAL '1d' WITH (ttl = '30d');
+-- At creation (shipped):
+CREATE HYPERTABLE logs TIME_COLUMN ts CHUNK_INTERVAL '1d' TTL '30d';
 
--- Or after the fact via policy daemon:
+-- Or after the fact via policy daemon (planned):
 SELECT add_retention_policy('logs', INTERVAL '30 days');
 ```
 
