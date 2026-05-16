@@ -161,7 +161,7 @@ jobs:
           # cannot rely on Rosetta being available for a local smoke test.
           - { os: macos-14,       target: x86_64-apple-darwin,           asset_name: macos-x86_64,        cross: false, smoke: false, optional: true }
           - { os: macos-14,       target: aarch64-apple-darwin,          asset_name: macos-aarch64,       cross: false, optional: true }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc, asset_name: windows-x86_64, cross: false }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, asset_name: windows-x86_64, cross: false, optional: true }
     steps:
       - uses: actions/checkout@v6
 
