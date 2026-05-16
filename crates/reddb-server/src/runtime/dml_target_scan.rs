@@ -78,15 +78,22 @@ impl<'a> DmlTargetScan<'a> {
 
         // Fast path: WHERE _entity_id = N. The resolver maps stable
         // table-row identity to the version visible to this statement.
-        if let Some(entity_id) = query_exec::extract_entity_id_from_filter(&self.filter.cloned()) {
-            if let Some(entity) = self.table_row_resolver.resolve_logical_id(
-                &store,
-                self.table,
-                EntityId::new(entity_id),
-            ) {
-                return Ok(self.target_ids_from_entities([entity]));
+        // Skip for graph node/edge targets — the table-row resolver only
+        // knows TableRow entities, so a graph node whose logical_id == N
+        // would be lost and yield zero matches.
+        if !matches!(self.target, Some(UpdateTarget::Nodes) | Some(UpdateTarget::Edges)) {
+            if let Some(entity_id) =
+                query_exec::extract_entity_id_from_filter(&self.filter.cloned())
+            {
+                if let Some(entity) = self.table_row_resolver.resolve_logical_id(
+                    &store,
+                    self.table,
+                    EntityId::new(entity_id),
+                ) {
+                    return Ok(self.target_ids_from_entities([entity]));
+                }
+                return Ok(Vec::new());
             }
-            return Ok(Vec::new());
         }
 
         if !crate::runtime::impl_core::current_snapshot_requires_index_fallback() {
