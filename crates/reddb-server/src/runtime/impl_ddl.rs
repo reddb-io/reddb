@@ -295,6 +295,11 @@ impl RedDBRuntime {
             "graph" => CollectionModel::Graph,
             "document" => CollectionModel::Document,
             "metrics" => CollectionModel::Metrics,
+            // KIND blockchain — issue #523 foundation: stored on top of a
+            // Table-shaped collection. The `chain` marker + reserved-column
+            // discipline make the difference. Schema validation, conflict
+            // retries, and `verify_chain` come in later iterations.
+            "blockchain" => CollectionModel::Table,
             other => {
                 return Err(RedDBError::Query(format!(
                     "NOT_YET_SUPPORTED: CREATE COLLECTION KIND {other} is not implemented"
@@ -317,7 +322,48 @@ impl RedDBRuntime {
             subscriptions: Vec::new(),
             vault_own_master_key: false,
         };
-        self.execute_create_table(raw_query, &create)
+        let result = self.execute_create_table(raw_query, &create)?;
+        if query.kind == "blockchain" {
+            self.install_blockchain_kind(&query.name)?;
+        }
+        Ok(result)
+    }
+
+    /// Stamp `red.collection.{name}.kind = "chain"` and append the genesis
+    /// row. Idempotent against `IF NOT EXISTS`: if the collection already
+    /// has a row at height 0 we leave it.
+    fn install_blockchain_kind(&self, name: &str) -> RedDBResult<()> {
+        use crate::runtime::blockchain_kind;
+        use crate::storage::unified::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
+        use std::sync::Arc;
+
+        let store = self.inner.db.store();
+        blockchain_kind::mark_as_chain(&*store, name);
+
+        let existing_tip = blockchain_kind::chain_tip(&*store, name);
+        if existing_tip.height.is_some() {
+            return Ok(());
+        }
+
+        let fields = blockchain_kind::genesis_fields(blockchain_kind::now_ms());
+        let named: std::collections::HashMap<String, crate::storage::schema::Value> =
+            fields.into_iter().collect();
+        let entity = UnifiedEntity::new(
+            EntityId::new(0),
+            EntityKind::TableRow {
+                table: Arc::from(name),
+                row_id: 0,
+            },
+            EntityData::Row(RowData {
+                columns: Vec::new(),
+                named: Some(named),
+                schema: None,
+            }),
+        );
+        store
+            .insert_auto(name, entity)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        Ok(())
     }
 
     pub fn execute_create_vector(
