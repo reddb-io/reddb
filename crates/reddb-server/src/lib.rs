@@ -15,6 +15,7 @@ pub mod ai;
 pub mod api;
 pub mod application;
 pub mod auth;
+pub mod backup_bootstrap;
 pub mod catalog;
 pub mod cli;
 pub mod config;
