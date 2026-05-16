@@ -67,6 +67,43 @@ RedWire parameterized queries require the server to advertise
 `RedDBException.ParamsUnsupported`. HTTP sends the same typed values as
 the `/query` JSON `params` array.
 
+## Rich helpers (SDK Helper Spec v0.1)
+
+`dev.reddb.helpers.Helpers` wraps a `Conn` with three namespaces —
+`documents()`, `kv()`, `queue()` — mirroring the Go / Dart / Python
+helpers. Helpers are pure SQL builders + envelope normalisation; the
+same wire request works across RedWire and HTTP.
+
+```java
+import dev.reddb.helpers.Helpers;
+import dev.reddb.helpers.Envelopes;
+
+var helpers = Helpers.of(conn);
+
+// Documents
+Envelopes.InsertResult ins = helpers.documents()
+    .insert("people", java.util.Map.of("name", "alice"));
+var row = helpers.documents().get("people", ins.rid());
+
+// KV (default collection: kv_default)
+helpers.kv().set("characters:hansel", "ok");
+Object v = helpers.kv().get("characters:hansel");
+var list = helpers.kv().list(new dev.reddb.helpers.KvClient.KvListOptions().prefix("characters:"));
+
+// Queue
+var push = helpers.queue().push("jobs", java.util.Map.of("id", 1),
+    new dev.reddb.helpers.QueueClient.PushOptions().priority(5));
+long len = helpers.queue().len("jobs");
+var jobs = helpers.queue().pop("jobs", 10);
+```
+
+Typed errors (mirror Go/Python): `HelperException.InvalidArgument`,
+`HelperException.NotFound`, `HelperException.InvalidResponse`.
+
+Transactions are not yet exposed through helpers — the underlying
+`Conn` doesn't ship a transaction helper. Use raw
+`conn.query("BEGIN" / "COMMIT" / "ROLLBACK")` for now.
+
 ## URL grammar
 
 | Scheme    | Transport         | Default port | TLS |
