@@ -26,7 +26,7 @@
  *   - drivers/js-client/package.json  (@reddb-io/client npm — optional, Lane T #136)
  *   - drivers/bun/package.json        (@reddb-io/client-bun npm)
  *   - packages/internal-*.package.json (private npm workspace support packages)
- *   - drivers/python/Cargo.toml       (reddb-python internal name)
+ *   - drivers/python/Cargo.toml       (reddb-io-python internal name)
  *   - drivers/python/Cargo.lock       (path package versions)
  *   - drivers/python/pyproject.toml   (reddb PyPI)
  *
@@ -173,7 +173,7 @@ syncCargoLock(path.join(root, 'Cargo.lock'), [
   'reddb-io-client',
   'reddb-io-client-connector',
 ])
-syncCargoLock(path.join(root, 'drivers', 'python', 'Cargo.lock'), ['reddb-io', 'reddb-python'])
+syncCargoLock(path.join(root, 'drivers', 'python', 'Cargo.lock'), ['reddb-io', 'reddb-io-python'])
 
 // Stage every file that the version bump touches so pnpm's
 // version commit picks them up in one atomic commit.

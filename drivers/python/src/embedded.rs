@@ -15,6 +15,7 @@ use reddb::RuntimeEntityPort;
 
 pub use reddb::storage::schema::Value as ParamValue;
 
+#[derive(Clone)]
 pub struct EmbeddedRuntime {
     runtime: Arc<RedDBRuntime>,
 }
@@ -40,6 +41,7 @@ pub enum ScalarOut {
     Int(i64),
     Float(f64),
     Text(String),
+    Json(String),
 }
 
 impl EmbeddedRuntime {
@@ -103,7 +105,7 @@ impl EmbeddedRuntime {
     }
 
     pub fn delete(&self, collection: &str, id: &str) -> Result<u64, String> {
-        let sql = format!("DELETE FROM {collection} WHERE _entity_id = {id}");
+        let sql = format!("DELETE FROM {collection} WHERE rid = {id}");
         let qr = self.runtime.execute_query(&sql).map_err(|e| e.to_string())?;
         Ok(qr.affected_rows)
     }
@@ -124,6 +126,7 @@ fn scalar_to_schema_value(v: &ScalarOut) -> SchemaValue {
         ScalarOut::Int(n) => SchemaValue::Integer(*n),
         ScalarOut::Float(n) => SchemaValue::Float(*n),
         ScalarOut::Text(s) => SchemaValue::Text(Arc::from(s.as_str())),
+        ScalarOut::Json(s) => SchemaValue::Json(s.as_bytes().to_vec()),
     }
 }
 
@@ -175,6 +178,9 @@ fn schema_value_to_scalar(v: &SchemaValue) -> ScalarOut {
         | SchemaValue::Decimal(n) => ScalarOut::Int(*n),
         SchemaValue::Password(_) | SchemaValue::Secret(_) => ScalarOut::Text("***".to_string()),
         SchemaValue::Text(s) => ScalarOut::Text(s.to_string()),
+        SchemaValue::Json(bytes) => {
+            ScalarOut::Json(String::from_utf8_lossy(bytes.as_slice()).to_string())
+        }
         SchemaValue::Email(s)
         | SchemaValue::Url(s)
         | SchemaValue::NodeRef(s)

@@ -83,17 +83,62 @@ from reddb_asyncio import (
 )
 ```
 
-`Reddb` exposes:
+`Reddb` exposes the generic surface:
 
 * `await db.query(sql, params=None)`
 * `await db.execute(sql, params=None)`
-* `await db.insert(collection, payload)`
-* `await db.bulk_insert(collection, payloads)`
+* `await db.insert(collection, payload)` → `{affected, rid, id}` (`id` is a legacy alias for `rid`)
+* `await db.bulk_insert(collection, payloads)` → `{affected, rids, ids}`
+* `await db.exists(collection, rid)` → `{exists}`
 * `await db.get(collection, rid)`
 * `await db.delete(collection, rid)`
+* `await db.transaction(callback)` (single connection — nested transactions are not supported)
 * `await db.ping()`
 * `await db.close()`
 * `async with await connect(uri) as db: ...`
+
+### Rich helper namespaces
+
+The driver implements the [SDK Helper Spec v0.1](../../docs/clients/sdk-helper-spec.md):
+
+```python
+async with await connect("http://localhost:8080") as db:
+    # Documents
+    inserted = await db.documents.insert("people", {"name": "alice", "age": 30})
+    doc = await db.documents.get("people", inserted["rid"])
+    page = await db.documents.list("people", limit=20)
+    await db.documents.patch("people", inserted["rid"], {"age": 31})
+    await db.documents.delete("people", inserted["rid"])
+
+    # KV (exact keys, namespaced keys round-trip unchanged)
+    await db.kv.set("characters:hansel", {"role": "hero"})
+    value = await db.kv.get("characters:hansel")
+    presence = await db.kv.exists("characters:hansel")
+    await db.kv.delete("characters:hansel")
+
+    # Queue (FIFO)
+    await db.queue.push("jobs", {"id": 1})
+    next_item = await db.queue.peek("jobs")
+    popped = await db.queue.pop("jobs")
+    length = await db.queue.len("jobs")
+```
+
+| Helper namespace | Methods | Notes |
+| ---------------- | ------- | ----- |
+| `db.documents`   | `insert`, `get`, `list`, `patch`, `delete` | Patch applies top-level fields; JSON-pointer paths rejected. |
+| `db.kv`          | `set`, `put`, `get`, `get_many`, `exists`, `delete`, `list`, `invalidate_tags`, `watch`, `watch_prefix` | Keys are exact strings — `:`, `/`, `.`, and Unicode are preserved. `watch`/`watch_prefix` require the HTTP transport. |
+| `db.queue`       | `push`, `pop`, `peek`, `len`, `purge` | FIFO ordering; `pop`/`peek` accept an optional count. |
+| `db.transaction` | `transaction(async callback)` | Auto `BEGIN`/`COMMIT`; rolls back on raise. Nested transactions are not supported. |
+
+Probabilistic helpers (HLL/Bloom/CMS) are not yet implemented in this driver
+— call them through `db.query` with the matching `RED HLL ...`, `RED BLOOM
+...`, `RED CMS ...` statements until they ship.
+
+#### Embedded URIs
+
+`red://`, `red:///path`, and `red://:memory:` raise `NotImplementedError` here
+— install the PyO3 `reddb` package from `drivers/python/` for in-process
+embedded databases.
 
 ## Safe parameter binding
 
