@@ -46,10 +46,11 @@ LIMIT 5
 
 | Parameter | Required | Description |
 |:----------|:---------|:------------|
-| Vector | Yes | Query vector as array of floats |
-| `IN collection` | Yes | Collection to search |
-| `K n` | No | Number of results (default 10) |
-| `MIN_SCORE f` | No | Minimum similarity threshold |
+| Vector | Yes | Query vector as array of floats, or `$N` placeholder |
+| `COLLECTION col` | Yes | Collection to search |
+| `LIMIT n` | No | Number of results (default 10); also accepts `$N` |
+| `MIN_SCORE f` | No | Minimum similarity threshold; also accepts `$N` |
+| `USING provider` | No | Embedding provider for `TEXT` form |
 
 ### Semantic Search (Text-Based Similarity)
 
@@ -108,11 +109,13 @@ SEARCH HYBRID TEXT 'neural networks' VECTOR [0.15, 0.89, 0.40] IN docs LIMIT $1
 
 ## SEARCH IVF
 
-Use the IVF index for approximate search on large collections:
-
-```sql
-SEARCH IVF [0.12, 0.91, 0.44] IN embeddings K 10 PROBES 3
-```
+> [!NOTE]
+> `SEARCH IVF` is **not** a recognised SQL form today — the parser does not accept
+> the `SEARCH IVF [...] IN ... K ... PROBES ...` grammar. The IVF index itself is
+> live and can be exercised through the runtime / HTTP search endpoints; when an
+> IVF index exists on the target collection, `SEARCH SIMILAR` and `VECTOR SEARCH`
+> use it automatically. Track [#465](https://github.com/reddb-io/reddb/issues/465)
+> for the dedicated SQL grammar.
 
 ## SEARCH MULTIMODAL
 
