@@ -100,6 +100,43 @@ auto conn = reddb::connect("reds://db.example.com:5050", o);
 | `http://host[:port]`                 | HTTP via libcurl         |
 | `https://host[:port]`                | HTTPS via libcurl        |
 
+## Rich helpers (SDK Helper Spec v0.1)
+
+`reddb::helpers::Helpers` wraps a `Conn*` (or any `IQuerier`) with
+typed namespaces — `documents`, `kv`, `queue` — mirroring
+`drivers/go/helpers.go`.
+
+```cpp
+#include "reddb/helpers.hpp"
+
+auto conn = reddb::connect("red://localhost:5050");
+auto h = reddb::helpers::Helpers::of(conn.get());
+
+// Documents
+reddb::helpers::JsonObject doc;
+doc.emplace("name", reddb::helpers::JsonValue::make_string("alice"));
+auto inserted = h.documents().insert("people", doc);
+
+// KV
+h.kv().set("characters:hansel", reddb::helpers::JsonValue::make_string("ok"));
+auto v = h.kv().get("characters:hansel");
+
+// Queue
+h.queue().push("jobs", reddb::helpers::JsonValue::make_string("payload"));
+auto out = h.queue().pop("jobs", 1);
+```
+
+Typed errors (`reddb::helpers::HelperError::code()`):
+
+| Code | When |
+| --- | --- |
+| `InvalidArgument` | Bad identifier, negative limit, JSON-pointer patch path |
+| `NotFound` | `documents.get` / `documents.patch` on missing rid |
+| `InvalidResponse` | Insert response missing `rid` |
+
+Transactions are not exposed — use `conn->query("BEGIN" / "COMMIT" /
+"ROLLBACK")` directly.
+
 ## Smoke test
 
 `tests/smoke_test.cpp` is gated by `RED_SMOKE=1`. It spawns a server
