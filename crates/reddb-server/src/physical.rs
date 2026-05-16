@@ -20,9 +20,14 @@ pub const DEFAULT_SUPERBLOCK_COPIES: u8 = 4;
 pub const PHYSICAL_METADATA_PROTOCOL_VERSION: &str = "reddb-physical-v1";
 pub const PHYSICAL_METADATA_BINARY_EXTENSION: &str = "meta.rdbx";
 pub const DEFAULT_MANIFEST_EVENT_HISTORY: usize = 256;
+/// Retention applied when the seq-N catalog journal is enabled at the `Max`
+/// tier. See [`seqn_journal_retention`].
 pub const DEFAULT_METADATA_JOURNAL_RETENTION: usize = 32;
+/// Retention applied when the seq-N catalog journal is opt-in enabled outside
+/// of the `Max` tier — keeps forensics surface minimal on lower tiers.
+pub const OPT_IN_METADATA_JOURNAL_RETENTION: usize = 4;
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 // JSON sidecar policy. 0 = unset (consult env, default off), 1 = enabled,
 // 2 = disabled. Threaded as a process-global because the metadata save path
@@ -51,6 +56,58 @@ pub fn meta_json_sidecar_enabled() -> bool {
             .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
             .unwrap_or(false),
     }
+}
+
+// Seq-N catalog journal policy. 0 = unset (consult env, default off), 1 =
+// enabled, 2 = disabled. Mirrors the meta-json sidecar toggle but governs the
+// `<data>.meta.rdbx.seq-{N}` forensic trail emitted on every metadata save.
+// Tier wiring (deferred) flips this on for `Max` with retention 32; opt-in
+// elsewhere lands with retention 4. See `seqn_journal_retention`.
+static SEQN_JOURNAL_POLICY: AtomicU8 = AtomicU8::new(0);
+// Retention override. 0 = unset (consult env, default off-tier retention).
+static SEQN_JOURNAL_RETENTION: AtomicUsize = AtomicUsize::new(0);
+
+/// Process-wide opt-in for the seq-N catalog journal (`<data>.meta.rdbx.seq-N`
+/// snapshot trail). Defaults off so non-`Max` tiers don't accumulate forensic
+/// artifacts. Tier wiring should call this with `true` for `Max`. Escape
+/// hatch: `REDDB_SEQN_JOURNAL=1`.
+pub fn set_seqn_journal_enabled(enabled: bool) {
+    SEQN_JOURNAL_POLICY.store(if enabled { 1 } else { 2 }, Ordering::Relaxed);
+}
+
+/// Whether new metadata saves should also emit a seq-N journal entry.
+pub fn seqn_journal_enabled() -> bool {
+    match SEQN_JOURNAL_POLICY.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => std::env::var("REDDB_SEQN_JOURNAL")
+            .ok()
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+            .unwrap_or(false),
+    }
+}
+
+/// Process-wide retention for the seq-N catalog journal. Tier wiring should
+/// call this with `DEFAULT_METADATA_JOURNAL_RETENTION` (32) for `Max` and
+/// `OPT_IN_METADATA_JOURNAL_RETENTION` (4) for opt-in non-`Max` use.
+/// `0` resets to defaults (env or off-tier baseline).
+pub fn set_seqn_journal_retention(retention: usize) {
+    SEQN_JOURNAL_RETENTION.store(retention, Ordering::Relaxed);
+}
+
+/// Resolved retention bound for the seq-N journal. Falls back to env
+/// `REDDB_SEQN_JOURNAL_RETENTION`, then to `OPT_IN_METADATA_JOURNAL_RETENTION`
+/// (4) — the conservative off-tier baseline.
+pub fn seqn_journal_retention() -> usize {
+    let stored = SEQN_JOURNAL_RETENTION.load(Ordering::Relaxed);
+    if stored > 0 {
+        return stored;
+    }
+    std::env::var("REDDB_SEQN_JOURNAL_RETENTION")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(OPT_IN_METADATA_JOURNAL_RETENTION)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
