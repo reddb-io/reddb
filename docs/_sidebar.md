@@ -209,6 +209,7 @@
   - [Artifact Lifecycle](/reference/artifacts.md)
   - [Health & Observability](/reference/health.md)
   - [Feature Matrix](/reference/features.md)
+  - [Contract Matrix](/reference/contract-matrix.md)
   - [Limitations](/reference/limitations.md)
 
 - **Release Notes**
