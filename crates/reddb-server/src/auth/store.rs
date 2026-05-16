@@ -705,6 +705,27 @@ impl AuthStore {
         password: &str,
         role: Role,
     ) -> Result<User, AuthError> {
+        self.create_user_in_tenant_with_ownership(tenant_id, username, password, role, false)
+    }
+
+    pub fn create_system_user(
+        &self,
+        username: &str,
+        password: &str,
+        role: Role,
+        tenant_id: Option<&str>,
+    ) -> Result<User, AuthError> {
+        self.create_user_in_tenant_with_ownership(tenant_id, username, password, role, true)
+    }
+
+    fn create_user_in_tenant_with_ownership(
+        &self,
+        tenant_id: Option<&str>,
+        username: &str,
+        password: &str,
+        role: Role,
+        system_owned: bool,
+    ) -> Result<User, AuthError> {
         let id = UserId::from_parts(tenant_id, username);
         let mut users = self.users.write().map_err(lock_err)?;
         if users.contains_key(&id) {
@@ -722,6 +743,7 @@ impl AuthStore {
             created_at: now,
             updated_at: now,
             enabled: true,
+            system_owned,
         };
         users.insert(id, user.clone());
         drop(users); // release lock before vault I/O
@@ -817,6 +839,10 @@ impl AuthStore {
         let id = UserId::from_parts(tenant_id, username);
         let mut users = self.users.write().map_err(lock_err)?;
         let user = users
+            .get(&id)
+            .ok_or_else(|| AuthError::UserNotFound(id.to_string()))?;
+        reject_system_owned(&id, user)?;
+        let user = users
             .remove(&id)
             .ok_or_else(|| AuthError::UserNotFound(id.to_string()))?;
 
@@ -862,6 +888,7 @@ impl AuthStore {
         let user = users
             .get_mut(&id)
             .ok_or_else(|| AuthError::UserNotFound(id.to_string()))?;
+        reject_system_owned(&id, user)?;
 
         if !verify_password(old_password, &user.password_hash) {
             return Err(AuthError::InvalidCredentials);
@@ -892,6 +919,7 @@ impl AuthStore {
         let user = users
             .get_mut(&id)
             .ok_or_else(|| AuthError::UserNotFound(id.to_string()))?;
+        reject_system_owned(&id, user)?;
 
         let prior_role = user.role;
         user.role = new_role;
@@ -1526,6 +1554,7 @@ impl AuthStore {
         let user = users
             .get_mut(uid)
             .ok_or_else(|| AuthError::UserNotFound(uid.to_string()))?;
+        reject_system_owned(uid, user)?;
         user.enabled = enabled;
         user.updated_at = now_ms();
         drop(users);
@@ -2581,6 +2610,15 @@ fn lock_err<T>(_: T) -> AuthError {
     AuthError::Internal("lock poisoned".to_string())
 }
 
+fn reject_system_owned(uid: &UserId, user: &User) -> Result<(), AuthError> {
+    if user.system_owned {
+        return Err(AuthError::SystemUserImmutable {
+            username: uid.to_string(),
+        });
+    }
+    Ok(())
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -2702,6 +2740,56 @@ mod tests {
 
         // API keys should have been downgraded.
         assert_eq!(alice.api_keys[0].role, Role::Read);
+    }
+
+    #[test]
+    fn test_system_owned_user_blocks_destructive_mutations() {
+        let store = AuthStore::new(test_config());
+        store
+            .create_system_user("system", "pass", Role::Admin, None)
+            .unwrap();
+
+        let uid = UserId::platform("system");
+        let err = store.delete_user("system").unwrap_err();
+        assert!(matches!(err, AuthError::SystemUserImmutable { .. }));
+
+        let err = store.change_password("system", "pass", "new").unwrap_err();
+        assert!(matches!(err, AuthError::SystemUserImmutable { .. }));
+
+        let err = store.change_role("system", Role::Read).unwrap_err();
+        assert!(matches!(err, AuthError::SystemUserImmutable { .. }));
+
+        let err = store.set_user_enabled(&uid, false).unwrap_err();
+        assert!(matches!(err, AuthError::SystemUserImmutable { .. }));
+
+        let key = store
+            .create_api_key("system", "rotation", Role::Admin)
+            .unwrap();
+        assert!(store.validate_token(&key.key).is_some());
+        store.revoke_api_key(&key.key).unwrap();
+        assert!(store.validate_token(&key.key).is_none());
+    }
+
+    #[test]
+    fn test_regular_user_mutations_still_work() {
+        let store = AuthStore::new(test_config());
+        store.create_user("alice", "old", Role::Admin).unwrap();
+
+        let uid = UserId::platform("alice");
+        store.set_user_enabled(&uid, false).unwrap();
+        assert!(matches!(
+            store.authenticate("alice", "old"),
+            Err(AuthError::InvalidCredentials)
+        ));
+
+        store.set_user_enabled(&uid, true).unwrap();
+        store.change_password("alice", "old", "new").unwrap();
+        store.change_role("alice", Role::Read).unwrap();
+        store.delete_user("alice").unwrap();
+        assert!(matches!(
+            store.authenticate("alice", "new"),
+            Err(AuthError::InvalidCredentials)
+        ));
     }
 
     #[test]
