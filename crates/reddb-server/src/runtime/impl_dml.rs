@@ -2498,8 +2498,14 @@ fn resolve_update_entity_by_logical_id(
     logical_id: EntityId,
 ) -> Option<UnifiedEntity> {
     let store = runtime.inner.db.store();
-    crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::current_statement()
+    if let Some(entity) = crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::current_statement()
         .resolve_logical_id(&store, table, logical_id)
+    {
+        return Some(entity);
+    }
+    // Fallback for non-table-row entities (graph nodes/edges, etc.) where
+    // entity_id == logical_id and the MVCC table-row resolver doesn't apply.
+    store.get(table, logical_id)
 }
 
 fn update_cdc_item_kind(
