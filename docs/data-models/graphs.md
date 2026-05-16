@@ -116,6 +116,36 @@ curl -X POST http://127.0.0.1:8080/collections/social/edges \
 | `properties` | No | Arbitrary key-value properties |
 | `metadata` | No | Operational metadata |
 
+## Updating Nodes and Edges
+
+Graph mutations use explicit `NODES` and `EDGES` targets:
+
+```sql
+UPDATE social NODES
+SET visits += 1
+WHERE label = 'alice'
+RETURNING rid, label, visits
+```
+
+```sql
+UPDATE social EDGES
+SET weight += 0.5
+WHERE label = 'FOLLOWS' AND from_rid = 102
+RETURNING rid, from_rid, to_rid, weight
+```
+
+Mutability rules in the first multi-model update version:
+
+| Item | Immutable | Mutable |
+|:-----|:----------|:--------|
+| Node | `rid`, `label` | `node_type`, properties |
+| Edge | `rid`, `label`, `from_rid`, `to_rid` | `weight`, properties |
+
+`WHERE` and `SET` see node/edge fields, properties, and the public envelope.
+Compound assignment (`+=`, `-=`, `*=`, `/=`, `%=`) requires an existing,
+non-null numeric field; arithmetic or domain errors abort the whole statement.
+`ORDER BY ... LIMIT` and `RETURNING` work the same as on rows.
+
 ## Graph Traversal
 
 Traverse the graph from a starting node:
