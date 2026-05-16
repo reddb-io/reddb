@@ -158,6 +158,7 @@
 
 - **Clients & Drivers**
   - [Driver Matrix](/clients/drivers.md)
+  - [SDK Helper Spec](/clients/sdk-helper-spec.md)
   - [JavaScript / TypeScript (full guide)](/guides/javascript-typescript-driver.md)
   - [Rust](/clients/drivers/rust.md)
   - [Python (embedded, PyO3)](/clients/drivers/python.md)
