@@ -62,6 +62,7 @@ pub fn build(b: *std.Build) void {
         "tests/value_codec_test.zig",
         "tests/redwire_conn_test.zig",
         "tests/smoke_test.zig",
+        "tests/helpers_test.zig",
     };
 
     for (test_files) |path| {
