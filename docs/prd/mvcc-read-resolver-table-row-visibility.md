@@ -32,7 +32,7 @@ exists so callers can vary how they find candidates without varying what "visibl
 
 - Define the MVCC read resolver as the shared visibility seam for SQL table rows.
 - Keep the first slice aligned with [#507](https://github.com/reddb-io/reddb/issues/507) and
-  [ADR 0014](../adr/0014-mvcc-history-store-and-transaction-recovery.md).
+  [ADR 0014](../../.red/adr/0014-mvcc-history-store-and-transaction-recovery.md).
 - Preserve current public behavior while tightening the internal ownership boundary.
 - Cover table scan materialization, indexed candidate recheck, logical-row lookup, DML target
   scans, and `AS OF` table reads with one intended resolver contract.

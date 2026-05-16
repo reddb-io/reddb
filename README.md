@@ -534,7 +534,7 @@ Driver docs live in `crates/reddb-client/README.md`, `drivers/js/README.md`, and
 For JavaScript and TypeScript, RedDB ships three packages under the
 `@reddb-io/` scope. Pick the one that matches your scenario — see the
 [JavaScript / TypeScript driver guide](./docs/guides/javascript-typescript-driver.md#package-matrix)
-for the full matrix and [ADR 0007](./docs/adr/0007-npm-package-matrix.md)
+for the full matrix and [ADR 0007](./.red/adr/0007-npm-package-matrix.md)
 for the rationale.
 
 ```bash

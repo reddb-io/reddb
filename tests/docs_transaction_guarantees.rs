@@ -56,7 +56,7 @@ fn transaction_docs_name_explicit_deferrals() {
 fn transaction_docs_link_prd_and_adr() {
     assert_contains(
         TRANSACTIONS_DOC,
-        "../adr/0014-mvcc-history-store-and-transaction-recovery.md",
+        "../.red/adr/0014-mvcc-history-store-and-transaction-recovery.md",
     );
     assert_contains(
         TRANSACTIONS_DOC,

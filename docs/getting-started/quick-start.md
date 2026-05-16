@@ -96,7 +96,7 @@ curl -X POST http://127.0.0.1:8080/query \
 After configuring an AI provider, `ASK` retrieves context and returns a
 source-cited answer. `[^1]` maps to `sources_flat[0].urn`; `validation.ok`
 confirms every marker points at a real source. The contract is documented in
-[ADR 0013](../adr/0013-ask-grounding-citations.md), from
+[ADR 0013](../../.red/adr/0013-ask-grounding-citations.md), from
 [#392](https://github.com/reddb-io/reddb/issues/392).
 
 ```bash

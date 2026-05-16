@@ -1,6 +1,6 @@
 //! `HeaderEscapeGuard` — typed boundary guard for HTTP response header values.
 //!
-//! Per ADR 0010 (`docs/adr/0010-serialization-boundary-discipline.md`)
+//! Per ADR 0010 (`.red/adr/0010-serialization-boundary-discipline.md`)
 //! and issue #176, the producing side of every serialization boundary
 //! is owned by a typed guard whose only job is to know the boundary's
 //! escape contract. This module is the guard for HTTP response header

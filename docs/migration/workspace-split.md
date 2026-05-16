@@ -111,7 +111,7 @@ name `reddb` — which re-exports the same paths).
 
 - PRD [#54][prd]
 - [Connection strings](../clients/connection-strings.md)
-- [ADR 0001 — RedWire](../adr/0001-redwire-tcp-protocol.md)
+- [ADR 0001 — RedWire](../../.red/adr/0001-redwire-tcp-protocol.md)
 
 [prd]: https://github.com/reddb-io/reddb/issues/54
 [drivers-rust]: ../../crates/reddb-client

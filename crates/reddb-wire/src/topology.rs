@@ -1,6 +1,6 @@
 //! Canonical `Topology` payload — shared by both transports.
 //!
-//! ADR 0008 (`docs/adr/0008-topology-advertisement-security.md`)
+//! ADR 0008 (`.red/adr/0008-topology-advertisement-security.md`)
 //! settled the security model and the schema-evolution rule:
 //!
 //!   * New optional fields land under a versioned envelope.

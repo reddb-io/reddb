@@ -1,7 +1,7 @@
 # Migrating from Redis to RedDB Blob Cache
 
 Status: 2026-05-06 — first cut. Companion to
-[ADR 0006 — Tiered Blob Cache](../adr/0006-tiered-blob-cache.md) and
+[ADR 0006 — Tiered Blob Cache](../../.red/adr/0006-tiered-blob-cache.md) and
 [`docs/guides/cache-comparison.md`](./cache-comparison.md).
 
 This guide is for teams that already run Redis as an application cache
@@ -418,8 +418,8 @@ nobody has to re-derive the boundary later:
 
 ## Cross-links
 
-- [ADR 0006 — Tiered Blob Cache](../adr/0006-tiered-blob-cache.md)
+- [ADR 0006 — Tiered Blob Cache](../../.red/adr/0006-tiered-blob-cache.md)
 - [`docs/guides/cache-comparison.md`](./cache-comparison.md)
 - [`docs/perf/blob-cache-bench-2026-05-06.md`](../perf/blob-cache-bench-2026-05-06.md)
 - [`docs/perf/blob-cache-l2-spike.md`](../perf/blob-cache-l2-spike.md)
-- [ADR 0008 — Topology Advertisement & Security](../adr/0008-topology-advertisement-security.md)
+- [ADR 0008 — Topology Advertisement & Security](../../.red/adr/0008-topology-advertisement-security.md)

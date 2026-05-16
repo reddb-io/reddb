@@ -1,6 +1,6 @@
 //! RedWire — RedDB's binary TCP/TLS wire protocol.
 //!
-//! ADR 0001 (`docs/adr/0001-redwire-tcp-protocol.md`) is the
+//! ADR 0001 (`.red/adr/0001-redwire-tcp-protocol.md`) is the
 //! normative spec. This module owns the *transport-agnostic* parts:
 //! frame layout, message-kind discriminator, flags, and the
 //! encode/decode codec. Server-side dispatch (auth handshake,

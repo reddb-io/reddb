@@ -99,7 +99,7 @@ bytes, vector, and JSON slices are borrowed for the duration of the call.
 | `red:///abs/path/data.rdb`                     | embedded (n/a) |
 | `memory://`, `file:///path`, `grpc(s)://host`  | legacy aliases |
 
-Default port for `red://` / `reds://` is **5050** (see [ADR 0001](../../adr/0001-redwire-tcp-protocol.md)).
+Default port for `red://` / `reds://` is **5050** (see [ADR 0001](../../../.red/adr/0001-redwire-tcp-protocol.md)).
 
 ## Auth
 

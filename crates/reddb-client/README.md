@@ -188,7 +188,7 @@ every PR to catch accidental engine re-linkage.
 - [ADR 0001 — RedWire][adr-0001]
 - [Workspace migration guide](../../docs/migration/workspace-split.md)
 
-[adr-0001]: ../../docs/adr/0001-redwire-tcp-protocol.md
+[adr-0001]: ../../.red/adr/0001-redwire-tcp-protocol.md
 [conn-strings]: ../../docs/clients/connection-strings.md
 [rw]: ../reddb-wire
 [sdk]: ../../docs/clients/sdk-compatibility.md

@@ -3,7 +3,7 @@
 //! Mirrors the server-side codec (`reddb::wire::redwire`) but
 //! lives in the driver crate so the client doesn't drag the
 //! engine in. The framing is a stable wire contract — both sides
-//! re-implement it from the same ADR (`docs/adr/0001-redwire-tcp-protocol.md`).
+//! re-implement it from the same ADR (`.red/adr/0001-redwire-tcp-protocol.md`).
 //!
 //! Public surface:
 //!   - [`RedWireClient::connect`][]: TCP + handshake + auth

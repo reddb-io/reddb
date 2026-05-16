@@ -5,7 +5,7 @@ isolation. Every connection can open a transaction, nest savepoints,
 and roll back to any level without affecting other connections.
 
 The v1 table-row guarantee is the MVCC history-store contract from
-[ADR 0014](../adr/0014-mvcc-history-store-and-transaction-recovery.md)
+[ADR 0014](../../.red/adr/0014-mvcc-history-store-and-transaction-recovery.md)
 and [PRD #432](https://github.com/reddb-io/reddb/issues/432): SQL
 table rows use stable logical identity, versioned `UPDATE`, tombstone
 `DELETE`, first-committer-wins conflict checks, atomic `TxCommitBatch`
@@ -245,7 +245,7 @@ current snapshot engine.
 
 ## See also
 
-- [ADR 0014 — MVCC history store and transaction crash recovery](../adr/0014-mvcc-history-store-and-transaction-recovery.md)
+- [ADR 0014 — MVCC history store and transaction crash recovery](../../.red/adr/0014-mvcc-history-store-and-transaction-recovery.md)
 - [PRD #432 — MVCC history store and transaction crash recovery](https://github.com/reddb-io/reddb/issues/432)
 - [Row Level Security](../security/rls.md)
 - [Multi-Tenancy](../security/multi-tenancy.md)

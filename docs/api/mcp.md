@@ -128,7 +128,7 @@ tool returns the canonical ASK envelope: `answer`, `sources_flat`,
 `citations`, `validation`, `cache_hit`, provider/model metadata, token counts,
 and `cost_usd`. Every factual claim in `answer` is expected to cite a marker
 like `[^1]`; that marker maps to `sources_flat[0].urn`. The citation contract
-is [ADR 0013](../adr/0013-ask-grounding-citations.md), tracked from
+is [ADR 0013](../../.red/adr/0013-ask-grounding-citations.md), tracked from
 [#392](https://github.com/reddb-io/reddb/issues/392).
 
 ```json

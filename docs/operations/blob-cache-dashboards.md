@@ -1,8 +1,8 @@
 # Blob Cache observability: dashboards, queries, alerts
 
 Status: 2026-05-06 — first cut. Companion to
-[ADR 0006 — Tiered Blob Cache](../adr/0006-tiered-blob-cache.md),
-[ADR 0010 — Serialization boundary discipline](../adr/0010-serialization-boundary-discipline.md),
+[ADR 0006 — Tiered Blob Cache](../../.red/adr/0006-tiered-blob-cache.md),
+[ADR 0010 — Serialization boundary discipline](../../.red/adr/0010-serialization-boundary-discipline.md),
 and [Cache vs KV vs Redis](../guides/cache-comparison.md).
 
 This page is for operators who already have RedDB shipping Prometheus
@@ -357,8 +357,8 @@ explosion.
 
 ## See also
 
-- ADR 0006 — Tiered Blob Cache: [`docs/adr/0006-tiered-blob-cache.md`](../adr/0006-tiered-blob-cache.md)
-- ADR 0010 — Serialization boundary discipline: [`docs/adr/0010-serialization-boundary-discipline.md`](../adr/0010-serialization-boundary-discipline.md)
+- ADR 0006 — Tiered Blob Cache: [`.red/adr/0006-tiered-blob-cache.md`](../../.red/adr/0006-tiered-blob-cache.md)
+- ADR 0010 — Serialization boundary discipline: [`.red/adr/0010-serialization-boundary-discipline.md`](../../.red/adr/0010-serialization-boundary-discipline.md)
 - Cache comparison guide: [`docs/guides/cache-comparison.md`](../guides/cache-comparison.md)
 - Blob Cache backup/restore (Lane #187): [`docs/operations/blob-cache-backup-restore.md`](./blob-cache-backup-restore.md)
 - Metric source: [`crates/reddb-server/src/storage/cache/blob/cache.rs`](../../crates/reddb-server/src/storage/cache/blob/cache.rs)
