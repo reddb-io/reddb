@@ -626,6 +626,11 @@ impl crate::RedDBRuntime {
             return Ok(());
         }
 
+        let kind = match contract.declared_model {
+            crate::catalog::CollectionModel::Document => "document",
+            crate::catalog::CollectionModel::Kv | crate::catalog::CollectionModel::Vault => "kv",
+            _ => "row",
+        };
         for (&id, &lsn) in deleted_ids.iter().zip(lsns) {
             let before = pre_images
                 .get(&id.raw())
@@ -639,6 +644,7 @@ impl crate::RedDBRuntime {
                     collection,
                     id.raw(),
                     lsn,
+                    kind,
                     &before,
                     subscription.redact_fields.as_slice(),
                 )?;
@@ -1349,6 +1355,7 @@ fn delete_event_payload(
     collection: &str,
     id: u64,
     lsn: u64,
+    kind: &str,
     before: &JsonValue,
     redact_fields: &[String],
 ) -> RedDBResult<Vec<u8>> {
@@ -1369,7 +1376,7 @@ fn delete_event_payload(
         "collection".to_string(),
         JsonValue::String(collection.to_string()),
     );
-    insert_event_item_identity(&mut object, id, "row");
+    insert_event_item_identity(&mut object, id, kind);
     object.insert("id".to_string(), id_json);
     object.insert(
         "ts".to_string(),
