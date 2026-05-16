@@ -363,6 +363,14 @@ impl RedDBRuntime {
         store
             .insert_auto(name, entity)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        // #524: prime the in-memory tip cache so the chain-tip endpoint and
+        // subsequent INSERTs don't have to scan the collection to find genesis.
+        if let Some(tip) = blockchain_kind::chain_tip_full(&*store, name) {
+            self.inner
+                .chain_tip_cache
+                .lock()
+                .insert(name.to_string(), tip);
+        }
         Ok(())
     }
 

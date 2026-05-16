@@ -1141,6 +1141,12 @@ impl RedDBServer {
                             ),
                         );
                     }
+                    // Issue #524 — chain-tip endpoint. Returns the cached tip
+                    // for a `KIND blockchain` collection so a client can
+                    // construct the next INSERT without scanning the chain.
+                    if let Some(collection) = collection_from_action_path(&path, "chain-tip") {
+                        return handle_chain_tip(&self.runtime, collection);
+                    }
                 }
                 if let Some(response) =
                     self.handle_v1_keyed_route(method.as_str(), &path, &query, &body)
@@ -1831,6 +1837,36 @@ mod tests {
         ));
         assert_eq!(vault_counter.status, 405);
     }
+}
+
+/// Issue #524 — `GET /collections/:name/chain-tip`. Returns the cached chain
+/// tip JSON. 404 when the collection is not a `KIND blockchain` or has no
+/// rows yet (the engine guarantees a genesis row on creation, so the 404
+/// branch effectively means "wrong kind / collection absent").
+fn handle_chain_tip(runtime: &crate::runtime::RedDBRuntime, collection: &str) -> HttpResponse {
+    let Some(tip) = runtime.chain_tip_for_collection(collection) else {
+        return json_error(404, format!("chain-tip: collection '{collection}' is not a blockchain or has no rows"));
+    };
+    let server_time = crate::runtime::blockchain_kind::now_ms();
+    let mut hex = String::with_capacity(64);
+    for b in tip.hash.iter() {
+        hex.push_str(&format!("{b:02x}"));
+    }
+    let mut obj = crate::json::Map::new();
+    obj.insert(
+        "block_height".to_string(),
+        crate::json::Value::Number(tip.height as f64),
+    );
+    obj.insert("hash".to_string(), crate::json::Value::String(hex));
+    obj.insert(
+        "timestamp".to_string(),
+        crate::json::Value::Number(tip.timestamp_ms as f64),
+    );
+    obj.insert(
+        "server_time".to_string(),
+        crate::json::Value::Number(server_time as f64),
+    );
+    json_response(200, crate::json::Value::Object(obj))
 }
 
 fn collection_from_scan_path(path: &str) -> Option<&str> {

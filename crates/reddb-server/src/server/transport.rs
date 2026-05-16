@@ -245,6 +245,11 @@ pub(crate) fn map_runtime_error(err: &crate::api::RedDBError) -> (u16, String) {
     let status = match err {
         NotFound(_) => 404,
         ReadOnly(_) => 403,
+        // Issue #524 — chain-INSERT conflict surfaces as a 409 so a polite
+        // client can retry against the advanced tip. The body still carries
+        // the marker so deeper handlers can parse the tip payload back out.
+        InvalidOperation(msg) if msg.starts_with("BlockchainConflict:") => 409,
+        InvalidOperation(msg) if msg.starts_with("BlockchainCollectionImmutable") => 409,
         InvalidConfig(_) | InvalidOperation(_) => 400,
         Query(msg) if msg.starts_with("ask_provider_failover_exhausted:") => 503,
         Query(msg) if msg.starts_with("ask_primary_sync_unavailable:") => 503,

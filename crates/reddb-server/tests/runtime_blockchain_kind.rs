@@ -123,21 +123,25 @@ fn delete_on_blockchain_returns_immutable_error() {
 }
 
 #[test]
-fn user_supplied_reserved_columns_are_overwritten_by_engine() {
+fn user_supplied_reserved_columns_without_full_set_rejected_with_conflict() {
+    // Issue #524 — once #523's silent-overwrite contract evolved into chain
+    // protocol enforcement, supplying a single reserved column without the
+    // full (prev_hash, block_height, timestamp) triple is a 409.
     let rt = rt();
     rt.execute_query("CREATE COLLECTION audit_log KIND blockchain")
         .expect("create");
-    rt.execute_query("INSERT INTO audit_log (actor, block_height) VALUES ('alice', 9999)")
-        .expect("insert");
-
-    let mut res = select_all(&rt, "audit_log");
-    sort_by_height(&mut res);
-    let last = res.result.records.len() - 1;
-    assert_eq!(
-        height_at(&res, last),
-        1,
-        "engine recomputes block_height, ignores user-supplied 9999"
-    );
+    let err = rt
+        .execute_query("INSERT INTO audit_log (actor, block_height) VALUES ('alice', 9999)")
+        .expect_err("partial reserved-col supply must be rejected");
+    match err {
+        RedDBError::InvalidOperation(msg) => {
+            assert!(
+                msg.starts_with("BlockchainConflict:"),
+                "expected BlockchainConflict marker, got {msg}"
+            );
+        }
+        other => panic!("expected InvalidOperation, got {other:?}"),
+    }
 }
 
 #[test]
