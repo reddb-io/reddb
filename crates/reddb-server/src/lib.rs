@@ -124,10 +124,11 @@ pub use crate::index::{
     IndexStats,
 };
 pub use crate::physical::{
-    ArtifactState, BlockReference, CompactionPolicy, ExportDescriptor, GridLayout, ManifestEvent,
-    ManifestEventKind, ManifestPointers, PhysicalAnalyticsJob, PhysicalGraphProjection,
-    PhysicalIndexState, PhysicalLayout, PhysicalMetadataFile, SnapshotDescriptor, SuperblockHeader,
-    WalPolicy, DEFAULT_MANIFEST_EVENT_HISTORY, PHYSICAL_METADATA_PROTOCOL_VERSION,
+    meta_json_sidecar_enabled, set_meta_json_sidecar_enabled, ArtifactState, BlockReference,
+    CompactionPolicy, ExportDescriptor, GridLayout, ManifestEvent, ManifestEventKind,
+    ManifestPointers, PhysicalAnalyticsJob, PhysicalGraphProjection, PhysicalIndexState,
+    PhysicalLayout, PhysicalMetadataFile, SnapshotDescriptor, SuperblockHeader, WalPolicy,
+    DEFAULT_MANIFEST_EVENT_HISTORY, PHYSICAL_METADATA_PROTOCOL_VERSION,
 };
 pub use crate::replication::{ReplicationConfig, ReplicationRole};
 pub use crate::runtime::{

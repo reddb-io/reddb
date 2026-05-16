@@ -975,6 +975,10 @@ fn main() {
             }
         }
 
+        "inspect" => {
+            run_inspect_command(&result.flags, remaining);
+        }
+
         "mcp" => {
             let path = result
                 .flags
@@ -3066,6 +3070,107 @@ fn build_tick_payload(operations: Option<&str>, dry_run: bool) -> String {
 
 fn json_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+// ---------------------------------------------------------------------------
+// Inspect command implementation
+// ---------------------------------------------------------------------------
+
+/// `red inspect catalog --path <FILE> [--at <SEQ>]`
+///
+/// Loads the physical metadata for an on-disk database and prints the
+/// catalog snapshot as JSON. With `--at <seq>` reads the journal
+/// snapshot for that sequence; returns an explicit error when the
+/// journal is unavailable. Substitutes the historical auto-written
+/// `.meta.json` sidecar for tiers that no longer emit it.
+fn run_inspect_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
+    let json_mode = wants_json(flags);
+    let subcommand = remaining.first().map(|s| s.as_str()).unwrap_or("");
+
+    if subcommand != "catalog" {
+        let msg = "Usage: red inspect catalog --path <FILE> [--at <SEQ>]";
+        if json_mode {
+            json_error("inspect", msg);
+        }
+        eprintln!("{msg}");
+        std::process::exit(1);
+    }
+
+    let path = match flag_string(flags, "path").filter(|p| !p.is_empty()) {
+        Some(p) => p,
+        None => {
+            let msg = "inspect catalog requires --path <FILE>";
+            if json_mode {
+                json_error("inspect.catalog", msg);
+            }
+            eprintln!("error: {msg}");
+            std::process::exit(1);
+        }
+    };
+
+    let data_path = PathBuf::from(&path);
+    let at_seq = flag_string(flags, "at")
+        .filter(|v| !v.is_empty())
+        .map(|v| v.parse::<u64>())
+        .transpose();
+    let at_seq = match at_seq {
+        Ok(opt) => opt,
+        Err(err) => {
+            let msg = format!("--at must be a non-negative integer: {err}");
+            if json_mode {
+                json_error("inspect.catalog", &msg);
+            }
+            eprintln!("error: {msg}");
+            std::process::exit(1);
+        }
+    };
+
+    let metadata = match at_seq {
+        Some(seq) => {
+            let journal_path =
+                reddb::PhysicalMetadataFile::metadata_journal_path_for(&data_path, seq);
+            if !journal_path.exists() {
+                let msg = format!(
+                    "catalog snapshot for seq={seq} not available (journal missing: {})",
+                    journal_path.display()
+                );
+                if json_mode {
+                    json_error("inspect.catalog", &msg);
+                }
+                eprintln!("error: {msg}");
+                std::process::exit(1);
+            }
+            match reddb::PhysicalMetadataFile::load_from_binary_path(&journal_path) {
+                Ok(meta) => meta,
+                Err(err) => {
+                    let msg = format!("failed to load journal {}: {err}", journal_path.display());
+                    if json_mode {
+                        json_error("inspect.catalog", &msg);
+                    }
+                    eprintln!("error: {msg}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        None => match reddb::PhysicalMetadataFile::load_for_data_path(&data_path) {
+            Ok(meta) => meta,
+            Err(err) => {
+                let msg = format!("failed to load catalog for {path}: {err}");
+                if json_mode {
+                    json_error("inspect.catalog", &msg);
+                }
+                eprintln!("error: {msg}");
+                std::process::exit(1);
+            }
+        },
+    };
+
+    let pretty = metadata.to_json_value().to_string_pretty();
+    if json_mode {
+        json_ok("inspect.catalog", &pretty);
+    } else {
+        println!("{pretty}");
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -135,6 +135,12 @@ pub fn all_commands() -> Vec<CommandDef> {
       flags: status_flags(),
     },
     CommandDef {
+      name: "inspect",
+      summary: "Inspect on-disk database state (catalog snapshot)",
+      usage: "red inspect catalog --path <FILE> [--at <SEQ>] [--json]",
+      flags: inspect_flags(),
+    },
+    CommandDef {
       name: "mcp",
       summary: "Start MCP server for AI agent integration",
       usage: "red mcp [--path /data]",
@@ -624,6 +630,16 @@ fn status_flags() -> Vec<FlagSchema> {
         .with_default("0.0.0.0:6380")]
 }
 
+fn inspect_flags() -> Vec<FlagSchema> {
+    vec![
+        FlagSchema::new("path")
+            .with_short('d')
+            .with_description("Path to the on-disk database file"),
+        FlagSchema::new("at")
+            .with_description("Catalog at snapshot sequence (requires metadata journal)"),
+    ]
+}
+
 fn mcp_flags() -> Vec<FlagSchema> {
     vec![FlagSchema::new("path")
         .with_short('d')
@@ -687,6 +703,7 @@ pub fn completion_domains() -> Vec<(String, Vec<String>)> {
         ("delete".to_string(), vec!["del".to_string()]),
         ("health".to_string(), vec![]),
         ("status".to_string(), vec![]),
+        ("inspect".to_string(), vec![]),
         ("migrate-from-redis".to_string(), vec![]),
         ("mcp".to_string(), vec![]),
         ("auth".to_string(), vec![]),
@@ -724,8 +741,18 @@ mod tests {
         assert!(names.contains(&"tick"));
         assert!(names.contains(&"migrate-from-redis"));
         assert!(names.contains(&"status"));
+        assert!(names.contains(&"inspect"));
         assert!(names.contains(&"connect"));
         assert!(names.contains(&"version"));
+    }
+
+    #[test]
+    fn test_inspect_has_flags() {
+        let cmds = all_commands();
+        let inspect = cmds.iter().find(|c| c.name == "inspect").unwrap();
+        let flag_names: Vec<&str> = inspect.flags.iter().map(|f| f.long.as_str()).collect();
+        assert!(flag_names.contains(&"path"));
+        assert!(flag_names.contains(&"at"));
     }
 
     #[test]
