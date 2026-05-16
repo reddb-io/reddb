@@ -1809,12 +1809,16 @@ pub struct CreateTableQuery {
     pub vault_own_master_key: bool,
 }
 
-/// CREATE COLLECTION name KIND kind
+/// CREATE COLLECTION name KIND kind [SIGNED_BY ('pubkey_hex', ...)]
 #[derive(Debug, Clone)]
 pub struct CreateCollectionQuery {
     pub name: String,
     pub kind: String,
     pub if_not_exists: bool,
+    /// Initial Ed25519 allowed-signer registry. Empty = unsigned collection.
+    /// Each entry is a 32-byte Ed25519 public key. Mutable post-create via
+    /// `ALTER COLLECTION ... ADD|REVOKE SIGNER` (see issue #520).
+    pub allowed_signers: Vec<[u8; 32]>,
 }
 
 /// CREATE VECTOR name DIM n [METRIC metric]
