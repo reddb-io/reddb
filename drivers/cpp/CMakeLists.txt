@@ -62,6 +62,7 @@ set(REDDB_SOURCES
     src/redwire/value_codec.cpp
     src/redwire/scram.cpp
     src/redwire/conn.cpp
+    src/helpers.cpp
 )
 if(REDDB_HAS_CURL)
     list(APPEND REDDB_SOURCES src/http/client.cpp)
@@ -115,3 +116,4 @@ reddb_add_test(frame_test)
 reddb_add_test(value_codec_test)
 reddb_add_test(redwire_conn_test)
 reddb_add_test(smoke_test)
+reddb_add_test(helpers_test)

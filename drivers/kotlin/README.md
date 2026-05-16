@@ -89,6 +89,47 @@ RedWire parameterized queries require the server to advertise
 `RedDBException.ParamsUnsupported`. HTTP sends the canonical `/query`
 body with `query` and adds typed `params` only for non-empty varargs.
 
+## Rich helpers (SDK Helper Spec v0.1)
+
+`dev.reddb.helpers.Helpers` wraps a `Conn` (or any `Querier`) with
+typed namespaces — `documents`, `kv`, `queue` — that mirror the
+helper surface in `drivers/go/helpers.go`.
+
+```kotlin
+import dev.reddb.connect
+import dev.reddb.helpers.Helpers
+import kotlinx.coroutines.runBlocking
+
+fun main() = runBlocking {
+    connect("red://localhost:5050").use { conn ->
+        val h = Helpers.of(conn)
+
+        // Documents
+        val inserted = h.documents().insert("people", mapOf("name" to "alice"))
+        h.documents().patch("people", inserted.rid, mapOf("age" to 30))
+
+        // KV
+        h.kv().set("characters:hansel", "ok")
+        val v = h.kv().get("characters:hansel")
+
+        // Queue
+        h.queue().push("jobs", mapOf("id" to 1))
+        val popped = h.queue().pop("jobs", 1)
+    }
+}
+```
+
+Typed errors (caller can `catch` each):
+
+| Type | When |
+| --- | --- |
+| `HelperException.InvalidArgument` | Bad identifier, negative limit, JSON-pointer patch path |
+| `HelperException.NotFound` | `documents.get` / `documents.patch` on missing rid |
+| `HelperException.InvalidResponse` | Insert response missing `rid` |
+
+Transactions are not exposed as a helper — use
+`conn.query("BEGIN" / "COMMIT" / "ROLLBACK")` directly.
+
 ## URL shapes
 
 | URL                                    | Transport      | TLS |

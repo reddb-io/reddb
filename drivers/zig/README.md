@@ -15,6 +15,46 @@ mirrors the JS driver's REST surface.
   The server side accepts redwire connections without ALPN, so this works in
   practice; if your operator stack requires ALPN you'll need a newer Zig.
 
+## Rich helpers (SDK Helper Spec v0.1)
+
+`reddb.helpers.Helpers` wraps a `Querier` (any vtable carrying a `query`
+fn pointer) with typed namespaces — `documents`, `kv`, `queue` —
+mirroring `drivers/go/helpers.go`.
+
+```zig
+const std = @import("std");
+const reddb = @import("reddb");
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const conn = try reddb.connect(allocator, "red://localhost:5050", null);
+    defer conn.deinit();
+
+    // Adapt your Conn to a Querier. The simplest path is a thin shim that
+    // calls `conn.query(sql)`; positional params are caller-stringified.
+    const q: reddb.helpers.Querier = .{ .ptr = conn, .queryFn = myThunk };
+    const h = reddb.helpers.Helpers.init(allocator, q);
+
+    try h.kv(null).set("characters:hansel", .{ .string = "ok" }, .{});
+    const v = try h.kv(null).get("characters:hansel", null);
+    _ = v;
+}
+```
+
+Typed errors (`reddb.helpers.HelperError`):
+
+| Error | When |
+| --- | --- |
+| `InvalidArgument` | Bad identifier, negative limit, JSON-pointer patch path |
+| `NotFound` | `documents.get` / `documents.patch` on missing rid |
+| `InvalidResponse` | Insert response missing `rid` |
+
+Transactions are not exposed — issue `conn.query("BEGIN" / "COMMIT" /
+"ROLLBACK")` directly through the underlying `Conn`.
+
 ## Layout
 
 ```
