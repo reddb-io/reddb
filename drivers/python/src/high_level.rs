@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyTuple};
+use pyo3::IntoPyObject;
 
 #[cfg(feature = "embedded")]
 use crate::embedded::{EmbeddedRuntime, ParamValue, QueryRows, ScalarOut};
@@ -160,6 +161,7 @@ impl RedDb {
                 let out = PyDict::new(py);
                 out.set_item("affected", result.affected)?;
                 if let Some(id) = result.id {
+                    out.set_item("rid", &id)?;
                     out.set_item("id", id)?;
                 }
                 Ok(out)
@@ -174,7 +176,9 @@ impl RedDb {
                     .map_err(|e| err("QUERY_ERROR", e.to_string()))?;
                 let out = PyDict::new(py);
                 out.set_item("affected", 1u64)?;
-                out.set_item("id", reply.id.to_string())?;
+                let id = reply.id.to_string();
+                out.set_item("rid", &id)?;
+                out.set_item("id", id)?;
                 Ok(out)
             }
         }
@@ -208,6 +212,7 @@ impl RedDb {
                 }
                 let out = PyDict::new(py);
                 out.set_item("affected", total)?;
+                out.set_item("rids", &ids)?;
                 out.set_item("ids", ids)?;
                 Ok(out)
             }
@@ -228,6 +233,7 @@ impl RedDb {
                 let out = PyDict::new(py);
                 out.set_item("affected", reply.count)?;
                 let ids: Vec<String> = reply.ids.into_iter().map(|id| id.to_string()).collect();
+                out.set_item("rids", &ids)?;
                 out.set_item("ids", ids)?;
                 Ok(out)
             }
@@ -267,6 +273,101 @@ impl RedDb {
                 Ok(out)
             }
         }
+    }
+
+    /// Fetch one item by public RedDB ID. Returns the item or None.
+    fn get<'py>(
+        &self,
+        py: Python<'py>,
+        collection: &str,
+        rid: &str,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        self.ensure_open()?;
+        let collection = sql_identifier_path(collection)?;
+        let rid = sql_rid_literal(rid)?;
+        let sql = format!("SELECT * FROM {collection} WHERE rid = {rid} LIMIT 1");
+        match &self.backend {
+            #[cfg(feature = "embedded")]
+            Backend::Embedded(rt) => {
+                let qr = rt.query(&sql).map_err(|e| err("QUERY_ERROR", e))?;
+                match qr.rows.first() {
+                    Some(row) => Ok(Some(row_to_pydict(py, row)?)),
+                    None => Ok(None),
+                }
+            }
+            Backend::Grpc(client) => {
+                let json_str = crate::get_runtime()
+                    .block_on(async {
+                        let mut guard = client.lock().expect("client poisoned");
+                        guard.query(&sql).await
+                    })
+                    .map_err(|e| err("QUERY_ERROR", e.to_string()))?;
+                let result = grpc_query_json_to_pydict(py, &json_str)?;
+                let rows_any = result.get_item("rows")?.expect("rows set");
+                let rows = rows_any.downcast::<PyList>()?;
+                if rows.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(rows.get_item(0)?.downcast_into::<PyDict>()?))
+                }
+            }
+        }
+    }
+
+    /// Return whether an item exists for a public RedDB ID.
+    fn exists<'py>(
+        &self,
+        py: Python<'py>,
+        collection: &str,
+        rid: &str,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let out = PyDict::new(py);
+        out.set_item("exists", self.get(py, collection, rid)?.is_some())?;
+        Ok(out)
+    }
+
+    /// Deterministically list items in a collection.
+    #[pyo3(signature = (collection, *, limit=None, filter=None, order_by=None))]
+    fn list<'py>(
+        &self,
+        py: Python<'py>,
+        collection: &str,
+        limit: Option<usize>,
+        filter: Option<&str>,
+        order_by: Option<&str>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        self.ensure_open()?;
+        let collection = sql_identifier_path(collection)?;
+        let limit = normalize_limit(limit)?;
+        let where_sql = filter
+            .map(|f| format!(" WHERE {f}"))
+            .unwrap_or_default();
+        let order_sql = order_by.unwrap_or("rid ASC");
+        let sql = format!(
+            "SELECT * FROM {collection}{where_sql} ORDER BY {order_sql} LIMIT {limit}"
+        );
+        let rows = match &self.backend {
+            #[cfg(feature = "embedded")]
+            Backend::Embedded(rt) => {
+                let qr = rt.query(&sql).map_err(|e| err("QUERY_ERROR", e))?;
+                rows_to_pylist(py, &qr.rows)?
+            }
+            Backend::Grpc(client) => {
+                let json_str = crate::get_runtime()
+                    .block_on(async {
+                        let mut guard = client.lock().expect("client poisoned");
+                        guard.query(&sql).await
+                    })
+                    .map_err(|e| err("QUERY_ERROR", e.to_string()))?;
+                grpc_query_json_to_pydict(py, &json_str)?
+                    .get_item("rows")?
+                    .expect("rows set")
+                    .downcast_into::<PyList>()?
+            }
+        };
+        let out = PyDict::new(py);
+        out.set_item("items", rows)?;
+        Ok(out)
     }
 
     fn health<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
@@ -317,6 +418,36 @@ impl RedDb {
         }
     }
 
+    /// Rich document helpers.
+    #[getter]
+    fn documents(&self) -> PyResult<DocumentClient> {
+        self.ensure_open()?;
+        match &self.backend {
+            #[cfg(feature = "embedded")]
+            Backend::Embedded(rt) => Ok(DocumentClient {
+                backend: HelperBackend::Embedded(rt.clone()),
+            }),
+            Backend::Grpc(_) => Ok(DocumentClient {
+                backend: HelperBackend::Unsupported("documents helpers are not available over grpc:// yet; use query() or memory:// / file://"),
+            }),
+        }
+    }
+
+    /// Rich KV helpers.
+    #[getter]
+    fn kv(&self) -> PyResult<KvClient> {
+        self.ensure_open()?;
+        match &self.backend {
+            #[cfg(feature = "embedded")]
+            Backend::Embedded(rt) => Ok(KvClient {
+                backend: HelperBackend::Embedded(rt.clone()),
+            }),
+            Backend::Grpc(_) => Ok(KvClient {
+                backend: HelperBackend::Unsupported("kv helpers are not available over grpc:// yet; use query() or memory:// / file://"),
+            }),
+        }
+    }
+
     fn close(&mut self) -> PyResult<()> {
         if self.closed {
             return Ok(());
@@ -357,6 +488,287 @@ impl RedDb {
             ));
         }
         Ok(())
+    }
+}
+
+enum HelperBackend {
+    #[cfg(feature = "embedded")]
+    Embedded(EmbeddedRuntime),
+    Unsupported(&'static str),
+}
+
+#[pyclass]
+pub struct DocumentClient {
+    backend: HelperBackend,
+}
+
+#[pymethods]
+impl DocumentClient {
+    fn insert<'py>(
+        &self,
+        py: Python<'py>,
+        collection: &str,
+        document: &Bound<'py, PyDict>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let rt = self.embedded()?;
+        let collection = sql_identifier_path(collection)?;
+        ensure_document_collection(rt, &collection)?;
+        let body = sql_json_literal(py, document.as_any())?;
+        let sql = format!(
+            "INSERT INTO {collection} DOCUMENT (body) VALUES ({body}) RETURNING *"
+        );
+        let qr = rt.query(&sql).map_err(|e| err("QUERY_ERROR", e))?;
+        let row = qr
+            .rows
+            .first()
+            .ok_or_else(|| err("INVALID_RESPONSE", "documents.insert expected one returned item"))?;
+        let item = row_to_pydict(py, row)?;
+        let rid = item
+            .get_item("rid")?
+            .ok_or_else(|| err("INVALID_RESPONSE", "documents.insert expected rid"))?;
+        let out = PyDict::new(py);
+        out.set_item("affected", if qr.affected == 0 { 1 } else { qr.affected })?;
+        out.set_item("rid", rid)?;
+        out.set_item("item", item)?;
+        Ok(out)
+    }
+
+    fn get<'py>(
+        &self,
+        py: Python<'py>,
+        collection: &str,
+        rid: &str,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let rt = self.embedded()?;
+        let item = document_get_optional(py, rt, collection, rid)?;
+        item.ok_or_else(|| err("NOT_FOUND", format!("document {rid} was not found")))
+    }
+
+    #[pyo3(signature = (collection, *, limit=None, filter=None, order_by=None))]
+    fn list<'py>(
+        &self,
+        py: Python<'py>,
+        collection: &str,
+        limit: Option<usize>,
+        filter: Option<&str>,
+        order_by: Option<&str>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let rt = self.embedded()?;
+        let collection = sql_identifier_path(collection)?;
+        let limit = normalize_limit(limit)?;
+        let where_sql = filter
+            .map(|f| format!(" WHERE {f}"))
+            .unwrap_or_default();
+        let order_sql = order_by.unwrap_or("rid ASC");
+        let sql = format!(
+            "SELECT * FROM {collection}{where_sql} ORDER BY {order_sql} LIMIT {limit}"
+        );
+        let qr = rt.query(&sql).map_err(|e| err("QUERY_ERROR", e))?;
+        let out = PyDict::new(py);
+        out.set_item("items", rows_to_pylist(py, &qr.rows)?)?;
+        Ok(out)
+    }
+
+    fn patch<'py>(
+        &self,
+        py: Python<'py>,
+        collection: &str,
+        rid: &str,
+        patch: &Bound<'py, PyDict>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let rt = self.embedded()?;
+        if patch.is_empty() {
+            return self.get(py, collection, rid);
+        }
+        let collection = sql_identifier_path(collection)?;
+        let rid_sql = sql_rid_literal(rid)?;
+        let mut assignments = Vec::with_capacity(patch.len());
+        for (key, value) in patch.iter() {
+            let field: String = key
+                .extract()
+                .map_err(|_| err("INVALID_ARGUMENT", "patch field names must be strings"))?;
+            if field.contains('/') {
+                return Err(err(
+                    "INVALID_ARGUMENT",
+                    "documents.patch currently accepts top-level document fields",
+                ));
+            }
+            assignments.push(format!(
+                "{} = {}",
+                sql_identifier(&field)?,
+                sql_value_literal(py, &value)?
+            ));
+        }
+        let sql = format!(
+            "UPDATE {collection} DOCUMENTS SET {} WHERE rid = {rid_sql} RETURNING *",
+            assignments.join(", ")
+        );
+        let qr = rt.query(&sql).map_err(|e| err("QUERY_ERROR", e))?;
+        let row = qr
+            .rows
+            .first()
+            .ok_or_else(|| err("NOT_FOUND", format!("document {rid} was not found")))?;
+        row_to_pydict(py, row)
+    }
+
+    fn delete<'py>(
+        &self,
+        py: Python<'py>,
+        collection: &str,
+        rid: &str,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let rt = self.embedded()?;
+        let collection = sql_identifier_path(collection)?;
+        let rid = sql_rid_literal(rid)?;
+        let qr = rt
+            .query(&format!("DELETE FROM {collection} WHERE rid = {rid}"))
+            .map_err(|e| err("QUERY_ERROR", e))?;
+        let out = PyDict::new(py);
+        out.set_item("affected", qr.affected)?;
+        Ok(out)
+    }
+}
+
+impl DocumentClient {
+    #[cfg(feature = "embedded")]
+    fn embedded(&self) -> PyResult<&EmbeddedRuntime> {
+        match &self.backend {
+            HelperBackend::Embedded(rt) => Ok(rt),
+            HelperBackend::Unsupported(message) => Err(err("NOT_SUPPORTED", *message)),
+        }
+    }
+}
+
+#[pyclass]
+pub struct KvClient {
+    backend: HelperBackend,
+}
+
+#[pymethods]
+impl KvClient {
+    fn set<'py>(
+        &self,
+        py: Python<'py>,
+        collection: &str,
+        key: &str,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let rt = self.embedded()?;
+        let path = kv_path(collection, key)?;
+        let value = sql_value_literal(py, value)?;
+        let qr = rt
+            .query(&format!("KV PUT {path} = {value}"))
+            .map_err(|e| err("QUERY_ERROR", e))?;
+        let out = PyDict::new(py);
+        out.set_item("affected", qr.affected)?;
+        Ok(out)
+    }
+
+    fn get<'py>(
+        &self,
+        py: Python<'py>,
+        collection: &str,
+        key: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let rt = self.embedded()?;
+        let path = kv_path(collection, key)?;
+        let qr = rt
+            .query(&format!("KV GET {path}"))
+            .map_err(|e| err("QUERY_ERROR", e))?;
+        let row = qr
+            .rows
+            .first()
+            .ok_or_else(|| err("NOT_FOUND", format!("key {key} was not found")))?;
+        if !kv_row_exists(row) {
+            return Err(err("NOT_FOUND", format!("key {key} was not found")));
+        }
+        let value = row
+            .iter()
+            .find_map(|(name, value)| (name == "value").then_some(value))
+            .ok_or_else(|| err("INVALID_RESPONSE", "KV GET expected value column"))?;
+        kv_scalar_to_py(py, value)
+    }
+
+    fn exists<'py>(
+        &self,
+        py: Python<'py>,
+        collection: &str,
+        key: &str,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let rt = self.embedded()?;
+        let path = kv_path(collection, key)?;
+        let qr = rt
+            .query(&format!("KV GET {path}"))
+            .map_err(|e| err("QUERY_ERROR", e))?;
+        let out = PyDict::new(py);
+        out.set_item("exists", qr.rows.first().is_some_and(|row| kv_row_exists(row)))?;
+        Ok(out)
+    }
+
+    fn delete<'py>(
+        &self,
+        py: Python<'py>,
+        collection: &str,
+        key: &str,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let rt = self.embedded()?;
+        let path = kv_path(collection, key)?;
+        let qr = rt
+            .query(&format!("KV DELETE {path}"))
+            .map_err(|e| err("QUERY_ERROR", e))?;
+        let out = PyDict::new(py);
+        out.set_item("affected", qr.affected)?;
+        Ok(out)
+    }
+
+    #[pyo3(signature = (collection, *, prefix=None, limit=None))]
+    fn list<'py>(
+        &self,
+        py: Python<'py>,
+        collection: &str,
+        prefix: Option<&str>,
+        limit: Option<usize>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let rt = self.embedded()?;
+        let collection_sql = sql_identifier_path(collection)?;
+        let limit = normalize_limit(limit)?;
+        let qr = rt
+            .query(&format!(
+                "SELECT key, value FROM {collection_sql} ORDER BY key ASC LIMIT {limit}"
+            ))
+            .map_err(|e| err("QUERY_ERROR", e))?;
+        let items = PyList::empty(py);
+        for row in &qr.rows {
+            let key = row.iter().find_map(|(name, value)| {
+                (name == "key").then(|| scalar_string(value))
+            });
+            if let Some(key) = key {
+                if prefix.is_some_and(|prefix| !key.starts_with(prefix)) {
+                    continue;
+                }
+                let item = PyDict::new(py);
+                item.set_item("key", key)?;
+                if let Some(value) = row.iter().find_map(|(name, value)| {
+                    (name == "value").then_some(value)
+                }) {
+                    item.set_item("value", kv_scalar_to_py(py, value)?)?;
+                }
+                items.append(item)?;
+            }
+        }
+        let out = PyDict::new(py);
+        out.set_item("items", items)?;
+        Ok(out)
+    }
+}
+
+impl KvClient {
+    #[cfg(feature = "embedded")]
+    fn embedded(&self) -> PyResult<&EmbeddedRuntime> {
+        match &self.backend {
+            HelperBackend::Embedded(rt) => Ok(rt),
+            HelperBackend::Unsupported(message) => Err(err("NOT_SUPPORTED", *message)),
+        }
     }
 }
 
@@ -779,8 +1191,217 @@ fn scalar_to_py(py: Python<'_>, v: ScalarOut) -> PyObject {
         ScalarOut::Bool(b) => b.into_pyobject(py).unwrap().to_owned().into_any().unbind(),
         ScalarOut::Int(n) => n.into_pyobject(py).unwrap().into_any().unbind(),
         ScalarOut::Float(n) => n.into_pyobject(py).unwrap().into_any().unbind(),
-        ScalarOut::Text(s) => s.into_pyobject(py).unwrap().into_any().unbind(),
+        ScalarOut::Text(s) => {
+            if let Ok(value) = json_text_to_py(py, &s) {
+                return value.unbind();
+            }
+            s.into_pyobject(py).unwrap().into_any().unbind()
+        }
+        ScalarOut::Json(s) => {
+            if let Ok(value) = json_text_to_py(py, &s) {
+                return value.unbind();
+            }
+            s.into_pyobject(py).unwrap().into_any().unbind()
+        }
     }
+}
+
+fn row_to_pydict<'py>(
+    py: Python<'py>,
+    row: &[(String, ScalarOut)],
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    for (col, val) in row {
+        dict.set_item(col, scalar_to_py(py, val.clone()))?;
+    }
+    Ok(dict)
+}
+
+fn rows_to_pylist<'py>(
+    py: Python<'py>,
+    rows: &[Vec<(String, ScalarOut)>],
+) -> PyResult<Bound<'py, PyList>> {
+    let list = PyList::empty(py);
+    for row in rows {
+        list.append(row_to_pydict(py, row)?)?;
+    }
+    Ok(list)
+}
+
+#[cfg(feature = "embedded")]
+fn ensure_document_collection(rt: &EmbeddedRuntime, collection: &str) -> PyResult<()> {
+    match rt.query(&format!("CREATE DOCUMENT {collection}")) {
+        Ok(_) => Ok(()),
+        Err(message) if message.contains("already exists") => Ok(()),
+        Err(message) => Err(err("QUERY_ERROR", message)),
+    }
+}
+
+#[cfg(feature = "embedded")]
+fn document_get_optional<'py>(
+    py: Python<'py>,
+    rt: &EmbeddedRuntime,
+    collection: &str,
+    rid: &str,
+) -> PyResult<Option<Bound<'py, PyDict>>> {
+    let collection = sql_identifier_path(collection)?;
+    let rid = sql_rid_literal(rid)?;
+    let sql = format!("SELECT * FROM {collection} WHERE rid = {rid} LIMIT 1");
+    let qr = rt.query(&sql).map_err(|e| err("QUERY_ERROR", e))?;
+    qr.rows
+        .first()
+        .map(|row| row_to_pydict(py, row))
+        .transpose()
+}
+
+fn normalize_limit(limit: Option<usize>) -> PyResult<usize> {
+    match limit {
+        Some(0) => Err(err("INVALID_ARGUMENT", "limit must be a positive integer")),
+        Some(value) => Ok(value),
+        None => Ok(100),
+    }
+}
+
+fn sql_identifier_path(value: &str) -> PyResult<String> {
+    value
+        .split('.')
+        .map(sql_identifier)
+        .collect::<PyResult<Vec<_>>>()
+        .map(|parts| parts.join("."))
+}
+
+fn sql_identifier(value: &str) -> PyResult<String> {
+    if value.is_empty()
+        || !value
+            .chars()
+            .next()
+            .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+        || !value
+            .chars()
+            .all(|c| c == '_' || c.is_ascii_alphanumeric())
+    {
+        return Err(err(
+            "INVALID_ARGUMENT",
+            format!("invalid SQL identifier {value:?}"),
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn sql_rid_literal(value: &str) -> PyResult<String> {
+    value
+        .parse::<u64>()
+        .map(|n| n.to_string())
+        .map_err(|_| err("INVALID_ARGUMENT", "rid must be a numeric string"))
+}
+
+fn sql_json_literal(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<String> {
+    let json = py.import("json")?;
+    let rendered: String = json.call_method1("dumps", (value,))?.extract()?;
+    Ok(sql_string_literal(&rendered))
+}
+
+fn sql_value_literal(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<String> {
+    if value.is_none() {
+        return Ok("NULL".to_string());
+    }
+    let type_name = value
+        .get_type()
+        .name()
+        .ok()
+        .map(|n| n.to_string())
+        .unwrap_or_default();
+    if type_name == "bool" {
+        if let Ok(b) = value.extract::<bool>() {
+            return Ok(if b { "true" } else { "false" }.to_string());
+        }
+    }
+    if value.downcast::<pyo3::types::PyFloat>().is_err() {
+        if let Ok(i) = value.extract::<i64>() {
+            return Ok(i.to_string());
+        }
+        if let Ok(u) = value.extract::<u64>() {
+            return Ok(u.to_string());
+        }
+    }
+    if let Ok(f) = value.extract::<f64>() {
+        return Ok(f.to_string());
+    }
+    if let Ok(s) = value.extract::<String>() {
+        return Ok(sql_string_literal(&s));
+    }
+    if value.downcast::<PyDict>().is_ok() || value.downcast::<PyList>().is_ok() {
+        return sql_json_literal(py, value);
+    }
+    Err(err(
+        "INVALID_ARGUMENT",
+        "value must be None, bool, int, float, str, list, or dict",
+    ))
+}
+
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn kv_path(collection: &str, key: &str) -> PyResult<String> {
+    Ok(format!(
+        "{}.{}",
+        sql_identifier_path(collection)?,
+        kv_key_segment(key)
+    ))
+}
+
+fn kv_key_segment(key: &str) -> String {
+    if !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c == '_' || c.is_ascii_alphanumeric())
+    {
+        key.to_string()
+    } else {
+        sql_string_literal(key)
+    }
+}
+
+fn scalar_string(value: &ScalarOut) -> String {
+    match value {
+        ScalarOut::Null => String::new(),
+        ScalarOut::Bool(value) => value.to_string(),
+        ScalarOut::Int(value) => value.to_string(),
+        ScalarOut::Float(value) => value.to_string(),
+        ScalarOut::Text(value) | ScalarOut::Json(value) => value.clone(),
+    }
+}
+
+fn kv_scalar_to_py<'py>(
+    py: Python<'py>,
+    value: &ScalarOut,
+) -> PyResult<Bound<'py, PyAny>> {
+    match value {
+        ScalarOut::Text(text) => {
+            json_text_to_py(py, text)
+                .or_else(|_| Ok(text.as_str().into_pyobject(py).unwrap().into_any()))
+        }
+        ScalarOut::Json(text) => json_text_to_py(py, text)
+            .or_else(|_| Ok(text.as_str().into_pyobject(py).unwrap().into_any())),
+        other => Ok(scalar_to_py(py, other.clone()).into_bound(py)),
+    }
+}
+
+fn kv_row_exists(row: &[(String, ScalarOut)]) -> bool {
+    row.iter().any(|(name, value)| {
+        name == "rid" && !matches!(value, ScalarOut::Null)
+    })
+}
+
+fn json_text_to_py<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyAny>> {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
+        return Err(err("INVALID_ARGUMENT", "not JSON object or array text"));
+    }
+    let json = serde_json::from_str::<serde_json::Value>(text)
+        .map_err(|e| err("INVALID_ARGUMENT", e.to_string()))?;
+    json_value_to_py(py, &json)
 }
 
 // -----------------------------------------------------------------------
@@ -916,7 +1537,19 @@ fn json_value_to_py<'py>(py: Python<'py>, v: &serde_json::Value) -> PyResult<Bou
             }
         }
         serde_json::Value::String(s) => s.as_str().into_pyobject(py).unwrap().into_any(),
-        // For complex values, fall back to the JSON text representation.
-        other => other.to_string().into_pyobject(py).unwrap().into_any(),
+        serde_json::Value::Array(values) => {
+            let list = PyList::empty(py);
+            for item in values {
+                list.append(json_value_to_py(py, item)?)?;
+            }
+            list.into_any()
+        }
+        serde_json::Value::Object(map) => {
+            let dict = PyDict::new(py);
+            for (key, value) in map {
+                dict.set_item(key, json_value_to_py(py, value)?)?;
+            }
+            dict.into_any()
+        }
     })
 }

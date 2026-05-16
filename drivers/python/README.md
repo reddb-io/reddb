@@ -21,7 +21,17 @@ db = reddb.connect("memory://")
 # or:  reddb.connect("file:///var/lib/reddb/data.rdb")
 
 db.insert("users", {"name": "Alice", "age": 30})
-db.bulk_insert("users", [{"name": "Bob"}, {"name": "Carol"}])
+inserted = db.bulk_insert("users", [{"name": "Bob"}, {"name": "Carol"}])
+print(inserted["rids"])
+
+doc = db.documents.insert("profiles", {
+    "name": "Hansel",
+    "details": {"trail": "crumbs"},
+})
+print(db.documents.get("profiles", str(doc["rid"])))
+
+db.kv.set("settings", "characters:hansel", {"role": "finder"})
+print(db.kv.get("settings", "characters:hansel"))
 
 result = db.query("SELECT * FROM users")
 for row in result["rows"]:
@@ -126,17 +136,47 @@ db.query(sql: str, *params)                      -> {"statement", "affected", "c
 db.query(sql: str, params=[...] | (...))         -> {"statement", "affected", "columns", "rows"}
 db.execute(sql: str, *params)                    -> {"statement", "affected", "columns", "rows"}
 db.execute(sql: str, params=[...] | (...))       -> {"statement", "affected", "columns", "rows"}
-db.insert(collection: str, payload: dict)        -> {"affected"}
-db.bulk_insert(collection: str, payloads: list[dict]) -> {"affected"}
+db.insert(collection: str, payload: dict)        -> {"affected", "rid", "id"}
+db.bulk_insert(collection: str, payloads: list[dict]) -> {"affected", "rids", "ids"}
+db.get(collection: str, rid: str)                -> item | None
+db.exists(collection: str, rid: str)             -> {"exists"}
+db.list(collection: str, *, limit, filter, order_by) -> {"items"}
 db.delete(collection: str, rid: str)             -> {"affected"}
+db.documents.insert(collection: str, document: dict) -> {"affected", "rid", "item"}
+db.documents.get(collection: str, rid: str)      -> item
+db.documents.list(collection: str, *, limit, filter, order_by) -> {"items"}
+db.documents.patch(collection: str, rid: str, patch: dict) -> item
+db.documents.delete(collection: str, rid: str)   -> {"affected"}
+db.kv.set(collection: str, key: str, value)      -> {"affected"}
+db.kv.get(collection: str, key: str)             -> value
+db.kv.exists(collection: str, key: str)          -> {"exists"}
+db.kv.delete(collection: str, key: str)          -> {"affected"}
+db.kv.list(collection: str, *, prefix, limit)    -> {"items"}
 db.health()                                      -> {"ok": True, "version": str}
 db.version()                                     -> {"version": str, "protocol": "1.0"}
 db.close()                                       -> None
 ```
 
-`payload` values must be `None`, `bool`, `int`, `float` or `str`. Nested
-dicts/lists are not yet supported as field values — wrap them in a JSON string
-if you need to round-trip them.
+Row `payload` values must be `None`, `bool`, `int`, `float` or `str`.
+Document and KV helpers accept JSON-compatible nested dicts/lists. Public
+identity is always `rid`; `id` and `ids` are compatibility aliases on row
+insert results only.
+
+Helper availability:
+
+| Helper group | `memory://` / `file://` | `grpc://` |
+|--------------|--------------------------|-----------|
+| query/execute without params | supported | supported |
+| query/execute with params | supported | raises `PARAMS_UNSUPPORTED` |
+| row insert/bulk/get/list/delete | supported | supported except parameterized internals |
+| documents | supported | raises `NOT_SUPPORTED`; use `query()` until remote helper parity lands |
+| kv | supported | raises `NOT_SUPPORTED`; use `query()` until remote helper parity lands |
+
+Conformance command:
+
+```bash
+python -m pytest drivers/python/tests/test_smoke.py drivers/python/tests/test_helpers.py
+```
 
 ### Low-level (advanced)
 
