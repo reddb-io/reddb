@@ -104,8 +104,8 @@ pub mod prelude {
 }
 
 pub use crate::api::{
-    Capability, CapabilitySet, CatalogService, CatalogSnapshot, CollectionStats, DataOps,
-    QueryPlanner, RedDBError, RedDBOptions, RedDBResult, SchemaManifest, StorageMode,
+    tier_wiring, Capability, CapabilitySet, CatalogService, CatalogSnapshot, CollectionStats,
+    DataOps, QueryPlanner, RedDBError, RedDBOptions, RedDBResult, SchemaManifest, StorageMode,
     DEFAULT_EXPORT_RETENTION, DEFAULT_SNAPSHOT_RETENTION, REDDB_FORMAT_VERSION,
     REDDB_PROTOCOL_VERSION,
 };

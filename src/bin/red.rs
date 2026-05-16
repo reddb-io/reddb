@@ -956,17 +956,22 @@ fn main() {
             let uptime_ms = now_ms.saturating_sub(stats.started_at_unix_ms);
             let journal_enabled = reddb::seqn_journal_enabled();
             let journal_retention = reddb::seqn_journal_retention();
+            let (audit_dest, slow_dest) = reddb::tier_wiring::current_log_destinations();
+            let audit_desc = audit_dest.describe();
+            let slow_desc = slow_dest.describe();
             if json_mode {
                 json_ok(
                     "status",
                     &format!(
-                        "{{\"uptime_ms\":{},\"collections\":{},\"entities\":{},\"pid\":{},\"seqn_journal\":{{\"enabled\":{},\"retention\":{}}}}}",
+                        "{{\"uptime_ms\":{},\"collections\":{},\"entities\":{},\"pid\":{},\"seqn_journal\":{{\"enabled\":{},\"retention\":{}}},\"logs\":{{\"audit\":\"{}\",\"slow\":\"{}\"}}}}",
                         uptime_ms,
                         stats.store.collection_count,
                         stats.store.total_entities,
                         stats.system.pid,
                         journal_enabled,
                         journal_retention,
+                        audit_desc.replace('\\', "\\\\").replace('"', "\\\""),
+                        slow_desc.replace('\\', "\\\\").replace('"', "\\\""),
                     ),
                 );
             } else {
@@ -981,6 +986,8 @@ fn main() {
                     if journal_enabled { "enabled" } else { "disabled" },
                     journal_retention,
                 );
+                println!("audit_log:   {}", audit_desc);
+                println!("slow_log:    {}", slow_desc);
             }
         }
 
