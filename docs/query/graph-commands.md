@@ -113,11 +113,15 @@ Ordering metrics: `size`, `component_size`.
 
 ## GRAPH CYCLES
 
-Detect cycles:
+Detect cycles up to a maximum length (default `10` when omitted):
 
 ```sql
-GRAPH CYCLES MAX_LENGTH 10 MAX_CYCLES 50
+GRAPH CYCLES MAX_LENGTH 10
 ```
+
+> [!NOTE]
+> `MAX_CYCLES n` is **not** parsed today. Track [#465](https://github.com/reddb-io/reddb/issues/465)
+> for the result-cap form.
 
 ## GRAPH CLUSTERING
 
@@ -127,13 +131,10 @@ Compute the clustering coefficient:
 GRAPH CLUSTERING
 ```
 
-## GRAPH HITS
-
-Compute hub and authority scores (HITS algorithm):
-
-```sql
-GRAPH HITS
-```
+> [!NOTE]
+> `GRAPH HITS` (hub/authority scoring) is **not** parsed today. Use
+> `GRAPH CENTRALITY ALGORITHM pagerank` for influence ranking until a HITS
+> grammar is wired up.
 
 ## GRAPH TOPOLOGICAL_SORT
 
