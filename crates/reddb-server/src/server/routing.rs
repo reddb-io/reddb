@@ -153,6 +153,7 @@ impl RedDBServer {
             // Auth endpoints
             ("POST", "/auth/bootstrap") => self.handle_auth_bootstrap(body),
             ("POST", "/auth/login") => self.handle_auth_login(body),
+            ("POST", "/v1/_admin/system-users") => self.handle_admin_create_system_user(body),
             ("POST", "/auth/users") => self.handle_auth_create_user(&headers, body, None),
             ("GET", "/auth/users") => self.handle_auth_list_users(&headers, &query),
             ("POST", "/auth/api-keys") => self.handle_auth_create_api_key(body),
@@ -1494,7 +1495,9 @@ impl RedDBServer {
         // dev installs and dashboards keep working; once set, every
         // hit needs `Authorization: Bearer <token>` with a
         // constant-time match.
-        let is_admin_surface = path.starts_with("/admin/") || path == "/metrics";
+        let requires_admin_token = path.starts_with("/v1/_admin/");
+        let is_admin_surface =
+            path.starts_with("/admin/") || requires_admin_token || path == "/metrics";
         if is_admin_surface {
             if let Some(expected) = read_admin_token() {
                 let presented = headers
@@ -1508,6 +1511,9 @@ impl RedDBServer {
                 // chain. Operators want /admin/* to keep working when
                 // the user-auth backend is down for maintenance.
                 return true;
+            }
+            if requires_admin_token {
+                return false;
             }
         }
 
@@ -1688,6 +1694,14 @@ mod tests {
         }
     }
 
+    fn request_with_bearer(method: &str, path: &str, body: Vec<u8>, token: &str) -> HttpRequest {
+        let mut request = request_with(method, path, body);
+        request
+            .headers
+            .insert("authorization".to_string(), format!("Bearer {token}"));
+        request
+    }
+
     #[test]
     fn deprecated_catalog_endpoint_returns_deprecation_headers() {
         let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
@@ -1716,6 +1730,51 @@ mod tests {
             .extra_headers
             .iter()
             .all(|(name, _)| *name != "Deprecation" && *name != "Sunset"));
+    }
+
+    #[test]
+    fn admin_system_users_requires_shared_secret_and_marks_user_system_owned() {
+        let previous = std::env::var_os("RED_ADMIN_TOKEN");
+        std::env::set_var("RED_ADMIN_TOKEN", "admin-secret");
+
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let auth = std::sync::Arc::new(crate::auth::AuthStore::new(crate::auth::AuthConfig {
+            enabled: true,
+            require_auth: true,
+            ..crate::auth::AuthConfig::default()
+        }));
+        let server = RedDBServer::new(runtime).with_auth(std::sync::Arc::clone(&auth));
+        let body =
+            br#"{"username":"system","password":"pw","role":"admin","tenant_id":"acme"}"#.to_vec();
+
+        let unauthorized = server.route(request_with(
+            "POST",
+            "/v1/_admin/system-users",
+            body.clone(),
+        ));
+        assert_eq!(unauthorized.status, 401);
+
+        let created = server.route(request_with_bearer(
+            "POST",
+            "/v1/_admin/system-users",
+            body,
+            "admin-secret",
+        ));
+        assert_eq!(
+            created.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&created.body)
+        );
+
+        let user = auth.get_user(Some("acme"), "system").unwrap();
+        assert!(user.system_owned);
+        assert_eq!(user.role, crate::auth::Role::Admin);
+
+        match previous {
+            Some(value) => std::env::set_var("RED_ADMIN_TOKEN", value),
+            None => std::env::remove_var("RED_ADMIN_TOKEN"),
+        }
     }
 
     #[test]

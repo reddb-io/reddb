@@ -123,6 +123,7 @@ pub struct User {
     pub created_at: u128,
     pub updated_at: u128,
     pub enabled: bool,
+    pub system_owned: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +271,7 @@ pub enum AuthError {
     InvalidCredentials,
     KeyNotFound(String),
     RoleExceeded { requested: Role, ceiling: Role },
+    SystemUserImmutable { username: String },
     Disabled,
     Forbidden(String),
     Internal(String),
@@ -287,6 +289,9 @@ impl fmt::Display for AuthError {
                     f,
                     "requested role '{requested}' exceeds ceiling '{ceiling}'"
                 )
+            }
+            Self::SystemUserImmutable { username } => {
+                write!(f, "system-owned user is immutable: {username}")
             }
             Self::Disabled => write!(f, "authentication is disabled"),
             Self::Forbidden(msg) => write!(f, "forbidden: {msg}"),
