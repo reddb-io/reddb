@@ -13,7 +13,7 @@
 //! can target any tenant.
 
 use super::*;
-use crate::auth::UserId;
+use crate::auth::{AuthError, UserId};
 
 /// Resolved caller for an admin-only auth endpoint.
 struct AuthCaller {
@@ -109,6 +109,63 @@ impl RedDBServer {
                 json_response(200, JsonValue::Object(object))
             }
             Err(err) => json_error(403, err.to_string()),
+        }
+    }
+
+    /// POST /v1/_admin/system-users
+    ///
+    /// Creates an operator-owned user. Routing gates this endpoint with
+    /// `RED_ADMIN_TOKEN`; regular auth tokens are intentionally ignored.
+    /// Body: `{ "username": "system", "password": "secret", "role": "admin",
+    ///          "tenant_id": "acme" }`
+    pub(crate) fn handle_admin_create_system_user(&self, body: Vec<u8>) -> HttpResponse {
+        let auth_store = match &self.auth_store {
+            Some(store) => store,
+            None => return json_error(501, "authentication is not configured"),
+        };
+
+        let payload = match parse_json_body(&body) {
+            Ok(value) => value,
+            Err(resp) => return resp,
+        };
+
+        let username = match json_string_field(&payload, "username") {
+            Some(u) => u,
+            None => return json_error(400, "missing 'username' field"),
+        };
+        let password = match json_string_field(&payload, "password") {
+            Some(p) => p,
+            None => return json_error(400, "missing 'password' field"),
+        };
+        let role_str = json_string_field(&payload, "role").unwrap_or_else(|| "read".to_string());
+        let role = match crate::auth::Role::from_str(&role_str) {
+            Some(r) => r,
+            None => {
+                return json_error(
+                    400,
+                    format!("invalid role '{}': must be read, write, or admin", role_str),
+                )
+            }
+        };
+        let tenant_id = json_string_field(&payload, "tenant_id");
+
+        match auth_store.create_system_user(&username, &password, role, tenant_id.as_deref()) {
+            Ok(user) => {
+                let mut object = Map::new();
+                object.insert("ok".to_string(), JsonValue::Bool(true));
+                object.insert("username".to_string(), JsonValue::String(user.username));
+                object.insert("role".to_string(), JsonValue::String(user.role.to_string()));
+                object.insert("enabled".to_string(), JsonValue::Bool(user.enabled));
+                object.insert(
+                    "system_owned".to_string(),
+                    JsonValue::Bool(user.system_owned),
+                );
+                if let Some(tenant_id) = user.tenant_id {
+                    object.insert("tenant_id".to_string(), JsonValue::String(tenant_id));
+                }
+                json_response(201, JsonValue::Object(object))
+            }
+            Err(err) => json_error(400, err.to_string()),
         }
     }
 
@@ -282,6 +339,10 @@ impl RedDBServer {
                 }
                 object.insert("role".to_string(), JsonValue::String(user.role.to_string()));
                 object.insert("enabled".to_string(), JsonValue::Bool(user.enabled));
+                object.insert(
+                    "system_owned".to_string(),
+                    JsonValue::Bool(user.system_owned),
+                );
                 json_response(201, JsonValue::Object(object))
             }
             Err(err) => json_error(409, err.to_string()),
@@ -337,6 +398,7 @@ impl RedDBServer {
                 }
                 obj.insert("role".to_string(), JsonValue::String(u.role.to_string()));
                 obj.insert("enabled".to_string(), JsonValue::Bool(u.enabled));
+                obj.insert("system_owned".to_string(), JsonValue::Bool(u.system_owned));
                 obj.insert(
                     "created_at".to_string(),
                     JsonValue::Number(u.created_at as f64),
@@ -419,6 +481,7 @@ impl RedDBServer {
                 );
                 json_ok(format!("user '{}' deleted", principal))
             }
+            Err(err @ AuthError::SystemUserImmutable { .. }) => json_error(409, err.to_string()),
             Err(err) => json_error(404, err.to_string()),
         }
     }
@@ -515,6 +578,7 @@ impl RedDBServer {
 
         match auth_store.change_password(&username, &old_password, &new_password) {
             Ok(()) => json_ok("password changed"),
+            Err(err @ AuthError::SystemUserImmutable { .. }) => json_error(409, err.to_string()),
             Err(err) => json_error(400, err.to_string()),
         }
     }
