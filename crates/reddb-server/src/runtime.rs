@@ -1174,6 +1174,11 @@ struct RuntimeInner {
     chain_tip_cache: parking_lot::Mutex<
         HashMap<String, crate::runtime::blockchain_kind::ChainTipFull>,
     >,
+    /// Issue #525 — in-memory mirror of the persisted `integrity` flag per
+    /// chain collection.  `true` means INSERTs must be rejected with
+    /// `ChainIntegrityBroken`.  Loaded lazily from `red_config` on first
+    /// access so the flag survives restart.
+    chain_integrity_broken: parking_lot::Mutex<HashMap<String, bool>>,
 }
 
 #[derive(Clone)]

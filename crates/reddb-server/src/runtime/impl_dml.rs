@@ -85,6 +85,66 @@ impl RedDBRuntime {
         Some(scanned)
     }
 
+    /// Issue #525 — walks the chain end-to-end, recomputes each block's hash
+    /// against the stored fields, and returns the verification outcome.  On
+    /// `ok == false` the integrity flag is persisted and the in-memory cache
+    /// is updated so subsequent INSERTs surface `ChainIntegrityBroken`.
+    ///
+    /// Returns `None` when the collection is absent or not a `KIND blockchain`.
+    pub fn verify_chain_for_collection(
+        &self,
+        collection: &str,
+    ) -> Option<crate::runtime::blockchain_kind::VerifyChainOutcome> {
+        let store = self.inner.db.store();
+        let outcome =
+            crate::runtime::blockchain_kind::verify_chain_outcome(&*store, collection)?;
+        if !outcome.ok {
+            crate::runtime::blockchain_kind::persist_integrity_flag(&*store, collection, true);
+            self.inner
+                .chain_integrity_broken
+                .lock()
+                .insert(collection.to_string(), true);
+        }
+        Some(outcome)
+    }
+
+    /// Issue #525 — admin clears the `ChainIntegrityBroken` flag so the chain
+    /// accepts INSERTs again.  Returns `false` when the collection is not a
+    /// chain.
+    pub fn clear_chain_integrity_flag(&self, collection: &str) -> bool {
+        let store = self.inner.db.store();
+        if !crate::runtime::blockchain_kind::is_chain(&*store, collection) {
+            return false;
+        }
+        crate::runtime::blockchain_kind::persist_integrity_flag(&*store, collection, false);
+        self.inner
+            .chain_integrity_broken
+            .lock()
+            .insert(collection.to_string(), false);
+        true
+    }
+
+    /// Issue #525 — INSERT-time check.  Combines in-memory cache (fast path)
+    /// with a one-time scan of `red_config` on cold start so the flag survives
+    /// restart.
+    fn is_chain_integrity_broken(&self, collection: &str) -> bool {
+        {
+            let cache = self.inner.chain_integrity_broken.lock();
+            if let Some(v) = cache.get(collection) {
+                return *v;
+            }
+        }
+        let store = self.inner.db.store();
+        let persisted =
+            crate::runtime::blockchain_kind::is_integrity_broken_persisted(&*store, collection)
+                .unwrap_or(false);
+        self.inner
+            .chain_integrity_broken
+            .lock()
+            .insert(collection.to_string(), persisted);
+        persisted
+    }
+
     /// Phase 2.5.4: inject `CURRENT_TENANT()` into an INSERT when the
     /// target table is tenant-scoped and the user's column list does
     /// not already name the tenant column.
@@ -524,6 +584,16 @@ impl RedDBRuntime {
                 None
             };
             let _chain_guard = _chain_lock_arc.as_ref().map(|m| m.lock());
+
+            // Issue #525 — refuse new blocks if the chain has been marked
+            // `integrity = broken` until an admin clears the flag.
+            if chain_mode && self.is_chain_integrity_broken(&query.table) {
+                return Err(RedDBError::InvalidOperation(format!(
+                    "ChainIntegrityBroken: collection '{}' is locked until \
+                     POST /collections/{}/clear-integrity-flag is called by an admin",
+                    query.table, query.table
+                )));
+            }
 
             // Pull the tip from the in-memory cache; fall back to a one-time
             // scan if the cache hasn't seen this collection yet (cold start
