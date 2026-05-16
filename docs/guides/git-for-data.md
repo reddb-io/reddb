@@ -257,7 +257,7 @@ red vcs tag v1.0 main --path /tmp/git-for-data.rdb
 # the exact row at that moment:
 reddb -X POST /query \
   -H 'content-type: application/json' \
-  -d "{\"sql\":\"SELECT role FROM users AS OF TAG 'v1.0' WHERE _entity_id = 1\"}" | jq
+  -d "{\"sql\":\"SELECT role FROM users AS OF TAG 'v1.0' WHERE rid = 1\"}" | jq
 ```
 
 The scanner installs the MVCC snapshot pinned by the `v1.0` tag
