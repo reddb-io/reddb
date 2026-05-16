@@ -63,6 +63,28 @@ struct MaterializedUpdateAssignments {
 }
 
 impl RedDBRuntime {
+    /// Issue #524 — public read of the in-memory chain tip. Returns `None`
+    /// when the collection is not a chain or has no rows (pre-genesis). On a
+    /// cold cache the first call falls back to a one-time scan so the HTTP
+    /// `GET /collections/:name/chain-tip` handler stays consistent with the
+    /// INSERT path after a restart.
+    pub fn chain_tip_for_collection(
+        &self,
+        collection: &str,
+    ) -> Option<crate::runtime::blockchain_kind::ChainTipFull> {
+        let store = self.inner.db.store();
+        if !crate::runtime::blockchain_kind::is_chain(&*store, collection) {
+            return None;
+        }
+        let mut cache = self.inner.chain_tip_cache.lock();
+        if let Some(existing) = cache.get(collection) {
+            return Some(existing.clone());
+        }
+        let scanned = crate::runtime::blockchain_kind::chain_tip_full(&*store, collection)?;
+        cache.insert(collection.to_string(), scanned.clone());
+        Some(scanned)
+    }
+
     /// Phase 2.5.4: inject `CURRENT_TENANT()` into an INSERT when the
     /// target table is tenant-scoped and the user's column list does
     /// not already name the tenant column.
@@ -485,13 +507,44 @@ impl RedDBRuntime {
                 Some(crate::catalog::CollectionModel::TimeSeries)
             )
         {
-            // Issue #523: blockchain collections auto-fill the reserved
-            // chain columns. We compute the next-block fields per row,
-            // threading the local tip forward so a batch INSERT produces a
-            // contiguous chain in a single statement.
+            // Issue #523 + #524: blockchain collections seal each row into the
+            // chain. When the caller omits the reserved columns, the engine
+            // auto-fills (#523). When the caller supplies any reserved column,
+            // the values are validated against the current tip and a mismatch
+            // surfaces a `BlockchainConflict:` error mapped to HTTP 409 (#524).
+            //
+            // The whole batch runs under a per-collection chain lock so two
+            // concurrent submitters can't both bind to the same prev_hash —
+            // the loser observes the advanced tip and gets 409 with the new
+            // tip so it can retry.
             let chain_mode = crate::runtime::blockchain_kind::is_chain(&*store, &query.table);
-            let mut chain_prev =
-                crate::runtime::blockchain_kind::chain_tip(&*store, &query.table);
+            let _chain_lock_arc: Option<Arc<parking_lot::Mutex<()>>> = if chain_mode {
+                Some(self.inner.rmw_locks.lock_for(&query.table, "__chain__"))
+            } else {
+                None
+            };
+            let _chain_guard = _chain_lock_arc.as_ref().map(|m| m.lock());
+
+            // Pull the tip from the in-memory cache; fall back to a one-time
+            // scan if the cache hasn't seen this collection yet (cold start
+            // after restart). Cache is updated below as rows are sealed.
+            let mut chain_tip_full: Option<
+                crate::runtime::blockchain_kind::ChainTipFull,
+            > = if chain_mode {
+                let mut cache = self.inner.chain_tip_cache.lock();
+                if let Some(existing) = cache.get(&query.table) {
+                    Some(existing.clone())
+                } else if let Some(scanned) =
+                    crate::runtime::blockchain_kind::chain_tip_full(&*store, &query.table)
+                {
+                    cache.insert(query.table.clone(), scanned.clone());
+                    Some(scanned)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             let mut rows = Vec::with_capacity(effective_rows.len());
             for row_values in &effective_rows {
@@ -505,23 +558,191 @@ impl RedDBRuntime {
                 let (mut fields, mut metadata) =
                     split_insert_metadata(self, &query.columns, row_values)?;
                 if chain_mode {
-                    fields.retain(|(k, _)| {
-                        !crate::runtime::blockchain_kind::RESERVED_COLUMNS
-                            .contains(&k.as_str())
-                    });
+                    use crate::runtime::blockchain_kind::{
+                        chain_conflict_error, COL_BLOCK_HEIGHT, COL_HASH, COL_PREV_HASH,
+                        COL_TIMESTAMP, RESERVED_COLUMNS,
+                    };
+                    let supplied_height = fields
+                        .iter()
+                        .find(|(k, _)| k == COL_BLOCK_HEIGHT)
+                        .map(|(_, v)| v.clone());
+                    let supplied_prev = fields
+                        .iter()
+                        .find(|(k, _)| k == COL_PREV_HASH)
+                        .map(|(_, v)| v.clone());
+                    let supplied_ts = fields
+                        .iter()
+                        .find(|(k, _)| k == COL_TIMESTAMP)
+                        .map(|(_, v)| v.clone());
+                    let supplied_hash =
+                        fields.iter().any(|(k, _)| k == COL_HASH);
+                    let user_supplied_any = supplied_height.is_some()
+                        || supplied_prev.is_some()
+                        || supplied_ts.is_some()
+                        || supplied_hash;
+
+                    fields.retain(|(k, _)| !RESERVED_COLUMNS.contains(&k.as_str()));
                     let payload =
                         crate::runtime::blockchain_kind::canonical_payload(&fields);
-                    let (prev_hash, height) = chain_prev.next();
-                    let ts = crate::runtime::blockchain_kind::now_ms();
+
+                    let (tip_prev_hash, tip_next_height) = match &chain_tip_full {
+                        Some(t) => (t.hash, t.height + 1),
+                        None => (
+                            crate::storage::blockchain::GENESIS_PREV_HASH,
+                            0u64,
+                        ),
+                    };
+                    let server_now = crate::runtime::blockchain_kind::now_ms();
+
+                    let (use_prev, use_height, use_ts) = if user_supplied_any {
+                        // Caller is participating in the chain protocol —
+                        // every field must be supplied AND match the tip.
+                        if supplied_hash {
+                            return Err(chain_conflict_error(
+                                tip_next_height.saturating_sub(1),
+                                tip_prev_hash,
+                                chain_tip_full
+                                    .as_ref()
+                                    .map(|t| t.timestamp_ms)
+                                    .unwrap_or(0),
+                                server_now,
+                                "hash column is engine-computed and cannot be supplied",
+                            ));
+                        }
+                        let caller_prev = match &supplied_prev {
+                            Some(Value::Blob(b)) if b.len() == 32 => {
+                                let mut a = [0u8; 32];
+                                a.copy_from_slice(b);
+                                a
+                            }
+                            Some(Value::Text(s)) if s.len() == 64 => {
+                                // Accept hex-encoded prev_hash so JSON / SQL
+                                // callers without literal-blob syntax can
+                                // still participate in the chain protocol.
+                                let mut a = [0u8; 32];
+                                let mut ok = true;
+                                for i in 0..32 {
+                                    let pair = &s.as_ref()[i * 2..i * 2 + 2];
+                                    match u8::from_str_radix(pair, 16) {
+                                        Ok(byte) => a[i] = byte,
+                                        Err(_) => {
+                                            ok = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if !ok {
+                                    return Err(chain_conflict_error(
+                                        tip_next_height.saturating_sub(1),
+                                        tip_prev_hash,
+                                        chain_tip_full
+                                            .as_ref()
+                                            .map(|t| t.timestamp_ms)
+                                            .unwrap_or(0),
+                                        server_now,
+                                        "prev_hash is not valid hex",
+                                    ));
+                                }
+                                a
+                            }
+                            _ => {
+                                return Err(chain_conflict_error(
+                                    tip_next_height.saturating_sub(1),
+                                    tip_prev_hash,
+                                    chain_tip_full
+                                        .as_ref()
+                                        .map(|t| t.timestamp_ms)
+                                        .unwrap_or(0),
+                                    server_now,
+                                    "prev_hash missing or not a 32-byte Blob",
+                                ));
+                            }
+                        };
+                        if caller_prev != tip_prev_hash {
+                            return Err(chain_conflict_error(
+                                tip_next_height.saturating_sub(1),
+                                tip_prev_hash,
+                                chain_tip_full
+                                    .as_ref()
+                                    .map(|t| t.timestamp_ms)
+                                    .unwrap_or(0),
+                                server_now,
+                                "prev_hash does not match current tip",
+                            ));
+                        }
+                        let caller_height = match &supplied_height {
+                            Some(Value::UnsignedInteger(v)) => *v,
+                            Some(Value::Integer(v)) if *v >= 0 => *v as u64,
+                            _ => {
+                                return Err(chain_conflict_error(
+                                    tip_next_height.saturating_sub(1),
+                                    tip_prev_hash,
+                                    chain_tip_full
+                                        .as_ref()
+                                        .map(|t| t.timestamp_ms)
+                                        .unwrap_or(0),
+                                    server_now,
+                                    "block_height missing or not an unsigned integer",
+                                ));
+                            }
+                        };
+                        if caller_height != tip_next_height {
+                            return Err(chain_conflict_error(
+                                tip_next_height.saturating_sub(1),
+                                tip_prev_hash,
+                                chain_tip_full
+                                    .as_ref()
+                                    .map(|t| t.timestamp_ms)
+                                    .unwrap_or(0),
+                                server_now,
+                                "block_height does not match tip+1",
+                            ));
+                        }
+                        let caller_ts = match &supplied_ts {
+                            Some(Value::UnsignedInteger(v)) => *v,
+                            Some(Value::Integer(v)) if *v >= 0 => *v as u64,
+                            _ => {
+                                return Err(chain_conflict_error(
+                                    tip_next_height.saturating_sub(1),
+                                    tip_prev_hash,
+                                    chain_tip_full
+                                        .as_ref()
+                                        .map(|t| t.timestamp_ms)
+                                        .unwrap_or(0),
+                                    server_now,
+                                    "timestamp missing or not an unsigned integer",
+                                ));
+                            }
+                        };
+                        let drift = (caller_ts as i128) - (server_now as i128);
+                        if drift.abs() > 60_000 {
+                            return Err(chain_conflict_error(
+                                tip_next_height.saturating_sub(1),
+                                tip_prev_hash,
+                                chain_tip_full
+                                    .as_ref()
+                                    .map(|t| t.timestamp_ms)
+                                    .unwrap_or(0),
+                                server_now,
+                                "timestamp outside ±60s of server_time",
+                            ));
+                        }
+                        (caller_prev, caller_height, caller_ts)
+                    } else {
+                        (tip_prev_hash, tip_next_height, server_now)
+                    };
+
                     let (reserved, new_hash) =
                         crate::runtime::blockchain_kind::make_block_reserved_fields(
-                            prev_hash, height, ts, &payload,
+                            use_prev, use_height, use_ts, &payload,
                         );
                     fields.extend(reserved);
-                    chain_prev = crate::runtime::blockchain_kind::ChainTip {
-                        height: Some(height),
-                        hash: new_hash,
-                    };
+                    chain_tip_full =
+                        Some(crate::runtime::blockchain_kind::ChainTipFull {
+                            height: use_height,
+                            hash: new_hash,
+                            timestamp_ms: use_ts,
+                        });
                 }
                 merge_with_clauses(
                     &mut metadata,
@@ -546,6 +767,18 @@ impl RedDBRuntime {
                 suppress_events: query.suppress_events,
             })?;
             inserted_count = outputs.len() as u64;
+
+            // Chain mode: commit the new tip to the in-memory cache only after
+            // the batch persisted successfully. If the batch threw mid-way the
+            // cache stays on the previous tip and the chain lock releases.
+            if chain_mode {
+                if let Some(new_tip) = chain_tip_full.as_ref() {
+                    self.inner
+                        .chain_tip_cache
+                        .lock()
+                        .insert(query.table.clone(), new_tip.clone());
+                }
+            }
 
             // Hypertable chunk routing: if this table was declared via
             // CREATE HYPERTABLE, register each row's time-column value

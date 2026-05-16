@@ -71,6 +71,65 @@ pub fn is_chain(store: &UnifiedStore, collection: &str) -> bool {
     }
 }
 
+/// Full chain tip including timestamp. Returned by `chain_tip_full` and
+/// `GET /collections/:name/chain-tip`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainTipFull {
+    pub height: u64,
+    pub hash: [u8; 32],
+    pub timestamp_ms: u64,
+}
+
+/// Scan-based tip with timestamp. `None` when the collection has no rows
+/// (pre-genesis). Used by the chain-tip endpoint and the chain-INSERT
+/// validation path (#524).
+pub fn chain_tip_full(store: &UnifiedStore, collection: &str) -> Option<ChainTipFull> {
+    let manager = store.get_collection(collection)?;
+    let mut best: Option<ChainTipFull> = None;
+    for entity in manager.query_all(|_| true) {
+        let crate::storage::unified::EntityData::Row(row) = &entity.data else {
+            continue;
+        };
+        let Some(named) = &row.named else { continue };
+        let height = match named.get(COL_BLOCK_HEIGHT) {
+            Some(Value::UnsignedInteger(v)) => *v,
+            Some(Value::Integer(v)) if *v >= 0 => *v as u64,
+            _ => continue,
+        };
+        let hash = match named.get(COL_HASH) {
+            Some(Value::Blob(b)) if b.len() == 32 => {
+                let mut out = [0u8; 32];
+                out.copy_from_slice(b);
+                out
+            }
+            _ => continue,
+        };
+        let timestamp_ms = match named.get(COL_TIMESTAMP) {
+            Some(Value::UnsignedInteger(v)) => *v,
+            Some(Value::Integer(v)) if *v >= 0 => *v as u64,
+            _ => 0,
+        };
+        match &best {
+            None => {
+                best = Some(ChainTipFull {
+                    height,
+                    hash,
+                    timestamp_ms,
+                });
+            }
+            Some(cur) if height > cur.height => {
+                best = Some(ChainTipFull {
+                    height,
+                    hash,
+                    timestamp_ms,
+                });
+            }
+            _ => {}
+        }
+    }
+    best
+}
+
 /// Scan the collection for the highest `block_height` and return its row's
 /// `hash`. O(n) — replaced by a cached tip in a later iteration.
 pub fn chain_tip(store: &UnifiedStore, collection: &str) -> ChainTip {
@@ -111,6 +170,35 @@ pub fn chain_tip(store: &UnifiedStore, collection: &str) -> ChainTip {
         },
         None => ChainTip::empty(),
     }
+}
+
+fn hex32(bytes: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// Build the `BlockchainConflict:<json>` error payload mapped to HTTP 409
+/// (#524). The JSON body carries the current tip so the caller can retry
+/// with the right `prev_hash` / `block_height`.
+pub fn chain_conflict_error(
+    tip_height: u64,
+    tip_hash: [u8; 32],
+    tip_timestamp_ms: u64,
+    server_now_ms: u64,
+    reason: &str,
+) -> crate::api::RedDBError {
+    let body = format!(
+        "{{\"block_height\":{},\"hash\":\"{}\",\"timestamp\":{},\"server_time\":{},\"reason\":\"{}\"}}",
+        tip_height,
+        hex32(&tip_hash),
+        tip_timestamp_ms,
+        server_now_ms,
+        reason.replace('"', "'")
+    );
+    crate::api::RedDBError::InvalidOperation(format!("BlockchainConflict:{body}"))
 }
 
 pub fn now_ms() -> u64 {
