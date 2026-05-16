@@ -29,3 +29,13 @@ Parse and validate explicit item-kind update targets: `ROWS`, `DOCUMENTS`, `KV`,
 - 466-rid-row-envelope-tracer.md
 - 468-document-kv-rid-envelope-tracer.md
 - 469-graph-rid-from-rid-to-rid-tracer.md
+
+## Progress note (2026-05-16)
+
+Duplicate of done issue `issues/done/501-gh-explicit-update-target-parser-validation.md`.
+Implementation already on main:
+- Parser: `crates/reddb-server/src/storage/query/parser/dml.rs` accepts `UPDATE <coll> ROWS|DOCUMENTS|KV|NODES|EDGES SET ...`, preserves omitted-target row behavior.
+- Runtime validation: `crates/reddb-server/src/runtime/impl_dml.rs` rejects incompatible target/model combos before mutation.
+- Tests: `tests/e2e_explicit_update_targets.rs` covers positive/negative target cases including graph NODES/EDGES and rejected cross-kind forms.
+
+Bash + git mv blocked in this session (permission denied for `cargo test` and `git mv`). Could not run feedback loops or move file to `issues/done/`. Leaving note; next iteration should `git mv` to `issues/done/`.
