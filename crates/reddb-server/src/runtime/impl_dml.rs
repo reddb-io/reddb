@@ -1129,6 +1129,7 @@ impl RedDBRuntime {
             crate::runtime::collection_contract::MutationKind::Update,
         )?;
         ensure_update_target_contract(self, &query.table, query.target)?;
+        ensure_graph_identity_update_target_allowed(query)?;
 
         // Apply RLS augmentation first so every downstream path — plain
         // UPDATE, UPDATE...RETURNING, the inner scan — observes the
@@ -1736,6 +1737,25 @@ impl RedDBRuntime {
             "runtime-dml",
         ))
     }
+}
+
+/// Reject UPDATE … NODES/EDGES that assign to graph identity/topology
+/// columns regardless of whether any row matches the WHERE clause. The
+/// per-entity guard below covers only the matched-rows case, but ADR 0019
+/// declares these columns immutable on the surface itself, so a zero-row
+/// UPDATE should still surface the same error to operators and SDKs.
+fn ensure_graph_identity_update_target_allowed(query: &UpdateQuery) -> RedDBResult<()> {
+    if !matches!(query.target, UpdateTarget::Nodes | UpdateTarget::Edges) {
+        return Ok(());
+    }
+    for (column, _) in &query.assignment_exprs {
+        if is_immutable_graph_identity_field(column) {
+            return Err(RedDBError::Query(format!(
+                "immutable graph field '{column}' cannot be updated"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn ensure_graph_identity_update_allowed(
