@@ -152,6 +152,66 @@ pub struct QueryResult {
     pub rows: Vec<Vec<(String, ValueOut)>>,
 }
 
+pub type Row = Vec<(String, ValueOut)>;
+
+#[derive(Debug, Clone, Default)]
+pub struct ListOptions<'a> {
+    pub filter: Option<&'a str>,
+    pub order_by: Option<&'a str>,
+    pub limit: Option<u64>,
+}
+
+impl<'a> ListOptions<'a> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn filter(mut self, filter: &'a str) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    pub fn order_by(mut self, order_by: &'a str) -> Self {
+        self.order_by = Some(order_by);
+        self
+    }
+
+    pub fn limit(mut self, limit: u64) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ListResult {
+    pub items: Vec<Row>,
+    pub affected: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteResult {
+    pub affected: u64,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExistsResult {
+    pub exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocumentItem {
+    pub rid: String,
+    pub fields: Row,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct KvItem {
+    pub collection: String,
+    pub key: String,
+    pub value: ValueOut,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct KvWatchEvent {
     pub key: String,

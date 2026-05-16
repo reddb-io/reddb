@@ -38,6 +38,10 @@ pub enum ErrorCode {
     NotFound,
     /// Server does not advertise support for parameterized transport frames.
     ParamsUnsupported,
+    /// Helper input failed local validation before contacting the server.
+    InvalidArgument,
+    /// Server-side response did not match the helper contract.
+    InvalidResponse,
 }
 
 impl ErrorCode {
@@ -56,6 +60,8 @@ impl ErrorCode {
             ErrorCode::Engine => "ENGINE_ERROR",
             ErrorCode::NotFound => "NOT_FOUND",
             ErrorCode::ParamsUnsupported => "PARAMS_UNSUPPORTED",
+            ErrorCode::InvalidArgument => "INVALID_ARGUMENT",
+            ErrorCode::InvalidResponse => "INVALID_RESPONSE",
         }
     }
 }
@@ -96,7 +102,7 @@ impl ClientError {
             ErrorCode::FeatureDisabled,
             format!(
                 "the '{feature}' feature is not enabled. Enable it in Cargo.toml: \
-                 reddb-client = {{ version = \"…\", features = [\"{feature}\"] }}"
+                 reddb-io-client = {{ version = \"…\", features = [\"{feature}\"] }}"
             ),
         )
     }

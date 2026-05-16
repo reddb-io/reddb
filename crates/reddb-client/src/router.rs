@@ -81,6 +81,10 @@ impl ClusterMembership {
         1 + self.replicas.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+
     /// All URLs in primary-then-replicas order.
     fn urls(&self) -> Vec<String> {
         let mut out = Vec::with_capacity(self.len());
@@ -289,6 +293,10 @@ impl HealthAwareRouter {
     /// Number of endpoints (primary + replicas).
     pub fn len(&self) -> usize {
         self.endpoints.lock().unwrap().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Whether `force_primary` is set.

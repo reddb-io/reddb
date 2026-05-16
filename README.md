@@ -491,7 +491,7 @@ ceremony.
 
 | Language          | Package          | Install                        | Backends                            |
 |-------------------|------------------|--------------------------------|-------------------------------------|
-| Rust              | `reddb-client`   | `cargo add reddb-client`       | embedded ✅ · gRPC ✅ · HTTP ✅      |
+| Rust              | `reddb-io-client` | `cargo add reddb-io-client`   | embedded ✅ · gRPC ✅ · HTTP ✅      |
 | Node / Bun / Deno | `@reddb-io/sdk` (npm) | `pnpm add @reddb-io/sdk`  | stdio subprocess ✅                 |
 | Python            | `reddb` (PyPI)   | `pip install reddb` *(soon)*   | embedded ✅ · gRPC ✅ · wire ✅      |
 
