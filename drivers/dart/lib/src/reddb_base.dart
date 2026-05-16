@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'conn.dart';
 import 'errors.dart';
+import 'helpers.dart';
 import 'http/client.dart';
 import 'options.dart';
 import 'redwire/conn.dart';
@@ -65,14 +66,19 @@ Future<Reddb> connect(
 /// Public façade returned by `connect()`. Thin wrapper around the
 /// underlying [Conn]; methods return raw JSON bytes for `query`/`get`,
 /// matching the JS / Python drivers' "decode at the call site" stance.
-class Reddb {
+class Reddb implements Querier {
   Reddb._(this._conn);
 
   final Conn _conn;
 
+  /// Rich SDK Helper namespaces (`documents`, `kv`, `queue`).
+  /// See `docs/clients/sdk-helper-spec.md`.
+  late final Helpers helpers = Helpers(this);
+
   /// Run a SQL string with optional positional params.
   ///
   /// Returns the raw response bytes (UTF-8 JSON).
+  @override
   Future<Uint8List> query(String sql, {List<Object?>? params}) =>
       _conn.query(sql, params: params);
 

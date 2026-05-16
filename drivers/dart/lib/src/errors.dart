@@ -76,3 +76,21 @@ class InvalidUri extends RedDBError {
 class UnsupportedScheme extends RedDBError {
   UnsupportedScheme(String message) : super('UNSUPPORTED_SCHEME', message);
 }
+
+/// Helper input failed local validation before any transport call
+/// (SDK Helper Spec `INVALID_ARGUMENT`).
+class InvalidArgument extends RedDBError {
+  InvalidArgument(String message) : super('INVALID_ARGUMENT', message);
+}
+
+/// Server returned a payload the helper cannot reconcile with the
+/// SDK Helper Spec envelopes.
+class InvalidResponse extends RedDBError {
+  InvalidResponse(String message) : super('INVALID_RESPONSE', message);
+}
+
+/// Server returned no row for an operation that requires one
+/// (`documents.get`, `documents.patch`, etc).
+class NotFound extends RedDBError {
+  NotFound(String message) : super('NOT_FOUND', message);
+}
