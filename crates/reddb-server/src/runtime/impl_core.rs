@@ -2112,11 +2112,20 @@ impl RedDBRuntime {
                     // Default audit-log path for the in-memory case
                     // sits in the system temp dir; persistent runs
                     // place it next to data.rdb.
+                    //
+                    // gh-471 iter 2: route through the resolved
+                    // `LogDestination`. Performance/Max tiers emit a
+                    // `File(...)` under `<dbname>.rdb.red/logs/`;
+                    // lower tiers / ephemeral runs report `Stderr`
+                    // and we keep the legacy file-next-to-data sink.
                     let data_path = options
                         .data_path
                         .clone()
                         .unwrap_or_else(|| std::env::temp_dir().join("reddb"));
-                    Arc::new(crate::runtime::audit_log::AuditLogger::for_data_path(
+                    let (audit_dest, _) =
+                        crate::api::tier_wiring::current_log_destinations();
+                    Arc::new(crate::runtime::audit_log::AuditLogger::for_destination(
+                        &audit_dest,
                         &data_path,
                     ))
                 },
@@ -2134,10 +2143,12 @@ impl RedDBRuntime {
                     // emitted lines are rare and complete. Operators
                     // tune via env / config matrix in a follow-up.
                     //
-                    // `data_path` points at the primary `.rdb` *file*
-                    // (mirrors AuditLogger::for_data_path), so we
-                    // anchor the slow log at its parent directory.
-                    let log_dir = options
+                    // gh-471 iter 2: same routing as the audit log —
+                    // `LogDestination::File(...)` for Performance/Max
+                    // lands under `<dbname>.rdb.red/logs/slow.log`;
+                    // lower tiers fall back to `red-slow.log` in the
+                    // data directory.
+                    let fallback_dir = options
                         .data_path
                         .as_ref()
                         .and_then(|p| p.parent().map(std::path::PathBuf::from))
@@ -2150,12 +2161,13 @@ impl RedDBRuntime {
                         .ok()
                         .and_then(|s| s.parse::<u8>().ok())
                         .unwrap_or(100);
-                    crate::telemetry::slow_query_logger::SlowQueryLogger::new(
-                        crate::telemetry::slow_query_logger::SlowQueryOpts {
-                            log_dir,
-                            threshold_ms,
-                            sample_pct,
-                        },
+                    let (_, slow_dest) =
+                        crate::api::tier_wiring::current_log_destinations();
+                    crate::telemetry::slow_query_logger::SlowQueryLogger::for_destination(
+                        &slow_dest,
+                        &fallback_dir,
+                        threshold_ms,
+                        sample_pct,
                     )
                 },
                 kv_stats: crate::runtime::KvStatsCounters::default(),
