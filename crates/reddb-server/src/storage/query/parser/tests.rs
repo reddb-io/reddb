@@ -114,6 +114,27 @@ fn test_parse_create_graph_document_and_collection_forms() {
     let bad = format!("CREATE COLLECTION sc KIND graph SIGNED_BY ('{}')", "g".repeat(64));
     assert!(parse(&bad).is_err());
 
+    // Blockchain collection kind (issue #521) — parser accepts the kind
+    // verbatim; runtime semantics ship in a later iteration. The DDL must
+    // compose with SIGNED_BY from #520.
+    let chain = parse("CREATE COLLECTION audit_log KIND blockchain").unwrap();
+    let QueryExpr::CreateCollection(chain) = chain else {
+        panic!("Expected CreateCollectionQuery");
+    };
+    assert_eq!(chain.name, "audit_log");
+    assert_eq!(chain.kind, "blockchain");
+    assert!(chain.allowed_signers.is_empty());
+
+    let pk = "33".repeat(32);
+    let sql = format!("CREATE COLLECTION audit_log KIND blockchain SIGNED_BY ('{pk}')");
+    let chain_signed = parse(&sql).unwrap();
+    let QueryExpr::CreateCollection(chain_signed) = chain_signed else {
+        panic!("Expected CreateCollectionQuery");
+    };
+    assert_eq!(chain_signed.kind, "blockchain");
+    assert_eq!(chain_signed.allowed_signers.len(), 1);
+    assert_eq!(chain_signed.allowed_signers[0], [0x33u8; 32]);
+
     let hll = parse("CREATE HLL h PRECISION 14").unwrap();
     let QueryExpr::ProbabilisticCommand(
         crate::storage::query::ast::ProbabilisticCommand::CreateHll {
