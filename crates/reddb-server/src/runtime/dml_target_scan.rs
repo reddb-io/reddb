@@ -359,6 +359,11 @@ fn entity_row_snapshot(entity: &crate::storage::UnifiedEntity) -> Option<Vec<(St
                 })?
             };
             let tenant = row.get_field("tenant_id").cloned().unwrap_or(Value::Null);
+            let kind = match row_item_kind(entity) {
+                Some(RowItemKind::Kv) => "kv",
+                Some(RowItemKind::Document) => "document",
+                _ => "row",
+            };
             snapshot.extend([
                 (
                     "rid".to_string(),
@@ -368,7 +373,7 @@ fn entity_row_snapshot(entity: &crate::storage::UnifiedEntity) -> Option<Vec<(St
                     "collection".to_string(),
                     Value::text(entity.kind.collection().to_string()),
                 ),
-                ("kind".to_string(), Value::text("row".to_string())),
+                ("kind".to_string(), Value::text(kind.to_string())),
                 ("tenant".to_string(), tenant),
                 (
                     "created_at".to_string(),
