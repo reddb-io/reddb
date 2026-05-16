@@ -73,8 +73,39 @@ pub struct SlowQueryLogger {
 
 impl SlowQueryLogger {
     pub fn new(opts: SlowQueryOpts) -> Arc<Self> {
-        let _ = std::fs::create_dir_all(&opts.log_dir);
         let path = opts.log_dir.join("red-slow.log");
+        Self::open_at(path, opts.threshold_ms, opts.sample_pct)
+    }
+
+    /// Resolve a [`crate::storage::layout::LogDestination`] into a concrete
+    /// slow-query sink. `File(p)` writes to that exact path; `Stderr` and
+    /// `Syslog` fall back to `<fallback_log_dir>/red-slow.log` until the
+    /// dedicated sinks are wired (ADR 0018).
+    pub fn for_destination(
+        dest: &crate::storage::layout::LogDestination,
+        fallback_log_dir: &std::path::Path,
+        threshold_ms: u64,
+        sample_pct: u8,
+    ) -> Arc<Self> {
+        use crate::storage::layout::LogDestination;
+        let path = match dest {
+            LogDestination::File(p) => p.clone(),
+            LogDestination::Stderr => fallback_log_dir.join("red-slow.log"),
+            LogDestination::Syslog => {
+                tracing::warn!(
+                    target: "reddb::slow",
+                    "slow-query LogDestination::Syslog requested; sink not implemented, falling back to file"
+                );
+                fallback_log_dir.join("red-slow.log")
+            }
+        };
+        Self::open_at(path, threshold_ms, sample_pct)
+    }
+
+    fn open_at(path: PathBuf, threshold_ms: u64, sample_pct: u8) -> Arc<Self> {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -89,8 +120,8 @@ impl SlowQueryLogger {
         Arc::new(Self {
             writer: Mutex::new(writer),
             _guard: guard,
-            threshold_ms: AtomicU64::new(opts.threshold_ms),
-            sample_pct: AtomicU8::new(opts.sample_pct.min(100)),
+            threshold_ms: AtomicU64::new(threshold_ms),
+            sample_pct: AtomicU8::new(sample_pct.min(100)),
             above_count: AtomicU64::new(0),
         })
     }
