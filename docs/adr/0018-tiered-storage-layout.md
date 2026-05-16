@@ -91,3 +91,54 @@ Negative:
 The next implementation slice should thread `StorageLayout` through server
 configuration and migrate the actual storage callsites to consume
 `TieredLayoutPaths`, preserving compatibility for existing adjacent sidecars.
+
+## `<data>.shm` shared-memory substrate (gh-475)
+
+The `standard` tier and above expose a `<data>-shm` sibling file as the lock
+substrate for multi-reader embedded use, comparable in role to SQLite's
+WAL-mode `-shm`. The on-disk shape is intentionally minimal so the future
+mmap wiring slice has nothing to redesign.
+
+### Binary layout (v1, little-endian, 64-byte fixed header)
+
+| offset | size | field             | notes                                             |
+| ------ | ---- | ----------------- | ------------------------------------------------- |
+|      0 |    8 | magic             | ASCII `"RDBSHM01"`                                |
+|      8 |    4 | version           | `u32 = 1`                                         |
+|     12 |    4 | owner_pid         | host pid of the writer holding the lease          |
+|     16 |    8 | generation        | bumped on every takeover or heal                  |
+|     24 |    8 | reader_count      | attached embedded reader handles                  |
+|     32 |    8 | last_heartbeat_ms | owner heartbeat in unix-ms                        |
+|     40 |   16 | reserved          | zeroed; room for v2 fields                        |
+|     56 |    8 | checksum          | FNV-1a fold over bytes `[0..56)`                  |
+
+The full file is sized to one OS page (`4096` bytes) so mmap integration is
+mechanical when the runtime auto-enable slice lands.
+
+### Lock protocol
+
+1. On open, the writer claims ownership of the header. If the magic is
+   absent or the checksum fails, the substrate is reinitialised in place
+   (`HealedCorruptHeader`). If the magic is valid, the existing
+   `owner_pid` is probed.
+2. Liveness probe: on unix, `kill(pid, 0)` distinguishes a live owner
+   (`AttachedToLiveOwner`) from a dead one (`RecoveredFromCrash`). On
+   non-unix targets the probe currently assumes liveness — full crash
+   recovery on those platforms is a follow-up.
+3. A crashed takeover bumps `generation`, clears `reader_count`, and
+   rewrites the header under `sync_data` before the open path is allowed
+   to return. The bumped generation is the canonical "ownership changed"
+   signal for any observer cached against a prior generation.
+4. Embedded readers attach by incrementing `reader_count` and detach by
+   decrementing it (saturating). The count survives a writer crash so
+   the next opener sees how many stale handles must be cleaned in the
+   eventual mmap-backed slice.
+
+### Non-goals (this slice)
+
+- Mapping the file with `memmap2` and wiring readers to share state via
+  the mmap region is deferred. The on-disk substrate is the contract;
+  the mmap step is mechanical.
+- Tier-driven auto-enable (`standard` / `performance` / `max` flipping
+  the toggle on at startup) lands with the same `RuntimeOptions` /
+  layout wiring that gates gh-471/472/473.
