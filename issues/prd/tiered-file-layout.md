@@ -46,7 +46,7 @@ moves optional artifacts into explicit paths.
 - Route audit and slow logs into `.rdb.d/logs/` for `performance` and `max`.
 - Unify result-cache and blob-cache L2 files into one `cache.rdb` support file.
 - Stop writing `.meta.json` by default; replace it with an explicit catalog
-  inspection command.
+  inspection command (`red inspect catalog --path <FILE> [--at <SEQ>]`).
 - Make `seq-N` catalog journal snapshots opt-in outside `max`.
 
 ### Phase B: Standard tier

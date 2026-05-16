@@ -22,6 +22,37 @@ pub const PHYSICAL_METADATA_BINARY_EXTENSION: &str = "meta.rdbx";
 pub const DEFAULT_MANIFEST_EVENT_HISTORY: usize = 256;
 pub const DEFAULT_METADATA_JOURNAL_RETENTION: usize = 32;
 
+use std::sync::atomic::{AtomicU8, Ordering};
+
+// JSON sidecar policy. 0 = unset (consult env, default off), 1 = enabled,
+// 2 = disabled. Threaded as a process-global because the metadata save path
+// is reached from many call sites that do not currently carry a layout
+// handle. Tier wiring (#469/#471/#472) flips this on at startup for `Max`;
+// minimal/standard/performance leave it off and emit only the binary
+// `<data>.meta.rdbx` + journal entries.
+static META_JSON_SIDECAR_POLICY: AtomicU8 = AtomicU8::new(0);
+
+/// Process-wide opt-in for the legacy `<data>.meta.json` sidecar.
+/// Call once at startup after resolving the active [`StorageLayout`].
+pub fn set_meta_json_sidecar_enabled(enabled: bool) {
+    META_JSON_SIDECAR_POLICY.store(if enabled { 1 } else { 2 }, Ordering::Relaxed);
+}
+
+/// Whether new metadata writes should additionally emit the JSON sidecar.
+/// Defaults to `false`; opt-in via [`set_meta_json_sidecar_enabled`] or the
+/// `REDDB_META_JSON_SIDECAR=1` env var (escape hatch for ad-hoc debugging
+/// of a non-Max instance). Reads always tolerate either JSON or binary.
+pub fn meta_json_sidecar_enabled() -> bool {
+    match META_JSON_SIDECAR_POLICY.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => std::env::var("REDDB_META_JSON_SIDECAR")
+            .ok()
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+            .unwrap_or(false),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhysicalMetadataSource {
     Binary,

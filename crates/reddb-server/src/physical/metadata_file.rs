@@ -180,8 +180,10 @@ impl PhysicalMetadataFile {
         }
         self.save_to_binary_path(&binary_path)?;
         self.prune_journal_for_data_path(data_path)?;
-        let json_path = Self::metadata_path_for(data_path);
-        self.save_to_path(&json_path)?;
+        if super::meta_json_sidecar_enabled() {
+            let json_path = Self::metadata_path_for(data_path);
+            self.save_to_path(&json_path)?;
+        }
         Ok(binary_path)
     }
 
@@ -263,8 +265,10 @@ impl PhysicalMetadataFile {
     pub fn heal_primary_metadata_for_data_path(&self, data_path: &Path) -> io::Result<()> {
         let binary_path = Self::metadata_binary_path_for(data_path);
         self.save_to_binary_path(&binary_path)?;
-        let json_path = Self::metadata_path_for(data_path);
-        self.save_to_path(&json_path)?;
+        if super::meta_json_sidecar_enabled() {
+            let json_path = Self::metadata_path_for(data_path);
+            self.save_to_path(&json_path)?;
+        }
         Ok(())
     }
 
