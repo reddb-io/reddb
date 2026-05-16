@@ -134,6 +134,9 @@ impl RedDb for MockServer {
     type KvWatchStream = ::core::pin::Pin<
         Box<dyn tokio_stream::Stream<Item = Result<KvWatchEvent, Status>> + Send + 'static>,
     >;
+    type AskStreamStream = ::core::pin::Pin<
+        Box<dyn tokio_stream::Stream<Item = Result<AskStreamEvent, Status>> + Send + 'static>,
+    >;
 
     async fn kv_watch(
         &self,
@@ -141,6 +144,15 @@ impl RedDb for MockServer {
     ) -> Result<Response<Self::KvWatchStream>, Status> {
         Ok(Response::new(Box::pin(tokio_stream::iter(
             std::iter::empty::<Result<KvWatchEvent, Status>>(),
+        ))))
+    }
+
+    async fn ask_stream(
+        &self,
+        _request: Request<AskRequest>,
+    ) -> Result<Response<Self::AskStreamStream>, Status> {
+        Ok(Response::new(Box::pin(tokio_stream::iter(
+            std::iter::empty::<Result<AskStreamEvent, Status>>(),
         ))))
     }
 
@@ -187,6 +199,7 @@ impl RedDb for MockServer {
     // ----- everything else: default-returning stubs -----
     stub_rpc!(bulk_create_rows, JsonBulkCreateRequest, BulkEntityReply);
     stub_rpc!(health, Empty, HealthReply);
+    stub_rpc!(submit_ask_side_effects, JsonPayloadRequest, PayloadReply);
     stub_rpc!(ready, Empty, HealthReply);
     stub_rpc!(stats, Empty, StatsReply);
     stub_rpc!(collections, Empty, CollectionsReply);

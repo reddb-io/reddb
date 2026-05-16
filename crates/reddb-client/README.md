@@ -1,4 +1,4 @@
-# reddb-client
+# reddb-io-client
 
 Official Rust client for [RedDB](https://github.com/reddb-io/reddb).
 One connection-string API across embedded, gRPC, HTTP, and
@@ -10,7 +10,7 @@ workspace-internal connector used by `red`'s REPL and
 
 ```toml
 [dependencies]
-reddb-client = "0.2"
+reddb-io-client = "1.2"
 ```
 
 ```rust,no_run
@@ -22,6 +22,45 @@ db.insert("users", &JsonValue::object([("name", JsonValue::string("Alice"))])).a
 let result = db.query("SELECT * FROM users").await?;
 println!("{} rows", result.rows.len());
 db.close().await?;
+# Ok(())
+# }
+```
+
+### Rich helpers
+
+The Rust client exposes the same helper families as the other SDKs while
+keeping the low-level `query` API available.
+
+```rust,no_run
+use reddb_client::{JsonValue, ListOptions, Reddb};
+
+# async fn run() -> reddb_client::Result<()> {
+let db = Reddb::connect("memory://").await?;
+
+let doc = db
+    .documents()
+    .insert(
+        "events",
+        &JsonValue::object([
+            ("event_type", JsonValue::string("login")),
+            ("attempts", JsonValue::number(1.0)),
+        ]),
+    )
+    .await?;
+let _same_doc = db.documents().get("events", &doc.rid).await?;
+let _recent = db
+    .documents()
+    .list("events", ListOptions::new().filter("event_type = 'login'").limit(10))
+    .await?;
+
+let kv = db.kv_collection("settings");
+kv.set("characters:hansel", JsonValue::string("trail")).await?;
+let _value = kv.get("characters:hansel").await?;
+
+let queue = db.queue();
+queue.create("jobs").await?;
+queue.push("jobs", &JsonValue::object([("kind", JsonValue::string("email"))])).await?;
+let _jobs = queue.pop("jobs").await?;
 # Ok(())
 # }
 ```

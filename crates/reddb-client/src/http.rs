@@ -72,7 +72,7 @@ impl HttpClient {
         let client = builder
             .build()
             .map_err(|e| ClientError::new(ErrorCode::Network, format!("reqwest: {e}")))?;
-        let mut handle = Self {
+        let handle = Self {
             base_url: opts.base_url,
             inner: client,
             token: opts.token,

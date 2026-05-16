@@ -211,8 +211,9 @@ impl EmbeddedClient {
         })
     }
 
-    pub fn delete(&self, collection: &str, id: &str) -> Result<u64> {
-        let sql = format!("DELETE FROM {collection} WHERE _entity_id = {id}");
+    pub fn delete(&self, collection: &str, rid: &str) -> Result<u64> {
+        let rid = rid.replace('\'', "''");
+        let sql = format!("DELETE FROM {collection} WHERE rid = '{rid}'");
         let qr = self
             .runtime
             .execute_query(&sql)
