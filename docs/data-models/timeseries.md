@@ -151,9 +151,7 @@ Three complementary knobs, strongest first:
 
 ```sql
 -- (1) Partition TTL at CREATE time — declarative, O(1) chunk drop.
-CREATE HYPERTABLE sensor_metrics (ts BIGINT, value DOUBLE)
-  CHUNK_INTERVAL '1 day'
-  WITH (ttl = '365d');
+CREATE HYPERTABLE sensor_metrics TIME_COLUMN ts CHUNK_INTERVAL '1d' TTL '365d';
 
 -- (2) Classic CREATE TIMESERIES RETENTION — single-collection shortcut.
 CREATE TIMESERIES sensor_data RETENTION 365 d;

@@ -316,7 +316,8 @@ drops whole chunks once their newest row is older than the TTL.
 O(1) per chunk — no row scans, no DELETE tombstones.
 
 ```sql
-CREATE HYPERTABLE logs (...) CHUNK_INTERVAL '1d' WITH (ttl = '90d');
+-- Shipped form (no column list, TTL keyword instead of WITH (...)):
+CREATE HYPERTABLE logs TIME_COLUMN ts CHUNK_INTERVAL '1d' TTL '90d';
 ```
 
 See [Partition TTL](../data-models/partition-ttl.md) for the full

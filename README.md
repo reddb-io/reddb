@@ -41,7 +41,7 @@ that data lives.
 INSERT INTO users (name, email) VALUES ('Alice', 'alice@co.com')
 
 -- JSON documents
-INSERT INTO logs DOCUMENT (body) VALUES ({"level":"info","msg":"login"})
+INSERT INTO logs DOCUMENT (body) VALUES ('{"level":"info","msg":"login"}')
 
 -- Graph edges
 INSERT INTO network EDGE (label, from_rid, to_rid) VALUES ('CONNECTS', 102, 103)
@@ -50,15 +50,14 @@ INSERT INTO network EDGE (label, from_rid, to_rid) VALUES ('CONNECTS', 102, 103)
 SEARCH SIMILAR TEXT 'anomaly detected' COLLECTION events
 
 -- Key-value
-PUT config.theme = 'dark'
+KV PUT config.theme = 'dark'
 
 -- Time-series metrics (with retention & downsampling)
 CREATE TIMESERIES cpu_metrics RETENTION 90 d
 INSERT INTO cpu_metrics (metric, value, tags) VALUES ('cpu.idle', 95.2, {"host":"srv1"})
 
 -- Hypertables + partition TTL + continuous aggregates (logs / events / telemetry)
-CREATE HYPERTABLE access_log (ts BIGINT, service TEXT, status INT, latency_ms INT)
-  CHUNK_INTERVAL '1 day' WITH (ttl = '90d');
+CREATE HYPERTABLE access_log TIME_COLUMN ts CHUNK_INTERVAL '1d' TTL '90d'
 
 -- Append-only tables (audit, ledger, immutable events)
 CREATE TABLE audit_log (id BIGINT, action TEXT) APPEND ONLY

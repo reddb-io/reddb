@@ -215,7 +215,7 @@ columns or top-level document, KV, node, or edge properties named `rid`,
 | Syntax | Example | Status |
 | --- | --- | --- |
 | `CREATE TIMESERIES` / `DROP TIMESERIES` | `CREATE TIMESERIES metrics` | supported |
-| `CREATE HYPERTABLE` / `DROP HYPERTABLE` | `CREATE HYPERTABLE metrics TIME COLUMN ts CHUNK INTERVAL 1h` | supported |
+| `CREATE HYPERTABLE` / `DROP HYPERTABLE` | `CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h' [TTL '7d']` | supported |
 | Retention | `CREATE TIMESERIES metrics RETENTION 30d` | supported |
 | Downsample / continuous aggregate surface | `CREATE TIMESERIES metrics DOWNSAMPLE 1m` | partial |
 | Insert points via SQL table path | `INSERT INTO metrics (ts, value) VALUES (NOW(), 42)` | supported |
