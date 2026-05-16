@@ -47,6 +47,36 @@ impl WalReader {
             position: self.position,
         }
     }
+
+    /// Scan a WAL file and collect the most recent full-page image for
+    /// each page id observed. Returned map is `page_id → (lsn, data)`.
+    /// Recovery applies these images before redo so torn writes are
+    /// healed without the legacy `-dwb` sidecar (gh-478).
+    pub fn collect_full_page_images<P: AsRef<Path>>(
+        path: P,
+    ) -> io::Result<std::collections::BTreeMap<u32, (u64, Vec<u8>)>> {
+        use std::collections::BTreeMap;
+        let mut out: BTreeMap<u32, (u64, Vec<u8>)> = BTreeMap::new();
+        if !path.as_ref().exists() {
+            return Ok(out);
+        }
+        let reader = Self::open(path)?;
+        for item in reader.iter() {
+            let (lsn, record) = item?;
+            if let WalRecord::FullPageImage {
+                page_id, data, ..
+            } = record
+            {
+                match out.get(&page_id) {
+                    Some((existing_lsn, _)) if *existing_lsn > lsn => {}
+                    _ => {
+                        out.insert(page_id, (lsn, data));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
 }
 
 pub struct WalIterator {

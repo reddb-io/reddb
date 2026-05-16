@@ -56,6 +56,17 @@ pub enum RecordType {
     /// [TxID: 8][ActionCount: 4][[DataLen: 4][Data: N]...][CRC: 4]
     /// ```
     TxCommitBatch = 7,
+    /// Full-page image (FPI). Captures a complete page before its first
+    /// modification within a checkpoint cycle so torn-page recovery can
+    /// replay the pristine image before redo replays subsequent
+    /// `PageWrite`s. Enables `fold_dwb_into_wal` to retire the `-dwb`
+    /// sidecar (gh-478).
+    ///
+    /// Layout (after the type byte):
+    /// ```text
+    /// [TxID: 8][PageID: 4][CkptEpoch: 8][DataLen: 4][Data: N][CRC: 4]
+    /// ```
+    FullPageImage = 8,
 }
 
 impl RecordType {
@@ -68,6 +79,7 @@ impl RecordType {
             5 => Some(RecordType::Checkpoint),
             6 => Some(RecordType::PageWriteCompressed),
             7 => Some(RecordType::TxCommitBatch),
+            8 => Some(RecordType::FullPageImage),
             _ => None,
         }
     }
@@ -92,6 +104,15 @@ pub enum WalRecord {
     /// Atomic logical commit batch. Recovery applies all actions in
     /// order iff this complete record and checksum are present.
     TxCommitBatch { tx_id: u64, actions: Vec<Vec<u8>> },
+    /// Full-page image — pristine page bytes captured before the first
+    /// modification per checkpoint cycle. Recovery applies these before
+    /// redo so torn writes are healed without the `-dwb` sidecar.
+    FullPageImage {
+        tx_id: u64,
+        page_id: u32,
+        ckpt_epoch: u64,
+        data: Vec<u8>,
+    },
     /// Checkpoint marker (indicates up to which LSN pages are flushed)
     Checkpoint { lsn: u64 },
 }
@@ -172,6 +193,19 @@ impl WalRecord {
                     buf.extend_from_slice(&(action.len() as u32).to_le_bytes());
                     buf.extend_from_slice(action);
                 }
+            }
+            WalRecord::FullPageImage {
+                tx_id,
+                page_id,
+                ckpt_epoch,
+                data,
+            } => {
+                buf.push(RecordType::FullPageImage as u8);
+                buf.extend_from_slice(&tx_id.to_le_bytes());
+                buf.extend_from_slice(&page_id.to_le_bytes());
+                buf.extend_from_slice(&ckpt_epoch.to_le_bytes());
+                buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+                buf.extend_from_slice(data);
             }
             WalRecord::Checkpoint { lsn } => {
                 buf.push(RecordType::Checkpoint as u8);
@@ -337,6 +371,38 @@ impl WalRecord {
 
                 WalRecord::TxCommitBatch { tx_id, actions }
             }
+            RecordType::FullPageImage => {
+                let mut tx_buf = [0u8; 8];
+                reader.read_exact(&mut tx_buf)?;
+                running_crc = crc32_update(running_crc, &tx_buf);
+                let tx_id = u64::from_le_bytes(tx_buf);
+
+                let mut page_buf = [0u8; 4];
+                reader.read_exact(&mut page_buf)?;
+                running_crc = crc32_update(running_crc, &page_buf);
+                let page_id = u32::from_le_bytes(page_buf);
+
+                let mut epoch_buf = [0u8; 8];
+                reader.read_exact(&mut epoch_buf)?;
+                running_crc = crc32_update(running_crc, &epoch_buf);
+                let ckpt_epoch = u64::from_le_bytes(epoch_buf);
+
+                let mut len_buf = [0u8; 4];
+                reader.read_exact(&mut len_buf)?;
+                running_crc = crc32_update(running_crc, &len_buf);
+                let len = u32::from_le_bytes(len_buf) as usize;
+
+                let mut data = vec![0u8; len];
+                reader.read_exact(&mut data)?;
+                running_crc = crc32_update(running_crc, &data);
+
+                WalRecord::FullPageImage {
+                    tx_id,
+                    page_id,
+                    ckpt_epoch,
+                    data,
+                }
+            }
             RecordType::Checkpoint => {
                 let mut buf = [0u8; 8];
                 reader.read_exact(&mut buf)?;
@@ -381,12 +447,13 @@ mod tests {
             Some(RecordType::PageWriteCompressed)
         );
         assert_eq!(RecordType::from_u8(7), Some(RecordType::TxCommitBatch));
+        assert_eq!(RecordType::from_u8(8), Some(RecordType::FullPageImage));
     }
 
     #[test]
     fn test_record_type_invalid() {
         assert_eq!(RecordType::from_u8(0), None);
-        assert_eq!(RecordType::from_u8(8), None);
+        assert_eq!(RecordType::from_u8(9), None);
         assert_eq!(RecordType::from_u8(255), None);
     }
 
@@ -587,6 +654,38 @@ mod tests {
                 data
             }
         );
+    }
+
+    #[test]
+    fn full_page_image_roundtrip() {
+        let data: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
+        let original = WalRecord::FullPageImage {
+            tx_id: 11,
+            page_id: 9,
+            ckpt_epoch: 42,
+            data: data.clone(),
+        };
+        let encoded = original.encode();
+        assert_eq!(encoded[0], RecordType::FullPageImage as u8);
+
+        let mut cursor = Cursor::new(encoded);
+        let decoded = WalRecord::read(&mut cursor).unwrap().unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn full_page_image_checksum_mismatch_detected() {
+        let original = WalRecord::FullPageImage {
+            tx_id: 1,
+            page_id: 2,
+            ckpt_epoch: 3,
+            data: vec![0xAA; 32],
+        };
+        let mut encoded = original.encode();
+        let mid = encoded.len() / 2;
+        encoded[mid] ^= 0xFF;
+        let mut cursor = Cursor::new(encoded);
+        assert!(WalRecord::read(&mut cursor).is_err());
     }
 
     #[test]
