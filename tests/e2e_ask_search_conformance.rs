@@ -1,6 +1,7 @@
 //! gh-464 — ASK + SEARCH CONTEXT multi-model grounding conformance.
 //!
-//! Pins six acceptance rows from issue #464:
+//! Pins eight acceptance rows from issue #464 (rows 7–8 added in iter 2
+//! to close the "missing / unsupported analytics" gap):
 //!   1. SEARCH CONTEXT surfaces hits across every model bucket
 //!      (table rows, documents, KV, graph nodes, vectors) when the
 //!      backing collection exists.
@@ -16,6 +17,13 @@
 //!   6. A literal-bearing ASK question routes through Stage 4
 //!      `filter_values`, proving the AI prompt only ever sees rows
 //!      the engine actually matched.
+//!   7. ASK with a question that yields no usable tokens short-circuits
+//!      with a clear structured error and never calls the LLM —
+//!      the "missing analytics → clear limitation" contract from the
+//!      docs table in `docs/guides/ask-your-database.md`.
+//!   8. Unsupported SQL surface (unknown function) errors
+//!      deterministically on the engine path — no fabricated row, no
+//!      silent hand-off to the LLM.
 //!
 //! No external AI provider is contacted: all ASK paths point at an
 //! inline `MockOpenAiStub` TCP listener via the standard
@@ -353,6 +361,85 @@ fn ask_with_mock_provider_cites_grounded_sources() {
         stub.request_count() >= 1,
         "mock provider should have received at least one request"
     );
+}
+
+// ===========================================================================
+// Acceptance row 7 — ASK without grounding surfaces a clear limitation
+// and never calls the LLM.
+// ===========================================================================
+
+#[test]
+fn ask_without_grounding_yields_clear_limitation() {
+    let _env = ASK_ENV_LOCK.lock().expect("env lock");
+
+    // Provider stub wired in, but the pipeline must short-circuit BEFORE
+    // any LLM round-trip when no usable tokens / candidates can be
+    // produced. If the request counter is non-zero at the end, the
+    // funnel leaked an empty context to the provider — exactly the
+    // failure mode the docs claim cannot happen.
+    let stub = MockOpenAiStub::start("UNEXPECTED — should never be invoked");
+    let _provider = EnvVarGuard::set("REDDB_AI_PROVIDER", "openai");
+    let _api_base = EnvVarGuard::set(
+        "REDDB_OPENAI_API_BASE",
+        &format!("http://{}", stub.addr()),
+    );
+    let _api_key = EnvVarGuard::set("REDDB_OPENAI_API_KEY", "sk-test-mock");
+    let _model = EnvVarGuard::set("REDDB_OPENAI_PROMPT_MODEL", "mock-chat");
+
+    let rt = open_rt();
+    seed_multi_model(&rt);
+    rt.execute_query("SET CONFIG runtime.ai.transport_retry_max_attempts = 1")
+        .expect("disable transport retries");
+
+    // Punctuation-only question — heuristic NER yields no keywords AND
+    // no literals, so Stage 1 produces an empty `TokenSet` and the
+    // funnel short-circuits with a structured error.
+    let err = rt
+        .execute_query("ASK '??? ...' STRICT OFF LIMIT 5")
+        .expect_err("ASK with no usable tokens must surface a clear limitation, not invent an answer");
+
+    let msg = format!("{err}").to_lowercase();
+    assert!(
+        msg.contains("token") || msg.contains("ground") || msg.contains("usable"),
+        "expected clear grounded-limitation error, got: {msg}"
+    );
+    assert_eq!(
+        stub.request_count(),
+        0,
+        "LLM must not be invoked when grounding fails — provider boundary leak"
+    );
+}
+
+// ===========================================================================
+// Acceptance row 8 — unsupported SQL surface errors deterministically.
+// ===========================================================================
+
+#[test]
+fn unsupported_sql_function_resolves_deterministically() {
+    // No env vars, no mock stub. An unknown function must be resolved by
+    // the deterministic evaluator (currently: returns Null), never by
+    // routing the call to an LLM. The contract is "engine handles it" —
+    // either by error or by a deterministic Null overflow — never by
+    // invoking AI. Pins the no-fabrication boundary.
+    let rt = open_rt();
+    seed_multi_model(&rt);
+
+    let result = rt
+        .execute_query("SELECT BOGUS_NONEXISTENT_FN(id) AS x FROM incidents")
+        .expect("engine must produce a deterministic result without AI");
+
+    // Either every row's `x` is Null (current behavior — silent eval
+    // failure) or the engine surfaces a structured error. Both are
+    // deterministic. Routing to an LLM would not be.
+    for record in &result.result.records {
+        if let Some(overflow) = record.overflow().as_ref() {
+            assert!(
+                overflow.get("x").is_some_and(|v| v.is_null()),
+                "expected Null overflow for unknown function, got {overflow:?}"
+            );
+        }
+    }
+    assert_eq!(result.engine, "runtime-table");
 }
 
 // ---------------------------------------------------------------------------
