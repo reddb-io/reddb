@@ -319,7 +319,7 @@ impl VaultState {
             };
             let tenant_field = user.tenant_id.clone().unwrap_or_default();
             out.push_str(&format!(
-                "USER:{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                "USER:{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 user.username,
                 user.password_hash,
                 user.role.as_str(),
@@ -328,6 +328,7 @@ impl VaultState {
                 user.updated_at,
                 scram_field,
                 tenant_field,
+                user.system_owned,
             ));
         }
 
@@ -381,10 +382,10 @@ impl VaultState {
             } else if let Some(rest) = line.strip_prefix("USER:") {
                 let parts: Vec<&str> = rest.split('\t').collect();
                 // 7 fields = pre-tenant v2 USER line; 8 fields = with
-                // tenant id appended. Anything else is corrupt.
-                if parts.len() != 7 && parts.len() != 8 {
+                // tenant id appended; 9 fields = with system_owned appended.
+                if !(7..=9).contains(&parts.len()) {
                     return Err(VaultError::Corrupt(format!(
-                        "USER line has {} fields, expected 7 or 8",
+                        "USER line has {} fields, expected 7, 8, or 9",
                         parts.len()
                     )));
                 }
@@ -408,6 +409,7 @@ impl VaultState {
                     .map(|s| s.trim())
                     .filter(|s| !s.is_empty())
                     .map(|s| s.to_string());
+                let system_owned = parts.get(8).map(|s| s.trim() == "true").unwrap_or(false);
 
                 users.push(User {
                     username: parts[0].to_string(),
@@ -419,6 +421,7 @@ impl VaultState {
                     created_at,
                     updated_at,
                     enabled,
+                    system_owned,
                 });
             } else if let Some(rest) = line.strip_prefix("KEY:") {
                 let parts: Vec<&str> = rest.split('\t').collect();
@@ -1276,6 +1279,7 @@ mod tests {
                     created_at: now,
                     updated_at: now,
                     enabled: true,
+                    system_owned: false,
                 },
                 User {
                     username: "bob".into(),
@@ -1287,6 +1291,7 @@ mod tests {
                     created_at: now,
                     updated_at: now,
                     enabled: false,
+                    system_owned: false,
                 },
             ],
             api_keys: vec![(
@@ -1664,6 +1669,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
                 enabled: true,
+                system_owned: true,
             }],
             api_keys: vec![],
             bootstrapped: true,
@@ -1703,6 +1709,24 @@ mod tests {
             .unwrap();
         assert!(dave.scram_verifier.is_none());
         assert!(dave.tenant_id.is_none());
+        assert!(!dave.system_owned);
+    }
+
+    #[test]
+    fn test_vault_state_legacy_tenant_user_line_defaults_system_owned_false() {
+        let now = now_ms();
+        let line = format!(
+            "USER:erin\targon2id$x$y\twrite\ttrue\t{}\t{}\t\tacme\nSEALED:false\n",
+            now, now
+        );
+        let restored = VaultState::deserialize(line.as_bytes()).unwrap();
+        let erin = restored
+            .users
+            .iter()
+            .find(|u| u.username == "erin")
+            .unwrap();
+        assert_eq!(erin.tenant_id.as_deref(), Some("acme"));
+        assert!(!erin.system_owned);
     }
 
     #[test]
@@ -1719,6 +1743,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
                 enabled: true,
+                system_owned: true,
             }],
             api_keys: vec![],
             bootstrapped: true,
@@ -1727,8 +1752,8 @@ mod tests {
         };
         let bytes = state.serialize();
         let text = std::str::from_utf8(&bytes).unwrap();
-        // 8 fields: trailing `\tacme` after the empty SCRAM field.
-        assert!(text.contains("\tacme\n"));
+        // 9 fields: tenant followed by system_owned.
+        assert!(text.contains("\tacme\ttrue\n"));
 
         let restored = VaultState::deserialize(&bytes).unwrap();
         let alice = restored
@@ -1737,6 +1762,7 @@ mod tests {
             .find(|u| u.username == "alice")
             .unwrap();
         assert_eq!(alice.tenant_id.as_deref(), Some("acme"));
+        assert!(alice.system_owned);
     }
 
     #[test]
@@ -1756,6 +1782,7 @@ mod tests {
                     created_at: now,
                     updated_at: now,
                     enabled: true,
+                    system_owned: false,
                 },
                 User {
                     username: "alice".into(),
@@ -1767,6 +1794,7 @@ mod tests {
                     created_at: now,
                     updated_at: now,
                     enabled: true,
+                    system_owned: false,
                 },
             ],
             api_keys: vec![
