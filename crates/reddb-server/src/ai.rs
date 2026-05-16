@@ -1237,6 +1237,285 @@ mod tests {
         assert!(err.to_string().contains("prompt cannot be empty"));
     }
 
+    // ========================================================================
+    // openai-compat client tests (issue gh-516)
+    //
+    // Each test spins up a tiny TCP server, hands its base URL to the
+    // new generic client, and asserts on the captured request +
+    // synthesised response. Tests run in parallel-safe fashion (each
+    // server binds to port 0).
+    // ========================================================================
+
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    struct CapturedRequest {
+        method: String,
+        path: String,
+        headers: Vec<(String, String)>,
+        body: String,
+    }
+
+    fn parse_http_request(stream: &mut std::net::TcpStream) -> CapturedRequest {
+        let mut buf = [0u8; 8192];
+        let mut data = Vec::new();
+        loop {
+            let read = stream.read(&mut buf).unwrap_or(0);
+            if read == 0 {
+                break;
+            }
+            data.extend_from_slice(&buf[..read]);
+            if let Some(idx) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                let header_len = idx + 4;
+                let header_str = String::from_utf8_lossy(&data[..idx]).to_string();
+                let mut lines = header_str.split("\r\n");
+                let request_line = lines.next().unwrap_or("");
+                let mut parts = request_line.split_whitespace();
+                let method = parts.next().unwrap_or("").to_string();
+                let path = parts.next().unwrap_or("").to_string();
+                let mut headers = Vec::new();
+                let mut content_length: usize = 0;
+                for line in lines {
+                    if let Some((k, v)) = line.split_once(':') {
+                        let k = k.trim().to_string();
+                        let v = v.trim().to_string();
+                        if k.eq_ignore_ascii_case("content-length") {
+                            content_length = v.parse().unwrap_or(0);
+                        }
+                        headers.push((k, v));
+                    }
+                }
+                while data.len() < header_len + content_length {
+                    let read = stream.read(&mut buf).unwrap_or(0);
+                    if read == 0 {
+                        break;
+                    }
+                    data.extend_from_slice(&buf[..read]);
+                }
+                let body =
+                    String::from_utf8_lossy(&data[header_len..header_len + content_length])
+                        .to_string();
+                return CapturedRequest {
+                    method,
+                    path,
+                    headers,
+                    body,
+                };
+            }
+        }
+        CapturedRequest {
+            method: String::new(),
+            path: String::new(),
+            headers: Vec::new(),
+            body: String::new(),
+        }
+    }
+
+    /// Spawn a one-shot HTTP server that replies with `(status, body)`
+    /// to a single request, captures it, and returns `(base_url, captured)`.
+    fn spawn_mock(
+        status: u16,
+        response_body: &'static str,
+    ) -> (String, Arc<Mutex<Option<CapturedRequest>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let captured: Arc<Mutex<Option<CapturedRequest>>> = Arc::new(Mutex::new(None));
+        let captured_clone = Arc::clone(&captured);
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let req = parse_http_request(&mut stream);
+                *captured_clone.lock().unwrap() = Some(req);
+                let status_line = match status {
+                    200 => "200 OK",
+                    400 => "400 Bad Request",
+                    401 => "401 Unauthorized",
+                    500 => "500 Internal Server Error",
+                    _ => "200 OK",
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status_line}\r\n\
+                     Content-Type: application/json\r\n\
+                     Content-Length: {}\r\n\
+                     Connection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        (format!("http://{}", addr), captured)
+    }
+
+    #[test]
+    fn openai_compat_chat_roundtrip_honors_arbitrary_api_base_and_headers() {
+        let body = r#"{
+            "id":"chatcmpl_x",
+            "model":"custom-model",
+            "choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],
+            "usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}
+        }"#;
+        let (base, captured) = spawn_mock(200, body);
+
+        let req = OpenAiCompatChatRequest {
+            api_base: base.clone(),
+            api_key: "sk-test".to_string(),
+            model: "custom-model".to_string(),
+            prompt: "say hi".to_string(),
+            temperature: None,
+            seed: None,
+            max_output_tokens: None,
+            extra_headers: vec![("X-Custom-Tag".to_string(), "abc".to_string())],
+        };
+        let resp = openai_compat_chat(req).expect("ok");
+
+        assert_eq!(resp.output_text, "hi");
+        assert_eq!(resp.model, "custom-model");
+        assert_eq!(resp.usage.input_tokens, Some(7));
+        assert_eq!(resp.usage.output_tokens, Some(2));
+        assert_eq!(resp.usage.total_tokens, Some(9));
+        assert_eq!(resp.stop_reason.as_deref(), Some("stop"));
+
+        let cap = captured.lock().unwrap().take().expect("captured");
+        assert_eq!(cap.method, "POST");
+        assert_eq!(cap.path, "/chat/completions");
+        let has_auth = cap
+            .headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("authorization") && v == "Bearer sk-test");
+        assert!(has_auth, "Authorization header missing");
+        let has_custom = cap
+            .headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("x-custom-tag") && v == "abc");
+        assert!(has_custom, "extra header missing");
+        assert!(cap.body.contains("\"model\":\"custom-model\""));
+    }
+
+    #[test]
+    fn openai_compat_embeddings_roundtrip_with_dimensions() {
+        let body = r#"{
+            "object":"list",
+            "model":"embed-model",
+            "data":[{"object":"embedding","index":0,"embedding":[0.5,0.25]}],
+            "usage":{"prompt_tokens":4,"total_tokens":4}
+        }"#;
+        let (base, captured) = spawn_mock(200, body);
+
+        let req = OpenAiCompatEmbeddingsRequest {
+            api_base: base,
+            api_key: "sk-emb".to_string(),
+            model: "embed-model".to_string(),
+            inputs: vec!["hello".to_string()],
+            dimensions: Some(2),
+            extra_headers: vec![],
+        };
+        let resp = openai_compat_embeddings(req).expect("ok");
+
+        assert_eq!(resp.embeddings.len(), 1);
+        assert_eq!(resp.embeddings[0], vec![0.5_f32, 0.25_f32]);
+        assert_eq!(resp.usage.total_tokens, Some(4));
+        assert_eq!(resp.usage.input_tokens, Some(4));
+
+        let cap = captured.lock().unwrap().take().expect("captured");
+        assert_eq!(cap.path, "/embeddings");
+        assert!(cap.body.contains("\"dimensions\":2"));
+    }
+
+    #[test]
+    fn openai_compat_chat_non_2xx_returns_structured_error() {
+        let body = r#"{"error":{"message":"bad api key","type":"invalid_request_error"}}"#;
+        let (base, _captured) = spawn_mock(401, body);
+
+        let req = OpenAiCompatChatRequest {
+            api_base: base,
+            api_key: "bad".to_string(),
+            model: "m".to_string(),
+            prompt: "hi".to_string(),
+            temperature: None,
+            seed: None,
+            max_output_tokens: None,
+            extra_headers: vec![],
+        };
+        let err = openai_compat_chat(req).unwrap_err().to_string();
+        assert!(err.contains("status 401"), "got: {err}");
+        assert!(err.contains("bad api key"), "got: {err}");
+    }
+
+    #[test]
+    fn openai_compat_chat_rejects_empty_model_and_prompt() {
+        let req = OpenAiCompatChatRequest {
+            api_base: "http://localhost:1".to_string(),
+            api_key: "k".to_string(),
+            model: "  ".to_string(),
+            prompt: "hi".to_string(),
+            temperature: None,
+            seed: None,
+            max_output_tokens: None,
+            extra_headers: vec![],
+        };
+        let err = openai_compat_chat(req).unwrap_err().to_string();
+        assert!(err.contains("model cannot be empty"), "got: {err}");
+
+        let req = OpenAiCompatChatRequest {
+            api_base: "http://localhost:1".to_string(),
+            api_key: "k".to_string(),
+            model: "m".to_string(),
+            prompt: "  ".to_string(),
+            temperature: None,
+            seed: None,
+            max_output_tokens: None,
+            extra_headers: vec![],
+        };
+        let err = openai_compat_chat(req).unwrap_err().to_string();
+        assert!(err.contains("prompt cannot be empty"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_provider_mode_recognizes_all_three_tokens() {
+        assert_eq!(
+            parse_provider_mode("openai-compat"),
+            Some(AiProviderMode::OpenAiCompat)
+        );
+        assert_eq!(
+            parse_provider_mode("OPENAI_NATIVE"),
+            Some(AiProviderMode::OpenAiNative)
+        );
+        assert_eq!(
+            parse_provider_mode("anthropic-native"),
+            Some(AiProviderMode::AnthropicNative)
+        );
+        assert_eq!(parse_provider_mode("groq"), None);
+    }
+
+    #[test]
+    fn resolve_provider_mode_reads_kv_key() {
+        let kv = |key: &str| -> crate::RedDBResult<Option<String>> {
+            if key == "red.config.ai.provider" {
+                Ok(Some("anthropic-native".to_string()))
+            } else {
+                Ok(None)
+            }
+        };
+        assert_eq!(
+            resolve_provider_mode(&kv),
+            Some(AiProviderMode::AnthropicNative)
+        );
+    }
+
+    #[test]
+    fn resolve_default_provider_honors_mode_key() {
+        let kv = |key: &str| -> crate::RedDBResult<Option<String>> {
+            match key {
+                "red.config.ai.provider" => Ok(Some("anthropic-native".to_string())),
+                "red.config.ai.default.provider" => Ok(Some("groq".to_string())),
+                _ => Ok(None),
+            }
+        };
+        assert_eq!(resolve_default_provider(&kv), AiProvider::Anthropic);
+    }
+
     #[tokio::test]
     async fn anthropic_prompt_async_rejects_empty_api_key() {
         let transport = crate::runtime::ai::transport::AiTransport::new(Default::default());
@@ -1442,6 +1721,11 @@ pub fn resolve_default_provider<F>(kv_getter: &F) -> AiProvider
 where
     F: Fn(&str) -> crate::RedDBResult<Option<String>>,
 {
+    // 0. New mode selector (red.config.ai.provider) takes precedence
+    //    when explicitly set — it picks the wire-protocol family.
+    if let Some(mode) = resolve_provider_mode(kv_getter) {
+        return provider_mode_to_provider(mode);
+    }
     // 1. Env var
     if let Ok(value) = std::env::var("REDDB_AI_PROVIDER") {
         let value = value.trim().to_string();
@@ -2124,4 +2408,258 @@ pub fn grpc_credentials(
     Err(crate::RedDBError::FeatureNotEnabled(
         "AI credentials via gRPC requires HTTP endpoint; use POST /ai/credentials".to_string(),
     ))
+}
+
+// ============================================================================
+// Generic OpenAI-compatible client (issue gh-516)
+//
+// Thin blocking client that targets any `{api_base}/chat/completions`
+// and `{api_base}/embeddings` endpoint with arbitrary auth headers.
+// Existing vendor-native paths (`openai_prompt_async`,
+// `anthropic_prompt_async`) remain unchanged; this exists so callers
+// can talk to non-OpenAI providers that expose an OpenAI-compatible
+// surface (Groq, OpenRouter, Together, Ollama, vLLM, LM Studio, ...)
+// without having to register a new `AiProvider` variant.
+// ============================================================================
+
+/// Normalized usage block. Field names follow the Anthropic shape
+/// (`input_tokens` / `output_tokens`) so downstream cost-accounting
+/// has one canonical schema regardless of the upstream provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OpenAiCompatUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenAiCompatChatRequest {
+    pub api_base: String,
+    pub api_key: String,
+    pub model: String,
+    pub prompt: String,
+    pub temperature: Option<f32>,
+    pub seed: Option<u64>,
+    pub max_output_tokens: Option<usize>,
+    pub extra_headers: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenAiCompatChatResponse {
+    pub model: String,
+    pub output_text: String,
+    pub stop_reason: Option<String>,
+    pub usage: OpenAiCompatUsage,
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenAiCompatEmbeddingsRequest {
+    pub api_base: String,
+    pub api_key: String,
+    pub model: String,
+    pub inputs: Vec<String>,
+    pub dimensions: Option<usize>,
+    pub extra_headers: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenAiCompatEmbeddingsResponse {
+    pub model: String,
+    pub embeddings: Vec<Vec<f32>>,
+    pub usage: OpenAiCompatUsage,
+}
+
+fn extra_header_refs(headers: &[(String, String)]) -> Vec<(&str, &str)> {
+    headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect()
+}
+
+/// POST `{api_base}/chat/completions` and return a normalized response.
+///
+/// Errors:
+/// * empty model / prompt → `RedDBError::Query`.
+/// * transport / non-2xx → `RedDBError::Query` carrying the status code
+///   and the provider's parsed `error.message` when available, raw body
+///   otherwise.
+pub fn openai_compat_chat(
+    request: OpenAiCompatChatRequest,
+) -> RedDBResult<OpenAiCompatChatResponse> {
+    if request.model.trim().is_empty() {
+        return Err(RedDBError::Query(
+            "openai-compat: model cannot be empty".to_string(),
+        ));
+    }
+    if request.prompt.trim().is_empty() {
+        return Err(RedDBError::Query(
+            "openai-compat: prompt cannot be empty".to_string(),
+        ));
+    }
+
+    let url = format!(
+        "{}/chat/completions",
+        request.api_base.trim_end_matches('/')
+    );
+    let payload = build_openai_prompt_payload(
+        &request.model,
+        &request.prompt,
+        request.temperature,
+        request.seed,
+        request.max_output_tokens,
+        false,
+    );
+
+    let extra = extra_header_refs(&request.extra_headers);
+    let (status, body) = http_post_json(&url, &request.api_key, &extra, payload, 120)
+        .map_err(|err| RedDBError::Query(format!("openai-compat transport error: {err}")))?;
+
+    if !(200..300).contains(&status) {
+        let message = openai_error_message(&body).unwrap_or_else(|| {
+            if body.trim().is_empty() {
+                "openai-compat chat request failed".to_string()
+            } else {
+                body.clone()
+            }
+        });
+        return Err(RedDBError::Query(format!(
+            "openai-compat chat request failed (status {status}): {message}"
+        )));
+    }
+
+    let parsed = parse_openai_prompt_response(&body, &request.model)?;
+    Ok(OpenAiCompatChatResponse {
+        model: parsed.model,
+        output_text: parsed.output_text,
+        stop_reason: parsed.stop_reason,
+        usage: OpenAiCompatUsage {
+            input_tokens: parsed.prompt_tokens,
+            output_tokens: parsed.completion_tokens,
+            total_tokens: parsed.total_tokens,
+        },
+    })
+}
+
+/// POST `{api_base}/embeddings` and return a normalized response.
+pub fn openai_compat_embeddings(
+    request: OpenAiCompatEmbeddingsRequest,
+) -> RedDBResult<OpenAiCompatEmbeddingsResponse> {
+    if request.model.trim().is_empty() {
+        return Err(RedDBError::Query(
+            "openai-compat: embedding model cannot be empty".to_string(),
+        ));
+    }
+    if request.inputs.is_empty() {
+        return Err(RedDBError::Query(
+            "openai-compat: at least one input is required".to_string(),
+        ));
+    }
+
+    let url = format!("{}/embeddings", request.api_base.trim_end_matches('/'));
+    let payload =
+        build_openai_embedding_payload(&request.model, &request.inputs, request.dimensions);
+
+    let extra = extra_header_refs(&request.extra_headers);
+    let (status, body) = http_post_json(&url, &request.api_key, &extra, payload, 90)
+        .map_err(|err| RedDBError::Query(format!("openai-compat transport error: {err}")))?;
+
+    if !(200..300).contains(&status) {
+        let message = openai_error_message(&body).unwrap_or_else(|| {
+            if body.trim().is_empty() {
+                "openai-compat embeddings request failed".to_string()
+            } else {
+                body.clone()
+            }
+        });
+        return Err(RedDBError::Query(format!(
+            "openai-compat embeddings request failed (status {status}): {message}"
+        )));
+    }
+
+    let parsed = parse_openai_embedding_response(&body)?;
+    Ok(OpenAiCompatEmbeddingsResponse {
+        model: parsed.model,
+        embeddings: parsed.embeddings,
+        usage: OpenAiCompatUsage {
+            input_tokens: parsed.prompt_tokens,
+            output_tokens: None,
+            total_tokens: parsed.total_tokens,
+        },
+    })
+}
+
+// ============================================================================
+// Provider mode selector (issue gh-516)
+//
+// `red.config.ai.provider` picks the wire-protocol family that engine
+// consumers (currently AskPipeline) should use. This is intentionally
+// distinct from `red.config.ai.default.provider`, which names a
+// concrete vendor (openai, groq, ollama, ...). The mode selector
+// answers the prior question of which HTTP shape to speak.
+// ============================================================================
+
+/// Wire-protocol family used by engine-side AI consumers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiProviderMode {
+    /// Generic OpenAI-compatible client (`POST {api_base}/chat/completions`).
+    OpenAiCompat,
+    /// Vendor-native OpenAI client (api.openai.com, default headers).
+    OpenAiNative,
+    /// Vendor-native Anthropic client (api.anthropic.com, x-api-key).
+    AnthropicNative,
+}
+
+impl AiProviderMode {
+    pub fn token(&self) -> &'static str {
+        match self {
+            Self::OpenAiCompat => "openai-compat",
+            Self::OpenAiNative => "openai-native",
+            Self::AnthropicNative => "anthropic-native",
+        }
+    }
+}
+
+/// Parse a mode token. Accepts hyphen or underscore spellings.
+pub fn parse_provider_mode(name: &str) -> Option<AiProviderMode> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "openai-compat" | "openai_compat" | "openaicompat" => Some(AiProviderMode::OpenAiCompat),
+        "openai-native" | "openai_native" | "openainative" => Some(AiProviderMode::OpenAiNative),
+        "anthropic-native" | "anthropic_native" | "anthropicnative" => {
+            Some(AiProviderMode::AnthropicNative)
+        }
+        _ => None,
+    }
+}
+
+/// Resolve the provider mode. Lookup chain:
+/// 1. `REDDB_AI_PROVIDER_MODE` env var.
+/// 2. `red_config` KV key `red.config.ai.provider`.
+/// 3. Returns `None` so callers can fall back to their existing
+///    vendor-based routing.
+pub fn resolve_provider_mode<F>(kv_getter: &F) -> Option<AiProviderMode>
+where
+    F: Fn(&str) -> crate::RedDBResult<Option<String>>,
+{
+    if let Ok(value) = std::env::var("REDDB_AI_PROVIDER_MODE") {
+        if let Some(mode) = parse_provider_mode(&value) {
+            return Some(mode);
+        }
+    }
+    if let Ok(Some(value)) = kv_getter("red.config.ai.provider") {
+        if let Some(mode) = parse_provider_mode(&value) {
+            return Some(mode);
+        }
+    }
+    None
+}
+
+/// Map a mode to the matching [`AiProvider`] variant. `OpenAiCompat`
+/// stays as a `Custom("")` marker — callers must resolve the actual
+/// api_base separately (typically via `resolve_api_base_with_kv`).
+pub fn provider_mode_to_provider(mode: AiProviderMode) -> AiProvider {
+    match mode {
+        AiProviderMode::OpenAiNative => AiProvider::OpenAi,
+        AiProviderMode::AnthropicNative => AiProvider::Anthropic,
+        AiProviderMode::OpenAiCompat => AiProvider::Custom(String::new()),
+    }
 }
