@@ -2,7 +2,10 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use reddb_server::storage::{LayoutOverrides, LayoutToggles, StorageLayout, TieredLayoutPaths};
+use reddb_server::storage::{
+    LayoutOverrides, LayoutToggles, LogDestination, LogRoutingOverrides, StorageLayout,
+    TieredLayoutPaths,
+};
 
 #[test]
 fn standard_layout_is_default_and_derives_stable_sidecar_paths() {
@@ -29,6 +32,9 @@ fn standard_layout_is_default_and_derives_stable_sidecar_paths() {
         Some(Path::new("data/main.rdb.red/indexes").to_path_buf())
     );
     assert_eq!(paths.cache_dir, None);
+    assert_eq!(paths.logs_dir, None);
+    assert_eq!(paths.audit_log_destination, LogDestination::Stderr);
+    assert_eq!(paths.slow_log_destination, LogDestination::Stderr);
 }
 
 #[test]
@@ -85,7 +91,7 @@ fn layout_presets_expand_to_deterministic_toggles() {
     ];
 
     for (layout, expected) in cases {
-        assert_eq!(layout.expand(LayoutOverrides::default()), expected);
+        assert_eq!(layout.expand(&LayoutOverrides::default()), expected);
     }
 }
 
@@ -99,10 +105,11 @@ fn overrides_apply_after_preset_expansion() {
         dedicated_blob_dir: None,
         dedicated_temp_dir: Some(true),
         dedicated_metrics_dir: None,
+        logs: LogRoutingOverrides::default(),
     };
 
     assert_eq!(
-        StorageLayout::Standard.expand(overrides),
+        StorageLayout::Standard.expand(&overrides),
         LayoutToggles {
             dedicated_wal_dir: true,
             dedicated_index_dir: false,
@@ -132,6 +139,9 @@ fn minimal_layout_keeps_optional_tier_dirs_disabled() {
     assert_eq!(paths.cache_dir, None);
     assert_eq!(paths.blob_dir, None);
     assert_eq!(paths.metrics_dir, None);
+    assert_eq!(paths.logs_dir, None);
+    assert_eq!(paths.audit_log_destination, LogDestination::Stderr);
+    assert_eq!(paths.slow_log_destination, LogDestination::Stderr);
     assert!(paths.dirs_to_create().is_empty());
 }
 
@@ -176,18 +186,124 @@ fn max_layout_places_every_tier_under_support_dir() {
         Some(Path::new("/var/lib/reddb/main.rdb.red/metrics").to_path_buf())
     );
     assert_eq!(
+        paths.logs_dir,
+        Some(Path::new("/var/lib/reddb/main.rdb.red/logs").to_path_buf())
+    );
+    assert_eq!(
+        paths.audit_log_destination,
+        LogDestination::File(
+            Path::new("/var/lib/reddb/main.rdb.red/logs/audit.log").to_path_buf()
+        )
+    );
+    assert_eq!(
+        paths.slow_log_destination,
+        LogDestination::File(Path::new("/var/lib/reddb/main.rdb.red/logs/slow.log").to_path_buf())
+    );
+    assert_eq!(
         paths.dirs_to_create(),
         vec![
             Path::new("/var/lib/reddb").to_path_buf(),
             Path::new("/var/lib/reddb/main.rdb.red/blobs").to_path_buf(),
             Path::new("/var/lib/reddb/main.rdb.red/cache").to_path_buf(),
             Path::new("/var/lib/reddb/main.rdb.red/indexes").to_path_buf(),
+            Path::new("/var/lib/reddb/main.rdb.red/logs").to_path_buf(),
             Path::new("/var/lib/reddb/main.rdb.red/metrics").to_path_buf(),
             Path::new("/var/lib/reddb/main.rdb.red/snapshots").to_path_buf(),
             Path::new("/var/lib/reddb/main.rdb.red/tmp").to_path_buf(),
             Path::new("/var/lib/reddb/main.rdb.red/wal").to_path_buf(),
         ]
     );
+}
+
+#[test]
+fn performance_layout_routes_audit_and_slow_logs_under_support_dir() {
+    let paths = TieredLayoutPaths::new(
+        Path::new("/srv/main.rdb"),
+        StorageLayout::Performance,
+        LayoutOverrides::default(),
+    );
+
+    assert_eq!(
+        paths.audit_log_destination,
+        LogDestination::File(Path::new("/srv/main.rdb.red/logs/audit.log").to_path_buf())
+    );
+    assert_eq!(
+        paths.slow_log_destination,
+        LogDestination::File(Path::new("/srv/main.rdb.red/logs/slow.log").to_path_buf())
+    );
+    assert_eq!(
+        paths.logs_dir,
+        Some(Path::new("/srv/main.rdb.red/logs").to_path_buf())
+    );
+    assert!(paths
+        .dirs_to_create()
+        .contains(&Path::new("/srv/main.rdb.red/logs").to_path_buf()));
+}
+
+#[test]
+fn standard_layout_defaults_logs_to_stderr() {
+    let paths = TieredLayoutPaths::new(
+        Path::new("/srv/main.rdb"),
+        StorageLayout::Standard,
+        LayoutOverrides::default(),
+    );
+
+    assert_eq!(paths.audit_log_destination, LogDestination::Stderr);
+    assert_eq!(paths.slow_log_destination, LogDestination::Stderr);
+    assert_eq!(paths.logs_dir, None);
+    assert_eq!(paths.audit_log_destination.describe(), "stderr");
+}
+
+#[test]
+fn log_routing_overrides_replace_tier_defaults() {
+    let overrides = LayoutOverrides {
+        logs: LogRoutingOverrides {
+            audit_log: Some(LogDestination::File(
+                Path::new("/var/log/reddb/audit.log").to_path_buf(),
+            )),
+            slow_log: Some(LogDestination::Syslog),
+        },
+        ..Default::default()
+    };
+
+    let paths = TieredLayoutPaths::new(
+        Path::new("/srv/main.rdb"),
+        StorageLayout::Standard,
+        overrides,
+    );
+
+    assert_eq!(
+        paths.audit_log_destination,
+        LogDestination::File(Path::new("/var/log/reddb/audit.log").to_path_buf())
+    );
+    assert_eq!(paths.slow_log_destination, LogDestination::Syslog);
+    assert_eq!(
+        paths.logs_dir,
+        Some(Path::new("/srv/main.rdb.red/logs").to_path_buf())
+    );
+    let dirs = paths.dirs_to_create();
+    assert!(dirs.contains(&Path::new("/var/log/reddb").to_path_buf()));
+}
+
+#[test]
+fn override_can_force_stderr_on_performance_tier() {
+    let overrides = LayoutOverrides {
+        logs: LogRoutingOverrides {
+            audit_log: Some(LogDestination::Stderr),
+            slow_log: Some(LogDestination::Stderr),
+        },
+        ..Default::default()
+    };
+
+    let paths = TieredLayoutPaths::new(
+        Path::new("/srv/main.rdb"),
+        StorageLayout::Performance,
+        overrides,
+    );
+
+    assert_eq!(paths.audit_log_destination, LogDestination::Stderr);
+    assert_eq!(paths.slow_log_destination, LogDestination::Stderr);
+    assert_eq!(paths.logs_dir, None);
 }
 
 #[test]
@@ -215,7 +331,7 @@ dedicated_metrics_dir = true
     )
     .expect("layout config parses");
 
-    let toggles = cfg.layout.expand(cfg.overrides);
+    let toggles = cfg.layout.expand(&cfg.overrides);
     assert!(!toggles.dedicated_wal_dir);
     assert!(toggles.dedicated_metrics_dir);
     assert!(toggles.dedicated_cache_dir);

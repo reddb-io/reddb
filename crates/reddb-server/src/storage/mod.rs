@@ -73,7 +73,10 @@ pub use backend::{BackendError, LocalBackend, RemoteBackend};
 pub use keyring::{
     clear_keyring, has_keyring_password, resolve_password, save_to_keyring, PasswordSource,
 };
-pub use layout::{LayoutOverrides, LayoutToggles, StorageLayout, TieredLayoutPaths};
+pub use layout::{
+    LayoutOverrides, LayoutToggles, LogDestination, LogRoutingOverrides, StorageLayout,
+    TieredLayoutPaths,
+};
 pub use unified::RedDB;
 
 // =============================================================================

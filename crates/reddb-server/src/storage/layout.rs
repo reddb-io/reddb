@@ -31,7 +31,7 @@ impl Default for StorageLayout {
 }
 
 /// Optional per-toggle override applied after preset expansion.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LayoutOverrides {
     pub dedicated_wal_dir: Option<bool>,
@@ -41,6 +41,52 @@ pub struct LayoutOverrides {
     pub dedicated_blob_dir: Option<bool>,
     pub dedicated_temp_dir: Option<bool>,
     pub dedicated_metrics_dir: Option<bool>,
+    /// Per-log routing overrides. See [`LogRoutingOverrides`].
+    #[serde(default)]
+    pub logs: LogRoutingOverrides,
+}
+
+/// Where a log stream should be written.
+///
+/// `Stderr` is the safe default — operators see lines without files
+/// accumulating in user data directories. `File(path)` is selected
+/// automatically by the `performance` / `max` tiers under
+/// `<dbname>.rdb.red/logs/` and can be overridden to an arbitrary path.
+/// `Syslog` is recognised by the routing layer; the actual syslog
+/// sink integration lives outside this pure layout module.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "kind", content = "path")]
+pub enum LogDestination {
+    Stderr,
+    File(PathBuf),
+    Syslog,
+}
+
+impl LogDestination {
+    /// Human-readable destination tag for `reddb status` / diagnostics.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Stderr => "stderr".to_string(),
+            Self::Syslog => "syslog".to_string(),
+            Self::File(path) => format!("file:{}", path.display()),
+        }
+    }
+
+    /// Returns the file path if this destination writes to a file.
+    pub fn file_path(&self) -> Option<&Path> {
+        match self {
+            Self::File(path) => Some(path.as_path()),
+            _ => None,
+        }
+    }
+}
+
+/// Per-log destination overrides. `None` keeps the tier default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LogRoutingOverrides {
+    pub audit_log: Option<LogDestination>,
+    pub slow_log: Option<LogDestination>,
 }
 
 /// Fully expanded layout toggles after applying a preset and overrides.
@@ -56,7 +102,31 @@ pub struct LayoutToggles {
 }
 
 impl StorageLayout {
-    pub fn expand(self, overrides: LayoutOverrides) -> LayoutToggles {
+    /// Default audit-log destination for this tier, before any override.
+    /// `Performance` / `Max` write to a file under `<support_dir>/logs/`;
+    /// `Standard` / `Minimal` default to stderr so no log files land in
+    /// the user's data directory.
+    pub fn default_audit_log_in(self, support_dir: &Path) -> LogDestination {
+        match self {
+            Self::Performance | Self::Max => {
+                LogDestination::File(support_dir.join("logs").join("audit.log"))
+            }
+            Self::Minimal | Self::Standard => LogDestination::Stderr,
+        }
+    }
+
+    /// Default slow-query log destination for this tier. See
+    /// [`Self::default_audit_log_in`].
+    pub fn default_slow_log_in(self, support_dir: &Path) -> LogDestination {
+        match self {
+            Self::Performance | Self::Max => {
+                LogDestination::File(support_dir.join("logs").join("slow.log"))
+            }
+            Self::Minimal | Self::Standard => LogDestination::Stderr,
+        }
+    }
+
+    pub fn expand(self, overrides: &LayoutOverrides) -> LayoutToggles {
         let mut toggles = match self {
             Self::Minimal => LayoutToggles {
                 dedicated_wal_dir: false,
@@ -135,6 +205,12 @@ pub struct TieredLayoutPaths {
     pub cache_dir: Option<PathBuf>,
     pub blob_dir: Option<PathBuf>,
     pub metrics_dir: Option<PathBuf>,
+    /// `<support_dir>/logs/` when any log destination resolves to a
+    /// file under the support tree. `None` keeps log files out of the
+    /// user's data directory entirely.
+    pub logs_dir: Option<PathBuf>,
+    pub audit_log_destination: LogDestination,
+    pub slow_log_destination: LogDestination,
     pub toggles: LayoutToggles,
 }
 
@@ -144,7 +220,7 @@ impl TieredLayoutPaths {
         layout: StorageLayout,
         overrides: LayoutOverrides,
     ) -> TieredLayoutPaths {
-        let toggles = layout.expand(overrides);
+        let toggles = layout.expand(&overrides);
         let data_file = data_path.to_path_buf();
         let support_dir = sibling_path(data_path, &format!("{}.red", file_name(data_path)));
 
@@ -170,6 +246,24 @@ impl TieredLayoutPaths {
             data_path.with_extension("rdb-tmp")
         };
 
+        let audit_log_destination = overrides
+            .logs
+            .audit_log
+            .clone()
+            .unwrap_or_else(|| layout.default_audit_log_in(&support_dir));
+        let slow_log_destination = overrides
+            .logs
+            .slow_log
+            .clone()
+            .unwrap_or_else(|| layout.default_slow_log_in(&support_dir));
+        let logs_dir = match (
+            audit_log_destination.file_path(),
+            slow_log_destination.file_path(),
+        ) {
+            (None, None) => None,
+            _ => Some(support_dir.join("logs")),
+        };
+
         TieredLayoutPaths {
             data_file,
             support_dir: support_dir.clone(),
@@ -191,6 +285,9 @@ impl TieredLayoutPaths {
             metrics_dir: toggles
                 .dedicated_metrics_dir
                 .then(|| support_dir.join("metrics")),
+            logs_dir,
+            audit_log_destination,
+            slow_log_destination,
             toggles,
         }
     }
@@ -206,6 +303,13 @@ impl TieredLayoutPaths {
         push_optional(&mut dirs, self.cache_dir.as_ref());
         push_optional(&mut dirs, self.blob_dir.as_ref());
         push_optional(&mut dirs, self.metrics_dir.as_ref());
+        push_optional(&mut dirs, self.logs_dir.as_ref());
+        if let Some(path) = self.audit_log_destination.file_path() {
+            push_parent(&mut dirs, path);
+        }
+        if let Some(path) = self.slow_log_destination.file_path() {
+            push_parent(&mut dirs, path);
+        }
         dirs.sort();
         dirs.dedup();
         dirs
