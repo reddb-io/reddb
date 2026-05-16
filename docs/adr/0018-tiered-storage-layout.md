@@ -142,3 +142,82 @@ mechanical when the runtime auto-enable slice lands.
 - Tier-driven auto-enable (`standard` / `performance` / `max` flipping
   the toggle on at startup) lands with the same `RuntimeOptions` /
   layout wiring that gates gh-471/472/473.
+
+## Folded pager meta — page 0/1 layout (gh-477)
+
+The pager's metadata page lives at page 1 of the data file. Historically
+that page was also mirrored to a `<data>-meta` sidecar shadow used as a
+last-resort corruption recovery path, and the page was capped at a single
+4 KiB frame — large catalogs (many collections, many cross-refs) were
+silently truncated when the serialised blob exceeded one page.
+
+The `fold_pager_meta` process-global policy (off by default, env escape
+hatch `REDDB_FOLD_PAGER_META=1`) folds the pager meta into the datafile:
+
+- when **ON**, the `<data>-meta` shadow is not written and any pre-existing
+  shadow is removed on the next write — page 1 (plus its overflow chain
+  when needed) is the sole source of truth;
+- when **OFF**, the legacy shadow behaviour is preserved verbatim;
+- reads always tolerate either layout, so databases written under the old
+  shadow remain loadable after the flag is flipped on.
+
+### Page 0 (database header)
+
+Unchanged. The header carries `freelist_head` (first trunk page id of the
+freelist chain) and the mirrored `PhysicalFileHeader` block. See
+`crates/reddb-server/src/storage/engine/pager.rs` for the byte layout.
+
+### Page 1 (pager metadata) — single-page form
+
+When the serialised metadata payload fits within `PAGE_SIZE - HEADER_SIZE`
+(4064 bytes), page 1 carries the payload directly at content offset 0:
+
+```text
+[0..4]   "RDM2"             // METADATA_MAGIC
+[4..8]   format_version u32
+[8..12]  collection_count u32
+…
+```
+
+Byte-identical to the historical layout — older readers keep working.
+
+### Page 1 (pager metadata) — overflow form
+
+When the payload exceeds the single-page bound, page 1 switches to a
+wrapper header pointing at an overflow chain of `PageType::Overflow`
+pages:
+
+```text
+Page 1 (content offset):
+  [0..4]   "RDM3"                 // METADATA_OVERFLOW_MAGIC
+  [4..8]   format_version u32
+  [8..12]  total_payload_bytes u32
+  [12..16] next_overflow_page_id u32   (> 0)
+  [16..]   first payload chunk (≤ 4048 bytes)
+
+Overflow continuation page (content offset):
+  [0..4]   next_overflow_page_id u32   (0 = last)
+  [4..8]   chunk_bytes u32
+  [8..]    payload chunk (≤ 4056 bytes)
+```
+
+`N` per-chunk capacity:
+
+- first chunk on page 1: **4048** bytes
+- subsequent overflow pages: **4056** bytes
+
+The reader transparently follows the chain; the parser sees a flat byte
+sequence identical to the single-page payload, so the upstream parsing
+logic is unchanged.
+
+### Free list overflow (page allocation)
+
+The free page list is stored as a linked chain of `FreelistTrunk` pages
+rooted at `header.freelist_head` (see
+`crates/reddb-server/src/storage/engine/freelist.rs`). A single trunk page
+holds `FREE_IDS_PER_TRUNK = 1014` free page ids. When more pages are
+freed, additional trunk pages are allocated and threaded through the
+chain — there is no static cap. The existing
+`freelist::tests::test_trunk_chain` covers > 2000 freed pages and the new
+`tests/e2e_fold_pager_meta_policy.rs::freelist_trunk_chain_handles_many_pages`
+extends coverage to multi-page reload.
