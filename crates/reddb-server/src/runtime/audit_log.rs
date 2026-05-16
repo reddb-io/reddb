@@ -708,6 +708,30 @@ impl AuditLogger {
         Self::with_path(path)
     }
 
+    /// Resolve a [`crate::storage::layout::LogDestination`] into a concrete
+    /// audit-log sink. `File(p)` writes to that exact path (Performance /
+    /// Max tier route here). `Stderr` and `Syslog` fall back to the legacy
+    /// `.audit.log` next to `fallback_data_path` — emit sites still get
+    /// durable storage while the dedicated stderr / syslog sinks are not
+    /// yet wired (ADR 0018 marks Syslog as a stub-and-warn lane).
+    pub fn for_destination(
+        dest: &crate::storage::layout::LogDestination,
+        fallback_data_path: &Path,
+    ) -> Self {
+        use crate::storage::layout::LogDestination;
+        match dest {
+            LogDestination::File(path) => Self::with_path(path.clone()),
+            LogDestination::Stderr => Self::for_data_path(fallback_data_path),
+            LogDestination::Syslog => {
+                tracing::warn!(
+                    target: "reddb::audit",
+                    "audit LogDestination::Syslog requested; sink not implemented, falling back to file next to data path"
+                );
+                Self::for_data_path(fallback_data_path)
+            }
+        }
+    }
+
     /// Direct constructor primarily for tests that want a custom path.
     pub fn with_path(path: PathBuf) -> Self {
         let max_bytes = std::env::var("RED_AUDIT_MAX_BYTES")
