@@ -6,10 +6,10 @@
 //! re-implement it from the same ADR (`docs/adr/0001-redwire-tcp-protocol.md`).
 //!
 //! Public surface:
-//!   - [`RedWireClient::connect`]: TCP + handshake + auth
-//!   - [`RedWireClient::query`]: SQL → server result
-//!   - [`RedWireClient::ping`]: keepalive
-//!   - [`RedWireClient::close`]: clean shutdown via Bye
+//!   - [`RedWireClient::connect`][]: TCP + handshake + auth
+//!   - [`RedWireClient::query`][]: SQL → server result
+//!   - [`RedWireClient::ping`][]: keepalive
+//!   - [`RedWireClient::close`][]: clean shutdown via Bye
 
 pub mod codec;
 mod frame;
@@ -581,6 +581,38 @@ fn io_err(err: io::Error) -> ClientError {
     ClientError::new(ErrorCode::Network, err.to_string())
 }
 
+fn bulk_insert_result_from_json(value: serde_json::Value) -> BulkInsertResult {
+    let affected = value
+        .as_object()
+        .and_then(|o| o.get("affected"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let rids: Vec<String> = value
+        .as_object()
+        .and_then(|o| o.get("rids").or_else(|| o.get("ids")))
+        .and_then(|v| v.as_array())
+        .map(|items| items.iter().filter_map(json_id_to_string).collect())
+        .unwrap_or_default();
+    let ids = value
+        .as_object()
+        .and_then(|o| o.get("ids"))
+        .and_then(|v| v.as_array())
+        .map(|items| items.iter().filter_map(json_id_to_string).collect())
+        .unwrap_or_else(|| rids.clone());
+    BulkInsertResult {
+        affected,
+        rids,
+        ids,
+    }
+}
+
+fn json_id_to_string(value: &serde_json::Value) -> Option<String> {
+    value
+        .as_str()
+        .map(String::from)
+        .or_else(|| value.as_u64().map(|n| n.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::param_to_redwire;
@@ -619,36 +651,4 @@ mod tests {
             assert_eq!(param_to_redwire(&input), expected);
         }
     }
-}
-
-fn bulk_insert_result_from_json(value: serde_json::Value) -> BulkInsertResult {
-    let affected = value
-        .as_object()
-        .and_then(|o| o.get("affected"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let rids: Vec<String> = value
-        .as_object()
-        .and_then(|o| o.get("rids").or_else(|| o.get("ids")))
-        .and_then(|v| v.as_array())
-        .map(|items| items.iter().filter_map(json_id_to_string).collect())
-        .unwrap_or_default();
-    let ids = value
-        .as_object()
-        .and_then(|o| o.get("ids"))
-        .and_then(|v| v.as_array())
-        .map(|items| items.iter().filter_map(json_id_to_string).collect())
-        .unwrap_or_else(|| rids.clone());
-    BulkInsertResult {
-        affected,
-        rids,
-        ids,
-    }
-}
-
-fn json_id_to_string(value: &serde_json::Value) -> Option<String> {
-    value
-        .as_str()
-        .map(String::from)
-        .or_else(|| value.as_u64().map(|n| n.to_string()))
 }
