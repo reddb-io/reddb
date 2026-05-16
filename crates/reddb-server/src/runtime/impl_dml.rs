@@ -485,6 +485,14 @@ impl RedDBRuntime {
                 Some(crate::catalog::CollectionModel::TimeSeries)
             )
         {
+            // Issue #523: blockchain collections auto-fill the reserved
+            // chain columns. We compute the next-block fields per row,
+            // threading the local tip forward so a batch INSERT produces a
+            // contiguous chain in a single statement.
+            let chain_mode = crate::runtime::blockchain_kind::is_chain(&*store, &query.table);
+            let mut chain_prev =
+                crate::runtime::blockchain_kind::chain_tip(&*store, &query.table);
+
             let mut rows = Vec::with_capacity(effective_rows.len());
             for row_values in &effective_rows {
                 if row_values.len() != query.columns.len() {
@@ -494,8 +502,27 @@ impl RedDBRuntime {
                         row_values.len()
                     )));
                 }
-                let (fields, mut metadata) =
+                let (mut fields, mut metadata) =
                     split_insert_metadata(self, &query.columns, row_values)?;
+                if chain_mode {
+                    fields.retain(|(k, _)| {
+                        !crate::runtime::blockchain_kind::RESERVED_COLUMNS
+                            .contains(&k.as_str())
+                    });
+                    let payload =
+                        crate::runtime::blockchain_kind::canonical_payload(&fields);
+                    let (prev_hash, height) = chain_prev.next();
+                    let ts = crate::runtime::blockchain_kind::now_ms();
+                    let (reserved, new_hash) =
+                        crate::runtime::blockchain_kind::make_block_reserved_fields(
+                            prev_hash, height, ts, &payload,
+                        );
+                    fields.extend(reserved);
+                    chain_prev = crate::runtime::blockchain_kind::ChainTip {
+                        height: Some(height),
+                        hash: new_hash,
+                    };
+                }
                 merge_with_clauses(
                     &mut metadata,
                     query.ttl_ms,
@@ -1118,6 +1145,18 @@ impl RedDBRuntime {
         query: &UpdateQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        // Issue #523 — blockchain collections are immutable. Reject before
+        // RLS / RETURNING work so the operator sees a clean 409-mapped
+        // error instead of a partially-applied mutation surface.
+        if crate::runtime::blockchain_kind::is_chain(
+            self.inner.db.store().as_ref(),
+            &query.table,
+        ) {
+            return Err(RedDBError::InvalidOperation(format!(
+                "BlockchainCollectionImmutable: UPDATE not allowed on '{}'",
+                query.table
+            )));
+        }
         // CollectionContract gate (#50): runs the APPEND ONLY guard
         // (and any future contract bits) before RLS / RETURNING work
         // so the operator's immutability declaration is honoured
@@ -1594,6 +1633,17 @@ impl RedDBRuntime {
         query: &DeleteQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        // Issue #523 — blockchain collections are immutable; see
+        // execute_update for the same gate.
+        if crate::runtime::blockchain_kind::is_chain(
+            self.inner.db.store().as_ref(),
+            &query.table,
+        ) {
+            return Err(RedDBError::InvalidOperation(format!(
+                "BlockchainCollectionImmutable: DELETE not allowed on '{}'",
+                query.table
+            )));
+        }
         // CollectionContract gate (#50) — see execute_update for
         // rationale. The gate handles APPEND ONLY rejection and is
         // the single point where future contract bits land.
