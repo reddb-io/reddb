@@ -152,7 +152,7 @@ rows = await db.query(
 )
 
 hits = await db.query(
-    "SEARCH SIMILAR $1 IN embeddings K 5",
+    "SEARCH SIMILAR $1 COLLECTION embeddings LIMIT 5",
     [[0.1, 0.2, 0.3]],
 )
 ```
