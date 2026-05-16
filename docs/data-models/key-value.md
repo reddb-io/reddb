@@ -148,6 +148,30 @@ KV query results include the public item envelope: `rid`, `collection`, `kind`,
 `tenant`, `created_at`, and `updated_at`, with `kind = 'kv'`. Those envelope
 names are reserved and cannot be used as top-level KV payload fields.
 
+## Updating KV with SQL
+
+KV updates use the explicit `KV` target. Compound assignment is supported on
+numeric values:
+
+```sql
+UPDATE config KV
+SET value += 1
+WHERE key = 'rollout.percent'
+RETURNING rid, key, value
+```
+
+```sql
+UPDATE config KV
+SET value = false
+WHERE key = 'feature.dark_mode'
+RETURNING key, value
+```
+
+`WHERE` and `SET` see `key`, `value`, exposed metadata, and the public
+envelope. Compound assignment requires an existing, non-null numeric `value`;
+missing, null, non-numeric, division by zero, modulo by zero, and overflow
+abort the whole statement without partial writes.
+
 ## Deleting a Key
 
 ```bash

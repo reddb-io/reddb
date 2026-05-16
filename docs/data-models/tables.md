@@ -134,6 +134,24 @@ WHERE rid = 102
 RETURNING rid, active, age
 ```
 
+Ordered batch update with deterministic tie-breaker:
+
+```sql
+UPDATE users ROWS
+SET touched = true
+WHERE active = true
+ORDER BY priority DESC
+LIMIT 100
+RETURNING rid
+```
+
+`ORDER BY` requires `LIMIT` and accepts only top-level fields. When the order
+key has ties and `rid` is not already in the order list, RedDB appends
+`rid ASC` as the deterministic tie-breaker. Multi-row updates are atomic: if
+any candidate fails authorization, RLS, arithmetic, or write, no candidate is
+changed. Compound assignment (`+=`, `-=`, `*=`, `/=`, `%=`) requires an
+existing, non-null numeric field.
+
 ## Deleting Rows
 
 ```bash
