@@ -173,4 +173,4 @@ the issue stays open, and the slice that closes it removes the entry.
 - CI lint slice: [#180](https://github.com/reddb-io/reddb/issues/180)
 - Topology wire payload (HelloAck / topology JSON surface):
   [#166](https://github.com/reddb-io/reddb/issues/166)
-- Prior security ADR: `docs/adr/0008-topology-advertisement-security.md`
+- Prior security ADR: `.red/adr/0008-topology-advertisement-security.md`

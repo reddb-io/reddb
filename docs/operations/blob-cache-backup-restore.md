@@ -3,9 +3,9 @@
 Operator playbook for managing **L2 Blob Cache** state across backup,
 restore, and emergency invalidation. Pairs with:
 
-- [ADR 0006 — tiered blob cache](../adr/0006-tiered-blob-cache.md) — L1/L2
+- [ADR 0006 — tiered blob cache](../../.red/adr/0006-tiered-blob-cache.md) — L1/L2
   layout, membership synopsis, and recovery contract.
-- [ADR 0009 — performance gate scope](../adr/0009-performance-gate-scope.md) —
+- [ADR 0009 — performance gate scope](../../.red/adr/0009-performance-gate-scope.md) —
   scope rules; cache backup is opt-in.
 - [`crates/reddb-server/src/storage/cache/sweeper.rs`](../../crates/reddb-server/src/storage/cache/sweeper.rs)
   — sweeper module landed by #148, now driven by the live admin endpoints

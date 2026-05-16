@@ -7,7 +7,7 @@
 //!
 //! Today it exposes the [`conn_string`] connection-string parser.
 //! Future slices will add the RedWire frame layout, header types,
-//! and framing codec (see ADR 0001 in `docs/adr/`).
+//! and framing codec (see ADR 0001 in `.red/adr/`).
 
 pub mod conn_string;
 pub mod query_with_params;

@@ -16,7 +16,7 @@ remains the dev variant; published numbers must come from
 ## Posture (ADR 0009)
 
 PRD #152 ships against the **scenario-specific** posture chosen in
-[ADR 0009](../adr/0009-performance-gate-scope.md): RedDB defends the
+[ADR 0009](../../.red/adr/0009-performance-gate-scope.md): RedDB defends the
 unified-engine wins (`typed_insert`, `disk_usage`, cross-model
 queries) and narrows — not necessarily inverts — the gap scenarios
 where storage-engine specialisation dominates (`concurrent`,
@@ -149,7 +149,7 @@ Server-advertised topology so clients learn the primary endpoint
 and the replica fleet from whichever node they hit first, instead
 of enumerating the cluster in their seed config. Throughput
 motivation is replica-aware read routing. Security model is
-recorded in [ADR 0008](../adr/0008-topology-advertisement-security.md).
+recorded in [ADR 0008](../../.red/adr/0008-topology-advertisement-security.md).
 
 ### Slice DAG
 

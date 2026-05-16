@@ -7,8 +7,8 @@ catalog is available.
 This page is the canonical reference for the implemented `red.*` surface.
 All documented columns are stable since RedDB 0.1 unless an individual
 description says otherwise. New columns may be added according to the evolution
-rules in [ADR 0011](../adr/0011-red-schema-stability-policy.md); protocol
-translation remains adapter-owned per [ADR 0010](../adr/0010-wire-adapters-translate-never-duplicate.md).
+rules in [ADR 0011](../../.red/adr/0011-red-schema-stability-policy.md); protocol
+translation remains adapter-owned per [ADR 0010](../../.red/adr/0010-wire-adapters-translate-never-duplicate.md).
 
 Implemented relations:
 
@@ -279,10 +279,10 @@ See [Events](../data-models/events.md) for subscription semantics.
 The `red.*` schema is RedDB's native introspection contract. Existing stable
 columns are append-only for compatibility: removals or incompatible type changes
 require deprecation notice in this reference and the stability process in
-[ADR 0011](../adr/0011-red-schema-stability-policy.md). Postgres-wire catalog
+[ADR 0011](../../.red/adr/0011-red-schema-stability-policy.md). Postgres-wire catalog
 views translate to this native surface at the adapter boundary; the runtime does
 not expose `pg_catalog` as a parallel source of truth, per
-[ADR 0010](../adr/0010-wire-adapters-translate-never-duplicate.md).
+[ADR 0010](../../.red/adr/0010-wire-adapters-translate-never-duplicate.md).
 
 ## `SHOW SAMPLE`
 

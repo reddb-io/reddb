@@ -676,7 +676,7 @@ curl -X POST http://127.0.0.1:8080/ai/prompt \
 to a provider and returns the canonical non-streaming ASK envelope. New clients
 should consume `sources_flat`, `citations`, and `validation`; `[^N]` markers in
 `answer` map to `sources_flat[N-1].urn`. The grounding contract is defined in
-[ADR 0013](../adr/0013-ask-grounding-citations.md), from
+[ADR 0013](../../.red/adr/0013-ask-grounding-citations.md), from
 [#392](https://github.com/reddb-io/reddb/issues/392).
 
 ```bash

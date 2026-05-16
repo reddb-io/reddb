@@ -23,7 +23,7 @@ Result after sync:
 | #372 Bun verification | Local open issue. | Keep open; local Bun verification previously blocked by runtime crash/segfault. |
 | #373 Cross-driver golden fixtures | Local open issue. | Keep open; blocked by remaining value/driver contract work. |
 | #374 Docs sweep parameterized | Local open with progress notes. | Keep open; multiple docs slices landed, sweep not complete. |
-| #377 ADR: parameter contract | GitHub-only ADR issue. | Keep open; no accepted ADR found under `docs/adr/`. |
+| #377 ADR: parameter contract | GitHub-only ADR issue. | Keep open; no accepted ADR found under `.red/adr/`. |
 | #378 Engine binder | GitHub-only issue; binder code exists in `user_params.rs`. | Keep open; contract/value coverage still incomplete. |
 | #379 Embedded Rust API | GitHub-only issue; `query_with` exists. | Keep open; `execute_with`/tuple API acceptance not complete. |
 | #380 HTTP params | GitHub-only issue; local #358 landed a tracer slice. | Keep open; all value variants/docs/DML gaps remain. |

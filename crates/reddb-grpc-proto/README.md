@@ -30,5 +30,5 @@ other (which would form a dependency cycle).
 - [Connection strings][conn-strings] — gRPC vs RedWire vs HTTP transports
 - [ADR 0001 — RedWire][adr-0001] — companion binary protocol
 
-[adr-0001]: ../../docs/adr/0001-redwire-tcp-protocol.md
+[adr-0001]: ../../.red/adr/0001-redwire-tcp-protocol.md
 [conn-strings]: ../../docs/clients/connection-strings.md

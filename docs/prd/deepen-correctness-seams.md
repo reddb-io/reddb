@@ -285,7 +285,7 @@ small issues once the MVCC tranche is underway:
 
 ## References
 
-- [ADR 0010 - Wire adapters translate, never duplicate](../adr/0010-wire-adapters-translate-never-duplicate.md)
-- [ADR 0014 - MVCC history store and transaction recovery](../adr/0014-mvcc-history-store-and-transaction-recovery.md)
-- [ADR 0015 - WITH EVENTS Dual-Write Window](../adr/0015-events-dual-write-window.md)
+- [ADR 0010 - Wire adapters translate, never duplicate](../../.red/adr/0010-wire-adapters-translate-never-duplicate.md)
+- [ADR 0014 - MVCC history store and transaction recovery](../../.red/adr/0014-mvcc-history-store-and-transaction-recovery.md)
+- [ADR 0015 - WITH EVENTS Dual-Write Window](../../.red/adr/0015-events-dual-write-window.md)
 - `CONTEXT.md` domain glossary

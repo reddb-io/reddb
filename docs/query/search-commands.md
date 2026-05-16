@@ -232,7 +232,7 @@ Ask natural-language questions against your data. RedDB retrieves relevant
 context from all collections and generates an answer with inline `[^N]`
 citations. Markers map to the flat `sources_flat` array by position and carry
 stable URNs for UI deep-links. See
-[ADR 0013](../adr/0013-ask-grounding-citations.md) for the grounding contract.
+[ADR 0013](../../.red/adr/0013-ask-grounding-citations.md) for the grounding contract.
 
 ```sql
 ASK 'what happened on host 10.0.0.1?' USING groq

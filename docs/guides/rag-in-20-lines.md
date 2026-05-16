@@ -80,7 +80,7 @@ Example shape:
 }
 ```
 
-See [ADR 0013](../adr/0013-ask-grounding-citations.md), from tracker
+See [ADR 0013](../../.red/adr/0013-ask-grounding-citations.md), from tracker
 [#392](https://github.com/reddb-io/reddb/issues/392), for the citation and URN
 contract behind this shape.
 

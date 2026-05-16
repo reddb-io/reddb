@@ -85,7 +85,7 @@ openapi-generator-cli generate -i admin.openapi.yaml -g go -o ./reddb-admin-go
 
 ## Native binary wire (RedWire)
 
-Length-framed binary protocol used for the highest-throughput path (point lookups, bulk insert) on port 5050. Frame layout: `[u32 length][u8 kind][u8 flags][u16 stream][u64 corr_id][payload]`. Adds a Hello/Auth handshake (SCRAM-SHA-256, bearer, OAuth-JWT, mTLS), per-frame zstd compression, multiplexing via `correlation_id`, and version negotiation. Documented in [`docs/adr/0001-redwire-tcp-protocol.md`](../adr/0001-redwire-tcp-protocol.md).
+Length-framed binary protocol used for the highest-throughput path (point lookups, bulk insert) on port 5050. Frame layout: `[u32 length][u8 kind][u8 flags][u16 stream][u64 corr_id][payload]`. Adds a Hello/Auth handshake (SCRAM-SHA-256, bearer, OAuth-JWT, mTLS), per-frame zstd compression, multiplexing via `correlation_id`, and version negotiation. Documented in [`.red/adr/0001-redwire-tcp-protocol.md`](../../.red/adr/0001-redwire-tcp-protocol.md).
 
 Use the binary wire when:
 

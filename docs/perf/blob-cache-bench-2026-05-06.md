@@ -10,7 +10,7 @@ cache and Redis"*.
 
 Parent issue: #139.
 
-ADR: [`0006-tiered-blob-cache.md`](../adr/0006-tiered-blob-cache.md).
+ADR: [`0006-tiered-blob-cache.md`](../../.red/adr/0006-tiered-blob-cache.md).
 Spike doc: [`blob-cache-l2-spike.md`](blob-cache-l2-spike.md).
 
 Cited session id: `sess-2026-05-11-redis-baseline`.

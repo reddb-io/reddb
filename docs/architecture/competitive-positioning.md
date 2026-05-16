@@ -83,7 +83,7 @@ cache advantage is for teams that already need the database and want cached
 artifacts to share durability, backup, replication, observability, and
 SQL-adjacent invalidation.
 
-Tracked in [ADR 0006](../adr/0006-tiered-blob-cache.md) and
+Tracked in [ADR 0006](../../.red/adr/0006-tiered-blob-cache.md) and
 [Cache](/data-models/cache.md).
 
 ## Pitch

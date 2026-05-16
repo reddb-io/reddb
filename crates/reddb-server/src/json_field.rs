@@ -1,7 +1,7 @@
 //! `SerializedJsonField` — typed guard for JSON-envelope construction.
 //!
 //! Issue [#178](https://github.com/reddb-io/reddb/issues/178), enforcing
-//! [ADR 0010 §3](../../../docs/adr/0010-serialization-boundary-discipline.md#3-serializedjsonfield--helloack--payloadreply--topology-json).
+//! [ADR 0010 §3](../../../.red/adr/0010-serialization-boundary-discipline.md#3-serializedjsonfield--helloack--payloadreply--topology-json).
 //!
 //! # The boundary
 //!

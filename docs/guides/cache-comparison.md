@@ -1,7 +1,7 @@
 # Cache vs KV vs Redis: which RedDB surface fits
 
 Status: 2026-05-06 — first cut. Companion to
-[ADR 0006 — Tiered Blob Cache](../adr/0006-tiered-blob-cache.md).
+[ADR 0006 — Tiered Blob Cache](../../.red/adr/0006-tiered-blob-cache.md).
 
 RedDB exposes several cache-shaped surfaces. They are not interchangeable
 and they exist for different reasons. This guide answers two questions:
@@ -338,7 +338,7 @@ narrative and the migration discussion. Bench evidence at
 ## Where to go next
 
 - Architectural rationale and the full Interface sketch:
-  [ADR 0006 — Tiered Blob Cache](../adr/0006-tiered-blob-cache.md).
+  [ADR 0006 — Tiered Blob Cache](../../.red/adr/0006-tiered-blob-cache.md).
 - L2 storage primitive spike:
   [`docs/perf/blob-cache-l2-spike.md`](../perf/blob-cache-l2-spike.md).
 - Performance methodology:

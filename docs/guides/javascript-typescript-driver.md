@@ -3,7 +3,7 @@
 RedDB ships three npm packages under the `@reddb-io/` scope. Pick the one
 that matches how your code talks to RedDB — they are not interchangeable
 and each has a distinct binary-acquisition contract (see
-[ADR 0007](../adr/0007-npm-package-matrix.md) for the rationale).
+[ADR 0007](../../.red/adr/0007-npm-package-matrix.md) for the rationale).
 
 ## Package matrix
 
@@ -201,7 +201,7 @@ don't see the new frame at all.
 
 `ASK` rows use the same grounded envelope across embedded stdio, HTTP, gRPC,
 MCP, and Postgres-wire. The citation contract is
-[ADR 0013](../adr/0013-ask-grounding-citations.md), created from
+[ADR 0013](../../.red/adr/0013-ask-grounding-citations.md), created from
 [#392](https://github.com/reddb-io/reddb/issues/392), and is the user-visible
 AI-native wedge tracked by [PRD #391](https://github.com/reddb-io/reddb/issues/391).
 

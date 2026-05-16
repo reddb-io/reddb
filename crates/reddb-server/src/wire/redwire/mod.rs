@@ -1,7 +1,7 @@
 //! RedWire — RedDB's binary TCP / TLS wire protocol with auth
 //! handshake, multiplex, compression, and version negotiation.
 //!
-//! See `docs/adr/0001-redwire-tcp-protocol.md`. The protocol is
+//! See `.red/adr/0001-redwire-tcp-protocol.md`. The protocol is
 //! gated on a `0xFE` startup magic byte so the listener can share
 //! a port with HTTP and gRPC behind the service router.
 //!

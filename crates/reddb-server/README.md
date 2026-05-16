@@ -45,9 +45,9 @@ Top-level modules (full list in `src/lib.rs`):
 
 - [Connection strings][conn-strings]
 - [ADR 0001 — RedWire][adr-0001]
-- [Disk format v1](../../docs/adr/0003-disk-format-v1.md)
+- [Disk format v1](../../.red/adr/0003-disk-format-v1.md)
 - [Workspace migration guide](../../docs/migration/workspace-split.md)
 
-[adr-0001]: ../../docs/adr/0001-redwire-tcp-protocol.md
+[adr-0001]: ../../.red/adr/0001-redwire-tcp-protocol.md
 [conn-strings]: ../../docs/clients/connection-strings.md
 [drivers-rust]: ../../crates/reddb-client

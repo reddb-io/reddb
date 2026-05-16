@@ -218,7 +218,7 @@ adapter only — RedWire bindings live behind the `redwire` extra.
 
 ## See also
 
-- `docs/adr/0001-redwire-tcp-protocol.md` — wire protocol spec
+- `.red/adr/0001-redwire-tcp-protocol.md` — wire protocol spec
 - `docs/clients/wire-protocol-comparison.md` — vs Postgres / Mongo
 - `docs/clients/sdk-compatibility.md` — driver feature matrix
 - `docs/security/overview.md` — server-side auth config

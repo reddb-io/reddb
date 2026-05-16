@@ -2,7 +2,7 @@
 
 **Status:** v0 implementation contract
 **Date:** 2026-05-14
-**Related:** [Metrics data model](../data-models/metrics.md), [ADR 0017](../adr/0017-prometheus-grafana-adapters-for-metrics.md)
+**Related:** [Metrics data model](../data-models/metrics.md), [ADR 0017](../../.red/adr/0017-prometheus-grafana-adapters-for-metrics.md)
 
 This matrix defines the first compatibility target for using RedDB as a
 Prometheus-compatible metrics backend and as a Grafana Prometheus datasource

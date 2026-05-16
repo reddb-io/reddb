@@ -429,7 +429,7 @@ The response contains:
 ### Grounding and citations
 
 ASK returns inline, server-validated citations by default. The contract is
-defined in [ADR 0013](../adr/0013-ask-grounding-citations.md), created from
+defined in [ADR 0013](../../.red/adr/0013-ask-grounding-citations.md), created from
 GitHub issue [#392](https://github.com/reddb-io/reddb/issues/392), and is the
 core AI-native wedge from [PRD #391](https://github.com/reddb-io/reddb/issues/391).
 

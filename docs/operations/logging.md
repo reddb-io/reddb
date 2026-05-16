@@ -7,8 +7,8 @@ production. Pairs with:
 - [`docs/operations/replication.md`](replication.md) — replica bootstrap and resumability.
 - [`docs/operations/blob-cache-dashboards.md`](blob-cache-dashboards.md) — Grafana dashboard reference.
 - [`docs/operations/blob-cache-backup-restore.md`](blob-cache-backup-restore.md) — backup and restore procedures.
-- [`docs/adr/0006-tiered-blob-cache.md`](../adr/0006-tiered-blob-cache.md) — tiered cache design rationale.
-- [`docs/adr/0008-topology-advertisement-security.md`](../adr/0008-topology-advertisement-security.md) — auth and identity security model.
+- [`.red/adr/0006-tiered-blob-cache.md`](../../.red/adr/0006-tiered-blob-cache.md) — tiered cache design rationale.
+- [`.red/adr/0008-topology-advertisement-security.md`](../../.red/adr/0008-topology-advertisement-security.md) — auth and identity security model.
 
 ---
 
@@ -375,9 +375,9 @@ regardless of the level setting.
 - **Security model** — `OperatorEvent::AuthBypass` and
   `OperatorEvent::AdminCapabilityGranted` are the audit hooks for the
   threat model described in
-  [ADR 0008](../adr/0008-topology-advertisement-security.md). Any auth
+  [ADR 0008](../../.red/adr/0008-topology-advertisement-security.md). Any auth
   invariant violation surfaces here before it surfaces anywhere else.
-- **Cache ADR** — [ADR 0006](../adr/0006-tiered-blob-cache.md) documents why
+- **Cache ADR** — [ADR 0006](../../.red/adr/0006-tiered-blob-cache.md) documents why
   the blob cache is derived state: it is not included in backups by default,
   and operator-grade cache events (e.g. namespace corruption) map to
   `SchemaCorruption` in the audit log.

@@ -3,7 +3,7 @@
 Official drivers for talking to a RedDB server (or, where supported, embedding the engine in-process). Pick your language, install the package, point it at a connection string, run a query.
 
 For the wire-level details every driver implements, see
-[Connection Strings](./connection-strings.md), [SDK & Client Compatibility](./sdk-compatibility.md), and [ADR 0001 — RedWire](../adr/0001-redwire-tcp-protocol.md).
+[Connection Strings](./connection-strings.md), [SDK & Client Compatibility](./sdk-compatibility.md), and [ADR 0001 — RedWire](../../.red/adr/0001-redwire-tcp-protocol.md).
 
 ## Driver matrix
 

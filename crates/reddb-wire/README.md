@@ -34,5 +34,5 @@ published [`reddb-client`](../reddb-client) driver. It depends on
 - [ADR 0001 — RedWire][adr-0001]
 - [Connection strings][conn-strings]
 
-[adr-0001]: ../../docs/adr/0001-redwire-tcp-protocol.md
+[adr-0001]: ../../.red/adr/0001-redwire-tcp-protocol.md
 [conn-strings]: ../../docs/clients/connection-strings.md

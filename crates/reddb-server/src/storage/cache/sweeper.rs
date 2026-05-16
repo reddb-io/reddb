@@ -91,7 +91,7 @@
 //!    backup-orchestrator module) needs an `include_blob_cache: bool` flag
 //!    and matching dump/restore round-trip for the L2 metadata B+ tree and
 //!    blob chains. The sweeper plays no part in backup itself, but the spec
-//!    in `docs/adr/0006-tiered-blob-cache.md` ties them together: a backup
+//!    in `.red/adr/0006-tiered-blob-cache.md` ties them together: a backup
 //!    triggered while a sweep is in flight must observe a consistent L2
 //!    snapshot.
 //!

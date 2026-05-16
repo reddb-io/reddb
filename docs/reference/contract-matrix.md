@@ -93,7 +93,7 @@ shipped via [#463](https://github.com/reddb-io/reddb/issues/463) and follow-up R
 |---|---|---|
 | `SEARCH SIMILAR $1 COLLECTION col LIMIT n` (vector ANN) | [docs/query/search-commands.md](../query/search-commands.md) | Proven — `crates/reddb-server/tests/vector_search_parser.rs`, `vector_search_snapshots.rs` |
 | `SEARCH CONTEXT` bucket coverage + tenant scoping | [docs/guides/ask-your-database.md](../guides/ask-your-database.md) | Proven — `tests/e2e_ask_search_conformance.rs`, `tests/e2e_ask_tenant_scoped.rs`, `crates/reddb-server/tests/ask_parser.rs`, `ask_snapshots.rs` |
-| ASK grounding + citations contract | [ADR 0013](../adr/0013-ask-grounding-citations.md) | Proven — `tests/e2e_ask_search_conformance.rs`, closed via [#464](https://github.com/reddb-io/reddb/issues/464) |
+| ASK grounding + citations contract | [ADR 0013](../../.red/adr/0013-ask-grounding-citations.md) | Proven — `tests/e2e_ask_search_conformance.rs`, closed via [#464](https://github.com/reddb-io/reddb/issues/464) |
 | `SEARCH IVF` SQL form | n/a | Unsupported / planned — removed from `docs/query/search-commands.md` in #465 iter 2; runtime auto-picks IVF when present. |
 
 ## Data models — multi-model durability

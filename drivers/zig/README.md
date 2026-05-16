@@ -154,7 +154,7 @@ duration of the call. The driver does not retain them.
 | `memory://`, `file:///path`, `grpc(s)://host`  | legacy aliases    |
 
 Default port for `red://` / `reds://` is **5050** (the redwire listener
-documented in `docs/adr/0001`). Other transports keep the port defaults from the
+documented in `.red/adr/0001`). Other transports keep the port defaults from the
 JS driver.
 
 ## Build
