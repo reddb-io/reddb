@@ -31,6 +31,14 @@ zstd = { version = "0.13", default-features = false }
 lz4_flex = { version = "0.13", default-features = false, features = ["std"] }
 sha2 = "0.11"
 hex = "0.4"
+# Ed25519 signature verification for Signed Writes (issue #520 / #522).
+# Used by `storage::signed_writes` to validate that an INSERT's
+# `signature` column was produced by a key in the collection's
+# `SIGNED_BY (...)` registry. Default features pull in `rand` and
+# `std` which we already rely on elsewhere; pinning to "2" tracks the
+# 2.x line that the rest of the workspace's transitive graph
+# already resolved to in Cargo.lock.
+ed25519-dalek = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["net", "sync"] }
 tonic = { version = "0.14", features = ["transport", "gzip", "zstd", "tls-ring"] }
