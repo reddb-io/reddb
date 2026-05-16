@@ -19,14 +19,11 @@ per-row scan, no WAL growth from DELETE tombstones.
 ## Declaration
 
 ```sql
-CREATE HYPERTABLE access_log (
-  ts BIGINT, service TEXT, message TEXT
-)
-CHUNK_INTERVAL '1 day'
-WITH (ttl = '90 days');
+-- Shipped form (column list + WITH (ttl=...) is planned; see hypertables.md):
+CREATE HYPERTABLE access_log TIME_COLUMN ts CHUNK_INTERVAL '1d' TTL '90d';
 ```
 
-The `WITH (ttl = '...')` clause attaches a **default TTL** to every
+The `TTL '...'` clause attaches a **default TTL** to every
 chunk the hypertable allocates. A chunk is safely droppable once:
 
 ```
