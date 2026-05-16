@@ -1188,6 +1188,25 @@ impl RedDBServer {
                     };
                 }
                 if method == "POST" {
+                    // Issue #525 — admin-gated verify-chain + clear-integrity
+                    // endpoints.  Both require `RED_ADMIN_TOKEN` when one is
+                    // configured (operator surface, not application auth).
+                    if let Some(collection) =
+                        collection_from_action_path(&path, "verify-chain")
+                    {
+                        if !admin_token_ok(&headers) {
+                            return json_error(401, "verify-chain requires admin token");
+                        }
+                        return handle_verify_chain(&self.runtime, collection);
+                    }
+                    if let Some(collection) =
+                        collection_from_action_path(&path, "clear-integrity-flag")
+                    {
+                        if !admin_token_ok(&headers) {
+                            return json_error(401, "clear-integrity-flag requires admin token");
+                        }
+                        return handle_clear_integrity_flag(&self.runtime, collection);
+                    }
                     // Auth: POST /auth/tenants/:tenant/users — explicit
                     // tenant-scoped user creation. Equivalent to the
                     // body-`tenant_id` field on /auth/users.
@@ -1865,6 +1884,71 @@ fn handle_chain_tip(runtime: &crate::runtime::RedDBRuntime, collection: &str) ->
     obj.insert(
         "server_time".to_string(),
         crate::json::Value::Number(server_time as f64),
+    );
+    json_response(200, crate::json::Value::Object(obj))
+}
+
+/// Issue #525 — admin-token gate for verify-chain + clear-integrity endpoints.
+/// When `RED_ADMIN_TOKEN` is unset the endpoints stay open (dev installs).
+/// When set, callers must present a matching `Authorization: Bearer <token>`.
+fn admin_token_ok(headers: &BTreeMap<String, String>) -> bool {
+    let Some(expected) = read_admin_token() else {
+        return true;
+    };
+    let presented = headers
+        .get("authorization")
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    crate::crypto::constant_time_eq(presented.as_bytes(), expected.as_bytes())
+}
+
+/// Issue #525 — `POST /collections/:name/verify-chain`.
+fn handle_verify_chain(
+    runtime: &crate::runtime::RedDBRuntime,
+    collection: &str,
+) -> HttpResponse {
+    let Some(outcome) = runtime.verify_chain_for_collection(collection) else {
+        return json_error(
+            404,
+            format!(
+                "verify-chain: collection '{collection}' is not a blockchain or does not exist"
+            ),
+        );
+    };
+    let mut obj = crate::json::Map::new();
+    obj.insert(
+        "checked".to_string(),
+        crate::json::Value::Number(outcome.checked as f64),
+    );
+    obj.insert("ok".to_string(), crate::json::Value::Bool(outcome.ok));
+    obj.insert(
+        "first_bad_height".to_string(),
+        match outcome.first_bad_height {
+            Some(h) => crate::json::Value::Number(h as f64),
+            None => crate::json::Value::Null,
+        },
+    );
+    json_response(200, crate::json::Value::Object(obj))
+}
+
+/// Issue #525 — `POST /collections/:name/clear-integrity-flag`.
+fn handle_clear_integrity_flag(
+    runtime: &crate::runtime::RedDBRuntime,
+    collection: &str,
+) -> HttpResponse {
+    if !runtime.clear_chain_integrity_flag(collection) {
+        return json_error(
+            404,
+            format!(
+                "clear-integrity-flag: collection '{collection}' is not a blockchain or does not exist"
+            ),
+        );
+    }
+    let mut obj = crate::json::Map::new();
+    obj.insert("ok".to_string(), crate::json::Value::Bool(true));
+    obj.insert(
+        "collection".to_string(),
+        crate::json::Value::String(collection.to_string()),
     );
     json_response(200, crate::json::Value::Object(obj))
 }
