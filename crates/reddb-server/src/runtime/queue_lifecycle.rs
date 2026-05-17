@@ -18,7 +18,7 @@
 //! `EffectiveScope` / auth checks stay with the Statement frame at the
 //! caller; this Module trusts that callers have already authorised.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::storage::queue::lifecycle::{
@@ -26,6 +26,22 @@ use crate::storage::queue::lifecycle::{
 };
 use crate::storage::queue::mode::QueueMode;
 use crate::storage::schema::Value;
+
+/// Monotonic clock abstraction. The Module reads "now" through this so
+/// unit tests can drive lock-expiry transitions without `std::thread::sleep`.
+/// Production wiring uses [`SystemClock`].
+pub(crate) trait Clock: Send + Sync {
+    fn now(&self) -> Instant;
+}
+
+/// Production clock — thin wrapper over [`Instant::now`].
+pub(crate) struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
 
 /// Lock duration + retry policy. Constructor takes this so the catalog
 /// wiring slice can swap the source without touching the Module surface.
@@ -77,14 +93,27 @@ pub(crate) struct Delivery {
 pub(crate) struct QueueLifecycle<S: QueueStore> {
     store: S,
     config: LifecycleConfig,
+    clock: Arc<dyn Clock>,
     outcomes: Mutex<Vec<RetirementOutcome>>,
 }
 
 impl<S: QueueStore> QueueLifecycle<S> {
     pub(crate) fn new(store: S, config: LifecycleConfig) -> Self {
+        Self::with_clock(store, config, Arc::new(SystemClock))
+    }
+
+    /// Same as [`new`], but with a caller-supplied clock. Used by unit
+    /// tests exercising lazy lock-expiry reclaim so deadlines can be
+    /// crossed without sleeping.
+    pub(crate) fn with_clock(
+        store: S,
+        config: LifecycleConfig,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         Self {
             store,
             config,
+            clock,
             outcomes: Mutex::new(Vec::new()),
         }
     }
@@ -102,6 +131,11 @@ impl<S: QueueStore> QueueLifecycle<S> {
         if count == 0 {
             return Ok(Vec::new());
         }
+        let now = self.clock.now();
+        // Lazy reclaim: release any pending row whose lock deadline has
+        // already passed before we scan for available messages. No
+        // sweeper, no timer — every deliver pays its own reclaim cost.
+        self.store.reclaim_expired(queue, now)?;
         let available = match self.config.mode {
             QueueMode::Work => self.store.available_messages(queue, QueueSide::Left),
             QueueMode::Fanout => self
@@ -110,7 +144,7 @@ impl<S: QueueStore> QueueLifecycle<S> {
         };
         let mut out = Vec::with_capacity(count.min(available.len()));
         for message_id in available.into_iter().take(count) {
-            let deadline = Instant::now() + self.config.lock_duration;
+            let deadline = now + self.config.lock_duration;
             let delivery_id = self.store.mark_pending(queue, message_id, group, deadline)?;
             let payload = self
                 .store
@@ -187,6 +221,32 @@ impl<S: QueueStore> QueueLifecycle<S> {
     #[cfg(test)]
     pub(crate) fn store_ref(&self) -> &S {
         &self.store
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct TestClock {
+    inner: Mutex<Instant>,
+}
+
+#[cfg(test)]
+impl TestClock {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: Mutex::new(Instant::now()),
+        }
+    }
+
+    pub(crate) fn advance(&self, by: Duration) {
+        let mut now = self.inner.lock().expect("clock poisoned");
+        *now += by;
+    }
+}
+
+#[cfg(test)]
+impl Clock for TestClock {
+    fn now(&self) -> Instant {
+        *self.inner.lock().expect("clock poisoned")
     }
 }
 
@@ -544,5 +604,81 @@ mod tests {
             ]
         );
         assert_eq!(lc.store.dlq_snapshot().len(), 1);
+    }
+
+    fn config_with_lock(lock: Duration) -> LifecycleConfig {
+        LifecycleConfig {
+            lock_duration: lock,
+            ..LifecycleConfig::default()
+        }
+    }
+
+    #[test]
+    fn expired_pending_is_reclaimed_lazily_on_next_deliver() {
+        // Acceptance: deliver, advance test clock past deadline,
+        // deliver again — the same message must come back.
+        let clock = Arc::new(TestClock::new());
+        let lc = QueueLifecycle::with_clock(
+            store_with(&[(1, "only")]),
+            config_with_lock(Duration::from_millis(100)),
+            clock.clone() as Arc<dyn Clock>,
+        );
+
+        let first = lc.deliver("q", "workers", 1).expect("first");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].payload, Value::text("only"));
+
+        // Before deadline: no redelivery (slot held).
+        clock.advance(Duration::from_millis(50));
+        let blocked = lc.deliver("q", "workers", 1).expect("still locked");
+        assert!(blocked.is_empty(), "lock still held — must not redeliver");
+
+        // Cross the deadline: next deliver reclaims and hands the
+        // message back. A fresh delivery_id is forged for the new lease.
+        clock.advance(Duration::from_millis(60));
+        let second = lc.deliver("q", "workers", 1).expect("after expiry");
+        assert_eq!(second.len(), 1, "expired lock must release for redelivery");
+        assert_eq!(second[0].payload, Value::text("only"));
+        assert_ne!(second[0].delivery_id, first[0].delivery_id);
+    }
+
+    #[test]
+    fn partial_advance_then_recreate_module_keeps_lock_held() {
+        // Acceptance: deliver, advance clock partially (still within
+        // deadline), recreate Module against same store — message
+        // stays locked. Models a primary restart: in-flight pending
+        // rows are not flushed; the original deadline is honored.
+        let clock = Arc::new(TestClock::new());
+        let store = store_with(&[(1, "in-flight")]);
+
+        let lc1 = QueueLifecycle::with_clock(
+            store.clone(),
+            config_with_lock(Duration::from_secs(30)),
+            clock.clone() as Arc<dyn Clock>,
+        );
+        let first = lc1.deliver("q", "workers", 1).expect("deliver");
+        assert_eq!(first.len(), 1);
+        let original_delivery_id = first[0].delivery_id.clone();
+
+        // Partial advance — still well within the 30s deadline.
+        clock.advance(Duration::from_secs(5));
+
+        // "Restart": new Module instance pointing at the same store
+        // (and same clock — the lock deadline is anchored in wall time,
+        // not in process identity).
+        let lc2 = QueueLifecycle::with_clock(
+            store.clone(),
+            config_with_lock(Duration::from_secs(30)),
+            clock.clone() as Arc<dyn Clock>,
+        );
+        let again = lc2.deliver("q", "workers", 1).expect("post-restart deliver");
+        assert!(
+            again.is_empty(),
+            "pending row must survive Module recreation while deadline holds"
+        );
+
+        // The original delivery handle remains ackable through the new
+        // Module — confirming the pending row was not silently dropped.
+        lc2.ack(&original_delivery_id).expect("original delivery still ackable");
     }
 }
