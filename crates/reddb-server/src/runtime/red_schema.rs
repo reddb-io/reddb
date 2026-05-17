@@ -37,6 +37,8 @@ pub(super) const STATS: &str = "red.stats";
 pub(super) const STATS_INTERNAL: &str = "__red_schema_stats";
 pub(super) const SUBSCRIPTIONS: &str = "red.subscriptions";
 pub(super) const SUBSCRIPTIONS_INTERNAL: &str = "__red_schema_subscriptions";
+pub(super) const SCHEMA_REGISTRY: &str = "red.schema_registry";
+pub(super) const SCHEMA_REGISTRY_INTERNAL: &str = "__red_schema_schema_registry";
 pub(super) const READ_ONLY_ERROR: &str = "system schema is read-only";
 
 const COLLECTION_COLUMNS: [&str; 13] = [
@@ -115,6 +117,13 @@ const STATS_COLUMNS: [&str; 10] = [
     "attention_score",
 ];
 
+const SCHEMA_REGISTRY_COLUMNS: [&str; 4] = [
+    "event_name",
+    "version",
+    "schema_json",
+    "registered_at",
+];
+
 const SUBSCRIPTION_COLUMNS: [&str; 11] = [
     "name",
     "collection",
@@ -143,6 +152,7 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
         (POLICIES, POLICIES_INTERNAL),
         (STATS, STATS_INTERNAL),
         (SUBSCRIPTIONS, SUBSCRIPTIONS_INTERNAL),
+        (SCHEMA_REGISTRY, SCHEMA_REGISTRY_INTERNAL),
     ] {
         if let Some(next) = replace_case_insensitive_outside_quotes(&rewritten, public, internal) {
             rewritten = next;
@@ -186,6 +196,8 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(STATS)
         || table.eq_ignore_ascii_case(SUBSCRIPTIONS_INTERNAL)
         || table.eq_ignore_ascii_case(SUBSCRIPTIONS)
+        || table.eq_ignore_ascii_case(SCHEMA_REGISTRY_INTERNAL)
+        || table.eq_ignore_ascii_case(SCHEMA_REGISTRY)
 }
 
 pub(super) fn red_query(
@@ -227,6 +239,7 @@ pub(super) fn red_query(
         VirtualTableKind::Policies => policies_snapshot(runtime, tenant, visible_collections),
         VirtualTableKind::Stats => stats_snapshot(runtime, visible_collections),
         VirtualTableKind::Subscriptions => subscriptions_snapshot(runtime, visible_collections),
+        VirtualTableKind::SchemaRegistry => schema_registry_snapshot(runtime),
     };
 
     let table_name = query.table.as_str();
@@ -328,6 +341,7 @@ enum VirtualTableKind {
     Policies,
     Stats,
     Subscriptions,
+    SchemaRegistry,
 }
 
 impl VirtualTableKind {
@@ -342,6 +356,7 @@ impl VirtualTableKind {
             Self::Policies => &POLICY_COLUMNS,
             Self::Stats => &STATS_COLUMNS,
             Self::Subscriptions => &SUBSCRIPTION_COLUMNS,
+            Self::SchemaRegistry => &SCHEMA_REGISTRY_COLUMNS,
         }
     }
 
@@ -356,6 +371,7 @@ impl VirtualTableKind {
             Self::Policies => POLICIES,
             Self::Stats => STATS,
             Self::Subscriptions => SUBSCRIPTIONS,
+            Self::SchemaRegistry => SCHEMA_REGISTRY,
         }
     }
 }
@@ -389,9 +405,38 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
     {
         return Ok(VirtualTableKind::Subscriptions);
     }
+    if name.eq_ignore_ascii_case(SCHEMA_REGISTRY_INTERNAL)
+        || name.eq_ignore_ascii_case(SCHEMA_REGISTRY)
+    {
+        return Ok(VirtualTableKind::SchemaRegistry);
+    }
     Err(RedDBError::Query(format!(
         "unknown system schema relation `{name}`"
     )))
+}
+
+fn schema_registry_snapshot(runtime: &RedDBRuntime) -> Vec<UnifiedRecord> {
+    let store = runtime.db().store();
+    let schema = Arc::new(
+        SCHEMA_REGISTRY_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    super::analytics_schema_registry::list(store.as_ref())
+        .into_iter()
+        .map(|entry| {
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(entry.event_name),
+                    Value::UnsignedInteger(entry.version as u64),
+                    Value::text(entry.schema_json),
+                    Value::TimestampMs(entry.registered_at_ms as i64),
+                ],
+            )
+        })
+        .collect()
 }
 
 fn subscriptions_snapshot(
