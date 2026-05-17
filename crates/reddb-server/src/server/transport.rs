@@ -250,6 +250,13 @@ pub(crate) fn map_runtime_error(err: &crate::api::RedDBError) -> (u16, String) {
         // the marker so deeper handlers can parse the tip payload back out.
         InvalidOperation(msg) if msg.starts_with("BlockchainConflict:") => 409,
         InvalidOperation(msg) if msg.starts_with("BlockchainCollectionImmutable") => 409,
+        // Issue #522 — Signed Writes verification failures. 401 for the
+        // three "the request is well-formed but the credential check
+        // failed" cases; 400 for the bytes-on-the-wire problems
+        // (missing/length/encoding).
+        InvalidOperation(msg) if msg.starts_with("SignedWriteError:UnknownSigner") => 401,
+        InvalidOperation(msg) if msg.starts_with("SignedWriteError:RevokedSigner") => 401,
+        InvalidOperation(msg) if msg.starts_with("SignedWriteError:InvalidSignature") => 401,
         InvalidConfig(_) | InvalidOperation(_) => 400,
         Query(msg) if msg.starts_with("ask_provider_failover_exhausted:") => 503,
         Query(msg) if msg.starts_with("ask_primary_sync_unavailable:") => 503,
