@@ -399,6 +399,17 @@ pub struct CollectionContract {
     /// Declarative subscriptions created by `WITH EVENTS`. This is
     /// metadata only in #291; event emission is wired by the outbox slice.
     pub subscriptions: Vec<crate::catalog::SubscriptionDescriptor>,
+    /// `CREATE TIMESERIES ... WITH SESSION_KEY <col>` — the column the
+    /// `SESSIONIZE` operator partitions by when no key is supplied at
+    /// query-time. `None` for non-timeseries collections and for
+    /// timeseries created without the clause. Issue #576 slice 1.
+    pub session_key: Option<String>,
+    /// `CREATE TIMESERIES ... SESSION_GAP <duration>` — the default
+    /// inactivity gap (milliseconds) the `SESSIONIZE` operator uses to
+    /// close a session when no gap is supplied at query-time. `None`
+    /// for non-timeseries collections and for timeseries created
+    /// without the clause. Issue #576 slice 1.
+    pub session_gap_ms: Option<u64>,
 }
 
 /// Canonical artifact lifecycle states.

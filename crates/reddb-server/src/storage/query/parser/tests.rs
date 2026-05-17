@@ -4116,6 +4116,70 @@ fn test_parse_timeseries_duration_downsample_and_hypertable_forms() {
 }
 
 #[test]
+fn test_parse_create_timeseries_with_session_clause() {
+    // Positive: WITH SESSION_KEY <col> SESSION_GAP <duration> parses
+    // and lands both fields on the AST. Combines with RETENTION to
+    // exercise the in-loop ordering against the other clauses.
+    let query = parse(
+        "CREATE TIMESERIES events RETENTION 7 d WITH SESSION_KEY user_id SESSION_GAP 30 m",
+    )
+    .unwrap();
+    let QueryExpr::CreateTimeSeries(ts) = query else {
+        panic!("Expected CreateTimeSeriesQuery");
+    };
+    assert_eq!(ts.session_key.as_deref(), Some("user_id"));
+    assert_eq!(ts.session_gap_ms, Some(30 * 60_000));
+    assert_eq!(ts.retention_ms, Some(7 * 86_400_000));
+
+    // Default (no WITH clause) leaves both fields None — confirms the
+    // descriptor distinguishes "absent" from "zero".
+    let query = parse("CREATE TIMESERIES events RETENTION 7 d").unwrap();
+    let QueryExpr::CreateTimeSeries(ts) = query else {
+        panic!("Expected CreateTimeSeriesQuery");
+    };
+    assert_eq!(ts.session_key, None);
+    assert_eq!(ts.session_gap_ms, None);
+
+    // Order-independence: WITH may appear before RETENTION.
+    let query =
+        parse("CREATE TIMESERIES events WITH SESSION_KEY uid SESSION_GAP 15 s RETENTION 1 d")
+            .unwrap();
+    let QueryExpr::CreateTimeSeries(ts) = query else {
+        panic!("Expected CreateTimeSeriesQuery");
+    };
+    assert_eq!(ts.session_key.as_deref(), Some("uid"));
+    assert_eq!(ts.session_gap_ms, Some(15_000));
+    assert_eq!(ts.retention_ms, Some(86_400_000));
+
+    // Negative parses — each malformed variant must error rather than
+    // silently land a half-populated descriptor.
+    for sql in [
+        // Missing column ident after SESSION_KEY (i.e. "missing column").
+        "CREATE TIMESERIES events WITH SESSION_KEY SESSION_GAP 30 m",
+        // Missing SESSION_GAP duration (i.e. "missing duration").
+        "CREATE TIMESERIES events WITH SESSION_KEY user_id",
+        // SESSION_KEY without a SESSION_GAP follow-up is rejected even
+        // if the user supplies something else afterwards.
+        "CREATE TIMESERIES events WITH SESSION_KEY user_id RETENTION 1 d",
+        // Bare WITH with no SESSION_KEY is rejected (no fallthrough).
+        "CREATE TIMESERIES events WITH RETENTION 1 d",
+    ] {
+        assert!(parse(sql).is_err(), "{sql} should not parse");
+    }
+
+    // Non-timeseries kinds must reject the clause at parse time. The
+    // CREATE TABLE / CREATE QUEUE / CREATE COLLECTION grammars do not
+    // know SESSION_KEY, so the parser errors before construction.
+    for sql in [
+        "CREATE TABLE events (id INTEGER) WITH SESSION_KEY user_id SESSION_GAP 30 m",
+        "CREATE QUEUE jobs WITH SESSION_KEY user_id SESSION_GAP 30 m",
+        "CREATE COLLECTION rooms KIND blockchain WITH SESSION_KEY user_id SESSION_GAP 30 m",
+    ] {
+        assert!(parse(sql).is_err(), "{sql} should not parse on non-timeseries");
+    }
+}
+
+#[test]
 fn test_parse_create_queue() {
     let query = parse("CREATE QUEUE tasks MAX_SIZE 1000 PRIORITY").unwrap();
     if let QueryExpr::CreateQueue(q) = query {

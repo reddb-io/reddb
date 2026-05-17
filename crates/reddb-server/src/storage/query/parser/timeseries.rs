@@ -17,6 +17,8 @@ impl<'a> Parser<'a> {
         let mut retention_ms = None;
         let mut chunk_size = None;
         let mut downsample_policies = Vec::new();
+        let mut session_key: Option<String> = None;
+        let mut session_gap_ms: Option<u64> = None;
 
         // Parse optional clauses in any order
         loop {
@@ -31,6 +33,13 @@ impl<'a> Parser<'a> {
                 while self.consume(&Token::Comma)? {
                     downsample_policies.push(self.parse_downsample_policy_spec()?);
                 }
+            } else if self.consume(&Token::With)? {
+                // `WITH SESSION_KEY <col> SESSION_GAP <duration>` — both
+                // clauses are paired so the SESSIONIZE operator (slice
+                // 2+) has a complete default. Order is fixed
+                // (SESSION_KEY first) to keep the grammar simple; one
+                // without the other is a parse error.
+                self.parse_with_session_clause(&mut session_key, &mut session_gap_ms)?;
             } else {
                 break;
             }
@@ -43,7 +52,38 @@ impl<'a> Parser<'a> {
             downsample_policies,
             if_not_exists,
             hypertable: None,
+            session_key,
+            session_gap_ms,
         }))
+    }
+
+    /// Parse `SESSION_KEY <ident> SESSION_GAP <duration>` after a
+    /// `WITH` token has been consumed. Both clauses are required; a
+    /// SESSION_KEY without a SESSION_GAP (or vice-versa) is rejected
+    /// at parse time so the descriptor never carries half a pairing.
+    fn parse_with_session_clause(
+        &mut self,
+        session_key: &mut Option<String>,
+        session_gap_ms: &mut Option<u64>,
+    ) -> Result<(), ParseError> {
+        if !self.consume_ident_ci("SESSION_KEY")? {
+            return Err(ParseError::new(
+                "expected SESSION_KEY after WITH on CREATE TIMESERIES".to_string(),
+                self.position(),
+            ));
+        }
+        let key = self.expect_ident()?;
+        if !self.consume_ident_ci("SESSION_GAP")? {
+            return Err(ParseError::new(
+                "WITH SESSION_KEY requires a paired SESSION_GAP <duration>".to_string(),
+                self.position(),
+            ));
+        }
+        let value = self.parse_float()?;
+        let unit = self.parse_duration_unit()?;
+        *session_key = Some(key);
+        *session_gap_ms = Some((value * unit) as u64);
+        Ok(())
     }
 
     /// Parse CREATE METRICS body (after CREATE METRICS consumed).
@@ -162,6 +202,8 @@ impl<'a> Parser<'a> {
                 chunk_interval_ns,
                 default_ttl_ns: ttl_ns,
             }),
+            session_key: None,
+            session_gap_ms: None,
         }))
     }
 

@@ -2125,6 +2125,8 @@ fn queue_collection_contract(
         // `UPDATE/DELETE FROM queue_name` statements fail loudly.
         append_only: true,
         subscriptions: Vec::new(),
+        session_key: None,
+        session_gap_ms: None,
     }
 }
 
