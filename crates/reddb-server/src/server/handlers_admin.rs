@@ -1603,6 +1603,77 @@ impl RedDBServer {
             let _ = writeln!(body, "reddb_limit_memory_bytes {}", v);
         }
 
+        // Queue lifecycle counters — slice 10 of issue #527 / ADR-0017.
+        // Process-local counters per (queue, group, mode); the
+        // pending gauge is scraped live from `red_queue_meta` so it
+        // cannot drift from the source of truth. Cardinality is
+        // bounded by the catalog: only queues/groups the operator
+        // already created appear here.
+        {
+            let queue_telemetry = self.runtime.queue_telemetry_snapshot();
+            let _ = writeln!(
+                body,
+                "# HELP queue_delivered_total Messages handed to a consumer (per queue/group/mode)."
+            );
+            let _ = writeln!(body, "# TYPE queue_delivered_total counter");
+            for ((queue, group, mode), n) in &queue_telemetry.delivered {
+                let _ = writeln!(
+                    body,
+                    "queue_delivered_total{{queue=\"{}\",group=\"{}\",mode=\"{}\"}} {}",
+                    sanitize_label(queue),
+                    sanitize_label(group),
+                    sanitize_label(mode),
+                    n
+                );
+            }
+            let _ = writeln!(
+                body,
+                "# HELP queue_acked_total Messages acknowledged (per queue/group/mode)."
+            );
+            let _ = writeln!(body, "# TYPE queue_acked_total counter");
+            for ((queue, group, mode), n) in &queue_telemetry.acked {
+                let _ = writeln!(
+                    body,
+                    "queue_acked_total{{queue=\"{}\",group=\"{}\",mode=\"{}\"}} {}",
+                    sanitize_label(queue),
+                    sanitize_label(group),
+                    sanitize_label(mode),
+                    n
+                );
+            }
+            let _ = writeln!(
+                body,
+                "# HELP queue_nacked_total Messages negatively-acknowledged (per queue/group/mode/outcome)."
+            );
+            let _ = writeln!(body, "# TYPE queue_nacked_total counter");
+            for ((queue, group, mode, outcome), n) in &queue_telemetry.nacked {
+                let _ = writeln!(
+                    body,
+                    "queue_nacked_total{{queue=\"{}\",group=\"{}\",mode=\"{}\",outcome=\"{}\"}} {}",
+                    sanitize_label(queue),
+                    sanitize_label(group),
+                    sanitize_label(mode),
+                    outcome,
+                    n
+                );
+            }
+            let pending = self.runtime.queue_pending_counts();
+            let _ = writeln!(
+                body,
+                "# HELP queue_pending_gauge In-flight (delivered, not yet acked) messages per queue/group."
+            );
+            let _ = writeln!(body, "# TYPE queue_pending_gauge gauge");
+            for ((queue, group), n) in &pending {
+                let _ = writeln!(
+                    body,
+                    "queue_pending_gauge{{queue=\"{}\",group=\"{}\"}} {}",
+                    sanitize_label(queue),
+                    sanitize_label(group),
+                    n
+                );
+            }
+        }
+
         // Events outbox metrics — issue #299
         {
             use crate::runtime::impl_queue::{
