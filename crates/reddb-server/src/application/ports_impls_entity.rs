@@ -124,6 +124,8 @@ fn ensure_collection_model_contract(
         // is the default until the operator runs explicit DDL.
         append_only: false,
         subscriptions: Vec::new(),
+        session_key: None,
+        session_gap_ms: None,
     })
     .map(|_| ())
     .map_err(|err| crate::RedDBError::Internal(err.to_string()))
