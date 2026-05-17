@@ -126,6 +126,11 @@ pub struct ServerCommandConfig {
     /// Telemetry config (Phase 6 logging). `None` falls back to the
     /// built-in default derived from `path` + stderr-only.
     pub telemetry: Option<crate::telemetry::TelemetryConfig>,
+    /// HTTP handler-pool knobs from the CLI layer (issue #574 slice 5).
+    /// Carries flag and env values; red_config and built-in defaults
+    /// are applied later by [`crate::server::http_limits::resolve_http_limits`]
+    /// once the runtime is open.
+    pub http_limits_cli: crate::server::HttpLimitsCliInput,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1237,6 +1242,7 @@ fn run_routed_server(config: ServerCommandConfig, router_bind_addr: String) -> R
         auth_store.clone(),
         http_backend.to_string(),
     );
+    let http_server = apply_http_limits(http_server, &config, &runtime);
     let http_handle = http_server.serve_in_background_on(http_listener);
 
     thread::sleep(Duration::from_millis(100));
@@ -1976,6 +1982,36 @@ fn build_http_server(
     )
 }
 
+/// Apply the resolved HTTP limits to a freshly-built `RedDBServer`.
+///
+/// Centralised here so every `run_*` path goes through the same
+/// resolver and the structured startup log line carries the same
+/// `http_limits.*` fields regardless of transport combination.
+fn apply_http_limits(
+    server: RedDBServer,
+    config: &ServerCommandConfig,
+    runtime: &RedDBRuntime,
+) -> RedDBServer {
+    let store = runtime.db().store();
+    let resolved = crate::server::http_limits::resolve_http_limits(
+        &config.http_limits_cli,
+        |key| match store.get_config(key) {
+            Some(crate::storage::schema::Value::Text(v)) => Some(v.to_string()),
+            Some(crate::storage::schema::Value::Integer(n)) if n >= 0 => Some(n.to_string()),
+            Some(crate::storage::schema::Value::UnsignedInteger(n)) => Some(n.to_string()),
+            _ => None,
+        },
+    );
+    tracing::info!(
+        target: "reddb::http_limits",
+        max_handlers = resolved.max_handlers,
+        handler_timeout_ms = resolved.handler_timeout_ms,
+        retry_after_secs = resolved.retry_after_secs,
+        "http_limits resolved"
+    );
+    server.with_http_limits(resolved)
+}
+
 #[inline(never)]
 fn build_http_server_with_transport_readiness(
     runtime: RedDBRuntime,
@@ -2073,11 +2109,12 @@ fn run_http_server(config: ServerCommandConfig, bind_addr: String) -> Result<(),
     spawn_admin_metrics_listeners(&runtime, &auth_store);
     spawn_http_tls_listener(&config, &runtime, &auth_store)?;
     let server = build_http_server_with_transport_readiness(
-        runtime,
+        runtime.clone(),
         auth_store,
         bind_addr.clone(),
         transport_readiness,
     );
+    let server = apply_http_limits(server, &config, &runtime);
     tracing::info!(transport = "http", bind = %bind_addr, "listener online");
     server.serve_on(listener).map_err(|err| err.to_string())
 }
@@ -2101,6 +2138,7 @@ fn spawn_http_tls_listener(
         .map_err(|err| format!("HTTP TLS: {err}"))?;
 
     let server = build_http_server(runtime.clone(), auth_store.clone(), addr.clone());
+    let server = apply_http_limits(server, config, runtime);
     let _handle = server.serve_tls_in_background(server_config);
     tracing::info!(
         transport = "https",
@@ -2251,6 +2289,7 @@ fn run_dual_server(
             http_bind_addr.clone(),
             transport_readiness.clone(),
         );
+        let http_server = apply_http_limits(http_server, &config, &runtime);
         Some(http_server.serve_in_background_on(listener))
     } else {
         None
