@@ -104,6 +104,7 @@ pub mod handlers_admin;
 mod handlers_ai;
 pub mod http_connection_limiter;
 pub mod http_handler_metrics;
+pub mod http_limits;
 mod handlers_auth;
 mod handlers_backup;
 mod handlers_ec;
@@ -131,6 +132,9 @@ mod transport;
 use self::handlers_ai::*;
 use self::http_connection_limiter::HttpConnectionLimiter;
 use self::http_handler_metrics::{HttpHandlerMetrics, HttpRejectReason, HttpTransport};
+pub use self::http_limits::{
+    HttpLimitsCliInput, HttpLimitsResolved, DEFAULT_HANDLER_TIMEOUT_MS, DEFAULT_RETRY_AFTER_SECS,
+};
 use self::handlers_entity::*;
 use self::handlers_graph::*;
 use self::handlers_keyed::*;
@@ -226,6 +230,14 @@ pub struct RedDBServer {
     /// with the server via `Arc` so every serve loop on the same
     /// `RedDBServer` writes to one set of counters.
     http_metrics: HttpHandlerMetrics,
+    /// `Retry-After` value (seconds) emitted in the limiter's reject
+    /// path (issue #574 slice 5). Pre-rendered into `reject_503_bytes`
+    /// at construction so the hot path is one write+close.
+    retry_after_secs: u64,
+    /// Cached bytes of the limiter's 503 response. Shared via `Arc`
+    /// across cloned server handles so flipping `retry_after_secs`
+    /// via `with_http_limits` propagates to every accept loop.
+    reject_503_bytes: Arc<Vec<u8>>,
 }
 
 /// Default per-handler total-time budget (issue #571 slice 2).
@@ -329,6 +341,8 @@ impl RedDBServer {
             handler_timeout: DEFAULT_HANDLER_TIMEOUT,
             slow_inject_ms: Arc::new(AtomicU64::new(0)),
             http_metrics: HttpHandlerMetrics::new(),
+            retry_after_secs: DEFAULT_RETRY_AFTER_SECS,
+            reject_503_bytes: Arc::new(build_reject_503_bytes(DEFAULT_RETRY_AFTER_SECS)),
         }
     }
 
@@ -345,6 +359,23 @@ impl RedDBServer {
     pub fn with_http_limiter_cap(mut self, cap: usize) -> Self {
         self.http_limiter = HttpConnectionLimiter::new(cap);
         self
+    }
+
+    /// Stamp resolved HTTP limits onto the server (issue #574 slice 5).
+    /// Replaces the limiter cap, the per-handler deadline, and the
+    /// `Retry-After` value used by the limiter's reject path. All
+    /// values are assumed validated by [`http_limits::resolve_http_limits`].
+    pub fn with_http_limits(mut self, limits: HttpLimitsResolved) -> Self {
+        self.http_limiter = HttpConnectionLimiter::new(limits.max_handlers);
+        self.handler_timeout = Duration::from_millis(limits.handler_timeout_ms);
+        self.retry_after_secs = limits.retry_after_secs;
+        self.reject_503_bytes = Arc::new(build_reject_503_bytes(limits.retry_after_secs));
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn retry_after_secs(&self) -> u64 {
+        self.retry_after_secs
     }
 
     #[doc(hidden)]
@@ -511,7 +542,7 @@ impl RedDBServer {
                         // no runtime call.
                         self.http_metrics
                             .record_reject(HttpTransport::Http, HttpRejectReason::CapExhausted);
-                        Self::reject_with_503(stream, self.options.write_timeout_ms);
+                        self.reject_with_503(stream, self.options.write_timeout_ms);
                     }
                 },
                 Err(err) => return Err(err),
@@ -520,16 +551,13 @@ impl RedDBServer {
         Ok(())
     }
 
-    /// Static 503 response used when the connection limiter is full.
-    /// Inlined into the accept loop so it costs one write and a close.
-    fn reject_with_503(mut stream: TcpStream, write_timeout_ms: u64) {
-        const RESPONSE: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\n\
-            Connection: close\r\n\
-            Content-Length: 0\r\n\
-            Retry-After: 5\r\n\
-            \r\n";
+    /// 503 response used when the connection limiter is full. The
+    /// payload is pre-rendered into `reject_503_bytes` at construction
+    /// (issue #574 slice 5: `Retry-After` is configurable), so the
+    /// hot path is still one write and a close.
+    fn reject_with_503(&self, mut stream: TcpStream, write_timeout_ms: u64) {
         let _ = stream.set_write_timeout(Some(Duration::from_millis(write_timeout_ms)));
-        let _ = stream.write_all(RESPONSE);
+        let _ = stream.write_all(&self.reject_503_bytes);
         let _ = stream.flush();
         let _ = stream.shutdown(std::net::Shutdown::Both);
     }
@@ -765,4 +793,19 @@ impl RedDBServer {
         tls_stream.flush()?;
         Ok(())
     }
+}
+
+/// Pre-render the limiter-reject 503 response. The `Retry-After`
+/// value comes from the resolved HTTP limits (issue #574 slice 5)
+/// and is fixed for the lifetime of the server, so we build the
+/// bytes once and hand a shared `Arc<Vec<u8>>` to every accept loop.
+fn build_reject_503_bytes(retry_after_secs: u64) -> Vec<u8> {
+    format!(
+        "HTTP/1.1 503 Service Unavailable\r\n\
+         Connection: close\r\n\
+         Content-Length: 0\r\n\
+         Retry-After: {retry_after_secs}\r\n\
+         \r\n"
+    )
+    .into_bytes()
 }

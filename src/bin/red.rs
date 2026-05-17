@@ -2832,6 +2832,8 @@ fn build_server_config(
         })
         .map(PathBuf::from);
 
+    let http_limits_cli = build_http_limits_cli_input(flags)?;
+
     Ok(ServerCommandConfig {
         path,
         router_bind_addr,
@@ -2863,6 +2865,99 @@ fn build_server_config(
         vault: flag_bool(flags, "vault"),
         workers,
         telemetry: Some(telemetry),
+        http_limits_cli,
+    })
+}
+
+/// Read the three slice-5 HTTP limiter knobs from CLI flags and env
+/// vars, validate each, and pack them into a `HttpLimitsCliInput` for
+/// the resolver. Validation failures abort boot with a clear message
+/// (acceptance: "Invalid input fails fast with a clear error").
+fn build_http_limits_cli_input(
+    flags: &HashMap<String, FlagValue>,
+) -> Result<reddb::server::HttpLimitsCliInput, String> {
+    use reddb::server::http_limits::{
+        validate_handler_timeout_ms, validate_max_handlers, validate_retry_after_secs,
+    };
+
+    fn parse_usize_validated<V>(
+        source: &str,
+        raw: Option<String>,
+        validate: V,
+    ) -> Result<Option<usize>, String>
+    where
+        V: Fn(usize) -> Result<usize, String>,
+    {
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        let parsed: usize = raw
+            .trim()
+            .parse()
+            .map_err(|err| format!("{source}: invalid integer `{raw}`: {err}"))?;
+        let validated = validate(parsed).map_err(|err| format!("{source}: {err}"))?;
+        Ok(Some(validated))
+    }
+
+    fn parse_u64_validated<V>(
+        source: &str,
+        raw: Option<String>,
+        validate: V,
+    ) -> Result<Option<u64>, String>
+    where
+        V: Fn(u64) -> Result<u64, String>,
+    {
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        let parsed: u64 = raw
+            .trim()
+            .parse()
+            .map_err(|err| format!("{source}: invalid integer `{raw}`: {err}"))?;
+        let validated = validate(parsed).map_err(|err| format!("{source}: {err}"))?;
+        Ok(Some(validated))
+    }
+
+    let max_handlers_flag = parse_usize_validated(
+        "--http-max-handlers",
+        flag_string(flags, "http-max-handlers").filter(|v| !v.is_empty()),
+        validate_max_handlers,
+    )?;
+    let max_handlers_env = parse_usize_validated(
+        "REDDB_HTTP_MAX_HANDLERS",
+        env_string("REDDB_HTTP_MAX_HANDLERS"),
+        validate_max_handlers,
+    )?;
+
+    let handler_timeout_ms_flag = parse_u64_validated(
+        "--http-handler-timeout-ms",
+        flag_string(flags, "http-handler-timeout-ms").filter(|v| !v.is_empty()),
+        validate_handler_timeout_ms,
+    )?;
+    let handler_timeout_ms_env = parse_u64_validated(
+        "REDDB_HTTP_HANDLER_TIMEOUT_MS",
+        env_string("REDDB_HTTP_HANDLER_TIMEOUT_MS"),
+        validate_handler_timeout_ms,
+    )?;
+
+    let retry_after_secs_flag = parse_u64_validated(
+        "--http-retry-after-secs",
+        flag_string(flags, "http-retry-after-secs").filter(|v| !v.is_empty()),
+        validate_retry_after_secs,
+    )?;
+    let retry_after_secs_env = parse_u64_validated(
+        "REDDB_HTTP_RETRY_AFTER_SECS",
+        env_string("REDDB_HTTP_RETRY_AFTER_SECS"),
+        validate_retry_after_secs,
+    )?;
+
+    Ok(reddb::server::HttpLimitsCliInput {
+        max_handlers_flag,
+        max_handlers_env,
+        handler_timeout_ms_flag,
+        handler_timeout_ms_env,
+        retry_after_secs_flag,
+        retry_after_secs_env,
     })
 }
 
@@ -4935,6 +5030,66 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
         let (grpc_bind, http_bind) = resolve_server_binds(&flags).unwrap();
         assert_eq!(grpc_bind.as_deref(), Some("0.0.0.0:50051"));
         assert_eq!(http_bind.as_deref(), Some("0.0.0.0:8080"));
+    }
+
+    #[test]
+    fn build_http_limits_flag_overrides_env() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("REDDB_HTTP_MAX_HANDLERS", "99"),
+            ("REDDB_HTTP_HANDLER_TIMEOUT_MS", "7000"),
+            ("REDDB_HTTP_RETRY_AFTER_SECS", "9"),
+        ]);
+        let flags = HashMap::from([
+            ("http-max-handlers".to_string(), str_flag("16")),
+            ("http-handler-timeout-ms".to_string(), str_flag("5000")),
+            ("http-retry-after-secs".to_string(), str_flag("3")),
+        ]);
+        let limits = build_http_limits_cli_input(&flags).unwrap();
+        assert_eq!(limits.max_handlers_flag, Some(16));
+        assert_eq!(limits.handler_timeout_ms_flag, Some(5_000));
+        assert_eq!(limits.retry_after_secs_flag, Some(3));
+        assert_eq!(limits.max_handlers_env, Some(99));
+        assert_eq!(limits.handler_timeout_ms_env, Some(7_000));
+        assert_eq!(limits.retry_after_secs_env, Some(9));
+    }
+
+    #[test]
+    fn build_http_limits_rejects_zero_cap_flag() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::clear(&["REDDB_HTTP_MAX_HANDLERS"]);
+        let flags = HashMap::from([("http-max-handlers".to_string(), str_flag("0"))]);
+        let err = build_http_limits_cli_input(&flags).unwrap_err();
+        assert!(err.contains("--http-max-handlers"), "got: {err}");
+        assert!(err.contains(">= 1"), "got: {err}");
+    }
+
+    #[test]
+    fn build_http_limits_rejects_too_short_timeout_flag() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::clear(&["REDDB_HTTP_HANDLER_TIMEOUT_MS"]);
+        let flags = HashMap::from([("http-handler-timeout-ms".to_string(), str_flag("10"))]);
+        let err = build_http_limits_cli_input(&flags).unwrap_err();
+        assert!(err.contains("handler_timeout_ms"), "got: {err}");
+    }
+
+    #[test]
+    fn build_http_limits_rejects_out_of_range_retry_after_flag() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::clear(&["REDDB_HTTP_RETRY_AFTER_SECS"]);
+        let flags = HashMap::from([("http-retry-after-secs".to_string(), str_flag("99"))]);
+        let err = build_http_limits_cli_input(&flags).unwrap_err();
+        assert!(err.contains("retry_after_secs"), "got: {err}");
+        assert!(err.contains("[1, 30]"), "got: {err}");
+    }
+
+    #[test]
+    fn build_http_limits_rejects_garbage_env() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::set(&[("REDDB_HTTP_MAX_HANDLERS", "not-a-number")]);
+        let flags: HashMap<String, FlagValue> = HashMap::new();
+        let err = build_http_limits_cli_input(&flags).unwrap_err();
+        assert!(err.contains("REDDB_HTTP_MAX_HANDLERS"), "got: {err}");
     }
 
     #[test]
