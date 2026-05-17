@@ -2463,6 +2463,13 @@ pub struct CreateTimeSeriesQuery {
     /// When `Some`, the DDL was spelled `CREATE HYPERTABLE` and the
     /// runtime must register the spec with the hypertable registry.
     pub hypertable: Option<HypertableDdl>,
+    /// `WITH SESSION_KEY <col>` — default partition column for the
+    /// `SESSIONIZE` operator. Persisted on the collection contract so
+    /// queries that omit `BY <col>` pick it up. Issue #576 slice 1.
+    pub session_key: Option<String>,
+    /// `SESSION_GAP <duration>` — default inactivity gap (ms) for the
+    /// `SESSIONIZE` operator. Issue #576 slice 1.
+    pub session_gap_ms: Option<u64>,
 }
 
 /// Hypertable-specific DDL fields — set only when the caller used

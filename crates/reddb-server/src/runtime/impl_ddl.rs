@@ -1565,6 +1565,8 @@ fn collection_contract_from_create_table(
         metrics_namespace: None,
         append_only: query.append_only,
         subscriptions: query.subscriptions.clone(),
+        session_key: None,
+        session_gap_ms: None,
     })
 }
 
@@ -1594,6 +1596,8 @@ fn default_collection_contract_for_existing_table(
         metrics_namespace: None,
         append_only: false,
         subscriptions: Vec::new(),
+        session_key: None,
+        session_gap_ms: None,
     }
 }
 
@@ -1624,6 +1628,8 @@ fn keyed_collection_contract(
         metrics_namespace: None,
         append_only: false,
         subscriptions: Vec::new(),
+        session_key: None,
+        session_gap_ms: None,
     }
 }
 
@@ -1656,6 +1662,8 @@ fn metrics_collection_contract(query: &CreateTableQuery) -> crate::physical::Col
         metrics_namespace: Some("default".to_string()),
         append_only: true,
         subscriptions: Vec::new(),
+        session_key: None,
+        session_gap_ms: None,
     }
 }
 
@@ -1683,6 +1691,8 @@ fn vector_collection_contract(query: &CreateVectorQuery) -> crate::physical::Col
         metrics_namespace: None,
         append_only: false,
         subscriptions: Vec::new(),
+        session_key: None,
+        session_gap_ms: None,
     }
 }
 
@@ -2187,6 +2197,8 @@ fn event_queue_collection_contract(queue: &str) -> crate::physical::CollectionCo
         metrics_namespace: None,
         append_only: true,
         subscriptions: Vec::new(),
+        session_key: None,
+        session_gap_ms: None,
     }
 }
 

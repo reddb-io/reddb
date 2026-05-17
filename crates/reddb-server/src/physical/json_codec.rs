@@ -408,6 +408,21 @@ pub(super) fn collection_contract_to_json(contract: &CollectionContract) -> Json
         ),
     );
     object.insert(
+        "session_key".to_string(),
+        contract
+            .session_key
+            .as_ref()
+            .map(|name| JsonValue::String(name.clone()))
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
+        "session_gap_ms".to_string(),
+        contract
+            .session_gap_ms
+            .map(|ms| JsonValue::Number(ms as f64))
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
         "table_def".to_string(),
         contract
             .table_def
@@ -538,6 +553,17 @@ pub(super) fn collection_contract_from_json(value: &JsonValue) -> io::Result<Col
             })
             .transpose()?
             .unwrap_or_default(),
+        // Legacy sidecars lack the session_key / session_gap_ms keys —
+        // default None preserves pre-feature behaviour (no SESSIONIZE
+        // defaults). Issue #576 slice 1.
+        session_key: object
+            .get("session_key")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string),
+        session_gap_ms: match object.get("session_gap_ms") {
+            Some(JsonValue::Null) | None => None,
+            Some(value) => Some(json_u64_value(value)?),
+        },
     })
 }
 

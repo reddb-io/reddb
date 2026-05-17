@@ -39,7 +39,7 @@ pub(super) const SUBSCRIPTIONS: &str = "red.subscriptions";
 pub(super) const SUBSCRIPTIONS_INTERNAL: &str = "__red_schema_subscriptions";
 pub(super) const READ_ONLY_ERROR: &str = "system schema is read-only";
 
-const COLLECTION_COLUMNS: [&str; 13] = [
+const COLLECTION_COLUMNS: [&str; 15] = [
     "name",
     "model",
     "schema_mode",
@@ -53,6 +53,11 @@ const COLLECTION_COLUMNS: [&str; 13] = [
     "queue_mode",
     "dimension",
     "metric",
+    // Timeseries-only — populated when `CREATE TIMESERIES ... WITH
+    // SESSION_KEY <col> SESSION_GAP <duration>` was used. NULL
+    // otherwise. Issue #576 slice 1.
+    "session_key",
+    "session_gap_ms",
 ];
 
 const COLUMN_COLUMNS: [&str; 7] = [
@@ -1279,6 +1284,15 @@ fn collections_snapshot(
                 .vector_metric
                 .map(|metric| Value::text(distance_metric_name(metric)))
                 .unwrap_or(Value::Null);
+            let session_key = collection
+                .session_key
+                .as_ref()
+                .map(|key| Value::text(key.clone()))
+                .unwrap_or(Value::Null);
+            let session_gap_ms = collection
+                .session_gap_ms
+                .map(Value::UnsignedInteger)
+                .unwrap_or(Value::Null);
             UnifiedRecord::with_schema(
                 Arc::clone(&schema),
                 vec![
@@ -1295,6 +1309,8 @@ fn collections_snapshot(
                     queue_mode,
                     vector_dimension,
                     vector_metric,
+                    session_key,
+                    session_gap_ms,
                 ],
             )
         })
@@ -1713,7 +1729,10 @@ mod tests {
     #[test]
     fn collection_columns_includes_queue_mode() {
         assert!(COLLECTION_COLUMNS.contains(&"queue_mode"));
-        assert_eq!(COLLECTION_COLUMNS.len(), 13);
+        // Two timeseries session columns were added by #576 slice 1.
+        assert!(COLLECTION_COLUMNS.contains(&"session_key"));
+        assert!(COLLECTION_COLUMNS.contains(&"session_gap_ms"));
+        assert_eq!(COLLECTION_COLUMNS.len(), 15);
     }
 
     #[test]

@@ -103,6 +103,13 @@ pub struct CollectionDescriptor {
     pub queue_dlq_target: Option<String>,
     pub vector_dimension: Option<usize>,
     pub vector_metric: Option<crate::storage::engine::distance::DistanceMetric>,
+    /// `WITH SESSION_KEY <col>` declared on the timeseries collection.
+    /// `None` for non-timeseries and for timeseries without the clause.
+    /// Issue #576 slice 1.
+    pub session_key: Option<String>,
+    /// `SESSION_GAP <duration>` in milliseconds declared on the
+    /// timeseries collection. Issue #576 slice 1.
+    pub session_gap_ms: Option<u64>,
     pub declared_schema_mode: Option<SchemaMode>,
     pub observed_schema_mode: SchemaMode,
     pub entities: usize,
@@ -414,6 +421,8 @@ pub fn snapshot_store_with_declarations(
             },
             vector_dimension: contract.and_then(|contract| contract.vector_dimension),
             vector_metric: contract.and_then(|contract| contract.vector_metric),
+            session_key: contract.and_then(|contract| contract.session_key.clone()),
+            session_gap_ms: contract.and_then(|contract| contract.session_gap_ms),
             declared_schema_mode: contract.map(|contract| contract.schema_mode),
             observed_schema_mode: inferred_schema_mode,
             entities: entity_count,
