@@ -75,6 +75,11 @@ pub(crate) trait QueueStore {
     /// `delivery_id` is unknown (already released or never existed).
     fn release_pending(&self, delivery_id: &str) -> Result<()>;
 
+    /// Permanently retire a pending delivery — removes the pending entry
+    /// AND the underlying message from the available pool. Used for ACK.
+    /// Returns `UnknownDelivery` if `delivery_id` is not currently held.
+    fn ack_pending(&self, delivery_id: &str) -> Result<()>;
+
     /// Increment attempt count for `delivery_id`. Returns the new count.
     fn bump_attempt(&self, delivery_id: &str) -> Result<u32>;
 
@@ -83,6 +88,9 @@ pub(crate) trait QueueStore {
 
     /// Pending deadline for `delivery_id`, if it is currently held.
     fn read_lock_deadline(&self, delivery_id: &str) -> Option<Instant>;
+
+    /// Read the stored payload for `message_id` on `queue`, if known.
+    fn read_message(&self, queue: &str, message_id: MessageId) -> Option<Value>;
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +116,9 @@ struct State {
     pending: HashMap<DeliveryId, PendingDelivery>,
     /// Reverse index for idempotent `mark_pending`.
     by_key: HashMap<(QueueId, MessageId, ConsumerGroupId), DeliveryId>,
+    /// Stored payloads keyed by `(queue, message_id)`. Seeded by tests via
+    /// `seed_payload`; real storage hydrates from segment files.
+    payloads: HashMap<(QueueId, MessageId), Value>,
     dlq: Vec<DlqRecord>,
 }
 
@@ -137,6 +148,15 @@ impl InMemoryQueueStore {
     /// Snapshot of the DLQ — test helper.
     pub(crate) fn dlq_snapshot(&self) -> Vec<DlqRecord> {
         self.state.lock().expect("state poisoned").dlq.clone()
+    }
+
+    /// Associate `payload` with `(queue, message_id)` — test helper used
+    /// by lifecycle tests that need `read_message` to return data.
+    pub(crate) fn seed_payload(&self, queue: &str, message_id: MessageId, payload: Value) {
+        let mut state = self.state.lock().expect("state poisoned");
+        state
+            .payloads
+            .insert((queue.to_string(), message_id), payload);
     }
 
     fn next_delivery_id(&self) -> DeliveryId {
@@ -221,6 +241,21 @@ impl QueueStore for InMemoryQueueStore {
         Ok(())
     }
 
+    fn ack_pending(&self, delivery_id: &str) -> Result<()> {
+        let mut state = self.state.lock().expect("state poisoned");
+        let entry = state
+            .pending
+            .remove(delivery_id)
+            .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
+        let key = (entry.queue.clone(), entry.message_id, entry.group);
+        state.by_key.remove(&key);
+        if let Some(msgs) = state.queues.get_mut(&entry.queue) {
+            msgs.retain(|m| *m != entry.message_id);
+        }
+        state.payloads.remove(&(entry.queue, entry.message_id));
+        Ok(())
+    }
+
     fn bump_attempt(&self, delivery_id: &str) -> Result<u32> {
         let mut state = self.state.lock().expect("state poisoned");
         let entry = state
@@ -243,6 +278,14 @@ impl QueueStore for InMemoryQueueStore {
     fn read_lock_deadline(&self, delivery_id: &str) -> Option<Instant> {
         let state = self.state.lock().expect("state poisoned");
         state.pending.get(delivery_id).map(|p| p.deadline)
+    }
+
+    fn read_message(&self, queue: &str, message_id: MessageId) -> Option<Value> {
+        let state = self.state.lock().expect("state poisoned");
+        state
+            .payloads
+            .get(&(queue.to_string(), message_id))
+            .cloned()
     }
 }
 
