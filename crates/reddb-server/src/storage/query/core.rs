@@ -482,6 +482,11 @@ pub struct CreateViewQuery {
     pub if_not_exists: bool,
     /// `CREATE OR REPLACE VIEW` — overwrites any existing definition.
     pub or_replace: bool,
+    /// `REFRESH EVERY <duration>` clause — only valid on materialized
+    /// views. When set, a background scheduler ticks the view at this
+    /// cadence. `None` means refresh-on-demand only (slice 9 behaviour).
+    /// Issue #583 slice 10.
+    pub refresh_every_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

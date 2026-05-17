@@ -1340,12 +1340,39 @@ impl<'a> Parser<'a> {
                     // Recursive parse of the body. Any QueryExpr that the
                     // rest of the grammar accepts is valid (Select, Join, etc.).
                     let body = self.parse_sql_command()?.into_query_expr();
+                    // Optional `REFRESH EVERY <duration>` clause on
+                    // materialized views (issue #583 slice 10). The
+                    // background scheduler reads this off the view
+                    // descriptor and ticks the view on its cadence.
+                    let mut refresh_every_ms: Option<u64> = None;
+                    if self.check(&Token::Refresh) {
+                        if !materialized {
+                            return Err(ParseError::new(
+                                "REFRESH EVERY is only valid on \
+                                 CREATE MATERIALIZED VIEW"
+                                    .to_string(),
+                                self.position(),
+                            ));
+                        }
+                        self.advance()?;
+                        if !self.consume_ident_ci("EVERY")? {
+                            return Err(ParseError::expected(
+                                vec!["EVERY"],
+                                self.peek(),
+                                self.position(),
+                            ));
+                        }
+                        let value = self.parse_float()?;
+                        let unit_mult = self.parse_duration_unit()?;
+                        refresh_every_ms = Some((value * unit_mult).round() as u64);
+                    }
                     return Ok(SqlCommand::CreateView(CreateViewQuery {
                         name,
                         query: Box::new(body),
                         materialized,
                         if_not_exists,
                         or_replace,
+                        refresh_every_ms,
                     }));
                 }
                 // If OR REPLACE / MATERIALIZED was consumed but VIEW was not,

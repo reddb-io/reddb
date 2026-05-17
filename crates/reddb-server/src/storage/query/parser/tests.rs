@@ -5609,6 +5609,69 @@ fn test_parse_view_ddl() {
     }
 }
 
+/// Issue #583 slice 10 — `CREATE MATERIALIZED VIEW ... REFRESH EVERY <duration>`.
+#[test]
+fn test_parse_create_materialized_view_refresh_every() {
+    // Seconds
+    if let QueryExpr::CreateView(q) = parse(
+        "CREATE MATERIALIZED VIEW daily AS SELECT id FROM t REFRESH EVERY 5 s",
+    )
+    .unwrap()
+    {
+        assert!(q.materialized);
+        assert_eq!(q.refresh_every_ms, Some(5_000));
+    } else {
+        panic!("Expected CreateView with REFRESH EVERY 5 s");
+    }
+
+    // Milliseconds
+    if let QueryExpr::CreateView(q) = parse(
+        "CREATE MATERIALIZED VIEW mv AS SELECT id FROM t REFRESH EVERY 250 ms",
+    )
+    .unwrap()
+    {
+        assert_eq!(q.refresh_every_ms, Some(250));
+    } else {
+        panic!("Expected CreateView with REFRESH EVERY 250 ms");
+    }
+
+    // Minutes
+    if let QueryExpr::CreateView(q) = parse(
+        "CREATE MATERIALIZED VIEW mv AS SELECT id FROM t REFRESH EVERY 2 m",
+    )
+    .unwrap()
+    {
+        assert_eq!(q.refresh_every_ms, Some(120_000));
+    } else {
+        panic!("Expected CreateView with REFRESH EVERY 2 m");
+    }
+
+    // REFRESH EVERY on a non-materialized view must error.
+    let err = parse("CREATE VIEW v AS SELECT id FROM t REFRESH EVERY 5 s");
+    assert!(
+        err.is_err(),
+        "REFRESH EVERY on non-materialized view should error: {err:?}"
+    );
+
+    // Missing duration must error.
+    let err = parse("CREATE MATERIALIZED VIEW mv AS SELECT id FROM t REFRESH EVERY");
+    assert!(err.is_err(), "missing duration should error: {err:?}");
+
+    // Bare REFRESH without EVERY must error.
+    let err = parse("CREATE MATERIALIZED VIEW mv AS SELECT id FROM t REFRESH 5 s");
+    assert!(err.is_err(), "REFRESH without EVERY should error: {err:?}");
+
+    // Omitting REFRESH EVERY keeps refresh-on-demand semantics.
+    if let QueryExpr::CreateView(q) =
+        parse("CREATE MATERIALIZED VIEW mv AS SELECT id FROM t").unwrap()
+    {
+        assert!(q.materialized);
+        assert_eq!(q.refresh_every_ms, None);
+    } else {
+        panic!("Expected CreateView without REFRESH EVERY");
+    }
+}
+
 #[test]
 fn test_parse_partitioning_ddl() {
     use crate::storage::query::ast::{AlterOperation, PartitionKind};
