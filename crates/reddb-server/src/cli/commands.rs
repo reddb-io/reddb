@@ -370,6 +370,20 @@ fn server_flags() -> Vec<FlagSchema> {
             .with_default("14"),
         FlagSchema::boolean("no-log-file")
             .with_description("Disable rotating file logs (stderr only)"),
+        FlagSchema::new("http-max-handlers").with_description(
+            "Max concurrent HTTP handler threads (env: REDDB_HTTP_MAX_HANDLERS; \
+             red_config: red.http.max_handlers; default: (2 x num_cpus).clamp(8, 256))",
+        ),
+        FlagSchema::new("http-handler-timeout-ms").with_description(
+            "Per-handler total-time budget in ms (env: REDDB_HTTP_HANDLER_TIMEOUT_MS; \
+             red_config: red.http.handler_timeout_ms)",
+        )
+            .with_default("30000"),
+        FlagSchema::new("http-retry-after-secs").with_description(
+            "Retry-After seconds on limiter 503 (env: REDDB_HTTP_RETRY_AFTER_SECS; \
+             red_config: red.http.retry_after_secs; clamped to [1, 30])",
+        )
+            .with_default("5"),
     ]
 }
 
@@ -762,6 +776,19 @@ mod tests {
         let flag_names: Vec<&str> = server.flags.iter().map(|f| f.long.as_str()).collect();
         assert!(flag_names.contains(&"path"));
         assert!(flag_names.contains(&"bind"));
+        // Slice 5 of issue #574 — HTTP handler-pool knobs.
+        assert!(flag_names.contains(&"http-max-handlers"));
+        assert!(flag_names.contains(&"http-handler-timeout-ms"));
+        assert!(flag_names.contains(&"http-retry-after-secs"));
+    }
+
+    #[test]
+    fn test_server_help_text_lists_http_limit_flags() {
+        let help = command_help_text("server").unwrap();
+        assert!(help.contains("--http-max-handlers"));
+        assert!(help.contains("--http-handler-timeout-ms"));
+        assert!(help.contains("--http-retry-after-secs"));
+        assert!(help.contains("REDDB_HTTP_MAX_HANDLERS"));
     }
 
     #[test]
