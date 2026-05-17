@@ -410,6 +410,12 @@ pub struct CollectionContract {
     /// for non-timeseries collections and for timeseries created
     /// without the clause. Issue #576 slice 1.
     pub session_gap_ms: Option<u64>,
+    /// `ALTER COLLECTION ... SET RETENTION <duration>` — declarative
+    /// retention policy in milliseconds. `None` means retention is
+    /// not enforced. Reads filter out rows older than `now -
+    /// retention_duration_ms` by the collection's timestamp column.
+    /// Issue #580 — DeclarativeRetention slice 1.
+    pub retention_duration_ms: Option<u64>,
 }
 
 /// Canonical artifact lifecycle states.

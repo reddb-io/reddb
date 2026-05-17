@@ -301,6 +301,7 @@ fn hypertable_collection_contract(
         subscriptions: Vec::new(),
         session_key: None,
         session_gap_ms: None,
+        retention_duration_ms: None,
     }
 }
 
@@ -340,6 +341,7 @@ fn timeseries_collection_contract(
         // extra metadata side-table.
         session_key: query.session_key.clone(),
         session_gap_ms: query.session_gap_ms,
+        retention_duration_ms: None,
     }
 }
 

@@ -146,7 +146,13 @@ pub(super) fn execute_runtime_table_query(
         }
     }
 
-    let records = execute_runtime_canonical_table_query_indexed(db, query, index_store)?;
+    let mut records = execute_runtime_canonical_table_query_indexed(db, query, index_store)?;
+    // Issue #580 — DeclarativeRetention slice 1. Lazy-on-scan: drop
+    // rows older than `now - retention_duration_ms` after the scan
+    // assembles them, before the result reaches the caller. No-op for
+    // collections without a retention policy on the contract.
+    let contract = db.collection_contract(query.table.as_str());
+    crate::runtime::retention_filter::apply(&mut records, contract.as_ref());
     let columns = projected_columns(&records, &effective_projections);
 
     Ok(UnifiedResult {

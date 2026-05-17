@@ -655,6 +655,7 @@ impl RedDBRuntime {
                 subscriptions: Vec::new(),
                 session_key: None,
                 session_gap_ms: None,
+                retention_duration_ms: None,
             })
             .map(|_| ())
             .map_err(|err| RedDBError::Internal(err.to_string()))
