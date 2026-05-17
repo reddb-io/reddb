@@ -1640,6 +1640,13 @@ impl RedDBServer {
         // AI provider and embedding metrics — issue #280.
         crate::runtime::ai::metrics::render_ai_metrics(&mut body);
 
+        // HTTP handler-thread pool metrics — issue #573 slice 4.
+        // Renders four series (`http_active_handler_threads`,
+        // `http_handler_cap`, `http_handler_rejected_total`,
+        // `http_handler_duration_seconds`) so operators can observe
+        // saturation against the bounded handler-thread cap.
+        self.http_metrics().render(&mut body, self.http_limiter());
+
         HttpResponse {
             status: 200,
             content_type: "text/plain; version=0.0.4",
