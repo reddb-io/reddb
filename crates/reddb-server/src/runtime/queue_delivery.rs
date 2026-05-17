@@ -180,6 +180,14 @@ pub(super) fn read_messages(
         });
     }
 
+    if !delivered.is_empty() {
+        runtime.queue_telemetry().record_delivered(
+            queue,
+            group,
+            config.mode.as_str(),
+            delivered.len() as u64,
+        );
+    }
     Ok(delivered)
 }
 
@@ -282,6 +290,14 @@ pub(super) fn claim_messages(
         });
     }
 
+    if !delivered.is_empty() {
+        runtime.queue_telemetry().record_delivered(
+            queue,
+            group,
+            config.mode.as_str(),
+            delivered.len() as u64,
+        );
+    }
     Ok(delivered)
 }
 
@@ -304,6 +320,9 @@ pub(super) fn ack_message(
     {
         delete_message_with_state(Some(runtime), store, queue, message_id)?;
     }
+    runtime
+        .queue_telemetry()
+        .record_acked(queue, group, config.mode.as_str());
     Ok(())
 }
 
@@ -326,21 +345,50 @@ pub(super) fn nack_message(
         super::impl_queue::queue_message_attempts(store, queue, message_id)?
     };
     let max_attempts = super::impl_queue::queue_message_max_attempts(store, queue, message_id)?;
+    let mode_label = config.mode.as_str();
     if attempts >= max_attempts {
-        return match move_message_to_dlq_or_drop(
+        let reason = "nack_max_attempts_exceeded";
+        let moved = move_message_to_dlq_or_drop(
             Some(runtime),
             store,
             queue,
             message_id,
             config,
             Some(group),
-            "nack_max_attempts_exceeded",
-        )? {
-            Some(dlq) => Ok(NackOutcome::MovedToDlq(dlq)),
-            None => Ok(NackOutcome::Dropped),
+            reason,
+        )?;
+        return match moved {
+            Some(dlq) => {
+                runtime.queue_telemetry().record_nacked(
+                    queue,
+                    group,
+                    mode_label,
+                    crate::runtime::queue_telemetry::NackOutcomeLabel::Dlq,
+                );
+                // OperatorEvent::QueueDlqPromoted is emitted inside
+                // `move_message_to_dlq_or_drop` so the read-path
+                // auto-DLQ branches share the same forensic record.
+                let _ = reason;
+                Ok(NackOutcome::MovedToDlq(dlq))
+            }
+            None => {
+                runtime.queue_telemetry().record_nacked(
+                    queue,
+                    group,
+                    mode_label,
+                    crate::runtime::queue_telemetry::NackOutcomeLabel::Drop,
+                );
+                Ok(NackOutcome::Dropped)
+            }
         };
     }
 
+    runtime.queue_telemetry().record_nacked(
+        queue,
+        group,
+        mode_label,
+        crate::runtime::queue_telemetry::NackOutcomeLabel::Retry,
+    );
     Ok(NackOutcome::Requeued)
 }
 
@@ -401,8 +449,10 @@ pub(super) fn move_message_to_dlq_or_drop(
     message_id: EntityId,
     config: &super::impl_queue::QueueRuntimeConfig,
     group: Option<&str>,
-    _reason: &str,
+    reason: &str,
 ) -> RedDBResult<Option<String>> {
+    let attempts_for_event =
+        super::impl_queue::queue_message_attempts(store, queue, message_id).unwrap_or(0);
     let data = super::impl_queue::queue_message_data(store, queue, message_id)?;
 
     if let Some(dlq) = &config.dlq {
@@ -441,6 +491,15 @@ pub(super) fn move_message_to_dlq_or_drop(
                 .map_err(|err| RedDBError::Internal(err.to_string()))?;
         }
         retire_message_for_group(runtime, store, queue, message_id, group, config)?;
+        crate::telemetry::operator_event::OperatorEvent::QueueDlqPromoted {
+            queue: queue.to_string(),
+            group: group.unwrap_or("").to_string(),
+            dlq: dlq.clone(),
+            message_id: message_id.raw(),
+            attempts: attempts_for_event,
+            reason: reason.to_string(),
+        }
+        .emit_global();
         Ok(Some(dlq.clone()))
     } else {
         retire_message_for_group(runtime, store, queue, message_id, group, config)?;

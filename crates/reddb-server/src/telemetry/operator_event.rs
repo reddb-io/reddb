@@ -148,6 +148,17 @@ pub enum OperatorEvent {
         dlq: String,
         reason: String,
     },
+    /// A queue message exhausted `max_attempts` and was promoted to its
+    /// DLQ target. Forensic: data has left the normal flow and operators
+    /// must be able to trace it later. Slice 10 of issue #527.
+    QueueDlqPromoted {
+        queue: String,
+        group: String,
+        dlq: String,
+        message_id: u64,
+        attempts: u32,
+        reason: String,
+    },
 }
 
 impl OperatorEvent {
@@ -170,6 +181,7 @@ impl OperatorEvent {
             "ConfigChangeRequiresRestart",
             "SubscriptionSchemaChange",
             "OutboxDlqActivated",
+            "QueueDlqPromoted",
         ]
     }
 
@@ -192,6 +204,7 @@ impl OperatorEvent {
             Self::ConfigChangeRequiresRestart { .. } => "ConfigChangeRequiresRestart",
             Self::SubscriptionSchemaChange { .. } => "SubscriptionSchemaChange",
             Self::OutboxDlqActivated { .. } => "OutboxDlqActivated",
+            Self::QueueDlqPromoted { .. } => "QueueDlqPromoted",
         }
     }
 
@@ -429,6 +442,27 @@ impl OperatorEvent {
                     AuditFieldEscaper::field("reason", reason),
                 ];
                 ("operator/outbox_dlq_activated", fields, summary)
+            }
+            Self::QueueDlqPromoted {
+                queue,
+                group,
+                dlq,
+                message_id,
+                attempts,
+                reason,
+            } => {
+                let summary = format!(
+                    "queue DLQ promoted: queue={queue} group={group} dlq={dlq} message_id={message_id} attempts={attempts} reason={reason}"
+                );
+                let fields = vec![
+                    AuditFieldEscaper::field("queue", queue),
+                    AuditFieldEscaper::field("group", group),
+                    AuditFieldEscaper::field("dlq", dlq),
+                    AuditFieldEscaper::field("message_id", message_id),
+                    AuditFieldEscaper::field("attempts", attempts as u64),
+                    AuditFieldEscaper::field("reason", reason),
+                ];
+                ("operator/queue_dlq_promoted", fields, summary)
             }
         }
     }
