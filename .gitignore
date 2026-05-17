@@ -49,3 +49,4 @@ perf.data
 perf.data.old
 *.pprof
 .red/tmp/
+.red/state/
