@@ -995,6 +995,12 @@ struct RuntimeInner {
     /// survive a restart. Persistence is a Phase 3 follow-up.
     views: parking_lot::RwLock<HashMap<String, Arc<crate::storage::query::ast::CreateViewQuery>>>,
     materialized_views: parking_lot::RwLock<crate::storage::cache::result::MaterializedViewCache>,
+    /// Per-collection retention sweeper state (issue #584 slice 12).
+    /// Tracks `last_sweep_at_ms`, `rows_swept_total`, and the latest
+    /// pending-rows estimate that feeds the three new columns on
+    /// `red.retention`. In-memory only; resets across restart.
+    pub(crate) retention_sweeper:
+        parking_lot::RwLock<crate::runtime::retention_sweeper::RetentionSweeperState>,
     /// MVCC snapshot manager (Phase 2.3 PG parity).
     ///
     /// Allocates monotonic `xid`s on BEGIN and tracks the active/aborted
@@ -1244,6 +1250,7 @@ pub mod quota_bucket;
 mod record_search;
 mod red_schema;
 pub(crate) mod retention_filter;
+pub(crate) mod retention_sweeper;
 pub mod resource_limits;
 pub(crate) mod scalar_evaluator;
 pub mod schema_diff;

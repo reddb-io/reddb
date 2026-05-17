@@ -10,7 +10,9 @@
 //!    returns a typed error at ALTER time.
 //! 3. WAL replay — restart of a persistent engine rehydrates the
 //!    `retention_duration_ms` policy on the descriptor.
-//! 4. `red.retention` virtual view exposes the four columns.
+//! 4. `red.retention` virtual view exposes the seven columns
+//!    (four contract columns + three sweeper observability columns
+//!    added in slice 12).
 
 use reddb::application::ExecuteQueryInput;
 use reddb::storage::schema::Value;
@@ -31,11 +33,17 @@ fn unique_dir(prefix: &str) -> PathBuf {
 
 #[test]
 fn lazy_filter_drops_expired_then_unset_reveals_them_again() {
+    // Issue #584 slice 12 — retention now physically reclaims expired
+    // rows via the background sweeper (~500ms cadence). The original
+    // slice-11 "UNSET reveals previously-hidden rows" semantic only
+    // holds within the sweeper window. This test asserts both halves:
+    //   1. Inside the sweeper window the lazy-on-scan filter hides
+    //      expired rows and UNSET re-exposes them (slice 11).
+    //   2. After the sweeper has had a chance to tick (slice 12), the
+    //      rows are physically gone and UNSET cannot resurrect them.
     let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
     let q = QueryUseCases::new(&rt);
 
-    // The collection uses the auto `created_at` system column, which
-    // the retention filter keys off when `WITH timestamps = true`.
     q.execute(ExecuteQueryInput {
         query: "CREATE TABLE events (id INTEGER, msg TEXT) WITH timestamps = true".into(),
     })
@@ -46,14 +54,15 @@ fn lazy_filter_drops_expired_then_unset_reveals_them_again() {
     })
     .expect("insert row");
 
-    // Set retention to 1 second, then wait long enough that the row's
-    // engine-stamped `created_at` becomes "older than now - 1s".
+    // Retention 1s — wait just long enough for the row to be expired
+    // by the lazy filter but *not* long enough for the 500ms sweeper
+    // to have its first physical tick after the policy goes live.
     q.execute(ExecuteQueryInput {
         query: "ALTER COLLECTION events SET RETENTION 1 s".into(),
     })
     .expect("set retention");
 
-    std::thread::sleep(std::time::Duration::from_millis(1_500));
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
 
     let after = q
         .execute(ExecuteQueryInput {
@@ -66,22 +75,25 @@ fn lazy_filter_drops_expired_then_unset_reveals_them_again() {
         "expired rows should be hidden by the lazy-on-scan filter"
     );
 
-    // UNSET — the same row materialises again because the slice
-    // never physically dropped it.
+    // Now drive the sweeper deterministically and assert physical
+    // removal — UNSET cannot resurrect rows the sweeper has reclaimed.
+    rt.sweep_retention_tick(1_000);
+
     q.execute(ExecuteQueryInput {
         query: "ALTER COLLECTION events UNSET RETENTION".into(),
     })
     .expect("unset retention");
 
-    let revived = q
+    let after_sweep = q
         .execute(ExecuteQueryInput {
             query: "SELECT id FROM events".into(),
         })
-        .expect("select after unset");
+        .expect("select after sweep + unset");
     assert_eq!(
-        revived.result.records.len(),
-        1,
-        "UNSET RETENTION must re-expose previously-hidden rows"
+        after_sweep.result.records.len(),
+        0,
+        "background sweeper must physically reclaim expired rows; \
+         UNSET after the sweep cannot resurrect them"
     );
 }
 

@@ -469,6 +469,11 @@ pub struct MaterializedViewDef {
     pub dependencies: Vec<String>,
     /// Refresh policy
     pub refresh: RefreshPolicy,
+    /// `WITH RETENTION <duration>` clause on CREATE MATERIALIZED VIEW
+    /// (issue #584 slice 12). Persisted on the view definition; the
+    /// physical sweep against view-backing rows activates once the
+    /// slice-9 row-storage follow-up lands.
+    pub retention_duration_ms: Option<u64>,
 }
 
 /// How to refresh a materialized view
@@ -505,6 +510,9 @@ struct MaterializedView {
     /// Scheduled refresh cadence in milliseconds (mirrors
     /// `RefreshPolicy::Periodic`). `None` means refresh-on-demand.
     refresh_every_ms: Option<u64>,
+    /// `WITH RETENTION <duration>` from CREATE MATERIALIZED VIEW
+    /// (issue #584 slice 12).
+    view_retention_ms: Option<u64>,
     /// Write count since last refresh
     writes_since_refresh: usize,
     /// Whether the view is stale
@@ -523,6 +531,9 @@ pub struct MaterializedViewMetadata {
     pub last_refresh_duration_ms: u64,
     pub last_error: Option<String>,
     pub current_row_count: u64,
+    /// `WITH RETENTION <duration>` clause from CREATE MATERIALIZED VIEW
+    /// (issue #584 slice 12).
+    pub retention_duration_ms: Option<u64>,
 }
 
 /// Cache for materialized views
@@ -556,6 +567,7 @@ impl MaterializedViewCache {
             RefreshPolicy::Periodic(d) => Some(d.as_millis() as u64),
             _ => None,
         };
+        let view_retention_ms = def.retention_duration_ms;
 
         let view = MaterializedView {
             data: Vec::new(),
@@ -566,6 +578,7 @@ impl MaterializedViewCache {
             last_error: None,
             current_row_count: 0,
             refresh_every_ms,
+            view_retention_ms,
             writes_since_refresh: 0,
             stale: true,
         };
@@ -645,6 +658,7 @@ impl MaterializedViewCache {
                 last_refresh_duration_ms: v.last_refresh_duration_ms,
                 last_error: v.last_error.clone(),
                 current_row_count: v.current_row_count,
+                retention_duration_ms: v.view_retention_ms,
             })
             .collect()
     }
@@ -747,6 +761,7 @@ mod tests {
             query: "<test>".into(),
             dependencies: vec![],
             refresh: RefreshPolicy::Periodic(Duration::from_millis(ms)),
+            retention_duration_ms: None,
         }
     }
 
@@ -784,6 +799,7 @@ mod tests {
             query: "<test>".into(),
             dependencies: vec![],
             refresh: RefreshPolicy::Manual,
+            retention_duration_ms: None,
         });
         let t = Instant::now() + Duration::from_secs(60);
         assert!(cache.claim_due_at(t).is_empty());
@@ -946,6 +962,7 @@ mod tests {
             query: "SELECT * FROM hosts WHERE status = 'active'".to_string(),
             dependencies: vec!["hosts".to_string()],
             refresh: RefreshPolicy::OnChange,
+            retention_duration_ms: None,
         });
 
         // Initially stale
