@@ -2180,6 +2180,9 @@ impl RedDBRuntime {
                 metrics_ingest_stats: crate::runtime::MetricsIngestCounters::default(),
                 metrics_tenant_activity_stats:
                     crate::runtime::MetricsTenantActivityCounters::default(),
+                queue_telemetry: Arc::new(
+                    crate::runtime::queue_telemetry::QueueTelemetryCounters::default(),
+                ),
                 kv_tag_index: crate::runtime::KvTagIndex::default(),
                 chain_tip_cache: parking_lot::Mutex::new(HashMap::new()),
                 chain_integrity_broken: parking_lot::Mutex::new(HashMap::new()),
@@ -3084,6 +3087,38 @@ impl RedDBRuntime {
     /// keep the logger alive past the runtime's stack frame.
     pub fn audit_log_arc(&self) -> Arc<crate::runtime::audit_log::AuditLogger> {
         Arc::clone(&self.inner.audit_log)
+    }
+
+    /// Slice 10 of issue #527 — shared queue telemetry counters
+    /// (delivered/acked/nacked). Cloned by `queue_delivery.rs` on
+    /// each transition.
+    pub(crate) fn queue_telemetry(
+        &self,
+    ) -> &crate::runtime::queue_telemetry::QueueTelemetryCounters {
+        &self.inner.queue_telemetry
+    }
+
+    /// Snapshots of the queue telemetry counters in label-deterministic
+    /// order for `/metrics` rendering and the integration test.
+    pub fn queue_telemetry_snapshot(
+        &self,
+    ) -> crate::runtime::queue_telemetry::QueueTelemetrySnapshot {
+        crate::runtime::queue_telemetry::QueueTelemetrySnapshot {
+            delivered: self.inner.queue_telemetry.delivered_snapshot(),
+            acked: self.inner.queue_telemetry.acked_snapshot(),
+            nacked: self.inner.queue_telemetry.nacked_snapshot(),
+        }
+    }
+
+    /// Slice 10 of issue #527 — render-time scan of pending entries
+    /// per (queue, group) for the `queue_pending_gauge` exposition.
+    /// Walks `red_queue_meta` live so the gauge cannot drift from
+    /// the source of truth.
+    pub fn queue_pending_counts(&self) -> Vec<((String, String), u64)> {
+        let store = self.inner.db.store();
+        crate::runtime::impl_queue::pending_counts_by_group(store.as_ref())
+            .into_iter()
+            .collect()
     }
 
     /// Shared `Arc` to the write gate. Same rationale as

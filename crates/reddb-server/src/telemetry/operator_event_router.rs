@@ -823,6 +823,21 @@ mod tests {
                     reason: reason.clone(),
                 }
             }
+            OperatorEvent::QueueDlqPromoted {
+                queue,
+                group,
+                dlq,
+                message_id,
+                attempts,
+                reason,
+            } => OperatorEvent::QueueDlqPromoted {
+                queue: queue.clone(),
+                group: group.clone(),
+                dlq: dlq.clone(),
+                message_id: *message_id,
+                attempts: *attempts,
+                reason: reason.clone(),
+            },
         }
     }
 

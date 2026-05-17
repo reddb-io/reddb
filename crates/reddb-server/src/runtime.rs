@@ -1170,6 +1170,10 @@ struct RuntimeInner {
     kv_stats: KvStatsCounters,
     metrics_ingest_stats: MetricsIngestCounters,
     metrics_tenant_activity_stats: MetricsTenantActivityCounters,
+    /// Slice 10 of issue #527 — Prometheus counters for the queue
+    /// lifecycle (delivered/acked/nacked) rendered onto `/metrics`.
+    /// Process-local; counters reset on restart by design.
+    queue_telemetry: std::sync::Arc<queue_telemetry::QueueTelemetryCounters>,
     /// Process-local normal-KV tag index used by `INVALIDATE TAGS`.
     kv_tag_index: KvTagIndex,
     /// Issue #524 — in-memory chain-tip cache per collection. Populated lazily
@@ -1245,6 +1249,7 @@ mod probabilistic_store;
 pub(crate) mod query_exec;
 mod queue_delivery;
 pub(crate) mod queue_lifecycle;
+pub(crate) mod queue_telemetry;
 pub(crate) mod primary_queue_store;
 pub mod quota_bucket;
 mod record_search;

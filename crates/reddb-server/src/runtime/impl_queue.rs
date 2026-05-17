@@ -2057,6 +2057,35 @@ fn message_id_string(message_id: EntityId) -> String {
     message_id.raw().to_string()
 }
 
+/// Slice 10 of issue #527 — render-time scan of pending entries
+/// per (queue, group) for `queue_pending_gauge` exposition. Walks
+/// `red_queue_meta` live so the gauge cannot drift from the source
+/// of truth.
+pub(crate) fn pending_counts_by_group(
+    store: &UnifiedStore,
+) -> std::collections::BTreeMap<(String, String), u64> {
+    let mut counts: std::collections::BTreeMap<(String, String), u64> =
+        std::collections::BTreeMap::new();
+    let Some(manager) = store.get_collection(QUEUE_META_COLLECTION) else {
+        return counts;
+    };
+    for entity in manager.query_all(|entity| {
+        entity
+            .data
+            .as_row()
+            .is_some_and(|row| row_text(row, "kind").as_deref() == Some("queue_pending"))
+    }) {
+        if let Some(row) = entity.data.as_row() {
+            let queue = row_text(row, "queue");
+            let group = row_text(row, "group");
+            if let (Some(q), Some(g)) = (queue, group) {
+                *counts.entry((q, g)).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
+}
+
 pub(super) fn row_text(row: &RowData, field: &str) -> Option<String> {
     match row.get_field(field)?.clone() {
         Value::Text(value) => Some(value.to_string()),
