@@ -183,6 +183,11 @@ impl<S: QueueStore> QueueLifecycle<S> {
     pub(crate) fn recorded_outcomes(&self) -> Vec<RetirementOutcome> {
         self.outcomes.lock().expect("outcomes poisoned").clone()
     }
+
+    #[cfg(test)]
+    pub(crate) fn store_ref(&self) -> &S {
+        &self.store
+    }
 }
 
 #[cfg(test)]
