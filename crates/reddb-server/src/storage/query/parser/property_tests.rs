@@ -83,6 +83,7 @@ fn arb_table_query_no_filter() -> impl Strategy<Value = QueryExpr> {
                 offset_param: None,
                 expand: None,
                 as_of: None,
+                sessionize: None,
             })
         })
 }
@@ -123,6 +124,7 @@ fn arb_table_query_with_filter() -> impl Strategy<Value = QueryExpr> {
                 offset_param: None,
                 expand: None,
                 as_of: None,
+                sessionize: None,
             })
         })
 }
