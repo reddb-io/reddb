@@ -9,6 +9,7 @@
 
 pub mod consumer_group;
 pub mod deque;
+pub(crate) mod lifecycle;
 pub mod mode;
 
 pub use consumer_group::{ConsumerGroup, PendingEntry};
