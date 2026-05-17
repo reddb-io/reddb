@@ -91,6 +91,11 @@ pub(crate) trait QueueStore {
 
     /// Read the stored payload for `message_id` on `queue`, if known.
     fn read_message(&self, queue: &str, message_id: MessageId) -> Option<Value>;
+
+    /// Read the stored payload for the message backing `delivery_id`, if it
+    /// is currently held. Used by `QueueLifecycle::nack` to capture the
+    /// payload before `ack_pending` retires the underlying message.
+    fn read_pending_payload(&self, delivery_id: &str) -> Option<Value>;
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +124,10 @@ struct State {
     /// Stored payloads keyed by `(queue, message_id)`. Seeded by tests via
     /// `seed_payload`; real storage hydrates from segment files.
     payloads: HashMap<(QueueId, MessageId), Value>,
+    /// Attempt counts keyed by `(queue, message_id, group)`. Survives
+    /// release/redeliver cycles so NACK→requeue→redeliver preserves the
+    /// retry budget; cleared on `ack_pending`.
+    attempts: HashMap<(QueueId, MessageId, ConsumerGroupId), u32>,
     dlq: Vec<DlqRecord>,
 }
 
@@ -218,6 +227,7 @@ impl QueueStore for InMemoryQueueStore {
         }
         let delivery_id = self.next_delivery_id();
         let mut state = self.state.lock().expect("state poisoned");
+        let attempts = state.attempts.get(&key).copied().unwrap_or(0);
         state.pending.insert(
             delivery_id.clone(),
             PendingDelivery {
@@ -225,7 +235,7 @@ impl QueueStore for InMemoryQueueStore {
                 message_id,
                 group: group.to_string(),
                 deadline,
-                attempts: 0,
+                attempts,
             },
         );
         state.by_key.insert(key, delivery_id.clone());
@@ -249,6 +259,7 @@ impl QueueStore for InMemoryQueueStore {
             .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
         let key = (entry.queue.clone(), entry.message_id, entry.group);
         state.by_key.remove(&key);
+        state.attempts.remove(&key);
         if let Some(msgs) = state.queues.get_mut(&entry.queue) {
             msgs.retain(|m| *m != entry.message_id);
         }
@@ -263,7 +274,10 @@ impl QueueStore for InMemoryQueueStore {
             .get_mut(delivery_id)
             .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
         entry.attempts += 1;
-        Ok(entry.attempts)
+        let count = entry.attempts;
+        let key = (entry.queue.clone(), entry.message_id, entry.group.clone());
+        state.attempts.insert(key, count);
+        Ok(count)
     }
 
     fn enqueue_dlq(&self, dlq_target: &str, original: Value) -> Result<()> {
@@ -285,6 +299,15 @@ impl QueueStore for InMemoryQueueStore {
         state
             .payloads
             .get(&(queue.to_string(), message_id))
+            .cloned()
+    }
+
+    fn read_pending_payload(&self, delivery_id: &str) -> Option<Value> {
+        let state = self.state.lock().expect("state poisoned");
+        let entry = state.pending.get(delivery_id)?;
+        state
+            .payloads
+            .get(&(entry.queue.clone(), entry.message_id))
             .cloned()
     }
 }
