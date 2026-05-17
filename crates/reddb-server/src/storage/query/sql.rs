@@ -1328,6 +1328,37 @@ impl<'a> Parser<'a> {
                     self.advance()?;
                     let if_not_exists = self.match_if_not_exists()?;
                     let name = self.expect_ident()?;
+                    // Issue #584 slice 12 — `WITH RETENTION <duration>`
+                    // on CREATE MATERIALIZED VIEW. Parsed before `AS`
+                    // so the SELECT body parser cannot consume the
+                    // trailing `WITH` for its own (TTL / METADATA /
+                    // …) clauses. Persisted on the view definition;
+                    // the physical sweep against view-backing rows
+                    // activates with the slice-9 row-storage follow-up.
+                    let mut retention_duration_ms: Option<u64> = None;
+                    if self.check(&Token::With) {
+                        self.advance()?;
+                        if !self.consume(&Token::Retention)?
+                            && !self.consume_ident_ci("RETENTION")?
+                        {
+                            return Err(ParseError::expected(
+                                vec!["RETENTION"],
+                                self.peek(),
+                                self.position(),
+                            ));
+                        }
+                        if !materialized {
+                            return Err(ParseError::new(
+                                "WITH RETENTION is only valid on \
+                                 CREATE MATERIALIZED VIEW"
+                                    .to_string(),
+                                self.position(),
+                            ));
+                        }
+                        let value = self.parse_float()?;
+                        let unit_mult = self.parse_duration_unit()?;
+                        retention_duration_ms = Some((value * unit_mult).round() as u64);
+                    }
                     // Accept `AS` — the lexer promotes it to `Token::As`
                     // (keyword) but some paths still see it as an ident.
                     if !self.consume(&Token::As)? && !self.consume_ident_ci("AS")? {
@@ -1373,6 +1404,7 @@ impl<'a> Parser<'a> {
                         if_not_exists,
                         or_replace,
                         refresh_every_ms,
+                        retention_duration_ms,
                     }));
                 }
                 // If OR REPLACE / MATERIALIZED was consumed but VIEW was not,

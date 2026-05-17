@@ -487,6 +487,13 @@ pub struct CreateViewQuery {
     /// cadence. `None` means refresh-on-demand only (slice 9 behaviour).
     /// Issue #583 slice 10.
     pub refresh_every_ms: Option<u64>,
+    /// `WITH RETENTION <duration>` clause — only valid on materialized
+    /// views (issue #584 slice 12). Opts the view's backing storage
+    /// into a retention policy independent of the source. Persisted on
+    /// the view definition; the physical sweep is applied to the
+    /// MV's backing rows once slice-9's row-storage follow-up lands.
+    /// `None` means the view is unaffected by source retention.
+    pub retention_duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
