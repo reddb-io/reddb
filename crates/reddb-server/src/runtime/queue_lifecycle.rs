@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use crate::storage::queue::lifecycle::{
     DeliveryId, DlqTarget, MessageId, QueueSide, QueueStore, QueueStoreError, Result,
 };
+use crate::storage::queue::mode::QueueMode;
 use crate::storage::schema::Value;
 
 /// Lock duration + retry policy. Constructor takes this so the catalog
@@ -36,6 +37,11 @@ pub(crate) struct LifecycleConfig {
     pub(crate) max_attempts: u32,
     /// Destination queue for retired messages. `None` → drop on retire.
     pub(crate) dlq_target: Option<DlqTarget>,
+    /// Delivery semantics. WORK reserves each message for exactly one
+    /// consumer; FANOUT delivers every message to every group
+    /// independently. Caller supplies — sourced from the queue's
+    /// `CollectionDescriptor` in the eventual production wiring.
+    pub(crate) mode: QueueMode,
 }
 
 impl Default for LifecycleConfig {
@@ -44,6 +50,7 @@ impl Default for LifecycleConfig {
             lock_duration: Duration::from_secs(30),
             max_attempts: 3,
             dlq_target: None,
+            mode: QueueMode::Work,
         }
     }
 }
@@ -95,7 +102,12 @@ impl<S: QueueStore> QueueLifecycle<S> {
         if count == 0 {
             return Ok(Vec::new());
         }
-        let available = self.store.available_messages(queue, QueueSide::Left);
+        let available = match self.config.mode {
+            QueueMode::Work => self.store.available_messages(queue, QueueSide::Left),
+            QueueMode::Fanout => self
+                .store
+                .available_messages_for_group(queue, group, QueueSide::Left),
+        };
         let mut out = Vec::with_capacity(count.min(available.len()));
         for message_id in available.into_iter().take(count) {
             let deadline = Instant::now() + self.config.lock_duration;
@@ -115,7 +127,17 @@ impl<S: QueueStore> QueueLifecycle<S> {
     /// Retire `delivery_id` — the message is consumed and will not be
     /// redelivered. Unknown delivery ids surface `UnknownDelivery`.
     pub(crate) fn ack(&self, delivery_id: &str) -> Result<()> {
-        self.store.ack_pending(delivery_id)
+        self.retire(delivery_id)
+    }
+
+    /// Apply mode-appropriate retirement: WORK consumes the message
+    /// (removes from queue + payload); FANOUT retires only the calling
+    /// group's pending row and marks the (msg, group) as acked.
+    fn retire(&self, delivery_id: &str) -> Result<()> {
+        match self.config.mode {
+            QueueMode::Work => self.store.ack_pending(delivery_id),
+            QueueMode::Fanout => self.store.retire_for_group(delivery_id),
+        }
     }
 
     /// Negative-acknowledge `delivery_id`. The Module picks one of
@@ -134,12 +156,12 @@ impl<S: QueueStore> QueueLifecycle<S> {
                         .ok_or_else(|| {
                             QueueStoreError::UnknownDelivery(delivery_id.to_string())
                         })?;
-                    self.store.ack_pending(delivery_id)?;
+                    self.retire(delivery_id)?;
                     self.store.enqueue_dlq(target, payload)?;
                     self.record(RetirementOutcome::MovedToDlq(target.clone()));
                 }
                 None => {
-                    self.store.ack_pending(delivery_id)?;
+                    self.retire(delivery_id)?;
                     self.record(RetirementOutcome::Dropped);
                 }
             }
@@ -352,6 +374,140 @@ mod tests {
         let err = lc.nack("nope").unwrap_err();
         assert!(matches!(err, QueueStoreError::UnknownDelivery(_)));
         assert!(lc.recorded_outcomes().is_empty());
+    }
+
+    fn fanout_config() -> LifecycleConfig {
+        LifecycleConfig {
+            mode: QueueMode::Fanout,
+            ..LifecycleConfig::default()
+        }
+    }
+
+    fn fanout_config_with(max_attempts: u32, dlq: Option<&str>) -> LifecycleConfig {
+        LifecycleConfig {
+            mode: QueueMode::Fanout,
+            max_attempts,
+            dlq_target: dlq.map(|s| s.to_string()),
+            ..LifecycleConfig::default()
+        }
+    }
+
+    #[test]
+    fn fanout_two_groups_both_receive_same_message() {
+        let lc = QueueLifecycle::new(store_with(&[(1, "shared")]), fanout_config());
+
+        let a = lc.deliver("q", "subs.a", 1).expect("deliver a");
+        let b = lc.deliver("q", "subs.b", 1).expect("deliver b");
+
+        assert_eq!(a.len(), 1);
+        assert_eq!(b.len(), 1);
+        assert_eq!(a[0].payload, Value::text("shared"));
+        assert_eq!(b[0].payload, Value::text("shared"));
+        assert_ne!(a[0].delivery_id, b[0].delivery_id);
+    }
+
+    #[test]
+    fn fanout_ack_by_one_group_leaves_other_pending_intact() {
+        let lc = QueueLifecycle::new(store_with(&[(1, "shared")]), fanout_config());
+
+        let a = lc.deliver("q", "subs.a", 1).expect("deliver a");
+        let b = lc.deliver("q", "subs.b", 1).expect("deliver b");
+
+        lc.ack(&a[0].delivery_id).expect("ack a");
+
+        // A must not see the message again.
+        assert!(lc.deliver("q", "subs.a", 1).unwrap().is_empty());
+
+        // B's delivery is still ackable — pending row untouched.
+        lc.ack(&b[0].delivery_id).expect("ack b still valid");
+    }
+
+    #[test]
+    fn fanout_nack_by_one_group_does_not_touch_other() {
+        // Two groups deliver; group A nacks (below max) and requeues
+        // *for A only*. Group B's attempt counter must stay at 0 and
+        // its pending row must remain intact.
+        let lc =
+            QueueLifecycle::new(store_with(&[(1, "shared")]), fanout_config_with(3, None));
+
+        let a = lc.deliver("q", "subs.a", 1).expect("deliver a");
+        let b = lc.deliver("q", "subs.b", 1).expect("deliver b");
+        let b_delivery = b[0].delivery_id.clone();
+
+        lc.nack(&a[0].delivery_id).expect("nack a");
+        assert_eq!(lc.recorded_outcomes(), vec![RetirementOutcome::Requeued]);
+
+        // A redelivery on group A should hand back the same message,
+        // because the message wasn't removed and A's pending was released.
+        let a2 = lc.deliver("q", "subs.a", 1).expect("a redeliver");
+        assert_eq!(a2.len(), 1);
+        assert_eq!(a2[0].payload, Value::text("shared"));
+
+        // B's original delivery is still valid and acks cleanly — its
+        // attempt counter never moved, its pending row never released.
+        lc.ack(&b_delivery).expect("ack b's original delivery_id");
+    }
+
+    #[test]
+    fn fanout_terminal_nack_with_dlq_only_retires_caller_group() {
+        // max=1 + DLQ target. Group A nacks → MovedToDlq. Group B has
+        // not yet delivered: it must still be able to deliver the
+        // original message (FANOUT keeps the payload for other groups).
+        let lc = QueueLifecycle::new(
+            store_with(&[(1, "orders/42")]),
+            fanout_config_with(1, Some("orders.dlq")),
+        );
+
+        let a = lc.deliver("q", "subs.a", 1).expect("deliver a");
+        lc.nack(&a[0].delivery_id).expect("nack a");
+
+        assert_eq!(
+            lc.recorded_outcomes(),
+            vec![RetirementOutcome::MovedToDlq("orders.dlq".to_string())]
+        );
+        let dlq = lc.store.dlq_snapshot();
+        assert_eq!(dlq.len(), 1);
+        assert_eq!(dlq[0].original, Value::text("orders/42"));
+
+        // A is done; B has never delivered — message must still be available to B.
+        assert!(lc.deliver("q", "subs.a", 1).unwrap().is_empty());
+        let b = lc.deliver("q", "subs.b", 1).expect("deliver b");
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].payload, Value::text("orders/42"));
+    }
+
+    #[test]
+    fn fanout_terminal_nack_no_dlq_drops_for_caller_group_only() {
+        let lc =
+            QueueLifecycle::new(store_with(&[(1, "p")]), fanout_config_with(1, None));
+
+        let a = lc.deliver("q", "subs.a", 1).expect("deliver a");
+        lc.nack(&a[0].delivery_id).expect("nack a");
+
+        assert_eq!(lc.recorded_outcomes(), vec![RetirementOutcome::Dropped]);
+        assert!(lc.store.dlq_snapshot().is_empty());
+        assert!(lc.deliver("q", "subs.a", 1).unwrap().is_empty());
+
+        // B still sees it.
+        let b = lc.deliver("q", "subs.b", 1).expect("deliver b");
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].payload, Value::text("p"));
+    }
+
+    #[test]
+    fn fanout_does_not_share_pending_across_groups_with_work_semantics() {
+        // Regression for the WORK code path leaking into FANOUT: in WORK
+        // a single deliver call blocks the message from a second group;
+        // in FANOUT it must not.
+        let lc = QueueLifecycle::new(store_with(&[(1, "x"), (2, "y")]), fanout_config());
+
+        let a = lc.deliver("q", "subs.a", 2).expect("deliver a");
+        let b = lc.deliver("q", "subs.b", 2).expect("deliver b");
+        assert_eq!(a.len(), 2);
+        assert_eq!(b.len(), 2);
+        let a_payloads: Vec<_> = a.iter().map(|d| d.payload.clone()).collect();
+        let b_payloads: Vec<_> = b.iter().map(|d| d.payload.clone()).collect();
+        assert_eq!(a_payloads, b_payloads);
     }
 
     #[test]

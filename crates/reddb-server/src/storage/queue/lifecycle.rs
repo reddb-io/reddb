@@ -76,9 +76,29 @@ pub(crate) trait QueueStore {
     fn release_pending(&self, delivery_id: &str) -> Result<()>;
 
     /// Permanently retire a pending delivery — removes the pending entry
-    /// AND the underlying message from the available pool. Used for ACK.
-    /// Returns `UnknownDelivery` if `delivery_id` is not currently held.
+    /// AND the underlying message from the available pool. Used for ACK
+    /// in WORK mode. Returns `UnknownDelivery` if `delivery_id` is not
+    /// currently held.
     fn ack_pending(&self, delivery_id: &str) -> Result<()>;
+
+    /// Retire a pending delivery for one consumer group only. Used for
+    /// ACK / terminal NACK in FANOUT mode: the pending row goes away and
+    /// the (queue, msg, group) tuple is recorded as "acked" so the same
+    /// group will not see the message again, but the message remains in
+    /// the queue and the payload stays addressable for other groups that
+    /// have not yet retired it.
+    fn retire_for_group(&self, delivery_id: &str) -> Result<()>;
+
+    /// Available message ids on `queue` from the perspective of a single
+    /// consumer group: filters out messages that this group has already
+    /// retired or currently holds pending, but ignores other groups'
+    /// state. Used by `QueueLifecycle::deliver` in FANOUT mode.
+    fn available_messages_for_group(
+        &self,
+        queue: &str,
+        group: &str,
+        side: QueueSide,
+    ) -> Vec<MessageId>;
 
     /// Increment attempt count for `delivery_id`. Returns the new count.
     fn bump_attempt(&self, delivery_id: &str) -> Result<u32>;
@@ -128,6 +148,10 @@ struct State {
     /// release/redeliver cycles so NACK→requeue→redeliver preserves the
     /// retry budget; cleared on `ack_pending`.
     attempts: HashMap<(QueueId, MessageId, ConsumerGroupId), u32>,
+    /// Groups that have retired a message under FANOUT semantics — the
+    /// message remains in the queue for other groups, but `available_for_group`
+    /// must filter it out for any group present in this set.
+    acked: std::collections::HashSet<(QueueId, MessageId, ConsumerGroupId)>,
     dlq: Vec<DlqRecord>,
 }
 
@@ -265,6 +289,47 @@ impl QueueStore for InMemoryQueueStore {
         }
         state.payloads.remove(&(entry.queue, entry.message_id));
         Ok(())
+    }
+
+    fn retire_for_group(&self, delivery_id: &str) -> Result<()> {
+        let mut state = self.state.lock().expect("state poisoned");
+        let entry = state
+            .pending
+            .remove(delivery_id)
+            .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
+        let key = (entry.queue, entry.message_id, entry.group);
+        state.by_key.remove(&key);
+        state.attempts.remove(&key);
+        state.acked.insert(key);
+        Ok(())
+    }
+
+    fn available_messages_for_group(
+        &self,
+        queue: &str,
+        group: &str,
+        side: QueueSide,
+    ) -> Vec<MessageId> {
+        let state = self.state.lock().expect("state poisoned");
+        let Some(msgs) = state.queues.get(queue) else {
+            return Vec::new();
+        };
+        let pending: std::collections::HashSet<MessageId> = state
+            .pending
+            .values()
+            .filter(|p| p.queue == queue && p.group == group)
+            .map(|p| p.message_id)
+            .collect();
+        let mut out: Vec<MessageId> = msgs
+            .iter()
+            .copied()
+            .filter(|m| !pending.contains(m))
+            .filter(|m| !state.acked.contains(&(queue.to_string(), *m, group.to_string())))
+            .collect();
+        if matches!(side, QueueSide::Right) {
+            out.reverse();
+        }
+        out
     }
 
     fn bump_attempt(&self, delivery_id: &str) -> Result<u32> {
