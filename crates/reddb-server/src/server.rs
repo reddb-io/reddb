@@ -103,6 +103,7 @@ fn graph_projection_json(projection: &crate::PhysicalGraphProjection) -> JsonVal
 pub mod handlers_admin;
 mod handlers_ai;
 pub mod http_connection_limiter;
+pub mod http_handler_metrics;
 mod handlers_auth;
 mod handlers_backup;
 mod handlers_ec;
@@ -129,6 +130,7 @@ mod transport;
 
 use self::handlers_ai::*;
 use self::http_connection_limiter::HttpConnectionLimiter;
+use self::http_handler_metrics::{HttpHandlerMetrics, HttpRejectReason, HttpTransport};
 use self::handlers_entity::*;
 use self::handlers_graph::*;
 use self::handlers_keyed::*;
@@ -218,6 +220,12 @@ pub struct RedDBServer {
     /// observes flips from the originating handle. Production callers
     /// have no way to set this — the setter is `#[doc(hidden)]`.
     slow_inject_ms: Arc<AtomicU64>,
+    /// Prometheus metrics for the HTTP handler-thread pool (issue
+    /// #573 slice 4). Records rejections (cap_exhausted /
+    /// handler_timeout) and per-handler duration histograms. Cloned
+    /// with the server via `Arc` so every serve loop on the same
+    /// `RedDBServer` writes to one set of counters.
+    http_metrics: HttpHandlerMetrics,
 }
 
 /// Default per-handler total-time budget (issue #571 slice 2).
@@ -320,7 +328,13 @@ impl RedDBServer {
             http_limiter: HttpConnectionLimiter::with_default_cap(),
             handler_timeout: DEFAULT_HANDLER_TIMEOUT,
             slow_inject_ms: Arc::new(AtomicU64::new(0)),
+            http_metrics: HttpHandlerMetrics::new(),
         }
+    }
+
+    #[doc(hidden)]
+    pub fn http_metrics(&self) -> &HttpHandlerMetrics {
+        &self.http_metrics
     }
 
     /// Visible for tests. Lets the integration test in
@@ -495,6 +509,8 @@ impl RedDBServer {
                         // accept thread, close the socket, and continue.
                         // No thread spawn, no `HttpRequest::read_from`,
                         // no runtime call.
+                        self.http_metrics
+                            .record_reject(HttpTransport::Http, HttpRejectReason::CapExhausted);
                         Self::reject_with_503(stream, self.options.write_timeout_ms);
                     }
                 },
@@ -566,6 +582,8 @@ impl RedDBServer {
                         // a non-handshaken TLS socket is not meaningful,
                         // so reject by closing the raw socket. No TLS
                         // handshake, no thread spawn, no runtime call.
+                        self.http_metrics
+                            .record_reject(HttpTransport::Https, HttpRejectReason::CapExhausted);
                         let _ = stream.shutdown(std::net::Shutdown::Both);
                         drop(stream);
                     }
@@ -593,7 +611,20 @@ impl RedDBServer {
         thread::spawn(move || server.serve_tls_on(listener, tls_config))
     }
 
-    fn handle_connection(&self, mut stream: TcpStream) -> io::Result<()> {
+    fn handle_connection(&self, stream: TcpStream) -> io::Result<()> {
+        let started = Instant::now();
+        let result = self.handle_connection_inner(stream, started);
+        let elapsed = started.elapsed().as_secs_f64();
+        self.http_metrics
+            .record_duration(HttpTransport::Http, elapsed);
+        result
+    }
+
+    fn handle_connection_inner(
+        &self,
+        mut stream: TcpStream,
+        started: Instant,
+    ) -> io::Result<()> {
         stream.set_read_timeout(Some(Duration::from_millis(self.options.read_timeout_ms)))?;
         stream.set_write_timeout(Some(Duration::from_millis(self.options.write_timeout_ms)))?;
 
@@ -601,12 +632,14 @@ impl RedDBServer {
         // check at coarse boundaries. No hard pre-emption — a thread
         // blocked inside a true syscall is still bounded only by the
         // per-socket read/write timeouts.
-        let deadline = Instant::now() + self.handler_timeout;
+        let deadline = started + self.handler_timeout;
 
         let request = HttpRequest::read_from(&mut stream, self.options.max_body_bytes)?;
 
         // Boundary (a): between request parse and route dispatch.
         if Instant::now() >= deadline {
+            self.http_metrics
+                .record_reject(HttpTransport::Http, HttpRejectReason::HandlerTimeout);
             Self::write_handler_timeout_503(&mut stream);
             return Ok(());
         }
@@ -626,6 +659,8 @@ impl RedDBServer {
 
         // Boundary (b): between route dispatch and response write.
         if Instant::now() >= deadline {
+            self.http_metrics
+                .record_reject(HttpTransport::Http, HttpRejectReason::HandlerTimeout);
             Self::write_handler_timeout_503(&mut stream);
             return Ok(());
         }
@@ -654,12 +689,26 @@ impl RedDBServer {
         tcp: TcpStream,
         tls_config: std::sync::Arc<rustls::ServerConfig>,
     ) -> io::Result<()> {
+        let started = Instant::now();
+        let result = self.handle_tls_connection_inner(tcp, tls_config, started);
+        let elapsed = started.elapsed().as_secs_f64();
+        self.http_metrics
+            .record_duration(HttpTransport::Https, elapsed);
+        result
+    }
+
+    fn handle_tls_connection_inner(
+        &self,
+        tcp: TcpStream,
+        tls_config: std::sync::Arc<rustls::ServerConfig>,
+        started: Instant,
+    ) -> io::Result<()> {
         tcp.set_read_timeout(Some(Duration::from_millis(self.options.read_timeout_ms)))?;
         tcp.set_write_timeout(Some(Duration::from_millis(self.options.write_timeout_ms)))?;
 
         // Issue #572 slice 3: per-handler deadline applies to TLS
         // handlers too — same handler-thread scaffolding as slice 2.
-        let deadline = Instant::now() + self.handler_timeout;
+        let deadline = started + self.handler_timeout;
 
         let mut tls_stream = match self::tls::accept_tls(tls_config, tcp) {
             Ok(s) => s,
@@ -686,6 +735,8 @@ impl RedDBServer {
 
         // Boundary (a): between request parse and route dispatch.
         if Instant::now() >= deadline {
+            self.http_metrics
+                .record_reject(HttpTransport::Https, HttpRejectReason::HandlerTimeout);
             Self::write_handler_timeout_503(&mut tls_stream);
             return Ok(());
         }
@@ -704,6 +755,8 @@ impl RedDBServer {
 
         // Boundary (b): between route dispatch and response write.
         if Instant::now() >= deadline {
+            self.http_metrics
+                .record_reject(HttpTransport::Https, HttpRejectReason::HandlerTimeout);
             Self::write_handler_timeout_503(&mut tls_stream);
             return Ok(());
         }
