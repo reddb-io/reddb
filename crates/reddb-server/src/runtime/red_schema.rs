@@ -48,6 +48,12 @@ pub(super) const RETENTION_INTERNAL: &str = "__red_schema_retention";
 // last_refresh_duration_ms, last_error, current_row_count)`.
 pub(super) const MATERIALIZED_VIEWS: &str = "red.materialized_views";
 pub(super) const MATERIALIZED_VIEWS_INTERNAL: &str = "__red_schema_materialized_views";
+// Issue #536 — QueueLifecycle slice 9. Per-row pending-delivery drill-
+// down: `(queue, group, message_id, delivery_id, attempts,
+// lock_deadline, locked_by)`. Cold-scan tier (no caching) so operators
+// see live state when auditing stuck consumers.
+pub(super) const QUEUE_PENDING: &str = "red.queue_pending";
+pub(super) const QUEUE_PENDING_INTERNAL: &str = "__red_schema_queue_pending";
 pub(super) const READ_ONLY_ERROR: &str = "system schema is read-only";
 
 const COLLECTION_COLUMNS: [&str; 15] = [
@@ -142,6 +148,16 @@ const RETENTION_COLUMNS: [&str; 7] = [
     "current_rows_pending_sweep_estimate",
 ];
 
+const QUEUE_PENDING_COLUMNS: [&str; 7] = [
+    "queue",
+    "group",
+    "message_id",
+    "delivery_id",
+    "attempts",
+    "lock_deadline",
+    "locked_by",
+];
+
 const MATERIALIZED_VIEW_COLUMNS: [&str; 7] = [
     "name",
     "query_text",
@@ -182,6 +198,7 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
         (SUBSCRIPTIONS, SUBSCRIPTIONS_INTERNAL),
         (RETENTION, RETENTION_INTERNAL),
         (MATERIALIZED_VIEWS, MATERIALIZED_VIEWS_INTERNAL),
+        (QUEUE_PENDING, QUEUE_PENDING_INTERNAL),
     ] {
         if let Some(next) = replace_case_insensitive_outside_quotes(&rewritten, public, internal) {
             rewritten = next;
@@ -229,6 +246,8 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(RETENTION)
         || table.eq_ignore_ascii_case(MATERIALIZED_VIEWS_INTERNAL)
         || table.eq_ignore_ascii_case(MATERIALIZED_VIEWS)
+        || table.eq_ignore_ascii_case(QUEUE_PENDING_INTERNAL)
+        || table.eq_ignore_ascii_case(QUEUE_PENDING)
 }
 
 pub(super) fn red_query(
@@ -272,6 +291,7 @@ pub(super) fn red_query(
         VirtualTableKind::Subscriptions => subscriptions_snapshot(runtime, visible_collections),
         VirtualTableKind::Retention => retention_snapshot(runtime, visible_collections),
         VirtualTableKind::MaterializedViews => materialized_views_snapshot(runtime),
+        VirtualTableKind::QueuePending => queue_pending_snapshot(runtime, visible_collections),
     };
 
     let table_name = query.table.as_str();
@@ -375,6 +395,7 @@ enum VirtualTableKind {
     Subscriptions,
     Retention,
     MaterializedViews,
+    QueuePending,
 }
 
 impl VirtualTableKind {
@@ -391,6 +412,7 @@ impl VirtualTableKind {
             Self::Subscriptions => &SUBSCRIPTION_COLUMNS,
             Self::Retention => &RETENTION_COLUMNS,
             Self::MaterializedViews => &MATERIALIZED_VIEW_COLUMNS,
+            Self::QueuePending => &QUEUE_PENDING_COLUMNS,
         }
     }
 
@@ -407,6 +429,7 @@ impl VirtualTableKind {
             Self::Subscriptions => SUBSCRIPTIONS,
             Self::Retention => RETENTION,
             Self::MaterializedViews => MATERIALIZED_VIEWS,
+            Self::QueuePending => QUEUE_PENDING,
         }
     }
 }
@@ -447,6 +470,11 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
         || name.eq_ignore_ascii_case(MATERIALIZED_VIEWS)
     {
         return Ok(VirtualTableKind::MaterializedViews);
+    }
+    if name.eq_ignore_ascii_case(QUEUE_PENDING_INTERNAL)
+        || name.eq_ignore_ascii_case(QUEUE_PENDING)
+    {
+        return Ok(VirtualTableKind::QueuePending);
     }
     Err(RedDBError::Query(format!(
         "unknown system schema relation `{name}`"
@@ -1520,6 +1548,113 @@ fn materialized_views_snapshot(runtime: &RedDBRuntime) -> Vec<UnifiedRecord> {
             )
         })
         .collect()
+}
+
+/// Issue #536 — per-row pending-delivery drill-down.
+///
+/// Reads from the `red_queue_meta` rows that the user-facing
+/// `QUEUE READ` path writes (`kind = "queue_pending"`). Cold scan,
+/// no caching: every read walks the live meta collection.
+///
+/// Field mapping from the meta-row schema to the public columns:
+/// - `consumer`            -> `locked_by`
+/// - `delivery_count - 1`  -> `attempts` (delivery_count is incremented
+///                             to 1 on the first deliver, so attempts
+///                             starts at 0 and rises on NACK/redelivery)
+/// - `delivered_at_ns + queue.lock_deadline_ms`
+///                         -> `lock_deadline` (the legacy plumbing does
+///                             not persist the deadline; derive it
+///                             from the queue descriptor's
+///                             `lock_deadline_ms`).
+/// - opaque `delivery_id`  composed from `(queue, group, message_id,
+///                          delivery_count)`. The legacy plumbing has
+///                          no first-class delivery_id; this string
+///                          is stable for a given delivery instance
+///                          and changes when the message is
+///                          re-delivered (delivery_count bumps).
+fn queue_pending_snapshot(
+    runtime: &RedDBRuntime,
+    visible_collections: Option<&HashSet<String>>,
+) -> Vec<UnifiedRecord> {
+    use crate::storage::query::DEFAULT_QUEUE_LOCK_DEADLINE_MS;
+
+    let schema = Arc::new(
+        QUEUE_PENDING_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let store = runtime.db().store();
+    let Some(manager) = store.get_collection("red_queue_meta") else {
+        return Vec::new();
+    };
+
+    // Queue → lock_deadline_ms lookup from the catalog descriptor hot
+    // fields. Falls back to the engine-wide default when unset.
+    let snapshot = runtime.db().catalog_model_snapshot();
+    let queue_lock_ms: HashMap<String, u64> = snapshot
+        .collections
+        .iter()
+        .filter_map(|c| c.queue_lock_deadline_ms.map(|ms| (c.name.clone(), ms)))
+        .collect();
+
+    let mut records = Vec::new();
+    let entities = manager.query_all(|entity| {
+        entity
+            .data
+            .as_row()
+            .is_some_and(|row| row_text(row, "kind").as_deref() == Some("queue_pending"))
+    });
+    for entity in entities {
+        let Some(row) = entity.data.as_row() else {
+            continue;
+        };
+        let Some(queue) = row_text(row, "queue") else {
+            continue;
+        };
+        if !collection_is_visible(&queue, visible_collections) {
+            continue;
+        }
+        let Some(group) = row_text(row, "group") else {
+            continue;
+        };
+        let Some(message_id) = row_u64(row, "message_id") else {
+            continue;
+        };
+        let consumer = row_text(row, "consumer").unwrap_or_default();
+        let delivered_at_ns = row_u64(row, "delivered_at_ns").unwrap_or(0);
+        let delivery_count = row_u64(row, "delivery_count").unwrap_or(1);
+
+        let lock_ms = queue_lock_ms
+            .get(&queue)
+            .copied()
+            .unwrap_or(DEFAULT_QUEUE_LOCK_DEADLINE_MS);
+        let lock_deadline_ms = (delivered_at_ns / 1_000_000).saturating_add(lock_ms);
+        let attempts = delivery_count.saturating_sub(1);
+        let delivery_id = format!("{queue}:{group}:{message_id}:{delivery_count}");
+
+        records.push(UnifiedRecord::with_schema(
+            Arc::clone(&schema),
+            vec![
+                Value::text(queue),
+                Value::text(group),
+                Value::UnsignedInteger(message_id),
+                Value::text(delivery_id),
+                Value::UnsignedInteger(attempts),
+                Value::TimestampMs(lock_deadline_ms as i64),
+                Value::text(consumer),
+            ],
+        ));
+    }
+    records
+}
+
+fn row_u64(row: &crate::storage::unified::entity::RowData, field: &str) -> Option<u64> {
+    match row.get_field(field)? {
+        Value::UnsignedInteger(v) => Some(*v),
+        Value::Integer(v) if *v >= 0 => Some(*v as u64),
+        _ => None,
+    }
 }
 
 fn value_as_ms(value: &crate::storage::schema::Value) -> Option<i64> {
