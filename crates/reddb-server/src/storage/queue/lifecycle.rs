@@ -8,6 +8,7 @@
 //! production code consumes it yet.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -116,6 +117,14 @@ pub(crate) trait QueueStore {
     /// is currently held. Used by `QueueLifecycle::nack` to capture the
     /// payload before `ack_pending` retires the underlying message.
     fn read_pending_payload(&self, delivery_id: &str) -> Option<Value>;
+
+    /// Release every pending row on `queue` whose `lock_deadline` is at or
+    /// before `now`. The reclaimed messages become eligible for delivery
+    /// again. Attempt counts are preserved (release, not retire), so a
+    /// reclaim looks the same to NACK accounting as an explicit release.
+    /// Implementations must be idempotent — calling twice with the same
+    /// `now` is a no-op on the second call.
+    fn reclaim_expired(&self, queue: &str, now: Instant) -> Result<()>;
 }
 
 #[derive(Debug, Clone)]
@@ -157,17 +166,20 @@ struct State {
 
 /// In-memory fake for unit tests. Thread-safe via a single Mutex — the
 /// real implementation will live elsewhere; this only needs to be correct,
-/// not fast.
+/// not fast. Cloneable so the same backing state can be handed to two
+/// `QueueLifecycle` instances (used by the crash-safety test that
+/// recreates the Module against an existing store).
+#[derive(Clone)]
 pub(crate) struct InMemoryQueueStore {
-    state: Mutex<State>,
-    counter: AtomicU64,
+    state: Arc<Mutex<State>>,
+    counter: Arc<AtomicU64>,
 }
 
 impl InMemoryQueueStore {
     pub(crate) fn new() -> Self {
         Self {
-            state: Mutex::new(State::default()),
-            counter: AtomicU64::new(0),
+            state: Arc::new(Mutex::new(State::default())),
+            counter: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -374,6 +386,23 @@ impl QueueStore for InMemoryQueueStore {
             .payloads
             .get(&(entry.queue.clone(), entry.message_id))
             .cloned()
+    }
+
+    fn reclaim_expired(&self, queue: &str, now: Instant) -> Result<()> {
+        let mut state = self.state.lock().expect("state poisoned");
+        let expired: Vec<DeliveryId> = state
+            .pending
+            .iter()
+            .filter(|(_, p)| p.queue == queue && p.deadline <= now)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in expired {
+            if let Some(entry) = state.pending.remove(&id) {
+                let key = (entry.queue, entry.message_id, entry.group);
+                state.by_key.remove(&key);
+            }
+        }
+        Ok(())
     }
 }
 
