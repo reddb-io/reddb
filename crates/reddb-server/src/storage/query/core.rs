@@ -892,6 +892,29 @@ pub struct TableQuery {
     /// to an MVCC xid and evaluates the query against that snapshot
     /// instead of the current one. Mirrors git's `AS OF` semantics.
     pub as_of: Option<AsOfClause>,
+    /// `SESSIONIZE BY <actor> GAP <duration> [ORDER BY <ts>]` operator
+    /// (issue #585 slice 8). When present, the executor annotates each
+    /// result row with a `session_id` column. `actor_col` / `gap_ms`
+    /// may be `None` when the source collection's descriptor (slice 1
+    /// `SESSION_KEY` / `SESSION_GAP`) supplies the defaults; one
+    /// without the other resolved at execution time is the typed
+    /// `MissingSessionKey` error.
+    pub sessionize: Option<SessionizeClause>,
+}
+
+/// `SESSIONIZE BY <actor_col> GAP <duration> [ORDER BY <ts_col>]`.
+#[derive(Debug, Clone, Default)]
+pub struct SessionizeClause {
+    /// Explicit `BY <ident>`. `None` means "default from descriptor's
+    /// `SESSION_KEY`" — resolved at execution time.
+    pub actor_col: Option<String>,
+    /// Explicit `GAP <duration>` in milliseconds. `None` means
+    /// "default from descriptor's `SESSION_GAP`".
+    pub gap_ms: Option<u64>,
+    /// Explicit `ORDER BY <ident>` immediately after `GAP`. When
+    /// `None` the executor falls back to the collection's timestamp
+    /// column (the same resolution as `retention_filter`).
+    pub order_col: Option<String>,
 }
 
 /// Source spec for `AS OF` — parsed form sits in `TableQuery`, then
@@ -958,6 +981,7 @@ impl TableQuery {
             offset_param: None,
             expand: None,
             as_of: None,
+            sessionize: None,
         }
     }
 
@@ -990,6 +1014,7 @@ impl TableQuery {
             offset_param: None,
             expand: None,
             as_of: None,
+            sessionize: None,
         }
     }
 }

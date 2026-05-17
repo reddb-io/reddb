@@ -219,6 +219,10 @@ pub enum Token {
     Options,
     Data,
 
+    // SESSIONIZE operator (issue #585 slice 8).
+    Sessionize,
+    Gap,
+
     // Literals
     String(String),
     Integer(i64),
@@ -447,6 +451,8 @@ impl fmt::Display for Token {
             Token::Wrapper => write!(f, "WRAPPER"),
             Token::Options => write!(f, "OPTIONS"),
             Token::Data => write!(f, "DATA"),
+            Token::Sessionize => write!(f, "SESSIONIZE"),
+            Token::Gap => write!(f, "GAP"),
             Token::String(s) => write!(f, "'{}'", s),
             Token::Integer(n) => write!(f, "{}", n),
             Token::Float(n) => write!(f, "{}", n),
@@ -1254,6 +1260,8 @@ impl<'a> Lexer<'a> {
             "WRAPPER" => Token::Wrapper,
             "OPTIONS" => Token::Options,
             "DATA" => Token::Data,
+            "SESSIONIZE" => Token::Sessionize,
+            "GAP" => Token::Gap,
             _ => Token::Ident(value),
         };
 

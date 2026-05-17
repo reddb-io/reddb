@@ -1038,6 +1038,7 @@ mod tests {
             offset_param: None,
             expand: None,
             as_of: None,
+            sessionize: None,
         }
     }
 
@@ -1191,6 +1192,7 @@ mod tests {
             offset_param: None,
             expand: None,
             as_of: None,
+            sessionize: None,
         });
 
         let cost = estimator.estimate(&query);
@@ -1261,6 +1263,7 @@ mod tests {
             offset_param: None,
             expand: None,
             as_of: None,
+            sessionize: None,
         };
 
         let card = estimator.estimate_table_cardinality(&query);

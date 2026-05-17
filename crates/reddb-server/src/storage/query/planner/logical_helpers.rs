@@ -928,6 +928,7 @@ mod tests {
             offset_param: None,
             expand: None,
             as_of: None,
+            sessionize: None,
         })
     }
 

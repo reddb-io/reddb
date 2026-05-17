@@ -155,6 +155,7 @@ fn parameterize_table_query(query: &TableQuery, next_index: &mut usize) -> Optio
         offset_param: query.offset_param,
         expand: query.expand.clone(),
         as_of: query.as_of.clone(),
+        sessionize: query.sessionize.clone(),
     })
 }
 
@@ -1173,6 +1174,7 @@ fn bind_table_query(query: &TableQuery, binds: &[Value]) -> Option<TableQuery> {
         offset_param: query.offset_param,
         expand: query.expand.clone(),
         as_of: query.as_of.clone(),
+        sessionize: query.sessionize.clone(),
     })
 }
 
@@ -1334,6 +1336,7 @@ mod tests {
             offset_param: None,
             expand: None,
             as_of: None,
+            sessionize: None,
         });
 
         let prepared = parameterize_query_expr(&query).unwrap();

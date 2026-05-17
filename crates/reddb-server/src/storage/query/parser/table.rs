@@ -192,6 +192,7 @@ impl<'a> Parser<'a> {
             offset_param: None,
             expand: None,
             as_of: None,
+            sessionize: None,
         };
 
         if self.is_join_keyword() {
@@ -205,10 +206,50 @@ impl<'a> Parser<'a> {
             return Ok(expr);
         }
 
+        // SESSIONIZE BY <ident> GAP <duration> [ORDER BY <ident>]
+        // — issue #585 slice 8. Parsed before WHERE/GROUP BY so the
+        // optional inner ORDER BY (which the user binds to the
+        // operator's timestamp axis) cannot be confused with the
+        // SELECT's top-level ORDER BY further down. Both `BY` and
+        // `GAP` may be omitted when the source collection's
+        // descriptor carries `SESSION_KEY` / `SESSION_GAP` defaults
+        // (slice 1) — the executor resolves them at run time and
+        // raises `MissingSessionKey` if neither side supplies a
+        // value.
+        if self.consume(&Token::Sessionize)? {
+            query.sessionize = Some(self.parse_sessionize_clause()?);
+        }
+
         // Parse optional clauses
         self.parse_table_clauses(&mut query)?;
 
         Ok(QueryExpr::Table(query))
+    }
+
+    fn parse_sessionize_clause(
+        &mut self,
+    ) -> Result<crate::storage::query::ast::SessionizeClause, ParseError> {
+        use crate::storage::query::ast::SessionizeClause;
+
+        let mut clause = SessionizeClause::default();
+
+        if self.consume(&Token::By)? {
+            clause.actor_col = Some(self.expect_ident()?);
+        }
+        if self.consume(&Token::Gap)? {
+            let value = self.parse_float()?;
+            let unit = self.parse_duration_unit()?;
+            clause.gap_ms = Some((value * unit) as u64);
+        }
+        // Optional `ORDER BY <ident>` immediately after GAP. The
+        // top-level SELECT ORDER BY parsed by `parse_table_clauses`
+        // sees the next ORDER token, so this only consumes the one
+        // immediately attached to SESSIONIZE.
+        if self.consume(&Token::Order)? {
+            self.expect(Token::By)?;
+            clause.order_col = Some(self.expect_ident()?);
+        }
+        Ok(clause)
     }
 }
 
@@ -226,6 +267,7 @@ impl<'a> Parser<'a> {
                 | Token::Left
                 | Token::Right
                 | Token::As
+                | Token::Sessionize
         )
     }
 
@@ -1205,5 +1247,72 @@ mod tests {
         assert_eq!(table.select_items.len(), 1);
 
         assert!(super::super::parse("FROM (MATCH (n) RETURN n) AS g").is_err());
+    }
+
+    // ── SESSIONIZE operator (issue #585 slice 8) ──
+
+    #[test]
+    fn test_parse_sessionize_full_clause() {
+        let q = parse_table(
+            "SELECT user_id, ts FROM events SESSIONIZE BY user_id GAP 30 m ORDER BY ts",
+        );
+        let s = q.sessionize.expect("sessionize present");
+        assert_eq!(s.actor_col.as_deref(), Some("user_id"));
+        assert_eq!(s.gap_ms, Some(30 * 60_000));
+        assert_eq!(s.order_col.as_deref(), Some("ts"));
+    }
+
+    #[test]
+    fn test_parse_sessionize_omits_optional_order_by() {
+        let q = parse_table("SELECT * FROM events SESSIONIZE BY user_id GAP 5 s");
+        let s = q.sessionize.expect("sessionize present");
+        assert_eq!(s.actor_col.as_deref(), Some("user_id"));
+        assert_eq!(s.gap_ms, Some(5_000));
+        assert!(s.order_col.is_none());
+    }
+
+    #[test]
+    fn test_parse_sessionize_bare_defers_to_descriptor() {
+        // Both BY and GAP omitted — parser accepts the shape; the
+        // executor raises MissingSessionKey when the descriptor
+        // doesn't supply defaults.
+        let q = parse_table("SELECT * FROM events SESSIONIZE");
+        let s = q.sessionize.expect("sessionize present");
+        assert!(s.actor_col.is_none());
+        assert!(s.gap_ms.is_none());
+        assert!(s.order_col.is_none());
+    }
+
+    #[test]
+    fn test_parse_sessionize_composes_with_where_and_limit() {
+        let q = parse_table(
+            "SELECT user_id FROM events \
+             SESSIONIZE BY user_id GAP 1 m \
+             WHERE user_id = 'u1' LIMIT 10",
+        );
+        let s = q.sessionize.expect("sessionize present");
+        assert_eq!(s.actor_col.as_deref(), Some("user_id"));
+        assert_eq!(s.gap_ms, Some(60_000));
+        assert!(q.where_expr.is_some(), "WHERE still parsed");
+        assert_eq!(q.limit, Some(10));
+    }
+
+    #[test]
+    fn test_parse_sessionize_absent_leaves_field_none() {
+        let q = parse_table("SELECT * FROM events");
+        assert!(q.sessionize.is_none());
+    }
+
+    #[test]
+    fn test_parse_sessionize_with_session_id_in_projection_e2e_shape() {
+        // Matches the literal shape e2e tests use — session_id in the
+        // projection list must not confuse the parser.
+        let q = parse_table(
+            "SELECT id, user_id, ts, session_id FROM events \
+             SESSIONIZE BY user_id GAP 30 s ORDER BY ts",
+        );
+        let s = q.sessionize.expect("sessionize present");
+        assert_eq!(s.actor_col.as_deref(), Some("user_id"));
+        assert_eq!(s.gap_ms, Some(30_000));
     }
 }
