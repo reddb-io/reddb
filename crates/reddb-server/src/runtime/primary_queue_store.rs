@@ -519,6 +519,23 @@ impl QueueStore for PrimaryQueueStore {
         let (_, row) = self.find_pending_by_delivery(delivery_id)?;
         self.read_message(&row.queue, row.message_id)
     }
+
+    fn reclaim_expired(&self, queue: &str, now: Instant) -> Result<()> {
+        // Persisted deadlines are wall-clock unix-ns (see
+        // `instant_to_unix_ns` at `mark_pending` time). Convert the
+        // monotonic `now` argument the same way so the comparison
+        // happens in a single domain.
+        let now_ns = instant_to_unix_ns(now);
+        let queue_owned = queue.to_string();
+        self.delete_meta_where(|row| {
+            row_text(row, "kind").as_deref() == Some(KIND_PENDING_LC)
+                && row_text(row, "queue").as_deref() == Some(&queue_owned)
+                && row_u64(row, "lock_deadline_ns")
+                    .map(|d| d <= now_ns)
+                    .unwrap_or(false)
+        });
+        Ok(())
+    }
 }
 
 fn row_text(row: &RowData, field: &str) -> Option<String> {
