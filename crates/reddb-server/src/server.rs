@@ -551,13 +551,25 @@ impl RedDBServer {
     ) -> io::Result<()> {
         for stream in listener.incoming() {
             match stream {
-                Ok(stream) => {
-                    let server = self.clone();
-                    let cfg = tls_config.clone();
-                    thread::spawn(move || {
-                        let _ = server.handle_tls_connection(stream, cfg);
-                    });
-                }
+                Ok(stream) => match self.http_limiter.try_acquire() {
+                    Some(permit) => {
+                        let server = self.clone();
+                        let cfg = tls_config.clone();
+                        thread::spawn(move || {
+                            let _guard = permit; // released on thread exit
+                            let _ = server.handle_tls_connection(stream, cfg);
+                        });
+                    }
+                    None => {
+                        // Issue #572 slice 3: cross-transport cap shared
+                        // with the clear-text limiter. Writing a 503 over
+                        // a non-handshaken TLS socket is not meaningful,
+                        // so reject by closing the raw socket. No TLS
+                        // handshake, no thread spawn, no runtime call.
+                        let _ = stream.shutdown(std::net::Shutdown::Both);
+                        drop(stream);
+                    }
+                },
                 Err(err) => return Err(err),
             }
         }
@@ -644,6 +656,11 @@ impl RedDBServer {
     ) -> io::Result<()> {
         tcp.set_read_timeout(Some(Duration::from_millis(self.options.read_timeout_ms)))?;
         tcp.set_write_timeout(Some(Duration::from_millis(self.options.write_timeout_ms)))?;
+
+        // Issue #572 slice 3: per-handler deadline applies to TLS
+        // handlers too — same handler-thread scaffolding as slice 2.
+        let deadline = Instant::now() + self.handler_timeout;
+
         let mut tls_stream = match self::tls::accept_tls(tls_config, tcp) {
             Ok(s) => s,
             Err(err) => {
@@ -666,10 +683,31 @@ impl RedDBServer {
                 return Err(err);
             }
         };
+
+        // Boundary (a): between request parse and route dispatch.
+        if Instant::now() >= deadline {
+            Self::write_handler_timeout_503(&mut tls_stream);
+            return Ok(());
+        }
+
         if self.try_route_streaming(&request, &mut tls_stream)? {
             return Ok(());
         }
         let response = self.route(request);
+
+        // Test-only injected slow downstream (issue #572 slice 3
+        // integration test). Production sets this to 0.
+        let inject_ms = self.slow_inject_ms.load(Ordering::Relaxed);
+        if inject_ms > 0 {
+            thread::sleep(Duration::from_millis(inject_ms));
+        }
+
+        // Boundary (b): between route dispatch and response write.
+        if Instant::now() >= deadline {
+            Self::write_handler_timeout_503(&mut tls_stream);
+            return Ok(());
+        }
+
         tls_stream.write_all(&response.to_http_bytes())?;
         tls_stream.flush()?;
         Ok(())
