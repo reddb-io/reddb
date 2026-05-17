@@ -326,6 +326,20 @@ impl RedDBRuntime {
         if query.kind == "blockchain" {
             self.install_blockchain_kind(&query.name)?;
         }
+        // Issue #522 — wire `SIGNED_BY (...)` into the runtime. The parser
+        // already produces a validated 32-byte pubkey list; installing
+        // the registry stamps the per-collection signer set into
+        // `red_config` so the INSERT path can load it cheaply.
+        if !query.allowed_signers.is_empty() {
+            let actor = crate::runtime::impl_core::current_user_projected()
+                .unwrap_or_else(|| "@system/create-collection".to_string());
+            crate::runtime::signed_writes_kind::install(
+                &*self.inner.db.store(),
+                &query.name,
+                &query.allowed_signers,
+                &actor,
+            );
+        }
         Ok(result)
     }
 
@@ -925,6 +939,51 @@ impl RedDBRuntime {
                     messages.push(format!(
                         "subscription '{}' dropped on '{}'",
                         name, query.name
+                    ));
+                }
+                AlterOperation::AddSigner { pubkey } => {
+                    // Issue #522 — admin-gated registry mutation. The
+                    // standard DDL `check_write` above gates by role; we
+                    // additionally verify the collection actually has a
+                    // signed-writes registry installed so this isn't a
+                    // covert way to retrofit one (use `CREATE COLLECTION
+                    // ... SIGNED_BY (...)` for that).
+                    if !crate::runtime::signed_writes_kind::is_signed(&*store, &query.name)
+                    {
+                        return Err(RedDBError::Query(format!(
+                            "ALTER COLLECTION ADD SIGNER: '{}' has no signer registry; \
+                             recreate it with CREATE COLLECTION ... SIGNED_BY (...)",
+                            query.name
+                        )));
+                    }
+                    let actor = crate::runtime::impl_core::current_user_projected()
+                        .unwrap_or_else(|| "@system/alter".to_string());
+                    let changed = crate::runtime::signed_writes_kind::add_signer(
+                        &*store, &query.name, *pubkey, &actor,
+                    );
+                    messages.push(format!(
+                        "signer {} on '{}'",
+                        if changed { "added" } else { "already present" },
+                        query.name
+                    ));
+                }
+                AlterOperation::RevokeSigner { pubkey } => {
+                    if !crate::runtime::signed_writes_kind::is_signed(&*store, &query.name)
+                    {
+                        return Err(RedDBError::Query(format!(
+                            "ALTER COLLECTION REVOKE SIGNER: '{}' has no signer registry",
+                            query.name
+                        )));
+                    }
+                    let actor = crate::runtime::impl_core::current_user_projected()
+                        .unwrap_or_else(|| "@system/alter".to_string());
+                    let changed = crate::runtime::signed_writes_kind::revoke_signer(
+                        &*store, &query.name, pubkey, &actor,
+                    );
+                    messages.push(format!(
+                        "signer {} on '{}'",
+                        if changed { "revoked" } else { "already revoked" },
+                        query.name
                     ));
                 }
             }
@@ -1818,6 +1877,11 @@ fn apply_alter_operations_to_contract(
             AlterOperation::DropSubscription { name } => {
                 contract.subscriptions.retain(|s| s.name != *name);
             }
+            // Signer registry mutations live in `red_config` outside the
+            // contract surface — the executor applied them directly via
+            // `signed_writes_kind::{add,revoke}_signer`. Nothing to fold
+            // into the column-shaped contract.
+            AlterOperation::AddSigner { .. } | AlterOperation::RevokeSigner { .. } => {}
         }
     }
 }

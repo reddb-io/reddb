@@ -162,6 +162,20 @@ impl SignerRegistry {
         reg
     }
 
+    /// Rebuild a registry from previously-persisted state. Used by the
+    /// runtime adapter when loading the registry off `red_config` — the
+    /// caller is responsible for the storage format; this constructor
+    /// only stitches the in-memory invariants back together.
+    pub fn from_persisted_parts(
+        allowed: Vec<[u8; SIGNER_PUBKEY_LEN]>,
+        history: Vec<SignerHistoryEntry>,
+    ) -> Self {
+        Self {
+            allowed: allowed.into_iter().collect(),
+            history,
+        }
+    }
+
     /// Snapshot of the currently-allowed signers, in stable order.
     pub fn allowed(&self) -> impl Iterator<Item = &[u8; SIGNER_PUBKEY_LEN]> {
         self.allowed.iter()

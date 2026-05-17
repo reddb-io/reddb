@@ -421,6 +421,31 @@ impl<'a> Parser<'a> {
         }))
     }
 
+    /// Parse a single `'hex32'` string literal as a 32-byte Ed25519
+    /// pubkey. Used by `ALTER COLLECTION ... ADD|REVOKE SIGNER 'hex'`
+    /// (issue #522).
+    fn parse_single_signer_hex(&mut self) -> Result<[u8; 32], ParseError> {
+        let hex = match self.peek().clone() {
+            Token::String(s) => {
+                self.advance()?;
+                s
+            }
+            _ => {
+                return Err(ParseError::expected(
+                    vec!["string literal (ed25519 pubkey hex)"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+        };
+        decode_hex_32(&hex).map_err(|msg| {
+            ParseError::new(
+                format!("SIGNER pubkey '{hex}' invalid: {msg}"),
+                self.position(),
+            )
+        })
+    }
+
     /// Parse `( 'hex32', 'hex32', ... )` — Ed25519 pubkey list. Each entry
     /// must decode to exactly 32 bytes. Used by both `CREATE COLLECTION ...
     /// SIGNED_BY (...)` and (in a later iteration) `ALTER COLLECTION` signer
@@ -554,9 +579,23 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse: ALTER TABLE name ADD/DROP/RENAME COLUMN ...
+    ///
+    /// Also accepts `ALTER COLLECTION name ADD|REVOKE SIGNER 'hex'`
+    /// (issue #522) — collection-level signer registry mutations share
+    /// the AlterTable AST so the existing executor dispatch path picks
+    /// them up without a new top-level variant.
     pub fn parse_alter_table_query(&mut self) -> Result<QueryExpr, ParseError> {
         self.expect(Token::Alter)?;
-        self.expect(Token::Table)?;
+        if !self.consume(&Token::Table)?
+            && !self.consume(&Token::Collection)?
+            && !self.consume_ident_ci("COLLECTION")?
+        {
+            return Err(ParseError::expected(
+                vec!["TABLE", "COLLECTION"],
+                self.peek(),
+                self.position(),
+            ));
+        }
         let name = self.expect_ident()?;
 
         let mut operations = Vec::new();
@@ -582,12 +621,27 @@ impl<'a> Parser<'a> {
                     name: sub_name,
                     descriptor,
                 })
+            } else if self.consume_ident_ci("SIGNER")? {
+                // ADD SIGNER 'hex_pubkey' — issue #522.
+                let pubkey = self.parse_single_signer_hex()?;
+                Ok(AlterOperation::AddSigner { pubkey })
             } else {
                 // ADD COLUMN definition (COLUMN keyword is optional)
                 let _ = self.consume(&Token::Column)?;
                 let col_def = self.parse_column_def()?;
                 Ok(AlterOperation::AddColumn(col_def))
             }
+        } else if self.consume_ident_ci("REVOKE")? {
+            // REVOKE SIGNER 'hex_pubkey' — issue #522.
+            if !self.consume_ident_ci("SIGNER")? {
+                return Err(ParseError::expected(
+                    vec!["SIGNER"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+            let pubkey = self.parse_single_signer_hex()?;
+            Ok(AlterOperation::RevokeSigner { pubkey })
         } else if self.consume(&Token::Drop)? {
             if self.consume_ident_ci("SUBSCRIPTION")? {
                 // DROP SUBSCRIPTION name

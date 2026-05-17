@@ -2011,7 +2011,15 @@ impl<'a> Parser<'a> {
                             self.position(),
                         )),
                     }
-                } else if matches!(next, Token::Table) {
+                } else if matches!(next, Token::Table)
+                    || matches!(next, Token::Collection)
+                    || matches!(next, Token::Ident(ref s) if s.eq_ignore_ascii_case("COLLECTION"))
+                {
+                    // Issue #522 — `ALTER COLLECTION` shares the AlterTable
+                    // AST so signer-registry mutations dispatch through the
+                    // existing executor. The DDL parser body accepts either
+                    // keyword interchangeably for the open-vocabulary alters
+                    // we own (currently `ADD|REVOKE SIGNER`).
                     match self.parse_alter_table_query()? {
                         QueryExpr::AlterTable(query) => Ok(SqlCommand::AlterTable(query)),
                         other => Err(ParseError::new(

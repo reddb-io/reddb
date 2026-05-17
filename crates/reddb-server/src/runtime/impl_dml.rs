@@ -814,6 +814,54 @@ impl RedDBRuntime {
                             timestamp_ms: use_ts,
                         });
                 }
+                // Issue #522 — signed-writes verification. On collections
+                // created with `SIGNED_BY (...)` the row must carry valid
+                // `signer_pubkey` + `signature` reserved columns. Runs
+                // after chain_mode so canonical payload covers user-supplied
+                // fields only (blockchain reserved columns are filtered by
+                // `canonical_payload`; the two signed-writes reserved
+                // columns are split out before payload computation, then
+                // re-attached for storage). The blockchain + SIGNED_BY
+                // composition is owned by issue #526; we keep #522 to the
+                // non-chain path and let chain_mode collections punt to that
+                // slice rather than half-wire it here.
+                if crate::runtime::signed_writes_kind::is_signed(&*store, &query.table)
+                {
+                    let (pk_col, sig_col, residual) =
+                        crate::runtime::signed_writes_kind::split_signature_fields(fields);
+                    let payload =
+                        crate::runtime::blockchain_kind::canonical_payload(&residual);
+                    let reg = crate::runtime::signed_writes_kind::registry(
+                        &*store,
+                        &query.table,
+                    );
+                    crate::runtime::signed_writes_kind::verify_row(
+                        &reg,
+                        pk_col.as_ref().map(|c| c.bytes.as_slice()),
+                        sig_col.as_ref().map(|c| c.bytes.as_slice()),
+                        &payload,
+                    )
+                    .map_err(crate::runtime::signed_writes_kind::map_error)?;
+                    fields = residual;
+                    // Round-trip the reserved columns with the value
+                    // type the caller supplied (Text/hex on the SQL path,
+                    // Blob on the binary path). Keeps SELECT and WHERE
+                    // predicates symmetric with the INSERT shape.
+                    if let Some(col) = pk_col {
+                        fields.push((
+                            crate::storage::signed_writes::RESERVED_SIGNER_PUBKEY_COL
+                                .to_string(),
+                            col.raw_value,
+                        ));
+                    }
+                    if let Some(col) = sig_col {
+                        fields.push((
+                            crate::storage::signed_writes::RESERVED_SIGNATURE_COL
+                                .to_string(),
+                            col.raw_value,
+                        ));
+                    }
+                }
                 merge_with_clauses(
                     &mut metadata,
                     query.ttl_ms,
