@@ -719,15 +719,36 @@ impl<'a> Parser<'a> {
             }
         } else if self.consume(&Token::Set)? || self.consume_ident_ci("SET")? {
             // SET APPEND_ONLY = true|false | SET VERSIONED = true|false
+            // SET RETENTION <duration> (issue #580)
             if self.consume_ident_ci("APPEND_ONLY")? {
                 let on = self.parse_bool_assign()?;
                 Ok(AlterOperation::SetAppendOnly(on))
             } else if self.consume_ident_ci("VERSIONED")? {
                 let on = self.parse_bool_assign()?;
                 Ok(AlterOperation::SetVersioned(on))
+            } else if self.consume(&Token::Retention)? {
+                // `SET RETENTION <duration>` — reuse the same float+unit
+                // grammar the timeseries CREATE clause uses so `7 DAYS`,
+                // `30 m`, `1 h`, `90 d` all parse identically.
+                let value = self.parse_float()?;
+                let unit = self.parse_duration_unit()?;
+                Ok(AlterOperation::SetRetention {
+                    duration_ms: (value * unit) as u64,
+                })
             } else {
                 Err(ParseError::expected(
-                    vec!["APPEND_ONLY", "VERSIONED"],
+                    vec!["APPEND_ONLY", "VERSIONED", "RETENTION"],
+                    self.peek(),
+                    self.position(),
+                ))
+            }
+        } else if self.consume_ident_ci("UNSET")? {
+            // `UNSET RETENTION` — clears the declarative retention policy.
+            if self.consume(&Token::Retention)? {
+                Ok(AlterOperation::UnsetRetention)
+            } else {
+                Err(ParseError::expected(
+                    vec!["RETENTION"],
                     self.peek(),
                     self.position(),
                 ))
@@ -736,6 +757,7 @@ impl<'a> Parser<'a> {
             Err(ParseError::expected(
                 vec![
                     "ADD", "DROP", "RENAME", "ATTACH", "DETACH", "ENABLE", "DISABLE", "SET",
+                    "UNSET",
                 ],
                 self.peek(),
                 self.position(),

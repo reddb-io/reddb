@@ -37,6 +37,12 @@ pub(super) const STATS: &str = "red.stats";
 pub(super) const STATS_INTERNAL: &str = "__red_schema_stats";
 pub(super) const SUBSCRIPTIONS: &str = "red.subscriptions";
 pub(super) const SUBSCRIPTIONS_INTERNAL: &str = "__red_schema_subscriptions";
+// Issue #580 — DeclarativeRetention slice 1. Per-collection retention
+// state: `(name, retention_duration, oldest_row_ts,
+// expired_row_count_estimate)`. Materialised views are not subject to
+// source retention by default in this slice.
+pub(super) const RETENTION: &str = "red.retention";
+pub(super) const RETENTION_INTERNAL: &str = "__red_schema_retention";
 pub(super) const READ_ONLY_ERROR: &str = "system schema is read-only";
 
 const COLLECTION_COLUMNS: [&str; 15] = [
@@ -120,6 +126,13 @@ const STATS_COLUMNS: [&str; 10] = [
     "attention_score",
 ];
 
+const RETENTION_COLUMNS: [&str; 4] = [
+    "name",
+    "retention_duration",
+    "oldest_row_ts",
+    "expired_row_count_estimate",
+];
+
 const SUBSCRIPTION_COLUMNS: [&str; 11] = [
     "name",
     "collection",
@@ -148,6 +161,7 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
         (POLICIES, POLICIES_INTERNAL),
         (STATS, STATS_INTERNAL),
         (SUBSCRIPTIONS, SUBSCRIPTIONS_INTERNAL),
+        (RETENTION, RETENTION_INTERNAL),
     ] {
         if let Some(next) = replace_case_insensitive_outside_quotes(&rewritten, public, internal) {
             rewritten = next;
@@ -191,6 +205,8 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(STATS)
         || table.eq_ignore_ascii_case(SUBSCRIPTIONS_INTERNAL)
         || table.eq_ignore_ascii_case(SUBSCRIPTIONS)
+        || table.eq_ignore_ascii_case(RETENTION_INTERNAL)
+        || table.eq_ignore_ascii_case(RETENTION)
 }
 
 pub(super) fn red_query(
@@ -232,6 +248,7 @@ pub(super) fn red_query(
         VirtualTableKind::Policies => policies_snapshot(runtime, tenant, visible_collections),
         VirtualTableKind::Stats => stats_snapshot(runtime, visible_collections),
         VirtualTableKind::Subscriptions => subscriptions_snapshot(runtime, visible_collections),
+        VirtualTableKind::Retention => retention_snapshot(runtime, visible_collections),
     };
 
     let table_name = query.table.as_str();
@@ -333,6 +350,7 @@ enum VirtualTableKind {
     Policies,
     Stats,
     Subscriptions,
+    Retention,
 }
 
 impl VirtualTableKind {
@@ -347,6 +365,7 @@ impl VirtualTableKind {
             Self::Policies => &POLICY_COLUMNS,
             Self::Stats => &STATS_COLUMNS,
             Self::Subscriptions => &SUBSCRIPTION_COLUMNS,
+            Self::Retention => &RETENTION_COLUMNS,
         }
     }
 
@@ -361,6 +380,7 @@ impl VirtualTableKind {
             Self::Policies => POLICIES,
             Self::Stats => STATS,
             Self::Subscriptions => SUBSCRIPTIONS,
+            Self::Retention => RETENTION,
         }
     }
 }
@@ -393,6 +413,9 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
     if name.eq_ignore_ascii_case(SUBSCRIPTIONS_INTERNAL) || name.eq_ignore_ascii_case(SUBSCRIPTIONS)
     {
         return Ok(VirtualTableKind::Subscriptions);
+    }
+    if name.eq_ignore_ascii_case(RETENTION_INTERNAL) || name.eq_ignore_ascii_case(RETENTION) {
+        return Ok(VirtualTableKind::Retention);
     }
     Err(RedDBError::Query(format!(
         "unknown system schema relation `{name}`"
@@ -1315,6 +1338,112 @@ fn collections_snapshot(
             )
         })
         .collect()
+}
+
+/// Issue #580 — DeclarativeRetention slice 1. Per-collection retention
+/// state: `(name, retention_duration, oldest_row_ts,
+/// expired_row_count_estimate)`. Materialised views are not subject to
+/// source retention in this slice.
+fn retention_snapshot(
+    runtime: &RedDBRuntime,
+    visible_collections: Option<&std::collections::HashSet<String>>,
+) -> Vec<UnifiedRecord> {
+    let snapshot = runtime.db().catalog_model_snapshot();
+    let schema = Arc::new(
+        RETENTION_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let store = runtime.db().store();
+    let db = runtime.db();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+
+    snapshot
+        .collections
+        .into_iter()
+        .filter(|collection| {
+            visible_collections.is_none_or(|visible| visible.contains(&collection.name))
+        })
+        .map(|collection| {
+            let contract = db.collection_contract(&collection.name);
+            let retention_ms = contract
+                .as_ref()
+                .and_then(|c| c.retention_duration_ms);
+            let ts_column = contract.as_ref().and_then(
+                crate::runtime::retention_filter::resolve_timestamp_column,
+            );
+
+            // Cheap-ish single pass: walk the collection once,
+            // tracking the min timestamp and counting expired rows.
+            // The acceptance criterion explicitly allows an
+            // approximation here; we deliberately keep the scan
+            // simple rather than reach for zone-map min lookups
+            // that don't exist on the schemaless `created_at`
+            // axis yet.
+            let cutoff = retention_ms
+                .map(|ret| (now_ms as i64).saturating_sub(ret as i64));
+            let mut oldest_ts: Option<i64> = None;
+            let mut expired_count: u64 = 0;
+            if let Some(manager) = store.get_collection(&collection.name) {
+                manager.for_each_entity(|entity| {
+                    let ts = match ts_column.as_deref() {
+                        Some("created_at") => Some(entity.created_at as i64),
+                        Some("updated_at") => Some(entity.updated_at as i64),
+                        Some(name) => entity
+                            .data
+                            .as_row()
+                            .and_then(|row| row.get_field(name))
+                            .and_then(value_as_ms),
+                        None => Some(entity.created_at as i64),
+                    };
+                    if let Some(t) = ts {
+                        oldest_ts = Some(match oldest_ts {
+                            Some(prev) => prev.min(t),
+                            None => t,
+                        });
+                        if let Some(c) = cutoff {
+                            if t < c {
+                                expired_count = expired_count.saturating_add(1);
+                            }
+                        }
+                    }
+                    true
+                });
+            }
+
+            let retention_value = retention_ms
+                .map(Value::UnsignedInteger)
+                .unwrap_or(Value::Null);
+            let oldest_value = oldest_ts
+                .map(Value::BigInt)
+                .unwrap_or(Value::Null);
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(collection.name),
+                    retention_value,
+                    oldest_value,
+                    Value::UnsignedInteger(expired_count),
+                ],
+            )
+        })
+        .collect()
+}
+
+fn value_as_ms(value: &crate::storage::schema::Value) -> Option<i64> {
+    use crate::storage::schema::Value;
+    match value {
+        Value::TimestampMs(v) => Some(*v),
+        Value::Timestamp(v) => Some(v.saturating_mul(1_000)),
+        Value::BigInt(v) => Some(*v),
+        Value::UnsignedInteger(v) => i64::try_from(*v).ok(),
+        Value::Integer(v) => Some(*v as i64),
+        _ => None,
+    }
 }
 
 fn distance_metric_name(metric: crate::storage::engine::distance::DistanceMetric) -> &'static str {

@@ -986,6 +986,34 @@ impl RedDBRuntime {
                         query.name
                     ));
                 }
+                AlterOperation::SetRetention { duration_ms } => {
+                    // Issue #580 — validate that the collection has a
+                    // timestamp column the lazy-on-scan filter can key
+                    // off. Without one there is no anchor for "older
+                    // than now - duration"; reject at ALTER time so the
+                    // policy can never silently hide all rows.
+                    let existing = self.inner.db.collection_contract(&query.name);
+                    let has_ts_column = existing
+                        .as_ref()
+                        .map(retention_timestamp_column_exists)
+                        .unwrap_or(false);
+                    if !has_ts_column {
+                        return Err(RedDBError::Query(format!(
+                            "ALTER COLLECTION SET RETENTION: '{}' has no timestamp \
+                             column — declare a TIMESTAMP/TIMESTAMPMS/DATETIME column \
+                             or enable WITH timestamps = true before setting a \
+                             retention policy",
+                            query.name
+                        )));
+                    }
+                    messages.push(format!(
+                        "retention set to {duration_ms} ms on '{}'",
+                        query.name
+                    ));
+                }
+                AlterOperation::UnsetRetention => {
+                    messages.push(format!("retention cleared on '{}'", query.name));
+                }
             }
         }
 
@@ -1567,6 +1595,7 @@ fn collection_contract_from_create_table(
         subscriptions: query.subscriptions.clone(),
         session_key: None,
         session_gap_ms: None,
+        retention_duration_ms: None,
     })
 }
 
@@ -1598,6 +1627,7 @@ fn default_collection_contract_for_existing_table(
         subscriptions: Vec::new(),
         session_key: None,
         session_gap_ms: None,
+        retention_duration_ms: None,
     }
 }
 
@@ -1630,6 +1660,7 @@ fn keyed_collection_contract(
         subscriptions: Vec::new(),
         session_key: None,
         session_gap_ms: None,
+        retention_duration_ms: None,
     }
 }
 
@@ -1664,6 +1695,7 @@ fn metrics_collection_contract(query: &CreateTableQuery) -> crate::physical::Col
         subscriptions: Vec::new(),
         session_key: None,
         session_gap_ms: None,
+        retention_duration_ms: None,
     }
 }
 
@@ -1693,6 +1725,7 @@ fn vector_collection_contract(query: &CreateVectorQuery) -> crate::physical::Col
         subscriptions: Vec::new(),
         session_key: None,
         session_gap_ms: None,
+        retention_duration_ms: None,
     }
 }
 
@@ -1892,8 +1925,48 @@ fn apply_alter_operations_to_contract(
             // `signed_writes_kind::{add,revoke}_signer`. Nothing to fold
             // into the column-shaped contract.
             AlterOperation::AddSigner { .. } | AlterOperation::RevokeSigner { .. } => {}
+            AlterOperation::SetRetention { duration_ms } => {
+                contract.retention_duration_ms = Some(*duration_ms);
+            }
+            AlterOperation::UnsetRetention => {
+                contract.retention_duration_ms = None;
+            }
         }
     }
+}
+
+/// Issue #580 — returns true if the contract carries at least one
+/// column the retention filter can use as a timestamp anchor:
+/// either `WITH timestamps = true` (auto `created_at` / `updated_at`)
+/// or a user-declared column with a temporal data_type.
+pub(crate) fn retention_timestamp_column_exists(
+    contract: &crate::physical::CollectionContract,
+) -> bool {
+    if contract.timestamps_enabled {
+        return true;
+    }
+    if matches!(
+        contract.declared_model,
+        crate::catalog::CollectionModel::TimeSeries
+            | crate::catalog::CollectionModel::Metrics
+    ) {
+        // Time-series and metrics collections carry an intrinsic
+        // timestamp axis on every row even without a declared column;
+        // retention has a natural anchor.
+        return true;
+    }
+    contract
+        .declared_columns
+        .iter()
+        .any(|column| is_temporal_data_type(&column.data_type))
+}
+
+fn is_temporal_data_type(data_type: &str) -> bool {
+    let upper = data_type.to_ascii_uppercase();
+    matches!(
+        upper.as_str(),
+        "TIMESTAMP" | "TIMESTAMPMS" | "TIMESTAMP_MS" | "DATETIME" | "DATE"
+    )
 }
 
 fn validate_event_subscriptions(
@@ -2199,6 +2272,7 @@ fn event_queue_collection_contract(queue: &str) -> crate::physical::CollectionCo
         subscriptions: Vec::new(),
         session_key: None,
         session_gap_ms: None,
+        retention_duration_ms: None,
     }
 }
 

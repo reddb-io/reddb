@@ -1243,6 +1243,7 @@ pub(crate) mod primary_queue_store;
 pub mod quota_bucket;
 mod record_search;
 mod red_schema;
+pub(crate) mod retention_filter;
 pub mod resource_limits;
 pub(crate) mod scalar_evaluator;
 pub mod schema_diff;

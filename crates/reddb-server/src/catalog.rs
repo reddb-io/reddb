@@ -110,6 +110,10 @@ pub struct CollectionDescriptor {
     /// `SESSION_GAP <duration>` in milliseconds declared on the
     /// timeseries collection. Issue #576 slice 1.
     pub session_gap_ms: Option<u64>,
+    /// Declarative retention duration in milliseconds. `None` means no
+    /// retention policy is enforced. Set via `ALTER COLLECTION ... SET
+    /// RETENTION <duration>`. Issue #580 slice 1.
+    pub retention_duration_ms: Option<u64>,
     pub declared_schema_mode: Option<SchemaMode>,
     pub observed_schema_mode: SchemaMode,
     pub entities: usize,
@@ -423,6 +427,7 @@ pub fn snapshot_store_with_declarations(
             vector_metric: contract.and_then(|contract| contract.vector_metric),
             session_key: contract.and_then(|contract| contract.session_key.clone()),
             session_gap_ms: contract.and_then(|contract| contract.session_gap_ms),
+            retention_duration_ms: contract.and_then(|contract| contract.retention_duration_ms),
             declared_schema_mode: contract.map(|contract| contract.schema_mode),
             observed_schema_mode: inferred_schema_mode,
             entities: entity_count,

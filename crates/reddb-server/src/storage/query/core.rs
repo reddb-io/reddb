@@ -2012,6 +2012,15 @@ pub enum AlterOperation {
     /// `Revoke` entry. Past rows signed by `pubkey` remain readable
     /// and re-verifiable — only future inserts are rejected.
     RevokeSigner { pubkey: [u8; 32] },
+    /// Issue #580 — `ALTER COLLECTION name SET RETENTION <duration>`.
+    /// Stores a declarative retention policy on the collection contract.
+    /// Enforcement is lazy-on-scan: reads silently filter out rows older
+    /// than `now - duration_ms` by the collection's timestamp column.
+    SetRetention { duration_ms: u64 },
+    /// Issue #580 — `ALTER COLLECTION name UNSET RETENTION`.
+    /// Removes the policy. Previously-hidden expired rows become
+    /// readable again — the slice never physically dropped them.
+    UnsetRetention,
 }
 
 // ============================================================================

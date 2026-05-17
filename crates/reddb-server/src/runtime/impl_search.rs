@@ -2851,6 +2851,7 @@ fn ask_audit_collection_contract() -> crate::physical::CollectionContract {
         subscriptions: Vec::new(),
         session_key: None,
         session_gap_ms: None,
+        retention_duration_ms: None,
     }
 }
 

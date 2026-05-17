@@ -423,6 +423,13 @@ pub(super) fn collection_contract_to_json(contract: &CollectionContract) -> Json
             .unwrap_or(JsonValue::Null),
     );
     object.insert(
+        "retention_duration_ms".to_string(),
+        contract
+            .retention_duration_ms
+            .map(json_u64)
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
         "table_def".to_string(),
         contract
             .table_def
@@ -561,6 +568,13 @@ pub(super) fn collection_contract_from_json(value: &JsonValue) -> io::Result<Col
             .and_then(JsonValue::as_str)
             .map(str::to_string),
         session_gap_ms: match object.get("session_gap_ms") {
+            Some(JsonValue::Null) | None => None,
+            Some(value) => Some(json_u64_value(value)?),
+        },
+        // Legacy sidecars lack the retention_duration_ms key — default
+        // None preserves pre-feature behaviour (no retention filter).
+        // Issue #580 slice 1.
+        retention_duration_ms: match object.get("retention_duration_ms") {
             Some(JsonValue::Null) | None => None,
             Some(value) => Some(json_u64_value(value)?),
         },
