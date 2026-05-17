@@ -47,6 +47,8 @@ pub(super) struct QueueRuntimeConfig {
     pub(super) ttl_ms: Option<u64>,
     pub(super) dlq: Option<String>,
     pub(super) max_attempts: u32,
+    pub(super) lock_deadline_ms: u64,
+    pub(super) in_flight_cap_per_group: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -269,6 +271,8 @@ impl RedDBRuntime {
                 ttl_ms: query.ttl_ms,
                 dlq: query.dlq.clone(),
                 max_attempts: query.max_attempts,
+                lock_deadline_ms: query.lock_deadline_ms,
+                in_flight_cap_per_group: query.in_flight_cap_per_group,
             },
         )?;
 
@@ -340,22 +344,48 @@ impl RedDBRuntime {
         let store = self.inner.db.store();
         ensure_queue_exists(store.as_ref(), &query.name)?;
 
-        let pending =
-            load_pending_entries(store.as_ref(), &query.name, None, None).unwrap_or_default();
-        if !pending.is_empty() {
-            tracing::warn!(
-                queue = %query.name,
-                pending_count = pending.len(),
-                new_mode = %query.mode.as_str(),
-                "ALTER QUEUE SET MODE: {} in-flight messages will drain with old mode; \
-                 new reads use {}",
-                pending.len(),
-                query.mode.as_str(),
-            );
+        let mut config = load_queue_config(store.as_ref(), &query.name);
+        let mut summary: Vec<String> = Vec::new();
+
+        if let Some(new_mode) = query.mode {
+            let pending =
+                load_pending_entries(store.as_ref(), &query.name, None, None).unwrap_or_default();
+            if !pending.is_empty() {
+                tracing::warn!(
+                    queue = %query.name,
+                    pending_count = pending.len(),
+                    new_mode = %new_mode.as_str(),
+                    "ALTER QUEUE SET MODE: {} in-flight messages will drain with old mode; \
+                     new reads use {}",
+                    pending.len(),
+                    new_mode.as_str(),
+                );
+            }
+            config.mode = new_mode;
+            summary.push(format!("mode={}", new_mode.as_str()));
+        }
+        if let Some(max_attempts) = query.max_attempts {
+            config.max_attempts = max_attempts;
+            summary.push(format!("max_attempts={max_attempts}"));
+        }
+        if let Some(lock_deadline_ms) = query.lock_deadline_ms {
+            config.lock_deadline_ms = lock_deadline_ms;
+            summary.push(format!("lock_deadline_ms={lock_deadline_ms}"));
+        }
+        if let Some(in_flight_cap) = query.in_flight_cap_per_group {
+            config.in_flight_cap_per_group = in_flight_cap;
+            summary.push(format!("in_flight_cap_per_group={in_flight_cap}"));
+        }
+        if let Some(dlq) = &query.dlq {
+            if dlq == &query.name {
+                return Err(RedDBError::Query(
+                    "dead-letter queue must be different from the source queue".to_string(),
+                ));
+            }
+            config.dlq = Some(dlq.clone());
+            summary.push(format!("dlq={dlq}"));
         }
 
-        let mut config = load_queue_config(store.as_ref(), &query.name);
-        config.mode = query.mode;
         save_queue_config(store.as_ref(), &query.name, &config)?;
 
         self.invalidate_result_cache();
@@ -366,7 +396,7 @@ impl RedDBRuntime {
 
         Ok(RuntimeQueryResult::ok_message(
             raw_query.to_string(),
-            &format!("queue '{}' mode set to {}", query.name, query.mode.as_str()),
+            &format!("queue '{}' altered: {}", query.name, summary.join(", ")),
             "alter",
         ))
     }
@@ -1070,7 +1100,9 @@ pub(super) fn load_queue_config(store: &UnifiedStore, queue: &str) -> QueueRunti
         max_size: None,
         ttl_ms: None,
         dlq: None,
-        max_attempts: 3,
+        max_attempts: crate::storage::query::DEFAULT_QUEUE_MAX_ATTEMPTS,
+        lock_deadline_ms: crate::storage::query::DEFAULT_QUEUE_LOCK_DEADLINE_MS,
+        in_flight_cap_per_group: crate::storage::query::DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP,
     };
 
     let Some(manager) = store.get_collection(QUEUE_META_COLLECTION) else {
@@ -1097,7 +1129,12 @@ pub(super) fn load_queue_config(store: &UnifiedStore, queue: &str) -> QueueRunti
                 dlq: row_text(row, "dlq"),
                 max_attempts: row_u64(row, "max_attempts")
                     .map(|value| value as u32)
-                    .unwrap_or(3),
+                    .unwrap_or(crate::storage::query::DEFAULT_QUEUE_MAX_ATTEMPTS),
+                lock_deadline_ms: row_u64(row, "lock_deadline_ms")
+                    .unwrap_or(crate::storage::query::DEFAULT_QUEUE_LOCK_DEADLINE_MS),
+                in_flight_cap_per_group: row_u64(row, "in_flight_cap_per_group")
+                    .map(|value| value as u32)
+                    .unwrap_or(crate::storage::query::DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP),
             })
         })
         .unwrap_or(default)
@@ -1146,6 +1183,14 @@ fn save_queue_config(
     fields.insert(
         "max_attempts".to_string(),
         Value::UnsignedInteger(u64::from(config.max_attempts)),
+    );
+    fields.insert(
+        "lock_deadline_ms".to_string(),
+        Value::UnsignedInteger(config.lock_deadline_ms),
+    );
+    fields.insert(
+        "in_flight_cap_per_group".to_string(),
+        Value::UnsignedInteger(u64::from(config.in_flight_cap_per_group)),
     );
     insert_meta_row(store, fields)
 }

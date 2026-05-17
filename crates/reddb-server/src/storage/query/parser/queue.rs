@@ -2,7 +2,8 @@
 
 use super::super::ast::{
     AlterQueueQuery, CreateQueueQuery, DropQueueQuery, QueryExpr, QueueCommand, QueueMode,
-    QueueSide,
+    QueueSide, DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP, DEFAULT_QUEUE_LOCK_DEADLINE_MS,
+    DEFAULT_QUEUE_MAX_ATTEMPTS,
 };
 use super::super::lexer::Token;
 use super::error::ParseError;
@@ -19,7 +20,9 @@ impl<'a> Parser<'a> {
         let mut max_size = None;
         let mut ttl_ms = None;
         let mut dlq = None;
-        let mut max_attempts = 3u32;
+        let mut max_attempts = DEFAULT_QUEUE_MAX_ATTEMPTS;
+        let mut lock_deadline_ms = DEFAULT_QUEUE_LOCK_DEADLINE_MS;
+        let mut in_flight_cap_per_group = DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP;
 
         // Parse optional clauses in any order
         loop {
@@ -33,6 +36,10 @@ impl<'a> Parser<'a> {
                 || self.consume_ident_ci("MAXATTEMPTS")?
             {
                 max_attempts = self.parse_integer()?.max(1) as u32;
+            } else if self.consume_ident_ci("LOCK_DEADLINE_MS")? {
+                lock_deadline_ms = self.parse_integer()?.max(1) as u64;
+            } else if self.consume_ident_ci("IN_FLIGHT_CAP_PER_GROUP")? {
+                in_flight_cap_per_group = self.parse_integer()?.max(1) as u32;
             } else if self.consume(&Token::With)? {
                 if self.consume_ident_ci("EVENTS")? {
                     return Err(ParseError::new(
@@ -59,11 +66,20 @@ impl<'a> Parser<'a> {
             ttl_ms,
             dlq,
             max_attempts,
+            lock_deadline_ms,
+            in_flight_cap_per_group,
             if_not_exists,
         }))
     }
 
     /// Parse ALTER QUEUE body (after ALTER QUEUE consumed)
+    ///
+    /// Syntax: `ALTER QUEUE <name> SET <clause>` where `<clause>` is one of
+    ///   `MODE <WORK|FANOUT>`
+    ///   `MAX_ATTEMPTS <int>`
+    ///   `LOCK_DEADLINE_MS <int>`
+    ///   `IN_FLIGHT_CAP_PER_GROUP <int>`
+    ///   `DLQ <ident>`
     pub fn parse_alter_queue_body(&mut self) -> Result<QueryExpr, ParseError> {
         let name = self.expect_ident()?;
         if !self.consume(&Token::Set)? && !self.consume_ident_ci("SET")? {
@@ -73,15 +89,39 @@ impl<'a> Parser<'a> {
                 self.position(),
             ));
         }
-        if !self.consume(&Token::Mode)? && !self.consume_ident_ci("MODE")? {
+
+        let mut alter = AlterQueueQuery {
+            name,
+            ..Default::default()
+        };
+
+        if self.consume(&Token::Mode)? || self.consume_ident_ci("MODE")? {
+            alter.mode = Some(self.parse_queue_mode()?);
+        } else if self.consume_ident_ci("MAX_ATTEMPTS")?
+            || self.consume_ident_ci("MAXATTEMPTS")?
+        {
+            alter.max_attempts = Some(self.parse_integer()?.max(1) as u32);
+        } else if self.consume_ident_ci("LOCK_DEADLINE_MS")? {
+            alter.lock_deadline_ms = Some(self.parse_integer()?.max(1) as u64);
+        } else if self.consume_ident_ci("IN_FLIGHT_CAP_PER_GROUP")? {
+            alter.in_flight_cap_per_group = Some(self.parse_integer()?.max(1) as u32);
+        } else if self.consume_ident_ci("DLQ")? {
+            alter.dlq = Some(self.expect_ident()?);
+        } else {
             return Err(ParseError::expected(
-                vec!["MODE"],
+                vec![
+                    "MODE",
+                    "MAX_ATTEMPTS",
+                    "LOCK_DEADLINE_MS",
+                    "IN_FLIGHT_CAP_PER_GROUP",
+                    "DLQ",
+                ],
                 self.peek(),
                 self.position(),
             ));
         }
-        let mode = self.parse_queue_mode()?;
-        Ok(QueryExpr::AlterQueue(AlterQueueQuery { name, mode }))
+
+        Ok(QueryExpr::AlterQueue(alter))
     }
 
     /// Parse DROP QUEUE body (after DROP QUEUE consumed)

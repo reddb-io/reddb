@@ -4113,7 +4113,7 @@ fn test_parse_queue_mode_ddl() {
     let query = parse("ALTER QUEUE fanout_tasks SET MODE FANOUT").unwrap();
     assert!(matches!(
         query,
-        QueryExpr::AlterQueue(q) if q.name == "fanout_tasks" && q.mode == QueueMode::Fanout
+        QueryExpr::AlterQueue(q) if q.name == "fanout_tasks" && q.mode == Some(QueueMode::Fanout)
     ));
 }
 

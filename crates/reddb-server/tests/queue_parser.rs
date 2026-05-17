@@ -205,7 +205,7 @@ fn create_and_alter_queue_mode_parse() {
     match q {
         QueryExpr::AlterQueue(aq) => {
             assert_eq!(aq.name, "tasks");
-            assert_eq!(aq.mode, QueueMode::Work);
+            assert_eq!(aq.mode, Some(QueueMode::Work));
         }
         other => panic!("expected AlterQueue, got {other:?}"),
     }
@@ -221,6 +221,89 @@ fn create_queue_with_dlq_and_max_attempts_parses() {
             assert_eq!(cq.max_attempts, 5);
         }
         other => panic!("expected CreateQueue, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_queue_with_lock_deadline_and_in_flight_cap_parses() {
+    let q = parse_query(
+        "CREATE QUEUE tasks LOCK_DEADLINE_MS 45000 IN_FLIGHT_CAP_PER_GROUP 250",
+    );
+    match q {
+        QueryExpr::CreateQueue(cq) => {
+            assert_eq!(cq.name, "tasks");
+            assert_eq!(cq.lock_deadline_ms, 45_000);
+            assert_eq!(cq.in_flight_cap_per_group, 250);
+        }
+        other => panic!("expected CreateQueue, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_queue_defaults_for_policy_clauses() {
+    use reddb_server::storage::query::{
+        DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP, DEFAULT_QUEUE_LOCK_DEADLINE_MS,
+        DEFAULT_QUEUE_MAX_ATTEMPTS,
+    };
+    let q = parse_query("CREATE QUEUE tasks");
+    match q {
+        QueryExpr::CreateQueue(cq) => {
+            assert_eq!(cq.max_attempts, DEFAULT_QUEUE_MAX_ATTEMPTS);
+            assert_eq!(cq.lock_deadline_ms, DEFAULT_QUEUE_LOCK_DEADLINE_MS);
+            assert_eq!(
+                cq.in_flight_cap_per_group,
+                DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP
+            );
+            assert!(cq.dlq.is_none());
+        }
+        other => panic!("expected CreateQueue, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_queue_set_max_attempts_parses() {
+    let q = parse_query("ALTER QUEUE tasks SET MAX_ATTEMPTS 7");
+    match q {
+        QueryExpr::AlterQueue(aq) => {
+            assert_eq!(aq.name, "tasks");
+            assert_eq!(aq.max_attempts, Some(7));
+            assert!(aq.mode.is_none());
+            assert!(aq.lock_deadline_ms.is_none());
+        }
+        other => panic!("expected AlterQueue, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_queue_set_lock_deadline_parses() {
+    let q = parse_query("ALTER QUEUE tasks SET LOCK_DEADLINE_MS 60000");
+    match q {
+        QueryExpr::AlterQueue(aq) => {
+            assert_eq!(aq.lock_deadline_ms, Some(60_000));
+        }
+        other => panic!("expected AlterQueue, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_queue_set_in_flight_cap_parses() {
+    let q = parse_query("ALTER QUEUE tasks SET IN_FLIGHT_CAP_PER_GROUP 42");
+    match q {
+        QueryExpr::AlterQueue(aq) => {
+            assert_eq!(aq.in_flight_cap_per_group, Some(42));
+        }
+        other => panic!("expected AlterQueue, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_queue_set_dlq_parses() {
+    let q = parse_query("ALTER QUEUE tasks SET DLQ failed");
+    match q {
+        QueryExpr::AlterQueue(aq) => {
+            assert_eq!(aq.dlq.as_deref(), Some("failed"));
+        }
+        other => panic!("expected AlterQueue, got {other:?}"),
     }
 }
 
