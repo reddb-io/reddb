@@ -1430,11 +1430,74 @@ impl RedDBRuntime {
         let (columns, values) = pairwise_columns_values(&fields);
         validate_timeseries_insert_columns(&columns)?;
 
-        let metric = find_column_value_string(&columns, &values, "metric")?;
-        let value = find_column_value_f64(&columns, &values, "value")?;
+        // Issue #577 — AnalyticsSchemaRegistry hook. If the row carries
+        // an `event_name` whose schema is registered, validate the
+        // `payload` JSON against it BEFORE any write side-effect. On
+        // failure we return a typed error and the row is not
+        // persisted. When no schema is registered for the event name
+        // (or no `event_name` column is supplied at all) we fall
+        // through to the normal write path for back-compat with
+        // existing timeseries rows.
+        let event_name_opt =
+            find_column_value_opt_string(&columns, &values, "event_name");
+        let payload_opt = find_column_value_opt_string(&columns, &values, "payload");
+        if let Some(event_name) = event_name_opt.as_deref() {
+            let store_for_schema = self.inner.db.store();
+            if super::analytics_schema_registry::latest(
+                store_for_schema.as_ref(),
+                event_name,
+            )
+            .is_some()
+            {
+                let payload_json = payload_opt.as_deref().unwrap_or("{}");
+                super::analytics_schema_registry::validate(
+                    store_for_schema.as_ref(),
+                    event_name,
+                    payload_json,
+                )
+                .map_err(super::analytics_schema_registry::validation_error_to_reddb)?;
+            }
+        }
+
+        // `metric` is required by the existing timeseries write path;
+        // when an analytics-style row supplies `event_name` but not
+        // `metric`, fall back to the event name so the storage path
+        // still has a non-empty metric tag.
+        let metric = match find_column_value_opt_string(&columns, &values, "metric") {
+            Some(m) => m,
+            None => event_name_opt.clone().ok_or_else(|| {
+                RedDBError::Query(
+                    "timeseries INSERT requires either `metric` or `event_name`".to_string(),
+                )
+            })?,
+        };
+        // `value` is optional for analytics-event rows (which are
+        // semantically counts of 1); default to 1.0 when missing so
+        // analytics inserts don't have to fabricate a metric value.
+        let value = match find_column_value_opt_string(&columns, &values, "value") {
+            Some(s) => s.parse::<f64>().unwrap_or(1.0),
+            None => columns
+                .iter()
+                .position(|c| c.eq_ignore_ascii_case("value"))
+                .and_then(|i| match &values[i] {
+                    Value::Float(f) => Some(*f),
+                    Value::Integer(n) | Value::BigInt(n) => Some(*n as f64),
+                    Value::UnsignedInteger(n) => Some(*n as f64),
+                    _ => None,
+                })
+                .unwrap_or(1.0),
+        };
         let timestamp_ns =
             find_timeseries_timestamp_ns(&columns, &values)?.unwrap_or_else(current_unix_ns);
-        let tags = find_timeseries_tags(&columns, &values)?;
+        let mut tags = find_timeseries_tags(&columns, &values)?;
+        if let Some(ref name) = event_name_opt {
+            tags.entry("event_name".to_string())
+                .or_insert_with(|| name.clone());
+        }
+        if let Some(ref payload) = payload_opt {
+            tags.entry("payload".to_string())
+                .or_insert_with(|| payload.clone());
+        }
 
         let mut entity = UnifiedEntity::new(
             EntityId::new(0),
@@ -3536,7 +3599,18 @@ fn validate_timeseries_insert_columns(columns: &[String]) -> RedDBResult<()> {
 fn is_timeseries_insert_column(column: &str) -> bool {
     matches!(
         column.to_ascii_lowercase().as_str(),
-        "metric" | "value" | "tags" | "timestamp" | "timestamp_ns" | "time"
+        "metric"
+            | "value"
+            | "tags"
+            | "timestamp"
+            | "timestamp_ns"
+            | "time"
+            // Analytics-event extension (#577): an analytics row carries
+            // an `event_name` + JSON `payload`. The payload is validated
+            // against the AnalyticsSchemaRegistry inside
+            // `insert_timeseries_point` before the row lands.
+            | "event_name"
+            | "payload"
     )
 }
 
