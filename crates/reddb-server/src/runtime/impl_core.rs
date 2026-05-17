@@ -2068,6 +2068,9 @@ impl RedDBRuntime {
                 materialized_views: parking_lot::RwLock::new(
                     crate::storage::cache::result::MaterializedViewCache::new(),
                 ),
+                retention_sweeper: parking_lot::RwLock::new(
+                    crate::runtime::retention_sweeper::RetentionSweeperState::new(),
+                ),
                 snapshot_manager: Arc::new(
                     crate::storage::transaction::snapshot::SnapshotManager::new(),
                 ),
@@ -2625,6 +2628,32 @@ impl RedDBRuntime {
                     };
                     let rt = RedDBRuntime { inner };
                     rt.refresh_due_materialized_views();
+                })
+                .ok();
+        }
+
+        // Issue #584 slice 12 — DeclarativeRetention background sweeper.
+        // Low-priority ticker that physically reclaims rows whose
+        // timestamp has fallen beyond the retention window. Holds a
+        // `Weak<RuntimeInner>` so the thread exits within one tick of
+        // the runtime drop (graceful shutdown leaves storage consistent
+        // because each tick goes through the standard DELETE path —
+        // there is no half-finished mutation state to clean up). The
+        // tick interval is intentionally longer than the MV scheduler
+        // (500ms) because retention is order-of-seconds at minimum.
+        {
+            let weak_inner = Arc::downgrade(&runtime.inner);
+            std::thread::Builder::new()
+                .name("reddb-retention-sweeper".into())
+                .spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    let Some(inner) = weak_inner.upgrade() else {
+                        break;
+                    };
+                    let rt = RedDBRuntime { inner };
+                    rt.sweep_retention_tick(
+                        crate::runtime::retention_sweeper::DEFAULT_SWEEPER_BATCH,
+                    );
                 })
                 .ok();
         }
@@ -5602,6 +5631,7 @@ impl RedDBRuntime {
                         query: format!("<parsed view {}>", q.name),
                         dependencies: collect_table_refs(&q.query),
                         refresh,
+                        retention_duration_ms: q.retention_duration_ms,
                     };
                     self.inner.materialized_views.write().register(def);
                 }
@@ -6094,6 +6124,139 @@ impl RedDBRuntime {
     /// view) and runs each refresh through the standard execution
     /// path — failures are captured in `last_error` and the prior
     /// content stays intact. Issue #583 slice 10.
+    /// Snapshot of every tracked retention sweeper state — feeds the
+    /// three extra columns on `red.retention`. Issue #584 slice 12.
+    pub(crate) fn retention_sweeper_snapshot(
+        &self,
+    ) -> Vec<(String, crate::runtime::retention_sweeper::SweeperState)> {
+        self.inner.retention_sweeper.read().snapshot()
+    }
+
+    /// Drive one tick of the retention sweeper. Iterates collections
+    /// with a retention policy set, physically deletes at most
+    /// `batch_size` expired rows per collection, and records the
+    /// `last_sweep_at_ms` / `rows_swept_total` / pending estimate that
+    /// `red.retention` exposes. Called from the background sweeper
+    /// thread; safe to invoke directly from tests with a small batch
+    /// size to drain rows deterministically. Issue #584 slice 12.
+    ///
+    /// Deletes are issued as `DELETE FROM <collection> WHERE
+    /// <ts_column> < <cutoff>` through the standard `execute_query`
+    /// chokepoint so WAL participation and snapshot guards apply
+    /// exactly as for a user-issued DELETE — replicas replay the
+    /// sweeper's deletes via the same WAL stream with no special
+    /// handling on the replication side.
+    ///
+    /// Batching is enforced by tightening the cutoff: if more than
+    /// `batch_size` rows are expired, the cutoff is dropped to the
+    /// `batch_size`-th oldest expired timestamp + 1 so the predicate
+    /// matches roughly `batch_size` rows; the remainder is reported
+    /// as `current_rows_pending_sweep_estimate` and drained on the
+    /// next tick.
+    pub fn sweep_retention_tick(&self, batch_size: usize) {
+        if batch_size == 0 {
+            return;
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let store = self.inner.db.store();
+        let collections = store.list_collections();
+        for name in collections {
+            let Some(contract) = self.inner.db.collection_contract(&name) else {
+                continue;
+            };
+            let Some(retention_ms) = contract.retention_duration_ms else {
+                continue;
+            };
+            let Some(ts_column) =
+                crate::runtime::retention_filter::resolve_timestamp_column(&contract)
+            else {
+                continue;
+            };
+            let Some(manager) = store.get_collection(&name) else {
+                continue;
+            };
+            let cutoff = (now_ms as i64).saturating_sub(retention_ms as i64);
+
+            // Single pass: collect expired timestamps. We keep the
+            // full Vec rather than a bounded heap because the partial
+            // sort below is the simplest correct way to find the
+            // batch-th oldest; for the slice's "1000-row default
+            // batch" target this is bounded enough for production
+            // operation, and the alternative (in-place heap of size
+            // batch+1) is a follow-up optimisation.
+            let mut expired_ts: Vec<i64> = Vec::new();
+            manager.for_each_entity(|entity| {
+                let ts = match ts_column.as_str() {
+                    "created_at" => Some(entity.created_at as i64),
+                    "updated_at" => Some(entity.updated_at as i64),
+                    other => entity
+                        .data
+                        .as_row()
+                        .and_then(|row| row.get_field(other))
+                        .and_then(|v| match v {
+                            crate::storage::schema::Value::TimestampMs(t) => Some(*t),
+                            crate::storage::schema::Value::Timestamp(t) => {
+                                Some(t.saturating_mul(1_000))
+                            }
+                            crate::storage::schema::Value::BigInt(t) => Some(*t),
+                            crate::storage::schema::Value::UnsignedInteger(t) => {
+                                i64::try_from(*t).ok()
+                            }
+                            crate::storage::schema::Value::Integer(t) => Some(*t as i64),
+                            _ => None,
+                        }),
+                };
+                if let Some(t) = ts {
+                    if t < cutoff {
+                        expired_ts.push(t);
+                    }
+                }
+                true
+            });
+
+            let total_expired = expired_ts.len() as u64;
+            if total_expired == 0 {
+                self.inner
+                    .retention_sweeper
+                    .write()
+                    .record_tick(&name, 0, 0, now_ms);
+                continue;
+            }
+
+            let (effective_cutoff, pending) = if (total_expired as usize) <= batch_size {
+                (cutoff, 0u64)
+            } else {
+                // Tighten the cutoff to the (batch_size)-th oldest
+                // expired timestamp + 1 so DELETE matches roughly
+                // `batch_size` rows.
+                expired_ts.sort_unstable();
+                let nth = expired_ts[batch_size - 1];
+                (
+                    nth.saturating_add(1),
+                    total_expired.saturating_sub(batch_size as u64),
+                )
+            };
+
+            let stmt = format!(
+                "DELETE FROM {} WHERE {} < {}",
+                name, ts_column, effective_cutoff
+            );
+            let deleted = match self.execute_query(&stmt) {
+                Ok(r) => r.affected_rows,
+                Err(_) => 0,
+            };
+
+            self.inner
+                .retention_sweeper
+                .write()
+                .record_tick(&name, deleted, pending, now_ms);
+        }
+    }
+
     pub fn refresh_due_materialized_views(&self) {
         let due = {
             let mut cache = self.inner.materialized_views.write();

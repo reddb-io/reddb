@@ -131,11 +131,15 @@ const STATS_COLUMNS: [&str; 10] = [
     "attention_score",
 ];
 
-const RETENTION_COLUMNS: [&str; 4] = [
+const RETENTION_COLUMNS: [&str; 7] = [
     "name",
     "retention_duration",
     "oldest_row_ts",
     "expired_row_count_estimate",
+    // Issue #584 slice 12 — sweeper observability columns.
+    "last_sweep_at",
+    "rows_swept_total",
+    "current_rows_pending_sweep_estimate",
 ];
 
 const MATERIALIZED_VIEW_COLUMNS: [&str; 7] = [
@@ -1448,6 +1452,19 @@ fn retention_snapshot(
             let oldest_value = oldest_ts
                 .map(Value::BigInt)
                 .unwrap_or(Value::Null);
+            // Issue #584 slice 12 — sweeper state. `last_sweep_at == 0`
+            // means the collection has never been ticked; surface as
+            // NULL rather than the unix epoch.
+            let sweeper_state = runtime
+                .inner
+                .retention_sweeper
+                .read()
+                .get(&collection.name);
+            let last_sweep_at = if sweeper_state.last_sweep_at_ms == 0 {
+                Value::Null
+            } else {
+                Value::TimestampMs(sweeper_state.last_sweep_at_ms as i64)
+            };
             UnifiedRecord::with_schema(
                 Arc::clone(&schema),
                 vec![
@@ -1455,6 +1472,9 @@ fn retention_snapshot(
                     retention_value,
                     oldest_value,
                     Value::UnsignedInteger(expired_count),
+                    last_sweep_at,
+                    Value::UnsignedInteger(sweeper_state.rows_swept_total),
+                    Value::UnsignedInteger(sweeper_state.last_pending_estimate),
                 ],
             )
         })
