@@ -2606,6 +2606,29 @@ impl RedDBRuntime {
         // 200 here; shutdown begins from this state.
         runtime.inner.lifecycle.mark_ready();
 
+        // Issue #583 slice 10 — ContinuousMaterializedView scheduler.
+        // Low-priority background ticker that drains the cache's
+        // `claim_due_at` set every ~50ms. Holds only a Weak<RuntimeInner>
+        // so the thread exits cleanly when the runtime drops (≤50ms
+        // latency between drop and exit). Materialized views without
+        // a `REFRESH EVERY` clause stay on the manual-refresh path
+        // and are skipped by `claim_due_at`, so the loop is a no-op
+        // when no scheduled views exist.
+        {
+            let weak_inner = Arc::downgrade(&runtime.inner);
+            std::thread::Builder::new()
+                .name("reddb-mv-scheduler".into())
+                .spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    let Some(inner) = weak_inner.upgrade() else {
+                        break;
+                    };
+                    let rt = RedDBRuntime { inner };
+                    rt.refresh_due_materialized_views();
+                })
+                .ok();
+        }
+
         Ok(runtime)
     }
 
@@ -5568,11 +5591,17 @@ impl RedDBRuntime {
                 // Materialized view: register cache slot (data is empty until REFRESH).
                 if q.materialized {
                     use crate::storage::cache::result::{MaterializedViewDef, RefreshPolicy};
+                    let refresh = match q.refresh_every_ms {
+                        Some(ms) => {
+                            RefreshPolicy::Periodic(std::time::Duration::from_millis(ms))
+                        }
+                        None => RefreshPolicy::Manual,
+                    };
                     let def = MaterializedViewDef {
                         name: q.name.clone(),
                         query: format!("<parsed view {}>", q.name),
                         dependencies: collect_table_refs(&q.query),
-                        refresh: RefreshPolicy::Manual,
+                        refresh,
                     };
                     self.inner.materialized_views.write().register(def);
                 }
@@ -5642,19 +5671,47 @@ impl RedDBRuntime {
                     )));
                 }
                 // Execute the underlying query fresh.
-                let inner_result = self.execute_query_expr((*view.query).clone())?;
-                // Cache data = JSON-serialised result (opaque blob; read path
-                // returns it verbatim for now).
-                let serialized = format!("{:?}", inner_result.result);
-                self.inner
-                    .materialized_views
-                    .write()
-                    .refresh(&q.name, serialized.into_bytes());
-                Ok(RuntimeQueryResult::ok_message(
-                    query.to_string(),
-                    &format!("materialized view {} refreshed", q.name),
-                    "refresh_materialized_view",
-                ))
+                let started = std::time::Instant::now();
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                match self.execute_query_expr((*view.query).clone()) {
+                    Ok(inner_result) => {
+                        let duration_ms = started.elapsed().as_millis() as u64;
+                        let row_count = inner_result.result.records.len() as u64;
+                        let serialized = format!("{:?}", inner_result.result);
+                        self.inner
+                            .materialized_views
+                            .write()
+                            .record_refresh_success(
+                                &q.name,
+                                serialized.into_bytes(),
+                                row_count,
+                                duration_ms,
+                                now_ms,
+                            );
+                        Ok(RuntimeQueryResult::ok_message(
+                            query.to_string(),
+                            &format!("materialized view {} refreshed", q.name),
+                            "refresh_materialized_view",
+                        ))
+                    }
+                    Err(err) => {
+                        let duration_ms = started.elapsed().as_millis() as u64;
+                        let msg = err.to_string();
+                        self.inner
+                            .materialized_views
+                            .write()
+                            .record_refresh_failure(
+                                &q.name,
+                                msg.clone(),
+                                duration_ms,
+                                now_ms,
+                            );
+                        Err(err)
+                    }
+                }
             }
             // Row Level Security (Phase 2.5 PG parity).
             //
@@ -6018,6 +6075,40 @@ impl RedDBRuntime {
         }
 
         query_result
+    }
+
+    /// Snapshot of every registered materialized view's runtime
+    /// state — feeds the `red.materialized_views` virtual table.
+    /// Issue #583 slice 10.
+    pub fn materialized_view_metadata(
+        &self,
+    ) -> Vec<crate::storage::cache::result::MaterializedViewMetadata> {
+        self.inner.materialized_views.read().metadata()
+    }
+
+    /// Drive scheduled refreshes for materialized views with a
+    /// `REFRESH EVERY <duration>` clause. Called from the background
+    /// scheduler thread (and from unit tests with a fake clock via
+    /// `claim_due_at`). Each invocation atomically claims the set of
+    /// due views (so two concurrent ticks never double-fire the same
+    /// view) and runs each refresh through the standard execution
+    /// path — failures are captured in `last_error` and the prior
+    /// content stays intact. Issue #583 slice 10.
+    pub fn refresh_due_materialized_views(&self) {
+        let due = {
+            let mut cache = self.inner.materialized_views.write();
+            cache.claim_due_at(std::time::Instant::now())
+        };
+        for name in due {
+            // Round-trip through `execute_query` (rather than the
+            // prepared-statement `execute_query_expr` fast path, which
+            // explicitly rejects DDL/maintenance statements). Failures
+            // are captured inside the RefreshMaterializedView handler
+            // via `record_refresh_failure`; the scheduler ignores the
+            // Result so one bad view doesn't halt the loop.
+            let stmt = format!("REFRESH MATERIALIZED VIEW {}", name);
+            let _ = self.execute_query(&stmt);
+        }
     }
 
     /// Execute a pre-parsed `QueryExpr` directly, bypassing SQL parsing and the

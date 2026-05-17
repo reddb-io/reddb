@@ -490,12 +490,39 @@ struct MaterializedView {
     data: Vec<u8>,
     /// View definition
     def: MaterializedViewDef,
-    /// When last refreshed
+    /// When last refreshed (logical clock — `Instant::now()` in
+    /// production, fed by callers for fake-clock unit tests).
     last_refresh: Instant,
+    /// Wall-clock timestamp of the last successful or attempted
+    /// refresh — surfaced via `red.materialized_views.last_refresh_at`.
+    last_refresh_at_ms: u64,
+    /// Duration of the last refresh attempt (success or failure).
+    last_refresh_duration_ms: u64,
+    /// Last refresh error, cleared on next successful refresh.
+    last_error: Option<String>,
+    /// Row count of the most recent successful refresh.
+    current_row_count: u64,
+    /// Scheduled refresh cadence in milliseconds (mirrors
+    /// `RefreshPolicy::Periodic`). `None` means refresh-on-demand.
+    refresh_every_ms: Option<u64>,
     /// Write count since last refresh
     writes_since_refresh: usize,
     /// Whether the view is stale
     stale: bool,
+}
+
+/// Public snapshot of a materialized view's runtime state. Returned
+/// by `MaterializedViewCache::metadata` for the `red.materialized_views`
+/// virtual table.
+#[derive(Debug, Clone)]
+pub struct MaterializedViewMetadata {
+    pub name: String,
+    pub query_text: String,
+    pub refresh_every_ms: Option<u64>,
+    pub last_refresh_at_ms: u64,
+    pub last_refresh_duration_ms: u64,
+    pub last_error: Option<String>,
+    pub current_row_count: u64,
 }
 
 /// Cache for materialized views
@@ -525,15 +552,101 @@ impl MaterializedViewCache {
                 .insert(def.name.clone());
         }
 
+        let refresh_every_ms = match &def.refresh {
+            RefreshPolicy::Periodic(d) => Some(d.as_millis() as u64),
+            _ => None,
+        };
+
         let view = MaterializedView {
             data: Vec::new(),
             def,
             last_refresh: Instant::now(),
+            last_refresh_at_ms: 0,
+            last_refresh_duration_ms: 0,
+            last_error: None,
+            current_row_count: 0,
+            refresh_every_ms,
             writes_since_refresh: 0,
             stale: true,
         };
 
         self.views.insert(view.def.name.clone(), view);
+    }
+
+    /// Atomically claim the set of views due for periodic refresh at
+    /// the given logical instant. Returned views have their
+    /// `last_refresh` pre-advanced to `now` so a concurrent caller on
+    /// the same tick sees them as not-due (the contract requested by
+    /// the "exactly once per tick, no duplicates" acceptance criterion
+    /// in issue #583 slice 10).
+    pub fn claim_due_at(&mut self, now: Instant) -> Vec<String> {
+        let mut due = Vec::new();
+        for view in self.views.values_mut() {
+            if let RefreshPolicy::Periodic(interval) = &view.def.refresh {
+                let elapsed = now.saturating_duration_since(view.last_refresh);
+                if elapsed >= *interval {
+                    due.push(view.def.name.clone());
+                    view.last_refresh = now;
+                }
+            }
+        }
+        due
+    }
+
+    /// Record a successful refresh — updates cached data, row count,
+    /// duration, wall-clock timestamp, and clears any prior error.
+    pub fn record_refresh_success(
+        &mut self,
+        name: &str,
+        data: Vec<u8>,
+        row_count: u64,
+        duration_ms: u64,
+        at_unix_ms: u64,
+    ) {
+        if let Some(view) = self.views.get_mut(name) {
+            view.data = data;
+            view.last_refresh = Instant::now();
+            view.last_refresh_at_ms = at_unix_ms;
+            view.last_refresh_duration_ms = duration_ms;
+            view.last_error = None;
+            view.current_row_count = row_count;
+            view.writes_since_refresh = 0;
+            view.stale = false;
+        }
+    }
+
+    /// Record a refresh failure — captures the error string and
+    /// duration but leaves `data` / `current_row_count` intact so
+    /// the prior content remains readable (per acceptance criterion).
+    pub fn record_refresh_failure(
+        &mut self,
+        name: &str,
+        error: String,
+        duration_ms: u64,
+        at_unix_ms: u64,
+    ) {
+        if let Some(view) = self.views.get_mut(name) {
+            view.last_refresh = Instant::now();
+            view.last_refresh_at_ms = at_unix_ms;
+            view.last_refresh_duration_ms = duration_ms;
+            view.last_error = Some(error);
+        }
+    }
+
+    /// Per-view runtime state snapshot — feeds `red.materialized_views`.
+    pub fn metadata(&self) -> Vec<MaterializedViewMetadata> {
+        self.views
+            .values()
+            .map(|v| MaterializedViewMetadata {
+                name: v.def.name.clone(),
+                query_text: v.def.query.clone(),
+                refresh_every_ms: v.refresh_every_ms,
+                last_refresh_at_ms: v.last_refresh_at_ms,
+                last_refresh_duration_ms: v.last_refresh_duration_ms,
+                last_error: v.last_error.clone(),
+                current_row_count: v.current_row_count,
+            })
+            .collect()
     }
 
     /// Get view data (if not stale)
@@ -627,6 +740,118 @@ impl Default for MaterializedViewCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mk_periodic_view(name: &str, ms: u64) -> MaterializedViewDef {
+        MaterializedViewDef {
+            name: name.into(),
+            query: "<test>".into(),
+            dependencies: vec![],
+            refresh: RefreshPolicy::Periodic(Duration::from_millis(ms)),
+        }
+    }
+
+    /// Issue #583 slice 10 — `claim_due_at` returns due views and
+    /// pre-advances their `last_refresh`, so a second tick at the
+    /// same instant returns an empty set.
+    #[test]
+    fn test_materialized_view_claim_due_exactly_once_per_tick() {
+        let mut cache = MaterializedViewCache::new();
+        cache.register(mk_periodic_view("v1", 100));
+
+        let t0 = Instant::now();
+        // No time has passed — not due yet.
+        assert!(cache.claim_due_at(t0).is_empty());
+
+        // Advance past the interval.
+        let t1 = t0 + Duration::from_millis(150);
+        let due = cache.claim_due_at(t1);
+        assert_eq!(due, vec!["v1".to_string()]);
+
+        // Same tick → already claimed, must not duplicate.
+        assert!(cache.claim_due_at(t1).is_empty());
+
+        // Advance another full interval → due again exactly once.
+        let t2 = t1 + Duration::from_millis(150);
+        assert_eq!(cache.claim_due_at(t2), vec!["v1".to_string()]);
+    }
+
+    /// `Manual` views never appear in `claim_due_at`'s output.
+    #[test]
+    fn test_materialized_view_claim_due_skips_manual_views() {
+        let mut cache = MaterializedViewCache::new();
+        cache.register(MaterializedViewDef {
+            name: "m".into(),
+            query: "<test>".into(),
+            dependencies: vec![],
+            refresh: RefreshPolicy::Manual,
+        });
+        let t = Instant::now() + Duration::from_secs(60);
+        assert!(cache.claim_due_at(t).is_empty());
+    }
+
+    /// `record_refresh_failure` keeps prior data + row count intact
+    /// and stores the error string; the next success clears it.
+    #[test]
+    fn test_materialized_view_failure_preserves_prior_content() {
+        let mut cache = MaterializedViewCache::new();
+        cache.register(mk_periodic_view("v", 100));
+
+        cache.record_refresh_success("v", b"first-payload".to_vec(), 42, 7, 1_000);
+        {
+            let md = cache.metadata();
+            let entry = md.iter().find(|m| m.name == "v").unwrap();
+            assert_eq!(entry.current_row_count, 42);
+            assert!(entry.last_error.is_none());
+        }
+
+        cache.record_refresh_failure("v", "boom".into(), 3, 2_000);
+        {
+            let md = cache.metadata();
+            let entry = md.iter().find(|m| m.name == "v").unwrap();
+            // Prior content intact.
+            assert_eq!(entry.current_row_count, 42);
+            assert_eq!(entry.last_error.as_deref(), Some("boom"));
+            assert_eq!(entry.last_refresh_at_ms, 2_000);
+        }
+
+        cache.record_refresh_success("v", b"second".to_vec(), 7, 4, 3_000);
+        {
+            let md = cache.metadata();
+            let entry = md.iter().find(|m| m.name == "v").unwrap();
+            assert_eq!(entry.current_row_count, 7);
+            assert!(entry.last_error.is_none());
+        }
+    }
+
+    /// DROP cleanup: `remove` drops the view from both indices and
+    /// future `claim_due_at` ticks see nothing — proves no leaked
+    /// scheduled state remains after the view is dropped.
+    #[test]
+    fn test_materialized_view_drop_cleans_scheduled_work() {
+        let mut cache = MaterializedViewCache::new();
+        cache.register(mk_periodic_view("v", 50));
+        cache.remove("v");
+        let t = Instant::now() + Duration::from_secs(10);
+        assert!(cache.claim_due_at(t).is_empty());
+        assert!(cache.metadata().is_empty());
+    }
+
+    /// `metadata()` reflects the seven columns surfaced by
+    /// `red.materialized_views`.
+    #[test]
+    fn test_materialized_view_metadata_exposes_seven_fields() {
+        let mut cache = MaterializedViewCache::new();
+        cache.register(mk_periodic_view("v", 500));
+        let md = cache.metadata();
+        assert_eq!(md.len(), 1);
+        let m = &md[0];
+        assert_eq!(m.name, "v");
+        assert_eq!(m.refresh_every_ms, Some(500));
+        assert_eq!(m.last_refresh_at_ms, 0);
+        assert_eq!(m.last_refresh_duration_ms, 0);
+        assert!(m.last_error.is_none());
+        assert_eq!(m.current_row_count, 0);
+    }
 
     #[test]
     fn test_cache_key_hashing() {
