@@ -1251,6 +1251,7 @@ mod queue_delivery;
 pub(crate) mod queue_lifecycle;
 pub(crate) mod queue_telemetry;
 pub(crate) mod primary_queue_store;
+pub(crate) mod replica_queue_store;
 pub mod quota_bucket;
 mod record_search;
 mod red_schema;
