@@ -21,11 +21,13 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::runtime::queue_telemetry::{NackOutcomeLabel, QueueTelemetryCounters};
 use crate::storage::queue::lifecycle::{
     DeliveryId, DlqTarget, MessageId, QueueSide, QueueStore, QueueStoreError, Result,
 };
 use crate::storage::queue::mode::QueueMode;
 use crate::storage::schema::Value;
+use crate::telemetry::operator_event::OperatorEvent;
 
 /// Monotonic clock abstraction. The Module reads "now" through this so
 /// unit tests can drive lock-expiry transitions without `std::thread::sleep`.
@@ -95,6 +97,11 @@ pub(crate) struct QueueLifecycle<S: QueueStore> {
     config: LifecycleConfig,
     clock: Arc<dyn Clock>,
     outcomes: Mutex<Vec<RetirementOutcome>>,
+    /// Optional handle to the runtime-shared Prometheus counters.
+    /// `None` in lifecycle unit tests so the Module stays free of
+    /// runtime-state dependencies; production wiring (slice 12)
+    /// will pass `Some(runtime.queue_telemetry_arc())`.
+    telemetry: Option<Arc<QueueTelemetryCounters>>,
 }
 
 impl<S: QueueStore> QueueLifecycle<S> {
@@ -115,7 +122,17 @@ impl<S: QueueStore> QueueLifecycle<S> {
             config,
             clock,
             outcomes: Mutex::new(Vec::new()),
+            telemetry: None,
         }
+    }
+
+    /// Attach the runtime-shared Prometheus counters. Called by the
+    /// production wiring (slice 12 of issue #527); lifecycle unit
+    /// tests omit it.
+    #[allow(dead_code)]
+    pub(crate) fn with_telemetry(mut self, telemetry: Arc<QueueTelemetryCounters>) -> Self {
+        self.telemetry = Some(telemetry);
+        self
     }
 
     /// Reserve up to `count` available messages from `queue` for `group`
@@ -135,6 +152,14 @@ impl<S: QueueStore> QueueLifecycle<S> {
         // Lazy reclaim: release any pending row whose lock deadline has
         // already passed before we scan for available messages. No
         // sweeper, no timer — every deliver pays its own reclaim cost.
+        // Developer signal only — high-volume routine event, not
+        // paging-grade (slice 10 of issue #527).
+        tracing::debug!(
+            target: "reddb::queue_lifecycle",
+            queue = queue,
+            group = group,
+            "queue lock reclaim sweep"
+        );
         self.store.reclaim_expired(queue, now)?;
         let available = match self.config.mode {
             QueueMode::Work => self.store.available_messages(queue, QueueSide::Left),
@@ -154,6 +179,16 @@ impl<S: QueueStore> QueueLifecycle<S> {
                 delivery_id,
                 payload,
             });
+        }
+        if !out.is_empty() {
+            if let Some(telemetry) = self.telemetry.as_ref() {
+                telemetry.record_delivered(
+                    queue,
+                    group,
+                    self.config.mode.as_str(),
+                    out.len() as u64,
+                );
+            }
         }
         Ok(out)
     }
@@ -193,6 +228,23 @@ impl<S: QueueStore> QueueLifecycle<S> {
                     self.retire(delivery_id)?;
                     self.store.enqueue_dlq(target, payload)?;
                     self.record(RetirementOutcome::MovedToDlq(target.clone()));
+                    // DLQ promotion is forensic — emit through the
+                    // process-wide audit sink (which also lays a
+                    // tracing::warn breadcrumb under
+                    // target=reddb::operator). The lifecycle surface
+                    // doesn't yet carry queue/group on the delivery
+                    // handle (slice 12 of issue #527); the production
+                    // path emits the populated event today via
+                    // `queue_delivery::move_message_to_dlq_or_drop`.
+                    OperatorEvent::QueueDlqPromoted {
+                        queue: String::new(),
+                        group: String::new(),
+                        dlq: target.clone(),
+                        message_id: 0,
+                        attempts,
+                        reason: format!("lifecycle_nack:{delivery_id}"),
+                    }
+                    .emit_global();
                 }
                 None => {
                     self.retire(delivery_id)?;
@@ -202,6 +254,22 @@ impl<S: QueueStore> QueueLifecycle<S> {
         } else {
             self.store.release_pending(delivery_id)?;
             self.record(RetirementOutcome::Requeued);
+        }
+        // Counter bumping when the telemetry handle is attached.
+        // Per-(queue, group, mode) labels stay accurate even though
+        // the lifecycle surface lacks queue/group on the nack handle
+        // today — the production wiring (slice 12) builds the
+        // lifecycle with the full descriptor and constructs the
+        // labels at that layer. Until then the lifecycle-only path
+        // bumps with placeholder labels so unit tests don't depend
+        // on absent context.
+        if let Some(telemetry) = self.telemetry.as_ref() {
+            let outcome = match self.outcomes.lock().unwrap_or_else(|p| p.into_inner()).last() {
+                Some(RetirementOutcome::MovedToDlq(_)) => NackOutcomeLabel::Dlq,
+                Some(RetirementOutcome::Dropped) => NackOutcomeLabel::Drop,
+                Some(RetirementOutcome::Requeued) | None => NackOutcomeLabel::Retry,
+            };
+            telemetry.record_nacked("", "", self.config.mode.as_str(), outcome);
         }
         Ok(())
     }
