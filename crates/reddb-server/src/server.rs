@@ -18,8 +18,9 @@ pub(crate) use crate::application::{
 use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use std::sync::Arc;
 
@@ -204,7 +205,23 @@ pub struct RedDBServer {
     /// `HttpConnectionLimiter` shares an `Arc` so every serve loop on
     /// the same `RedDBServer` shares one cap.
     http_limiter: HttpConnectionLimiter,
+    /// Per-handler total-time deadline (issue #570 slice 2). Each
+    /// clear-text handler thread arms a deadline at spawn and bails
+    /// with a best-effort 503 at coarse boundaries between request
+    /// parse, route dispatch, and response write. Hard-coded to 30s
+    /// here; the config knob lands in slice 5.
+    handler_timeout: Duration,
+    /// Test-only synchronous sleep injected between route dispatch and
+    /// response write so an integration test can simulate a slow
+    /// downstream tripping the deadline. Default 0 (no-op). Shared via
+    /// `Arc` so a cloned `RedDBServer` (e.g. `serve_in_background`)
+    /// observes flips from the originating handle. Production callers
+    /// have no way to set this — the setter is `#[doc(hidden)]`.
+    slow_inject_ms: Arc<AtomicU64>,
 }
+
+/// Default per-handler total-time budget (issue #571 slice 2).
+const DEFAULT_HANDLER_TIMEOUT: Duration = Duration::from_millis(30_000);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ServerlessWarmupScope {
@@ -301,6 +318,8 @@ impl RedDBServer {
             auth_store: None,
             replication: None,
             http_limiter: HttpConnectionLimiter::with_default_cap(),
+            handler_timeout: DEFAULT_HANDLER_TIMEOUT,
+            slow_inject_ms: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -317,6 +336,29 @@ impl RedDBServer {
     #[doc(hidden)]
     pub fn http_limiter(&self) -> &HttpConnectionLimiter {
         &self.http_limiter
+    }
+
+    /// Visible for tests. Override the per-handler total-time deadline
+    /// (issue #570 slice 2). Default 30s.
+    #[doc(hidden)]
+    pub fn with_handler_timeout(mut self, timeout: Duration) -> Self {
+        self.handler_timeout = timeout;
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn handler_timeout(&self) -> Duration {
+        self.handler_timeout
+    }
+
+    /// Test hook: set a synchronous sleep (in ms) inserted between
+    /// route dispatch and response write. The integration test for
+    /// slice 2 sets a value greater than `handler_timeout` to trip
+    /// the deadline, then resets to 0 to verify recovery. Shared via
+    /// `Arc<AtomicU64>` so cloned server handles see the same flip.
+    #[doc(hidden)]
+    pub fn set_test_slow_inject_ms(&self, ms: u64) {
+        self.slow_inject_ms.store(ms, Ordering::Relaxed);
     }
 
     /// Attach an `AuthStore` for HTTP-layer authentication.
@@ -543,14 +585,56 @@ impl RedDBServer {
         stream.set_read_timeout(Some(Duration::from_millis(self.options.read_timeout_ms)))?;
         stream.set_write_timeout(Some(Duration::from_millis(self.options.write_timeout_ms)))?;
 
+        // Issue #570 slice 2: arm a deadline at handler spawn and
+        // check at coarse boundaries. No hard pre-emption — a thread
+        // blocked inside a true syscall is still bounded only by the
+        // per-socket read/write timeouts.
+        let deadline = Instant::now() + self.handler_timeout;
+
         let request = HttpRequest::read_from(&mut stream, self.options.max_body_bytes)?;
+
+        // Boundary (a): between request parse and route dispatch.
+        if Instant::now() >= deadline {
+            Self::write_handler_timeout_503(&mut stream);
+            return Ok(());
+        }
+
         if self.try_route_streaming(&request, &mut stream)? {
             return Ok(());
         }
         let response = self.route(request);
+
+        // Test-only injected slow downstream (issue #570 slice 2
+        // integration test). Production builds set this to 0, so this
+        // is a single relaxed atomic load on the hot path.
+        let inject_ms = self.slow_inject_ms.load(Ordering::Relaxed);
+        if inject_ms > 0 {
+            thread::sleep(Duration::from_millis(inject_ms));
+        }
+
+        // Boundary (b): between route dispatch and response write.
+        if Instant::now() >= deadline {
+            Self::write_handler_timeout_503(&mut stream);
+            return Ok(());
+        }
+
         stream.write_all(&response.to_http_bytes())?;
         stream.flush()?;
         Ok(())
+    }
+
+    /// Best-effort 503 emitted when the per-handler deadline expires
+    /// at a coarse boundary. Writes are swallowed — the caller has
+    /// already exceeded its budget, so we do not propagate write
+    /// errors. Permit drop happens on the handler thread's normal
+    /// exit path.
+    fn write_handler_timeout_503<S: Write>(stream: &mut S) {
+        const RESPONSE: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\n\
+            Connection: close\r\n\
+            Content-Length: 0\r\n\
+            \r\n";
+        let _ = stream.write_all(RESPONSE);
+        let _ = stream.flush();
     }
 
     fn handle_tls_connection(
