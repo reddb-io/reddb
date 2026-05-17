@@ -338,6 +338,7 @@ mod tests {
                 offset_param: None,
                 expand: None,
                 as_of: None,
+                sessionize: None,
             }),
             QueryExpr::Table(TableQuery {
                 table: "test".to_string(),
@@ -358,6 +359,7 @@ mod tests {
                 offset_param: None,
                 expand: None,
                 as_of: None,
+                sessionize: None,
             }),
             PlanCost::default(),
         )

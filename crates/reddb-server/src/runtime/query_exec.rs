@@ -153,6 +153,16 @@ pub(super) fn execute_runtime_table_query(
     // collections without a retention policy on the contract.
     let contract = db.collection_contract(query.table.as_str());
     crate::runtime::retention_filter::apply(&mut records, contract.as_ref());
+    // Issue #585 slice 8 — SESSIONIZE post-scan operator. Annotates
+    // each row with `session_id` (opaque base32) based on the
+    // (actor_col, gap_ms, order_col) supplied either explicitly on
+    // the clause or by the source contract's SESSION_KEY/SESSION_GAP
+    // descriptor defaults. Errors as `RedDBError::Query(
+    // "MissingSessionKey: …")` when neither side supplies the
+    // required fields.
+    if let Some(clause) = query.sessionize.as_ref() {
+        crate::runtime::sessionize::apply(&mut records, contract.as_ref(), clause)?;
+    }
     let columns = projected_columns(&records, &effective_projections);
 
     Ok(UnifiedResult {
