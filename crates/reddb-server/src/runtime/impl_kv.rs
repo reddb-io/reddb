@@ -2187,6 +2187,7 @@ fn kv_collection_contract(name: &str) -> crate::physical::CollectionContract {
         subscriptions: Vec::new(),
         session_key: None,
         session_gap_ms: None,
+        retention_duration_ms: None,
     }
 }
 

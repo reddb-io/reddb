@@ -243,7 +243,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse a duration unit and return the multiplier in milliseconds
-    fn parse_duration_unit(&mut self) -> Result<f64, ParseError> {
+    pub(super) fn parse_duration_unit(&mut self) -> Result<f64, ParseError> {
         // Aggregate-function keywords (`MIN`, `MAX`, `AVG`) lex as
         // dedicated tokens, not `Token::Ident`, so they need their
         // own arms. `MIN` is the minute alias; `MAX` and `AVG` have

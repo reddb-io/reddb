@@ -185,6 +185,61 @@ fn test_parse_create_graph_document_and_collection_forms() {
 }
 
 #[test]
+fn test_parse_alter_collection_set_unset_retention() {
+    // Issue #580 — DeclarativeRetention slice 1. `SET RETENTION
+    // <duration>` and `UNSET RETENTION` ride the shared AlterTable
+    // AST. The duration grammar mirrors `CREATE TIMESERIES
+    // RETENTION`: `<float> <unit>` with unit ∈ {ms, s, m, h, d}.
+    let q = parse("ALTER COLLECTION events SET RETENTION 7 DAYS").unwrap();
+    let QueryExpr::AlterTable(alter) = q else {
+        panic!("Expected AlterTable for SET RETENTION");
+    };
+    assert_eq!(alter.name, "events");
+    assert_eq!(alter.operations.len(), 1);
+    match &alter.operations[0] {
+        crate::storage::query::ast::AlterOperation::SetRetention { duration_ms } => {
+            assert_eq!(*duration_ms, 7 * 86_400_000);
+        }
+        other => panic!("expected SetRetention, got {other:?}"),
+    }
+
+    let q = parse("ALTER COLLECTION events SET RETENTION 30 m").unwrap();
+    let QueryExpr::AlterTable(alter) = q else {
+        panic!("Expected AlterTable for SET RETENTION minutes");
+    };
+    match &alter.operations[0] {
+        crate::storage::query::ast::AlterOperation::SetRetention { duration_ms } => {
+            assert_eq!(*duration_ms, 30 * 60_000);
+        }
+        other => panic!("expected SetRetention, got {other:?}"),
+    }
+
+    let q = parse("ALTER COLLECTION events UNSET RETENTION").unwrap();
+    let QueryExpr::AlterTable(alter) = q else {
+        panic!("Expected AlterTable for UNSET RETENTION");
+    };
+    assert!(matches!(
+        alter.operations[0],
+        crate::storage::query::ast::AlterOperation::UnsetRetention
+    ));
+
+    // `ALTER TABLE` spelling also accepted on the same AST.
+    let q = parse("ALTER TABLE events SET RETENTION 1 h").unwrap();
+    let QueryExpr::AlterTable(alter) = q else {
+        panic!("Expected AlterTable for ALTER TABLE SET RETENTION");
+    };
+    assert!(matches!(
+        alter.operations[0],
+        crate::storage::query::ast::AlterOperation::SetRetention { duration_ms } if duration_ms == 3_600_000
+    ));
+
+    // SET RETENTION without a duration is a parse error.
+    assert!(parse("ALTER COLLECTION events SET RETENTION").is_err());
+    // UNSET requires the RETENTION keyword.
+    assert!(parse("ALTER COLLECTION events UNSET").is_err());
+}
+
+#[test]
 fn test_parse_create_vector_forms() {
     let vector = parse("CREATE VECTOR embeddings DIM 4").unwrap();
     let QueryExpr::CreateVector(vector) = vector else {
