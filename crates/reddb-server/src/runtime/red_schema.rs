@@ -43,6 +43,11 @@ pub(super) const SUBSCRIPTIONS_INTERNAL: &str = "__red_schema_subscriptions";
 // source retention by default in this slice.
 pub(super) const RETENTION: &str = "red.retention";
 pub(super) const RETENTION_INTERNAL: &str = "__red_schema_retention";
+// Issue #583 — ContinuousMaterializedView slice 10. Per-view runtime
+// state: `(name, query_text, refresh_every_ms, last_refresh_at,
+// last_refresh_duration_ms, last_error, current_row_count)`.
+pub(super) const MATERIALIZED_VIEWS: &str = "red.materialized_views";
+pub(super) const MATERIALIZED_VIEWS_INTERNAL: &str = "__red_schema_materialized_views";
 pub(super) const READ_ONLY_ERROR: &str = "system schema is read-only";
 
 const COLLECTION_COLUMNS: [&str; 15] = [
@@ -133,6 +138,16 @@ const RETENTION_COLUMNS: [&str; 4] = [
     "expired_row_count_estimate",
 ];
 
+const MATERIALIZED_VIEW_COLUMNS: [&str; 7] = [
+    "name",
+    "query_text",
+    "refresh_every_ms",
+    "last_refresh_at",
+    "last_refresh_duration_ms",
+    "last_error",
+    "current_row_count",
+];
+
 const SUBSCRIPTION_COLUMNS: [&str; 11] = [
     "name",
     "collection",
@@ -162,6 +177,7 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
         (STATS, STATS_INTERNAL),
         (SUBSCRIPTIONS, SUBSCRIPTIONS_INTERNAL),
         (RETENTION, RETENTION_INTERNAL),
+        (MATERIALIZED_VIEWS, MATERIALIZED_VIEWS_INTERNAL),
     ] {
         if let Some(next) = replace_case_insensitive_outside_quotes(&rewritten, public, internal) {
             rewritten = next;
@@ -207,6 +223,8 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(SUBSCRIPTIONS)
         || table.eq_ignore_ascii_case(RETENTION_INTERNAL)
         || table.eq_ignore_ascii_case(RETENTION)
+        || table.eq_ignore_ascii_case(MATERIALIZED_VIEWS_INTERNAL)
+        || table.eq_ignore_ascii_case(MATERIALIZED_VIEWS)
 }
 
 pub(super) fn red_query(
@@ -249,6 +267,7 @@ pub(super) fn red_query(
         VirtualTableKind::Stats => stats_snapshot(runtime, visible_collections),
         VirtualTableKind::Subscriptions => subscriptions_snapshot(runtime, visible_collections),
         VirtualTableKind::Retention => retention_snapshot(runtime, visible_collections),
+        VirtualTableKind::MaterializedViews => materialized_views_snapshot(runtime),
     };
 
     let table_name = query.table.as_str();
@@ -351,6 +370,7 @@ enum VirtualTableKind {
     Stats,
     Subscriptions,
     Retention,
+    MaterializedViews,
 }
 
 impl VirtualTableKind {
@@ -366,6 +386,7 @@ impl VirtualTableKind {
             Self::Stats => &STATS_COLUMNS,
             Self::Subscriptions => &SUBSCRIPTION_COLUMNS,
             Self::Retention => &RETENTION_COLUMNS,
+            Self::MaterializedViews => &MATERIALIZED_VIEW_COLUMNS,
         }
     }
 
@@ -381,6 +402,7 @@ impl VirtualTableKind {
             Self::Stats => STATS,
             Self::Subscriptions => SUBSCRIPTIONS,
             Self::Retention => RETENTION,
+            Self::MaterializedViews => MATERIALIZED_VIEWS,
         }
     }
 }
@@ -416,6 +438,11 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
     }
     if name.eq_ignore_ascii_case(RETENTION_INTERNAL) || name.eq_ignore_ascii_case(RETENTION) {
         return Ok(VirtualTableKind::Retention);
+    }
+    if name.eq_ignore_ascii_case(MATERIALIZED_VIEWS_INTERNAL)
+        || name.eq_ignore_ascii_case(MATERIALIZED_VIEWS)
+    {
+        return Ok(VirtualTableKind::MaterializedViews);
     }
     Err(RedDBError::Query(format!(
         "unknown system schema relation `{name}`"
@@ -1428,6 +1455,47 @@ fn retention_snapshot(
                     retention_value,
                     oldest_value,
                     Value::UnsignedInteger(expired_count),
+                ],
+            )
+        })
+        .collect()
+}
+
+fn materialized_views_snapshot(runtime: &RedDBRuntime) -> Vec<UnifiedRecord> {
+    let schema = Arc::new(
+        MATERIALIZED_VIEW_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let entries = runtime.materialized_view_metadata();
+    entries
+        .into_iter()
+        .map(|m| {
+            let refresh_every = m
+                .refresh_every_ms
+                .map(Value::UnsignedInteger)
+                .unwrap_or(Value::Null);
+            let last_refresh_at = if m.last_refresh_at_ms == 0 {
+                Value::Null
+            } else {
+                Value::TimestampMs(m.last_refresh_at_ms as i64)
+            };
+            let last_error = m
+                .last_error
+                .clone()
+                .map(Value::text)
+                .unwrap_or(Value::Null);
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(m.name),
+                    Value::text(m.query_text),
+                    refresh_every,
+                    last_refresh_at,
+                    Value::UnsignedInteger(m.last_refresh_duration_ms),
+                    last_error,
+                    Value::UnsignedInteger(m.current_row_count),
                 ],
             )
         })
