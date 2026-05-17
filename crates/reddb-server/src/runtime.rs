@@ -1248,6 +1248,7 @@ pub(crate) mod scalar_evaluator;
 pub mod schema_diff;
 pub mod schema_vocabulary;
 pub mod signed_chain;
+pub mod signed_writes_kind;
 pub mod snapshot_reuse;
 mod statement_frame;
 mod table_row_mvcc_resolver;

@@ -2003,6 +2003,15 @@ pub enum AlterOperation {
     },
     /// `DROP SUBSCRIPTION name` — remove a named subscription by name.
     DropSubscription { name: String },
+    /// Issue #522 — `ALTER COLLECTION name ADD SIGNER 'hex_pubkey'`.
+    /// Appends the key to the per-collection signer registry and
+    /// records an `Add` entry on the `signer_history` audit log.
+    AddSigner { pubkey: [u8; 32] },
+    /// Issue #522 — `ALTER COLLECTION name REVOKE SIGNER 'hex_pubkey'`.
+    /// Removes the key from the *currently allowed* set and records a
+    /// `Revoke` entry. Past rows signed by `pubkey` remain readable
+    /// and re-verifiable — only future inserts are rejected.
+    RevokeSigner { pubkey: [u8; 32] },
 }
 
 // ============================================================================

@@ -114,6 +114,42 @@ fn test_parse_create_graph_document_and_collection_forms() {
     let bad = format!("CREATE COLLECTION sc KIND graph SIGNED_BY ('{}')", "g".repeat(64));
     assert!(parse(&bad).is_err());
 
+    // Issue #522: ALTER COLLECTION ... ADD|REVOKE SIGNER '<hex>' rides
+    // the AlterTable AST. Both spellings (TABLE and COLLECTION) are
+    // accepted by the alter-statement entry point.
+    let pk_add = "44".repeat(32);
+    let add = parse(&format!(
+        "ALTER COLLECTION sc ADD SIGNER '{pk_add}'"
+    ))
+    .unwrap();
+    let QueryExpr::AlterTable(alter) = add else {
+        panic!("Expected AlterTable for ALTER COLLECTION ADD SIGNER");
+    };
+    assert_eq!(alter.name, "sc");
+    assert_eq!(alter.operations.len(), 1);
+    match &alter.operations[0] {
+        crate::storage::query::ast::AlterOperation::AddSigner { pubkey } => {
+            assert_eq!(*pubkey, [0x44u8; 32]);
+        }
+        other => panic!("expected AddSigner, got {other:?}"),
+    }
+    let pk_rev = "55".repeat(32);
+    let rev = parse(&format!(
+        "ALTER COLLECTION sc REVOKE SIGNER '{pk_rev}'"
+    ))
+    .unwrap();
+    let QueryExpr::AlterTable(alter) = rev else {
+        panic!("Expected AlterTable for ALTER COLLECTION REVOKE SIGNER");
+    };
+    match &alter.operations[0] {
+        crate::storage::query::ast::AlterOperation::RevokeSigner { pubkey } => {
+            assert_eq!(*pubkey, [0x55u8; 32]);
+        }
+        other => panic!("expected RevokeSigner, got {other:?}"),
+    }
+    // Bad hex on ALTER is rejected at parse-time too.
+    assert!(parse("ALTER COLLECTION sc ADD SIGNER 'deadbeef'").is_err());
+
     // Blockchain collection kind (issue #521) — parser accepts the kind
     // verbatim; runtime semantics ship in a later iteration. The DDL must
     // compose with SIGNED_BY from #520.
