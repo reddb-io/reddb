@@ -101,6 +101,7 @@ fn graph_projection_json(projection: &crate::PhysicalGraphProjection) -> JsonVal
 
 pub mod handlers_admin;
 mod handlers_ai;
+pub mod http_connection_limiter;
 mod handlers_auth;
 mod handlers_backup;
 mod handlers_ec;
@@ -126,6 +127,7 @@ pub mod tls;
 mod transport;
 
 use self::handlers_ai::*;
+use self::http_connection_limiter::HttpConnectionLimiter;
 use self::handlers_entity::*;
 use self::handlers_graph::*;
 use self::handlers_keyed::*;
@@ -197,6 +199,11 @@ pub struct RedDBServer {
     options: ServerOptions,
     auth_store: Option<Arc<AuthStore>>,
     replication: Option<Arc<ServerReplicationState>>,
+    /// Bounded handler-thread admission for the clear-text HTTP accept
+    /// loop (issue #570 slice 1). Cloned with the server; `Clone` of
+    /// `HttpConnectionLimiter` shares an `Arc` so every serve loop on
+    /// the same `RedDBServer` shares one cap.
+    http_limiter: HttpConnectionLimiter,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -293,7 +300,23 @@ impl RedDBServer {
             options,
             auth_store: None,
             replication: None,
+            http_limiter: HttpConnectionLimiter::with_default_cap(),
         }
+    }
+
+    /// Visible for tests. Lets the integration test in
+    /// `tests/http_connection_limiter.rs` saturate the cap and observe
+    /// `503 Service Unavailable` responses without spinning up
+    /// thousands of sockets.
+    #[doc(hidden)]
+    pub fn with_http_limiter_cap(mut self, cap: usize) -> Self {
+        self.http_limiter = HttpConnectionLimiter::new(cap);
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn http_limiter(&self) -> &HttpConnectionLimiter {
+        &self.http_limiter
     }
 
     /// Attach an `AuthStore` for HTTP-layer authentication.
@@ -416,17 +439,41 @@ impl RedDBServer {
     pub fn serve_on(&self, listener: TcpListener) -> io::Result<()> {
         for stream in listener.incoming() {
             match stream {
-                Ok(stream) => {
-                    // Spawn a thread per connection for concurrent request handling
-                    let server = self.clone();
-                    thread::spawn(move || {
-                        let _ = server.handle_connection(stream);
-                    });
-                }
+                Ok(stream) => match self.http_limiter.try_acquire() {
+                    Some(permit) => {
+                        // Spawn a thread per connection for concurrent request handling
+                        let server = self.clone();
+                        thread::spawn(move || {
+                            let _guard = permit; // released on thread exit
+                            let _ = server.handle_connection(stream);
+                        });
+                    }
+                    None => {
+                        // Cap exhausted: write static 503 inline on the
+                        // accept thread, close the socket, and continue.
+                        // No thread spawn, no `HttpRequest::read_from`,
+                        // no runtime call.
+                        Self::reject_with_503(stream, self.options.write_timeout_ms);
+                    }
+                },
                 Err(err) => return Err(err),
             }
         }
         Ok(())
+    }
+
+    /// Static 503 response used when the connection limiter is full.
+    /// Inlined into the accept loop so it costs one write and a close.
+    fn reject_with_503(mut stream: TcpStream, write_timeout_ms: u64) {
+        const RESPONSE: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\n\
+            Connection: close\r\n\
+            Content-Length: 0\r\n\
+            Retry-After: 5\r\n\
+            \r\n";
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(write_timeout_ms)));
+        let _ = stream.write_all(RESPONSE);
+        let _ = stream.flush();
+        let _ = stream.shutdown(std::net::Shutdown::Both);
     }
 
     pub fn serve_one_on(&self, listener: TcpListener) -> io::Result<()> {
