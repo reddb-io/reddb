@@ -93,6 +93,7 @@ Reusable vocabulary for code, docs, and architecture decisions. New terms join t
 - **Queue delivery** — the lifecycle step that selects an available queue message for a consumer group, records it as pending, and updates attempt counters according to the queue mode.
 - **Pending delivery** — a queue message copy that has been delivered to one consumer group but has not yet been ACKed, NACKed, claimed by another consumer, or retired.
 - **Queue retirement** — the lifecycle step that ends a pending delivery by acknowledging it for one group, moving it to a DLQ, dropping it, or physically deleting it when queue mode semantics allow.
+- **QueueLifecycle** — deep Module owning the full delivery + retirement state machine for both `WORK` and `FANOUT` queues: pick → lock → ack/nack/drop/DLQ. Replaces today's split between `runtime/impl_queue.rs` and `runtime/queue_delivery.rs`. Participates in the caller's transaction (statement frame), reclaims expired locks lazily on next `deliver()`, owns retry/DLQ policy read from queue catalog metadata. Depends on a narrow `QueueStore` adapter trait (not `&Engine`) — primary executes decisions; replicas replay WAL outcomes via the Logical change applier.
 
 ## Performance gate
 
