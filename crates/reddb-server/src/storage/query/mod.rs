@@ -81,7 +81,8 @@ pub use analyzer::{
 };
 pub use ast::{
     AlterOperation, AlterQueueQuery, AlterTableQuery, AlterUserAttribute, AlterUserStmt, CompareOp,
-    CreateColumnDef, CreateQueueQuery, CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery,
+    CreateColumnDef, CreateQueueQuery, CreateTableQuery, DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP,
+    DEFAULT_QUEUE_LOCK_DEADLINE_MS, DEFAULT_QUEUE_MAX_ATTEMPTS, CreateTimeSeriesQuery, CreateTreeQuery,
     CreateVectorQuery, CteDefinition, CteQueryBuilder, DeleteQuery, DropCollectionQuery,
     DropDocumentQuery, DropGraphQuery, DropKvQuery, DropQueueQuery, DropTableQuery,
     DropTimeSeriesQuery, DropTreeQuery, DropVectorQuery, EdgeDirection, EdgePattern, FieldRef,

@@ -2479,7 +2479,15 @@ pub struct DropTimeSeriesQuery {
 // Queue DDL & Commands
 // ============================================================================
 
-/// CREATE QUEUE name [MAX_SIZE n] [PRIORITY] [WITH TTL duration] [WITH DLQ name] [MAX_ATTEMPTS n]
+/// Default `MAX_ATTEMPTS` for `CREATE QUEUE` when omitted.
+pub const DEFAULT_QUEUE_MAX_ATTEMPTS: u32 = 3;
+/// Default `LOCK_DEADLINE_MS` for `CREATE QUEUE` when omitted.
+pub const DEFAULT_QUEUE_LOCK_DEADLINE_MS: u64 = 30_000;
+/// Default `IN_FLIGHT_CAP_PER_GROUP` for `CREATE QUEUE` when omitted.
+pub const DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP: u32 = 10_000;
+
+/// CREATE QUEUE name [MAX_SIZE n] [PRIORITY] [WITH TTL duration] [WITH DLQ name]
+/// [MAX_ATTEMPTS n] [LOCK_DEADLINE_MS n] [IN_FLIGHT_CAP_PER_GROUP n]
 #[derive(Debug, Clone)]
 pub struct CreateQueueQuery {
     pub name: String,
@@ -2489,14 +2497,25 @@ pub struct CreateQueueQuery {
     pub ttl_ms: Option<u64>,
     pub dlq: Option<String>,
     pub max_attempts: u32,
+    pub lock_deadline_ms: u64,
+    pub in_flight_cap_per_group: u32,
     pub if_not_exists: bool,
 }
 
-/// ALTER QUEUE name SET MODE [FANOUT|WORK]
-#[derive(Debug, Clone)]
+/// ALTER QUEUE name SET <clause>
+///   MODE [FANOUT|WORK]
+///   MAX_ATTEMPTS n
+///   LOCK_DEADLINE_MS n
+///   IN_FLIGHT_CAP_PER_GROUP n
+///   DLQ name
+#[derive(Debug, Clone, Default)]
 pub struct AlterQueueQuery {
     pub name: String,
-    pub mode: QueueMode,
+    pub mode: Option<QueueMode>,
+    pub max_attempts: Option<u32>,
+    pub lock_deadline_ms: Option<u64>,
+    pub in_flight_cap_per_group: Option<u32>,
+    pub dlq: Option<String>,
 }
 
 /// DROP QUEUE [IF EXISTS] name

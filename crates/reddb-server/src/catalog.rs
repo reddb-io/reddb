@@ -91,6 +91,16 @@ pub struct CollectionDescriptor {
     pub declared_model: Option<CollectionModel>,
     pub observed_model: CollectionModel,
     pub queue_mode: Option<QueueMode>,
+    /// MAX_ATTEMPTS per-queue policy. Hot-fields tier — populated for
+    /// `model = queue` from the catalog snapshot for sub-ms reads by
+    /// `QueueLifecycle`. `None` for non-queue collections.
+    pub queue_max_attempts: Option<u32>,
+    /// LOCK_DEADLINE_MS per-queue policy. Hot-fields tier.
+    pub queue_lock_deadline_ms: Option<u64>,
+    /// IN_FLIGHT_CAP_PER_GROUP per-queue policy. Hot-fields tier.
+    pub queue_in_flight_cap_per_group: Option<u32>,
+    /// DLQ target collection name. `None` means on-max drop.
+    pub queue_dlq_target: Option<String>,
     pub vector_dimension: Option<usize>,
     pub vector_metric: Option<crate::storage::engine::distance::DistanceMetric>,
     pub declared_schema_mode: Option<SchemaMode>,
@@ -259,7 +269,7 @@ pub fn snapshot_store_with_declarations(
     for (collection, entity) in store.query_all(|_| true) {
         grouped.entry(collection).or_default().push(entity);
     }
-    let queue_modes = queue_modes_from_grouped(&grouped);
+    let queue_policies = queue_policies_from_grouped(&grouped);
 
     let mut stats_by_collection = BTreeMap::new();
     let mut collections = Vec::new();
@@ -357,11 +367,48 @@ pub fn snapshot_store_with_declarations(
             observed_model: inferred_model,
             queue_mode: if model == CollectionModel::Queue {
                 Some(
-                    queue_modes
+                    queue_policies
                         .get(&collection_name)
-                        .copied()
+                        .map(|p| p.mode)
                         .unwrap_or_default(),
                 )
+            } else {
+                None
+            },
+            queue_max_attempts: if model == CollectionModel::Queue {
+                Some(
+                    queue_policies
+                        .get(&collection_name)
+                        .map(|p| p.max_attempts)
+                        .unwrap_or(crate::storage::query::DEFAULT_QUEUE_MAX_ATTEMPTS),
+                )
+            } else {
+                None
+            },
+            queue_lock_deadline_ms: if model == CollectionModel::Queue {
+                Some(
+                    queue_policies
+                        .get(&collection_name)
+                        .map(|p| p.lock_deadline_ms)
+                        .unwrap_or(crate::storage::query::DEFAULT_QUEUE_LOCK_DEADLINE_MS),
+                )
+            } else {
+                None
+            },
+            queue_in_flight_cap_per_group: if model == CollectionModel::Queue {
+                Some(
+                    queue_policies
+                        .get(&collection_name)
+                        .map(|p| p.in_flight_cap_per_group)
+                        .unwrap_or(crate::storage::query::DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP),
+                )
+            } else {
+                None
+            },
+            queue_dlq_target: if model == CollectionModel::Queue {
+                queue_policies
+                    .get(&collection_name)
+                    .and_then(|p| p.dlq_target.clone())
             } else {
                 None
             },
@@ -461,14 +508,26 @@ pub fn snapshot_store_with_declarations(
     }
 }
 
-fn queue_modes_from_grouped(
+/// Hot-fields snapshot of per-queue policy, materialised at catalog
+/// snapshot time so `QueueLifecycle` (and the descriptor) can read
+/// values without re-scanning `red_queue_meta`.
+#[derive(Debug, Clone)]
+pub struct QueuePolicySnapshot {
+    pub mode: QueueMode,
+    pub max_attempts: u32,
+    pub lock_deadline_ms: u64,
+    pub in_flight_cap_per_group: u32,
+    pub dlq_target: Option<String>,
+}
+
+fn queue_policies_from_grouped(
     grouped: &HashMap<String, Vec<UnifiedEntity>>,
-) -> HashMap<String, QueueMode> {
+) -> HashMap<String, QueuePolicySnapshot> {
     let Some(meta) = grouped.get("red_queue_meta") else {
         return HashMap::new();
     };
 
-    let mut modes = HashMap::new();
+    let mut policies = HashMap::new();
     for entity in meta {
         let Some(row) = entity.data.as_row() else {
             continue;
@@ -483,9 +542,35 @@ fn queue_modes_from_grouped(
             .as_deref()
             .and_then(QueueMode::parse)
             .unwrap_or_default();
-        modes.insert(queue, mode);
+        let max_attempts = row_u64(row, "max_attempts")
+            .map(|v| v as u32)
+            .unwrap_or(crate::storage::query::DEFAULT_QUEUE_MAX_ATTEMPTS);
+        let lock_deadline_ms = row_u64(row, "lock_deadline_ms")
+            .unwrap_or(crate::storage::query::DEFAULT_QUEUE_LOCK_DEADLINE_MS);
+        let in_flight_cap_per_group = row_u64(row, "in_flight_cap_per_group")
+            .map(|v| v as u32)
+            .unwrap_or(crate::storage::query::DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP);
+        let dlq_target = row_text(row, "dlq");
+        policies.insert(
+            queue,
+            QueuePolicySnapshot {
+                mode,
+                max_attempts,
+                lock_deadline_ms,
+                in_flight_cap_per_group,
+                dlq_target,
+            },
+        );
     }
-    modes
+    policies
+}
+
+fn row_u64(row: &crate::storage::unified::entity::RowData, key: &str) -> Option<u64> {
+    match row.get_field(key) {
+        Some(Value::UnsignedInteger(v)) => Some(*v),
+        Some(Value::Integer(v)) if *v >= 0 => Some(*v as u64),
+        _ => None,
+    }
 }
 
 fn row_text(row: &crate::storage::unified::entity::RowData, key: &str) -> Option<String> {
