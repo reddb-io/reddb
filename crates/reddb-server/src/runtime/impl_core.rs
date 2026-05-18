@@ -2749,6 +2749,12 @@ impl RedDBRuntime {
         *self.inner.auth_store.write() = Some(store);
     }
 
+    /// Snapshot the current AuthStore (if any). Used by the wire listener
+    /// to validate bearer tokens issued via HTTP `/auth/login`.
+    pub fn auth_store(&self) -> Option<Arc<crate::auth::store::AuthStore>> {
+        self.inner.auth_store.read().clone()
+    }
+
     /// Read a vault KV secret from the configured AuthStore, if present.
     pub fn vault_kv_get(&self, key: &str) -> Option<String> {
         self.inner

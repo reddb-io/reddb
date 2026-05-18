@@ -50,12 +50,19 @@ pub async fn start_redwire_listener(
 
 /// Start a RedWire listener on an already-bound TCP listener (used
 /// by the service router which owns the public socket and proxies
-/// to a loopback redwire backend).
+/// to a loopback redwire backend, and by service_cli's spawn_wire_listeners
+/// when binding the user-facing wire port directly).
+///
+/// Pulls the auth store off the runtime so bearer tokens issued by the
+/// HTTP `/auth/login` endpoint are honoured on the wire transport too —
+/// otherwise every authenticated client gets "bearer auth refused — server
+/// has no auth store configured" even when `--vault true` is set.
 pub async fn start_redwire_listener_on(
     listener: TcpListener,
     runtime: Arc<RedDBRuntime>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    serve_redwire_tcp(listener, runtime, None, None).await
+    let auth_store = runtime.auth_store();
+    serve_redwire_tcp(listener, runtime, auth_store, None).await
 }
 
 async fn serve_redwire_tcp(
