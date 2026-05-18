@@ -1,3 +1,50 @@
+/// Translate a shared `BatchOutcome` (HTTP-shaped JSON envelope) into
+/// the typed gRPC reply or a `Status` with the row-pinpoint metadata
+/// the brief asks for (`x-row-index`, `x-batch-error-code`). Used by
+/// the `BatchInsert` RPC (issue #586 / slice 5 of #575).
+///
+/// Mapping (mirrors `BatchInsertError::http_status` / `code`):
+/// * 2xx (`{"ok":true,"count":N}`) → `Ok(BatchInsertReply { ok, count })`.
+/// * 413 / `BatchTooLarge` → `Status::resource_exhausted` (per the brief).
+/// * anything else (`RowParseFailure`, `RowSchemaRejected`, …) →
+///   `Status::failed_precondition` with the typed code + row index
+///   echoed back as trailing metadata.
+fn grpc_batch_outcome_to_reply(
+    outcome: crate::server::handlers_entity::BatchOutcome,
+) -> Result<Response<BatchInsertReply>, Status> {
+    let body: JsonValue = crate::json::from_slice(&outcome.body)
+        .map_err(|e| Status::internal(format!("batch outcome body not JSON: {e}")))?;
+    if (200..300).contains(&outcome.status) {
+        let count = body.get("count").and_then(JsonValue::as_u64).unwrap_or(0);
+        return Ok(Response::new(BatchInsertReply { ok: true, count }));
+    }
+    let code = body
+        .get("code")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("BatchError")
+        .to_string();
+    let message = body
+        .get("message")
+        .and_then(JsonValue::as_str)
+        .or_else(|| body.get("error").and_then(JsonValue::as_str))
+        .unwrap_or("batch insert failed")
+        .to_string();
+    let row_index = body.get("row_index").and_then(JsonValue::as_u64);
+    let mut status = match (outcome.status, code.as_str()) {
+        (413, _) | (_, "BatchTooLarge") => Status::resource_exhausted(message),
+        _ => Status::failed_precondition(message),
+    };
+    if let Ok(val) = code.parse() {
+        status.metadata_mut().insert("x-batch-error-code", val);
+    }
+    if let Some(idx) = row_index {
+        if let Ok(val) = idx.to_string().parse() {
+            status.metadata_mut().insert("x-row-index", val);
+        }
+    }
+    Err(status)
+}
+
 fn insert_snapshot_sidecar(
     map: &mut Map<String, JsonValue>,
     field: &str,
@@ -2384,6 +2431,85 @@ impl RedDb for GrpcRuntime {
             .map_err(|e| Status::internal(e.to_string()))??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
+    }
+
+    /// Issue #586 — Analytics slice 5: gRPC mirror of HTTP
+    /// `BatchInsertEndpoint` (slice 4 / #582). The shared
+    /// `process_batch_insert` pipeline holds the all-or-nothing commit,
+    /// `AnalyticsSchemaRegistry` validation, and the process-wide
+    /// idempotency cache that this RPC shares with the HTTP (#582) and
+    /// RedWire (#587) transports.
+    ///
+    /// Streaming contract:
+    /// * First chunk MUST set `collection`. Subsequent chunks MAY omit it.
+    ///   Switching `collection` mid-stream is rejected with
+    ///   `INVALID_ARGUMENT` — one stream = one batch = one collection.
+    /// * Initial-metadata `idempotency-key` (lowercase, gRPC convention)
+    ///   flips dedup. Empty value treated as absent.
+    /// * Oversize batches surface as `RESOURCE_EXHAUSTED` before any
+    ///   storage write (mirrors HTTP 413).
+    /// * Row K parse/schema failure surfaces as `FAILED_PRECONDITION`
+    ///   with `x-row-index` + `x-batch-error-code` trailing metadata so
+    ///   the caller can pinpoint the broken row without re-parsing the
+    ///   message text. Storage is untouched on failure.
+    async fn batch_insert(
+        &self,
+        request: Request<tonic::Streaming<BatchInsertChunk>>,
+    ) -> Result<Response<BatchInsertReply>, Status> {
+        self.authorize_write(request.metadata())?;
+
+        let idempotency_key = request
+            .metadata()
+            .get("idempotency-key")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty());
+
+        let mut stream = request.into_inner();
+        let mut collection: Option<String> = None;
+        let mut rows: Vec<JsonValue> = Vec::new();
+        while let Some(chunk) = stream.message().await? {
+            if let Some(ref pinned) = collection {
+                if !chunk.collection.is_empty() && chunk.collection != *pinned {
+                    return Err(Status::invalid_argument(
+                        "BatchInsert stream cannot switch 'collection' between chunks",
+                    ));
+                }
+            } else {
+                if chunk.collection.is_empty() {
+                    return Err(Status::invalid_argument(
+                        "first BatchInsertChunk must set 'collection'",
+                    ));
+                }
+                collection = Some(chunk.collection.clone());
+            }
+            if chunk.row_json.is_empty() {
+                continue;
+            }
+            let value: JsonValue = json_from_str(&chunk.row_json).map_err(|err| {
+                Status::invalid_argument(format!("row_json is not valid JSON: {err}"))
+            })?;
+            rows.push(value);
+        }
+        let collection = collection.ok_or_else(|| {
+            Status::invalid_argument("BatchInsert stream must contain at least one chunk")
+        })?;
+
+        let runtime = self.runtime.clone();
+        let key = idempotency_key.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            crate::server::handlers_entity::process_batch_insert(
+                &runtime,
+                &collection,
+                &rows,
+                key.as_deref(),
+            )
+        })
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        self.enforce_commit_policy_after_write()?;
+        grpc_batch_outcome_to_reply(outcome)
     }
 
     async fn bulk_create_nodes(

@@ -2239,6 +2239,7 @@ dependencies = [
  "serde_json",
  "snap",
  "tokio",
+ "tokio-stream",
  "tonic",
  "trybuild",
  "ureq",

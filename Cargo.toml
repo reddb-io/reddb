@@ -86,6 +86,11 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # tonic for gRPC-side smoke tests.
 tonic = { version = "0.14", features = ["transport"] }
+# Streaming-RPC client tests (e.g. gRPC BatchInsert / #586) build
+# request streams via `tokio_stream::iter`. Server-side already
+# depends on it transitively through tonic; we restate it here as a
+# dev-only dep so the umbrella test crate can name it directly.
+tokio-stream = "0.1"
 # Self-signed certificate generator for TLS smoke tests.
 rcgen = "0.14"
 # IAM policy property tests at the umbrella integration-test layer.
