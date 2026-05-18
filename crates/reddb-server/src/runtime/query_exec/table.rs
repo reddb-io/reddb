@@ -701,7 +701,20 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         let table_name = query.table.as_str();
         let table_alias = query.alias.as_deref().unwrap_or(table_name);
         let explicit_limit = query.limit;
-        let limit = explicit_limit.unwrap_or(10000) as usize;
+        // Issue #550 — the sequential scan terminates once `records.len()
+        // >= limit` so the cap must cover the rows OFFSET will skip later;
+        // otherwise `WHERE … LIMIT N OFFSET M` returns `N - M` rows instead
+        // of `N`. ORDER BY is applied after the scan, so when a sort key is
+        // present the cap is invalidated (capping at `off + lim` would
+        // surface whichever rows the storage layer happens to yield first,
+        // not the sort-ordered slice). Matches the unfiltered fast path's
+        // `scan_cap` shape further down in this file.
+        let limit = match (query.offset, explicit_limit) {
+            _ if !query.order_by.is_empty() => 10000,
+            (Some(off), Some(lim)) => (off as usize).saturating_add(lim as usize),
+            (None, Some(lim)) => lim as usize,
+            _ => 10000,
+        };
 
         // Bloom filter: extract PK key for segment pruning
         let bloom_key = extract_bloom_key_for_pk(filter);
@@ -937,7 +950,11 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             );
         }
 
-        // Apply OFFSET
+        // Apply OFFSET, then LIMIT. Order matters: SQL semantics drop the
+        // first `OFFSET` filtered rows, then keep the next `LIMIT`. The
+        // scan above terminates at `offset + limit` records (when there is
+        // no ORDER BY) so we still get the right slice; with ORDER BY the
+        // scan is uncapped above and the sort runs before OFFSET/LIMIT.
         if let Some(offset) = query.offset {
             let offset = offset as usize;
             if offset < records.len() {
@@ -945,6 +962,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             } else {
                 records.clear();
             }
+        }
+        if let Some(limit) = explicit_limit {
+            records.truncate(limit as usize);
         }
 
         return Ok(records);
