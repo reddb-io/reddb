@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 
 use crate::catalog::CollectionDescriptor;
 use crate::storage::queue::lifecycle::{
-    DeliveryId, MessageId, QueueSide, QueueStore, QueueStoreError, Result,
+    BumpedAttempt, DeliveryId, MessageId, QueueSide, QueueStore, QueueStoreError, Result,
+    DEFAULT_READ_MAX_ATTEMPTS,
 };
 use crate::storage::queue::QueueMode;
 use crate::storage::schema::Value;
@@ -62,17 +63,13 @@ impl PrimaryQueueStore {
 
     /// Build a `LifecycleConfig` for `queue` from the catalog descriptor's
     /// hot-fields tier. Falls back to crate defaults when the descriptor is
-    /// absent or a field is unset.
+    /// absent or a field is unset. `max_attempts` is no longer a config
+    /// knob — it lives on each message and is read at decision time via
+    /// [`QueueStore::read_max_attempts`].
     pub(crate) fn lifecycle_config(&self, queue: &str) -> LifecycleConfig {
-        use crate::storage::query::{
-            DEFAULT_QUEUE_LOCK_DEADLINE_MS, DEFAULT_QUEUE_MAX_ATTEMPTS,
-        };
+        use crate::storage::query::DEFAULT_QUEUE_LOCK_DEADLINE_MS;
 
         let desc = self.descriptor(queue);
-        let max_attempts = desc
-            .as_ref()
-            .and_then(|d| d.queue_max_attempts)
-            .unwrap_or(DEFAULT_QUEUE_MAX_ATTEMPTS);
         let lock_ms = desc
             .as_ref()
             .and_then(|d| d.queue_lock_deadline_ms)
@@ -85,7 +82,6 @@ impl PrimaryQueueStore {
 
         LifecycleConfig {
             lock_duration: Duration::from_millis(lock_ms),
-            max_attempts,
             dlq_target,
             mode,
         }
@@ -466,14 +462,38 @@ impl QueueStore for PrimaryQueueStore {
         self.insert_meta_row(fields)
     }
 
-    fn bump_attempt(&self, delivery_id: &str) -> Result<u32> {
+    fn bump_attempt(&self, delivery_id: &str) -> Result<BumpedAttempt> {
         let (_, row) = self
             .find_pending_by_delivery(delivery_id)
             .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
         let current = self.read_attempts(&row.queue, row.message_id, &row.group);
         let next = current.saturating_add(1);
         self.write_attempts(&row.queue, row.message_id, &row.group, next)?;
-        Ok(next)
+        Ok(BumpedAttempt {
+            attempts: next,
+            queue: row.queue,
+            message_id: row.message_id,
+        })
+    }
+
+    fn read_max_attempts(&self, queue: &str, message_id: MessageId) -> u32 {
+        // Mirrors `impl_queue::queue_message_max_attempts`: the value is
+        // stamped onto each `QueueMessageData` at push time from the
+        // descriptor's `max_attempts`. Falling back to the crate-wide
+        // default when the message is missing or the entity isn't a
+        // queue message keeps the trait surface total — the caller
+        // shouldn't have to handle "deleted underneath us" here.
+        let store = self.store();
+        let Some(manager) = store.get_collection(queue) else {
+            return DEFAULT_READ_MAX_ATTEMPTS;
+        };
+        let Some(entity) = manager.get(EntityId::new(message_id)) else {
+            return DEFAULT_READ_MAX_ATTEMPTS;
+        };
+        match entity.data {
+            EntityData::QueueMessage(data) => data.max_attempts,
+            _ => DEFAULT_READ_MAX_ATTEMPTS,
+        }
     }
 
     fn enqueue_dlq(&self, dlq_target: &str, original: Value) -> Result<()> {
@@ -646,28 +666,42 @@ mod tests {
             "CREATE QUEUE qcfg MAX_ATTEMPTS 7 LOCK_DEADLINE_MS 4000 WITH DLQ qcfg_dlq",
         )
         .expect("create");
+        // Push a message so the descriptor's `MAX_ATTEMPTS 7` lands on
+        // a `QueueMessageData` row — that's where `read_max_attempts`
+        // now sources the per-message budget.
+        push(&rt, "qcfg", "p");
 
         let ps = PrimaryQueueStore::new(rt);
         let cfg = ps.lifecycle_config("qcfg");
-        assert_eq!(cfg.max_attempts, 7);
         assert_eq!(cfg.lock_duration, Duration::from_millis(4000));
         assert_eq!(cfg.dlq_target.as_deref(), Some("qcfg_dlq"));
+
+        let msgs = ps.list_queue_messages("qcfg");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(
+            ps.read_max_attempts("qcfg", msgs[0].id.raw()),
+            7,
+            "per-message max_attempts must match the descriptor's value",
+        );
     }
 
     #[test]
     fn lifecycle_config_falls_back_to_defaults_for_unknown_queue() {
-        use crate::storage::query::{
-            DEFAULT_QUEUE_LOCK_DEADLINE_MS, DEFAULT_QUEUE_MAX_ATTEMPTS,
-        };
+        use crate::storage::query::DEFAULT_QUEUE_LOCK_DEADLINE_MS;
         let rt = boot();
         let ps = PrimaryQueueStore::new(rt);
         let cfg = ps.lifecycle_config("missing");
-        assert_eq!(cfg.max_attempts, DEFAULT_QUEUE_MAX_ATTEMPTS);
         assert_eq!(
             cfg.lock_duration,
             Duration::from_millis(DEFAULT_QUEUE_LOCK_DEADLINE_MS)
         );
         assert!(cfg.dlq_target.is_none());
+        // No queue → `read_max_attempts` falls back to the crate default
+        // rather than erroring; keeps the trait surface total.
+        assert_eq!(
+            ps.read_max_attempts("missing", 0),
+            DEFAULT_READ_MAX_ATTEMPTS,
+        );
     }
 
     #[test]
