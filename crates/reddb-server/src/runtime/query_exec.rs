@@ -186,7 +186,7 @@ fn resolve_table_row_by_logical_id(
 }
 
 pub(super) fn runtime_record_has_document_capability(record: &UnifiedRecord) -> bool {
-    record
+    let has_capability = record
         .get("red_capabilities")
         .and_then(|value| match value {
             crate::storage::schema::Value::Text(value) => Some(value),
@@ -197,6 +197,23 @@ pub(super) fn runtime_record_has_document_capability(record: &UnifiedRecord) -> 
                 .split(',')
                 .any(|capability| capability.trim() == "document")
         })
+        .unwrap_or(false);
+    if has_capability {
+        return true;
+    }
+    // Fallback: rows produced by `set_public_row_envelope` skip the
+    // `red_capabilities` summary and only carry `kind`. Issue #551 —
+    // `WHERE body.field` routes through the `document_path_filter`
+    // operator which gates on document capability, so without this
+    // fallback every document row gets dropped before the filter
+    // ever runs.
+    record
+        .get("kind")
+        .and_then(|value| match value {
+            crate::storage::schema::Value::Text(value) => Some(value),
+            _ => None,
+        })
+        .map(|kind| kind.as_ref() == "document")
         .unwrap_or(false)
 }
 
