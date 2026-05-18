@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 
 use crate::catalog::CollectionDescriptor;
 use crate::storage::queue::lifecycle::{
-    BumpedAttempt, DeliveryId, MessageId, QueueSide, QueueStore, QueueStoreError, Result,
-    DEFAULT_READ_MAX_ATTEMPTS,
+    BumpedAttempt, DeliveryId, MessageId, QueueSide, QueueStore, QueueStoreError, QueueTxn,
+    Result, DEFAULT_READ_MAX_ATTEMPTS,
 };
 use crate::storage::queue::QueueMode;
 use crate::storage::schema::Value;
@@ -392,6 +392,7 @@ impl QueueStore for PrimaryQueueStore {
 
     fn mark_pending(
         &self,
+        _txn: &QueueTxn,
         queue: &str,
         message_id: MessageId,
         group: &str,
@@ -430,24 +431,31 @@ impl QueueStore for PrimaryQueueStore {
         Ok(delivery_id)
     }
 
-    fn release_pending(&self, delivery_id: &str) -> Result<()> {
+    fn release_pending(&self, _txn: &QueueTxn, delivery_id: &str) -> Result<()> {
         if let Some((entity_id, _)) = self.find_pending_by_delivery(delivery_id) {
             let _ = self.store().delete(QUEUE_META_COLLECTION, entity_id);
         }
         Ok(())
     }
 
-    fn ack_pending(&self, delivery_id: &str) -> Result<()> {
+    fn ack_pending(&self, txn: &QueueTxn, delivery_id: &str) -> Result<()> {
         let (entity_id, row) = self
             .find_pending_by_delivery(delivery_id)
             .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
         let _ = self.store().delete(QUEUE_META_COLLECTION, entity_id);
         self.clear_attempts(&row.queue, row.message_id, &row.group);
         self.delete_message(&row.queue, EntityId::new(row.message_id));
+        // Mirror the in-memory contract: the WORK-mode ack tombstones the
+        // underlying message. The legacy `queue_delivery::delete_message_with_state`
+        // path still owns the actual MVCC tombstone wiring against the
+        // runtime; this prereq only records the would-be tombstone on
+        // the threaded txn so the seam is exercised end-to-end on the
+        // primary too.
+        txn.record_pending_tombstone(&row.queue, row.message_id);
         Ok(())
     }
 
-    fn retire_for_group(&self, delivery_id: &str) -> Result<()> {
+    fn retire_for_group(&self, _txn: &QueueTxn, delivery_id: &str) -> Result<()> {
         let (entity_id, row) = self
             .find_pending_by_delivery(delivery_id)
             .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
@@ -462,7 +470,7 @@ impl QueueStore for PrimaryQueueStore {
         self.insert_meta_row(fields)
     }
 
-    fn bump_attempt(&self, delivery_id: &str) -> Result<BumpedAttempt> {
+    fn bump_attempt(&self, _txn: &QueueTxn, delivery_id: &str) -> Result<BumpedAttempt> {
         let (_, row) = self
             .find_pending_by_delivery(delivery_id)
             .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
@@ -496,7 +504,7 @@ impl QueueStore for PrimaryQueueStore {
         }
     }
 
-    fn enqueue_dlq(&self, dlq_target: &str, original: Value) -> Result<()> {
+    fn enqueue_dlq(&self, _txn: &QueueTxn, dlq_target: &str, original: Value) -> Result<()> {
         let store = self.store();
         if store.get_collection(dlq_target).is_none() {
             store
@@ -552,7 +560,7 @@ impl QueueStore for PrimaryQueueStore {
         self.read_message(&row.queue, row.message_id)
     }
 
-    fn reclaim_expired(&self, queue: &str, now: Instant) -> Result<()> {
+    fn reclaim_expired(&self, _txn: &QueueTxn, queue: &str, now: Instant) -> Result<()> {
         // Persisted deadlines are wall-clock unix-ns (see
         // `instant_to_unix_ns` at `mark_pending` time). Convert the
         // monotonic `now` argument the same way so the comparison
@@ -714,24 +722,24 @@ mod tests {
         let ps = PrimaryQueueStore::new(rt);
         let lc = QueueLifecycle::new(ps, LifecycleConfig::default());
 
-        let first = lc.deliver("qround", "workers", 1).expect("deliver");
+        let first = lc.deliver(&QueueTxn::new(),"qround", "workers", 1).expect("deliver");
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].payload, Value::text("alpha"));
         assert!(!first[0].delivery_id.is_empty());
 
         // Pending row blocks redelivery of the same message.
-        let second = lc.deliver("qround", "workers", 1).expect("deliver-2");
+        let second = lc.deliver(&QueueTxn::new(),"qround", "workers", 1).expect("deliver-2");
         assert_eq!(second.len(), 1);
         assert_ne!(second[0].delivery_id, first[0].delivery_id);
         assert_eq!(second[0].payload, Value::text("beta"));
 
-        lc.ack(&first[0].delivery_id).expect("ack");
+        lc.ack(&QueueTxn::new(),&first[0].delivery_id).expect("ack");
 
         // After ack the underlying message is gone — only `beta` remains and it's pending.
         let remaining = list_message_ids(&lc.store_ref(), "qround");
         assert_eq!(remaining.len(), 1);
 
-        lc.ack(&second[0].delivery_id).expect("ack-2");
+        lc.ack(&QueueTxn::new(),&second[0].delivery_id).expect("ack-2");
         assert!(list_message_ids(&lc.store_ref(), "qround").is_empty());
     }
 
@@ -747,14 +755,14 @@ mod tests {
         let lc = QueueLifecycle::new(ps, cfg);
 
         // First nack → Requeued.
-        let a = lc.deliver("qdlq", "workers", 1).expect("deliver-a");
+        let a = lc.deliver(&QueueTxn::new(),"qdlq", "workers", 1).expect("deliver-a");
         assert_eq!(a[0].payload, Value::text("payload"));
-        lc.nack(&a[0].delivery_id).expect("nack-a");
+        lc.nack(&QueueTxn::new(),&a[0].delivery_id).expect("nack-a");
 
         // Second nack → MovedToDlq.
-        let b = lc.deliver("qdlq", "workers", 1).expect("deliver-b");
+        let b = lc.deliver(&QueueTxn::new(),"qdlq", "workers", 1).expect("deliver-b");
         assert_eq!(b[0].payload, Value::text("payload"), "redelivered original");
-        lc.nack(&b[0].delivery_id).expect("nack-b");
+        lc.nack(&QueueTxn::new(),&b[0].delivery_id).expect("nack-b");
 
         assert_eq!(
             lc.recorded_outcomes(),
@@ -765,7 +773,7 @@ mod tests {
         );
 
         // Source queue is now empty.
-        assert!(lc.deliver("qdlq", "workers", 1).unwrap().is_empty());
+        assert!(lc.deliver(&QueueTxn::new(),"qdlq", "workers", 1).unwrap().is_empty());
 
         // DLQ has the original payload.
         let dlq_msgs = lc.store_ref().list_queue_messages("qdlq_dlq");
@@ -785,8 +793,9 @@ mod tests {
         let mid = msgs[0].id.raw();
 
         let deadline = Instant::now() + Duration::from_millis(1500);
+        let t = QueueTxn::new();
         let id = ps
-            .mark_pending("qpersist", mid, "g", deadline)
+            .mark_pending(&t, "qpersist", mid, "g", deadline)
             .expect("mark");
         assert!(!id.is_empty());
         // Persisted delivery_id is base32-lower.
@@ -803,7 +812,7 @@ mod tests {
 
         // Idempotent on same key.
         let id2 = ps
-            .mark_pending("qpersist", mid, "g", deadline + Duration::from_millis(500))
+            .mark_pending(&t, "qpersist", mid, "g", deadline + Duration::from_millis(500))
             .expect("mark-2");
         assert_eq!(id, id2);
     }
@@ -812,8 +821,9 @@ mod tests {
     fn mark_pending_on_unknown_queue_errors() {
         let rt = boot();
         let ps = PrimaryQueueStore::new(rt);
+        let t = QueueTxn::new();
         let err = ps
-            .mark_pending("nope", 1, "g", Instant::now() + Duration::from_secs(1))
+            .mark_pending(&t, "nope", 1, "g", Instant::now() + Duration::from_secs(1))
             .unwrap_err();
         assert!(matches!(err, QueueStoreError::UnknownQueue(_)));
     }
@@ -822,7 +832,8 @@ mod tests {
     fn ack_unknown_delivery_errors() {
         let rt = boot();
         let ps = PrimaryQueueStore::new(rt);
-        let err = ps.ack_pending("nope").unwrap_err();
+        let t = QueueTxn::new();
+        let err = ps.ack_pending(&t, "nope").unwrap_err();
         assert!(matches!(err, QueueStoreError::UnknownDelivery(_)));
     }
 
@@ -838,16 +849,16 @@ mod tests {
         assert_eq!(cfg.mode, QueueMode::Fanout);
         let lc = QueueLifecycle::new(ps, cfg);
 
-        let a = lc.deliver("qfan", "subs.a", 1).expect("deliver-a");
-        let b = lc.deliver("qfan", "subs.b", 1).expect("deliver-b");
+        let a = lc.deliver(&QueueTxn::new(),"qfan", "subs.a", 1).expect("deliver-a");
+        let b = lc.deliver(&QueueTxn::new(),"qfan", "subs.b", 1).expect("deliver-b");
         assert_eq!(a[0].payload, Value::text("shared"));
         assert_eq!(b[0].payload, Value::text("shared"));
         assert_ne!(a[0].delivery_id, b[0].delivery_id);
 
-        lc.ack(&a[0].delivery_id).expect("ack-a");
+        lc.ack(&QueueTxn::new(),&a[0].delivery_id).expect("ack-a");
         // A no longer sees the message; B's pending row remains valid.
-        assert!(lc.deliver("qfan", "subs.a", 1).unwrap().is_empty());
-        lc.ack(&b[0].delivery_id).expect("ack-b");
+        assert!(lc.deliver(&QueueTxn::new(),"qfan", "subs.a", 1).unwrap().is_empty());
+        lc.ack(&QueueTxn::new(),&b[0].delivery_id).expect("ack-b");
     }
 }
 
