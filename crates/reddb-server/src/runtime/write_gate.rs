@@ -21,7 +21,7 @@
 //! configured deployments stay on `NotRequired` so the check is a
 //! single atomic load of zero.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use crate::api::{RedDBError, RedDBOptions, RedDBResult};
 use crate::replication::ReplicationRole;
@@ -101,9 +101,28 @@ impl LeaseGateState {
 /// the data-safety plan), and shouldn't be a single-flag decision.
 #[derive(Debug)]
 pub struct WriteGate {
+    /// Operator-set read-only flag. Mutated by `POST /admin/readonly`
+    /// and by boot-time resolution (CLI/env/persisted state). Sticky:
+    /// the archive-lag auto-pause path (#519) never touches this — only
+    /// the operator can clear an operator-set pin.
     read_only: AtomicBool,
     role: ReplicationRole,
     lease: AtomicU8,
+    /// Issue #519 — engine-managed graceful read-only triggered by
+    /// `REDDB_BACKUP_PAUSE_ON_LAG_SECS` when WAL archive lag exceeds
+    /// the threshold. Independent of `read_only` so the two precedences
+    /// (manual sticky, auto auto-resumes) cannot stomp each other.
+    auto_paused: AtomicBool,
+    /// Unix-ms timestamp of the last *successful* remote archive. `0`
+    /// means "never observed since boot"; the lag evaluator treats
+    /// that as "lag since boot" once it has been initialised by the
+    /// caller (typical pattern: stamp `now` at construction so the
+    /// instance gets a `threshold_secs` grace window).
+    last_archive_at_ms: AtomicU64,
+    /// Threshold from `REDDB_BACKUP_PAUSE_ON_LAG_SECS`. `0` = feature
+    /// disabled — `evaluate_archive_lag` short-circuits without
+    /// touching `auto_paused`.
+    pause_threshold_secs: AtomicU64,
 }
 
 impl WriteGate {
@@ -112,6 +131,9 @@ impl WriteGate {
             read_only: AtomicBool::new(options.read_only),
             role: options.replication.role.clone(),
             lease: AtomicU8::new(LeaseGateState::NotRequired as u8),
+            auto_paused: AtomicBool::new(false),
+            last_archive_at_ms: AtomicU64::new(0),
+            pause_threshold_secs: AtomicU64::new(0),
         }
     }
 
@@ -156,6 +178,12 @@ impl WriteGate {
                 kind.label()
             )));
         }
+        if self.auto_paused.load(Ordering::Acquire) {
+            return Err(RedDBError::ReadOnly(format!(
+                "instance is paused — WAL archive lag exceeded threshold — {} rejected",
+                kind.label()
+            )));
+        }
         Ok(crate::application::WriteConsent {
             kind,
             _seal: crate::application::WriteConsentSeal::new(),
@@ -164,8 +192,24 @@ impl WriteGate {
 
     pub fn is_read_only(&self) -> bool {
         self.read_only.load(Ordering::Acquire)
+            || self.auto_paused.load(Ordering::Acquire)
             || matches!(self.role, ReplicationRole::Replica { .. })
             || matches!(self.lease_state(), LeaseGateState::NotHeld)
+    }
+
+    /// Whether the operator explicitly pinned this instance read-only
+    /// (via boot config or `POST /admin/readonly`). Distinct from
+    /// [`is_read_only`] which also returns `true` for structural
+    /// reasons (replica role, lease lost, archive-lag pause).
+    pub fn is_manual_read_only(&self) -> bool {
+        self.read_only.load(Ordering::Acquire)
+    }
+
+    /// Whether the engine-managed archive-lag pause (#519) is
+    /// currently active. Mutually independent of [`is_manual_read_only`]
+    /// so callers like `/backup/status` can report both.
+    pub fn is_auto_paused(&self) -> bool {
+        self.auto_paused.load(Ordering::Acquire)
     }
 
     pub fn role(&self) -> &ReplicationRole {
@@ -189,6 +233,70 @@ impl WriteGate {
         LeaseGateState::from_u8(self.lease.load(Ordering::Acquire))
     }
 
+    /// Issue #519 — install the archive-lag pause threshold and the
+    /// baseline "last archive observed at" stamp. Threshold `0`
+    /// disables auto-pause; subsequent `record_archive_success` /
+    /// `evaluate_archive_lag` calls then become no-ops.
+    ///
+    /// Idempotent: callers should invoke once during startup after
+    /// parsing `REDDB_BACKUP_PAUSE_ON_LAG_SECS`. Stamping `last_archive_at_ms`
+    /// to "now" at construction grants a `threshold_secs` grace
+    /// window before the first auto-pause can fire — without it, a
+    /// freshly-booted instance with a never-archived WAL would flip
+    /// to read-only on the first poll.
+    pub fn configure_archive_lag_pause(&self, threshold_secs: u64, baseline_ms: u64) {
+        self.pause_threshold_secs
+            .store(threshold_secs, Ordering::Release);
+        self.last_archive_at_ms
+            .store(baseline_ms, Ordering::Release);
+    }
+
+    /// Stamp `last_archive_at_ms` after a successful remote archive.
+    /// Called by the WAL-archive task wrapper in `service_cli` after
+    /// `runtime.trigger_backup()` returns `Ok`.
+    pub fn record_archive_success(&self, now_ms: u64) {
+        self.last_archive_at_ms.store(now_ms, Ordering::Release);
+    }
+
+    /// Current archive-lag threshold in seconds. `0` means the
+    /// feature is disabled.
+    pub fn archive_pause_threshold_secs(&self) -> u64 {
+        self.pause_threshold_secs.load(Ordering::Acquire)
+    }
+
+    /// Last archive observation timestamp (unix ms).
+    pub fn last_archive_at_ms(&self) -> u64 {
+        self.last_archive_at_ms.load(Ordering::Acquire)
+    }
+
+    /// Re-evaluate the archive-lag state. Returns the resulting
+    /// `auto_paused` value.
+    ///
+    /// Semantics (issue #519):
+    /// * Threshold `0` → feature disabled, returns current state
+    ///   without writing.
+    /// * Manual read-only is **sticky** — when [`is_manual_read_only`]
+    ///   is true, this method never modifies `auto_paused`. The
+    ///   operator must clear the manual pin first; only then does the
+    ///   auto-path take over again on the next tick.
+    /// * Lag > threshold and manual=false → set `auto_paused = true`.
+    /// * Lag <= threshold and `auto_paused = true` → clear it
+    ///   (auto-resume). If `auto_paused` was already false, no-op.
+    pub fn evaluate_archive_lag(&self, now_ms: u64) -> bool {
+        let threshold = self.pause_threshold_secs.load(Ordering::Acquire);
+        if threshold == 0 {
+            return self.auto_paused.load(Ordering::Acquire);
+        }
+        if self.read_only.load(Ordering::Acquire) {
+            return self.auto_paused.load(Ordering::Acquire);
+        }
+        let last_ms = self.last_archive_at_ms.load(Ordering::Acquire);
+        let lag_secs = now_ms.saturating_sub(last_ms) / 1000;
+        let should_pause = lag_secs > threshold;
+        self.auto_paused.store(should_pause, Ordering::Release);
+        should_pause
+    }
+
     /// Flip the lease gate state. Only `LeaseLifecycle` should call
     /// this — other callers must go through the lifecycle so the
     /// gate flip and the corresponding `lease/*` audit record
@@ -210,6 +318,9 @@ mod tests {
             read_only: AtomicBool::new(read_only),
             role,
             lease: AtomicU8::new(LeaseGateState::NotRequired as u8),
+            auto_paused: AtomicBool::new(false),
+            last_archive_at_ms: AtomicU64::new(0),
+            pause_threshold_secs: AtomicU64::new(0),
         }
     }
 
@@ -307,6 +418,117 @@ mod tests {
             RedDBError::ReadOnly(msg) => assert!(msg.contains("lease")),
             other => panic!("expected ReadOnly, got {other:?}"),
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Issue #519 — graceful read-only mode when WAL archive lag
+    // exceeds REDDB_BACKUP_PAUSE_ON_LAG_SECS.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn archive_lag_disabled_threshold_is_noop() {
+        let g = gate(false, ReplicationRole::Standalone);
+        g.configure_archive_lag_pause(0, 1_000);
+        // Even with an ancient timestamp, threshold=0 must not pause.
+        assert!(!g.evaluate_archive_lag(10_000_000_000));
+        assert!(!g.is_auto_paused());
+        assert!(g.check(WriteKind::Dml).is_ok());
+    }
+
+    #[test]
+    fn archive_lag_triggers_auto_pause_past_threshold() {
+        let g = gate(false, ReplicationRole::Standalone);
+        // Last archive at t=1_000_000ms; threshold = 60s.
+        g.configure_archive_lag_pause(60, 1_000_000);
+        // 30s later — still under threshold.
+        assert!(!g.evaluate_archive_lag(1_000_000 + 30_000));
+        assert!(g.check(WriteKind::Dml).is_ok());
+
+        // 120s later — over threshold; must auto-pause.
+        assert!(g.evaluate_archive_lag(1_000_000 + 120_000));
+        assert!(g.is_auto_paused());
+        let err = g.check(WriteKind::Dml).unwrap_err();
+        match err {
+            RedDBError::ReadOnly(msg) => assert!(msg.contains("WAL archive lag"), "{msg}"),
+            other => panic!("expected ReadOnly, got {other:?}"),
+        }
+        assert!(g.is_read_only());
+    }
+
+    #[test]
+    fn archive_lag_auto_resume_after_recovery() {
+        let g = gate(false, ReplicationRole::Standalone);
+        g.configure_archive_lag_pause(60, 1_000_000);
+        // Trip the auto-pause.
+        assert!(g.evaluate_archive_lag(1_000_000 + 120_000));
+        assert!(g.is_auto_paused());
+        // Archiver catches up — stamp success and re-evaluate.
+        g.record_archive_success(1_000_000 + 130_000);
+        assert!(!g.evaluate_archive_lag(1_000_000 + 130_000));
+        assert!(!g.is_auto_paused());
+        assert!(g.check(WriteKind::Dml).is_ok());
+    }
+
+    #[test]
+    fn manual_read_only_blocks_auto_pause_writes_and_is_sticky() {
+        // Operator pinned read-only *before* lag condition. The
+        // auto-pause path must be a no-op while manual is set, and
+        // archive recovery must NOT auto-clear the manual pin.
+        let g = gate(true, ReplicationRole::Standalone);
+        g.configure_archive_lag_pause(60, 1_000_000);
+
+        // Lag past threshold; but manual is set so auto stays false.
+        assert!(!g.evaluate_archive_lag(1_000_000 + 120_000));
+        assert!(!g.is_auto_paused());
+        assert!(g.is_manual_read_only());
+        // Writes still rejected — for the manual reason.
+        let err = g.check(WriteKind::Dml).unwrap_err();
+        match err {
+            RedDBError::ReadOnly(msg) => {
+                assert!(msg.contains("read_only"), "{msg}");
+                assert!(!msg.contains("WAL archive lag"), "{msg}");
+            }
+            other => panic!("expected ReadOnly, got {other:?}"),
+        }
+
+        // Archiver recovers; re-evaluate. Manual still set ⇒ auto stays false,
+        // manual stays true ⇒ instance stays read-only by operator intent.
+        g.record_archive_success(1_000_000 + 130_000);
+        assert!(!g.evaluate_archive_lag(1_000_000 + 130_000));
+        assert!(g.is_manual_read_only(), "manual must stay set");
+        assert!(!g.is_auto_paused());
+        assert!(g.check(WriteKind::Dml).is_err());
+    }
+
+    #[test]
+    fn manual_clearing_resumes_auto_evaluation() {
+        // Manual was set; operator clears it; lag is still bad.
+        // Next evaluation must auto-pause.
+        let g = gate(true, ReplicationRole::Standalone);
+        g.configure_archive_lag_pause(60, 1_000_000);
+        // No-op while manual.
+        assert!(!g.evaluate_archive_lag(1_000_000 + 120_000));
+        // Operator unsets manual.
+        g.set_read_only(false);
+        // Now the lag condition must fire.
+        assert!(g.evaluate_archive_lag(1_000_000 + 120_000));
+        assert!(g.is_auto_paused());
+    }
+
+    #[test]
+    fn archive_lag_pause_state_independent_from_manual_flag() {
+        let g = gate(false, ReplicationRole::Standalone);
+        g.configure_archive_lag_pause(60, 1_000_000);
+        assert!(g.evaluate_archive_lag(1_000_000 + 120_000));
+        // Operator separately pins manual on top; still both true.
+        let prev = g.set_read_only(true);
+        assert!(!prev);
+        assert!(g.is_manual_read_only());
+        assert!(g.is_auto_paused());
+        // Operator clears manual; auto pause survives.
+        g.set_read_only(false);
+        assert!(g.is_auto_paused());
+        assert!(g.check(WriteKind::Dml).is_err());
     }
 
     #[test]

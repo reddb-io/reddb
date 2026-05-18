@@ -16,6 +16,9 @@
 //!   * `REDDB_BACKUP_S3_REGION`     (default `auto`)
 //!   * `REDDB_BACKUP_CHECKPOINT_INTERVAL_SECS` (default 3600, must be > 0)
 //!   * `REDDB_BACKUP_WAL_FLUSH_INTERVAL_SECS`  (default 30,   must be > 0)
+//!   * `REDDB_BACKUP_PAUSE_ON_LAG_SECS`        (default 0 = disabled; > 0 enables
+//!     graceful read-only mode when WAL archive lag exceeds the threshold —
+//!     issue #519)
 //!
 //! Resolution:
 //!   * All required vars absent → `Ok(None)` (standalone; identical to
@@ -38,6 +41,12 @@ pub struct BackupConfig {
     pub prefix: String,
     pub checkpoint_interval_secs: u64,
     pub wal_flush_interval_secs: u64,
+    /// Issue #519 — when > 0, the engine monitors archive lag (`now -
+    /// last_successful_archive_at`) and transitions to a graceful
+    /// read-only mode when the lag exceeds this threshold. `0` keeps
+    /// the legacy behaviour (writes always accepted while local volume
+    /// has room, regardless of remote backend health).
+    pub pause_on_lag_secs: u64,
 }
 
 const REQUIRED_VARS: &[&str] = &[
@@ -51,10 +60,12 @@ const REQUIRED_VARS: &[&str] = &[
 const REGION_VAR: &str = "REDDB_BACKUP_S3_REGION";
 const CHECKPOINT_VAR: &str = "REDDB_BACKUP_CHECKPOINT_INTERVAL_SECS";
 const WAL_FLUSH_VAR: &str = "REDDB_BACKUP_WAL_FLUSH_INTERVAL_SECS";
+const PAUSE_ON_LAG_VAR: &str = "REDDB_BACKUP_PAUSE_ON_LAG_SECS";
 
 const DEFAULT_REGION: &str = "auto";
 const DEFAULT_CHECKPOINT_SECS: u64 = 3600;
 const DEFAULT_WAL_FLUSH_SECS: u64 = 30;
+const DEFAULT_PAUSE_ON_LAG_SECS: u64 = 0;
 
 /// Parse the `REDDB_BACKUP_*` env contract using the supplied
 /// env-var lookup. See module docs for the contract.
@@ -98,6 +109,7 @@ where
     let checkpoint_interval_secs =
         parse_interval(&env, CHECKPOINT_VAR, DEFAULT_CHECKPOINT_SECS)?;
     let wal_flush_interval_secs = parse_interval(&env, WAL_FLUSH_VAR, DEFAULT_WAL_FLUSH_SECS)?;
+    let pause_on_lag_secs = parse_pause_on_lag(&env, DEFAULT_PAUSE_ON_LAG_SECS)?;
 
     Ok(Some(BackupConfig {
         endpoint,
@@ -108,7 +120,29 @@ where
         prefix,
         checkpoint_interval_secs,
         wal_flush_interval_secs,
+        pause_on_lag_secs,
     }))
+}
+
+fn parse_pause_on_lag<F>(env: &F, default: u64) -> Result<u64, String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let Some(raw) = env(PAUSE_ON_LAG_VAR).filter(|v| !v.trim().is_empty()) else {
+        return Ok(default);
+    };
+    let trimmed = raw.trim();
+    let parsed: i128 = trimmed.parse().map_err(|_| {
+        format!("{PAUSE_ON_LAG_VAR} must be a non-negative integer; got {raw:?}")
+    })?;
+    if parsed < 0 {
+        return Err(format!(
+            "{PAUSE_ON_LAG_VAR} must be >= 0; got {parsed} (negative not allowed)"
+        ));
+    }
+    let as_u64 = u64::try_from(parsed)
+        .map_err(|_| format!("{PAUSE_ON_LAG_VAR} exceeds u64 range; got {parsed}"))?;
+    Ok(as_u64)
 }
 
 fn parse_interval<F>(env: &F, name: &str, default: u64) -> Result<u64, String>
@@ -170,6 +204,72 @@ mod tests {
         assert_eq!(cfg.region, DEFAULT_REGION);
         assert_eq!(cfg.checkpoint_interval_secs, DEFAULT_CHECKPOINT_SECS);
         assert_eq!(cfg.wal_flush_interval_secs, DEFAULT_WAL_FLUSH_SECS);
+        assert_eq!(cfg.pause_on_lag_secs, DEFAULT_PAUSE_ON_LAG_SECS);
+    }
+
+    #[test]
+    fn pause_on_lag_is_parsed_when_present() {
+        let map: HashMap<&'static str, &'static str> = [
+            ("REDDB_BACKUP_S3_ENDPOINT", "https://x"),
+            ("REDDB_BACKUP_S3_BUCKET", "b"),
+            ("REDDB_BACKUP_S3_PREFIX", "p/"),
+            ("REDDB_BACKUP_S3_ACCESS_KEY_ID", "AK"),
+            ("REDDB_BACKUP_S3_SECRET_ACCESS_KEY", "SK"),
+            ("REDDB_BACKUP_PAUSE_ON_LAG_SECS", "300"),
+        ]
+        .into_iter()
+        .collect();
+        let cfg = from_env(lookup(&map)).unwrap().expect("Some");
+        assert_eq!(cfg.pause_on_lag_secs, 300);
+    }
+
+    #[test]
+    fn pause_on_lag_zero_is_disabled() {
+        let map: HashMap<&'static str, &'static str> = [
+            ("REDDB_BACKUP_S3_ENDPOINT", "https://x"),
+            ("REDDB_BACKUP_S3_BUCKET", "b"),
+            ("REDDB_BACKUP_S3_PREFIX", "p/"),
+            ("REDDB_BACKUP_S3_ACCESS_KEY_ID", "AK"),
+            ("REDDB_BACKUP_S3_SECRET_ACCESS_KEY", "SK"),
+            ("REDDB_BACKUP_PAUSE_ON_LAG_SECS", "0"),
+        ]
+        .into_iter()
+        .collect();
+        let cfg = from_env(lookup(&map)).unwrap().expect("Some");
+        assert_eq!(cfg.pause_on_lag_secs, 0);
+    }
+
+    #[test]
+    fn pause_on_lag_negative_is_error() {
+        let map: HashMap<&'static str, &'static str> = [
+            ("REDDB_BACKUP_S3_ENDPOINT", "https://x"),
+            ("REDDB_BACKUP_S3_BUCKET", "b"),
+            ("REDDB_BACKUP_S3_PREFIX", "p/"),
+            ("REDDB_BACKUP_S3_ACCESS_KEY_ID", "AK"),
+            ("REDDB_BACKUP_S3_SECRET_ACCESS_KEY", "SK"),
+            ("REDDB_BACKUP_PAUSE_ON_LAG_SECS", "-1"),
+        ]
+        .into_iter()
+        .collect();
+        let err = from_env(lookup(&map)).unwrap_err();
+        assert!(err.contains("REDDB_BACKUP_PAUSE_ON_LAG_SECS"), "{err}");
+    }
+
+    #[test]
+    fn pause_on_lag_non_numeric_is_error() {
+        let map: HashMap<&'static str, &'static str> = [
+            ("REDDB_BACKUP_S3_ENDPOINT", "https://x"),
+            ("REDDB_BACKUP_S3_BUCKET", "b"),
+            ("REDDB_BACKUP_S3_PREFIX", "p/"),
+            ("REDDB_BACKUP_S3_ACCESS_KEY_ID", "AK"),
+            ("REDDB_BACKUP_S3_SECRET_ACCESS_KEY", "SK"),
+            ("REDDB_BACKUP_PAUSE_ON_LAG_SECS", "soon"),
+        ]
+        .into_iter()
+        .collect();
+        let err = from_env(lookup(&map)).unwrap_err();
+        assert!(err.contains("REDDB_BACKUP_PAUSE_ON_LAG_SECS"), "{err}");
+        assert!(err.contains("non-negative"), "{err}");
     }
 
     #[test]
