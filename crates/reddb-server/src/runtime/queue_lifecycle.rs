@@ -23,7 +23,8 @@ use std::time::{Duration, Instant};
 
 use crate::runtime::queue_telemetry::{NackOutcomeLabel, QueueTelemetryCounters};
 use crate::storage::queue::lifecycle::{
-    DeliveryId, DlqTarget, MessageId, QueueSide, QueueStore, QueueStoreError, QueueTxn, Result,
+    DeliveryId, DlqTarget, MessageId, PendingDeliveryView, QueueSide, QueueStore, QueueStoreError,
+    QueueTxn, Result,
 };
 use crate::storage::queue::mode::QueueMode;
 use crate::storage::schema::Value;
@@ -330,6 +331,86 @@ impl<S: QueueStore> QueueLifecycle<S> {
     /// delivery ids.
     pub(crate) fn read(&self, delivery_id: &str, _txn: &QueueTxn) -> Option<Value> {
         self.store.read_pending_payload(delivery_id)
+    }
+
+    /// Claim (steal) every pending delivery on `queue` whose lock has
+    /// expired beyond `min_idle_ms`. Mirrors
+    /// `queue_delivery::claim_messages` semantics:
+    ///
+    /// - selection criterion is `(now - lock_deadline) >= min_idle_ms`;
+    ///   non-expired locks are skipped silently
+    /// - each claimed delivery has its lock refreshed (idempotent
+    ///   `mark_pending` on the same `(queue, message_id, group)` key) and
+    ///   its attempt counter bumped — claim counts as a delivery attempt
+    /// - if the bump pushes attempts past `read_max_attempts`, the
+    ///   delivery is routed through nack-style retirement (DLQ when
+    ///   `LifecycleConfig::dlq_target` is set, else dropped) and is NOT
+    ///   returned to the caller
+    ///
+    /// `new_consumer` is accepted for shape-consistency with the legacy
+    /// `queue_delivery::claim_messages` signature; the lifecycle layer
+    /// does not track per-consumer identity (the pending row is keyed by
+    /// consumer group, not consumer), so the parameter is intentionally
+    /// not persisted here.
+    pub(crate) fn claim(
+        &self,
+        queue: &str,
+        _new_consumer: &str,
+        min_idle_ms: u64,
+        txn: &QueueTxn,
+    ) -> Result<Vec<DeliveryId>> {
+        let now = self.clock.now();
+        let threshold = Duration::from_millis(min_idle_ms);
+        // "Expired beyond `min_idle_ms`" means `now >= deadline + threshold`.
+        // Phrasing it as an addition on the deadline (rather than a
+        // subtraction at `now`) avoids the `saturating_duration_since`
+        // pitfall where a deadline strictly in the future returns a
+        // zero gap and a `threshold == 0` would accept it.
+        let mut candidates: Vec<PendingDeliveryView> = self
+            .store
+            .pending_deliveries_for_queue(queue)
+            .into_iter()
+            .filter(|p| p.deadline + threshold <= now)
+            .collect();
+        // Stable ordering by deadline so the oldest-stuck-first invariant
+        // from `queue_delivery::claim_messages` carries through.
+        candidates.sort_by_key(|p| p.deadline);
+
+        let mut claimed = Vec::with_capacity(candidates.len());
+        for entry in candidates {
+            let bumped = self.store.bump_attempt(txn, &entry.delivery_id)?;
+            let max_attempts = self
+                .store
+                .read_max_attempts(&bumped.queue, bumped.message_id);
+            if bumped.attempts > max_attempts {
+                match &self.config.dlq_target {
+                    Some(target) => {
+                        let payload = self
+                            .store
+                            .read_pending_payload(&entry.delivery_id)
+                            .ok_or_else(|| {
+                                QueueStoreError::UnknownDelivery(entry.delivery_id.clone())
+                            })?;
+                        self.retire(txn, &entry.delivery_id)?;
+                        self.store.enqueue_dlq(txn, target, payload)?;
+                        self.record(RetirementOutcome::MovedToDlq(target.clone()));
+                    }
+                    None => {
+                        self.retire(txn, &entry.delivery_id)?;
+                        self.record(RetirementOutcome::Dropped);
+                    }
+                }
+                continue;
+            }
+            // Refresh the lock on the same (queue, message_id, group) key.
+            // `mark_pending` is idempotent on that key — it returns the
+            // existing delivery_id and refreshes the deadline.
+            let new_deadline = now + self.config.lock_duration;
+            self.store
+                .mark_pending(txn, &entry.queue, entry.message_id, &entry.group, new_deadline)?;
+            claimed.push(entry.delivery_id);
+        }
+        Ok(claimed)
     }
 
     /// Atomically remove every pending and available message from
@@ -1060,6 +1141,201 @@ mod tests {
         // Neither group can deliver anything afterwards.
         assert!(lc.deliver(&QueueTxn::new(), "q", "subs.a", 5).unwrap().is_empty());
         assert!(lc.deliver(&QueueTxn::new(), "q", "subs.b", 5).unwrap().is_empty());
+    }
+
+    // Issue #603 — claim (steal-after-min-idle, bumps attempt).
+
+    fn lifecycle_with_clock(
+        store: InMemoryQueueStore,
+        cfg: LifecycleConfig,
+        clock: Arc<TestClock>,
+    ) -> QueueLifecycle<InMemoryQueueStore> {
+        QueueLifecycle::with_clock(store, cfg, clock as Arc<dyn Clock>)
+    }
+
+    #[test]
+    fn claim_on_queue_with_no_pending_returns_empty() {
+        let lc = lifecycle(store_with(&[(1, "a")]));
+        let claimed = lc.claim("q", "consumer-x", 0, &QueueTxn::new()).expect("claim");
+        assert!(claimed.is_empty());
+        // Unknown queue is also empty.
+        let claimed = lc.claim("missing", "c", 0, &QueueTxn::new()).expect("claim");
+        assert!(claimed.is_empty());
+    }
+
+    #[test]
+    fn claim_on_idle_but_not_expired_returns_empty() {
+        // Deliver a message, advance the clock slightly (well within the
+        // lock_duration), and request `min_idle_ms=0`. Even with a zero
+        // threshold the lock is *not yet* expired (deadline is in the
+        // future), so no candidate is selected.
+        let clock = Arc::new(TestClock::new());
+        let store = store_with(&[(1, "payload")]);
+        let lc = lifecycle_with_clock(
+            store,
+            LifecycleConfig {
+                lock_duration: Duration::from_secs(30),
+                ..LifecycleConfig::default()
+            },
+            clock.clone(),
+        );
+
+        let d = lc.deliver(&QueueTxn::new(), "q", "workers", 1).expect("deliver");
+        let original_deadline = lc.store_ref().read_lock_deadline(&d[0].delivery_id);
+
+        clock.advance(Duration::from_secs(5));
+        let claimed = lc.claim("q", "consumer-x", 0, &QueueTxn::new()).expect("claim");
+        assert!(claimed.is_empty(), "lock still held; nothing to claim");
+
+        // Deadline unchanged, no tombstone written.
+        assert_eq!(lc.store_ref().read_lock_deadline(&d[0].delivery_id), original_deadline);
+    }
+
+    #[test]
+    fn claim_on_expired_delivery_reassigns_and_bumps_attempt() {
+        let clock = Arc::new(TestClock::new());
+        let store = store_with(&[(1, "payload")]);
+        store.seed_max_attempts("q", 1, 10);
+        let lc = lifecycle_with_clock(
+            store,
+            LifecycleConfig {
+                lock_duration: Duration::from_millis(100),
+                ..LifecycleConfig::default()
+            },
+            clock.clone(),
+        );
+
+        let d = lc.deliver(&QueueTxn::new(), "q", "workers", 1).expect("deliver");
+        let id = d[0].delivery_id.clone();
+        let pre_deadline = lc.store_ref().read_lock_deadline(&id).expect("pre-deadline");
+
+        // Cross the lock deadline plus the requested idle threshold.
+        clock.advance(Duration::from_millis(500));
+        let t = QueueTxn::new();
+        let claimed = lc.claim("q", "consumer-x", 100, &t).expect("claim");
+        assert_eq!(claimed, vec![id.clone()], "expired delivery must be claimed");
+
+        // Deadline refreshed forward.
+        let post_deadline = lc.store_ref().read_lock_deadline(&id).expect("post-deadline");
+        assert!(post_deadline > pre_deadline, "deadline must move forward on claim");
+
+        // Attempt counter bumped to 1 — observable by tripping
+        // `read_max_attempts` later. Easiest check: another claim with
+        // max_attempts=10 still succeeds; with max_attempts=1 (re-seed
+        // and re-expire) the second claim would route through retirement
+        // (covered in the next test).
+
+        // claim does not write a tombstone on the happy path.
+        assert!(t.recorded_tombstones().is_empty(), "happy-path claim must not tombstone");
+    }
+
+    #[test]
+    fn claim_that_exhausts_attempts_retires_delivery() {
+        // max_attempts=1: the first claim's bump_attempt pushes attempts
+        // to 1, which is NOT > max — so the claim succeeds. The second
+        // claim's bump pushes attempts to 2, which IS > max — so it
+        // routes through nack-style retirement (drop, since no DLQ).
+        let clock = Arc::new(TestClock::new());
+        let store = store_with(&[(1, "payload")]);
+        store.seed_max_attempts("q", 1, 1);
+        let lc = lifecycle_with_clock(
+            store,
+            LifecycleConfig {
+                lock_duration: Duration::from_millis(100),
+                ..LifecycleConfig::default()
+            },
+            clock.clone(),
+        );
+
+        let d = lc.deliver(&QueueTxn::new(), "q", "workers", 1).expect("deliver");
+        let id = d[0].delivery_id.clone();
+
+        // First claim — within budget, reassigns.
+        clock.advance(Duration::from_millis(500));
+        let c1 = lc.claim("q", "consumer-x", 100, &QueueTxn::new()).expect("claim-1");
+        assert_eq!(c1, vec![id.clone()]);
+
+        // Second claim — over budget, retired (dropped).
+        clock.advance(Duration::from_millis(500));
+        let t = QueueTxn::new();
+        let c2 = lc.claim("q", "consumer-y", 100, &t).expect("claim-2");
+        assert!(c2.is_empty(), "exhausted delivery must not be returned");
+
+        // WORK-mode retirement tombstones the underlying message.
+        assert!(
+            lc.store_ref().read_lock_deadline(&id).is_none(),
+            "pending row must be gone after retirement",
+        );
+        assert_eq!(
+            lc.recorded_outcomes(),
+            vec![RetirementOutcome::Dropped],
+        );
+        // ack_pending records one tombstone per retired message.
+        assert_eq!(t.recorded_tombstones().len(), 1);
+    }
+
+    #[test]
+    fn claim_that_exhausts_attempts_with_dlq_target_promotes_to_dlq() {
+        let clock = Arc::new(TestClock::new());
+        let store = store_with(&[(1, "payload")]);
+        store.seed_max_attempts("q", 1, 1);
+        let lc = lifecycle_with_clock(
+            store,
+            LifecycleConfig {
+                lock_duration: Duration::from_millis(100),
+                dlq_target: Some("q.dlq".to_string()),
+                ..LifecycleConfig::default()
+            },
+            clock.clone(),
+        );
+
+        let d = lc.deliver(&QueueTxn::new(), "q", "workers", 1).expect("deliver");
+        let _id = d[0].delivery_id.clone();
+
+        clock.advance(Duration::from_millis(500));
+        let _ = lc.claim("q", "consumer-x", 100, &QueueTxn::new()).expect("claim-1");
+
+        clock.advance(Duration::from_millis(500));
+        let c2 = lc.claim("q", "consumer-y", 100, &QueueTxn::new()).expect("claim-2");
+        assert!(c2.is_empty());
+
+        assert_eq!(
+            lc.recorded_outcomes(),
+            vec![RetirementOutcome::MovedToDlq("q.dlq".to_string())],
+        );
+        let dlq = lc.store_ref().dlq_snapshot();
+        assert_eq!(dlq.len(), 1);
+        assert_eq!(dlq[0].target, "q.dlq");
+        assert_eq!(dlq[0].original, Value::text("payload"));
+    }
+
+    #[test]
+    fn claim_respects_min_idle_threshold_per_delivery() {
+        // Two messages delivered at the same instant. After expiry, advance
+        // by an amount that satisfies min_idle_ms=0 but not min_idle_ms=200.
+        let clock = Arc::new(TestClock::new());
+        let store = store_with(&[(1, "a"), (2, "b")]);
+        let lc = lifecycle_with_clock(
+            store,
+            LifecycleConfig {
+                lock_duration: Duration::from_millis(100),
+                ..LifecycleConfig::default()
+            },
+            clock.clone(),
+        );
+
+        let d = lc.deliver(&QueueTxn::new(), "q", "workers", 2).expect("deliver");
+        assert_eq!(d.len(), 2);
+
+        // Cross the deadline by 50ms — locks are expired, but not by
+        // 200ms beyond expiry.
+        clock.advance(Duration::from_millis(150));
+        let none = lc.claim("q", "consumer-x", 200, &QueueTxn::new()).expect("strict");
+        assert!(none.is_empty(), "min_idle 200ms not yet satisfied past deadline");
+
+        // Loosen the threshold — both deliveries claim.
+        let both = lc.claim("q", "consumer-x", 0, &QueueTxn::new()).expect("loose");
+        assert_eq!(both.len(), 2);
     }
 
     #[test]
