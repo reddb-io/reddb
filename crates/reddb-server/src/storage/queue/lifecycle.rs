@@ -231,6 +231,16 @@ pub(crate) trait QueueStore {
     /// Implementations must be idempotent — calling twice with the same
     /// `now` is a no-op on the second call.
     fn reclaim_expired(&self, txn: &QueueTxn, queue: &str, now: Instant) -> Result<()>;
+
+    /// Atomically remove every message on `queue` — both available rows
+    /// and currently-pending ones. Records a tombstone per removed
+    /// `(queue, message_id)` through `txn.record_pending_tombstone(...)`,
+    /// in the same shape as `ack_pending`. Returns the count of message
+    /// ids purged. Mirrors `queue_delivery::purge_messages` semantics:
+    /// every pending row, every available row, and the underlying
+    /// payloads all go away. Failure modes propagate; no partial purge
+    /// is observable to readers after a successful return.
+    fn purge_queue(&self, txn: &QueueTxn, queue: &str) -> Result<usize>;
 }
 
 #[derive(Debug, Clone)]
@@ -576,6 +586,63 @@ impl QueueStore for InMemoryQueueStore {
             }
         }
         Ok(())
+    }
+
+    fn purge_queue(&self, txn: &QueueTxn, queue: &str) -> Result<usize> {
+        // Collect the set of message ids first so the tombstones we
+        // record line up with the rows we actually remove. The unique
+        // set is the union of `queues[queue]` (everything ever pushed
+        // and not yet ack-removed) and any currently-pending row that
+        // references this queue — that second source catches the edge
+        // case where a pending row outlived its `queues` entry (which
+        // the in-memory fake never produces today, but the trait
+        // surface is total against either ordering).
+        let mut message_ids: Vec<MessageId> = {
+            let state = self.state.lock().expect("state poisoned");
+            let mut ids: Vec<MessageId> = state
+                .queues
+                .get(queue)
+                .map(|v| v.clone())
+                .unwrap_or_default();
+            for pending in state.pending.values() {
+                if pending.queue == queue && !ids.contains(&pending.message_id) {
+                    ids.push(pending.message_id);
+                }
+            }
+            ids
+        };
+        message_ids.sort_unstable();
+        message_ids.dedup();
+
+        {
+            let mut state = self.state.lock().expect("state poisoned");
+            // Drop every pending row referencing this queue, plus its
+            // attempts/by_key/acked sibling entries.
+            let pending_to_remove: Vec<DeliveryId> = state
+                .pending
+                .iter()
+                .filter(|(_, p)| p.queue == queue)
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in pending_to_remove {
+                if let Some(entry) = state.pending.remove(&id) {
+                    let key = (entry.queue, entry.message_id, entry.group);
+                    state.by_key.remove(&key);
+                    state.attempts.remove(&key);
+                }
+            }
+            state.acked.retain(|(q, _, _)| q != queue);
+            // Drop the available rows and their payloads.
+            state.queues.remove(queue);
+            state.payloads.retain(|(q, _), _| q != queue);
+        }
+
+        // Tombstones recorded after the state mutation, mirroring the
+        // ack_pending shape (one tombstone per removed message_id).
+        for message_id in &message_ids {
+            txn.record_pending_tombstone(queue, *message_id);
+        }
+        Ok(message_ids.len())
     }
 }
 

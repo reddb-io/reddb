@@ -350,6 +350,13 @@ impl QueueStore for ReplicaQueueStore {
         self.read_message(&row.queue, row.message_id)
     }
 
+    fn purge_queue(&self, _txn: &QueueTxn, _queue: &str) -> Result<usize> {
+        // Replica purge happens by replaying the primary's logical-WAL
+        // delete records — never invoked directly. Fail closed so a
+        // misrouted call is loud rather than silently no-op.
+        Err(QueueStoreError::ReplicaImmutable)
+    }
+
     fn reclaim_expired(&self, _txn: &QueueTxn, _queue: &str, _now: Instant) -> Result<()> {
         // Replica reclaim happens by replaying the primary's release
         // change records — never invoked directly. Fail closed for the
@@ -512,6 +519,10 @@ mod tests {
         ));
         assert!(matches!(
             replica.reclaim_expired(&t, "q", Instant::now()).unwrap_err(),
+            QueueStoreError::ReplicaImmutable
+        ));
+        assert!(matches!(
+            replica.purge_queue(&t, "q").unwrap_err(),
             QueueStoreError::ReplicaImmutable
         ));
         // Replica txn must remain untouched across reject paths.

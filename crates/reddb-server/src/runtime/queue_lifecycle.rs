@@ -332,6 +332,16 @@ impl<S: QueueStore> QueueLifecycle<S> {
         self.store.read_pending_payload(delivery_id)
     }
 
+    /// Atomically remove every pending and available message from
+    /// `queue`. Records one tombstone per removed message id via
+    /// `txn.record_pending_tombstone(...)`, in the same shape
+    /// `ack_pending` uses. Returns the count of message ids purged.
+    /// Mirrors `queue_delivery::purge_messages` semantics; failure modes
+    /// propagate and no partial purge is observable.
+    pub(crate) fn purge(&self, queue: &str, txn: &QueueTxn) -> Result<usize> {
+        self.store.purge_queue(txn, queue)
+    }
+
     fn record(&self, outcome: RetirementOutcome) {
         self.outcomes
             .lock()
@@ -379,7 +389,7 @@ impl Clock for TestClock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::queue::lifecycle::InMemoryQueueStore;
+    use crate::storage::queue::lifecycle::{InMemoryQueueStore, TombstoneRecord};
 
     fn store_with(messages: &[(MessageId, &str)]) -> InMemoryQueueStore {
         let store = InMemoryQueueStore::new();
@@ -948,6 +958,108 @@ mod tests {
     fn read_returns_none_for_unknown_delivery() {
         let lc = lifecycle(store_with(&[(1, "p")]));
         assert!(lc.read("does-not-exist", &QueueTxn::new()).is_none());
+    }
+
+    // Issue #604 — purge (atomic remove-all, txn-context tombstones).
+
+    #[test]
+    fn purge_on_empty_queue_returns_zero_and_records_no_tombstones() {
+        let store = InMemoryQueueStore::new();
+        let lc = QueueLifecycle::new(store, LifecycleConfig::default());
+        let t = QueueTxn::new();
+        let n = lc.purge("missing", &t).expect("purge unknown");
+        assert_eq!(n, 0);
+        assert!(t.recorded_tombstones().is_empty());
+    }
+
+    #[test]
+    fn purge_on_seeded_queue_with_no_pending_removes_all_and_returns_count() {
+        let lc = lifecycle(store_with(&[(1, "a"), (2, "b"), (3, "c")]));
+        let t = QueueTxn::new();
+
+        let n = lc.purge("q", &t).expect("purge");
+        assert_eq!(n, 3);
+
+        // Available pool is empty afterwards.
+        assert!(
+            lc.store_ref().available_messages("q", QueueSide::Left).is_empty(),
+            "no available messages after purge",
+        );
+        // Payloads are gone too — read_message returns None.
+        for id in [1u64, 2, 3] {
+            assert!(
+                lc.store_ref().read_message("q", id).is_none(),
+                "message {id} payload should be purged",
+            );
+        }
+
+        // One tombstone per removed message id, ordered by message id.
+        assert_eq!(
+            t.recorded_tombstones(),
+            vec![
+                TombstoneRecord { queue: "q".to_string(), message_id: 1 },
+                TombstoneRecord { queue: "q".to_string(), message_id: 2 },
+                TombstoneRecord { queue: "q".to_string(), message_id: 3 },
+            ],
+        );
+    }
+
+    #[test]
+    fn purge_removes_pending_rows_and_records_tombstone_per_message() {
+        // Two messages, one of them currently pending under a WORK
+        // delivery — purge must clean up the pending row alongside the
+        // available row, and tombstone both.
+        let lc = lifecycle(store_with(&[(1, "first"), (2, "second")]));
+        let delivered = lc.deliver(&QueueTxn::new(), "q", "workers", 1).expect("deliver");
+        assert_eq!(delivered.len(), 1);
+        let pending_id = delivered[0].delivery_id.clone();
+
+        let t = QueueTxn::new();
+        let n = lc.purge("q", &t).expect("purge");
+        assert_eq!(n, 2);
+
+        // No pending row survives (lock deadline lookup returns None).
+        assert!(
+            lc.store_ref().read_lock_deadline(&pending_id).is_none(),
+            "pending row should be gone after purge",
+        );
+        // Re-purge is idempotent — empty queue + no new tombstones.
+        let t2 = QueueTxn::new();
+        assert_eq!(lc.purge("q", &t2).expect("re-purge"), 0);
+        assert!(t2.recorded_tombstones().is_empty());
+
+        assert_eq!(
+            t.recorded_tombstones(),
+            vec![
+                TombstoneRecord { queue: "q".to_string(), message_id: 1 },
+                TombstoneRecord { queue: "q".to_string(), message_id: 2 },
+            ],
+        );
+    }
+
+    #[test]
+    fn purge_on_fanout_queue_tombstones_each_message_once() {
+        // FANOUT acceptance: two groups each holding a pending row for
+        // the same message must produce exactly one tombstone per
+        // message id after purge, not one per pending row.
+        let lc = QueueLifecycle::new(store_with(&[(1, "shared"), (2, "other")]), fanout_config());
+        let _a = lc.deliver(&QueueTxn::new(), "q", "subs.a", 2).expect("deliver a");
+        let _b = lc.deliver(&QueueTxn::new(), "q", "subs.b", 2).expect("deliver b");
+
+        let t = QueueTxn::new();
+        let n = lc.purge("q", &t).expect("purge");
+        assert_eq!(n, 2, "two unique message ids — not four pending rows");
+        assert_eq!(
+            t.recorded_tombstones(),
+            vec![
+                TombstoneRecord { queue: "q".to_string(), message_id: 1 },
+                TombstoneRecord { queue: "q".to_string(), message_id: 2 },
+            ],
+        );
+
+        // Neither group can deliver anything afterwards.
+        assert!(lc.deliver(&QueueTxn::new(), "q", "subs.a", 5).unwrap().is_empty());
+        assert!(lc.deliver(&QueueTxn::new(), "q", "subs.b", 5).unwrap().is_empty());
     }
 
     #[test]
