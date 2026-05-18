@@ -35,7 +35,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::storage::queue::lifecycle::{
-    DeliveryId, MessageId, QueueSide, QueueStore, QueueStoreError, Result,
+    BumpedAttempt, DeliveryId, MessageId, QueueSide, QueueStore, QueueStoreError, Result,
+    DEFAULT_READ_MAX_ATTEMPTS,
 };
 use crate::storage::schema::Value;
 use crate::storage::unified::entity::RowData;
@@ -299,8 +300,27 @@ impl QueueStore for ReplicaQueueStore {
         Err(QueueStoreError::ReplicaImmutable)
     }
 
-    fn bump_attempt(&self, _delivery_id: &str) -> Result<u32> {
+    fn bump_attempt(&self, _delivery_id: &str) -> Result<BumpedAttempt> {
         Err(QueueStoreError::ReplicaImmutable)
+    }
+
+    fn read_max_attempts(&self, queue: &str, message_id: MessageId) -> u32 {
+        // Mirrors the primary path: replica's `UnifiedStore` carries the
+        // same `QueueMessageData` (replayed bit-for-bit by the
+        // logical-WAL applier), so the per-message budget is readable
+        // through the same lookup. No mutation, no CDC dependency
+        // beyond the original push having been replayed.
+        let store = self.store();
+        let Some(manager) = store.get_collection(queue) else {
+            return DEFAULT_READ_MAX_ATTEMPTS;
+        };
+        let Some(entity) = manager.get(EntityId::new(message_id)) else {
+            return DEFAULT_READ_MAX_ATTEMPTS;
+        };
+        match entity.data {
+            EntityData::QueueMessage(data) => data.max_attempts,
+            _ => DEFAULT_READ_MAX_ATTEMPTS,
+        }
     }
 
     fn enqueue_dlq(&self, _dlq_target: &str, _original: Value) -> Result<()> {
