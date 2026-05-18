@@ -131,5 +131,5 @@ insta = { version = "1", features = ["filters"] }
 regex = "1"
 toml = "0.8"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
