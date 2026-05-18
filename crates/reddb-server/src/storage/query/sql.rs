@@ -2326,9 +2326,36 @@ impl<'a> Parser<'a> {
                         self, "table",
                     )?))
                 } else if self.consume_ident_ci("QUEUES")? {
-                    Ok(SqlCommand::Select(parse_show_collections_by_model(
-                        self, "queue",
-                    )?))
+                    // Issue #535 — `SHOW QUEUES` desugars to the
+                    // `red.queues` virtual table (queue-shaped
+                    // columns), not the filtered `red.collections`
+                    // view. `INCLUDING INTERNAL` mirrors the
+                    // `SHOW COLLECTIONS` opt-in: without it, DLQ
+                    // targets and other auto-created queues are
+                    // hidden via the `internal = false` filter.
+                    let mut query = TableQuery::new("red.queues");
+                    let include_internal = if self.consume_ident_ci("INCLUDING")? {
+                        if !self.consume_ident_ci("INTERNAL")? {
+                            return Err(ParseError::expected(
+                                vec!["INTERNAL"],
+                                self.peek(),
+                                self.position(),
+                            ));
+                        }
+                        true
+                    } else {
+                        false
+                    };
+                    self.parse_table_clauses(&mut query)?;
+                    if !include_internal {
+                        let hide_internal = Filter::Compare {
+                            field: FieldRef::column("", "internal"),
+                            op: CompareOp::Eq,
+                            value: Value::Boolean(false),
+                        };
+                        add_table_filter(&mut query, hide_internal);
+                    }
+                    Ok(SqlCommand::Select(query))
                 } else if self.consume(&Token::Vectors)? || self.consume_ident_ci("VECTORS")? {
                     Ok(SqlCommand::Select(parse_show_collections_by_model(
                         self, "vector",

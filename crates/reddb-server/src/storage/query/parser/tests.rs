@@ -111,17 +111,17 @@ fn test_parse_create_graph_document_and_collection_forms() {
     assert!(parse("CREATE COLLECTION sc KIND graph SIGNED_BY ('deadbeef')").is_err());
 
     // Non-hex char is rejected at parse-time
-    let bad = format!("CREATE COLLECTION sc KIND graph SIGNED_BY ('{}')", "g".repeat(64));
+    let bad = format!(
+        "CREATE COLLECTION sc KIND graph SIGNED_BY ('{}')",
+        "g".repeat(64)
+    );
     assert!(parse(&bad).is_err());
 
     // Issue #522: ALTER COLLECTION ... ADD|REVOKE SIGNER '<hex>' rides
     // the AlterTable AST. Both spellings (TABLE and COLLECTION) are
     // accepted by the alter-statement entry point.
     let pk_add = "44".repeat(32);
-    let add = parse(&format!(
-        "ALTER COLLECTION sc ADD SIGNER '{pk_add}'"
-    ))
-    .unwrap();
+    let add = parse(&format!("ALTER COLLECTION sc ADD SIGNER '{pk_add}'")).unwrap();
     let QueryExpr::AlterTable(alter) = add else {
         panic!("Expected AlterTable for ALTER COLLECTION ADD SIGNER");
     };
@@ -134,10 +134,7 @@ fn test_parse_create_graph_document_and_collection_forms() {
         other => panic!("expected AddSigner, got {other:?}"),
     }
     let pk_rev = "55".repeat(32);
-    let rev = parse(&format!(
-        "ALTER COLLECTION sc REVOKE SIGNER '{pk_rev}'"
-    ))
-    .unwrap();
+    let rev = parse(&format!("ALTER COLLECTION sc REVOKE SIGNER '{pk_rev}'")).unwrap();
     let QueryExpr::AlterTable(alter) = rev else {
         panic!("Expected AlterTable for ALTER COLLECTION REVOKE SIGNER");
     };
@@ -2129,7 +2126,6 @@ fn test_parse_show_collections_where_desugars_with_filter() {
 fn test_parse_typed_show_desugars_to_red_collections_model_filter() {
     for (input, model) in [
         ("SHOW TABLES", "table"),
-        ("SHOW QUEUES", "queue"),
         ("SHOW VECTORS", "vector"),
         ("SHOW DOCUMENTS", "document"),
         ("SHOW TIMESERIES", "timeseries"),
@@ -2155,6 +2151,47 @@ fn test_parse_typed_show_desugars_to_red_collections_model_filter() {
         } else {
             panic!("Expected Table for {input}");
         }
+    }
+}
+
+#[test]
+fn test_parse_show_queues_desugars_to_red_queues_select() {
+    // Issue #535 — `SHOW QUEUES` repoints from filtered
+    // `red.collections` to the queue-shaped `red.queues` virtual
+    // table. By default, internal queues (DLQ targets, auto-event
+    // queues) are hidden via the `internal = false` filter.
+    let query = parse("SHOW QUEUES").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.queues");
+        assert!(matches!(
+            tq.filter,
+            Some(Filter::Compare {
+                field: FieldRef::TableColumn { ref column, .. },
+                op: CompareOp::Eq,
+                value: crate::storage::schema::Value::Boolean(false),
+            }) if column == "internal"
+        ));
+    } else {
+        panic!("Expected Table for SHOW QUEUES");
+    }
+}
+
+#[test]
+fn test_parse_show_queues_including_internal_omits_internal_filter() {
+    // Issue #535 — `INCLUDING INTERNAL` opt-in surfaces internal
+    // queues (e.g. DLQ targets declared via `WITH DLQ`) in the
+    // result set, mirroring the `SHOW COLLECTIONS INCLUDING
+    // INTERNAL` contract.
+    let query = parse("SHOW QUEUES INCLUDING INTERNAL").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.queues");
+        assert!(
+            tq.filter.is_none(),
+            "INCLUDING INTERNAL must not add an internal filter, got: {:?}",
+            tq.filter
+        );
+    } else {
+        panic!("Expected Table for SHOW QUEUES INCLUDING INTERNAL");
     }
 }
 
@@ -4175,10 +4212,9 @@ fn test_parse_create_timeseries_with_session_clause() {
     // Positive: WITH SESSION_KEY <col> SESSION_GAP <duration> parses
     // and lands both fields on the AST. Combines with RETENTION to
     // exercise the in-loop ordering against the other clauses.
-    let query = parse(
-        "CREATE TIMESERIES events RETENTION 7 d WITH SESSION_KEY user_id SESSION_GAP 30 m",
-    )
-    .unwrap();
+    let query =
+        parse("CREATE TIMESERIES events RETENTION 7 d WITH SESSION_KEY user_id SESSION_GAP 30 m")
+            .unwrap();
     let QueryExpr::CreateTimeSeries(ts) = query else {
         panic!("Expected CreateTimeSeriesQuery");
     };
@@ -4230,7 +4266,10 @@ fn test_parse_create_timeseries_with_session_clause() {
         "CREATE QUEUE jobs WITH SESSION_KEY user_id SESSION_GAP 30 m",
         "CREATE COLLECTION rooms KIND blockchain WITH SESSION_KEY user_id SESSION_GAP 30 m",
     ] {
-        assert!(parse(sql).is_err(), "{sql} should not parse on non-timeseries");
+        assert!(
+            parse(sql).is_err(),
+            "{sql} should not parse on non-timeseries"
+        );
     }
 }
 
@@ -5613,10 +5652,8 @@ fn test_parse_view_ddl() {
 #[test]
 fn test_parse_create_materialized_view_refresh_every() {
     // Seconds
-    if let QueryExpr::CreateView(q) = parse(
-        "CREATE MATERIALIZED VIEW daily AS SELECT id FROM t REFRESH EVERY 5 s",
-    )
-    .unwrap()
+    if let QueryExpr::CreateView(q) =
+        parse("CREATE MATERIALIZED VIEW daily AS SELECT id FROM t REFRESH EVERY 5 s").unwrap()
     {
         assert!(q.materialized);
         assert_eq!(q.refresh_every_ms, Some(5_000));
@@ -5625,10 +5662,8 @@ fn test_parse_create_materialized_view_refresh_every() {
     }
 
     // Milliseconds
-    if let QueryExpr::CreateView(q) = parse(
-        "CREATE MATERIALIZED VIEW mv AS SELECT id FROM t REFRESH EVERY 250 ms",
-    )
-    .unwrap()
+    if let QueryExpr::CreateView(q) =
+        parse("CREATE MATERIALIZED VIEW mv AS SELECT id FROM t REFRESH EVERY 250 ms").unwrap()
     {
         assert_eq!(q.refresh_every_ms, Some(250));
     } else {
@@ -5636,10 +5671,8 @@ fn test_parse_create_materialized_view_refresh_every() {
     }
 
     // Minutes
-    if let QueryExpr::CreateView(q) = parse(
-        "CREATE MATERIALIZED VIEW mv AS SELECT id FROM t REFRESH EVERY 2 m",
-    )
-    .unwrap()
+    if let QueryExpr::CreateView(q) =
+        parse("CREATE MATERIALIZED VIEW mv AS SELECT id FROM t REFRESH EVERY 2 m").unwrap()
     {
         assert_eq!(q.refresh_every_ms, Some(120_000));
     } else {
