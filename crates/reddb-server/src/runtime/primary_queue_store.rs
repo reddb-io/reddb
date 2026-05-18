@@ -160,7 +160,7 @@ impl PrimaryQueueStore {
         .and_then(|(eid, row)| Some((eid, PendingRow::from_row(&row)?)))
     }
 
-    fn find_pending_by_key(
+    fn find_pending_entry_by_key(
         &self,
         queue: &str,
         message_id: MessageId,
@@ -384,6 +384,16 @@ impl QueueStore for PrimaryQueueStore {
         out
     }
 
+    fn find_pending_by_key(
+        &self,
+        queue: &str,
+        message_id: MessageId,
+        group: &str,
+    ) -> Option<DeliveryId> {
+        self.find_pending_entry_by_key(queue, message_id, group)
+            .map(|(_, row)| row.delivery_id)
+    }
+
     fn mark_pending(
         &self,
         queue: &str,
@@ -395,7 +405,9 @@ impl QueueStore for PrimaryQueueStore {
             return Err(QueueStoreError::UnknownQueue(queue.to_string()));
         }
         let deadline_ns = instant_to_unix_ns(deadline);
-        if let Some((entity_id, existing)) = self.find_pending_by_key(queue, message_id, group) {
+        if let Some((entity_id, existing)) =
+            self.find_pending_entry_by_key(queue, message_id, group)
+        {
             // Refresh deadline; same delivery_id.
             let store = self.store();
             let _ = store.delete(QUEUE_META_COLLECTION, entity_id);

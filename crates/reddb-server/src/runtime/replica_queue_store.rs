@@ -211,6 +211,25 @@ impl PendingRow {
     }
 }
 
+impl ReplicaQueueStore {
+    fn pending_delivery_for_key(
+        &self,
+        queue: &str,
+        message_id: MessageId,
+        group: &str,
+    ) -> Option<DeliveryId> {
+        self.meta_rows(|row| {
+            row_text(row, "kind").as_deref() == Some(KIND_PENDING_LC)
+                && row_text(row, "queue").as_deref() == Some(queue)
+                && row_text(row, "group").as_deref() == Some(group)
+                && row_u64(row, "message_id") == Some(message_id)
+        })
+        .into_iter()
+        .next()
+        .and_then(|row| row_text(&row, "delivery_id"))
+    }
+}
+
 impl QueueStore for ReplicaQueueStore {
     fn available_messages(&self, queue: &str, side: QueueSide) -> Vec<MessageId> {
         let pending: HashSet<MessageId> =
@@ -247,6 +266,15 @@ impl QueueStore for ReplicaQueueStore {
             out.reverse();
         }
         out
+    }
+
+    fn find_pending_by_key(
+        &self,
+        queue: &str,
+        message_id: MessageId,
+        group: &str,
+    ) -> Option<DeliveryId> {
+        self.pending_delivery_for_key(queue, message_id, group)
     }
 
     fn mark_pending(
@@ -598,6 +626,109 @@ mod tests {
             replica_store.ack_pending(gamma_delivery).unwrap_err(),
             QueueStoreError::ReplicaImmutable
         ));
+    }
+
+    #[test]
+    fn find_pending_by_key_conforms_across_primary_replica_inmemory() {
+        // Trait conformance for `QueueStore::find_pending_by_key` (issue
+        // #599 prereq A): all three adapters must answer the same shape
+        // of question — Some(delivery_id) for a seeded
+        // `(queue, message_id, group)` tuple, None for a tuple that
+        // was never marked pending. Delivery-id strings differ across
+        // adapters (each store mints its own), so each call is
+        // cross-checked against the id that adapter's `mark_pending`
+        // returned, not against the other adapters' ids.
+
+        use crate::storage::queue::lifecycle::InMemoryQueueStore;
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+
+        // 1. InMemory: direct mark_pending.
+        let mem = InMemoryQueueStore::new();
+        mem.seed_queue("q", vec![1, 2]);
+        let mem_id = mem.mark_pending("q", 1, "g", deadline).expect("mem mark");
+        assert_eq!(
+            mem.find_pending_by_key("q", 1, "g"),
+            Some(mem_id),
+            "in-memory: seeded tuple must resolve to its delivery_id",
+        );
+        assert_eq!(
+            mem.find_pending_by_key("q", 1, "other"),
+            None,
+            "in-memory: different group must miss",
+        );
+        assert_eq!(
+            mem.find_pending_by_key("q", 2, "g"),
+            None,
+            "in-memory: un-marked message must miss",
+        );
+
+        // 2. Primary: real adapter, mark_pending against the runtime.
+        let primary_rt = boot();
+        primary_rt
+            .execute_query("CREATE QUEUE qpk")
+            .expect("create");
+        push(&primary_rt, "qpk", "payload");
+        let primary_store = PrimaryQueueStore::new(primary_rt.clone());
+        let msg_id = primary_rt
+            .db()
+            .store()
+            .get_collection("qpk")
+            .and_then(|mgr| {
+                mgr.query_all(|e| matches!(e.kind, EntityKind::QueueMessage { .. }))
+                    .into_iter()
+                    .next()
+                    .map(|e| e.id.raw())
+            })
+            .expect("seeded message");
+        let primary_id = primary_store
+            .mark_pending("qpk", msg_id, "workers", deadline)
+            .expect("primary mark");
+        assert_eq!(
+            primary_store.find_pending_by_key("qpk", msg_id, "workers"),
+            Some(primary_id.clone()),
+            "primary: seeded tuple must resolve to its delivery_id",
+        );
+        assert_eq!(
+            primary_store.find_pending_by_key("qpk", msg_id, "other"),
+            None,
+            "primary: different group must miss",
+        );
+        assert_eq!(
+            primary_store.find_pending_by_key("qpk", msg_id + 999, "workers"),
+            None,
+            "primary: unknown message must miss",
+        );
+
+        // 3. Replica: replay the primary's meta + queue collections onto
+        //    a fresh runtime; same key must resolve to the same
+        //    delivery_id the primary minted (the CDC stream carries it
+        //    byte-for-byte).
+        let replica_rt = boot();
+        replica_rt
+            .execute_query("CREATE QUEUE qpk")
+            .expect("replica create");
+        replay_collections(
+            &primary_rt.db().store(),
+            &replica_rt.db(),
+            &["qpk", QUEUE_META_COLLECTION],
+        );
+        let replica_store = ReplicaQueueStore::new(replica_rt);
+        assert_eq!(
+            replica_store.find_pending_by_key("qpk", msg_id, "workers"),
+            Some(primary_id),
+            "replica: seeded tuple must resolve to the primary's delivery_id",
+        );
+        assert_eq!(
+            replica_store.find_pending_by_key("qpk", msg_id, "other"),
+            None,
+            "replica: different group must miss",
+        );
+        assert_eq!(
+            replica_store.find_pending_by_key("qpk", msg_id + 999, "workers"),
+            None,
+            "replica: unknown message must miss",
+        );
     }
 
     #[test]
