@@ -466,7 +466,7 @@ jobs:
           publish_one() {
             local crate="$1"
             echo "==> publish ${crate}@${VERSION}"
-            cargo publish --locked -p "$crate"
+            cargo publish --locked --allow-dirty -p "$crate"
           }
 
           publish_one reddb-io-wire
