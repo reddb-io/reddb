@@ -1,16 +1,19 @@
 //! Issue #577 — Analytics slice 2: `AnalyticsSchemaRegistry`.
+//! Issue #581 — Analytics slice 3: additive schema evolution +
+//! breaking-change rejection.
 //!
 //! Owns `(event_name, version) → schema_json` mappings persisted in
 //! `red_config`, validates payloads at insert time, and exposes the
 //! registered set for the `red.schema_registry` virtual table.
 //!
-//! Scope of this slice (per PRD #575): register a fresh schema
-//! (version 1 only), validate a payload against it, and list every
-//! registered schema. Schema evolution (v2+) and breaking-change
-//! detection live in a follow-up slice — re-registering the same
-//! `event_name` is rejected here as `SchemaError::AlreadyRegistered`
-//! so we cannot silently accept an evolution that the breaking-change
-//! checker hasn't reviewed yet.
+//! Re-registering an existing `event_name` is allowed iff the change
+//! is *additive*: new optional fields only (with or without default),
+//! widening string `maxLength`. Anything else — rename, retype, drop,
+//! optional→required, brand-new required field — is rejected with a
+//! typed `SchemaError::BreakingChange { offenders }` whose `offenders`
+//! list names every offending field together with the kind of break,
+//! so the caller can pick a new `event_name` rather than smuggle the
+//! incompatible change through the same one.
 //!
 //! Persistence shape: a single JSON document stored under
 //! `red.analytics.schema_registry.entries_json` as a Text value. It
@@ -52,15 +55,60 @@ pub struct SchemaEntry {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SchemaError {
-    /// `event_name` already has a registered schema. Slice 2 rejects
-    /// re-registration; schema evolution is owned by a follow-up
-    /// slice that ships the breaking-change checker.
-    AlreadyRegistered { event_name: String, existing_version: u32 },
     /// Schema text did not parse as JSON.
     InvalidSchemaJson(String),
     /// Schema parsed but did not match the expected
     /// `{type:"object", properties:{}, required:[]}` shape.
     InvalidSchemaShape(String),
+    /// A re-registration would break wire compatibility with the
+    /// previously registered version. `offenders` carries every
+    /// breaking change found in the diff so the caller can fix the
+    /// schema or pick a different `event_name` in one shot.
+    BreakingChange {
+        event_name: String,
+        previous_version: u32,
+        offenders: Vec<BreakingChange>,
+    },
+}
+
+/// One reason why a candidate schema is not an additive successor of
+/// the previous version. Used inside [`SchemaError::BreakingChange`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum BreakingChange {
+    /// A field present in the previous version disappeared, and a new
+    /// field of the same declared type appeared in the candidate.
+    /// Treated as a rename rather than two separate changes because
+    /// the caller almost certainly meant to rename — the error
+    /// message tells them which pair we paired up.
+    Rename { from: String, to: String },
+    /// A field changed declared `type`.
+    Retype {
+        field: String,
+        from: String,
+        to: String,
+    },
+    /// A previously declared field is gone in the candidate.
+    Drop { field: String },
+    /// A field that was previously optional became required, or a new
+    /// field appeared in the candidate's `required` list (existing
+    /// rows wouldn't carry it).
+    RequiredAdd { field: String },
+}
+
+impl BreakingChange {
+    /// Short, machine-parseable description used in error bodies.
+    pub fn describe(&self) -> String {
+        match self {
+            BreakingChange::Rename { from, to } => format!("renamed field '{from}' to '{to}'"),
+            BreakingChange::Retype { field, from, to } => {
+                format!("retyped field '{field}' from {from} to {to}")
+            }
+            BreakingChange::Drop { field } => format!("dropped field '{field}'"),
+            BreakingChange::RequiredAdd { field } => {
+                format!("required-add for field '{field}'")
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -248,30 +296,163 @@ fn validate_schema_shape(schema_json: &str) -> Result<JsonValue, SchemaError> {
     Ok(parsed)
 }
 
-/// Register a fresh schema for `event_name`. Slice 2 only supports
-/// the *first* registration — returns version `1` on success and
-/// `SchemaError::AlreadyRegistered` if any version already exists.
+/// Register a schema for `event_name`.
+///
+/// * First registration → returns version `1`.
+/// * Additive successor → returns `previous_version + 1`.
+/// * Anything else → `SchemaError::BreakingChange { offenders }` with
+///   every break the diff turned up so the caller can fix them all in
+///   one round-trip.
 pub fn register(
     store: &UnifiedStore,
     event_name: &str,
     schema_json: &str,
 ) -> Result<u32, SchemaError> {
-    let _shape = validate_schema_shape(schema_json)?;
+    let candidate = validate_schema_shape(schema_json)?;
     let mut entries = load(store);
-    if let Some(existing) = entries.iter().find(|e| e.event_name == event_name) {
-        return Err(SchemaError::AlreadyRegistered {
-            event_name: event_name.to_string(),
-            existing_version: existing.version,
-        });
-    }
+
+    let previous = entries
+        .iter()
+        .filter(|e| e.event_name == event_name)
+        .max_by_key(|e| e.version)
+        .cloned();
+
+    let next_version = match previous {
+        None => 1,
+        Some(prev) => {
+            let prev_schema = parse_json(&prev.schema_json).map_err(|e| {
+                SchemaError::InvalidSchemaShape(format!(
+                    "previously registered schema for {event_name} v{} is corrupt: {e}",
+                    prev.version
+                ))
+            })?;
+            let offenders = diff_for_breaking_changes(&prev_schema, &candidate);
+            if !offenders.is_empty() {
+                return Err(SchemaError::BreakingChange {
+                    event_name: event_name.to_string(),
+                    previous_version: prev.version,
+                    offenders,
+                });
+            }
+            prev.version + 1
+        }
+    };
+
     entries.push(SchemaEntry {
         event_name: event_name.to_string(),
-        version: 1,
+        version: next_version,
         schema_json: schema_json.to_string(),
         registered_at_ms: now_ms(),
     });
     save(store, &entries);
-    Ok(1)
+    Ok(next_version)
+}
+
+/// Extract `(field, type, is_required)` triples from a parsed schema
+/// object. `type` is the declared JSON-Schema `type` string for the
+/// property, or `""` when none was declared.
+fn schema_fields(schema: &JsonValue) -> Vec<(String, String, bool)> {
+    let Some(obj) = schema.as_object() else {
+        return Vec::new();
+    };
+    let properties: &[(String, JsonValue)] = obj
+        .iter()
+        .find(|(k, _)| k == "properties")
+        .and_then(|(_, v)| v.as_object())
+        .unwrap_or(&[]);
+    let required: Vec<&str> = obj
+        .iter()
+        .find(|(k, _)| k == "required")
+        .and_then(|(_, v)| v.as_array())
+        .map(|arr| arr.iter().filter_map(JsonValue::as_str).collect())
+        .unwrap_or_default();
+    properties
+        .iter()
+        .map(|(name, prop)| {
+            let ty = prop
+                .as_object()
+                .and_then(|entries| entries.iter().find(|(k, _)| k == "type"))
+                .and_then(|(_, v)| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let req = required.iter().any(|r| *r == name.as_str());
+            (name.clone(), ty, req)
+        })
+        .collect()
+}
+
+/// Diff a previously registered schema against a candidate and return
+/// every breaking change. Empty result == additive (or identical).
+///
+/// The diff intentionally pairs unmatched drops + adds of the same
+/// declared type as a [`BreakingChange::Rename`] — the caller is told
+/// which pair we associated so they can disambiguate if our guess is
+/// wrong.
+fn diff_for_breaking_changes(prev: &JsonValue, next: &JsonValue) -> Vec<BreakingChange> {
+    let prev_fields = schema_fields(prev);
+    let next_fields = schema_fields(next);
+
+    let mut breaks = Vec::new();
+    let mut dropped: Vec<(String, String)> = Vec::new();
+    // (name, type, required) for fields present in next but not prev.
+    let mut added: Vec<(String, String, bool)> = Vec::new();
+
+    for (name, prev_type, prev_required) in &prev_fields {
+        match next_fields.iter().find(|(n, _, _)| n == name) {
+            Some((_, next_type, next_required)) => {
+                if prev_type != next_type && !prev_type.is_empty() && !next_type.is_empty() {
+                    breaks.push(BreakingChange::Retype {
+                        field: name.clone(),
+                        from: prev_type.clone(),
+                        to: next_type.clone(),
+                    });
+                }
+                if !prev_required && *next_required {
+                    breaks.push(BreakingChange::RequiredAdd {
+                        field: name.clone(),
+                    });
+                }
+            }
+            None => dropped.push((name.clone(), prev_type.clone())),
+        }
+    }
+
+    for (name, next_type, next_required) in &next_fields {
+        if prev_fields.iter().any(|(n, _, _)| n == name) {
+            continue;
+        }
+        added.push((name.clone(), next_type.clone(), *next_required));
+    }
+
+    // Pair drops with same-typed additions first → rename. A paired
+    // addition is *not* also reported as RequiredAdd even if the new
+    // version flagged it required: the user's intent was a rename,
+    // and surfacing both would just be noise for the same root cause.
+    for (drop_name, drop_type) in dropped {
+        let paired = added
+            .iter()
+            .position(|(_, ty, _)| ty == &drop_type && !drop_type.is_empty());
+        match paired {
+            Some(idx) => {
+                let (add_name, _, _) = added.remove(idx);
+                breaks.push(BreakingChange::Rename {
+                    from: drop_name,
+                    to: add_name,
+                });
+            }
+            None => breaks.push(BreakingChange::Drop { field: drop_name }),
+        }
+    }
+
+    // Unpaired added fields: required-add is breaking, optional-add
+    // is additive (the happy path).
+    for (name, _, required) in added {
+        if required {
+            breaks.push(BreakingChange::RequiredAdd { field: name });
+        }
+    }
+
+    breaks
 }
 
 /// Return `(version, schema_json)` for the latest registered schema
@@ -468,20 +649,262 @@ mod tests {
     }
 
     #[test]
-    fn second_registration_same_event_is_rejected_in_slice_2() {
+    fn re_registering_identical_schema_bumps_to_next_version() {
+        // Slice 3 (#581): re-registering an identical schema is the
+        // degenerate additive case — no fields changed, so it must
+        // be accepted as v2.
         let s = store();
         register(&s, "page_view", PAGE_VIEW_SCHEMA).unwrap();
-        let err = register(&s, "page_view", PAGE_VIEW_SCHEMA).unwrap_err();
+        let v = register(&s, "page_view", PAGE_VIEW_SCHEMA).expect("identical is additive");
+        assert_eq!(v, 2);
+    }
+
+    // --- slice 3 (#581): additive evolution + breaking-change rejection ---
+
+    const PURCHASE_V1: &str =
+        r#"{"type":"object","properties":{"amount":{"type":"number"}},"required":["amount"]}"#;
+
+    #[test]
+    fn additive_optional_field_is_accepted_as_v2() {
+        let s = store();
+        register(&s, "purchase", PURCHASE_V1).unwrap();
+        let v2 = register(
+            &s,
+            "purchase",
+            r#"{"type":"object",
+                "properties":{"amount":{"type":"number"},
+                              "discount_code":{"type":"string"}},
+                "required":["amount"]}"#,
+        )
+        .expect("optional add is additive");
+        assert_eq!(v2, 2);
+        let (latest_v, _) = latest(&s, "purchase").unwrap();
+        assert_eq!(latest_v, 2);
+    }
+
+    #[test]
+    fn additive_optional_field_with_default_is_accepted() {
+        let s = store();
+        register(&s, "purchase", PURCHASE_V1).unwrap();
+        let v2 = register(
+            &s,
+            "purchase",
+            r#"{"type":"object",
+                "properties":{"amount":{"type":"number"},
+                              "currency":{"type":"string","default":"USD"}},
+                "required":["amount"]}"#,
+        )
+        .expect("optional add with default is additive");
+        assert_eq!(v2, 2);
+    }
+
+    #[test]
+    fn widening_string_max_length_is_accepted() {
+        let s = store();
+        register(
+            &s,
+            "ev",
+            r#"{"type":"object","properties":{"name":{"type":"string","maxLength":32}},"required":["name"]}"#,
+        )
+        .unwrap();
+        let v2 = register(
+            &s,
+            "ev",
+            r#"{"type":"object","properties":{"name":{"type":"string","maxLength":128}},"required":["name"]}"#,
+        )
+        .expect("widening maxLength is additive");
+        assert_eq!(v2, 2);
+    }
+
+    #[test]
+    fn breaking_rename_is_rejected() {
+        let s = store();
+        register(&s, "purchase", PURCHASE_V1).unwrap();
+        let err = register(
+            &s,
+            "purchase",
+            r#"{"type":"object","properties":{"total":{"type":"number"}},"required":["total"]}"#,
+        )
+        .unwrap_err();
         match err {
-            SchemaError::AlreadyRegistered {
+            SchemaError::BreakingChange {
                 event_name,
-                existing_version,
+                previous_version,
+                offenders,
             } => {
-                assert_eq!(event_name, "page_view");
-                assert_eq!(existing_version, 1);
+                assert_eq!(event_name, "purchase");
+                assert_eq!(previous_version, 1);
+                assert!(
+                    offenders.iter().any(|b| matches!(
+                        b,
+                        BreakingChange::Rename { from, to }
+                            if from == "amount" && to == "total"
+                    )),
+                    "expected Rename(amount->total), got {offenders:?}"
+                );
             }
-            other => panic!("expected AlreadyRegistered, got {other:?}"),
+            other => panic!("expected BreakingChange, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn breaking_retype_is_rejected() {
+        let s = store();
+        register(&s, "purchase", PURCHASE_V1).unwrap();
+        let err = register(
+            &s,
+            "purchase",
+            r#"{"type":"object","properties":{"amount":{"type":"string"}},"required":["amount"]}"#,
+        )
+        .unwrap_err();
+        let SchemaError::BreakingChange { offenders, .. } = err else {
+            panic!("expected BreakingChange");
+        };
+        assert!(offenders.iter().any(|b| matches!(
+            b,
+            BreakingChange::Retype { field, from, to }
+                if field == "amount" && from == "number" && to == "string"
+        )));
+    }
+
+    #[test]
+    fn breaking_drop_is_rejected() {
+        let s = store();
+        register(
+            &s,
+            "ev",
+            r#"{"type":"object",
+                "properties":{"a":{"type":"number"},"b":{"type":"boolean"}},
+                "required":["a"]}"#,
+        )
+        .unwrap();
+        let err = register(
+            &s,
+            "ev",
+            r#"{"type":"object","properties":{"a":{"type":"number"}},"required":["a"]}"#,
+        )
+        .unwrap_err();
+        let SchemaError::BreakingChange { offenders, .. } = err else {
+            panic!("expected BreakingChange");
+        };
+        assert!(offenders
+            .iter()
+            .any(|b| matches!(b, BreakingChange::Drop { field } if field == "b")));
+    }
+
+    #[test]
+    fn breaking_optional_to_required_is_rejected() {
+        let s = store();
+        register(
+            &s,
+            "ev",
+            r#"{"type":"object",
+                "properties":{"a":{"type":"number"},"b":{"type":"string"}},
+                "required":["a"]}"#,
+        )
+        .unwrap();
+        let err = register(
+            &s,
+            "ev",
+            r#"{"type":"object",
+                "properties":{"a":{"type":"number"},"b":{"type":"string"}},
+                "required":["a","b"]}"#,
+        )
+        .unwrap_err();
+        let SchemaError::BreakingChange { offenders, .. } = err else {
+            panic!("expected BreakingChange");
+        };
+        assert!(offenders
+            .iter()
+            .any(|b| matches!(b, BreakingChange::RequiredAdd { field } if field == "b")));
+    }
+
+    #[test]
+    fn multi_field_break_reports_every_offender() {
+        let s = store();
+        register(
+            &s,
+            "ev",
+            r#"{"type":"object",
+                "properties":{"a":{"type":"number"},
+                              "b":{"type":"string"},
+                              "c":{"type":"boolean"}},
+                "required":["a"]}"#,
+        )
+        .unwrap();
+        // Retype `a` (number → string), drop `c`, and add brand-new
+        // required field `d`. Three independent breaks in one diff.
+        let err = register(
+            &s,
+            "ev",
+            r#"{"type":"object",
+                "properties":{"a":{"type":"string"},
+                              "b":{"type":"string"},
+                              "d":{"type":"integer"}},
+                "required":["a","d"]}"#,
+        )
+        .unwrap_err();
+        let SchemaError::BreakingChange { offenders, .. } = err else {
+            panic!("expected BreakingChange");
+        };
+        assert!(offenders
+            .iter()
+            .any(|b| matches!(b, BreakingChange::Retype { field, .. } if field == "a")));
+        assert!(offenders
+            .iter()
+            .any(|b| matches!(b, BreakingChange::Drop { field } if field == "c")));
+        assert!(offenders
+            .iter()
+            .any(|b| matches!(b, BreakingChange::RequiredAdd { field } if field == "d")));
+    }
+
+    #[test]
+    fn validate_resolves_to_latest_version_after_evolution() {
+        // After an additive evolution, validate() must use v2's
+        // strict-properties set — a payload using only v1 fields
+        // still passes; a payload using v2's new optional field
+        // also passes; an unknown field still rejects.
+        let s = store();
+        register(&s, "purchase", PURCHASE_V1).unwrap();
+        register(
+            &s,
+            "purchase",
+            r#"{"type":"object",
+                "properties":{"amount":{"type":"number"},
+                              "discount_code":{"type":"string"}},
+                "required":["amount"]}"#,
+        )
+        .unwrap();
+        validate(&s, "purchase", r#"{"amount":1.0}"#).expect("v1-shape still valid");
+        validate(&s, "purchase", r#"{"amount":1.0,"discount_code":"X"}"#)
+            .expect("v2-only field accepted");
+        let err = validate(&s, "purchase", r#"{"amount":1.0,"mystery":1}"#).unwrap_err();
+        assert!(matches!(err, ValidationError::UnknownField { version, .. } if version == 2));
+    }
+
+    #[test]
+    fn list_returns_every_version_not_just_latest() {
+        // red.schema_registry virtual table is fed by list(); slice 3
+        // contract is "every version, not just the latest".
+        let s = store();
+        register(&s, "purchase", PURCHASE_V1).unwrap();
+        register(
+            &s,
+            "purchase",
+            r#"{"type":"object",
+                "properties":{"amount":{"type":"number"},
+                              "discount_code":{"type":"string"}},
+                "required":["amount"]}"#,
+        )
+        .unwrap();
+        let purchase_versions: Vec<u32> = list(&s)
+            .into_iter()
+            .filter(|e| e.event_name == "purchase")
+            .map(|e| e.version)
+            .collect();
+        let mut sorted = purchase_versions.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![1, 2], "expected both versions, got {purchase_versions:?}");
     }
 
     #[test]

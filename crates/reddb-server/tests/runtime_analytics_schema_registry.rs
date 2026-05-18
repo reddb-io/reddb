@@ -92,6 +92,70 @@ fn insert_unknown_field_rejected() {
 }
 
 #[test]
+fn red_schema_registry_surfaces_every_version() {
+    // #581 acceptance: red.schema_registry exposes every version,
+    // not just the latest.
+    let rt = rt();
+    let store = rt.db().store();
+    registry::register(
+        store.as_ref(),
+        "purchase",
+        r#"{"type":"object","properties":{"amount":{"type":"number"}},"required":["amount"]}"#,
+    )
+    .unwrap();
+    let v2 = registry::register(
+        store.as_ref(),
+        "purchase",
+        r#"{"type":"object",
+            "properties":{"amount":{"type":"number"},
+                          "discount_code":{"type":"string"}},
+            "required":["amount"]}"#,
+    )
+    .expect("additive evolution");
+    assert_eq!(v2, 2);
+
+    let res = rt
+        .execute_query("SELECT event_name, version FROM red.schema_registry")
+        .expect("query schema_registry virtual table");
+    let rows = &res.result.records;
+    assert_eq!(
+        rows.len(),
+        2,
+        "expected both versions surfaced, got {rows:?}"
+    );
+}
+
+#[test]
+fn breaking_change_rejected_at_register() {
+    // Demo path from the brief: rename amount → total is rejected,
+    // and the caller should pick a fresh event_name.
+    let rt = rt();
+    let store = rt.db().store();
+    registry::register(
+        store.as_ref(),
+        "purchase",
+        r#"{"type":"object","properties":{"amount":{"type":"number"}},"required":["amount"]}"#,
+    )
+    .unwrap();
+    let err = registry::register(
+        store.as_ref(),
+        "purchase",
+        r#"{"type":"object","properties":{"total":{"type":"number"}},"required":["total"]}"#,
+    )
+    .unwrap_err();
+    match err {
+        registry::SchemaError::BreakingChange { offenders, .. } => {
+            assert!(offenders.iter().any(|b| matches!(
+                b,
+                registry::BreakingChange::Rename { from, to }
+                    if from == "amount" && to == "total"
+            )));
+        }
+        other => panic!("expected BreakingChange, got {other:?}"),
+    }
+}
+
+#[test]
 fn insert_for_unregistered_event_name_accepted() {
     // Collections without any registered schema for the event_name
     // accept the row as today (back-compat criterion).
