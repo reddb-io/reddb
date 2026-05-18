@@ -2129,7 +2129,6 @@ fn test_parse_show_collections_where_desugars_with_filter() {
 fn test_parse_typed_show_desugars_to_red_collections_model_filter() {
     for (input, model) in [
         ("SHOW TABLES", "table"),
-        ("SHOW QUEUES", "queue"),
         ("SHOW VECTORS", "vector"),
         ("SHOW DOCUMENTS", "document"),
         ("SHOW TIMESERIES", "timeseries"),
@@ -2155,6 +2154,39 @@ fn test_parse_typed_show_desugars_to_red_collections_model_filter() {
         } else {
             panic!("Expected Table for {input}");
         }
+    }
+}
+
+#[test]
+fn test_parse_show_queues_desugars_to_red_queues_select() {
+    // Issue #535 — `SHOW QUEUES` is the type-faithful entry point and
+    // now lives on `red.queues` (not `red.collections WHERE
+    // model='queue'`). The default hides internal queues by appending
+    // an `internal = false` predicate, just like `SHOW COLLECTIONS`.
+    let query = parse("SHOW QUEUES").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.queues");
+        assert!(matches!(
+            tq.filter,
+            Some(Filter::Compare {
+                field: FieldRef::TableColumn { ref column, .. },
+                op: CompareOp::Eq,
+                value: crate::storage::schema::Value::Boolean(false),
+            }) if column == "internal"
+        ));
+    } else {
+        panic!("Expected Table");
+    }
+}
+
+#[test]
+fn test_parse_show_queues_including_internal_drops_filter() {
+    let query = parse("SHOW QUEUES INCLUDING INTERNAL").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "red.queues");
+        assert!(tq.filter.is_none());
+    } else {
+        panic!("Expected Table");
     }
 }
 

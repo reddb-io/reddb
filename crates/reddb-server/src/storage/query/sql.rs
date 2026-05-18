@@ -2326,9 +2326,41 @@ impl<'a> Parser<'a> {
                         self, "table",
                     )?))
                 } else if self.consume_ident_ci("QUEUES")? {
-                    Ok(SqlCommand::Select(parse_show_collections_by_model(
-                        self, "queue",
-                    )?))
+                    // Issue #535 — slice 8. Repointed from
+                    // `red.collections WHERE model='queue'` to the
+                    // type-faithful `red.queues` virtual table.
+                    // `INCLUDING INTERNAL` continues to surface DLQs
+                    // and auto-event queues, mirroring the
+                    // `SHOW COLLECTIONS` knob.
+                    let mut query = TableQuery::new("red.queues");
+                    let include_internal = if self.consume_ident_ci("INCLUDING")? {
+                        if !self.consume_ident_ci("INTERNAL")? {
+                            return Err(ParseError::expected(
+                                vec!["INTERNAL"],
+                                self.peek(),
+                                self.position(),
+                            ));
+                        }
+                        true
+                    } else {
+                        false
+                    };
+                    self.parse_table_clauses(&mut query)?;
+                    if !include_internal {
+                        let user_filter = query.filter.take();
+                        let hide_internal = Filter::Compare {
+                            field: FieldRef::column("", "internal"),
+                            op: CompareOp::Eq,
+                            value: Value::Boolean(false),
+                        };
+                        let combined = match user_filter {
+                            Some(filter) => filter.and(hide_internal),
+                            None => hide_internal,
+                        };
+                        query.where_expr = Some(filter_to_expr(&combined));
+                        query.filter = Some(combined);
+                    }
+                    Ok(SqlCommand::Select(query))
                 } else if self.consume(&Token::Vectors)? || self.consume_ident_ci("VECTORS")? {
                     Ok(SqlCommand::Select(parse_show_collections_by_model(
                         self, "vector",
