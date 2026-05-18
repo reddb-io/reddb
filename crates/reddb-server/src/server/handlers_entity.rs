@@ -30,9 +30,15 @@ impl RedDBServer {
                     .map(|page| {
                         // The legacy scan use-case applied offset client-side
                         // before this migration; preserve that semantic by
-                        // slicing the cursor-based page.
+                        // slicing the cursor-based page. A beyond-end offset
+                        // must collapse to an empty page (issue #550) — the
+                        // earlier `offset < items.len()` guard accidentally
+                        // returned the full page when the offset skipped
+                        // past everything.
                         let mut page = page;
-                        if offset > 0 && offset < page.items.len() {
+                        if offset >= page.items.len() {
+                            page.items.clear();
+                        } else if offset > 0 {
                             page.items = page.items.split_off(offset);
                         }
                         page
