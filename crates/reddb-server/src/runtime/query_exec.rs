@@ -34,6 +34,7 @@ pub(super) use hybrid::execute_runtime_hybrid_query;
 pub(crate) use indexed_scan::try_sorted_index_lookup;
 pub(super) use join::execute_runtime_join_query;
 pub(super) use json_writers::execute_runtime_serialize_single_entity;
+pub(crate) use json_writers::{decode_stored_tag_value, TIMESERIES_TAG_JSON_PREFIX};
 pub(super) use vector::execute_runtime_vector_query;
 
 // Private imports used by functions still in query_exec.rs.

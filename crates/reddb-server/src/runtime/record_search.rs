@@ -1009,7 +1009,12 @@ fn append_timeseries_record_fields(
 fn timeseries_tags_value(tags: &std::collections::HashMap<String, String>) -> Value {
     let object = tags
         .iter()
-        .map(|(key, value)| (key.clone(), crate::json::Value::String(value.clone())))
+        .map(|(key, value)| {
+            (
+                key.clone(),
+                super::query_exec::decode_stored_tag_value(value),
+            )
+        })
         .collect();
     let json = crate::json::Value::Object(object);
     Value::Json(crate::json::to_vec(&json).unwrap_or_default())

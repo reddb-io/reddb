@@ -20,6 +20,21 @@ fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("failed to create in-memory runtime")
 }
 
+/// Decode an internally-stored time-series tag value. Issue #543
+/// changed the SQL INSERT path to prepend `\x01` + compact JSON to
+/// each tag value so non-string types (numbers, bools, nested
+/// objects) survive the `HashMap<String, String>` storage shape.
+/// Tests that inspect `TimeSeriesData::tags` directly need to undo
+/// that encoding before comparing against the user-facing value.
+fn decoded_string_tag(tags: &HashMap<String, String>, key: &str) -> Option<String> {
+    let raw = tags.get(key)?;
+    let Some(suffix) = raw.strip_prefix('\u{1}') else {
+        return Some(raw.clone());
+    };
+    let json: reddb::json::Value = reddb::json::from_str(suffix).ok()?;
+    json.as_str().map(|s| s.to_string())
+}
+
 fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
     QueryUseCases::new(rt)
         .execute(ExecuteQueryInput {
@@ -706,8 +721,14 @@ fn test_timeseries_persistent_reopen_retains_tags() {
     assert_eq!(entities.len(), 1);
     match &entities[0].data {
         EntityData::TimeSeries(ts) => {
-            assert_eq!(ts.tags.get("host").map(String::as_str), Some("srv1"));
-            assert_eq!(ts.tags.get("region").map(String::as_str), Some("us-east"));
+            assert_eq!(
+                decoded_string_tag(&ts.tags, "host").as_deref(),
+                Some("srv1")
+            );
+            assert_eq!(
+                decoded_string_tag(&ts.tags, "region").as_deref(),
+                Some("us-east")
+            );
         }
         other => panic!("expected native timeseries entity, got {other:?}"),
     }
@@ -836,8 +857,14 @@ fn test_insert_into_timeseries_uses_native_point_entities() {
             assert_eq!(ts.metric, "cpu.idle");
             assert_eq!(ts.timestamp_ns, explicit_timestamp);
             assert_eq!(ts.value, 94.8);
-            assert_eq!(ts.tags.get("host").map(String::as_str), Some("srv1"));
-            assert_eq!(ts.tags.get("region").map(String::as_str), Some("us-east"));
+            assert_eq!(
+                decoded_string_tag(&ts.tags, "host").as_deref(),
+                Some("srv1")
+            );
+            assert_eq!(
+                decoded_string_tag(&ts.tags, "region").as_deref(),
+                Some("us-east")
+            );
         }
         other => panic!("expected native timeseries entity, got {other:?}"),
     }

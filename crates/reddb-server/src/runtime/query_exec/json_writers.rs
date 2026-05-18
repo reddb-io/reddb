@@ -19,10 +19,39 @@ pub(crate) fn timeseries_tags_json_value(
 ) -> Value {
     let object = tags
         .iter()
-        .map(|(key, value)| (key.clone(), crate::json::Value::String(value.clone())))
+        .map(|(key, value)| (key.clone(), decode_stored_tag_value(value)))
         .collect();
     let json = crate::json::Value::Object(object);
     Value::Json(crate::json::to_vec(&json).unwrap_or_default())
+}
+
+/// Marker prepended to JSON-encoded tag values written through the
+/// SQL `INSERT INTO <ts> (tags, ...)` path. The character is `\x01`
+/// (Start-of-Heading) — invalid as a leading byte in well-formed
+/// JSON, never used by Prometheus label values, and small enough to
+/// keep storage overhead at one byte per tag. See
+/// `impl_dml::json_tag_value_to_string` and `decode_stored_tag_value`
+/// below for the read/write pair.
+pub(crate) const TIMESERIES_TAG_JSON_PREFIX: char = '\u{1}';
+
+/// Decode a stored tag value back into a JSON value (issue #543).
+///
+/// Values written through the SQL INSERT path carry a
+/// [`TIMESERIES_TAG_JSON_PREFIX`] marker and a compact JSON suffix;
+/// we strip the marker and parse the suffix so numbers, booleans,
+/// nulls, arrays, and nested objects come back as their native JSON
+/// kinds rather than stringified placeholders. Values without the
+/// marker — Prometheus remote-write labels, internal `__tenant_id` /
+/// `__namespace` / `__reddb_kind` tags, and any pre-#543 on-disk
+/// rows — are passed through as `JsonValue::String(raw)` so the
+/// Prometheus and metrics surfaces keep their plain-string contract.
+pub(crate) fn decode_stored_tag_value(stored: &str) -> crate::json::Value {
+    if let Some(suffix) = stored.strip_prefix(TIMESERIES_TAG_JSON_PREFIX) {
+        crate::json::from_str(suffix)
+            .unwrap_or_else(|_| crate::json::Value::String(suffix.to_string()))
+    } else {
+        crate::json::Value::String(stored.to_string())
+    }
 }
 
 /// Write a u64 as decimal digits.

@@ -3684,14 +3684,26 @@ fn parse_timeseries_tags_json(
     Ok(tags)
 }
 
+/// Encode a tag value for storage so the original JSON type can be
+/// recovered on read (issue #543).
+///
+/// Time-series tags are stored as `HashMap<String, String>` on the
+/// physical record (see [`crate::storage::TimeSeriesData`]) so that
+/// the segment codec, WAL and gRPC mirrors don't need a new value
+/// variant. To preserve the original JSON type across that
+/// string-only channel we prepend the
+/// [`crate::runtime::query_exec::TIMESERIES_TAG_JSON_PREFIX`] marker
+/// and serialize the value as compact JSON text. The read paths
+/// (`timeseries_tags_json_value` / `timeseries_tags_value`) detect
+/// the marker, parse the suffix, and recover a real JSON value.
+/// Tags written through other channels (Prometheus remote write,
+/// metrics handlers, legacy on-disk data) lack the marker and are
+/// returned as `JsonValue::String(raw)` exactly as before.
 fn json_tag_value_to_string(value: &crate::json::Value) -> String {
-    match value {
-        crate::json::Value::Null => "null".to_string(),
-        crate::json::Value::Bool(value) => value.to_string(),
-        crate::json::Value::Number(value) => value.to_string(),
-        crate::json::Value::String(value) => value.clone(),
-        other => other.to_string(),
-    }
+    let mut buf = String::with_capacity(value.to_string_compact().len() + 1);
+    buf.push(crate::runtime::query_exec::TIMESERIES_TAG_JSON_PREFIX);
+    buf.push_str(&value.to_string_compact());
+    buf
 }
 
 fn coerce_value_to_non_negative_u64(value: &Value, column: &str) -> RedDBResult<u64> {

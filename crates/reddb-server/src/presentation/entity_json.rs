@@ -539,7 +539,12 @@ fn entity_data_json(data: &EntityData) -> JsonValue {
                 JsonValue::Object(
                     ts.tags
                         .iter()
-                        .map(|(k, v)| (k.clone(), JsonValue::String(v.clone())))
+                        .map(|(k, v)| {
+                            (
+                                k.clone(),
+                                crate::runtime::query_exec::decode_stored_tag_value(v),
+                            )
+                        })
                         .collect(),
                 ),
             );
