@@ -1,0 +1,65 @@
+# git-cliff configuration — drives the release-notes block in each
+# GitHub Release published by .github/workflows/release.yml.
+#
+# Conventions in this repo:
+#   - Conventional commits with scopes: `feat(queue):`, `fix(server):`, …
+#   - Merge commits land as `merge: #N <title>` and we already include the
+#     squashed feat/fix above, so we filter the bare merges out.
+#   - `chore(afk): pre-merge snapshot for #N` is housekeeping noise from
+#     the autonomous loop and never belongs in a public changelog.
+
+[changelog]
+header = ""
+trim = true
+footer = ""
+
+# Body is rendered with Tera. `commits` here are only the commits the
+# `commit_parsers` below classified into a group — filtered ones are
+# already gone.
+body = """
+{% if version -%}
+## What's in {{ version | trim_start_matches(pat="v") }}
+{% else -%}
+## Unreleased
+{% endif %}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+
+{% for commit in commits -%}
+- {% if commit.scope %}**{{ commit.scope }}**: {% endif %}{{ commit.message | split(pat="\n") | first | trim }}
+{% endfor %}
+{% endfor -%}
+{% if previous and previous.version %}
+**Full Changelog**: https://github.com/reddb-io/reddb/compare/{{ previous.version }}...{{ version }}
+{% endif %}
+"""
+
+[git]
+# Use full commit messages so BREAKING CHANGE footers are visible.
+conventional_commits = true
+filter_unconventional = true
+split_commits = false
+commit_preprocessors = []
+
+# Order: more-specific patterns first (BREAKING, then feat/fix/etc).
+# Anything that doesn't match is dropped — `chore(afk)`, plain `merge:`
+# commits, and other noise never reach the changelog.
+commit_parsers = [
+  { message = "^[a-z]+!:", group = "⚠ Breaking changes" },
+  { body = ".*BREAKING CHANGE.*", group = "⚠ Breaking changes" },
+  { message = "^feat", group = "🚀 Features" },
+  { message = "^fix", group = "🐛 Bug fixes" },
+  { message = "^perf", group = "⚡ Performance" },
+  { message = "^refactor", group = "🔧 Refactor" },
+  { message = "^docs", group = "📚 Documentation" },
+  { message = "^test", group = "🧪 Tests" },
+  { message = "^build|^ci\\(release\\)", group = "🏗 Build & CI" },
+  # Drop everything else (chore, style, plain merge, afk snapshots, …).
+  { message = ".*", skip = true },
+]
+
+protect_breaking_commits = false
+filter_commits = true
+tag_pattern = "v[0-9]+\\.[0-9]+\\.[0-9]+"
+topo_order = false
+sort_commits = "newest"

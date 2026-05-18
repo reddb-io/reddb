@@ -323,44 +323,85 @@ jobs:
       needs.plan.outputs.release_channel == 'stable'
     steps:
       - uses: actions/checkout@v6
+        with:
+          # git-cliff walks the full commit history to build the changelog.
+          fetch-depth: 0
       - uses: actions/download-artifact@v8
         with:
           path: release
           merge-multiple: true
+
+      - name: Generate changelog from commits
+        uses: orhun/git-cliff-action@v4
+        id: changelog
+        with:
+          config: cliff.toml
+          # --unreleased: commits since the most recent tag
+          # --tag: label the rendered block with this version even though
+          #        the tag isn't pushed yet (workflow_dispatch path)
+          # --strip header: drop the top-level Changelog title; we wrap it
+          args: --unreleased --tag ${{ needs.plan.outputs.release_tag }} --strip header
+        env:
+          OUTPUT: release-changelog.md
+          GITHUB_REPO: ${{ github.repository }}
+
+      - name: Compose release body
+        env:
+          TAG: ${{ needs.plan.outputs.release_tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          CHANGELOG="$(cat release-changelog.md)"
+          cat > release-body.md <<MARKDOWN
+          # RedDB ${TAG}
+
+          ${CHANGELOG}
+
+          ---
+
+          ## Install
+
+          **npm / pnpm:**
+          \`\`\`bash
+          pnpm add @reddb-io/cli    # CLI launcher (\`red\` binary wrapper)
+          pnpm add @reddb-io/sdk    # Node/TS driver package (native protocol + spawn)
+          pnpm add @reddb-io/client # Thin remote-only client
+          \`\`\`
+
+          **Binaries (Linux x86_64):**
+          \`\`\`bash
+          # Full server + embedded engine
+          curl -fsSL https://github.com/${REPO}/releases/download/${TAG}/red-linux-x86_64 -o red && chmod +x red
+          # Thin remote-only client (~2 MB)
+          curl -fsSL https://github.com/${REPO}/releases/download/${TAG}/red_client-linux-x86_64 -o red_client && chmod +x red_client
+          \`\`\`
+
+          **Docker:**
+          \`\`\`bash
+          docker run --rm ghcr.io/${REPO}:${TAG} version
+          \`\`\`
+
+          **Or via Docker (thin client, ~7 MB):**
+          \`\`\`bash
+          docker run --rm ghcr.io/${REPO}-client:${TAG} red://reddb.example.com:5050 -c "SELECT 1"
+          \`\`\`
+
+          ## Crate (Rust)
+
+          \`\`\`toml
+          [dependencies]
+          reddb-io = "${TAG#v}"
+          \`\`\`
+          MARKDOWN
+          echo "---- composed body ----"
+          cat release-body.md
+
       - name: Create release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.plan.outputs.release_tag }}
           name: RedDB ${{ needs.plan.outputs.release_tag }}
-          body: |
-            # RedDB ${{ needs.plan.outputs.release_tag }}
-
-            ## Install
-
-            **npm / pnpm:**
-            ```bash
-            pnpm add @reddb-io/cli    # CLI launcher (`red` binary wrapper)
-            pnpm add @reddb-io/sdk    # Node/TS driver package (native protocol + spawn)
-            pnpm add @reddb-io/client # Thin remote-only client
-            ```
-
-            **Binaries (Linux x86_64):**
-            ```bash
-            # Full server + embedded engine
-            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.release_tag }}/red-linux-x86_64 -o red && chmod +x red
-            # Thin remote-only client (~2 MB)
-            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.release_tag }}/red_client-linux-x86_64 -o red_client && chmod +x red_client
-            ```
-
-            **Docker:**
-            ```bash
-            docker run --rm ghcr.io/${{ github.repository }}:${{ needs.plan.outputs.release_tag }} version
-            ```
-
-            **Or via Docker (thin client, ~7 MB):**
-            ```bash
-            docker run --rm ghcr.io/${{ github.repository }}-client:${{ needs.plan.outputs.release_tag }} red://reddb.example.com:5050 -c "SELECT 1"
-            ```
+          body_path: release-body.md
           prerelease: ${{ needs.plan.outputs.github_prerelease }}
           files: release/*
           token: ${{ secrets.GITHUB_TOKEN }}
