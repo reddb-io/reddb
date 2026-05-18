@@ -241,6 +241,25 @@ pub(crate) trait QueueStore {
     /// payloads all go away. Failure modes propagate; no partial purge
     /// is observable to readers after a successful return.
     fn purge_queue(&self, txn: &QueueTxn, queue: &str) -> Result<usize>;
+
+    /// Enumerate every pending delivery currently held on `queue`,
+    /// regardless of consumer group. Used by `QueueLifecycle::claim` to
+    /// find candidates whose lock has expired beyond the caller-supplied
+    /// `min_idle_ms` threshold. Read-only — no transaction context.
+    fn pending_deliveries_for_queue(&self, queue: &str) -> Vec<PendingDeliveryView>;
+}
+
+/// Read-only view of a pending delivery, returned by
+/// [`QueueStore::pending_deliveries_for_queue`]. Carries the same fields
+/// `mark_pending` needs to refresh a lock (queue, message_id, group) plus
+/// the delivery handle and current lock deadline.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingDeliveryView {
+    pub(crate) delivery_id: DeliveryId,
+    pub(crate) queue: QueueId,
+    pub(crate) message_id: MessageId,
+    pub(crate) group: ConsumerGroupId,
+    pub(crate) deadline: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -643,6 +662,22 @@ impl QueueStore for InMemoryQueueStore {
             txn.record_pending_tombstone(queue, *message_id);
         }
         Ok(message_ids.len())
+    }
+
+    fn pending_deliveries_for_queue(&self, queue: &str) -> Vec<PendingDeliveryView> {
+        let state = self.state.lock().expect("state poisoned");
+        state
+            .pending
+            .iter()
+            .filter(|(_, p)| p.queue == queue)
+            .map(|(id, p)| PendingDeliveryView {
+                delivery_id: id.clone(),
+                queue: p.queue.clone(),
+                message_id: p.message_id,
+                group: p.group.clone(),
+                deadline: p.deadline,
+            })
+            .collect()
     }
 }
 

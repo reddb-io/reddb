@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 
 use crate::catalog::CollectionDescriptor;
 use crate::storage::queue::lifecycle::{
-    BumpedAttempt, DeliveryId, MessageId, QueueSide, QueueStore, QueueStoreError, QueueTxn,
-    Result, DEFAULT_READ_MAX_ATTEMPTS,
+    BumpedAttempt, DeliveryId, MessageId, PendingDeliveryView, QueueSide, QueueStore,
+    QueueStoreError, QueueTxn, Result, DEFAULT_READ_MAX_ATTEMPTS,
 };
 use crate::storage::queue::QueueMode;
 use crate::storage::schema::Value;
@@ -602,6 +602,38 @@ impl QueueStore for PrimaryQueueStore {
             txn.record_pending_tombstone(queue, *message_id);
         }
         Ok(ids.len())
+    }
+
+    fn pending_deliveries_for_queue(&self, queue: &str) -> Vec<PendingDeliveryView> {
+        // Walk every `queue_pending_lc` meta-row scoped to this queue and
+        // hydrate it into the trait-level view. The persisted deadline is
+        // unix-ns; convert to a live `Instant` the same way
+        // `read_lock_deadline` does so the caller compares against
+        // `Clock::now()` in a single domain.
+        let queue_owned = queue.to_string();
+        let now_i = Instant::now();
+        let now_w = now_unix_ns();
+        self.meta_rows(|row| {
+            row_text(row, "kind").as_deref() == Some(KIND_PENDING_LC)
+                && row_text(row, "queue").as_deref() == Some(&queue_owned)
+        })
+        .into_iter()
+        .filter_map(|(_, row)| {
+            let pending = PendingRow::from_row(&row)?;
+            let deadline = if pending.lock_deadline_ns >= now_w {
+                now_i + Duration::from_nanos(pending.lock_deadline_ns - now_w)
+            } else {
+                now_i - Duration::from_nanos(now_w - pending.lock_deadline_ns)
+            };
+            Some(PendingDeliveryView {
+                delivery_id: pending.delivery_id,
+                queue: pending.queue,
+                message_id: pending.message_id,
+                group: pending.group,
+                deadline,
+            })
+        })
+        .collect()
     }
 
     fn reclaim_expired(&self, _txn: &QueueTxn, queue: &str, now: Instant) -> Result<()> {

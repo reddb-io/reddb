@@ -35,8 +35,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::storage::queue::lifecycle::{
-    BumpedAttempt, DeliveryId, MessageId, QueueSide, QueueStore, QueueStoreError, QueueTxn,
-    Result, DEFAULT_READ_MAX_ATTEMPTS,
+    BumpedAttempt, DeliveryId, MessageId, PendingDeliveryView, QueueSide, QueueStore,
+    QueueStoreError, QueueTxn, Result, DEFAULT_READ_MAX_ATTEMPTS,
 };
 use crate::storage::schema::Value;
 use crate::storage::unified::entity::RowData;
@@ -362,6 +362,40 @@ impl QueueStore for ReplicaQueueStore {
         // change records — never invoked directly. Fail closed for the
         // same reason as the other mutation methods.
         Err(QueueStoreError::ReplicaImmutable)
+    }
+
+    fn pending_deliveries_for_queue(&self, queue: &str) -> Vec<PendingDeliveryView> {
+        // Read-only — mirrors the primary's hydrate-from-meta-row shape.
+        // Replica callers (e.g. admin tooling inspecting in-flight rows
+        // without lock-stealing) can see the same pending set the primary
+        // would see for the same WAL state.
+        let queue_owned = queue.to_string();
+        let now_i = Instant::now();
+        let now_w = now_unix_ns();
+        self.meta_rows(|row| {
+            row_text(row, "kind").as_deref() == Some(KIND_PENDING_LC)
+                && row_text(row, "queue").as_deref() == Some(&queue_owned)
+        })
+        .into_iter()
+        .filter_map(|row| {
+            let delivery_id = row_text(&row, "delivery_id")?;
+            let group = row_text(&row, "group")?;
+            let message_id = row_u64(&row, "message_id")?;
+            let lock_deadline_ns = row_u64(&row, "lock_deadline_ns")?;
+            let deadline = if lock_deadline_ns >= now_w {
+                now_i + Duration::from_nanos(lock_deadline_ns - now_w)
+            } else {
+                now_i - Duration::from_nanos(now_w - lock_deadline_ns)
+            };
+            Some(PendingDeliveryView {
+                delivery_id,
+                queue: row_text(&row, "queue")?,
+                message_id,
+                group,
+                deadline,
+            })
+        })
+        .collect()
     }
 }
 
