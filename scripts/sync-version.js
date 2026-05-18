@@ -263,7 +263,7 @@ function syncCargoLock(file, packageNames) {
 
   for (const name of packageNames) {
     const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const pattern = new RegExp(`(\\[\\[package\\]\\]\\nname = "${escaped}"\\nversion = ")([^"]+)(")`, 'm')
+    const pattern = new RegExp(`(\\[\\[package\\]\\]\\r?\\nname = "${escaped}"\\r?\\nversion = ")([^"]+)(")`, 'm')
     if (!pattern.test(updated)) {
       console.warn(`  WARN ${path.relative(root, file)}: package ${name} not found`)
       continue

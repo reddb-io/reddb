@@ -20,7 +20,7 @@ on:
       publish_cargo:
         description: Publish crates to crates.io from GitHub Actions
         required: false
-        default: false
+        default: true
         type: boolean
 
 permissions:
@@ -161,7 +161,7 @@ jobs:
           # frequently queues long enough to block publishing; cross-building
           # from macos-14 still produces the x86_64-apple-darwin asset, but we
           # cannot rely on Rosetta being available for a local smoke test.
-          - { os: macos-14,       target: x86_64-apple-darwin,           asset_name: macos-x86_64,        cross: false, smoke: false, optional: true }
+          - { os: macos-14,       target: x86_64-apple-darwin,           asset_name: macos-x86_64,        cross: true,  smoke: false, optional: true }
           - { os: macos-14,       target: aarch64-apple-darwin,          asset_name: macos-aarch64,       cross: false, optional: true }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, asset_name: windows-x86_64, cross: false, optional: true }
     steps:
