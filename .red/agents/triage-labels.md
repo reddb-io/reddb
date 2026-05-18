@@ -14,6 +14,8 @@ The skills speak in terms of canonical triage roles. Map them here to the actual
 | `running`          | `running`            | `/afk` (when claiming an issue)       | `/afk` (on close, blocker, or release) |
 | `ready-for-human`  | `ready-for-human`    | `/triage`, `/afk` (on blocker)        | maintainer                          |
 | `wontfix`          | `wontfix`            | `/triage` (then close)                | rarely — usually issue closes       |
+| `needs-slicing`    | `needs-slicing`      | `/to-prd` (on publish)                | `/to-issues` (when slices are created) |
+| `type:prd`         | `type:prd`           | `/to-prd` (on publish)                | never — type marker, permanent       |
 
 Edit the right-hand column to match whatever vocabulary you actually use.
 
@@ -99,6 +101,12 @@ The issue requires human implementation. Two sources: `/triage` decides it durin
 
 ### `wontfix`
 Will not be actioned. Applied by `/triage`. For bugs, paired with a polite explanation and close. For enhancements, paired with a `.out-of-scope/*.md` entry (see `triage/OUT-OF-SCOPE.md`).
+
+### `type:prd`
+Permanent type marker for PRD issues created by `/to-prd`. A PRD is a planning artifact, **not an implementable slice** — it describes *what* to build at the product level and must be split into child issues by `/to-issues` before any agent can execute. `/afk` hard-filters issues carrying `type:prd` from its candidate list even if `ready-for-agent` was applied by mistake. Never remove this label.
+
+### `needs-slicing`
+The PRD has been published but `/to-issues` has not yet split it into child slices. Applied by `/to-prd` on publish, removed by `/to-issues` once at least one child issue with `prd:{N}` exists. `/afk` counts these in its straggler check so a forgotten PRD surfaces before the loop runs dry.
 
 ## Heartbeat Comments
 
