@@ -285,3 +285,97 @@ Deferred (tracked alongside #471/#472/#473/#475/#477):
   picks a single path);
 - tier-driven auto-enable from `RuntimeOptions`;
 - benchmark gate documenting OLTP overhead.
+
+## Promotion criteria for tier-default feature flags (gh-480)
+
+A feature flag may be **promoted** from "off by default + env hatch" to
+an ON default on a given tier (`minimal` / `standard` / `performance` /
+`max`) only when every objective gate below has been cleared. The
+intent is to make tier-default changes boring and auditable — never a
+judgement call from a single reviewer.
+
+### Gates
+
+A promotion proposal must point at concrete evidence for each item:
+
+1. **One full release** has shipped with the flag available as a
+   voluntary opt-in (env hatch and/or `LayoutOverrides`). The flag's
+   landing slice does **not** count as that release — the release that
+   landed the flag is the floor, the next tagged release with the flag
+   present is the earliest eligible promotion point.
+2. **No perf regression on the standard benchmark set** between the
+   release that landed the flag and the proposed promotion release,
+   measured with the flag ON. The benchmark set is whatever
+   `cargo test --release --test *_bench` covers at the time of the
+   proposal (e.g. `tests/fold_dwb_into_wal_bench.rs` is the
+   load-bearing example for `fold_dwb_into_wal`). Regression is
+   defined per-benchmark by the gate the benchmark file itself
+   asserts; if a benchmark has no gate, that benchmark is not
+   evidence — add one before proposing promotion.
+3. **No open `priority:urgent` or `type:incident` issue** against the
+   flag's behaviour or any surface it touches. A `type:bug` that is
+   not flag-attributed is not blocking unless triage links it.
+4. **An ADR addendum** under this ADR records the promotion decision:
+   which flag, which tier, the release before/after the promotion,
+   and the benchmark numbers cited. Promotion without an addendum
+   entry is not promotion — it's drift.
+
+### Mechanics
+
+- The promotion lands by editing `RedDBOptions::apply_tier_defaults`
+  in `crates/reddb-server/src/api.rs` so the per-tier truth table
+  matches the new default. The doc-comment table in
+  `apply_tier_defaults` and the table in `tests/e2e_tier_wiring.rs`
+  must move in lockstep — those two tables are the contract.
+- The env hatch and `LayoutOverrides` entry that disabled the flag
+  before promotion **must remain** for **at least two further
+  releases** after promotion lands. That gives operators a documented
+  rollback path during the post-promotion observation window. Only
+  after those two releases — and only if the flag has accumulated no
+  rollback reports — may the override surface be removed in a
+  separate deprecation slice.
+- Release notes for the promotion release call the new default out by
+  name, link to this ADR section, and document the override
+  (`REDDB_<FLAG>=0` or `LayoutOverrides { ... }`) the operator can
+  set to keep the old behaviour on. Without that operator-facing
+  note, the promotion is incomplete.
+
+### What is **not** a promotion criterion
+
+- "It feels mature." Subjective maturity is not a gate; the
+  release-count + benchmark + incident triad above is.
+- "The author of the flag thinks it's ready." Self-review does not
+  satisfy gate 3 — only the absence of incident-class issues from
+  the wider tracker does.
+- "Other databases default to it." Comparative norms are useful
+  context for an ADR addendum but do not substitute for the gates.
+
+### Phase grouping (gh-480)
+
+The `gh-480` meta tracks three phase buckets of candidate flags so
+the gates above are evaluated in batches that share an evidence
+window, not one PR per flag:
+
+- **Phase A — cosmetic** (low blast radius, observable but
+  reversible): tier-default routing of cache and log artefacts into
+  `<dbname>.rdb.red/cache/` and `<dbname>.rdb.red/logs/`. This
+  phase is already the live default for `performance` and `max`
+  (see the `default_audit_log_in` / `default_slow_log_in` table
+  above). The promotion was landed under gh-471 and is recorded
+  here as the worked example of how the gates apply.
+- **Phase B — pager substrate**: `fold_pager_meta`,
+  `fold_dwb_into_wal`, and `-shm` provisioning. `-shm` was
+  promoted to `standard` under gh-475 (see the tier table in
+  `tests/e2e_tier_wiring.rs`). `fold_pager_meta` and
+  `fold_dwb_into_wal` remain `max`-only pending gate 1 (a full
+  release with the flag available as opt-in) and gate 2 (the OLTP
+  overhead benchmark in `tests/fold_dwb_into_wal_bench.rs` is in
+  place; the `fold_pager_meta` side needs a paired benchmark
+  before that flag is eligible).
+- **Phase C — catalog placement**: `embed_catalog_in_datafile` is
+  named here as a forward placeholder for the catalog-into-page-1
+  consolidation tracked elsewhere on the PRD. The flag has not
+  been introduced yet; it cannot be promoted until it exists and
+  has cleared the gates above. Any promotion proposal that names
+  a flag not present in the codebase is rejected at the ADR-edit
+  step.
