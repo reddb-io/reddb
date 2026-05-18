@@ -560,6 +560,50 @@ impl QueueStore for PrimaryQueueStore {
         self.read_message(&row.queue, row.message_id)
     }
 
+    fn purge_queue(&self, txn: &QueueTxn, queue: &str) -> Result<usize> {
+        // Snapshot every message id on the queue so the tombstones we
+        // record match the rows we actually remove. Pending rows may
+        // reference message ids that are still present in
+        // `list_queue_messages` (mark_pending does not remove the
+        // underlying message) so the queue's own listing is the
+        // authoritative source. Anything that *only* lives in the
+        // pending meta-row stream (no backing queue message) gets
+        // tombstoned too — matches the in-memory contract.
+        let mut ids: Vec<MessageId> = self
+            .list_queue_messages(queue)
+            .into_iter()
+            .map(|m| m.id.raw())
+            .collect();
+        for pending_id in self.pending_message_ids(queue, None) {
+            if !ids.contains(&pending_id) {
+                ids.push(pending_id);
+            }
+        }
+        ids.sort_unstable();
+        ids.dedup();
+
+        for message_id in &ids {
+            self.delete_message(queue, EntityId::new(*message_id));
+        }
+        // Sweep every meta-row keyed off this queue (pending, acked,
+        // attempts) — none of them are meaningful once the underlying
+        // messages are gone.
+        let queue_owned = queue.to_string();
+        self.delete_meta_where(|row| {
+            let kind = row_text(row, "kind");
+            let kind_matches = matches!(
+                kind.as_deref(),
+                Some(KIND_PENDING_LC) | Some(KIND_ACKED_LC) | Some(KIND_ATTEMPTS_LC)
+            );
+            kind_matches && row_text(row, "queue").as_deref() == Some(&queue_owned)
+        });
+
+        for message_id in &ids {
+            txn.record_pending_tombstone(queue, *message_id);
+        }
+        Ok(ids.len())
+    }
+
     fn reclaim_expired(&self, _txn: &QueueTxn, queue: &str, now: Instant) -> Result<()> {
         // Persisted deadlines are wall-clock unix-ns (see
         // `instant_to_unix_ns` at `mark_pending` time). Convert the
