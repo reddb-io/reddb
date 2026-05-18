@@ -35,8 +35,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::storage::queue::lifecycle::{
-    BumpedAttempt, DeliveryId, MessageId, QueueSide, QueueStore, QueueStoreError, Result,
-    DEFAULT_READ_MAX_ATTEMPTS,
+    BumpedAttempt, DeliveryId, MessageId, QueueSide, QueueStore, QueueStoreError, QueueTxn,
+    Result, DEFAULT_READ_MAX_ATTEMPTS,
 };
 use crate::storage::schema::Value;
 use crate::storage::unified::entity::RowData;
@@ -280,6 +280,7 @@ impl QueueStore for ReplicaQueueStore {
 
     fn mark_pending(
         &self,
+        _txn: &QueueTxn,
         _queue: &str,
         _message_id: MessageId,
         _group: &str,
@@ -288,19 +289,19 @@ impl QueueStore for ReplicaQueueStore {
         Err(QueueStoreError::ReplicaImmutable)
     }
 
-    fn release_pending(&self, _delivery_id: &str) -> Result<()> {
+    fn release_pending(&self, _txn: &QueueTxn, _delivery_id: &str) -> Result<()> {
         Err(QueueStoreError::ReplicaImmutable)
     }
 
-    fn ack_pending(&self, _delivery_id: &str) -> Result<()> {
+    fn ack_pending(&self, _txn: &QueueTxn, _delivery_id: &str) -> Result<()> {
         Err(QueueStoreError::ReplicaImmutable)
     }
 
-    fn retire_for_group(&self, _delivery_id: &str) -> Result<()> {
+    fn retire_for_group(&self, _txn: &QueueTxn, _delivery_id: &str) -> Result<()> {
         Err(QueueStoreError::ReplicaImmutable)
     }
 
-    fn bump_attempt(&self, _delivery_id: &str) -> Result<BumpedAttempt> {
+    fn bump_attempt(&self, _txn: &QueueTxn, _delivery_id: &str) -> Result<BumpedAttempt> {
         Err(QueueStoreError::ReplicaImmutable)
     }
 
@@ -323,7 +324,7 @@ impl QueueStore for ReplicaQueueStore {
         }
     }
 
-    fn enqueue_dlq(&self, _dlq_target: &str, _original: Value) -> Result<()> {
+    fn enqueue_dlq(&self, _txn: &QueueTxn, _dlq_target: &str, _original: Value) -> Result<()> {
         Err(QueueStoreError::ReplicaImmutable)
     }
 
@@ -349,7 +350,7 @@ impl QueueStore for ReplicaQueueStore {
         self.read_message(&row.queue, row.message_id)
     }
 
-    fn reclaim_expired(&self, _queue: &str, _now: Instant) -> Result<()> {
+    fn reclaim_expired(&self, _txn: &QueueTxn, _queue: &str, _now: Instant) -> Result<()> {
         // Replica reclaim happens by replaying the primary's release
         // change records — never invoked directly. Fail closed for the
         // same reason as the other mutation methods.
@@ -483,35 +484,41 @@ mod tests {
     fn replica_store_mutation_methods_fail_closed() {
         let rt = boot();
         let replica = ReplicaQueueStore::new(rt);
+        let t = QueueTxn::new();
 
         let err = replica
-            .mark_pending("q", 1, "g", Instant::now() + Duration::from_secs(1))
+            .mark_pending(&t, "q", 1, "g", Instant::now() + Duration::from_secs(1))
             .unwrap_err();
         assert!(matches!(err, QueueStoreError::ReplicaImmutable));
         assert!(matches!(
-            replica.release_pending("any").unwrap_err(),
+            replica.release_pending(&t, "any").unwrap_err(),
             QueueStoreError::ReplicaImmutable
         ));
         assert!(matches!(
-            replica.ack_pending("any").unwrap_err(),
+            replica.ack_pending(&t, "any").unwrap_err(),
             QueueStoreError::ReplicaImmutable
         ));
         assert!(matches!(
-            replica.retire_for_group("any").unwrap_err(),
+            replica.retire_for_group(&t, "any").unwrap_err(),
             QueueStoreError::ReplicaImmutable
         ));
         assert!(matches!(
-            replica.bump_attempt("any").unwrap_err(),
+            replica.bump_attempt(&t, "any").unwrap_err(),
             QueueStoreError::ReplicaImmutable
         ));
         assert!(matches!(
-            replica.enqueue_dlq("dlq", Value::text("x")).unwrap_err(),
+            replica.enqueue_dlq(&t, "dlq", Value::text("x")).unwrap_err(),
             QueueStoreError::ReplicaImmutable
         ));
         assert!(matches!(
-            replica.reclaim_expired("q", Instant::now()).unwrap_err(),
+            replica.reclaim_expired(&t, "q", Instant::now()).unwrap_err(),
             QueueStoreError::ReplicaImmutable
         ));
+        // Replica txn must remain untouched across reject paths.
+        assert!(
+            t.recorded_tombstones().is_empty(),
+            "rejected mutations must not record tombstones"
+        );
     }
 
     #[test]
@@ -535,22 +542,22 @@ mod tests {
         let lc = QueueLifecycle::new(primary_store, cfg);
 
         // alpha: deliver → nack (Requeued, below max) → deliver → ack.
-        let a1 = lc.deliver("qrep", "workers", 1).expect("a1");
+        let a1 = lc.deliver(&QueueTxn::new(),"qrep", "workers", 1).expect("a1");
         assert_eq!(a1[0].payload, Value::text("alpha"));
-        lc.nack(&a1[0].delivery_id).expect("a1 nack");
+        lc.nack(&QueueTxn::new(),&a1[0].delivery_id).expect("a1 nack");
 
-        let a2 = lc.deliver("qrep", "workers", 1).expect("a2");
+        let a2 = lc.deliver(&QueueTxn::new(),"qrep", "workers", 1).expect("a2");
         assert_eq!(a2[0].payload, Value::text("alpha"), "alpha redelivered");
-        lc.ack(&a2[0].delivery_id).expect("a2 ack");
+        lc.ack(&QueueTxn::new(),&a2[0].delivery_id).expect("a2 ack");
 
         // beta: deliver → nack → deliver → nack → moves to DLQ on
         // the second nack because max_attempts=2.
-        let b1 = lc.deliver("qrep", "workers", 1).expect("b1");
+        let b1 = lc.deliver(&QueueTxn::new(),"qrep", "workers", 1).expect("b1");
         assert_eq!(b1[0].payload, Value::text("beta"));
-        lc.nack(&b1[0].delivery_id).expect("b1 nack");
-        let b2 = lc.deliver("qrep", "workers", 1).expect("b2");
+        lc.nack(&QueueTxn::new(),&b1[0].delivery_id).expect("b1 nack");
+        let b2 = lc.deliver(&QueueTxn::new(),"qrep", "workers", 1).expect("b2");
         assert_eq!(b2[0].payload, Value::text("beta"));
-        lc.nack(&b2[0].delivery_id).expect("b2 nack");
+        lc.nack(&QueueTxn::new(),&b2[0].delivery_id).expect("b2 nack");
 
         assert_eq!(
             lc.recorded_outcomes(),
@@ -564,7 +571,7 @@ mod tests {
         // Push a fresh message that stays in flight at replay time
         // (deliver but no ack/nack) — covers the pending-row case.
         push(&primary_rt, "qrep", "gamma");
-        let g1 = lc.deliver("qrep", "workers", 1).expect("g1");
+        let g1 = lc.deliver(&QueueTxn::new(),"qrep", "workers", 1).expect("g1");
         assert_eq!(g1[0].payload, Value::text("gamma"));
 
         // --- Replay on a fresh replica DB ---
@@ -643,7 +650,7 @@ mod tests {
         // 5. Mutation surface on the replica still fails closed —
         //    confirms QueueLifecycle was *not* invoked on the replica.
         assert!(matches!(
-            replica_store.ack_pending(gamma_delivery).unwrap_err(),
+            replica_store.ack_pending(&QueueTxn::new(), gamma_delivery).unwrap_err(),
             QueueStoreError::ReplicaImmutable
         ));
     }
@@ -663,10 +670,12 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(60);
 
+        let t = QueueTxn::new();
+
         // 1. InMemory: direct mark_pending.
         let mem = InMemoryQueueStore::new();
         mem.seed_queue("q", vec![1, 2]);
-        let mem_id = mem.mark_pending("q", 1, "g", deadline).expect("mem mark");
+        let mem_id = mem.mark_pending(&t, "q", 1, "g", deadline).expect("mem mark");
         assert_eq!(
             mem.find_pending_by_key("q", 1, "g"),
             Some(mem_id),
@@ -702,7 +711,7 @@ mod tests {
             })
             .expect("seeded message");
         let primary_id = primary_store
-            .mark_pending("qpk", msg_id, "workers", deadline)
+            .mark_pending(&t, "qpk", msg_id, "workers", deadline)
             .expect("primary mark");
         assert_eq!(
             primary_store.find_pending_by_key("qpk", msg_id, "workers"),
@@ -770,7 +779,7 @@ mod tests {
         let primary_store = PrimaryQueueStore::new(primary_rt.clone());
         let cfg = primary_store.lifecycle_config("qpassive");
         let lc = QueueLifecycle::new(primary_store, cfg);
-        let d = lc.deliver("qpassive", "w", 1).expect("deliver");
+        let d = lc.deliver(&QueueTxn::new(),"qpassive", "w", 1).expect("deliver");
 
         let replica_rt = boot();
         replica_rt

@@ -63,6 +63,72 @@ impl std::error::Error for QueueStoreError {}
 
 pub(crate) type Result<T> = std::result::Result<T, QueueStoreError>;
 
+/// Tombstone record observed through [`QueueTxn::record_pending_tombstone`].
+///
+/// Used by tests against [`InMemoryQueueStore`] to assert that the
+/// ack-and-delete flow records the expected tombstone calls. Production
+/// adapters route the same call through the runtime's pending-tombstones
+/// map (see `RedDBRuntime::record_pending_tombstone`); the field shape is
+/// kept narrow on purpose — only the public surface ADR-0020 calls out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TombstoneRecord {
+    pub(crate) queue: QueueId,
+    pub(crate) message_id: MessageId,
+}
+
+/// Opaque transaction-context handle threaded through every mutating
+/// [`QueueStore`] method. The public surface is intentionally limited to
+/// [`QueueTxn::record_pending_tombstone`] — the one interaction
+/// ADR-0020 requires the store to be able to drive against the running
+/// transaction. Anything richer (xid, savepoint id, full pending-tombstone
+/// integration) is wired by the production-side bridge in a later slice;
+/// this prereq only establishes the seam so callers cannot pretend the
+/// transaction does not exist.
+///
+/// In-memory tests construct a fresh `QueueTxn::new()` per call and assert
+/// `recorded_tombstones()` post-hoc; production callers will eventually
+/// construct one from the running `RedDBRuntime` connection context.
+pub(crate) struct QueueTxn {
+    tombstones: Mutex<Vec<TombstoneRecord>>,
+}
+
+impl QueueTxn {
+    pub(crate) fn new() -> Self {
+        Self {
+            tombstones: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Record that the running transaction has marked `(queue, message_id)`
+    /// for deletion. Mirrors the runtime-side `record_pending_tombstone`
+    /// contract — the message stays addressable until the transaction
+    /// commits; rollback revives it.
+    pub(crate) fn record_pending_tombstone(&self, queue: &str, message_id: MessageId) {
+        self.tombstones
+            .lock()
+            .expect("queue txn poisoned")
+            .push(TombstoneRecord {
+                queue: queue.to_string(),
+                message_id,
+            });
+    }
+
+    /// Snapshot of every tombstone recorded against this txn — used by
+    /// in-memory tests asserting on the ack-and-delete flow.
+    pub(crate) fn recorded_tombstones(&self) -> Vec<TombstoneRecord> {
+        self.tombstones
+            .lock()
+            .expect("queue txn poisoned")
+            .clone()
+    }
+}
+
+impl Default for QueueTxn {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Narrow storage surface the `QueueLifecycle` Module depends on.
 ///
 /// Methods are intentionally minimal — the lifecycle owns transition
@@ -92,6 +158,7 @@ pub(crate) trait QueueStore {
     /// same key return the same `DeliveryId` and refresh the deadline.
     fn mark_pending(
         &self,
+        txn: &QueueTxn,
         queue: &str,
         message_id: MessageId,
         group: &str,
@@ -100,13 +167,13 @@ pub(crate) trait QueueStore {
 
     /// Release a pending delivery back to the available pool. No-op if
     /// `delivery_id` is unknown (already released or never existed).
-    fn release_pending(&self, delivery_id: &str) -> Result<()>;
+    fn release_pending(&self, txn: &QueueTxn, delivery_id: &str) -> Result<()>;
 
     /// Permanently retire a pending delivery — removes the pending entry
     /// AND the underlying message from the available pool. Used for ACK
     /// in WORK mode. Returns `UnknownDelivery` if `delivery_id` is not
     /// currently held.
-    fn ack_pending(&self, delivery_id: &str) -> Result<()>;
+    fn ack_pending(&self, txn: &QueueTxn, delivery_id: &str) -> Result<()>;
 
     /// Retire a pending delivery for one consumer group only. Used for
     /// ACK / terminal NACK in FANOUT mode: the pending row goes away and
@@ -114,7 +181,7 @@ pub(crate) trait QueueStore {
     /// group will not see the message again, but the message remains in
     /// the queue and the payload stays addressable for other groups that
     /// have not yet retired it.
-    fn retire_for_group(&self, delivery_id: &str) -> Result<()>;
+    fn retire_for_group(&self, txn: &QueueTxn, delivery_id: &str) -> Result<()>;
 
     /// Available message ids on `queue` from the perspective of a single
     /// consumer group: filters out messages that this group has already
@@ -133,7 +200,7 @@ pub(crate) trait QueueStore {
     /// per-message policy via [`QueueStore::read_max_attempts`] without a
     /// second pending-row lookup. Pending row is left in place; only the
     /// attempts counter mutates.
-    fn bump_attempt(&self, delivery_id: &str) -> Result<BumpedAttempt>;
+    fn bump_attempt(&self, txn: &QueueTxn, delivery_id: &str) -> Result<BumpedAttempt>;
 
     /// Per-message retry budget — the value the lifecycle compares the
     /// `bump_attempt` return against to decide retire-vs-requeue. Sourced
@@ -144,7 +211,7 @@ pub(crate) trait QueueStore {
     fn read_max_attempts(&self, queue: &str, message_id: MessageId) -> u32;
 
     /// Move `original` onto the DLQ at `dlq_target`.
-    fn enqueue_dlq(&self, dlq_target: &str, original: Value) -> Result<()>;
+    fn enqueue_dlq(&self, txn: &QueueTxn, dlq_target: &str, original: Value) -> Result<()>;
 
     /// Pending deadline for `delivery_id`, if it is currently held.
     fn read_lock_deadline(&self, delivery_id: &str) -> Option<Instant>;
@@ -163,7 +230,7 @@ pub(crate) trait QueueStore {
     /// reclaim looks the same to NACK accounting as an explicit release.
     /// Implementations must be idempotent — calling twice with the same
     /// `now` is a no-op on the second call.
-    fn reclaim_expired(&self, queue: &str, now: Instant) -> Result<()>;
+    fn reclaim_expired(&self, txn: &QueueTxn, queue: &str, now: Instant) -> Result<()>;
 }
 
 #[derive(Debug, Clone)]
@@ -313,6 +380,7 @@ impl QueueStore for InMemoryQueueStore {
 
     fn mark_pending(
         &self,
+        _txn: &QueueTxn,
         queue: &str,
         message_id: MessageId,
         group: &str,
@@ -361,7 +429,7 @@ impl QueueStore for InMemoryQueueStore {
             .cloned()
     }
 
-    fn release_pending(&self, delivery_id: &str) -> Result<()> {
+    fn release_pending(&self, _txn: &QueueTxn, delivery_id: &str) -> Result<()> {
         let mut state = self.state.lock().expect("state poisoned");
         if let Some(entry) = state.pending.remove(delivery_id) {
             let key = (entry.queue, entry.message_id, entry.group);
@@ -370,7 +438,7 @@ impl QueueStore for InMemoryQueueStore {
         Ok(())
     }
 
-    fn ack_pending(&self, delivery_id: &str) -> Result<()> {
+    fn ack_pending(&self, txn: &QueueTxn, delivery_id: &str) -> Result<()> {
         let mut state = self.state.lock().expect("state poisoned");
         let entry = state
             .pending
@@ -382,11 +450,18 @@ impl QueueStore for InMemoryQueueStore {
         if let Some(msgs) = state.queues.get_mut(&entry.queue) {
             msgs.retain(|m| *m != entry.message_id);
         }
-        state.payloads.remove(&(entry.queue, entry.message_id));
+        state.payloads.remove(&(entry.queue.clone(), entry.message_id));
+        // ack-and-delete on a WORK-mode queue tombstones the underlying
+        // message — mirror the runtime-side `record_pending_tombstone`
+        // call so tests observe the would-be MVCC tombstone. Drop the
+        // state lock first so a future txn implementation that needs to
+        // re-enter the store can.
+        drop(state);
+        txn.record_pending_tombstone(&entry.queue, entry.message_id);
         Ok(())
     }
 
-    fn retire_for_group(&self, delivery_id: &str) -> Result<()> {
+    fn retire_for_group(&self, _txn: &QueueTxn, delivery_id: &str) -> Result<()> {
         let mut state = self.state.lock().expect("state poisoned");
         let entry = state
             .pending
@@ -427,7 +502,7 @@ impl QueueStore for InMemoryQueueStore {
         out
     }
 
-    fn bump_attempt(&self, delivery_id: &str) -> Result<BumpedAttempt> {
+    fn bump_attempt(&self, _txn: &QueueTxn, delivery_id: &str) -> Result<BumpedAttempt> {
         let mut state = self.state.lock().expect("state poisoned");
         let entry = state
             .pending
@@ -455,7 +530,7 @@ impl QueueStore for InMemoryQueueStore {
             .unwrap_or(DEFAULT_READ_MAX_ATTEMPTS)
     }
 
-    fn enqueue_dlq(&self, dlq_target: &str, original: Value) -> Result<()> {
+    fn enqueue_dlq(&self, _txn: &QueueTxn, dlq_target: &str, original: Value) -> Result<()> {
         let mut state = self.state.lock().expect("state poisoned");
         state.dlq.push(DlqRecord {
             target: dlq_target.to_string(),
@@ -486,7 +561,7 @@ impl QueueStore for InMemoryQueueStore {
             .cloned()
     }
 
-    fn reclaim_expired(&self, queue: &str, now: Instant) -> Result<()> {
+    fn reclaim_expired(&self, _txn: &QueueTxn, queue: &str, now: Instant) -> Result<()> {
         let mut state = self.state.lock().expect("state poisoned");
         let expired: Vec<DeliveryId> = state
             .pending
@@ -536,12 +611,17 @@ mod tests {
         Instant::now() + Duration::from_millis(ms)
     }
 
+    fn txn() -> QueueTxn {
+        QueueTxn::new()
+    }
+
     #[test]
     fn delivery_id_is_opaque_base32() {
         let store = InMemoryQueueStore::new();
         store.seed_queue("q", vec![1]);
+        let t = txn();
         let id = store
-            .mark_pending("q", 1, "g", deadline_in(1000))
+            .mark_pending(&t, "q", 1, "g", deadline_in(1000))
             .expect("mark");
         assert!(!id.is_empty(), "delivery_id is empty");
         assert!(
@@ -555,8 +635,9 @@ mod tests {
     fn delivery_ids_are_unique() {
         let store = InMemoryQueueStore::new();
         store.seed_queue("q", vec![1, 2]);
-        let a = store.mark_pending("q", 1, "g", deadline_in(1000)).unwrap();
-        let b = store.mark_pending("q", 2, "g", deadline_in(1000)).unwrap();
+        let t = txn();
+        let a = store.mark_pending(&t, "q", 1, "g", deadline_in(1000)).unwrap();
+        let b = store.mark_pending(&t, "q", 2, "g", deadline_in(1000)).unwrap();
         assert_ne!(a, b);
     }
 
@@ -564,28 +645,83 @@ mod tests {
     fn mark_pending_is_idempotent_on_same_key() {
         let store = InMemoryQueueStore::new();
         store.seed_queue("q", vec![1]);
-        let a = store.mark_pending("q", 1, "g", deadline_in(1000)).unwrap();
-        let b = store.mark_pending("q", 1, "g", deadline_in(2000)).unwrap();
+        let t = txn();
+        let a = store.mark_pending(&t, "q", 1, "g", deadline_in(1000)).unwrap();
+        let b = store.mark_pending(&t, "q", 1, "g", deadline_in(2000)).unwrap();
         assert_eq!(a, b, "same (queue, msg, group) should return same delivery_id");
     }
 
     #[test]
     fn release_pending_is_noop_on_unknown_id() {
         let store = InMemoryQueueStore::new();
-        assert!(store.release_pending("does-not-exist").is_ok());
+        let t = txn();
+        assert!(store.release_pending(&t, "does-not-exist").is_ok());
     }
 
     #[test]
     fn bump_attempt_returns_new_count() {
         let store = InMemoryQueueStore::new();
         store.seed_queue("q", vec![1]);
-        let id = store.mark_pending("q", 1, "g", deadline_in(1000)).unwrap();
-        let first = store.bump_attempt(&id).unwrap();
+        let t = txn();
+        let id = store.mark_pending(&t, "q", 1, "g", deadline_in(1000)).unwrap();
+        let first = store.bump_attempt(&t, &id).unwrap();
         assert_eq!(first.attempts, 1);
         assert_eq!(first.queue, "q");
         assert_eq!(first.message_id, 1);
-        assert_eq!(store.bump_attempt(&id).unwrap().attempts, 2);
-        assert_eq!(store.bump_attempt(&id).unwrap().attempts, 3);
+        assert_eq!(store.bump_attempt(&t, &id).unwrap().attempts, 2);
+        assert_eq!(store.bump_attempt(&t, &id).unwrap().attempts, 3);
+    }
+
+    #[test]
+    fn ack_and_delete_records_one_pending_tombstone_per_call() {
+        // Acceptance criterion (issue #601): the ack-and-delete flow on
+        // `InMemoryQueueStore` must observe a `record_pending_tombstone`
+        // call for the message it tombstoned. Two seeded messages, two
+        // mark_pending + ack_pending pairs → exactly two tombstones in
+        // the order acked. Mutations that are *not* delete-shaped
+        // (release_pending, retire_for_group, mark_pending,
+        // bump_attempt, reclaim_expired) must record nothing.
+        let store = InMemoryQueueStore::new();
+        store.seed_queue("q", vec![1, 2, 3]);
+        store.seed_payload("q", 1, Value::text("p1"));
+        store.seed_payload("q", 2, Value::text("p2"));
+        store.seed_payload("q", 3, Value::text("p3"));
+        let t = txn();
+
+        // mark_pending alone does not tombstone.
+        let d1 = store.mark_pending(&t, "q", 1, "g", deadline_in(1000)).unwrap();
+        let d2 = store.mark_pending(&t, "q", 2, "g", deadline_in(1000)).unwrap();
+        let d3 = store.mark_pending(&t, "q", 3, "g", deadline_in(1000)).unwrap();
+        assert!(
+            t.recorded_tombstones().is_empty(),
+            "mark_pending must not record tombstones"
+        );
+
+        // ack_pending tombstones the underlying message.
+        store.ack_pending(&t, &d1).unwrap();
+        store.ack_pending(&t, &d2).unwrap();
+        assert_eq!(
+            t.recorded_tombstones(),
+            vec![
+                TombstoneRecord { queue: "q".to_string(), message_id: 1 },
+                TombstoneRecord { queue: "q".to_string(), message_id: 2 },
+            ],
+            "each ack_pending must record exactly one tombstone, in order",
+        );
+
+        // release_pending, bump_attempt, retire_for_group, reclaim_expired
+        // are not delete-shaped — none of them must add tombstones.
+        store.release_pending(&t, &d3).unwrap();
+        assert_eq!(t.recorded_tombstones().len(), 2, "release_pending must not record");
+        let d3 = store.mark_pending(&t, "q", 3, "g", deadline_in(1000)).unwrap();
+        store.bump_attempt(&t, &d3).unwrap();
+        assert_eq!(t.recorded_tombstones().len(), 2, "bump_attempt must not record");
+        store.retire_for_group(&t, &d3).unwrap();
+        assert_eq!(t.recorded_tombstones().len(), 2, "retire_for_group must not record");
+        store
+            .reclaim_expired(&t, "q", Instant::now() + Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(t.recorded_tombstones().len(), 2, "reclaim_expired must not record");
     }
 
     #[test]
@@ -613,15 +749,17 @@ mod tests {
     #[test]
     fn bump_attempt_unknown_id_errors() {
         let store = InMemoryQueueStore::new();
-        let err = store.bump_attempt("nope").unwrap_err();
+        let t = txn();
+        let err = store.bump_attempt(&t, "nope").unwrap_err();
         assert!(matches!(err, QueueStoreError::UnknownDelivery(_)));
     }
 
     #[test]
     fn enqueue_dlq_records_original() {
         let store = InMemoryQueueStore::new();
-        store.enqueue_dlq("orders.dlq", Value::text("payload-1")).unwrap();
-        store.enqueue_dlq("orders.dlq", Value::Integer(42)).unwrap();
+        let t = txn();
+        store.enqueue_dlq(&t, "orders.dlq", Value::text("payload-1")).unwrap();
+        store.enqueue_dlq(&t, "orders.dlq", Value::Integer(42)).unwrap();
         let snap = store.dlq_snapshot();
         assert_eq!(snap.len(), 2);
         assert_eq!(snap[0].target, "orders.dlq");
@@ -633,7 +771,8 @@ mod tests {
     fn available_messages_skips_pending() {
         let store = InMemoryQueueStore::new();
         store.seed_queue("q", vec![1, 2, 3]);
-        let _ = store.mark_pending("q", 2, "g", deadline_in(1000)).unwrap();
+        let t = txn();
+        let _ = store.mark_pending(&t, "q", 2, "g", deadline_in(1000)).unwrap();
         let avail = store.available_messages("q", QueueSide::Left);
         assert_eq!(avail, vec![1, 3]);
         let avail_right = store.available_messages("q", QueueSide::Right);
@@ -644,9 +783,10 @@ mod tests {
     fn release_returns_message_to_available() {
         let store = InMemoryQueueStore::new();
         store.seed_queue("q", vec![1]);
-        let id = store.mark_pending("q", 1, "g", deadline_in(1000)).unwrap();
+        let t = txn();
+        let id = store.mark_pending(&t, "q", 1, "g", deadline_in(1000)).unwrap();
         assert!(store.available_messages("q", QueueSide::Left).is_empty());
-        store.release_pending(&id).unwrap();
+        store.release_pending(&t, &id).unwrap();
         assert_eq!(store.available_messages("q", QueueSide::Left), vec![1]);
     }
 
@@ -654,10 +794,11 @@ mod tests {
     fn read_lock_deadline_reflects_pending_state() {
         let store = InMemoryQueueStore::new();
         store.seed_queue("q", vec![1]);
+        let t = txn();
         let dl = deadline_in(1000);
-        let id = store.mark_pending("q", 1, "g", dl).unwrap();
+        let id = store.mark_pending(&t, "q", 1, "g", dl).unwrap();
         assert_eq!(store.read_lock_deadline(&id), Some(dl));
-        store.release_pending(&id).unwrap();
+        store.release_pending(&t, &id).unwrap();
         assert_eq!(store.read_lock_deadline(&id), None);
     }
 
@@ -665,10 +806,11 @@ mod tests {
     fn mark_pending_refreshes_deadline_on_repeat() {
         let store = InMemoryQueueStore::new();
         store.seed_queue("q", vec![1]);
+        let t = txn();
         let d1 = deadline_in(1000);
         let d2 = deadline_in(5000);
-        let id = store.mark_pending("q", 1, "g", d1).unwrap();
-        let id2 = store.mark_pending("q", 1, "g", d2).unwrap();
+        let id = store.mark_pending(&t, "q", 1, "g", d1).unwrap();
+        let id2 = store.mark_pending(&t, "q", 1, "g", d2).unwrap();
         assert_eq!(id, id2);
         assert_eq!(store.read_lock_deadline(&id), Some(d2));
     }
@@ -676,7 +818,8 @@ mod tests {
     #[test]
     fn mark_pending_unknown_queue_errors() {
         let store = InMemoryQueueStore::new();
-        let err = store.mark_pending("missing", 1, "g", deadline_in(1000)).unwrap_err();
+        let t = txn();
+        let err = store.mark_pending(&t, "missing", 1, "g", deadline_in(1000)).unwrap_err();
         assert!(matches!(err, QueueStoreError::UnknownQueue(_)));
     }
 
