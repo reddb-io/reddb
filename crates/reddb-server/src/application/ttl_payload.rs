@@ -340,7 +340,7 @@ fn ttl_unit_multiplier_ms(field: &str, unit: &str) -> RedDBResult<f64> {
         "h" | "hr" | "hrs" | "hour" | "hours" => Ok(3_600_000.0),
         "d" | "day" | "days" => Ok(86_400_000.0),
         other => Err(RedDBError::Query(format!(
-            "field '{field}' uses unsupported TTL unit '{other}'"
+            "field '{field}' uses unsupported TTL unit '{other}'; supported units: ms, s, m, h, d (e.g. \"30m\")"
         ))),
     }
 }
