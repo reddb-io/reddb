@@ -1202,6 +1202,7 @@ pub struct RuntimeConnection {
 }
 
 pub mod ai;
+pub mod analytics_schema_registry;
 pub mod ask_pipeline;
 pub mod audit_log;
 pub mod audit_query;

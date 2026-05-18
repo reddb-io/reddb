@@ -54,6 +54,10 @@ pub(super) const MATERIALIZED_VIEWS_INTERNAL: &str = "__red_schema_materialized_
 // see live state when auditing stuck consumers.
 pub(super) const QUEUE_PENDING: &str = "red.queue_pending";
 pub(super) const QUEUE_PENDING_INTERNAL: &str = "__red_schema_queue_pending";
+// Issue #577 — AnalyticsSchemaRegistry slice 2. Per-event-name schema
+// versions: `(event_name, version, schema_json, registered_at)`.
+pub(super) const SCHEMA_REGISTRY: &str = "red.schema_registry";
+pub(super) const SCHEMA_REGISTRY_INTERNAL: &str = "__red_schema_schema_registry";
 pub(super) const READ_ONLY_ERROR: &str = "system schema is read-only";
 
 const COLLECTION_COLUMNS: [&str; 15] = [
@@ -168,6 +172,13 @@ const MATERIALIZED_VIEW_COLUMNS: [&str; 7] = [
     "current_row_count",
 ];
 
+const SCHEMA_REGISTRY_COLUMNS: [&str; 4] = [
+    "event_name",
+    "version",
+    "schema_json",
+    "registered_at",
+];
+
 const SUBSCRIPTION_COLUMNS: [&str; 11] = [
     "name",
     "collection",
@@ -199,6 +210,7 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
         (RETENTION, RETENTION_INTERNAL),
         (MATERIALIZED_VIEWS, MATERIALIZED_VIEWS_INTERNAL),
         (QUEUE_PENDING, QUEUE_PENDING_INTERNAL),
+        (SCHEMA_REGISTRY, SCHEMA_REGISTRY_INTERNAL),
     ] {
         if let Some(next) = replace_case_insensitive_outside_quotes(&rewritten, public, internal) {
             rewritten = next;
@@ -248,6 +260,8 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(MATERIALIZED_VIEWS)
         || table.eq_ignore_ascii_case(QUEUE_PENDING_INTERNAL)
         || table.eq_ignore_ascii_case(QUEUE_PENDING)
+        || table.eq_ignore_ascii_case(SCHEMA_REGISTRY_INTERNAL)
+        || table.eq_ignore_ascii_case(SCHEMA_REGISTRY)
 }
 
 pub(super) fn red_query(
@@ -292,6 +306,7 @@ pub(super) fn red_query(
         VirtualTableKind::Retention => retention_snapshot(runtime, visible_collections),
         VirtualTableKind::MaterializedViews => materialized_views_snapshot(runtime),
         VirtualTableKind::QueuePending => queue_pending_snapshot(runtime, visible_collections),
+        VirtualTableKind::SchemaRegistry => schema_registry_snapshot(runtime),
     };
 
     let table_name = query.table.as_str();
@@ -396,6 +411,7 @@ enum VirtualTableKind {
     Retention,
     MaterializedViews,
     QueuePending,
+    SchemaRegistry,
 }
 
 impl VirtualTableKind {
@@ -413,6 +429,7 @@ impl VirtualTableKind {
             Self::Retention => &RETENTION_COLUMNS,
             Self::MaterializedViews => &MATERIALIZED_VIEW_COLUMNS,
             Self::QueuePending => &QUEUE_PENDING_COLUMNS,
+            Self::SchemaRegistry => &SCHEMA_REGISTRY_COLUMNS,
         }
     }
 
@@ -430,6 +447,7 @@ impl VirtualTableKind {
             Self::Retention => RETENTION,
             Self::MaterializedViews => MATERIALIZED_VIEWS,
             Self::QueuePending => QUEUE_PENDING,
+            Self::SchemaRegistry => SCHEMA_REGISTRY,
         }
     }
 }
@@ -476,9 +494,38 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
     {
         return Ok(VirtualTableKind::QueuePending);
     }
+    if name.eq_ignore_ascii_case(SCHEMA_REGISTRY_INTERNAL)
+        || name.eq_ignore_ascii_case(SCHEMA_REGISTRY)
+    {
+        return Ok(VirtualTableKind::SchemaRegistry);
+    }
     Err(RedDBError::Query(format!(
         "unknown system schema relation `{name}`"
     )))
+}
+
+fn schema_registry_snapshot(runtime: &RedDBRuntime) -> Vec<UnifiedRecord> {
+    let store = runtime.db().store();
+    let schema = Arc::new(
+        SCHEMA_REGISTRY_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    super::analytics_schema_registry::list(store.as_ref())
+        .into_iter()
+        .map(|entry| {
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(entry.event_name),
+                    Value::UnsignedInteger(entry.version as u64),
+                    Value::text(entry.schema_json),
+                    Value::TimestampMs(entry.registered_at_ms as i64),
+                ],
+            )
+        })
+        .collect()
 }
 
 fn subscriptions_snapshot(
