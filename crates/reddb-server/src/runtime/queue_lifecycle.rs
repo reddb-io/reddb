@@ -92,6 +92,17 @@ pub(crate) struct Delivery {
     pub(crate) payload: Value,
 }
 
+/// Non-mutating view of a queue message, returned by [`QueueLifecycle::peek`].
+/// Carries the per-message retry budget (sourced via
+/// [`QueueStore::read_max_attempts`]) so callers don't need a second lookup
+/// to mirror the legacy `queue_delivery::peek_messages` + max-attempts pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QueueMessageView {
+    pub(crate) message_id: MessageId,
+    pub(crate) payload: Value,
+    pub(crate) max_attempts: u32,
+}
+
 /// WORK-mode queue lifecycle.
 pub(crate) struct QueueLifecycle<S: QueueStore> {
     store: S,
@@ -278,6 +289,47 @@ impl<S: QueueStore> QueueLifecycle<S> {
             telemetry.record_nacked("", "", self.config.mode.as_str(), outcome);
         }
         Ok(())
+    }
+
+    /// Non-mutating peek — returns up to `count` available messages on
+    /// `queue` from the left, mirroring `queue_delivery::peek_messages`.
+    /// Does **not** mark anything pending, does **not** record tombstones,
+    /// does **not** bump attempt counters. The `&QueueTxn` parameter is
+    /// kept for shape-consistency with the mutating ops (so the bridge
+    /// in PRD #598 doesn't need a different call site convention) but
+    /// is intentionally unused here.
+    pub(crate) fn peek(
+        &self,
+        queue: &str,
+        count: usize,
+        _txn: &QueueTxn,
+    ) -> Vec<QueueMessageView> {
+        if count == 0 {
+            return Vec::new();
+        }
+        let available = self.store.available_messages(queue, QueueSide::Left);
+        available
+            .into_iter()
+            .take(count)
+            .filter_map(|message_id| {
+                self.store
+                    .read_message(queue, message_id)
+                    .map(|payload| QueueMessageView {
+                        message_id,
+                        payload,
+                        max_attempts: self.store.read_max_attempts(queue, message_id),
+                    })
+            })
+            .collect()
+    }
+
+    /// Non-mutating read — returns the payload backing `delivery_id` if it
+    /// is currently held pending. Mirrors the read-shaped portion of
+    /// `queue_delivery::read_messages` without touching pending state or
+    /// the attempts counter. Returns `None` for unknown / already-retired
+    /// delivery ids.
+    pub(crate) fn read(&self, delivery_id: &str, _txn: &QueueTxn) -> Option<Value> {
+        self.store.read_pending_payload(delivery_id)
     }
 
     fn record(&self, outcome: RetirementOutcome) {
@@ -778,5 +830,136 @@ mod tests {
         // The original delivery handle remains ackable through the new
         // Module — confirming the pending row was not silently dropped.
         lc2.ack(&QueueTxn::new(),&original_delivery_id).expect("original delivery still ackable");
+    }
+
+    // Issue #602 — peek + read (non-mutating inspection).
+
+    #[test]
+    fn peek_returns_available_slice_without_mutating_state() {
+        let store = store_with(&[(1, "a"), (2, "b"), (3, "c")]);
+        let lc = lifecycle(store);
+        let t = QueueTxn::new();
+
+        let view = lc.peek("q", 2, &t);
+        assert_eq!(view.len(), 2);
+        assert_eq!(view[0].message_id, 1);
+        assert_eq!(view[0].payload, Value::text("a"));
+        assert_eq!(view[1].message_id, 2);
+        assert_eq!(view[1].payload, Value::text("b"));
+
+        // peek must not mark anything pending: the same deliver should
+        // still hand back message 1 from the front.
+        let delivered = lc.deliver(&QueueTxn::new(), "q", "workers", 1).expect("deliver");
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].payload, Value::text("a"));
+
+        // peek must not have recorded a tombstone either.
+        assert!(t.recorded_tombstones().is_empty(), "peek must not tombstone");
+    }
+
+    #[test]
+    fn peek_count_zero_returns_empty() {
+        let lc = lifecycle(store_with(&[(1, "a")]));
+        let got = lc.peek("q", 0, &QueueTxn::new());
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn peek_unknown_queue_returns_empty() {
+        let store = InMemoryQueueStore::new();
+        let lc = QueueLifecycle::new(store, LifecycleConfig::default());
+        let got = lc.peek("missing", 5, &QueueTxn::new());
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn peek_count_larger_than_available_returns_all() {
+        let lc = lifecycle(store_with(&[(1, "a"), (2, "b")]));
+        let view = lc.peek("q", 10, &QueueTxn::new());
+        assert_eq!(view.len(), 2);
+    }
+
+    #[test]
+    fn peek_skips_pending_messages() {
+        let lc = lifecycle(store_with(&[(1, "a"), (2, "b"), (3, "c")]));
+        // Reserve message 1 — peek must skip it.
+        let _ = lc.deliver(&QueueTxn::new(), "q", "workers", 1).expect("deliver");
+        let view = lc.peek("q", 5, &QueueTxn::new());
+        let ids: Vec<_> = view.iter().map(|v| v.message_id).collect();
+        assert_eq!(ids, vec![2, 3]);
+    }
+
+    #[test]
+    fn peek_carries_per_message_max_attempts() {
+        let store = store_with(&[(1, "a"), (2, "b")]);
+        store.seed_max_attempts("q", 1, 7);
+        // 2 unseeded — falls back to crate default (3).
+        let lc = lifecycle(store);
+        let view = lc.peek("q", 2, &QueueTxn::new());
+        assert_eq!(view[0].message_id, 1);
+        assert_eq!(view[0].max_attempts, 7);
+        assert_eq!(view[1].message_id, 2);
+        assert_eq!(view[1].max_attempts, 3);
+    }
+
+    #[test]
+    fn peek_works_on_fanout_queue_and_does_not_mutate() {
+        // FANOUT acceptance: peek behaves like WORK — the store-level
+        // `available_messages` filter (pending across any group) is the
+        // same surface both modes use. Acked-per-group state is not
+        // peek's concern (peek mirrors `queue_delivery::peek_messages`
+        // which is mode-agnostic).
+        let store = store_with(&[(1, "x"), (2, "y")]);
+        let lc = QueueLifecycle::new(store, fanout_config());
+
+        let view = lc.peek("q", 5, &QueueTxn::new());
+        assert_eq!(view.len(), 2);
+        assert_eq!(view[0].payload, Value::text("x"));
+        assert_eq!(view[1].payload, Value::text("y"));
+
+        // Two FANOUT groups should still both see both messages — peek
+        // didn't touch any pending row.
+        let a = lc.deliver(&QueueTxn::new(), "q", "subs.a", 2).expect("deliver a");
+        let b = lc.deliver(&QueueTxn::new(), "q", "subs.b", 2).expect("deliver b");
+        assert_eq!(a.len(), 2);
+        assert_eq!(b.len(), 2);
+    }
+
+    #[test]
+    fn read_returns_payload_for_pending_delivery_without_locking() {
+        let lc = lifecycle(store_with(&[(1, "payload-1")]));
+        let t = QueueTxn::new();
+        let delivered = lc.deliver(&t, "q", "workers", 1).expect("deliver");
+        let id = delivered[0].delivery_id.clone();
+        let deadline_before = lc.store_ref().read_lock_deadline(&id);
+
+        let got = lc.read(&id, &t);
+        assert_eq!(got, Some(Value::text("payload-1")));
+
+        // read must not touch the lock deadline — same instant before and after.
+        assert_eq!(lc.store_ref().read_lock_deadline(&id), deadline_before);
+        // read must not record a tombstone.
+        assert!(t.recorded_tombstones().is_empty(), "read must not tombstone");
+        // The delivery handle stays valid and ackable.
+        lc.ack(&QueueTxn::new(), &id).expect("delivery still ackable after read");
+    }
+
+    #[test]
+    fn read_returns_none_for_unknown_delivery() {
+        let lc = lifecycle(store_with(&[(1, "p")]));
+        assert!(lc.read("does-not-exist", &QueueTxn::new()).is_none());
+    }
+
+    #[test]
+    fn read_returns_none_after_ack() {
+        let lc = lifecycle(store_with(&[(1, "p")]));
+        let t = QueueTxn::new();
+        let delivered = lc.deliver(&t, "q", "workers", 1).expect("deliver");
+        let id = delivered[0].delivery_id.clone();
+        lc.ack(&t, &id).expect("ack");
+        assert!(
+            lc.read(&id, &QueueTxn::new()).is_none(),
+            "retired delivery must not be readable",
+        );
     }
 }
