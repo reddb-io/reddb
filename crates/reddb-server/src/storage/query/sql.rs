@@ -2326,12 +2326,13 @@ impl<'a> Parser<'a> {
                         self, "table",
                     )?))
                 } else if self.consume_ident_ci("QUEUES")? {
-                    // Issue #535 — slice 8. Repointed from
-                    // `red.collections WHERE model='queue'` to the
-                    // type-faithful `red.queues` virtual table.
-                    // `INCLUDING INTERNAL` continues to surface DLQs
-                    // and auto-event queues, mirroring the
-                    // `SHOW COLLECTIONS` knob.
+                    // Issue #535 — `SHOW QUEUES` desugars to the
+                    // `red.queues` virtual table (queue-shaped
+                    // columns), not the filtered `red.collections`
+                    // view. `INCLUDING INTERNAL` mirrors the
+                    // `SHOW COLLECTIONS` opt-in: without it, DLQ
+                    // targets and other auto-created queues are
+                    // hidden via the `internal = false` filter.
                     let mut query = TableQuery::new("red.queues");
                     let include_internal = if self.consume_ident_ci("INCLUDING")? {
                         if !self.consume_ident_ci("INTERNAL")? {
@@ -2347,18 +2348,12 @@ impl<'a> Parser<'a> {
                     };
                     self.parse_table_clauses(&mut query)?;
                     if !include_internal {
-                        let user_filter = query.filter.take();
                         let hide_internal = Filter::Compare {
                             field: FieldRef::column("", "internal"),
                             op: CompareOp::Eq,
                             value: Value::Boolean(false),
                         };
-                        let combined = match user_filter {
-                            Some(filter) => filter.and(hide_internal),
-                            None => hide_internal,
-                        };
-                        query.where_expr = Some(filter_to_expr(&combined));
-                        query.filter = Some(combined);
+                        add_table_filter(&mut query, hide_internal);
                     }
                     Ok(SqlCommand::Select(query))
                 } else if self.consume(&Token::Vectors)? || self.consume_ident_ci("VECTORS")? {
