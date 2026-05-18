@@ -52,9 +52,30 @@ impl RedDBServer {
     /// GET /backup/status — backup scheduler status.
     pub(crate) fn handle_backup_status(&self) -> HttpResponse {
         let status = self.runtime.backup_status();
+        let gate = self.runtime.write_gate();
+        let pause_state = if gate.is_auto_paused() {
+            "paused_archive_lag"
+        } else {
+            "active"
+        };
         let mut object = Map::new();
         object.insert("ok".to_string(), JsonValue::Bool(true));
         object.insert("running".to_string(), JsonValue::Bool(status.running));
+        // Issue #519 — graceful read-only mode triggered by WAL
+        // archive lag. `paused_archive_lag` means the engine has
+        // transitioned to read-only because the archiver has not made
+        // progress within `REDDB_BACKUP_PAUSE_ON_LAG_SECS`. Note: this
+        // field reflects only the auto-pause state. A separate
+        // operator-set read-only flag (see `/admin/readonly`) is
+        // tracked independently and is sticky across archive recovery.
+        object.insert(
+            "pause_state".to_string(),
+            JsonValue::String(pause_state.to_string()),
+        );
+        object.insert(
+            "pause_on_lag_secs".to_string(),
+            JsonValue::Number(gate.archive_pause_threshold_secs() as f64),
+        );
         object.insert(
             "interval_secs".to_string(),
             JsonValue::Number(status.interval_secs as f64),

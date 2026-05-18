@@ -242,6 +242,10 @@ pub fn default_telemetry_for_path(
 const BACKUP_INTERVAL_META_CHECKPOINT: &str = "red.boot.backup.checkpoint_interval_secs";
 const BACKUP_INTERVAL_META_WAL_FLUSH: &str = "red.boot.backup.wal_flush_interval_secs";
 const BACKUP_KIND_META: &str = "red.boot.backup.backend_kind";
+/// Issue #519 — threaded through `metadata` like the existing interval
+/// values. `0` (default) means "feature disabled" and the runner skips
+/// the lag-monitor wiring entirely.
+const BACKUP_PAUSE_ON_LAG_META: &str = "red.boot.backup.pause_on_lag_secs";
 
 impl ServerCommandConfig {
     fn to_db_options(&self) -> Result<RedDBOptions, String> {
@@ -359,6 +363,10 @@ fn apply_backup_config(options: &mut RedDBOptions, cfg: &crate::backup_bootstrap
     options
         .metadata
         .insert(BACKUP_KIND_META.to_string(), "s3".to_string());
+    options.metadata.insert(
+        BACKUP_PAUSE_ON_LAG_META.to_string(),
+        cfg.pause_on_lag_secs.to_string(),
+    );
 
     #[cfg(feature = "backend-s3")]
     {
@@ -432,11 +440,36 @@ fn spawn_backup_tasks_if_configured(
         .get(BACKUP_INTERVAL_META_WAL_FLUSH)?
         .parse()
         .ok()?;
+    // Issue #519 — opt-in graceful read-only when remote archive lag
+    // exceeds the threshold. `0` (default) keeps legacy behaviour.
+    let pause_on_lag_secs: u64 = options
+        .metadata
+        .get(BACKUP_PAUSE_ON_LAG_META)
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(0);
     if options.remote_backend.is_none() {
         return None;
     }
 
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    // Stamp the gate with the threshold + a "now" baseline so the
+    // first auto-pause can only fire after `pause_on_lag_secs` of
+    // archive silence. The poller below re-evaluates on the same
+    // clock the archive-task wrapper uses.
+    if pause_on_lag_secs > 0 {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        runtime
+            .write_gate()
+            .configure_archive_lag_pause(pause_on_lag_secs, now_ms);
+        tracing::info!(
+            pause_on_lag_secs,
+            "archive-lag pause enabled — engine will transition to read-only after threshold seconds of archiver silence"
+        );
+    }
 
     let checkpoint_handle = {
         let stop = Arc::clone(&stop);
@@ -458,16 +491,68 @@ fn spawn_backup_tasks_if_configured(
         let stop = Arc::clone(&stop);
         let runtime = runtime.clone();
         let interval = Duration::from_secs(wal_secs);
+        let lag_enabled = pause_on_lag_secs > 0;
         thread::Builder::new()
             .name("red-wal-archiver".into())
             .spawn(move || {
-                periodic_loop(stop, interval, move || {
-                    if let Err(err) = runtime.trigger_backup() {
+                periodic_loop(stop, interval, move || match runtime.trigger_backup() {
+                    Ok(_) if lag_enabled => {
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        runtime.write_gate().record_archive_success(now_ms);
+                        // Same-tick re-evaluation: catching up while
+                        // already auto-paused must auto-resume without
+                        // waiting for the poller's cadence.
+                        runtime.write_gate().evaluate_archive_lag(now_ms);
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
                         tracing::warn!(error = %err, "periodic WAL archive/backup failed");
                     }
                 })
             })
             .ok()
+    };
+
+    // Issue #519 — lag poller. Wakes on a short cadence so a frozen
+    // archiver (the worst case) still flips the gate within ~5s of
+    // crossing the threshold, instead of waiting up to a full
+    // `wal_secs` for the next archive attempt that may never come.
+    let lag_monitor_handle = if pause_on_lag_secs > 0 {
+        let stop = Arc::clone(&stop);
+        let runtime = runtime.clone();
+        // 5s is short enough that the threshold is honoured tightly
+        // and long enough that the atomic loads stay invisible at the
+        // process level.
+        let interval = Duration::from_secs(5);
+        thread::Builder::new()
+            .name("red-archive-lag-monitor".into())
+            .spawn(move || {
+                periodic_loop(stop, interval, move || {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    let was_paused = runtime.write_gate().is_auto_paused();
+                    let now_paused = runtime.write_gate().evaluate_archive_lag(now_ms);
+                    if now_paused && !was_paused {
+                        tracing::warn!(
+                            pause_on_lag_secs,
+                            last_archive_at_ms = runtime.write_gate().last_archive_at_ms(),
+                            "WAL archive lag exceeded threshold — entering graceful read-only mode (issue #519)"
+                        );
+                    } else if !now_paused && was_paused {
+                        tracing::info!(
+                            "WAL archive caught up — exiting graceful read-only mode (issue #519)"
+                        );
+                    }
+                })
+            })
+            .ok()
+    } else {
+        None
     };
 
     tracing::info!(
@@ -480,6 +565,7 @@ fn spawn_backup_tasks_if_configured(
         stop,
         _checkpoint_handle: checkpoint_handle,
         _archiver_handle: archiver_handle,
+        _lag_monitor_handle: lag_monitor_handle,
     })
 }
 
@@ -489,6 +575,9 @@ pub struct BackupTasksHandle {
     stop: Arc<std::sync::atomic::AtomicBool>,
     _checkpoint_handle: Option<thread::JoinHandle<()>>,
     _archiver_handle: Option<thread::JoinHandle<()>>,
+    /// Issue #519 — periodic archive-lag poller, only spawned when
+    /// `REDDB_BACKUP_PAUSE_ON_LAG_SECS > 0`.
+    _lag_monitor_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl Drop for BackupTasksHandle {
