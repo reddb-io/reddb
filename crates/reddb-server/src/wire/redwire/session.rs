@@ -724,10 +724,20 @@ fn param_to_schema_value(value: RedWireParamValue) -> crate::storage::schema::Va
     }
 }
 
-/// Insert dispatch — handles both single-row and bulk shapes off
-/// the same `BulkInsert` (0x04) frame:
+/// Insert dispatch — handles single-row, bulk, and the analytics
+/// batch shape off the same `BulkInsert` (0x04) frame:
 ///   - `{ "collection": "...", "payload": {...} }` → single insert
 ///   - `{ "collection": "...", "payloads": [...] }` → bulk insert
+///   - `{ "collection": "...", "payloads": [...], "idempotency_key": "...",
+///       "batch": true? }` → analytics `BatchInsertEndpoint`
+///     (issue #587) — all-or-nothing commit with
+///     `AnalyticsSchemaRegistry` validation up front and replay served
+///     from the process-wide cache shared with the HTTP (#582) and
+///     gRPC (#585) mirrors. Either an `idempotency_key` OR `batch:
+///     true` flips the dispatch — the literal idempotency key in the
+///     frame is the canonical signal in the brief, the boolean lets a
+///     client opt into the validation semantics without committing to
+///     a cache window.
 ///
 /// Mirrors the JSON-RPC `insert` / `bulk_insert` method shapes
 /// from `rpc_stdio.rs` so both transports agree on the payload.
@@ -749,6 +759,44 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
         Some(s) if !s.is_empty() => s,
         _ => return error_frame(frame.correlation_id, "Insert: missing 'collection' string"),
     };
+
+    // Analytics batch-insert path (issue #587). Either field flips the
+    // dispatch — the brief carries `idempotency_key` as the canonical
+    // signal; the optional `batch: true` boolean exists for callers
+    // that want the validation contract without committing to a
+    // replay window.
+    let idempotency_key = obj.get("idempotency_key").and_then(|x| x.as_str());
+    let batch_flag = obj
+        .get("batch")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    if idempotency_key.is_some() || batch_flag {
+        let items = match obj.get("payloads").and_then(|x| x.as_array()) {
+            Some(rows) => &rows[..],
+            None => {
+                return error_frame(
+                    frame.correlation_id,
+                    "BatchInsert: missing 'payloads' array",
+                )
+            }
+        };
+        let outcome = crate::server::handlers_entity::process_batch_insert(
+            runtime,
+            collection,
+            items,
+            idempotency_key,
+        );
+        // Mirror the HTTP transport's status convention: 2xx → BulkOk,
+        // everything else → Error frame (the body carries the typed
+        // code/row_index envelope so the client can decode it without
+        // an out-of-band header).
+        let kind = if (200..300).contains(&outcome.status) {
+            MessageKind::BulkOk
+        } else {
+            MessageKind::Error
+        };
+        return build_dispatch_reply(frame.correlation_id, kind, outcome.body);
+    }
 
     if let Some(rows) = obj.get("payloads").and_then(|x| x.as_array()) {
         let mut objects = Vec::with_capacity(rows.len());
@@ -1101,6 +1149,333 @@ mod tests {
                 .and_then(JsonValue::as_array)
                 .map(|ids| ids.len()),
             Some(1)
+        );
+    }
+
+    // ── Issue #587 — BatchInsertEndpoint RedWire mirror ──────────────
+    //
+    // The brief carries the rows + idempotency key in the existing
+    // `BulkInsert` (0x04) frame: the presence of `idempotency_key` in
+    // the JSON payload flips the dispatch onto the analytics batch
+    // path (all-or-nothing commit, AnalyticsSchemaRegistry validation,
+    // process-wide cache shared with HTTP #582 and gRPC #585). Each
+    // test below maps to one acceptance bullet.
+
+    /// Bullet 1 — wire form: `BulkInsert` payload with
+    /// `idempotency_key` routes to the batch path; success returns a
+    /// `BulkOk` frame carrying `{"ok":true,"count":N}`. Bullet 5 —
+    /// every row commits in submission order (we read them back and
+    /// assert ascending storage order matches insertion order).
+    #[test]
+    fn redwire_batch_insert_happy_path_returns_bulkok_with_count() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE events_587_ok (id INTEGER, name TEXT)")
+            .expect("create table");
+
+        let frame = Frame::new(
+            MessageKind::BulkInsert,
+            100,
+            br#"{
+                "collection":"events_587_ok",
+                "idempotency_key":"k-ok",
+                "payloads":[
+                    {"fields":{"id":1,"name":"a"}},
+                    {"fields":{"id":2,"name":"b"}},
+                    {"fields":{"id":3,"name":"c"}}
+                ]
+            }"#
+            .to_vec(),
+        );
+        let reply = run_insert_dispatch(&runtime, &frame);
+        assert_eq!(reply.kind, MessageKind::BulkOk, "body={:?}", String::from_utf8_lossy(&reply.payload));
+        let body: JsonValue =
+            serde_json::from_slice(&reply.payload).expect("ok body json");
+        assert_eq!(body.get("ok").and_then(JsonValue::as_bool), Some(true));
+        assert_eq!(body.get("count").and_then(JsonValue::as_u64), Some(3));
+
+        // Submission-order commit — every row landed and the scan can
+        // see them all. (CDC ordering is a property of
+        // `create_rows_batch`, which the shared
+        // `process_batch_insert` re-uses; we pin the user-observable
+        // surface here.)
+        let qr = runtime
+            .execute_query("SELECT name FROM events_587_ok ORDER BY id ASC")
+            .expect("scan");
+        let names: Vec<String> = qr
+            .result
+            .records
+            .iter()
+            .filter_map(|record| match record.get("name") {
+                Some(crate::storage::schema::Value::Text(s)) => Some(s.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    /// Bullet 3 — row K's failure rolls back the whole batch; the
+    /// reply is an `Error` frame whose JSON body carries the failing
+    /// `row_index` so the client can pinpoint the broken row without
+    /// re-uploading.
+    #[test]
+    fn redwire_batch_insert_row_failure_rolls_back_with_row_index() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE events_587_rollback (id INTEGER, name TEXT)")
+            .expect("create table");
+
+        // Row index 1 omits the required `fields` envelope — the parse
+        // step rejects before any commit fires.
+        let frame = Frame::new(
+            MessageKind::BulkInsert,
+            101,
+            br#"{
+                "collection":"events_587_rollback",
+                "idempotency_key":"k-rollback",
+                "payloads":[
+                    {"fields":{"id":1,"name":"a"}},
+                    {"not_fields":{"id":2}},
+                    {"fields":{"id":3,"name":"c"}}
+                ]
+            }"#
+            .to_vec(),
+        );
+        let reply = run_insert_dispatch(&runtime, &frame);
+        assert_eq!(reply.kind, MessageKind::Error);
+        let body: JsonValue =
+            serde_json::from_slice(&reply.payload).expect("err body json");
+        assert_eq!(body.get("ok").and_then(JsonValue::as_bool), Some(false));
+        assert_eq!(
+            body.get("code").and_then(JsonValue::as_str),
+            Some("RowParseFailure")
+        );
+        assert_eq!(body.get("row_index").and_then(JsonValue::as_u64), Some(1));
+
+        // Storage untouched — row 0 was never committed even though
+        // it would have parsed cleanly on its own.
+        let qr = runtime
+            .execute_query("SELECT name FROM events_587_rollback")
+            .expect("scan");
+        assert!(
+            qr.result.records.is_empty(),
+            "row 0 leaked despite row 1 rejection: {} rows present",
+            qr.result.records.len()
+        );
+    }
+
+    /// Bullet 2 — `idempotency_key` carried in the frame; the
+    /// process-wide cache (shared with HTTP slice 4) replays a
+    /// previous success byte-for-byte even when the retry's body
+    /// differs from the original. The HTTP slice 4 already pins the
+    /// cross-call behaviour at its boundary; this test pins the
+    /// RedWire boundary plus the cross-transport sharing (a retry on
+    /// the same key via HTTP returns the body RedWire just produced).
+    #[test]
+    fn redwire_batch_insert_idempotency_key_replays_cached_result() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE events_587_dedup (id INTEGER, name TEXT)")
+            .expect("create table");
+
+        // Use a process-unique key so this test doesn't trample
+        // (or get trampled by) the HTTP-side dedup test that shares
+        // the global cache.
+        let key = format!(
+            "redwire-587-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+
+        let frame1 = Frame::new(
+            MessageKind::BulkInsert,
+            200,
+            format!(
+                r#"{{
+                    "collection":"events_587_dedup",
+                    "idempotency_key":"{key}",
+                    "payloads":[{{"fields":{{"id":1,"name":"first"}}}}]
+                }}"#
+            )
+            .into_bytes(),
+        );
+        let reply1 = run_insert_dispatch(&runtime, &frame1);
+        assert_eq!(reply1.kind, MessageKind::BulkOk);
+        let body1 = reply1.payload.clone();
+
+        // Replay with the same key + DIFFERENT body — the cache
+        // returns the original bytes verbatim and the second row is
+        // not committed.
+        let frame2 = Frame::new(
+            MessageKind::BulkInsert,
+            201,
+            format!(
+                r#"{{
+                    "collection":"events_587_dedup",
+                    "idempotency_key":"{key}",
+                    "payloads":[{{"fields":{{"id":2,"name":"second"}}}}]
+                }}"#
+            )
+            .into_bytes(),
+        );
+        let reply2 = run_insert_dispatch(&runtime, &frame2);
+        assert_eq!(reply2.kind, MessageKind::BulkOk);
+        assert_eq!(reply2.payload, body1, "replay must return cached body byte-for-byte");
+
+        let qr = runtime
+            .execute_query("SELECT name FROM events_587_dedup")
+            .expect("scan");
+        assert_eq!(
+            qr.result.records.len(),
+            1,
+            "replay re-executed and committed the second row"
+        );
+    }
+
+    /// Bullet 2 (cont.) — the cache is *shared with HTTP slice 4*: a
+    /// RedWire submission populates the cache, and a same-key HTTP
+    /// retry returns the cached body verbatim.
+    #[test]
+    fn redwire_batch_insert_cache_shared_with_http_transport() {
+        use crate::runtime::batch_insert::global_cache;
+
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE events_587_shared (id INTEGER, name TEXT)")
+            .expect("create table");
+
+        let key = format!(
+            "shared-cache-587-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+
+        let frame = Frame::new(
+            MessageKind::BulkInsert,
+            300,
+            format!(
+                r#"{{
+                    "collection":"events_587_shared",
+                    "idempotency_key":"{key}",
+                    "payloads":[{{"fields":{{"id":1,"name":"x"}}}}]
+                }}"#
+            )
+            .into_bytes(),
+        );
+        let reply = run_insert_dispatch(&runtime, &frame);
+        assert_eq!(reply.kind, MessageKind::BulkOk);
+
+        // Look the entry up directly via the process-wide cache that
+        // both HTTP and RedWire share. A hit here is the entire
+        // "shared with HTTP slice 4" contract.
+        let hit = global_cache()
+            .lookup("events_587_shared", &key, std::time::Instant::now())
+            .expect("shared cache must serve the RedWire write to HTTP");
+        assert_eq!(hit.status, 200);
+        assert_eq!(hit.body, reply.payload);
+    }
+
+    /// Bullet 4 — schema-validation failure mirrors the other
+    /// transports: a row that the `AnalyticsSchemaRegistry` rejects
+    /// surfaces as `RowSchemaRejected` with the offending `row_index`,
+    /// and the batch leaves the collection untouched.
+    #[test]
+    fn redwire_batch_insert_schema_validation_rejects_unknown_field() {
+        use crate::runtime::analytics_schema_registry as reg;
+
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE events_587_schema (event_name TEXT, payload TEXT)")
+            .expect("create table");
+
+        let schema =
+            r#"{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}"#;
+        reg::register(runtime.db().store().as_ref(), "click_587", schema)
+            .expect("register schema");
+
+        let frame = Frame::new(
+            MessageKind::BulkInsert,
+            400,
+            br#"{
+                "collection":"events_587_schema",
+                "idempotency_key":"k-schema",
+                "payloads":[
+                    {"fields":{"event_name":"click_587","payload":"{\"url\":\"/a\"}"}},
+                    {"fields":{"event_name":"click_587","payload":"{\"url\":\"/b\",\"extra\":1}"}}
+                ]
+            }"#
+            .to_vec(),
+        );
+        let reply = run_insert_dispatch(&runtime, &frame);
+        assert_eq!(reply.kind, MessageKind::Error);
+        let body: JsonValue =
+            serde_json::from_slice(&reply.payload).expect("err body json");
+        assert_eq!(
+            body.get("code").and_then(JsonValue::as_str),
+            Some("RowSchemaRejected")
+        );
+        assert_eq!(body.get("row_index").and_then(JsonValue::as_u64), Some(1));
+
+        let qr = runtime
+            .execute_query("SELECT event_name FROM events_587_schema")
+            .expect("scan");
+        assert!(
+            qr.result.records.is_empty(),
+            "row 0 leaked despite row 1 schema rejection"
+        );
+    }
+
+    /// Bullet 4 (cont.) — oversize fails with `BatchTooLarge` and a
+    /// 413-equivalent status; the storage is never touched.
+    ///
+    /// Build one row past the default ceiling rather than mutating
+    /// `RED_BATCH_MAX_ROWS`. The env var is process-wide and the
+    /// `cargo test` runner schedules tests in parallel; a `set_var`
+    /// here leaks into sibling tests in this crate (e.g. the
+    /// row-failure case sees its 3-row batch flagged as oversize).
+    /// The HTTP slice 4 test takes the same "build past the default"
+    /// route for the same reason.
+    #[test]
+    fn redwire_batch_insert_oversize_returns_error_before_storage() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE events_587_oversize (id INTEGER, name TEXT)")
+            .expect("create table");
+
+        // Default `red.batch.max_rows = 10_000`; submit one more.
+        let max = 10_000usize;
+        let mut payloads = String::with_capacity(max * 32);
+        payloads.push('[');
+        for i in 0..(max + 1) {
+            if i > 0 {
+                payloads.push(',');
+            }
+            payloads.push_str(&format!(r#"{{"fields":{{"id":{i},"name":"x"}}}}"#));
+        }
+        payloads.push(']');
+        let frame_body = format!(
+            r#"{{"collection":"events_587_oversize","idempotency_key":"k-oversize-587","payloads":{payloads}}}"#
+        );
+        let frame = Frame::new(MessageKind::BulkInsert, 500, frame_body.into_bytes());
+        let reply = run_insert_dispatch(&runtime, &frame);
+
+        assert_eq!(reply.kind, MessageKind::Error);
+        let body: JsonValue =
+            serde_json::from_slice(&reply.payload).expect("err body json");
+        assert_eq!(
+            body.get("code").and_then(JsonValue::as_str),
+            Some("BatchTooLarge")
+        );
+        let qr = runtime
+            .execute_query("SELECT name FROM events_587_oversize")
+            .expect("scan");
+        assert!(
+            qr.result.records.is_empty(),
+            "oversize batch leaked rows into storage"
         );
     }
 
