@@ -47,12 +47,14 @@ impl Clock for SystemClock {
 
 /// Lock duration + retry policy. Constructor takes this so the catalog
 /// wiring slice can swap the source without touching the Module surface.
+///
+/// `max_attempts` is *not* a config field — the retry budget lives on
+/// each message and is read at decision time via
+/// [`QueueStore::read_max_attempts`], so a single queue can carry
+/// per-message overrides instead of being capped at one global value.
 #[derive(Debug, Clone)]
 pub(crate) struct LifecycleConfig {
     pub(crate) lock_duration: Duration,
-    /// Max NACK attempts before the message is retired. The Nth NACK
-    /// (where N = `max_attempts`) is the one that retires.
-    pub(crate) max_attempts: u32,
     /// Destination queue for retired messages. `None` → drop on retire.
     pub(crate) dlq_target: Option<DlqTarget>,
     /// Delivery semantics. WORK reserves each message for exactly one
@@ -66,7 +68,6 @@ impl Default for LifecycleConfig {
     fn default() -> Self {
         Self {
             lock_duration: Duration::from_secs(30),
-            max_attempts: 3,
             dlq_target: None,
             mode: QueueMode::Work,
         }
@@ -215,8 +216,12 @@ impl<S: QueueStore> QueueLifecycle<S> {
     /// it. Callers never see the decision — observe outcomes via the test
     /// tap.
     pub(crate) fn nack(&self, delivery_id: &str) -> Result<()> {
-        let attempts = self.store.bump_attempt(delivery_id)?;
-        if attempts >= self.config.max_attempts {
+        let bumped = self.store.bump_attempt(delivery_id)?;
+        let max_attempts = self
+            .store
+            .read_max_attempts(&bumped.queue, bumped.message_id);
+        let attempts = bumped.attempts;
+        if attempts >= max_attempts {
             match &self.config.dlq_target {
                 Some(target) => {
                     let payload = self
@@ -412,9 +417,19 @@ mod tests {
         assert!(got.is_empty());
     }
 
-    fn config_with(max_attempts: u32, dlq: Option<&str>) -> LifecycleConfig {
+    /// Build a [`LifecycleConfig`] for the WORK-mode nack tests and seed
+    /// the per-message retry budget on the store under
+    /// `(queue="q", message_id=1)` — every WORK test in this module
+    /// uses message id `1` as the sole seeded message. Per-message
+    /// `max_attempts` is no longer a config field; the lifecycle reads
+    /// it via `QueueStore::read_max_attempts` at nack time.
+    fn config_with(
+        store: &InMemoryQueueStore,
+        max_attempts: u32,
+        dlq: Option<&str>,
+    ) -> LifecycleConfig {
+        store.seed_max_attempts("q", 1, max_attempts);
         LifecycleConfig {
-            max_attempts,
             dlq_target: dlq.map(|s| s.to_string()),
             ..LifecycleConfig::default()
         }
@@ -423,7 +438,8 @@ mod tests {
     #[test]
     fn nack_below_max_requeues_same_message() {
         let store = store_with(&[(1, "payload")]);
-        let lc = QueueLifecycle::new(store, config_with(3, None));
+        let cfg = config_with(&store, 3, None);
+        let lc = QueueLifecycle::new(store, cfg);
 
         let first = lc.deliver("q", "workers", 1).expect("deliver-1");
         assert_eq!(first[0].payload, Value::text("payload"));
@@ -439,7 +455,9 @@ mod tests {
 
     #[test]
     fn three_nacks_at_max_three_yield_two_requeues_then_retire() {
-        let lc = QueueLifecycle::new(store_with(&[(1, "payload")]), config_with(3, None));
+        let store = store_with(&[(1, "payload")]);
+        let cfg = config_with(&store, 3, None);
+        let lc = QueueLifecycle::new(store, cfg);
 
         for _ in 0..2 {
             let d = lc.deliver("q", "workers", 1).expect("deliver");
@@ -462,7 +480,8 @@ mod tests {
     #[test]
     fn nack_at_max_with_dlq_promotes_to_dlq_target() {
         let store = store_with(&[(1, "orders/42")]);
-        let lc = QueueLifecycle::new(store, config_with(2, Some("orders.dlq")));
+        let cfg = config_with(&store, 2, Some("orders.dlq"));
+        let lc = QueueLifecycle::new(store, cfg);
 
         // First nack → Requeued
         let a = lc.deliver("q", "workers", 1).expect("deliver-a");
@@ -491,7 +510,8 @@ mod tests {
     #[test]
     fn nack_at_max_without_dlq_drops_silently() {
         let store = store_with(&[(1, "ephemeral")]);
-        let lc = QueueLifecycle::new(store, config_with(1, None));
+        let cfg = config_with(&store, 1, None);
+        let lc = QueueLifecycle::new(store, cfg);
 
         let d = lc.deliver("q", "workers", 1).expect("deliver");
         lc.nack(&d[0].delivery_id).expect("nack");
@@ -503,7 +523,9 @@ mod tests {
 
     #[test]
     fn nack_unknown_delivery_id_errors() {
-        let lc = QueueLifecycle::new(InMemoryQueueStore::new(), config_with(3, None));
+        let store = InMemoryQueueStore::new();
+        let cfg = config_with(&store, 3, None);
+        let lc = QueueLifecycle::new(store, cfg);
         let err = lc.nack("nope").unwrap_err();
         assert!(matches!(err, QueueStoreError::UnknownDelivery(_)));
         assert!(lc.recorded_outcomes().is_empty());
@@ -516,10 +538,14 @@ mod tests {
         }
     }
 
-    fn fanout_config_with(max_attempts: u32, dlq: Option<&str>) -> LifecycleConfig {
+    fn fanout_config_with(
+        store: &InMemoryQueueStore,
+        max_attempts: u32,
+        dlq: Option<&str>,
+    ) -> LifecycleConfig {
+        store.seed_max_attempts("q", 1, max_attempts);
         LifecycleConfig {
             mode: QueueMode::Fanout,
-            max_attempts,
             dlq_target: dlq.map(|s| s.to_string()),
             ..LifecycleConfig::default()
         }
@@ -560,8 +586,9 @@ mod tests {
         // Two groups deliver; group A nacks (below max) and requeues
         // *for A only*. Group B's attempt counter must stay at 0 and
         // its pending row must remain intact.
-        let lc =
-            QueueLifecycle::new(store_with(&[(1, "shared")]), fanout_config_with(3, None));
+        let store = store_with(&[(1, "shared")]);
+        let cfg = fanout_config_with(&store, 3, None);
+        let lc = QueueLifecycle::new(store, cfg);
 
         let a = lc.deliver("q", "subs.a", 1).expect("deliver a");
         let b = lc.deliver("q", "subs.b", 1).expect("deliver b");
@@ -586,10 +613,9 @@ mod tests {
         // max=1 + DLQ target. Group A nacks → MovedToDlq. Group B has
         // not yet delivered: it must still be able to deliver the
         // original message (FANOUT keeps the payload for other groups).
-        let lc = QueueLifecycle::new(
-            store_with(&[(1, "orders/42")]),
-            fanout_config_with(1, Some("orders.dlq")),
-        );
+        let store = store_with(&[(1, "orders/42")]);
+        let cfg = fanout_config_with(&store, 1, Some("orders.dlq"));
+        let lc = QueueLifecycle::new(store, cfg);
 
         let a = lc.deliver("q", "subs.a", 1).expect("deliver a");
         lc.nack(&a[0].delivery_id).expect("nack a");
@@ -611,8 +637,9 @@ mod tests {
 
     #[test]
     fn fanout_terminal_nack_no_dlq_drops_for_caller_group_only() {
-        let lc =
-            QueueLifecycle::new(store_with(&[(1, "p")]), fanout_config_with(1, None));
+        let store = store_with(&[(1, "p")]);
+        let cfg = fanout_config_with(&store, 1, None);
+        let lc = QueueLifecycle::new(store, cfg);
 
         let a = lc.deliver("q", "subs.a", 1).expect("deliver a");
         lc.nack(&a[0].delivery_id).expect("nack a");
@@ -648,7 +675,9 @@ mod tests {
         // With max=3, a NACK→requeue→NACK→requeue→NACK should retire,
         // even though the second and third nacks operate on fresh
         // delivery_ids (the redelivery path).
-        let lc = QueueLifecycle::new(store_with(&[(1, "p")]), config_with(3, Some("dlq")));
+        let store = store_with(&[(1, "p")]);
+        let cfg = config_with(&store, 3, Some("dlq"));
+        let lc = QueueLifecycle::new(store, cfg);
 
         let mut ids = Vec::new();
         for _ in 0..3 {

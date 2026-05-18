@@ -127,8 +127,21 @@ pub(crate) trait QueueStore {
         side: QueueSide,
     ) -> Vec<MessageId>;
 
-    /// Increment attempt count for `delivery_id`. Returns the new count.
-    fn bump_attempt(&self, delivery_id: &str) -> Result<u32>;
+    /// Increment attempt count for `delivery_id`. Returns the new count
+    /// alongside the `(queue, message_id)` the delivery resolves to —
+    /// callers (notably `QueueLifecycle::nack`) need the pair to consult
+    /// per-message policy via [`QueueStore::read_max_attempts`] without a
+    /// second pending-row lookup. Pending row is left in place; only the
+    /// attempts counter mutates.
+    fn bump_attempt(&self, delivery_id: &str) -> Result<BumpedAttempt>;
+
+    /// Per-message retry budget — the value the lifecycle compares the
+    /// `bump_attempt` return against to decide retire-vs-requeue. Sourced
+    /// from the row data on `Primary`/`Replica` (the same field
+    /// `impl_queue::queue_message_max_attempts` reads) and from the test
+    /// seed map on `InMemoryQueueStore`. Returns a sensible default if no
+    /// per-message override is set so the trait surface is total.
+    fn read_max_attempts(&self, queue: &str, message_id: MessageId) -> u32;
 
     /// Move `original` onto the DLQ at `dlq_target`.
     fn enqueue_dlq(&self, dlq_target: &str, original: Value) -> Result<()>;
@@ -162,6 +175,22 @@ struct PendingDelivery {
     attempts: u32,
 }
 
+/// Return value of [`QueueStore::bump_attempt`] — the new attempt count
+/// plus the pending key the delivery resolves to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BumpedAttempt {
+    pub(crate) attempts: u32,
+    pub(crate) queue: QueueId,
+    pub(crate) message_id: MessageId,
+}
+
+/// Crate-wide fallback when a `read_max_attempts` caller hits a tuple
+/// without a configured override. Mirrors the user-facing
+/// `DEFAULT_QUEUE_MAX_ATTEMPTS` in `storage::query` — duplicated here so
+/// `InMemoryQueueStore` can resolve a default without a runtime/query
+/// dep.
+pub(crate) const DEFAULT_READ_MAX_ATTEMPTS: u32 = 3;
+
 #[derive(Debug, Clone)]
 pub(crate) struct DlqRecord {
     pub target: DlqTarget,
@@ -187,6 +216,10 @@ struct State {
     /// message remains in the queue for other groups, but `available_for_group`
     /// must filter it out for any group present in this set.
     acked: std::collections::HashSet<(QueueId, MessageId, ConsumerGroupId)>,
+    /// Per-message retry budget overrides for the in-memory fake. Seeded
+    /// by tests via `seed_max_attempts`; absence falls back to
+    /// `DEFAULT_READ_MAX_ATTEMPTS`.
+    max_attempts: HashMap<(QueueId, MessageId), u32>,
     dlq: Vec<DlqRecord>,
 }
 
@@ -219,6 +252,17 @@ impl InMemoryQueueStore {
     /// Snapshot of the DLQ — test helper.
     pub(crate) fn dlq_snapshot(&self) -> Vec<DlqRecord> {
         self.state.lock().expect("state poisoned").dlq.clone()
+    }
+
+    /// Seed a per-message retry budget — test helper. Real adapters
+    /// source the value from the `QueueMessageData` row on push; the
+    /// fake takes the value directly so unit tests can drive the
+    /// retire-vs-requeue decision without booting the engine.
+    pub(crate) fn seed_max_attempts(&self, queue: &str, message_id: MessageId, max_attempts: u32) {
+        let mut state = self.state.lock().expect("state poisoned");
+        state
+            .max_attempts
+            .insert((queue.to_string(), message_id), max_attempts);
     }
 
     /// Associate `payload` with `(queue, message_id)` — test helper used
@@ -383,7 +427,7 @@ impl QueueStore for InMemoryQueueStore {
         out
     }
 
-    fn bump_attempt(&self, delivery_id: &str) -> Result<u32> {
+    fn bump_attempt(&self, delivery_id: &str) -> Result<BumpedAttempt> {
         let mut state = self.state.lock().expect("state poisoned");
         let entry = state
             .pending
@@ -391,9 +435,24 @@ impl QueueStore for InMemoryQueueStore {
             .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
         entry.attempts += 1;
         let count = entry.attempts;
-        let key = (entry.queue.clone(), entry.message_id, entry.group.clone());
+        let queue = entry.queue.clone();
+        let message_id = entry.message_id;
+        let key = (queue.clone(), message_id, entry.group.clone());
         state.attempts.insert(key, count);
-        Ok(count)
+        Ok(BumpedAttempt {
+            attempts: count,
+            queue,
+            message_id,
+        })
+    }
+
+    fn read_max_attempts(&self, queue: &str, message_id: MessageId) -> u32 {
+        let state = self.state.lock().expect("state poisoned");
+        state
+            .max_attempts
+            .get(&(queue.to_string(), message_id))
+            .copied()
+            .unwrap_or(DEFAULT_READ_MAX_ATTEMPTS)
     }
 
     fn enqueue_dlq(&self, dlq_target: &str, original: Value) -> Result<()> {
@@ -521,9 +580,34 @@ mod tests {
         let store = InMemoryQueueStore::new();
         store.seed_queue("q", vec![1]);
         let id = store.mark_pending("q", 1, "g", deadline_in(1000)).unwrap();
-        assert_eq!(store.bump_attempt(&id).unwrap(), 1);
-        assert_eq!(store.bump_attempt(&id).unwrap(), 2);
-        assert_eq!(store.bump_attempt(&id).unwrap(), 3);
+        let first = store.bump_attempt(&id).unwrap();
+        assert_eq!(first.attempts, 1);
+        assert_eq!(first.queue, "q");
+        assert_eq!(first.message_id, 1);
+        assert_eq!(store.bump_attempt(&id).unwrap().attempts, 2);
+        assert_eq!(store.bump_attempt(&id).unwrap().attempts, 3);
+    }
+
+    #[test]
+    fn read_max_attempts_defaults_to_three_when_not_seeded() {
+        let store = InMemoryQueueStore::new();
+        assert_eq!(
+            store.read_max_attempts("q", 1),
+            DEFAULT_READ_MAX_ATTEMPTS,
+            "unseeded message must return the crate-wide default",
+        );
+        assert_eq!(DEFAULT_READ_MAX_ATTEMPTS, 3);
+    }
+
+    #[test]
+    fn seed_max_attempts_overrides_default_per_message() {
+        let store = InMemoryQueueStore::new();
+        store.seed_max_attempts("q", 1, 7);
+        store.seed_max_attempts("q", 2, 1);
+        assert_eq!(store.read_max_attempts("q", 1), 7);
+        assert_eq!(store.read_max_attempts("q", 2), 1);
+        // Different queue, same id — not affected by the seed above.
+        assert_eq!(store.read_max_attempts("other", 1), DEFAULT_READ_MAX_ATTEMPTS);
     }
 
     #[test]
