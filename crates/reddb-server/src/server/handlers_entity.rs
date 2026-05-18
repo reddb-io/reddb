@@ -347,6 +347,128 @@ impl RedDBServer {
         json_response(200, JsonValue::Object(object))
     }
 
+    /// Issue #582 — Analytics slice 4. `POST /collections/:name/batch`.
+    /// All-or-nothing commit of a JSON array of rows under a single
+    /// Statement frame, with `AnalyticsSchemaRegistry` validation up
+    /// front and `Idempotency-Key` replay served from an in-memory
+    /// process-wide cache (see [`crate::runtime::batch_insert`]).
+    pub(crate) fn handle_batch_insert(
+        &self,
+        collection: &str,
+        body: Vec<u8>,
+        idempotency_key: Option<&str>,
+    ) -> HttpResponse {
+        use crate::runtime::batch_insert::{
+            global_cache, BatchInsertConfig, BatchInsertError,
+        };
+        use std::time::Instant;
+
+        let cache = global_cache();
+        let config = BatchInsertConfig::from_env();
+        let now = Instant::now();
+
+        // Idempotency replay short-circuits before any parse work so a
+        // misshapen retry of an earlier success still returns the
+        // cached success.
+        if let Some(key) = idempotency_key {
+            if !key.is_empty() {
+                if let Some(cached) = cache.lookup(collection, key, now) {
+                    return HttpResponse {
+                        status: cached.status,
+                        body: cached.body,
+                        content_type: "application/json",
+                        extra_headers: Vec::new(),
+                    };
+                }
+            }
+        }
+
+        let payload = match parse_json_body(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+        let Some(items) = payload.as_array() else {
+            let err = BatchInsertError::BodyNotJsonArray;
+            return batch_error_response(err);
+        };
+
+        if items.len() > config.max_rows {
+            let err = BatchInsertError::BatchTooLarge {
+                limit: config.max_rows,
+                got: items.len(),
+            };
+            return batch_error_response(err);
+        }
+
+        // Two-phase: parse + schema-validate every row BEFORE any
+        // storage write. The brief's all-or-nothing contract requires
+        // that row K's failure leave the collection untouched, so we
+        // refuse to start the commit until every row clears the gate.
+        let mut row_inputs = Vec::with_capacity(items.len());
+        let store = self.runtime.db().store();
+        for (index, item) in items.iter().enumerate() {
+            let input = match crate::application::entity_payload::parse_create_row_input(
+                collection.to_string(),
+                item,
+            ) {
+                Ok(input) => input,
+                Err(err) => {
+                    return batch_error_response(BatchInsertError::RowParseFailure {
+                        index,
+                        reason: err.to_string(),
+                    });
+                }
+            };
+
+            if let Some(reason) = schema_validate_row(store.as_ref(), &input) {
+                return batch_error_response(BatchInsertError::RowSchemaRejected {
+                    index,
+                    reason,
+                });
+            }
+
+            row_inputs.push(input);
+        }
+
+        let count = row_inputs.len();
+        let result =
+            self.entity_use_cases()
+                .create_rows_batch(crate::application::CreateRowsBatchInput {
+                    collection: collection.to_string(),
+                    rows: row_inputs,
+                    suppress_events: false,
+                });
+
+        let response = match result {
+            Ok(_) => {
+                let mut object = Map::new();
+                object.insert("ok".to_string(), JsonValue::Bool(true));
+                object.insert("count".to_string(), JsonValue::Number(count as f64));
+                json_response(200, JsonValue::Object(object))
+            }
+            Err(err) => json_error(400, err.to_string()),
+        };
+
+        // Cache successful results AND deterministic 4xx outcomes; the
+        // brief calls for "the cached prior result" without
+        // distinguishing success vs. failure. A retry with the same key
+        // must see the same outcome, otherwise the dedup window leaks.
+        if let Some(key) = idempotency_key {
+            if !key.is_empty() {
+                cache.store(
+                    collection,
+                    key,
+                    response.status,
+                    response.body.clone(),
+                    config.idempotency_window,
+                    now,
+                );
+            }
+        }
+
+        response
+    }
+
     pub(crate) fn handle_create_vector(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body_allow_empty(&body) {
             Ok(payload) => payload,
@@ -855,6 +977,71 @@ impl RedDBServer {
     }
 }
 
+/// Build the HTTP error body for a `BatchInsertError`. Uses
+/// `json_error_code` so the response carries both `code` (machine-
+/// readable for the brief's typed-error contract) and `error`/`message`
+/// (human-readable) on the same envelope every other 4xx uses.
+fn batch_error_response(err: crate::runtime::batch_insert::BatchInsertError) -> HttpResponse {
+    let mut object = Map::new();
+    object.insert("ok".to_string(), JsonValue::Bool(false));
+    object.insert("code".to_string(), JsonValue::String(err.code().to_string()));
+    let message = err.message();
+    object.insert(
+        "error".to_string(),
+        crate::json_field::SerializedJsonField::tainted(&message),
+    );
+    object.insert(
+        "message".to_string(),
+        crate::json_field::SerializedJsonField::tainted(&message),
+    );
+    if let Some(index) = err.row_index() {
+        object.insert("row_index".to_string(), JsonValue::Number(index as f64));
+    }
+    json_response(err.http_status(), JsonValue::Object(object))
+}
+
+/// Run `AnalyticsSchemaRegistry::validate` against a single row's
+/// `payload` when its `event_name` field names a registered schema.
+/// Returns `None` when the row passes (or no schema is registered)
+/// and `Some(reason)` when the registry rejects.
+fn schema_validate_row(
+    store: &crate::storage::unified::UnifiedStore,
+    input: &crate::application::CreateRowInput,
+) -> Option<String> {
+    let event_name = input.fields.iter().find_map(|(k, v)| {
+        if k.eq_ignore_ascii_case("event_name") {
+            match v {
+                Value::Text(t) => Some(t.to_string()),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    })?;
+    crate::runtime::analytics_schema_registry::latest(store, &event_name)?;
+    let payload_json = input
+        .fields
+        .iter()
+        .find_map(|(k, v)| {
+            if k.eq_ignore_ascii_case("payload") {
+                match v {
+                    Value::Text(t) => Some(t.to_string()),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "{}".to_string());
+    match crate::runtime::analytics_schema_registry::validate(store, &event_name, &payload_json) {
+        Ok(()) => None,
+        Err(err) => {
+            let mapped = crate::runtime::analytics_schema_registry::validation_error_to_reddb(err);
+            Some(mapped.to_string())
+        }
+    }
+}
+
 fn json_string_array_field(payload: &JsonValue, field: &str) -> Result<Vec<String>, String> {
     match payload.get(field) {
         None | Some(JsonValue::Null) => Ok(Vec::new()),
@@ -1069,5 +1256,169 @@ mod tests {
         let server = make_server();
         let r = post_bulk_rows(&server, "any", r#"{"rows": []}"#);
         assert_eq!(r.status, 400);
+    }
+
+    // ── Issue #582 — BatchInsertEndpoint ──────────────────────────────
+
+    fn post_batch(
+        server: &RedDBServer,
+        collection: &str,
+        body: &str,
+        idempotency_key: Option<&str>,
+    ) -> HttpResponse {
+        server.handle_batch_insert(collection, body.as_bytes().to_vec(), idempotency_key)
+    }
+
+    fn create_table(server: &RedDBServer, ddl: &str) {
+        let body = format!(r#"{{"query": "{ddl}"}}"#);
+        let r = server.handle_query(body.into_bytes());
+        assert_eq!(r.status, 200, "ddl failed: {}", String::from_utf8_lossy(&r.body));
+    }
+
+    #[test]
+    fn batch_insert_happy_path_returns_200_with_count() {
+        let server = make_server();
+        create_table(&server, "CREATE TABLE events (id INTEGER, name TEXT)");
+
+        let body = r#"[
+            {"fields": {"id": 1, "name": "a"}},
+            {"fields": {"id": 2, "name": "b"}},
+            {"fields": {"id": 3, "name": "c"}}
+        ]"#;
+        let r = post_batch(&server, "events", body, None);
+        assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+        let parsed = crate::json::parse_json(std::str::from_utf8(&r.body).unwrap()).unwrap();
+        assert_eq!(parsed.get("count").and_then(|v| v.as_f64()), Some(3.0));
+    }
+
+    #[test]
+    fn batch_insert_oversize_returns_413_before_storage() {
+        let server = make_server();
+        create_table(&server, "CREATE TABLE events (id INTEGER, name TEXT)");
+
+        // Build a body one row over the documented default ceiling so
+        // we don't touch the process-wide env, which other tests in
+        // this module read.
+        let max = 10_000;
+        let mut body = String::from("[");
+        for i in 0..(max + 1) {
+            if i > 0 {
+                body.push(',');
+            }
+            body.push_str(&format!(
+                "{{\"fields\":{{\"id\":{i},\"name\":\"x\"}}}}"
+            ));
+        }
+        body.push(']');
+        let r = post_batch(&server, "events", &body, None);
+        assert_eq!(r.status, 413, "{}", String::from_utf8_lossy(&r.body));
+        let text = String::from_utf8_lossy(&r.body);
+        assert!(text.contains("BatchTooLarge"), "body={text}");
+        assert!(text.contains("\"code\":\"BatchTooLarge\""), "body={text}");
+
+        // Storage should be untouched — a scan returns zero rows.
+        let scan = server.handle_scan("events", &Default::default());
+        let scan_text = String::from_utf8_lossy(&scan.body);
+        assert!(
+            !scan_text.contains("\"id\":1"),
+            "oversize batch leaked rows: {scan_text}"
+        );
+    }
+
+    #[test]
+    fn batch_insert_row_failure_rolls_back_whole_batch() {
+        let server = make_server();
+        create_table(&server, "CREATE TABLE events (id INTEGER, name TEXT)");
+
+        // Row 1 omits the required `fields` object — the row-parse
+        // step rejects before any commit fires.
+        let body = r#"[
+            {"fields": {"id": 1, "name": "a"}},
+            {"not_fields": {"id": 2}},
+            {"fields": {"id": 3, "name": "c"}}
+        ]"#;
+        let r = post_batch(&server, "events", body, None);
+        assert_eq!(r.status, 400, "{}", String::from_utf8_lossy(&r.body));
+        let text = String::from_utf8_lossy(&r.body);
+        assert!(text.contains("\"row_index\":1"), "body={text}");
+        assert!(text.contains("RowParseFailure"), "body={text}");
+
+        // Storage is untouched (row 0 was never committed even
+        // though it would have parsed cleanly on its own).
+        let scan = server.handle_scan("events", &Default::default());
+        let scan_text = String::from_utf8_lossy(&scan.body);
+        assert!(
+            !scan_text.contains("\"id\":1"),
+            "row 0 leaked despite row 1 rejection: {scan_text}"
+        );
+    }
+
+    #[test]
+    fn batch_insert_idempotency_key_replays_cached_result() {
+        let server = make_server();
+        create_table(&server, "CREATE TABLE events (id INTEGER, name TEXT)");
+
+        let body = r#"[{"fields": {"id": 1, "name": "first"}}]"#;
+        let r1 = post_batch(&server, "events", body, Some("replay-token-1"));
+        assert_eq!(r1.status, 200);
+        let body1 = String::from_utf8_lossy(&r1.body).to_string();
+
+        // Replay with the same key + DIFFERENT body should still
+        // return the cached prior result and NOT execute again.
+        let other_body = r#"[{"fields": {"id": 2, "name": "second"}}]"#;
+        let r2 = post_batch(&server, "events", other_body, Some("replay-token-1"));
+        assert_eq!(r2.status, 200);
+        assert_eq!(
+            String::from_utf8_lossy(&r2.body).to_string(),
+            body1,
+            "replay must return the cached body byte-for-byte"
+        );
+
+        // Storage holds only the first row, proving the replay did
+        // not re-execute.
+        let scan = server.handle_scan("events", &Default::default());
+        let scan_text = String::from_utf8_lossy(&scan.body);
+        assert!(scan_text.contains("\"name\":\"first\""), "{scan_text}");
+        assert!(
+            !scan_text.contains("\"name\":\"second\""),
+            "replay re-executed: {scan_text}"
+        );
+    }
+
+    #[test]
+    fn batch_insert_schema_validation_rejects_unknown_field() {
+        use crate::runtime::analytics_schema_registry as reg;
+
+        let server = make_server();
+        create_table(
+            &server,
+            "CREATE TABLE events (event_name TEXT, payload TEXT)",
+        );
+
+        // Register a schema that only allows {"url"}.
+        let schema =
+            r#"{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}"#;
+        reg::register(server.runtime().db().store().as_ref(), "click", schema)
+            .expect("register schema");
+
+        // Row 1 carries an unknown `extra` field — registry must
+        // reject before any commit.
+        let body = r#"[
+            {"fields": {"event_name": "click", "payload": "{\"url\":\"/a\"}"}},
+            {"fields": {"event_name": "click", "payload": "{\"url\":\"/b\",\"extra\":1}"}}
+        ]"#;
+        let r = post_batch(&server, "events", body, None);
+        assert_eq!(r.status, 400, "{}", String::from_utf8_lossy(&r.body));
+        let text = String::from_utf8_lossy(&r.body);
+        assert!(text.contains("RowSchemaRejected"), "body={text}");
+        assert!(text.contains("\"row_index\":1"), "body={text}");
+
+        // Storage is untouched.
+        let scan = server.handle_scan("events", &Default::default());
+        let scan_text = String::from_utf8_lossy(&scan.body);
+        assert!(
+            !scan_text.contains("\"url\":\"/a\""),
+            "row 0 leaked despite row 1 schema rejection: {scan_text}"
+        );
     }
 }

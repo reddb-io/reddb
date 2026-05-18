@@ -1273,6 +1273,16 @@ impl RedDBServer {
                     if let Some(collection) = collection_from_action_path(&path, "rows") {
                         return self.handle_create_row(collection, body);
                     }
+                    // Issue #582 — Analytics slice 4. BatchInsertEndpoint
+                    // accepts an array body, enforces all-or-nothing
+                    // commit + AnalyticsSchemaRegistry validation, and
+                    // dedups by `Idempotency-Key` header.
+                    if let Some(collection) = collection_from_action_path(&path, "batch") {
+                        let idempotency_key = headers
+                            .get("idempotency-key")
+                            .map(|value| value.as_str());
+                        return self.handle_batch_insert(collection, body, idempotency_key);
+                    }
                     if let Some(collection) = collection_from_action_path(&path, "nodes") {
                         return self.handle_create_node(collection, body);
                     }

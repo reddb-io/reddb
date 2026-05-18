@@ -1207,6 +1207,7 @@ pub mod ask_pipeline;
 pub mod audit_log;
 pub mod audit_query;
 pub mod authorized_search;
+pub mod batch_insert;
 pub mod blockchain_kind;
 mod collection_contract;
 pub mod config_matrix;
