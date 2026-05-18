@@ -71,6 +71,22 @@ pub(crate) trait QueueStore {
     /// Available (not yet pending) message ids on `queue`, scanning from `side`.
     fn available_messages(&self, queue: &str, side: QueueSide) -> Vec<MessageId>;
 
+    /// Look up the `DeliveryId` currently held for the
+    /// `(queue, message_id, group)` tuple, if any. Returns `None` when
+    /// no pending row matches — including the case where the tuple was
+    /// retired (acked / moved to DLQ) or never marked pending.
+    ///
+    /// Prereq seam for the wire compat bridge (PRD #598): exposes the
+    /// idempotency key `mark_pending` already consults internally so
+    /// the bridge can resolve a re-delivery to the same `DeliveryId`
+    /// without round-tripping through `mark_pending` itself.
+    fn find_pending_by_key(
+        &self,
+        queue: &str,
+        message_id: MessageId,
+        group: &str,
+    ) -> Option<DeliveryId>;
+
     /// Reserve `message_id` for `group` with a pending deadline. Idempotent
     /// on the `(queue, message_id, group)` key — repeated calls with the
     /// same key return the same `DeliveryId` and refresh the deadline.
@@ -286,6 +302,19 @@ impl QueueStore for InMemoryQueueStore {
         );
         state.by_key.insert(key, delivery_id.clone());
         Ok(delivery_id)
+    }
+
+    fn find_pending_by_key(
+        &self,
+        queue: &str,
+        message_id: MessageId,
+        group: &str,
+    ) -> Option<DeliveryId> {
+        let state = self.state.lock().expect("state poisoned");
+        state
+            .by_key
+            .get(&(queue.to_string(), message_id, group.to_string()))
+            .cloned()
     }
 
     fn release_pending(&self, delivery_id: &str) -> Result<()> {
