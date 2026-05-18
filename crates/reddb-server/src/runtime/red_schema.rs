@@ -54,6 +54,13 @@ pub(super) const MATERIALIZED_VIEWS_INTERNAL: &str = "__red_schema_materialized_
 // see live state when auditing stuck consumers.
 pub(super) const QUEUE_PENDING: &str = "red.queue_pending";
 pub(super) const QUEUE_PENDING_INTERNAL: &str = "__red_schema_queue_pending";
+// Issue #535 — QueueLifecycle slice 8. Per-queue introspection so
+// users no longer see queue-irrelevant columns through `SHOW QUEUES`.
+// Hot fields (`mode`, `dlq_target`, `attention`, `depth`) read from
+// the catalog snapshot (sub-ms); `total_pending` and
+// `oldest_pending_age` come from a single pass over `red_queue_meta`.
+pub(super) const QUEUES: &str = "red.queues";
+pub(super) const QUEUES_INTERNAL: &str = "__red_schema_queues";
 // Issue #577 — AnalyticsSchemaRegistry slice 2. Per-event-name schema
 // versions: `(event_name, version, schema_json, registered_at)`.
 pub(super) const SCHEMA_REGISTRY: &str = "red.schema_registry";
@@ -162,6 +169,21 @@ const QUEUE_PENDING_COLUMNS: [&str; 7] = [
     "locked_by",
 ];
 
+// Issue #535 — `internal` is appended so `SHOW QUEUES` can apply the
+// same `internal = false` default filter that `SHOW COLLECTIONS` does
+// (and `SHOW QUEUES INCLUDING INTERNAL` drops it). The first seven are
+// the public introspection contract from the acceptance criteria.
+const QUEUE_COLUMNS: [&str; 8] = [
+    "name",
+    "mode",
+    "depth",
+    "total_pending",
+    "oldest_pending_age",
+    "dlq_target",
+    "attention",
+    "internal",
+];
+
 const MATERIALIZED_VIEW_COLUMNS: [&str; 7] = [
     "name",
     "query_text",
@@ -210,6 +232,7 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
         (RETENTION, RETENTION_INTERNAL),
         (MATERIALIZED_VIEWS, MATERIALIZED_VIEWS_INTERNAL),
         (QUEUE_PENDING, QUEUE_PENDING_INTERNAL),
+        (QUEUES, QUEUES_INTERNAL),
         (SCHEMA_REGISTRY, SCHEMA_REGISTRY_INTERNAL),
     ] {
         if let Some(next) = replace_case_insensitive_outside_quotes(&rewritten, public, internal) {
@@ -260,6 +283,8 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(MATERIALIZED_VIEWS)
         || table.eq_ignore_ascii_case(QUEUE_PENDING_INTERNAL)
         || table.eq_ignore_ascii_case(QUEUE_PENDING)
+        || table.eq_ignore_ascii_case(QUEUES_INTERNAL)
+        || table.eq_ignore_ascii_case(QUEUES)
         || table.eq_ignore_ascii_case(SCHEMA_REGISTRY_INTERNAL)
         || table.eq_ignore_ascii_case(SCHEMA_REGISTRY)
 }
@@ -306,6 +331,7 @@ pub(super) fn red_query(
         VirtualTableKind::Retention => retention_snapshot(runtime, visible_collections),
         VirtualTableKind::MaterializedViews => materialized_views_snapshot(runtime),
         VirtualTableKind::QueuePending => queue_pending_snapshot(runtime, visible_collections),
+        VirtualTableKind::Queues => queues_snapshot(runtime, tenant, visible_collections),
         VirtualTableKind::SchemaRegistry => schema_registry_snapshot(runtime),
     };
 
@@ -411,6 +437,7 @@ enum VirtualTableKind {
     Retention,
     MaterializedViews,
     QueuePending,
+    Queues,
     SchemaRegistry,
 }
 
@@ -429,6 +456,7 @@ impl VirtualTableKind {
             Self::Retention => &RETENTION_COLUMNS,
             Self::MaterializedViews => &MATERIALIZED_VIEW_COLUMNS,
             Self::QueuePending => &QUEUE_PENDING_COLUMNS,
+            Self::Queues => &QUEUE_COLUMNS,
             Self::SchemaRegistry => &SCHEMA_REGISTRY_COLUMNS,
         }
     }
@@ -447,6 +475,7 @@ impl VirtualTableKind {
             Self::Retention => RETENTION,
             Self::MaterializedViews => MATERIALIZED_VIEWS,
             Self::QueuePending => QUEUE_PENDING,
+            Self::Queues => QUEUES,
             Self::SchemaRegistry => SCHEMA_REGISTRY,
         }
     }
@@ -493,6 +522,9 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
         || name.eq_ignore_ascii_case(QUEUE_PENDING)
     {
         return Ok(VirtualTableKind::QueuePending);
+    }
+    if name.eq_ignore_ascii_case(QUEUES_INTERNAL) || name.eq_ignore_ascii_case(QUEUES) {
+        return Ok(VirtualTableKind::Queues);
     }
     if name.eq_ignore_ascii_case(SCHEMA_REGISTRY_INTERNAL)
         || name.eq_ignore_ascii_case(SCHEMA_REGISTRY)
@@ -1694,6 +1726,121 @@ fn queue_pending_snapshot(
         ));
     }
     records
+}
+
+/// Issue #535 — QueueLifecycle slice 8.
+///
+/// Per-queue introspection backing `red.queues` and the repointed
+/// `SHOW QUEUES` desugar. Hot fields (`mode`, `dlq_target`,
+/// `attention`, `depth`) read straight from the catalog snapshot
+/// (sub-ms). `total_pending` and `oldest_pending_age` come from a
+/// single pass over the `red_queue_meta` rows the queue runtime
+/// already maintains — cold-scan tier, same shape as
+/// [`queue_pending_snapshot`].
+fn queues_snapshot(
+    runtime: &RedDBRuntime,
+    tenant: Option<&str>,
+    visible_collections: Option<&HashSet<String>>,
+) -> Vec<UnifiedRecord> {
+    let snapshot = runtime.db().catalog_model_snapshot();
+    let store = runtime.db().store();
+    let schema = Arc::new(
+        QUEUE_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let internal_registry = InternalCollectionRegistry::from_store(store.as_ref());
+
+    // One pass over `red_queue_meta` gives us per-queue
+    // `total_pending` and the oldest `delivered_at_ns` we will
+    // convert to an age. Cheaper than walking it once per queue.
+    let mut pending_total: HashMap<String, u64> = HashMap::new();
+    let mut oldest_delivered_ns: HashMap<String, u64> = HashMap::new();
+    if let Some(meta) = store.get_collection("red_queue_meta") {
+        for entity in meta.query_all(|entity| {
+            entity
+                .data
+                .as_row()
+                .is_some_and(|row| row_text(row, "kind").as_deref() == Some("queue_pending"))
+        }) {
+            let Some(row) = entity.data.as_row() else {
+                continue;
+            };
+            let Some(queue) = row_text(row, "queue") else {
+                continue;
+            };
+            *pending_total.entry(queue.clone()).or_insert(0) += 1;
+            let delivered = row_u64(row, "delivered_at_ns").unwrap_or(0);
+            if delivered > 0 {
+                let entry = oldest_delivered_ns.entry(queue).or_insert(u64::MAX);
+                if delivered < *entry {
+                    *entry = delivered;
+                }
+            }
+        }
+    }
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    snapshot
+        .collections
+        .into_iter()
+        .filter(|collection| collection.model == CollectionModel::Queue)
+        .filter(|collection| collection_is_visible(&collection.name, visible_collections))
+        .filter(|collection| {
+            tenant.is_none_or(|tenant| {
+                collection_tenant(store.as_ref(), &collection.name)
+                    .as_deref()
+                    .is_none_or(|owner| owner == tenant)
+            })
+        })
+        .map(|collection| {
+            let mode_text = collection
+                .queue_mode
+                .map(|mode| mode.as_str().to_string())
+                .unwrap_or_else(|| {
+                    super::impl_queue::queue_mode_str(store.as_ref(), &collection.name).to_string()
+                })
+                .to_ascii_uppercase();
+            let depth = collection.entities as u64;
+            let total_pending = pending_total
+                .get(&collection.name)
+                .copied()
+                .unwrap_or(0);
+            let oldest_age_ms = oldest_delivered_ns
+                .get(&collection.name)
+                .copied()
+                .filter(|ns| *ns > 0 && *ns != u64::MAX)
+                .map(|ns| now_ms.saturating_sub(ns / 1_000_000));
+            let oldest_value = oldest_age_ms
+                .map(Value::UnsignedInteger)
+                .unwrap_or(Value::Null);
+            let dlq_value = collection
+                .queue_dlq_target
+                .clone()
+                .map(Value::text)
+                .unwrap_or(Value::Null);
+            let internal = internal_registry.is_internal(&collection.name);
+
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(collection.name),
+                    Value::text(mode_text),
+                    Value::UnsignedInteger(depth),
+                    Value::UnsignedInteger(total_pending),
+                    oldest_value,
+                    dlq_value,
+                    Value::UnsignedInteger(collection.attention_score as u64),
+                    Value::Boolean(internal),
+                ],
+            )
+        })
+        .collect()
 }
 
 fn row_u64(row: &crate::storage::unified::entity::RowData, field: &str) -> Option<u64> {
