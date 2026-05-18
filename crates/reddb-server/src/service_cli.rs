@@ -406,7 +406,10 @@ fn apply_backup_config(options: &mut RedDBOptions, cfg: &crate::backup_bootstrap
 }
 
 fn endpoint_host(endpoint: &str) -> &str {
-    let after_scheme = endpoint.split_once("://").map(|(_, r)| r).unwrap_or(endpoint);
+    let after_scheme = endpoint
+        .split_once("://")
+        .map(|(_, r)| r)
+        .unwrap_or(endpoint);
     after_scheme.split('/').next().unwrap_or(after_scheme)
 }
 
@@ -441,11 +444,13 @@ fn spawn_backup_tasks_if_configured(
         let interval = Duration::from_secs(checkpoint_secs);
         thread::Builder::new()
             .name("red-checkpointer".into())
-            .spawn(move || periodic_loop(stop, interval, move || {
-                if let Err(err) = runtime.checkpoint() {
-                    tracing::warn!(error = %err, "periodic checkpoint failed");
-                }
-            }))
+            .spawn(move || {
+                periodic_loop(stop, interval, move || {
+                    if let Err(err) = runtime.checkpoint() {
+                        tracing::warn!(error = %err, "periodic checkpoint failed");
+                    }
+                })
+            })
             .ok()
     };
 
@@ -455,11 +460,13 @@ fn spawn_backup_tasks_if_configured(
         let interval = Duration::from_secs(wal_secs);
         thread::Builder::new()
             .name("red-wal-archiver".into())
-            .spawn(move || periodic_loop(stop, interval, move || {
-                if let Err(err) = runtime.trigger_backup() {
-                    tracing::warn!(error = %err, "periodic WAL archive/backup failed");
-                }
-            }))
+            .spawn(move || {
+                periodic_loop(stop, interval, move || {
+                    if let Err(err) = runtime.trigger_backup() {
+                        tracing::warn!(error = %err, "periodic WAL archive/backup failed");
+                    }
+                })
+            })
             .ok()
     };
 
@@ -486,8 +493,7 @@ pub struct BackupTasksHandle {
 
 impl Drop for BackupTasksHandle {
     fn drop(&mut self) {
-        self.stop
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -1005,7 +1011,24 @@ fn run_configured_servers(config: ServerCommandConfig) -> Result<(), String> {
     }
 }
 
-fn bind_listener_for_startup(
+/// Bind a TCP listener for a transport at startup and record the
+/// outcome in the shared [`TransportReadiness`] state.
+///
+/// The split between *explicit* and *implicit/default* binds is the
+/// contract from issue #545:
+///
+/// * `explicit == true` — the operator named this transport on the
+///   CLI / env / config. A failed bind is fatal: this returns `Err`
+///   and the boot path must propagate the error so the process exits
+///   non-zero with the recorded `reason`.
+/// * `explicit == false` — this is a default listener the server
+///   would have spun up regardless. A failed bind degrades: this
+///   returns `Ok(None)` (no listener) but the failure is still
+///   recorded in `readiness.failed`, so the server keeps running and
+///   the next `/health` probe enumerates the degraded listener.
+///
+/// On success the bound listener lands in `readiness.active`.
+pub fn bind_listener_for_startup(
     readiness: &mut TransportReadiness,
     transport: &str,
     bind_addr: &str,
@@ -1993,15 +2016,15 @@ fn apply_http_limits(
     runtime: &RedDBRuntime,
 ) -> RedDBServer {
     let store = runtime.db().store();
-    let resolved = crate::server::http_limits::resolve_http_limits(
-        &config.http_limits_cli,
-        |key| match store.get_config(key) {
+    let resolved =
+        crate::server::http_limits::resolve_http_limits(&config.http_limits_cli, |key| match store
+            .get_config(key)
+        {
             Some(crate::storage::schema::Value::Text(v)) => Some(v.to_string()),
             Some(crate::storage::schema::Value::Integer(n)) if n >= 0 => Some(n.to_string()),
             Some(crate::storage::schema::Value::UnsignedInteger(n)) => Some(n.to_string()),
             _ => None,
-        },
-    );
+        });
     tracing::info!(
         target: "reddb::http_limits",
         max_handlers = resolved.max_handlers,
