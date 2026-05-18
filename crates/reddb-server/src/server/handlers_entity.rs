@@ -358,121 +358,31 @@ impl RedDBServer {
     /// Statement frame, with `AnalyticsSchemaRegistry` validation up
     /// front and `Idempotency-Key` replay served from an in-memory
     /// process-wide cache (see [`crate::runtime::batch_insert`]).
+    ///
+    /// The core ingest pipeline lives in [`process_batch_insert`] so
+    /// the RedWire (#587) and gRPC (#585) mirrors can call the same
+    /// path and share the dedup cache. This wrapper only does the
+    /// HTTP-shaped body parse + response packaging.
     pub(crate) fn handle_batch_insert(
         &self,
         collection: &str,
         body: Vec<u8>,
         idempotency_key: Option<&str>,
     ) -> HttpResponse {
-        use crate::runtime::batch_insert::{
-            global_cache, BatchInsertConfig, BatchInsertError,
-        };
-        use std::time::Instant;
-
-        let cache = global_cache();
-        let config = BatchInsertConfig::from_env();
-        let now = Instant::now();
-
-        // Idempotency replay short-circuits before any parse work so a
-        // misshapen retry of an earlier success still returns the
-        // cached success.
-        if let Some(key) = idempotency_key {
-            if !key.is_empty() {
-                if let Some(cached) = cache.lookup(collection, key, now) {
-                    return HttpResponse {
-                        status: cached.status,
-                        body: cached.body,
-                        content_type: "application/json",
-                        extra_headers: Vec::new(),
-                    };
-                }
-            }
-        }
+        use crate::runtime::batch_insert::BatchInsertError;
 
         let payload = match parse_json_body(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
         };
         let Some(items) = payload.as_array() else {
-            let err = BatchInsertError::BodyNotJsonArray;
-            return batch_error_response(err);
+            return batch_outcome_to_http(BatchOutcome::from_error(
+                &BatchInsertError::BodyNotJsonArray,
+            ));
         };
 
-        if items.len() > config.max_rows {
-            let err = BatchInsertError::BatchTooLarge {
-                limit: config.max_rows,
-                got: items.len(),
-            };
-            return batch_error_response(err);
-        }
-
-        // Two-phase: parse + schema-validate every row BEFORE any
-        // storage write. The brief's all-or-nothing contract requires
-        // that row K's failure leave the collection untouched, so we
-        // refuse to start the commit until every row clears the gate.
-        let mut row_inputs = Vec::with_capacity(items.len());
-        let store = self.runtime.db().store();
-        for (index, item) in items.iter().enumerate() {
-            let input = match crate::application::entity_payload::parse_create_row_input(
-                collection.to_string(),
-                item,
-            ) {
-                Ok(input) => input,
-                Err(err) => {
-                    return batch_error_response(BatchInsertError::RowParseFailure {
-                        index,
-                        reason: err.to_string(),
-                    });
-                }
-            };
-
-            if let Some(reason) = schema_validate_row(store.as_ref(), &input) {
-                return batch_error_response(BatchInsertError::RowSchemaRejected {
-                    index,
-                    reason,
-                });
-            }
-
-            row_inputs.push(input);
-        }
-
-        let count = row_inputs.len();
-        let result =
-            self.entity_use_cases()
-                .create_rows_batch(crate::application::CreateRowsBatchInput {
-                    collection: collection.to_string(),
-                    rows: row_inputs,
-                    suppress_events: false,
-                });
-
-        let response = match result {
-            Ok(_) => {
-                let mut object = Map::new();
-                object.insert("ok".to_string(), JsonValue::Bool(true));
-                object.insert("count".to_string(), JsonValue::Number(count as f64));
-                json_response(200, JsonValue::Object(object))
-            }
-            Err(err) => json_error(400, err.to_string()),
-        };
-
-        // Cache successful results AND deterministic 4xx outcomes; the
-        // brief calls for "the cached prior result" without
-        // distinguishing success vs. failure. A retry with the same key
-        // must see the same outcome, otherwise the dedup window leaks.
-        if let Some(key) = idempotency_key {
-            if !key.is_empty() {
-                cache.store(
-                    collection,
-                    key,
-                    response.status,
-                    response.body.clone(),
-                    config.idempotency_window,
-                    now,
-                );
-            }
-        }
-
-        response
+        let outcome = process_batch_insert(&self.runtime, collection, items, idempotency_key);
+        batch_outcome_to_http(outcome)
     }
 
     pub(crate) fn handle_create_vector(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
@@ -983,27 +893,221 @@ impl RedDBServer {
     }
 }
 
-/// Build the HTTP error body for a `BatchInsertError`. Uses
-/// `json_error_code` so the response carries both `code` (machine-
-/// readable for the brief's typed-error contract) and `error`/`message`
-/// (human-readable) on the same envelope every other 4xx uses.
-fn batch_error_response(err: crate::runtime::batch_insert::BatchInsertError) -> HttpResponse {
-    let mut object = Map::new();
-    object.insert("ok".to_string(), JsonValue::Bool(false));
-    object.insert("code".to_string(), JsonValue::String(err.code().to_string()));
-    let message = err.message();
-    object.insert(
-        "error".to_string(),
-        crate::json_field::SerializedJsonField::tainted(&message),
-    );
-    object.insert(
-        "message".to_string(),
-        crate::json_field::SerializedJsonField::tainted(&message),
-    );
-    if let Some(index) = err.row_index() {
-        object.insert("row_index".to_string(), JsonValue::Number(index as f64));
+/// Transport-agnostic outcome of a batch insert: the HTTP-shaped status
+/// + body, ready to be served verbatim either as an HTTP response or
+/// as the payload of a RedWire `BulkOk` / `Error` frame. The body is
+/// always a compact JSON object so a downstream consumer can decode it
+/// once and present whichever fields the client cares about.
+///
+/// Sharing this representation across transports is what lets the
+/// idempotency cache (process-wide, keyed by `(collection, key)`)
+/// replay byte-for-byte across HTTP / gRPC / RedWire: the cache stores
+/// the body that this function produces, and every transport agrees on
+/// the shape.
+#[derive(Debug, Clone)]
+pub(crate) struct BatchOutcome {
+    pub status: u16,
+    pub body: Vec<u8>,
+}
+
+impl BatchOutcome {
+    fn ok(count: usize) -> Self {
+        let mut object = Map::new();
+        object.insert("ok".to_string(), JsonValue::Bool(true));
+        object.insert("count".to_string(), JsonValue::Number(count as f64));
+        Self {
+            status: 200,
+            body: JsonValue::Object(object).to_string_compact().into_bytes(),
+        }
     }
-    json_response(err.http_status(), JsonValue::Object(object))
+
+    pub(crate) fn from_error(err: &crate::runtime::batch_insert::BatchInsertError) -> Self {
+        let mut object = Map::new();
+        object.insert("ok".to_string(), JsonValue::Bool(false));
+        object.insert("code".to_string(), JsonValue::String(err.code().to_string()));
+        let message = err.message();
+        object.insert(
+            "error".to_string(),
+            crate::json_field::SerializedJsonField::tainted(&message),
+        );
+        object.insert(
+            "message".to_string(),
+            crate::json_field::SerializedJsonField::tainted(&message),
+        );
+        if let Some(index) = err.row_index() {
+            object.insert("row_index".to_string(), JsonValue::Number(index as f64));
+        }
+        Self {
+            status: err.http_status(),
+            body: JsonValue::Object(object).to_string_compact().into_bytes(),
+        }
+    }
+
+    fn from_runtime_error(err: &crate::api::RedDBError) -> Self {
+        // Non-typed failures (storage write rejection, etc.) keep the
+        // existing 400-shape envelope so the HTTP test that asserts
+        // `json_error` body shape ({"ok":false,"error":...}) still
+        // passes without changes.
+        let mut object = Map::new();
+        object.insert("ok".to_string(), JsonValue::Bool(false));
+        let message = err.to_string();
+        object.insert(
+            "error".to_string(),
+            crate::json_field::SerializedJsonField::tainted(&message),
+        );
+        Self {
+            status: 400,
+            body: JsonValue::Object(object).to_string_compact().into_bytes(),
+        }
+    }
+}
+
+fn batch_outcome_to_http(outcome: BatchOutcome) -> HttpResponse {
+    HttpResponse {
+        status: outcome.status,
+        body: outcome.body,
+        content_type: "application/json",
+        extra_headers: Vec::new(),
+    }
+}
+
+/// Shared analytics batch-insert pipeline. Mirrored on every transport
+/// (HTTP slice 4, gRPC slice 5, RedWire slice 6) so the validation
+/// contract, the dedup window, and the all-or-nothing commit all agree.
+///
+/// Reads:
+/// - The process-wide `BatchInsertCache` (see [`crate::runtime::batch_insert`]).
+/// - `RED_BATCH_MAX_ROWS` and `RED_BATCH_IDEMPOTENCY_WINDOW_SECS` via
+///   `BatchInsertConfig::from_env()`.
+/// - The `AnalyticsSchemaRegistry` for any row carrying a registered
+///   `event_name`.
+///
+/// Writes (only on full validation success):
+/// - The batch via `EntityUseCases::create_rows_batch`, which already
+///   threads CDC through `MutationEngine::commit_rows` so events fire
+///   for every row in caller order.
+/// - The (collection, key) entry in the idempotency cache, so a retry
+///   replays the exact same body bytes (both 2xx and deterministic 4xx).
+pub(crate) fn process_batch_insert(
+    runtime: &crate::runtime::RedDBRuntime,
+    collection: &str,
+    items: &[JsonValue],
+    idempotency_key: Option<&str>,
+) -> BatchOutcome {
+    use crate::runtime::batch_insert::{global_cache, BatchInsertConfig, BatchInsertError};
+    use std::time::Instant;
+
+    let cache = global_cache();
+    let config = BatchInsertConfig::from_env();
+    let now = Instant::now();
+
+    // Idempotency replay short-circuits before any work so a misshapen
+    // retry of an earlier success still returns the cached success.
+    let cache_key = idempotency_key.filter(|k| !k.is_empty());
+    if let Some(key) = cache_key {
+        if let Some(cached) = cache.lookup(collection, key, now) {
+            return BatchOutcome {
+                status: cached.status,
+                body: cached.body,
+            };
+        }
+    }
+
+    if items.len() > config.max_rows {
+        let outcome = BatchOutcome::from_error(&BatchInsertError::BatchTooLarge {
+            limit: config.max_rows,
+            got: items.len(),
+        });
+        if let Some(key) = cache_key {
+            cache.store(
+                collection,
+                key,
+                outcome.status,
+                outcome.body.clone(),
+                config.idempotency_window,
+                now,
+            );
+        }
+        return outcome;
+    }
+
+    // Two-phase: parse + schema-validate every row BEFORE any storage
+    // write. All-or-nothing requires that row K's failure leave the
+    // collection untouched, so we refuse to start the commit until
+    // every row clears the gate.
+    let mut row_inputs = Vec::with_capacity(items.len());
+    let store = runtime.db().store();
+    for (index, item) in items.iter().enumerate() {
+        let input = match crate::application::entity_payload::parse_create_row_input(
+            collection.to_string(),
+            item,
+        ) {
+            Ok(input) => input,
+            Err(err) => {
+                let outcome = BatchOutcome::from_error(&BatchInsertError::RowParseFailure {
+                    index,
+                    reason: err.to_string(),
+                });
+                if let Some(key) = cache_key {
+                    cache.store(
+                        collection,
+                        key,
+                        outcome.status,
+                        outcome.body.clone(),
+                        config.idempotency_window,
+                        now,
+                    );
+                }
+                return outcome;
+            }
+        };
+
+        if let Some(reason) = schema_validate_row(store.as_ref(), &input) {
+            let outcome =
+                BatchOutcome::from_error(&BatchInsertError::RowSchemaRejected { index, reason });
+            if let Some(key) = cache_key {
+                cache.store(
+                    collection,
+                    key,
+                    outcome.status,
+                    outcome.body.clone(),
+                    config.idempotency_window,
+                    now,
+                );
+            }
+            return outcome;
+        }
+
+        row_inputs.push(input);
+    }
+
+    let count = row_inputs.len();
+    let result =
+        crate::application::EntityUseCases::new(runtime).create_rows_batch(
+            crate::application::CreateRowsBatchInput {
+                collection: collection.to_string(),
+                rows: row_inputs,
+                suppress_events: false,
+            },
+        );
+
+    let outcome = match result {
+        Ok(_) => BatchOutcome::ok(count),
+        Err(err) => BatchOutcome::from_runtime_error(&err),
+    };
+
+    if let Some(key) = cache_key {
+        cache.store(
+            collection,
+            key,
+            outcome.status,
+            outcome.body.clone(),
+            config.idempotency_window,
+            now,
+        );
+    }
+
+    outcome
 }
 
 /// Run `AnalyticsSchemaRegistry::validate` against a single row's

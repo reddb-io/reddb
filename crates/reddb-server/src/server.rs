@@ -108,7 +108,7 @@ pub mod http_limits;
 mod handlers_auth;
 mod handlers_backup;
 mod handlers_ec;
-mod handlers_entity;
+pub(crate) mod handlers_entity;
 mod handlers_geo;
 mod handlers_graph;
 mod handlers_keyed;
