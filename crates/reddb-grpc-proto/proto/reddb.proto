@@ -106,6 +106,12 @@ service RedDb {
   rpc BulkCreateRows(JsonBulkCreateRequest) returns (BulkEntityReply);
   // Binary bulk insert — zero JSON, zero parse. Like PostgreSQL COPY FROM.
   rpc BulkInsertBinary(BinaryBulkInsertRequest) returns (BulkInsertReply);
+  // Analytics BatchInsertEndpoint (issue #586, slice 5 of #575). Client
+  // streams `BatchInsertChunk` rows; the first chunk MUST carry the
+  // collection. Initial-metadata `idempotency-key` (lowercase, gRPC
+  // convention) flips dedup against the process-wide cache that is
+  // shared with the HTTP (#582) and RedWire (#587) mirrors.
+  rpc BatchInsert(stream BatchInsertChunk) returns (BatchInsertReply);
   rpc BulkCreateNodes(JsonBulkCreateRequest) returns (BulkEntityReply);
   rpc BulkCreateEdges(JsonBulkCreateRequest) returns (BulkEntityReply);
   rpc BulkCreateVectors(JsonBulkCreateRequest) returns (BulkEntityReply);
@@ -459,6 +465,28 @@ message BulkInsertReply {
   bool ok = 1;
   uint64 count = 2;
   uint64 first_id = 3;
+}
+
+// One row in a BatchInsert client stream. The first chunk MUST set
+// `collection`; subsequent chunks MAY leave it empty (the server pins
+// the collection from the first chunk and one stream = one batch =
+// one collection). `row_json` mirrors the HTTP slice 4 row envelope
+// `{"fields":{...}}` verbatim so the shared `process_batch_insert`
+// pipeline parses it identically across all three transports.
+message BatchInsertChunk {
+  string collection = 1;
+  string row_json = 2;
+}
+
+// Reply for a successful BatchInsert stream. On row-level failures
+// (parse / schema / oversize) the server returns a `tonic::Status`
+// error instead — `RESOURCE_EXHAUSTED` for oversize, otherwise
+// `FAILED_PRECONDITION` with the `x-row-index` and `x-batch-error-code`
+// trailing metadata set so the caller can pinpoint the broken row
+// without re-parsing the message text.
+message BatchInsertReply {
+  bool ok = 1;
+  uint64 count = 2;
 }
 
 // Topology RPC (#166). The canonical, version-tagged byte string is
