@@ -1057,7 +1057,9 @@ impl<'a> Parser<'a> {
                 // F-05: `option_name` is caller-controlled identifier text.
                 // Render via `{:?}` so embedded CR/LF/NUL/quotes are escaped
                 // before the message reaches downstream serialization sinks.
-                format!("unsupported CREATE TABLE option {option_name:?}, expected TTL"),
+                format!(
+                    "unsupported CREATE TABLE option {option_name:?}; supported options: TTL <duration> [ms|s|m|h|d] (e.g. `WITH TTL 30 m`)"
+                ),
                 self.position(),
             ));
         }
@@ -1083,7 +1085,9 @@ impl<'a> Parser<'a> {
                     // F-05: render `other` via `{:?}` so caller-controlled
                     // bytes (CR / LF / NUL / quotes) are escaped before
                     // reaching downstream serialization sinks.
-                    format!("unsupported TTL unit {other:?}"),
+                    format!(
+                        "unsupported TTL unit {other:?}; supported units: ms, s, m, h, d (e.g. `WITH TTL 30 m`)"
+                    ),
                     self.position(),
                 ));
             }

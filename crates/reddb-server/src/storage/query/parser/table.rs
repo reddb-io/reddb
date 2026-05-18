@@ -401,7 +401,9 @@ fn queue_projection_columns(columns: &[Projection]) -> Result<Vec<String>, Parse
             Projection::All => return Ok(Vec::new()),
             other => {
                 return Err(ParseError::new(
-                    format!("unsupported SELECT FROM QUEUE projection {other:?}"),
+                    format!(
+                        "unsupported SELECT FROM QUEUE projection {other:?}; use `SELECT *` or bare column names, or use queue verbs (PUSH, POP, PEEK, LEN, ACK, NACK, …) for queue operations"
+                    ),
                     crate::storage::query::lexer::Position::default(),
                 ));
             }

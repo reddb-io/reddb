@@ -172,7 +172,9 @@ impl<'a> Parser<'a> {
                     // F-05: render `other` via `{:?}` so caller-controlled
                     // bytes (CR / LF / NUL / quotes) are escaped before
                     // landing in the JSON/audit/log/gRPC error sinks.
-                    format!("unsupported TTL unit {other:?}"),
+                    format!(
+                        "unsupported TTL unit {other:?}; supported units: ms, s, m, h, d (e.g. `WITH TTL 30 m`)"
+                    ),
                     self.position(),
                 ));
             }
