@@ -42,6 +42,7 @@ services:
     ports:
       - "50081:50051"
       - "8110:8080"
+      - "8553:8443"
     volumes:
       - serverless-data:/data
     command:
@@ -52,6 +53,8 @@ services:
       - "0.0.0.0:50051"
       - "--http-bind"
       - "0.0.0.0:8080"
+      - "--http-tls-bind"
+      - "0.0.0.0:8443"
     environment:
       RUST_LOG: info
       REDDB_REMOTE_BACKEND: s3

@@ -19,12 +19,13 @@ WORKDIR /data
 VOLUME /data
 VOLUME /etc/reddb
 
-EXPOSE 5050 5055 8080
+EXPOSE 5050 5055 8080 8443
 
 ENV REDDB_DATA_PATH=/data/data.rdb
 ENV REDDB_BIND_ADDR=0.0.0.0:5050
 ENV REDDB_GRPC_BIND_ADDR=0.0.0.0:5055
 ENV REDDB_HTTP_BIND_ADDR=0.0.0.0:8080
+ENV REDDB_HTTP_TLS_BIND=0.0.0.0:8443
 ENV RUST_MIN_STACK=8388608
 ENV REDDB_CONFIG_FILE=/etc/reddb/config.json
 
@@ -34,4 +35,4 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
     CMD ["/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
 
 ENTRYPOINT ["/usr/local/bin/red"]
-CMD ["server", "--http", "--vault", "--path", "/data/data.rdb", "--http-bind", "0.0.0.0:8080", "--wire-bind", "0.0.0.0:5050", "--grpc-bind", "0.0.0.0:5055"]
+CMD ["server", "--http", "--vault", "--path", "/data/data.rdb", "--http-bind", "0.0.0.0:8080", "--http-tls-bind", "0.0.0.0:8443", "--wire-bind", "0.0.0.0:5050", "--grpc-bind", "0.0.0.0:5055"]
