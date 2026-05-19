@@ -23,7 +23,9 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use crate::api::RedDBError;
-use crate::storage::query::ast::{Projection, WindowSpec};
+use crate::storage::query::ast::{
+    Projection, WindowFrame, WindowFrameBound, WindowFrameUnit, WindowSpec,
+};
 use crate::storage::query::evaluator;
 use crate::storage::query::sql_lowering::projection_to_expr;
 use crate::storage::query::unified::UnifiedRecord;
@@ -230,6 +232,33 @@ fn compute_window_column(
 
     let mut results: Vec<Value> = vec![Value::Null; row_count];
 
+    // Pre-evaluate the source-column expression for the five aggregate
+    // OVER functions (slice 7c). COUNT(*) — encoded as `Projection::All`
+    // — has no source expression, so we leave the vector empty and the
+    // aggregator interprets that as "count every row in the frame".
+    let agg_src_values: Vec<Value> = if matches!(
+        upper.as_str(),
+        "SUM" | "AVG" | "MIN" | "MAX" | "COUNT"
+    ) {
+        match args.first() {
+            None | Some(Projection::All) => Vec::new(),
+            Some(arg_proj) => {
+                let (expr, _) = projection_to_expr(arg_proj).ok_or_else(|| {
+                    RedDBError::Query(format!(
+                        "{upper} OVER: argument is not a supported expression"
+                    ))
+                })?;
+                records
+                    .iter()
+                    .map(|rec| eval_expr_on_record(&expr, rec, table_name, table_alias))
+                    .collect()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let agg_counts_all_rows = matches!(args.first(), None | Some(Projection::All));
+
     let (lag_lead_offset, lag_lead_default, lag_lead_src_values) = if matches!(
         upper.as_str(),
         "LAG" | "LEAD"
@@ -325,10 +354,45 @@ fn compute_window_column(
                     }
                 }
             }
+            "SUM" | "COUNT" | "AVG" | "MIN" | "MAX" => {
+                let has_order = !window.order_by.is_empty();
+                for (pos, &idx) in partition_indices.iter().enumerate() {
+                    let (start, end) = frame_bounds(
+                        pos,
+                        partition_indices,
+                        &order_keys,
+                        window.frame.as_ref(),
+                        has_order,
+                    )?;
+                    let frame_slice = &partition_indices[start..=end];
+                    let value = match upper.as_str() {
+                        "COUNT" => {
+                            let n = if agg_counts_all_rows {
+                                frame_slice.len() as i64
+                            } else {
+                                frame_slice
+                                    .iter()
+                                    .filter(|&&row_idx| {
+                                        !matches!(agg_src_values[row_idx], Value::Null)
+                                    })
+                                    .count() as i64
+                            };
+                            Value::Integer(n)
+                        }
+                        "SUM" => sum_over_frame(&agg_src_values, frame_slice),
+                        "AVG" => avg_over_frame(&agg_src_values, frame_slice),
+                        "MIN" => min_over_frame(&agg_src_values, frame_slice, true),
+                        "MAX" => min_over_frame(&agg_src_values, frame_slice, false),
+                        _ => unreachable!(),
+                    };
+                    results[idx] = value;
+                }
+            }
             other => {
                 return Err(RedDBError::Query(format!(
-                    "window function {other} is not supported in slice 7b — \
-                     only ROW_NUMBER / RANK / DENSE_RANK / LAG / LEAD are wired"
+                    "window function {other} is not supported — \
+                     wired functions are ROW_NUMBER / RANK / DENSE_RANK / LAG / LEAD \
+                     and aggregate OVER for SUM / COUNT / AVG / MIN / MAX"
                 )));
             }
         }
@@ -338,6 +402,195 @@ fn compute_window_column(
         records[idx].set(out_col, value);
     }
     Ok(())
+}
+
+/// Resolve the frame's `[start, end]` row positions (inclusive,
+/// indexed into the sorted partition slice) for the row at `pos`.
+///
+/// Slice 7c handles three explicit frame variants plus the SQL
+/// defaults:
+/// - No ORDER BY → frame = the whole partition (unordered aggregate).
+/// - ORDER BY present and `frame: None` → `RANGE UNBOUNDED PRECEDING
+///   AND CURRENT ROW` (the SQL default for ordered windows). "CURRENT
+///   ROW" under RANGE means *peers* — every row whose ORDER BY keys
+///   equal the current row's keys, so ties accumulate together.
+/// - `ROWS UNBOUNDED PRECEDING AND CURRENT ROW` → `[0, pos]`.
+/// - `ROWS BETWEEN N PRECEDING AND CURRENT ROW` → `[max(0, pos-N), pos]`.
+///
+/// Anything else (FOLLOWING bounds, RANGE arithmetic, etc.) is out of
+/// scope for slice 7c and returns an explicit `RedDBError::Query`.
+fn frame_bounds(
+    pos: usize,
+    partition_indices: &[usize],
+    order_keys: &[Vec<CanonicalKey>],
+    frame: Option<&WindowFrame>,
+    has_order: bool,
+) -> Result<(usize, usize), RedDBError> {
+    let last = partition_indices.len() - 1;
+    let frame = match frame {
+        None => {
+            return if has_order {
+                Ok((0, range_current_row_end(pos, partition_indices, order_keys)))
+            } else {
+                Ok((0, last))
+            };
+        }
+        Some(f) => f,
+    };
+
+    let end_bound = frame
+        .end
+        .clone()
+        .unwrap_or(WindowFrameBound::CurrentRow);
+
+    match (frame.unit, &frame.start, &end_bound) {
+        (
+            WindowFrameUnit::Range,
+            WindowFrameBound::UnboundedPreceding,
+            WindowFrameBound::CurrentRow,
+        ) => {
+            if has_order {
+                Ok((0, range_current_row_end(pos, partition_indices, order_keys)))
+            } else {
+                Ok((0, last))
+            }
+        }
+        (
+            WindowFrameUnit::Rows,
+            WindowFrameBound::UnboundedPreceding,
+            WindowFrameBound::CurrentRow,
+        ) => Ok((0, pos)),
+        (WindowFrameUnit::Rows, WindowFrameBound::Preceding(offset_expr), WindowFrameBound::CurrentRow) => {
+            let n = preceding_offset_value(offset_expr)?;
+            let start = pos.saturating_sub(n);
+            Ok((start, pos))
+        }
+        _ => Err(RedDBError::Query(
+            "window frame variant not supported in slice 7c — \
+             supported: RANGE UNBOUNDED PRECEDING AND CURRENT ROW, \
+             ROWS UNBOUNDED PRECEDING AND CURRENT ROW, \
+             ROWS N PRECEDING AND CURRENT ROW"
+                .to_string(),
+        )),
+    }
+}
+
+/// Under RANGE, CURRENT ROW extends through every peer row — i.e.
+/// every subsequent row sharing the current row's ORDER BY keys. The
+/// partition is already sorted, so peers are contiguous; walk forward
+/// from `pos` while the keys still match.
+fn range_current_row_end(
+    pos: usize,
+    partition_indices: &[usize],
+    order_keys: &[Vec<CanonicalKey>],
+) -> usize {
+    let here = order_keys[partition_indices[pos]].as_slice();
+    let mut end = pos;
+    while end + 1 < partition_indices.len()
+        && order_keys[partition_indices[end + 1]].as_slice() == here
+    {
+        end += 1;
+    }
+    end
+}
+
+/// `ROWS N PRECEDING` — N must be a non-negative integer literal.
+fn preceding_offset_value(
+    expr: &crate::storage::query::ast::Expr,
+) -> Result<usize, RedDBError> {
+    use crate::storage::query::ast::Expr;
+    match expr {
+        Expr::Literal { value, .. } => match value {
+            Value::Integer(v) | Value::BigInt(v) if *v >= 0 => Ok(*v as usize),
+            Value::Integer(v) | Value::BigInt(v) => Err(RedDBError::Query(format!(
+                "ROWS PRECEDING offset must be non-negative, got {v}"
+            ))),
+            Value::UnsignedInteger(v) => Ok(*v as usize),
+            other => Err(RedDBError::Query(format!(
+                "ROWS PRECEDING offset must be an integer literal, got {other:?}"
+            ))),
+        },
+        other => Err(RedDBError::Query(format!(
+            "ROWS PRECEDING offset must be an integer literal, got {other:?}"
+        ))),
+    }
+}
+
+fn sum_over_frame(src: &[Value], indices: &[usize]) -> Value {
+    let mut i_sum: i64 = 0;
+    let mut f_sum: f64 = 0.0;
+    let mut any_float = false;
+    let mut any_nonnull = false;
+    for &i in indices {
+        match &src[i] {
+            Value::Null => {}
+            Value::Integer(v) | Value::BigInt(v) => {
+                any_nonnull = true;
+                i_sum = i_sum.saturating_add(*v);
+                f_sum += *v as f64;
+            }
+            Value::UnsignedInteger(v) => {
+                any_nonnull = true;
+                i_sum = i_sum.saturating_add(*v as i64);
+                f_sum += *v as f64;
+            }
+            Value::Float(v) => {
+                any_nonnull = true;
+                any_float = true;
+                f_sum += *v;
+            }
+            _ => {}
+        }
+    }
+    if !any_nonnull {
+        Value::Null
+    } else if any_float {
+        Value::Float(f_sum)
+    } else {
+        Value::Integer(i_sum)
+    }
+}
+
+fn avg_over_frame(src: &[Value], indices: &[usize]) -> Value {
+    let mut sum: f64 = 0.0;
+    let mut count: u64 = 0;
+    for &i in indices {
+        if let Some(v) = value_as_f64(&src[i]) {
+            sum += v;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        Value::Null
+    } else {
+        Value::Float(sum / count as f64)
+    }
+}
+
+fn min_over_frame(src: &[Value], indices: &[usize], pick_min: bool) -> Value {
+    let mut best: Option<(CanonicalKey, Value)> = None;
+    for &i in indices {
+        if matches!(src[i], Value::Null) {
+            continue;
+        }
+        let Some(key) = value_to_canonical_key(&src[i]) else {
+            continue;
+        };
+        let take = match &best {
+            None => true,
+            Some((b_key, _)) => {
+                if pick_min {
+                    key < *b_key
+                } else {
+                    key > *b_key
+                }
+            }
+        };
+        if take {
+            best = Some((key, src[i].clone()));
+        }
+    }
+    best.map(|(_, v)| v).unwrap_or(Value::Null)
 }
 
 fn compare_with_nulls(a: &CanonicalKey, b: &CanonicalKey, nulls_first: bool) -> Ordering {
