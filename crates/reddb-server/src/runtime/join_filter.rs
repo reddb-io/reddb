@@ -663,8 +663,13 @@ pub(super) fn project_runtime_record_with_db(
                     .or_else(|| evaluate_scalar_function_with_db(db, name, args, source))
             }
             Projection::All => None,
-            // Slice 7a (#589): window functions have no runtime yet.
-            Projection::Window { .. } => None,
+            // Slice 7b (#590): the window phase has already
+            // materialised this column onto `source` under the
+            // projection's output label; just read it back.
+            Projection::Window { name, alias, .. } => {
+                let label: String = alias.clone().unwrap_or_else(|| name.clone());
+                source.get(label.as_str()).cloned()
+            }
         };
 
         record.set_arc(std::sync::Arc::from(label), value.unwrap_or(Value::Null));
@@ -2889,7 +2894,12 @@ pub(super) fn eval_projection_value(proj: &Projection, source: &UnifiedRecord) -
                 })
         }
         Projection::All => None,
-        Projection::Window { .. } => None,
+        // Slice 7b (#590): window output is pre-materialised on the
+        // record under the alias by `runtime::window_phase::apply`.
+        Projection::Window { name, alias, .. } => {
+            let label: String = alias.clone().unwrap_or_else(|| name.clone());
+            source.get(label.as_str()).cloned()
+        }
     }
 }
 
