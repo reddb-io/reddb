@@ -146,7 +146,7 @@ db.documents.insert(collection: str, document: dict) -> {"affected", "rid", "ite
 db.documents.get(collection: str, rid: str)      -> item
 db.documents.list(collection: str, *, limit, filter, order_by) -> {"items"}
 db.documents.patch(collection: str, rid: str, patch: dict) -> item
-db.documents.delete(collection: str, rid: str)   -> {"affected"}
+db.documents.delete(collection: str, rid: str)   -> {"affected", "deleted"}
 db.kv.set(collection: str, key: str, value)      -> {"affected"}
 db.kv.get(collection: str, key: str)             -> value
 db.kv.exists(collection: str, key: str)          -> {"exists"}
@@ -175,8 +175,24 @@ Helper availability:
 Conformance command:
 
 ```bash
-python -m pytest drivers/python/tests/test_smoke.py drivers/python/tests/test_helpers.py
+python -m pytest drivers/python/tests/test_smoke.py drivers/python/tests/test_helpers.py \
+  drivers/python/tests/test_documents_conformance.py
 ```
+
+### SDK Helper Spec — documents.*
+
+`documents.*` is conformant with [`docs/spec/sdk-helpers.md`](../../docs/spec/sdk-helpers.md)
+on the embedded transports (`memory://`, `file://`). Patch is a top-level
+merge (unrelated fields survive). An empty patch raises `INVALID_ARGUMENT`.
+`documents.delete` returns `{"affected", "deleted"}` and NEVER raises on a
+missing rid. Case IDs ported from the Rust harness:
+
+| Case ID                              | Status     |
+|--------------------------------------|------------|
+| `documents.crud_nested_patch`        | supported  |
+| `documents.delete_missing_no_error`  | supported  |
+| `documents.patch_empty_rejects`      | supported  |
+| `errors.not_found.document_get`      | supported  |
 
 ### Low-level (advanced)
 

@@ -29,7 +29,17 @@ db.close().await?;
 ### Rich helpers
 
 The Rust client exposes the same helper families as the other SDKs while
-keeping the low-level `query` API available.
+keeping the low-level `query` API available. `documents.*` is conformant
+with the [SDK Helper Spec v1.0](../../docs/spec/sdk-helpers.md) — patch is a
+top-level merge, an empty patch returns `INVALID_ARGUMENT`, and
+`documents.delete` of a missing rid returns `{ affected: 0, deleted: false }`
+without raising. Reference cases (`documents.crud_nested_patch`,
+`documents.delete_missing_no_error`, `documents.patch_empty_rejects`,
+`errors.not_found.document_get`) run via:
+
+```sh
+cargo test -p reddb-io-client --test conformance
+```
 
 ```rust,no_run
 use reddb_client::{JsonValue, ListOptions, Reddb};

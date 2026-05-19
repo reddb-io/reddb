@@ -40,7 +40,10 @@ export class DocumentClient {
     validateObject(patch, 'documents.patch patch')
     const entries = Object.entries(patch)
     if (entries.length === 0) {
-      return this.get(collection, rid)
+      throw new RedDBError(
+        'INVALID_ARGUMENT',
+        'documents.patch patch must be a non-empty object',
+      )
     }
     for (const [field] of entries) {
       if (field.includes('/')) {
@@ -66,7 +69,8 @@ export class DocumentClient {
 
   async delete(collection, rid) {
     const result = await this.db.delete(collection, rid)
-    return { affected: result.affected ?? 0 }
+    const affected = result.affected ?? 0
+    return { affected, deleted: affected > 0 }
   }
 
   async ensureCollection(collection) {
