@@ -274,6 +274,10 @@ fn parameterize_expr(expr: &Expr, next_index: &mut usize) -> Expr {
             span: *span,
         },
         Expr::Subquery { .. } => expr.clone(),
+        // Slice 7a (#589): preserve WindowFunctionCall shape unchanged
+        // for parameterization. The slice only ships parser/AST, so
+        // there are no parameter substitutions to thread through yet.
+        Expr::WindowFunctionCall { .. } => expr.clone(),
     }
 }
 
@@ -791,6 +795,9 @@ fn parameterize_projection(projection: &Projection, next_index: &mut usize) -> O
             alias.clone(),
         )),
         Projection::Field(field, alias) => Some(Projection::Field(field.clone(), alias.clone())),
+        // Slice 7a (#589): window projections are preserved verbatim;
+        // they don't carry parameter slots yet.
+        Projection::Window { .. } => Some(projection.clone()),
     }
 }
 
@@ -812,6 +819,7 @@ fn bind_projection(projection: &Projection, binds: &[Value]) -> Option<Projectio
             alias.clone(),
         )),
         Projection::Field(field, alias) => Some(Projection::Field(field.clone(), alias.clone())),
+        Projection::Window { .. } => Some(projection.clone()),
     }
 }
 
@@ -1009,6 +1017,14 @@ fn attach_projection_alias(projection: Projection, alias: Option<&str>) -> Proje
         Projection::Column(column) => Projection::Alias(column, alias.to_string()),
         Projection::Alias(column, _) => Projection::Alias(column, alias.to_string()),
         Projection::All => Projection::All,
+        Projection::Window {
+            name, args, window, ..
+        } => Projection::Window {
+            name,
+            args,
+            window,
+            alias: Some(alias.to_string()),
+        },
     }
 }
 
@@ -1283,6 +1299,7 @@ fn bind_expr(expr: &Expr, binds: &[Value]) -> Option<Expr> {
             span: *span,
         }),
         Expr::Subquery { .. } => Some(expr.clone()),
+        Expr::WindowFunctionCall { .. } => Some(expr.clone()),
     }
 }
 

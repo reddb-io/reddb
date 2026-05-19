@@ -197,6 +197,7 @@ fn expr_contains_subquery(expr: &Expr) -> bool {
                 || expr_contains_subquery(high)
         }
         Expr::Literal { .. } | Expr::Column { .. } | Expr::Parameter { .. } => false,
+        Expr::WindowFunctionCall { args, .. } => args.iter().any(expr_contains_subquery),
     }
 }
 

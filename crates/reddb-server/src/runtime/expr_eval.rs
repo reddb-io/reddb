@@ -298,6 +298,11 @@ pub(super) fn evaluate_runtime_expr_with_db(
         }
 
         Expr::Subquery { .. } => None,
+        // Slice 7a (#589): window function calls are accepted by the
+        // parser but have no runtime executor yet. Returning None keeps
+        // the existing "expression not foldable" fast-path; the
+        // analytics executor will plug in here in a follow-up slice.
+        Expr::WindowFunctionCall { .. } => None,
     }
 }
 

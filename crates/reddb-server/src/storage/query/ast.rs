@@ -215,6 +215,16 @@ pub enum Expr {
     },
     /// Parenthesized SELECT used in an expression context.
     Subquery { query: ExprSubquery, span: Span },
+    /// Window function call: `fn(args) OVER (PARTITION BY ... ORDER BY
+    /// ... [frame])`. Carries the same `name`/`args` payload as a plain
+    /// `FunctionCall` plus a `WindowSpec` describing the OVER clause.
+    /// Issue #589 slice 7a — parser + AST only; no runtime execution.
+    WindowFunctionCall {
+        name: String,
+        args: Vec<Expr>,
+        window: WindowSpec,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -245,7 +255,8 @@ impl Expr {
             | Expr::IsNull { span, .. }
             | Expr::InList { span, .. }
             | Expr::Between { span, .. }
-            | Expr::Subquery { span, .. } => *span,
+            | Expr::Subquery { span, .. }
+            | Expr::WindowFunctionCall { span, .. } => *span,
         }
     }
 
