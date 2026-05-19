@@ -15,6 +15,12 @@ public final class QueueClient {
         public PushOptions priority(int v) { this.priority = v; return this; }
     }
 
+    /** Create a queue if it does not already exist. Idempotent. */
+    public void create(String queue) {
+        Sql.assertIdentifier(queue, "queue name");
+        q.query("CREATE QUEUE IF NOT EXISTS " + Sql.sqlIdentifier(queue));
+    }
+
     public Envelopes.QueuePushResult push(String queue, Object value) { return push(queue, value, null); }
 
     public Envelopes.QueuePushResult push(String queue, Object value, PushOptions opts) {

@@ -12,7 +12,9 @@ public final class Envelopes {
 
     public record InsertResult(long affected, String rid, Map<String, Object> item) {}
 
-    public record DeleteResult(long affected) {}
+    public record DeleteResult(long affected, boolean deleted) {
+        public DeleteResult(long affected) { this(affected, affected > 0L); }
+    }
 
     public record ExistsResult(boolean exists) {}
 
