@@ -3,9 +3,9 @@ import 'dart:typed_data';
 
 import 'errors.dart';
 
-// SDK Helper Spec v0.1 — rich helper surface on top of the transport-agnostic
+// SDK Helper Spec v1.0 — rich helper surface on top of the transport-agnostic
 // Conn. Helpers compile SQL strings against the engine; the same wire request
-// works across RedWire and HTTP. See docs/clients/sdk-helper-spec.md.
+// works across RedWire and HTTP. See docs/spec/sdk-helpers.md.
 
 /// Minimal contract helpers need. `Conn` and `Reddb` both satisfy it via
 /// `query`; tests pass fakes that record SQL.
@@ -13,10 +13,14 @@ abstract class Querier {
   Future<Uint8List> query(String sql, {List<Object?>? params});
 }
 
-/// Groups the rich namespaces (`documents`, `kv`, `queue`) bound to a single
-/// transport. Helpers are stateless — safe to construct per call.
+/// Groups the rich namespaces (`documents`, `kv`, `queues`, `tx`) bound to a
+/// single transport. Helpers are stateless — safe to construct per call.
 class Helpers {
   Helpers(this._q);
+
+  /// SDK Helper Spec version this driver implements.
+  /// See `docs/spec/sdk-helpers.md` §14.
+  static const String helperSpecVersion = '1.0';
 
   final Querier _q;
 
@@ -25,7 +29,15 @@ class Helpers {
   /// KV namespace bound to the default collection (``kv_default``).
   KvClient get kv => KvClient(_q);
 
+  /// Queue namespace (spec-canonical alias of [queue]).
+  QueueClient get queues => QueueClient(_q);
+
+  /// Single-handle queue namespace (legacy singular alias).
   QueueClient get queue => QueueClient(_q);
+
+  /// Imperative transaction client (`begin`/`commit`/`rollback` +
+  /// optional callback form). See spec §7.
+  TxClient tx() => TxClient(_q);
 }
 
 // --- Envelopes -------------------------------------------------------
@@ -39,9 +51,20 @@ class InsertResult {
 }
 
 class DeleteResult {
-  DeleteResult(this.affected);
+  DeleteResult(this.affected) : deleted = affected > 0;
 
   final int affected;
+
+  /// Per spec §2.4: `deleted == affected > 0`. A delete of a missing item
+  /// surfaces `{affected: 0, deleted: false}` and is NOT an error.
+  final bool deleted;
+}
+
+class BulkInsertResult {
+  BulkInsertResult({required this.affected, required this.rids});
+
+  final int affected;
+  final List<String> rids;
 }
 
 class ExistsResult {
@@ -127,7 +150,9 @@ class DocumentClient {
     String rid,
     Map<String, Object?> patch,
   ) async {
-    if (patch.isEmpty) return get(collection, rid);
+    if (patch.isEmpty) {
+      throw InvalidArgument('documents.patch requires a non-empty patch object');
+    }
     final parts = <String>[];
     patch.forEach((field, value) {
       if (field.contains('/')) {
@@ -155,6 +180,33 @@ class DocumentClient {
       params: [rid],
     );
     return DeleteResult(_affectedFromBody(body));
+  }
+
+  /// Bulk insert. Empty payloads is a no-op. Identity (`rids`) preserved in
+  /// input order per spec §3.4.
+  Future<BulkInsertResult> bulkInsert(
+    String collection,
+    List<Map<String, Object?>> payloads,
+  ) async {
+    if (payloads.isEmpty) {
+      return BulkInsertResult(affected: 0, rids: const []);
+    }
+    await _ensureCollection(collection);
+    final rids = <String>[];
+    for (final p in payloads) {
+      final body = await _q.query(
+        'INSERT INTO ${_sqlIdentifierPath(collection)} DOCUMENT (body) '
+        'VALUES (${_jsonLiteral(p)}) RETURNING *',
+      );
+      final (row, _) = _firstRow(body);
+      if (row == null || row['rid'] == null) {
+        throw InvalidResponse(
+          'documents.bulk_insert expected returned rid per row',
+        );
+      }
+      rids.add(_ridString(row['rid'])!);
+    }
+    return BulkInsertResult(affected: rids.length, rids: rids);
   }
 
   Future<void> _ensureCollection(String collection) async {
@@ -262,6 +314,12 @@ class QueueClient {
 
   final Querier _q;
 
+  /// Idempotent `CREATE QUEUE IF NOT EXISTS`.
+  Future<void> create(String queue) async {
+    _assertIdentifier(queue, 'queue name');
+    await _q.query('CREATE QUEUE IF NOT EXISTS ${_sqlIdentifier(queue)}');
+  }
+
   Future<QueuePushResult> push(
     String queue,
     Object? value, {
@@ -317,6 +375,66 @@ class QueueClient {
     _assertIdentifier(queue, 'queue name');
     final body = await _q.query('QUEUE PURGE ${_sqlIdentifier(queue)}');
     return DeleteResult(_affectedFromBody(body));
+  }
+}
+
+// --- Transactions ----------------------------------------------------
+
+/// Callback signature for [TxClient.run].
+typedef TxBody = Future<void> Function(TxClient tx);
+
+/// Imperative + optional callback transactions per spec §7.
+///
+/// Nested [run] calls are rejected with `INVALID_ARGUMENT`; callers who need
+/// savepoints should issue them directly via `conn.query`. Matches the Java
+/// and Rust driver decision so cross-driver docs stay consistent.
+class TxClient {
+  TxClient(this._q);
+
+  final Querier _q;
+  bool _open = false;
+  bool _inRun = false;
+
+  Future<void> begin() async {
+    await _q.query('BEGIN');
+    _open = true;
+  }
+
+  Future<void> commit() async {
+    await _q.query('COMMIT');
+    _open = false;
+  }
+
+  Future<void> rollback() async {
+    await _q.query('ROLLBACK');
+    _open = false;
+  }
+
+  /// Run [body] inside a transaction. Successful body commits; a thrown
+  /// error rolls back and re-throws.
+  Future<void> run(TxBody body) async {
+    if (_inRun) {
+      throw InvalidArgument('nested tx.run is not supported');
+    }
+    _inRun = true;
+    try {
+      await begin();
+      try {
+        await body(this);
+        await commit();
+      } catch (_) {
+        if (_open) {
+          try {
+            await rollback();
+          } catch (_) {
+            // swallow secondary rollback failure to preserve original error
+          }
+        }
+        rethrow;
+      }
+    } finally {
+      _inRun = false;
+    }
   }
 }
 
