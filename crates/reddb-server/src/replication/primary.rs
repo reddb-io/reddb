@@ -715,6 +715,7 @@ mod tests {
             entity_kind: "row".to_string(),
             entity_bytes: Some(vec![1, 2, 3]),
             metadata: None,
+            refresh_records: None,
         };
         let record2 = ChangeRecord {
             lsn: 8,
@@ -725,6 +726,7 @@ mod tests {
             entity_kind: "row".to_string(),
             entity_bytes: Some(vec![4, 5, 6]),
             metadata: None,
+            refresh_records: None,
         };
 
         spool

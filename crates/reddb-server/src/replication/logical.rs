@@ -237,6 +237,24 @@ impl LogicalChangeApplier {
             ChangeOperation::Delete => {
                 let _ = store.delete(&record.collection, EntityId::new(record.entity_id));
             }
+            ChangeOperation::Refresh => {
+                // Issue #596 slice 9d — replica replay of
+                // `REFRESH MATERIALIZED VIEW v`. The primary
+                // emitted the serialized backing-collection
+                // contents in `refresh_records`; apply the
+                // atomic swap on the replica's local store
+                // (which also persists a `RefreshCollection`
+                // WAL action so the post-swap contents survive
+                // a replica restart).
+                let records = record.refresh_records.clone().ok_or_else(|| {
+                    RedDBError::Internal(
+                        "replication refresh record missing refresh_records payload".to_string(),
+                    )
+                })?;
+                store
+                    .refresh_collection_from_records(&record.collection, records)
+                    .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            }
             ChangeOperation::Insert | ChangeOperation::Update => {
                 let Some(bytes) = &record.entity_bytes else {
                     return Err(RedDBError::Internal(
@@ -284,6 +302,16 @@ fn record_payload_hash(record: &ChangeRecord) -> [u8; 32] {
     hasher.update(&record.entity_id.to_le_bytes());
     if let Some(bytes) = &record.entity_bytes {
         hasher.update(bytes);
+    }
+    // Issue #596 slice 9d — refresh payload participates in the
+    // payload-hash so the same-LSN-idempotent / different-payload-
+    // divergence state machine works for Refresh records too.
+    if let Some(records) = &record.refresh_records {
+        hasher.update(&(records.len() as u64).to_le_bytes());
+        for r in records {
+            hasher.update(&(r.len() as u64).to_le_bytes());
+            hasher.update(r);
+        }
     }
     hasher.finalize()
 }

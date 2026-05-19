@@ -1220,6 +1220,7 @@ mod tests {
             entity_kind: "row".to_string(),
             entity_bytes: Some(vec![1, 2, 3]),
             metadata: None,
+            refresh_records: None,
         };
 
         let meta =
@@ -1250,6 +1251,7 @@ mod tests {
             entity_kind: "row".to_string(),
             entity_bytes: Some(b"x".to_vec()),
             metadata: None,
+            refresh_records: None,
         };
         let meta =
             archive_change_records(&backend, &prefix, &[(record.lsn, record.encode())], None)
@@ -1356,6 +1358,7 @@ mod tests {
             entity_kind: "row".to_string(),
             entity_bytes: Some(format!("payload-{lsn}").into_bytes()),
             metadata: None,
+            refresh_records: None,
         };
 
         let r1 = mk(10);
