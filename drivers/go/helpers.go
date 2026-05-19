@@ -8,9 +8,13 @@ import (
 	"strings"
 )
 
-// SDK Helper Spec v0.1 — rich helper surface on top of the transport-agnostic
+// SDK Helper Spec v1.0 — rich helper surface on top of the transport-agnostic
 // Conn. Helpers compile SQL strings against the engine; the same wire request
-// works across RedWire and HTTP. See docs/clients/sdk-helper-spec.md.
+// works across RedWire, gRPC, and HTTP. See `docs/spec/sdk-helpers.md`.
+
+// HelperSpecVersion is the SDK Helper Spec revision this driver satisfies.
+// CI in cross-driver dashboards asserts against this constant per spec §14.
+const HelperSpecVersion = "1.0"
 
 // Querier is the minimal contract helpers need. Conn satisfies it; tests pass
 // fakes that record SQL.
@@ -35,6 +39,14 @@ func (h *Helpers) KV() *KVClient { return &KVClient{q: h.q, Collection: "kv_defa
 // Queue returns the queue namespace client.
 func (h *Helpers) Queue() *QueueClient { return &QueueClient{q: h.q} }
 
+// Queues is an alias for Queue() that matches the spec namespace name
+// (`queues.*`). Both forms call into the same client.
+func (h *Helpers) Queues() *QueueClient { return h.Queue() }
+
+// Tx returns the transaction namespace client implementing `tx.begin`,
+// `tx.commit`, `tx.rollback`.
+func (h *Helpers) Tx() *TxClient { return &TxClient{q: h.q} }
+
 // --- Envelopes -------------------------------------------------------
 
 // InsertResult is the spec envelope for single-item inserts.
@@ -45,8 +57,13 @@ type InsertResult struct {
 }
 
 // DeleteResult is the spec envelope for delete helpers.
+//
+// `Deleted` reports whether anything was actually removed (`Affected > 0`).
+// A delete of a missing item returns `{Affected: 0, Deleted: false}` rather
+// than a `NOT_FOUND` error, per SDK Helper Spec v1.0 §4.5 / §5.4.
 type DeleteResult struct {
 	Affected uint64 `json:"affected"`
+	Deleted  bool   `json:"deleted"`
 }
 
 // ExistsResult is the spec envelope for existence checks.
@@ -151,7 +168,7 @@ func (d *DocumentClient) Patch(ctx context.Context, collection, rid string, patc
 		return nil, NewError(CodeInvalidArgument, "documents.patch patch must be an object")
 	}
 	if len(patch) == 0 {
-		return d.Get(ctx, collection, rid)
+		return nil, NewError(CodeInvalidArgument, "documents.patch patch must be a non-empty object")
 	}
 	parts := make([]string, 0, len(patch))
 	for field, value := range patch {
@@ -179,13 +196,18 @@ func (d *DocumentClient) Patch(ctx context.Context, collection, rid string, patc
 }
 
 // Delete removes a document by rid.
+//
+// Per SDK Helper Spec §4.5, deleting a missing rid is NOT an error: the
+// helper returns `{Affected: 0, Deleted: false}` so callers can keep an
+// idempotent shape.
 func (d *DocumentClient) Delete(ctx context.Context, collection, rid string) (*DeleteResult, error) {
 	sql := fmt.Sprintf("DELETE FROM %s WHERE rid = $1", sqlIdentifierPath(collection))
 	body, err := d.q.Query(ctx, sql, rid)
 	if err != nil {
 		return nil, err
 	}
-	return &DeleteResult{Affected: affectedFromBody(body)}, nil
+	n := affectedFromBody(body)
+	return &DeleteResult{Affected: n, Deleted: n > 0}, nil
 }
 
 func (d *DocumentClient) ensureCollection(ctx context.Context, collection string) error {
@@ -299,7 +321,8 @@ func (k *KVClient) Delete(ctx context.Context, key string, collection ...string)
 	if err != nil {
 		return nil, err
 	}
-	return &DeleteResult{Affected: affectedFromBody(body)}, nil
+	n := affectedFromBody(body)
+	return &DeleteResult{Affected: n, Deleted: n > 0}, nil
 }
 
 // KVListOptions controls KV List output.
@@ -450,7 +473,82 @@ func (qc *QueueClient) Purge(ctx context.Context, queue string) (*DeleteResult, 
 	if err != nil {
 		return nil, err
 	}
-	return &DeleteResult{Affected: affectedFromBody(body)}, nil
+	n := affectedFromBody(body)
+	return &DeleteResult{Affected: n, Deleted: n > 0}, nil
+}
+
+// Create makes the queue if it does not exist (idempotent). Wraps
+// `CREATE QUEUE IF NOT EXISTS`.
+func (qc *QueueClient) Create(ctx context.Context, queue string) error {
+	if err := assertIdentifier(queue, "queue name"); err != nil {
+		return err
+	}
+	_, err := qc.q.Query(ctx, "CREATE QUEUE IF NOT EXISTS "+sqlIdentifier(queue))
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "already exists") {
+		return nil
+	}
+	return err
+}
+
+// --- Transactions -----------------------------------------------------
+
+// txClient internal flag — `inTx` marks a child TxClient handed to a Run
+// callback so that nested Run calls can be rejected cheaply.
+
+// TxClient implements `tx.*` from the SDK Helper Spec — imperative form.
+// The Go driver does not (yet) expose a callback form; nest `Begin` /
+// `Commit` / `Rollback` around your SQL.
+//
+// The connection is session-stateful: a `Begin` opens a transaction that
+// the next `Commit` or `Rollback` closes. Concurrent calls on the same
+// client during an open transaction MUST serialise (the underlying
+// transport already serialises one in-flight statement at a time).
+type TxClient struct {
+	q    Querier
+	inTx bool
+}
+
+// Begin starts a transaction.
+func (t *TxClient) Begin(ctx context.Context) error {
+	_, err := t.q.Query(ctx, "BEGIN")
+	return err
+}
+
+// Commit commits the open transaction.
+func (t *TxClient) Commit(ctx context.Context) error {
+	_, err := t.q.Query(ctx, "COMMIT")
+	return err
+}
+
+// Rollback discards the open transaction.
+func (t *TxClient) Rollback(ctx context.Context) error {
+	_, err := t.q.Query(ctx, "ROLLBACK")
+	return err
+}
+
+// Run is the optional callback form (spec §7.2). The callback receives the
+// same TxClient so nested calls go through the same wire session. A
+// returned error rolls back and re-surfaces; success commits.
+//
+// Nested `Run` calls are rejected with `INVALID_ARGUMENT` — the Go driver
+// does NOT use savepoints. Callers wanting nested semantics should issue
+// `SAVEPOINT` statements directly via `Conn.Query`.
+func (t *TxClient) Run(ctx context.Context, fn func(*TxClient) error) error {
+	if t.inTx {
+		return NewError(CodeInvalidArgument, "tx.run does not support nested transactions; use SAVEPOINT explicitly")
+	}
+	if err := t.Begin(ctx); err != nil {
+		return err
+	}
+	child := &TxClient{q: t.q, inTx: true}
+	if cbErr := fn(child); cbErr != nil {
+		_ = t.Rollback(ctx)
+		return cbErr
+	}
+	return t.Commit(ctx)
 }
 
 // --- pure SQL helpers (unit-testable) --------------------------------
