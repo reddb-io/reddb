@@ -1261,6 +1261,7 @@ mod red_schema;
 pub(crate) mod retention_filter;
 pub(crate) mod retention_sweeper;
 pub(crate) mod sessionize;
+pub(crate) mod window_phase;
 pub mod resource_limits;
 pub(crate) mod scalar_evaluator;
 pub mod schema_diff;

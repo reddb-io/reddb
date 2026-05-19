@@ -862,6 +862,17 @@ fn attach_projection_alias(proj: Projection, alias: Option<String>) -> Projectio
             }
         }
         Projection::Column(c) => Projection::Alias(c, alias),
+        Projection::Window {
+            name,
+            args,
+            window,
+            ..
+        } => Projection::Window {
+            name,
+            args,
+            window,
+            alias: Some(alias),
+        },
         other => other,
     }
 }

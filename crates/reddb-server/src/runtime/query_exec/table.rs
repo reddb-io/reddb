@@ -975,8 +975,10 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     // (e.g. VERIFY_PASSWORD(...), UPPER(...)), since the fast path
     // returns raw records without running project_runtime_record.
     let has_scalar_function = effective_projections.iter().any(|p| {
-        matches!(p, Projection::Function(_, _) | Projection::Expression(_, _))
-            || matches!(p, Projection::Column(column) | Projection::Alias(column, _) if column.starts_with("LIT:"))
+        matches!(
+            p,
+            Projection::Function(_, _) | Projection::Expression(_, _) | Projection::Window { .. }
+        ) || matches!(p, Projection::Column(column) | Projection::Alias(column, _) if column.starts_with("LIT:"))
     });
     if effective_filter.is_none()
         && effective_group_by.is_empty()
@@ -1315,16 +1317,30 @@ pub(crate) fn execute_runtime_canonical_table_node(
             })
         }
         "projection" | "document_projection" | "entity_projection" => {
-            let records = execute_runtime_canonical_table_child(db, node, context)?;
+            let mut records = execute_runtime_canonical_table_child(db, node, context)?;
             let document_projection = node.operator == "document_projection";
             let entity_projection = node.operator == "entity_projection";
+            let effective_projections = effective_table_projections(context.query);
+            // Issue #590 slice 7b — apply the window phase (ROW_NUMBER,
+            // RANK, DENSE_RANK, LAG, LEAD) between filter/sort and the
+            // final per-row projection. The window phase materialises a
+            // virtual column on each record under the projection's
+            // alias; the `Projection::Window` arm in
+            // `project_runtime_record_with_db` then reads that column
+            // back like any other field.
+            crate::runtime::window_phase::apply(
+                &mut records,
+                &effective_projections,
+                Some(context.table_name),
+                Some(context.table_alias),
+            )?;
             Ok(records
                 .iter()
                 .map(|record| {
                     project_runtime_record_with_db(
                         Some(db),
                         record,
-                        &effective_table_projections(context.query),
+                        &effective_projections,
                         Some(context.table_name),
                         Some(context.table_alias),
                         document_projection,
