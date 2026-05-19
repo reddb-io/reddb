@@ -943,7 +943,7 @@ impl UnifiedStore {
         &self,
         name: &str,
         entities: Vec<UnifiedEntity>,
-    ) -> Result<(), StoreError> {
+    ) -> Result<Vec<Vec<u8>>, StoreError> {
         let fv = self.format_version();
 
         // Build a fresh manager. Done outside the collections lock so
@@ -985,10 +985,10 @@ impl UnifiedStore {
 
         self.finish_paged_write([StoreWalAction::RefreshCollection {
             collection: name.to_string(),
-            records: serialized,
+            records: serialized.clone(),
         }])?;
 
-        Ok(())
+        Ok(serialized)
     }
 
     /// Atomic swap of the in-memory collection state. Used by both
@@ -1065,6 +1065,32 @@ impl UnifiedStore {
         }
 
         self.swap_collection_state(collection, new_manager, &prepared, records);
+        Ok(())
+    }
+
+    /// Replica-side analogue of [`Self::refresh_collection`] — issue
+    /// #596 slice 9d. Takes pre-serialized record bytes from the
+    /// primary's CDC stream (the same bytes the primary wrote into the
+    /// `RefreshCollection` WAL action), applies the atomic swap, and
+    /// emits the same `RefreshCollection` WAL action against the
+    /// replica's local store WAL so the post-swap state survives a
+    /// replica restart through the normal recovery path.
+    ///
+    /// Idempotency: re-applying the same records bytes is a full
+    /// rebuild from the same payload, so the resulting backing-
+    /// collection contents are equal to the prior call's result.
+    /// The primary-side `LogicalChangeApplier` short-circuits exact
+    /// duplicate LSN+payload combinations before reaching here.
+    pub fn refresh_collection_from_records(
+        &self,
+        name: &str,
+        records: Vec<Vec<u8>>,
+    ) -> Result<(), StoreError> {
+        self.apply_replayed_refresh_collection(name, &records)?;
+        self.finish_paged_write([StoreWalAction::RefreshCollection {
+            collection: name.to_string(),
+            records,
+        }])?;
         Ok(())
     }
 

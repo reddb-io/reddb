@@ -3442,6 +3442,7 @@ impl RedDBRuntime {
                     .as_ref()
                     .map(|e| UnifiedStore::serialize_entity(e, store.format_version())),
                 metadata: self.latest_metadata_for(collection, entity_id),
+                refresh_records: None,
             };
             let encoded = record.encode();
             primary.wal_buffer.append(record.lsn, encoded.clone());
@@ -3528,6 +3529,7 @@ impl RedDBRuntime {
                     .as_ref()
                     .map(|entity| UnifiedStore::serialize_entity(entity, store.format_version())),
                 metadata: self.latest_metadata_for(collection, entity_id),
+                refresh_records: None,
             };
             let encoded = record.encode();
             primary.wal_buffer.append(record.lsn, encoded.clone());
@@ -3657,6 +3659,7 @@ impl RedDBRuntime {
                 metadata: metadata
                     .map(metadata_to_json)
                     .or_else(|| self.latest_metadata_for(collection, entity.id.raw())),
+                refresh_records: None,
             };
             let encoded = record.encode();
             primary.wal_buffer.append(record.lsn, encoded.clone());
@@ -5915,19 +5918,55 @@ impl RedDBRuntime {
                             view_records_to_entities(&q.name, &inner_result.result.records);
                         let row_count = entities.len() as u64;
                         let store = self.inner.db.store();
-                        if let Err(err) = store.refresh_collection(&q.name, entities) {
-                            let duration_ms = started.elapsed().as_millis() as u64;
-                            let msg = err.to_string();
-                            self.inner.materialized_views.write().record_refresh_failure(
-                                &q.name,
-                                msg.clone(),
-                                duration_ms,
-                                now_ms,
+                        let serialized_records = match store.refresh_collection(&q.name, entities) {
+                            Ok(records) => records,
+                            Err(err) => {
+                                let duration_ms = started.elapsed().as_millis() as u64;
+                                let msg = err.to_string();
+                                self.inner.materialized_views.write().record_refresh_failure(
+                                    &q.name,
+                                    msg.clone(),
+                                    duration_ms,
+                                    now_ms,
+                                );
+                                return Err(RedDBError::Internal(format!(
+                                    "REFRESH MATERIALIZED VIEW {}: {msg}",
+                                    q.name
+                                )));
+                            }
+                        };
+
+                        // Issue #596 slice 9d — emit a Refresh
+                        // ChangeRecord into the logical-WAL spool so
+                        // replicas deterministically replay the same
+                        // backing-collection contents via
+                        // `LogicalChangeApplier::apply_record`.
+                        if let Some(ref primary) = self.inner.db.replication {
+                            let lsn = self
+                                .inner
+                                .cdc
+                                .emit(
+                                    crate::replication::cdc::ChangeOperation::Refresh,
+                                    &q.name,
+                                    0,
+                                    "refresh",
+                                );
+                            self.invalidate_result_cache_for_table(&q.name);
+                            let timestamp = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64;
+                            let record = ChangeRecord::for_refresh(
+                                lsn,
+                                timestamp,
+                                q.name.clone(),
+                                serialized_records,
                             );
-                            return Err(RedDBError::Internal(format!(
-                                "REFRESH MATERIALIZED VIEW {}: {msg}",
-                                q.name
-                            )));
+                            let encoded = record.encode();
+                            primary.wal_buffer.append(record.lsn, encoded.clone());
+                            if let Some(spool) = &primary.logical_wal_spool {
+                                let _ = spool.append(record.lsn, &encoded);
+                            }
                         }
 
                         let duration_ms = started.elapsed().as_millis() as u64;

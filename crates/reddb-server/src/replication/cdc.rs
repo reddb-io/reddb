@@ -15,6 +15,12 @@ pub enum ChangeOperation {
     Insert,
     Update,
     Delete,
+    /// Issue #596 slice 9d — atomic full-collection replace.
+    /// Carries a list of serialized entity records in
+    /// [`ChangeRecord::refresh_records`]; the replica applier
+    /// calls `UnifiedStore::refresh_collection` to apply the
+    /// swap atomically (no partial state visible to readers).
+    Refresh,
 }
 
 impl ChangeOperation {
@@ -23,6 +29,7 @@ impl ChangeOperation {
             "insert" => Some(Self::Insert),
             "update" => Some(Self::Update),
             "delete" => Some(Self::Delete),
+            "refresh" => Some(Self::Refresh),
             _ => None,
         }
     }
@@ -32,6 +39,7 @@ impl ChangeOperation {
             Self::Insert => "insert",
             Self::Update => "update",
             Self::Delete => "delete",
+            Self::Refresh => "refresh",
         }
     }
 }
@@ -127,6 +135,12 @@ pub struct ChangeRecord {
     pub entity_kind: String,
     pub entity_bytes: Option<Vec<u8>>,
     pub metadata: Option<JsonValue>,
+    /// Issue #596 slice 9d — payload for [`ChangeOperation::Refresh`].
+    /// Each element is a serialized entity record (the same
+    /// `serialize_entity_record` payload the store's `RefreshCollection`
+    /// WAL action uses), in the order the replica should `bulk_insert`
+    /// after dropping the prior backing-collection contents.
+    pub refresh_records: Option<Vec<Vec<u8>>>,
 }
 
 impl ChangeRecord {
@@ -141,7 +155,7 @@ impl ChangeRecord {
         metadata: Option<JsonValue>,
     ) -> Self {
         let entity_bytes = match operation {
-            ChangeOperation::Delete => None,
+            ChangeOperation::Delete | ChangeOperation::Refresh => None,
             ChangeOperation::Insert | ChangeOperation::Update => Some(
                 crate::storage::UnifiedStore::serialize_entity(entity, format_version),
             ),
@@ -156,6 +170,29 @@ impl ChangeRecord {
             entity_kind: entity_kind.into(),
             entity_bytes,
             metadata,
+            refresh_records: None,
+        }
+    }
+
+    /// Build a refresh change record carrying the new contents for a
+    /// `REFRESH MATERIALIZED VIEW` replay on the replica. Issue #596
+    /// slice 9d.
+    pub fn for_refresh(
+        lsn: u64,
+        timestamp: u64,
+        collection: impl Into<String>,
+        records: Vec<Vec<u8>>,
+    ) -> Self {
+        Self {
+            lsn,
+            timestamp,
+            operation: ChangeOperation::Refresh,
+            collection: collection.into(),
+            entity_id: 0,
+            entity_kind: "refresh".to_string(),
+            entity_bytes: None,
+            metadata: None,
+            refresh_records: Some(records),
         }
     }
 
@@ -187,6 +224,13 @@ impl ChangeRecord {
         }
         if let Some(metadata) = &self.metadata {
             object.insert("metadata".to_string(), metadata.clone());
+        }
+        if let Some(records) = &self.refresh_records {
+            let arr = records
+                .iter()
+                .map(|bytes| JsonValue::String(hex::encode(bytes)))
+                .collect();
+            object.insert("refresh_records_hex".to_string(), JsonValue::Array(arr));
         }
         JsonValue::Object(object)
     }
@@ -237,6 +281,21 @@ impl ChangeRecord {
                 .to_string(),
             entity_bytes,
             metadata: value.get("metadata").cloned(),
+            refresh_records: match value.get("refresh_records_hex") {
+                Some(JsonValue::Array(items)) => {
+                    let mut out = Vec::with_capacity(items.len());
+                    for item in items {
+                        let hex_str = item
+                            .as_str()
+                            .ok_or_else(|| "refresh_records_hex entry not a string".to_string())?;
+                        let bytes = hex::decode(hex_str).map_err(|err| err.to_string())?;
+                        out.push(bytes);
+                    }
+                    Some(out)
+                }
+                None | Some(JsonValue::Null) => None,
+                _ => return Err("refresh_records_hex is not an array".to_string()),
+            },
         })
     }
 }
@@ -639,6 +698,7 @@ mod tests {
             entity_kind: "row".to_string(),
             entity_bytes: Some(vec![1, 2, 3]),
             metadata: Some(crate::json!({"role": "admin"})),
+            refresh_records: None,
         };
 
         let decoded = ChangeRecord::decode(&record.encode()).expect("decode");
@@ -646,5 +706,22 @@ mod tests {
         assert_eq!(decoded.collection, record.collection);
         assert_eq!(decoded.entity_id, record.entity_id);
         assert_eq!(decoded.entity_bytes, record.entity_bytes);
+    }
+
+    /// Issue #596 slice 9d — refresh records survive a JSON round-trip
+    /// through the logical-WAL wire format the primary writes and the
+    /// replica reads. Bit-for-bit equality on every payload byte is the
+    /// contract — the replica calls `bulk_insert` with whatever bytes
+    /// land in `refresh_records`, so a decode that silently drops or
+    /// re-orders them would silently diverge replica state.
+    #[test]
+    fn test_change_record_refresh_roundtrip() {
+        let records = vec![vec![0x10, 0x20, 0x30], vec![0xAA, 0xBB], Vec::new()];
+        let record = ChangeRecord::for_refresh(11, 99, "mv_orders_summary", records.clone());
+
+        let decoded = ChangeRecord::decode(&record.encode()).expect("decode");
+        assert_eq!(decoded.operation, ChangeOperation::Refresh);
+        assert_eq!(decoded.collection, "mv_orders_summary");
+        assert_eq!(decoded.refresh_records.as_deref(), Some(&records[..]));
     }
 }
