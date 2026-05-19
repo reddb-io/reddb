@@ -88,6 +88,43 @@ fn secret_sql_value_to_string(value: &Value) -> RedDBResult<String> {
     }
 }
 
+/// Convert the rows produced by a materialized-view body into
+/// `UnifiedEntity` table rows targeting the backing collection.
+/// Issue #595 slice 9c — feeds `UnifiedStore::refresh_collection`.
+///
+/// Graph fragments and vector hits are ignored: a materialized view
+/// is a relational result set (SELECT-shaped); slices 11+ may extend
+/// this once we have a richer view body shape. Each row materialises
+/// the union of its schema-bound columns + overflow.
+fn view_records_to_entities(
+    table: &str,
+    records: &[crate::storage::query::unified::UnifiedRecord],
+) -> Vec<crate::storage::UnifiedEntity> {
+    use std::collections::HashMap;
+    let table_arc: std::sync::Arc<str> = std::sync::Arc::from(table);
+    let mut out = Vec::with_capacity(records.len());
+    for record in records {
+        let mut named: HashMap<String, crate::storage::schema::Value> = HashMap::new();
+        for (name, value) in record.iter_fields() {
+            named.insert(name.to_string(), value.clone());
+        }
+        let entity = crate::storage::UnifiedEntity::new(
+            crate::storage::EntityId::new(0),
+            crate::storage::EntityKind::TableRow {
+                table: std::sync::Arc::clone(&table_arc),
+                row_id: 0,
+            },
+            crate::storage::EntityData::Row(crate::storage::RowData {
+                columns: Vec::new(),
+                named: Some(named),
+                schema: None,
+            }),
+        );
+        out.push(entity);
+    }
+    out
+}
+
 fn system_keyed_collection_contract(
     name: &str,
     model: crate::catalog::CollectionModel,
@@ -5868,8 +5905,32 @@ impl RedDBRuntime {
                     .unwrap_or(0);
                 match self.execute_query_expr((*view.query).clone()) {
                     Ok(inner_result) => {
+                        // Issue #595 slice 9c — atomically replace the
+                        // backing collection's contents under a single
+                        // WAL group. Concurrent SELECT from the view
+                        // sees either the prior or new contents, never
+                        // partial. A crash before the WAL commit lands
+                        // leaves the prior contents intact on recovery.
+                        let entities =
+                            view_records_to_entities(&q.name, &inner_result.result.records);
+                        let row_count = entities.len() as u64;
+                        let store = self.inner.db.store();
+                        if let Err(err) = store.refresh_collection(&q.name, entities) {
+                            let duration_ms = started.elapsed().as_millis() as u64;
+                            let msg = err.to_string();
+                            self.inner.materialized_views.write().record_refresh_failure(
+                                &q.name,
+                                msg.clone(),
+                                duration_ms,
+                                now_ms,
+                            );
+                            return Err(RedDBError::Internal(format!(
+                                "REFRESH MATERIALIZED VIEW {}: {msg}",
+                                q.name
+                            )));
+                        }
+
                         let duration_ms = started.elapsed().as_millis() as u64;
-                        let row_count = inner_result.result.records.len() as u64;
                         let serialized = format!("{:?}", inner_result.result);
                         self.inner
                             .materialized_views
@@ -5881,6 +5942,11 @@ impl RedDBRuntime {
                                 duration_ms,
                                 now_ms,
                             );
+                        // SELECT FROM v now reads through the rewriter
+                        // skip into the backing collection — drop the
+                        // result cache so prior empty-backing reads
+                        // don't shadow the new contents.
+                        self.invalidate_result_cache();
                         Ok(RuntimeQueryResult::ok_message(
                             query.to_string(),
                             &format!("materialized view {} refreshed", q.name),
@@ -6268,7 +6334,20 @@ impl RedDBRuntime {
     pub fn materialized_view_metadata(
         &self,
     ) -> Vec<crate::storage::cache::result::MaterializedViewMetadata> {
-        self.inner.materialized_views.read().metadata()
+        // Issue #595 slice 9c — `current_row_count` is now scraped
+        // live from the backing collection rather than read from the
+        // cache slot. Mirrors the slice-10 invariant on
+        // `queue_pending_gauge` in #527: the live store is the source
+        // of truth, the cache slot only carries last-refresh telemetry
+        // (timing, error, refresh cadence).
+        let store = self.inner.db.store();
+        let mut entries = self.inner.materialized_views.read().metadata();
+        for entry in &mut entries {
+            if let Some(manager) = store.get_collection(&entry.name) {
+                entry.current_row_count = manager.count() as u64;
+            }
+        }
+        entries
     }
 
     /// Drive scheduled refreshes for materialized views with a
