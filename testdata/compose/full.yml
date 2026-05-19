@@ -27,6 +27,7 @@ services:
     ports:
       - "50051:50051"
       - "8080:8080"
+      - "8443:8443"
     command:
       - "server"
       - "--role"
@@ -35,6 +36,8 @@ services:
       - "0.0.0.0:50051"
       - "--http-bind"
       - "0.0.0.0:8080"
+      - "--http-tls-bind"
+      - "0.0.0.0:8443"
     depends_on:
       - mock-ai
 
@@ -51,6 +54,7 @@ services:
     ports:
       - "50052:50051"
       - "8081:8080"
+      - "8444:8443"
     command:
       - "replica"
       - "--primary-addr"
@@ -59,6 +63,8 @@ services:
       - "0.0.0.0:50051"
       - "--http-bind"
       - "0.0.0.0:8080"
+      - "--http-tls-bind"
+      - "0.0.0.0:8443"
     depends_on:
       - primary
       - mock-ai
@@ -76,6 +82,7 @@ services:
     ports:
       - "50053:50051"
       - "8082:8080"
+      - "8445:8443"
     command:
       - "replica"
       - "--primary-addr"
@@ -84,6 +91,8 @@ services:
       - "0.0.0.0:50051"
       - "--http-bind"
       - "0.0.0.0:8080"
+      - "--http-tls-bind"
+      - "0.0.0.0:8443"
     depends_on:
       - primary
       - mock-ai

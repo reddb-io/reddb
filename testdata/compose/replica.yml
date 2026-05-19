@@ -11,6 +11,7 @@ services:
     ports:
       - "50051:50051"
       - "8080:8080"
+      - "8443:8443"
     volumes:
       - primary-data:/data
     command:
@@ -23,6 +24,8 @@ services:
       - "0.0.0.0:50051"
       - "--http-bind"
       - "0.0.0.0:8080"
+      - "--http-tls-bind"
+      - "0.0.0.0:8443"
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -44,6 +47,7 @@ services:
     ports:
       - "50052:50051"
       - "8081:8080"
+      - "8444:8443"
     volumes:
       - replica-data:/data
     command:
@@ -56,6 +60,8 @@ services:
       - "0.0.0.0:50051"
       - "--http-bind"
       - "0.0.0.0:8080"
+      - "--http-tls-bind"
+      - "0.0.0.0:8443"
     security_opt:
       - no-new-privileges:true
     cap_drop:

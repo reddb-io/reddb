@@ -42,6 +42,7 @@ services:
     ports:
       - "50071:50051"
       - "8100:8080"
+      - "8543:8443"
     volumes:
       - pitr-primary-data:/data
     command:
@@ -54,6 +55,8 @@ services:
       - "0.0.0.0:50051"
       - "--http-bind"
       - "0.0.0.0:8080"
+      - "--http-tls-bind"
+      - "0.0.0.0:8443"
     environment:
       RUST_LOG: info
       REDDB_REMOTE_BACKEND: s3
