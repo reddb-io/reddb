@@ -578,7 +578,10 @@ impl DocumentClient {
     ) -> PyResult<Bound<'py, PyDict>> {
         let rt = self.embedded()?;
         if patch.is_empty() {
-            return self.get(py, collection, rid);
+            return Err(err(
+                "INVALID_ARGUMENT",
+                "documents.patch patch must be a non-empty mapping",
+            ));
         }
         let collection = sql_identifier_path(collection)?;
         let rid_sql = sql_rid_literal(rid)?;
@@ -625,6 +628,7 @@ impl DocumentClient {
             .map_err(|e| err("QUERY_ERROR", e))?;
         let out = PyDict::new(py);
         out.set_item("affected", qr.affected)?;
+        out.set_item("deleted", qr.affected > 0)?;
         Ok(out)
     }
 }
