@@ -303,6 +303,123 @@ func TestDocuments_Insert_PassesThroughExistingCollection(t *testing.T) {
 	}
 }
 
+// ----------------------------------------------------------------- Tx
+
+func TestTx_Begin_Commit_Rollback_EmitsSQL(t *testing.T) {
+	fq := &fakeQuerier{replies: [][]byte{
+		reply(t, map[string]any{}),
+		reply(t, map[string]any{}),
+		reply(t, map[string]any{}),
+	}}
+	tx := NewHelpers(fq).Tx()
+	ctx := context.Background()
+	if err := tx.Begin(ctx); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	want := []string{"BEGIN", "COMMIT", "ROLLBACK"}
+	for i, c := range fq.calls {
+		if c.sql != want[i] {
+			t.Fatalf("call %d: got %q want %q", i, c.sql, want[i])
+		}
+	}
+}
+
+func TestTx_Run_CommitsOnSuccess(t *testing.T) {
+	fq := &fakeQuerier{replies: [][]byte{
+		reply(t, map[string]any{}), // BEGIN
+		reply(t, map[string]any{}), // body work
+		reply(t, map[string]any{}), // COMMIT
+	}}
+	tx := NewHelpers(fq).Tx()
+	err := tx.Run(context.Background(), func(child *TxClient) error {
+		_, err := child.q.Query(context.Background(), "INSERT INTO t VALUES (1)")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if fq.calls[0].sql != "BEGIN" || fq.calls[2].sql != "COMMIT" {
+		t.Fatalf("expected BEGIN..COMMIT, got %+v", fq.calls)
+	}
+}
+
+func TestTx_Run_RollsBackOnError(t *testing.T) {
+	fq := &fakeQuerier{replies: [][]byte{
+		reply(t, map[string]any{}), // BEGIN
+		reply(t, map[string]any{}), // ROLLBACK
+	}}
+	tx := NewHelpers(fq).Tx()
+	err := tx.Run(context.Background(), func(_ *TxClient) error {
+		return errors.New("boom")
+	})
+	if err == nil || err.Error() != "boom" {
+		t.Fatalf("expected boom, got %v", err)
+	}
+	if fq.calls[len(fq.calls)-1].sql != "ROLLBACK" {
+		t.Fatalf("expected ROLLBACK last, got %+v", fq.calls)
+	}
+}
+
+// ----------------------------------------------------------------- Documents extra
+
+func TestDocuments_Patch_EmptyRejects(t *testing.T) {
+	d := NewHelpers(&fakeQuerier{}).Documents()
+	_, err := d.Patch(context.Background(), "people", "doc-1", map[string]any{})
+	if !IsCode(err, CodeInvalidArgument) {
+		t.Fatalf("want INVALID_ARGUMENT, got %v", err)
+	}
+}
+
+func TestDocuments_Delete_PopulatesDeletedFlag(t *testing.T) {
+	fq := &fakeQuerier{replies: [][]byte{
+		reply(t, map[string]any{"affected": 1}),
+		reply(t, map[string]any{"affected": 0}),
+	}}
+	d := NewHelpers(fq).Documents()
+	r, _ := d.Delete(context.Background(), "people", "rid-1")
+	if !r.Deleted || r.Affected != 1 {
+		t.Fatalf("hit: %+v", r)
+	}
+	r, _ = d.Delete(context.Background(), "people", "rid-missing")
+	if r.Deleted || r.Affected != 0 {
+		t.Fatalf("miss: %+v", r)
+	}
+}
+
+// ----------------------------------------------------------------- Queues extra
+
+func TestQueue_Create_EmitsIfNotExists(t *testing.T) {
+	fq := &fakeQuerier{replies: [][]byte{reply(t, map[string]any{})}}
+	q := NewHelpers(fq).Queues()
+	if err := q.Create(context.Background(), "jobs"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if fq.calls[0].sql != "CREATE QUEUE IF NOT EXISTS jobs" {
+		t.Fatalf("sql: %q", fq.calls[0].sql)
+	}
+}
+
+func TestQueue_Create_RejectsBadIdentifier(t *testing.T) {
+	q := NewHelpers(&fakeQuerier{}).Queues()
+	if err := q.Create(context.Background(), "bad-name!"); !IsCode(err, CodeInvalidArgument) {
+		t.Fatalf("want INVALID_ARGUMENT, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------- spec constant
+
+func TestHelperSpecVersion(t *testing.T) {
+	if HelperSpecVersion != "1.0" {
+		t.Fatalf("HelperSpecVersion: got %q want %q", HelperSpecVersion, "1.0")
+	}
+}
+
 // ---------------------------------------------------------- decode helpers
 
 func TestAffectedFromBody_HandlesNestedResult(t *testing.T) {
