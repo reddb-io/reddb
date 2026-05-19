@@ -91,10 +91,12 @@ fn materialized_view_refresh_executes_body() {
     let result = exec(&rt, "REFRESH MATERIALIZED VIEW paid_orders");
     assert_eq!(result.statement_type, "refresh_materialized_view");
 
-    // Selecting the materialized view name also executes the body
-    // (the rewriter descends into it just like a regular view).
+    // Issue #594 slice 9b — `SELECT FROM mv` now reads the backing
+    // collection (empty until 9c wires REFRESH through it), not the
+    // re-executed view body. REFRESH continues to populate the cache
+    // slot, which is what `red.materialized_views` reports.
     let result = exec(&rt, "SELECT * FROM paid_orders");
-    assert_eq!(result.result.records.len(), 2);
+    assert_eq!(result.result.records.len(), 0);
 }
 
 #[test]
