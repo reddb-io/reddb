@@ -84,14 +84,18 @@ fn materialized_view_survives_restart() {
             "after restart: paid_orders must still be listed, got {names:?}",
         );
 
-        // The view body resolves: SELECT against the view name runs
-        // the underlying query through the rewriter. Two of the
-        // three orders are paid.
+        // Issue #594 slice 9b — `SELECT FROM mv` resolves to the
+        // backing collection rather than re-executing the body.
+        // REFRESH hasn't been wired through the backing yet (lands
+        // in 9c), so post-rehydrate the backing is empty. The point
+        // of this slice's restart assertion is that the materialized
+        // view itself still resolves as a known relation, not that
+        // it returns rows.
         let result = exec(&rt, "SELECT * FROM paid_orders");
         assert_eq!(
             result.result.records.len(),
-            2,
-            "view body must rewrite to filtered orders after restart",
+            0,
+            "post-rehydrate, materialized view reads from empty backing collection",
         );
 
         // REFRESH against the rehydrated view also works — the
