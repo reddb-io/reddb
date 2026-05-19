@@ -91,12 +91,13 @@ fn materialized_view_refresh_executes_body() {
     let result = exec(&rt, "REFRESH MATERIALIZED VIEW paid_orders");
     assert_eq!(result.statement_type, "refresh_materialized_view");
 
-    // Issue #594 slice 9b — `SELECT FROM mv` now reads the backing
-    // collection (empty until 9c wires REFRESH through it), not the
-    // re-executed view body. REFRESH continues to populate the cache
-    // slot, which is what `red.materialized_views` reports.
+    // Issue #595 slice 9c — REFRESH writes the body's row set into
+    // the backing collection via the new atomic WAL primitive, so
+    // `SELECT FROM mv` now returns the materialised rows (the two
+    // 'paid' orders) instead of the empty backing reads we got
+    // post-9b.
     let result = exec(&rt, "SELECT * FROM paid_orders");
-    assert_eq!(result.result.records.len(), 0);
+    assert_eq!(result.result.records.len(), 2);
 }
 
 #[test]
