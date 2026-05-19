@@ -1213,6 +1213,7 @@ mod collection_contract;
 pub mod config_matrix;
 pub mod config_overlay;
 pub mod config_watcher;
+pub mod continuous_materialized_view;
 pub(crate) mod ddl;
 pub mod disk_space_monitor;
 mod dml_target_scan;
