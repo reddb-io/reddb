@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Documentation
+
+- New canonical SDK Helper Spec at `docs/spec/sdk-helpers.md` (v1.0). Defines
+  the helper names (snake_case dot-namespaced), input shapes, output
+  envelopes, error taxonomy, and per-model conformance cases for documents,
+  KV, queues, transactions, vectors, graph, time-series, and probabilistic
+  surfaces. The previous v0.1 draft at `docs/clients/sdk-helper-spec.md`
+  now points at the canonical spec. A reference conformance harness ships
+  in `crates/reddb-client/tests/conformance.rs`; other-language drivers
+  port the case IDs verbatim. Refs #546.
+
 ## 1.2.0 - 2026-05-15
 
 ### Fixed
