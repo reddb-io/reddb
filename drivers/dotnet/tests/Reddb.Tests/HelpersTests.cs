@@ -230,4 +230,97 @@ public class HelpersTests
         Assert.Single(res.Items);
         Assert.Equal("x", res.Items[0]["rid"]);
     }
+
+    // --- SDK Helper Spec v1.0 -------------------------------------------
+
+    [Fact] public void HelperSpecVersion_Is_1_0()
+    {
+        Assert.Equal("1.0", Helpers.Helpers.HelperSpecVersion);
+    }
+
+    [Fact] public async Task Documents_Patch_RejectsEmptyPatch()
+    {
+        // Spec §4.4 / case documents.patch_empty_rejects.
+        await Assert.ThrowsAsync<HelperException.InvalidArgument>(
+            async () => await new Helpers.Helpers(new FakeQuerier())
+                .Documents().PatchAsync("people", "doc-1",
+                    new Dictionary<string, object?>()));
+    }
+
+    [Fact] public async Task Documents_Delete_DeletedFlagReflectsAffected()
+    {
+        var fq = new FakeQuerier()
+            .Reply(M(("affected", 1)))
+            .Reply(M(("affected", 0)));
+        var docs = new Helpers.Helpers(fq).Documents();
+        var hit = await docs.DeleteAsync("people", "doc-1");
+        Assert.Equal(1L, hit.Affected);
+        Assert.True(hit.Deleted);
+        var miss = await docs.DeleteAsync("people", "missing");
+        Assert.Equal(0L, miss.Affected);
+        Assert.False(miss.Deleted);
+    }
+
+    [Fact] public async Task Kv_Delete_DeletedFlagReflectsAffected()
+    {
+        var fq = new FakeQuerier()
+            .Reply(M(("affected", 1)))
+            .Reply(M(("affected", 0)));
+        var kv = new Helpers.Helpers(fq).Kv();
+        var hit = await kv.DeleteAsync("k");
+        Assert.True(hit.Deleted);
+        var miss = await kv.DeleteAsync("k");
+        Assert.False(miss.Deleted);
+    }
+
+    [Fact] public async Task Queue_Create_EmitsCreateIfNotExists()
+    {
+        var fq = new FakeQuerier().Reply(M());
+        await new Helpers.Helpers(fq).Queues().CreateAsync("jobs");
+        Assert.Equal("CREATE QUEUE IF NOT EXISTS jobs", fq.Sqls[0]);
+    }
+
+    [Fact] public async Task Queue_Create_RejectsBadIdentifier()
+    {
+        await Assert.ThrowsAsync<HelperException.InvalidArgument>(
+            async () => await new Helpers.Helpers(new FakeQuerier())
+                .Queues().CreateAsync("bad-name!"));
+    }
+
+    [Fact] public async Task Tx_Begin_Commit_Rollback_EmitSql()
+    {
+        var fq = new FakeQuerier().Reply(M()).Reply(M()).Reply(M());
+        var tx = new Helpers.Helpers(fq).Tx();
+        await tx.BeginAsync();
+        await tx.CommitAsync();
+        await tx.RollbackAsync();
+        Assert.Equal(new[] { "BEGIN", "COMMIT", "ROLLBACK" }, fq.Sqls.ToArray());
+    }
+
+    [Fact] public async Task Tx_Run_CommitsOnSuccess()
+    {
+        var fq = new FakeQuerier().Reply(M()).Reply(M());
+        var tx = new Helpers.Helpers(fq).Tx();
+        await tx.RunAsync(async _ => await Task.CompletedTask);
+        Assert.Equal(new[] { "BEGIN", "COMMIT" }, fq.Sqls.ToArray());
+    }
+
+    [Fact] public async Task Tx_Run_RollsBackAndRethrowsOnFailure()
+    {
+        var fq = new FakeQuerier().Reply(M()).Reply(M());
+        var tx = new Helpers.Helpers(fq).Tx();
+        var boom = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await tx.RunAsync(_ => throw new InvalidOperationException("boom")));
+        Assert.Equal("boom", boom.Message);
+        Assert.Equal(new[] { "BEGIN", "ROLLBACK" }, fq.Sqls.ToArray());
+    }
+
+    [Fact] public async Task Tx_Run_RejectsNesting()
+    {
+        var fq = new FakeQuerier().Reply(M()).Reply(M());
+        var tx = new Helpers.Helpers(fq).Tx();
+        await Assert.ThrowsAsync<HelperException.InvalidArgument>(
+            async () => await tx.RunAsync(async inner =>
+                await inner.RunAsync(_ => ValueTask.CompletedTask)));
+    }
 }

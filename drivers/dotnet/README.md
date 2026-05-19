@@ -64,11 +64,16 @@ Native mappings:
 | `DateTime`, `DateTimeOffset`                    | timestamp        |
 | `Guid`                                          | uuid             |
 
-## Rich helpers (SDK Helper Spec v0.1)
+## Rich helpers (SDK Helper Spec v1.0)
 
-`Reddb.Helpers.Helpers` wraps an `IConn` with three namespaces —
-`Documents()`, `Kv()`, `Queue()` — mirroring the Go / Dart / Python
-helpers.
+`Reddb.Helpers.Helpers` wraps an `IConn` with the four first-class
+namespaces from the canonical
+[`docs/spec/sdk-helpers.md`](../../docs/spec/sdk-helpers.md): `Documents()`,
+`Kv()`, `Queues()` (alias: `Queue()`), and `Tx()`. The helper API mirrors
+the Go / Rust / Python helpers.
+
+`Helpers.HelperSpecVersion` is `"1.0"` — cross-driver CI dashboards
+assert against this constant per spec §14.
 
 ```csharp
 using Reddb.Helpers;
@@ -79,25 +84,99 @@ var helpers = Helpers.For(conn);
 var ins = await helpers.Documents().InsertAsync("people",
     new Dictionary<string, object?> { ["name"] = "alice" });
 var row = await helpers.Documents().GetAsync("people", ins.Rid);
+var patched = await helpers.Documents().PatchAsync("people", ins.Rid,
+    new Dictionary<string, object?> { ["name"] = "alicia" });
+DeleteResult del = await helpers.Documents().DeleteAsync("people", ins.Rid);
+// del.Deleted is true when del.Affected > 0; missing rid → {0, false}, NOT NOT_FOUND.
 
 // KV (default collection: kv_default)
-await helpers.Kv().SetAsync("characters:hansel", "ok");
-object? v = await helpers.Kv().GetAsync("characters:hansel");
+await helpers.Kv().SetAsync("characters:hansel", "witch");
+object? v = await helpers.Kv().GetAsync("characters:hansel"); // null when missing, NOT NOT_FOUND
 var list = await helpers.Kv().ListAsync(new KvClient.ListOpts { Prefix = "characters:" });
 
-// Queue
-var push = await helpers.Queue().PushAsync("jobs",
+// Queues
+await helpers.Queues().CreateAsync("jobs"); // idempotent (CREATE QUEUE IF NOT EXISTS)
+await helpers.Queues().PushAsync("jobs",
     new Dictionary<string, object?> { ["id"] = 1 },
     new QueueClient.PushOptions { Priority = 5 });
-long len = await helpers.Queue().LenAsync("jobs");
-var jobs = await helpers.Queue().PopAsync("jobs", 10);
+long len = await helpers.Queues().LenAsync("jobs");
+var jobs = await helpers.Queues().PopAsync("jobs", 10);
+
+// Transactions — imperative + callback
+var tx = helpers.Tx();
+await tx.BeginAsync();
+await conn.QueryAsync("INSERT INTO people (name) VALUES ('eve')");
+await tx.CommitAsync();
+
+await tx.RunAsync(async _ =>
+{
+    await conn.QueryAsync("INSERT INTO people (name) VALUES ('frank')");
+}); // commits on success, rolls back + rethrows on exception
 ```
+
+### Envelope summary
+
+| Envelope          | Fields                                                |
+| ----------------- | ----------------------------------------------------- |
+| `InsertResult`    | `Affected` (always 1), `Rid`, `Item`                  |
+| `DeleteResult`    | `Affected`, `Deleted` (`Affected > 0`)                |
+| `ExistsResult`    | `Exists`                                              |
+| `ListResult`      | `Items`, optional `NextCursor`                        |
+| `QueuePushResult` | `Affected`, `Rid`                                     |
 
 Typed errors: `HelperException.InvalidArgument`,
 `HelperException.NotFound`, `HelperException.InvalidResponse`.
 
-Transactions aren't surfaced through helpers yet — call
-`conn.QueryAsync("BEGIN" / "COMMIT" / "ROLLBACK")` directly.
+### Transaction support
+
+Both imperative (`BeginAsync` / `CommitAsync` / `RollbackAsync`) and
+callback (`RunAsync(async tx => …)`) forms. Nested `RunAsync` rejects
+with `INVALID_ARGUMENT` — call `conn.QueryAsync("SAVEPOINT …")`
+directly for savepoint semantics (spec §7.2).
+
+### Conformance matrix
+
+The .NET driver ports every case ID from
+[`docs/spec/sdk-helpers.md` §12](../../docs/spec/sdk-helpers.md). Run
+the harness against a real engine:
+
+```bash
+RED_SMOKE=1 RED_BIN=/path/to/red dotnet test drivers/dotnet -c Release \
+    --filter "FullyQualifiedName~Reddb.Tests.ConformanceTests"
+```
+
+| Case ID                              | Status |
+| ------------------------------------ | ------ |
+| `generic.query.no_params`            | ✅     |
+| `generic.query_with.params`          | ✅     |
+| `generic.insert.rid`                 | ✅     |
+| `generic.bulk_insert.rids`           | reachable via `conn.BulkInsertAsync` |
+| `generic.delete`                     | ✅     |
+| `documents.crud_nested_patch`        | ✅     |
+| `documents.delete_missing_no_error`  | ✅     |
+| `documents.patch_empty_rejects`      | ✅     |
+| `kv.exact_key_round_trip`            | ✅     |
+| `kv.missing_get_returns_none`        | ✅     |
+| `kv.delete_returns_envelope`         | ✅     |
+| `queues.fifo_peek_pop_len`           | ✅     |
+| `queues.empty_pop_returns_empty`     | ✅     |
+| `queues.purge_resets_len`            | ✅     |
+| `tx.commit_persists`                 | ✅     |
+| `tx.rollback_discards`               | ✅     |
+| `errors.not_found.document_get`      | ✅     |
+| `wire.probabilistic.hll_round_trip`  | ✅     |
+| `wire.vectors.sql_round_trip`        | reachable via `conn.QueryAsync` (spec §8 provisional)  |
+| `wire.graph.sql_round_trip`          | reachable via `conn.QueryAsync` (spec §9 provisional)  |
+| `wire.timeseries.sql_round_trip`     | reachable via `conn.QueryAsync` (spec §10 provisional) |
+
+### Out of scope (v1.0)
+
+- `vectors.*`, `graph.*`, `timeseries.*`, `probabilistic.*` first-class
+  helpers — provisional namespaces; reach today via `conn.QueryAsync`.
+  Lifted into helpers in v1.x per spec §8–§11.
+- KV TTL helpers (`kv.expire(…)`) — use `WITH TTL` on the underlying
+  `KV PUT` until v1.1.
+- Isolation-level argument on `tx.begin` — engine default only in v1.0.
 
 ## Supported URIs
 
