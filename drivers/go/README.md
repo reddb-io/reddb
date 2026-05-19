@@ -99,9 +99,9 @@ Auth shorthands the URI carries:
 
 ## SDK Helper Spec
 
-The driver exposes the rich helper surface defined in
-[`docs/clients/sdk-helper-spec.md`](../../docs/clients/sdk-helper-spec.md) via
-`reddb.NewHelpers(conn)`:
+This driver implements **SDK Helper Spec v1.0**
+([`docs/spec/sdk-helpers.md`](../../docs/spec/sdk-helpers.md)). The version
+is exposed as `reddb.HelperSpecVersion`.
 
 ```go
 h := reddb.NewHelpers(conn)
@@ -111,32 +111,102 @@ ins, err := h.Documents().Insert(ctx, "people", map[string]any{"name": "Ada"})
 got, err := h.Documents().Get(ctx, "people", ins.RID)
 out, err := h.Documents().List(ctx, "people", reddb.ListOptions{Limit: 20})
 upd, err := h.Documents().Patch(ctx, "people", ins.RID, map[string]any{"name": "Grace"})
-del, err := h.Documents().Delete(ctx, "people", ins.RID)
+del, err := h.Documents().Delete(ctx, "people", ins.RID) // {Affected, Deleted}
 
 // KV (defaults to collection "kv_default")
 err  = h.KV().Set(ctx, "characters:hansel", "ok")
-val, err := h.KV().Get(ctx, "characters:hansel")
+val, err := h.KV().Get(ctx, "characters:hansel") // nil when missing — NOT NotFound
 ex,  err := h.KV().Exists(ctx, "characters:hansel")
 lst, err := h.KV().List(ctx, reddb.KVListOptions{Prefix: "characters:"})
 ttl  := reddb.SetOptions{ExpireMs: 60_000, Tags: []string{"corpus"}}
 err  = h.KV().Put(ctx, "k", "v", ttl)
 
-// Queue
+// Queues (h.Queue() and h.Queues() are aliases)
+_ = h.Queues().Create(ctx, "jobs") // idempotent CREATE QUEUE IF NOT EXISTS
 p := 5
-_, err = h.Queue().Push(ctx, "jobs", map[string]any{"id": 1}, reddb.PushOptions{Priority: &p})
-peek,_ := h.Queue().Peek(ctx, "jobs", 1)
-pop, _ := h.Queue().Pop(ctx, "jobs", 1)
-n,   _ := h.Queue().Len(ctx, "jobs")
-_, err  = h.Queue().Purge(ctx, "jobs")
+_, err = h.Queues().Push(ctx, "jobs", map[string]any{"id": 1}, reddb.PushOptions{Priority: &p})
+peek,_ := h.Queues().Peek(ctx, "jobs", 1)
+pop, _ := h.Queues().Pop(ctx, "jobs", 1)
+n,   _ := h.Queues().Len(ctx, "jobs")
+_, err  = h.Queues().Purge(ctx, "jobs")
+
+// Transactions — imperative + optional Run callback
+tx := h.Tx()
+_ = tx.Begin(ctx)
+// ... conn.Query / conn.Exec ...
+_ = tx.Commit(ctx) // or _ = tx.Rollback(ctx)
+
+err = tx.Run(ctx, func(child *reddb.TxClient) error {
+    _, err := conn.Exec(ctx, "INSERT INTO t (v) VALUES (1)")
+    return err // non-nil → ROLLBACK + return; nil → COMMIT
+})
 ```
 
-Envelope structs are stable (`InsertResult`, `DeleteResult`, `ExistsResult`,
-`ListResult`, `QueuePushResult`) — see
-[`helpers.go`](helpers.go) for fields. Validation errors raise
+### Envelopes
+
+| Envelope            | Fields                                            |
+| ------------------- | ------------------------------------------------- |
+| `InsertResult`      | `Affected`, `RID`, `Item`                         |
+| `DeleteResult`      | `Affected`, `Deleted`                             |
+| `ExistsResult`      | `Exists`                                          |
+| `ListResult`        | `Items`, `NextCursor`                             |
+| `QueuePushResult`   | `Affected`, `RID`                                 |
+
+See [`helpers.go`](helpers.go) for source fields. Validation failures raise
 `reddb.CodeInvalidArgument` before any wire call; missing items raise
-`reddb.CodeNotFound`. Transactions are not yet wired in the Go driver — call
-`Conn.Exec(ctx, "BEGIN" | "COMMIT" | "ROLLBACK")` directly until that helper
-ships.
+`reddb.CodeNotFound`. `documents.Delete` / `kv.Delete` of a missing item
+return `{Affected: 0, Deleted: false}` — they are **not** errors, per
+spec §4.5 / §5.4.
+
+### Conformance matrix (Helper Spec §12)
+
+Every case in the spec table is ported under
+[`conformance_test.go`](conformance_test.go) as `TestConformance_<case_id>`
+(dots → underscores). The harness needs a real server, so it is gated on the
+same env contract as `internal/redserver/`:
+
+```sh
+RED_SMOKE=1 RED_BIN=/path/to/red go test -run TestConformance -v ./...
+```
+
+| Case ID                                | Status |
+| -------------------------------------- | ------ |
+| `generic.query.no_params`              | wired |
+| `generic.query_with.params`            | wired |
+| `generic.insert.rid`                   | wired |
+| `generic.bulk_insert.rids`             | wired |
+| `generic.delete`                       | wired |
+| `documents.crud_nested_patch`          | wired |
+| `documents.delete_missing_no_error`    | wired |
+| `documents.patch_empty_rejects`        | wired |
+| `kv.exact_key_round_trip`              | wired |
+| `kv.missing_get_returns_none`          | wired |
+| `kv.delete_returns_envelope`           | wired |
+| `queues.fifo_peek_pop_len`             | wired |
+| `queues.empty_pop_returns_empty`       | wired |
+| `queues.purge_resets_len`              | wired |
+| `tx.commit_persists`                   | wired |
+| `tx.rollback_discards`                 | wired |
+| `errors.not_found.document_get`        | wired |
+| `wire.probabilistic.hll_round_trip`    | wired (SQL surface; helper provisional) |
+| `wire.vectors.sql_round_trip`          | reachable via `conn.Query` — helper provisional in v1.0 |
+| `wire.graph.sql_round_trip`            | reachable via `conn.Query` — helper provisional in v1.0 |
+| `wire.timeseries.sql_round_trip`       | reachable via `conn.Query` — helper provisional in v1.0 |
+| `errors.invalid_argument.empty_sql`    | engine-side error pass-through |
+
+### Transaction support
+
+Imperative-only (`Begin` / `Commit` / `Rollback`) plus the optional `Run`
+callback wrapper. Nested `Run` is rejected with `INVALID_ARGUMENT`; use
+explicit `SAVEPOINT` statements via `conn.Exec` if you need nested
+semantics.
+
+### Out-of-scope helpers in v1.0
+
+`vectors.*`, `graph.*`, `timeseries.*`, `probabilistic.*` namespaces are
+**provisional** — reachable via raw `conn.Query()` / `conn.Exec()`. Helper
+methods land in v1.1. See spec §8 / §9 / §10 / §11 for the required wire
+patterns each driver MUST be able to issue today.
 
 ## Auth options
 
@@ -183,6 +253,8 @@ The end-to-end engine smoke at `internal/redserver/` is opt-in:
 - Embedded mode (`red:///path` and `red://memory`). The pure-Go build can't
   link the engine; a future cgo build will close that gap.
 - gRPC mutations beyond `Query` and `Ping`.
+- First-class helpers for `vectors.*`, `graph.*`, `timeseries.*`,
+  `probabilistic.*` — provisional per Helper Spec v1.0 (use `conn.Query`).
 - `bulk_insert_binary` (0x06) — JSON path is wired; binary fast path is TODO.
 - Streaming bulk inserts (`BulkStreamStart` / `BulkStreamRows`).
 
