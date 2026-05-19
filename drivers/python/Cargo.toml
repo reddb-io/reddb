@@ -39,4 +39,4 @@ webpki-roots = "0.26"
 reddb = { package = "reddb-io", version = "1.0", path = "../..", optional = true }
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-build = "0.14"
