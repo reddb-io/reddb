@@ -69,10 +69,10 @@ public final class DocumentClient {
 
     /** Top-level patch one document. JSON-pointer paths rejected. */
     public Map<String, Object> patch(String collection, String rid, Map<String, Object> patch) {
-        if (patch == null) {
-            throw new HelperException.InvalidArgument("documents.patch patch must be an object");
+        if (patch == null || patch.isEmpty()) {
+            throw new HelperException.InvalidArgument(
+                "documents.patch patch must be a non-empty object");
         }
-        if (patch.isEmpty()) return get(collection, rid);
         List<String> parts = new ArrayList<>(patch.size());
         for (Map.Entry<String, Object> e : patch.entrySet()) {
             String field = e.getKey();

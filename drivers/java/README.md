@@ -67,12 +67,16 @@ RedWire parameterized queries require the server to advertise
 `RedDBException.ParamsUnsupported`. HTTP sends the same typed values as
 the `/query` JSON `params` array.
 
-## Rich helpers (SDK Helper Spec v0.1)
+## Rich helpers (SDK Helper Spec v1.0)
 
-`dev.reddb.helpers.Helpers` wraps a `Conn` with three namespaces —
-`documents()`, `kv()`, `queue()` — mirroring the Go / Dart / Python
-helpers. Helpers are pure SQL builders + envelope normalisation; the
-same wire request works across RedWire and HTTP.
+Canonical spec: [`docs/spec/sdk-helpers.md`](../../docs/spec/sdk-helpers.md)
+(version exposed at runtime via `Helpers.HELPER_SPEC_VERSION` = `"1.0"`).
+
+`dev.reddb.helpers.Helpers` wraps a `Conn` with four first-class
+namespaces — `documents()`, `kv()`, `queues()` (alias `queue()`), and
+`tx()` — mirroring the Go / Dart / Python helpers. Helpers are pure SQL
+builders + envelope normalisation; the same wire request works across
+RedWire and HTTP.
 
 ```java
 import dev.reddb.helpers.Helpers;
@@ -98,11 +102,87 @@ var jobs = helpers.queue().pop("jobs", 10);
 ```
 
 Typed errors (mirror Go/Python): `HelperException.InvalidArgument`,
-`HelperException.NotFound`, `HelperException.InvalidResponse`.
+`HelperException.NotFound`, `HelperException.InvalidResponse`. These
+map onto the spec error codes `INVALID_ARGUMENT`, `NOT_FOUND`,
+`INVALID_RESPONSE`. Server-side errors (`CONFLICT`,
+`UNAUTHENTICATED`, `PERMISSION_DENIED`, `UNAVAILABLE`,
+`FEATURE_DISABLED`, `INTERNAL`) propagate as `RedDBException` with the
+server code preserved verbatim.
 
-Transactions are not yet exposed through helpers — the underlying
-`Conn` doesn't ship a transaction helper. Use raw
-`conn.query("BEGIN" / "COMMIT" / "ROLLBACK")` for now.
+### Envelopes
+
+| Envelope            | Required fields                                            |
+|---------------------|-------------------------------------------------------------|
+| `InsertResult`      | `affected`, `rid`, `item`                                   |
+| `DeleteResult`      | `affected`, `deleted` (bool: `affected > 0`)                |
+| `ExistsResult`      | `exists`                                                    |
+| `ListResult`        | `items`, optional `nextCursor`                              |
+| `QueuePushResult`   | `affected`, `rid`                                           |
+
+### Transactions
+
+Both forms are supported (imperative + callback). Nested `tx.run`
+rejects with `INVALID_ARGUMENT` — callers needing savepoints issue
+`SAVEPOINT`/`RELEASE` directly via `conn.query`.
+
+```java
+// Imperative
+helpers.tx().begin();
+helpers.documents().insert("events", java.util.Map.of("k", "v"));
+helpers.tx().commit();
+
+// Callback (commit on return, rollback on throw)
+helpers.tx().run(t -> {
+    helpers.documents().insert("events", java.util.Map.of("k", "v"));
+});
+```
+
+### Helper availability matrix (spec §12 case IDs)
+
+| Case ID                              | Status |
+|--------------------------------------|--------|
+| `generic.query.no_params`            | ok |
+| `generic.query_with.params`          | ok |
+| `generic.insert.rid`                 | ok |
+| `generic.bulk_insert.rids`           | ok (via repeated `documents.insert` until single-shot bulk lifts) |
+| `generic.delete`                     | ok |
+| `documents.crud_nested_patch`        | ok |
+| `documents.delete_missing_no_error`  | ok |
+| `documents.patch_empty_rejects`      | ok |
+| `kv.exact_key_round_trip`            | ok |
+| `kv.missing_get_returns_none`        | ok |
+| `kv.delete_returns_envelope`         | ok |
+| `queues.fifo_peek_pop_len`           | ok |
+| `queues.empty_pop_returns_empty`     | ok |
+| `queues.purge_resets_len`            | ok |
+| `tx.commit_persists`                 | ok |
+| `tx.rollback_discards`               | ok |
+| `errors.not_found.document_get`      | ok |
+| `wire.probabilistic.hll_round_trip`  | ok (provisional) |
+| `wire.vectors.sql_round_trip`        | provisional — reachable via `conn.query` |
+| `wire.graph.sql_round_trip`          | provisional — reachable via `conn.query` |
+| `wire.timeseries.sql_round_trip`     | provisional — reachable via `conn.query` |
+
+### Conformance harness
+
+`drivers/java/src/test/java/dev/reddb/helpers/ConformanceTest.java`
+spawns one `red server` process per JUnit run and exercises the case
+IDs above. Gated on `RED_SMOKE=1`:
+
+```
+RED_SMOKE=1 RED_BIN=/path/to/red ./gradlew test --tests \
+    "dev.reddb.helpers.ConformanceTest"
+```
+
+### Out-of-scope for v1.0
+
+Per spec §8–§11, these helper namespaces are **provisional** — reach
+the same wire surface via `conn.query` / `conn.query(sql, params)`
+until v1.1 lifts them into helpers: `vectors.*`, `graph.*`,
+`timeseries.*`, `probabilistic.*`. KV TTL helpers, queue
+priority / consumer-group sugar, JSON Patch (RFC 6902), deep-merge
+`documents.patch`, and isolation-level arguments on `tx.begin` are all
+deferred — see the spec for one-line rationale per item.
 
 ## URL grammar
 
