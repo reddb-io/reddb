@@ -1,0 +1,24 @@
+-- CREATE TABLE events (id INTEGER, user_id TEXT, ts BIGINT)
+table 'events' created
+
+-- INSERT INTO events (id, user_id, ts) VALUES (1, 'u1', 100)
+INSERT 0 1
+
+-- INSERT INTO events (id, user_id, ts) VALUES (2, 'u1', 200)
+INSERT 0 1
+
+-- INSERT INTO events (id, user_id, ts) VALUES (3, 'u1', 300)
+INSERT 0 1
+
+-- INSERT INTO events (id, user_id, ts) VALUES (4, 'u2', 50)
+INSERT 0 1
+
+-- SELECT id, LAG(ts) OVER (PARTITION BY user_id ORDER BY ts) AS prev_ts FROM events ORDER BY id
+id | prev_ts
+---+--------
+1  | NULL
+2  | 100
+3  | 200
+4  | NULL
+(4 rows)
+

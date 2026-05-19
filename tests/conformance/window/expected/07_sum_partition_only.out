@@ -1,0 +1,28 @@
+-- CREATE TABLE purchases (id INTEGER, user_id TEXT, ts BIGINT, amount BIGINT)
+table 'purchases' created
+
+-- INSERT INTO purchases (id, user_id, ts, amount) VALUES (1, 'u1', 100, 10)
+INSERT 0 1
+
+-- INSERT INTO purchases (id, user_id, ts, amount) VALUES (2, 'u1', 200, 20)
+INSERT 0 1
+
+-- INSERT INTO purchases (id, user_id, ts, amount) VALUES (3, 'u1', 300, 30)
+INSERT 0 1
+
+-- INSERT INTO purchases (id, user_id, ts, amount) VALUES (4, 'u2', 100, 7)
+INSERT 0 1
+
+-- INSERT INTO purchases (id, user_id, ts, amount) VALUES (5, 'u2', 200, 9)
+INSERT 0 1
+
+-- SELECT id, user_id, SUM(amount) OVER (PARTITION BY user_id) AS total FROM purchases ORDER BY id
+id | user_id | total
+---+---------+------
+1  | u1      | 60
+2  | u1      | 60
+3  | u1      | 60
+4  | u2      | 16
+5  | u2      | 16
+(5 rows)
+
