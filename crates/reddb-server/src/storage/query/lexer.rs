@@ -223,6 +223,16 @@ pub enum Token {
     Sessionize,
     Gap,
 
+    // Window OVER-clause keywords (issue #589 slice 7a).
+    // Note: PARTITION, RANGE, BETWEEN, ROW already exist for DDL/predicate
+    // contexts; reused here in window context.
+    Over,
+    Rows,
+    Preceding,
+    Following,
+    Unbounded,
+    Current,
+
     // Literals
     String(String),
     Integer(i64),
@@ -453,6 +463,12 @@ impl fmt::Display for Token {
             Token::Data => write!(f, "DATA"),
             Token::Sessionize => write!(f, "SESSIONIZE"),
             Token::Gap => write!(f, "GAP"),
+            Token::Over => write!(f, "OVER"),
+            Token::Rows => write!(f, "ROWS"),
+            Token::Preceding => write!(f, "PRECEDING"),
+            Token::Following => write!(f, "FOLLOWING"),
+            Token::Unbounded => write!(f, "UNBOUNDED"),
+            Token::Current => write!(f, "CURRENT"),
             Token::String(s) => write!(f, "'{}'", s),
             Token::Integer(n) => write!(f, "{}", n),
             Token::Float(n) => write!(f, "{}", n),
@@ -1262,6 +1278,12 @@ impl<'a> Lexer<'a> {
             "DATA" => Token::Data,
             "SESSIONIZE" => Token::Sessionize,
             "GAP" => Token::Gap,
+            "OVER" => Token::Over,
+            "ROWS" => Token::Rows,
+            "PRECEDING" => Token::Preceding,
+            "FOLLOWING" => Token::Following,
+            "UNBOUNDED" => Token::Unbounded,
+            "CURRENT" => Token::Current,
             _ => Token::Ident(value),
         };
 

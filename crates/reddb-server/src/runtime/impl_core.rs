@@ -2128,8 +2128,7 @@ impl RedDBRuntime {
                         .data_path
                         .clone()
                         .unwrap_or_else(|| std::env::temp_dir().join("reddb"));
-                    let (audit_dest, _) =
-                        crate::api::tier_wiring::current_log_destinations();
+                    let (audit_dest, _) = crate::api::tier_wiring::current_log_destinations();
                     Arc::new(crate::runtime::audit_log::AuditLogger::for_destination(
                         &audit_dest,
                         &data_path,
@@ -2167,8 +2166,7 @@ impl RedDBRuntime {
                         .ok()
                         .and_then(|s| s.parse::<u8>().ok())
                         .unwrap_or(100);
-                    let (_, slow_dest) =
-                        crate::api::tier_wiring::current_log_destinations();
+                    let (_, slow_dest) = crate::api::tier_wiring::current_log_destinations();
                     crate::telemetry::slow_query_logger::SlowQueryLogger::for_destination(
                         &slow_dest,
                         &fallback_dir,
@@ -5674,9 +5672,7 @@ impl RedDBRuntime {
                 if q.materialized {
                     use crate::storage::cache::result::{MaterializedViewDef, RefreshPolicy};
                     let refresh = match q.refresh_every_ms {
-                        Some(ms) => {
-                            RefreshPolicy::Periodic(std::time::Duration::from_millis(ms))
-                        }
+                        Some(ms) => RefreshPolicy::Periodic(std::time::Duration::from_millis(ms)),
                         None => RefreshPolicy::Manual,
                     };
                     let dependencies = collect_table_refs(&q.query);
@@ -5814,12 +5810,7 @@ impl RedDBRuntime {
                         self.inner
                             .materialized_views
                             .write()
-                            .record_refresh_failure(
-                                &q.name,
-                                msg.clone(),
-                                duration_ms,
-                                now_ms,
-                            );
+                            .record_refresh_failure(&q.name, msg.clone(), duration_ms, now_ms);
                         Err(err)
                     }
                 }
@@ -10327,6 +10318,14 @@ fn collect_projection_columns(
         Projection::Field(field, _) => {
             collect_field_ref_column(field, table_name, table_alias, columns);
         }
+        // Slice 7a (#589): no runtime support yet; recurse into args so
+        // any column references are still tracked in case a future
+        // executor needs the column set.
+        Projection::Window { args, .. } => {
+            for arg in args {
+                collect_projection_columns(arg, table_name, table_alias, columns);
+            }
+        }
     }
 }
 
@@ -10417,6 +10416,17 @@ fn collect_expr_columns(
             collect_expr_columns(high, table_name, table_alias, columns);
         }
         Expr::Subquery { .. } => {}
+        Expr::WindowFunctionCall { args, window, .. } => {
+            for arg in args {
+                collect_expr_columns(arg, table_name, table_alias, columns);
+            }
+            for e in &window.partition_by {
+                collect_expr_columns(e, table_name, table_alias, columns);
+            }
+            for o in &window.order_by {
+                collect_expr_columns(&o.expr, table_name, table_alias, columns);
+            }
+        }
     }
 }
 
@@ -10557,6 +10567,11 @@ fn collect_projection_columns_for_table(
             }
         }
         Projection::Expression(_, _) | Projection::All | Projection::Field(_, _) => {}
+        Projection::Window { args, .. } => {
+            for arg in args {
+                collect_projection_columns_for_table(arg, table, alias, out);
+            }
+        }
     }
 }
 
@@ -10595,6 +10610,11 @@ fn collect_projection_columns_for_join_side(
             }
         }
         Projection::Expression(_, _) | Projection::All | Projection::Field(_, _) => {}
+        Projection::Window { args, .. } => {
+            for arg in args {
+                collect_projection_columns_for_join_side(arg, left, right, out)?;
+            }
+        }
     }
     Ok(())
 }
@@ -10919,6 +10939,18 @@ fn expr_references_outer_scope(
         }
         Expr::Subquery { query, .. } => query_references_outer_scope(&query.query, inner_scopes),
         Expr::Literal { .. } | Expr::Parameter { .. } => false,
+        Expr::WindowFunctionCall { args, window, .. } => {
+            args.iter()
+                .any(|arg| expr_references_outer_scope(arg, outer_scopes, inner_scopes))
+                || window
+                    .partition_by
+                    .iter()
+                    .any(|e| expr_references_outer_scope(e, outer_scopes, inner_scopes))
+                || window
+                    .order_by
+                    .iter()
+                    .any(|o| expr_references_outer_scope(&o.expr, outer_scopes, inner_scopes))
+        }
     }
 }
 

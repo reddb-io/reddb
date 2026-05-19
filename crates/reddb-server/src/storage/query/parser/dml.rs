@@ -437,7 +437,7 @@ impl<'a> Parser<'a> {
         if self.consume(&Token::Kv)? {
             return Ok(UpdateTarget::Kv);
         }
-        if self.consume_ident_ci("ROWS")? {
+        if self.consume(&Token::Rows)? {
             return Ok(UpdateTarget::Rows);
         }
         if self.consume_ident_ci("DOCUMENTS")? {

@@ -53,6 +53,14 @@ pub fn expr_contains_parameter(expr: &Expr) -> bool {
                 || expr_contains_parameter(high)
         }
         Expr::Subquery { .. } => false,
+        Expr::WindowFunctionCall { args, window, .. } => {
+            args.iter().any(expr_contains_parameter)
+                || window.partition_by.iter().any(expr_contains_parameter)
+                || window
+                    .order_by
+                    .iter()
+                    .any(|o| expr_contains_parameter(&o.expr))
+        }
     }
 }
 
@@ -164,6 +172,48 @@ fn substitute_params_in_expr(expr: Expr, params: &[Value]) -> Result<Expr, UserP
             span,
         }),
         Expr::Subquery { .. } => Ok(expr),
+        // Window function calls don't appear in INSERT VALUES contexts
+        // (the only path that drives substitute_params_in_expr), but
+        // forward parameter substitution into the args / partition /
+        // order keys so this stays correct if a future caller routes
+        // window-bearing expressions through here.
+        Expr::WindowFunctionCall {
+            name,
+            args,
+            window,
+            span,
+        } => {
+            let new_args = args
+                .into_iter()
+                .map(|a| substitute_params_in_expr(a, params))
+                .collect::<Result<Vec<_>, _>>()?;
+            let new_partition = window
+                .partition_by
+                .into_iter()
+                .map(|e| substitute_params_in_expr(e, params))
+                .collect::<Result<Vec<_>, _>>()?;
+            let new_order = window
+                .order_by
+                .into_iter()
+                .map(|o| {
+                    Ok::<_, UserParamError>(crate::storage::query::ast::WindowOrderItem {
+                        expr: substitute_params_in_expr(o.expr, params)?,
+                        ascending: o.ascending,
+                        nulls_first: o.nulls_first,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Expr::WindowFunctionCall {
+                name,
+                args: new_args,
+                window: crate::storage::query::ast::WindowSpec {
+                    partition_by: new_partition,
+                    order_by: new_order,
+                    frame: window.frame,
+                },
+                span,
+            })
+        }
     }
 }
 
@@ -1115,6 +1165,17 @@ fn visit_expr<F: FnMut(&Expr)>(expr: &Expr, visit: &mut F) {
             visit_expr(high, visit);
         }
         Expr::Subquery { .. } => {}
+        Expr::WindowFunctionCall { args, window, .. } => {
+            for a in args {
+                visit_expr(a, visit);
+            }
+            for e in &window.partition_by {
+                visit_expr(e, visit);
+            }
+            for o in &window.order_by {
+                visit_expr(&o.expr, visit);
+            }
+        }
     }
 }
 

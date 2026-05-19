@@ -377,6 +377,13 @@ pub fn type_expr(expr: &Expr, scope: &dyn Scope) -> Result<TypedExpr, TypeError>
             ty: DataType::Nullable,
             kind: TypedExprKind::Literal(Value::Null),
         }),
+        // Slice 7a (#589): no concrete type yet — the analytics
+        // executor and its type inference land in a follow-up. Fall
+        // back to Nullable so downstream callers don't trip.
+        Expr::WindowFunctionCall { .. } => Ok(TypedExpr {
+            ty: DataType::Nullable,
+            kind: TypedExprKind::Literal(Value::Null),
+        }),
     }
 }
 
