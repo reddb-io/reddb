@@ -70,6 +70,17 @@ pub(crate) enum StoreWalAction {
         collection: String,
         records: Vec<Vec<u8>>,
     },
+    /// Atomic full-collection replace — issue #595 slice 9c.
+    /// Replay drops the in-memory collection state and rebuilds it
+    /// from the contained records. Used by REFRESH MATERIALIZED VIEW
+    /// so a concurrent reader sees either the prior contents or the
+    /// new contents, never a partial state, and a crash mid-refresh
+    /// leaves the prior contents intact on recovery (the action is
+    /// only durable once the WAL commit lands).
+    RefreshCollection {
+        collection: String,
+        records: Vec<Vec<u8>>,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -171,6 +182,17 @@ impl StoreWalAction {
                     write_bytes(&mut out, record);
                 }
             }
+            Self::RefreshCollection {
+                collection,
+                records,
+            } => {
+                out.push(6);
+                write_string(&mut out, collection);
+                out.extend_from_slice(&(records.len() as u32).to_le_bytes());
+                for record in records {
+                    write_bytes(&mut out, record);
+                }
+            }
         }
         out
     }
@@ -229,6 +251,30 @@ impl StoreWalAction {
                     records.push(read_bytes(bytes, &mut pos)?);
                 }
                 Ok(Self::BulkUpsertEntityRecords {
+                    collection,
+                    records,
+                })
+            }
+            6 => {
+                let collection = read_string(bytes, &mut pos)?;
+                if pos + 4 > bytes.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "refresh collection wal action: missing record count",
+                    ));
+                }
+                let count = u32::from_le_bytes([
+                    bytes[pos],
+                    bytes[pos + 1],
+                    bytes[pos + 2],
+                    bytes[pos + 3],
+                ]) as usize;
+                pos += 4;
+                let mut records = Vec::with_capacity(count);
+                for _ in 0..count {
+                    records.push(read_bytes(bytes, &mut pos)?);
+                }
+                Ok(Self::RefreshCollection {
                     collection,
                     records,
                 })
@@ -870,7 +916,156 @@ impl UnifiedStore {
                 }
                 Ok(())
             }
+            StoreWalAction::RefreshCollection {
+                collection,
+                records,
+            } => self.apply_replayed_refresh_collection(collection, records),
         }
+    }
+
+    /// Atomic full-collection replace — issue #595 slice 9c.
+    ///
+    /// Builds a fresh `SegmentManager` populated with `entities`,
+    /// atomically swaps it into the collections map, rebuilds the
+    /// paged B-tree from the same records, and emits a single
+    /// `RefreshCollection` WAL action.
+    ///
+    /// Concurrent readers that resolved an `Arc<SegmentManager>` for
+    /// this collection before the swap continue reading the prior
+    /// contents; readers after the swap see the new contents. The
+    /// transition is single-pointer so partial state is unobservable.
+    ///
+    /// A crash between in-memory mutation and WAL fsync leaves the
+    /// previous WAL stream intact — on recovery the prior
+    /// `RefreshCollection` (or whatever last bulk-applied to the
+    /// collection) is replayed, so the prior contents are observed.
+    pub fn refresh_collection(
+        &self,
+        name: &str,
+        entities: Vec<UnifiedEntity>,
+    ) -> Result<(), StoreError> {
+        let fv = self.format_version();
+
+        // Build a fresh manager. Done outside the collections lock so
+        // the critical section is just the pointer swap below.
+        let new_manager = Arc::new(SegmentManager::with_config(
+            name,
+            self.config.manager_config.clone(),
+        ));
+
+        let mut prepared = entities;
+        for entity in &mut prepared {
+            if entity.id.raw() == 0 {
+                entity.id = self.next_entity_id();
+            } else {
+                self.register_entity_id(entity.id);
+            }
+            if let EntityKind::TableRow { ref mut row_id, .. } = entity.kind {
+                if *row_id == 0 {
+                    *row_id = new_manager.next_row_id();
+                } else {
+                    new_manager.register_row_id(*row_id);
+                }
+            }
+            entity.ensure_table_logical_id();
+        }
+
+        let serialized: Vec<Vec<u8>> = prepared
+            .iter()
+            .map(|e| Self::serialize_entity_record(e, None, fv))
+            .collect();
+
+        new_manager.bulk_insert(prepared.clone()).map_err(|e| {
+            StoreError::Io(std::io::Error::other(format!(
+                "refresh_collection: bulk_insert into new manager failed: {e}"
+            )))
+        })?;
+
+        self.swap_collection_state(name, new_manager, &prepared, &serialized);
+
+        self.finish_paged_write([StoreWalAction::RefreshCollection {
+            collection: name.to_string(),
+            records: serialized,
+        }])?;
+
+        Ok(())
+    }
+
+    /// Atomic swap of the in-memory collection state. Used by both
+    /// the live `refresh_collection` path and WAL replay. The new
+    /// manager is already populated; this fn replaces the live Arc,
+    /// purges side-state pointing at the previous contents, and
+    /// rebuilds the paged B-tree from the supplied records.
+    fn swap_collection_state(
+        &self,
+        name: &str,
+        new_manager: Arc<SegmentManager>,
+        prepared: &[UnifiedEntity],
+        serialized: &[Vec<u8>],
+    ) {
+        {
+            let mut collections = self.collections.write();
+            collections.insert(name.to_string(), new_manager);
+        }
+
+        self.entity_cache
+            .retain(|_, (collection, _)| collection != name);
+        self.remove_from_graph_label_index_batch(
+            name,
+            &prepared
+                .iter()
+                .map(|e| e.id)
+                .collect::<Vec<_>>(),
+        );
+
+        if let Some(pager) = &self.pager {
+            let new_btree = Arc::new(BTree::new(Arc::clone(pager)));
+            let mut sorted: Vec<(Vec<u8>, Vec<u8>)> = prepared
+                .iter()
+                .zip(serialized.iter())
+                .map(|(e, r)| (e.id.raw().to_be_bytes().to_vec(), r.clone()))
+                .collect();
+            sorted.sort_by(|a, b| a.0.cmp(&b.0));
+            if !sorted.is_empty() {
+                let _ = new_btree.bulk_insert_sorted(&sorted);
+            }
+            self.btree_indices
+                .write()
+                .insert(name.to_string(), new_btree);
+            self.mark_paged_registry_dirty();
+        }
+    }
+
+    fn apply_replayed_refresh_collection(
+        &self,
+        collection: &str,
+        records: &[Vec<u8>],
+    ) -> Result<(), StoreError> {
+        let new_manager = Arc::new(SegmentManager::with_config(
+            collection,
+            self.config.manager_config.clone(),
+        ));
+
+        let mut prepared: Vec<UnifiedEntity> = Vec::with_capacity(records.len());
+        for record in records {
+            let (entity, _metadata) = Self::deserialize_entity_record(record, self.format_version())?;
+            self.register_entity_id(entity.id);
+            if let EntityKind::TableRow { row_id, .. } = &entity.kind {
+                new_manager.register_row_id(*row_id);
+            }
+            prepared.push(entity);
+        }
+
+        if !prepared.is_empty() {
+            new_manager.bulk_insert(prepared.clone()).map_err(|e| {
+                StoreError::Io(std::io::Error::other(format!(
+                    "replay refresh_collection: bulk_insert failed: {e}"
+                )))
+            })?;
+        }
+
+        self.swap_collection_state(collection, new_manager, &prepared, records);
+        Ok(())
     }
 
     pub(crate) fn create_collection_in_memory(&self, name: &str) -> Result<(), StoreError> {

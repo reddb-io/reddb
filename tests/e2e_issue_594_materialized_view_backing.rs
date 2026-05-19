@@ -43,9 +43,10 @@ fn create_materialized_view_provisions_empty_backing_collection() {
         "empty backing collection must return 0 rows, not the body's filtered rows"
     );
 
-    // REFRESH still succeeds — it updates the cache slot. The cache
-    // path is what `red.materialized_views.current_row_count`
-    // reflects (unchanged from slice 9a / 10).
+    // Issue #595 slice 9c — REFRESH now writes through the backing
+    // collection, so `current_row_count` scrapes live from the
+    // backing (mirrors the slice-10 invariant on `queue_pending_gauge`)
+    // and `SELECT FROM v` returns the materialised rows.
     let result = exec(&rt, "REFRESH MATERIALIZED VIEW paid_orders");
     assert_eq!(result.statement_type, "refresh_materialized_view");
     let count = rt
@@ -54,11 +55,10 @@ fn create_materialized_view_provisions_empty_backing_collection() {
         .find(|m| m.name == "paid_orders")
         .expect("metadata")
         .current_row_count;
-    assert_eq!(count, 2, "cache slot still reflects body row count");
+    assert_eq!(count, 2, "current_row_count must scrape live backing");
 
-    // SELECT from the backing remains 0 — REFRESH wiring lands in 9c.
     let result = exec(&rt, "SELECT * FROM paid_orders");
-    assert_eq!(result.result.records.len(), 0);
+    assert_eq!(result.result.records.len(), 2);
 }
 
 #[test]
