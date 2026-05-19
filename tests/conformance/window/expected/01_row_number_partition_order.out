@@ -1,0 +1,28 @@
+-- CREATE TABLE events (id INTEGER, user_id TEXT, ts BIGINT)
+table 'events' created
+
+-- INSERT INTO events (id, user_id, ts) VALUES (1, 'u1', 100)
+INSERT 0 1
+
+-- INSERT INTO events (id, user_id, ts) VALUES (2, 'u1', 200)
+INSERT 0 1
+
+-- INSERT INTO events (id, user_id, ts) VALUES (3, 'u2', 50)
+INSERT 0 1
+
+-- INSERT INTO events (id, user_id, ts) VALUES (4, 'u1', 150)
+INSERT 0 1
+
+-- INSERT INTO events (id, user_id, ts) VALUES (5, 'u2', 75)
+INSERT 0 1
+
+-- SELECT id, user_id, ts, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY ts) AS rn FROM events ORDER BY id
+id | user_id | ts  | rn
+---+---------+-----+---
+1  | u1      | 100 | 1
+2  | u1      | 200 | 3
+3  | u2      | 50  | 1
+4  | u1      | 150 | 2
+5  | u2      | 75  | 2
+(5 rows)
+
