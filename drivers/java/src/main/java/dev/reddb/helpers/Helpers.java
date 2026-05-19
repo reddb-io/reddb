@@ -2,10 +2,14 @@ package dev.reddb.helpers;
 
 /**
  * Groups the rich namespaces ({@link DocumentClient}, {@link KvClient},
- * {@link QueueClient}) bound to a single transport. Stateless — safe to
- * construct per call. Mirrors {@code drivers/go/helpers.go}.
+ * {@link QueueClient}, {@link TxClient}) bound to a single transport.
+ * Stateless — safe to construct per call. Mirrors
+ * {@code drivers/go/helpers.go}.
  */
 public final class Helpers {
+    /** SDK Helper Spec version this driver targets — see docs/spec/sdk-helpers.md §14. */
+    public static final String HELPER_SPEC_VERSION = "1.0";
+
     private final Querier q;
 
     public Helpers(Querier q) { this.q = q; }
@@ -25,4 +29,7 @@ public final class Helpers {
     public KvClient kv() { return new KvClient(q); }
     public KvClient kv(String collection) { return new KvClient(q, collection); }
     public QueueClient queue() { return new QueueClient(q); }
+    /** Spec namespace alias for {@link #queue()} (`queues.*`). */
+    public QueueClient queues() { return new QueueClient(q); }
+    public TxClient tx() { return new TxClient(q); }
 }

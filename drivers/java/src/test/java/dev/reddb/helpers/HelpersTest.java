@@ -206,4 +206,104 @@ class HelpersTest {
         byte[] body = JSON.writeValueAsBytes(map("result", map("affected", 7)));
         assertEquals(7L, Sql.affectedFromBody(body));
     }
+
+    // --- v1.0 additions ----------------------------------------------
+
+    @Test void helperSpecVersion_isOne() {
+        assertEquals("1.0", Helpers.HELPER_SPEC_VERSION);
+    }
+
+    @Test void documents_patch_rejectsEmptyPatch() {
+        assertThrows(HelperException.InvalidArgument.class,
+            () -> new Helpers(new FakeQuerier()).documents()
+                .patch("people", "doc-1", Map.of()));
+    }
+
+    @Test void deleteResult_deletedTracksAffected() {
+        assertTrue(new Envelopes.DeleteResult(1).deleted());
+        assertFalse(new Envelopes.DeleteResult(0).deleted());
+        assertTrue(new Envelopes.DeleteResult(2L, true).deleted());
+    }
+
+    @Test void documents_delete_missingReturnsNotDeleted() {
+        FakeQuerier fq = new FakeQuerier().reply(map("affected", 0));
+        Envelopes.DeleteResult out = new Helpers(fq).documents().delete("people", "doc-1");
+        assertEquals(0L, out.affected());
+        assertFalse(out.deleted());
+    }
+
+    @Test void kv_delete_missingReturnsNotDeleted() {
+        FakeQuerier fq = new FakeQuerier().reply(map("affected", 0));
+        Envelopes.DeleteResult out = new Helpers(fq).kv().delete("missing-key");
+        assertEquals(0L, out.affected());
+        assertFalse(out.deleted());
+    }
+
+    @Test void queues_create_emitsIdempotentDDL() {
+        FakeQuerier fq = new FakeQuerier().reply(map());
+        new Helpers(fq).queues().create("jobs");
+        assertEquals("CREATE QUEUE IF NOT EXISTS jobs", fq.sqls.get(0));
+    }
+
+    @Test void queues_create_rejectsBadIdentifier() {
+        assertThrows(HelperException.InvalidArgument.class,
+            () -> new Helpers(new FakeQuerier()).queues().create("bad-name!"));
+    }
+
+    @Test void queues_aliasMatchesQueue() {
+        Helpers h = new Helpers(new FakeQuerier());
+        assertNotNull(h.queues());
+        assertNotNull(h.queue());
+    }
+
+    // --- Tx ----------------------------------------------------------
+
+    @Test void tx_imperative_emitsBeginCommit() {
+        FakeQuerier fq = new FakeQuerier().reply(map()).reply(map());
+        TxClient tx = new Helpers(fq).tx();
+        tx.begin();
+        tx.commit();
+        assertEquals("BEGIN", fq.sqls.get(0));
+        assertEquals("COMMIT", fq.sqls.get(1));
+    }
+
+    @Test void tx_imperative_rollbackEmitsRollback() {
+        FakeQuerier fq = new FakeQuerier().reply(map()).reply(map());
+        TxClient tx = new Helpers(fq).tx();
+        tx.begin();
+        tx.rollback();
+        assertEquals("BEGIN", fq.sqls.get(0));
+        assertEquals("ROLLBACK", fq.sqls.get(1));
+    }
+
+    @Test void tx_run_commitsOnSuccess() {
+        FakeQuerier fq = new FakeQuerier()
+            .reply(map())  // BEGIN
+            .reply(map())  // body query
+            .reply(map()); // COMMIT
+        new Helpers(fq).tx().run(t -> {
+            // body does its own query through the same Querier indirectly;
+            // we just need to confirm BEGIN/COMMIT bracket the call.
+        });
+        assertEquals("BEGIN", fq.sqls.get(0));
+        assertEquals("COMMIT", fq.sqls.get(1));
+    }
+
+    @Test void tx_run_rollsBackOnException() {
+        FakeQuerier fq = new FakeQuerier().reply(map()).reply(map());
+        TxClient tx = new Helpers(fq).tx();
+        RuntimeException boom = new RuntimeException("nope");
+        RuntimeException caught = assertThrows(RuntimeException.class,
+            () -> tx.run(t -> { throw boom; }));
+        assertSame(boom, caught);
+        assertEquals("BEGIN", fq.sqls.get(0));
+        assertEquals("ROLLBACK", fq.sqls.get(1));
+    }
+
+    @Test void tx_run_rejectsNesting() {
+        FakeQuerier fq = new FakeQuerier().reply(map()).reply(map());
+        TxClient tx = new Helpers(fq).tx();
+        assertThrows(HelperException.InvalidArgument.class,
+            () -> tx.run(outer -> outer.run(inner -> {})));
+    }
 }
