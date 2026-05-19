@@ -201,8 +201,27 @@ const updated = await db.documents.patch('events', inserted.rid, {
 await db.documents.delete('events', inserted.rid)
 ```
 
-`documents.insert()` creates the document collection when needed. Patch support
-currently accepts top-level document fields.
+`documents.insert()` creates the document collection when needed. Patch is a
+top-level merge: unrelated fields survive. An empty patch raises
+`INVALID_ARGUMENT`. `documents.delete` returns `{ affected, deleted }` and
+NEVER raises on a missing rid (returns `{ affected: 0, deleted: false }`).
+
+**SDK Helper Spec conformance (documents.*):** supported per
+[`docs/spec/sdk-helpers.md`](../../docs/spec/sdk-helpers.md). Case IDs ported:
+
+| Case ID                              | Status     |
+|--------------------------------------|------------|
+| `documents.crud_nested_patch`        | supported  |
+| `documents.delete_missing_no_error`  | supported  |
+| `documents.patch_empty_rejects`      | supported  |
+| `errors.not_found.document_get`      | supported  |
+
+Run the conformance harness against a locally built binary:
+
+```sh
+cargo build                              # produces target/debug/red
+node drivers/js/test/documents-conformance.test.mjs
+```
 
 ### `db.kv(collection?)`
 
