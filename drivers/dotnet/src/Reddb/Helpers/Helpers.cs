@@ -38,18 +38,36 @@ public class HelperException : Exception
 }
 
 public sealed record InsertResult(long Affected, string Rid, IReadOnlyDictionary<string, object?>? Item);
-public sealed record DeleteResult(long Affected);
+
+/// <summary>
+/// Spec envelope for delete helpers (SDK Helper Spec v1.0 §4.5 / §5.4).
+/// <see cref="Deleted"/> reports whether anything was actually removed
+/// (<see cref="Affected"/> &gt; 0). A delete of a missing item returns
+/// <c>{ Affected = 0, Deleted = false }</c> rather than NOT_FOUND.
+/// </summary>
+public sealed record DeleteResult(long Affected, bool Deleted)
+{
+    public DeleteResult(long Affected) : this(Affected, Affected > 0) { }
+}
+
 public sealed record ExistsResult(bool Exists);
 public sealed record ListResult(IReadOnlyList<IReadOnlyDictionary<string, object?>> Items, string? NextCursor = null);
 public sealed record QueuePushResult(long Affected, string? Rid);
 
 /// <summary>
 /// Groups the rich namespaces (<see cref="Documents"/>, <see cref="Kv"/>,
-/// <see cref="Queue"/>) bound to a single transport. Stateless — safe to
-/// construct per call. Mirrors <c>drivers/go/helpers.go</c>.
+/// <see cref="Queue"/>, <see cref="Tx"/>) bound to a single transport.
+/// Stateless — safe to construct per call. Mirrors
+/// <c>drivers/go/helpers.go</c>.
 /// </summary>
 public sealed class Helpers
 {
+    /// <summary>
+    /// SDK Helper Spec revision this driver satisfies. Cross-driver CI
+    /// dashboards assert against this constant per spec §14.
+    /// </summary>
+    public const string HelperSpecVersion = "1.0";
+
     private readonly IQuerier _q;
 
     public Helpers(IQuerier q) { _q = q; }
@@ -60,6 +78,18 @@ public sealed class Helpers
     public DocumentClient Documents() => new(_q);
     public KvClient Kv(string collection = "kv_default") => new(_q, collection);
     public QueueClient Queue() => new(_q);
+
+    /// <summary>
+    /// Alias for <see cref="Queue"/> matching the spec namespace name
+    /// (<c>queues.*</c>). Both forms return the same client.
+    /// </summary>
+    public QueueClient Queues() => Queue();
+
+    /// <summary>
+    /// Transaction namespace client implementing <c>tx.begin</c>,
+    /// <c>tx.commit</c>, <c>tx.rollback</c> (SDK Helper Spec §7).
+    /// </summary>
+    public TxClient Tx() => new(_q);
 
     private sealed class ConnQuerier : IQuerier
     {
@@ -129,7 +159,8 @@ public sealed class DocumentClient
     {
         if (patch is null)
             throw new HelperException.InvalidArgument("documents.patch patch must be an object");
-        if (patch.Count == 0) return await GetAsync(collection, rid, ct).ConfigureAwait(false);
+        if (patch.Count == 0)
+            throw new HelperException.InvalidArgument("documents.patch patch must be a non-empty object");
         var parts = new List<string>(patch.Count);
         foreach (var kv in patch)
         {
@@ -253,6 +284,16 @@ public sealed class QueueClient
         public int? Priority { get; set; }
     }
 
+    /// <summary>
+    /// Create a queue if it doesn't already exist (spec §6.1, idempotent).
+    /// </summary>
+    public async ValueTask CreateAsync(string name, CancellationToken ct = default)
+    {
+        Sql.AssertIdentifier(name, "queue name");
+        await _q.QueryAsync($"CREATE QUEUE IF NOT EXISTS {Sql.Identifier(name)}",
+            Array.Empty<object?>(), ct).ConfigureAwait(false);
+    }
+
     public async ValueTask<QueuePushResult> PushAsync(
         string queue, object? value, PushOptions? opts = null, CancellationToken ct = default)
     {
@@ -323,6 +364,65 @@ public sealed class QueueClient
         var body = await _q.QueryAsync($"QUEUE PURGE {Sql.Identifier(queue)}",
             Array.Empty<object?>(), ct).ConfigureAwait(false);
         return new DeleteResult(Sql.AffectedFromBody(body.Span));
+    }
+}
+
+/// <summary>
+/// Transaction namespace (SDK Helper Spec §7). Imperative
+/// <see cref="BeginAsync"/> / <see cref="CommitAsync"/> /
+/// <see cref="RollbackAsync"/> plus an optional callback form
+/// <see cref="RunAsync"/>. Nested <see cref="RunAsync"/> rejects with
+/// INVALID_ARGUMENT — callers needing savepoints should issue them
+/// directly via <c>conn.QueryAsync</c>.
+/// </summary>
+public sealed class TxClient
+{
+    private readonly IQuerier _q;
+    private bool _inRun;
+
+    internal TxClient(IQuerier q) { _q = q; }
+
+    public async ValueTask BeginAsync(CancellationToken ct = default)
+        => await _q.QueryAsync("BEGIN", Array.Empty<object?>(), ct).ConfigureAwait(false);
+
+    public async ValueTask CommitAsync(CancellationToken ct = default)
+        => await _q.QueryAsync("COMMIT", Array.Empty<object?>(), ct).ConfigureAwait(false);
+
+    public async ValueTask RollbackAsync(CancellationToken ct = default)
+        => await _q.QueryAsync("ROLLBACK", Array.Empty<object?>(), ct).ConfigureAwait(false);
+
+    /// <summary>
+    /// Callback form: opens a transaction, runs <paramref name="body"/>,
+    /// commits on success, rolls back and re-throws on failure. Nested
+    /// invocation rejects with INVALID_ARGUMENT (spec §7.2).
+    /// </summary>
+    public async ValueTask RunAsync(Func<TxClient, ValueTask> body, CancellationToken ct = default)
+    {
+        if (body is null)
+            throw new HelperException.InvalidArgument("tx.run requires a callback");
+        if (_inRun)
+            throw new HelperException.InvalidArgument(
+                "tx.run does not support nesting; use raw SAVEPOINT via conn.QueryAsync");
+        _inRun = true;
+        try
+        {
+            await BeginAsync(ct).ConfigureAwait(false);
+            try
+            {
+                await body(this).ConfigureAwait(false);
+            }
+            catch
+            {
+                try { await RollbackAsync(ct).ConfigureAwait(false); }
+                catch { /* preserve original exception */ }
+                throw;
+            }
+            await CommitAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _inRun = false;
+        }
     }
 }
 
