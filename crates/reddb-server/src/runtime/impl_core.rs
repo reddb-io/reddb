@@ -2684,6 +2684,72 @@ impl RedDBRuntime {
         }
     }
 
+    /// Provision an empty Table-shaped collection that backs a
+    /// `CREATE MATERIALIZED VIEW v` (issue #594 slice 9b of #575).
+    /// `SELECT FROM v` reads this collection directly; the rewriter is
+    /// configured to skip materialized views so the body is no longer
+    /// substituted. REFRESH still writes to the cache slot — wiring it
+    /// into this backing collection is the job of slice 9c.
+    ///
+    /// Idempotent: re-running for the same name leaves the existing
+    /// collection in place (mirrors `CREATE TABLE IF NOT EXISTS`
+    /// semantics). This keeps `CREATE OR REPLACE MATERIALIZED VIEW v`
+    /// cheap — the body change does not invalidate already-buffered
+    /// rows. Until 9c lands the backing is always empty anyway.
+    pub(crate) fn ensure_materialized_view_backing(&self, name: &str) -> RedDBResult<()> {
+        let store = self.inner.db.store();
+        let mut changed = false;
+        if store.get_collection(name).is_none() {
+            store.get_or_create_collection(name);
+            changed = true;
+        }
+        if self.inner.db.collection_contract(name).is_none() {
+            self.inner
+                .db
+                .save_collection_contract(system_keyed_collection_contract(
+                    name,
+                    crate::catalog::CollectionModel::Table,
+                ))
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            changed = true;
+        }
+        if changed {
+            self.inner
+                .db
+                .persist_metadata()
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Inverse of [`ensure_materialized_view_backing`] — drops the
+    /// backing collection on `DROP MATERIALIZED VIEW v`. No-op when
+    /// the collection was never created (e.g. a `DROP MATERIALIZED
+    /// VIEW IF EXISTS v` against an unknown name).
+    pub(crate) fn drop_materialized_view_backing(&self, name: &str) -> RedDBResult<()> {
+        let store = self.inner.db.store();
+        if store.get_collection(name).is_none() {
+            return Ok(());
+        }
+        store
+            .drop_collection(name)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        // The contract may have been dropped already (DROP TABLE path)
+        // — ignore "not found" errors by checking presence first.
+        if self.inner.db.collection_contract(name).is_some() {
+            self.inner
+                .db
+                .remove_collection_contract(name)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        }
+        self.invalidate_result_cache();
+        self.inner
+            .db
+            .persist_metadata()
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        Ok(())
+    }
+
     fn bootstrap_system_keyed_collections(&self) -> RedDBResult<()> {
         let mut changed = false;
         for (name, model) in [
@@ -5703,6 +5769,14 @@ impl RedDBRuntime {
                         store.as_ref(),
                         &descriptor,
                     )?;
+
+                    // Issue #594 slice 9b — provision a Table-shaped
+                    // backing collection named after the view. The
+                    // rewriter skips materialized views (see
+                    // `rewrite_view_refs_inner`) so `SELECT FROM v`
+                    // resolves to this collection directly. Empty
+                    // until REFRESH wires through it in 9c.
+                    self.ensure_materialized_view_backing(&q.name)?;
                 }
                 // Plan cache may have cached a plan that didn't know about this
                 // view — invalidate so future references pick up the new binding.
@@ -5723,7 +5797,10 @@ impl RedDBRuntime {
             }
             QueryExpr::DropView(ref q) => {
                 let mut views = self.inner.views.write();
-                let existed = views.remove(&q.name).is_some();
+                let removed = views.remove(&q.name);
+                let existed = removed.is_some();
+                let removed_materialized =
+                    removed.as_ref().map(|v| v.materialized).unwrap_or(false);
                 drop(views);
                 if q.materialized || existed {
                     // Try the materialised cache too — silent if absent.
@@ -5736,6 +5813,12 @@ impl RedDBRuntime {
                         store.as_ref(),
                         &q.name,
                     )?;
+                }
+                // Issue #594 slice 9b — drop the backing collection
+                // that was provisioned at CREATE time. Only mat views
+                // ever had one; regular views never did.
+                if removed_materialized || q.materialized {
+                    self.drop_materialized_view_backing(&q.name)?;
                 }
                 // Drop any plan / result cache entries that baked the
                 // view body into their QueryExpr.
@@ -6504,6 +6587,15 @@ impl RedDBRuntime {
                 let Some(view) = maybe_view else {
                     return QueryExpr::Table(tq);
                 };
+
+                // Issue #594 slice 9b — materialized views are read
+                // from their backing collection, not by substituting
+                // the body. Returning the TableQuery as-is lets the
+                // normal table-read path resolve `SELECT FROM v`
+                // against the collection provisioned at CREATE time.
+                if view.materialized {
+                    return QueryExpr::Table(tq);
+                }
 
                 // Recurse into the view body — views may reference other
                 // views. The recursion yields the final QueryExpr we need
