@@ -335,6 +335,7 @@ pub(crate) fn projection_uses_document_path(projection: &Projection, query: &Tab
         Projection::Field(field, _) => field_ref_uses_document_path(field, query),
         Projection::Expression(filter, _) => filter_uses_document_path(filter, query),
         Projection::Function(_, _) | Projection::All => false,
+        Projection::Window { .. } => false,
     }
 }
 
@@ -629,6 +630,14 @@ pub(crate) fn projection_summary(projections: &[Projection]) -> String {
             Projection::Expression(_, alias) => alias.clone().unwrap_or_else(|| "expr".to_string()),
             Projection::Field(field, alias) => {
                 alias.clone().unwrap_or_else(|| field_ref_summary(field))
+            }
+            Projection::Window {
+                name, args, alias, ..
+            } => {
+                let label = alias
+                    .clone()
+                    .unwrap_or_else(|| format!("{name}({}) OVER (...)", args.len()));
+                label
             }
         })
         .collect::<Vec<_>>()

@@ -2079,6 +2079,17 @@ pub enum Projection {
     Expression(Box<Filter>, Option<String>),
     /// Field reference (for graph properties)
     Field(FieldRef, Option<String>),
+    /// Window function call: `fn(args) OVER (PARTITION BY ... ORDER BY ...
+    /// [frame])`. Carries the window specification as a sibling so the
+    /// planner can lower it without re-parsing. No runtime in slice 7a —
+    /// the analytics executor lands in a subsequent slice (issue #589
+    /// follow-ups). See `super::WindowSpec`.
+    Window {
+        name: String,
+        args: Vec<Projection>,
+        window: Box<super::WindowSpec>,
+        alias: Option<String>,
+    },
 }
 
 impl Projection {
@@ -2275,6 +2286,67 @@ impl OrderByClause {
         self.expr = Some(expr);
         self
     }
+}
+
+// ============================================================================
+// Window OVER clause (issue #589 slice 7a)
+// ============================================================================
+//
+// Syntactic representation of `OVER (PARTITION BY ... ORDER BY ... [frame])`.
+// Slice 7a: AST + parser only. No runtime / executor wiring.
+
+/// Frame unit: `ROWS` (physical row offset) or `RANGE` (logical value
+/// offset). Slice 7a stores the choice but does not yet differentiate
+/// at runtime — semantics arrive with the analytics executor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowFrameUnit {
+    Rows,
+    Range,
+}
+
+/// One endpoint of a frame: UNBOUNDED PRECEDING / CURRENT ROW /
+/// PRECEDING(expr) / FOLLOWING(expr) / UNBOUNDED FOLLOWING.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WindowFrameBound {
+    UnboundedPreceding,
+    UnboundedFollowing,
+    CurrentRow,
+    Preceding(Box<super::Expr>),
+    Following(Box<super::Expr>),
+}
+
+/// `ROWS|RANGE BETWEEN start AND end` — or the single-bound shorthand
+/// `ROWS start` (end implied as CURRENT ROW per SQL standard). Slice 7a
+/// represents both shapes uniformly with `end: Option<...>` so downstream
+/// code can normalise.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowFrame {
+    pub unit: WindowFrameUnit,
+    pub start: WindowFrameBound,
+    pub end: Option<WindowFrameBound>,
+}
+
+/// One ORDER BY item inside a window spec. Window order keys are
+/// expression-based by SQL standard, so we carry an `Expr` directly
+/// rather than reusing the top-level `OrderByClause` (which still has
+/// a legacy `FieldRef` slot for the Fase 2 migration).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowOrderItem {
+    pub expr: super::Expr,
+    pub ascending: bool,
+    pub nulls_first: bool,
+}
+
+/// Full window specification — the AST node behind `OVER (...)`.
+/// `frame` is `None` when the user did not specify a frame clause; the
+/// analytics executor will materialise the SQL default (RANGE UNBOUNDED
+/// PRECEDING AND CURRENT ROW when ORDER BY is present, the full
+/// partition otherwise) once it lands.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct WindowSpec {
+    pub partition_by: Vec<super::Expr>,
+    pub order_by: Vec<WindowOrderItem>,
+    pub frame: Option<WindowFrame>,
 }
 
 // ============================================================================

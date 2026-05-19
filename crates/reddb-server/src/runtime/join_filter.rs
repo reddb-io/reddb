@@ -663,6 +663,8 @@ pub(super) fn project_runtime_record_with_db(
                     .or_else(|| evaluate_scalar_function_with_db(db, name, args, source))
             }
             Projection::All => None,
+            // Slice 7a (#589): window functions have no runtime yet.
+            Projection::Window { .. } => None,
         };
 
         record.set_arc(std::sync::Arc::from(label), value.unwrap_or(Value::Null));
@@ -811,6 +813,7 @@ pub(super) fn projection_name(projection: &Projection) -> String {
         }
         Projection::Expression(_, alias) => alias.clone().unwrap_or_else(|| "expr".to_string()),
         Projection::Field(field, alias) => alias.clone().unwrap_or_else(|| field_ref_name(field)),
+        Projection::Window { name, alias, .. } => alias.clone().unwrap_or_else(|| name.clone()),
     }
 }
 
@@ -2886,6 +2889,7 @@ pub(super) fn eval_projection_value(proj: &Projection, source: &UnifiedRecord) -
                 })
         }
         Projection::All => None,
+        Projection::Window { .. } => None,
     }
 }
 

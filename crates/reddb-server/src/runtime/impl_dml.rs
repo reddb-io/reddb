@@ -96,8 +96,7 @@ impl RedDBRuntime {
         collection: &str,
     ) -> Option<crate::runtime::blockchain_kind::VerifyChainOutcome> {
         let store = self.inner.db.store();
-        let outcome =
-            crate::runtime::blockchain_kind::verify_chain_outcome(&*store, collection)?;
+        let outcome = crate::runtime::blockchain_kind::verify_chain_outcome(&*store, collection)?;
         if !outcome.ok {
             crate::runtime::blockchain_kind::persist_integrity_flag(&*store, collection, true);
             self.inner
@@ -598,23 +597,22 @@ impl RedDBRuntime {
             // Pull the tip from the in-memory cache; fall back to a one-time
             // scan if the cache hasn't seen this collection yet (cold start
             // after restart). Cache is updated below as rows are sealed.
-            let mut chain_tip_full: Option<
-                crate::runtime::blockchain_kind::ChainTipFull,
-            > = if chain_mode {
-                let mut cache = self.inner.chain_tip_cache.lock();
-                if let Some(existing) = cache.get(&query.table) {
-                    Some(existing.clone())
-                } else if let Some(scanned) =
-                    crate::runtime::blockchain_kind::chain_tip_full(&*store, &query.table)
-                {
-                    cache.insert(query.table.clone(), scanned.clone());
-                    Some(scanned)
+            let mut chain_tip_full: Option<crate::runtime::blockchain_kind::ChainTipFull> =
+                if chain_mode {
+                    let mut cache = self.inner.chain_tip_cache.lock();
+                    if let Some(existing) = cache.get(&query.table) {
+                        Some(existing.clone())
+                    } else if let Some(scanned) =
+                        crate::runtime::blockchain_kind::chain_tip_full(&*store, &query.table)
+                    {
+                        cache.insert(query.table.clone(), scanned.clone());
+                        Some(scanned)
+                    } else {
+                        None
+                    }
                 } else {
                     None
-                }
-            } else {
-                None
-            };
+                };
 
             let mut rows = Vec::with_capacity(effective_rows.len());
             for row_values in &effective_rows {
@@ -644,23 +642,18 @@ impl RedDBRuntime {
                         .iter()
                         .find(|(k, _)| k == COL_TIMESTAMP)
                         .map(|(_, v)| v.clone());
-                    let supplied_hash =
-                        fields.iter().any(|(k, _)| k == COL_HASH);
+                    let supplied_hash = fields.iter().any(|(k, _)| k == COL_HASH);
                     let user_supplied_any = supplied_height.is_some()
                         || supplied_prev.is_some()
                         || supplied_ts.is_some()
                         || supplied_hash;
 
                     fields.retain(|(k, _)| !RESERVED_COLUMNS.contains(&k.as_str()));
-                    let payload =
-                        crate::runtime::blockchain_kind::canonical_payload(&fields);
+                    let payload = crate::runtime::blockchain_kind::canonical_payload(&fields);
 
                     let (tip_prev_hash, tip_next_height) = match &chain_tip_full {
                         Some(t) => (t.hash, t.height + 1),
-                        None => (
-                            crate::storage::blockchain::GENESIS_PREV_HASH,
-                            0u64,
-                        ),
+                        None => (crate::storage::blockchain::GENESIS_PREV_HASH, 0u64),
                     };
                     let server_now = crate::runtime::blockchain_kind::now_ms();
 
@@ -671,10 +664,7 @@ impl RedDBRuntime {
                             return Err(chain_conflict_error(
                                 tip_next_height.saturating_sub(1),
                                 tip_prev_hash,
-                                chain_tip_full
-                                    .as_ref()
-                                    .map(|t| t.timestamp_ms)
-                                    .unwrap_or(0),
+                                chain_tip_full.as_ref().map(|t| t.timestamp_ms).unwrap_or(0),
                                 server_now,
                                 "hash column is engine-computed and cannot be supplied",
                             ));
@@ -719,10 +709,7 @@ impl RedDBRuntime {
                                 return Err(chain_conflict_error(
                                     tip_next_height.saturating_sub(1),
                                     tip_prev_hash,
-                                    chain_tip_full
-                                        .as_ref()
-                                        .map(|t| t.timestamp_ms)
-                                        .unwrap_or(0),
+                                    chain_tip_full.as_ref().map(|t| t.timestamp_ms).unwrap_or(0),
                                     server_now,
                                     "prev_hash missing or not a 32-byte Blob",
                                 ));
@@ -732,10 +719,7 @@ impl RedDBRuntime {
                             return Err(chain_conflict_error(
                                 tip_next_height.saturating_sub(1),
                                 tip_prev_hash,
-                                chain_tip_full
-                                    .as_ref()
-                                    .map(|t| t.timestamp_ms)
-                                    .unwrap_or(0),
+                                chain_tip_full.as_ref().map(|t| t.timestamp_ms).unwrap_or(0),
                                 server_now,
                                 "prev_hash does not match current tip",
                             ));
@@ -747,10 +731,7 @@ impl RedDBRuntime {
                                 return Err(chain_conflict_error(
                                     tip_next_height.saturating_sub(1),
                                     tip_prev_hash,
-                                    chain_tip_full
-                                        .as_ref()
-                                        .map(|t| t.timestamp_ms)
-                                        .unwrap_or(0),
+                                    chain_tip_full.as_ref().map(|t| t.timestamp_ms).unwrap_or(0),
                                     server_now,
                                     "block_height missing or not an unsigned integer",
                                 ));
@@ -760,10 +741,7 @@ impl RedDBRuntime {
                             return Err(chain_conflict_error(
                                 tip_next_height.saturating_sub(1),
                                 tip_prev_hash,
-                                chain_tip_full
-                                    .as_ref()
-                                    .map(|t| t.timestamp_ms)
-                                    .unwrap_or(0),
+                                chain_tip_full.as_ref().map(|t| t.timestamp_ms).unwrap_or(0),
                                 server_now,
                                 "block_height does not match tip+1",
                             ));
@@ -775,10 +753,7 @@ impl RedDBRuntime {
                                 return Err(chain_conflict_error(
                                     tip_next_height.saturating_sub(1),
                                     tip_prev_hash,
-                                    chain_tip_full
-                                        .as_ref()
-                                        .map(|t| t.timestamp_ms)
-                                        .unwrap_or(0),
+                                    chain_tip_full.as_ref().map(|t| t.timestamp_ms).unwrap_or(0),
                                     server_now,
                                     "timestamp missing or not an unsigned integer",
                                 ));
@@ -789,10 +764,7 @@ impl RedDBRuntime {
                             return Err(chain_conflict_error(
                                 tip_next_height.saturating_sub(1),
                                 tip_prev_hash,
-                                chain_tip_full
-                                    .as_ref()
-                                    .map(|t| t.timestamp_ms)
-                                    .unwrap_or(0),
+                                chain_tip_full.as_ref().map(|t| t.timestamp_ms).unwrap_or(0),
                                 server_now,
                                 "timestamp outside ±60s of server_time",
                             ));
@@ -807,12 +779,11 @@ impl RedDBRuntime {
                             use_prev, use_height, use_ts, &payload,
                         );
                     fields.extend(reserved);
-                    chain_tip_full =
-                        Some(crate::runtime::blockchain_kind::ChainTipFull {
-                            height: use_height,
-                            hash: new_hash,
-                            timestamp_ms: use_ts,
-                        });
+                    chain_tip_full = Some(crate::runtime::blockchain_kind::ChainTipFull {
+                        height: use_height,
+                        hash: new_hash,
+                        timestamp_ms: use_ts,
+                    });
                 }
                 // Issue #522 — signed-writes verification. On collections
                 // created with `SIGNED_BY (...)` the row must carry valid
@@ -825,16 +796,11 @@ impl RedDBRuntime {
                 // composition is owned by issue #526; we keep #522 to the
                 // non-chain path and let chain_mode collections punt to that
                 // slice rather than half-wire it here.
-                if crate::runtime::signed_writes_kind::is_signed(&*store, &query.table)
-                {
+                if crate::runtime::signed_writes_kind::is_signed(&*store, &query.table) {
                     let (pk_col, sig_col, residual) =
                         crate::runtime::signed_writes_kind::split_signature_fields(fields);
-                    let payload =
-                        crate::runtime::blockchain_kind::canonical_payload(&residual);
-                    let reg = crate::runtime::signed_writes_kind::registry(
-                        &*store,
-                        &query.table,
-                    );
+                    let payload = crate::runtime::blockchain_kind::canonical_payload(&residual);
+                    let reg = crate::runtime::signed_writes_kind::registry(&*store, &query.table);
                     crate::runtime::signed_writes_kind::verify_row(
                         &reg,
                         pk_col.as_ref().map(|c| c.bytes.as_slice()),
@@ -849,15 +815,13 @@ impl RedDBRuntime {
                     // predicates symmetric with the INSERT shape.
                     if let Some(col) = pk_col {
                         fields.push((
-                            crate::storage::signed_writes::RESERVED_SIGNER_PUBKEY_COL
-                                .to_string(),
+                            crate::storage::signed_writes::RESERVED_SIGNER_PUBKEY_COL.to_string(),
                             col.raw_value,
                         ));
                     }
                     if let Some(col) = sig_col {
                         fields.push((
-                            crate::storage::signed_writes::RESERVED_SIGNATURE_COL
-                                .to_string(),
+                            crate::storage::signed_writes::RESERVED_SIGNATURE_COL.to_string(),
                             col.raw_value,
                         ));
                     }
@@ -1438,16 +1402,12 @@ impl RedDBRuntime {
         // (or no `event_name` column is supplied at all) we fall
         // through to the normal write path for back-compat with
         // existing timeseries rows.
-        let event_name_opt =
-            find_column_value_opt_string(&columns, &values, "event_name");
+        let event_name_opt = find_column_value_opt_string(&columns, &values, "event_name");
         let payload_opt = find_column_value_opt_string(&columns, &values, "payload");
         if let Some(event_name) = event_name_opt.as_deref() {
             let store_for_schema = self.inner.db.store();
-            if super::analytics_schema_registry::latest(
-                store_for_schema.as_ref(),
-                event_name,
-            )
-            .is_some()
+            if super::analytics_schema_registry::latest(store_for_schema.as_ref(), event_name)
+                .is_some()
             {
                 let payload_json = payload_opt.as_deref().unwrap_or("{}");
                 super::analytics_schema_registry::validate(
@@ -1562,10 +1522,7 @@ impl RedDBRuntime {
         // Issue #523 — blockchain collections are immutable. Reject before
         // RLS / RETURNING work so the operator sees a clean 409-mapped
         // error instead of a partially-applied mutation surface.
-        if crate::runtime::blockchain_kind::is_chain(
-            self.inner.db.store().as_ref(),
-            &query.table,
-        ) {
+        if crate::runtime::blockchain_kind::is_chain(self.inner.db.store().as_ref(), &query.table) {
             return Err(RedDBError::InvalidOperation(format!(
                 "BlockchainCollectionImmutable: UPDATE not allowed on '{}'",
                 query.table
@@ -2049,10 +2006,7 @@ impl RedDBRuntime {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         // Issue #523 — blockchain collections are immutable; see
         // execute_update for the same gate.
-        if crate::runtime::blockchain_kind::is_chain(
-            self.inner.db.store().as_ref(),
-            &query.table,
-        ) {
+        if crate::runtime::blockchain_kind::is_chain(self.inner.db.store().as_ref(), &query.table) {
             return Err(RedDBError::InvalidOperation(format!(
                 "BlockchainCollectionImmutable: DELETE not allowed on '{}'",
                 query.table
@@ -2940,6 +2894,18 @@ fn expr_references_update_column(expr: &Expr, table_name: &str, target_column: &
                 || expr_references_update_column(low, table_name, target_column)
                 || expr_references_update_column(high, table_name, target_column)
         }
+        Expr::WindowFunctionCall { args, window, .. } => {
+            args.iter()
+                .any(|arg| expr_references_update_column(arg, table_name, target_column))
+                || window
+                    .partition_by
+                    .iter()
+                    .any(|e| expr_references_update_column(e, table_name, target_column))
+                || window
+                    .order_by
+                    .iter()
+                    .any(|o| expr_references_update_column(&o.expr, table_name, target_column))
+        }
     }
 }
 
@@ -2965,8 +2931,9 @@ fn resolve_update_entity_by_logical_id(
     logical_id: EntityId,
 ) -> Option<UnifiedEntity> {
     let store = runtime.inner.db.store();
-    if let Some(entity) = crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::current_statement()
-        .resolve_logical_id(&store, table, logical_id)
+    if let Some(entity) =
+        crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::current_statement()
+            .resolve_logical_id(&store, table, logical_id)
     {
         return Some(entity);
     }

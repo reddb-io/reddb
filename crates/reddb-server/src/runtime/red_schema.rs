@@ -1372,6 +1372,14 @@ fn render_expr_for_catalog(expr: &Expr) -> String {
             render_expr_for_catalog(high)
         ),
         Expr::Subquery { .. } => "(SELECT ...)".to_string(),
+        Expr::WindowFunctionCall { name, args, .. } => {
+            let args = args
+                .iter()
+                .map(render_expr_for_catalog)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{name}({args}) OVER (...)")
+        }
     }
 }
 

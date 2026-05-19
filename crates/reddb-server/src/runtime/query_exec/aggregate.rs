@@ -931,6 +931,18 @@ fn render_projection_signature(projection: &Projection) -> String {
         Projection::Expression(filter, alias) => alias
             .clone()
             .unwrap_or_else(|| render_filter_signature(filter)),
+        Projection::Window {
+            name, args, alias, ..
+        } => alias.clone().unwrap_or_else(|| {
+            format!(
+                "{}({}) OVER (...)",
+                name,
+                args.iter()
+                    .map(render_projection_signature)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        }),
     }
 }
 
@@ -1088,6 +1100,7 @@ fn render_expr_signature(expr: &Expr) -> Option<String> {
             render_expr_signature(high)?
         )),
         Expr::Subquery { .. } => None,
+        Expr::WindowFunctionCall { .. } => None,
     }
 }
 
@@ -1387,6 +1400,7 @@ fn render_aggregate_argument_key(arg: &Projection) -> String {
             format!("{}({rendered})", base_function_name(name))
         }
         Projection::Expression(_, alias) => alias.clone().unwrap_or_else(|| "expr".to_string()),
+        Projection::Window { name, alias, .. } => alias.clone().unwrap_or_else(|| name.clone()),
     }
 }
 

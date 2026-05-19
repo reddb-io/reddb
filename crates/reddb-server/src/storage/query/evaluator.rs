@@ -224,6 +224,10 @@ pub fn evaluate(expr: &Expr, row: &dyn Row) -> Result<Value, EvalError> {
             name: "SUBQUERY".to_string(),
             args: Vec::new(),
         }),
+        Expr::WindowFunctionCall { name, .. } => Err(EvalError::UnknownFunction {
+            name: format!("{name} OVER (...)"),
+            args: Vec::new(),
+        }),
     }
 }
 
