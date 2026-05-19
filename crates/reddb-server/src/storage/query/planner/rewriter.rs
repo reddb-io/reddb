@@ -563,6 +563,7 @@ fn projection_name(proj: &Projection) -> String {
             alias.clone().unwrap_or_else(|| format!("{:?}", expr))
         }
         Projection::Field(field, alias) => alias.clone().unwrap_or_else(|| format!("{:?}", field)),
+        Projection::Window { name, alias, .. } => alias.clone().unwrap_or_else(|| name.clone()),
     }
 }
 

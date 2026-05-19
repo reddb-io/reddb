@@ -39,7 +39,7 @@ impl<'a> Parser<'a> {
                     self.advance()?;
                     batch_size = Some(n as u64);
                 }
-                self.consume_ident_ci("ROWS")?;
+                self.consume(&Token::Rows)?;
             } else if self.consume_ident_ci("NO")? {
                 let _ = self.consume(&Token::Rollback)? || self.consume_ident_ci("ROLLBACK")?;
                 no_rollback = true;

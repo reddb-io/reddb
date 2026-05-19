@@ -332,6 +332,20 @@ fn contains_nested_aggregate(expr: &Expr) -> bool {
             is_aggregate_function(&name.to_uppercase())
                 || args.iter().any(contains_nested_aggregate)
         }
+        // Issue #589 slice 7a: a window function aggregate (e.g.
+        // `SUM(x) OVER (...)`) is NOT a plain aggregate from the
+        // group-by analyser's point of view — it operates over a
+        // partitioned window, not a GROUP BY group. We still recurse
+        // into args / partition / order keys so a *nested* aggregate
+        // (e.g. `SUM(COUNT(*) OVER ()) OVER (...)`) is caught.
+        Expr::WindowFunctionCall { args, window, .. } => {
+            args.iter().any(contains_nested_aggregate)
+                || window.partition_by.iter().any(contains_nested_aggregate)
+                || window
+                    .order_by
+                    .iter()
+                    .any(|o| contains_nested_aggregate(&o.expr))
+        }
         Expr::BinaryOp { lhs, rhs, .. } => {
             contains_nested_aggregate(lhs) || contains_nested_aggregate(rhs)
         }
@@ -790,6 +804,7 @@ fn render_group_by_expr(expr: &Expr) -> Option<String> {
             Projection::All => "*".to_string(),
             Projection::Expression(_, _) => "expr".to_string(),
             Projection::Field(other, _) => format!("{other:?}"),
+            Projection::Window { name, .. } => name,
         }),
     }
 }

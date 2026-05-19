@@ -72,6 +72,20 @@ pub fn expr_to_projection(expr: &Expr) -> Option<Projection> {
         | Expr::InList { .. }
         | Expr::Between { .. }
         | Expr::Subquery { .. } => Some(boolean_expr_projection(expr.clone())),
+        Expr::WindowFunctionCall {
+            name, args, window, ..
+        } => {
+            let lowered_args = args
+                .iter()
+                .map(expr_to_projection)
+                .collect::<Option<Vec<_>>>()?;
+            Some(crate::storage::query::ast::Projection::Window {
+                name: name.to_uppercase(),
+                args: lowered_args,
+                window: Box::new(window.clone()),
+                alias: None,
+            })
+        }
     }
 }
 
@@ -226,6 +240,29 @@ pub fn projection_to_expr(projection: &Projection) -> Option<(Expr, Option<Strin
             },
             alias.clone(),
         )),
+        Projection::Window {
+            name,
+            args,
+            window,
+            alias,
+        } => {
+            let args = args
+                .iter()
+                .map(projection_to_expr)
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .map(|(expr, _)| expr)
+                .collect();
+            Some((
+                Expr::WindowFunctionCall {
+                    name: name.clone(),
+                    args,
+                    window: (**window).clone(),
+                    span: Span::synthetic(),
+                },
+                alias.clone(),
+            ))
+        }
     }
 }
 
@@ -726,6 +763,14 @@ fn render_expr_label_prec(expr: &Expr, parent_prec: u8) -> String {
             )
         }
         Expr::Subquery { .. } => "subquery".to_string(),
+        Expr::WindowFunctionCall { name, args, .. } => {
+            let args = args
+                .iter()
+                .map(render_expr_label)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{name}({args}) OVER (...)")
+        }
     }
 }
 

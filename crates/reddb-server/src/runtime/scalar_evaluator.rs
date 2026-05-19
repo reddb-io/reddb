@@ -396,6 +396,7 @@ fn compile_expr(expr: &Expr, scope: &dyn Scope) -> Result<CompiledScalar, Compil
         Expr::InList { .. } => Err(CompileError::Unsupported("IN list")),
         Expr::Between { .. } => Err(CompileError::Unsupported("BETWEEN")),
         Expr::Subquery { .. } => Err(CompileError::Unsupported("subquery")),
+        Expr::WindowFunctionCall { .. } => Err(CompileError::Unsupported("window function")),
     }
 }
 

@@ -95,6 +95,45 @@ fn keyword_function_name(token: &Token) -> Option<&'static str> {
     }
 }
 
+/// Whether `name` may appear as the function in `fn(...) OVER (...)`.
+/// Window-only functions plus the standard aggregates (which behave as
+/// window aggregates when an OVER clause is attached). Mirrored loosely
+/// from PG's pg_proc catalog — slice 7a only validates lexical eligibility,
+/// runtime support arrives with the analytics executor.
+fn is_window_eligible_function(name: &str) -> bool {
+    matches!(
+        name.to_ascii_uppercase().as_str(),
+        // Window-only.
+        "LAG"
+            | "LEAD"
+            | "ROW_NUMBER"
+            | "RANK"
+            | "DENSE_RANK"
+            | "PERCENT_RANK"
+            | "CUME_DIST"
+            | "NTILE"
+            | "FIRST_VALUE"
+            | "LAST_VALUE"
+            | "NTH_VALUE"
+            // Aggregates valid in window position.
+            | "COUNT"
+            | "SUM"
+            | "AVG"
+            | "MIN"
+            | "MAX"
+            | "STDDEV"
+            | "VARIANCE"
+            | "MEDIAN"
+            | "PERCENTILE"
+            | "GROUP_CONCAT"
+            | "STRING_AGG"
+            | "FIRST"
+            | "LAST"
+            | "ARRAY_AGG"
+            | "COUNT_DISTINCT"
+    )
+}
+
 fn bare_zero_arg_function_name(name: &str) -> Option<&'static str> {
     match name.to_ascii_uppercase().as_str() {
         "CURRENT_TIMESTAMP" => Some("CURRENT_TIMESTAMP"),
@@ -464,6 +503,23 @@ impl<'a> Parser<'a> {
         start: crate::storage::query::lexer::Position,
         function_name: String,
     ) -> Result<Expr, ParseError> {
+        let call = self.parse_function_call_expr_with_name_inner(start, function_name)?;
+        // Issue #589 slice 7a: `fn(args) OVER (...)` lifts a plain
+        // FunctionCall into a WindowFunctionCall carrying the OVER
+        // clause. CAST and other shapes that don't return a
+        // FunctionCall are rejected by `parse_over_clause_for` so the
+        // user gets a clear error rather than silent acceptance.
+        if matches!(self.peek(), Token::Over) {
+            return self.lift_to_window_call(start, call);
+        }
+        Ok(call)
+    }
+
+    fn parse_function_call_expr_with_name_inner(
+        &mut self,
+        start: crate::storage::query::lexer::Position,
+        function_name: String,
+    ) -> Result<Expr, ParseError> {
         self.expect(Token::LParen)?;
 
         if function_name.eq_ignore_ascii_case("CAST") {
@@ -566,6 +622,180 @@ impl<'a> Parser<'a> {
             args,
             span: Span::new(start, end),
         })
+    }
+
+    /// Wrap a freshly-parsed `Expr::FunctionCall` in
+    /// `Expr::WindowFunctionCall` by consuming the trailing `OVER (...)`
+    /// clause. The caller has already confirmed the next token is
+    /// `OVER`. Rejects:
+    /// - CAST(...) OVER (...) and other non-FunctionCall shapes.
+    /// - Function names that are neither window-only nor aggregates.
+    fn lift_to_window_call(
+        &mut self,
+        start: crate::storage::query::lexer::Position,
+        call: Expr,
+    ) -> Result<Expr, ParseError> {
+        let (name, args) = match call {
+            Expr::FunctionCall { name, args, .. } => (name, args),
+            other => {
+                return Err(ParseError::new(
+                    format!(
+                        "OVER may only follow a function call, got {:?}",
+                        std::mem::discriminant(&other)
+                    ),
+                    self.position(),
+                ));
+            }
+        };
+        if !is_window_eligible_function(&name) {
+            return Err(ParseError::new(
+                format!(
+                    "function `{}` cannot be used with an OVER clause; \
+                     expected a window function (LAG, LEAD, ROW_NUMBER, \
+                     RANK, DENSE_RANK) or an aggregate",
+                    name.to_uppercase()
+                ),
+                self.position(),
+            ));
+        }
+        let window = self.parse_over_clause()?;
+        let end = self.position();
+        Ok(Expr::WindowFunctionCall {
+            name,
+            args,
+            window,
+            span: Span::new(start, end),
+        })
+    }
+
+    /// Parse the `OVER ( [PARTITION BY ...] [ORDER BY ...] [frame] )`
+    /// clause. The leading `OVER` keyword is consumed here.
+    fn parse_over_clause(&mut self) -> Result<crate::storage::query::ast::WindowSpec, ParseError> {
+        self.expect(Token::Over)?;
+        self.expect(Token::LParen)?;
+
+        let mut spec = crate::storage::query::ast::WindowSpec::default();
+
+        if self.consume(&Token::Partition)? {
+            self.expect(Token::By)?;
+            loop {
+                spec.partition_by.push(self.parse_expr_prec(0)?);
+                if !self.consume(&Token::Comma)? {
+                    break;
+                }
+            }
+        }
+
+        if self.consume(&Token::Order)? {
+            self.expect(Token::By)?;
+            loop {
+                let expr = self.parse_expr_prec(0)?;
+                let ascending = if self.consume(&Token::Desc)? {
+                    false
+                } else {
+                    self.consume(&Token::Asc)?;
+                    true
+                };
+                // NULLS FIRST / LAST defaults mirror PG: nulls last for
+                // ASC, nulls first for DESC. Explicit clause overrides.
+                let mut nulls_first = !ascending;
+                if self.consume(&Token::Nulls)? {
+                    if self.consume(&Token::First)? {
+                        nulls_first = true;
+                    } else if self.consume(&Token::Last)? {
+                        nulls_first = false;
+                    } else {
+                        return Err(ParseError::new(
+                            "expected FIRST or LAST after NULLS".to_string(),
+                            self.position(),
+                        ));
+                    }
+                }
+                spec.order_by
+                    .push(crate::storage::query::ast::WindowOrderItem {
+                        expr,
+                        ascending,
+                        nulls_first,
+                    });
+                if !self.consume(&Token::Comma)? {
+                    break;
+                }
+            }
+        }
+
+        if matches!(self.peek(), Token::Rows | Token::Range) {
+            spec.frame = Some(self.parse_window_frame()?);
+        }
+
+        self.expect(Token::RParen)?;
+        Ok(spec)
+    }
+
+    fn parse_window_frame(
+        &mut self,
+    ) -> Result<crate::storage::query::ast::WindowFrame, ParseError> {
+        let unit = if self.consume(&Token::Rows)? {
+            crate::storage::query::ast::WindowFrameUnit::Rows
+        } else if self.consume(&Token::Range)? {
+            crate::storage::query::ast::WindowFrameUnit::Range
+        } else {
+            return Err(ParseError::new(
+                "expected ROWS or RANGE in window frame".to_string(),
+                self.position(),
+            ));
+        };
+
+        if self.consume(&Token::Between)? {
+            let start = self.parse_window_frame_bound()?;
+            self.expect(Token::And)?;
+            let end = self.parse_window_frame_bound()?;
+            Ok(crate::storage::query::ast::WindowFrame {
+                unit,
+                start,
+                end: Some(end),
+            })
+        } else {
+            let start = self.parse_window_frame_bound()?;
+            Ok(crate::storage::query::ast::WindowFrame {
+                unit,
+                start,
+                end: None,
+            })
+        }
+    }
+
+    fn parse_window_frame_bound(
+        &mut self,
+    ) -> Result<crate::storage::query::ast::WindowFrameBound, ParseError> {
+        use crate::storage::query::ast::WindowFrameBound;
+        if self.consume(&Token::Unbounded)? {
+            if self.consume(&Token::Preceding)? {
+                return Ok(WindowFrameBound::UnboundedPreceding);
+            }
+            if self.consume(&Token::Following)? {
+                return Ok(WindowFrameBound::UnboundedFollowing);
+            }
+            return Err(ParseError::new(
+                "expected PRECEDING or FOLLOWING after UNBOUNDED".to_string(),
+                self.position(),
+            ));
+        }
+        if self.consume(&Token::Current)? {
+            self.expect(Token::Row)?;
+            return Ok(WindowFrameBound::CurrentRow);
+        }
+        // Numeric / expression offset: `N PRECEDING` / `N FOLLOWING`.
+        let offset = self.parse_expr_prec(0)?;
+        if self.consume(&Token::Preceding)? {
+            return Ok(WindowFrameBound::Preceding(Box::new(offset)));
+        }
+        if self.consume(&Token::Following)? {
+            return Ok(WindowFrameBound::Following(Box::new(offset)));
+        }
+        Err(ParseError::new(
+            "expected PRECEDING or FOLLOWING after frame offset".to_string(),
+            self.position(),
+        ))
     }
 
     /// Parse `CASE WHEN cond THEN val [WHEN …] [ELSE val] END`.
@@ -1335,5 +1565,161 @@ mod tests {
         let span = e.span();
         assert!(!span.is_synthetic(), "root span must be real");
         assert!(span.start.offset < span.end.offset);
+    }
+
+    // ====================================================================
+    // Window OVER clause — issue #589 slice 7a
+    // ====================================================================
+
+    fn try_parse(input: &str) -> Result<Expr, ParseError> {
+        let mut parser = Parser::new(input).expect("lexer init");
+        parser.parse_expr()
+    }
+
+    #[test]
+    fn window_lag_partition_and_order() {
+        let e = parse("LAG(ts) OVER (PARTITION BY user_id ORDER BY ts)");
+        let Expr::WindowFunctionCall {
+            name, args, window, ..
+        } = e
+        else {
+            panic!("expected WindowFunctionCall");
+        };
+        assert_eq!(name.to_uppercase(), "LAG");
+        assert_eq!(args.len(), 1);
+        assert_eq!(window.partition_by.len(), 1);
+        assert_eq!(window.order_by.len(), 1);
+        assert!(window.order_by[0].ascending);
+        assert!(window.frame.is_none());
+    }
+
+    #[test]
+    fn window_row_number_empty_over() {
+        let e = parse("ROW_NUMBER() OVER ()");
+        let Expr::WindowFunctionCall {
+            name, args, window, ..
+        } = e
+        else {
+            panic!("expected WindowFunctionCall");
+        };
+        assert_eq!(name.to_uppercase(), "ROW_NUMBER");
+        assert!(args.is_empty());
+        assert!(window.partition_by.is_empty());
+        assert!(window.order_by.is_empty());
+        assert!(window.frame.is_none());
+    }
+
+    #[test]
+    fn window_sum_with_frame_rows_between() {
+        let e = parse(
+            "SUM(amount) OVER (PARTITION BY user_id ORDER BY ts \
+             ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)",
+        );
+        let Expr::WindowFunctionCall { name, window, .. } = e else {
+            panic!("expected WindowFunctionCall");
+        };
+        assert_eq!(name.to_uppercase(), "SUM");
+        let frame = window.frame.expect("frame present");
+        assert!(matches!(
+            frame.unit,
+            crate::storage::query::ast::WindowFrameUnit::Rows
+        ));
+        assert!(matches!(
+            frame.start,
+            crate::storage::query::ast::WindowFrameBound::Preceding(_)
+        ));
+        assert!(matches!(
+            frame.end,
+            Some(crate::storage::query::ast::WindowFrameBound::CurrentRow)
+        ));
+    }
+
+    #[test]
+    fn window_rank_order_desc_multiple_keys() {
+        let e = parse("RANK() OVER (ORDER BY score DESC, ts)");
+        let Expr::WindowFunctionCall { window, .. } = e else {
+            panic!("expected WindowFunctionCall");
+        };
+        assert_eq!(window.order_by.len(), 2);
+        assert!(!window.order_by[0].ascending);
+        assert!(window.order_by[1].ascending);
+    }
+
+    #[test]
+    fn window_unbounded_preceding_following_frame() {
+        let e = parse(
+            "AVG(x) OVER (ORDER BY t \
+             RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)",
+        );
+        let Expr::WindowFunctionCall { window, .. } = e else {
+            panic!("expected WindowFunctionCall");
+        };
+        let frame = window.frame.expect("frame present");
+        assert!(matches!(
+            frame.unit,
+            crate::storage::query::ast::WindowFrameUnit::Range
+        ));
+        assert!(matches!(
+            frame.start,
+            crate::storage::query::ast::WindowFrameBound::UnboundedPreceding
+        ));
+        assert!(matches!(
+            frame.end,
+            Some(crate::storage::query::ast::WindowFrameBound::UnboundedFollowing)
+        ));
+    }
+
+    #[test]
+    fn window_rejects_non_window_function() {
+        // UPPER is a scalar function, not eligible for OVER.
+        let err = try_parse("UPPER(name) OVER (PARTITION BY id)")
+            .err()
+            .expect("should reject scalar OVER");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("UPPER") || msg.contains("upper"),
+            "error should mention function name, got: {msg}"
+        );
+        assert!(msg.to_ascii_uppercase().contains("OVER") || msg.contains("window"));
+    }
+
+    #[test]
+    fn window_rejects_missing_open_paren() {
+        let err = try_parse("LAG(ts) OVER PARTITION BY user_id")
+            .err()
+            .expect("should reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("(") || msg.to_ascii_uppercase().contains("EXPECTED"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn window_rejects_invalid_frame_syntax() {
+        // CURRENT without ROW is malformed.
+        let err = try_parse("LAG(ts) OVER (ORDER BY ts ROWS CURRENT)")
+            .err()
+            .expect("should reject");
+        let msg = err.to_string();
+        assert!(
+            !msg.is_empty(),
+            "expected non-empty error for malformed frame"
+        );
+    }
+
+    #[test]
+    fn window_first_value_with_partition_only() {
+        let e = parse("FIRST_VALUE(price) OVER (PARTITION BY symbol)");
+        let Expr::WindowFunctionCall {
+            name, window, args, ..
+        } = e
+        else {
+            panic!("expected WindowFunctionCall");
+        };
+        assert_eq!(name.to_uppercase(), "FIRST_VALUE");
+        assert_eq!(args.len(), 1);
+        assert_eq!(window.partition_by.len(), 1);
+        assert!(window.order_by.is_empty());
     }
 }

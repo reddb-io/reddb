@@ -463,6 +463,7 @@ pub(crate) fn project_runtime_join_record_with_db(
                 super::super::join_filter::evaluate_scalar_function_with_db(db, name, args, source)
             }
             Projection::All => None,
+            Projection::Window { .. } => None,
         };
 
         record.set_arc(std::sync::Arc::from(label), value.unwrap_or(Value::Null));
