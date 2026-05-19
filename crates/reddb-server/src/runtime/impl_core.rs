@@ -2245,6 +2245,11 @@ impl RedDBRuntime {
         // tables declared via `TENANT BY (col)` survive restart. Each
         // entry re-registers the auto-policy and flips RLS on again.
         runtime.rehydrate_tenant_tables();
+        // Issue #593 slice 9a — replay persisted materialized-view
+        // descriptors so `CREATE MATERIALIZED VIEW v AS …` survives a
+        // restart. Runs after the system-keyed collections bootstrap
+        // and before the API opens.
+        runtime.rehydrate_materialized_view_descriptors();
         if let Some(repl) = &runtime.inner.db.replication {
             repl.wal_buffer.set_current_lsn(restored_cdc_lsn);
         }
@@ -2686,6 +2691,13 @@ impl RedDBRuntime {
         for (name, model) in [
             ("red.config", crate::catalog::CollectionModel::Config),
             ("red.vault", crate::catalog::CollectionModel::Vault),
+            // Issue #593 — materialized-view catalog. One row per
+            // `CREATE MATERIALIZED VIEW`; rehydrated at boot before
+            // the API opens.
+            (
+                crate::runtime::continuous_materialized_view::CATALOG_COLLECTION,
+                crate::catalog::CollectionModel::Config,
+            ),
         ] {
             if self.inner.db.store().get_collection(name).is_none() {
                 self.inner.db.store().get_or_create_collection(name);
@@ -5667,14 +5679,34 @@ impl RedDBRuntime {
                         }
                         None => RefreshPolicy::Manual,
                     };
+                    let dependencies = collect_table_refs(&q.query);
                     let def = MaterializedViewDef {
                         name: q.name.clone(),
                         query: format!("<parsed view {}>", q.name),
-                        dependencies: collect_table_refs(&q.query),
+                        dependencies: dependencies.clone(),
                         refresh,
                         retention_duration_ms: q.retention_duration_ms,
                     };
                     self.inner.materialized_views.write().register(def);
+
+                    // Issue #593 slice 9a — persist the descriptor to
+                    // the system catalog so the definition survives a
+                    // restart. Upsert semantics (delete-then-insert by
+                    // name) keep the catalog free of duplicate rows
+                    // across `CREATE OR REPLACE` churn.
+                    let descriptor = crate::runtime::continuous_materialized_view::
+                        MaterializedViewDescriptor {
+                            name: q.name.clone(),
+                            source_sql: query.to_string(),
+                            source_collections: dependencies,
+                            refresh_every_ms: q.refresh_every_ms,
+                            retention_duration_ms: q.retention_duration_ms,
+                        };
+                    let store = self.inner.db.store();
+                    crate::runtime::continuous_materialized_view::persist_descriptor(
+                        store.as_ref(),
+                        &descriptor,
+                    )?;
                 }
                 // Plan cache may have cached a plan that didn't know about this
                 // view — invalidate so future references pick up the new binding.
@@ -5700,6 +5732,14 @@ impl RedDBRuntime {
                 if q.materialized || existed {
                     // Try the materialised cache too — silent if absent.
                     self.inner.materialized_views.write().remove(&q.name);
+                    // Issue #593 slice 9a — remove any persisted
+                    // catalog row. Idempotent: a no-op when the view
+                    // was never materialized (no row was ever written).
+                    let store = self.inner.db.store();
+                    crate::runtime::continuous_materialized_view::remove_by_name(
+                        store.as_ref(),
+                        &q.name,
+                    )?;
                 }
                 // Drop any plan / result cache entries that baked the
                 // view body into their QueryExpr.
@@ -7468,6 +7508,77 @@ impl RedDBRuntime {
                 _ => {}
             }
         }
+    }
+
+    /// Replay every persisted `MaterializedViewDescriptor` from the
+    /// `red_materialized_view_defs` system collection (issue #593
+    /// slice 9a). For each descriptor, re-parse the original SQL,
+    /// extract the `QueryExpr::CreateView` it produced, and populate
+    /// the in-memory registries (`inner.views` and
+    /// `inner.materialized_views`) directly — no write paths run, so
+    /// rehydrate does not re-persist what it just read.
+    ///
+    /// Malformed rows (missing `name`/`source_sql`, parse errors) are
+    /// skipped with a `SchemaCorruption` operator event so a single
+    /// bad entry does not block startup.
+    pub(crate) fn rehydrate_materialized_view_descriptors(&self) {
+        let store = self.inner.db.store();
+        let descriptors =
+            crate::runtime::continuous_materialized_view::load_all(store.as_ref());
+        for descriptor in descriptors {
+            let parsed = match crate::storage::query::parser::parse(&descriptor.source_sql) {
+                Ok(qc) => qc,
+                Err(err) => {
+                    crate::telemetry::operator_event::OperatorEvent::SchemaCorruption {
+                        collection: crate::runtime::continuous_materialized_view::
+                            CATALOG_COLLECTION
+                            .to_string(),
+                        detail: format!(
+                            "failed to re-parse materialized-view source for {}: {err}",
+                            descriptor.name
+                        ),
+                    }
+                    .emit_global();
+                    continue;
+                }
+            };
+            let crate::storage::query::ast::QueryExpr::CreateView(create) = parsed.query else {
+                crate::telemetry::operator_event::OperatorEvent::SchemaCorruption {
+                    collection: crate::runtime::continuous_materialized_view::
+                        CATALOG_COLLECTION
+                        .to_string(),
+                    detail: format!(
+                        "materialized-view source for {} did not re-parse as CREATE VIEW",
+                        descriptor.name
+                    ),
+                }
+                .emit_global();
+                continue;
+            };
+            // Populate in-memory view registry.
+            let view_name = create.name.clone();
+            self.inner
+                .views
+                .write()
+                .insert(view_name.clone(), Arc::new(create));
+            // Materialized cache slot (data empty until next REFRESH).
+            use crate::storage::cache::result::{MaterializedViewDef, RefreshPolicy};
+            let refresh = match descriptor.refresh_every_ms {
+                Some(ms) => RefreshPolicy::Periodic(std::time::Duration::from_millis(ms)),
+                None => RefreshPolicy::Manual,
+            };
+            let def = MaterializedViewDef {
+                name: view_name.clone(),
+                query: format!("<parsed view {}>", view_name),
+                dependencies: descriptor.source_collections.clone(),
+                refresh,
+                retention_duration_ms: descriptor.retention_duration_ms,
+            };
+            self.inner.materialized_views.write().register(def);
+        }
+        // A rehydrated view shape may differ from any plans the cache
+        // bootstrapped before this method ran — flush to be safe.
+        self.invalidate_plan_cache();
     }
 
     pub(crate) fn rehydrate_declared_column_schemas(&self) {
