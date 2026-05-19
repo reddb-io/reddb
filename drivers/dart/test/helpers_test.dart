@@ -248,6 +248,151 @@ void main() {
       ]);
       final out = await Helpers(q).queue.purge('jobs');
       expect(out.affected, 7);
+      expect(out.deleted, isTrue);
+    });
+  });
+
+  // --- SDK Helper Spec v1.0 ---------------------------------------------
+
+  group('spec v1.0', () {
+    test('exposes HELPER_SPEC_VERSION = "1.0"', () {
+      expect(Helpers.helperSpecVersion, '1.0');
+    });
+
+    test('documents.patch rejects empty patch with INVALID_ARGUMENT', () async {
+      final q = _FakeQuerier();
+      expect(
+        () => Helpers(q).documents.patch('people', 'doc-1', {}),
+        throwsA(isA<InvalidArgument>()),
+      );
+      expect(q.calls, isEmpty,
+          reason: 'empty patch must reject before issuing any query');
+    });
+
+    test('documents.delete of missing rid returns deleted=false (not error)',
+        () async {
+      final q = _FakeQuerier(replies: [
+        {'affected': 0},
+      ]);
+      final out = await Helpers(q).documents.delete('people', 'no-such-rid');
+      expect(out.affected, 0);
+      expect(out.deleted, isFalse);
+    });
+
+    test('documents.delete of present rid returns deleted=true', () async {
+      final q = _FakeQuerier(replies: [
+        {'affected': 1},
+      ]);
+      final out = await Helpers(q).documents.delete('people', 'doc-1');
+      expect(out.affected, 1);
+      expect(out.deleted, isTrue);
+    });
+
+    test('kv.delete of missing key returns deleted=false', () async {
+      final q = _FakeQuerier(replies: [
+        {'affected': 0},
+      ]);
+      final out = await Helpers(q).kv.delete('nope');
+      expect(out.affected, 0);
+      expect(out.deleted, isFalse);
+    });
+
+    test('documents.bulkInsert empty is no-op', () async {
+      final q = _FakeQuerier();
+      final out = await Helpers(q).documents.bulkInsert('people', const []);
+      expect(out.affected, 0);
+      expect(out.rids, isEmpty);
+      expect(q.calls, isEmpty);
+    });
+
+    test('documents.bulkInsert preserves per-row rid order', () async {
+      final q = _FakeQuerier(replies: [
+        // _ensureCollection
+        <String, Object?>{},
+        // first insert
+        {
+          'rows': [
+            {'rid': 'r-1'},
+          ],
+          'affected': 1,
+        },
+        // second insert
+        {
+          'rows': [
+            {'rid': 'r-2'},
+          ],
+          'affected': 1,
+        },
+      ]);
+      final out = await Helpers(q).documents.bulkInsert('people', [
+        {'i': 1},
+        {'i': 2},
+      ]);
+      expect(out.affected, 2);
+      expect(out.rids, ['r-1', 'r-2']);
+    });
+
+    test('queues alias and queues.create emit CREATE QUEUE IF NOT EXISTS',
+        () async {
+      final q = _FakeQuerier(replies: [<String, Object?>{}]);
+      await Helpers(q).queues.create('jobs');
+      expect(q.calls.first.sql, 'CREATE QUEUE IF NOT EXISTS jobs');
+    });
+
+    test('queues.create rejects bad identifier', () async {
+      expect(
+        () => Helpers(_FakeQuerier()).queues.create('bad-name!'),
+        throwsA(isA<InvalidArgument>()),
+      );
+    });
+
+    test('tx.begin / commit / rollback emit BEGIN / COMMIT / ROLLBACK',
+        () async {
+      final q = _FakeQuerier(
+          replies: [<String, Object?>{}, <String, Object?>{}, <String, Object?>{}]);
+      final tx = Helpers(q).tx();
+      await tx.begin();
+      await tx.commit();
+      await tx.begin();
+      await tx.rollback();
+      expect(q.calls.map((c) => c.sql), ['BEGIN', 'COMMIT', 'BEGIN', 'ROLLBACK']);
+    });
+
+    test('tx.run commits on success', () async {
+      final q = _FakeQuerier(replies: [
+        <String, Object?>{}, // BEGIN
+        <String, Object?>{}, // body insert
+        <String, Object?>{}, // COMMIT
+      ]);
+      final tx = Helpers(q).tx();
+      await tx.run((t) async {
+        await q.query('SOMETHING');
+      });
+      expect(q.calls.map((c) => c.sql), ['BEGIN', 'SOMETHING', 'COMMIT']);
+    });
+
+    test('tx.run rolls back and re-throws on error', () async {
+      final q = _FakeQuerier(
+        replies: [<String, Object?>{}, <String, Object?>{}, <String, Object?>{}],
+        errors: [null, Exception('boom'), null],
+      );
+      final tx = Helpers(q).tx();
+      await expectLater(
+        tx.run((t) async => q.query('SOMETHING')),
+        throwsA(isA<Exception>()),
+      );
+      expect(q.calls.map((c) => c.sql), ['BEGIN', 'SOMETHING', 'ROLLBACK']);
+    });
+
+    test('tx.run rejects nested run with INVALID_ARGUMENT', () async {
+      final q = _FakeQuerier(replies: [<String, Object?>{}]);
+      final tx = Helpers(q).tx();
+      await expectLater(
+        tx.run((outer) async {
+          await outer.run((_) async {});
+        }),
+        throwsA(isA<InvalidArgument>()),
+      );
     });
   });
 }

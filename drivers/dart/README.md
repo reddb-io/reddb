@@ -102,9 +102,16 @@ test/
 
 ## SDK Helper Spec
 
-The driver exposes the rich namespaces from
-[`docs/clients/sdk-helper-spec.md`](../../docs/clients/sdk-helper-spec.md)
-via `Reddb.helpers`:
+The driver implements **SDK Helper Spec v1.0**
+([`docs/spec/sdk-helpers.md`](../../docs/spec/sdk-helpers.md)). The
+constant `Helpers.helperSpecVersion` exposes the version for cross-driver
+CI assertions:
+
+```dart
+assert(Helpers.helperSpecVersion == '1.0');
+```
+
+Rich namespaces hang off `Reddb.helpers`:
 
 ```dart
 final db = await connect('http://localhost:8080');
@@ -114,23 +121,95 @@ final h = db.helpers;
 final res = await h.documents.insert('people', {'name': 'alice'});
 final row = await h.documents.get('people', res.rid);
 await h.documents.patch('people', res.rid, {'name': 'bob'});
+final bulk = await h.documents.bulkInsert('events', [
+  {'kind': 'login'},
+  {'kind': 'logout'},
+]);
+final del = await h.documents.delete('people', res.rid);
+assert(del.deleted);
 
 // KV (default collection: kv_default)
 await h.kv.set('characters:hansel', 'baker');
 final v = await h.kv.get('characters:hansel');
 final page = await h.kv.list(prefix: 'characters:');
 
-// Queue
-await h.queue.push('jobs', {'id': 1}, priority: 5);
-final n = await h.queue.len('jobs');
-final next = await h.queue.pop('jobs', count: 1);
+// Queues (spec-canonical plural; `queue` is kept as a singular alias)
+await h.queues.create('jobs');
+await h.queues.push('jobs', {'id': 1}, priority: 5);
+final n = await h.queues.len('jobs');
+final next = await h.queues.pop('jobs', count: 1);
+
+// Transactions (imperative + callback form)
+final tx = h.tx();
+await tx.begin();
+await h.documents.insert('events', {'kind': 'commit'});
+await tx.commit();
+
+await h.tx().run((t) async {
+  await h.documents.insert('events', {'kind': 'callback'});
+}); // commits on success; rolls back + rethrows on error
 ```
+
+### Return envelopes
+
+| Envelope            | Required fields                                            |
+|---------------------|-------------------------------------------------------------|
+| `InsertResult`      | `affected` (always 1), `rid`, optional `item`               |
+| `BulkInsertResult`  | `affected`, `rids` in input order                           |
+| `DeleteResult`      | `affected`, `deleted` (`affected > 0`)                      |
+| `ExistsResult`      | `exists`                                                    |
+| `ListResult`        | `items`, optional `nextCursor`                              |
 
 Errors are typed (`InvalidArgument`, `NotFound`, `InvalidResponse`) and
 match the wording used by the Go / Python / JS drivers.
 
-Transactions are not yet wired — `Conn` has no transaction helper. Use
-`db.query('BEGIN' | 'COMMIT' | 'ROLLBACK')` as an escape hatch.
+### Transaction support
+
+Imperative `begin()`/`commit()`/`rollback()` **and** a callback form
+`tx.run(body)`. Nested `tx.run` rejects with `INVALID_ARGUMENT` — callers
+who need savepoints should issue them directly via `db.query`. Same
+decision as the Rust and Java drivers (spec §7.2).
+
+### Conformance matrix (spec §12)
+
+| Case ID                              | Status |
+|--------------------------------------|--------|
+| `generic.query.no_params`            | ✅ |
+| `generic.query_with.params`          | ✅ |
+| `generic.insert.rid`                 | ✅ |
+| `generic.bulk_insert.rids`           | ✅ |
+| `generic.delete`                     | ✅ |
+| `documents.crud_nested_patch`        | ✅ |
+| `documents.delete_missing_no_error`  | ✅ |
+| `documents.patch_empty_rejects`      | ✅ |
+| `kv.exact_key_round_trip`            | ✅ |
+| `kv.missing_get_returns_none`        | ✅ |
+| `kv.delete_returns_envelope`         | ✅ |
+| `queues.fifo_peek_pop_len`           | ✅ |
+| `queues.empty_pop_returns_empty`     | ✅ |
+| `queues.purge_resets_len`            | ✅ |
+| `tx.commit_persists`                 | ✅ |
+| `tx.rollback_discards`               | ✅ |
+| `errors.invalid_argument.empty_sql`  | ✅ (helper-level via `patch_empty_rejects`) |
+| `errors.not_found.document_get`      | ✅ |
+| `wire.probabilistic.hll_round_trip`  | ✅ |
+| `wire.vectors.sql_round_trip`        | reachable via `db.query` (provisional in v1.0) |
+| `wire.graph.sql_round_trip`          | reachable via `db.query` (provisional in v1.0) |
+| `wire.timeseries.sql_round_trip`     | reachable via `db.query` (provisional in v1.0) |
+
+The four provisional namespaces (`vectors`, `graph`, `timeseries`,
+`probabilistic.*`) have **no first-class helpers** in v1.0 — drivers
+surface them via raw `db.query` per spec §1. v1.1 will lift the most
+common operations into helpers without breaking v1.0 callers.
+
+Run the conformance suite against a real `red` server:
+
+```
+RED_SMOKE=1 RED_BIN=/path/to/red \
+  dart test test/conformance_test.dart
+```
+
+Skipped by default and when `RED_SKIP_SMOKE=1` is set.
 
 ## Limitations
 
