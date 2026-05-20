@@ -32,6 +32,16 @@ print(db.documents.get("profiles", str(doc["rid"])))
 
 db.kv.set("settings", "characters:hansel", {"role": "finder"})
 print(db.kv.get("settings", "characters:hansel"))
+print(db.kv.get("settings", "missing"))   # -> None (not an error)
+
+db.queues.create("jobs")
+db.queues.push("jobs", {"task": "reindex"})
+print(db.queues.len("jobs"))              # -> 1
+print(db.queues.pop("jobs")["items"])     # FIFO
+
+# Transactions: imperative or callback. A clean callback commits; a raised
+# exception rolls back and re-raises.
+db.tx.run(lambda tx: db.insert("users", {"name": "Dave"}))
 
 result = db.query("SELECT * FROM users")
 for row in result["rows"]:
@@ -148,14 +158,28 @@ db.documents.list(collection: str, *, limit, filter, order_by) -> {"items"}
 db.documents.patch(collection: str, rid: str, patch: dict) -> item
 db.documents.delete(collection: str, rid: str)   -> {"affected", "deleted"}
 db.kv.set(collection: str, key: str, value)      -> {"affected"}
-db.kv.get(collection: str, key: str)             -> value
+db.kv.get(collection: str, key: str)             -> value | None
 db.kv.exists(collection: str, key: str)          -> {"exists"}
-db.kv.delete(collection: str, key: str)          -> {"affected"}
+db.kv.delete(collection: str, key: str)          -> {"affected", "deleted"}
 db.kv.list(collection: str, *, prefix, limit)    -> {"items"}
+db.queues.create(name: str)                      -> {"affected"}
+db.queues.push(name: str, payload)               -> {"affected"}
+db.queues.peek(name: str, limit=None)            -> {"items", "affected"}
+db.queues.pop(name: str, limit=None)             -> {"items", "affected"}
+db.queues.len(name: str)                         -> int
+db.queues.purge(name: str)                       -> {"affected", "deleted"}
+db.tx.begin()                                    -> {"affected"}
+db.tx.commit()                                   -> {"affected"}
+db.tx.rollback()                                 -> {"affected"}
+db.tx.run(callback)                              -> callback return value
+db.helper_spec_version                           -> "1.0"
 db.health()                                      -> {"ok": True, "version": str}
 db.version()                                     -> {"version": str, "protocol": "1.0"}
 db.close()                                       -> None
 ```
+
+`db.queue` is a singular alias for `db.queues` (same client). `reddb.helper_spec_version`
+is also exposed at module level for CI assertions.
 
 Row `payload` values must be `None`, `bool`, `int`, `float` or `str`.
 Document and KV helpers accept JSON-compatible nested dicts/lists. Public
@@ -171,28 +195,68 @@ Helper availability:
 | row insert/bulk/get/list/delete | supported | supported except parameterized internals |
 | documents | supported | raises `NOT_SUPPORTED`; use `query()` until remote helper parity lands |
 | kv | supported | raises `NOT_SUPPORTED`; use `query()` until remote helper parity lands |
+| queues | supported | raises `NOT_SUPPORTED`; use `query()` until remote helper parity lands |
+| tx | supported | raises `NOT_SUPPORTED`; use `query()` until remote helper parity lands |
 
 Conformance command:
 
 ```bash
 python -m pytest drivers/python/tests/test_smoke.py drivers/python/tests/test_helpers.py \
-  drivers/python/tests/test_documents_conformance.py
+  drivers/python/tests/test_documents_conformance.py \
+  drivers/python/tests/test_conformance.py
 ```
 
-### SDK Helper Spec — documents.*
+### SDK Helper Spec conformance
 
-`documents.*` is conformant with [`docs/spec/sdk-helpers.md`](../../docs/spec/sdk-helpers.md)
-on the embedded transports (`memory://`, `file://`). Patch is a top-level
-merge (unrelated fields survive). An empty patch raises `INVALID_ARGUMENT`.
-`documents.delete` returns `{"affected", "deleted"}` and NEVER raises on a
-missing rid. Case IDs ported from the Rust harness:
+This driver is conformant with [`docs/spec/sdk-helpers.md`](../../docs/spec/sdk-helpers.md)
+v1.0 on the embedded transports (`memory://`, `file://`). The full §12 case
+list is ported in [`tests/test_conformance.py`](tests/test_conformance.py).
+`db.helper_spec_version` (and the module attribute `reddb.helper_spec_version`)
+returns `"1.0"`.
+
+**Return envelopes.** `insert` → `{affected, rid, id}`; `bulk_insert` →
+`{affected, rids, ids}`; `documents.delete` / `kv.delete` / `queues.purge` →
+`{affected, deleted}`; `exists` → `{exists}`; `list` / `queues.peek` /
+`queues.pop` → `{items, ...}`; `kv.get` returns the value or `None`. Wire field
+names (`rid`, `affected`, `deleted`, `items`) are preserved.
+
+**Transaction support: imperative + callback.** `db.tx.begin/commit/rollback`
+are session-stateful on the connection. `db.tx.run(callback)` commits on a
+clean return and rolls back + re-raises on exception. Nested `tx.run` is
+rejected with `INVALID_ARGUMENT` — issue savepoints via `db.query` directly
+if you need them (spec §7.2).
 
 | Case ID                              | Status     |
 |--------------------------------------|------------|
+| `generic.query.no_params`            | supported  |
+| `generic.query_with.params`          | supported  |
+| `generic.insert.rid`                 | supported  |
+| `generic.bulk_insert.rids`           | supported  |
+| `generic.delete`                     | supported  |
 | `documents.crud_nested_patch`        | supported  |
 | `documents.delete_missing_no_error`  | supported  |
 | `documents.patch_empty_rejects`      | supported  |
+| `kv.exact_key_round_trip`            | supported  |
+| `kv.missing_get_returns_none`        | supported  |
+| `kv.delete_returns_envelope`         | supported  |
+| `queues.fifo_peek_pop_len`           | supported  |
+| `queues.empty_pop_returns_empty`     | supported  |
+| `queues.purge_resets_len`            | supported  |
+| `tx.commit_persists`                 | supported  |
+| `tx.rollback_discards`               | supported  |
+| `errors.invalid_argument.empty_sql`  | supported  |
 | `errors.not_found.document_get`      | supported  |
+| `wire.vectors.sql_round_trip`        | provisional (raw `query()`) |
+| `wire.graph.sql_round_trip`          | provisional (raw `query()`) |
+| `wire.timeseries.sql_round_trip`     | provisional (raw `query()`) |
+| `wire.probabilistic.hll_round_trip`  | provisional (raw `query()`) |
+
+**Out of scope in v1.0** (reachable via raw `db.query` until lifted into
+helpers in v1.x, per spec §8–§11): first-class `vectors.*`, `graph.*`,
+`timeseries.*`, and `probabilistic.*` helpers; queue priority / consumer
+groups / dead-letter routing (§6); `kv.expire` TTL helper and gRPC
+`kv.watch` (§5); isolation-level argument and cross-shard transactions (§7).
+Helpers are embedded-only today; over `grpc://` they raise `NOT_SUPPORTED`.
 
 ### Low-level (advanced)
 
@@ -223,6 +287,9 @@ The high-level API raises `ValueError` with a message of the form
 | `INVALID_URI`         | URI malformed                                              |
 | `UNSUPPORTED_SCHEME`  | Scheme not recognized                                      |
 | `INVALID_PARAMS`      | A method argument has the wrong type                       |
+| `INVALID_ARGUMENT`    | Helper input is malformed (empty SQL, empty patch, …)      |
+| `NOT_FOUND`           | A required item, rid, or document is absent                |
+| `NOT_SUPPORTED`       | Helper not available on this transport (e.g. `grpc://`)    |
 | `QUERY_ERROR`         | SQL parse or execution failure                             |
 | `IO_ERROR`            | Disk / file backend failure                                |
 | `FEATURE_DISABLED`    | Caller hit a path gated behind a Cargo feature             |

@@ -55,7 +55,7 @@ def test_documents_delete_missing_no_error():
         ins = db.documents.insert("conf_events_missing", {"k": "v"})
         db.documents.delete("conf_events_missing", str(ins["rid"]))
         # Deleting an absent rid MUST NOT raise; affected = 0.
-        r = db.documents.delete("conf_events_missing", "rid_that_does_not_exist")
+        r = db.documents.delete("conf_events_missing", "999999999")
         assert r["affected"] == 0
         assert r["deleted"] is False
 
@@ -80,7 +80,7 @@ def test_errors_not_found_document_get():
         ins = db.documents.insert("conf_errors_nf", {"k": "v"})
         db.documents.delete("conf_errors_nf", str(ins["rid"]))
         try:
-            db.documents.get("conf_errors_nf", "rid_definitely_missing")
+            db.documents.get("conf_errors_nf", "999999999")
         except ValueError as exc:
             assert "NOT_FOUND" in str(exc), f"expected NOT_FOUND, got {exc}"
         else:
