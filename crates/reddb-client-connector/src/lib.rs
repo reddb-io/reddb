@@ -30,6 +30,9 @@ pub struct QueryResponse {
     pub engine: String,
     pub columns: Vec<String>,
     pub record_count: u64,
+    /// Rows changed by a DML statement (INSERT / UPDATE / DELETE). 0 for
+    /// reads. Distinct from `record_count` (rows returned).
+    pub affected_rows: u64,
     pub result_json: String,
 }
 
@@ -139,6 +142,7 @@ impl RedDBClient {
             engine: reply.engine,
             columns: reply.columns,
             record_count: reply.record_count,
+            affected_rows: reply.affected_rows,
             result_json: reply.result_json,
         })
     }

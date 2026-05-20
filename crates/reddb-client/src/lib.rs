@@ -176,6 +176,15 @@ impl Reddb {
     }
 
     pub async fn query(&self, sql: &str) -> Result<QueryResult> {
+        // Spec §3.1: empty SQL is a caller bug; reject locally before the
+        // request is sent so every transport (embedded, gRPC, HTTP) maps it to
+        // the same `INVALID_ARGUMENT` code.
+        if sql.trim().is_empty() {
+            return Err(ClientError::new(
+                ErrorCode::InvalidArgument,
+                "query SQL must not be empty",
+            ));
+        }
         match self {
             #[cfg(feature = "embedded")]
             Reddb::Embedded(c) => c.query(sql),
@@ -925,4 +934,22 @@ fn value_as_u64(value: &ValueOut) -> Option<u64> {
 /// Crate version (matches the engine version when published in lockstep).
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+/// SDK Helper Spec version this driver conforms to.
+///
+/// Spec §14 asks every official driver to expose a `helper_spec_version`
+/// constant so cross-driver CI dashboards can assert all drivers track the
+/// same contract. Rust is the reference implementation: `reddb-io-client`
+/// ≥ 1.2.0 satisfies Helper Spec v1.0 (`docs/spec/sdk-helpers.md`).
+pub const HELPER_SPEC_VERSION: &str = "1.0";
+
+#[cfg(test)]
+mod helper_spec_tests {
+    use super::HELPER_SPEC_VERSION;
+
+    #[test]
+    fn helper_spec_version_is_pinned() {
+        assert_eq!(HELPER_SPEC_VERSION, "1.0");
+    }
 }

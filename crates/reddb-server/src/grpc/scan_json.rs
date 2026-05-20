@@ -35,6 +35,7 @@ pub(crate) fn query_reply(
         statement,
         engine,
         result,
+        affected_rows,
         ..
     } = result;
 
@@ -70,6 +71,7 @@ pub(crate) fn query_reply(
             columns: result.columns,
             record_count: 1,
             result_json: ask_json.to_string_compact(),
+            affected_rows,
         };
     }
 
@@ -84,6 +86,7 @@ pub(crate) fn query_reply(
             columns: result.columns,
             record_count: count,
             result_json: pre_serialized_json,
+            affected_rows,
         };
     }
 
@@ -105,6 +108,7 @@ pub(crate) fn query_reply(
             entity_types,
             capabilities,
         ),
+        affected_rows,
     }
 }
 

@@ -309,6 +309,11 @@ message QueryReply {
   repeated string columns = 5;
   uint64 record_count = 6;
   string result_json = 7;
+  // Affected-row count for DML (INSERT / UPDATE / DELETE). `record_count`
+  // reports rows *returned*; this reports rows *changed* so clients can
+  // honour the spec's DeleteResult/QueryResult `affected` field over the
+  // wire. Field 8, default 0 — backward compatible with pre-1.2 clients.
+  uint64 affected_rows = 8;
 }
 
 message AskRequest {
