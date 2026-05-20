@@ -61,3 +61,17 @@ Full reference: [Connection Strings](./connection-strings.md).
 Issues for any driver belong in the central tracker:
 [github.com/reddb-io/reddb/issues](https://github.com/reddb-io/reddb/issues) — tag with `driver:<lang>`.
 Include the driver version, the connection string (redacted), the failing operation, and a `red doctor --json` snapshot from the server.
+
+<!-- contract-matrix:begin -->
+## Public-surface support
+
+> Generated from [`docs/conformance/public-surface-contract-matrix.json`](/docs/conformance/public-surface-contract-matrix.json) by `scripts/gen-docs-from-matrix.mjs`. Do not edit between the markers by hand — run `node scripts/gen-docs-from-matrix.mjs --write`. The matrix is the source of truth; this block can never claim more than it, and CI (`docs-matrix`) fails on drift.
+>
+> The public promises this document makes, and the status of each surface.
+
+| Promise | sql | http | redwire | grpc | driver_helpers |
+| --- | --- | --- | --- | --- | --- |
+| **PSC-013** — Official drivers implement the SDK Helper Spec v1.0 conformance suite (all 22 §12 case IDs). | ❌ unsupported | ❌ unsupported | ❌ unsupported | ✅ supported | ✅ supported |
+
+_Status legend: ✅ supported · ⚠️ partial (known gaps) · ❌ unsupported._
+<!-- contract-matrix:end -->

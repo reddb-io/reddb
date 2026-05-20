@@ -186,3 +186,18 @@ flowchart LR
     E --> G
     F --> G
 ```
+
+<!-- contract-matrix:begin -->
+## Public-surface support
+
+> Generated from [`docs/conformance/public-surface-contract-matrix.json`](/docs/conformance/public-surface-contract-matrix.json) by `scripts/gen-docs-from-matrix.mjs`. Do not edit between the markers by hand — run `node scripts/gen-docs-from-matrix.mjs --write`. The matrix is the source of truth; this block can never claim more than it, and CI (`docs-matrix`) fails on drift.
+>
+> The public promises this document makes, and the status of each surface.
+
+| Promise | sql | http | redwire | grpc | driver_helpers |
+| --- | --- | --- | --- | --- | --- |
+| **PSC-002** — MATCH supports node, edge, label, property, and LIMIT projections. | ✅ supported | ✅ supported | ⚠️ partial | ⚠️ partial | ✅ supported |
+| **PSC-003** — GRAPH algorithms accept semantic identifiers, limits, ordering, and return stable rich rows. | ✅ supported | ✅ supported | ❌ unsupported | ❌ unsupported | ❌ unsupported |
+
+_Status legend: ✅ supported · ⚠️ partial (known gaps) · ❌ unsupported._
+<!-- contract-matrix:end -->

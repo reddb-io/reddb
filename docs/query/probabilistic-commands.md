@@ -96,3 +96,17 @@ FILTER CHECK sessions 'sess_abc123'
 
 - [Probabilistic Structures](/data-models/probabilistic.md) -- Detailed guide with accuracy tables
 - [Search Commands](/query/search-commands.md) -- Vector and text search
+
+<!-- contract-matrix:begin -->
+## Public-surface support
+
+> Generated from [`docs/conformance/public-surface-contract-matrix.json`](/docs/conformance/public-surface-contract-matrix.json) by `scripts/gen-docs-from-matrix.mjs`. Do not edit between the markers by hand — run `node scripts/gen-docs-from-matrix.mjs --write`. The matrix is the source of truth; this block can never claim more than it, and CI (`docs-matrix`) fails on drift.
+>
+> The public promises this document makes, and the status of each surface.
+
+| Promise | sql | http | redwire | grpc | driver_helpers |
+| --- | --- | --- | --- | --- | --- |
+| **PSC-005** — HLL/SKETCH/FILTER expose write and read commands for cardinality, frequency, and membership. | ⚠️ partial | ❌ unsupported | ❌ unsupported | ❌ unsupported | ⚠️ partial |
+
+_Status legend: ✅ supported · ⚠️ partial (known gaps) · ❌ unsupported._
+<!-- contract-matrix:end -->

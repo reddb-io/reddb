@@ -504,3 +504,19 @@ Driver minimum versions:
 - Rust `reddb-io-client` ≥ 1.2.0 satisfies v1.0.
 - Other-language drivers add a `helper_spec_version = "1.0"` constant on
   their client object and assert against it in CI.
+
+<!-- contract-matrix:begin -->
+## Public-surface support
+
+> Generated from [`docs/conformance/public-surface-contract-matrix.json`](/docs/conformance/public-surface-contract-matrix.json) by `scripts/gen-docs-from-matrix.mjs`. Do not edit between the markers by hand — run `node scripts/gen-docs-from-matrix.mjs --write`. The matrix is the source of truth; this block can never claim more than it, and CI (`docs-matrix`) fails on drift.
+>
+> The public promises this document makes, and the status of each surface.
+
+| Promise | sql | http | redwire | grpc | driver_helpers |
+| --- | --- | --- | --- | --- | --- |
+| **PSC-008** — KV helpers expose get/put/delete; get of a missing key returns null, delete reports affected. | ✅ supported | ❌ unsupported | ❌ unsupported | ✅ supported | ✅ supported |
+| **PSC-009** — Queue helpers expose create/push/peek/pop/len/purge with FIFO semantics; empty pop is not an error. | ✅ supported | ❌ unsupported | ❌ unsupported | ❌ unsupported | ✅ supported |
+| **PSC-010** — Transactions are imperative (begin/commit/rollback) plus a run(callback) form; empty SQL rejects with INVALID_ARGUMENT. | ✅ supported | ❌ unsupported | ❌ unsupported | ✅ supported | ✅ supported |
+
+_Status legend: ✅ supported · ⚠️ partial (known gaps) · ❌ unsupported._
+<!-- contract-matrix:end -->
