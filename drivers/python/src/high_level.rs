@@ -21,6 +21,11 @@ use reddb::storage::cache::blob::CachePresence;
 
 use reddb::client::RedDBClient;
 
+/// SDK Helper Spec revision this driver satisfies (spec §14). Exposed both
+/// as the module attribute `reddb.helper_spec_version` and the property
+/// `RedDb.helper_spec_version` so cross-driver CI dashboards can assert it.
+pub const HELPER_SPEC_VERSION: &str = "1.0";
+
 // -----------------------------------------------------------------------
 // Error type
 // -----------------------------------------------------------------------
@@ -93,6 +98,10 @@ impl RedDb {
         params: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyDict>> {
         self.ensure_open()?;
+
+        if sql.trim().is_empty() {
+            return Err(err("INVALID_ARGUMENT", "query SQL must be a non-empty string"));
+        }
 
         let binds = collect_params(args, params)?;
 
@@ -448,6 +457,54 @@ impl RedDb {
         }
     }
 
+    /// Rich queue helpers (`queues.*` in the SDK Helper Spec).
+    #[getter]
+    fn queues(&self) -> PyResult<QueueClient> {
+        self.ensure_open()?;
+        match &self.backend {
+            #[cfg(feature = "embedded")]
+            Backend::Embedded(rt) => Ok(QueueClient {
+                backend: HelperBackend::Embedded(rt.clone()),
+            }),
+            Backend::Grpc(_) => Ok(QueueClient {
+                backend: HelperBackend::Unsupported("queue helpers are not available over grpc:// yet; use query() or memory:// / file://"),
+            }),
+        }
+    }
+
+    /// Alias for `queues` — the spec namespace is plural (`queues.*`) but the
+    /// singular reads naturally for a single handle. Both return the same client.
+    #[getter]
+    fn queue(&self) -> PyResult<QueueClient> {
+        self.queues()
+    }
+
+    /// Transaction helpers (`tx.*` in the SDK Helper Spec). Imperative
+    /// `begin`/`commit`/`rollback` plus a `run(callback)` convenience.
+    #[getter]
+    fn tx(&self) -> PyResult<TxClient> {
+        self.ensure_open()?;
+        match &self.backend {
+            #[cfg(feature = "embedded")]
+            Backend::Embedded(rt) => Ok(TxClient {
+                backend: HelperBackend::Embedded(rt.clone()),
+                open: std::sync::atomic::AtomicBool::new(false),
+                in_run: std::sync::atomic::AtomicBool::new(false),
+            }),
+            Backend::Grpc(_) => Ok(TxClient {
+                backend: HelperBackend::Unsupported("transaction helpers are not available over grpc:// yet; use query() or memory:// / file://"),
+                open: std::sync::atomic::AtomicBool::new(false),
+                in_run: std::sync::atomic::AtomicBool::new(false),
+            }),
+        }
+    }
+
+    /// The SDK Helper Spec revision this driver satisfies (spec §14).
+    #[getter]
+    fn helper_spec_version(&self) -> &'static str {
+        HELPER_SPEC_VERSION
+    }
+
     fn close(&mut self) -> PyResult<()> {
         if self.closed {
             return Ok(());
@@ -668,6 +725,8 @@ impl KvClient {
         Ok(out)
     }
 
+    /// Fetch a value by exact key. Returns the value, or `None` when the key
+    /// is absent — a missing key is NOT an error (spec §5.2).
     fn get<'py>(
         &self,
         py: Python<'py>,
@@ -679,13 +738,10 @@ impl KvClient {
         let qr = rt
             .query(&format!("KV GET {path}"))
             .map_err(|e| err("QUERY_ERROR", e))?;
-        let row = qr
-            .rows
-            .first()
-            .ok_or_else(|| err("NOT_FOUND", format!("key {key} was not found")))?;
-        if !kv_row_exists(row) {
-            return Err(err("NOT_FOUND", format!("key {key} was not found")));
-        }
+        let row = match qr.rows.first() {
+            Some(row) if kv_row_exists(row) => row,
+            _ => return Ok(py.None().into_bound(py)),
+        };
         let value = row
             .iter()
             .find_map(|(name, value)| (name == "value").then_some(value))
@@ -722,6 +778,7 @@ impl KvClient {
             .map_err(|e| err("QUERY_ERROR", e))?;
         let out = PyDict::new(py);
         out.set_item("affected", qr.affected)?;
+        out.set_item("deleted", qr.affected > 0)?;
         Ok(out)
     }
 
@@ -767,6 +824,227 @@ impl KvClient {
 }
 
 impl KvClient {
+    #[cfg(feature = "embedded")]
+    fn embedded(&self) -> PyResult<&EmbeddedRuntime> {
+        match &self.backend {
+            HelperBackend::Embedded(rt) => Ok(rt),
+            HelperBackend::Unsupported(message) => Err(err("NOT_SUPPORTED", *message)),
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// QueueClient — `queues.*` (SDK Helper Spec §6)
+// -----------------------------------------------------------------------
+
+#[pyclass]
+pub struct QueueClient {
+    backend: HelperBackend,
+}
+
+#[pymethods]
+impl QueueClient {
+    /// Create the queue if it does not exist (idempotent).
+    fn create<'py>(&self, py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyDict>> {
+        let rt = self.embedded()?;
+        let queue = sql_identifier(name)?;
+        let qr = rt
+            .query(&format!("CREATE QUEUE IF NOT EXISTS {queue}"))
+            .map_err(|e| err("QUERY_ERROR", e))?;
+        let out = PyDict::new(py);
+        out.set_item("affected", qr.affected)?;
+        Ok(out)
+    }
+
+    /// Enqueue one payload. Returns `{"affected": 1}`.
+    fn push<'py>(
+        &self,
+        py: Python<'py>,
+        name: &str,
+        payload: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let rt = self.embedded()?;
+        let queue = sql_identifier(name)?;
+        let value = sql_value_literal(py, payload)?;
+        let qr = rt
+            .query(&format!("QUEUE PUSH {queue} {value}"))
+            .map_err(|e| err("QUERY_ERROR", e))?;
+        let out = PyDict::new(py);
+        out.set_item("affected", if qr.affected == 0 { 1 } else { qr.affected })?;
+        Ok(out)
+    }
+
+    /// Return up to `limit` payloads without removing them. Does NOT
+    /// decrement the queue length.
+    #[pyo3(signature = (name, limit=None))]
+    fn peek<'py>(
+        &self,
+        py: Python<'py>,
+        name: &str,
+        limit: Option<usize>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        self.fetch(py, "PEEK", name, limit)
+    }
+
+    /// Remove and return the next payload. An empty queue returns an empty
+    /// `items` list — NOT an error (spec §6.4).
+    #[pyo3(signature = (name, limit=None))]
+    fn pop<'py>(
+        &self,
+        py: Python<'py>,
+        name: &str,
+        limit: Option<usize>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        self.fetch(py, "POP", name, limit)
+    }
+
+    /// Return the queue length.
+    fn len(&self, name: &str) -> PyResult<u64> {
+        let rt = self.embedded()?;
+        let queue = sql_identifier(name)?;
+        let qr = rt
+            .query(&format!("QUEUE LEN {queue}"))
+            .map_err(|e| err("QUERY_ERROR", e))?;
+        let row = match qr.rows.first() {
+            Some(row) => row,
+            None => return Ok(0),
+        };
+        let value = row
+            .iter()
+            .find_map(|(name, value)| (name == "len").then_some(value))
+            .ok_or_else(|| err("INVALID_RESPONSE", "QUEUE LEN expected len column"))?;
+        Ok(match value {
+            ScalarOut::Int(n) => (*n).max(0) as u64,
+            ScalarOut::Float(n) => n.max(0.0) as u64,
+            _ => 0,
+        })
+    }
+
+    /// Remove every item in the queue. Returns `{"affected", "deleted"}`.
+    fn purge<'py>(&self, py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyDict>> {
+        let rt = self.embedded()?;
+        let queue = sql_identifier(name)?;
+        let qr = rt
+            .query(&format!("QUEUE PURGE {queue}"))
+            .map_err(|e| err("QUERY_ERROR", e))?;
+        let out = PyDict::new(py);
+        out.set_item("affected", qr.affected)?;
+        out.set_item("deleted", qr.affected > 0)?;
+        Ok(out)
+    }
+}
+
+impl QueueClient {
+    #[cfg(feature = "embedded")]
+    fn embedded(&self) -> PyResult<&EmbeddedRuntime> {
+        match &self.backend {
+            HelperBackend::Embedded(rt) => Ok(rt),
+            HelperBackend::Unsupported(message) => Err(err("NOT_SUPPORTED", *message)),
+        }
+    }
+
+    fn fetch<'py>(
+        &self,
+        py: Python<'py>,
+        verb: &str,
+        name: &str,
+        limit: Option<usize>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let rt = self.embedded()?;
+        let queue = sql_identifier(name)?;
+        let suffix = match limit {
+            Some(0) => return Err(err("INVALID_ARGUMENT", "queue limit must be positive")),
+            Some(n) => format!(" {n}"),
+            None => String::new(),
+        };
+        let qr = rt
+            .query(&format!("QUEUE {verb} {queue}{suffix}"))
+            .map_err(|e| err("QUERY_ERROR", e))?;
+        let out = PyDict::new(py);
+        out.set_item("items", rows_to_pylist(py, &qr.rows)?)?;
+        out.set_item("affected", qr.affected)?;
+        Ok(out)
+    }
+}
+
+// -----------------------------------------------------------------------
+// TxClient — `tx.*` (SDK Helper Spec §7)
+// -----------------------------------------------------------------------
+
+#[pyclass]
+pub struct TxClient {
+    backend: HelperBackend,
+    open: std::sync::atomic::AtomicBool,
+    in_run: std::sync::atomic::AtomicBool,
+}
+
+#[pymethods]
+impl TxClient {
+    /// Open a transaction.
+    fn begin<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let out = self.exec(py, "BEGIN")?;
+        self.open.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(out)
+    }
+
+    /// Commit the open transaction.
+    fn commit<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let out = self.exec(py, "COMMIT")?;
+        self.open.store(false, std::sync::atomic::Ordering::SeqCst);
+        Ok(out)
+    }
+
+    /// Roll back the open transaction.
+    fn rollback<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let out = self.exec(py, "ROLLBACK")?;
+        self.open.store(false, std::sync::atomic::Ordering::SeqCst);
+        Ok(out)
+    }
+
+    /// Run `callback` inside a transaction. The callback receives this
+    /// `TxClient`; a clean return commits, a raised exception rolls back and
+    /// re-raises. Nested `run` is rejected with `INVALID_ARGUMENT` — issue
+    /// savepoints via `query` directly if you need them (spec §7.2).
+    fn run<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        callback: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if slf.borrow().in_run.swap(true, SeqCst) {
+            return Err(err("INVALID_ARGUMENT", "nested tx.run is not supported"));
+        }
+        let result: PyResult<Bound<'py, PyAny>> = (|| {
+            slf.borrow().begin(py)?;
+            let value = callback.call1((slf.clone(),))?;
+            slf.borrow().commit(py)?;
+            Ok(value)
+        })();
+        let out = match result {
+            Ok(value) => Ok(value),
+            Err(e) => {
+                let this = slf.borrow();
+                if this.open.load(SeqCst) {
+                    // Preserve the original error even if rollback fails.
+                    let _ = this.rollback(py);
+                }
+                Err(e)
+            }
+        };
+        slf.borrow().in_run.store(false, SeqCst);
+        out
+    }
+}
+
+impl TxClient {
+    fn exec<'py>(&self, py: Python<'py>, sql: &str) -> PyResult<Bound<'py, PyDict>> {
+        let rt = self.embedded()?;
+        let qr = rt.query(sql).map_err(|e| err("QUERY_ERROR", e))?;
+        let out = PyDict::new(py);
+        out.set_item("affected", qr.affected)?;
+        Ok(out)
+    }
+
     #[cfg(feature = "embedded")]
     fn embedded(&self) -> PyResult<&EmbeddedRuntime> {
         match &self.backend {
