@@ -87,9 +87,11 @@ For the SQL/RQL grammar that `db.query()` accepts, see
 
 ## Transactions
 
-Use `db.transaction()` when a group of writes must commit or roll back together.
-The callback receives a transaction handle with the same `query`, `insert`, and
-`bulkInsert` methods as `db`.
+This driver supports **both** transaction forms from the SDK Helper Spec
+(§7): the imperative `begin` / `commit` / `rollback` trio and the callback
+form.
+
+**Callback form** — `db.transaction(callback)` (or `db.tx().run(callback)`):
 
 ```js
 const userId = await db.transaction(async (tx) => {
@@ -100,9 +102,28 @@ const userId = await db.transaction(async (tx) => {
 ```
 
 The wrapper sends `BEGIN`, commits when the callback resolves, and rolls back
-when the callback or a `tx.query()` / `tx.insert()` call throws. Nested
-transactions on the same connection are rejected with `NESTED_TX_NOT_SUPPORTED`;
-open another `connect()` handle for independent concurrent transactions.
+when the callback or a `tx.query()` / `tx.insert()` call throws.
+
+**Imperative form** — `db.tx()` returns a transaction handle:
+
+```js
+const tx = db.tx()
+await tx.begin()
+try {
+  await db.query("INSERT INTO audit (action) VALUES ('created user')")
+  await tx.commit()
+} catch (err) {
+  await tx.rollback()
+  throw err
+}
+```
+
+`begin` / `commit` / `rollback` each resolve to a `QueryResult`. A nested
+`tx.run()` (or `db.transaction()`) on the same connection is rejected with
+`INVALID_ARGUMENT` (`NESTED_TX_NOT_SUPPORTED` for the legacy
+`db.transaction()` shortcut) — callers wanting savepoints issue them
+directly via `tx.query()`. Open another `connect()` handle for independent
+concurrent transactions.
 
 ## Connection URIs
 
@@ -206,23 +227,6 @@ top-level merge: unrelated fields survive. An empty patch raises
 `INVALID_ARGUMENT`. `documents.delete` returns `{ affected, deleted }` and
 NEVER raises on a missing rid (returns `{ affected: 0, deleted: false }`).
 
-**SDK Helper Spec conformance (documents.*):** supported per
-[`docs/spec/sdk-helpers.md`](../../docs/spec/sdk-helpers.md). Case IDs ported:
-
-| Case ID                              | Status     |
-|--------------------------------------|------------|
-| `documents.crud_nested_patch`        | supported  |
-| `documents.delete_missing_no_error`  | supported  |
-| `documents.patch_empty_rejects`      | supported  |
-| `errors.not_found.document_get`      | supported  |
-
-Run the conformance harness against a locally built binary:
-
-```sh
-cargo build                              # produces target/debug/red
-node drivers/js/test/documents-conformance.test.mjs
-```
-
 ### `db.kv(collection?)`
 
 KV helpers preserve exact keys, including namespaced keys with `:`.
@@ -231,25 +235,103 @@ KV helpers preserve exact keys, including namespaced keys with `:`.
 await db.query('CREATE KV settings')
 const kv = db.kv('settings')
 
-await kv.put('characters:hansel', 'crumbs')
-await kv.get('characters:hansel')        // 'crumbs'
+await kv.set('characters:hansel', 'crumbs')  // `put` is a back-compat alias
+await kv.get('characters:hansel')        // 'crumbs'   (null when missing)
 await kv.exists('characters:hansel')     // { exists: true }
 await kv.list({ prefix: 'characters:' }) // { items: [{ key, value }] }
-await kv.delete('characters:hansel')     // { affected }
+await kv.delete('characters:hansel')     // { affected, deleted }
 ```
 
-### `db.queue`
+A `kv.get` of a missing key returns `null` (never `NOT_FOUND`). `kv.delete`
+returns the `{ affected, deleted }` envelope; deleting a missing key is not an
+error and returns `{ affected: 0, deleted: false }`.
 
-Queue helpers cover the embedded FIFO workflow:
+### `db.queues` (alias `db.queue`)
+
+Queue helpers cover the embedded FIFO workflow. The spec-canonical namespace
+is the plural `db.queues`; `db.queue` remains as an alias.
 
 ```js
-await db.query('CREATE QUEUE jobs')
-await db.queue.push('jobs', { task: 'ship' })
-await db.queue.peek('jobs')
-await db.queue.pop('jobs')
-await db.queue.len('jobs')
-await db.queue.purge('jobs')
+await db.queues.create('jobs')           // CREATE QUEUE IF NOT EXISTS (idempotent)
+await db.queues.push('jobs', { task: 'ship' })
+await db.queues.peek('jobs')             // does NOT decrement length
+await db.queues.pop('jobs')              // empty queue → [] (never NOT_FOUND)
+await db.queues.len('jobs')
+await db.queues.purge('jobs')
 ```
+
+## SDK Helper Spec conformance
+
+This driver implements **SDK Helper Spec v1.0**
+([`docs/spec/sdk-helpers.md`](../../docs/spec/sdk-helpers.md)). The version is
+exposed for cross-driver CI dashboards:
+
+```js
+import { HELPER_SPEC_VERSION } from '@reddb-io/sdk'
+HELPER_SPEC_VERSION   // '1.0'
+db.helperSpecVersion  // '1.0'
+```
+
+**Return envelopes** (wire field names preserved when serialised to JSON):
+
+| Envelope            | Fields                                            |
+|---------------------|---------------------------------------------------|
+| `QueryResult`       | `statement`, `affected`, `columns`, `rows`        |
+| `InsertResult`      | `affected` (1), `rid` (`id` legacy alias)         |
+| `BulkInsertResult`  | `affected`, `rids` in input order (`ids` alias)   |
+| `DeleteResult`      | `affected`, `deleted` (= `affected > 0`)          |
+| `ExistsResult`      | `exists`                                          |
+
+**Transaction support:** imperative (`db.tx().begin/commit/rollback`) **and**
+callback (`db.transaction(cb)` / `db.tx().run(cb)`). Nested callbacks reject
+with `INVALID_ARGUMENT`.
+
+**Case matrix** (spec §12 — ported verbatim in
+`test/conformance.test.mjs`):
+
+| Case ID                              | Status      |
+|--------------------------------------|-------------|
+| `meta.spec_version`                  | supported   |
+| `generic.query.no_params`            | supported   |
+| `generic.query_with.params`          | supported   |
+| `generic.insert.rid`                 | supported   |
+| `generic.bulk_insert.rids`           | supported   |
+| `generic.delete`                     | supported   |
+| `documents.crud_nested_patch`        | supported   |
+| `documents.delete_missing_no_error`  | supported   |
+| `documents.patch_empty_rejects`      | supported   |
+| `kv.exact_key_round_trip`            | supported   |
+| `kv.missing_get_returns_none`        | supported   |
+| `kv.delete_returns_envelope`         | supported   |
+| `queues.fifo_peek_pop_len`           | supported   |
+| `queues.empty_pop_returns_empty`     | supported   |
+| `queues.purge_resets_len`            | supported   |
+| `tx.commit_persists`                 | supported   |
+| `tx.rollback_discards`               | supported   |
+| `errors.invalid_argument.empty_sql`  | supported   |
+| `errors.not_found.document_get`      | supported   |
+| `wire.probabilistic.hll_round_trip`  | provisional (SQL via `db.query`) |
+| `wire.vectors.sql_round_trip`        | reachable via `db.query` (no v1.0 case) |
+| `wire.graph.sql_round_trip`          | reachable via `db.query` (no v1.0 case) |
+| `wire.timeseries.sql_round_trip`     | reachable via `db.query` (no v1.0 case) |
+
+**Out-of-scope in v1.0** (reach via raw `db.query` until v1.1, per spec):
+first-class `vectors.*`, `graph.*`, `timeseries.*`, and `probabilistic.*`
+helpers; KV TTL (`kv.expire`) and gRPC watch; priority queues, consumer
+groups, dead-letter routing; transaction isolation-level arguments and
+cross-shard transactions; JSON Patch / nested / array-positional document
+patches (top-level merge only).
+
+Run the conformance harness against a locally built binary:
+
+```sh
+cargo build                                   # produces target/debug/red
+node drivers/js/test/conformance.test.mjs
+# or: REDDB_BINARY_PATH=/path/to/red node drivers/js/test/conformance.test.mjs
+```
+
+The harness (and the README-examples test) self-skip with exit 0 when no
+binary is present, so `pnpm test` stays green on machines without a build.
 
 ### `db.health() → Promise<{ ok, version }>`
 

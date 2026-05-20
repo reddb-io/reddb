@@ -17,6 +17,11 @@ export class KvClient {
     })
   }
 
+  // Spec-canonical alias for `put` (SDK Helper Spec §5.1 `kv.set`).
+  set(key, value, options = {}) {
+    return this.put(key, value, options)
+  }
+
   async get(key, options = {}) {
     const collection = options.collection ?? this.collection
     const result = await this.client.call('query', {
@@ -40,7 +45,9 @@ export class KvClient {
     const result = await this.client.call('query', {
       sql: `KV DELETE ${kvPath(collection, key)}`,
     })
-    return { affected: result.affected ?? result.affected_rows ?? 0 }
+    const affected = result.affected ?? result.affected_rows ?? 0
+    // Spec §5.4 / §2.4 DeleteResult: `deleted` is `affected > 0`.
+    return { affected, deleted: affected > 0 }
   }
 
   async list(options = {}) {

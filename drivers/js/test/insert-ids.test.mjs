@@ -17,7 +17,8 @@ function fakeDb(handler) {
 
 test('insert returns required id', async () => {
   const { db, calls } = fakeDb(() => ({ affected: 1, id: 42 }))
-  assert.deepEqual(await db.insert('users', { name: 'Ada' }), { affected: 1, id: 42 })
+  // Spec §3.3: InsertResult exposes `rid`. `id` is kept as a legacy alias.
+  assert.deepEqual(await db.insert('users', { name: 'Ada' }), { affected: 1, id: 42, rid: 42 })
   assert.deepEqual(calls[0], {
     method: 'insert',
     params: { collection: 'users', payload: { name: 'Ada' } },
@@ -27,7 +28,8 @@ test('insert returns required id', async () => {
 test('bulkInsert returns ordered ids', async () => {
   const { db } = fakeDb(() => ({ affected: 2, ids: [101, 102] }))
   const result = await db.bulkInsert('users', [{ name: 'Ada' }, { name: 'Grace' }])
-  assert.deepEqual(result, { affected: 2, ids: [101, 102] })
+  // Spec §3.4: BulkInsertResult exposes `rids`. `ids` is a legacy alias.
+  assert.deepEqual(result, { affected: 2, ids: [101, 102], rids: [101, 102] })
 })
 
 test('missing insert ids surface ENGINE_TOO_OLD', async () => {

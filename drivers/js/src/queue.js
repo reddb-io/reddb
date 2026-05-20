@@ -5,6 +5,14 @@ export class QueueClient {
     this.client = client
   }
 
+  // Spec §6.1 `queues.create`: idempotent (CREATE QUEUE IF NOT EXISTS) so
+  // conformance fixtures can prime a queue the same way the Rust/Go harnesses do.
+  create(queue) {
+    return this.client.call('query', {
+      sql: `CREATE QUEUE IF NOT EXISTS ${queueIdentifier(queue)}`,
+    })
+  }
+
   push(queue, value, options = {}) {
     const priority = options.priority != null ? ` PRIORITY ${queuePriority(options.priority)}` : ''
     return this.client.call('query', {

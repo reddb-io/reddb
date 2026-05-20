@@ -105,6 +105,8 @@ export interface GetResult {
 
 export interface DeleteResult {
   affected: number
+  /** `affected > 0`. Present on `documents.delete` / `kv.delete` (spec §2.4). */
+  deleted?: boolean
 }
 
 export interface CollectionMeta {
@@ -233,6 +235,12 @@ export class KvClient {
     value: unknown,
     options?: { collection?: string; expireMs?: number; tags?: string[] },
   ): Promise<QueryResult>
+  /** Spec-canonical alias for `put` (spec §5.1 `kv.set`). */
+  set(
+    key: string,
+    value: unknown,
+    options?: { collection?: string; expireMs?: number; tags?: string[] },
+  ): Promise<QueryResult>
   get(key: string, options?: { collection?: string }): Promise<unknown | null>
   getMany(keys: string[], options?: { collection?: string }): Promise<Array<unknown | null>>
   exists(key: string, options?: { collection?: string }): Promise<{ exists: boolean }>
@@ -279,6 +287,8 @@ export class DocumentClient {
 }
 
 export class QueueClient {
+  /** Idempotent CREATE QUEUE IF NOT EXISTS (spec §6.1). */
+  create(queue: string): Promise<QueryResult>
   push(
     queue: string,
     value: unknown,
@@ -288,6 +298,19 @@ export class QueueClient {
   peek(queue: string, count?: number): Promise<unknown[]>
   len(queue: string): Promise<number>
   purge(queue: string): Promise<QueryResult>
+}
+
+/**
+ * Spec §7 transaction client returned by `db.tx()`. Imperative
+ * `begin`/`commit`/`rollback` each resolve to a `QueryResult`; `run` is the
+ * callback form (commit on success, rollback + re-throw on failure). Nested
+ * `run` rejects with `INVALID_ARGUMENT`.
+ */
+export class TxClient {
+  begin(): Promise<QueryResult>
+  commit(): Promise<QueryResult>
+  rollback(): Promise<QueryResult>
+  run<T>(callback: (tx: RedDBTransaction) => T | Promise<T>): Promise<T>
 }
 
 /**
@@ -349,8 +372,12 @@ export interface RedDBTransaction {
 export class RedDB {
   /** Underlying transport label. connect() returns 'embedded'. */
   readonly transport: string | null
+  /** SDK Helper Spec version this driver implements (spec §14). */
+  readonly helperSpecVersion: string
   readonly cache: CacheClient
   readonly queue: QueueClient
+  /** Spec-canonical plural alias for `queue` (spec §6). */
+  readonly queues: QueueClient
   readonly documents: DocumentClient
   readonly kv: KvClient & ((collection?: string) => KvClient)
   readonly config: (collection?: string) => ConfigClient
@@ -371,6 +398,8 @@ export class RedDB {
   transaction<T>(
     callback: (tx: RedDBTransaction) => T | Promise<T>,
   ): Promise<T>
+  /** Spec §7 transaction handle: imperative begin/commit/rollback + run(). */
+  tx(): TxClient
   exists(collection: string): Promise<boolean>
   list(): Promise<CollectionMeta[]>
   /**
@@ -408,6 +437,9 @@ export class RedDB {
 export function connect(uri: string, options?: ConnectOptions): Promise<RedDB>
 
 export const EMBEDDED_ONLY_MESSAGE: string
+
+/** SDK Helper Spec version implemented by this driver (spec §14). */
+export const HELPER_SPEC_VERSION: string
 
 /**
  * Translate a connection URI + (optional) auth into argv for

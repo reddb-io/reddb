@@ -43,6 +43,13 @@ export { parseUri, deriveLoginUrl } from './url.js'
 export const EMBEDDED_ONLY_MESSAGE =
   'remote URIs are not supported in @reddb-io/sdk; install @reddb-io/client for grpc/http/red transports'
 
+/**
+ * SDK Helper Spec version this driver implements. See
+ * `docs/spec/sdk-helpers.md` §14 — every official driver exposes this so
+ * cross-driver CI dashboards can assert against it.
+ */
+export const HELPER_SPEC_VERSION = '1.0'
+
 const MIN_INSERT_ID_ENGINE_VERSION = '1.0.9'
 const NESTED_TX_NOT_SUPPORTED = 'NESTED_TX_NOT_SUPPORTED'
 
@@ -304,6 +311,92 @@ class TransactionHandle {
   }
 }
 
+/**
+ * Spec §7 transaction client. Returned by `db.tx()`. Exposes the imperative
+ * `begin` / `commit` / `rollback` trio (each resolves to a `QueryResult`) plus
+ * the optional `run(callback)` form. Transaction state is tracked on the parent
+ * `RedDB` so it serialises with `db.transaction()` and nested opens are
+ * rejected rather than silently interleaved.
+ */
+export class TxClient {
+  constructor(db) {
+    this.db = db
+    this.active = false
+  }
+
+  async begin() {
+    if (this.db.inTransaction) {
+      throw nestedTransactionError()
+    }
+    this.db.inTransaction = true
+    this.active = true
+    try {
+      return await this.db.query('BEGIN')
+    } catch (err) {
+      this.db.inTransaction = false
+      this.active = false
+      throw err
+    }
+  }
+
+  async commit() {
+    if (!this.active) {
+      throw new RedDBError('INVALID_ARGUMENT', 'tx.commit() called without an open transaction')
+    }
+    try {
+      return await this.db.query('COMMIT')
+    } finally {
+      this.active = false
+      this.db.inTransaction = false
+    }
+  }
+
+  async rollback() {
+    if (!this.active) {
+      throw new RedDBError('INVALID_ARGUMENT', 'tx.rollback() called without an open transaction')
+    }
+    try {
+      return await this.db.query('ROLLBACK')
+    } finally {
+      this.active = false
+      this.db.inTransaction = false
+    }
+  }
+
+  /**
+   * Callback form: commit on success, roll back and re-throw on failure.
+   * Nested `tx.run` rejects with `INVALID_ARGUMENT` — callers wanting
+   * savepoints issue them directly via `tx.query()` (spec §7.2; the README
+   * records this choice).
+   */
+  async run(callback) {
+    if (typeof callback !== 'function') {
+      throw new TypeError('tx.run(callback) requires a function')
+    }
+    if (this.db.inTransaction) {
+      throw new RedDBError(
+        'INVALID_ARGUMENT',
+        'nested tx.run() is not supported; issue savepoints via tx.query() instead',
+      )
+    }
+    await this.begin()
+    try {
+      const result = await callback(new TransactionHandle(this.db))
+      await this.commit()
+      return result
+    } catch (err) {
+      if (this.active) {
+        try {
+          await this.rollback()
+        } catch (rollbackErr) {
+          attachRollbackError(err, rollbackErr)
+        }
+      }
+      throw err
+    }
+  }
+}
+
 export class RedDB {
   /**
    * @param {RpcClient} client
@@ -315,8 +408,12 @@ export class RedDB {
   constructor(client, opts = {}) {
     this.client = client
     this.transport = opts.transport ?? null
+    this.helperSpecVersion = HELPER_SPEC_VERSION
     this.cache = new CacheClient(client, this.transport)
     this.queue = new QueueClient(client)
+    // Spec §6: the canonical namespace is the plural `queues`. `queue` is kept
+    // as a back-compat alias to the same handle.
+    this.queues = this.queue
     this.documents = new DocumentClient(this)
     const defaultKv = new KvClient(client)
     this.kv = Object.assign((collection = 'kv_default') => new KvClient(client, collection), {
@@ -341,6 +438,13 @@ export class RedDB {
    * Returns `{ statement, affected, columns, rows }`.
    */
   query(sql, ...params) {
+    // Spec §3.1 / §2.5: empty SQL is a caller bug; reject locally before
+    // touching the wire.
+    if (typeof sql !== 'string' || sql.trim().length === 0) {
+      return Promise.reject(
+        new RedDBError('INVALID_ARGUMENT', 'query() requires a non-empty SQL string'),
+      )
+    }
     const wireParams = normalizeQueryParams(params)
     if (wireParams == null) {
       return this.client.call('query', { sql }).then(normalizeResult)
@@ -361,8 +465,21 @@ export class RedDB {
 
   /** Insert many rows in one call. Returns `{ affected, rids, ids }`; `ids` is a legacy alias. */
   async bulkInsert(collection, payloads) {
+    // Spec §3.4: empty payloads is a no-op returning `{ affected: 0, rids: [] }`.
+    if (Array.isArray(payloads) && payloads.length === 0) {
+      return { affected: 0, rids: [], ids: [] }
+    }
     const result = await this.client.call('bulk_insert', { collection, payloads })
     return requireInsertIds(result, payloads.length)
+  }
+
+  /**
+   * Spec §7 transaction handle. `db.tx()` returns a {@link TxClient} exposing
+   * imperative `begin` / `commit` / `rollback` plus a `run(callback)` form.
+   * `db.transaction(callback)` remains as the original callback-only shortcut.
+   */
+  tx() {
+    return new TxClient(this)
   }
 
   async transaction(callback) {
