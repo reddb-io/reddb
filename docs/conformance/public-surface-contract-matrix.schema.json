@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://reddb.io/schema/public-surface-contract-matrix.json",
+  "title": "Public Surface Contract Matrix",
+  "type": "object",
+  "required": ["version", "surfaces", "statuses", "promises"],
+  "additionalProperties": true,
+  "properties": {
+    "version": { "type": "string" },
+    "surfaces": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "type": "string" }
+    },
+    "statuses": {
+      "type": "object",
+      "required": ["supported", "partial", "unsupported"],
+      "additionalProperties": { "type": "string" }
+    },
+    "promises": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "source", "promise", "cells"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^PSC-[0-9]{3}$" },
+          "source": { "type": "string" },
+          "promise": { "type": "string" },
+          "cells": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": {
+              "type": "object",
+              "required": ["status"],
+              "additionalProperties": false,
+              "properties": {
+                "status": { "enum": ["supported", "partial", "unsupported"] },
+                "tests": { "type": "array", "items": { "type": "string" } }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

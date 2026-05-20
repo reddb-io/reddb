@@ -1,5 +1,20 @@
 # Public Surface Contract Matrix
 
+> **Machine-readable source of truth:**
+> [`public-surface-contract-matrix.json`](./public-surface-contract-matrix.json)
+> (schema: [`public-surface-contract-matrix.schema.json`](./public-surface-contract-matrix.schema.json)).
+> Every promise is a row; every public surface (`sql`, `http`, `redwire`,
+> `grpc`, `driver_helpers`) is a column. A cell marked `supported` or `partial`
+> **must** name at least one automated test that exists on disk. The release
+> gate [`scripts/verify-contract-matrix.mjs`](../../scripts/verify-contract-matrix.mjs)
+> enforces this and **blocks the release** otherwise (wired into both
+> `.github/workflows/ci.yml` and the `plan` job of `.github/workflows/release.yml`).
+> Run it locally with `node scripts/verify-contract-matrix.mjs`.
+>
+> The prose tables below are the human-facing ledger and feedback-coverage map;
+> when they disagree with the JSON, **the JSON wins** because it is the gated
+> artifact.
+
 This matrix is the release-quality ledger for public RedDB promises that were
 visible in README/docs/drivers/examples or proven by the Grimms feedback files.
 It is intentionally conservative: a row is only `passing` when there is named
@@ -152,3 +167,54 @@ minimum acceptable proof is:
   reachable scenarios assert engine behavior directly; transport, SDK,
   and persistence scenarios pin the matrix row so any silent change to
   the disposition breaks the suite.
+
+## Adding a promised feature
+
+When you ship (or document) a new public capability, add it to the matrix in
+the same change so the release gate keeps the promise honest:
+
+1. **Add a row** to `public-surface-contract-matrix.json`. Pick the next free
+   `PSC-NNN` id, set `source` (the README/doc/driver file that makes the
+   promise), and write the `promise` text. Add a `cells` entry for **every**
+   surface listed in `surfaces` — the verifier rejects a row that skips one.
+2. **Set each cell's status honestly:**
+   - `supported` — offered on this surface and backed by automated tests.
+   - `partial` — offered with known gaps; the listed tests pin current
+     behaviour.
+   - `unsupported` — not offered on this surface (no test required).
+3. **Name the backing test(s).** For `supported`/`partial`, `tests` must list
+   at least one path that exists in the repo (Rust integration test, driver
+   conformance test, wire fixture, etc.). The path is relative to the repo
+   root. If you don't have a test yet, write one first — that is the point of
+   the gate; you cannot mark a cell supported on a promise alone.
+4. **Run the gate locally:** `node scripts/verify-contract-matrix.mjs` must
+   exit 0, and `node --test scripts/contract_matrix_contract.test.mjs` must
+   pass. Update the prose tables above if the new promise belongs in the
+   human-facing ledger.
+
+## Removing a promised feature
+
+Removing or relaxing a promise is a release-policy decision (see below):
+
+1. If the capability is being **dropped from a surface**, set that cell to
+   `unsupported` and delete its `tests`. Also remove the promise from the
+   README/doc/driver file named in `source` — the matrix must not promise what
+   the docs no longer claim, and vice versa.
+2. If the **entire promise is retired**, delete the row from the JSON and the
+   corresponding prose rows, and remove the public claim from its `source`.
+3. Re-run `node scripts/verify-contract-matrix.mjs`. Removing coverage never
+   fails the gate, but leaving a `supported` cell with a now-deleted test
+   will — so deletions and matrix edits land in one commit.
+
+## Release-blocking policy and ownership (HITL)
+
+The matrix is a **release-blocking** control. `scripts/verify-contract-matrix.mjs`
+runs in the `contract-matrix` job of `ci.yml` and, critically, in the `plan`
+job of `release.yml`; every `publish-*` job depends on `plan`, so a violation
+stops GitHub, npm, crates.io, Docker, and PyPI publishing.
+
+Because relaxing this gate (downgrading a cell, deleting the step, weakening
+the rule) changes what "released" guarantees, those files are owned by the
+release-policy owner in [`.github/CODEOWNERS`](../../.github/CODEOWNERS)
+(`@filipeforattini`). Changes under `docs/conformance/` and to the verifier
+require that owner's review — the human sign-off this policy depends on.
