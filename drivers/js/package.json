@@ -20,7 +20,7 @@
   ],
   "scripts": {
     "postinstall": "node postinstall.js",
-    "test": "node --test test/ask.test.mjs test/cache.test.mjs test/db-helpers.test.mjs test/embedded-only.test.mjs test/insert-ids.test.mjs test/kv.test.mjs test/params.test.mjs test/postinstall.test.mjs test/queue.test.mjs test/redwire.params.test.mjs test/transaction.test.mjs && node test/smoke.test.mjs"
+    "test": "node --test test/ask.test.mjs test/cache.test.mjs test/db-helpers.test.mjs test/embedded-only.test.mjs test/helpers.test.mjs test/insert-ids.test.mjs test/kv.test.mjs test/params.test.mjs test/postinstall.test.mjs test/queue.test.mjs test/redwire.params.test.mjs test/transaction.test.mjs && node test/smoke.test.mjs && node test/conformance.test.mjs && node test/readme-examples.test.mjs"
   },
   "engines": {
     "node": ">=18"
