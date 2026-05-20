@@ -28,17 +28,89 @@ db.close().await?;
 
 ### Rich helpers
 
-The Rust client exposes the same helper families as the other SDKs while
-keeping the low-level `query` API available. `documents.*` is conformant
-with the [SDK Helper Spec v1.0](../../docs/spec/sdk-helpers.md) — patch is a
-top-level merge, an empty patch returns `INVALID_ARGUMENT`, and
-`documents.delete` of a missing rid returns `{ affected: 0, deleted: false }`
-without raising. Reference cases (`documents.crud_nested_patch`,
-`documents.delete_missing_no_error`, `documents.patch_empty_rejects`,
-`errors.not_found.document_get`) run via:
+The Rust client is the **reference implementation** of the
+[SDK Helper Spec v1.0](../../docs/spec/sdk-helpers.md). The exact spec version
+this driver tracks is exported as a constant (spec §14):
+
+```rust
+assert_eq!(reddb_client::HELPER_SPEC_VERSION, "1.0");
+```
+
+`documents.*`, `kv.*`, `queues.*`, and `tx.*` are first-class; patch is a
+top-level merge, an empty patch returns `INVALID_ARGUMENT`, an empty `query`
+returns `INVALID_ARGUMENT`, and `documents.delete` / `kv.delete` of a missing
+item return `{ affected: 0, deleted: false }` without raising.
+
+**Transaction support:** imperative only — `db.begin()`, `db.commit()`,
+`db.rollback()` (spec §7.1). There is no callback `tx.run` form (§7.2);
+callers wanting savepoints issue them directly via `db.query`.
+
+#### Return envelopes (spec §2.4)
+
+| Envelope            | Fields surfaced                                  |
+|---------------------|--------------------------------------------------|
+| `QueryResult`       | `columns`, `rows`, `affected`                    |
+| `InsertResult`      | `affected` (1), `rid`                            |
+| `BulkInsertResult`  | `affected`, `rids` (input order)                 |
+| `DeleteResult`      | `affected`, `deleted` (`affected > 0`)           |
+| `ExistsResult`      | `exists`                                         |
+| `ListResult`        | `items`, `affected`                              |
+| `DocumentItem`      | `rid`, `fields`                                  |
+| `KvItem`            | `collection`, `key`, `value`                     |
+
+#### Conformance matrix (spec §12)
+
+Every case ID below is wired in `tests/conformance.rs` and runs against
+**both** transports the helper surface targets — embedded (`memory://`,
+always) and a live client (`red://` gRPC, gated):
+
+| Case ID                              | Status |
+|--------------------------------------|--------|
+| `generic.query.no_params`            | ✅ |
+| `generic.query_with.params`          | ✅ |
+| `generic.insert.rid`                 | ✅ |
+| `generic.bulk_insert.rids`           | ✅ |
+| `generic.delete`                     | ✅ |
+| `documents.crud_nested_patch`        | ✅ |
+| `documents.delete_missing_no_error`  | ✅ |
+| `documents.patch_empty_rejects`      | ✅ |
+| `kv.exact_key_round_trip`            | ✅ |
+| `kv.missing_get_returns_none`        | ✅ |
+| `kv.delete_returns_envelope`         | ✅ |
+| `queues.fifo_peek_pop_len`           | ✅ |
+| `queues.empty_pop_returns_empty`     | ✅ |
+| `queues.purge_resets_len`            | ✅ |
+| `tx.commit_persists`                 | ✅ |
+| `tx.rollback_discards`               | ✅ |
+| `errors.invalid_argument.empty_sql`  | ✅ |
+| `errors.not_found.document_get`      | ✅ |
+| `wire.vectors.sql_round_trip`        | ✅ (provisional, SQL-only) |
+| `wire.graph.sql_round_trip`          | ✅ (provisional, SQL-only) |
+| `wire.timeseries.sql_round_trip`     | ✅ (provisional, SQL-only) |
+| `wire.probabilistic.hll_round_trip`  | ✅ (provisional, SQL-only) |
+
+#### Out-of-scope in v1.0 (reach via raw `query` / `query_with`)
+
+- **Vectors / Graph / Time-series / Probabilistic** — no first-class helpers;
+  the wire SQL surface is stable (spec §§8–11). First-class helpers land in
+  v1.1.
+- **`kv.expire` / TTL helper** — reach via `WITH TTL` on the underlying put.
+- **Queue priority / consumer groups / dead-letter** — reach via raw
+  `CREATE QUEUE … PRIORITY` / `QUEUE POP … GROUP`.
+- **Callback `tx.run`, isolation-level `begin`, cross-shard tx** — deferred.
+
+#### Running the conformance harness
 
 ```sh
+# Embedded transport (memory://) — always runs:
 cargo test -p reddb-io-client --test conformance
+
+# Add the live client transport (red:// over gRPC):
+RED_SMOKE=1 RED_BIN=/path/to/red \
+  cargo test -p reddb-io-client --features grpc --test conformance
+
+# Embedded helper tour (runnable example):
+cargo run -p reddb-io-client --example embedded_helpers
 ```
 
 ```rust,no_run
