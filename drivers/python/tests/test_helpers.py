@@ -82,6 +82,77 @@ def test_kv_namespaced_exact_key_round_trip():
         assert db.kv.exists("settings", key) == {"exists": False}
 
 
+def test_kv_get_missing_returns_none_and_delete_envelope():
+    with reddb.connect("memory://") as db:
+        db.kv.set("kvenv", "present", {"v": 1})
+        assert db.kv.get("kvenv", "absent") is None
+        deleted = db.kv.delete("kvenv", "present")
+        assert deleted == {"affected": 1, "deleted": True}
+        missing = db.kv.delete("kvenv", "absent")
+        assert missing["deleted"] is False
+
+
+def test_queues_fifo_round_trip():
+    with reddb.connect("memory://") as db:
+        db.queues.create("jobs")
+        db.queues.push("jobs", {"n": 1})
+        db.queues.push("jobs", {"n": 2})
+        assert db.queues.len("jobs") == 2
+        # peek does not consume
+        assert len(db.queues.peek("jobs", 1)["items"]) == 1
+        assert db.queues.len("jobs") == 2
+        assert len(db.queues.pop("jobs")["items"]) == 1
+        assert db.queues.len("jobs") == 1
+        # empty pop is not an error
+        db.queues.purge("jobs")
+        assert db.queues.pop("jobs")["items"] == []
+        assert db.queues.len("jobs") == 0
+        # singular alias points at the same client
+        assert db.queue.len("jobs") == 0
+
+
+def test_tx_run_commit_and_rollback():
+    with reddb.connect("memory://") as db:
+        db.query("CREATE TABLE tx_users (name TEXT)")
+
+        db.tx.run(lambda tx: db.query("INSERT INTO tx_users (name) VALUES ('kept')"))
+        assert len(db.query("SELECT name FROM tx_users WHERE name = 'kept'")["rows"]) == 1
+
+        def boom(tx):
+            db.query("INSERT INTO tx_users (name) VALUES ('dropped')")
+            raise RuntimeError("explode")
+
+        try:
+            db.tx.run(boom)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("expected the callback exception to propagate")
+        assert db.query("SELECT name FROM tx_users WHERE name = 'dropped'")["rows"] == []
+
+
+def test_tx_run_rejects_nesting():
+    with reddb.connect("memory://") as db:
+        db.query("CREATE TABLE tx_nest (name TEXT)")
+        tx = db.tx
+
+        def outer(inner):
+            inner.run(lambda _t: None)
+
+        try:
+            tx.run(outer)
+        except ValueError as exc:
+            assert "INVALID_ARGUMENT" in str(exc)
+        else:
+            raise AssertionError("expected nested tx.run to reject")
+
+
+def test_helper_spec_version_constant():
+    assert reddb.helper_spec_version == "1.0"
+    with reddb.connect("memory://") as db:
+        assert db.helper_spec_version == "1.0"
+
+
 def test_grpc_helper_limitations_are_explicit_without_server():
     try:
         db = reddb.connect("grpc://127.0.0.1:1")
@@ -104,6 +175,11 @@ if __name__ == "__main__":
         ("insert_and_bulk_insert_expose_rid_aliases", test_insert_and_bulk_insert_expose_rid_aliases),
         ("documents_crud_nested_patch_delete", test_documents_crud_nested_patch_delete),
         ("kv_namespaced_exact_key_round_trip", test_kv_namespaced_exact_key_round_trip),
+        ("kv_get_missing_returns_none_and_delete_envelope", test_kv_get_missing_returns_none_and_delete_envelope),
+        ("queues_fifo_round_trip", test_queues_fifo_round_trip),
+        ("tx_run_commit_and_rollback", test_tx_run_commit_and_rollback),
+        ("tx_run_rejects_nesting", test_tx_run_rejects_nesting),
+        ("helper_spec_version_constant", test_helper_spec_version_constant),
         ("grpc_helper_limitations_are_explicit_without_server", test_grpc_helper_limitations_are_explicit_without_server),
     ]
     passed = failed = 0

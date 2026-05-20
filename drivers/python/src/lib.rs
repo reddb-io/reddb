@@ -636,6 +636,9 @@ fn reddb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<high_level::CacheClient>()?;
     m.add_class::<high_level::DocumentClient>()?;
     m.add_class::<high_level::KvClient>()?;
+    m.add_class::<high_level::QueueClient>()?;
+    m.add_class::<high_level::TxClient>()?;
+    m.add("helper_spec_version", high_level::HELPER_SPEC_VERSION)?;
 
     // Legacy: keep the existing classes available for power users.
     m.add_function(wrap_pyfunction!(legacy_grpc_connect, m)?)?;
