@@ -1,0 +1,199 @@
+{
+  "$schema": "./public-surface-contract-matrix.schema.json",
+  "version": "1.0",
+  "description": "Machine-readable public-surface contract matrix. Every public promise is a row; every public surface is a column. A cell marked `supported` or `partial` MUST name at least one automated test that exists on disk; the release gate (scripts/verify-contract-matrix.mjs) fails when it does not. See docs/conformance/public-surface-contract-matrix.md for the prose ledger and the add/remove-a-promise runbook.",
+  "surfaces": {
+    "sql": "SQL / parser+runtime engine reachable from any client.",
+    "http": "Public HTTP query surface.",
+    "redwire": "RedWire binary wire protocol.",
+    "grpc": "gRPC transport.",
+    "driver_helpers": "Rich per-language driver helper APIs (SDK Helper Spec v1.0)."
+  },
+  "statuses": {
+    "supported": "Offered on this surface and backed by automated tests. MUST list >=1 existing test.",
+    "partial": "Offered with known gaps; the listed tests pin current behaviour. MUST list >=1 existing test.",
+    "unsupported": "Not offered on this surface. No test required."
+  },
+  "promises": [
+    {
+      "id": "PSC-001",
+      "source": "README.md",
+      "promise": "RedDB is one multi-model database (tables, graph, KV, timeseries, probabilistic, vector, queue, documents) backed by a single file.",
+      "cells": {
+        "sql": { "status": "supported", "tests": ["tests/e2e_cross_model_tx.rs", "tests/e2e_feedback_regression_pack.rs"] },
+        "http": { "status": "supported", "tests": ["tests/http_query_grimms_graph.rs"] },
+        "redwire": { "status": "supported", "tests": ["tests/cross_binary_smoke.rs"] },
+        "grpc": { "status": "supported", "tests": ["tests/cross_binary_smoke.rs"] },
+        "driver_helpers": { "status": "supported", "tests": ["crates/reddb-client/tests/conformance.rs", "drivers/python/tests/test_conformance.py"] }
+      }
+    },
+    {
+      "id": "PSC-002",
+      "source": "docs/query/graph-commands.md",
+      "promise": "MATCH supports node, edge, label, property, and LIMIT projections.",
+      "cells": {
+        "sql": { "status": "supported", "tests": ["tests/e2e_feedback_regression_pack.rs", "tests/feedback_regression.rs"] },
+        "http": { "status": "supported", "tests": ["tests/e2e_issue_556_graph_sql_http_parity_and_limits.rs", "tests/http_query_grimms_graph.rs"] },
+        "redwire": { "status": "partial", "tests": ["tests/cross_binary_smoke.rs"] },
+        "grpc": { "status": "partial", "tests": ["tests/cross_binary_smoke.rs"] },
+        "driver_helpers": { "status": "supported", "tests": ["crates/reddb-client/tests/conformance.rs"] }
+      }
+    },
+    {
+      "id": "PSC-003",
+      "source": "docs/query/graph-commands.md",
+      "promise": "GRAPH algorithms accept semantic identifiers, limits, ordering, and return stable rich rows.",
+      "cells": {
+        "sql": { "status": "supported", "tests": ["tests/feedback_regression.rs"] },
+        "http": { "status": "supported", "tests": ["tests/e2e_issue_556_graph_sql_http_parity_and_limits.rs"] },
+        "redwire": { "status": "unsupported" },
+        "grpc": { "status": "unsupported" },
+        "driver_helpers": { "status": "unsupported" }
+      }
+    },
+    {
+      "id": "PSC-004",
+      "source": "docs/query/insert.md",
+      "promise": "INSERT creates rows, documents, and native timeseries points.",
+      "cells": {
+        "sql": { "status": "supported", "tests": ["tests/e2e_documents_first_class_crud.rs", "tests/e2e_create_hypertable.rs"] },
+        "http": { "status": "supported", "tests": ["tests/http_batch_insert.rs"] },
+        "redwire": { "status": "partial", "tests": ["crates/reddb-wire/tests/params_fixtures.rs"] },
+        "grpc": { "status": "supported", "tests": ["crates/reddb-client/tests/conformance.rs"] },
+        "driver_helpers": { "status": "supported", "tests": ["drivers/python/tests/test_conformance.py", "drivers/js/test/insert-ids.test.mjs"] }
+      }
+    },
+    {
+      "id": "PSC-005",
+      "source": "docs/query/probabilistic-commands.md",
+      "promise": "HLL/SKETCH/FILTER expose write and read commands for cardinality, frequency, and membership.",
+      "cells": {
+        "sql": { "status": "partial", "tests": ["tests/e2e_feedback_regression_pack.rs"] },
+        "http": { "status": "unsupported" },
+        "redwire": { "status": "unsupported" },
+        "grpc": { "status": "unsupported" },
+        "driver_helpers": { "status": "partial", "tests": ["drivers/python/tests/test_conformance.py"] }
+      }
+    },
+    {
+      "id": "PSC-006",
+      "source": "docs/query/insert.md",
+      "promise": "Timeseries stores timestamped metrics with tags and supports query/readback.",
+      "cells": {
+        "sql": { "status": "supported", "tests": ["tests/e2e_create_hypertable.rs", "tests/e2e_feedback_regression_pack.rs"] },
+        "http": { "status": "partial", "tests": ["tests/http_batch_insert.rs"] },
+        "redwire": { "status": "unsupported" },
+        "grpc": { "status": "unsupported" },
+        "driver_helpers": { "status": "partial", "tests": ["drivers/python/tests/test_conformance.py"] }
+      }
+    },
+    {
+      "id": "PSC-007",
+      "source": "docs/query/document-commands.md",
+      "promise": "Documents are first-class: create, read, update, delete, and SQL analytics over JSON.",
+      "cells": {
+        "sql": { "status": "supported", "tests": ["tests/e2e_documents_first_class_crud.rs", "tests/e2e_document_sql_analytics.rs"] },
+        "http": { "status": "supported", "tests": ["tests/http_batch_insert.rs"] },
+        "redwire": { "status": "unsupported" },
+        "grpc": { "status": "supported", "tests": ["crates/reddb-client/tests/conformance.rs"] },
+        "driver_helpers": { "status": "supported", "tests": ["drivers/python/tests/test_documents_conformance.py", "drivers/js/test/db-helpers.test.mjs"] }
+      }
+    },
+    {
+      "id": "PSC-008",
+      "source": "docs/spec/sdk-helpers.md",
+      "promise": "KV helpers expose get/put/delete; get of a missing key returns null, delete reports affected.",
+      "cells": {
+        "sql": { "status": "supported", "tests": ["tests/e2e_feedback_regression_pack.rs"] },
+        "http": { "status": "unsupported" },
+        "redwire": { "status": "unsupported" },
+        "grpc": { "status": "supported", "tests": ["crates/reddb-client/tests/conformance.rs"] },
+        "driver_helpers": { "status": "supported", "tests": ["drivers/python/tests/test_conformance.py", "drivers/js/test/kv.test.mjs"] }
+      }
+    },
+    {
+      "id": "PSC-009",
+      "source": "docs/spec/sdk-helpers.md",
+      "promise": "Queue helpers expose create/push/peek/pop/len/purge with FIFO semantics; empty pop is not an error.",
+      "cells": {
+        "sql": { "status": "supported", "tests": ["tests/feedback_regression.rs"] },
+        "http": { "status": "unsupported" },
+        "redwire": { "status": "unsupported" },
+        "grpc": { "status": "unsupported" },
+        "driver_helpers": { "status": "supported", "tests": ["drivers/python/tests/test_conformance.py", "drivers/js/test/queue.test.mjs"] }
+      }
+    },
+    {
+      "id": "PSC-010",
+      "source": "docs/spec/sdk-helpers.md",
+      "promise": "Transactions are imperative (begin/commit/rollback) plus a run(callback) form; empty SQL rejects with INVALID_ARGUMENT.",
+      "cells": {
+        "sql": { "status": "supported", "tests": ["tests/e2e_cross_model_tx.rs", "tests/docs_transaction_guarantees.rs"] },
+        "http": { "status": "unsupported" },
+        "redwire": { "status": "unsupported" },
+        "grpc": { "status": "supported", "tests": ["crates/reddb-client/tests/conformance.rs"] },
+        "driver_helpers": { "status": "supported", "tests": ["drivers/python/tests/test_conformance.py", "drivers/js/test/transaction.test.mjs"] }
+      }
+    },
+    {
+      "id": "PSC-011",
+      "source": "../feedbacks.md",
+      "promise": "SQL aggregate, projection, expression, and mutation behaviour matches ordinary SQL expectations where advertised.",
+      "cells": {
+        "sql": { "status": "supported", "tests": ["tests/feedback_regression.rs", "tests/e2e_feedback_regression_pack.rs"] },
+        "http": { "status": "supported", "tests": ["tests/e2e_issue_556_graph_sql_http_parity_and_limits.rs"] },
+        "redwire": { "status": "partial", "tests": ["crates/reddb-wire/tests/params_fixtures.rs"] },
+        "grpc": { "status": "partial", "tests": ["crates/reddb-client/tests/conformance.rs"] },
+        "driver_helpers": { "status": "supported", "tests": ["crates/reddb-client/tests/conformance.rs"] }
+      }
+    },
+    {
+      "id": "PSC-012",
+      "source": "../feedbacks-new.md",
+      "promise": "Server transports expose the same query contract as embedded (HTTP, RedWire, gRPC parity).",
+      "cells": {
+        "sql": { "status": "supported", "tests": ["tests/cross_binary_smoke.rs"] },
+        "http": { "status": "supported", "tests": ["tests/e2e_issue_556_graph_sql_http_parity_and_limits.rs", "tests/cross_binary_smoke.rs"] },
+        "redwire": { "status": "supported", "tests": ["crates/reddb-wire/tests/params_fixtures.rs", "drivers/js/test/redwire.params.test.mjs"] },
+        "grpc": { "status": "supported", "tests": ["crates/reddb-client/tests/conformance.rs", "tests/cross_binary_smoke.rs"] },
+        "driver_helpers": { "status": "supported", "tests": ["drivers/go/conformance_test.go", "drivers/java/src/test/java/dev/reddb/helpers/ConformanceTest.java"] }
+      }
+    },
+    {
+      "id": "PSC-013",
+      "source": "docs/clients/drivers.md",
+      "promise": "Official drivers implement the SDK Helper Spec v1.0 conformance suite (all 22 §12 case IDs).",
+      "cells": {
+        "sql": { "status": "unsupported" },
+        "http": { "status": "unsupported" },
+        "redwire": { "status": "unsupported" },
+        "grpc": { "status": "supported", "tests": ["crates/reddb-client/tests/conformance.rs"] },
+        "driver_helpers": {
+          "status": "supported",
+          "tests": [
+            "crates/reddb-client/tests/conformance.rs",
+            "drivers/python/tests/test_conformance.py",
+            "drivers/go/conformance_test.go",
+            "drivers/java/src/test/java/dev/reddb/helpers/ConformanceTest.java",
+            "drivers/dotnet/tests/Reddb.Tests/ConformanceTests.cs",
+            "drivers/dart/test/conformance_test.dart",
+            "drivers/php/tests/ConformanceTest.php",
+            "drivers/js/test/conformance.test.mjs"
+          ]
+        }
+      }
+    },
+    {
+      "id": "PSC-014",
+      "source": "docs/query/ask-commands.md",
+      "promise": "ASK / SEARCH semantic surfaces return ranked results with stable shape.",
+      "cells": {
+        "sql": { "status": "supported", "tests": ["tests/e2e_ask_search_conformance.rs"] },
+        "http": { "status": "partial", "tests": ["tests/e2e_ask_search_conformance.rs"] },
+        "redwire": { "status": "unsupported" },
+        "grpc": { "status": "unsupported" },
+        "driver_helpers": { "status": "partial", "tests": ["drivers/js/test/ask.test.mjs"] }
+      }
+    }
+  ]
+}

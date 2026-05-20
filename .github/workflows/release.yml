@@ -130,6 +130,15 @@ jobs:
         if: steps.plan.outputs.should_skip != 'true'
         run: bash scripts/check-versions.sh
 
+      - name: Public-surface contract matrix gate (release-blocking)
+        # Issue #567 — refuse to cut a release when any public promise is
+        # marked `supported`/`partial` on a surface but has no backing test.
+        # Runs in `plan`, which every publish-* job depends on, so a failure
+        # here blocks GitHub/npm/cargo/docker/python publishing. Release-policy
+        # owner: @filipeforattini (.github/CODEOWNERS).
+        if: steps.plan.outputs.should_skip != 'true'
+        run: node scripts/verify-contract-matrix.mjs
+
   build:
     name: Build ${{ matrix.asset_name }}
     needs: [plan]

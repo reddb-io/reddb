@@ -1,0 +1,10 @@
+# Code owners. GitHub requests review from these owners automatically and,
+# when branch protection requires CODEOWNERS review, blocks merge without it.
+#
+# The public-surface contract matrix is a release-blocking policy artifact
+# (issue #567). Changing which promises are `supported`/`partial`, or relaxing
+# the release gate, requires sign-off from the release-policy owner — this is
+# the human-in-the-loop control the issue called for.
+/docs/conformance/                       @filipeforattini
+/scripts/verify-contract-matrix.mjs      @filipeforattini
+/scripts/contract_matrix_contract.test.mjs @filipeforattini

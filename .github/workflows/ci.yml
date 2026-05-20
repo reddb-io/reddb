@@ -103,6 +103,26 @@ jobs:
           done
           echo "OK: every lint category was triggered by the fixture"
 
+  contract-matrix:
+    # Issue #567 — public-surface contract matrix gate. Fails the build
+    # (and, on the release workflow, blocks the release) when any cell
+    # marked `supported`/`partial` lacks an existing backing test. The
+    # release-blocking policy is owned by @filipeforattini (see
+    # .github/CODEOWNERS for docs/conformance/ and scripts/verify-contract-matrix.mjs).
+    name: Contract Matrix Gate
+    needs: gate
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Verify every supported cell has a backing test
+        run: node scripts/verify-contract-matrix.mjs
+      - name: Contract-matrix tooling contract test
+        run: node --test scripts/contract_matrix_contract.test.mjs
+
   quality:
     name: Quality (fmt, check, clippy)
     needs: gate
