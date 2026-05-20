@@ -4,16 +4,20 @@
 //!
 //! Spec: `docs/spec/sdk-helpers.md` (v1.0).
 //!
-//! Each test corresponds to one case ID in §12 of the spec. The harness runs
-//! against `memory://`, which exercises the same transport-agnostic helper
-//! code path that fires for `grpc://`, `http://`, and `red://` targets — the
-//! helper methods on `Reddb` dispatch into the embedded engine here, but the
-//! envelopes, error codes, and validation are the same surface every
-//! external driver sees.
+//! Each test corresponds to one case ID in §12 of the spec. The case body
+//! lives in a `case_*` function that takes a `&Reddb`, so the *same* assertions
+//! run against **both** transports the issue requires:
 //!
-//! Other-language drivers MUST port the same case IDs verbatim. The case ID
-//! is encoded in each test function name so cross-driver CI dashboards line
-//! up.
+//! - **Embedded** (`memory://`) — always on. One `#[tokio::test]` per case,
+//!   named after the case ID (dots → underscores) so cross-driver CI dashboards
+//!   line up.
+//! - **Client** (`red://`, gRPC) — gated behind `RED_SMOKE=1` + `RED_BIN` and
+//!   the `grpc` feature (see the `client_transport` module). The harness spawns
+//!   one `red server` process and replays every case body over the wire,
+//!   proving the helper surface is transport-agnostic rather than asserting it
+//!   by comment.
+//!
+//! Other-language drivers MUST port the same case IDs verbatim.
 
 use reddb_client::{ErrorCode, JsonValue, ListOptions, Reddb, ValueOut};
 
@@ -24,11 +28,15 @@ fn field<'a>(row: &'a [(String, ValueOut)], name: &str) -> &'a ValueOut {
         .unwrap_or_else(|| panic!("missing column {name}: {row:?}"))
 }
 
+// ============================================================================
+// Case bodies — transport-agnostic. Each takes a connected `Reddb` and asserts
+// the spec §12 contract. Collection / table / key names are unique per case so
+// the suite can replay every case against one shared client-transport server.
+// ============================================================================
+
 // ---------------------------------------------------------------- generic.*
 
-#[tokio::test]
-async fn generic_query_no_params() {
-    let db = Reddb::connect("memory://").await.expect("connect");
+async fn case_generic_query_no_params(db: &Reddb) {
     db.query("CREATE TABLE generic_q (id INTEGER, name TEXT)")
         .await
         .expect("create");
@@ -43,9 +51,7 @@ async fn generic_query_no_params() {
     assert_eq!(field(&r.rows[0], "name"), &ValueOut::String("a".into()));
 }
 
-#[tokio::test]
-async fn generic_query_with_params() {
-    let db = Reddb::connect("memory://").await.expect("connect");
+async fn case_generic_query_with_params(db: &Reddb) {
     db.query("CREATE TABLE generic_p (id INTEGER, name TEXT)")
         .await
         .expect("create");
@@ -63,9 +69,7 @@ async fn generic_query_with_params() {
     assert_eq!(field(&r.rows[0], "name"), &ValueOut::String("alice".into()));
 }
 
-#[tokio::test]
-async fn generic_insert_rid() {
-    let db = Reddb::connect("memory://").await.expect("connect");
+async fn case_generic_insert_rid(db: &Reddb) {
     let r = db
         .insert(
             "generic_ins",
@@ -78,10 +82,7 @@ async fn generic_insert_rid() {
     assert!(!rid.is_empty(), "InsertResult.rid must be non-empty");
 }
 
-#[tokio::test]
-async fn generic_bulk_insert_rids() {
-    let db = Reddb::connect("memory://").await.expect("connect");
-
+async fn case_generic_bulk_insert_rids(db: &Reddb) {
     // Empty is a no-op (spec §3.4 v1.0).
     let empty = db.bulk_insert("generic_bulk", &[]).await.expect("empty");
     assert_eq!(empty.affected, 0);
@@ -106,9 +107,7 @@ async fn generic_bulk_insert_rids() {
     assert_eq!(s.len(), 3, "rids must be unique");
 }
 
-#[tokio::test]
-async fn generic_delete() {
-    let db = Reddb::connect("memory://").await.expect("connect");
+async fn case_generic_delete(db: &Reddb) {
     let ins = db
         .insert(
             "generic_del",
@@ -123,9 +122,7 @@ async fn generic_delete() {
 
 // -------------------------------------------------------------- documents.*
 
-#[tokio::test]
-async fn documents_crud_nested_patch() {
-    let db = Reddb::connect("memory://").await.expect("connect");
+async fn case_documents_crud_nested_patch(db: &Reddb) {
     let docs = db.documents();
 
     let inserted = docs
@@ -174,9 +171,7 @@ async fn documents_crud_nested_patch() {
     assert!(del.deleted);
 }
 
-#[tokio::test]
-async fn documents_delete_missing_no_error() {
-    let db = Reddb::connect("memory://").await.expect("connect");
+async fn case_documents_delete_missing_no_error(db: &Reddb) {
     // Force the collection to exist by inserting + deleting first.
     let ins = db
         .documents()
@@ -200,9 +195,7 @@ async fn documents_delete_missing_no_error() {
     assert!(!r.deleted);
 }
 
-#[tokio::test]
-async fn documents_patch_empty_rejects() {
-    let db = Reddb::connect("memory://").await.expect("connect");
+async fn case_documents_patch_empty_rejects(db: &Reddb) {
     let ins = db
         .documents()
         .insert(
@@ -213,7 +206,11 @@ async fn documents_patch_empty_rejects() {
         .expect("insert");
     let err = db
         .documents()
-        .patch("events_patch", &ins.rid, &JsonValue::object(Vec::<(&str, JsonValue)>::new()))
+        .patch(
+            "events_patch",
+            &ins.rid,
+            &JsonValue::object(Vec::<(&str, JsonValue)>::new()),
+        )
         .await
         .expect_err("empty patch must reject");
     assert_eq!(err.code, ErrorCode::InvalidArgument);
@@ -221,23 +218,17 @@ async fn documents_patch_empty_rejects() {
 
 // --------------------------------------------------------------------- kv.*
 
-#[tokio::test]
-async fn kv_exact_key_round_trip() {
-    let db = Reddb::connect("memory://").await.expect("connect");
+async fn case_kv_exact_key_round_trip(db: &Reddb) {
     let kv = db.kv_collection("conf_kv");
     let key = "characters:hansel";
 
-    kv.set(key, JsonValue::string("witch"))
-        .await
-        .expect("set");
+    kv.set(key, JsonValue::string("witch")).await.expect("set");
     let got = kv.get(key).await.expect("get").expect("present");
     assert_eq!(got.key, key, "key must round trip without normalisation");
     assert_eq!(got.value, ValueOut::String("witch".into()));
 }
 
-#[tokio::test]
-async fn kv_missing_get_returns_none() {
-    let db = Reddb::connect("memory://").await.expect("connect");
+async fn case_kv_missing_get_returns_none(db: &Reddb) {
     let kv = db.kv_collection("conf_kv_missing");
     // Touch the collection so it exists.
     kv.set("seed", JsonValue::string("v")).await.expect("seed");
@@ -248,9 +239,7 @@ async fn kv_missing_get_returns_none() {
     );
 }
 
-#[tokio::test]
-async fn kv_delete_returns_envelope() {
-    let db = Reddb::connect("memory://").await.expect("connect");
+async fn case_kv_delete_returns_envelope(db: &Reddb) {
     let kv = db.kv_collection("conf_kv_del");
     kv.set("k", JsonValue::string("v")).await.expect("set");
     let r = kv.delete("k").await.expect("delete");
@@ -264,9 +253,7 @@ async fn kv_delete_returns_envelope() {
 
 // ----------------------------------------------------------------- queues.*
 
-#[tokio::test]
-async fn queues_fifo_peek_pop_len() {
-    let db = Reddb::connect("memory://").await.expect("connect");
+async fn case_queues_fifo_peek_pop_len(db: &Reddb) {
     let q = db.queue();
     q.create("conf_q").await.expect("create");
     q.push("conf_q", &JsonValue::object([("n", JsonValue::number(1.0))]))
@@ -288,21 +275,20 @@ async fn queues_fifo_peek_pop_len() {
     assert_eq!(q.len("conf_q").await.expect("len after pop"), 1);
 }
 
-#[tokio::test]
-async fn queues_empty_pop_returns_empty() {
-    let db = Reddb::connect("memory://").await.expect("connect");
+async fn case_queues_empty_pop_returns_empty(db: &Reddb) {
     let q = db.queue();
     q.create("conf_q_empty").await.expect("create");
-    let r = q.pop("conf_q_empty").await.expect("pop on empty must not error");
+    let r = q
+        .pop("conf_q_empty")
+        .await
+        .expect("pop on empty must not error");
     assert!(
         r.items.is_empty(),
         "empty pop must return empty items, NOT raise"
     );
 }
 
-#[tokio::test]
-async fn queues_purge_resets_len() {
-    let db = Reddb::connect("memory://").await.expect("connect");
+async fn case_queues_purge_resets_len(db: &Reddb) {
     let q = db.queue();
     q.create("conf_q_purge").await.expect("create");
     for i in 0..3 {
@@ -320,9 +306,7 @@ async fn queues_purge_resets_len() {
 
 // --------------------------------------------------------------------- tx.*
 
-#[tokio::test]
-async fn tx_commit_persists() {
-    let db = Reddb::connect("memory://").await.expect("connect");
+async fn case_tx_commit_persists(db: &Reddb) {
     db.query("CREATE TABLE conf_tx_commit (name TEXT)")
         .await
         .expect("create");
@@ -338,9 +322,7 @@ async fn tx_commit_persists() {
     assert_eq!(r.rows.len(), 1, "commit must persist the row");
 }
 
-#[tokio::test]
-async fn tx_rollback_discards() {
-    let db = Reddb::connect("memory://").await.expect("connect");
+async fn case_tx_rollback_discards(db: &Reddb) {
     db.query("CREATE TABLE conf_tx_rb (name TEXT)")
         .await
         .expect("create");
@@ -358,9 +340,20 @@ async fn tx_rollback_discards() {
 
 // ----------------------------------------------------------------- errors.*
 
-#[tokio::test]
-async fn errors_not_found_document_get() {
-    let db = Reddb::connect("memory://").await.expect("connect");
+async fn case_errors_invalid_argument_empty_sql(db: &Reddb) {
+    // Spec §3.1 — empty SQL must reject with INVALID_ARGUMENT before the
+    // request is sent. The guard lives on `Reddb::query`, so it fires for
+    // every transport identically.
+    let err = db.query("").await.expect_err("empty SQL must reject");
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    let err_ws = db
+        .query("   \n\t ")
+        .await
+        .expect_err("whitespace-only SQL must reject");
+    assert_eq!(err_ws.code, ErrorCode::InvalidArgument);
+}
+
+async fn case_errors_not_found_document_get(db: &Reddb) {
     // Touch the collection so the SELECT doesn't fail with QueryError on a
     // missing table — we want to isolate the NOT_FOUND on a missing rid.
     let ins = db
@@ -384,14 +377,83 @@ async fn errors_not_found_document_get() {
 }
 
 // ------------------------- wire.* (provisional: SQL-only namespaces) -------
+//
+// Spec §§8–11: vectors / graph / time-series / probabilistic have no
+// first-class helpers in v1.0. These cases pin the wire-level SQL surface
+// every driver MUST be able to reach via `db.query()`. The exact SQL nouns
+// are owned by the engine (the spec's snippets are illustrative); the case
+// asserts the round trip reaches the engine and returns a usable envelope.
 
-#[tokio::test]
-async fn wire_probabilistic_hll_round_trip() {
-    // Spec §11 — `probabilistic.*` has no first-class helpers in v1.0; this
-    // pins the wire-level SQL surface drivers MUST be able to reach via
-    // `db.query()`.
-    let db = Reddb::connect("memory://").await.expect("connect");
-    db.query("CREATE HLL conf_visitors").await.expect("create hll");
+async fn case_wire_vectors_sql_round_trip(db: &Reddb) {
+    // Insert auto-creates the vector collection; literal-vector search needs
+    // no embedding provider, so this runs offline.
+    db.query("INSERT INTO conf_vec VECTOR (dense, content) VALUES ([1.0, 0.0], 'match-a')")
+        .await
+        .expect("insert vector a");
+    db.query("INSERT INTO conf_vec VECTOR (dense, content) VALUES ([0.0, 1.0], 'match-b')")
+        .await
+        .expect("insert vector b");
+    let r = db
+        .query("VECTOR SEARCH conf_vec SIMILAR TO [1.0, 0.0] LIMIT 1")
+        .await
+        .expect("vector search");
+    assert_eq!(r.rows.len(), 1, "top-1 vector search must return one row");
+    assert_eq!(
+        field(&r.rows[0], "content"),
+        &ValueOut::String("match-a".into()),
+        "nearest vector must be the co-linear one"
+    );
+}
+
+async fn case_wire_graph_sql_round_trip(db: &Reddb) {
+    db.query("INSERT INTO conf_graph NODE (label, name) VALUES ('alice', 'Alice')")
+        .await
+        .expect("insert node alice");
+    db.query("INSERT INTO conf_graph NODE (label, name) VALUES ('bob', 'Bob')")
+        .await
+        .expect("insert node bob");
+    db.query(
+        "INSERT INTO conf_graph EDGE (label, from_rid, to_rid) VALUES ('knows', 'alice', 'bob')",
+    )
+    .await
+    .expect("insert edge");
+    // `WITH EXPAND GRAPH` must reach the engine and return the base row plus
+    // any expanded neighbours without a parse error.
+    let r = db
+        .query("SELECT * FROM conf_graph WHERE label = 'alice' WITH EXPAND GRAPH DEPTH 1")
+        .await
+        .expect("expand graph");
+    assert!(
+        !r.rows.is_empty(),
+        "WITH EXPAND GRAPH must return at least the anchor row"
+    );
+}
+
+async fn case_wire_timeseries_sql_round_trip(db: &Reddb) {
+    db.query("CREATE TIMESERIES conf_ts RETENTION 7 d")
+        .await
+        .expect("create timeseries");
+    db.query(
+        "INSERT INTO conf_ts (metric, value, tags, timestamp) \
+         VALUES ('cpu.idle', 94.8, {host: 'srv1'}, 1704067200000000000)",
+    )
+    .await
+    .expect("insert point");
+    let r = db
+        .query("SELECT metric, value, timestamp FROM conf_ts WHERE metric = 'cpu.idle'")
+        .await
+        .expect("select point");
+    assert_eq!(r.rows.len(), 1, "time-series point must round trip");
+    assert_eq!(
+        field(&r.rows[0], "metric"),
+        &ValueOut::String("cpu.idle".into())
+    );
+}
+
+async fn case_wire_probabilistic_hll_round_trip(db: &Reddb) {
+    db.query("CREATE HLL conf_visitors")
+        .await
+        .expect("create hll");
     db.query("HLL ADD conf_visitors 'alice' 'bob' 'alice'")
         .await
         .expect("hll add");
@@ -412,5 +474,172 @@ async fn wire_probabilistic_hll_round_trip() {
         ValueOut::Integer(n) => assert!(*n >= 1, "count must be at least 1"),
         ValueOut::Float(n) => assert!(*n >= 1.0, "count must be at least 1"),
         other => panic!("HLL COUNT must be numeric, got {other:?}"),
+    }
+}
+
+// ============================================================================
+// Embedded transport — `memory://`. One test per spec §12 case ID.
+// ============================================================================
+
+macro_rules! embedded_case {
+    ($name:ident) => {
+        #[tokio::test]
+        async fn $name() {
+            let db = Reddb::connect("memory://").await.expect("connect memory://");
+            super::$name(&db).await;
+        }
+    };
+}
+
+mod embedded {
+    use super::Reddb;
+
+    embedded_case!(case_generic_query_no_params);
+    embedded_case!(case_generic_query_with_params);
+    embedded_case!(case_generic_insert_rid);
+    embedded_case!(case_generic_bulk_insert_rids);
+    embedded_case!(case_generic_delete);
+    embedded_case!(case_documents_crud_nested_patch);
+    embedded_case!(case_documents_delete_missing_no_error);
+    embedded_case!(case_documents_patch_empty_rejects);
+    embedded_case!(case_kv_exact_key_round_trip);
+    embedded_case!(case_kv_missing_get_returns_none);
+    embedded_case!(case_kv_delete_returns_envelope);
+    embedded_case!(case_queues_fifo_peek_pop_len);
+    embedded_case!(case_queues_empty_pop_returns_empty);
+    embedded_case!(case_queues_purge_resets_len);
+    embedded_case!(case_tx_commit_persists);
+    embedded_case!(case_tx_rollback_discards);
+    embedded_case!(case_errors_invalid_argument_empty_sql);
+    embedded_case!(case_errors_not_found_document_get);
+    embedded_case!(case_wire_vectors_sql_round_trip);
+    embedded_case!(case_wire_graph_sql_round_trip);
+    embedded_case!(case_wire_timeseries_sql_round_trip);
+    embedded_case!(case_wire_probabilistic_hll_round_trip);
+}
+
+// ============================================================================
+// Client transport — `red://` over gRPC. Replays every case body against a
+// live `red server`. Gated behind the `grpc` feature + `RED_SMOKE=1` +
+// `RED_BIN`, mirroring the `redwire_query_with_live` smoke contract so the
+// default `cargo test` run (embedded only) is unaffected.
+// ============================================================================
+
+#[cfg(feature = "grpc")]
+mod client_transport {
+    use super::*;
+    use std::net::TcpListener;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    #[tokio::test]
+    async fn client_transport_conformance_suite() {
+        if std::env::var("RED_SMOKE").as_deref() != Ok("1") {
+            eprintln!(
+                "skipping client-transport conformance; set RED_SMOKE=1 and RED_BIN=/path/to/red"
+            );
+            return;
+        }
+        let bin = match std::env::var("RED_BIN") {
+            Ok(path) if std::path::Path::new(&path).exists() => path,
+            _ => {
+                eprintln!("skipping client-transport conformance; RED_BIN is unset or missing");
+                return;
+            }
+        };
+
+        let port = pick_free_port().expect("pick port");
+        let data_dir = std::env::temp_dir().join(format!(
+            "reddb-rust-conformance-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&data_dir).expect("scratch dir");
+
+        let mut server = Command::new(&bin)
+            .arg("server")
+            .arg("--grpc")
+            .arg("--grpc-bind")
+            .arg(format!("127.0.0.1:{port}"))
+            .arg("--path")
+            .arg(data_dir.join("data.db"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn red server");
+
+        let result = run_suite(port).await;
+
+        let _ = server.kill();
+        let _ = server.wait();
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        result.expect("client-transport conformance suite");
+    }
+
+    async fn run_suite(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+        let db = wait_for_connection(port).await?;
+
+        // Same case bodies as the embedded suite — proves the helper surface
+        // is transport-agnostic rather than asserting it by comment.
+        case_generic_query_no_params(&db).await;
+        case_generic_query_with_params(&db).await;
+        case_generic_insert_rid(&db).await;
+        case_generic_bulk_insert_rids(&db).await;
+        case_generic_delete(&db).await;
+        case_documents_crud_nested_patch(&db).await;
+        case_documents_delete_missing_no_error(&db).await;
+        case_documents_patch_empty_rejects(&db).await;
+        case_kv_exact_key_round_trip(&db).await;
+        case_kv_missing_get_returns_none(&db).await;
+        case_kv_delete_returns_envelope(&db).await;
+        case_queues_fifo_peek_pop_len(&db).await;
+        case_queues_empty_pop_returns_empty(&db).await;
+        case_queues_purge_resets_len(&db).await;
+        case_tx_commit_persists(&db).await;
+        case_tx_rollback_discards(&db).await;
+        case_errors_invalid_argument_empty_sql(&db).await;
+        case_errors_not_found_document_get(&db).await;
+        case_wire_vectors_sql_round_trip(&db).await;
+        case_wire_graph_sql_round_trip(&db).await;
+        case_wire_timeseries_sql_round_trip(&db).await;
+        case_wire_probabilistic_hll_round_trip(&db).await;
+
+        let _ = db.close().await;
+        Ok(())
+    }
+
+    async fn wait_for_connection(port: u16) -> Result<Reddb, Box<dyn std::error::Error>> {
+        let uri = format!("red://127.0.0.1:{port}");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut last_error = None;
+        while Instant::now() < deadline {
+            match Reddb::connect(&uri).await {
+                Ok(db) => match db.query("SELECT 1").await {
+                    Ok(_) => return Ok(db),
+                    Err(err) => {
+                        last_error = Some(err.to_string());
+                        let _ = db.close().await;
+                    }
+                },
+                Err(err) => last_error = Some(err.to_string()),
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Err(format!(
+            "server did not accept gRPC connections on {uri}: {}",
+            last_error.unwrap_or_else(|| "timed out".into())
+        )
+        .into())
+    }
+
+    fn pick_free_port() -> std::io::Result<u16> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        drop(listener);
+        Ok(port)
     }
 }

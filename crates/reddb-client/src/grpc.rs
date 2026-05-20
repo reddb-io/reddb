@@ -350,7 +350,16 @@ impl GrpcClient {
                 return Err(ClientError::new(ErrorCode::QueryError, e.to_string()));
             }
         };
-        parse_query_json(&reply.result_json)
+        let mut result = parse_query_json(&reply.result_json)?;
+        // `QueryReply.result_json` carries `records` but not the affected-row
+        // count — that travels in the dedicated `affected_rows` proto field
+        // (added in 1.2 / field 8). Mirror the embedded path (which surfaces
+        // `affected_rows`) so DML helpers like `documents.delete` / `kv.delete`
+        // report a non-zero `affected` over the wire (spec §4.5 / §5.4).
+        if result.affected == 0 {
+            result.affected = reply.affected_rows;
+        }
+        Ok(result)
     }
 
     pub async fn query_with(&self, sql: &str, params: &[ParamValue]) -> Result<QueryResult> {
@@ -370,7 +379,11 @@ impl GrpcClient {
                 return Err(ClientError::new(ErrorCode::QueryError, e.to_string()));
             }
         };
-        parse_query_json(&reply.result_json)
+        let mut result = parse_query_json(&reply.result_json)?;
+        if result.affected == 0 {
+            result.affected = reply.affected_rows;
+        }
+        Ok(result)
     }
 
     pub async fn insert(&self, collection: &str, payload: &JsonValue) -> Result<InsertResult> {
@@ -380,7 +393,12 @@ impl GrpcClient {
                 "insert payload must be a JSON object".to_string(),
             ));
         }
-        let json_payload = payload.to_json_string();
+        // The `create_row` RPC expects the row columns under a top-level
+        // `fields` object (server: `parse_create_row_input`). The embedded
+        // path wraps implicitly via the columnar port; wrap here so both
+        // transports honour the same `db.insert(collection, {col: val})`
+        // contract (spec §3.3).
+        let json_payload = JsonValue::object([("fields", payload.clone())]).to_json_string();
         // Writes always go to the primary.
         let mut client = self.primary.pick();
         let reply = client
@@ -399,6 +417,15 @@ impl GrpcClient {
         collection: &str,
         payloads: &[JsonValue],
     ) -> Result<BulkInsertResult> {
+        // Spec §3.4: empty input is a local no-op; never hit the wire (the
+        // server rejects an empty payload list).
+        if payloads.is_empty() {
+            return Ok(BulkInsertResult {
+                affected: 0,
+                rids: Vec::new(),
+                ids: Vec::new(),
+            });
+        }
         let mut encoded = Vec::with_capacity(payloads.len());
         for payload in payloads {
             if payload.as_object().is_none() {
@@ -407,7 +434,9 @@ impl GrpcClient {
                     "bulk_insert payloads must be JSON objects".to_string(),
                 ));
             }
-            encoded.push(payload.to_json_string());
+            // Same `fields` wrapper the server's per-row create path requires
+            // (`bulk_create_reply` delegates to `create_row_reply`).
+            encoded.push(JsonValue::object([("fields", payload.clone())]).to_json_string());
         }
         let mut client = self.primary.pick();
         let reply = client
