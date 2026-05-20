@@ -96,37 +96,136 @@ same typed values as the `/query` JSON `params` array.
 `query` and `get` return raw JSON — pick your own decoder
 (`json_decode`, `JsonMachine`, ...).
 
-## Rich helpers (SDK Helper Spec v0.1)
+## Rich helpers (SDK Helper Spec v1.0)
 
-`Reddb\Helpers\Helpers` wraps a `Conn` with three namespaces —
-`documents()`, `kv()`, `queue()` — mirroring the Go / Dart / Python
-helpers.
+`Reddb\Helpers\Helpers` wraps a `Conn` with the canonical helper surface
+defined in [`docs/spec/sdk-helpers.md`](../../docs/spec/sdk-helpers.md) —
+mirroring the Rust / Go / JS / .NET / Dart drivers. The spec revision this
+driver satisfies is published on the class:
+
+```php
+Reddb\Helpers\Helpers::HELPER_SPEC_VERSION; // "1.0"
+```
 
 ```php
 use Reddb\Helpers\Helpers;
 
 $helpers = Helpers::for($conn);
 
-// Documents
+// Generic (spec §3)
+$res = $helpers->query('SELECT * FROM people WHERE active = $1', [true]);
+$ins = $helpers->insert('people', ['name' => 'alice']);          // InsertResult
+$bulk = $helpers->bulkInsert('people', [['n' => 1], ['n' => 2]]); // BulkInsertResult
+
+// Documents (spec §4)
 $ins = $helpers->documents()->insert('people', ['name' => 'alice']);
 $row = $helpers->documents()->get('people', $ins->rid);
+$helpers->documents()->patch('people', $ins->rid, ['name' => 'alyce']);
+$del = $helpers->documents()->delete('people', $ins->rid);        // DeleteResult
 
-// KV (default collection: kv_default)
-$helpers->kv()->set('characters:hansel', 'ok');
-$v = $helpers->kv()->get('characters:hansel');
+// KV (default collection: kv_default) (spec §5)
+$helpers->kv()->set('characters:hansel', 'witch'); // exact key, never normalised
+$v = $helpers->kv()->get('characters:hansel');     // null when missing, not an error
 $list = $helpers->kv()->list(['prefix' => 'characters:']);
+$kvDel = $helpers->kv()->delete('characters:hansel'); // DeleteResult
 
-// Queue
-$push = $helpers->queue()->push('jobs', ['id' => 1], ['priority' => 5]);
-$len  = $helpers->queue()->len('jobs');
-$jobs = $helpers->queue()->pop('jobs', 10);
+// Queues (spec §6) — plural namespace is canonical; queue() is the alias
+$helpers->queues()->create('jobs');
+$helpers->queues()->push('jobs', ['id' => 1], ['priority' => 5]);
+$len  = $helpers->queues()->len('jobs');
+$jobs = $helpers->queues()->pop('jobs', 10);
+
+// Transactions (spec §7) — imperative + callback
+$tx = $helpers->tx();
+$tx->begin();
+$helpers->insert('people', ['name' => 'eve']);
+$tx->commit(); // or $tx->rollback();
+
+$helpers->tx()->run(function ($tx) use ($helpers) {
+    $helpers->insert('people', ['name' => 'frank']);
+    // throwing here rolls back and re-throws; returning commits
+});
 ```
+
+### Return envelopes
+
+| Envelope            | Fields |
+|---------------------|--------|
+| `InsertResult`      | `affected` (always 1), `rid`, `item` |
+| `BulkInsertResult`  | `affected`, `rids` (input order) |
+| `DeleteResult`      | `affected`, `deleted` (`affected > 0`) |
+| `ExistsResult`      | `exists` |
+| `ListResult`        | `items`, `nextCursor` |
+| `QueuePushResult`   | `affected`, `rid` |
+
+Generic `query`, raw `tx` statements, and KV `get`/`put` return the raw JSON
+envelope string (decode with `json_decode`). `documents.get` / `documents.patch`
+return the row as an associative array keyed by column name (`rid`, `body`, …).
+
+### Transaction support
+
+**Imperative + callback.** `tx()->begin()/commit()/rollback()` drive the
+session-stateful transaction; `tx()->run($fn)` commits on success and rolls
+back + re-throws on a thrown callback. Nested `run` is rejected with
+`INVALID_ARGUMENT` — the PHP driver does **not** open savepoints
+automatically; issue `SAVEPOINT` yourself via `$tx->query('SAVEPOINT s1')`.
+
+### Conformance matrix
+
+`tests/ConformanceTest.php` ports the spec §12 case IDs. Provisional
+namespaces (`vectors`, `graph`, `timeseries`, the rest of `probabilistic`)
+have no first-class helpers in v1.0 — reach them via `$conn->query(...)` /
+`$helpers->query(...)` raw SQL.
+
+| Case ID | Status |
+|---------|--------|
+| `generic.query.no_params` | ✅ helper |
+| `generic.query_with.params` | ✅ helper |
+| `generic.insert.rid` | ✅ helper |
+| `generic.bulk_insert.rids` | ✅ helper |
+| `generic.delete` | ✅ helper |
+| `documents.crud_nested_patch` | ✅ helper |
+| `documents.delete_missing_no_error` | ✅ helper |
+| `documents.patch_empty_rejects` | ✅ helper |
+| `kv.exact_key_round_trip` | ✅ helper |
+| `kv.missing_get_returns_none` | ✅ helper |
+| `kv.delete_returns_envelope` | ✅ helper |
+| `queues.fifo_peek_pop_len` | ✅ helper |
+| `queues.empty_pop_returns_empty` | ✅ helper |
+| `queues.purge_resets_len` | ✅ helper |
+| `tx.commit_persists` | ✅ helper |
+| `tx.rollback_discards` | ✅ helper |
+| `errors.invalid_argument.empty_sql` | ✅ helper |
+| `errors.not_found.document_get` | ✅ helper |
+| `wire.probabilistic.hll_round_trip` | ✅ raw SQL |
+| `wire.vectors.sql_round_trip` | raw SQL (provisional, not pinned) |
+| `wire.graph.sql_round_trip` | raw SQL (provisional, not pinned) |
+| `wire.timeseries.sql_round_trip` | raw SQL (provisional, not pinned) |
+
+Run the conformance harness against a real engine:
+
+```bash
+RED_SMOKE=1 RED_BIN=/path/to/red ./vendor/bin/phpunit --filter ConformanceTest
+```
+
+It is skipped by default (and when `RED_SKIP_SMOKE=1`), so a vanilla
+`phpunit` run stays offline.
+
+### Out-of-scope helpers (v1.0)
+
+These are reachable via raw SQL today; first-class helpers are deferred to
+v1.x per the spec:
+
+- `vectors.search` / `vectors.upsert` — provisional namespace (§8).
+- `graph.shortest_path` / `graph.community` — provisional namespace (§9).
+- `timeseries.write` / `timeseries.downsample` — provisional namespace (§10).
+- `probabilistic.hll.*` / `probabilistic.cms.*` / Cuckoo filters — provisional (§11).
+- `kv.expire` (TTL) — use `expireMs` on `kv.set` / `WITH TTL` until v1.1 (§5).
+- Priority queues / consumer groups / dead-letter routing — raw `QUEUE` SQL (§6).
+- Isolation-level argument on `tx.begin`, cross-shard transactions (§7).
 
 Typed errors: `Reddb\Helpers\InvalidArgument`,
 `Reddb\Helpers\NotFound`, `Reddb\Helpers\InvalidResponse`.
-
-Transactions aren't surfaced through helpers yet — call
-`$conn->query('BEGIN' / 'COMMIT' / 'ROLLBACK')` directly.
 
 ## Errors
 

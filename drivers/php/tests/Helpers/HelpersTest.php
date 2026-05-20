@@ -218,4 +218,133 @@ final class HelpersTest extends TestCase
         $body = (string) json_encode(['result' => ['affected' => 7]]);
         $this->assertSame(7, Sql::affectedFromBody($body));
     }
+
+    // --- SDK Helper Spec v1.0 surface -----------------------------------
+
+    public function testHelperSpecVersionConstant(): void
+    {
+        $this->assertSame('1.0', Helpers::HELPER_SPEC_VERSION);
+        $this->assertSame('1.0', (new Helpers(new FakeQuerier()))->helperSpecVersion());
+    }
+
+    public function testQueuesIsPluralAliasOfQueue(): void
+    {
+        $h = new Helpers(new FakeQuerier());
+        $this->assertInstanceOf(\Reddb\Helpers\Queue::class, $h->queues());
+    }
+
+    public function testQueueCreateEmitsIfNotExists(): void
+    {
+        $fq = (new FakeQuerier())->reply(new \stdClass());
+        (new Helpers($fq))->queues()->create('jobs');
+        $this->assertSame('CREATE QUEUE IF NOT EXISTS jobs', $fq->calls[0]['sql']);
+    }
+
+    public function testQueueCreateRejectsBadIdentifier(): void
+    {
+        $this->expectException(InvalidArgument::class);
+        (new Helpers(new FakeQuerier()))->queues()->create('bad-name!');
+    }
+
+    public function testKvDeleteReturnsEnvelope(): void
+    {
+        $fq = (new FakeQuerier())
+            ->reply(['affected' => 1])
+            ->reply(['affected' => 0]);
+        $kv = (new Helpers($fq))->kv();
+        $hit = $kv->delete('k');
+        $this->assertSame(1, $hit->affected);
+        $this->assertTrue($hit->deleted);
+        $miss = $kv->delete('k');
+        $this->assertSame(0, $miss->affected);
+        $this->assertFalse($miss->deleted);
+    }
+
+    public function testDocumentsDeleteReturnsEnvelope(): void
+    {
+        $fq = (new FakeQuerier())->reply(['affected' => 0]);
+        $res = (new Helpers($fq))->documents()->delete('people', 'missing');
+        $this->assertSame(0, $res->affected);
+        $this->assertFalse($res->deleted);
+    }
+
+    public function testDocumentsPatchRejectsEmptyPatch(): void
+    {
+        $this->expectException(InvalidArgument::class);
+        (new Helpers(new FakeQuerier()))->documents()->patch('people', 'doc-1', []);
+    }
+
+    public function testGenericQueryRejectsEmptySql(): void
+    {
+        $this->expectException(InvalidArgument::class);
+        (new Helpers(new FakeQuerier()))->query('   ');
+    }
+
+    public function testBulkInsertEmptyIsNoOp(): void
+    {
+        $fq = new FakeQuerier();
+        $res = (new Helpers($fq))->bulkInsert('people', []);
+        $this->assertSame(0, $res->affected);
+        $this->assertSame([], $res->rids);
+        $this->assertCount(0, $fq->calls);
+    }
+
+    public function testBulkInsertPreservesOrder(): void
+    {
+        $fq = (new FakeQuerier())
+            // first insert: ensureCollection + insert
+            ->reply(new \stdClass())
+            ->reply(['rows' => [['rid' => 'r-0']], 'affected' => 1])
+            ->reply(new \stdClass())
+            ->reply(['rows' => [['rid' => 'r-1']], 'affected' => 1]);
+        $res = (new Helpers($fq))->bulkInsert('people', [['i' => 0], ['i' => 1]]);
+        $this->assertSame(2, $res->affected);
+        $this->assertSame(['r-0', 'r-1'], $res->rids);
+    }
+
+    public function testTxBeginCommitRollbackEmitSql(): void
+    {
+        $fq = (new FakeQuerier())->reply(new \stdClass())->reply(new \stdClass())->reply(new \stdClass());
+        $tx = (new Helpers($fq))->tx();
+        $tx->begin();
+        $tx->commit();
+        $tx->rollback();
+        $this->assertSame('BEGIN', $fq->calls[0]['sql']);
+        $this->assertSame('COMMIT', $fq->calls[1]['sql']);
+        $this->assertSame('ROLLBACK', $fq->calls[2]['sql']);
+    }
+
+    public function testTxRunCommitsOnSuccess(): void
+    {
+        $fq = (new FakeQuerier())->reply(new \stdClass())->reply(new \stdClass());
+        (new Helpers($fq))->tx()->run(function ($tx): void {
+            // no-op body
+        });
+        $this->assertSame('BEGIN', $fq->calls[0]['sql']);
+        $this->assertSame('COMMIT', $fq->calls[1]['sql']);
+    }
+
+    public function testTxRunRollsBackAndRethrowsOnFailure(): void
+    {
+        $fq = (new FakeQuerier())->reply(new \stdClass())->reply(new \stdClass());
+        try {
+            (new Helpers($fq))->tx()->run(function ($tx): void {
+                throw new \RuntimeException('boom');
+            });
+            $this->fail('expected exception to propagate');
+        } catch (\RuntimeException $e) {
+            $this->assertSame('boom', $e->getMessage());
+        }
+        $this->assertSame('BEGIN', $fq->calls[0]['sql']);
+        $this->assertSame('ROLLBACK', $fq->calls[1]['sql']);
+    }
+
+    public function testTxRunRejectsNesting(): void
+    {
+        $fq = (new FakeQuerier())->reply(new \stdClass())->reply(new \stdClass());
+        $this->expectException(InvalidArgument::class);
+        (new Helpers($fq))->tx()->run(function ($tx): void {
+            $tx->run(function ($inner): void {});
+        });
+    }
 }

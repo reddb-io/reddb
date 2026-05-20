@@ -1,6 +1,8 @@
 <?php
 /**
- * Implements `queue.*` from the SDK Helper Spec.
+ * Implements `queues.*` from the SDK Helper Spec (v1.0 §6). The spec
+ * namespace is plural; {@see Helpers::queues()} is the canonical accessor and
+ * {@see Helpers::queue()} the singular alias.
  */
 
 declare(strict_types=1);
@@ -10,6 +12,21 @@ namespace Reddb\Helpers;
 final class Queue
 {
     public function __construct(private readonly Querier $q) {}
+
+    /**
+     * Create the queue if it does not exist (idempotent). Wraps
+     * `CREATE QUEUE IF NOT EXISTS`.
+     */
+    public function create(string $queue): void
+    {
+        Sql::assertIdentifier($queue, 'queue name');
+        try {
+            $this->q->query('CREATE QUEUE IF NOT EXISTS ' . Sql::identifier($queue));
+        } catch (\Throwable $e) {
+            if (str_contains($e->getMessage(), 'already exists')) return;
+            throw $e;
+        }
+    }
 
     /** @param array{priority?:int} $opts */
     public function push(string $queue, mixed $value, array $opts = []): QueuePushResult
