@@ -68,7 +68,9 @@ final class Documents
      */
     public function patch(string $collection, string $rid, array $patch): array
     {
-        if (count($patch) === 0) return $this->get($collection, $rid);
+        if (count($patch) === 0) {
+            throw new InvalidArgument('documents.patch patch must be a non-empty object');
+        }
         $parts = [];
         foreach ($patch as $field => $value) {
             if (!is_string($field) || str_contains($field, '/')) {
