@@ -123,6 +123,27 @@ jobs:
       - name: Contract-matrix tooling contract test
         run: node --test scripts/contract_matrix_contract.test.mjs
 
+  docs-matrix:
+    # Issue #568 — public docs (README, docs/query/*.md, driver READMEs) are
+    # checked against the contract matrix. The matrix is the source of truth;
+    # scripts/gen-docs-from-matrix.mjs projects it into a marker-delimited
+    # support block in every public doc, and `--check` fails the build when a
+    # doc drifts from the matrix — so a doc can never promise a feature the
+    # matrix does not mark supported. Run `--write` locally to regenerate.
+    name: Docs Match Contract Matrix
+    needs: gate
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Check public docs match the contract matrix
+        run: node scripts/gen-docs-from-matrix.mjs --check
+      - name: Doc-generation tooling contract test
+        run: node --test scripts/docs_matrix_contract.test.mjs
+
   quality:
     name: Quality (fmt, check, clippy)
     needs: gate

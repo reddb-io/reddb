@@ -191,6 +191,41 @@ the same change so the release gate keeps the promise honest:
    exit 0, and `node --test scripts/contract_matrix_contract.test.mjs` must
    pass. Update the prose tables above if the new promise belongs in the
    human-facing ledger.
+5. **Regenerate the docs:** `node scripts/gen-docs-from-matrix.mjs --write`
+   (see below) so the public docs reflect the new promise, and commit the
+   result in the same change.
+
+## Generating and checking docs against the matrix
+
+The matrix is also the source of truth for what the **public docs** may claim
+(issue #568). [`scripts/gen-docs-from-matrix.mjs`](../../scripts/gen-docs-from-matrix.mjs)
+projects the matrix into a marker-delimited **"Public-surface support"** block
+inside every public doc, so a doc can never present a surface as more-supported
+than the matrix says — the block content is computed entirely from the JSON.
+
+Covered docs:
+
+- `README.md` — the umbrella matrix across every surface.
+- Each existing `source` doc (e.g. `docs/query/insert.md`,
+  `docs/query/graph-commands.md`, `docs/spec/sdk-helpers.md`) — its own
+  promises across every surface.
+- Every driver README (`drivers/*/README.md` and
+  `crates/reddb-client/README.md`) — the `driver_helpers` column for every
+  promise. New driver READMEs are picked up automatically.
+
+Workflow:
+
+- **Regenerate:** `node scripts/gen-docs-from-matrix.mjs --write` rewrites the
+  managed block (between `<!-- contract-matrix:begin -->` and
+  `<!-- contract-matrix:end -->`) in each doc. Never edit between the markers
+  by hand.
+- **Check:** `node scripts/gen-docs-from-matrix.mjs --check` (the default)
+  exits non-zero when any doc's block is out of date or missing. It runs in the
+  `docs-matrix` job of [`ci.yml`](../../.github/workflows/ci.yml) and in the
+  release-blocking `plan` job of
+  [`release.yml`](../../.github/workflows/release.yml), so a doc that drifts
+  from the matrix fails CI and blocks the release.
+- **Contract test:** `node --test scripts/docs_matrix_contract.test.mjs`.
 
 ## Removing a promised feature
 

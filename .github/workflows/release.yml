@@ -139,6 +139,15 @@ jobs:
         if: steps.plan.outputs.should_skip != 'true'
         run: node scripts/verify-contract-matrix.mjs
 
+      - name: Public docs match the contract matrix (release-blocking)
+        # Issue #568 — refuse to cut a release when README/docs/driver READMEs
+        # drift from the contract matrix (i.e. a doc could promise a feature the
+        # matrix does not mark supported). Runs in `plan` alongside the matrix
+        # gate, so it also blocks publishing even when CI is skipped for a
+        # docs-only change. Regenerate with `node scripts/gen-docs-from-matrix.mjs --write`.
+        if: steps.plan.outputs.should_skip != 'true'
+        run: node scripts/gen-docs-from-matrix.mjs --check
+
   build:
     name: Build ${{ matrix.asset_name }}
     needs: [plan]

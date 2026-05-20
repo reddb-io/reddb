@@ -291,3 +291,18 @@ Bulk insert:
 > Collections are created automatically on first insert for generic row-style data. Model-specific
 > collections such as `CREATE TIMESERIES` and `CREATE QUEUE` should still be declared explicitly so
 > RedDB can enforce the correct native semantics.
+
+<!-- contract-matrix:begin -->
+## Public-surface support
+
+> Generated from [`docs/conformance/public-surface-contract-matrix.json`](/docs/conformance/public-surface-contract-matrix.json) by `scripts/gen-docs-from-matrix.mjs`. Do not edit between the markers by hand — run `node scripts/gen-docs-from-matrix.mjs --write`. The matrix is the source of truth; this block can never claim more than it, and CI (`docs-matrix`) fails on drift.
+>
+> The public promises this document makes, and the status of each surface.
+
+| Promise | sql | http | redwire | grpc | driver_helpers |
+| --- | --- | --- | --- | --- | --- |
+| **PSC-004** — INSERT creates rows, documents, and native timeseries points. | ✅ supported | ✅ supported | ⚠️ partial | ✅ supported | ✅ supported |
+| **PSC-006** — Timeseries stores timestamped metrics with tags and supports query/readback. | ✅ supported | ⚠️ partial | ❌ unsupported | ❌ unsupported | ⚠️ partial |
+
+_Status legend: ✅ supported · ⚠️ partial (known gaps) · ❌ unsupported._
+<!-- contract-matrix:end -->
