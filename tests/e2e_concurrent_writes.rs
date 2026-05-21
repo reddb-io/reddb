@@ -96,6 +96,6 @@ fn twenty_threads_five_collections_do_not_deadlock() {
     // Sanity: every collection got rows from multiple threads.
     for c in 0..5 {
         let r = rt.execute_query(&format!("SELECT * FROM c{c}")).unwrap();
-        assert!(r.result.records.len() > 0, "c{c} empty");
+        assert!(!r.result.records.is_empty(), "c{c} empty");
     }
 }

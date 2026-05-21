@@ -12,8 +12,7 @@ fn setup_purchases() -> RedDBRuntime {
     let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
     let q = QueryUseCases::new(&rt);
     q.execute(ExecuteQueryInput {
-        query: "CREATE TABLE purchases (id INTEGER, user_id TEXT, ts BIGINT, amount BIGINT)"
-            .into(),
+        query: "CREATE TABLE purchases (id INTEGER, user_id TEXT, ts BIGINT, amount BIGINT)".into(),
     })
     .expect("create purchases table");
     rt
@@ -39,7 +38,10 @@ fn id_int(row: &reddb::storage::query::unified::UnifiedRecord) -> i64 {
 }
 
 fn col_int(row: &reddb::storage::query::unified::UnifiedRecord, col: &str) -> i64 {
-    match row.get(col).unwrap_or_else(|| panic!("column {col} missing")) {
+    match row
+        .get(col)
+        .unwrap_or_else(|| panic!("column {col} missing"))
+    {
         Value::Integer(v) => *v,
         Value::BigInt(v) => *v,
         Value::UnsignedInteger(v) => *v as i64,
@@ -48,7 +50,10 @@ fn col_int(row: &reddb::storage::query::unified::UnifiedRecord, col: &str) -> i6
 }
 
 fn col_f64(row: &reddb::storage::query::unified::UnifiedRecord, col: &str) -> f64 {
-    match row.get(col).unwrap_or_else(|| panic!("column {col} missing")) {
+    match row
+        .get(col)
+        .unwrap_or_else(|| panic!("column {col} missing"))
+    {
         Value::Float(v) => *v,
         Value::Integer(v) | Value::BigInt(v) => *v as f64,
         other => panic!("expected float {col}, got {other:?}"),
@@ -57,7 +62,9 @@ fn col_f64(row: &reddb::storage::query::unified::UnifiedRecord, col: &str) -> f6
 
 fn run(rt: &RedDBRuntime, query: &str) -> Vec<reddb::storage::query::unified::UnifiedRecord> {
     QueryUseCases::new(rt)
-        .execute(ExecuteQueryInput { query: query.to_string() })
+        .execute(ExecuteQueryInput {
+            query: query.to_string(),
+        })
         .expect("query")
         .result
         .records
@@ -78,8 +85,10 @@ fn sum_partition_by_only_uses_full_partition_as_frame() {
          FROM purchases",
     );
     assert_eq!(rows.len(), 5);
-    let by_id: std::collections::HashMap<i64, i64> =
-        rows.iter().map(|r| (id_int(r), col_int(r, "total"))).collect();
+    let by_id: std::collections::HashMap<i64, i64> = rows
+        .iter()
+        .map(|r| (id_int(r), col_int(r, "total")))
+        .collect();
     for &id in &[1i64, 2, 3] {
         assert_eq!(by_id[&id], 60, "u1 total");
     }
@@ -190,7 +199,10 @@ fn rows_unbounded_preceding_current_row_is_per_row_running() {
     // both (15). The relative ordering of the two peers under
     // unstable sort is not guaranteed, so accept either pairing.
     let peer_totals: Vec<i64> = vec![by_id[&1], by_id[&2]];
-    assert!(peer_totals.contains(&15), "second peer must see both: {peer_totals:?}");
+    assert!(
+        peer_totals.contains(&15),
+        "second peer must see both: {peer_totals:?}"
+    );
     let first_peer = *peer_totals.iter().find(|&&v| v != 15).expect("first peer");
     assert!(
         first_peer == 5 || first_peer == 10,

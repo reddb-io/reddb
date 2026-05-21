@@ -18,9 +18,7 @@
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use reddb_server::runtime::blockchain_kind::canonical_payload;
 use reddb_server::storage::schema::Value;
-use reddb_server::storage::signed_writes::{
-    reverify_row, SIGNATURE_LEN, SIGNER_PUBKEY_LEN,
-};
+use reddb_server::storage::signed_writes::{reverify_row, SIGNATURE_LEN, SIGNER_PUBKEY_LEN};
 use reddb_server::{RedDBError, RedDBOptions, RedDBRuntime, RuntimeQueryResult};
 use std::sync::Arc;
 
@@ -389,10 +387,9 @@ fn standalone_verifier_round_trips_canonical_payload() {
     };
     let stored_pk = decode_hex(&stored_pk_hex).unwrap();
     let stored_sig = decode_hex(&stored_sig_hex).unwrap();
-    let vk = VerifyingKey::from_bytes(
-        <&[u8; SIGNER_PUBKEY_LEN]>::try_from(&stored_pk[..]).unwrap(),
-    )
-    .expect("vk parses");
+    let vk =
+        VerifyingKey::from_bytes(<&[u8; SIGNER_PUBKEY_LEN]>::try_from(&stored_pk[..]).unwrap())
+            .expect("vk parses");
     let mut sig_arr = [0u8; SIGNATURE_LEN];
     sig_arr.copy_from_slice(&stored_sig);
     let signature = ed25519_dalek::Signature::from_bytes(&sig_arr);

@@ -68,10 +68,7 @@ impl RetentionSweeperState {
     /// `SweeperState::default()` when the collection has never been
     /// ticked — keeps the call-site free of `Option` plumbing.
     pub(crate) fn get(&self, collection: &str) -> SweeperState {
-        self.states
-            .get(collection)
-            .cloned()
-            .unwrap_or_default()
+        self.states.get(collection).cloned().unwrap_or_default()
     }
 
     /// Record the outcome of a sweeper tick.

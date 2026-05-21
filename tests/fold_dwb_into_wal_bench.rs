@@ -101,9 +101,7 @@ fn fold_dwb_into_wal_oltp_overhead_under_20pct() {
     set_fold_dwb_into_wal_enabled(false);
 
     let ratio = on.as_secs_f64() / off.as_secs_f64();
-    eprintln!(
-        "[gh-478 bench] tx_count={TX_COUNT} off={off:?} on={on:?} ratio(on/off)={ratio:.3}"
-    );
+    eprintln!("[gh-478 bench] tx_count={TX_COUNT} off={off:?} on={on:?} ratio(on/off)={ratio:.3}");
 
     // Acceptance: ON must not be >20% slower than OFF. ON faster is
     // fine — that's a win, not a regression. We assert the upper

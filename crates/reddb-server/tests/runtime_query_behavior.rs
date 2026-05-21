@@ -43,7 +43,7 @@ fn uint_at(result: &RuntimeQueryResult, row: usize, column: &str) -> u64 {
 fn number_at_any(result: &RuntimeQueryResult, row: usize, columns: &[&str]) -> f64 {
     let value = columns
         .iter()
-        .find_map(|column| result.result.records[row].get(*column))
+        .find_map(|column| result.result.records[row].get(column))
         .unwrap_or_else(|| panic!("expected one of columns {columns:?} at row {row}"));
     match value {
         Value::Integer(value) => *value as f64,

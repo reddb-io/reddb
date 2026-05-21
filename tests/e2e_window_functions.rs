@@ -35,7 +35,10 @@ fn id_int(row: &reddb::storage::query::unified::UnifiedRecord) -> i64 {
 }
 
 fn col_int(row: &reddb::storage::query::unified::UnifiedRecord, col: &str) -> i64 {
-    match row.get(col).unwrap_or_else(|| panic!("column {col} missing")) {
+    match row
+        .get(col)
+        .unwrap_or_else(|| panic!("column {col} missing"))
+    {
         Value::Integer(v) => *v,
         Value::BigInt(v) => *v,
         Value::UnsignedInteger(v) => *v as i64,

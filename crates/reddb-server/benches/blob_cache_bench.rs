@@ -204,7 +204,7 @@ return count
             }
             b'-' => {
                 let line = self.read_line()?;
-                Err(io::Error::new(io::ErrorKind::Other, line))
+                Err(io::Error::other(line))
             }
             b':' => {
                 let line = self.read_line()?;
@@ -811,7 +811,7 @@ fn w8_mixed_blob_admission(c: &mut Criterion) {
                 let mut i = 0usize;
                 b.iter(|| {
                     // 80/20 read/write mix
-                    if i % 5 == 0 {
+                    if i.is_multiple_of(5) {
                         let idx = i % total_keys;
                         let put = if idx < small_count {
                             BlobCachePut::new(small_payload.clone())
@@ -851,7 +851,7 @@ fn w8_mixed_blob_admission(c: &mut Criterion) {
                 redis.set(&key(key_idx), put).unwrap();
             }
             b.iter(|| {
-                if i % 5 == 0 {
+                if i.is_multiple_of(5) {
                     let idx = i % total_keys;
                     let put = if idx < small_count {
                         &small_payload

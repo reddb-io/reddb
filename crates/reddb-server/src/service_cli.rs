@@ -236,7 +236,7 @@ pub fn default_telemetry_for_path(
 /// Metadata key used to thread the parsed backup config from
 /// `to_db_options` down to runner threads. The runner reads it back
 /// (via `runner_backup_intervals`) to spawn the periodic checkpointer
-/// + WAL-flush tasks. Threading through `metadata` avoids extending
+/// and WAL-flush tasks. Threading through `metadata` avoids extending
 /// `RedDBOptions` with a public field that has no meaning for
 /// library consumers.
 const BACKUP_INTERVAL_META_CHECKPOINT: &str = "red.boot.backup.checkpoint_interval_secs";
@@ -447,9 +447,7 @@ fn spawn_backup_tasks_if_configured(
         .get(BACKUP_PAUSE_ON_LAG_META)
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(0);
-    if options.remote_backend.is_none() {
-        return None;
-    }
+    options.remote_backend.as_ref()?;
 
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
 

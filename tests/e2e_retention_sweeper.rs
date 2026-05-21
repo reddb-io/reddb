@@ -182,8 +182,8 @@ fn sweeper_after_restart_continues_to_reclaim_via_wal() {
 
     // Phase 1 — write rows, set retention, sweep on the primary.
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&data_path))
-            .expect("open primary");
+        let rt =
+            RedDBRuntime::with_options(RedDBOptions::persistent(&data_path)).expect("open primary");
         let q = QueryUseCases::new(&rt);
         q.execute(ExecuteQueryInput {
             query: "CREATE TABLE events (id INTEGER, msg TEXT) WITH timestamps = true".into(),
@@ -223,8 +223,7 @@ fn sweeper_after_restart_continues_to_reclaim_via_wal() {
     // records emitted by the sweeper, so after replay the rows are
     // gone on the replica as well.
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&data_path))
-            .expect("reopen");
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&data_path)).expect("reopen");
         let q = QueryUseCases::new(&rt);
         let after = q
             .execute(ExecuteQueryInput {

@@ -145,10 +145,7 @@ async fn case_documents_crud_nested_patch(db: &Reddb) {
         &ValueOut::String("login".into())
     );
 
-    let listed = docs
-        .list("events", ListOptions::new())
-        .await
-        .expect("list");
+    let listed = docs.list("events", ListOptions::new()).await.expect("list");
     assert!(!listed.items.is_empty());
 
     let patched = docs
@@ -232,7 +229,10 @@ async fn case_kv_missing_get_returns_none(db: &Reddb) {
     let kv = db.kv_collection("conf_kv_missing");
     // Touch the collection so it exists.
     kv.set("seed", JsonValue::string("v")).await.expect("seed");
-    let got = kv.get("never:set").await.expect("missing get must not error");
+    let got = kv
+        .get("never:set")
+        .await
+        .expect("missing get must not error");
     assert!(
         got.is_none(),
         "kv.get on missing key must return None, not NOT_FOUND"
@@ -256,12 +256,18 @@ async fn case_kv_delete_returns_envelope(db: &Reddb) {
 async fn case_queues_fifo_peek_pop_len(db: &Reddb) {
     let q = db.queue();
     q.create("conf_q").await.expect("create");
-    q.push("conf_q", &JsonValue::object([("n", JsonValue::number(1.0))]))
-        .await
-        .expect("push 1");
-    q.push("conf_q", &JsonValue::object([("n", JsonValue::number(2.0))]))
-        .await
-        .expect("push 2");
+    q.push(
+        "conf_q",
+        &JsonValue::object([("n", JsonValue::number(1.0))]),
+    )
+    .await
+    .expect("push 1");
+    q.push(
+        "conf_q",
+        &JsonValue::object([("n", JsonValue::number(2.0))]),
+    )
+    .await
+    .expect("push 2");
 
     assert_eq!(q.len("conf_q").await.expect("len"), 2);
 
@@ -485,7 +491,9 @@ macro_rules! embedded_case {
     ($name:ident) => {
         #[tokio::test]
         async fn $name() {
-            let db = Reddb::connect("memory://").await.expect("connect memory://");
+            let db = Reddb::connect("memory://")
+                .await
+                .expect("connect memory://");
             super::$name(&db).await;
         }
     };

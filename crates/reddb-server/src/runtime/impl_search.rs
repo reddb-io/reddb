@@ -1346,7 +1346,6 @@ impl RedDBRuntime {
                         completion_tokens: completion_tokens_so_far,
                         estimated_cost_usd: cost_usd_so_far,
                         elapsed_ms,
-                        ..Default::default()
                     };
                     let daily_state = self.ask_daily_cost_state(&tenant_key, ask_cost_guard_now());
                     match crate::runtime::ai::cost_guard::evaluate(
@@ -1397,7 +1396,6 @@ impl RedDBRuntime {
                     completion_tokens: completion_tokens_u32,
                     estimated_cost_usd: cost_usd,
                     elapsed_ms,
-                    ..Default::default()
                 };
                 self.check_and_record_ask_daily_cost(&tenant_key, &usage, &settings)?;
 
@@ -1855,9 +1853,13 @@ impl RedDBRuntime {
         let default_ttl = default_ttl.trim();
         crate::runtime::ai::answer_cache_key::Settings {
             enabled: self.config_bool("ask.cache.enabled", false),
-            default_ttl: default_ttl.is_empty().then_some(None).unwrap_or_else(|| {
-                crate::runtime::ai::answer_cache_key::parse_ttl(default_ttl).ok()
-            }),
+            default_ttl: if default_ttl.is_empty() {
+                None
+            } else {
+                {
+                    crate::runtime::ai::answer_cache_key::parse_ttl(default_ttl).ok()
+                }
+            },
             max_entries: self
                 .config_u64("ask.cache.max_entries", 1024)
                 .min(usize::MAX as u64) as usize,
@@ -2615,7 +2617,7 @@ fn ask_attempt_error_from_reddb(
 
     match err {
         RedDBError::Query(message) if message.contains("AI transport error") => {
-            if let Some(code) = transport_status_code(&message) {
+            if let Some(code) = transport_status_code(message) {
                 if (500..=599).contains(&code) {
                     return AttemptError::Status5xx {
                         code,

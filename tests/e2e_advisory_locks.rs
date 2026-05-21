@@ -146,11 +146,11 @@ fn blocking_advisory_lock_waits_for_release() {
     set_current_connection_id(801);
     assert!(eval_bool(&rt, "SELECT pg_advisory_unlock(99)"));
 
-    let worker_owned = handle
-        .join()
-        .expect("worker thread")
-        .then_some(true)
-        .unwrap_or(false);
+    let worker_owned = if handle.join().expect("worker thread") {
+        true
+    } else {
+        false
+    };
     assert!(worker_owned, "worker acquired after main released");
 
     clear_current_connection_id();

@@ -72,6 +72,26 @@ check "@reddb-io/cli"               "$(grep -m1 '"version"' package.json | sed -
 
 node scripts/check-registry-names.mjs
 
+# Drift guard: the committed version must never be BEHIND the latest published
+# stable tag. Catches the failure mode where a release was cut without the
+# version bump landing back on main (e.g. a manual release.yml dispatch instead
+# of merging the Changesets "Version Packages" PR), leaving every committed
+# manifest stale — exactly the 1.2.0-vs-v1.2.5 drift this guard was added for.
+echo
+latest_tag=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname 2>/dev/null \
+  | grep -vE -- '-' | head -1 | sed 's/^v//')
+if [[ -z "$latest_tag" ]]; then
+  echo "  · no stable vX.Y.Z tags visible (shallow clone?) — skipping drift guard"
+elif [[ "$(printf '%s\n%s\n' "$latest_tag" "$ENGINE" | sort -V | tail -1)" != "$ENGINE" ]]; then
+  echo "  ✗ committed version $ENGINE is BEHIND latest published tag v$latest_tag"
+  echo "    a release bump did not land on main — cut releases via the Changesets"
+  echo "    'Version Packages' PR, not a manual release.yml dispatch."
+  echo "    See docs/release-runbook.md § Version integrity."
+  fail=1
+else
+  echo "  ✓ committed $ENGINE is at or ahead of latest published tag v$latest_tag"
+fi
+
 # Independent versions (informational only)
 echo
 echo "independent (no lock-step):"

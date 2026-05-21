@@ -33,9 +33,7 @@ use crate::storage::signed_writes::{
     SIGNER_PUBKEY_LEN,
 };
 
-use super::blockchain_kind::{
-    COL_BLOCK_HEIGHT, COL_HASH, COL_PREV_HASH, COL_TIMESTAMP,
-};
+use super::blockchain_kind::{COL_BLOCK_HEIGHT, COL_HASH, COL_PREV_HASH, COL_TIMESTAMP};
 
 /// All-zero pubkey marker recorded on the genesis row of a signed chain.
 /// Documented exemption: the genesis block predates any signer's first
@@ -107,10 +105,7 @@ pub fn make_signed_block_reserved_fields(
             RESERVED_SIGNER_PUBKEY_COL.to_string(),
             Value::Blob(signer_pubkey.to_vec()),
         ),
-        (
-            RESERVED_SIGNATURE_COL.to_string(),
-            Value::Blob(signature),
-        ),
+        (RESERVED_SIGNATURE_COL.to_string(), Value::Blob(signature)),
         (COL_HASH.to_string(), Value::Blob(hash.to_vec())),
     ];
     (fields, hash)
@@ -327,10 +322,7 @@ mod tests {
             }
             other => panic!("signature must be Blob, got {other:?}"),
         }
-        let height = fields
-            .iter()
-            .find(|(k, _)| k == COL_BLOCK_HEIGHT)
-            .unwrap();
+        let height = fields.iter().find(|(k, _)| k == COL_BLOCK_HEIGHT).unwrap();
         assert_eq!(height.1, Value::UnsignedInteger(0));
     }
 
@@ -346,26 +338,14 @@ mod tests {
         // Flip one byte of the signature → hash changes.
         let mut sig_tampered = sig.clone();
         sig_tampered[0] ^= 0x01;
-        let (_f2, hash_tampered) = make_signed_block_reserved_fields(
-            GENESIS_PREV_HASH,
-            1,
-            42,
-            payload,
-            pk,
-            sig_tampered,
-        );
+        let (_f2, hash_tampered) =
+            make_signed_block_reserved_fields(GENESIS_PREV_HASH, 1, 42, payload, pk, sig_tampered);
         assert_ne!(hash_with_sig, hash_tampered);
         // Flip one byte of the pubkey → hash changes.
         let mut pk_tampered = pk;
         pk_tampered[0] ^= 0x01;
-        let (_f3, hash_pk_tampered) = make_signed_block_reserved_fields(
-            GENESIS_PREV_HASH,
-            1,
-            42,
-            payload,
-            pk_tampered,
-            sig,
-        );
+        let (_f3, hash_pk_tampered) =
+            make_signed_block_reserved_fields(GENESIS_PREV_HASH, 1, 42, payload, pk_tampered, sig);
         assert_ne!(hash_with_sig, hash_pk_tampered);
     }
 
@@ -384,7 +364,8 @@ mod tests {
         // Acceptance: "Tampering with signer_pubkey → verify_chain fails
         // at that height."
         let sk = signing_key(4);
-        let mut chain = build_signed_chain(&sk, [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()]);
+        let mut chain =
+            build_signed_chain(&sk, [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()]);
         // Tamper height-2 signer pubkey. Hash stored is now stale, so
         // verify_chain catches it as a hash mismatch.
         if let Some(signed) = chain[2].signed.as_mut() {
@@ -402,7 +383,8 @@ mod tests {
         // row.
         let sk = signing_key(5);
         let attacker = signing_key(6);
-        let mut chain = build_signed_chain(&sk, [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()]);
+        let mut chain =
+            build_signed_chain(&sk, [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()]);
         // Forge height-2: keep the original pubkey but install a sig
         // produced by the attacker's key over the same payload. The
         // signature is well-formed (64 bytes) but does NOT verify under
@@ -495,12 +477,8 @@ mod tests {
         // Acceptance: "INSERT requires both chain + signature fields;
         // missing → typed error."
         let registry = SignerRegistry::default();
-        let err = verify_insert(
-            &registry,
-            &InsertSignatureFields::default(),
-            b"payload",
-        )
-        .unwrap_err();
+        let err =
+            verify_insert(&registry, &InsertSignatureFields::default(), b"payload").unwrap_err();
         match err {
             SignedWriteError::MissingSignatureFields { fields } => {
                 assert!(fields.contains(&RESERVED_SIGNER_PUBKEY_COL));

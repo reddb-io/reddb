@@ -1381,6 +1381,10 @@ fn embedding_source_row_ref(
         .get("red_entity_id")
         .or_else(|| record.get("entity_id"))
         .or_else(|| record.get("_entity_id"))
+        // The row rid envelope exposes the logical row identity under the
+        // canonical `rid` key; legacy `red_entity_id` is only materialised when
+        // explicitly projected, so fall back to `rid` for query-sourced rows.
+        .or_else(|| record.get("rid"))
         .and_then(|value| match value {
             Value::UnsignedInteger(id) => Some(*id),
             Value::Integer(id) if *id >= 0 => Some(*id as u64),

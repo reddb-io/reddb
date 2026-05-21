@@ -327,21 +327,19 @@ mod tests {
         m.render(&mut body, &limiter);
 
         // `le="0.005"` includes only the 3ms sample (cumulative).
-        assert!(body.contains(
-            "http_handler_duration_seconds_bucket{transport=\"http\",le=\"0.005\"} 1"
-        ));
+        assert!(body
+            .contains("http_handler_duration_seconds_bucket{transport=\"http\",le=\"0.005\"} 1"));
         // `le="0.05"` includes the 3ms + 40ms samples.
-        assert!(body.contains(
-            "http_handler_duration_seconds_bucket{transport=\"http\",le=\"0.05\"} 2"
-        ));
+        assert!(
+            body.contains("http_handler_duration_seconds_bucket{transport=\"http\",le=\"0.05\"} 2")
+        );
         // `le="+Inf"` sees all 3 samples.
-        assert!(body.contains(
-            "http_handler_duration_seconds_bucket{transport=\"http\",le=\"+Inf\"} 3"
-        ));
+        assert!(
+            body.contains("http_handler_duration_seconds_bucket{transport=\"http\",le=\"+Inf\"} 3")
+        );
         // HTTPS labelset present but empty.
-        assert!(body.contains(
-            "http_handler_duration_seconds_bucket{transport=\"https\",le=\"+Inf\"} 0"
-        ));
+        assert!(body
+            .contains("http_handler_duration_seconds_bucket{transport=\"https\",le=\"+Inf\"} 0"));
     }
 
     #[test]

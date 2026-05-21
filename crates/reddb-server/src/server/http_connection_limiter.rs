@@ -261,8 +261,7 @@ mod tests {
 
     impl FakeClock {
         fn advance(&self, d: Duration) {
-            self.nanos
-                .fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
+            self.nanos.fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
         }
     }
 

@@ -279,9 +279,8 @@ fn fb_old_20_basic_native_ddl_works() {
         "CREATE QUEUE fb_old_20_queue",
         "CREATE TIMESERIES fb_old_20_ts RETENTION 1 d",
     ] {
-        try_exec(&rt, sql).unwrap_or_else(|err| {
-            panic!("FB-OLD-20: native DDL `{sql}` must succeed, got: {err}")
-        });
+        try_exec(&rt, sql)
+            .unwrap_or_else(|err| panic!("FB-OLD-20: native DDL `{sql}` must succeed, got: {err}"));
     }
 }
 

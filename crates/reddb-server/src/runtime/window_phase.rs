@@ -48,24 +48,13 @@ pub(crate) fn apply(
     }
     for projection in projections {
         let Projection::Window {
-            name,
-            args,
-            window,
-            ..
+            name, args, window, ..
         } = projection
         else {
             continue;
         };
         let label = projection_name(projection);
-        compute_window_column(
-            records,
-            name,
-            args,
-            window,
-            &label,
-            table_name,
-            table_alias,
-        )?;
+        compute_window_column(records, name, args, window, &label, table_name, table_alias)?;
     }
     Ok(())
 }
@@ -165,13 +154,8 @@ fn compute_window_column(
                 .partition_by
                 .iter()
                 .map(|expr| {
-                    value_to_canonical_key(&eval_expr_on_record(
-                        expr,
-                        rec,
-                        table_name,
-                        table_alias,
-                    ))
-                    .unwrap_or(CanonicalKey::Null)
+                    value_to_canonical_key(&eval_expr_on_record(expr, rec, table_name, table_alias))
+                        .unwrap_or(CanonicalKey::Null)
                 })
                 .collect()
         })
@@ -201,8 +185,8 @@ fn compute_window_column(
     // partition iteration.
     let mut groups: HashMap<Vec<CanonicalKey>, Vec<usize>> = HashMap::new();
     let mut group_order: Vec<Vec<CanonicalKey>> = Vec::new();
-    for i in 0..row_count {
-        let key = partition_keys[i].clone();
+    for (i, key) in partition_keys.iter().enumerate() {
+        let key = key.clone();
         if !groups.contains_key(&key) {
             group_order.push(key.clone());
         }
@@ -236,76 +220,74 @@ fn compute_window_column(
     // OVER functions (slice 7c). COUNT(*) — encoded as `Projection::All`
     // — has no source expression, so we leave the vector empty and the
     // aggregator interprets that as "count every row in the frame".
-    let agg_src_values: Vec<Value> = if matches!(
-        upper.as_str(),
-        "SUM" | "AVG" | "MIN" | "MAX" | "COUNT"
-    ) {
-        match args.first() {
-            None | Some(Projection::All) => Vec::new(),
-            Some(arg_proj) => {
-                let (expr, _) = projection_to_expr(arg_proj).ok_or_else(|| {
-                    RedDBError::Query(format!(
-                        "{upper} OVER: argument is not a supported expression"
-                    ))
-                })?;
-                records
-                    .iter()
-                    .map(|rec| eval_expr_on_record(&expr, rec, table_name, table_alias))
-                    .collect()
-            }
-        }
-    } else {
-        Vec::new()
-    };
-    let agg_counts_all_rows = matches!(args.first(), None | Some(Projection::All));
-
-    let (lag_lead_offset, lag_lead_default, lag_lead_src_values) = if matches!(
-        upper.as_str(),
-        "LAG" | "LEAD"
-    ) {
-        let src_proj = args.first().ok_or_else(|| {
-            RedDBError::Query(format!(
-                "{upper} requires at least one argument (source column)"
-            ))
-        })?;
-        let (src_expr, _) = projection_to_expr(src_proj).ok_or_else(|| {
-            RedDBError::Query(format!("{upper} source argument is not a supported expression"))
-        })?;
-
-        let offset = if let Some(arg) = args.get(1) {
-            match eval_projection_constant(arg, &records[0], table_name, table_alias) {
-                Some(Value::Integer(v)) => v,
-                Some(Value::BigInt(v)) => v,
-                Some(Value::UnsignedInteger(v)) => v as i64,
-                Some(Value::Null) | None => 1,
-                Some(other) => {
-                    return Err(RedDBError::Query(format!(
-                        "{upper} offset must evaluate to an integer, got {other:?}"
-                    )))
+    let agg_src_values: Vec<Value> =
+        if matches!(upper.as_str(), "SUM" | "AVG" | "MIN" | "MAX" | "COUNT") {
+            match args.first() {
+                None | Some(Projection::All) => Vec::new(),
+                Some(arg_proj) => {
+                    let (expr, _) = projection_to_expr(arg_proj).ok_or_else(|| {
+                        RedDBError::Query(format!(
+                            "{upper} OVER: argument is not a supported expression"
+                        ))
+                    })?;
+                    records
+                        .iter()
+                        .map(|rec| eval_expr_on_record(&expr, rec, table_name, table_alias))
+                        .collect()
                 }
             }
         } else {
-            1
+            Vec::new()
         };
-        if offset < 0 {
-            return Err(RedDBError::Query(format!(
-                "{upper} offset must be non-negative, got {offset}"
-            )));
-        }
+    let agg_counts_all_rows = matches!(args.first(), None | Some(Projection::All));
 
-        let default = args
-            .get(2)
-            .and_then(|arg| eval_projection_constant(arg, &records[0], table_name, table_alias));
+    let (lag_lead_offset, lag_lead_default, lag_lead_src_values) =
+        if matches!(upper.as_str(), "LAG" | "LEAD") {
+            let src_proj = args.first().ok_or_else(|| {
+                RedDBError::Query(format!(
+                    "{upper} requires at least one argument (source column)"
+                ))
+            })?;
+            let (src_expr, _) = projection_to_expr(src_proj).ok_or_else(|| {
+                RedDBError::Query(format!(
+                    "{upper} source argument is not a supported expression"
+                ))
+            })?;
 
-        let src_values: Vec<Value> = records
-            .iter()
-            .map(|rec| eval_expr_on_record(&src_expr, rec, table_name, table_alias))
-            .collect();
+            let offset = if let Some(arg) = args.get(1) {
+                match eval_projection_constant(arg, &records[0], table_name, table_alias) {
+                    Some(Value::Integer(v)) => v,
+                    Some(Value::BigInt(v)) => v,
+                    Some(Value::UnsignedInteger(v)) => v as i64,
+                    Some(Value::Null) | None => 1,
+                    Some(other) => {
+                        return Err(RedDBError::Query(format!(
+                            "{upper} offset must evaluate to an integer, got {other:?}"
+                        )))
+                    }
+                }
+            } else {
+                1
+            };
+            if offset < 0 {
+                return Err(RedDBError::Query(format!(
+                    "{upper} offset must be non-negative, got {offset}"
+                )));
+            }
 
-        (offset, default, src_values)
-    } else {
-        (0, None, Vec::new())
-    };
+            let default = args.get(2).and_then(|arg| {
+                eval_projection_constant(arg, &records[0], table_name, table_alias)
+            });
+
+            let src_values: Vec<Value> = records
+                .iter()
+                .map(|rec| eval_expr_on_record(&src_expr, rec, table_name, table_alias))
+                .collect();
+
+            (offset, default, src_values)
+        } else {
+            (0, None, Vec::new())
+        };
 
     for key in &group_order {
         let partition_indices = groups.get(key).expect("partition exists");
@@ -438,10 +420,7 @@ fn frame_bounds(
         Some(f) => f,
     };
 
-    let end_bound = frame
-        .end
-        .clone()
-        .unwrap_or(WindowFrameBound::CurrentRow);
+    let end_bound = frame.end.clone().unwrap_or(WindowFrameBound::CurrentRow);
 
     match (frame.unit, &frame.start, &end_bound) {
         (
@@ -460,7 +439,11 @@ fn frame_bounds(
             WindowFrameBound::UnboundedPreceding,
             WindowFrameBound::CurrentRow,
         ) => Ok((0, pos)),
-        (WindowFrameUnit::Rows, WindowFrameBound::Preceding(offset_expr), WindowFrameBound::CurrentRow) => {
+        (
+            WindowFrameUnit::Rows,
+            WindowFrameBound::Preceding(offset_expr),
+            WindowFrameBound::CurrentRow,
+        ) => {
             let n = preceding_offset_value(offset_expr)?;
             let start = pos.saturating_sub(n);
             Ok((start, pos))
@@ -495,9 +478,7 @@ fn range_current_row_end(
 }
 
 /// `ROWS N PRECEDING` — N must be a non-negative integer literal.
-fn preceding_offset_value(
-    expr: &crate::storage::query::ast::Expr,
-) -> Result<usize, RedDBError> {
+fn preceding_offset_value(expr: &crate::storage::query::ast::Expr) -> Result<usize, RedDBError> {
     use crate::storage::query::ast::Expr;
     match expr {
         Expr::Literal { value, .. } => match value {
@@ -756,11 +737,7 @@ mod tests {
 
     #[test]
     fn lag_returns_prior_value_or_null_on_first_row() {
-        let mut rows = vec![
-            rec(1, "u1", 100),
-            rec(2, "u1", 200),
-            rec(3, "u1", 300),
-        ];
+        let mut rows = vec![rec(1, "u1", 100), rec(2, "u1", 200), rec(3, "u1", 300)];
         let spec = WindowSpec {
             partition_by: vec![col_expr("user_id")],
             order_by: vec![WindowOrderItem {
@@ -800,11 +777,7 @@ mod tests {
 
     #[test]
     fn lead_returns_next_value_or_null_on_last_row() {
-        let mut rows = vec![
-            rec(1, "u1", 100),
-            rec(2, "u1", 200),
-            rec(3, "u1", 300),
-        ];
+        let mut rows = vec![rec(1, "u1", 100), rec(2, "u1", 200), rec(3, "u1", 300)];
         let spec = WindowSpec {
             partition_by: vec![col_expr("user_id")],
             order_by: vec![WindowOrderItem {

@@ -1631,7 +1631,7 @@ fn parse_histogram_le(value: &str) -> Option<f64> {
     }
 }
 
-fn histogram_quantile(quantile: f64, buckets: &mut Vec<(f64, f64)>) -> Option<f64> {
+fn histogram_quantile(quantile: f64, buckets: &mut [(f64, f64)]) -> Option<f64> {
     if buckets.is_empty() {
         return None;
     }
@@ -2025,7 +2025,7 @@ fn decode_metric_batch(
         let series_key = metrics_series_key(&metric, &tags);
         let budget_key = format!("{tenant}\n{namespace}\n{metric}");
         let is_new_series = !known_series.contains(&series_key);
-        if is_new_series && series_budget.is_some() {
+        if let Some(budget) = series_budget.filter(|_| is_new_series) {
             let current = match admitted_counts.get(&budget_key).copied() {
                 Some(count) => count,
                 None => {
@@ -2041,7 +2041,6 @@ fn decode_metric_batch(
                     count
                 }
             };
-            let budget = series_budget.expect("checked is_some");
             if current >= budget {
                 rejected_series += 1;
                 rejected_samples += series.samples.len() as u64;

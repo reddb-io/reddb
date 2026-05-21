@@ -97,9 +97,7 @@ impl<'a> Parser<'a> {
 
         if self.consume(&Token::Mode)? || self.consume_ident_ci("MODE")? {
             alter.mode = Some(self.parse_queue_mode()?);
-        } else if self.consume_ident_ci("MAX_ATTEMPTS")?
-            || self.consume_ident_ci("MAXATTEMPTS")?
-        {
+        } else if self.consume_ident_ci("MAX_ATTEMPTS")? || self.consume_ident_ci("MAXATTEMPTS")? {
             alter.max_attempts = Some(self.parse_integer()?.max(1) as u32);
         } else if self.consume_ident_ci("LOCK_DEADLINE_MS")? {
             alter.lock_deadline_ms = Some(self.parse_integer()?.max(1) as u64);
@@ -169,13 +167,16 @@ impl<'a> Parser<'a> {
             Token::Peek => {
                 self.advance()?;
                 let queue = self.expect_ident()?;
-                let count = if self.consume(&Token::Count)? {
-                    self.parse_integer()? as usize
-                } else if matches!(self.peek(), Token::Integer(_)) {
-                    self.parse_integer()? as usize
-                } else {
-                    1
-                };
+                // Accept either `PEEK <q> COUNT <n>` or a bare `PEEK <q> <n>`.
+                // `consume` has a side effect (advances past COUNT), so the
+                // short-circuit order matters: only peek for a bare integer
+                // when the COUNT keyword was absent.
+                let count =
+                    if self.consume(&Token::Count)? || matches!(self.peek(), Token::Integer(_)) {
+                        self.parse_integer()? as usize
+                    } else {
+                        1
+                    };
                 Ok(QueryExpr::QueueCommand(QueueCommand::Peek { queue, count }))
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("LEN") => {

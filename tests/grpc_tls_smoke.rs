@@ -96,7 +96,7 @@ async fn grpc_tls_handshake_and_health_call() {
         .await
         .expect("Health RPC over TLS");
     let reply = resp.into_inner();
-    assert!(reply.state.len() > 0, "health reply should be populated");
+    assert!(!reply.state.is_empty(), "health reply should be populated");
 
     server_handle.abort();
 }

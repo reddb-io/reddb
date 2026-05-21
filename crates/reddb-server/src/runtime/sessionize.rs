@@ -29,7 +29,7 @@ pub(crate) const SESSION_ID_COLUMN: &str = "session_id";
 /// with `session_id`. Errors when the clause + contract together do
 /// not yield an actor column and a gap duration.
 pub(crate) fn apply(
-    records: &mut Vec<UnifiedRecord>,
+    records: &mut [UnifiedRecord],
     contract: Option<&CollectionContract>,
     clause: &SessionizeClause,
 ) -> Result<(), RedDBError> {
@@ -152,7 +152,7 @@ fn value_as_ms(value: &Value) -> Option<i64> {
         Value::Timestamp(v) => Some(v.saturating_mul(1_000)),
         Value::BigInt(v) => Some(*v),
         Value::UnsignedInteger(v) => i64::try_from(*v).ok(),
-        Value::Integer(v) => Some(*v as i64),
+        Value::Integer(v) => Some(*v),
         _ => None,
     }
 }
@@ -173,7 +173,7 @@ fn encode_session_id(actor: &str, start_ts: i64) -> String {
 /// only here so the slice does not pull in a base32 crate.
 fn base32_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz234567";
-    let mut out = String::with_capacity((bytes.len() * 8 + 4) / 5);
+    let mut out = String::with_capacity((bytes.len() * 8).div_ceil(5));
     let mut buf: u32 = 0;
     let mut bits: u32 = 0;
     for &b in bytes {

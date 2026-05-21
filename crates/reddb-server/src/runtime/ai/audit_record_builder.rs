@@ -82,19 +82,11 @@ use crate::serde_json::Value;
 /// Surfaced via the `ask.audit.*` settings tree; threaded into the
 /// builder so tests can pin both shapes without touching global
 /// config.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Settings {
     /// When `true`, store the full answer string under the `answer`
     /// key in addition to `answer_hash`. Default `false`.
     pub include_answer: bool,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            include_answer: false,
-        }
-    }
 }
 
 /// All call state needed to render one audit row. Plain data —

@@ -21,7 +21,7 @@
 //! configured deployments stay on `NotRequired` so the check is a
 //! single atomic load of zero.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 use crate::api::{RedDBError, RedDBOptions, RedDBResult};
 use crate::replication::ReplicationRole;

@@ -48,10 +48,8 @@ fn run_a_few_saves(path: &Path, table: &str, n: usize) {
     rt.execute_query(&format!("CREATE TABLE {table} (name TEXT)"))
         .expect("ddl");
     for i in 0..n {
-        rt.execute_query(&format!(
-            "INSERT INTO {table} (name) VALUES ('row-{i}')"
-        ))
-        .expect("insert");
+        rt.execute_query(&format!("INSERT INTO {table} (name) VALUES ('row-{i}')"))
+            .expect("insert");
         rt.checkpoint().expect("flush");
     }
 }
@@ -66,8 +64,7 @@ fn journal_absent_by_default_outside_max_tier() {
 
     run_a_few_saves(&path, "seqn_off", 3);
 
-    let journals =
-        PhysicalMetadataFile::journal_paths_for_data_path(&path).expect("list journals");
+    let journals = PhysicalMetadataFile::journal_paths_for_data_path(&path).expect("list journals");
     assert!(
         journals.is_empty(),
         "seq-N journal must be absent when policy is off: {journals:?}",
@@ -93,8 +90,7 @@ fn journal_written_when_opt_in_with_bounded_retention() {
 
     run_a_few_saves(&path, "seqn_on", 10);
 
-    let journals =
-        PhysicalMetadataFile::journal_paths_for_data_path(&path).expect("list journals");
+    let journals = PhysicalMetadataFile::journal_paths_for_data_path(&path).expect("list journals");
     assert!(
         !journals.is_empty(),
         "seq-N journal must appear when opt-in is on",
@@ -120,8 +116,8 @@ fn recovery_handles_present_absent_and_corrupt_binary() {
     let path = persistent_path("seqn_present");
     cleanup(&path);
     run_a_few_saves(&path, "present", 3);
-    let (_, source) = PhysicalMetadataFile::load_for_data_path_with_source(&path)
-        .expect("present binary loads");
+    let (_, source) =
+        PhysicalMetadataFile::load_for_data_path_with_source(&path).expect("present binary loads");
     assert_eq!(source.as_str(), "binary");
 
     // === Case 2: CORRUPT — overwrite the binary with garbage; loader heals from journal.

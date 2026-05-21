@@ -8,7 +8,9 @@
 //!     advanced tip and can retry to success
 //!   - end-to-end chain integrity (verify_chain == Ok) after the race
 
-use reddb_server::storage::blockchain::{compute_block_hash, verify_chain, Block, GENESIS_PREV_HASH};
+use reddb_server::storage::blockchain::{
+    compute_block_hash, verify_chain, Block, GENESIS_PREV_HASH,
+};
 use reddb_server::storage::schema::Value;
 use reddb_server::{RedDBError, RedDBOptions, RedDBRuntime, RuntimeQueryResult};
 use std::sync::Arc;
@@ -23,11 +25,13 @@ fn select_all(rt: &RedDBRuntime, name: &str) -> RuntimeQueryResult {
 }
 
 fn sort_by_height(res: &mut RuntimeQueryResult) {
-    res.result.records.sort_by_key(|r| match r.get("block_height") {
-        Some(Value::UnsignedInteger(v)) => *v as i64,
-        Some(Value::Integer(v)) => *v,
-        _ => i64::MAX,
-    });
+    res.result
+        .records
+        .sort_by_key(|r| match r.get("block_height") {
+            Some(Value::UnsignedInteger(v)) => *v as i64,
+            Some(Value::Integer(v)) => *v,
+            _ => i64::MAX,
+        });
 }
 
 fn hex32(bytes: &[u8]) -> String {
@@ -136,8 +140,7 @@ fn caller_supplied_correct_values_appended_and_hash_recomputed() {
 
     // Cross-check: recompute hash from canonical payload + headers matches.
     let payload = b"actor=alice;".to_vec();
-    let recomputed =
-        compute_block_hash(&tip.hash, height, ts, &payload, None);
+    let recomputed = compute_block_hash(&tip.hash, height, ts, &payload, None);
     assert_eq!(recomputed, new_tip.hash);
 }
 
@@ -246,7 +249,12 @@ fn concurrent_writers_loser_gets_conflict_then_retries_to_success() {
         // user-visible fields in sorted order. Genesis has none.
         let mut user_pairs: Vec<(String, String)> = rec
             .iter_fields()
-            .filter(|(k, _)| !matches!(k.as_ref(), "block_height" | "prev_hash" | "timestamp" | "hash"))
+            .filter(|(k, _)| {
+                !matches!(
+                    k.as_ref(),
+                    "block_height" | "prev_hash" | "timestamp" | "hash"
+                )
+            })
             .map(|(k, v)| (k.to_string(), value_to_plain(v)))
             .collect();
         user_pairs.sort_by(|a, b| a.0.cmp(&b.0));

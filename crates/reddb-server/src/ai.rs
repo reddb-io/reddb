@@ -1294,9 +1294,8 @@ mod tests {
                     }
                     data.extend_from_slice(&buf[..read]);
                 }
-                let body =
-                    String::from_utf8_lossy(&data[header_len..header_len + content_length])
-                        .to_string();
+                let body = String::from_utf8_lossy(&data[header_len..header_len + content_length])
+                    .to_string();
                 return CapturedRequest {
                     method,
                     path,

@@ -275,8 +275,7 @@ fn phase_c_embed_catalog_in_datafile_not_yet_introduced() {
         "Phase C placeholder must be named in ADR-0018"
     );
     assert!(
-        adr.contains("has not been introduced yet")
-            || adr.contains("forward placeholder"),
+        adr.contains("has not been introduced yet") || adr.contains("forward placeholder"),
         "ADR must state that `embed_catalog_in_datafile` is a pre-existence \
          placeholder until the flag is actually introduced"
     );

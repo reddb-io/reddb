@@ -4,9 +4,7 @@
 //! (which a future tier-wiring slice flips on for `Max`) or the
 //! `REDDB_META_JSON_SIDECAR=1` env escape hatch.
 
-use reddb::{
-    set_meta_json_sidecar_enabled, PhysicalMetadataFile, RedDBOptions, RedDBRuntime,
-};
+use reddb::{set_meta_json_sidecar_enabled, PhysicalMetadataFile, RedDBOptions, RedDBRuntime};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};

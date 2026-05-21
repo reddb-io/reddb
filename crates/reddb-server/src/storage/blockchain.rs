@@ -47,10 +47,7 @@ pub struct ChainTip {
 pub enum BlockchainError {
     /// Client submitted a `prev_hash` that no longer matches the current tip
     /// (someone else appended first). Surface as HTTP 409.
-    ConflictRetry {
-        expected: [u8; 32],
-        got: [u8; 32],
-    },
+    ConflictRetry { expected: [u8; 32], got: [u8; 32] },
     /// Caller attempted UPDATE or DELETE on a `KIND blockchain` collection.
     /// Surface as HTTP 409 (`BlockchainCollectionImmutable`).
     Immutable,
@@ -222,7 +219,10 @@ mod tests {
             None,
         );
         match verify_chain(&chain) {
-            VerifyReport::Inconsistent { block_height, reason } => {
+            VerifyReport::Inconsistent {
+                block_height,
+                reason,
+            } => {
                 assert_eq!(block_height, 1);
                 assert!(reason.contains("prev_hash"));
             }

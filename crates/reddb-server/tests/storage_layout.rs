@@ -191,9 +191,7 @@ fn max_layout_places_every_tier_under_support_dir() {
     );
     assert_eq!(
         paths.audit_log_destination,
-        LogDestination::File(
-            Path::new("/var/lib/reddb/main.rdb.red/logs/audit.log").to_path_buf()
-        )
+        LogDestination::File(Path::new("/var/lib/reddb/main.rdb.red/logs/audit.log").to_path_buf())
     );
     assert_eq!(
         paths.slow_log_destination,
