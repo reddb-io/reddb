@@ -1192,6 +1192,483 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse any SQL/RQL-style command through a single frontend module.
+    /// Parse a `CREATE ...` statement. Split out of
+    /// [`parse_sql_command`] so its very large per-arm locals
+    /// (every CREATE variant's query struct) live in their own
+    /// stack frame instead of inflating the dispatcher's frame.
+    /// `parse_sql_command` recurses (CREATE VIEW ... AS <stmt>,
+    /// nested subqueries), so a fat dispatcher frame stacked on
+    /// itself overflowed small (2 MiB) worker-thread stacks (#635).
+    #[inline(never)]
+    fn parse_create_command(&mut self) -> Result<SqlCommand, ParseError> {
+        let pos = self.position();
+        self.advance()?;
+
+        // CREATE [OR REPLACE] [MATERIALIZED] VIEW [IF NOT EXISTS] name AS <select>
+        // Detect the VIEW path early so OR REPLACE / MATERIALIZED modifiers
+        // don't collide with other CREATE variants (TABLE, INDEX, etc.).
+        let mut or_replace = false;
+        if self.consume(&Token::Or)? || self.consume_ident_ci("OR")? {
+            let _ = self.consume_ident_ci("REPLACE")?;
+            or_replace = true;
+        }
+        let materialized = self.consume(&Token::Materialized)?;
+        if self.check(&Token::View) {
+            self.advance()?;
+            let if_not_exists = self.match_if_not_exists()?;
+            let name = self.expect_ident()?;
+            // Issue #584 slice 12 — `WITH RETENTION <duration>`
+            // on CREATE MATERIALIZED VIEW. Parsed before `AS`
+            // so the SELECT body parser cannot consume the
+            // trailing `WITH` for its own (TTL / METADATA /
+            // …) clauses. Persisted on the view definition;
+            // the physical sweep against view-backing rows
+            // activates with the slice-9 row-storage follow-up.
+            let mut retention_duration_ms: Option<u64> = None;
+            if self.check(&Token::With) {
+                self.advance()?;
+                if !self.consume(&Token::Retention)? && !self.consume_ident_ci("RETENTION")? {
+                    return Err(ParseError::expected(
+                        vec!["RETENTION"],
+                        self.peek(),
+                        self.position(),
+                    ));
+                }
+                if !materialized {
+                    return Err(ParseError::new(
+                        "WITH RETENTION is only valid on \
+                                 CREATE MATERIALIZED VIEW"
+                            .to_string(),
+                        self.position(),
+                    ));
+                }
+                let value = self.parse_float()?;
+                let unit_mult = self.parse_duration_unit()?;
+                retention_duration_ms = Some((value * unit_mult).round() as u64);
+            }
+            // Accept `AS` — the lexer promotes it to `Token::As`
+            // (keyword) but some paths still see it as an ident.
+            if !self.consume(&Token::As)? && !self.consume_ident_ci("AS")? {
+                return Err(ParseError::expected(
+                    vec!["AS"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+            // Recursive parse of the body. Any QueryExpr that the
+            // rest of the grammar accepts is valid (Select, Join, etc.).
+            let body = self.parse_sql_command()?.into_query_expr();
+            // Optional `REFRESH EVERY <duration>` clause on
+            // materialized views (issue #583 slice 10). The
+            // background scheduler reads this off the view
+            // descriptor and ticks the view on its cadence.
+            let mut refresh_every_ms: Option<u64> = None;
+            if self.check(&Token::Refresh) {
+                if !materialized {
+                    return Err(ParseError::new(
+                        "REFRESH EVERY is only valid on \
+                                 CREATE MATERIALIZED VIEW"
+                            .to_string(),
+                        self.position(),
+                    ));
+                }
+                self.advance()?;
+                if !self.consume_ident_ci("EVERY")? {
+                    return Err(ParseError::expected(
+                        vec!["EVERY"],
+                        self.peek(),
+                        self.position(),
+                    ));
+                }
+                let value = self.parse_float()?;
+                let unit_mult = self.parse_duration_unit()?;
+                refresh_every_ms = Some((value * unit_mult).round() as u64);
+            }
+            return Ok(SqlCommand::CreateView(CreateViewQuery {
+                name,
+                query: Box::new(body),
+                materialized,
+                if_not_exists,
+                or_replace,
+                refresh_every_ms,
+                retention_duration_ms,
+            }));
+        }
+        // If OR REPLACE / MATERIALIZED was consumed but VIEW was not,
+        // bail out — no other CREATE form accepts those modifiers.
+        if or_replace || materialized {
+            return Err(ParseError::expected(
+                vec!["VIEW"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+
+        if self.check(&Token::Index) || self.check(&Token::Unique) {
+            match self.parse_create_index_query()? {
+                QueryExpr::CreateIndex(query) => Ok(SqlCommand::CreateIndex(query)),
+                other => Err(ParseError::new(
+                    format!("internal: CREATE INDEX produced unexpected kind {other:?}"),
+                    self.position(),
+                )),
+            }
+        } else if self.check(&Token::Table) {
+            self.expect(Token::Table)?;
+            match self.parse_create_table_body()? {
+                QueryExpr::CreateTable(query) => Ok(SqlCommand::CreateTable(query)),
+                other => Err(ParseError::new(
+                    format!("internal: CREATE TABLE produced unexpected kind {other:?}"),
+                    self.position(),
+                )),
+            }
+        } else if self.check(&Token::Graph) {
+            self.advance()?;
+            match self.parse_create_collection_model_body(CollectionModel::Graph)? {
+                QueryExpr::CreateTable(query) => Ok(SqlCommand::CreateTable(query)),
+                other => Err(ParseError::new(
+                    format!("internal: CREATE GRAPH produced unexpected kind {other:?}"),
+                    self.position(),
+                )),
+            }
+        } else if self.check(&Token::Document) {
+            self.advance()?;
+            match self.parse_create_collection_model_body(CollectionModel::Document)? {
+                QueryExpr::CreateTable(query) => Ok(SqlCommand::CreateTable(query)),
+                other => Err(ParseError::new(
+                    format!("internal: CREATE DOCUMENT produced unexpected kind {other:?}"),
+                    self.position(),
+                )),
+            }
+        } else if self.check(&Token::Vector) {
+            self.advance()?;
+            match self.parse_create_vector_body()? {
+                QueryExpr::CreateVector(query) => Ok(SqlCommand::CreateVector(query)),
+                other => Err(ParseError::new(
+                    format!("internal: CREATE VECTOR produced unexpected kind {other:?}"),
+                    self.position(),
+                )),
+            }
+        } else if self.check(&Token::Collection) {
+            self.advance()?;
+            match self.parse_create_collection_body()? {
+                QueryExpr::CreateCollection(query) => Ok(SqlCommand::CreateCollection(query)),
+                other => Err(ParseError::new(
+                    format!("internal: CREATE COLLECTION produced unexpected kind {other:?}"),
+                    self.position(),
+                )),
+            }
+        } else if self.check(&Token::Kv) {
+            self.advance()?;
+            match self.parse_create_keyed_body(CollectionModel::Kv)? {
+                QueryExpr::CreateTable(query) => Ok(SqlCommand::CreateTable(query)),
+                other => Err(ParseError::new(
+                    format!("internal: CREATE KV produced unexpected kind {other:?}"),
+                    self.position(),
+                )),
+            }
+        } else if self.consume_ident_ci("CONFIG")? {
+            match self.parse_create_keyed_body(CollectionModel::Config)? {
+                QueryExpr::CreateTable(query) => Ok(SqlCommand::CreateTable(query)),
+                other => Err(ParseError::new(
+                    format!("internal: CREATE CONFIG produced unexpected kind {other:?}"),
+                    self.position(),
+                )),
+            }
+        } else if self.consume_ident_ci("VAULT")? {
+            match self.parse_create_keyed_body(CollectionModel::Vault)? {
+                QueryExpr::CreateTable(query) => Ok(SqlCommand::CreateTable(query)),
+                other => Err(ParseError::new(
+                    format!("internal: CREATE VAULT produced unexpected kind {other:?}"),
+                    self.position(),
+                )),
+            }
+        } else if self.check(&Token::Timeseries) {
+            self.advance()?;
+            match self.parse_create_timeseries_body()? {
+                QueryExpr::CreateTimeSeries(query) => Ok(SqlCommand::CreateTimeSeries(query)),
+                other => Err(ParseError::new(
+                    format!("internal: CREATE TIMESERIES produced unexpected kind {other:?}"),
+                    self.position(),
+                )),
+            }
+        } else if self.consume_ident_ci("METRICS")? {
+            match self.parse_create_metrics_body()? {
+                QueryExpr::CreateTable(query) => Ok(SqlCommand::CreateTable(query)),
+                other => Err(ParseError::new(
+                    format!("internal: CREATE METRICS produced unexpected kind {other:?}"),
+                    self.position(),
+                )),
+            }
+        } else if matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case("HYPERTABLE")) {
+            self.advance()?;
+            match self.parse_create_hypertable_body()? {
+                QueryExpr::CreateTimeSeries(query) => Ok(SqlCommand::CreateTimeSeries(query)),
+                other => Err(ParseError::new(
+                    format!("internal: CREATE HYPERTABLE produced unexpected kind {other:?}"),
+                    self.position(),
+                )),
+            }
+        } else if self.check(&Token::Queue) {
+            self.advance()?;
+            match self.parse_create_queue_body()? {
+                QueryExpr::CreateQueue(query) => Ok(SqlCommand::CreateQueue(query)),
+                other => Err(ParseError::new(
+                    format!("internal: CREATE QUEUE produced unexpected kind {other:?}"),
+                    self.position(),
+                )),
+            }
+        } else if self.check(&Token::Tree) {
+            self.advance()?;
+            match self.parse_create_tree_body()? {
+                QueryExpr::CreateTree(query) => Ok(SqlCommand::CreateTree(query)),
+                other => Err(ParseError::new(
+                    format!("internal: CREATE TREE produced unexpected kind {other:?}"),
+                    self.position(),
+                )),
+            }
+        } else if matches!(self.peek(), Token::Ident(n) if
+                    n.eq_ignore_ascii_case("HLL") ||
+                    n.eq_ignore_ascii_case("SKETCH") ||
+                    n.eq_ignore_ascii_case("FILTER"))
+        {
+            match self.parse_create_probabilistic()? {
+                QueryExpr::ProbabilisticCommand(command) => Ok(SqlCommand::Probabilistic(command)),
+                other => Err(ParseError::new(
+                    format!("internal: CREATE probabilistic produced unexpected kind {other:?}"),
+                    self.position(),
+                )),
+            }
+        } else if self.check(&Token::Schema) {
+            // CREATE SCHEMA [IF NOT EXISTS] name
+            self.advance()?;
+            let if_not_exists = self.match_if_not_exists()?;
+            let name = self.expect_ident()?;
+            Ok(SqlCommand::CreateSchema(CreateSchemaQuery {
+                name,
+                if_not_exists,
+            }))
+        } else if self.check(&Token::Policy) {
+            // Two forms share the leading `CREATE POLICY` tokens:
+            //   * IAM:   CREATE POLICY '<id>' AS '<json>'          (string literal id)
+            //   * RLS:   CREATE POLICY <name> ON <target> ...      (bare ident name)
+            // Disambiguate by peeking the token after POLICY.
+            self.advance()?;
+            if matches!(self.peek(), Token::String(_)) {
+                // IAM form — short-circuit out of the SQL command stack.
+                let expr = self.parse_create_iam_policy_after_keywords()?;
+                // Inline command-wrapping: produce a synthetic SqlCommand by
+                // routing through a generic IAM admin holder. We don't
+                // have a dedicated SqlCommand variant for IAM yet, so we
+                // bounce through the existing Grant-shaped Admin slot
+                // which expects no further tokens.
+                return Ok(SqlCommand::IamPolicy(expr));
+            }
+            let name = self.expect_ident()?;
+            self.expect(Token::On)?;
+
+            let (target_kind, table) = {
+                use crate::storage::query::ast::PolicyTargetKind;
+                let kw = match self.peek() {
+                    Token::Ident(s) => Some(s.to_ascii_uppercase()),
+                    _ => None,
+                };
+                let kind = kw.as_deref().and_then(|k| match k {
+                    "NODES" => Some(PolicyTargetKind::Nodes),
+                    "EDGES" => Some(PolicyTargetKind::Edges),
+                    "VECTORS" => Some(PolicyTargetKind::Vectors),
+                    "MESSAGES" => Some(PolicyTargetKind::Messages),
+                    "POINTS" => Some(PolicyTargetKind::Points),
+                    "DOCUMENTS" => Some(PolicyTargetKind::Documents),
+                    _ => None,
+                });
+                if let Some(k) = kind {
+                    self.advance()?;
+                    self.expect(Token::Of)?;
+                    let coll = self.expect_ident()?;
+                    (k, coll)
+                } else {
+                    let coll = self.expect_ident()?;
+                    (PolicyTargetKind::Table, coll)
+                }
+            };
+
+            let action = if self.consume(&Token::For)? {
+                let a = match self.peek() {
+                    Token::Select => {
+                        self.advance()?;
+                        Some(PolicyAction::Select)
+                    }
+                    Token::Insert => {
+                        self.advance()?;
+                        Some(PolicyAction::Insert)
+                    }
+                    Token::Update => {
+                        self.advance()?;
+                        Some(PolicyAction::Update)
+                    }
+                    Token::Delete => {
+                        self.advance()?;
+                        Some(PolicyAction::Delete)
+                    }
+                    Token::All => {
+                        self.advance()?;
+                        None
+                    }
+                    _ => None,
+                };
+                a
+            } else {
+                None
+            };
+
+            let role = if self.consume(&Token::To)? {
+                Some(self.expect_ident()?)
+            } else {
+                None
+            };
+
+            self.expect(Token::Using)?;
+            self.expect(Token::LParen)?;
+            let filter = self.parse_filter()?;
+            self.expect(Token::RParen)?;
+
+            Ok(SqlCommand::CreatePolicy(CreatePolicyQuery {
+                name,
+                table,
+                action,
+                role,
+                using: Box::new(filter),
+                target_kind,
+            }))
+        } else if self.check(&Token::Server) {
+            // CREATE SERVER [IF NOT EXISTS] name
+            //   FOREIGN DATA WRAPPER kind
+            //   [OPTIONS (key 'value', ...)]
+            self.advance()?;
+            let if_not_exists = self.match_if_not_exists()?;
+            let name = self.expect_ident()?;
+            self.expect(Token::Foreign)?;
+            self.expect(Token::Data)?;
+            self.expect(Token::Wrapper)?;
+            let wrapper = self.expect_ident()?;
+            let options = self.parse_fdw_options_clause()?;
+            Ok(SqlCommand::CreateServer(CreateServerQuery {
+                name,
+                wrapper,
+                options,
+                if_not_exists,
+            }))
+        } else if self.check(&Token::Foreign) {
+            // CREATE FOREIGN TABLE [IF NOT EXISTS] name (cols)
+            //   SERVER server_name
+            //   [OPTIONS (key 'value', ...)]
+            self.advance()?;
+            self.expect(Token::Table)?;
+            let if_not_exists = self.match_if_not_exists()?;
+            let name = self.expect_ident()?;
+            self.expect(Token::LParen)?;
+            let mut columns = Vec::new();
+            loop {
+                let col_name = self.expect_ident()?;
+                let data_type = self.expect_ident_or_keyword()?;
+                // Inline NOT NULL check — the CREATE TABLE path's helper is
+                // private and coupling to it just for FDW columns isn't worth it.
+                let mut not_null = false;
+                if matches!(self.peek(), Token::Ident(n) if n.eq_ignore_ascii_case("NOT")) {
+                    self.advance()?;
+                    if matches!(self.peek(), Token::Ident(n) if n.eq_ignore_ascii_case("NULL")) {
+                        self.advance()?;
+                        not_null = true;
+                    }
+                }
+                columns.push(ForeignColumnDef {
+                    name: col_name,
+                    data_type,
+                    not_null,
+                });
+                if !self.consume(&Token::Comma)? {
+                    break;
+                }
+            }
+            self.expect(Token::RParen)?;
+            self.expect(Token::Server)?;
+            let server = self.expect_ident()?;
+            let options = self.parse_fdw_options_clause()?;
+            Ok(SqlCommand::CreateForeignTable(CreateForeignTableQuery {
+                name,
+                server,
+                columns,
+                options,
+                if_not_exists,
+            }))
+        } else if self.check(&Token::Sequence) {
+            // CREATE SEQUENCE [IF NOT EXISTS] name
+            //   [START [WITH] n] [INCREMENT [BY] n]
+            self.advance()?;
+            let if_not_exists = self.match_if_not_exists()?;
+            let name = self.expect_ident()?;
+            let mut start: i64 = 1;
+            let mut increment: i64 = 1;
+            // Loop over optional clauses in any order.
+            loop {
+                if self.consume(&Token::Start)? {
+                    // Accept `START 100` or `START WITH 100`.
+                    let _ = self.consume(&Token::With)? || self.consume_ident_ci("WITH")?;
+                    start = self.parse_integer()?;
+                } else if self.consume(&Token::Increment)? {
+                    // Accept `INCREMENT 5` or `INCREMENT BY 5`.
+                    let _ = self.consume(&Token::By)? || self.consume_ident_ci("BY")?;
+                    increment = self.parse_integer()?;
+                } else {
+                    break;
+                }
+            }
+            Ok(SqlCommand::CreateSequence(CreateSequenceQuery {
+                name,
+                if_not_exists,
+                start,
+                increment,
+            }))
+        } else if matches!(self.peek(), Token::Ident(n) if n.eq_ignore_ascii_case("MIGRATION")) {
+            self.advance()?; // consume MIGRATION
+            match self.parse_create_migration_body()? {
+                QueryExpr::CreateMigration(q) => Ok(SqlCommand::CreateMigration(q)),
+                other => Err(ParseError::new(
+                    format!("internal: CREATE MIGRATION produced unexpected kind {other:?}"),
+                    self.position(),
+                )),
+            }
+        } else if let Some(err) =
+            ParseError::unsupported_recognized_token(self.peek(), self.position())
+        {
+            Err(err)
+        } else {
+            Err(ParseError::expected(
+                vec![
+                    "TABLE",
+                    "GRAPH",
+                    "VECTOR",
+                    "DOCUMENT",
+                    "KV",
+                    "COLLECTION",
+                    "INDEX",
+                    "UNIQUE",
+                    "TIMESERIES",
+                    "QUEUE",
+                    "TREE",
+                    "HLL",
+                    "SKETCH",
+                    "FILTER",
+                    "SCHEMA",
+                    "SEQUENCE",
+                    "MIGRATION",
+                ],
+                self.peek(),
+                pos,
+            ))
+        }
+    }
+
     pub fn parse_sql_command(&mut self) -> Result<SqlCommand, ParseError> {
         match self.peek() {
             Token::Select => match self.parse_select_query()? {
@@ -1311,497 +1788,7 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
-            Token::Create => {
-                let pos = self.position();
-                self.advance()?;
-
-                // CREATE [OR REPLACE] [MATERIALIZED] VIEW [IF NOT EXISTS] name AS <select>
-                // Detect the VIEW path early so OR REPLACE / MATERIALIZED modifiers
-                // don't collide with other CREATE variants (TABLE, INDEX, etc.).
-                let mut or_replace = false;
-                if self.consume(&Token::Or)? || self.consume_ident_ci("OR")? {
-                    let _ = self.consume_ident_ci("REPLACE")?;
-                    or_replace = true;
-                }
-                let materialized = self.consume(&Token::Materialized)?;
-                if self.check(&Token::View) {
-                    self.advance()?;
-                    let if_not_exists = self.match_if_not_exists()?;
-                    let name = self.expect_ident()?;
-                    // Issue #584 slice 12 — `WITH RETENTION <duration>`
-                    // on CREATE MATERIALIZED VIEW. Parsed before `AS`
-                    // so the SELECT body parser cannot consume the
-                    // trailing `WITH` for its own (TTL / METADATA /
-                    // …) clauses. Persisted on the view definition;
-                    // the physical sweep against view-backing rows
-                    // activates with the slice-9 row-storage follow-up.
-                    let mut retention_duration_ms: Option<u64> = None;
-                    if self.check(&Token::With) {
-                        self.advance()?;
-                        if !self.consume(&Token::Retention)?
-                            && !self.consume_ident_ci("RETENTION")?
-                        {
-                            return Err(ParseError::expected(
-                                vec!["RETENTION"],
-                                self.peek(),
-                                self.position(),
-                            ));
-                        }
-                        if !materialized {
-                            return Err(ParseError::new(
-                                "WITH RETENTION is only valid on \
-                                 CREATE MATERIALIZED VIEW"
-                                    .to_string(),
-                                self.position(),
-                            ));
-                        }
-                        let value = self.parse_float()?;
-                        let unit_mult = self.parse_duration_unit()?;
-                        retention_duration_ms = Some((value * unit_mult).round() as u64);
-                    }
-                    // Accept `AS` — the lexer promotes it to `Token::As`
-                    // (keyword) but some paths still see it as an ident.
-                    if !self.consume(&Token::As)? && !self.consume_ident_ci("AS")? {
-                        return Err(ParseError::expected(
-                            vec!["AS"],
-                            self.peek(),
-                            self.position(),
-                        ));
-                    }
-                    // Recursive parse of the body. Any QueryExpr that the
-                    // rest of the grammar accepts is valid (Select, Join, etc.).
-                    let body = self.parse_sql_command()?.into_query_expr();
-                    // Optional `REFRESH EVERY <duration>` clause on
-                    // materialized views (issue #583 slice 10). The
-                    // background scheduler reads this off the view
-                    // descriptor and ticks the view on its cadence.
-                    let mut refresh_every_ms: Option<u64> = None;
-                    if self.check(&Token::Refresh) {
-                        if !materialized {
-                            return Err(ParseError::new(
-                                "REFRESH EVERY is only valid on \
-                                 CREATE MATERIALIZED VIEW"
-                                    .to_string(),
-                                self.position(),
-                            ));
-                        }
-                        self.advance()?;
-                        if !self.consume_ident_ci("EVERY")? {
-                            return Err(ParseError::expected(
-                                vec!["EVERY"],
-                                self.peek(),
-                                self.position(),
-                            ));
-                        }
-                        let value = self.parse_float()?;
-                        let unit_mult = self.parse_duration_unit()?;
-                        refresh_every_ms = Some((value * unit_mult).round() as u64);
-                    }
-                    return Ok(SqlCommand::CreateView(CreateViewQuery {
-                        name,
-                        query: Box::new(body),
-                        materialized,
-                        if_not_exists,
-                        or_replace,
-                        refresh_every_ms,
-                        retention_duration_ms,
-                    }));
-                }
-                // If OR REPLACE / MATERIALIZED was consumed but VIEW was not,
-                // bail out — no other CREATE form accepts those modifiers.
-                if or_replace || materialized {
-                    return Err(ParseError::expected(
-                        vec!["VIEW"],
-                        self.peek(),
-                        self.position(),
-                    ));
-                }
-
-                if self.check(&Token::Index) || self.check(&Token::Unique) {
-                    match self.parse_create_index_query()? {
-                        QueryExpr::CreateIndex(query) => Ok(SqlCommand::CreateIndex(query)),
-                        other => Err(ParseError::new(
-                            format!("internal: CREATE INDEX produced unexpected kind {other:?}"),
-                            self.position(),
-                        )),
-                    }
-                } else if self.check(&Token::Table) {
-                    self.expect(Token::Table)?;
-                    match self.parse_create_table_body()? {
-                        QueryExpr::CreateTable(query) => Ok(SqlCommand::CreateTable(query)),
-                        other => Err(ParseError::new(
-                            format!("internal: CREATE TABLE produced unexpected kind {other:?}"),
-                            self.position(),
-                        )),
-                    }
-                } else if self.check(&Token::Graph) {
-                    self.advance()?;
-                    match self.parse_create_collection_model_body(CollectionModel::Graph)? {
-                        QueryExpr::CreateTable(query) => Ok(SqlCommand::CreateTable(query)),
-                        other => Err(ParseError::new(
-                            format!("internal: CREATE GRAPH produced unexpected kind {other:?}"),
-                            self.position(),
-                        )),
-                    }
-                } else if self.check(&Token::Document) {
-                    self.advance()?;
-                    match self.parse_create_collection_model_body(CollectionModel::Document)? {
-                        QueryExpr::CreateTable(query) => Ok(SqlCommand::CreateTable(query)),
-                        other => Err(ParseError::new(
-                            format!("internal: CREATE DOCUMENT produced unexpected kind {other:?}"),
-                            self.position(),
-                        )),
-                    }
-                } else if self.check(&Token::Vector) {
-                    self.advance()?;
-                    match self.parse_create_vector_body()? {
-                        QueryExpr::CreateVector(query) => Ok(SqlCommand::CreateVector(query)),
-                        other => Err(ParseError::new(
-                            format!("internal: CREATE VECTOR produced unexpected kind {other:?}"),
-                            self.position(),
-                        )),
-                    }
-                } else if self.check(&Token::Collection) {
-                    self.advance()?;
-                    match self.parse_create_collection_body()? {
-                        QueryExpr::CreateCollection(query) => {
-                            Ok(SqlCommand::CreateCollection(query))
-                        }
-                        other => Err(ParseError::new(
-                            format!(
-                                "internal: CREATE COLLECTION produced unexpected kind {other:?}"
-                            ),
-                            self.position(),
-                        )),
-                    }
-                } else if self.check(&Token::Kv) {
-                    self.advance()?;
-                    match self.parse_create_keyed_body(CollectionModel::Kv)? {
-                        QueryExpr::CreateTable(query) => Ok(SqlCommand::CreateTable(query)),
-                        other => Err(ParseError::new(
-                            format!("internal: CREATE KV produced unexpected kind {other:?}"),
-                            self.position(),
-                        )),
-                    }
-                } else if self.consume_ident_ci("CONFIG")? {
-                    match self.parse_create_keyed_body(CollectionModel::Config)? {
-                        QueryExpr::CreateTable(query) => Ok(SqlCommand::CreateTable(query)),
-                        other => Err(ParseError::new(
-                            format!("internal: CREATE CONFIG produced unexpected kind {other:?}"),
-                            self.position(),
-                        )),
-                    }
-                } else if self.consume_ident_ci("VAULT")? {
-                    match self.parse_create_keyed_body(CollectionModel::Vault)? {
-                        QueryExpr::CreateTable(query) => Ok(SqlCommand::CreateTable(query)),
-                        other => Err(ParseError::new(
-                            format!("internal: CREATE VAULT produced unexpected kind {other:?}"),
-                            self.position(),
-                        )),
-                    }
-                } else if self.check(&Token::Timeseries) {
-                    self.advance()?;
-                    match self.parse_create_timeseries_body()? {
-                        QueryExpr::CreateTimeSeries(query) => {
-                            Ok(SqlCommand::CreateTimeSeries(query))
-                        }
-                        other => Err(ParseError::new(
-                            format!(
-                                "internal: CREATE TIMESERIES produced unexpected kind {other:?}"
-                            ),
-                            self.position(),
-                        )),
-                    }
-                } else if self.consume_ident_ci("METRICS")? {
-                    match self.parse_create_metrics_body()? {
-                        QueryExpr::CreateTable(query) => Ok(SqlCommand::CreateTable(query)),
-                        other => Err(ParseError::new(
-                            format!("internal: CREATE METRICS produced unexpected kind {other:?}"),
-                            self.position(),
-                        )),
-                    }
-                } else if matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case("HYPERTABLE"))
-                {
-                    self.advance()?;
-                    match self.parse_create_hypertable_body()? {
-                        QueryExpr::CreateTimeSeries(query) => {
-                            Ok(SqlCommand::CreateTimeSeries(query))
-                        }
-                        other => Err(ParseError::new(
-                            format!(
-                                "internal: CREATE HYPERTABLE produced unexpected kind {other:?}"
-                            ),
-                            self.position(),
-                        )),
-                    }
-                } else if self.check(&Token::Queue) {
-                    self.advance()?;
-                    match self.parse_create_queue_body()? {
-                        QueryExpr::CreateQueue(query) => Ok(SqlCommand::CreateQueue(query)),
-                        other => Err(ParseError::new(
-                            format!("internal: CREATE QUEUE produced unexpected kind {other:?}"),
-                            self.position(),
-                        )),
-                    }
-                } else if self.check(&Token::Tree) {
-                    self.advance()?;
-                    match self.parse_create_tree_body()? {
-                        QueryExpr::CreateTree(query) => Ok(SqlCommand::CreateTree(query)),
-                        other => Err(ParseError::new(
-                            format!("internal: CREATE TREE produced unexpected kind {other:?}"),
-                            self.position(),
-                        )),
-                    }
-                } else if matches!(self.peek(), Token::Ident(n) if
-                    n.eq_ignore_ascii_case("HLL") ||
-                    n.eq_ignore_ascii_case("SKETCH") ||
-                    n.eq_ignore_ascii_case("FILTER"))
-                {
-                    match self.parse_create_probabilistic()? {
-                        QueryExpr::ProbabilisticCommand(command) => {
-                            Ok(SqlCommand::Probabilistic(command))
-                        }
-                        other => Err(ParseError::new(
-                            format!(
-                                "internal: CREATE probabilistic produced unexpected kind {other:?}"
-                            ),
-                            self.position(),
-                        )),
-                    }
-                } else if self.check(&Token::Schema) {
-                    // CREATE SCHEMA [IF NOT EXISTS] name
-                    self.advance()?;
-                    let if_not_exists = self.match_if_not_exists()?;
-                    let name = self.expect_ident()?;
-                    Ok(SqlCommand::CreateSchema(CreateSchemaQuery {
-                        name,
-                        if_not_exists,
-                    }))
-                } else if self.check(&Token::Policy) {
-                    // Two forms share the leading `CREATE POLICY` tokens:
-                    //   * IAM:   CREATE POLICY '<id>' AS '<json>'          (string literal id)
-                    //   * RLS:   CREATE POLICY <name> ON <target> ...      (bare ident name)
-                    // Disambiguate by peeking the token after POLICY.
-                    self.advance()?;
-                    if matches!(self.peek(), Token::String(_)) {
-                        // IAM form — short-circuit out of the SQL command stack.
-                        let expr = self.parse_create_iam_policy_after_keywords()?;
-                        // Inline command-wrapping: produce a synthetic SqlCommand by
-                        // routing through a generic IAM admin holder. We don't
-                        // have a dedicated SqlCommand variant for IAM yet, so we
-                        // bounce through the existing Grant-shaped Admin slot
-                        // which expects no further tokens.
-                        return Ok(SqlCommand::IamPolicy(expr));
-                    }
-                    let name = self.expect_ident()?;
-                    self.expect(Token::On)?;
-
-                    let (target_kind, table) = {
-                        use crate::storage::query::ast::PolicyTargetKind;
-                        let kw = match self.peek() {
-                            Token::Ident(s) => Some(s.to_ascii_uppercase()),
-                            _ => None,
-                        };
-                        let kind = kw.as_deref().and_then(|k| match k {
-                            "NODES" => Some(PolicyTargetKind::Nodes),
-                            "EDGES" => Some(PolicyTargetKind::Edges),
-                            "VECTORS" => Some(PolicyTargetKind::Vectors),
-                            "MESSAGES" => Some(PolicyTargetKind::Messages),
-                            "POINTS" => Some(PolicyTargetKind::Points),
-                            "DOCUMENTS" => Some(PolicyTargetKind::Documents),
-                            _ => None,
-                        });
-                        if let Some(k) = kind {
-                            self.advance()?;
-                            self.expect(Token::Of)?;
-                            let coll = self.expect_ident()?;
-                            (k, coll)
-                        } else {
-                            let coll = self.expect_ident()?;
-                            (PolicyTargetKind::Table, coll)
-                        }
-                    };
-
-                    let action = if self.consume(&Token::For)? {
-                        let a = match self.peek() {
-                            Token::Select => {
-                                self.advance()?;
-                                Some(PolicyAction::Select)
-                            }
-                            Token::Insert => {
-                                self.advance()?;
-                                Some(PolicyAction::Insert)
-                            }
-                            Token::Update => {
-                                self.advance()?;
-                                Some(PolicyAction::Update)
-                            }
-                            Token::Delete => {
-                                self.advance()?;
-                                Some(PolicyAction::Delete)
-                            }
-                            Token::All => {
-                                self.advance()?;
-                                None
-                            }
-                            _ => None,
-                        };
-                        a
-                    } else {
-                        None
-                    };
-
-                    let role = if self.consume(&Token::To)? {
-                        Some(self.expect_ident()?)
-                    } else {
-                        None
-                    };
-
-                    self.expect(Token::Using)?;
-                    self.expect(Token::LParen)?;
-                    let filter = self.parse_filter()?;
-                    self.expect(Token::RParen)?;
-
-                    Ok(SqlCommand::CreatePolicy(CreatePolicyQuery {
-                        name,
-                        table,
-                        action,
-                        role,
-                        using: Box::new(filter),
-                        target_kind,
-                    }))
-                } else if self.check(&Token::Server) {
-                    // CREATE SERVER [IF NOT EXISTS] name
-                    //   FOREIGN DATA WRAPPER kind
-                    //   [OPTIONS (key 'value', ...)]
-                    self.advance()?;
-                    let if_not_exists = self.match_if_not_exists()?;
-                    let name = self.expect_ident()?;
-                    self.expect(Token::Foreign)?;
-                    self.expect(Token::Data)?;
-                    self.expect(Token::Wrapper)?;
-                    let wrapper = self.expect_ident()?;
-                    let options = self.parse_fdw_options_clause()?;
-                    Ok(SqlCommand::CreateServer(CreateServerQuery {
-                        name,
-                        wrapper,
-                        options,
-                        if_not_exists,
-                    }))
-                } else if self.check(&Token::Foreign) {
-                    // CREATE FOREIGN TABLE [IF NOT EXISTS] name (cols)
-                    //   SERVER server_name
-                    //   [OPTIONS (key 'value', ...)]
-                    self.advance()?;
-                    self.expect(Token::Table)?;
-                    let if_not_exists = self.match_if_not_exists()?;
-                    let name = self.expect_ident()?;
-                    self.expect(Token::LParen)?;
-                    let mut columns = Vec::new();
-                    loop {
-                        let col_name = self.expect_ident()?;
-                        let data_type = self.expect_ident_or_keyword()?;
-                        // Inline NOT NULL check — the CREATE TABLE path's helper is
-                        // private and coupling to it just for FDW columns isn't worth it.
-                        let mut not_null = false;
-                        if matches!(self.peek(), Token::Ident(n) if n.eq_ignore_ascii_case("NOT")) {
-                            self.advance()?;
-                            if matches!(self.peek(), Token::Ident(n) if n.eq_ignore_ascii_case("NULL"))
-                            {
-                                self.advance()?;
-                                not_null = true;
-                            }
-                        }
-                        columns.push(ForeignColumnDef {
-                            name: col_name,
-                            data_type,
-                            not_null,
-                        });
-                        if !self.consume(&Token::Comma)? {
-                            break;
-                        }
-                    }
-                    self.expect(Token::RParen)?;
-                    self.expect(Token::Server)?;
-                    let server = self.expect_ident()?;
-                    let options = self.parse_fdw_options_clause()?;
-                    Ok(SqlCommand::CreateForeignTable(CreateForeignTableQuery {
-                        name,
-                        server,
-                        columns,
-                        options,
-                        if_not_exists,
-                    }))
-                } else if self.check(&Token::Sequence) {
-                    // CREATE SEQUENCE [IF NOT EXISTS] name
-                    //   [START [WITH] n] [INCREMENT [BY] n]
-                    self.advance()?;
-                    let if_not_exists = self.match_if_not_exists()?;
-                    let name = self.expect_ident()?;
-                    let mut start: i64 = 1;
-                    let mut increment: i64 = 1;
-                    // Loop over optional clauses in any order.
-                    loop {
-                        if self.consume(&Token::Start)? {
-                            // Accept `START 100` or `START WITH 100`.
-                            let _ = self.consume(&Token::With)? || self.consume_ident_ci("WITH")?;
-                            start = self.parse_integer()?;
-                        } else if self.consume(&Token::Increment)? {
-                            // Accept `INCREMENT 5` or `INCREMENT BY 5`.
-                            let _ = self.consume(&Token::By)? || self.consume_ident_ci("BY")?;
-                            increment = self.parse_integer()?;
-                        } else {
-                            break;
-                        }
-                    }
-                    Ok(SqlCommand::CreateSequence(CreateSequenceQuery {
-                        name,
-                        if_not_exists,
-                        start,
-                        increment,
-                    }))
-                } else if matches!(self.peek(), Token::Ident(n) if n.eq_ignore_ascii_case("MIGRATION"))
-                {
-                    self.advance()?; // consume MIGRATION
-                    match self.parse_create_migration_body()? {
-                        QueryExpr::CreateMigration(q) => Ok(SqlCommand::CreateMigration(q)),
-                        other => Err(ParseError::new(
-                            format!(
-                                "internal: CREATE MIGRATION produced unexpected kind {other:?}"
-                            ),
-                            self.position(),
-                        )),
-                    }
-                } else if let Some(err) =
-                    ParseError::unsupported_recognized_token(self.peek(), self.position())
-                {
-                    Err(err)
-                } else {
-                    Err(ParseError::expected(
-                        vec![
-                            "TABLE",
-                            "GRAPH",
-                            "VECTOR",
-                            "DOCUMENT",
-                            "KV",
-                            "COLLECTION",
-                            "INDEX",
-                            "UNIQUE",
-                            "TIMESERIES",
-                            "QUEUE",
-                            "TREE",
-                            "HLL",
-                            "SKETCH",
-                            "FILTER",
-                            "SCHEMA",
-                            "SEQUENCE",
-                            "MIGRATION",
-                        ],
-                        self.peek(),
-                        pos,
-                    ))
-                }
-            }
+            Token::Create => self.parse_create_command(),
             Token::Drop => {
                 let pos = self.position();
                 self.advance()?;
