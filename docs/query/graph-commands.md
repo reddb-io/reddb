@@ -83,7 +83,12 @@ Algorithms: `degree`, `closeness`, `betweenness`, `eigenvector`, `pagerank`.
 
 `GRAPH CENTRALITY` keeps the historical implicit top-100 cap when `LIMIT`
 is omitted. Use `LIMIT N` to choose a different cap, or `LIMIT 0` to return
-no rows. Ordering metrics: `score`, `centrality_score`.
+no rows. For full-graph use — e.g. resolving `label → node_id` across the
+whole graph — pass an explicit `LIMIT` at least as large as the node count,
+otherwise nodes past the top 100 are silently omitted (no `truncated` flag)
+and look like missing data. See
+[Centrality → Default row cap](/graph/centrality.md#default-row-cap).
+Ordering metrics: `score`, `centrality_score`.
 
 ## GRAPH COMMUNITY
 

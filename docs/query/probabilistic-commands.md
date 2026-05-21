@@ -2,6 +2,12 @@
 
 SQL commands for HyperLogLog, Count-Min Sketch, and Cuckoo Filter. These are first-class data structures managed through the query language.
 
+> **Feeding:** probabilistic structures are fed with their own `ADD` verbs
+> (`HLL ADD`, `SKETCH ADD`, `FILTER ADD`), **not** `INSERT INTO` — a collection
+> declared as `hll`/`sketch`/`filter` rejects table writes with
+> `INVALID_OPERATION`. See
+> [Feeding probabilistic structures](/data-models/probabilistic.md#feeding-probabilistic-structures).
+
 ## HyperLogLog (HLL)
 
 Approximate distinct counting with ~0.81% standard error and ~16 KB memory.
