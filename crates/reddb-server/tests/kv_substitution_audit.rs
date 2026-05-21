@@ -184,11 +184,8 @@ fn kv_function_args_are_typed_path_literals() {
             // Some grammar paths emit the call as an expression
             // projection. Either way, the AST argument types are
             // string-literal Values, not raw text fragments.
-            match filter.as_ref() {
-                Filter::CompareExpr { .. } => {
-                    panic!("KV(...) projection should not lower to a comparison")
-                }
-                _ => {}
+            if let Filter::CompareExpr { .. } = filter.as_ref() {
+                panic!("KV(...) projection should not lower to a comparison")
             }
         }
         other => panic!("KV(...) must be a function projection, got {other:?}"),

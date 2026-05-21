@@ -159,7 +159,7 @@ fn now_ms() -> u128 {
 fn read_latest_registry_json(store: &UnifiedStore) -> Option<String> {
     let manager = store.get_collection("red_config")?;
     let mut all = manager.query_all(|_| true);
-    all.sort_by(|a, b| b.id.raw().cmp(&a.id.raw()));
+    all.sort_by_key(|b| std::cmp::Reverse(b.id.raw()));
     for entity in all {
         let EntityData::Row(row) = &entity.data else {
             continue;
@@ -375,7 +375,7 @@ fn schema_fields(schema: &JsonValue) -> Vec<(String, String, bool)> {
                 .and_then(|(_, v)| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let req = required.iter().any(|r| *r == name.as_str());
+            let req = required.contains(&name.as_str());
             (name.clone(), ty, req)
         })
         .collect()

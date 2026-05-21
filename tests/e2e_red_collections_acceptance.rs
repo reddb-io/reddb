@@ -148,7 +148,7 @@ fn select_star_from_red_collections_returns_collection_inventory() {
         ),
         "queue_mode should be null for non-queues or text for queues: {acme:?}"
     );
-    assert_eq!(bool_field(acme, "internal"), false);
+    assert!(!bool_field(acme, "internal"));
 }
 
 #[test]
@@ -180,7 +180,7 @@ fn dlq_is_internal_and_show_collections_hides_it_by_default() {
         .execute_query("SELECT name, internal FROM red.collections WHERE name = 'failed_foo'")
         .expect("red.collections should include DLQ metadata");
     assert_eq!(catalog.result.records.len(), 1);
-    assert_eq!(bool_field(&catalog.result.records[0], "internal"), true);
+    assert!(bool_field(&catalog.result.records[0], "internal"));
 
     let shown = rt
         .execute_query("SHOW COLLECTIONS")

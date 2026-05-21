@@ -1629,19 +1629,19 @@ fn materialized_views_snapshot(runtime: &RedDBRuntime) -> Vec<UnifiedRecord> {
 /// Field mapping from the meta-row schema to the public columns:
 /// - `consumer`            -> `locked_by`
 /// - `delivery_count - 1`  -> `attempts` (delivery_count is incremented
-///                             to 1 on the first deliver, so attempts
-///                             starts at 0 and rises on NACK/redelivery)
+///   to 1 on the first deliver, so attempts
+///   starts at 0 and rises on NACK/redelivery)
 /// - `delivered_at_ns + queue.lock_deadline_ms`
-///                         -> `lock_deadline` (the legacy plumbing does
-///                             not persist the deadline; derive it
-///                             from the queue descriptor's
-///                             `lock_deadline_ms`).
+///   -> `lock_deadline` (the legacy plumbing does
+///   not persist the deadline; derive it
+///   from the queue descriptor's
+///   `lock_deadline_ms`).
 /// - opaque `delivery_id`  composed from `(queue, group, message_id,
-///                          delivery_count)`. The legacy plumbing has
-///                          no first-class delivery_id; this string
-///                          is stable for a given delivery instance
-///                          and changes when the message is
-///                          re-delivered (delivery_count bumps).
+///   delivery_count)`. The legacy plumbing has
+///   no first-class delivery_id; this string
+///   is stable for a given delivery instance
+///   and changes when the message is
+///   re-delivered (delivery_count bumps).
 fn queue_pending_snapshot(
     runtime: &RedDBRuntime,
     visible_collections: Option<&HashSet<String>>,
@@ -1846,7 +1846,7 @@ fn value_as_ms(value: &crate::storage::schema::Value) -> Option<i64> {
         Value::Timestamp(v) => Some(v.saturating_mul(1_000)),
         Value::BigInt(v) => Some(*v),
         Value::UnsignedInteger(v) => i64::try_from(*v).ok(),
-        Value::Integer(v) => Some(*v as i64),
+        Value::Integer(v) => Some(*v),
         _ => None,
     }
 }

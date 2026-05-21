@@ -670,11 +670,7 @@ impl QueueStore for InMemoryQueueStore {
         // surface is total against either ordering).
         let mut message_ids: Vec<MessageId> = {
             let state = self.state.lock().expect("state poisoned");
-            let mut ids: Vec<MessageId> = state
-                .queues
-                .get(queue)
-                .map(|v| v.clone())
-                .unwrap_or_default();
+            let mut ids: Vec<MessageId> = state.queues.get(queue).cloned().unwrap_or_default();
             for pending in state.pending.values() {
                 if pending.queue == queue && !ids.contains(&pending.message_id) {
                     ids.push(pending.message_id);
@@ -737,7 +733,7 @@ impl QueueStore for InMemoryQueueStore {
 /// crate in workspace deps, and the alphabet is trivial.
 fn base32_lower(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
-    let mut out = String::with_capacity((bytes.len() * 8 + 4) / 5);
+    let mut out = String::with_capacity((bytes.len() * 8).div_ceil(5));
     let mut buf: u32 = 0;
     let mut bits: u32 = 0;
     for &b in bytes {

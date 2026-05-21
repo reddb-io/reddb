@@ -258,7 +258,7 @@ fn smoke_kv_crud() {
     assert!(val.is_some(), "key should exist");
     let (value, _id) = val.unwrap();
     assert!(
-        matches!(value, Value::Text(ref s) if &*&**s == "RedDB"),
+        matches!(value, Value::Text(ref s) if &**s == "RedDB"),
         "value should be RedDB"
     );
 

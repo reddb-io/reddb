@@ -34,8 +34,8 @@ fn label_for(rt: &RedDBRuntime, table: &str, red_entity_id: u64) -> Option<Strin
         .result
         .records
         .first()
-        .and_then(|record| match record.get("label") {
-            Some(Value::Text(value)) => Some(value.to_string()),
+        .map(|record| match record.get("label") {
+            Some(Value::Text(value)) => value.to_string(),
             other => panic!("expected label or empty result, got {other:?}"),
         })
 }

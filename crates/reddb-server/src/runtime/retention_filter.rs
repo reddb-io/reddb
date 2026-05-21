@@ -85,7 +85,7 @@ fn value_as_unix_ms(value: &Value) -> Option<i64> {
         Value::Timestamp(v) => Some(v.saturating_mul(1_000)),
         Value::BigInt(v) => Some(*v),
         Value::UnsignedInteger(v) => i64::try_from(*v).ok(),
-        Value::Integer(v) => Some(*v as i64),
+        Value::Integer(v) => Some(*v),
         _ => None,
     }
 }

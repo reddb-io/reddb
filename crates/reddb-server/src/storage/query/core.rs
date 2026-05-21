@@ -803,17 +803,12 @@ pub struct AskQuery {
     pub cache: AskCacheClause,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum AskCacheClause {
+    #[default]
     Default,
     CacheTtl(String),
     NoCache,
-}
-
-impl Default for AskCacheClause {
-    fn default() -> Self {
-        Self::Default
-    }
 }
 
 impl QueryExpr {
@@ -2676,6 +2671,10 @@ pub enum QueueSide {
 }
 
 /// Queue operation commands
+// The largest variant carries an inline `Filter`; boxing it would ripple
+// to every construction and match site for a marginal stack-size win, so
+// the size difference is accepted.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum QueueCommand {
     Push {

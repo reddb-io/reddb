@@ -275,7 +275,7 @@ fn sql_update_documents_set_creates_missing_top_level_body_field() {
     let status_field = record
         .get("status")
         .unwrap_or_else(|| panic!("status field absent in {record:?}"));
-    assert_eq!(format!("{status_field:?}").contains("reviewed"), true);
+    assert!(format!("{status_field:?}").contains("reviewed"));
     let event_type = record
         .get("event_type")
         .unwrap_or_else(|| panic!("event_type missing in {record:?}"));

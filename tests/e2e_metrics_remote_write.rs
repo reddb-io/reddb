@@ -61,7 +61,7 @@ fn uint(row: &reddb::storage::query::UnifiedRecord, field: &str) -> u64 {
     }
 }
 
-fn json_tags<'a>(row: &'a reddb::storage::query::UnifiedRecord, field: &str) -> reddb::json::Value {
+fn json_tags(row: &reddb::storage::query::UnifiedRecord, field: &str) -> reddb::json::Value {
     match row.get(field) {
         Some(Value::Json(bytes)) => reddb::json::from_slice(bytes).expect("tags json should parse"),
         other => panic!("expected {field} json, got {other:?} in {row:?}"),

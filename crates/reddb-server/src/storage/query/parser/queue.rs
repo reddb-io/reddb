@@ -167,13 +167,16 @@ impl<'a> Parser<'a> {
             Token::Peek => {
                 self.advance()?;
                 let queue = self.expect_ident()?;
-                let count = if self.consume(&Token::Count)? {
-                    self.parse_integer()? as usize
-                } else if matches!(self.peek(), Token::Integer(_)) {
-                    self.parse_integer()? as usize
-                } else {
-                    1
-                };
+                // Accept either `PEEK <q> COUNT <n>` or a bare `PEEK <q> <n>`.
+                // `consume` has a side effect (advances past COUNT), so the
+                // short-circuit order matters: only peek for a bare integer
+                // when the COUNT keyword was absent.
+                let count =
+                    if self.consume(&Token::Count)? || matches!(self.peek(), Token::Integer(_)) {
+                        self.parse_integer()? as usize
+                    } else {
+                        1
+                    };
                 Ok(QueryExpr::QueueCommand(QueueCommand::Peek { queue, count }))
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("LEN") => {

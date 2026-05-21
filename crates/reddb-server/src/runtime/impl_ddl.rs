@@ -334,7 +334,7 @@ impl RedDBRuntime {
             let actor = crate::runtime::impl_core::current_user_projected()
                 .unwrap_or_else(|| "@system/create-collection".to_string());
             crate::runtime::signed_writes_kind::install(
-                &*self.inner.db.store(),
+                &self.inner.db.store(),
                 &query.name,
                 &query.allowed_signers,
                 &actor,
@@ -352,9 +352,9 @@ impl RedDBRuntime {
         use std::sync::Arc;
 
         let store = self.inner.db.store();
-        blockchain_kind::mark_as_chain(&*store, name);
+        blockchain_kind::mark_as_chain(&store, name);
 
-        let existing_tip = blockchain_kind::chain_tip(&*store, name);
+        let existing_tip = blockchain_kind::chain_tip(&store, name);
         if existing_tip.height.is_some() {
             return Ok(());
         }
@@ -379,7 +379,7 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         // #524: prime the in-memory tip cache so the chain-tip endpoint and
         // subsequent INSERTs don't have to scan the collection to find genesis.
-        if let Some(tip) = blockchain_kind::chain_tip_full(&*store, name) {
+        if let Some(tip) = blockchain_kind::chain_tip_full(&store, name) {
             self.inner
                 .chain_tip_cache
                 .lock()
@@ -948,7 +948,7 @@ impl RedDBRuntime {
                     // signed-writes registry installed so this isn't a
                     // covert way to retrofit one (use `CREATE COLLECTION
                     // ... SIGNED_BY (...)` for that).
-                    if !crate::runtime::signed_writes_kind::is_signed(&*store, &query.name) {
+                    if !crate::runtime::signed_writes_kind::is_signed(&store, &query.name) {
                         return Err(RedDBError::Query(format!(
                             "ALTER COLLECTION ADD SIGNER: '{}' has no signer registry; \
                              recreate it with CREATE COLLECTION ... SIGNED_BY (...)",
@@ -958,7 +958,7 @@ impl RedDBRuntime {
                     let actor = crate::runtime::impl_core::current_user_projected()
                         .unwrap_or_else(|| "@system/alter".to_string());
                     let changed = crate::runtime::signed_writes_kind::add_signer(
-                        &*store,
+                        &store,
                         &query.name,
                         *pubkey,
                         &actor,
@@ -970,7 +970,7 @@ impl RedDBRuntime {
                     ));
                 }
                 AlterOperation::RevokeSigner { pubkey } => {
-                    if !crate::runtime::signed_writes_kind::is_signed(&*store, &query.name) {
+                    if !crate::runtime::signed_writes_kind::is_signed(&store, &query.name) {
                         return Err(RedDBError::Query(format!(
                             "ALTER COLLECTION REVOKE SIGNER: '{}' has no signer registry",
                             query.name
@@ -979,7 +979,7 @@ impl RedDBRuntime {
                     let actor = crate::runtime::impl_core::current_user_projected()
                         .unwrap_or_else(|| "@system/alter".to_string());
                     let changed = crate::runtime::signed_writes_kind::revoke_signer(
-                        &*store,
+                        &store,
                         &query.name,
                         pubkey,
                         &actor,

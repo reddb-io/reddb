@@ -82,7 +82,7 @@ impl QueueTelemetryCounters {
         let key = (queue.to_string(), group.to_string(), mode.to_string());
         let mut map = self.delivered.lock().unwrap_or_else(|p| p.into_inner());
         map.entry(key)
-            .or_insert_with(CounterCell::default)
+            .or_default()
             .value
             .fetch_add(n, Ordering::Relaxed);
     }
@@ -91,7 +91,7 @@ impl QueueTelemetryCounters {
         let key = (queue.to_string(), group.to_string(), mode.to_string());
         let mut map = self.acked.lock().unwrap_or_else(|p| p.into_inner());
         map.entry(key)
-            .or_insert_with(CounterCell::default)
+            .or_default()
             .value
             .fetch_add(1, Ordering::Relaxed);
     }
@@ -111,7 +111,7 @@ impl QueueTelemetryCounters {
         );
         let mut map = self.nacked.lock().unwrap_or_else(|p| p.into_inner());
         map.entry(key)
-            .or_insert_with(CounterCell::default)
+            .or_default()
             .value
             .fetch_add(1, Ordering::Relaxed);
     }

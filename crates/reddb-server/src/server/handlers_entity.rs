@@ -894,7 +894,7 @@ impl RedDBServer {
 }
 
 /// Transport-agnostic outcome of a batch insert: the HTTP-shaped status
-/// + body, ready to be served verbatim either as an HTTP response or
+/// and body, ready to be served verbatim either as an HTTP response or
 /// as the payload of a RedWire `BulkOk` / `Error` frame. The body is
 /// always a compact JSON object so a downstream consumer can decode it
 /// once and present whichever fields the client cares about.

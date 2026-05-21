@@ -81,10 +81,11 @@ pub struct Inputs<'a> {
 /// Per-query `CACHE TTL '...'` / `NOCACHE` clause, parsed from the SQL
 /// surface. Default-constructed `Mode` is [`Mode::Default`], which
 /// means "fall back to settings".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
     /// No per-query opinion. The effective behaviour comes from
     /// [`Settings::enabled`] / [`Settings::default_ttl`].
+    #[default]
     Default,
     /// `ASK '...' CACHE TTL '5m'` — populate and consult the cache
     /// with this TTL regardless of the global default.
@@ -93,14 +94,8 @@ pub enum Mode {
     NoCache,
 }
 
-impl Default for Mode {
-    fn default() -> Self {
-        Mode::Default
-    }
-}
-
 /// Deployment-level cache settings, surfaced via `ask.cache.*`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Settings {
     /// `ask.cache.enabled` (default `false`).
     pub enabled: bool,
@@ -110,16 +105,6 @@ pub struct Settings {
     /// `ask.cache.max_entries`. Not consulted here — the eviction
     /// policy lives in the cache store. Exposed for completeness.
     pub max_entries: usize,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            default_ttl: None,
-            max_entries: 0,
-        }
-    }
 }
 
 /// What the cache wrapper should do for a single ASK call.

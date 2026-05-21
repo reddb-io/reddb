@@ -185,8 +185,8 @@ fn compute_window_column(
     // partition iteration.
     let mut groups: HashMap<Vec<CanonicalKey>, Vec<usize>> = HashMap::new();
     let mut group_order: Vec<Vec<CanonicalKey>> = Vec::new();
-    for i in 0..row_count {
-        let key = partition_keys[i].clone();
+    for (i, key) in partition_keys.iter().enumerate() {
+        let key = key.clone();
         if !groups.contains_key(&key) {
             group_order.push(key.clone());
         }

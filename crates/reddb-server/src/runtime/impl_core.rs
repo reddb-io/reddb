@@ -6479,7 +6479,7 @@ impl RedDBRuntime {
                             crate::storage::schema::Value::UnsignedInteger(t) => {
                                 i64::try_from(*t).ok()
                             }
-                            crate::storage::schema::Value::Integer(t) => Some(*t as i64),
+                            crate::storage::schema::Value::Integer(t) => Some(*t),
                             _ => None,
                         }),
                 };

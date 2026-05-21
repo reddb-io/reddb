@@ -769,7 +769,7 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     let batch_flag = obj.get("batch").and_then(|x| x.as_bool()).unwrap_or(false);
     if idempotency_key.is_some() || batch_flag {
         let items = match obj.get("payloads").and_then(|x| x.as_array()) {
-            Some(rows) => &rows[..],
+            Some(rows) => rows,
             None => {
                 return error_frame(
                     frame.correlation_id,

@@ -955,12 +955,7 @@ pub fn graph_search_scoped(
     };
 
     let mut hits = Vec::new();
-    for entity in result
-        .graph
-        .nodes
-        .into_iter()
-        .chain(result.graph.edges.into_iter())
-    {
+    for entity in result.graph.nodes.into_iter().chain(result.graph.edges) {
         let crate::runtime::DiscoveryMethod::GraphTraversal { depth, .. } = entity.discovery else {
             continue;
         };

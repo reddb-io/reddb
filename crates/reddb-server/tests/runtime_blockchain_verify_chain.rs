@@ -166,14 +166,14 @@ fn integrity_flag_persisted_round_trips() {
     rt.execute_query("CREATE COLLECTION audit_log KIND blockchain")
         .expect("create");
     let store = rt.db().store();
-    persist_integrity_flag(&*store, "audit_log", true);
+    persist_integrity_flag(&store, "audit_log", true);
     assert_eq!(
-        is_integrity_broken_persisted(&*store, "audit_log"),
+        is_integrity_broken_persisted(&store, "audit_log"),
         Some(true)
     );
-    persist_integrity_flag(&*store, "audit_log", false);
+    persist_integrity_flag(&store, "audit_log", false);
     assert_eq!(
-        is_integrity_broken_persisted(&*store, "audit_log"),
+        is_integrity_broken_persisted(&store, "audit_log"),
         Some(false)
     );
 }
@@ -196,7 +196,7 @@ fn canonical_encoder_matches_engine_genesis_hash() {
     rt.execute_query("CREATE COLLECTION audit_log KIND blockchain")
         .expect("create");
     let store = rt.db().store();
-    let blocks = reddb_server::runtime::blockchain_kind::collect_blocks(&*store, "audit_log")
+    let blocks = reddb_server::runtime::blockchain_kind::collect_blocks(&store, "audit_log")
         .expect("blocks");
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0].block_height, 0);

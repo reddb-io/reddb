@@ -186,7 +186,7 @@ fn read_latest_config(store: &UnifiedStore, full_key: &str) -> Option<Value> {
     // monotonic `EntityId` descending and take the first match to get
     // the most recent write.
     let mut all = manager.query_all(|_| true);
-    all.sort_by(|a, b| b.id.raw().cmp(&a.id.raw()));
+    all.sort_by_key(|b| std::cmp::Reverse(b.id.raw()));
     for entity in all {
         let crate::storage::unified::EntityData::Row(row) = &entity.data else {
             continue;

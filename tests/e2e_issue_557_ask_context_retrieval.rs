@@ -153,7 +153,7 @@ fn issue_557_retrieval_surfaces_rows_bucket() {
         .map(|e| e.collection.as_str())
         .collect();
     assert!(
-        collections.iter().any(|c| *c == "incidents"),
+        collections.contains(&"incidents"),
         "rows bucket should name the 'incidents' collection, got {collections:?}"
     );
 }
@@ -175,7 +175,7 @@ fn issue_557_retrieval_surfaces_documents_bucket() {
         .map(|e| e.collection.as_str())
         .collect();
     assert!(
-        collections.iter().any(|c| *c == "runbooks"),
+        collections.contains(&"runbooks"),
         "documents bucket should name the 'runbooks' collection, got {collections:?}"
     );
 }
@@ -197,7 +197,7 @@ fn issue_557_retrieval_surfaces_kv_bucket() {
         .map(|e| e.collection.as_str())
         .collect();
     assert!(
-        collections.iter().any(|c| *c == "settings"),
+        collections.contains(&"settings"),
         "kv bucket should name the 'settings' collection, got {collections:?}"
     );
 }
@@ -232,7 +232,7 @@ fn issue_557_retrieval_surfaces_vectors_bucket() {
         .map(|e| e.collection.as_str())
         .collect();
     assert!(
-        collections.iter().any(|c| *c == "notes"),
+        collections.contains(&"notes"),
         "vectors bucket should name the 'notes' collection, got {collections:?}"
     );
 }
