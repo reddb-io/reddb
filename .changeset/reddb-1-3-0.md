@@ -24,6 +24,11 @@ follow-ups — the queue ACK/NACK contract is unchanged in this release.)
 **Analytics-event primitives (#575)** and **SDK Helper Spec v1.0 + cross-driver
 conformance (#449)** as previously merged on main.
 
+**Fix: embedding `linked_row_id` via rid envelope.** The row rid envelope
+refactor moved a query row's logical identity to the canonical `rid` key;
+`CLUSTER`/embedding writeback still keyed off the legacy `red_entity_id`
+column and silently dropped `linked_row_id`. Row→vector linkage is restored.
+
 Also documents that table column names persist across a file-backed reopen and
 that aggregate result columns use a single canonical `FUNC(arg)` casing —
 both verified by regression guards; these were 1.1.x-era reports already
