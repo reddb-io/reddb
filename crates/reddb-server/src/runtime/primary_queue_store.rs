@@ -36,6 +36,13 @@ const KIND_PENDING_LC: &str = "queue_pending_lc";
 const KIND_ACKED_LC: &str = "queue_acked_lc";
 const KIND_ATTEMPTS_LC: &str = "queue_attempts_lc";
 
+/// Legacy meta-row kind written by the pre-lifecycle delivery path
+/// (`impl_queue::save_queue_pending`). The lifecycle adapter reads these
+/// so a message reserved through the legacy path is visible to
+/// `QueueLifecycle` instead of surfacing `UnknownDelivery` — closing the
+/// parallel-meta-row divergence (issue #625, prereq B for the atomic flip).
+const KIND_PENDING_LEGACY: &str = "queue_pending";
+
 /// `QueueStore` implementation backed by `UnifiedStore`. Holds a clone of
 /// the runtime so it can reach the store + catalog without `&Engine`
 /// leaking into `QueueLifecycle`.
@@ -162,15 +169,105 @@ impl PrimaryQueueStore {
         message_id: MessageId,
         group: &str,
     ) -> Option<(EntityId, PendingRow)> {
+        let lifecycle_hit = self
+            .meta_rows(|row| {
+                row_text(row, "kind").as_deref() == Some(KIND_PENDING_LC)
+                    && row_text(row, "queue").as_deref() == Some(queue)
+                    && row_text(row, "group").as_deref() == Some(group)
+                    && row_u64(row, "message_id") == Some(message_id)
+            })
+            .into_iter()
+            .next()
+            .and_then(|(eid, row)| Some((eid, PendingRow::from_row(&row)?)));
+        if lifecycle_hit.is_some() {
+            return lifecycle_hit;
+        }
+        // Compat path: no lifecycle row exists, but the legacy delivery
+        // path may have reserved this message under a `queue_pending` row.
+        // Migrate it into the lifecycle representation so the rest of the
+        // adapter (ack / release / bump / read_lock_deadline, all keyed by
+        // delivery_id) resolves it through the normal `*_lc` machinery.
+        self.migrate_legacy_pending(queue, message_id, group)
+    }
+
+    /// One-shot migration of a single legacy `queue_pending` row into the
+    /// lifecycle representation. Forges a `delivery_id`, writes the
+    /// `queue_pending_lc` row (anchoring the lock deadline to the legacy
+    /// `delivered_at_ns` plus the queue's configured lock window), carries
+    /// the legacy `delivery_count` over to `queue_attempts_lc` so the
+    /// attempt counters agree across both views, then deletes the legacy
+    /// row — leaving the message pending in exactly one representation.
+    /// Returns the freshly-written lifecycle entry, or `None` when no
+    /// matching legacy row exists.
+    fn migrate_legacy_pending(
+        &self,
+        queue: &str,
+        message_id: MessageId,
+        group: &str,
+    ) -> Option<(EntityId, PendingRow)> {
+        let queue_owned = queue.to_string();
+        let group_owned = group.to_string();
+        let (legacy_eid, delivered_at_ns, delivery_count) = self
+            .meta_rows(|row| {
+                row_text(row, "kind").as_deref() == Some(KIND_PENDING_LEGACY)
+                    && row_text(row, "queue").as_deref() == Some(&queue_owned)
+                    && row_text(row, "group").as_deref() == Some(&group_owned)
+                    && row_u64(row, "message_id") == Some(message_id)
+            })
+            .into_iter()
+            .next()
+            .map(|(eid, row)| {
+                let delivered = row_u64(&row, "delivered_at_ns").unwrap_or_else(now_unix_ns);
+                let count = row_u64(&row, "delivery_count").unwrap_or(1) as u32;
+                (eid, delivered, count)
+            })?;
+
+        let delivery_id = new_delivery_id();
+        let lock_ms = self.lifecycle_config(queue).lock_duration.as_millis() as u64;
+        let deadline_ns =
+            delivered_at_ns.saturating_add(lock_ms.saturating_mul(1_000_000));
+
+        let mut fields = HashMap::new();
+        fields.insert("kind".into(), Value::text(KIND_PENDING_LC.to_string()));
+        fields.insert("queue".into(), Value::text(queue.to_string()));
+        fields.insert("group".into(), Value::text(group.to_string()));
+        fields.insert("message_id".into(), Value::UnsignedInteger(message_id));
+        fields.insert("delivery_id".into(), Value::text(delivery_id.clone()));
+        fields.insert("lock_deadline_ns".into(), Value::UnsignedInteger(deadline_ns));
+        self.insert_meta_row(fields).ok()?;
+
+        // Carry the legacy delivery_count across so the attempt counter
+        // is consistent between the two views for the same message.
+        if delivery_count > 0 {
+            let _ = self.write_attempts(queue, message_id, group, delivery_count);
+        }
+
+        // Drop the legacy row last — only after the lifecycle row is
+        // durably in place, so a failure mid-migration never strands the
+        // message in *neither* representation.
+        let _ = self.store().delete(QUEUE_META_COLLECTION, legacy_eid);
+
+        self.find_pending_by_delivery(&delivery_id)
+    }
+
+    /// Message ids currently reserved through the legacy `queue_pending`
+    /// path on `queue` (optionally scoped to `group`). Read-only — used to
+    /// keep legacy-pending messages out of the lifecycle "available" view
+    /// without migrating them (migration only happens on explicit resolve).
+    fn legacy_pending_message_ids(&self, queue: &str, group: Option<&str>) -> Vec<MessageId> {
+        let queue_owned = queue.to_string();
+        let group_owned = group.map(|g| g.to_string());
         self.meta_rows(|row| {
-            row_text(row, "kind").as_deref() == Some(KIND_PENDING_LC)
-                && row_text(row, "queue").as_deref() == Some(queue)
-                && row_text(row, "group").as_deref() == Some(group)
-                && row_u64(row, "message_id") == Some(message_id)
+            row_text(row, "kind").as_deref() == Some(KIND_PENDING_LEGACY)
+                && row_text(row, "queue").as_deref() == Some(&queue_owned)
+                && group_owned
+                    .as_ref()
+                    .map(|g| row_text(row, "group").as_deref() == Some(g))
+                    .unwrap_or(true)
         })
         .into_iter()
-        .next()
-        .and_then(|(eid, row)| Some((eid, PendingRow::from_row(&row)?)))
+        .filter_map(|(_, row)| row_u64(&row, "message_id"))
+        .collect()
     }
 
     fn read_attempts(&self, queue: &str, message_id: MessageId, group: &str) -> u32 {
@@ -224,17 +321,24 @@ impl PrimaryQueueStore {
     fn pending_message_ids(&self, queue: &str, group: Option<&str>) -> Vec<MessageId> {
         let queue_owned = queue.to_string();
         let group_owned = group.map(|g| g.to_string());
-        self.meta_rows(|row| {
-            row_text(row, "kind").as_deref() == Some(KIND_PENDING_LC)
-                && row_text(row, "queue").as_deref() == Some(&queue_owned)
-                && group_owned
-                    .as_ref()
-                    .map(|g| row_text(row, "group").as_deref() == Some(g))
-                    .unwrap_or(true)
-        })
-        .into_iter()
-        .filter_map(|(_, row)| row_u64(&row, "message_id"))
-        .collect()
+        let mut ids: Vec<MessageId> = self
+            .meta_rows(|row| {
+                row_text(row, "kind").as_deref() == Some(KIND_PENDING_LC)
+                    && row_text(row, "queue").as_deref() == Some(&queue_owned)
+                    && group_owned
+                        .as_ref()
+                        .map(|g| row_text(row, "group").as_deref() == Some(g))
+                        .unwrap_or(true)
+            })
+            .into_iter()
+            .filter_map(|(_, row)| row_u64(&row, "message_id"))
+            .collect();
+        // Union the legacy `queue_pending` reservations so a message
+        // reserved through the legacy delivery path stays out of the
+        // lifecycle "available" set — otherwise `deliver` would forge a
+        // second, parallel pending row for the same message (issue #625).
+        ids.extend(self.legacy_pending_message_ids(queue, group));
+        ids
     }
 
     fn acked_message_ids(&self, queue: &str, group: &str) -> Vec<MessageId> {
@@ -911,6 +1015,95 @@ mod tests {
         let t = QueueTxn::new();
         let err = ps.ack_pending(&t, "nope").unwrap_err();
         assert!(matches!(err, QueueStoreError::UnknownDelivery(_)));
+    }
+
+    // Issue #625 — legacy `queue_pending` divergence. A message reserved
+    // through the pre-lifecycle delivery path (`QUEUE READ`, which persists
+    // a `queue_pending` meta-row) must be resolvable and ack-able through
+    // the lifecycle adapter. `_work_default` is the WORK-mode default
+    // consumer group the legacy read path auto-creates when GROUP is
+    // omitted (see `impl_queue::WORK_DEFAULT_GROUP`).
+    const WORK_DEFAULT_GROUP: &str = "_work_default";
+
+    #[test]
+    fn legacy_pending_is_resolvable_and_ackable_via_lifecycle() {
+        let rt = boot();
+        rt.execute_query("CREATE QUEUE qlegacy").expect("create");
+        push(&rt, "qlegacy", "legacy-payload");
+
+        // Reserve via the LEGACY delivery path — persists a `queue_pending`
+        // row, never a `queue_pending_lc` row.
+        rt.execute_query("QUEUE READ qlegacy CONSUMER c1 COUNT 1")
+            .expect("legacy read reserves the message");
+
+        let ps = PrimaryQueueStore::new(rt);
+        let msgs = ps.list_queue_messages("qlegacy");
+        assert_eq!(msgs.len(), 1);
+        let mid = msgs[0].id.raw();
+
+        // The lifecycle adapter must SEE the legacy pending state.
+        let delivery_id = ps
+            .find_pending_by_key("qlegacy", mid, WORK_DEFAULT_GROUP)
+            .expect("legacy-reserved message must resolve through the lifecycle adapter");
+        assert!(!delivery_id.is_empty());
+
+        // Idempotent: a second resolve returns the same handle (the first
+        // call migrated the row into the lifecycle representation).
+        assert_eq!(
+            ps.find_pending_by_key("qlegacy", mid, WORK_DEFAULT_GROUP).as_deref(),
+            Some(delivery_id.as_str()),
+        );
+
+        // ...and the handle is ack-able through the lifecycle adapter.
+        let t = QueueTxn::new();
+        ps.ack_pending(&t, &delivery_id)
+            .expect("ack legacy-reserved message via lifecycle adapter");
+        assert!(
+            ps.list_queue_messages("qlegacy").is_empty(),
+            "message must be gone after lifecycle ack",
+        );
+    }
+
+    #[test]
+    fn legacy_pending_excluded_from_available_and_counters_agree() {
+        let rt = boot();
+        rt.execute_query("CREATE QUEUE qcount").expect("create");
+        push(&rt, "qcount", "p");
+
+        // Legacy read reserves the message and stamps delivery_count = 1.
+        rt.execute_query("QUEUE READ qcount CONSUMER c1 COUNT 1")
+            .expect("legacy read");
+
+        let ps = PrimaryQueueStore::new(rt);
+        let mid = ps.list_queue_messages("qcount")[0].id.raw();
+
+        // No double-counting: a legacy-pending message must not look
+        // available to the lifecycle adapter, or `deliver` would reserve a
+        // *second*, parallel `queue_pending_lc` row for the same message.
+        assert!(
+            ps.available_messages("qcount", QueueSide::Left).is_empty(),
+            "legacy-pending message must not appear available to the lifecycle adapter",
+        );
+
+        // Resolving migrates the row; the lifecycle attempts counter must
+        // agree with the legacy delivery_count (1) for the same message.
+        let _ = ps
+            .find_pending_by_key("qcount", mid, WORK_DEFAULT_GROUP)
+            .expect("resolve");
+        assert_eq!(
+            ps.read_attempts("qcount", mid, WORK_DEFAULT_GROUP),
+            1,
+            "lifecycle attempts must match the legacy delivery_count",
+        );
+
+        // Exactly one representation after the slice: the message is
+        // pending once (the legacy row was migrated away, not duplicated).
+        let pending = ps.pending_message_ids("qcount", None);
+        assert_eq!(
+            pending.iter().filter(|&&m| m == mid).count(),
+            1,
+            "message must be pending in exactly one representation",
+        );
     }
 
     #[test]
