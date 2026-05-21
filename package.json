@@ -18,6 +18,9 @@
   "scripts": {
     "postinstall": "node drivers/js/cli-postinstall.js",
     "test": "node drivers/js/test/smoke.test.mjs",
+    "typecheck": "cargo check --workspace --locked",
+    "lint": "cargo fmt --all -- --check && cargo clippy --workspace --locked -- -D warnings",
+    "build": "cargo test --workspace --locked",
     "changeset": "changeset",
     "release:version": "changeset version && node scripts/sync-version.js",
     "release:publish": "changeset publish",
