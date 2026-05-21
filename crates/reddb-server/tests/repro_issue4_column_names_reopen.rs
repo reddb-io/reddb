@@ -42,10 +42,8 @@ fn issue4_typed_column_names_survive_persistent_reopen() {
     {
         let rt =
             RedDBRuntime::with_options(RedDBOptions::persistent(&db_path)).expect("runtime boots");
-        rt.execute_query(
-            "CREATE TABLE chapter_words (chapter TEXT, word TEXT, freq INTEGER)",
-        )
-        .expect("create table");
+        rt.execute_query("CREATE TABLE chapter_words (chapter TEXT, word TEXT, freq INTEGER)")
+            .expect("create table");
 
         insert_chunks(&rt);
 
@@ -83,7 +81,10 @@ fn issue4_typed_column_names_survive_persistent_reopen() {
         .expect("reopened select-star executes");
 
     eprintln!("REOPEN projection columns = {:?}", reopened.result.columns);
-    eprintln!("REOPEN projection rows     = {}", reopened.result.records.len());
+    eprintln!(
+        "REOPEN projection rows     = {}",
+        reopened.result.records.len()
+    );
     eprintln!("REOPEN select-* columns    = {:?}", star.result.columns);
 
     // The bug report: after reopen these degrade to c0/c1/c2 and the

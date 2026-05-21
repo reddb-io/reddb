@@ -87,7 +87,11 @@ fn aggregate_column_name_casing_diag() {
         "count-lower-multi",
         "SELECT count(*), sum(amount) FROM t",
     );
-    let sum_lower_mixed = run(&rt, "SUM-upper-multi", "SELECT COUNT(*), SUM(amount) FROM t");
+    let sum_lower_mixed = run(
+        &rt,
+        "SUM-upper-multi",
+        "SELECT COUNT(*), SUM(amount) FROM t",
+    );
 
     println!("\n===== SUMMARY =====");
     println!("COUNT plain : lower={count_lower_plain:?}  upper={count_upper_plain:?}");
@@ -145,9 +149,7 @@ fn aggregate_column_name_casing_diag() {
     let count_consistent = count_keys.windows(2).all(|w| w[0] == w[1]);
     let sum_consistent = sum_keys.windows(2).all(|w| w[0] == w[1]);
 
-    println!(
-        "COUNT keys consistent across all forms? {count_consistent} ({count_keys:?})"
-    );
+    println!("COUNT keys consistent across all forms? {count_consistent} ({count_keys:?})");
     println!("SUM   keys consistent across all forms? {sum_consistent} ({sum_keys:?})");
 
     // This assertion encodes the DESIRED behavior (consistent casing).
