@@ -81,6 +81,42 @@ fn client_config_trusting(cert_der: &[u8]) -> Arc<rustls::ClientConfig> {
     Arc::new(client_config)
 }
 
+/// Clear-text `GET /health/live` over a raw TCP socket. Returns the
+/// raw response string, or a `<no-body ...>` marker if the limiter
+/// closed the socket before/while writing (mirrors `tls_get_health`).
+fn http_get_health(addr: &str) -> String {
+    let mut tcp = match TcpStream::connect(addr) {
+        Ok(s) => s,
+        Err(e) => return format!("<connect-err {e:?}>"),
+    };
+    tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    tcp.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+    let req = b"GET /health/live HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    let write_res = tcp.write_all(req).and_then(|_| tcp.flush());
+    let mut buf = Vec::new();
+    let read_res = tcp.read_to_end(&mut buf);
+    let body = String::from_utf8_lossy(&buf).to_string();
+    if body.is_empty() {
+        format!(
+            "<no-body write={:?} read={:?}>",
+            write_res.is_err(),
+            read_res.is_err()
+        )
+    } else {
+        body
+    }
+}
+
+fn wait_for_limiter(server: &RedDBServer, target: usize) -> bool {
+    for _ in 0..150 {
+        if server.http_limiter().current() == target {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    server.http_limiter().current() == target
+}
+
 fn tls_get_health(addr: &str, client_cfg: Arc<rustls::ClientConfig>) -> String {
     let server_name: ServerName<'static> = ServerName::try_from("localhost").unwrap();
     let mut conn = rustls::ClientConnection::new(client_cfg, server_name).unwrap();
@@ -251,5 +287,92 @@ fn tls_handler_deadline_emits_503_then_recovers() {
     assert!(
         body2.starts_with("HTTP/1.1 2"),
         "subsequent TLS request should succeed, got: {body2:?}"
+    );
+}
+
+/// AC #4 (vice-versa + mix): one shared cap, saturated by a *mixture*
+/// of clear-text and TLS connections. While saturated, a further
+/// request on *either* transport is rejected — proving HTTP and HTTPS
+/// draw against the single limiter regardless of which transport
+/// filled it. After the holders drain, capacity is restored on *both*
+/// transports.
+#[test]
+fn mixed_http_https_saturation_rejects_both_transports_then_recovers() {
+    let cap = 2;
+    let (tls_cfg, cert_der) = build_tls_config("mixed");
+
+    let opts = RedDBOptions::in_memory();
+    let runtime = RedDBRuntime::with_options(opts).expect("runtime");
+    let server = RedDBServer::new(runtime).with_http_limiter_cap(cap);
+
+    let clear_listener = TcpListener::bind("127.0.0.1:0").expect("bind clear");
+    let clear_addr = clear_listener.local_addr().unwrap().to_string();
+    let tls_listener = TcpListener::bind("127.0.0.1:0").expect("bind tls");
+    let tls_addr = tls_listener.local_addr().unwrap().to_string();
+
+    let s1 = server.clone();
+    thread::spawn(move || {
+        let _ = s1.serve_on(clear_listener);
+    });
+    let s2 = server.clone();
+    let cfg_arc = Arc::clone(&tls_cfg);
+    thread::spawn(move || {
+        let _ = s2.serve_tls_on(tls_listener, cfg_arc);
+    });
+    thread::sleep(Duration::from_millis(120));
+
+    // Saturate the shared cap with a MIX: one clear-text hold + one
+    // TLS-port hold. Both are raw TCP sockets that never send a full
+    // request, so each handler thread parks (clear-text on request
+    // read, TLS on the handshake read) holding its permit. The permit
+    // is acquired at accept on both loops, so a raw TCP connect to the
+    // TLS port is sufficient to occupy a slot.
+    let hold_http = TcpStream::connect(&clear_addr).expect("hold http");
+    let hold_https = TcpStream::connect(&tls_addr).expect("hold https");
+    assert!(
+        wait_for_limiter(&server, cap),
+        "a mix of one HTTP + one HTTPS connection must saturate the shared cap, current={}",
+        server.http_limiter().current()
+    );
+
+    // Cap is full (filled by both transports). A new clear-text request
+    // is rejected with the limiter 503...
+    let http_body = http_get_health(&clear_addr);
+    assert!(
+        http_body.starts_with("HTTP/1.1 503"),
+        "clear-text request must be rejected while shared cap is saturated, got: {http_body:?}"
+    );
+
+    // ...and a new TLS request is rejected pre-handshake (closed socket,
+    // never an HTTP 200).
+    let client_cfg = client_config_trusting(&cert_der);
+    let https_body = tls_get_health(&tls_addr, Arc::clone(&client_cfg));
+    assert!(
+        !https_body.starts_with("HTTP/1.1 200"),
+        "TLS request must be rejected while shared cap is saturated, got: {https_body:?}"
+    );
+
+    // Drain both holders; permits return to zero.
+    let _ = hold_http.shutdown(std::net::Shutdown::Both);
+    drop(hold_http);
+    let _ = hold_https.shutdown(std::net::Shutdown::Both);
+    drop(hold_https);
+    assert!(
+        wait_for_limiter(&server, 0),
+        "permits should drain to zero after both holders close, current={}",
+        server.http_limiter().current()
+    );
+    thread::sleep(Duration::from_millis(100));
+
+    // Capacity restored on BOTH transports.
+    let http_ok = http_get_health(&clear_addr);
+    assert!(
+        http_ok.starts_with("HTTP/1.1 2"),
+        "clear-text must recover after the shared cap drains, got: {http_ok:?}"
+    );
+    let https_ok = tls_get_health(&tls_addr, client_cfg);
+    assert!(
+        https_ok.starts_with("HTTP/1.1 2"),
+        "TLS must recover after the shared cap drains, got: {https_ok:?}"
     );
 }
