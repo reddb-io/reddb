@@ -18,7 +18,6 @@ fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn create_materialized_view_provisions_empty_backing_collection() {
     let rt = open_runtime();
     exec(&rt, "CREATE TABLE orders (id INT, total INT, status TEXT)");
@@ -63,7 +62,6 @@ fn create_materialized_view_provisions_empty_backing_collection() {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn drop_materialized_view_drops_backing_collection() {
     let rt = open_runtime();
     exec(&rt, "CREATE TABLE t (id INT)");
@@ -88,7 +86,6 @@ fn drop_materialized_view_drops_backing_collection() {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn regular_view_rewrite_unchanged_after_slice_9b() {
     let rt = open_runtime();
     exec(&rt, "CREATE TABLE users (id INT, active BOOLEAN)");

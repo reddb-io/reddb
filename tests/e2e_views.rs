@@ -23,7 +23,6 @@ fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn view_body_filters_rows_via_select_from_view() {
     let rt = open_runtime();
     exec(
@@ -71,7 +70,6 @@ fn view_body_filters_rows_via_select_from_view() {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn materialized_view_refresh_executes_body() {
     let rt = open_runtime();
     exec(&rt, "CREATE TABLE orders (id INT, total INT, status TEXT)");
@@ -103,7 +101,6 @@ fn materialized_view_refresh_executes_body() {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn view_chain_resolves_recursively() {
     let rt = open_runtime();
     exec(
