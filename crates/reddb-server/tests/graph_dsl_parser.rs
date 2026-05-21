@@ -470,15 +470,42 @@ fn graph_community_order_by_size_limit_parses() {
             max_iterations,
             limit,
             order_by: Some(GraphCommandOrderBy { metric, ascending }),
+            return_assignments,
         }) => {
             assert_eq!(algorithm, "louvain");
             assert_eq!(max_iterations, 100);
             assert_eq!(metric, "size");
             assert!(!ascending);
             assert_eq!(limit, Some(5));
+            assert!(!return_assignments, "RETURN ASSIGNMENTS defaults to false");
         }
         other => panic!("expected Community with ORDER BY size DESC LIMIT 5, got {other:?}"),
     }
+}
+
+#[test]
+fn graph_community_return_assignments_parses() {
+    let q = parse_query("GRAPH COMMUNITY ALGORITHM louvain RETURN ASSIGNMENTS");
+    match q {
+        QueryExpr::GraphCommand(GraphCommand::Community {
+            algorithm,
+            return_assignments,
+            ..
+        }) => {
+            assert_eq!(algorithm, "louvain");
+            assert!(return_assignments, "RETURN ASSIGNMENTS sets the flag");
+        }
+        other => panic!("expected Community with RETURN ASSIGNMENTS, got {other:?}"),
+    }
+}
+
+#[test]
+fn graph_community_return_requires_assignments_keyword() {
+    // RETURN must be followed by ASSIGNMENTS — anything else is a parse error.
+    assert!(
+        parser::parse("GRAPH COMMUNITY ALGORITHM louvain RETURN MEMBERS").is_err(),
+        "RETURN <other> must not parse"
+    );
 }
 
 #[test]

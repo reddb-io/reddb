@@ -301,24 +301,51 @@ impl RedDBRuntime {
                 max_iterations,
                 limit,
                 order_by,
+                return_assignments,
             } => {
                 let alg = parse_community_algorithm(algorithm)?;
                 let res =
                     self.graph_communities(alg, 1, Some(*max_iterations as usize), None, None)?;
-                let mut result =
-                    UnifiedResult::with_columns(vec!["community_id".into(), "size".into()]);
-                for community in &res.communities {
-                    let mut record = UnifiedRecord::new();
-                    record.set("community_id", Value::text(community.id.clone()));
-                    record.set("size", Value::Integer(community.size as i64));
-                    result.push(record);
-                }
-                apply_graph_order_and_limit(
-                    &mut result,
-                    "graph_community",
-                    order_by.as_ref(),
-                    limit.map(|n| n as usize),
-                )?;
+                let result = if *return_assignments {
+                    // Per-node node→community map (#660). Communities arrive
+                    // sorted (size desc, id asc); within each, sort nodes for a
+                    // deterministic row order. ORDER BY metrics target the
+                    // aggregate shape, so they don't apply here — only LIMIT
+                    // (row cap) is honoured.
+                    let mut result =
+                        UnifiedResult::with_columns(vec!["node_id".into(), "community_id".into()]);
+                    let row_cap = limit.map(|n| n as usize);
+                    'outer: for community in &res.communities {
+                        let mut nodes = community.nodes.clone();
+                        nodes.sort();
+                        for node_id in nodes {
+                            if row_cap.is_some_and(|cap| result.records.len() >= cap) {
+                                break 'outer;
+                            }
+                            let mut record = UnifiedRecord::new();
+                            record.set("node_id", Value::text(node_id));
+                            record.set("community_id", Value::text(community.id.clone()));
+                            result.push(record);
+                        }
+                    }
+                    result
+                } else {
+                    let mut result =
+                        UnifiedResult::with_columns(vec!["community_id".into(), "size".into()]);
+                    for community in &res.communities {
+                        let mut record = UnifiedRecord::new();
+                        record.set("community_id", Value::text(community.id.clone()));
+                        record.set("size", Value::Integer(community.size as i64));
+                        result.push(record);
+                    }
+                    apply_graph_order_and_limit(
+                        &mut result,
+                        "graph_community",
+                        order_by.as_ref(),
+                        limit.map(|n| n as usize),
+                    )?;
+                    result
+                };
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
                     mode: QueryMode::Sql,
