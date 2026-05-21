@@ -2390,12 +2390,17 @@ pub enum GraphCommand {
         limit: Option<u32>,
         order_by: Option<GraphCommandOrderBy>,
     },
-    /// GRAPH COMMUNITY [ALGORITHM alg] [MAX_ITERATIONS n] [ORDER BY metric [ASC|DESC]] [LIMIT n]
+    /// GRAPH COMMUNITY [ALGORITHM alg] [MAX_ITERATIONS n] [ORDER BY metric [ASC|DESC]] [LIMIT n] [RETURN ASSIGNMENTS]
+    ///
+    /// `return_assignments = false` (default) keeps the historical per-community
+    /// aggregate shape (`community_id`, `size`). `true` emits one row per node
+    /// (`node_id`, `community_id`) — the node→community map (#660).
     Community {
         algorithm: String,
         max_iterations: u32,
         limit: Option<u32>,
         order_by: Option<GraphCommandOrderBy>,
+        return_assignments: bool,
     },
     /// GRAPH COMPONENTS [MODE connected|weak|strong] [ORDER BY metric [ASC|DESC]] [LIMIT n]
     Components {

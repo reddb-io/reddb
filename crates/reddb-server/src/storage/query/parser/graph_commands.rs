@@ -174,13 +174,14 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parse: GRAPH COMMUNITY [ALGORITHM label_propagation|louvain] [MAX_ITERATIONS n] [ORDER BY metric [ASC|DESC]] [LIMIT n]
+    /// Parse: GRAPH COMMUNITY [ALGORITHM label_propagation|louvain] [MAX_ITERATIONS n] [ORDER BY metric [ASC|DESC]] [LIMIT n] [RETURN ASSIGNMENTS]
     fn parse_graph_community(&mut self) -> Result<QueryExpr, ParseError> {
         self.advance()?; // consume COMMUNITY
         let mut algorithm: Option<String> = None;
         let mut max_iterations: Option<u32> = None;
         let mut limit: Option<u32> = None;
         let mut order_by: Option<GraphCommandOrderBy> = None;
+        let mut return_assignments = false;
         loop {
             if algorithm.is_none() && self.consume(&Token::Algorithm)? {
                 algorithm = Some(self.expect_ident_or_keyword()?);
@@ -191,6 +192,17 @@ impl<'a> Parser<'a> {
             } else if limit.is_none() && self.consume(&Token::Limit)? {
                 let n = self.parse_integer()?;
                 limit = Some(n as u32);
+            } else if !return_assignments && self.consume(&Token::Return)? {
+                // RETURN ASSIGNMENTS — emit per-node node→community rows (#660)
+                let target = self.expect_ident_or_keyword()?;
+                if !target.eq_ignore_ascii_case("assignments") {
+                    return Err(ParseError::expected(
+                        vec!["ASSIGNMENTS"],
+                        self.peek(),
+                        self.position(),
+                    ));
+                }
+                return_assignments = true;
             } else {
                 break;
             }
@@ -200,6 +212,7 @@ impl<'a> Parser<'a> {
             max_iterations: max_iterations.unwrap_or(100),
             limit,
             order_by,
+            return_assignments,
         }))
     }
 

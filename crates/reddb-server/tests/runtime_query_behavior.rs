@@ -2325,6 +2325,69 @@ fn graph_community_order_by_size_desc_limit_executes() {
 }
 
 #[test]
+fn graph_community_return_assignments_emits_per_node_rows() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    seed_components_graph(&rt);
+    let res = rt
+        .execute_query("GRAPH COMMUNITY ALGORITHM louvain RETURN ASSIGNMENTS")
+        .expect("community RETURN ASSIGNMENTS parses+executes");
+    // Per-node shape: node_id + community_id, not the aggregate community_id+size.
+    assert_eq!(
+        res.result.columns,
+        vec!["node_id".to_string(), "community_id".to_string()],
+        "RETURN ASSIGNMENTS exposes node->community columns"
+    );
+    assert!(
+        !res.result.records.is_empty(),
+        "the seed graph has connected nodes to assign"
+    );
+    for rec in &res.result.records {
+        let node_id = rec.get("node_id").and_then(|v| v.as_text());
+        let community_id = rec.get("community_id").and_then(|v| v.as_text());
+        assert!(
+            node_id.is_some_and(|s| !s.is_empty()),
+            "every assignment row carries a node_id"
+        );
+        assert!(
+            community_id.is_some_and(|s| s.starts_with("community:")),
+            "every assignment row carries a community_id"
+        );
+    }
+    // node_id is unique per row (one assignment per node)
+    let mut ids: Vec<_> = res
+        .result
+        .records
+        .iter()
+        .filter_map(|r| {
+            r.get("node_id")
+                .and_then(|v| v.as_text())
+                .map(str::to_string)
+        })
+        .collect();
+    let total = ids.len();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(
+        ids.len(),
+        total,
+        "each node appears in exactly one assignment row"
+    );
+}
+
+#[test]
+fn graph_community_return_assignments_limit_caps_rows() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    seed_components_graph(&rt);
+    let res = rt
+        .execute_query("GRAPH COMMUNITY ALGORITHM louvain RETURN ASSIGNMENTS LIMIT 2")
+        .expect("community RETURN ASSIGNMENTS LIMIT parses+executes");
+    assert!(
+        res.result.records.len() <= 2,
+        "LIMIT 2 caps per-node assignment rows"
+    );
+}
+
+#[test]
 fn graph_shortest_path_limit_zero_returns_no_rows() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
     rt.execute_query("INSERT INTO path_net NODE (label, name) VALUES ('alice', 'Alice')")
