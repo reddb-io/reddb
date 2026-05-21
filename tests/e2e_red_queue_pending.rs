@@ -66,7 +66,10 @@ fn red_queue_pending_lists_active_delivery_row() {
     assert_eq!(row.get("group"), Some(&Value::text("workers")));
     assert_eq!(row.get("locked_by"), Some(&Value::text("worker1")));
     // First delivery: attempts == 0.
-    assert!(matches!(row.get("attempts"), Some(Value::UnsignedInteger(0))));
+    assert!(matches!(
+        row.get("attempts"),
+        Some(Value::UnsignedInteger(0))
+    ));
     // delivery_id is an opaque string we synthesize per delivery
     // instance — assert it is non-empty and contains the queue
     // and group as a sanity check on stability.

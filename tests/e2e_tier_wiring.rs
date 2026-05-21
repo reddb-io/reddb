@@ -17,9 +17,9 @@
 
 use reddb::{
     fold_dwb_into_wal_enabled, fold_pager_meta_enabled, meta_json_sidecar_enabled,
-    seqn_journal_enabled, seqn_journal_retention, shm_provisioning_enabled,
-    tier_wiring, LayoutOverrides, LogDestination, RedDBOptions, RedDBRuntime,
-    StorageLayout, DEFAULT_METADATA_JOURNAL_RETENTION, OPT_IN_METADATA_JOURNAL_RETENTION,
+    seqn_journal_enabled, seqn_journal_retention, shm_provisioning_enabled, tier_wiring,
+    LayoutOverrides, LogDestination, RedDBOptions, RedDBRuntime, StorageLayout,
+    DEFAULT_METADATA_JOURNAL_RETENTION, OPT_IN_METADATA_JOURNAL_RETENTION,
 };
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -62,7 +62,10 @@ fn minimal_tier_defaults_all_toggles_off() {
     assert!(!meta_json_sidecar_enabled(), "meta.json off for Minimal");
     assert!(!seqn_journal_enabled(), "seq-N journal off for Minimal");
     assert!(!shm_provisioning_enabled(), "-shm off for Minimal");
-    assert!(!fold_pager_meta_enabled(), "fold_pager_meta off for Minimal");
+    assert!(
+        !fold_pager_meta_enabled(),
+        "fold_pager_meta off for Minimal"
+    );
     assert!(!fold_dwb_into_wal_enabled(), "fold_dwb off for Minimal");
 
     let (audit, slow) = tier_wiring::current_log_destinations();
@@ -79,7 +82,10 @@ fn standard_tier_provisions_shm_only() {
     assert!(!meta_json_sidecar_enabled(), "meta.json off for Standard");
     assert!(!seqn_journal_enabled(), "seq-N journal off for Standard");
     assert!(shm_provisioning_enabled(), "-shm ON for Standard");
-    assert!(!fold_pager_meta_enabled(), "fold_pager_meta off for Standard");
+    assert!(
+        !fold_pager_meta_enabled(),
+        "fold_pager_meta off for Standard"
+    );
     assert!(!fold_dwb_into_wal_enabled(), "fold_dwb off for Standard");
     assert_eq!(seqn_journal_retention(), OPT_IN_METADATA_JOURNAL_RETENTION);
 

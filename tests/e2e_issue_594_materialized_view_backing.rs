@@ -65,10 +65,7 @@ fn create_materialized_view_provisions_empty_backing_collection() {
 fn drop_materialized_view_drops_backing_collection() {
     let rt = open_runtime();
     exec(&rt, "CREATE TABLE t (id INT)");
-    exec(
-        &rt,
-        "CREATE MATERIALIZED VIEW mv AS SELECT id FROM t",
-    );
+    exec(&rt, "CREATE MATERIALIZED VIEW mv AS SELECT id FROM t");
     // Backing exists — SELECT returns an empty result (not an error).
     let result = exec(&rt, "SELECT * FROM mv");
     assert_eq!(result.result.records.len(), 0);

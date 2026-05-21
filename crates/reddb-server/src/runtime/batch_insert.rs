@@ -237,39 +237,24 @@ mod tests {
     #[test]
     fn cache_misses_for_unknown_key() {
         let cache = BatchInsertCache::new();
-        assert!(cache.lookup("events", "never-stored", Instant::now()).is_none());
+        assert!(cache
+            .lookup("events", "never-stored", Instant::now())
+            .is_none());
     }
 
     #[test]
     fn cache_namespaced_by_collection() {
         let cache = BatchInsertCache::new();
         let now = Instant::now();
-        cache.store(
-            "c1",
-            "k",
-            200,
-            b"a".to_vec(),
-            Duration::from_secs(60),
-            now,
-        );
-        cache.store(
-            "c2",
-            "k",
-            200,
-            b"b".to_vec(),
-            Duration::from_secs(60),
-            now,
-        );
+        cache.store("c1", "k", 200, b"a".to_vec(), Duration::from_secs(60), now);
+        cache.store("c2", "k", 200, b"b".to_vec(), Duration::from_secs(60), now);
         assert_eq!(cache.lookup("c1", "k", now).unwrap().body, b"a");
         assert_eq!(cache.lookup("c2", "k", now).unwrap().body, b"b");
     }
 
     #[test]
     fn batch_too_large_maps_to_413() {
-        let err = BatchInsertError::BatchTooLarge {
-            limit: 10,
-            got: 11,
-        };
+        let err = BatchInsertError::BatchTooLarge { limit: 10, got: 11 };
         assert_eq!(err.http_status(), 413);
         assert_eq!(err.code(), "BatchTooLarge");
         assert!(err.row_index().is_none());

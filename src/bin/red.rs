@@ -983,7 +983,11 @@ fn main() {
                 println!("os/arch:     {}/{}", stats.system.os, stats.system.arch);
                 println!(
                     "seqn_journal: {} (retention={})",
-                    if journal_enabled { "enabled" } else { "disabled" },
+                    if journal_enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    },
                     journal_retention,
                 );
                 println!("audit_log:   {}", audit_desc);

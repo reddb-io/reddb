@@ -129,8 +129,8 @@ async fn drive_grpc(port: u16) -> QueryResult {
     // Synthesise an envelope around the gRPC reply so the same
     // `from_envelope` parser used for HTTP and RedWire is the sole
     // arbiter of "what counts as the documented envelope".
-    let result_value: serde_json::Value = serde_json::from_str(&reply.result_json)
-        .expect("gRPC result_json must be valid JSON");
+    let result_value: serde_json::Value =
+        serde_json::from_str(&reply.result_json).expect("gRPC result_json must be valid JSON");
     let envelope = json!({
         "statement": reply.statement,
         "affected_rows": reply.record_count,
@@ -147,9 +147,7 @@ async fn cross_transport_select_envelope_matches() {
     // a write-visibility race.
     let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
     runtime
-        .execute_query(&format!(
-            "CREATE TABLE {TABLE} (id INTEGER, name TEXT)"
-        ))
+        .execute_query(&format!("CREATE TABLE {TABLE} (id INTEGER, name TEXT)"))
         .expect("create table");
     runtime
         .execute_query(&format!(

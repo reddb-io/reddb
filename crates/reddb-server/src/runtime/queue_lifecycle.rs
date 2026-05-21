@@ -156,11 +156,7 @@ impl<S: QueueStore> QueueLifecycle<S> {
     /// Same as [`new`], but with a caller-supplied clock. Used by unit
     /// tests exercising lazy lock-expiry reclaim so deadlines can be
     /// crossed without sleeping.
-    pub(crate) fn with_clock(
-        store: S,
-        config: LifecycleConfig,
-        clock: Arc<dyn Clock>,
-    ) -> Self {
+    pub(crate) fn with_clock(store: S, config: LifecycleConfig, clock: Arc<dyn Clock>) -> Self {
         Self {
             store,
             config,
@@ -208,14 +204,17 @@ impl<S: QueueStore> QueueLifecycle<S> {
         self.store.reclaim_expired(txn, queue, now)?;
         let available = match self.config.mode {
             QueueMode::Work => self.store.available_messages(queue, QueueSide::Left),
-            QueueMode::Fanout => self
-                .store
-                .available_messages_for_group(queue, group, QueueSide::Left),
+            QueueMode::Fanout => {
+                self.store
+                    .available_messages_for_group(queue, group, QueueSide::Left)
+            }
         };
         let mut out = Vec::with_capacity(count.min(available.len()));
         for message_id in available.into_iter().take(count) {
             let deadline = now + self.config.lock_duration;
-            let delivery_id = self.store.mark_pending(txn, queue, message_id, group, deadline)?;
+            let delivery_id = self
+                .store
+                .mark_pending(txn, queue, message_id, group, deadline)?;
             let payload = self
                 .store
                 .read_message(queue, message_id)
@@ -274,9 +273,10 @@ impl<S: QueueStore> QueueLifecycle<S> {
         self.store.reclaim_expired(txn, queue, now)?;
         let available = match self.config.mode {
             QueueMode::Work => self.store.available_messages(queue, QueueSide::Left),
-            QueueMode::Fanout => self
-                .store
-                .available_messages_for_group(queue, group, QueueSide::Left),
+            QueueMode::Fanout => {
+                self.store
+                    .available_messages_for_group(queue, group, QueueSide::Left)
+            }
         };
         let mut out = Vec::with_capacity(count.min(available.len()));
         for message_id in available {
@@ -284,7 +284,9 @@ impl<S: QueueStore> QueueLifecycle<S> {
                 break;
             }
             let deadline = now + self.config.lock_duration;
-            let delivery_id = self.store.mark_pending(txn, queue, message_id, group, deadline)?;
+            let delivery_id = self
+                .store
+                .mark_pending(txn, queue, message_id, group, deadline)?;
             // WORK counts every (re)delivery against the persistent
             // attempt budget; FANOUT hands each group its own first copy.
             let delivery_count = match self.config.mode {
@@ -353,9 +355,7 @@ impl<S: QueueStore> QueueLifecycle<S> {
                     let payload = self
                         .store
                         .read_pending_payload(delivery_id)
-                        .ok_or_else(|| {
-                            QueueStoreError::UnknownDelivery(delivery_id.to_string())
-                        })?;
+                        .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
                     self.retire(txn, delivery_id)?;
                     self.store.enqueue_dlq(txn, target, payload)?;
                     self.record(RetirementOutcome::MovedToDlq(target.clone()));
@@ -395,7 +395,12 @@ impl<S: QueueStore> QueueLifecycle<S> {
         // bumps with placeholder labels so unit tests don't depend
         // on absent context.
         if let Some(telemetry) = self.telemetry.as_ref() {
-            let outcome = match self.outcomes.lock().unwrap_or_else(|p| p.into_inner()).last() {
+            let outcome = match self
+                .outcomes
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .last()
+            {
                 Some(RetirementOutcome::MovedToDlq(_)) => NackOutcomeLabel::Dlq,
                 Some(RetirementOutcome::Dropped) => NackOutcomeLabel::Drop,
                 Some(RetirementOutcome::Requeued) | None => NackOutcomeLabel::Retry,
@@ -412,12 +417,7 @@ impl<S: QueueStore> QueueLifecycle<S> {
     /// kept for shape-consistency with the mutating ops (so the bridge
     /// in PRD #598 doesn't need a different call site convention) but
     /// is intentionally unused here.
-    pub(crate) fn peek(
-        &self,
-        queue: &str,
-        count: usize,
-        _txn: &QueueTxn,
-    ) -> Vec<QueueMessageView> {
+    pub(crate) fn peek(&self, queue: &str, count: usize, _txn: &QueueTxn) -> Vec<QueueMessageView> {
         if count == 0 {
             return Vec::new();
         }
@@ -553,8 +553,13 @@ impl<S: QueueStore> QueueLifecycle<S> {
             // `mark_pending` is idempotent on that key — it returns the
             // existing delivery_id and refreshes the deadline.
             let new_deadline = now + self.config.lock_duration;
-            self.store
-                .mark_pending(txn, &entry.queue, entry.message_id, &entry.group, new_deadline)?;
+            self.store.mark_pending(
+                txn,
+                &entry.queue,
+                entry.message_id,
+                &entry.group,
+                new_deadline,
+            )?;
             claimed.push(ClaimedDelivery {
                 delivery_id: entry.delivery_id,
                 message: DeliveredMessage {
@@ -667,7 +672,9 @@ mod tests {
     #[test]
     fn work_deliver_returns_one_message_to_one_consumer() {
         let lc = lifecycle(store_with(&[(1, "first"), (2, "second")]));
-        let deliveries = lc.deliver(&QueueTxn::new(),"q", "workers", 1).expect("deliver");
+        let deliveries = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("deliver");
         assert_eq!(deliveries.len(), 1);
         assert_eq!(deliveries[0].payload, Value::text("first"));
         assert!(!deliveries[0].delivery_id.is_empty());
@@ -676,8 +683,12 @@ mod tests {
     #[test]
     fn work_second_consumer_gets_a_different_message() {
         let lc = lifecycle(store_with(&[(1, "first"), (2, "second")]));
-        let a = lc.deliver(&QueueTxn::new(),"q", "workers", 1).expect("deliver a");
-        let b = lc.deliver(&QueueTxn::new(),"q", "workers", 1).expect("deliver b");
+        let a = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("deliver a");
+        let b = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("deliver b");
         assert_eq!(a.len(), 1);
         assert_eq!(b.len(), 1);
         assert_ne!(a[0].delivery_id, b[0].delivery_id);
@@ -688,28 +699,41 @@ mod tests {
     #[test]
     fn work_exhausted_queue_returns_empty() {
         let lc = lifecycle(store_with(&[(1, "only")]));
-        let first = lc.deliver(&QueueTxn::new(),"q", "workers", 1).expect("first");
+        let first = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("first");
         assert_eq!(first.len(), 1);
-        let empty = lc.deliver(&QueueTxn::new(),"q", "workers", 1).expect("empty");
-        assert!(empty.is_empty(), "exhausted queue should yield no deliveries");
+        let empty = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("empty");
+        assert!(
+            empty.is_empty(),
+            "exhausted queue should yield no deliveries"
+        );
     }
 
     #[test]
     fn deliver_with_count_zero_is_noop() {
         let lc = lifecycle(store_with(&[(1, "first")]));
-        let got = lc.deliver(&QueueTxn::new(),"q", "workers", 0).expect("zero count");
+        let got = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 0)
+            .expect("zero count");
         assert!(got.is_empty());
     }
 
     #[test]
     fn ack_retires_message_no_longer_redeliverable() {
         let lc = lifecycle(store_with(&[(1, "first")]));
-        let delivered = lc.deliver(&QueueTxn::new(),"q", "workers", 1).expect("deliver");
+        let delivered = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("deliver");
         let delivery_id = delivered[0].delivery_id.clone();
-        lc.ack(&QueueTxn::new(),&delivery_id).expect("ack");
+        lc.ack(&QueueTxn::new(), &delivery_id).expect("ack");
 
         // Same group should not see it again.
-        let again = lc.deliver(&QueueTxn::new(),"q", "workers", 1).expect("redeliver attempt");
+        let again = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("redeliver attempt");
         assert!(again.is_empty(), "acked message must not redeliver");
     }
 
@@ -717,14 +741,16 @@ mod tests {
     fn ack_unknown_delivery_id_errors() {
         let store = InMemoryQueueStore::new();
         let lc = QueueLifecycle::new(store, LifecycleConfig::default());
-        let err = lc.ack(&QueueTxn::new(),"does-not-exist").unwrap_err();
+        let err = lc.ack(&QueueTxn::new(), "does-not-exist").unwrap_err();
         assert!(matches!(err, QueueStoreError::UnknownDelivery(_)));
     }
 
     #[test]
     fn deliver_count_larger_than_available_returns_all_available() {
         let lc = lifecycle(store_with(&[(1, "a"), (2, "b")]));
-        let got = lc.deliver(&QueueTxn::new(),"q", "workers", 10).expect("deliver");
+        let got = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 10)
+            .expect("deliver");
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].payload, Value::text("a"));
         assert_eq!(got[1].payload, Value::text("b"));
@@ -735,7 +761,9 @@ mod tests {
     fn deliver_on_unknown_queue_returns_empty() {
         let store = InMemoryQueueStore::new();
         let lc = QueueLifecycle::new(store, LifecycleConfig::default());
-        let got = lc.deliver(&QueueTxn::new(),"missing", "workers", 5).expect("deliver");
+        let got = lc
+            .deliver(&QueueTxn::new(), "missing", "workers", 5)
+            .expect("deliver");
         assert!(got.is_empty());
     }
 
@@ -763,11 +791,16 @@ mod tests {
         let cfg = config_with(&store, 3, None);
         let lc = QueueLifecycle::new(store, cfg);
 
-        let first = lc.deliver(&QueueTxn::new(),"q", "workers", 1).expect("deliver-1");
+        let first = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("deliver-1");
         assert_eq!(first[0].payload, Value::text("payload"));
-        lc.nack(&QueueTxn::new(),&first[0].delivery_id).expect("nack-1");
+        lc.nack(&QueueTxn::new(), &first[0].delivery_id)
+            .expect("nack-1");
 
-        let second = lc.deliver(&QueueTxn::new(),"q", "workers", 1).expect("deliver-2");
+        let second = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("deliver-2");
         assert_eq!(second.len(), 1, "requeued message must redeliver");
         assert_eq!(second[0].payload, Value::text("payload"));
         assert_ne!(second[0].delivery_id, first[0].delivery_id);
@@ -782,11 +815,16 @@ mod tests {
         let lc = QueueLifecycle::new(store, cfg);
 
         for _ in 0..2 {
-            let d = lc.deliver(&QueueTxn::new(),"q", "workers", 1).expect("deliver");
-            lc.nack(&QueueTxn::new(),&d[0].delivery_id).expect("nack");
+            let d = lc
+                .deliver(&QueueTxn::new(), "q", "workers", 1)
+                .expect("deliver");
+            lc.nack(&QueueTxn::new(), &d[0].delivery_id).expect("nack");
         }
-        let third = lc.deliver(&QueueTxn::new(),"q", "workers", 1).expect("deliver-3");
-        lc.nack(&QueueTxn::new(),&third[0].delivery_id).expect("nack-3");
+        let third = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("deliver-3");
+        lc.nack(&QueueTxn::new(), &third[0].delivery_id)
+            .expect("nack-3");
 
         assert_eq!(
             lc.recorded_outcomes(),
@@ -796,7 +834,10 @@ mod tests {
                 RetirementOutcome::Dropped,
             ]
         );
-        assert!(lc.deliver(&QueueTxn::new(),"q", "workers", 1).unwrap().is_empty());
+        assert!(lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -806,11 +847,17 @@ mod tests {
         let lc = QueueLifecycle::new(store, cfg);
 
         // First nack → Requeued
-        let a = lc.deliver(&QueueTxn::new(),"q", "workers", 1).expect("deliver-a");
-        lc.nack(&QueueTxn::new(),&a[0].delivery_id).expect("nack-a");
+        let a = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("deliver-a");
+        lc.nack(&QueueTxn::new(), &a[0].delivery_id)
+            .expect("nack-a");
         // Second nack → MovedToDlq
-        let b = lc.deliver(&QueueTxn::new(),"q", "workers", 1).expect("deliver-b");
-        lc.nack(&QueueTxn::new(),&b[0].delivery_id).expect("nack-b");
+        let b = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("deliver-b");
+        lc.nack(&QueueTxn::new(), &b[0].delivery_id)
+            .expect("nack-b");
 
         assert_eq!(
             lc.recorded_outcomes(),
@@ -826,7 +873,10 @@ mod tests {
         assert_eq!(dlq[0].original, Value::text("orders/42"));
 
         // Original is retired — not redeliverable on the source queue.
-        assert!(lc.deliver(&QueueTxn::new(),"q", "workers", 1).unwrap().is_empty());
+        assert!(lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -835,12 +885,20 @@ mod tests {
         let cfg = config_with(&store, 1, None);
         let lc = QueueLifecycle::new(store, cfg);
 
-        let d = lc.deliver(&QueueTxn::new(),"q", "workers", 1).expect("deliver");
-        lc.nack(&QueueTxn::new(),&d[0].delivery_id).expect("nack");
+        let d = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("deliver");
+        lc.nack(&QueueTxn::new(), &d[0].delivery_id).expect("nack");
 
         assert_eq!(lc.recorded_outcomes(), vec![RetirementOutcome::Dropped]);
-        assert!(lc.store.dlq_snapshot().is_empty(), "no DLQ enqueue when target unset");
-        assert!(lc.deliver(&QueueTxn::new(),"q", "workers", 1).unwrap().is_empty());
+        assert!(
+            lc.store.dlq_snapshot().is_empty(),
+            "no DLQ enqueue when target unset"
+        );
+        assert!(lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -848,7 +906,7 @@ mod tests {
         let store = InMemoryQueueStore::new();
         let cfg = config_with(&store, 3, None);
         let lc = QueueLifecycle::new(store, cfg);
-        let err = lc.nack(&QueueTxn::new(),"nope").unwrap_err();
+        let err = lc.nack(&QueueTxn::new(), "nope").unwrap_err();
         assert!(matches!(err, QueueStoreError::UnknownDelivery(_)));
         assert!(lc.recorded_outcomes().is_empty());
     }
@@ -877,8 +935,12 @@ mod tests {
     fn fanout_two_groups_both_receive_same_message() {
         let lc = QueueLifecycle::new(store_with(&[(1, "shared")]), fanout_config());
 
-        let a = lc.deliver(&QueueTxn::new(),"q", "subs.a", 1).expect("deliver a");
-        let b = lc.deliver(&QueueTxn::new(),"q", "subs.b", 1).expect("deliver b");
+        let a = lc
+            .deliver(&QueueTxn::new(), "q", "subs.a", 1)
+            .expect("deliver a");
+        let b = lc
+            .deliver(&QueueTxn::new(), "q", "subs.b", 1)
+            .expect("deliver b");
 
         assert_eq!(a.len(), 1);
         assert_eq!(b.len(), 1);
@@ -891,16 +953,24 @@ mod tests {
     fn fanout_ack_by_one_group_leaves_other_pending_intact() {
         let lc = QueueLifecycle::new(store_with(&[(1, "shared")]), fanout_config());
 
-        let a = lc.deliver(&QueueTxn::new(),"q", "subs.a", 1).expect("deliver a");
-        let b = lc.deliver(&QueueTxn::new(),"q", "subs.b", 1).expect("deliver b");
+        let a = lc
+            .deliver(&QueueTxn::new(), "q", "subs.a", 1)
+            .expect("deliver a");
+        let b = lc
+            .deliver(&QueueTxn::new(), "q", "subs.b", 1)
+            .expect("deliver b");
 
-        lc.ack(&QueueTxn::new(),&a[0].delivery_id).expect("ack a");
+        lc.ack(&QueueTxn::new(), &a[0].delivery_id).expect("ack a");
 
         // A must not see the message again.
-        assert!(lc.deliver(&QueueTxn::new(),"q", "subs.a", 1).unwrap().is_empty());
+        assert!(lc
+            .deliver(&QueueTxn::new(), "q", "subs.a", 1)
+            .unwrap()
+            .is_empty());
 
         // B's delivery is still ackable — pending row untouched.
-        lc.ack(&QueueTxn::new(),&b[0].delivery_id).expect("ack b still valid");
+        lc.ack(&QueueTxn::new(), &b[0].delivery_id)
+            .expect("ack b still valid");
     }
 
     #[test]
@@ -912,22 +982,30 @@ mod tests {
         let cfg = fanout_config_with(&store, 3, None);
         let lc = QueueLifecycle::new(store, cfg);
 
-        let a = lc.deliver(&QueueTxn::new(),"q", "subs.a", 1).expect("deliver a");
-        let b = lc.deliver(&QueueTxn::new(),"q", "subs.b", 1).expect("deliver b");
+        let a = lc
+            .deliver(&QueueTxn::new(), "q", "subs.a", 1)
+            .expect("deliver a");
+        let b = lc
+            .deliver(&QueueTxn::new(), "q", "subs.b", 1)
+            .expect("deliver b");
         let b_delivery = b[0].delivery_id.clone();
 
-        lc.nack(&QueueTxn::new(),&a[0].delivery_id).expect("nack a");
+        lc.nack(&QueueTxn::new(), &a[0].delivery_id)
+            .expect("nack a");
         assert_eq!(lc.recorded_outcomes(), vec![RetirementOutcome::Requeued]);
 
         // A redelivery on group A should hand back the same message,
         // because the message wasn't removed and A's pending was released.
-        let a2 = lc.deliver(&QueueTxn::new(),"q", "subs.a", 1).expect("a redeliver");
+        let a2 = lc
+            .deliver(&QueueTxn::new(), "q", "subs.a", 1)
+            .expect("a redeliver");
         assert_eq!(a2.len(), 1);
         assert_eq!(a2[0].payload, Value::text("shared"));
 
         // B's original delivery is still valid and acks cleanly — its
         // attempt counter never moved, its pending row never released.
-        lc.ack(&QueueTxn::new(),&b_delivery).expect("ack b's original delivery_id");
+        lc.ack(&QueueTxn::new(), &b_delivery)
+            .expect("ack b's original delivery_id");
     }
 
     #[test]
@@ -939,8 +1017,11 @@ mod tests {
         let cfg = fanout_config_with(&store, 1, Some("orders.dlq"));
         let lc = QueueLifecycle::new(store, cfg);
 
-        let a = lc.deliver(&QueueTxn::new(),"q", "subs.a", 1).expect("deliver a");
-        lc.nack(&QueueTxn::new(),&a[0].delivery_id).expect("nack a");
+        let a = lc
+            .deliver(&QueueTxn::new(), "q", "subs.a", 1)
+            .expect("deliver a");
+        lc.nack(&QueueTxn::new(), &a[0].delivery_id)
+            .expect("nack a");
 
         assert_eq!(
             lc.recorded_outcomes(),
@@ -951,8 +1032,13 @@ mod tests {
         assert_eq!(dlq[0].original, Value::text("orders/42"));
 
         // A is done; B has never delivered — message must still be available to B.
-        assert!(lc.deliver(&QueueTxn::new(),"q", "subs.a", 1).unwrap().is_empty());
-        let b = lc.deliver(&QueueTxn::new(),"q", "subs.b", 1).expect("deliver b");
+        assert!(lc
+            .deliver(&QueueTxn::new(), "q", "subs.a", 1)
+            .unwrap()
+            .is_empty());
+        let b = lc
+            .deliver(&QueueTxn::new(), "q", "subs.b", 1)
+            .expect("deliver b");
         assert_eq!(b.len(), 1);
         assert_eq!(b[0].payload, Value::text("orders/42"));
     }
@@ -963,15 +1049,23 @@ mod tests {
         let cfg = fanout_config_with(&store, 1, None);
         let lc = QueueLifecycle::new(store, cfg);
 
-        let a = lc.deliver(&QueueTxn::new(),"q", "subs.a", 1).expect("deliver a");
-        lc.nack(&QueueTxn::new(),&a[0].delivery_id).expect("nack a");
+        let a = lc
+            .deliver(&QueueTxn::new(), "q", "subs.a", 1)
+            .expect("deliver a");
+        lc.nack(&QueueTxn::new(), &a[0].delivery_id)
+            .expect("nack a");
 
         assert_eq!(lc.recorded_outcomes(), vec![RetirementOutcome::Dropped]);
         assert!(lc.store.dlq_snapshot().is_empty());
-        assert!(lc.deliver(&QueueTxn::new(),"q", "subs.a", 1).unwrap().is_empty());
+        assert!(lc
+            .deliver(&QueueTxn::new(), "q", "subs.a", 1)
+            .unwrap()
+            .is_empty());
 
         // B still sees it.
-        let b = lc.deliver(&QueueTxn::new(),"q", "subs.b", 1).expect("deliver b");
+        let b = lc
+            .deliver(&QueueTxn::new(), "q", "subs.b", 1)
+            .expect("deliver b");
         assert_eq!(b.len(), 1);
         assert_eq!(b[0].payload, Value::text("p"));
     }
@@ -983,8 +1077,12 @@ mod tests {
         // in FANOUT it must not.
         let lc = QueueLifecycle::new(store_with(&[(1, "x"), (2, "y")]), fanout_config());
 
-        let a = lc.deliver(&QueueTxn::new(),"q", "subs.a", 2).expect("deliver a");
-        let b = lc.deliver(&QueueTxn::new(),"q", "subs.b", 2).expect("deliver b");
+        let a = lc
+            .deliver(&QueueTxn::new(), "q", "subs.a", 2)
+            .expect("deliver a");
+        let b = lc
+            .deliver(&QueueTxn::new(), "q", "subs.b", 2)
+            .expect("deliver b");
         assert_eq!(a.len(), 2);
         assert_eq!(b.len(), 2);
         let a_payloads: Vec<_> = a.iter().map(|d| d.payload.clone()).collect();
@@ -1003,10 +1101,12 @@ mod tests {
 
         let mut ids = Vec::new();
         for _ in 0..3 {
-            let d = lc.deliver(&QueueTxn::new(),"q", "workers", 1).expect("deliver");
+            let d = lc
+                .deliver(&QueueTxn::new(), "q", "workers", 1)
+                .expect("deliver");
             assert_eq!(d.len(), 1, "should always redeliver until retired");
             ids.push(d[0].delivery_id.clone());
-            lc.nack(&QueueTxn::new(),&d[0].delivery_id).expect("nack");
+            lc.nack(&QueueTxn::new(), &d[0].delivery_id).expect("nack");
         }
 
         // All three delivery_ids must differ — each nack-then-deliver
@@ -1043,19 +1143,25 @@ mod tests {
             clock.clone() as Arc<dyn Clock>,
         );
 
-        let first = lc.deliver(&QueueTxn::new(),"q", "workers", 1).expect("first");
+        let first = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("first");
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].payload, Value::text("only"));
 
         // Before deadline: no redelivery (slot held).
         clock.advance(Duration::from_millis(50));
-        let blocked = lc.deliver(&QueueTxn::new(),"q", "workers", 1).expect("still locked");
+        let blocked = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("still locked");
         assert!(blocked.is_empty(), "lock still held — must not redeliver");
 
         // Cross the deadline: next deliver reclaims and hands the
         // message back. A fresh delivery_id is forged for the new lease.
         clock.advance(Duration::from_millis(60));
-        let second = lc.deliver(&QueueTxn::new(),"q", "workers", 1).expect("after expiry");
+        let second = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("after expiry");
         assert_eq!(second.len(), 1, "expired lock must release for redelivery");
         assert_eq!(second[0].payload, Value::text("only"));
         assert_ne!(second[0].delivery_id, first[0].delivery_id);
@@ -1075,7 +1181,9 @@ mod tests {
             config_with_lock(Duration::from_secs(30)),
             clock.clone() as Arc<dyn Clock>,
         );
-        let first = lc1.deliver(&QueueTxn::new(),"q", "workers", 1).expect("deliver");
+        let first = lc1
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("deliver");
         assert_eq!(first.len(), 1);
         let original_delivery_id = first[0].delivery_id.clone();
 
@@ -1090,7 +1198,9 @@ mod tests {
             config_with_lock(Duration::from_secs(30)),
             clock.clone() as Arc<dyn Clock>,
         );
-        let again = lc2.deliver(&QueueTxn::new(),"q", "workers", 1).expect("post-restart deliver");
+        let again = lc2
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("post-restart deliver");
         assert!(
             again.is_empty(),
             "pending row must survive Module recreation while deadline holds"
@@ -1098,7 +1208,8 @@ mod tests {
 
         // The original delivery handle remains ackable through the new
         // Module — confirming the pending row was not silently dropped.
-        lc2.ack(&QueueTxn::new(),&original_delivery_id).expect("original delivery still ackable");
+        lc2.ack(&QueueTxn::new(), &original_delivery_id)
+            .expect("original delivery still ackable");
     }
 
     // Issue #602 — peek + read (non-mutating inspection).
@@ -1118,12 +1229,17 @@ mod tests {
 
         // peek must not mark anything pending: the same deliver should
         // still hand back message 1 from the front.
-        let delivered = lc.deliver(&QueueTxn::new(), "q", "workers", 1).expect("deliver");
+        let delivered = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("deliver");
         assert_eq!(delivered.len(), 1);
         assert_eq!(delivered[0].payload, Value::text("a"));
 
         // peek must not have recorded a tombstone either.
-        assert!(t.recorded_tombstones().is_empty(), "peek must not tombstone");
+        assert!(
+            t.recorded_tombstones().is_empty(),
+            "peek must not tombstone"
+        );
     }
 
     #[test]
@@ -1152,7 +1268,9 @@ mod tests {
     fn peek_skips_pending_messages() {
         let lc = lifecycle(store_with(&[(1, "a"), (2, "b"), (3, "c")]));
         // Reserve message 1 — peek must skip it.
-        let _ = lc.deliver(&QueueTxn::new(), "q", "workers", 1).expect("deliver");
+        let _ = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("deliver");
         let view = lc.peek("q", 5, &QueueTxn::new());
         let ids: Vec<_> = view.iter().map(|v| v.message_id).collect();
         assert_eq!(ids, vec![2, 3]);
@@ -1188,8 +1306,12 @@ mod tests {
 
         // Two FANOUT groups should still both see both messages — peek
         // didn't touch any pending row.
-        let a = lc.deliver(&QueueTxn::new(), "q", "subs.a", 2).expect("deliver a");
-        let b = lc.deliver(&QueueTxn::new(), "q", "subs.b", 2).expect("deliver b");
+        let a = lc
+            .deliver(&QueueTxn::new(), "q", "subs.a", 2)
+            .expect("deliver a");
+        let b = lc
+            .deliver(&QueueTxn::new(), "q", "subs.b", 2)
+            .expect("deliver b");
         assert_eq!(a.len(), 2);
         assert_eq!(b.len(), 2);
     }
@@ -1208,9 +1330,13 @@ mod tests {
         // read must not touch the lock deadline — same instant before and after.
         assert_eq!(lc.store_ref().read_lock_deadline(&id), deadline_before);
         // read must not record a tombstone.
-        assert!(t.recorded_tombstones().is_empty(), "read must not tombstone");
+        assert!(
+            t.recorded_tombstones().is_empty(),
+            "read must not tombstone"
+        );
         // The delivery handle stays valid and ackable.
-        lc.ack(&QueueTxn::new(), &id).expect("delivery still ackable after read");
+        lc.ack(&QueueTxn::new(), &id)
+            .expect("delivery still ackable after read");
     }
 
     #[test]
@@ -1241,7 +1367,9 @@ mod tests {
 
         // Available pool is empty afterwards.
         assert!(
-            lc.store_ref().available_messages("q", QueueSide::Left).is_empty(),
+            lc.store_ref()
+                .available_messages("q", QueueSide::Left)
+                .is_empty(),
             "no available messages after purge",
         );
         // Payloads are gone too — read_message returns None.
@@ -1256,9 +1384,18 @@ mod tests {
         assert_eq!(
             t.recorded_tombstones(),
             vec![
-                TombstoneRecord { queue: "q".to_string(), message_id: 1 },
-                TombstoneRecord { queue: "q".to_string(), message_id: 2 },
-                TombstoneRecord { queue: "q".to_string(), message_id: 3 },
+                TombstoneRecord {
+                    queue: "q".to_string(),
+                    message_id: 1
+                },
+                TombstoneRecord {
+                    queue: "q".to_string(),
+                    message_id: 2
+                },
+                TombstoneRecord {
+                    queue: "q".to_string(),
+                    message_id: 3
+                },
             ],
         );
     }
@@ -1269,7 +1406,9 @@ mod tests {
         // delivery — purge must clean up the pending row alongside the
         // available row, and tombstone both.
         let lc = lifecycle(store_with(&[(1, "first"), (2, "second")]));
-        let delivered = lc.deliver(&QueueTxn::new(), "q", "workers", 1).expect("deliver");
+        let delivered = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("deliver");
         assert_eq!(delivered.len(), 1);
         let pending_id = delivered[0].delivery_id.clone();
 
@@ -1290,8 +1429,14 @@ mod tests {
         assert_eq!(
             t.recorded_tombstones(),
             vec![
-                TombstoneRecord { queue: "q".to_string(), message_id: 1 },
-                TombstoneRecord { queue: "q".to_string(), message_id: 2 },
+                TombstoneRecord {
+                    queue: "q".to_string(),
+                    message_id: 1
+                },
+                TombstoneRecord {
+                    queue: "q".to_string(),
+                    message_id: 2
+                },
             ],
         );
     }
@@ -1302,8 +1447,12 @@ mod tests {
         // the same message must produce exactly one tombstone per
         // message id after purge, not one per pending row.
         let lc = QueueLifecycle::new(store_with(&[(1, "shared"), (2, "other")]), fanout_config());
-        let _a = lc.deliver(&QueueTxn::new(), "q", "subs.a", 2).expect("deliver a");
-        let _b = lc.deliver(&QueueTxn::new(), "q", "subs.b", 2).expect("deliver b");
+        let _a = lc
+            .deliver(&QueueTxn::new(), "q", "subs.a", 2)
+            .expect("deliver a");
+        let _b = lc
+            .deliver(&QueueTxn::new(), "q", "subs.b", 2)
+            .expect("deliver b");
 
         let t = QueueTxn::new();
         let n = lc.purge("q", &t).expect("purge");
@@ -1311,14 +1460,26 @@ mod tests {
         assert_eq!(
             t.recorded_tombstones(),
             vec![
-                TombstoneRecord { queue: "q".to_string(), message_id: 1 },
-                TombstoneRecord { queue: "q".to_string(), message_id: 2 },
+                TombstoneRecord {
+                    queue: "q".to_string(),
+                    message_id: 1
+                },
+                TombstoneRecord {
+                    queue: "q".to_string(),
+                    message_id: 2
+                },
             ],
         );
 
         // Neither group can deliver anything afterwards.
-        assert!(lc.deliver(&QueueTxn::new(), "q", "subs.a", 5).unwrap().is_empty());
-        assert!(lc.deliver(&QueueTxn::new(), "q", "subs.b", 5).unwrap().is_empty());
+        assert!(lc
+            .deliver(&QueueTxn::new(), "q", "subs.a", 5)
+            .unwrap()
+            .is_empty());
+        assert!(lc
+            .deliver(&QueueTxn::new(), "q", "subs.b", 5)
+            .unwrap()
+            .is_empty());
     }
 
     // Issue #603 — claim (steal-after-min-idle, bumps attempt).
@@ -1334,10 +1495,14 @@ mod tests {
     #[test]
     fn claim_on_queue_with_no_pending_returns_empty() {
         let lc = lifecycle(store_with(&[(1, "a")]));
-        let claimed = lc.claim("q", "consumer-x", 0, &QueueTxn::new()).expect("claim");
+        let claimed = lc
+            .claim("q", "consumer-x", 0, &QueueTxn::new())
+            .expect("claim");
         assert!(claimed.is_empty());
         // Unknown queue is also empty.
-        let claimed = lc.claim("missing", "c", 0, &QueueTxn::new()).expect("claim");
+        let claimed = lc
+            .claim("missing", "c", 0, &QueueTxn::new())
+            .expect("claim");
         assert!(claimed.is_empty());
     }
 
@@ -1358,15 +1523,22 @@ mod tests {
             clock.clone(),
         );
 
-        let d = lc.deliver(&QueueTxn::new(), "q", "workers", 1).expect("deliver");
+        let d = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("deliver");
         let original_deadline = lc.store_ref().read_lock_deadline(&d[0].delivery_id);
 
         clock.advance(Duration::from_secs(5));
-        let claimed = lc.claim("q", "consumer-x", 0, &QueueTxn::new()).expect("claim");
+        let claimed = lc
+            .claim("q", "consumer-x", 0, &QueueTxn::new())
+            .expect("claim");
         assert!(claimed.is_empty(), "lock still held; nothing to claim");
 
         // Deadline unchanged, no tombstone written.
-        assert_eq!(lc.store_ref().read_lock_deadline(&d[0].delivery_id), original_deadline);
+        assert_eq!(
+            lc.store_ref().read_lock_deadline(&d[0].delivery_id),
+            original_deadline
+        );
     }
 
     #[test]
@@ -1383,19 +1555,34 @@ mod tests {
             clock.clone(),
         );
 
-        let d = lc.deliver(&QueueTxn::new(), "q", "workers", 1).expect("deliver");
+        let d = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("deliver");
         let id = d[0].delivery_id.clone();
-        let pre_deadline = lc.store_ref().read_lock_deadline(&id).expect("pre-deadline");
+        let pre_deadline = lc
+            .store_ref()
+            .read_lock_deadline(&id)
+            .expect("pre-deadline");
 
         // Cross the lock deadline plus the requested idle threshold.
         clock.advance(Duration::from_millis(500));
         let t = QueueTxn::new();
         let claimed = lc.claim("q", "consumer-x", 100, &t).expect("claim");
-        assert_eq!(claimed, vec![id.clone()], "expired delivery must be claimed");
+        assert_eq!(
+            claimed,
+            vec![id.clone()],
+            "expired delivery must be claimed"
+        );
 
         // Deadline refreshed forward.
-        let post_deadline = lc.store_ref().read_lock_deadline(&id).expect("post-deadline");
-        assert!(post_deadline > pre_deadline, "deadline must move forward on claim");
+        let post_deadline = lc
+            .store_ref()
+            .read_lock_deadline(&id)
+            .expect("post-deadline");
+        assert!(
+            post_deadline > pre_deadline,
+            "deadline must move forward on claim"
+        );
 
         // Attempt counter bumped to 1 — observable by tripping
         // `read_max_attempts` later. Easiest check: another claim with
@@ -1404,7 +1591,10 @@ mod tests {
         // (covered in the next test).
 
         // claim does not write a tombstone on the happy path.
-        assert!(t.recorded_tombstones().is_empty(), "happy-path claim must not tombstone");
+        assert!(
+            t.recorded_tombstones().is_empty(),
+            "happy-path claim must not tombstone"
+        );
     }
 
     #[test]
@@ -1425,12 +1615,16 @@ mod tests {
             clock.clone(),
         );
 
-        let d = lc.deliver(&QueueTxn::new(), "q", "workers", 1).expect("deliver");
+        let d = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("deliver");
         let id = d[0].delivery_id.clone();
 
         // First claim — within budget, reassigns.
         clock.advance(Duration::from_millis(500));
-        let c1 = lc.claim("q", "consumer-x", 100, &QueueTxn::new()).expect("claim-1");
+        let c1 = lc
+            .claim("q", "consumer-x", 100, &QueueTxn::new())
+            .expect("claim-1");
         assert_eq!(c1, vec![id.clone()]);
 
         // Second claim — over budget, retired (dropped).
@@ -1444,10 +1638,7 @@ mod tests {
             lc.store_ref().read_lock_deadline(&id).is_none(),
             "pending row must be gone after retirement",
         );
-        assert_eq!(
-            lc.recorded_outcomes(),
-            vec![RetirementOutcome::Dropped],
-        );
+        assert_eq!(lc.recorded_outcomes(), vec![RetirementOutcome::Dropped],);
         // ack_pending records one tombstone per retired message.
         assert_eq!(t.recorded_tombstones().len(), 1);
     }
@@ -1467,14 +1658,20 @@ mod tests {
             clock.clone(),
         );
 
-        let d = lc.deliver(&QueueTxn::new(), "q", "workers", 1).expect("deliver");
+        let d = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("deliver");
         let _id = d[0].delivery_id.clone();
 
         clock.advance(Duration::from_millis(500));
-        let _ = lc.claim("q", "consumer-x", 100, &QueueTxn::new()).expect("claim-1");
+        let _ = lc
+            .claim("q", "consumer-x", 100, &QueueTxn::new())
+            .expect("claim-1");
 
         clock.advance(Duration::from_millis(500));
-        let c2 = lc.claim("q", "consumer-y", 100, &QueueTxn::new()).expect("claim-2");
+        let c2 = lc
+            .claim("q", "consumer-y", 100, &QueueTxn::new())
+            .expect("claim-2");
         assert!(c2.is_empty());
 
         assert_eq!(
@@ -1502,17 +1699,26 @@ mod tests {
             clock.clone(),
         );
 
-        let d = lc.deliver(&QueueTxn::new(), "q", "workers", 2).expect("deliver");
+        let d = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 2)
+            .expect("deliver");
         assert_eq!(d.len(), 2);
 
         // Cross the deadline by 50ms — locks are expired, but not by
         // 200ms beyond expiry.
         clock.advance(Duration::from_millis(150));
-        let none = lc.claim("q", "consumer-x", 200, &QueueTxn::new()).expect("strict");
-        assert!(none.is_empty(), "min_idle 200ms not yet satisfied past deadline");
+        let none = lc
+            .claim("q", "consumer-x", 200, &QueueTxn::new())
+            .expect("strict");
+        assert!(
+            none.is_empty(),
+            "min_idle 200ms not yet satisfied past deadline"
+        );
 
         // Loosen the threshold — both deliveries claim.
-        let both = lc.claim("q", "consumer-x", 0, &QueueTxn::new()).expect("loose");
+        let both = lc
+            .claim("q", "consumer-x", 0, &QueueTxn::new())
+            .expect("loose");
         assert_eq!(both.len(), 2);
     }
 
@@ -1609,7 +1815,10 @@ mod tests {
             .group_read(&QueueTxn::new(), "q", "workers", "c2", 1)
             .expect("second");
         assert_eq!(second[0].message_id, 1);
-        assert_eq!(second[0].consumer, "c2", "consumer echoes the latest reader");
+        assert_eq!(
+            second[0].consumer, "c2",
+            "consumer echoes the latest reader"
+        );
         assert_eq!(
             second[0].delivery_count, 2,
             "redelivery bumps the persistent attempt counter",
@@ -1663,7 +1872,10 @@ mod tests {
         let second = lc
             .group_read(&QueueTxn::new(), "q", "workers", "c", 1)
             .expect("second");
-        assert!(second.is_empty(), "over-budget message must not be returned");
+        assert!(
+            second.is_empty(),
+            "over-budget message must not be returned"
+        );
         assert_eq!(
             lc.recorded_outcomes(),
             vec![RetirementOutcome::MovedToDlq("q.dlq".to_string())],
@@ -1690,7 +1902,9 @@ mod tests {
             clock.clone(),
         );
         // Deliver (no bump) then expire so the delivery is claimable.
-        let _ = lc.deliver(&QueueTxn::new(), "q", "workers", 1).expect("deliver");
+        let _ = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("deliver");
         clock.advance(Duration::from_millis(500));
 
         let claimed = lc
@@ -1723,10 +1937,15 @@ mod tests {
             },
             clock.clone(),
         );
-        let _ = lc.deliver(&QueueTxn::new(), "q", "workers", 1).expect("deliver");
+        let _ = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("deliver");
         clock.advance(Duration::from_secs(5));
         // Still locked → neither variant claims.
-        assert!(lc.claim("q", "x", 0, &QueueTxn::new()).expect("handles").is_empty());
+        assert!(lc
+            .claim("q", "x", 0, &QueueTxn::new())
+            .expect("handles")
+            .is_empty());
         assert!(lc
             .claim_delivering("q", "x", 0, &QueueTxn::new())
             .expect("projection")
@@ -1748,7 +1967,9 @@ mod tests {
             },
             clock.clone(),
         );
-        let _ = lc.deliver(&QueueTxn::new(), "q", "workers", 1).expect("deliver");
+        let _ = lc
+            .deliver(&QueueTxn::new(), "q", "workers", 1)
+            .expect("deliver");
 
         clock.advance(Duration::from_millis(500));
         let c1 = lc

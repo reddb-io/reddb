@@ -5796,8 +5796,8 @@ impl RedDBRuntime {
                     // restart. Upsert semantics (delete-then-insert by
                     // name) keep the catalog free of duplicate rows
                     // across `CREATE OR REPLACE` churn.
-                    let descriptor = crate::runtime::continuous_materialized_view::
-                        MaterializedViewDescriptor {
+                    let descriptor =
+                        crate::runtime::continuous_materialized_view::MaterializedViewDescriptor {
                             name: q.name.clone(),
                             source_sql: query.to_string(),
                             source_collections: dependencies,
@@ -5923,12 +5923,15 @@ impl RedDBRuntime {
                             Err(err) => {
                                 let duration_ms = started.elapsed().as_millis() as u64;
                                 let msg = err.to_string();
-                                self.inner.materialized_views.write().record_refresh_failure(
-                                    &q.name,
-                                    msg.clone(),
-                                    duration_ms,
-                                    now_ms,
-                                );
+                                self.inner
+                                    .materialized_views
+                                    .write()
+                                    .record_refresh_failure(
+                                        &q.name,
+                                        msg.clone(),
+                                        duration_ms,
+                                        now_ms,
+                                    );
                                 return Err(RedDBError::Internal(format!(
                                     "REFRESH MATERIALIZED VIEW {}: {msg}",
                                     q.name
@@ -5942,15 +5945,12 @@ impl RedDBRuntime {
                         // backing-collection contents via
                         // `LogicalChangeApplier::apply_record`.
                         if let Some(ref primary) = self.inner.db.replication {
-                            let lsn = self
-                                .inner
-                                .cdc
-                                .emit(
-                                    crate::replication::cdc::ChangeOperation::Refresh,
-                                    &q.name,
-                                    0,
-                                    "refresh",
-                                );
+                            let lsn = self.inner.cdc.emit(
+                                crate::replication::cdc::ChangeOperation::Refresh,
+                                &q.name,
+                                0,
+                                "refresh",
+                            );
                             self.invalidate_result_cache_for_table(&q.name);
                             let timestamp = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
@@ -7724,16 +7724,15 @@ impl RedDBRuntime {
     /// bad entry does not block startup.
     pub(crate) fn rehydrate_materialized_view_descriptors(&self) {
         let store = self.inner.db.store();
-        let descriptors =
-            crate::runtime::continuous_materialized_view::load_all(store.as_ref());
+        let descriptors = crate::runtime::continuous_materialized_view::load_all(store.as_ref());
         for descriptor in descriptors {
             let parsed = match crate::storage::query::parser::parse(&descriptor.source_sql) {
                 Ok(qc) => qc,
                 Err(err) => {
                     crate::telemetry::operator_event::OperatorEvent::SchemaCorruption {
-                        collection: crate::runtime::continuous_materialized_view::
-                            CATALOG_COLLECTION
-                            .to_string(),
+                        collection:
+                            crate::runtime::continuous_materialized_view::CATALOG_COLLECTION
+                                .to_string(),
                         detail: format!(
                             "failed to re-parse materialized-view source for {}: {err}",
                             descriptor.name
@@ -7745,8 +7744,7 @@ impl RedDBRuntime {
             };
             let crate::storage::query::ast::QueryExpr::CreateView(create) = parsed.query else {
                 crate::telemetry::operator_event::OperatorEvent::SchemaCorruption {
-                    collection: crate::runtime::continuous_materialized_view::
-                        CATALOG_COLLECTION
+                    collection: crate::runtime::continuous_materialized_view::CATALOG_COLLECTION
                         .to_string(),
                     detail: format!(
                         "materialized-view source for {} did not re-parse as CREATE VIEW",

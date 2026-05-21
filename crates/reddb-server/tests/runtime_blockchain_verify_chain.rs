@@ -48,7 +48,9 @@ fn tamper_block_actor(rt: &RedDBRuntime, collection: &str, height: u64, new_acto
         .query_all(|_| true)
         .into_iter()
         .find(|e| {
-            let EntityData::Row(r) = &e.data else { return false };
+            let EntityData::Row(r) = &e.data else {
+                return false;
+            };
             let Some(named) = &r.named else { return false };
             matches!(named.get("block_height"), Some(Value::UnsignedInteger(h)) if *h == height)
         })
@@ -75,9 +77,7 @@ fn genesis_only_chain_verifies_ok() {
     let rt = rt();
     rt.execute_query("CREATE COLLECTION audit_log KIND blockchain")
         .expect("create");
-    let outcome = rt
-        .verify_chain_for_collection("audit_log")
-        .expect("verify");
+    let outcome = rt.verify_chain_for_collection("audit_log").expect("verify");
     assert_eq!(
         outcome,
         VerifyChainOutcome {
@@ -96,9 +96,7 @@ fn intact_multi_block_chain_verifies_ok() {
     for actor in ["alice", "bob", "carol"] {
         insert_block(&rt, "audit_log", actor);
     }
-    let outcome = rt
-        .verify_chain_for_collection("audit_log")
-        .expect("verify");
+    let outcome = rt.verify_chain_for_collection("audit_log").expect("verify");
     assert!(outcome.ok, "intact chain must be ok, got {outcome:?}");
     assert_eq!(outcome.checked, 4);
     assert_eq!(outcome.first_bad_height, None);
@@ -113,9 +111,7 @@ fn corrupting_middle_block_reports_its_height() {
         insert_block(&rt, "audit_log", actor);
     }
     tamper_block_actor(&rt, "audit_log", 2, "EVE");
-    let outcome = rt
-        .verify_chain_for_collection("audit_log")
-        .expect("verify");
+    let outcome = rt.verify_chain_for_collection("audit_log").expect("verify");
     assert!(!outcome.ok);
     assert_eq!(outcome.first_bad_height, Some(2));
 }
@@ -129,9 +125,7 @@ fn corrupting_tip_reports_tip_height() {
         insert_block(&rt, "audit_log", actor);
     }
     tamper_block_actor(&rt, "audit_log", 2, "MALLORY");
-    let outcome = rt
-        .verify_chain_for_collection("audit_log")
-        .expect("verify");
+    let outcome = rt.verify_chain_for_collection("audit_log").expect("verify");
     assert!(!outcome.ok);
     assert_eq!(outcome.first_bad_height, Some(2));
 }
@@ -173,15 +167,22 @@ fn integrity_flag_persisted_round_trips() {
         .expect("create");
     let store = rt.db().store();
     persist_integrity_flag(&*store, "audit_log", true);
-    assert_eq!(is_integrity_broken_persisted(&*store, "audit_log"), Some(true));
+    assert_eq!(
+        is_integrity_broken_persisted(&*store, "audit_log"),
+        Some(true)
+    );
     persist_integrity_flag(&*store, "audit_log", false);
-    assert_eq!(is_integrity_broken_persisted(&*store, "audit_log"), Some(false));
+    assert_eq!(
+        is_integrity_broken_persisted(&*store, "audit_log"),
+        Some(false)
+    );
 }
 
 #[test]
 fn verify_returns_none_for_non_chain_collection() {
     let rt = rt();
-    rt.execute_query("CREATE TABLE plain (id INTEGER)").expect("create plain");
+    rt.execute_query("CREATE TABLE plain (id INTEGER)")
+        .expect("create plain");
     assert!(rt.verify_chain_for_collection("plain").is_none());
 }
 

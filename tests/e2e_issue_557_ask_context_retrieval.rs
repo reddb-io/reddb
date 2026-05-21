@@ -147,7 +147,11 @@ fn issue_557_retrieval_surfaces_rows_bucket() {
         "rows bucket must surface the seeded incident — got {:#?}",
         result.summary
     );
-    let collections: Vec<_> = result.tables.iter().map(|e| e.collection.as_str()).collect();
+    let collections: Vec<_> = result
+        .tables
+        .iter()
+        .map(|e| e.collection.as_str())
+        .collect();
     assert!(
         collections.iter().any(|c| *c == "incidents"),
         "rows bucket should name the 'incidents' collection, got {collections:?}"

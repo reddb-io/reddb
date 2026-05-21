@@ -251,8 +251,8 @@ fn save(store: &UnifiedStore, entries: &[SchemaEntry]) {
 /// canonical re-serialised form, so the registry stores a normalised
 /// representation regardless of caller whitespace / key ordering.
 fn validate_schema_shape(schema_json: &str) -> Result<JsonValue, SchemaError> {
-    let parsed = parse_json(schema_json)
-        .map_err(|err| SchemaError::InvalidSchemaJson(err.to_string()))?;
+    let parsed =
+        parse_json(schema_json).map_err(|err| SchemaError::InvalidSchemaJson(err.to_string()))?;
     let Some(obj) = parsed.as_object() else {
         return Err(SchemaError::InvalidSchemaShape(
             "schema must be a JSON object".to_string(),
@@ -520,8 +520,8 @@ pub fn validate(
     };
     let schema = parse_json(&schema_json)
         .map_err(|e| ValidationError::InvalidPayloadJson(format!("schema corrupt: {e}")))?;
-    let payload = parse_json(payload_json)
-        .map_err(|e| ValidationError::InvalidPayloadJson(e.to_string()))?;
+    let payload =
+        parse_json(payload_json).map_err(|e| ValidationError::InvalidPayloadJson(e.to_string()))?;
     let Some(payload_obj) = payload.as_object() else {
         return Err(ValidationError::PayloadNotObject);
     };
@@ -592,23 +592,17 @@ pub fn validation_error_to_reddb(err: ValidationError) -> crate::api::RedDBError
         ValidationError::InvalidPayloadJson(reason) => {
             format!("AnalyticsSchemaError:InvalidPayloadJson:{reason}")
         }
-        ValidationError::PayloadNotObject => {
-            "AnalyticsSchemaError:PayloadNotObject".to_string()
-        }
+        ValidationError::PayloadNotObject => "AnalyticsSchemaError:PayloadNotObject".to_string(),
         ValidationError::MissingRequiredField {
             event_name,
             version,
             field,
-        } => format!(
-            "AnalyticsSchemaError:MissingRequiredField:{event_name}:v{version}:{field}"
-        ),
+        } => format!("AnalyticsSchemaError:MissingRequiredField:{event_name}:v{version}:{field}"),
         ValidationError::UnknownField {
             event_name,
             version,
             field,
-        } => format!(
-            "AnalyticsSchemaError:UnknownField:{event_name}:v{version}:{field}"
-        ),
+        } => format!("AnalyticsSchemaError:UnknownField:{event_name}:v{version}:{field}"),
         ValidationError::TypeMismatch {
             event_name,
             version,
@@ -904,7 +898,11 @@ mod tests {
             .collect();
         let mut sorted = purchase_versions.clone();
         sorted.sort();
-        assert_eq!(sorted, vec![1, 2], "expected both versions, got {purchase_versions:?}");
+        assert_eq!(
+            sorted,
+            vec![1, 2],
+            "expected both versions, got {purchase_versions:?}"
+        );
     }
 
     #[test]
@@ -958,7 +956,10 @@ mod tests {
         let err = validate(&s, "page_view", r#"{"url":123}"#).unwrap_err();
         match err {
             ValidationError::TypeMismatch {
-                field, expected, got, ..
+                field,
+                expected,
+                got,
+                ..
             } => {
                 assert_eq!(field, "url");
                 assert_eq!(expected, "string");

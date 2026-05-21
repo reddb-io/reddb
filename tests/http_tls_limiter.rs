@@ -72,9 +72,7 @@ fn build_tls_config(label: &str) -> (Arc<rustls::ServerConfig>, Vec<u8>) {
 fn client_config_trusting(cert_der: &[u8]) -> Arc<rustls::ClientConfig> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let mut roots = rustls::RootCertStore::empty();
-    roots
-        .add(CertificateDer::from(cert_der.to_vec()))
-        .unwrap();
+    roots.add(CertificateDer::from(cert_der.to_vec())).unwrap();
     let client_config = rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
@@ -90,7 +88,8 @@ fn http_get_health(addr: &str) -> String {
         Err(e) => return format!("<connect-err {e:?}>"),
     };
     tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    tcp.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+    tcp.set_write_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
     let req = b"GET /health/live HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     let write_res = tcp.write_all(req).and_then(|_| tcp.flush());
     let mut buf = Vec::new();
@@ -122,10 +121,10 @@ fn tls_get_health(addr: &str, client_cfg: Arc<rustls::ClientConfig>) -> String {
     let mut conn = rustls::ClientConnection::new(client_cfg, server_name).unwrap();
     let mut tcp = TcpStream::connect(addr).expect("tcp connect");
     tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    tcp.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+    tcp.set_write_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
     let mut stream = rustls::Stream::new(&mut conn, &mut tcp);
-    let req =
-        b"GET /health/live HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    let req = b"GET /health/live HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     let write_res = stream.write_all(req).and_then(|_| stream.flush());
     let mut buf = Vec::new();
     let read_res = stream.read_to_end(&mut buf);

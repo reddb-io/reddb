@@ -131,16 +131,13 @@ fn replica_replay_of_refresh_collection_matches_primary_row_for_row() {
     // refresh path takes the same code branch the wire fetcher
     // would observe, then publish a 2-row refresh.
     let primary_rt = {
-        let opts = RedDBOptions::persistent(&primary_path)
-            .with_replication(ReplicationConfig::primary());
+        let opts =
+            RedDBOptions::persistent(&primary_path).with_replication(ReplicationConfig::primary());
         RedDBRuntime::with_options(opts).expect("open primary")
     };
     let primary_store = primary_rt.db().store();
 
-    let entities = vec![
-        table_row(1, "paid", 100),
-        table_row(2, "paid", 200),
-    ];
+    let entities = vec![table_row(1, "paid", 100), table_row(2, "paid", 200)];
 
     let serialized = primary_store
         .refresh_collection(BACKING, entities)
@@ -192,8 +189,8 @@ fn replica_replay_of_refresh_collection_is_idempotent() {
     let primary_path = temp_path("idempotent-primary");
 
     let primary_rt = {
-        let opts = RedDBOptions::persistent(&primary_path)
-            .with_replication(ReplicationConfig::primary());
+        let opts =
+            RedDBOptions::persistent(&primary_path).with_replication(ReplicationConfig::primary());
         RedDBRuntime::with_options(opts).expect("open primary")
     };
     let primary_store = primary_rt.db().store();
@@ -208,8 +205,7 @@ fn replica_replay_of_refresh_collection_is_idempotent() {
 
     let replica = RedDB::open(&path).expect("open replica");
     let timestamp = 1_700_000_000_000u64;
-    let refresh_record =
-        ChangeRecord::for_refresh(7, timestamp, BACKING.to_string(), serialized);
+    let refresh_record = ChangeRecord::for_refresh(7, timestamp, BACKING.to_string(), serialized);
 
     let applier = LogicalChangeApplier::new(0);
     assert_eq!(
@@ -245,8 +241,8 @@ fn replica_replay_of_refresh_collection_is_idempotent() {
 #[test]
 fn primary_refresh_materialized_view_emits_refresh_cdc_event() {
     let primary_path = temp_path("primary-cdc");
-    let opts = RedDBOptions::persistent(&primary_path)
-        .with_replication(ReplicationConfig::primary());
+    let opts =
+        RedDBOptions::persistent(&primary_path).with_replication(ReplicationConfig::primary());
     let rt = RedDBRuntime::with_options(opts).expect("open primary");
 
     rt.execute_query("CREATE TABLE orders_596 (id INT, total INT, status TEXT)")

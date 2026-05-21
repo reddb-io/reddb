@@ -8,9 +8,9 @@
 //! production code consumes it yet.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::storage::schema::Value;
@@ -165,10 +165,7 @@ impl QueueTxn {
     /// Snapshot of every tombstone recorded against this txn — used by
     /// in-memory tests asserting on the ack-and-delete flow.
     pub(crate) fn recorded_tombstones(&self) -> Vec<TombstoneRecord> {
-        self.tombstones
-            .lock()
-            .expect("queue txn poisoned")
-            .clone()
+        self.tombstones.lock().expect("queue txn poisoned").clone()
     }
 }
 
@@ -528,7 +525,9 @@ impl QueueStore for InMemoryQueueStore {
         if let Some(msgs) = state.queues.get_mut(&entry.queue) {
             msgs.retain(|m| *m != entry.message_id);
         }
-        state.payloads.remove(&(entry.queue.clone(), entry.message_id));
+        state
+            .payloads
+            .remove(&(entry.queue.clone(), entry.message_id));
         // ack-and-delete on a WORK-mode queue tombstones the underlying
         // message — mirror the runtime-side `record_pending_tombstone`
         // call so tests observe the would-be MVCC tombstone. Drop the
@@ -572,7 +571,11 @@ impl QueueStore for InMemoryQueueStore {
             .iter()
             .copied()
             .filter(|m| !pending.contains(m))
-            .filter(|m| !state.acked.contains(&(queue.to_string(), *m, group.to_string())))
+            .filter(|m| {
+                !state
+                    .acked
+                    .contains(&(queue.to_string(), *m, group.to_string()))
+            })
             .collect();
         if matches!(side, QueueSide::Right) {
             out.reverse();
@@ -776,8 +779,7 @@ mod tests {
             .expect("mark");
         assert!(!id.is_empty(), "delivery_id is empty");
         assert!(
-            id.chars()
-                .all(|c| matches!(c, 'a'..='z' | '2'..='7')),
+            id.chars().all(|c| matches!(c, 'a'..='z' | '2'..='7')),
             "delivery_id {id} not base32-lower"
         );
     }
@@ -787,8 +789,12 @@ mod tests {
         let store = InMemoryQueueStore::new();
         store.seed_queue("q", vec![1, 2]);
         let t = txn();
-        let a = store.mark_pending(&t, "q", 1, "g", deadline_in(1000)).unwrap();
-        let b = store.mark_pending(&t, "q", 2, "g", deadline_in(1000)).unwrap();
+        let a = store
+            .mark_pending(&t, "q", 1, "g", deadline_in(1000))
+            .unwrap();
+        let b = store
+            .mark_pending(&t, "q", 2, "g", deadline_in(1000))
+            .unwrap();
         assert_ne!(a, b);
     }
 
@@ -797,9 +803,16 @@ mod tests {
         let store = InMemoryQueueStore::new();
         store.seed_queue("q", vec![1]);
         let t = txn();
-        let a = store.mark_pending(&t, "q", 1, "g", deadline_in(1000)).unwrap();
-        let b = store.mark_pending(&t, "q", 1, "g", deadline_in(2000)).unwrap();
-        assert_eq!(a, b, "same (queue, msg, group) should return same delivery_id");
+        let a = store
+            .mark_pending(&t, "q", 1, "g", deadline_in(1000))
+            .unwrap();
+        let b = store
+            .mark_pending(&t, "q", 1, "g", deadline_in(2000))
+            .unwrap();
+        assert_eq!(
+            a, b,
+            "same (queue, msg, group) should return same delivery_id"
+        );
     }
 
     #[test]
@@ -814,7 +827,9 @@ mod tests {
         let store = InMemoryQueueStore::new();
         store.seed_queue("q", vec![1]);
         let t = txn();
-        let id = store.mark_pending(&t, "q", 1, "g", deadline_in(1000)).unwrap();
+        let id = store
+            .mark_pending(&t, "q", 1, "g", deadline_in(1000))
+            .unwrap();
         let first = store.bump_attempt(&t, &id).unwrap();
         assert_eq!(first.attempts, 1);
         assert_eq!(first.queue, "q");
@@ -840,9 +855,15 @@ mod tests {
         let t = txn();
 
         // mark_pending alone does not tombstone.
-        let d1 = store.mark_pending(&t, "q", 1, "g", deadline_in(1000)).unwrap();
-        let d2 = store.mark_pending(&t, "q", 2, "g", deadline_in(1000)).unwrap();
-        let d3 = store.mark_pending(&t, "q", 3, "g", deadline_in(1000)).unwrap();
+        let d1 = store
+            .mark_pending(&t, "q", 1, "g", deadline_in(1000))
+            .unwrap();
+        let d2 = store
+            .mark_pending(&t, "q", 2, "g", deadline_in(1000))
+            .unwrap();
+        let d3 = store
+            .mark_pending(&t, "q", 3, "g", deadline_in(1000))
+            .unwrap();
         assert!(
             t.recorded_tombstones().is_empty(),
             "mark_pending must not record tombstones"
@@ -854,8 +875,14 @@ mod tests {
         assert_eq!(
             t.recorded_tombstones(),
             vec![
-                TombstoneRecord { queue: "q".to_string(), message_id: 1 },
-                TombstoneRecord { queue: "q".to_string(), message_id: 2 },
+                TombstoneRecord {
+                    queue: "q".to_string(),
+                    message_id: 1
+                },
+                TombstoneRecord {
+                    queue: "q".to_string(),
+                    message_id: 2
+                },
             ],
             "each ack_pending must record exactly one tombstone, in order",
         );
@@ -863,16 +890,34 @@ mod tests {
         // release_pending, bump_attempt, retire_for_group, reclaim_expired
         // are not delete-shaped — none of them must add tombstones.
         store.release_pending(&t, &d3).unwrap();
-        assert_eq!(t.recorded_tombstones().len(), 2, "release_pending must not record");
-        let d3 = store.mark_pending(&t, "q", 3, "g", deadline_in(1000)).unwrap();
+        assert_eq!(
+            t.recorded_tombstones().len(),
+            2,
+            "release_pending must not record"
+        );
+        let d3 = store
+            .mark_pending(&t, "q", 3, "g", deadline_in(1000))
+            .unwrap();
         store.bump_attempt(&t, &d3).unwrap();
-        assert_eq!(t.recorded_tombstones().len(), 2, "bump_attempt must not record");
+        assert_eq!(
+            t.recorded_tombstones().len(),
+            2,
+            "bump_attempt must not record"
+        );
         store.retire_for_group(&t, &d3).unwrap();
-        assert_eq!(t.recorded_tombstones().len(), 2, "retire_for_group must not record");
+        assert_eq!(
+            t.recorded_tombstones().len(),
+            2,
+            "retire_for_group must not record"
+        );
         store
             .reclaim_expired(&t, "q", Instant::now() + Duration::from_secs(60))
             .unwrap();
-        assert_eq!(t.recorded_tombstones().len(), 2, "reclaim_expired must not record");
+        assert_eq!(
+            t.recorded_tombstones().len(),
+            2,
+            "reclaim_expired must not record"
+        );
     }
 
     #[test]
@@ -894,7 +939,10 @@ mod tests {
         assert_eq!(store.read_max_attempts("q", 1), 7);
         assert_eq!(store.read_max_attempts("q", 2), 1);
         // Different queue, same id — not affected by the seed above.
-        assert_eq!(store.read_max_attempts("other", 1), DEFAULT_READ_MAX_ATTEMPTS);
+        assert_eq!(
+            store.read_max_attempts("other", 1),
+            DEFAULT_READ_MAX_ATTEMPTS
+        );
     }
 
     #[test]
@@ -909,8 +957,12 @@ mod tests {
     fn enqueue_dlq_records_original() {
         let store = InMemoryQueueStore::new();
         let t = txn();
-        store.enqueue_dlq(&t, "orders.dlq", Value::text("payload-1")).unwrap();
-        store.enqueue_dlq(&t, "orders.dlq", Value::Integer(42)).unwrap();
+        store
+            .enqueue_dlq(&t, "orders.dlq", Value::text("payload-1"))
+            .unwrap();
+        store
+            .enqueue_dlq(&t, "orders.dlq", Value::Integer(42))
+            .unwrap();
         let snap = store.dlq_snapshot();
         assert_eq!(snap.len(), 2);
         assert_eq!(snap[0].target, "orders.dlq");
@@ -923,7 +975,9 @@ mod tests {
         let store = InMemoryQueueStore::new();
         store.seed_queue("q", vec![1, 2, 3]);
         let t = txn();
-        let _ = store.mark_pending(&t, "q", 2, "g", deadline_in(1000)).unwrap();
+        let _ = store
+            .mark_pending(&t, "q", 2, "g", deadline_in(1000))
+            .unwrap();
         let avail = store.available_messages("q", QueueSide::Left);
         assert_eq!(avail, vec![1, 3]);
         let avail_right = store.available_messages("q", QueueSide::Right);
@@ -935,7 +989,9 @@ mod tests {
         let store = InMemoryQueueStore::new();
         store.seed_queue("q", vec![1]);
         let t = txn();
-        let id = store.mark_pending(&t, "q", 1, "g", deadline_in(1000)).unwrap();
+        let id = store
+            .mark_pending(&t, "q", 1, "g", deadline_in(1000))
+            .unwrap();
         assert!(store.available_messages("q", QueueSide::Left).is_empty());
         store.release_pending(&t, &id).unwrap();
         assert_eq!(store.available_messages("q", QueueSide::Left), vec![1]);
@@ -970,7 +1026,9 @@ mod tests {
     fn mark_pending_unknown_queue_errors() {
         let store = InMemoryQueueStore::new();
         let t = txn();
-        let err = store.mark_pending(&t, "missing", 1, "g", deadline_in(1000)).unwrap_err();
+        let err = store
+            .mark_pending(&t, "missing", 1, "g", deadline_in(1000))
+            .unwrap_err();
         assert!(matches!(err, QueueStoreError::UnknownQueue(_)));
     }
 

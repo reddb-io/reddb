@@ -10,7 +10,9 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::storage::blockchain::{compute_block_hash, verify_chain, Block, GENESIS_PREV_HASH, VerifyReport};
+use crate::storage::blockchain::{
+    compute_block_hash, verify_chain, Block, VerifyReport, GENESIS_PREV_HASH,
+};
 use crate::storage::schema::Value;
 use crate::storage::unified::UnifiedStore;
 
@@ -240,10 +242,7 @@ pub fn make_block_reserved_fields(
 ) -> (Vec<(String, Value)>, [u8; 32]) {
     let hash = compute_block_hash(&prev_hash, height, timestamp_ms, payload_canonical, None);
     let fields = vec![
-        (
-            COL_BLOCK_HEIGHT.to_string(),
-            Value::UnsignedInteger(height),
-        ),
+        (COL_BLOCK_HEIGHT.to_string(), Value::UnsignedInteger(height)),
         (COL_PREV_HASH.to_string(), Value::Blob(prev_hash.to_vec())),
         (
             COL_TIMESTAMP.to_string(),
@@ -353,7 +352,11 @@ const INTEGRITY_OK: &str = "ok";
 /// Persist a chain's integrity flag in `red_config`. Append-only — readers use
 /// [`is_integrity_broken_persisted`] which picks the latest matching row by id.
 pub fn persist_integrity_flag(store: &UnifiedStore, collection: &str, broken: bool) {
-    let tag = if broken { INTEGRITY_BROKEN } else { INTEGRITY_OK };
+    let tag = if broken {
+        INTEGRITY_BROKEN
+    } else {
+        INTEGRITY_OK
+    };
     store.set_config_tree(
         &integrity_key(collection),
         &crate::serde_json::Value::String(tag.to_string()),
@@ -371,7 +374,8 @@ pub fn is_integrity_broken_persisted(store: &UnifiedStore, collection: &str) -> 
             continue;
         };
         let Some(named) = &row.named else { continue };
-        let k_match = matches!(named.get("key"), Some(Value::Text(s)) if s.as_ref() == key.as_str());
+        let k_match =
+            matches!(named.get("key"), Some(Value::Text(s)) if s.as_ref() == key.as_str());
         if !k_match {
             continue;
         }
@@ -453,10 +457,7 @@ mod tests {
     fn canonical_payload_skips_reserved_columns() {
         let fields = vec![
             ("user".to_string(), Value::text("alice")),
-            (
-                COL_BLOCK_HEIGHT.to_string(),
-                Value::UnsignedInteger(42),
-            ),
+            (COL_BLOCK_HEIGHT.to_string(), Value::UnsignedInteger(42)),
             (COL_HASH.to_string(), Value::Blob(vec![0xFF; 32])),
         ];
         let bytes = canonical_payload(&fields);
@@ -466,14 +467,15 @@ mod tests {
 
     #[test]
     fn block_hash_matches_recompute() {
-        let (fields, hash) = make_block_reserved_fields(
-            GENESIS_PREV_HASH,
+        let (fields, hash) =
+            make_block_reserved_fields(GENESIS_PREV_HASH, 0, 1_700_000_000_000, b"user=alice;");
+        let recomputed = compute_block_hash(
+            &GENESIS_PREV_HASH,
             0,
             1_700_000_000_000,
             b"user=alice;",
+            None,
         );
-        let recomputed =
-            compute_block_hash(&GENESIS_PREV_HASH, 0, 1_700_000_000_000, b"user=alice;", None);
         assert_eq!(hash, recomputed);
         let stored = fields.iter().find(|(k, _)| k == COL_HASH).unwrap();
         match &stored.1 {

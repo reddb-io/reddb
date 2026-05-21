@@ -65,8 +65,9 @@ fn provision_creates_shm_with_canonical_header() {
     assert!(bytes.len() >= SHM_HEADER_SIZE);
     assert_eq!(&bytes[0..8], SHM_MAGIC, "shm magic must be RDBSHM01");
 
-    let header =
-        read_shm_header(&data).expect("read header").expect("header present");
+    let header = read_shm_header(&data)
+        .expect("read header")
+        .expect("header present");
     assert_eq!(header.version, SHM_VERSION);
     assert_eq!(header.owner_pid, std::process::id());
     assert_eq!(header.generation, 1);

@@ -63,10 +63,7 @@ impl WalReader {
         let reader = Self::open(path)?;
         for item in reader.iter() {
             let (lsn, record) = item?;
-            if let WalRecord::FullPageImage {
-                page_id, data, ..
-            } = record
-            {
+            if let WalRecord::FullPageImage { page_id, data, .. } = record {
                 match out.get(&page_id) {
                     Some((existing_lsn, _)) if *existing_lsn > lsn => {}
                     _ => {

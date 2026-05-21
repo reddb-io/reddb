@@ -84,9 +84,7 @@ fn nack_to_dlq_emits_audit_event_and_increments_prom_counters() {
         .lines()
         .find(|line| line.contains("operator/queue_dlq_promoted"))
         .unwrap_or_else(|| {
-            panic!(
-                "audit log did not include operator/queue_dlq_promoted. body:\n{audit_body}"
-            )
+            panic!("audit log did not include operator/queue_dlq_promoted. body:\n{audit_body}")
         });
     assert!(
         promotion_line.contains("\"queue\":\"tasks\""),
@@ -109,9 +107,7 @@ fn nack_to_dlq_emits_audit_event_and_increments_prom_counters() {
 
     // deliver fired twice (one per READ).
     assert!(
-        body.contains(
-            "queue_delivered_total{queue=\"tasks\",group=\"workers\",mode=\"work\"} 2"
-        ),
+        body.contains("queue_delivered_total{queue=\"tasks\",group=\"workers\",mode=\"work\"} 2"),
         "missing delivered counter line. body:\n{body}"
     );
     // First NACK was a retry.
@@ -130,9 +126,10 @@ fn nack_to_dlq_emits_audit_event_and_increments_prom_counters() {
     );
     // After both NACKs the pending row is gone, so the gauge
     // either reports 0 for the (tasks, workers) pair or omits it.
-    if let Some(line) = body.lines().find(|line| {
-        line.starts_with("queue_pending_gauge{queue=\"tasks\",group=\"workers\"}")
-    }) {
+    if let Some(line) = body
+        .lines()
+        .find(|line| line.starts_with("queue_pending_gauge{queue=\"tasks\",group=\"workers\"}"))
+    {
         assert!(
             line.trim_end().ends_with(" 0"),
             "expected pending gauge to be zero, got: {line}"

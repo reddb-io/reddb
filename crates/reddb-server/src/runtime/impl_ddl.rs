@@ -948,8 +948,7 @@ impl RedDBRuntime {
                     // signed-writes registry installed so this isn't a
                     // covert way to retrofit one (use `CREATE COLLECTION
                     // ... SIGNED_BY (...)` for that).
-                    if !crate::runtime::signed_writes_kind::is_signed(&*store, &query.name)
-                    {
+                    if !crate::runtime::signed_writes_kind::is_signed(&*store, &query.name) {
                         return Err(RedDBError::Query(format!(
                             "ALTER COLLECTION ADD SIGNER: '{}' has no signer registry; \
                              recreate it with CREATE COLLECTION ... SIGNED_BY (...)",
@@ -959,7 +958,10 @@ impl RedDBRuntime {
                     let actor = crate::runtime::impl_core::current_user_projected()
                         .unwrap_or_else(|| "@system/alter".to_string());
                     let changed = crate::runtime::signed_writes_kind::add_signer(
-                        &*store, &query.name, *pubkey, &actor,
+                        &*store,
+                        &query.name,
+                        *pubkey,
+                        &actor,
                     );
                     messages.push(format!(
                         "signer {} on '{}'",
@@ -968,8 +970,7 @@ impl RedDBRuntime {
                     ));
                 }
                 AlterOperation::RevokeSigner { pubkey } => {
-                    if !crate::runtime::signed_writes_kind::is_signed(&*store, &query.name)
-                    {
+                    if !crate::runtime::signed_writes_kind::is_signed(&*store, &query.name) {
                         return Err(RedDBError::Query(format!(
                             "ALTER COLLECTION REVOKE SIGNER: '{}' has no signer registry",
                             query.name
@@ -978,11 +979,18 @@ impl RedDBRuntime {
                     let actor = crate::runtime::impl_core::current_user_projected()
                         .unwrap_or_else(|| "@system/alter".to_string());
                     let changed = crate::runtime::signed_writes_kind::revoke_signer(
-                        &*store, &query.name, pubkey, &actor,
+                        &*store,
+                        &query.name,
+                        pubkey,
+                        &actor,
                     );
                     messages.push(format!(
                         "signer {} on '{}'",
-                        if changed { "revoked" } else { "already revoked" },
+                        if changed {
+                            "revoked"
+                        } else {
+                            "already revoked"
+                        },
                         query.name
                     ));
                 }
@@ -1947,8 +1955,7 @@ pub(crate) fn retention_timestamp_column_exists(
     }
     if matches!(
         contract.declared_model,
-        crate::catalog::CollectionModel::TimeSeries
-            | crate::catalog::CollectionModel::Metrics
+        crate::catalog::CollectionModel::TimeSeries | crate::catalog::CollectionModel::Metrics
     ) {
         // Time-series and metrics collections carry an intrinsic
         // timestamp axis on every row even without a declared column;

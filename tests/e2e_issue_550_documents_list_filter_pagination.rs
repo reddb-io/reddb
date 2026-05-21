@@ -98,9 +98,7 @@ fn seed_documents(rt: &RedDBRuntime, collection: &str, count: usize) {
         .expect("CREATE DOCUMENT");
     for i in 0..count {
         let kind = if i % 2 == 0 { "login" } else { "logout" };
-        let payload = format!(
-            r#"{{"event_type":"{kind}","seq":{i},"meta":{{"i":{i}}}}}"#
-        );
+        let payload = format!(r#"{{"event_type":"{kind}","seq":{i},"meta":{{"i":{i}}}}}"#);
         rt.execute_query(&format!(
             "INSERT INTO {collection} DOCUMENT (body) VALUES ('{payload}')"
         ))
@@ -186,7 +184,11 @@ fn http_scan_offset_and_limit_paginates_documents() {
     );
     assert_eq!(status, 200, "first={first}");
     let items = first["items"].as_array().expect("items array");
-    assert_eq!(items.len(), 2, "first page should hold 2 items; got {first}");
+    assert_eq!(
+        items.len(),
+        2,
+        "first page should hold 2 items; got {first}"
+    );
 
     // Second page: limit=2, offset=2. Should give 2 more items, with a
     // disjoint id set vs the first page.
@@ -265,7 +267,11 @@ fn http_query_with_where_limit_offset_filters_and_paginates() {
         .as_array()
         .or_else(|| body["records"].as_array())
         .unwrap_or_else(|| panic!("expected records array in {body}"));
-    assert_eq!(records.len(), 2, "filtered page should hold 2 rows; got {body}");
+    assert_eq!(
+        records.len(),
+        2,
+        "filtered page should hold 2 rows; got {body}"
+    );
 
     // POST /query result records put projected fields under `values`.
     let field = |record: &JsonValue, name: &str| -> JsonValue {

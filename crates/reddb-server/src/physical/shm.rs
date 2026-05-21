@@ -122,12 +122,18 @@ impl ShmHeader {
 
     fn decode(buf: &[u8; SHM_HEADER_SIZE]) -> io::Result<Self> {
         if &buf[0..8] != SHM_MAGIC {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "shm magic mismatch"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "shm magic mismatch",
+            ));
         }
         let stored_checksum = u64::from_le_bytes(buf[56..64].try_into().unwrap());
         let computed = fold_checksum(&buf[..56]);
         if stored_checksum != computed {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "shm checksum mismatch"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "shm checksum mismatch",
+            ));
         }
         Ok(Self {
             version: u32::from_le_bytes(buf[8..12].try_into().unwrap()),

@@ -102,9 +102,6 @@ fn graph_projection_json(projection: &crate::PhysicalGraphProjection) -> JsonVal
 
 pub mod handlers_admin;
 mod handlers_ai;
-pub mod http_connection_limiter;
-pub mod http_handler_metrics;
-pub mod http_limits;
 mod handlers_auth;
 mod handlers_backup;
 mod handlers_ec;
@@ -120,6 +117,9 @@ mod handlers_replication;
 mod handlers_vcs;
 mod handlers_vector;
 pub mod header_escape_guard;
+pub mod http_connection_limiter;
+pub mod http_handler_metrics;
+pub mod http_limits;
 pub mod ingest_pipeline;
 mod patch_support;
 mod request_body;
@@ -130,6 +130,12 @@ pub mod tls;
 mod transport;
 
 use self::handlers_ai::*;
+use self::handlers_entity::*;
+use self::handlers_graph::*;
+use self::handlers_keyed::*;
+use self::handlers_metrics::*;
+use self::handlers_ops::*;
+use self::handlers_query::*;
 use self::http_connection_limiter::{
     HandlerDeadline, HttpConnectionLimiter, MonotonicClock, SystemMonotonicClock,
 };
@@ -137,12 +143,6 @@ use self::http_handler_metrics::{HttpHandlerMetrics, HttpRejectReason, HttpTrans
 pub use self::http_limits::{
     HttpLimitsCliInput, HttpLimitsResolved, DEFAULT_HANDLER_TIMEOUT_MS, DEFAULT_RETRY_AFTER_SECS,
 };
-use self::handlers_entity::*;
-use self::handlers_graph::*;
-use self::handlers_keyed::*;
-use self::handlers_metrics::*;
-use self::handlers_ops::*;
-use self::handlers_query::*;
 use self::patch_support::*;
 use self::request_body::*;
 use self::routing::*;

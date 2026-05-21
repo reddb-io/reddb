@@ -12,8 +12,8 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reddb::{
-    tier_wiring, LayoutOverrides, LogDestination, LogRoutingOverrides, RedDBOptions,
-    RedDBRuntime, StorageLayout,
+    tier_wiring, LayoutOverrides, LogDestination, LogRoutingOverrides, RedDBOptions, RedDBRuntime,
+    StorageLayout,
 };
 
 // Tier toggles + global audit sink are process-globals — serialise the

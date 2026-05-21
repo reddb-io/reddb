@@ -101,9 +101,7 @@ fn current_unix_ms() -> u128 {
 mod tests {
     use super::*;
     use crate::catalog::{CollectionModel, SchemaMode};
-    use crate::physical::{
-        CollectionContract, ContractOrigin, DeclaredColumnContract,
-    };
+    use crate::physical::{CollectionContract, ContractOrigin, DeclaredColumnContract};
     use crate::storage::query::unified::{sys_key_created_at, UnifiedRecord};
     use std::sync::Arc;
 
@@ -146,8 +144,8 @@ mod tests {
         let contract = base_contract();
         let now = current_unix_ms() as i64;
         let mut records = vec![
-            record_with_created_at(now - 10_000),         // fresh
-            record_with_created_at(now - 120_000),        // expired
+            record_with_created_at(now - 10_000),  // fresh
+            record_with_created_at(now - 120_000), // expired
         ];
         apply(&mut records, Some(&contract));
         assert_eq!(records.len(), 1, "exactly the fresh row should survive");
@@ -157,10 +155,7 @@ mod tests {
     fn no_policy_leaves_records_alone() {
         let mut contract = base_contract();
         contract.retention_duration_ms = None;
-        let mut records = vec![
-            record_with_created_at(0),
-            record_with_created_at(0),
-        ];
+        let mut records = vec![record_with_created_at(0), record_with_created_at(0)];
         apply(&mut records, Some(&contract));
         assert_eq!(records.len(), 2);
     }
@@ -186,8 +181,7 @@ mod tests {
             decimal_precision: None,
         });
         let schema = Arc::new(vec![Arc::<str>::from("other_col")]);
-        let mut records =
-            vec![UnifiedRecord::with_schema(schema, vec![Value::text("v")])];
+        let mut records = vec![UnifiedRecord::with_schema(schema, vec![Value::text("v")])];
         apply(&mut records, Some(&contract));
         assert_eq!(records.len(), 1);
     }

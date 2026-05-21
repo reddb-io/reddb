@@ -32,8 +32,7 @@ fn window_running_total_1m_rows_single_partition_completes_within_budget() {
     let q = QueryUseCases::new(&rt);
 
     q.execute(ExecuteQueryInput {
-        query: "CREATE TABLE purchases (id INTEGER, user_id TEXT, ts BIGINT, amount BIGINT)"
-            .into(),
+        query: "CREATE TABLE purchases (id INTEGER, user_id TEXT, ts BIGINT, amount BIGINT)".into(),
     })
     .expect("create table");
 
@@ -56,7 +55,8 @@ fn window_running_total_1m_rows_single_partition_completes_within_budget() {
             // phase has a 1M-row partition to scan/sort once.
             sql.push_str(&format!("({}, 'u1', {}, {})", i + 1, i + 1, (i % 1000) + 1));
         }
-        q.execute(ExecuteQueryInput { query: sql }).expect("insert batch");
+        q.execute(ExecuteQueryInput { query: sql })
+            .expect("insert batch");
         id = batch_end as i64;
     }
     let ingest = ingest_start.elapsed();

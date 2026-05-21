@@ -74,7 +74,10 @@ fn refresh_writes_through_backing_collection_and_scrapes_live_count() {
         .find(|m| m.name == "paid_orders")
         .expect("metadata after refresh")
         .current_row_count;
-    assert_eq!(post_count, 2, "live scrape reflects backing-collection count");
+    assert_eq!(
+        post_count, 2,
+        "live scrape reflects backing-collection count"
+    );
 
     // A subsequent REFRESH that yields a different row count also
     // shows up live (no cache-slot lag).

@@ -97,9 +97,7 @@ impl<'a> Parser<'a> {
 
         if self.consume(&Token::Mode)? || self.consume_ident_ci("MODE")? {
             alter.mode = Some(self.parse_queue_mode()?);
-        } else if self.consume_ident_ci("MAX_ATTEMPTS")?
-            || self.consume_ident_ci("MAXATTEMPTS")?
-        {
+        } else if self.consume_ident_ci("MAX_ATTEMPTS")? || self.consume_ident_ci("MAXATTEMPTS")? {
             alter.max_attempts = Some(self.parse_integer()?.max(1) as u32);
         } else if self.consume_ident_ci("LOCK_DEADLINE_MS")? {
             alter.lock_deadline_ms = Some(self.parse_integer()?.max(1) as u64);

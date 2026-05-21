@@ -81,7 +81,10 @@ impl<'a> DmlTargetScan<'a> {
         // Skip for graph node/edge targets — the table-row resolver only
         // knows TableRow entities, so a graph node whose logical_id == N
         // would be lost and yield zero matches.
-        if !matches!(self.target, Some(UpdateTarget::Nodes) | Some(UpdateTarget::Edges)) {
+        if !matches!(
+            self.target,
+            Some(UpdateTarget::Nodes) | Some(UpdateTarget::Edges)
+        ) {
             if let Some(entity_id) =
                 query_exec::extract_entity_id_from_filter(&self.filter.cloned())
             {

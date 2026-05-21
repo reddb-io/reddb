@@ -240,18 +240,15 @@ mod tests {
             ..Default::default()
         };
         let lookup = map_lookup(HashMap::from([
-            ("red.http.max_handlers", "0"), // rejected by validate
-            ("red.http.handler_timeout_ms", "5"), // rejected by validate
+            ("red.http.max_handlers", "0"),        // rejected by validate
+            ("red.http.handler_timeout_ms", "5"),  // rejected by validate
             ("red.http.retry_after_secs", "9999"), // rejected by validate
         ]));
         let resolved = resolve_http_limits(&input, lookup);
         // max_handlers: red_config invalid -> env (11)
         assert_eq!(resolved.max_handlers, 11);
         // handler_timeout_ms: red_config invalid, no env -> default
-        assert_eq!(
-            resolved.handler_timeout_ms,
-            DEFAULT_HANDLER_TIMEOUT_MS
-        );
+        assert_eq!(resolved.handler_timeout_ms, DEFAULT_HANDLER_TIMEOUT_MS);
         // retry_after_secs: red_config invalid, no env -> default
         assert_eq!(resolved.retry_after_secs, DEFAULT_RETRY_AFTER_SECS);
     }
