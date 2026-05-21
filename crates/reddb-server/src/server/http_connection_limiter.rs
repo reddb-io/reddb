@@ -206,6 +206,46 @@ impl HttpConnectionLimiter {
     }
 }
 
+/// Per-handler total wall-clock deadline (issue #621), armed against the
+/// same [`MonotonicClock`] abstraction the limiter uses. The clear-text
+/// (and TLS) HTTP handler arms one of these at spawn and polls
+/// [`expired`](Self::expired) at coarse boundaries (between parse, route
+/// dispatch, and write). Production wires [`SystemMonotonicClock`], so the
+/// deadline tracks real wall time; tests inject a fake clock to drive
+/// expiry deterministically without `sleep()`.
+///
+/// This bounds — but does not pre-empt — handler lifetime: a thread blocked
+/// inside a true syscall is still released only by the per-socket
+/// read/write timeouts. The deadline reclaims a limiter slot for the
+/// internal-lock-contention case the PRD (#569) targets.
+#[derive(Debug, Clone)]
+pub struct HandlerDeadline {
+    clock: Arc<dyn MonotonicClock>,
+    /// Absolute clock reading (nanos) at or after which the handler is
+    /// over budget. Saturating-added at arm time so a near-`u64::MAX`
+    /// base can never wrap into the past.
+    deadline_nanos: u64,
+}
+
+impl HandlerDeadline {
+    /// Arm a deadline `timeout` from now, read off `clock`. The clock is
+    /// shared (`Arc`) so the same instance can be reused across handlers.
+    pub fn arm(clock: Arc<dyn MonotonicClock>, timeout: Duration) -> Self {
+        let now = clock.now_nanos();
+        let deadline_nanos = now.saturating_add(timeout.as_nanos() as u64);
+        Self {
+            clock,
+            deadline_nanos,
+        }
+    }
+
+    /// `true` once the clock has reached the armed deadline. Checked at
+    /// coarse boundaries — never inside a blocking call.
+    pub fn expired(&self) -> bool {
+        self.clock.now_nanos() >= self.deadline_nanos
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,5 +429,43 @@ mod tests {
         assert_eq!(obs.elapsed, Duration::ZERO);
         assert_eq!(obs.rejected, 1);
         assert_eq!(obs.rejections_per_sec, 0.0);
+    }
+
+    #[test]
+    fn handler_deadline_not_expired_before_timeout() {
+        let clock = Arc::new(FakeClock::default());
+        let deadline = HandlerDeadline::arm(clock.clone(), Duration::from_millis(200));
+        // Right after arming: not expired.
+        assert!(!deadline.expired());
+        // Advance to just under the budget: still not expired.
+        clock.advance(Duration::from_millis(199));
+        assert!(!deadline.expired());
+    }
+
+    #[test]
+    fn handler_deadline_expires_at_and_after_timeout() {
+        let clock = Arc::new(FakeClock::default());
+        let deadline = HandlerDeadline::arm(clock.clone(), Duration::from_millis(200));
+        // Exactly at the deadline: expired (`>=`).
+        clock.advance(Duration::from_millis(200));
+        assert!(deadline.expired());
+        // And it stays expired as time marches on — no real sleeps used.
+        clock.advance(Duration::from_secs(5));
+        assert!(deadline.expired());
+    }
+
+    #[test]
+    fn handler_deadline_arm_saturates_without_wrapping() {
+        // A near-u64::MAX base must not wrap the deadline into the past.
+        #[derive(Debug)]
+        struct MaxClock;
+        impl MonotonicClock for MaxClock {
+            fn now_nanos(&self) -> u64 {
+                u64::MAX - 10
+            }
+        }
+        let deadline = HandlerDeadline::arm(Arc::new(MaxClock), Duration::from_secs(30));
+        // now (u64::MAX - 10) < saturated deadline (u64::MAX) -> not expired.
+        assert!(!deadline.expired());
     }
 }

@@ -130,7 +130,9 @@ pub mod tls;
 mod transport;
 
 use self::handlers_ai::*;
-use self::http_connection_limiter::HttpConnectionLimiter;
+use self::http_connection_limiter::{
+    HandlerDeadline, HttpConnectionLimiter, MonotonicClock, SystemMonotonicClock,
+};
 use self::http_handler_metrics::{HttpHandlerMetrics, HttpRejectReason, HttpTransport};
 pub use self::http_limits::{
     HttpLimitsCliInput, HttpLimitsResolved, DEFAULT_HANDLER_TIMEOUT_MS, DEFAULT_RETRY_AFTER_SECS,
@@ -217,6 +219,13 @@ pub struct RedDBServer {
     /// parse, route dispatch, and response write. Hard-coded to 30s
     /// here; the config knob lands in slice 5.
     handler_timeout: Duration,
+    /// Monotonic clock the per-handler deadline (issue #621) is armed
+    /// against — the same [`MonotonicClock`] abstraction the limiter
+    /// uses. Production wires [`SystemMonotonicClock`] (real wall time);
+    /// tests inject a fake to drive timeout expiry deterministically
+    /// without `sleep()`. Shared via `Arc` so cloned server handles
+    /// (e.g. `serve_in_background`) read the same clock.
+    handler_clock: Arc<dyn MonotonicClock>,
     /// Test-only synchronous sleep injected between route dispatch and
     /// response write so an integration test can simulate a slow
     /// downstream tripping the deadline. Default 0 (no-op). Shared via
@@ -339,6 +348,7 @@ impl RedDBServer {
             replication: None,
             http_limiter: HttpConnectionLimiter::with_default_cap(),
             handler_timeout: DEFAULT_HANDLER_TIMEOUT,
+            handler_clock: Arc::new(SystemMonotonicClock::new()),
             slow_inject_ms: Arc::new(AtomicU64::new(0)),
             http_metrics: HttpHandlerMetrics::new(),
             retry_after_secs: DEFAULT_RETRY_AFTER_SECS,
@@ -394,6 +404,16 @@ impl RedDBServer {
     #[doc(hidden)]
     pub fn handler_timeout(&self) -> Duration {
         self.handler_timeout
+    }
+
+    /// Visible for tests. Override the clock the per-handler deadline
+    /// (issue #621) is armed against, so timeout expiry can be driven
+    /// deterministically without real sleeps. Default is the real
+    /// monotonic clock.
+    #[doc(hidden)]
+    pub fn with_handler_clock(mut self, clock: Arc<dyn MonotonicClock>) -> Self {
+        self.handler_clock = clock;
+        self
     }
 
     /// Test hook: set a synchronous sleep (in ms) inserted between
@@ -641,31 +661,30 @@ impl RedDBServer {
 
     fn handle_connection(&self, stream: TcpStream) -> io::Result<()> {
         let started = Instant::now();
-        let result = self.handle_connection_inner(stream, started);
+        let result = self.handle_connection_inner(stream);
         let elapsed = started.elapsed().as_secs_f64();
         self.http_metrics
             .record_duration(HttpTransport::Http, elapsed);
         result
     }
 
-    fn handle_connection_inner(
-        &self,
-        mut stream: TcpStream,
-        started: Instant,
-    ) -> io::Result<()> {
+    fn handle_connection_inner(&self, mut stream: TcpStream) -> io::Result<()> {
         stream.set_read_timeout(Some(Duration::from_millis(self.options.read_timeout_ms)))?;
         stream.set_write_timeout(Some(Duration::from_millis(self.options.write_timeout_ms)))?;
 
-        // Issue #570 slice 2: arm a deadline at handler spawn and
-        // check at coarse boundaries. No hard pre-emption — a thread
-        // blocked inside a true syscall is still bounded only by the
-        // per-socket read/write timeouts.
-        let deadline = started + self.handler_timeout;
+        // Issue #570 slice 2 / #621: arm a deadline at handler spawn and
+        // check at coarse boundaries. Armed against the injectable
+        // monotonic clock (#621) so timeout behaviour is deterministically
+        // testable without real sleeps; production wires the real clock,
+        // so this tracks wall time. No hard pre-emption — a thread blocked
+        // inside a true syscall is still bounded only by the per-socket
+        // read/write timeouts.
+        let deadline = HandlerDeadline::arm(Arc::clone(&self.handler_clock), self.handler_timeout);
 
         let request = HttpRequest::read_from(&mut stream, self.options.max_body_bytes)?;
 
         // Boundary (a): between request parse and route dispatch.
-        if Instant::now() >= deadline {
+        if deadline.expired() {
             self.http_metrics
                 .record_reject(HttpTransport::Http, HttpRejectReason::HandlerTimeout);
             Self::write_handler_timeout_503(&mut stream);
@@ -686,7 +705,7 @@ impl RedDBServer {
         }
 
         // Boundary (b): between route dispatch and response write.
-        if Instant::now() >= deadline {
+        if deadline.expired() {
             self.http_metrics
                 .record_reject(HttpTransport::Http, HttpRejectReason::HandlerTimeout);
             Self::write_handler_timeout_503(&mut stream);
@@ -718,7 +737,7 @@ impl RedDBServer {
         tls_config: std::sync::Arc<rustls::ServerConfig>,
     ) -> io::Result<()> {
         let started = Instant::now();
-        let result = self.handle_tls_connection_inner(tcp, tls_config, started);
+        let result = self.handle_tls_connection_inner(tcp, tls_config);
         let elapsed = started.elapsed().as_secs_f64();
         self.http_metrics
             .record_duration(HttpTransport::Https, elapsed);
@@ -729,14 +748,14 @@ impl RedDBServer {
         &self,
         tcp: TcpStream,
         tls_config: std::sync::Arc<rustls::ServerConfig>,
-        started: Instant,
     ) -> io::Result<()> {
         tcp.set_read_timeout(Some(Duration::from_millis(self.options.read_timeout_ms)))?;
         tcp.set_write_timeout(Some(Duration::from_millis(self.options.write_timeout_ms)))?;
 
-        // Issue #572 slice 3: per-handler deadline applies to TLS
-        // handlers too — same handler-thread scaffolding as slice 2.
-        let deadline = started + self.handler_timeout;
+        // Issue #572 slice 3 / #621: per-handler deadline applies to TLS
+        // handlers too — same injectable-clock scaffolding as the
+        // clear-text path.
+        let deadline = HandlerDeadline::arm(Arc::clone(&self.handler_clock), self.handler_timeout);
 
         let mut tls_stream = match self::tls::accept_tls(tls_config, tcp) {
             Ok(s) => s,
@@ -762,7 +781,7 @@ impl RedDBServer {
         };
 
         // Boundary (a): between request parse and route dispatch.
-        if Instant::now() >= deadline {
+        if deadline.expired() {
             self.http_metrics
                 .record_reject(HttpTransport::Https, HttpRejectReason::HandlerTimeout);
             Self::write_handler_timeout_503(&mut tls_stream);
@@ -782,7 +801,7 @@ impl RedDBServer {
         }
 
         // Boundary (b): between route dispatch and response write.
-        if Instant::now() >= deadline {
+        if deadline.expired() {
             self.http_metrics
                 .record_reject(HttpTransport::Https, HttpRejectReason::HandlerTimeout);
             Self::write_handler_timeout_503(&mut tls_stream);
