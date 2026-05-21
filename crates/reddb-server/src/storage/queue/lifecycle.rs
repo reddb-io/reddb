@@ -76,33 +76,79 @@ pub(crate) struct TombstoneRecord {
     pub(crate) message_id: MessageId,
 }
 
-/// Opaque transaction-context handle threaded through every mutating
-/// [`QueueStore`] method. The public surface is intentionally limited to
-/// [`QueueTxn::record_pending_tombstone`] — the one interaction
-/// ADR-0020 requires the store to be able to drive against the running
-/// transaction. Anything richer (xid, savepoint id, full pending-tombstone
-/// integration) is wired by the production-side bridge in a later slice;
-/// this prereq only establishes the seam so callers cannot pretend the
-/// transaction does not exist.
+/// Bridge from a [`QueueTxn`] to the runtime's MVCC delete path.
 ///
-/// In-memory tests construct a fresh `QueueTxn::new()` per call and assert
-/// `recorded_tombstones()` post-hoc; production callers will eventually
-/// construct one from the running `RedDBRuntime` connection context.
+/// The lifecycle layer depends only on this trait, so it stays free of
+/// `&Engine` / runtime types. The production runtime supplies an
+/// implementation (`runtime::primary_queue_store::RuntimeQueueBridge`)
+/// that retires the underlying message through
+/// `current_xid → set_xmax → record_pending_tombstone`, making lifecycle
+/// ack/purge **rollback-safe**: a retirement inside a statement that
+/// later rolls back leaves the message visible again, and on commit the
+/// message is gone — parity with the legacy
+/// `queue_delivery::delete_message_with_state`.
+pub(crate) trait QueueTxnContext: Send + Sync {
+    /// Retire `(queue, message_id)` through the runtime MVCC path. Inside
+    /// an open transaction this stamps `xmax` and records a pending
+    /// tombstone (revived on rollback); under autocommit it falls back to
+    /// a hard delete. No new transaction is opened — the call participates
+    /// in the caller's Statement frame.
+    fn retire_message(&self, queue: &str, message_id: MessageId);
+}
+
+/// Transaction-context handle threaded through every mutating
+/// [`QueueStore`] method. Carries two things: the observable tombstone
+/// log (asserted by in-memory tests) and — in production — the live
+/// connection context via an attached [`QueueTxnContext`].
+///
+/// In-memory tests construct a fresh `QueueTxn::new()` (no context) per
+/// call and assert `recorded_tombstones()` post-hoc. Production callers
+/// build one bound to the running `RedDBRuntime` connection (see
+/// `PrimaryQueueStore::new_txn`) so `record_pending_tombstone` actually
+/// drives the MVCC retire against the caller's transaction instead of
+/// discarding the record.
 pub(crate) struct QueueTxn {
     tombstones: Mutex<Vec<TombstoneRecord>>,
+    /// Live runtime connection context. `None` for the stub used by
+    /// in-memory unit tests; `Some` once a production caller binds the
+    /// running transaction. When present, `record_pending_tombstone`
+    /// routes the underlying message retirement through the real MVCC
+    /// path.
+    context: Option<Arc<dyn QueueTxnContext>>,
 }
 
 impl QueueTxn {
     pub(crate) fn new() -> Self {
         Self {
             tombstones: Mutex::new(Vec::new()),
+            context: None,
         }
+    }
+
+    /// Bind a live runtime connection context (production path). The
+    /// resulting txn drives `record_pending_tombstone` through the
+    /// runtime MVCC retire in addition to logging the tombstone.
+    pub(crate) fn with_context(context: Arc<dyn QueueTxnContext>) -> Self {
+        Self {
+            tombstones: Mutex::new(Vec::new()),
+            context: Some(context),
+        }
+    }
+
+    /// Whether a live runtime context is attached. The primary adapter
+    /// consults this to decide whether the retire is already being driven
+    /// by the txn (production) or must be performed against its own
+    /// runtime handle (no-context unit-test path).
+    pub(crate) fn has_context(&self) -> bool {
+        self.context.is_some()
     }
 
     /// Record that the running transaction has marked `(queue, message_id)`
     /// for deletion. Mirrors the runtime-side `record_pending_tombstone`
     /// contract — the message stays addressable until the transaction
-    /// commits; rollback revives it.
+    /// commits; rollback revives it. When a live [`QueueTxnContext`] is
+    /// attached, the underlying message is retired through the real MVCC
+    /// path here; otherwise this only appends to the observable log.
     pub(crate) fn record_pending_tombstone(&self, queue: &str, message_id: MessageId) {
         self.tombstones
             .lock()
@@ -111,6 +157,9 @@ impl QueueTxn {
                 queue: queue.to_string(),
                 message_id,
             });
+        if let Some(context) = &self.context {
+            context.retire_message(queue, message_id);
+        }
     }
 
     /// Snapshot of every tombstone recorded against this txn — used by
