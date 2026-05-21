@@ -10,6 +10,36 @@ RedDB includes three built-in probabilistic data structures for real-time analyt
 | **Count-Min Sketch** | Estimate frequency | ~40 KB | Overestimates | No |
 | **Cuckoo Filter** | Membership testing | ~100 KB per 100K items | < 3% FP | Yes |
 
+## Feeding probabilistic structures
+
+Probabilistic structures are **not tables**. They are fed from the query
+surface with their own command verbs -- `HLL ADD`, `SKETCH ADD`,
+`FILTER ADD` -- never with `INSERT INTO`. A collection declared as `hll`,
+`sketch`, or `filter` rejects table writes:
+
+```sql
+CREATE HLL vocab_hll
+
+-- ❌ Wrong: probabilistic structures do not accept table writes
+INSERT INTO vocab_hll (value) VALUES ('frodo'), ('ring')
+-- INVALID_OPERATION: collection 'vocab_hll' is declared as 'hll'
+-- and does not allow 'table' writes
+
+-- ✅ Correct: feed elements with the ADD verb (one or many per call)
+HLL ADD vocab_hll 'frodo' 'ring' 'frodo'
+```
+
+Element values are passed directly as quoted string literals -- there is no
+column list and no `VALUES` clause. Each structure has its own `ADD` shape:
+
+| Structure | Feed verb | Example |
+|:----------|:----------|:--------|
+| HyperLogLog | `HLL ADD <name> '<el>' …` | `HLL ADD vocab_hll 'frodo' 'ring'` |
+| Count-Min Sketch | `SKETCH ADD <name> '<el>' [<count>]` | `SKETCH ADD clicks 'btn_signup' 5` |
+| Cuckoo Filter | `FILTER ADD <name> '<el>'` | `FILTER ADD sessions 'sess_abc123'` |
+
+See the command reference for each structure below.
+
 ## HyperLogLog (HLL)
 
 Estimates the number of **distinct elements** in a set. Uses ~16 KB of memory regardless of how many elements you add.
