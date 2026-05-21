@@ -295,6 +295,67 @@ impl PrimaryQueueStore {
         });
     }
 
+    /// Retire the queue message backing `message_id` on `queue`,
+    /// rollback-safely when the caller's `txn` carries a live transaction
+    /// context. Mirrors `queue_delivery::delete_message_with_state`:
+    ///
+    /// * Inside a transaction (`txn.xid()` is `Some`) the tuple is stamped
+    ///   `xmax = xid` and a runtime pending tombstone is recorded against
+    ///   the owning connection. COMMIT finalises it (the row is removed
+    ///   from the context index, invisible to every future snapshot);
+    ///   ROLLBACK revives it (`xmax` reset to its previous value) so the
+    ///   message becomes visible again — parity with the legacy path.
+    /// * Outside a transaction, on an already-tombstoned tuple, or when
+    ///   the MVCC update fails, fall back to the immediate hard delete.
+    ///
+    /// The queue meta-rows keyed off the message (pending/acked/attempts)
+    /// are lifecycle bookkeeping, not MVCC tuples, so they are swept in
+    /// both branches.
+    fn retire_message_mvcc(&self, txn: &QueueTxn, queue: &str, message_id: MessageId) {
+        let entity_id = EntityId::new(message_id);
+        if let Some(xid) = txn.xid() {
+            let store = self.store();
+            if let Some(manager) = store.get_collection(queue) {
+                if let Some(mut entity) = manager.get(entity_id) {
+                    if entity.xmax == 0 {
+                        let previous_xmax = entity.xmax;
+                        entity.set_xmax(xid);
+                        if manager.update(entity).is_ok() {
+                            self.runtime.record_pending_tombstone(
+                                txn.conn_id(),
+                                queue,
+                                entity_id,
+                                xid,
+                                previous_xmax,
+                            );
+                            let queue_owned = queue.to_string();
+                            self.delete_meta_where(|row| {
+                                row_text(row, "queue").as_deref() == Some(&queue_owned)
+                                    && row_u64(row, "message_id") == Some(message_id)
+                            });
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        self.delete_message(queue, entity_id);
+    }
+
+    /// Build a `QueueTxn` from the runtime's live connection context — the
+    /// xid of the active transaction (if any) plus the owning connection
+    /// id. This is the production bridge that threads the caller's
+    /// Statement frame into the lifecycle store; autocommit callers get a
+    /// context-less txn (immediate hard delete on retire). No stub: the
+    /// xid is read straight off the running transaction.
+    pub(crate) fn current_txn(&self) -> QueueTxn {
+        let conn_id = crate::runtime::impl_core::current_connection_id();
+        match self.runtime.current_xid() {
+            Some(xid) => QueueTxn::with_runtime_context(xid, conn_id),
+            None => QueueTxn::new(),
+        }
+    }
+
     fn next_position(&self, queue: &str) -> Result<u64> {
         let store = self.store();
         let Some(manager) = store.get_collection(queue) else {
@@ -444,13 +505,12 @@ impl QueueStore for PrimaryQueueStore {
             .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
         let _ = self.store().delete(QUEUE_META_COLLECTION, entity_id);
         self.clear_attempts(&row.queue, row.message_id, &row.group);
-        self.delete_message(&row.queue, EntityId::new(row.message_id));
-        // Mirror the in-memory contract: the WORK-mode ack tombstones the
-        // underlying message. The legacy `queue_delivery::delete_message_with_state`
-        // path still owns the actual MVCC tombstone wiring against the
-        // runtime; this prereq only records the would-be tombstone on
-        // the threaded txn so the seam is exercised end-to-end on the
-        // primary too.
+        // WORK-mode ack retires the underlying message through the runtime
+        // MVCC path when the caller's txn is live, so an aborted statement
+        // revives the message (parity with `delete_message_with_state`).
+        self.retire_message_mvcc(txn, &row.queue, row.message_id);
+        // Keep the in-memory observability contract: record the tombstone
+        // on the threaded txn so the seam is exercised end-to-end.
         txn.record_pending_tombstone(&row.queue, row.message_id);
         Ok(())
     }
@@ -583,7 +643,7 @@ impl QueueStore for PrimaryQueueStore {
         ids.dedup();
 
         for message_id in &ids {
-            self.delete_message(queue, EntityId::new(*message_id));
+            self.retire_message_mvcc(txn, queue, *message_id);
         }
         // Sweep every meta-row keyed off this queue (pending, acked,
         // attempts) — none of them are meaningful once the underlying
@@ -911,6 +971,142 @@ mod tests {
         let t = QueueTxn::new();
         let err = ps.ack_pending(&t, "nope").unwrap_err();
         assert!(matches!(err, QueueStoreError::UnknownDelivery(_)));
+    }
+
+    /// Read the live `xmax` stamp on a queue message, or `None` when the
+    /// tuple has been physically removed from the collection.
+    fn message_xmax(rt: &RedDBRuntime, queue: &str, message_id: MessageId) -> Option<u64> {
+        rt.db()
+            .store()
+            .get_collection(queue)
+            .and_then(|m| m.get(EntityId::new(message_id)))
+            .map(|e| e.xmax)
+    }
+
+    #[test]
+    fn ack_inside_rolled_back_statement_revives_message() {
+        // AC #3: a lifecycle ack inside a transaction that rolls back must
+        // leave the underlying message visible again afterwards.
+        let rt = boot();
+        rt.execute_query("CREATE QUEUE qroll").expect("create");
+        push(&rt, "qroll", "alpha");
+
+        let ps = PrimaryQueueStore::new(rt.clone());
+        let mid = ps.list_queue_messages("qroll")[0].id.raw();
+        let lc = QueueLifecycle::new(ps, LifecycleConfig::default());
+
+        // Deliver under autocommit to obtain a delivery handle.
+        let d = lc.deliver(&QueueTxn::new(), "qroll", "workers", 1).expect("deliver");
+
+        // Now open a transaction and ack inside it — the bridge lifts the
+        // live xid + conn id off the running frame (no stub).
+        rt.execute_query("BEGIN").expect("begin");
+        let xid = rt.current_xid().expect("active xid");
+        let txn = lc.store_ref().current_txn();
+        assert_eq!(txn.xid(), Some(xid), "current_txn threads the live xid");
+        lc.ack(&txn, &d[0].delivery_id).expect("ack");
+
+        // Mid-transaction the tuple is xmax-stamped, not hard-deleted.
+        assert_eq!(message_xmax(&rt, "qroll", mid), Some(xid));
+
+        rt.execute_query("ROLLBACK").expect("rollback");
+
+        // Rollback revives the tuple: xmax back to 0, message visible again.
+        assert_eq!(
+            message_xmax(&rt, "qroll", mid),
+            Some(0),
+            "rolled-back ack must revive the message",
+        );
+    }
+
+    #[test]
+    fn ack_committed_removes_message_and_records_tombstone() {
+        // AC #4: a lifecycle ack that commits leaves the message gone
+        // (xmax stamped with the committed xid → invisible to every future
+        // snapshot) and records a tombstone on the threaded txn.
+        let rt = boot();
+        rt.execute_query("CREATE QUEUE qcommit").expect("create");
+        push(&rt, "qcommit", "alpha");
+
+        let ps = PrimaryQueueStore::new(rt.clone());
+        let mid = ps.list_queue_messages("qcommit")[0].id.raw();
+        let lc = QueueLifecycle::new(ps, LifecycleConfig::default());
+
+        let d = lc.deliver(&QueueTxn::new(), "qcommit", "workers", 1).expect("deliver");
+
+        rt.execute_query("BEGIN").expect("begin");
+        let xid = rt.current_xid().expect("active xid");
+        let txn = lc.store_ref().current_txn();
+        lc.ack(&txn, &d[0].delivery_id).expect("ack");
+
+        // Seam observability: the would-be tombstone is recorded.
+        let recorded = txn.recorded_tombstones();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].queue, "qcommit");
+        assert_eq!(recorded[0].message_id, mid);
+
+        rt.execute_query("COMMIT").expect("commit");
+
+        // After commit the tuple stays xmax-stamped with the committed xid
+        // (the legacy contract — VACUUM reclaims it later; new snapshots
+        // never see it). It is NOT revived.
+        assert_eq!(
+            message_xmax(&rt, "qcommit", mid),
+            Some(xid),
+            "committed ack must keep the message tombstoned",
+        );
+    }
+
+    #[test]
+    fn mvcc_ack_matches_legacy_delete_message_with_state() {
+        // AC #4 (parity): the lifecycle MVCC retire stamps xmax + records a
+        // pending tombstone exactly as the legacy
+        // `delete_message_with_state` does, so both revive identically on
+        // rollback.
+        let rt = boot();
+        rt.execute_query("CREATE QUEUE qpar").expect("create");
+        push(&rt, "qpar", "m0");
+        push(&rt, "qpar", "m1");
+
+        let ps = PrimaryQueueStore::new(rt.clone());
+        let mids: Vec<MessageId> = ps
+            .list_queue_messages("qpar")
+            .into_iter()
+            .map(|m| m.id.raw())
+            .collect();
+        assert_eq!(mids.len(), 2);
+        let (mid_lc, mid_legacy) = (mids[0], mids[1]);
+        let lc = QueueLifecycle::new(ps, LifecycleConfig::default());
+
+        // Deliver the first message so the lifecycle has a handle to ack.
+        let d = lc.deliver(&QueueTxn::new(), "qpar", "workers", 1).expect("deliver");
+
+        rt.execute_query("BEGIN").expect("begin");
+        let xid = rt.current_xid().expect("active xid");
+
+        // Retire mid_lc via the lifecycle adapter…
+        let txn = lc.store_ref().current_txn();
+        lc.ack(&txn, &d[0].delivery_id).expect("ack");
+
+        // …and mid_legacy straight through the legacy path, same txn.
+        let store = rt.db().store();
+        crate::runtime::queue_delivery::delete_message_with_state(
+            Some(&rt),
+            store.as_ref(),
+            "qpar",
+            EntityId::new(mid_legacy),
+        )
+        .expect("legacy delete");
+
+        // Both tuples carry the same xmax stamp.
+        assert_eq!(message_xmax(&rt, "qpar", mid_lc), Some(xid));
+        assert_eq!(message_xmax(&rt, "qpar", mid_legacy), Some(xid));
+
+        rt.execute_query("ROLLBACK").expect("rollback");
+
+        // Both revive identically.
+        assert_eq!(message_xmax(&rt, "qpar", mid_lc), Some(0));
+        assert_eq!(message_xmax(&rt, "qpar", mid_legacy), Some(0));
     }
 
     #[test]

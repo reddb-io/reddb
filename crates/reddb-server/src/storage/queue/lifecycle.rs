@@ -86,17 +86,57 @@ pub(crate) struct TombstoneRecord {
 /// transaction does not exist.
 ///
 /// In-memory tests construct a fresh `QueueTxn::new()` per call and assert
-/// `recorded_tombstones()` post-hoc; production callers will eventually
-/// construct one from the running `RedDBRuntime` connection context.
+/// `recorded_tombstones()` post-hoc; production callers construct one from
+/// the running `RedDBRuntime` connection context via
+/// `QueueTxn::with_runtime_context`, which threads the live xid + conn id
+/// of the caller's Statement frame so the primary adapter can drive the
+/// runtime MVCC tombstone path instead of hard-deleting.
 pub(crate) struct QueueTxn {
     tombstones: Mutex<Vec<TombstoneRecord>>,
+    ctx: Option<RuntimeTxnCtx>,
+}
+
+/// Live transaction context lifted off the caller's Statement frame.
+/// `xid` is the writer xid the runtime returned from `current_xid()`;
+/// `conn_id` is the connection that owns the transaction (the key the
+/// runtime's pending-tombstones map is bucketed by). Present only when a
+/// `BEGIN/COMMIT` block is open — autocommit / embedded callers leave the
+/// context `None` and the adapter falls back to an immediate hard delete.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RuntimeTxnCtx {
+    pub(crate) xid: u64,
+    pub(crate) conn_id: u64,
 }
 
 impl QueueTxn {
     pub(crate) fn new() -> Self {
         Self {
             tombstones: Mutex::new(Vec::new()),
+            ctx: None,
         }
+    }
+
+    /// Construct a txn carrying the caller's live transaction context.
+    /// The primary `QueueStore` adapter consults this to stamp `xmax` +
+    /// record a runtime pending tombstone (rollback-safe) instead of an
+    /// immediate hard delete.
+    pub(crate) fn with_runtime_context(xid: u64, conn_id: u64) -> Self {
+        Self {
+            tombstones: Mutex::new(Vec::new()),
+            ctx: Some(RuntimeTxnCtx { xid, conn_id }),
+        }
+    }
+
+    /// Live writer xid of the caller's transaction, or `None` when running
+    /// outside a `BEGIN/COMMIT` block.
+    pub(crate) fn xid(&self) -> Option<u64> {
+        self.ctx.map(|c| c.xid)
+    }
+
+    /// Connection id that owns the caller's transaction. Defaults to `0`
+    /// (the embedded connection) when no runtime context is attached.
+    pub(crate) fn conn_id(&self) -> u64 {
+        self.ctx.map(|c| c.conn_id).unwrap_or(0)
     }
 
     /// Record that the running transaction has marked `(queue, message_id)`
