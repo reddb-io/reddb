@@ -13,21 +13,17 @@ use serde::{Deserialize, Serialize};
 /// Storage layout preset for future tier-aware startup integration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum StorageLayout {
     /// Keep only required durability sidecars next to the data file.
     Minimal,
     /// Default balance: shared support directory for durable metadata.
+    #[default]
     Standard,
     /// Put hot write/read artifacts into dedicated directories.
     Performance,
     /// Enable every known dedicated tier directory.
     Max,
-}
-
-impl Default for StorageLayout {
-    fn default() -> Self {
-        Self::Standard
-    }
 }
 
 /// Optional per-toggle override applied after preset expansion.

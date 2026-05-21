@@ -11,12 +11,10 @@
 //! Tier auto-enable + checkpoint-cycle FPI emission are deferred (see
 //! issue notes).
 
-use reddb::storage::wal::record::WalRecord;
 use reddb::storage::wal::reader::WalReader;
+use reddb::storage::wal::record::WalRecord;
 use reddb::storage::wal::writer::WalWriter;
-use reddb::{
-    fold_dwb_into_wal_enabled, set_fold_dwb_into_wal_enabled, RedDBOptions, RedDBRuntime,
-};
+use reddb::{fold_dwb_into_wal_enabled, set_fold_dwb_into_wal_enabled, RedDBOptions, RedDBRuntime};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -57,10 +55,7 @@ fn fold_dwb_off_default_preserves_dwb_sidecar() {
     let _g = POLICY_GUARD.lock().unwrap_or_else(|err| err.into_inner());
     set_fold_dwb_into_wal_enabled(false);
     std::env::remove_var("REDDB_FOLD_DWB_INTO_WAL");
-    assert!(
-        !fold_dwb_into_wal_enabled(),
-        "default policy must be OFF",
-    );
+    assert!(!fold_dwb_into_wal_enabled(), "default policy must be OFF",);
 
     let path = persistent_path("fold_dwb_off");
     cleanup(&path);

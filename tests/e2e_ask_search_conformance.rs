@@ -379,10 +379,7 @@ fn ask_without_grounding_yields_clear_limitation() {
     // failure mode the docs claim cannot happen.
     let stub = MockOpenAiStub::start("UNEXPECTED — should never be invoked");
     let _provider = EnvVarGuard::set("REDDB_AI_PROVIDER", "openai");
-    let _api_base = EnvVarGuard::set(
-        "REDDB_OPENAI_API_BASE",
-        &format!("http://{}", stub.addr()),
-    );
+    let _api_base = EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
     let _api_key = EnvVarGuard::set("REDDB_OPENAI_API_KEY", "sk-test-mock");
     let _model = EnvVarGuard::set("REDDB_OPENAI_PROMPT_MODEL", "mock-chat");
 
@@ -396,7 +393,9 @@ fn ask_without_grounding_yields_clear_limitation() {
     // funnel short-circuits with a structured error.
     let err = rt
         .execute_query("ASK '??? ...' STRICT OFF LIMIT 5")
-        .expect_err("ASK with no usable tokens must surface a clear limitation, not invent an answer");
+        .expect_err(
+            "ASK with no usable tokens must surface a clear limitation, not invent an answer",
+        );
 
     let msg = format!("{err}").to_lowercase();
     assert!(

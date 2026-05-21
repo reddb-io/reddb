@@ -374,15 +374,17 @@ fn server_flags() -> Vec<FlagSchema> {
             "Max concurrent HTTP handler threads (env: REDDB_HTTP_MAX_HANDLERS; \
              red_config: red.http.max_handlers; default: (2 x num_cpus).clamp(8, 256))",
         ),
-        FlagSchema::new("http-handler-timeout-ms").with_description(
-            "Per-handler total-time budget in ms (env: REDDB_HTTP_HANDLER_TIMEOUT_MS; \
+        FlagSchema::new("http-handler-timeout-ms")
+            .with_description(
+                "Per-handler total-time budget in ms (env: REDDB_HTTP_HANDLER_TIMEOUT_MS; \
              red_config: red.http.handler_timeout_ms)",
-        )
+            )
             .with_default("30000"),
-        FlagSchema::new("http-retry-after-secs").with_description(
-            "Retry-After seconds on limiter 503 (env: REDDB_HTTP_RETRY_AFTER_SECS; \
+        FlagSchema::new("http-retry-after-secs")
+            .with_description(
+                "Retry-After seconds on limiter 503 (env: REDDB_HTTP_RETRY_AFTER_SECS; \
              red_config: red.http.retry_after_secs; clamped to [1, 30])",
-        )
+            )
             .with_default("5"),
     ]
 }

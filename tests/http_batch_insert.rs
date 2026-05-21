@@ -51,15 +51,11 @@ fn spawn_server(tag: &str) -> String {
     addr
 }
 
-fn http_post(
-    addr: &str,
-    path: &str,
-    body: &str,
-    idempotency_key: Option<&str>,
-) -> (u16, String) {
+fn http_post(addr: &str, path: &str, body: &str, idempotency_key: Option<&str>) -> (u16, String) {
     let mut tcp = TcpStream::connect(addr).expect("connect");
     tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    tcp.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+    tcp.set_write_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
     let mut req = format!(
         "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\n"
     );
@@ -85,7 +81,8 @@ fn http_post(
 fn http_get(addr: &str, path: &str) -> (u16, String) {
     let mut tcp = TcpStream::connect(addr).expect("connect");
     tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    tcp.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+    tcp.set_write_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
     let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
     tcp.write_all(req.as_bytes()).unwrap();
     tcp.flush().unwrap();

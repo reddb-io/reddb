@@ -82,7 +82,7 @@ impl QueueTelemetryCounters {
         let key = (queue.to_string(), group.to_string(), mode.to_string());
         let mut map = self.delivered.lock().unwrap_or_else(|p| p.into_inner());
         map.entry(key)
-            .or_insert_with(CounterCell::default)
+            .or_default()
             .value
             .fetch_add(n, Ordering::Relaxed);
     }
@@ -91,7 +91,7 @@ impl QueueTelemetryCounters {
         let key = (queue.to_string(), group.to_string(), mode.to_string());
         let mut map = self.acked.lock().unwrap_or_else(|p| p.into_inner());
         map.entry(key)
-            .or_insert_with(CounterCell::default)
+            .or_default()
             .value
             .fetch_add(1, Ordering::Relaxed);
     }
@@ -111,7 +111,7 @@ impl QueueTelemetryCounters {
         );
         let mut map = self.nacked.lock().unwrap_or_else(|p| p.into_inner());
         map.entry(key)
-            .or_insert_with(CounterCell::default)
+            .or_default()
             .value
             .fetch_add(1, Ordering::Relaxed);
     }
@@ -130,9 +130,7 @@ impl QueueTelemetryCounters {
             .collect()
     }
 
-    pub(crate) fn nacked_snapshot(
-        &self,
-    ) -> Vec<((String, String, String, &'static str), u64)> {
+    pub(crate) fn nacked_snapshot(&self) -> Vec<((String, String, String, &'static str), u64)> {
         let map = self.nacked.lock().unwrap_or_else(|p| p.into_inner());
         map.iter()
             .map(|(k, v)| (k.clone(), v.value.load(Ordering::Relaxed)))
@@ -152,10 +150,8 @@ mod tests {
         c.record_delivered("orders", "audit", "work", 1);
         let snap = c.delivered_snapshot();
         assert_eq!(snap.len(), 2);
-        let by_group: BTreeMap<String, u64> = snap
-            .into_iter()
-            .map(|((_, g, _), n)| (g, n))
-            .collect();
+        let by_group: BTreeMap<String, u64> =
+            snap.into_iter().map(|((_, g, _), n)| (g, n)).collect();
         assert_eq!(by_group["workers"], 3);
         assert_eq!(by_group["audit"], 1);
     }

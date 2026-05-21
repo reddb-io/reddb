@@ -1181,9 +1181,8 @@ struct RuntimeInner {
     /// atomically with each chain INSERT. Backed by a single mutex so a chain
     /// INSERT serialises against concurrent submitters — the loser observes
     /// the advanced tip and surfaces `BlockchainConflict` to its caller.
-    chain_tip_cache: parking_lot::Mutex<
-        HashMap<String, crate::runtime::blockchain_kind::ChainTipFull>,
-    >,
+    chain_tip_cache:
+        parking_lot::Mutex<HashMap<String, crate::runtime::blockchain_kind::ChainTipFull>>,
     /// Issue #525 — in-memory mirror of the persisted `integrity` flag per
     /// chain collection.  `true` means INSERTs must be rejected with
     /// `ChainIntegrityBroken`.  Loaded lazily from `red_config` on first
@@ -1248,30 +1247,30 @@ pub mod lease_timer_wheel;
 pub mod lifecycle;
 pub mod locking;
 pub(crate) mod mutation;
+pub(crate) mod primary_queue_store;
 mod probabilistic_store;
 pub(crate) mod query_exec;
 mod queue_delivery;
 pub(crate) mod queue_lifecycle;
 pub(crate) mod queue_telemetry;
-pub(crate) mod primary_queue_store;
-pub(crate) mod replica_queue_store;
 pub mod quota_bucket;
 mod record_search;
 mod red_schema;
+pub(crate) mod replica_queue_store;
+pub mod resource_limits;
 pub(crate) mod retention_filter;
 pub(crate) mod retention_sweeper;
-pub(crate) mod sessionize;
-pub(crate) mod window_phase;
-pub mod resource_limits;
 pub(crate) mod scalar_evaluator;
 pub mod schema_diff;
 pub mod schema_vocabulary;
+pub(crate) mod sessionize;
 pub mod signed_chain;
 pub mod signed_writes_kind;
 pub mod snapshot_reuse;
 mod statement_frame;
 mod table_row_mvcc_resolver;
 mod vector_index;
+pub(crate) mod window_phase;
 pub mod within_clause;
 pub mod write_gate;
 

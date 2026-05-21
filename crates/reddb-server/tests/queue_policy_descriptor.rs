@@ -111,8 +111,5 @@ fn alter_queue_rejects_dlq_equal_to_source() {
     let err = rt
         .execute_query("ALTER QUEUE q_self SET DLQ q_self")
         .expect_err("self-DLQ rejected");
-    assert!(
-        err.to_string().contains("dead-letter queue"),
-        "{err}"
-    );
+    assert!(err.to_string().contains("dead-letter queue"), "{err}");
 }

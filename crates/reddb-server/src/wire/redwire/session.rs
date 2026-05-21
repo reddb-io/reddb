@@ -766,13 +766,10 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     // that want the validation contract without committing to a
     // replay window.
     let idempotency_key = obj.get("idempotency_key").and_then(|x| x.as_str());
-    let batch_flag = obj
-        .get("batch")
-        .and_then(|x| x.as_bool())
-        .unwrap_or(false);
+    let batch_flag = obj.get("batch").and_then(|x| x.as_bool()).unwrap_or(false);
     if idempotency_key.is_some() || batch_flag {
         let items = match obj.get("payloads").and_then(|x| x.as_array()) {
-            Some(rows) => &rows[..],
+            Some(rows) => rows,
             None => {
                 return error_frame(
                     frame.correlation_id,
@@ -1188,9 +1185,13 @@ mod tests {
             .to_vec(),
         );
         let reply = run_insert_dispatch(&runtime, &frame);
-        assert_eq!(reply.kind, MessageKind::BulkOk, "body={:?}", String::from_utf8_lossy(&reply.payload));
-        let body: JsonValue =
-            serde_json::from_slice(&reply.payload).expect("ok body json");
+        assert_eq!(
+            reply.kind,
+            MessageKind::BulkOk,
+            "body={:?}",
+            String::from_utf8_lossy(&reply.payload)
+        );
+        let body: JsonValue = serde_json::from_slice(&reply.payload).expect("ok body json");
         assert_eq!(body.get("ok").and_then(JsonValue::as_bool), Some(true));
         assert_eq!(body.get("count").and_then(JsonValue::as_u64), Some(3));
 
@@ -1243,8 +1244,7 @@ mod tests {
         );
         let reply = run_insert_dispatch(&runtime, &frame);
         assert_eq!(reply.kind, MessageKind::Error);
-        let body: JsonValue =
-            serde_json::from_slice(&reply.payload).expect("err body json");
+        let body: JsonValue = serde_json::from_slice(&reply.payload).expect("err body json");
         assert_eq!(body.get("ok").and_then(JsonValue::as_bool), Some(false));
         assert_eq!(
             body.get("code").and_then(JsonValue::as_str),
@@ -1322,7 +1322,10 @@ mod tests {
         );
         let reply2 = run_insert_dispatch(&runtime, &frame2);
         assert_eq!(reply2.kind, MessageKind::BulkOk);
-        assert_eq!(reply2.payload, body1, "replay must return cached body byte-for-byte");
+        assert_eq!(
+            reply2.payload, body1,
+            "replay must return cached body byte-for-byte"
+        );
 
         let qr = runtime
             .execute_query("SELECT name FROM events_587_dedup")
@@ -1394,8 +1397,7 @@ mod tests {
 
         let schema =
             r#"{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}"#;
-        reg::register(runtime.db().store().as_ref(), "click_587", schema)
-            .expect("register schema");
+        reg::register(runtime.db().store().as_ref(), "click_587", schema).expect("register schema");
 
         let frame = Frame::new(
             MessageKind::BulkInsert,
@@ -1412,8 +1414,7 @@ mod tests {
         );
         let reply = run_insert_dispatch(&runtime, &frame);
         assert_eq!(reply.kind, MessageKind::Error);
-        let body: JsonValue =
-            serde_json::from_slice(&reply.payload).expect("err body json");
+        let body: JsonValue = serde_json::from_slice(&reply.payload).expect("err body json");
         assert_eq!(
             body.get("code").and_then(JsonValue::as_str),
             Some("RowSchemaRejected")
@@ -1464,8 +1465,7 @@ mod tests {
         let reply = run_insert_dispatch(&runtime, &frame);
 
         assert_eq!(reply.kind, MessageKind::Error);
-        let body: JsonValue =
-            serde_json::from_slice(&reply.payload).expect("err body json");
+        let body: JsonValue = serde_json::from_slice(&reply.payload).expect("err body json");
         assert_eq!(
             body.get("code").and_then(JsonValue::as_str),
             Some("BatchTooLarge")

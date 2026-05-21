@@ -16,7 +16,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 fn temp_prefix(tag: &str) -> String {
-    let mut p = PathBuf::from(std::env::temp_dir());
+    let mut p = std::env::temp_dir();
     p.push(format!(
         "reddb-chaos-lease-race-{tag}-{}-{}",
         std::process::id(),

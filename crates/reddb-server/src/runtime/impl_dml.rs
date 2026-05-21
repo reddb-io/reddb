@@ -73,14 +73,14 @@ impl RedDBRuntime {
         collection: &str,
     ) -> Option<crate::runtime::blockchain_kind::ChainTipFull> {
         let store = self.inner.db.store();
-        if !crate::runtime::blockchain_kind::is_chain(&*store, collection) {
+        if !crate::runtime::blockchain_kind::is_chain(&store, collection) {
             return None;
         }
         let mut cache = self.inner.chain_tip_cache.lock();
         if let Some(existing) = cache.get(collection) {
             return Some(existing.clone());
         }
-        let scanned = crate::runtime::blockchain_kind::chain_tip_full(&*store, collection)?;
+        let scanned = crate::runtime::blockchain_kind::chain_tip_full(&store, collection)?;
         cache.insert(collection.to_string(), scanned.clone());
         Some(scanned)
     }
@@ -96,9 +96,9 @@ impl RedDBRuntime {
         collection: &str,
     ) -> Option<crate::runtime::blockchain_kind::VerifyChainOutcome> {
         let store = self.inner.db.store();
-        let outcome = crate::runtime::blockchain_kind::verify_chain_outcome(&*store, collection)?;
+        let outcome = crate::runtime::blockchain_kind::verify_chain_outcome(&store, collection)?;
         if !outcome.ok {
-            crate::runtime::blockchain_kind::persist_integrity_flag(&*store, collection, true);
+            crate::runtime::blockchain_kind::persist_integrity_flag(&store, collection, true);
             self.inner
                 .chain_integrity_broken
                 .lock()
@@ -112,10 +112,10 @@ impl RedDBRuntime {
     /// chain.
     pub fn clear_chain_integrity_flag(&self, collection: &str) -> bool {
         let store = self.inner.db.store();
-        if !crate::runtime::blockchain_kind::is_chain(&*store, collection) {
+        if !crate::runtime::blockchain_kind::is_chain(&store, collection) {
             return false;
         }
-        crate::runtime::blockchain_kind::persist_integrity_flag(&*store, collection, false);
+        crate::runtime::blockchain_kind::persist_integrity_flag(&store, collection, false);
         self.inner
             .chain_integrity_broken
             .lock()
@@ -135,7 +135,7 @@ impl RedDBRuntime {
         }
         let store = self.inner.db.store();
         let persisted =
-            crate::runtime::blockchain_kind::is_integrity_broken_persisted(&*store, collection)
+            crate::runtime::blockchain_kind::is_integrity_broken_persisted(&store, collection)
                 .unwrap_or(false);
         self.inner
             .chain_integrity_broken
@@ -576,7 +576,7 @@ impl RedDBRuntime {
             // concurrent submitters can't both bind to the same prev_hash —
             // the loser observes the advanced tip and gets 409 with the new
             // tip so it can retry.
-            let chain_mode = crate::runtime::blockchain_kind::is_chain(&*store, &query.table);
+            let chain_mode = crate::runtime::blockchain_kind::is_chain(&store, &query.table);
             let _chain_lock_arc: Option<Arc<parking_lot::Mutex<()>>> = if chain_mode {
                 Some(self.inner.rmw_locks.lock_for(&query.table, "__chain__"))
             } else {
@@ -603,7 +603,7 @@ impl RedDBRuntime {
                     if let Some(existing) = cache.get(&query.table) {
                         Some(existing.clone())
                     } else if let Some(scanned) =
-                        crate::runtime::blockchain_kind::chain_tip_full(&*store, &query.table)
+                        crate::runtime::blockchain_kind::chain_tip_full(&store, &query.table)
                     {
                         cache.insert(query.table.clone(), scanned.clone());
                         Some(scanned)
@@ -681,10 +681,10 @@ impl RedDBRuntime {
                                 // still participate in the chain protocol.
                                 let mut a = [0u8; 32];
                                 let mut ok = true;
-                                for i in 0..32 {
+                                for (i, slot) in a.iter_mut().enumerate() {
                                     let pair = &s.as_ref()[i * 2..i * 2 + 2];
                                     match u8::from_str_radix(pair, 16) {
-                                        Ok(byte) => a[i] = byte,
+                                        Ok(byte) => *slot = byte,
                                         Err(_) => {
                                             ok = false;
                                             break;
@@ -796,11 +796,11 @@ impl RedDBRuntime {
                 // composition is owned by issue #526; we keep #522 to the
                 // non-chain path and let chain_mode collections punt to that
                 // slice rather than half-wire it here.
-                if crate::runtime::signed_writes_kind::is_signed(&*store, &query.table) {
+                if crate::runtime::signed_writes_kind::is_signed(&store, &query.table) {
                     let (pk_col, sig_col, residual) =
                         crate::runtime::signed_writes_kind::split_signature_fields(fields);
                     let payload = crate::runtime::blockchain_kind::canonical_payload(&residual);
-                    let reg = crate::runtime::signed_writes_kind::registry(&*store, &query.table);
+                    let reg = crate::runtime::signed_writes_kind::registry(&store, &query.table);
                     crate::runtime::signed_writes_kind::verify_row(
                         &reg,
                         pk_col.as_ref().map(|c| c.bytes.as_slice()),

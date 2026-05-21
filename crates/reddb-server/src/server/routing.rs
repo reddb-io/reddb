@@ -1191,9 +1191,7 @@ impl RedDBServer {
                     // Issue #525 — admin-gated verify-chain + clear-integrity
                     // endpoints.  Both require `RED_ADMIN_TOKEN` when one is
                     // configured (operator surface, not application auth).
-                    if let Some(collection) =
-                        collection_from_action_path(&path, "verify-chain")
-                    {
+                    if let Some(collection) = collection_from_action_path(&path, "verify-chain") {
                         if !admin_token_ok(&headers) {
                             return json_error(401, "verify-chain requires admin token");
                         }
@@ -1278,9 +1276,8 @@ impl RedDBServer {
                     // commit + AnalyticsSchemaRegistry validation, and
                     // dedups by `Idempotency-Key` header.
                     if let Some(collection) = collection_from_action_path(&path, "batch") {
-                        let idempotency_key = headers
-                            .get("idempotency-key")
-                            .map(|value| value.as_str());
+                        let idempotency_key =
+                            headers.get("idempotency-key").map(|value| value.as_str());
                         return self.handle_batch_insert(collection, body, idempotency_key);
                     }
                     if let Some(collection) = collection_from_action_path(&path, "nodes") {
@@ -1874,7 +1871,10 @@ mod tests {
 /// branch effectively means "wrong kind / collection absent").
 fn handle_chain_tip(runtime: &crate::runtime::RedDBRuntime, collection: &str) -> HttpResponse {
     let Some(tip) = runtime.chain_tip_for_collection(collection) else {
-        return json_error(404, format!("chain-tip: collection '{collection}' is not a blockchain or has no rows"));
+        return json_error(
+            404,
+            format!("chain-tip: collection '{collection}' is not a blockchain or has no rows"),
+        );
     };
     let server_time = crate::runtime::blockchain_kind::now_ms();
     let mut hex = String::with_capacity(64);
@@ -1913,10 +1913,7 @@ fn admin_token_ok(headers: &BTreeMap<String, String>) -> bool {
 }
 
 /// Issue #525 — `POST /collections/:name/verify-chain`.
-fn handle_verify_chain(
-    runtime: &crate::runtime::RedDBRuntime,
-    collection: &str,
-) -> HttpResponse {
+fn handle_verify_chain(runtime: &crate::runtime::RedDBRuntime, collection: &str) -> HttpResponse {
     let Some(outcome) = runtime.verify_chain_for_collection(collection) else {
         return json_error(
             404,

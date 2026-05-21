@@ -89,7 +89,7 @@ fn lookup_passport_resolves_collection() {
     // pinned snapshot makes that intent explicit.
     insta::assert_snapshot!(
         "lookup_passport_resolves_collection",
-        fmt_hits("passport", &hits)
+        fmt_hits("passport", hits)
     );
 }
 
@@ -100,7 +100,7 @@ fn lookup_passports_resolves_collection() {
     let hits = vocab.lookup("passports");
     insta::assert_snapshot!(
         "lookup_passports_resolves_collection",
-        fmt_hits("passports", &hits)
+        fmt_hits("passports", hits)
     );
 }
 
@@ -109,7 +109,7 @@ fn lookup_id_resolves_every_collection() {
     let _guard = secret_redactor::install_redactions();
     let vocab = fixture();
     let hits = vocab.lookup("id");
-    insta::assert_snapshot!("lookup_id_resolves_every_collection", fmt_hits("id", &hits));
+    insta::assert_snapshot!("lookup_id_resolves_every_collection", fmt_hits("id", hits));
 }
 
 #[test]
@@ -119,7 +119,7 @@ fn lookup_email_resolves_collection_and_index() {
     let hits = vocab.lookup("email");
     insta::assert_snapshot!(
         "lookup_email_resolves_collection_and_index",
-        fmt_hits("email", &hits)
+        fmt_hits("email", hits)
     );
 }
 
@@ -132,6 +132,6 @@ fn lookup_accent_folded_variant_matches_passports() {
     let hits = vocab.lookup("pässpörts");
     insta::assert_snapshot!(
         "lookup_accent_folded_variant_matches_passports",
-        fmt_hits("pässpörts", &hits)
+        fmt_hits("pässpörts", hits)
     );
 }

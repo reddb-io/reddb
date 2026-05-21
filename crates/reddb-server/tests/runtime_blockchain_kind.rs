@@ -34,11 +34,13 @@ fn blob_at(res: &RuntimeQueryResult, row: usize, column: &str) -> Vec<u8> {
 }
 
 fn sort_by_height(res: &mut RuntimeQueryResult) {
-    res.result.records.sort_by_key(|r| match r.get("block_height") {
-        Some(Value::UnsignedInteger(v)) => *v as i64,
-        Some(Value::Integer(v)) => *v,
-        _ => i64::MAX,
-    });
+    res.result
+        .records
+        .sort_by_key(|r| match r.get("block_height") {
+            Some(Value::UnsignedInteger(v)) => *v as i64,
+            Some(Value::Integer(v)) => *v,
+            _ => i64::MAX,
+        });
 }
 
 #[test]

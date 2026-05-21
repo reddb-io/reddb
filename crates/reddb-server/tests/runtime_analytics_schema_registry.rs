@@ -12,7 +12,8 @@ fn rt() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots")
 }
 
-const PAGE_VIEW_SCHEMA: &str = r#"{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}"#;
+const PAGE_VIEW_SCHEMA: &str =
+    r#"{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}"#;
 
 #[test]
 fn schema_persisted_and_surfaced_via_virtual_table() {
@@ -63,7 +64,10 @@ fn insert_missing_required_field_rejected() {
                 body.contains("AnalyticsSchemaError:MissingRequiredField"),
                 "unexpected body: {body}"
             );
-            assert!(body.contains(":url"), "expected field 'url' in body: {body}");
+            assert!(
+                body.contains(":url"),
+                "expected field 'url' in body: {body}"
+            );
         }
         other => panic!("expected InvalidOperation, got {other:?}"),
     }

@@ -105,7 +105,7 @@ impl<'a> Parser<'a> {
                 .map(|expr| match fold_expr_to_value(expr.clone()) {
                     Ok(value) => Ok(value),
                     Err(msg) => {
-                        if crate::storage::query::user_params::expr_contains_parameter(&expr) {
+                        if crate::storage::query::user_params::expr_contains_parameter(expr) {
                             Ok(Value::Null)
                         } else {
                             Err(msg)

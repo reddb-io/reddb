@@ -643,7 +643,10 @@ pub mod tier_wiring {
     }
 
     pub fn current_layout_paths() -> Option<TieredLayoutPaths> {
-        CURRENT_LAYOUT_PATHS.lock().ok().and_then(|slot| slot.clone())
+        CURRENT_LAYOUT_PATHS
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
     }
 
     /// `(audit_log, slow_log)` destinations resolved from the active

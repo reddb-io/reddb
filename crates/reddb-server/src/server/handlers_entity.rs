@@ -894,7 +894,7 @@ impl RedDBServer {
 }
 
 /// Transport-agnostic outcome of a batch insert: the HTTP-shaped status
-/// + body, ready to be served verbatim either as an HTTP response or
+/// and body, ready to be served verbatim either as an HTTP response or
 /// as the payload of a RedWire `BulkOk` / `Error` frame. The body is
 /// always a compact JSON object so a downstream consumer can decode it
 /// once and present whichever fields the client cares about.
@@ -924,7 +924,10 @@ impl BatchOutcome {
     pub(crate) fn from_error(err: &crate::runtime::batch_insert::BatchInsertError) -> Self {
         let mut object = Map::new();
         object.insert("ok".to_string(), JsonValue::Bool(false));
-        object.insert("code".to_string(), JsonValue::String(err.code().to_string()));
+        object.insert(
+            "code".to_string(),
+            JsonValue::String(err.code().to_string()),
+        );
         let message = err.message();
         object.insert(
             "error".to_string(),
@@ -1082,14 +1085,13 @@ pub(crate) fn process_batch_insert(
     }
 
     let count = row_inputs.len();
-    let result =
-        crate::application::EntityUseCases::new(runtime).create_rows_batch(
-            crate::application::CreateRowsBatchInput {
-                collection: collection.to_string(),
-                rows: row_inputs,
-                suppress_events: false,
-            },
-        );
+    let result = crate::application::EntityUseCases::new(runtime).create_rows_batch(
+        crate::application::CreateRowsBatchInput {
+            collection: collection.to_string(),
+            rows: row_inputs,
+            suppress_events: false,
+        },
+    );
 
     let outcome = match result {
         Ok(_) => BatchOutcome::ok(count),
@@ -1382,7 +1384,12 @@ mod tests {
     fn create_table(server: &RedDBServer, ddl: &str) {
         let body = format!(r#"{{"query": "{ddl}"}}"#);
         let r = server.handle_query(body.into_bytes());
-        assert_eq!(r.status, 200, "ddl failed: {}", String::from_utf8_lossy(&r.body));
+        assert_eq!(
+            r.status,
+            200,
+            "ddl failed: {}",
+            String::from_utf8_lossy(&r.body)
+        );
     }
 
     #[test]
@@ -1415,9 +1422,7 @@ mod tests {
             if i > 0 {
                 body.push(',');
             }
-            body.push_str(&format!(
-                "{{\"fields\":{{\"id\":{i},\"name\":\"x\"}}}}"
-            ));
+            body.push_str(&format!("{{\"fields\":{{\"id\":{i},\"name\":\"x\"}}}}"));
         }
         body.push(']');
         let r = post_batch(&server, "events", &body, None);

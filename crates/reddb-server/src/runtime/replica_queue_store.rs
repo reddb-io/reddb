@@ -256,8 +256,7 @@ impl QueueStore for ReplicaQueueStore {
             .pending_message_ids(queue, Some(group))
             .into_iter()
             .collect();
-        let acked: HashSet<MessageId> =
-            self.acked_message_ids(queue, group).into_iter().collect();
+        let acked: HashSet<MessageId> = self.acked_message_ids(queue, group).into_iter().collect();
         let mut out: Vec<MessageId> = self
             .live_message_ids(queue)
             .into_iter()
@@ -548,11 +547,15 @@ mod tests {
             QueueStoreError::ReplicaImmutable
         ));
         assert!(matches!(
-            replica.enqueue_dlq(&t, "dlq", Value::text("x")).unwrap_err(),
+            replica
+                .enqueue_dlq(&t, "dlq", Value::text("x"))
+                .unwrap_err(),
             QueueStoreError::ReplicaImmutable
         ));
         assert!(matches!(
-            replica.reclaim_expired(&t, "q", Instant::now()).unwrap_err(),
+            replica
+                .reclaim_expired(&t, "q", Instant::now())
+                .unwrap_err(),
             QueueStoreError::ReplicaImmutable
         ));
         assert!(matches!(
@@ -587,22 +590,34 @@ mod tests {
         let lc = QueueLifecycle::new(primary_store, cfg);
 
         // alpha: deliver → nack (Requeued, below max) → deliver → ack.
-        let a1 = lc.deliver(&QueueTxn::new(),"qrep", "workers", 1).expect("a1");
+        let a1 = lc
+            .deliver(&QueueTxn::new(), "qrep", "workers", 1)
+            .expect("a1");
         assert_eq!(a1[0].payload, Value::text("alpha"));
-        lc.nack(&QueueTxn::new(),&a1[0].delivery_id).expect("a1 nack");
+        lc.nack(&QueueTxn::new(), &a1[0].delivery_id)
+            .expect("a1 nack");
 
-        let a2 = lc.deliver(&QueueTxn::new(),"qrep", "workers", 1).expect("a2");
+        let a2 = lc
+            .deliver(&QueueTxn::new(), "qrep", "workers", 1)
+            .expect("a2");
         assert_eq!(a2[0].payload, Value::text("alpha"), "alpha redelivered");
-        lc.ack(&QueueTxn::new(),&a2[0].delivery_id).expect("a2 ack");
+        lc.ack(&QueueTxn::new(), &a2[0].delivery_id)
+            .expect("a2 ack");
 
         // beta: deliver → nack → deliver → nack → moves to DLQ on
         // the second nack because max_attempts=2.
-        let b1 = lc.deliver(&QueueTxn::new(),"qrep", "workers", 1).expect("b1");
+        let b1 = lc
+            .deliver(&QueueTxn::new(), "qrep", "workers", 1)
+            .expect("b1");
         assert_eq!(b1[0].payload, Value::text("beta"));
-        lc.nack(&QueueTxn::new(),&b1[0].delivery_id).expect("b1 nack");
-        let b2 = lc.deliver(&QueueTxn::new(),"qrep", "workers", 1).expect("b2");
+        lc.nack(&QueueTxn::new(), &b1[0].delivery_id)
+            .expect("b1 nack");
+        let b2 = lc
+            .deliver(&QueueTxn::new(), "qrep", "workers", 1)
+            .expect("b2");
         assert_eq!(b2[0].payload, Value::text("beta"));
-        lc.nack(&QueueTxn::new(),&b2[0].delivery_id).expect("b2 nack");
+        lc.nack(&QueueTxn::new(), &b2[0].delivery_id)
+            .expect("b2 nack");
 
         assert_eq!(
             lc.recorded_outcomes(),
@@ -616,7 +631,9 @@ mod tests {
         // Push a fresh message that stays in flight at replay time
         // (deliver but no ack/nack) — covers the pending-row case.
         push(&primary_rt, "qrep", "gamma");
-        let g1 = lc.deliver(&QueueTxn::new(),"qrep", "workers", 1).expect("g1");
+        let g1 = lc
+            .deliver(&QueueTxn::new(), "qrep", "workers", 1)
+            .expect("g1");
         assert_eq!(g1[0].payload, Value::text("gamma"));
 
         // --- Replay on a fresh replica DB ---
@@ -656,8 +673,7 @@ mod tests {
         //    view: only gamma is in the queue (alpha was acked, beta
         //    moved to DLQ) and it's pending → available list is empty.
         let primary_store_for_read = PrimaryQueueStore::new(primary_rt.clone());
-        let primary_available =
-            primary_store_for_read.available_messages("qrep", QueueSide::Left);
+        let primary_available = primary_store_for_read.available_messages("qrep", QueueSide::Left);
         let replica_available = replica_store.available_messages("qrep", QueueSide::Left);
         assert_eq!(
             primary_available, replica_available,
@@ -695,7 +711,9 @@ mod tests {
         // 5. Mutation surface on the replica still fails closed —
         //    confirms QueueLifecycle was *not* invoked on the replica.
         assert!(matches!(
-            replica_store.ack_pending(&QueueTxn::new(), gamma_delivery).unwrap_err(),
+            replica_store
+                .ack_pending(&QueueTxn::new(), gamma_delivery)
+                .unwrap_err(),
             QueueStoreError::ReplicaImmutable
         ));
     }
@@ -720,7 +738,9 @@ mod tests {
         // 1. InMemory: direct mark_pending.
         let mem = InMemoryQueueStore::new();
         mem.seed_queue("q", vec![1, 2]);
-        let mem_id = mem.mark_pending(&t, "q", 1, "g", deadline).expect("mem mark");
+        let mem_id = mem
+            .mark_pending(&t, "q", 1, "g", deadline)
+            .expect("mem mark");
         assert_eq!(
             mem.find_pending_by_key("q", 1, "g"),
             Some(mem_id),
@@ -824,7 +844,9 @@ mod tests {
         let primary_store = PrimaryQueueStore::new(primary_rt.clone());
         let cfg = primary_store.lifecycle_config("qpassive");
         let lc = QueueLifecycle::new(primary_store, cfg);
-        let d = lc.deliver(&QueueTxn::new(),"qpassive", "w", 1).expect("deliver");
+        let d = lc
+            .deliver(&QueueTxn::new(), "qpassive", "w", 1)
+            .expect("deliver");
 
         let replica_rt = boot();
         replica_rt

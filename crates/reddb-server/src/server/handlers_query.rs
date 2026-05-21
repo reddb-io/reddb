@@ -686,7 +686,7 @@ fn ask_sse_validation_frame(
 }
 
 fn reddb_error_to_io(err: crate::api::RedDBError) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, err.to_string())
+    io::Error::other(err.to_string())
 }
 
 fn ask_answer_tokens(

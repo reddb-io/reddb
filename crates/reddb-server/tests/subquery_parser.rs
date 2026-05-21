@@ -107,7 +107,7 @@ fn dos_limit_deeply_nested_select_subquery_does_not_overflow_stack() {
             // parse_expr_prec → parse_atom → parse_select), so 200
             // is the equivalent stress point for this slice.
             let input = subquery_grammar::nested_scalar_subquery(200);
-            let err = parser::parse(&input).err().expect("must error, not panic");
+            let err = parser::parse(&input).expect_err("must error, not panic");
             assert!(
                 matches!(
                     err.kind,
@@ -156,7 +156,7 @@ fn dos_limit_deeply_nested_from_subquery_returns_depth_limit() {
             for i in 0..depth {
                 s.push_str(&format!(") AS a{}", i));
             }
-            let err = parser::parse(&s).err().expect("must error, not panic");
+            let err = parser::parse(&s).expect_err("must error, not panic");
             assert!(
                 matches!(
                     err.kind,

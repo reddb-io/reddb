@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 fn temp_prefix(tag: &str) -> String {
-    let mut p = PathBuf::from(std::env::temp_dir());
+    let mut p = std::env::temp_dir();
     p.push(format!(
         "reddb-chaos-promote-{tag}-{}-{}",
         std::process::id(),

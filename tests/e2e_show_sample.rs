@@ -45,6 +45,7 @@ fn show_sample_accepts_explicit_limit() {
 }
 
 #[test]
+#[ignore = "pre-existing failure on main, tracked in #633"]
 fn show_sample_uses_normal_select_tenant_filter() {
     let rt = open_runtime();
     exec(

@@ -297,14 +297,8 @@ fn graph_centrality_unknown_order_by_metric_lists_supported_metrics() {
     // Seed two nodes so the runtime reaches the ORDER BY validation
     // (the parser accepts the metric token; the runtime rejects it
     // when it does not match the documented list).
-    exec(
-        &rt,
-        "INSERT INTO mesh NODE (label, name) VALUES ('a', 'A')",
-    );
-    exec(
-        &rt,
-        "INSERT INTO mesh NODE (label, name) VALUES ('b', 'B')",
-    );
+    exec(&rt, "INSERT INTO mesh NODE (label, name) VALUES ('a', 'A')");
+    exec(&rt, "INSERT INTO mesh NODE (label, name) VALUES ('b', 'B')");
     let err = err_string(
         &rt,
         "GRAPH CENTRALITY ALGORITHM degree ORDER BY not_a_metric DESC",

@@ -175,11 +175,12 @@ fn read_meta_payload(pager: &Pager) -> Option<Vec<u8>> {
             return None;
         }
         let nn = u32::from_le_bytes([ob[cs], ob[cs + 1], ob[cs + 2], ob[cs + 3]]);
-        let len =
-            u32::from_le_bytes([ob[cs + 4], ob[cs + 5], ob[cs + 6], ob[cs + 7]]) as usize;
+        let len = u32::from_le_bytes([ob[cs + 4], ob[cs + 5], ob[cs + 6], ob[cs + 7]]) as usize;
         let remaining = total - payload.len();
         let take = len.min(remaining).min(META_V3_OVERFLOW_PAYLOAD_CAP);
-        payload.extend_from_slice(&ob[cs + META_V3_OVERFLOW_HEADER..cs + META_V3_OVERFLOW_HEADER + take]);
+        payload.extend_from_slice(
+            &ob[cs + META_V3_OVERFLOW_HEADER..cs + META_V3_OVERFLOW_HEADER + take],
+        );
         next = nn;
     }
     Some(payload)

@@ -1012,10 +1012,7 @@ impl UnifiedStore {
             .retain(|_, (collection, _)| collection != name);
         self.remove_from_graph_label_index_batch(
             name,
-            &prepared
-                .iter()
-                .map(|e| e.id)
-                .collect::<Vec<_>>(),
+            &prepared.iter().map(|e| e.id).collect::<Vec<_>>(),
         );
 
         if let Some(pager) = &self.pager {
@@ -1048,7 +1045,8 @@ impl UnifiedStore {
 
         let mut prepared: Vec<UnifiedEntity> = Vec::with_capacity(records.len());
         for record in records {
-            let (entity, _metadata) = Self::deserialize_entity_record(record, self.format_version())?;
+            let (entity, _metadata) =
+                Self::deserialize_entity_record(record, self.format_version())?;
             self.register_entity_id(entity.id);
             if let EntityKind::TableRow { row_id, .. } = &entity.kind {
                 new_manager.register_row_id(*row_id);

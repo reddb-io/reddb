@@ -362,7 +362,8 @@ mod tests {
         assert!(reg
             .history()
             .iter()
-            .all(|h| h.action == SignerHistoryAction::Add && h.actor == "@system/create-collection"
+            .all(|h| h.action == SignerHistoryAction::Add
+                && h.actor == "@system/create-collection"
                 && h.ts_unix_ms == 10));
     }
 

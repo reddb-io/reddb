@@ -400,10 +400,7 @@ fn attach_projection_alias(proj: Projection, alias: Option<String>) -> Projectio
         }
         Projection::Column(column) => Projection::Alias(column, alias),
         Projection::Window {
-            name,
-            args,
-            window,
-            ..
+            name, args, window, ..
         } => Projection::Window {
             name,
             args,

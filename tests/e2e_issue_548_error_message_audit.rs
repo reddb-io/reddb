@@ -56,7 +56,8 @@ fn assert_contains_all(haystack: &str, needles: &[&str], context: &str) {
 #[test]
 fn select_star_from_sketch_points_to_freq_read_form() {
     let rt = runtime();
-    rt.execute_query("CREATE SKETCH clicks").expect("create sketch");
+    rt.execute_query("CREATE SKETCH clicks")
+        .expect("create sketch");
     let message = err_text(&rt, "SELECT * FROM clicks");
     assert_contains_all(
         &message,
@@ -68,7 +69,8 @@ fn select_star_from_sketch_points_to_freq_read_form() {
 #[test]
 fn select_star_from_filter_points_to_contains_read_form() {
     let rt = runtime();
-    rt.execute_query("CREATE FILTER sessions").expect("create filter");
+    rt.execute_query("CREATE FILTER sessions")
+        .expect("create filter");
     let message = err_text(&rt, "SELECT * FROM sessions");
     assert_contains_all(
         &message,
@@ -86,7 +88,15 @@ fn create_table_unsupported_option_points_to_ttl_syntax() {
     );
     assert_contains_all(
         &message,
-        &["unsupported CREATE TABLE option", "TTL", "ms", "s", "m", "h", "d"],
+        &[
+            "unsupported CREATE TABLE option",
+            "TTL",
+            "ms",
+            "s",
+            "m",
+            "h",
+            "d",
+        ],
         "CREATE TABLE WITH <unknown>",
     );
 }
@@ -128,7 +138,12 @@ fn select_from_queue_unsupported_projection_points_to_queue_verbs() {
     let message = err_text(&rt, "SELECT id + 1 FROM QUEUE jobs");
     assert_contains_all(
         &message,
-        &["unsupported SELECT FROM QUEUE projection", "SELECT *", "PUSH", "POP"],
+        &[
+            "unsupported SELECT FROM QUEUE projection",
+            "SELECT *",
+            "PUSH",
+            "POP",
+        ],
         "SELECT <expr> FROM QUEUE",
     );
 }

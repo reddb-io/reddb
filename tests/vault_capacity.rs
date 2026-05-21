@@ -112,8 +112,8 @@ fn assert_states_eq(a: &VaultState, b: &VaultState) {
     };
     let mut left: Vec<_> = a.api_keys.iter().collect();
     let mut right: Vec<_> = b.api_keys.iter().collect();
-    left.sort_by(|x, y| key_for(&x.0, &x.1).cmp(&key_for(&y.0, &y.1)));
-    right.sort_by(|x, y| key_for(&x.0, &x.1).cmp(&key_for(&y.0, &y.1)));
+    left.sort_by_key(|x| key_for(&x.0, &x.1));
+    right.sort_by_key(|x| key_for(&x.0, &x.1));
     for ((u1, k1), (u2, k2)) in left.iter().zip(right.iter()) {
         assert_eq!(u1.username, u2.username);
         assert_eq!(u1.tenant, u2.tenant);

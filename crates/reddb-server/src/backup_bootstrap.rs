@@ -106,8 +106,7 @@ where
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_REGION.to_string());
 
-    let checkpoint_interval_secs =
-        parse_interval(&env, CHECKPOINT_VAR, DEFAULT_CHECKPOINT_SECS)?;
+    let checkpoint_interval_secs = parse_interval(&env, CHECKPOINT_VAR, DEFAULT_CHECKPOINT_SECS)?;
     let wal_flush_interval_secs = parse_interval(&env, WAL_FLUSH_VAR, DEFAULT_WAL_FLUSH_SECS)?;
     let pause_on_lag_secs = parse_pause_on_lag(&env, DEFAULT_PAUSE_ON_LAG_SECS)?;
 
@@ -132,9 +131,9 @@ where
         return Ok(default);
     };
     let trimmed = raw.trim();
-    let parsed: i128 = trimmed.parse().map_err(|_| {
-        format!("{PAUSE_ON_LAG_VAR} must be a non-negative integer; got {raw:?}")
-    })?;
+    let parsed: i128 = trimmed
+        .parse()
+        .map_err(|_| format!("{PAUSE_ON_LAG_VAR} must be a non-negative integer; got {raw:?}"))?;
     if parsed < 0 {
         return Err(format!(
             "{PAUSE_ON_LAG_VAR} must be >= 0; got {parsed} (negative not allowed)"
@@ -161,8 +160,8 @@ where
             "{name} must be > 0; got {parsed} (zero/negative not allowed)"
         ));
     }
-    let as_u64 = u64::try_from(parsed)
-        .map_err(|_| format!("{name} exceeds u64 range; got {parsed}"))?;
+    let as_u64 =
+        u64::try_from(parsed).map_err(|_| format!("{name} exceeds u64 range; got {parsed}"))?;
     Ok(as_u64)
 }
 
@@ -334,7 +333,10 @@ mod tests {
         .into_iter()
         .collect();
         let err = from_env(lookup(&map)).unwrap_err();
-        assert!(err.contains("REDDB_BACKUP_CHECKPOINT_INTERVAL_SECS"), "{err}");
+        assert!(
+            err.contains("REDDB_BACKUP_CHECKPOINT_INTERVAL_SECS"),
+            "{err}"
+        );
         assert!(err.contains("positive integer"), "{err}");
     }
 
@@ -351,7 +353,10 @@ mod tests {
         .into_iter()
         .collect();
         let err = from_env(lookup(&map)).unwrap_err();
-        assert!(err.contains("REDDB_BACKUP_WAL_FLUSH_INTERVAL_SECS"), "{err}");
+        assert!(
+            err.contains("REDDB_BACKUP_WAL_FLUSH_INTERVAL_SECS"),
+            "{err}"
+        );
         assert!(err.contains("> 0"), "{err}");
     }
 
@@ -368,6 +373,9 @@ mod tests {
         .into_iter()
         .collect();
         let err = from_env(lookup(&map)).unwrap_err();
-        assert!(err.contains("REDDB_BACKUP_CHECKPOINT_INTERVAL_SECS"), "{err}");
+        assert!(
+            err.contains("REDDB_BACKUP_CHECKPOINT_INTERVAL_SECS"),
+            "{err}"
+        );
     }
 }

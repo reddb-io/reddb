@@ -12,7 +12,10 @@ use reddb_client::{JsonValue, ListOptions, Reddb, HELPER_SPEC_VERSION};
 
 #[tokio::main]
 async fn main() -> reddb_client::Result<()> {
-    println!("reddb-io-client {} — Helper Spec v{HELPER_SPEC_VERSION}", reddb_client::version());
+    println!(
+        "reddb-io-client {} — Helper Spec v{HELPER_SPEC_VERSION}",
+        reddb_client::version()
+    );
 
     let db = Reddb::connect("memory://").await?;
 
@@ -23,7 +26,10 @@ async fn main() -> reddb_client::Result<()> {
             &JsonValue::object([("name", JsonValue::string("Alice"))]),
         )
         .await?;
-    println!("insert → affected={} rid={:?}", inserted.affected, inserted.rid);
+    println!(
+        "insert → affected={} rid={:?}",
+        inserted.affected, inserted.rid
+    );
 
     let bulk = db
         .bulk_insert(
@@ -34,9 +40,14 @@ async fn main() -> reddb_client::Result<()> {
             ],
         )
         .await?;
-    println!("bulk_insert → {} rids (input order preserved)", bulk.rids.len());
+    println!(
+        "bulk_insert → {} rids (input order preserved)",
+        bulk.rids.len()
+    );
 
-    let rows = db.query_with("SELECT * FROM users WHERE name = $1", ("Alice",)).await?;
+    let rows = db
+        .query_with("SELECT * FROM users WHERE name = $1", ("Alice",))
+        .await?;
     println!("query_with → {} row(s)", rows.rows.len());
 
     // --- documents.* ------------------------------------------------------
@@ -51,17 +62,29 @@ async fn main() -> reddb_client::Result<()> {
         )
         .await?;
     db.documents()
-        .patch("events", &doc.rid, &JsonValue::object([("attempts", JsonValue::number(2.0))]))
+        .patch(
+            "events",
+            &doc.rid,
+            &JsonValue::object([("attempts", JsonValue::number(2.0))]),
+        )
         .await?;
     let recent = db
         .documents()
-        .list("events", ListOptions::new().filter("event_type = 'login'").limit(10))
+        .list(
+            "events",
+            ListOptions::new().filter("event_type = 'login'").limit(10),
+        )
         .await?;
-    println!("documents → patched rid {}, {} listed", doc.rid, recent.items.len());
+    println!(
+        "documents → patched rid {}, {} listed",
+        doc.rid,
+        recent.items.len()
+    );
 
     // --- kv.* (exact, un-normalised keys) ---------------------------------
     let kv = db.kv_collection("settings");
-    kv.set("characters:hansel", JsonValue::string("trail")).await?;
+    kv.set("characters:hansel", JsonValue::string("trail"))
+        .await?;
     let value = kv.get("characters:hansel").await?;
     println!("kv → characters:hansel = {value:?}");
 
@@ -69,7 +92,10 @@ async fn main() -> reddb_client::Result<()> {
     let queue = db.queue();
     queue.create("jobs").await?;
     queue
-        .push("jobs", &JsonValue::object([("kind", JsonValue::string("email"))]))
+        .push(
+            "jobs",
+            &JsonValue::object([("kind", JsonValue::string("email"))]),
+        )
         .await?;
     let popped = queue.pop("jobs").await?;
     println!("queues → popped {} job(s)", popped.items.len());
@@ -77,7 +103,8 @@ async fn main() -> reddb_client::Result<()> {
     // --- tx.* (imperative begin/commit) -----------------------------------
     db.query("CREATE TABLE ledger (entry TEXT)").await?;
     db.begin().await?;
-    db.query("INSERT INTO ledger (entry) VALUES ('opening')").await?;
+    db.query("INSERT INTO ledger (entry) VALUES ('opening')")
+        .await?;
     db.commit().await?;
     println!("tx → committed");
 

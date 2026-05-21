@@ -35,7 +35,7 @@ fn number_field(row: &reddb::storage::query::UnifiedRecord, field: &str) -> f64 
     }
 }
 
-fn json_field<'a>(row: &'a reddb::storage::query::UnifiedRecord, field: &str) -> JsonValue {
+fn json_field(row: &reddb::storage::query::UnifiedRecord, field: &str) -> JsonValue {
     match row.get(field) {
         Some(Value::Json(value)) => serde_json::from_slice(value)
             .unwrap_or_else(|err| panic!("expected {field} JSON to decode: {err}")),

@@ -161,8 +161,7 @@ fn write_registry(store: &UnifiedStore, collection: &str, reg: &SignerRegistry) 
         .allowed()
         .map(|pk| crate::serde_json::Value::String(hex_encode(pk)))
         .collect();
-    let history: Vec<crate::serde_json::Value> =
-        reg.history().iter().map(entry_to_json).collect();
+    let history: Vec<crate::serde_json::Value> = reg.history().iter().map(entry_to_json).collect();
     store.set_config_tree(
         &key(collection, ALLOWED_SUFFIX),
         &crate::serde_json::Value::String(crate::serde_json::Value::Array(allowed).to_string()),
@@ -187,7 +186,7 @@ fn read_latest_config(store: &UnifiedStore, full_key: &str) -> Option<Value> {
     // monotonic `EntityId` descending and take the first match to get
     // the most recent write.
     let mut all = manager.query_all(|_| true);
-    all.sort_by(|a, b| b.id.raw().cmp(&a.id.raw()));
+    all.sort_by_key(|b| std::cmp::Reverse(b.id.raw()));
     for entity in all {
         let crate::storage::unified::EntityData::Row(row) = &entity.data else {
             continue;
@@ -213,29 +212,27 @@ fn read_registry(store: &UnifiedStore, collection: &str) -> SignerRegistry {
         Some(Value::Text(s)) => s.to_string(),
         _ => "[]".to_string(),
     };
-    let parsed_allowed: Vec<[u8; SIGNER_PUBKEY_LEN]> = match crate::utils::json::parse_json(
-        &allowed_json,
-    ) {
-        Ok(v) => match crate::serde_json::Value::from(v) {
-            crate::serde_json::Value::Array(arr) => arr
-                .iter()
-                .filter_map(|v| v.as_str().and_then(hex_decode_32))
-                .collect(),
-            _ => Vec::new(),
-        },
-        Err(_) => Vec::new(),
-    };
-    let parsed_history: Vec<SignerHistoryEntry> = match crate::utils::json::parse_json(
-        &history_json,
-    ) {
-        Ok(v) => match crate::serde_json::Value::from(v) {
-            crate::serde_json::Value::Array(arr) => {
-                arr.iter().filter_map(entry_from_json).collect()
-            }
-            _ => Vec::new(),
-        },
-        Err(_) => Vec::new(),
-    };
+    let parsed_allowed: Vec<[u8; SIGNER_PUBKEY_LEN]> =
+        match crate::utils::json::parse_json(&allowed_json) {
+            Ok(v) => match crate::serde_json::Value::from(v) {
+                crate::serde_json::Value::Array(arr) => arr
+                    .iter()
+                    .filter_map(|v| v.as_str().and_then(hex_decode_32))
+                    .collect(),
+                _ => Vec::new(),
+            },
+            Err(_) => Vec::new(),
+        };
+    let parsed_history: Vec<SignerHistoryEntry> =
+        match crate::utils::json::parse_json(&history_json) {
+            Ok(v) => match crate::serde_json::Value::from(v) {
+                crate::serde_json::Value::Array(arr) => {
+                    arr.iter().filter_map(entry_from_json).collect()
+                }
+                _ => Vec::new(),
+            },
+            Err(_) => Vec::new(),
+        };
     SignerRegistry::from_persisted_parts(parsed_allowed, parsed_history)
 }
 
@@ -301,7 +298,11 @@ pub struct SignerColumn {
 /// goes into the canonical payload.
 pub fn split_signature_fields(
     fields: Vec<(String, Value)>,
-) -> (Option<SignerColumn>, Option<SignerColumn>, Vec<(String, Value)>) {
+) -> (
+    Option<SignerColumn>,
+    Option<SignerColumn>,
+    Vec<(String, Value)>,
+) {
     let mut pubkey: Option<SignerColumn> = None;
     let mut signature: Option<SignerColumn> = None;
     let mut residual: Vec<(String, Value)> = Vec::with_capacity(fields.len());
@@ -315,7 +316,10 @@ pub fn split_signature_fields(
                 _ => None,
             };
             if let Some(bytes) = bytes {
-                pubkey = Some(SignerColumn { raw_value: v, bytes });
+                pubkey = Some(SignerColumn {
+                    raw_value: v,
+                    bytes,
+                });
             }
             continue;
         }
@@ -326,7 +330,10 @@ pub fn split_signature_fields(
                 _ => None,
             };
             if let Some(bytes) = bytes {
-                signature = Some(SignerColumn { raw_value: v, bytes });
+                signature = Some(SignerColumn {
+                    raw_value: v,
+                    bytes,
+                });
             }
             continue;
         }
@@ -379,7 +386,10 @@ pub fn verify_row(
 pub fn map_error(err: SignedWriteError) -> crate::api::RedDBError {
     let body = match &err {
         SignedWriteError::MissingSignatureFields { fields } => {
-            format!("SignedWriteError:MissingSignatureFields:{}", fields.join(","))
+            format!(
+                "SignedWriteError:MissingSignatureFields:{}",
+                fields.join(",")
+            )
         }
         SignedWriteError::UnknownSigner { pubkey } => {
             format!("SignedWriteError:UnknownSigner:{}", hex_encode(pubkey))
@@ -468,8 +478,14 @@ mod tests {
     fn split_signature_fields_extracts_blob_columns() {
         let fields = vec![
             ("name".to_string(), Value::text("alice".to_string())),
-            (RESERVED_SIGNER_PUBKEY_COL.to_string(), Value::Blob(vec![0x11; 32])),
-            (RESERVED_SIGNATURE_COL.to_string(), Value::Blob(vec![0x22; 64])),
+            (
+                RESERVED_SIGNER_PUBKEY_COL.to_string(),
+                Value::Blob(vec![0x11; 32]),
+            ),
+            (
+                RESERVED_SIGNATURE_COL.to_string(),
+                Value::Blob(vec![0x22; 64]),
+            ),
         ];
         let (pk, sig, residual) = split_signature_fields(fields);
         assert_eq!(pk.as_ref().unwrap().bytes.len(), 32);

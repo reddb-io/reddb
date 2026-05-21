@@ -66,7 +66,13 @@ fn format_runtime_result(result: &RuntimeQueryResult) -> String {
             .result
             .records
             .first()
-            .map(|record| record.column_names().iter().map(|k| k.to_string()).collect())
+            .map(|record| {
+                record
+                    .column_names()
+                    .iter()
+                    .map(|k| k.to_string())
+                    .collect()
+            })
             .unwrap_or_default();
         columns.sort();
         columns

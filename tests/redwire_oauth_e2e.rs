@@ -333,7 +333,7 @@ fn parse_reason(payload: &[u8]) -> String {
 
 fn base64_url_no_pad(input: &[u8]) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     let chunks = input.chunks_exact(3);
     let rem = chunks.remainder();
     for c in chunks {

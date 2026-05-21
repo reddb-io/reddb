@@ -226,9 +226,7 @@ fn create_queue_with_dlq_and_max_attempts_parses() {
 
 #[test]
 fn create_queue_with_lock_deadline_and_in_flight_cap_parses() {
-    let q = parse_query(
-        "CREATE QUEUE tasks LOCK_DEADLINE_MS 45000 IN_FLIGHT_CAP_PER_GROUP 250",
-    );
+    let q = parse_query("CREATE QUEUE tasks LOCK_DEADLINE_MS 45000 IN_FLIGHT_CAP_PER_GROUP 250");
     match q {
         QueryExpr::CreateQueue(cq) => {
             assert_eq!(cq.name, "tasks");

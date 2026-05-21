@@ -152,7 +152,7 @@ pub fn edge_body() -> impl Strategy<Value = String> {
                     s.push_str(&format!("*{}..{}", lo, hi));
                 }
                 (Some(mn), None) => s.push_str(&format!("*{}", mn)),
-                (None, Some(_)) => s.push_str("*"),
+                (None, Some(_)) => s.push('*'),
                 (None, None) => {}
             }
             s.push(']');
@@ -366,8 +366,6 @@ pub fn any_valid_graph_stmt() -> impl Strategy<Value = String> {
 fn first_alias(node: &str) -> String {
     debug_assert!(node.starts_with('('));
     let body = &node[1..];
-    let end = body
-        .find(|c: char| c == ':' || c == ' ' || c == ')')
-        .unwrap_or(body.len());
+    let end = body.find([':', ' ', ')']).unwrap_or(body.len());
     body[..end].to_string()
 }
