@@ -32,7 +32,6 @@ fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn materialized_view_survives_restart() {
     let path = persistent_path("mv_persist_survives");
     cleanup(&path);
@@ -107,7 +106,6 @@ fn materialized_view_survives_restart() {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn drop_materialized_view_removes_persisted_descriptor() {
     let path = persistent_path("mv_persist_drop");
     cleanup(&path);
