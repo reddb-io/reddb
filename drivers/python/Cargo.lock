@@ -1831,7 +1831,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client"
-version = "1.2.0"
+version = "1.2.5"
 dependencies = [
  "reddb-io-client-connector",
  "reddb-io-grpc-proto",
@@ -1845,7 +1845,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client-connector"
-version = "1.2.0"
+version = "1.2.5"
 dependencies = [
  "reddb-io-grpc-proto",
  "tonic 0.14.6",
@@ -1853,7 +1853,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-grpc-proto"
-version = "1.2.0"
+version = "1.2.5"
 dependencies = [
  "prost 0.14.3",
  "reddb-io-wire",
@@ -1867,7 +1867,7 @@ dependencies = [
 name = "reddb-io-python"
 version = "1.2.5"
 dependencies = [
- "prost 0.13.5",
+ "prost 0.14.3",
  "pyo3",
  "reddb-io",
  "rustls",
@@ -1881,7 +1881,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-server"
-version = "1.2.0"
+version = "1.2.5"
 dependencies = [
  "aes-gcm",
  "blake3",
@@ -1925,7 +1925,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-wire"
-version = "1.2.0"
+version = "1.2.5"
 dependencies = [
  "url",
  "zstd",
