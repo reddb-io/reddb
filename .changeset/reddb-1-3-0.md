@@ -1,8 +1,8 @@
 ---
-"@reddb-io/cli": patch
+"@reddb-io/cli": minor
 ---
 
-Ship the work merged since v1.2.5.
+Promote the work merged since v1.2.5 to a minor release (1.3.0): new Analytics primitives + window functions are feature-level, so this is a minor, not a patch.
 
 **HTTP transport hardening (#569).** Bounded handler concurrency via a deep
 `HttpConnectionLimiter` (hard cap → `503 Service Unavailable` + `Retry-After`

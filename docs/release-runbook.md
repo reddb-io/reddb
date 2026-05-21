@@ -379,3 +379,47 @@ Apple Silicon assets ship side-by-side.
 
 Older releases (`v1.0.5` and earlier): Intel Mac users must either run
 the aarch64 binary under Rosetta 2 or build from source.
+
+---
+
+## Version integrity (one version across every target)
+
+RedDB publishes the **same version** to every destination — the engine crate
+and workspace crates (crates.io), the `@reddb-io/*` npm packages, `drivers/python`
+(PyPI), `drivers/bun`, the internal support packages, and the GHCR container
+images. One number, locked in step.
+
+### Source of truth + propagation
+
+- Root `package.json` `version` is the source of truth.
+- `scripts/sync-version.js` propagates it to every manifest (root + crate
+  `Cargo.toml`s, `Cargo.lock` path versions, `drivers/python/{Cargo,pyproject}.toml`,
+  `drivers/bun`, `packages/internal-*`). It runs automatically via `release:version`.
+- The **container** tag is not a committed file: `release.yml` tags
+  `ghcr.io/reddb-io/reddb:v<package_version>` from the same resolved version, and
+  the post-build smoke test runs `docker run … version` to confirm the binary
+  reports it.
+- `scripts/check-versions.sh` verifies all of the above match, and is run by the
+  `version-integrity` CI job on every PR/push **and** as a hard gate in `release.yml`.
+
+### Cutting a release — the ONLY supported path
+
+1. Land your work on `main` with a changeset describing the bump:
+   `pnpm changeset` → pick **patch / minor / major** (this is the deliberate,
+   first-class choice of bump type) → commit the `.changeset/*.md`.
+2. The `changesets.yml` workflow opens (or updates) a **"Version Packages" PR**.
+   That PR runs `release:version` (= `changeset version` + `sync-version.js`), so
+   the bump + regenerated CHANGELOG + every synced manifest are **committed back
+   to `main`** when you merge it.
+3. Merging the Version PR pushes the `v<version>` tag, which triggers `release.yml`
+   to build binaries and publish to npm / crates.io / PyPI / GHCR.
+
+### Do NOT cut releases via a manual `release.yml` dispatch with a `version` input
+
+That path bumps the version **in-CI only** and never commits it back to `main`,
+so the committed manifests go stale while published tags march ahead. This is
+exactly how `main` ended up at `1.2.0` while `v1.2.5` was the latest published
+tag. The `version-integrity` drift guard now fails CI whenever the committed
+version falls behind the latest published `vX.Y.Z` tag — if you see that failure,
+the fix is to land the missing version bump via the Changesets Version PR, not to
+re-dispatch a manual release.

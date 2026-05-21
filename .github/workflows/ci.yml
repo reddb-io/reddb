@@ -103,6 +103,29 @@ jobs:
           done
           echo "OK: every lint category was triggered by the fixture"
 
+  version-integrity:
+    # Locks every publish target (engine crate, workspace crates, Cargo.lock,
+    # @reddb-io/* npm packages, drivers/python, bun, internal packages) to one
+    # version, AND fails if the committed version has fallen BEHIND the latest
+    # published vX.Y.Z tag — the drift that happens when a release is cut via a
+    # manual release.yml dispatch instead of the Changesets "Version Packages"
+    # PR. release.yml runs this same script as a hard gate at publish time; here
+    # it gives the feedback on every normal PR/push. Needs full tag history
+    # (fetch-depth: 0) so the drift guard can see the published tags.
+    name: Version integrity
+    needs: gate
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Check version lock-step + drift guard
+        run: bash scripts/check-versions.sh
+
   contract-matrix:
     # Issue #567 — public-surface contract matrix gate. Fails the build
     # (and, on the release workflow, blocks the release) when any cell
