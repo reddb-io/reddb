@@ -10,14 +10,78 @@
 //!
 //! Hard cap for this slice is `(2 * available_parallelism).clamp(8, 256)`.
 //! Config knobs (env / CLI) land in slice 5 per the parent brief.
+//!
+//! Beyond admission, the limiter keeps a single rejection counter and an
+//! injectable monotonic clock (issue #620). Every `try_acquire` that hits
+//! the cap bumps the counter; `observe()` snapshots-and-resets it against
+//! the elapsed wall to derive a rejection rate. v1 ships a constant
+//! `Retry-After`; the rate signal is what a future v2 will use to make
+//! `Retry-After` adaptive. The clock is a trait so tests drive the rate
+//! deterministically without sleeping.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// Monotonic clock abstraction. Production uses [`SystemMonotonicClock`]
+/// (a process-start `Instant` baseline); tests inject a fake that can be
+/// advanced by hand so the rejection-rate derivation is deterministic.
+pub trait MonotonicClock: Send + Sync + std::fmt::Debug {
+    /// Nanoseconds elapsed since an arbitrary, fixed epoch. Only
+    /// differences are meaningful; the absolute value carries no meaning.
+    fn now_nanos(&self) -> u64;
+}
+
+/// Real monotonic clock: nanoseconds since the limiter's construction.
+#[derive(Debug)]
+pub struct SystemMonotonicClock {
+    base: Instant,
+}
+
+impl SystemMonotonicClock {
+    pub fn new() -> Self {
+        Self {
+            base: Instant::now(),
+        }
+    }
+}
+
+impl Default for SystemMonotonicClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MonotonicClock for SystemMonotonicClock {
+    fn now_nanos(&self) -> u64 {
+        // u64 nanos overflows ~584 years after construction; safe.
+        self.base.elapsed().as_nanos() as u64
+    }
+}
+
+/// Snapshot returned by [`HttpConnectionLimiter::observe`]: the rejections
+/// accumulated since the previous observe, the wall elapsed across that
+/// window, and the derived rate. `rejections_per_sec` is `0.0` for a
+/// zero-length window (no time has passed) so callers never divide by
+/// zero.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LimiterObservation {
+    pub rejected: u64,
+    pub elapsed: Duration,
+    pub rejections_per_sec: f64,
+}
 
 #[derive(Debug)]
 struct Inner {
     cap: usize,
     in_use: AtomicUsize,
+    /// Rejections accumulated since the last `observe()`. Bumped on every
+    /// `try_acquire` that finds the cap full; reset to 0 by `observe()`.
+    rejected: AtomicU64,
+    /// Clock reading (nanos) captured at the last `observe()`, used as the
+    /// lower bound of the next window. Seeded at construction.
+    last_observe_nanos: AtomicU64,
+    clock: Arc<dyn MonotonicClock>,
 }
 
 /// Permit handle — owns one slot of the limiter. Dropping the permit
@@ -46,11 +110,22 @@ pub struct HttpConnectionLimiter {
 
 impl HttpConnectionLimiter {
     pub fn new(cap: usize) -> Self {
+        Self::with_clock(cap, Arc::new(SystemMonotonicClock::new()))
+    }
+
+    /// Construct with an explicit clock. Production uses [`new`], which
+    /// wires the real monotonic clock; tests inject a fake to drive the
+    /// rejection-rate derivation deterministically.
+    pub fn with_clock(cap: usize, clock: Arc<dyn MonotonicClock>) -> Self {
         assert!(cap > 0, "HttpConnectionLimiter cap must be positive");
+        let base = clock.now_nanos();
         Self {
             inner: Arc::new(Inner {
                 cap,
                 in_use: AtomicUsize::new(0),
+                rejected: AtomicU64::new(0),
+                last_observe_nanos: AtomicU64::new(base),
+                clock,
             }),
         }
     }
@@ -78,6 +153,10 @@ impl HttpConnectionLimiter {
         let mut observed = self.inner.in_use.load(Ordering::Relaxed);
         loop {
             if observed >= self.inner.cap {
+                // Cap full: count the rejection for the rate signal. This
+                // is the only mutation on the reject path — no alloc, no
+                // lock, no parsing, as the accept loop requires.
+                self.inner.rejected.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
             match self.inner.in_use.compare_exchange_weak(
@@ -95,6 +174,36 @@ impl HttpConnectionLimiter {
             }
         }
     }
+
+    /// Rejections accumulated since the last [`observe`](Self::observe).
+    /// Read-only: it accumulates monotonically within a window and is
+    /// reset only by `observe`.
+    pub fn rejected_since_last_observe(&self) -> u64 {
+        self.inner.rejected.load(Ordering::Relaxed)
+    }
+
+    /// Snapshot-and-reset the rejection window: returns the rejections
+    /// since the previous `observe` together with the elapsed wall and the
+    /// derived per-second rate, then resets the counter and arms the next
+    /// window at the current clock reading. `rejections_per_sec` is `0.0`
+    /// when no time has elapsed (avoids a divide-by-zero on back-to-back
+    /// observes).
+    pub fn observe(&self) -> LimiterObservation {
+        let now = self.inner.clock.now_nanos();
+        let last = self.inner.last_observe_nanos.swap(now, Ordering::Relaxed);
+        let rejected = self.inner.rejected.swap(0, Ordering::Relaxed);
+        let elapsed_nanos = now.saturating_sub(last);
+        let rejections_per_sec = if elapsed_nanos == 0 {
+            0.0
+        } else {
+            rejected as f64 * 1_000_000_000.0 / elapsed_nanos as f64
+        };
+        LimiterObservation {
+            rejected,
+            elapsed: Duration::from_nanos(elapsed_nanos),
+            rejections_per_sec,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -103,6 +212,25 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
     use std::thread;
+
+    /// Hand-advanced clock for deterministic rejection-rate tests.
+    #[derive(Debug, Default)]
+    struct FakeClock {
+        nanos: AtomicU64,
+    }
+
+    impl FakeClock {
+        fn advance(&self, d: Duration) {
+            self.nanos
+                .fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
+        }
+    }
+
+    impl MonotonicClock for FakeClock {
+        fn now_nanos(&self) -> u64 {
+            self.nanos.load(Ordering::Relaxed)
+        }
+    }
 
     #[test]
     fn cap_and_current_track_observed_state() {
@@ -199,5 +327,67 @@ mod tests {
         let limiter = HttpConnectionLimiter::with_default_cap();
         assert!(limiter.cap() >= 8);
         assert!(limiter.cap() <= 256);
+    }
+
+    #[test]
+    fn rejected_accumulates_within_window_and_resets_on_observe() {
+        let limiter = HttpConnectionLimiter::new(1);
+        let _held = limiter.try_acquire().expect("first slot");
+
+        assert_eq!(limiter.rejected_since_last_observe(), 0);
+        // Each over-cap acquire bumps the counter monotonically.
+        for expected in 1..=4 {
+            assert!(limiter.try_acquire().is_none());
+            assert_eq!(limiter.rejected_since_last_observe(), expected);
+        }
+
+        // observe() drains the window; the counter resets.
+        let obs = limiter.observe();
+        assert_eq!(obs.rejected, 4);
+        assert_eq!(limiter.rejected_since_last_observe(), 0);
+
+        // A subsequent observe with no rejections reports zero.
+        assert!(limiter.try_acquire().is_none());
+        assert_eq!(limiter.observe().rejected, 1);
+        assert_eq!(limiter.observe().rejected, 0);
+    }
+
+    #[test]
+    fn fake_clock_rejection_rate_derivation() {
+        let clock = Arc::new(FakeClock::default());
+        let limiter = HttpConnectionLimiter::with_clock(1, clock.clone());
+        let _held = limiter.try_acquire().expect("first slot");
+
+        // 10 rejections across a 2s window -> 5 rejections/sec.
+        for _ in 0..10 {
+            assert!(limiter.try_acquire().is_none());
+        }
+        clock.advance(Duration::from_secs(2));
+        let obs = limiter.observe();
+        assert_eq!(obs.rejected, 10);
+        assert_eq!(obs.elapsed, Duration::from_secs(2));
+        assert!((obs.rejections_per_sec - 5.0).abs() < 1e-9);
+
+        // Next window: 3 rejections across 500ms -> 6 rejections/sec.
+        for _ in 0..3 {
+            assert!(limiter.try_acquire().is_none());
+        }
+        clock.advance(Duration::from_millis(500));
+        let obs = limiter.observe();
+        assert_eq!(obs.rejected, 3);
+        assert!((obs.rejections_per_sec - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn observe_with_zero_elapsed_reports_zero_rate_not_nan() {
+        let clock = Arc::new(FakeClock::default());
+        let limiter = HttpConnectionLimiter::with_clock(1, clock.clone());
+        let _held = limiter.try_acquire().expect("first slot");
+        assert!(limiter.try_acquire().is_none());
+        // No clock advance: back-to-back observe must not divide by zero.
+        let obs = limiter.observe();
+        assert_eq!(obs.elapsed, Duration::ZERO);
+        assert_eq!(obs.rejected, 1);
+        assert_eq!(obs.rejections_per_sec, 0.0);
     }
 }
