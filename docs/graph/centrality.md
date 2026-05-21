@@ -2,6 +2,36 @@
 
 Centrality algorithms measure the importance of nodes in a graph. RedDB supports five centrality measures.
 
+## Default row cap
+
+The SQL form `GRAPH CENTRALITY` applies an **implicit top-100 cap** when no
+`LIMIT` is supplied — it returns only the 100 highest-scoring nodes, silently,
+with no `truncated` flag. This is the historical default (`top_k = 100`).
+
+This bites when centrality is used to resolve every node, for example to build
+a `label → node_id` map for the full graph: on a graph with thousands of nodes
+the response only carries 100 rows, so downstream lookups report results like
+`unresolved N node ids` and it looks like a data bug when the engine is
+behaving as designed.
+
+To page through more (or all) nodes, pass an explicit `LIMIT`:
+
+```sql
+-- Default: top 100 nodes only
+GRAPH CENTRALITY ALGORITHM pagerank
+
+-- Full graph: cap at least as large as the node count
+GRAPH CENTRALITY ALGORITHM pagerank LIMIT 100000
+
+-- Metadata only (no rows)
+GRAPH CENTRALITY ALGORITHM pagerank LIMIT 0
+```
+
+The HTTP form (`POST /graph/analytics/centrality`) has its own cap: the
+`top_k` body field, which defaults to **25** when omitted. Raise it the same
+way — pass `{"algorithm": "pagerank", "top_k": 100000}` for full-graph
+resolution.
+
 ## Degree Centrality
 
 Counts the number of connections for each node.
