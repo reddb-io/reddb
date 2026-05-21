@@ -104,6 +104,37 @@ pub(crate) struct QueueMessageView {
     pub(crate) max_attempts: u32,
 }
 
+/// Result of a delivering lifecycle method ([`QueueLifecycle::group_read`],
+/// [`QueueLifecycle::claim_delivering`]) — the exact column projection the
+/// legacy `GROUP READ` / `CLAIM` commands return to clients today
+/// (`message_id, payload, consumer, delivery_count`). Unlike [`Delivery`],
+/// which exposes only the opaque `delivery_id` + payload, this surfaces:
+///
+/// - the entity `message_id` clients key on (NOT the opaque `delivery_id`),
+/// - the `consumer` echoed back (the lifecycle store keys pending by
+///   consumer *group*, not consumer, so the value is the caller-supplied
+///   consumer threaded straight through — matching the legacy projection),
+/// - the `delivery_count` after this delivery's bump.
+///
+/// Mirrors the legacy `queue_delivery::DeliveredMessage` so the eventual
+/// call-site flip (PRD #527) preserves the client-visible columns exactly.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DeliveredMessage {
+    pub(crate) message_id: MessageId,
+    pub(crate) payload: Value,
+    pub(crate) consumer: String,
+    pub(crate) delivery_count: u32,
+}
+
+/// Internal carrier for the shared claim loop ([`QueueLifecycle::claim_inner`]):
+/// the opaque handle (consumed by the `Vec<DeliveryId>`-returning
+/// [`QueueLifecycle::claim`]) alongside the client-shaped projection
+/// (consumed by [`QueueLifecycle::claim_delivering`]).
+struct ClaimedDelivery {
+    delivery_id: DeliveryId,
+    message: DeliveredMessage,
+}
+
 /// WORK-mode queue lifecycle.
 pub(crate) struct QueueLifecycle<S: QueueStore> {
     store: S,
@@ -192,6 +223,88 @@ impl<S: QueueStore> QueueLifecycle<S> {
             out.push(Delivery {
                 delivery_id,
                 payload,
+            });
+        }
+        if !out.is_empty() {
+            if let Some(telemetry) = self.telemetry.as_ref() {
+                telemetry.record_delivered(
+                    queue,
+                    group,
+                    self.config.mode.as_str(),
+                    out.len() as u64,
+                );
+            }
+        }
+        Ok(out)
+    }
+
+    /// Reserve up to `count` available messages for `(group, consumer)`,
+    /// bump each one's `delivery_count`, and return the legacy `GROUP READ`
+    /// projection (`message_id, payload, consumer, delivery_count`).
+    ///
+    /// This is the delivering counterpart to [`deliver`]: same
+    /// lazy-reclaim-then-reserve flow, but it additionally increments the
+    /// per-message attempt counter (WORK) and surfaces the entity
+    /// `message_id`, echoed `consumer`, and `delivery_count` columns
+    /// clients see today, so the eventual call-site flip preserves the
+    /// wire shape exactly. Mirrors `queue_delivery::read_messages`:
+    ///
+    /// - WORK: `delivery_count` is the bumped attempt counter; FANOUT:
+    ///   each delivery is the group's first, so `delivery_count` is always
+    ///   `1` (matching the legacy `if mode == Fanout { 1 } else { increment }`).
+    /// - a message whose bump pushes `delivery_count` past
+    ///   `read_max_attempts` is routed through retirement (DLQ when
+    ///   `LifecycleConfig::dlq_target` is set, else dropped) and is NOT
+    ///   returned — and does not consume a `count` slot, exactly as the
+    ///   legacy read-path auto-DLQ does.
+    ///
+    /// [`deliver`]: Self::deliver
+    pub(crate) fn group_read(
+        &self,
+        txn: &QueueTxn,
+        queue: &str,
+        group: &str,
+        consumer: &str,
+        count: usize,
+    ) -> Result<Vec<DeliveredMessage>> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let now = self.clock.now();
+        self.store.reclaim_expired(txn, queue, now)?;
+        let available = match self.config.mode {
+            QueueMode::Work => self.store.available_messages(queue, QueueSide::Left),
+            QueueMode::Fanout => self
+                .store
+                .available_messages_for_group(queue, group, QueueSide::Left),
+        };
+        let mut out = Vec::with_capacity(count.min(available.len()));
+        for message_id in available {
+            if out.len() >= count {
+                break;
+            }
+            let deadline = now + self.config.lock_duration;
+            let delivery_id = self.store.mark_pending(txn, queue, message_id, group, deadline)?;
+            // WORK counts every (re)delivery against the persistent
+            // attempt budget; FANOUT hands each group its own first copy.
+            let delivery_count = match self.config.mode {
+                QueueMode::Work => self.store.bump_attempt(txn, &delivery_id)?.attempts,
+                QueueMode::Fanout => 1,
+            };
+            let max_attempts = self.store.read_max_attempts(queue, message_id);
+            if delivery_count > max_attempts {
+                self.retire_exhausted(txn, &delivery_id)?;
+                continue;
+            }
+            let payload = self
+                .store
+                .read_message(queue, message_id)
+                .ok_or_else(|| QueueStoreError::UnknownQueue(queue.to_string()))?;
+            out.push(DeliveredMessage {
+                message_id,
+                payload,
+                consumer: consumer.to_string(),
+                delivery_count,
             });
         }
         if !out.is_empty() {
@@ -355,10 +468,56 @@ impl<S: QueueStore> QueueLifecycle<S> {
     pub(crate) fn claim(
         &self,
         queue: &str,
-        _new_consumer: &str,
+        new_consumer: &str,
         min_idle_ms: u64,
         txn: &QueueTxn,
     ) -> Result<Vec<DeliveryId>> {
+        Ok(self
+            .claim_inner(queue, new_consumer, min_idle_ms, txn)?
+            .into_iter()
+            .map(|c| c.delivery_id)
+            .collect())
+    }
+
+    /// Delivering counterpart to [`claim`]: identical steal-after-min-idle
+    /// semantics, but returns the legacy `CLAIM` projection
+    /// (`message_id, payload, consumer, delivery_count`) instead of opaque
+    /// delivery handles. `new_consumer` is echoed into each returned
+    /// `consumer` field (the lifecycle store keys pending by group, not
+    /// consumer, so the value is threaded straight through — matching the
+    /// legacy `queue_delivery::claim_messages` projection). The
+    /// `delivery_count` is the attempt counter after the claim's bump.
+    ///
+    /// [`claim`]: Self::claim
+    pub(crate) fn claim_delivering(
+        &self,
+        queue: &str,
+        new_consumer: &str,
+        min_idle_ms: u64,
+        txn: &QueueTxn,
+    ) -> Result<Vec<DeliveredMessage>> {
+        Ok(self
+            .claim_inner(queue, new_consumer, min_idle_ms, txn)?
+            .into_iter()
+            .map(|c| c.message)
+            .collect())
+    }
+
+    /// Shared steal-after-min-idle loop powering both [`claim`] (handles
+    /// only) and [`claim_delivering`] (full projection). Selects pending
+    /// deliveries whose lock has expired beyond `min_idle_ms`, bumps each
+    /// attempt counter, retires the over-budget ones (DLQ/drop, not
+    /// returned), and refreshes the lock on the survivors.
+    ///
+    /// [`claim`]: Self::claim
+    /// [`claim_delivering`]: Self::claim_delivering
+    fn claim_inner(
+        &self,
+        queue: &str,
+        new_consumer: &str,
+        min_idle_ms: u64,
+        txn: &QueueTxn,
+    ) -> Result<Vec<ClaimedDelivery>> {
         let now = self.clock.now();
         let threshold = Duration::from_millis(min_idle_ms);
         // "Expired beyond `min_idle_ms`" means `now >= deadline + threshold`.
@@ -383,34 +542,53 @@ impl<S: QueueStore> QueueLifecycle<S> {
                 .store
                 .read_max_attempts(&bumped.queue, bumped.message_id);
             if bumped.attempts > max_attempts {
-                match &self.config.dlq_target {
-                    Some(target) => {
-                        let payload = self
-                            .store
-                            .read_pending_payload(&entry.delivery_id)
-                            .ok_or_else(|| {
-                                QueueStoreError::UnknownDelivery(entry.delivery_id.clone())
-                            })?;
-                        self.retire(txn, &entry.delivery_id)?;
-                        self.store.enqueue_dlq(txn, target, payload)?;
-                        self.record(RetirementOutcome::MovedToDlq(target.clone()));
-                    }
-                    None => {
-                        self.retire(txn, &entry.delivery_id)?;
-                        self.record(RetirementOutcome::Dropped);
-                    }
-                }
+                self.retire_exhausted(txn, &entry.delivery_id)?;
                 continue;
             }
+            let payload = self
+                .store
+                .read_pending_payload(&entry.delivery_id)
+                .ok_or_else(|| QueueStoreError::UnknownDelivery(entry.delivery_id.clone()))?;
             // Refresh the lock on the same (queue, message_id, group) key.
             // `mark_pending` is idempotent on that key — it returns the
             // existing delivery_id and refreshes the deadline.
             let new_deadline = now + self.config.lock_duration;
             self.store
                 .mark_pending(txn, &entry.queue, entry.message_id, &entry.group, new_deadline)?;
-            claimed.push(entry.delivery_id);
+            claimed.push(ClaimedDelivery {
+                delivery_id: entry.delivery_id,
+                message: DeliveredMessage {
+                    message_id: entry.message_id,
+                    payload,
+                    consumer: new_consumer.to_string(),
+                    delivery_count: bumped.attempts,
+                },
+            });
         }
         Ok(claimed)
+    }
+
+    /// Route an over-budget pending delivery through retirement: move to the
+    /// configured DLQ when `LifecycleConfig::dlq_target` is set, else drop.
+    /// Records the outcome for the test tap. Shared by the read-path and
+    /// claim-path max-attempts gates so both retire identically.
+    fn retire_exhausted(&self, txn: &QueueTxn, delivery_id: &str) -> Result<()> {
+        match &self.config.dlq_target {
+            Some(target) => {
+                let payload = self
+                    .store
+                    .read_pending_payload(delivery_id)
+                    .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
+                self.retire(txn, delivery_id)?;
+                self.store.enqueue_dlq(txn, target, payload)?;
+                self.record(RetirementOutcome::MovedToDlq(target.clone()));
+            }
+            None => {
+                self.retire(txn, delivery_id)?;
+                self.record(RetirementOutcome::Dropped);
+            }
+        }
+        Ok(())
     }
 
     /// Atomically remove every pending and available message from
@@ -1349,5 +1527,241 @@ mod tests {
             lc.read(&id, &QueueTxn::new()).is_none(),
             "retired delivery must not be readable",
         );
+    }
+
+    // Issue #626 — group_read + claim_delivering (consumer/delivery_count
+    // parity with the legacy GROUP READ / CLAIM projections).
+
+    #[test]
+    fn group_read_returns_legacy_projection_in_work_mode() {
+        // Field set must equal the legacy GROUP READ projection:
+        // message_id, payload, consumer, delivery_count.
+        let lc = lifecycle(store_with(&[(1, "first"), (2, "second")]));
+        let got = lc
+            .group_read(&QueueTxn::new(), "q", "workers", "consumer-1", 2)
+            .expect("group_read");
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            got[0],
+            DeliveredMessage {
+                message_id: 1,
+                payload: Value::text("first"),
+                consumer: "consumer-1".to_string(),
+                delivery_count: 1,
+            },
+        );
+        assert_eq!(
+            got[1],
+            DeliveredMessage {
+                message_id: 2,
+                payload: Value::text("second"),
+                consumer: "consumer-1".to_string(),
+                delivery_count: 1,
+            },
+        );
+    }
+
+    #[test]
+    fn group_read_message_id_is_entity_id_not_opaque_delivery_id() {
+        // The seeded entity message id (7) must surface verbatim — the
+        // opaque base32 delivery handle must never leak into message_id.
+        let lc = lifecycle(store_with(&[(7, "payload")]));
+        let got = lc
+            .group_read(&QueueTxn::new(), "q", "workers", "c", 1)
+            .expect("group_read");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].message_id, 7);
+    }
+
+    #[test]
+    fn group_read_count_zero_and_unknown_queue_are_empty() {
+        let lc = lifecycle(store_with(&[(1, "a")]));
+        assert!(lc
+            .group_read(&QueueTxn::new(), "q", "workers", "c", 0)
+            .expect("zero")
+            .is_empty());
+        let empty = QueueLifecycle::new(InMemoryQueueStore::new(), LifecycleConfig::default());
+        assert!(empty
+            .group_read(&QueueTxn::new(), "missing", "workers", "c", 5)
+            .expect("missing")
+            .is_empty());
+    }
+
+    #[test]
+    fn group_read_work_redelivery_bumps_delivery_count() {
+        // WORK counts each (re)delivery against the persistent attempt
+        // budget — mirroring the legacy `increment_queue_attempts`. A
+        // reclaim-then-reread must hand back the same message_id with an
+        // incremented delivery_count.
+        let clock = Arc::new(TestClock::new());
+        let lc = QueueLifecycle::with_clock(
+            store_with(&[(1, "only")]),
+            config_with_lock(Duration::from_millis(100)),
+            clock.clone() as Arc<dyn Clock>,
+        );
+        let first = lc
+            .group_read(&QueueTxn::new(), "q", "workers", "c1", 1)
+            .expect("first");
+        assert_eq!(first[0].delivery_count, 1);
+
+        clock.advance(Duration::from_millis(150));
+        let second = lc
+            .group_read(&QueueTxn::new(), "q", "workers", "c2", 1)
+            .expect("second");
+        assert_eq!(second[0].message_id, 1);
+        assert_eq!(second[0].consumer, "c2", "consumer echoes the latest reader");
+        assert_eq!(
+            second[0].delivery_count, 2,
+            "redelivery bumps the persistent attempt counter",
+        );
+    }
+
+    #[test]
+    fn group_read_fanout_delivery_count_is_one_per_group() {
+        // FANOUT: each group's read is its own first delivery, so
+        // delivery_count is always 1 (legacy `if mode == Fanout { 1 }`).
+        let lc = QueueLifecycle::new(store_with(&[(1, "shared")]), fanout_config());
+        let a = lc
+            .group_read(&QueueTxn::new(), "q", "subs.a", "c-a", 1)
+            .expect("read a");
+        let b = lc
+            .group_read(&QueueTxn::new(), "q", "subs.b", "c-b", 1)
+            .expect("read b");
+        assert_eq!(a[0].delivery_count, 1);
+        assert_eq!(a[0].consumer, "c-a");
+        assert_eq!(b[0].delivery_count, 1);
+        assert_eq!(b[0].consumer, "c-b");
+        // Both groups see the same entity message.
+        assert_eq!(a[0].message_id, 1);
+        assert_eq!(b[0].message_id, 1);
+    }
+
+    #[test]
+    fn group_read_routes_over_budget_message_to_dlq_without_returning_it() {
+        // max=1: the first read's bump makes delivery_count 1 (delivered).
+        // After a reclaim, the second read bumps to 2 (> max) — the message
+        // is routed to the DLQ and NOT returned, mirroring the legacy
+        // read-path auto-DLQ.
+        let clock = Arc::new(TestClock::new());
+        let store = store_with(&[(1, "doomed")]);
+        store.seed_max_attempts("q", 1, 1);
+        let lc = QueueLifecycle::with_clock(
+            store,
+            LifecycleConfig {
+                lock_duration: Duration::from_millis(100),
+                dlq_target: Some("q.dlq".to_string()),
+                ..LifecycleConfig::default()
+            },
+            clock.clone() as Arc<dyn Clock>,
+        );
+        let first = lc
+            .group_read(&QueueTxn::new(), "q", "workers", "c", 1)
+            .expect("first");
+        assert_eq!(first[0].delivery_count, 1);
+
+        clock.advance(Duration::from_millis(150));
+        let second = lc
+            .group_read(&QueueTxn::new(), "q", "workers", "c", 1)
+            .expect("second");
+        assert!(second.is_empty(), "over-budget message must not be returned");
+        assert_eq!(
+            lc.recorded_outcomes(),
+            vec![RetirementOutcome::MovedToDlq("q.dlq".to_string())],
+        );
+        let dlq = lc.store_ref().dlq_snapshot();
+        assert_eq!(dlq.len(), 1);
+        assert_eq!(dlq[0].original, Value::text("doomed"));
+    }
+
+    #[test]
+    fn claim_delivering_returns_legacy_projection_with_new_consumer() {
+        // Field set must equal the legacy CLAIM projection:
+        // message_id, payload, consumer, delivery_count. The new consumer
+        // is echoed; delivery_count is the post-bump attempt count.
+        let clock = Arc::new(TestClock::new());
+        let store = store_with(&[(1, "payload")]);
+        store.seed_max_attempts("q", 1, 10);
+        let lc = lifecycle_with_clock(
+            store,
+            LifecycleConfig {
+                lock_duration: Duration::from_millis(100),
+                ..LifecycleConfig::default()
+            },
+            clock.clone(),
+        );
+        // Deliver (no bump) then expire so the delivery is claimable.
+        let _ = lc.deliver(&QueueTxn::new(), "q", "workers", 1).expect("deliver");
+        clock.advance(Duration::from_millis(500));
+
+        let claimed = lc
+            .claim_delivering("q", "consumer-z", 100, &QueueTxn::new())
+            .expect("claim_delivering");
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(
+            claimed[0],
+            DeliveredMessage {
+                message_id: 1,
+                payload: Value::text("payload"),
+                consumer: "consumer-z".to_string(),
+                delivery_count: 1,
+            },
+        );
+    }
+
+    #[test]
+    fn claim_delivering_and_claim_agree_on_which_deliveries_are_stolen() {
+        // The handle-returning claim and the projection-returning
+        // claim_delivering share one loop — non-expired deliveries are
+        // skipped by both.
+        let clock = Arc::new(TestClock::new());
+        let store = store_with(&[(1, "a")]);
+        let lc = lifecycle_with_clock(
+            store,
+            LifecycleConfig {
+                lock_duration: Duration::from_secs(30),
+                ..LifecycleConfig::default()
+            },
+            clock.clone(),
+        );
+        let _ = lc.deliver(&QueueTxn::new(), "q", "workers", 1).expect("deliver");
+        clock.advance(Duration::from_secs(5));
+        // Still locked → neither variant claims.
+        assert!(lc.claim("q", "x", 0, &QueueTxn::new()).expect("handles").is_empty());
+        assert!(lc
+            .claim_delivering("q", "x", 0, &QueueTxn::new())
+            .expect("projection")
+            .is_empty());
+    }
+
+    #[test]
+    fn claim_delivering_skips_exhausted_delivery() {
+        // max=1: first claim bumps to 1 (returned); second claim bumps to
+        // 2 (> max) → retired (dropped), not returned.
+        let clock = Arc::new(TestClock::new());
+        let store = store_with(&[(1, "payload")]);
+        store.seed_max_attempts("q", 1, 1);
+        let lc = lifecycle_with_clock(
+            store,
+            LifecycleConfig {
+                lock_duration: Duration::from_millis(100),
+                ..LifecycleConfig::default()
+            },
+            clock.clone(),
+        );
+        let _ = lc.deliver(&QueueTxn::new(), "q", "workers", 1).expect("deliver");
+
+        clock.advance(Duration::from_millis(500));
+        let c1 = lc
+            .claim_delivering("q", "cx", 100, &QueueTxn::new())
+            .expect("claim-1");
+        assert_eq!(c1.len(), 1);
+        assert_eq!(c1[0].delivery_count, 1);
+
+        clock.advance(Duration::from_millis(500));
+        let c2 = lc
+            .claim_delivering("q", "cy", 100, &QueueTxn::new())
+            .expect("claim-2");
+        assert!(c2.is_empty(), "exhausted delivery must not be returned");
+        assert_eq!(lc.recorded_outcomes(), vec![RetirementOutcome::Dropped]);
     }
 }
