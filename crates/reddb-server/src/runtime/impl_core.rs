@@ -6736,6 +6736,17 @@ impl RedDBRuntime {
                                 }
                                 None => outer_filter,
                             });
+                            // Keep the `Expr` form in lock-step with the
+                            // merged `Filter`. The executor prefers
+                            // `where_expr` and nulls `filter` when it is
+                            // present (see `execute_query_inner`), so a
+                            // stacked view whose outer predicate was only
+                            // merged into `filter` would silently drop that
+                            // predicate at eval time (#635).
+                            inner_tq.where_expr = inner_tq
+                                .filter
+                                .as_ref()
+                                .map(crate::storage::query::sql_lowering::filter_to_expr);
                         }
                         if let Some(outer_limit) = tq.limit {
                             inner_tq.limit = Some(match inner_tq.limit {
