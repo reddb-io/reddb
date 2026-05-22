@@ -39,9 +39,11 @@ help:
 	@echo "  make perf-bench    - Capture an insert_sequential flamegraph (requires relaxed kernel knobs; see docs/perf/perf-knobs.md)"
 	@echo ""
 	@echo "Release:"
-	@echo "  make patch         - Release bump + commit/tag (patch)"
-	@echo "  make minor         - Release bump + commit/tag (minor)"
-	@echo "  make major         - Release bump + commit/tag (major)"
+	@echo "  make patch         - Release bump + verify + commit/tag (patch)"
+	@echo "  make minor         - Release bump + verify + commit/tag (minor)"
+	@echo "  make major         - Release bump + verify + commit/tag (major)"
+	@echo "  make release-push  - Push main + tag to fire the release workflow"
+	@echo "  make release-verify VERSION=vX.Y.Z - Verify tag/release/assets are in sync"
 	@echo "  make install       - Install binaries from source with cargo"
 	@echo "  make publish       - Publish crate to crates.io"
 	@echo "  make publish-dry-run - Validate package for crates.io"
@@ -186,6 +188,13 @@ major:
 # after `make patch|minor|major` once the working tree is clean.
 release-push:
 	@git push --follow-tags
+
+# Verify a pushed release: tag ↔ GitHub Release ↔ downloadable assets ↔
+# npm are all in sync. Pass --wait to poll release.yml until it finishes.
+#   make release-verify VERSION=v1.4.0
+#   make release-verify VERSION=v1.4.0 WAIT=--wait
+release-verify:
+	@./scripts/verify-release.sh $(VERSION) $(WAIT)
 
 # Manual cargo publish (engine only). Prefer the GitHub release
 # workflow (triggered by tag push) for the canonical path. Use
