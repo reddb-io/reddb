@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::storage::query::ast::{
-    FieldRef, Filter, FusionStrategy, JoinQuery, OrderByClause, Projection, QueryExpr, TableQuery,
+    Expr, FieldRef, Filter, FusionStrategy, JoinQuery, OrderByClause, Projection, QueryExpr,
+    TableQuery,
 };
 use crate::storage::query::is_universal_entity_source as is_universal_query_source;
 use crate::storage::query::planner::stats_provider::CatalogStatsProvider;
@@ -309,14 +310,16 @@ pub(crate) fn filter_uses_document_path(filter: &Filter, query: &TableQuery) -> 
         Filter::CompareFields { left, right, .. } => {
             field_ref_uses_document_path(left, query) || field_ref_uses_document_path(right, query)
         }
-        Filter::CompareExpr { .. } => {
-            // Conservative: assume expression-shaped predicates may
-            // touch document-path fields. A future pass can walk the
-            // Expr tree looking for qualified Column references and
-            // return a precise answer, but for Week 4 we opt into
-            // the document-filter path rather than risking missed
-            // paths.
-            true
+        Filter::CompareExpr { lhs, rhs, .. } => {
+            // Walk both operand Expr trees for a column reference that
+            // actually traverses a document path (dotted name or a
+            // foreign-table qualifier). A predicate that touches only
+            // flat columns and scalars — e.g. the auto tenant-iso
+            // policy `col = CURRENT_TENANT()` — must NOT be routed to
+            // the document-path filter, whose per-row evaluator gates
+            // on `runtime_record_has_document_capability` and so drops
+            // every plain table row before the predicate runs.
+            expr_uses_document_path(lhs, query) || expr_uses_document_path(rhs, query)
         }
         Filter::And(left, right) | Filter::Or(left, right) => {
             filter_uses_document_path(left, query) || filter_uses_document_path(right, query)
@@ -348,6 +351,50 @@ pub(crate) fn field_ref_uses_document_path(field: &FieldRef, query: &TableQuery)
                     && query.alias.as_deref() != Some(table.as_str()))
         }
         _ => false,
+    }
+}
+
+/// Does any column reference inside this expression traverse a document
+/// path (a dotted column name or a foreign-table qualifier)? Used to
+/// decide whether a `Filter::CompareExpr` predicate needs the
+/// document-path filter executor. Flat-column / scalar predicates
+/// return `false` so they take the regular filter path. Opaque
+/// sub-expressions the planner can't introspect cheaply (correlated
+/// subqueries, window calls) stay conservative and return `true`.
+pub(crate) fn expr_uses_document_path(expr: &Expr, query: &TableQuery) -> bool {
+    match expr {
+        Expr::Literal { .. } | Expr::Parameter { .. } => false,
+        Expr::Column { field, .. } => field_ref_uses_document_path(field, query),
+        Expr::BinaryOp { lhs, rhs, .. } => {
+            expr_uses_document_path(lhs, query) || expr_uses_document_path(rhs, query)
+        }
+        Expr::UnaryOp { operand, .. } => expr_uses_document_path(operand, query),
+        Expr::Cast { inner, .. } => expr_uses_document_path(inner, query),
+        Expr::FunctionCall { args, .. } => args.iter().any(|a| expr_uses_document_path(a, query)),
+        Expr::Case {
+            branches, else_, ..
+        } => {
+            branches.iter().any(|(cond, val)| {
+                expr_uses_document_path(cond, query) || expr_uses_document_path(val, query)
+            }) || else_
+                .as_ref()
+                .is_some_and(|e| expr_uses_document_path(e, query))
+        }
+        Expr::IsNull { operand, .. } => expr_uses_document_path(operand, query),
+        Expr::InList { target, values, .. } => {
+            expr_uses_document_path(target, query)
+                || values.iter().any(|v| expr_uses_document_path(v, query))
+        }
+        Expr::Between {
+            target, low, high, ..
+        } => {
+            expr_uses_document_path(target, query)
+                || expr_uses_document_path(low, query)
+                || expr_uses_document_path(high, query)
+        }
+        // Can't cheaply prove these are document-path-free — stay
+        // conservative and route to the document-path filter.
+        Expr::Subquery { .. } | Expr::WindowFunctionCall { .. } => true,
     }
 }
 
@@ -974,5 +1021,81 @@ mod tests {
 
         planner.clear_cache();
         assert_eq!(planner.cache_stats().size, 0);
+    }
+
+    // ── Regression: a flat CompareExpr predicate must NOT be classified
+    // as document-path. The tenant-iso RLS auto-policy is
+    // `col = CURRENT_TENANT()` (a CompareExpr); when it was blanket-
+    // routed to the document-path filter, that executor's
+    // `runtime_record_has_document_capability` gate dropped every plain
+    // table row, so `WITHIN TENANT … SELECT …` returned 0 rows.
+    use super::{expr_uses_document_path, filter_uses_document_path};
+    use crate::storage::query::ast::{CompareOp, Expr, FieldRef, Filter, Span};
+
+    fn table_query(table: &str) -> TableQuery {
+        match make_simple_query() {
+            QueryExpr::Table(mut tq) => {
+                tq.table = table.to_string();
+                tq
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn col(table: &str, column: &str) -> Expr {
+        Expr::Column {
+            field: FieldRef::TableColumn {
+                table: table.to_string(),
+                column: column.to_string(),
+            },
+            span: Span::synthetic(),
+        }
+    }
+
+    fn call(name: &str) -> Expr {
+        Expr::FunctionCall {
+            name: name.to_string(),
+            args: Vec::new(),
+            span: Span::synthetic(),
+        }
+    }
+
+    #[test]
+    fn tenant_iso_compareexpr_is_not_document_path() {
+        let q = table_query("orders");
+        let policy = Filter::CompareExpr {
+            lhs: col("orders", "client_id"),
+            op: CompareOp::Eq,
+            rhs: call("CURRENT_TENANT"),
+        };
+        assert!(
+            !filter_uses_document_path(&policy, &q),
+            "flat `col = CURRENT_TENANT()` must take the regular filter path"
+        );
+    }
+
+    #[test]
+    fn dotted_column_compareexpr_is_document_path() {
+        let q = table_query("orders");
+        let f = Filter::CompareExpr {
+            lhs: col("orders", "meta.region"),
+            op: CompareOp::Eq,
+            rhs: Expr::lit(crate::storage::schema::Value::text("eu")),
+        };
+        assert!(expr_uses_document_path(&col("orders", "meta.region"), &q));
+        assert!(filter_uses_document_path(&f, &q));
+    }
+
+    #[test]
+    fn foreign_qualifier_compareexpr_is_document_path() {
+        let q = table_query("orders");
+        // A qualifier that is neither the table nor its alias resolves
+        // as a document/cross-table path.
+        let f = Filter::CompareExpr {
+            lhs: col("customers", "tier"),
+            op: CompareOp::Eq,
+            rhs: Expr::lit(crate::storage::schema::Value::text("gold")),
+        };
+        assert!(filter_uses_document_path(&f, &q));
     }
 }
