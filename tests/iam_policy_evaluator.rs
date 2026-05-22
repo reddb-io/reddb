@@ -20,6 +20,8 @@ fn ctx_user() -> EvalContext {
         mfa_present: false,
         now_ms: 1_700_000_000_000,
         principal_is_admin_role: false,
+        principal_is_system_owned: false,
+        principal_is_platform_scoped: true,
     }
 }
 
@@ -161,6 +163,120 @@ fn condition_mfa_blocks_when_absent() {
     ctx.mfa_present = true;
     let d2 = evaluate(&[&p], "select", &r, &ctx);
     assert!(matches!(d2, Decision::Allow { .. }), "got {d2:?}");
+}
+
+/// Build a context for the four-cell matrix of (platform-scoped?) ×
+/// (system-owned?). `tenant` of `None` is platform-scoped.
+fn ctx_matrix(tenant: Option<&str>, system_owned: bool) -> EvalContext {
+    EvalContext {
+        principal_tenant: tenant.map(|t| t.to_string()),
+        current_tenant: tenant.map(|t| t.to_string()),
+        peer_ip: None,
+        mfa_present: false,
+        now_ms: 1_700_000_000_000,
+        principal_is_admin_role: false,
+        principal_is_system_owned: system_owned,
+        principal_is_platform_scoped: tenant.is_none(),
+    }
+}
+
+#[test]
+fn system_owned_condition_gates_on_principal_attribute() {
+    // Only system-owned principals may execute this maintenance action.
+    let p = parse(
+        r#"{
+            "id": "p-system-only",
+            "version": 1,
+            "statements": [{
+                "effect": "allow",
+                "actions": ["admin:reload"],
+                "resources": ["*"],
+                "condition": { "system_owned": true }
+            }]
+        }"#,
+    );
+    let r = ResourceRef::new("config", "global.reload");
+
+    // ordinary tenant user — denied
+    let d = evaluate(&[&p], "admin:reload", &r, &ctx_matrix(Some("acme"), false));
+    assert!(matches!(d, Decision::DefaultDeny), "tenant user: got {d:?}");
+    // ordinary platform-scoped user — denied (system_owned still false)
+    let d = evaluate(&[&p], "admin:reload", &r, &ctx_matrix(None, false));
+    assert!(
+        matches!(d, Decision::DefaultDeny),
+        "platform user: got {d:?}"
+    );
+    // tenant-scoped system-owned user — allowed
+    let d = evaluate(&[&p], "admin:reload", &r, &ctx_matrix(Some("acme"), true));
+    assert!(
+        matches!(d, Decision::Allow { .. }),
+        "tenant system-owned: got {d:?}"
+    );
+    // platform-scoped system-owned user — allowed
+    let d = evaluate(&[&p], "admin:reload", &r, &ctx_matrix(None, true));
+    assert!(
+        matches!(d, Decision::Allow { .. }),
+        "platform system-owned: got {d:?}"
+    );
+}
+
+#[test]
+fn platform_scoped_condition_gates_on_principal_attribute() {
+    // A guardrail that denies platform-scoped principals — exercising
+    // deny-on-attribute across the matrix. Resources are wildcards so the
+    // assertions stay tight to the `platform_scoped` condition rather than
+    // tenant resource-scoping.
+    let allow = parse(
+        r#"{
+            "id": "p-allow",
+            "version": 1,
+            "statements": [{
+                "effect": "allow",
+                "actions": ["select"],
+                "resources": ["*"]
+            }]
+        }"#,
+    );
+    let deny_platform = parse(
+        r#"{
+            "id": "p-deny-platform",
+            "version": 1,
+            "statements": [{
+                "sid": "no-platform",
+                "effect": "deny",
+                "actions": ["select"],
+                "resources": ["*"],
+                "condition": { "platform_scoped": true }
+            }]
+        }"#,
+    );
+    let r = ResourceRef::new("table", "public.orders");
+    let pols = [&allow, &deny_platform];
+
+    // ordinary tenant user — allowed (deny condition does not match)
+    let d = evaluate(&pols, "select", &r, &ctx_matrix(Some("acme"), false));
+    assert!(
+        matches!(d, Decision::Allow { .. }),
+        "tenant user: got {d:?}"
+    );
+    // tenant-scoped system-owned user — still allowed (not platform-scoped)
+    let d = evaluate(&pols, "select", &r, &ctx_matrix(Some("acme"), true));
+    assert!(
+        matches!(d, Decision::Allow { .. }),
+        "tenant system-owned: got {d:?}"
+    );
+    // ordinary platform-scoped user — denied by guardrail
+    let d = evaluate(&pols, "select", &r, &ctx_matrix(None, false));
+    assert!(
+        matches!(&d, Decision::Deny { matched_policy_id, .. } if matched_policy_id == "p-deny-platform"),
+        "platform user: got {d:?}"
+    );
+    // platform-scoped system-owned user — also denied by guardrail
+    let d = evaluate(&pols, "select", &r, &ctx_matrix(None, true));
+    assert!(
+        matches!(&d, Decision::Deny { matched_policy_id, .. } if matched_policy_id == "p-deny-platform"),
+        "platform system-owned: got {d:?}"
+    );
 }
 
 #[test]
