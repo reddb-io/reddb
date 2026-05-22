@@ -1,9 +1,9 @@
 //! Pure-evaluator regression tests on top of the IAM policy kernel.
 //!
 //! These tests exercise the precedence rules (`Deny > Allow > DefaultDeny`),
-//! conditions, admin bypass, and tenant scoping. They run against the
-//! kernel directly (no AuthStore round-trip) so the assertions stay
-//! tight to the algorithm in `crate::auth::policies`.
+//! conditions, policy-first admin authority, and tenant scoping. They run
+//! against the kernel directly (no AuthStore round-trip) so the assertions
+//! stay tight to the algorithm in `crate::auth::policies`.
 
 use reddb::auth::policies::{evaluate, Decision, EvalContext, Policy, ResourceRef};
 
@@ -94,7 +94,9 @@ fn empty_policy_set_is_default_deny() {
 }
 
 #[test]
-fn admin_bypass_overrides_deny() {
+fn admin_does_not_bypass_explicit_deny() {
+    // Policy-first authorization: admin authority grants a broad allow but
+    // an explicit Deny is a managed guardrail that wins even for admins.
     let p = parse(
         r#"{
             "id": "p-deny-all",
@@ -110,6 +112,31 @@ fn admin_bypass_overrides_deny() {
     ctx.principal_is_admin_role = true;
     let r = ResourceRef::new("table", "public.x");
     let d = evaluate(&[&p], "select", &r, &ctx);
+    assert!(
+        matches!(&d, Decision::Deny { matched_policy_id, .. } if matched_policy_id == "p-deny-all"),
+        "explicit deny must win over admin authority, got {d:?}"
+    );
+}
+
+#[test]
+fn admin_keeps_broad_allow_without_deny() {
+    // With no matching Deny, admin authority still grants access even when
+    // no Allow statement matches the request.
+    let p = parse(
+        r#"{
+            "id": "p-allow-orders",
+            "version": 1,
+            "statements": [{
+                "effect": "allow",
+                "actions": ["select"],
+                "resources": ["table:public.orders"]
+            }]
+        }"#,
+    );
+    let mut ctx = ctx_user();
+    ctx.principal_is_admin_role = true;
+    let r = ResourceRef::new("table", "public.unrelated");
+    let d = evaluate(&[&p], "delete", &r, &ctx);
     assert!(matches!(d, Decision::AdminBypass), "got {d:?}");
 }
 
