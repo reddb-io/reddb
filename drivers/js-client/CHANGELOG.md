@@ -1,5 +1,7 @@
 # @reddb-io/client
 
+## 1.3.0
+
 ## 1.1.0
 
 ### Minor Changes

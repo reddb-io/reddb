@@ -1,5 +1,59 @@
 # Changelog
 
+## 1.3.0
+
+### Minor Changes
+
+- [`162ed9b`](https://github.com/reddb-io/reddb/commit/162ed9bed3b7161d3e6e8f31de509eb376e16cf9) Thanks [@filipeforattini](https://github.com/filipeforattini)! - **Feature: per-node community assignment from `GRAPH COMMUNITY` ([#660](https://github.com/reddb-io/reddb/issues/660)).**
+  `GRAPH COMMUNITY ALGORITHM louvain RETURN ASSIGNMENTS` now emits one row per
+  node `{node_id, community_id}` — the node→community map needed to colour or
+  visualise nodes by community. Without the `RETURN ASSIGNMENTS` clause the
+  historical per-community aggregate shape (`community_id`, `size`) is unchanged
+  (backward compatible). `LIMIT` caps the per-node rows.
+
+- [#631](https://github.com/reddb-io/reddb/pull/631) [`b189b7e`](https://github.com/reddb-io/reddb/commit/b189b7eab9ea23553548007ec5106292a834e01f) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Promote the work merged since v1.2.5 to a minor release (1.3.0): new Analytics primitives + window functions are feature-level, so this is a minor, not a patch.
+
+  **HTTP transport hardening ([#569](https://github.com/reddb-io/reddb/issues/569)).** Bounded handler concurrency via a deep
+  `HttpConnectionLimiter` (hard cap → `503 Service Unavailable` + `Retry-After`
+  on saturation, rejection before parse/routing), an overall per-handler
+  wall-clock timeout that reclaims the limiter slot on expiry, the same shared
+  cap enforced on the TLS accept loop (HTTP + HTTPS draw one cap), and Prometheus
+  telemetry (`http_active_handler_threads`, `http_handler_rejected_total`,
+  `http_handler_duration_seconds`, `http_handler_cap`). New config: `--http-max-handlers`,
+  `--http-handler-timeout-ms`, `--http-retry-after-secs`.
+
+  **QueueLifecycle foundations ([#527](https://github.com/reddb-io/reddb/issues/527) prereqs).** `QueueTxn` now participates in the
+  caller's transaction via the runtime MVCC path so lifecycle ack/purge/delete are
+  rollback-safe; the primary `QueueStore` adapter reads the legacy `queue_pending`
+  state (closing the parallel meta-row divergence); and lifecycle gains
+  `group_read` + `claim` methods that preserve the legacy `consumer`/`delivery_count`
+  result shape. (The atomic cutover and the `delivery_id` wire handle remain
+  follow-ups — the queue ACK/NACK contract is unchanged in this release.)
+
+  **Analytics-event primitives ([#575](https://github.com/reddb-io/reddb/issues/575))** and **SDK Helper Spec v1.0 + cross-driver
+  conformance ([#449](https://github.com/reddb-io/reddb/issues/449))** as previously merged on main.
+
+  **Fix: embedding `linked_row_id` via rid envelope.** The row rid envelope
+  refactor moved a query row's logical identity to the canonical `rid` key;
+  `CLUSTER`/embedding writeback still keyed off the legacy `red_entity_id`
+  column and silently dropped `linked_row_id`. Row→vector linkage is restored.
+
+  Also documents that table column names persist across a file-backed reopen and
+  that aggregate result columns use a single canonical `FUNC(arg)` casing —
+  both verified by regression guards; these were 1.1.x-era reports already
+  resolved on the 1.2 line.
+
+### Patch Changes
+
+- [`162ed9b`](https://github.com/reddb-io/reddb/commit/162ed9bed3b7161d3e6e8f31de509eb376e16cf9) Thanks [@filipeforattini](https://github.com/filipeforattini)! - **Fix: parser stack overflow + view filter desync ([#635](https://github.com/reddb-io/reddb/issues/635)).** Parsing a recursive
+  view body could overflow the stack (the `parse_sql_command` match frame was
+  oversized — extracted the CREATE arm to shrink it). Separately, the view
+  rewriter merged the inner query's `filter`, but the executor prefers `where_expr`
+  and nulled `filter` when present, so the merged predicate was silently dropped
+  (`view_chain_resolves_recursively`); the rewriter now keeps `where_expr` in sync
+  with the merged filter. Re-enables the previously quarantined view/materialized-view
+  parser binaries ([#593](https://github.com/reddb-io/reddb/issues/593)/[#594](https://github.com/reddb-io/reddb/issues/594)/[#595](https://github.com/reddb-io/reddb/issues/595)/[#596](https://github.com/reddb-io/reddb/issues/596)/views).
+
 ## Unreleased
 
 ### Documentation
