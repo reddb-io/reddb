@@ -75,7 +75,9 @@ fn label_for(rt: &RedDBRuntime, table: &str, red_entity_id: u64) -> Option<Strin
         .execute_query(&format!("SELECT red_entity_id, label FROM {table}"))
         .expect("select label");
     result.result.records.iter().find_map(|record| {
-        let row_id = match record.get("red_entity_id") {
+        // Full-scan SELECT projects `red_entity_id` under the `rid` key
+        // (the projection-only path keeps the `red_entity_id` alias).
+        let row_id = match record.get("red_entity_id").or_else(|| record.get("rid")) {
             Some(Value::UnsignedInteger(id)) => *id,
             Some(Value::Integer(id)) => *id as u64,
             _ => return None,
@@ -114,7 +116,6 @@ fn truncate_wal_tail(path: &Path, bytes: u64) {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn autocommit_insert_update_delete_recover_from_commit_batches() {
     let db = DbPath::new("recover");
 
@@ -180,7 +181,6 @@ fn autocommit_insert_update_delete_recover_from_commit_batches() {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn truncated_commit_batch_is_absent_after_recovery() {
     let db = DbPath::new("truncated");
     let stable_db_image = db.path.with_extension("stable-copy");
