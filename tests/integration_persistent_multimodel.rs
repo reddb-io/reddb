@@ -169,7 +169,7 @@ fn insert_graph_node(rt: &RedDBRuntime, label: &str, name: &str) -> u64 {
         rt,
         &format!("INSERT INTO tales NODE (label, name) VALUES ('{label}', '{name}') RETURNING *"),
     );
-    uint_at(&result, 0, "red_entity_id")
+    uint_at(&result, 0, "rid")
 }
 
 fn insert_graph_nodes(
@@ -193,7 +193,7 @@ fn insert_graph_nodes(
         );
         assert_eq!(result.result.records.len(), end - start);
         for row in 0..result.result.records.len() {
-            ids.push(uint_at(&result, row, "red_entity_id"));
+            ids.push(uint_at(&result, row, "rid"));
         }
     }
     ids

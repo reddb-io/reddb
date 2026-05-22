@@ -267,6 +267,46 @@ impl ScalarEvaluator for DefaultScalarEvaluator {
 // compile() — resolve catalogs once
 // ---------------------------------------------------------------------------
 
+/// Functions whose implementation reads the live `RedDB` handle. The
+/// compiled `Call` path is db-less, so these must stay on the runtime
+/// walker (`evaluate_runtime_filter_with_db`) which threads the database
+/// through. Keep in sync with the special-cased names in
+/// `join_filter::evaluate_scalar_function_with_db` and
+/// `expr_eval::evaluate_runtime_expr_with_db`.
+fn function_requires_runtime_db(upper: &str) -> bool {
+    matches!(
+        upper,
+        "CONFIG"
+            | "KV"
+            | "__SECRET_REF"
+            | "ML_CLASSIFY"
+            | "ML_PREDICT_PROBA"
+            | "SEMANTIC_CACHE_GET"
+            | "SEMANTIC_CACHE_PUT"
+            | "EMBED"
+            | "CA_REGISTER"
+            | "CA_DROP"
+            | "CA_STATE"
+            | "CA_LIST"
+            | "CA_REFRESH"
+            | "CA_QUERY"
+            | "MODEL_REGISTER"
+            | "MODEL_DROP"
+            | "LIST_HYPERTABLES"
+            | "LIST_MODELS"
+            | "SHOW_HYPERTABLES"
+            | "SHOW_MODELS"
+            | "HYPERTABLE_PRUNE_CHUNKS"
+            | "HYPERTABLE_DROP_CHUNKS_BEFORE"
+            | "HYPERTABLE_SWEEP_EXPIRED"
+            | "HYPERTABLE_SHOW_CHUNKS"
+            | "HYPERTABLE_SWEEP_ALL_EXPIRED"
+            | "HYPERTABLE_SET_TTL"
+            | "HYPERTABLE_GET_TTL"
+            | "HYPERTABLE_CHUNKS_EXPIRING_WITHIN"
+    )
+}
+
 fn compile_expr(expr: &Expr, scope: &dyn Scope) -> Result<CompiledScalar, CompileError> {
     match expr {
         Expr::Literal { value, .. } => Ok(CompiledScalar::Literal(value.clone())),
@@ -365,6 +405,17 @@ fn compile_expr(expr: &Expr, scope: &dyn Scope) -> Result<CompiledScalar, Compil
         }
 
         Expr::FunctionCall { name, args, .. } => {
+            // Functions that need the live `RedDB` handle (config/KV
+            // lookups, secrets, ML, continuous aggregates, hypertable
+            // ops) cannot run on the db-less compiled `Call` path —
+            // `eval_compiled` would dispatch them without a database and
+            // silently yield NULL. Refuse to compile them so the filter
+            // falls back to the runtime walker, which evaluates them with
+            // full db context. (Regression: `WHERE x = KV(...)` matched
+            // nothing because KV resolved to NULL here.)
+            if function_requires_runtime_db(&name.to_ascii_uppercase()) {
+                return Err(CompileError::Unsupported("runtime-db function"));
+            }
             let mut compiled_args = Vec::with_capacity(args.len());
             for a in args {
                 compiled_args.push(compile_expr(a, scope)?);

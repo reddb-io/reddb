@@ -606,6 +606,37 @@ impl<'a> Parser<'a> {
             }
         }
 
+        // CONFIG()/KV() take bare dotted config paths as arguments
+        // (e.g. `CONFIG(red.ai.default.provider, openai)`,
+        // `KV(cfg, default.role, guest)`). Parsed through the generic
+        // expression grammar these become column references — and a
+        // keyword segment like `default` would be folded to `DEFAULT`,
+        // breaking the case-sensitive config-key lookup, while a
+        // source-free `SELECT CONFIG(...)` would fail with "unknown
+        // column". Capture each path-shaped argument as a lowercased
+        // string literal instead so it matches stored keys (which
+        // `SET CONFIG` also lowercases) and never resolves as a column.
+        if function_name.eq_ignore_ascii_case("CONFIG")
+            || function_name.eq_ignore_ascii_case("KV")
+        {
+            let mut args = Vec::new();
+            if !self.check(&Token::RParen) {
+                loop {
+                    args.push(self.parse_config_kv_arg(start)?);
+                    if !self.consume(&Token::Comma)? {
+                        break;
+                    }
+                }
+            }
+            self.expect(Token::RParen)?;
+            let end = self.position();
+            return Ok(Expr::FunctionCall {
+                name: function_name,
+                args,
+                span: Span::new(start, end),
+            });
+        }
+
         let mut args = Vec::new();
         if !self.check(&Token::RParen) {
             loop {
@@ -622,6 +653,49 @@ impl<'a> Parser<'a> {
             args,
             span: Span::new(start, end),
         })
+    }
+
+    /// Parse a single CONFIG()/KV() argument. A bare identifier or
+    /// dotted path (including keyword-shaped segments) becomes a
+    /// lowercased string literal — the config-key form. Anything else
+    /// (quoted string, number, `?`/`$N` placeholder, parenthesised
+    /// expression) falls through to the normal expression grammar so
+    /// dynamic defaults still work.
+    fn parse_config_kv_arg(
+        &mut self,
+        start: crate::storage::query::lexer::Position,
+    ) -> Result<Expr, ParseError> {
+        // Literals, placeholders and parenthesised sub-expressions are
+        // real expressions (dynamic defaults); everything else that can
+        // open an argument here is an identifier or keyword that forms a
+        // bare config path.
+        let mut is_expression_start = matches!(
+            self.peek(),
+            Token::String(_)
+                | Token::Integer(_)
+                | Token::Float(_)
+                | Token::Dollar
+                | Token::Question
+                | Token::LParen
+        );
+        // A bare identifier immediately followed by `(` is a nested
+        // function call (e.g. a dynamic default), not a config path.
+        if matches!(self.peek(), Token::Ident(_)) && matches!(self.peek_next()?, Token::LParen) {
+            is_expression_start = true;
+        }
+        if !is_expression_start && !self.check(&Token::RParen) {
+            let mut path = self.expect_ident_or_keyword()?;
+            while self.consume(&Token::Dot)? {
+                let next = self.expect_ident_or_keyword()?;
+                path = format!("{path}.{next}");
+            }
+            let end = self.position();
+            return Ok(Expr::Literal {
+                value: Value::text(path.to_ascii_lowercase()),
+                span: Span::new(start, end),
+            });
+        }
+        self.parse_expr_prec(0)
     }
 
     /// Wrap a freshly-parsed `Expr::FunctionCall` in

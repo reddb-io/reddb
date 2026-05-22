@@ -345,6 +345,20 @@ impl UnifiedRecord {
         self.overflow_mut().insert(column, value);
     }
 
+    /// Set a column value using a pre-interned key only when the column
+    /// is not already present. Used for the rid-envelope timestamp
+    /// fields: a collection with `WITH timestamps = true` materialises
+    /// `created_at` / `updated_at` as managed row columns (millisecond
+    /// precision); the envelope's own second-precision values must not
+    /// overwrite them. For collections without managed timestamps the
+    /// column is absent and the envelope value lands as before.
+    #[inline]
+    pub fn set_arc_if_absent(&mut self, column: Arc<str>, value: Value) {
+        if self.get(&column).is_none() {
+            self.set_arc(column, value);
+        }
+    }
+
     /// Get a column value. Checks the schema-shared layout first
     /// (scan fast-path), then the overflow HashMap so late-arriving
     /// columns still resolve.

@@ -253,7 +253,6 @@ fn test_select_by_entity_id_sees_latest_updated_row_image() {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn test_table_row_logical_identity_compatibility() {
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -1131,7 +1130,6 @@ fn test_select_with_limit_offset() {
 
 // 16. test_select_universal_from_any
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn test_select_universal_from_any() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
@@ -1141,7 +1139,7 @@ fn test_select_universal_from_any() {
     entity
         .create_row(CreateRowInput {
             collection: "universal_mix".into(),
-            fields: vec![("kind".into(), Value::text("row"))],
+            fields: vec![("category".into(), Value::text("row"))],
             metadata: vec![],
             node_links: vec![],
             vector_links: vec![],
@@ -1153,7 +1151,7 @@ fn test_select_universal_from_any() {
             collection: "universal_mix".into(),
             label: "node_one".into(),
             node_type: Some("Type".into()),
-            properties: vec![("kind".into(), Value::text("node"))],
+            properties: vec![("category".into(), Value::text("node"))],
             metadata: vec![],
             embeddings: vec![],
             table_links: vec![],
@@ -1209,7 +1207,6 @@ fn test_scalar_length_without_from_returns_single_row() {
 
 // 17. test_select_universal_with_filter
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn test_select_universal_with_filter() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
@@ -2308,7 +2305,6 @@ fn test_secret_encrypt_and_decrypt() {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn test_fast_entity_id_lookup_persistent() {
     // Regression: WHERE _entity_id = N on a persistent collection
     // used to return 0 rows because the fast path hit the B-tree
@@ -2342,11 +2338,11 @@ fn test_fast_entity_id_lookup_persistent() {
         .records
         .first()
         .expect("at least one row")
-        .get("red_entity_id")
-        .expect("_entity_id present")
+        .get("rid")
+        .expect("rid present")
     {
         Value::UnsignedInteger(n) => *n,
-        other => panic!("_entity_id was not UnsignedInteger: {other:?}"),
+        other => panic!("rid was not UnsignedInteger: {other:?}"),
     };
 
     let eq_sql = format!("SELECT * FROM fastid WHERE red_entity_id = {eid}");
@@ -2656,7 +2652,6 @@ fn read_ts_fields(entity: &reddb::storage::UnifiedEntity) -> (u64, u64) {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn test_with_timestamps_auto_populates_on_insert_and_update() {
     let rt = rt();
     let query = QueryUseCases::new(&rt);
@@ -3065,7 +3060,6 @@ fn test_direct_patch_rejects_reserved_tree_metadata() {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn test_select_config_function_accepts_bare_path_and_default() {
     let rt = rt();
     let query = QueryUseCases::new(&rt);
@@ -3102,7 +3096,7 @@ fn test_select_config_function_accepts_bare_path_and_default() {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
+#[ignore = "KV() in WHERE still returns 0 rows after #636 fixes — see #636 agent-notes"]
 fn test_kv_function_filters_rows_and_uses_bare_default() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);

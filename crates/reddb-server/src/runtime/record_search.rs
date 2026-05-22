@@ -70,11 +70,13 @@ fn set_public_row_envelope(
         Value::text(public_row_kind(row).to_string()),
     );
     record.set_arc(sys_key_tenant(), runtime_row_tenant_value(row));
-    record.set_arc(
+    // Managed `created_at` / `updated_at` row columns (WITH timestamps =
+    // true) take precedence over the second-precision envelope values.
+    record.set_arc_if_absent(
         sys_key_created_at(),
         Value::UnsignedInteger(entity.created_at),
     );
-    record.set_arc(
+    record.set_arc_if_absent(
         sys_key_updated_at(),
         Value::UnsignedInteger(entity.updated_at),
     );
@@ -361,8 +363,8 @@ pub(super) fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<Unified
         record.set_arc(sys_key_collection(), Value::text(collection));
         record.set_arc(sys_key_kind(), Value::text(kind));
         record.set_arc(sys_key_tenant(), tenant);
-        record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
-        record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
+        record.set_arc_if_absent(sys_key_created_at(), Value::UnsignedInteger(created_at));
+        record.set_arc_if_absent(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
         Some(record)
     } else if let Some(ref schema) = row.schema {
         let mut record = UnifiedRecord::with_capacity(6 + schema.len());
@@ -373,8 +375,8 @@ pub(super) fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<Unified
         record.set_arc(sys_key_collection(), Value::text(collection));
         record.set_arc(sys_key_kind(), Value::text(kind));
         record.set_arc(sys_key_tenant(), tenant);
-        record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
-        record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
+        record.set_arc_if_absent(sys_key_created_at(), Value::UnsignedInteger(created_at));
+        record.set_arc_if_absent(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
         Some(record)
     } else {
         let mut record = UnifiedRecord::with_capacity(6 + row.columns.len());
@@ -385,8 +387,8 @@ pub(super) fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<Unified
         record.set_arc(sys_key_collection(), Value::text(collection));
         record.set_arc(sys_key_kind(), Value::text(kind));
         record.set_arc(sys_key_tenant(), tenant);
-        record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
-        record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
+        record.set_arc_if_absent(sys_key_created_at(), Value::UnsignedInteger(created_at));
+        record.set_arc_if_absent(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
         Some(record)
     }
 }
@@ -441,11 +443,11 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
             record.set_arc(sys_key_collection(), Value::text(collection));
             record.set_arc(sys_key_kind(), Value::text(kind));
             record.set_arc(sys_key_tenant(), tenant);
-            record.set_arc(
+            record.set_arc_if_absent(
                 sys_key_created_at(),
                 Value::UnsignedInteger(entity.created_at),
             );
-            record.set_arc(
+            record.set_arc_if_absent(
                 sys_key_updated_at(),
                 Value::UnsignedInteger(entity.updated_at),
             );
@@ -631,11 +633,11 @@ pub(super) fn runtime_table_record_from_entity_projected(
             record.set_arc(sys_key_collection(), Value::text(collection));
             record.set_arc(sys_key_kind(), Value::text(kind));
             record.set_arc(sys_key_tenant(), tenant);
-            record.set_arc(
+            record.set_arc_if_absent(
                 sys_key_created_at(),
                 Value::UnsignedInteger(entity.created_at),
             );
-            record.set_arc(
+            record.set_arc_if_absent(
                 sys_key_updated_at(),
                 Value::UnsignedInteger(entity.updated_at),
             );
@@ -870,8 +872,8 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
         record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity_id));
         record.set_arc(sys_key_red_collection(), Value::text(collection));
         record.set_arc(sys_key_red_kind(), Value::text(storage_type));
-        record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
-        record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
+        record.set_arc_if_absent(sys_key_created_at(), Value::UnsignedInteger(created_at));
+        record.set_arc_if_absent(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
         record.set_arc(
             sys_key_red_sequence_id(),
             Value::UnsignedInteger(sequence_id),
@@ -979,8 +981,8 @@ pub(super) fn runtime_any_record_from_entity_ref(entity: &UnifiedEntity) -> Opti
         record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity_id));
         record.set_arc(sys_key_red_collection(), Value::text(collection));
         record.set_arc(sys_key_red_kind(), Value::text(storage_type));
-        record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
-        record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
+        record.set_arc_if_absent(sys_key_created_at(), Value::UnsignedInteger(created_at));
+        record.set_arc_if_absent(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
         record.set_arc(
             sys_key_red_sequence_id(),
             Value::UnsignedInteger(sequence_id),
