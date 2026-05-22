@@ -158,7 +158,6 @@ fn uint_field(record: &reddb::storage::query::unified::UnifiedRecord, field: &st
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn select_from_red_collections_materializes_catalog_rows() {
     cleanup_scope();
     let rt = runtime();
@@ -185,6 +184,9 @@ fn select_from_red_collections_materializes_catalog_rows() {
             "queue_mode",
             "dimension",
             "metric",
+            // Timeseries session columns (#576); red.* is additive-only (ADR 0011).
+            "session_key",
+            "session_gap_ms",
         ]
     );
     assert_eq!(result.result.records.len(), 1);
@@ -214,7 +216,6 @@ fn select_from_red_collections_materializes_catalog_rows() {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn red_schema_introspection_is_stable_across_virtual_tables() {
     cleanup_scope();
     let rt = runtime();
@@ -237,6 +238,9 @@ fn red_schema_introspection_is_stable_across_virtual_tables() {
                 "queue_mode",
                 "dimension",
                 "metric",
+                // Timeseries session columns (#576); red.* is additive-only (ADR 0011).
+                "session_key",
+                "session_gap_ms",
             ],
         ),
         (

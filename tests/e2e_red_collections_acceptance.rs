@@ -15,7 +15,7 @@ use reddb::storage::query::unified::UnifiedRecord;
 use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
 
-const COLLECTION_COLUMNS: [&str; 13] = [
+const COLLECTION_COLUMNS: [&str; 15] = [
     "name",
     "model",
     "schema_mode",
@@ -29,6 +29,11 @@ const COLLECTION_COLUMNS: [&str; 13] = [
     "queue_mode",
     "dimension",
     "metric",
+    // Timeseries session columns (#576). `red.*` is additive-only per
+    // ADR 0011, so these trail the original #244 surface rather than
+    // replacing it.
+    "session_key",
+    "session_gap_ms",
 ];
 
 fn open_runtime() -> RedDBRuntime {
@@ -92,7 +97,6 @@ fn names(records: &[UnifiedRecord]) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn select_star_from_red_collections_returns_collection_inventory() {
     let rt = open_runtime();
     seed_collection_inventory(&rt);
@@ -153,7 +157,6 @@ fn select_star_from_red_collections_returns_collection_inventory() {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn show_collections_reaches_same_result_as_selecting_red_collections() {
     let rt = open_runtime();
     seed_collection_inventory(&rt);
@@ -309,7 +312,6 @@ fn http_post_query(addr: &str, query: &str) -> (u16, serde_json::Value) {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn http_query_endpoint_returns_red_collections_inventory() {
     let rt = open_runtime();
     seed_collection_inventory(&rt);

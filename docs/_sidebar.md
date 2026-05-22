@@ -133,6 +133,9 @@
   - [Secret Inventory & Operations](/operations/secrets.md)
   - [Encryption at Rest](/security/encryption.md)
 
+- **Compliance**
+  - [Control Evidence Matrix](/compliance/control-evidence-matrix.md)
+
 - **Backup & Recovery**
   - [CDC (Change Data Capture)](/api/http.md#cdc--change-data-capture)
   - [Scheduled Backups](/api/http.md#backups)
