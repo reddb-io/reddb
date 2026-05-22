@@ -20,7 +20,7 @@
     "test": "node drivers/js/test/smoke.test.mjs",
     "typecheck": "cargo check --workspace --locked",
     "lint": "cargo fmt --all -- --check && cargo clippy --workspace --locked -- -D warnings",
-    "build": "cargo test --workspace --locked",
+    "build": "cargo build --workspace --locked",
     "changeset": "changeset",
     "release:version": "changeset version && node scripts/sync-version.js",
     "release:publish": "changeset publish",
