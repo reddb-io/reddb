@@ -88,6 +88,10 @@ Current columns:
 | `internal`        | `true` for runtime-owned collections and artifacts such as DLQs, `audit_log`, and `red_*` stores. |
 | `tenant_id`       | Tenant owning the collection, or `NULL` for global/unscoped collections. |
 | `queue_mode`      | `fanout` or `work` for queue collections; `NULL` for all other models. See [Queue Modes](../data-models/queues.md#queue-modes). |
+| `dimension`       | Vector dimension for vector collections; `NULL` for all other models. |
+| `metric`          | Vector distance metric for vector collections; `NULL` for all other models. |
+| `session_key`     | Session-key column for time-series collections created `WITH SESSION_KEY`; `NULL` otherwise. |
+| `session_gap_ms`  | Session gap in milliseconds for time-series collections created `WITH SESSION_GAP`; `NULL` otherwise. |
 
 `on_disk_bytes` is a conservative storage estimate, not a full database-file
 ownership report. It walks the live collection primary B-tree when the local

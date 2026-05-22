@@ -1,0 +1,5 @@
+# `red.registry` and managed guardrails
+
+RedDB will use a protected, versioned `red.registry` surface to govern internal resources such as config keys, vault paths, policies, audit surfaces, and future RedDB-owned resources. Values remain in their native stores (`red.config`, `red.vault`, the policy store, etc.); the registry stores governance metadata such as type/schema, mutability, sensitivity, managed status, required action/resource, evidence requirements, and preset ownership.
+
+Registry mutation happens through explicit governance commands rather than ordinary DML, and registry history is retained for audit and rollback. Managed targets are protected by two layers: an executor invariant that refuses ordinary callers before broad policy allow can widen access, and policy/capability checks that grant least-privilege access to platform-scoped system-owned users. This trades some implementation complexity for a single governance model that can protect config, vault, policy, and audit surfaces without hard-coding one-off rules for each subsystem.
