@@ -265,13 +265,8 @@ jobs:
       - name: Run persistent multimodel layer
         env:
           CARGO_TARGET_DIR: target/persistent-tests
-        # Two reopen cases fail pre-existing on main (rid/logical-identity
-        # column-type regression after multimodel reopen) — tracked in #633.
-        # Skip until fixed; the rest of the --ignored layer still runs.
         run: >-
           cargo test --locked --test integration_persistent_multimodel -- --ignored
-          --skip persistent_graph_then_table_reopens_and_scans_both_models
-          --skip persistent_medium_graph_then_table_reopens_without_checksum_or_schema_loss
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats

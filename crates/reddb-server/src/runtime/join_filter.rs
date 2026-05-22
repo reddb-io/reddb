@@ -689,17 +689,28 @@ pub(super) fn resolve_runtime_projection_value(
     if column.starts_with("LIT:") {
         return eval_projection_value(&Projection::Column(column.to_string()), source);
     }
-    source.get(column).cloned().or_else(|| {
-        if document_projection || entity_projection {
-            let field = FieldRef::TableColumn {
-                table: table_alias.or(table_name).unwrap_or_default().to_string(),
-                column: column.to_string(),
-            };
-            resolve_runtime_field(source, &field, table_name, table_alias)
-        } else {
-            None
-        }
-    })
+    source
+        .get(column)
+        .cloned()
+        .or_else(|| {
+            // Explicit `SELECT red_entity_id` / `red_collection` /
+            // `red_kind` resolves to the rid-envelope field even on the
+            // lean fast paths that don't pre-materialize the legacy alias
+            // column. `SELECT *` never names these, so the envelope stays
+            // clean.
+            legacy_runtime_system_alias(column).and_then(|canonical| source.get(canonical).cloned())
+        })
+        .or_else(|| {
+            if document_projection || entity_projection {
+                let field = FieldRef::TableColumn {
+                    table: table_alias.or(table_name).unwrap_or_default().to_string(),
+                    column: column.to_string(),
+                };
+                resolve_runtime_field(source, &field, table_name, table_alias)
+            } else {
+                None
+            }
+        })
 }
 
 pub(super) fn projected_columns(
@@ -1375,6 +1386,22 @@ pub(super) fn compare_runtime_optional_values(
     }
 }
 
+/// Map a legacy public-identity column name to its canonical rid-envelope
+/// field. The rid-envelope refactor exposes identity under `rid` /
+/// `collection` / `kind`, but WHERE/ORDER predicates written against the
+/// older `red_entity_id` / `red_collection` / `red_kind` names must still
+/// resolve. We only consult this alias when the literal column is absent
+/// from the materialized record, so it never shadows a real user column and
+/// never adds these names to `SELECT *` output (that stays envelope-clean).
+pub(super) fn legacy_runtime_system_alias(column: &str) -> Option<&'static str> {
+    match column {
+        "red_entity_id" | "entity_id" => Some("rid"),
+        "red_collection" => Some("collection"),
+        "red_kind" => Some("kind"),
+        _ => None,
+    }
+}
+
 pub(super) fn resolve_runtime_field(
     record: &UnifiedRecord,
     field: &FieldRef,
@@ -1403,6 +1430,10 @@ pub(super) fn resolve_runtime_field(
             record
                 .get(column.as_str())
                 .cloned()
+                .or_else(|| {
+                    legacy_runtime_system_alias(column)
+                        .and_then(|canonical| record.get(canonical).cloned())
+                })
                 .or_else(|| resolve_runtime_document_path(record, column))
         }
         FieldRef::NodeProperty { alias, property } => {
