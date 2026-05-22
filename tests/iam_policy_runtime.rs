@@ -135,6 +135,66 @@ fn audit_body(rt: &RedDBRuntime) -> String {
 }
 
 #[test]
+fn admin_explicit_deny_matches_between_simulator_and_sql_path() {
+    // Policy-first: an admin principal with an allow-all policy must still
+    // be denied by an explicit Deny. The policy simulator and the runtime
+    // SQL projection gate must report the same decision for the
+    // allow-all-plus-deny shape.
+    let (rt, store) = runtime_with_auth();
+    setup_users_table(&rt);
+    attach_policy(
+        &store,
+        reddb::auth::UserId::platform("admin"),
+        r#"{
+            "id":"admin-allow-all-deny-email",
+            "version":1,
+            "statements":[
+                {"effect":"allow","actions":["*"],"resources":["*"]},
+                {"effect":"deny","actions":["select"],"resources":["column:users.email"]}
+            ]
+        }"#,
+    );
+
+    // Runtime SQL path: admin SELECT of the denied column is rejected.
+    let denied = as_user("admin", Role::Admin, || {
+        rt.execute_query("SELECT id, email FROM users")
+    });
+    let err = err_string(denied);
+    assert!(err.contains("users.email"), "SQL path got {err}");
+
+    // Policy simulator: same principal, same allow-all-plus-deny shape,
+    // same Deny decision on the denied column.
+    let sim = store.simulate(
+        &reddb::auth::UserId::platform("admin"),
+        "select",
+        &reddb::auth::policies::ResourceRef::new("column", "users.email"),
+        reddb::auth::store::SimCtx::default(),
+    );
+    assert!(
+        matches!(sim.decision, reddb::auth::policies::Decision::Deny { .. }),
+        "simulator should deny admin on explicit deny, got {:?}",
+        sim.decision
+    );
+
+    // And the broad allow still holds for a non-denied column.
+    let allowed_sim = store.simulate(
+        &reddb::auth::UserId::platform("admin"),
+        "select",
+        &reddb::auth::policies::ResourceRef::new("column", "users.name"),
+        reddb::auth::store::SimCtx::default(),
+    );
+    assert!(
+        matches!(
+            allowed_sim.decision,
+            reddb::auth::policies::Decision::Allow { .. }
+                | reddb::auth::policies::Decision::AdminBypass
+        ),
+        "simulator should allow admin on non-denied resource, got {:?}",
+        allowed_sim.decision
+    );
+}
+
+#[test]
 fn select_column_policy_allows_safe_projection() {
     let (rt, store) = runtime_with_auth();
     setup_users_table(&rt);
