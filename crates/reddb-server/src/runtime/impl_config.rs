@@ -811,6 +811,8 @@ impl RedDBRuntime {
             mfa_present: false,
             now_ms: crate::utils::now_unix_millis() as u128,
             principal_is_admin_role: role == crate::auth::Role::Admin,
+            principal_is_system_owned: auth_store.principal_is_system_owned(&principal_id),
+            principal_is_platform_scoped: principal_id.tenant.is_none(),
         };
         if auth_store.check_policy_authz(&principal_id, action, &resource, &ctx) {
             Ok(())
