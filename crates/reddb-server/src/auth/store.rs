@@ -813,6 +813,16 @@ impl AuthStore {
 
     /// Look up a single user by `(tenant, username)`. Password hash
     /// is redacted.
+    /// Whether the given principal's user record is system-owned. Returns
+    /// `false` for unknown principals — an absent record is never treated as
+    /// operator-owned. Used to populate `EvalContext::principal_is_system_owned`
+    /// on the runtime authorization hot path.
+    pub fn principal_is_system_owned(&self, principal: &UserId) -> bool {
+        self.get_user_cloned(principal)
+            .map(|u| u.system_owned)
+            .unwrap_or(false)
+    }
+
     pub fn get_user(&self, tenant_id: Option<&str>, username: &str) -> Option<User> {
         let id = UserId::from_parts(tenant_id, username);
         self.get_user_cloned(&id).map(|u| User {
@@ -2039,11 +2049,12 @@ impl AuthStore {
         resource: &ResourceRef,
         ctx_extras: SimCtx,
     ) -> SimulationOutcome {
-        let user_role = self
+        let (user_role, user_system_owned) = self
             .users
             .read()
             .ok()
-            .and_then(|u| u.get(principal).map(|u| u.role));
+            .and_then(|u| u.get(principal).map(|u| (Some(u.role), u.system_owned)))
+            .unwrap_or((None, false));
         let principal_is_admin_role = user_role == Some(Role::Admin);
         let now = ctx_extras.now_ms.unwrap_or_else(now_ms);
         let ctx = EvalContext {
@@ -2053,6 +2064,8 @@ impl AuthStore {
             mfa_present: ctx_extras.mfa_present,
             now_ms: now,
             principal_is_admin_role,
+            principal_is_system_owned: user_system_owned,
+            principal_is_platform_scoped: principal.tenant.is_none(),
         };
         let pols = self.effective_policies(principal);
         let refs: Vec<&Policy> = pols.iter().map(|p| p.as_ref()).collect();

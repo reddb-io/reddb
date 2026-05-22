@@ -1359,6 +1359,8 @@ impl RedDBRuntime {
             mfa_present: false,
             now_ms: crate::auth::now_ms(),
             principal_is_admin_role: role == crate::auth::Role::Admin,
+            principal_is_system_owned: auth_store.principal_is_system_owned(&principal),
+            principal_is_platform_scoped: principal.tenant.is_none(),
         };
 
         let outcome = auth_store.check_column_projection_authz(&principal, &request, &ctx);
