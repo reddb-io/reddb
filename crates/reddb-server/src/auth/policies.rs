@@ -14,14 +14,18 @@
 //! next, user attachments last. Within each policy, statements are
 //! evaluated left-to-right.
 //!
-//! 1. If `ctx.principal_is_admin_role` is true, return `AdminBypass`
-//!    immediately. This preserves the legacy 3-role escape hatch.
-//! 2. For each statement, check the condition first (cheap), then the
+//! 1. For each statement, check the condition first (cheap), then the
 //!    action set, then the resource set.
-//! 3. Any matching `Deny` short-circuits to `Decision::Deny`.
-//! 4. The first matching `Allow` is recorded but evaluation continues so
+//! 2. Any matching `Deny` short-circuits to `Decision::Deny` — this wins
+//!    over everything, including admin authority. Explicit Deny is a
+//!    managed guardrail, so it is *never* bypassed.
+//! 3. The first matching `Allow` is recorded but evaluation continues so
 //!    that a later `Deny` can still override it.
-//! 5. If no statement matched at all, return `DefaultDeny`.
+//! 4. If no `Deny` matched and `ctx.principal_is_admin_role` is true,
+//!    return `AdminBypass`. Admin authority is policy-first: it grants a
+//!    broad allow, but it does not override an explicit Deny.
+//! 5. Otherwise return the recorded `Allow`, or `DefaultDeny` if nothing
+//!    matched at all.
 //!
 //! # Glob semantics
 //! Globs are *split-on-`*`*: a pattern is broken into a prefix, a suffix,
@@ -227,8 +231,10 @@ pub struct EvalContext {
     pub mfa_present: bool,
     /// Wall clock at decision time (unix ms).
     pub now_ms: u128,
-    /// Legacy 3-role bypass — set when the principal has the classic
-    /// `Role::Admin`. Short-circuits the entire evaluator.
+    /// Set when the principal has the classic `Role::Admin`. Grants a
+    /// policy-derived broad allow (`AdminBypass`) when no statement
+    /// matched and no explicit `Deny` applies — it does **not** override
+    /// an explicit Deny.
     pub principal_is_admin_role: bool,
 }
 
@@ -1111,10 +1117,6 @@ pub fn evaluate(
     resource: &ResourceRef,
     ctx: &EvalContext,
 ) -> Decision {
-    if ctx.principal_is_admin_role {
-        return Decision::AdminBypass;
-    }
-
     let mut allow_hit: Option<(String, Option<String>)> = None;
 
     for p in policies {
@@ -1133,6 +1135,8 @@ pub fn evaluate(
                 continue;
             }
             match st.effect {
+                // Explicit Deny wins over everything, including admin
+                // authority. This is what makes managed guardrails work.
                 Effect::Deny => {
                     return Decision::Deny {
                         matched_policy_id: p.id.clone(),
@@ -1146,6 +1150,12 @@ pub fn evaluate(
                 }
             }
         }
+    }
+
+    // No explicit Deny matched. Admin authority is a policy-derived broad
+    // allow that applies here, but it could never have overridden a Deny.
+    if ctx.principal_is_admin_role {
+        return Decision::AdminBypass;
     }
 
     match allow_hit {
@@ -1184,14 +1194,6 @@ pub fn simulate(
     resource: &ResourceRef,
     ctx: &EvalContext,
 ) -> SimulationOutcome {
-    if ctx.principal_is_admin_role {
-        return SimulationOutcome {
-            decision: Decision::AdminBypass,
-            reason: "admin bypass: principal has legacy Role::Admin".into(),
-            trail: Vec::new(),
-        };
-    }
-
     let mut trail = Vec::new();
     let mut allow_hit: Option<(String, Option<String>, usize)> = None;
     let mut deny_hit: Option<(String, Option<String>, usize)> = None;
@@ -1254,6 +1256,15 @@ pub fn simulate(
                 matched_sid: sid,
             },
             reason,
+            trail,
+        };
+    }
+    // No explicit Deny matched. Admin authority is policy-first: it grants
+    // a broad allow once we know no managed guardrail (Deny) applies.
+    if ctx.principal_is_admin_role {
+        return SimulationOutcome {
+            decision: Decision::AdminBypass,
+            reason: "admin allow: principal has Role::Admin (no explicit deny matched)".into(),
             trail,
         };
     }
@@ -1821,13 +1832,33 @@ mod tests {
     }
 
     #[test]
-    fn evaluator_admin_bypass() {
+    fn evaluator_admin_allow_when_no_deny() {
+        // Admin authority is a policy-derived broad allow: with no
+        // matching statement and no explicit Deny, the admin is allowed.
         let p = analyst_policy();
         let r = ResourceRef::new("table", "anything");
         let mut ctx = EvalContext::default();
         ctx.principal_is_admin_role = true;
         let d = evaluate(&[&p], "delete", &r, &ctx);
         assert_eq!(d, Decision::AdminBypass);
+    }
+
+    #[test]
+    fn evaluator_admin_does_not_bypass_explicit_deny() {
+        // An explicit Deny is a managed guardrail and must win even for an
+        // admin principal.
+        let allow = analyst_policy();
+        let deny = no_deletes_policy();
+        let r = ResourceRef::new("table", "public.orders");
+        let mut ctx = EvalContext::default();
+        ctx.principal_is_admin_role = true;
+        let d = evaluate(&[&allow, &deny], "delete", &r, &ctx);
+        match d {
+            Decision::Deny {
+                matched_policy_id, ..
+            } => assert_eq!(matched_policy_id, "no-deletes"),
+            other => panic!("expected Deny for admin, got {other:?}"),
+        }
     }
 
     #[test]
