@@ -1276,11 +1276,30 @@ fn inject_rls_filters(
         .reduce(|acc, f| Filter::Or(Box::new(acc), Box::new(f)))
         .expect("policies non-empty");
 
-    // AND into the caller's existing filter.
-    table.filter = Some(match table.filter.take() {
+    // AND into the caller's existing predicate. The predicate may live
+    // in `where_expr` rather than `filter`: `resolve_table_expr_subqueries`
+    // nulls `filter` whenever `where_expr` is present (the case for a
+    // view body rewritten into `SELECT … WHERE …`). Folding only into
+    // `filter` here would silently drop that `where_expr` predicate at
+    // eval time because `effective_table_filter` prefers `filter` —
+    // e.g. `WITHIN TENANT … SELECT * FROM <view>` would apply the
+    // tenant policy but lose the view's own WHERE (#635).
+    use crate::storage::query::sql_lowering::{expr_to_filter, filter_to_expr};
+    let had_where_expr = table.where_expr.is_some();
+    let existing = table
+        .filter
+        .take()
+        .or_else(|| table.where_expr.as_ref().map(expr_to_filter));
+    let new_filter = match existing {
         Some(existing) => Filter::And(Box::new(existing), Box::new(combined)),
         None => combined,
-    });
+    };
+    // Keep `where_expr` in lock-step with the merged `filter` so
+    // whichever the executor consults sees the full predicate.
+    if had_where_expr {
+        table.where_expr = Some(filter_to_expr(&new_filter));
+    }
+    table.filter = Some(new_filter);
     Some(table)
 }
 

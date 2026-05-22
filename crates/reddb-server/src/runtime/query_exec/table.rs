@@ -1384,12 +1384,68 @@ fn runtime_filter_uses_document_path(filter: &Filter, query: &TableQuery) -> boo
             runtime_field_ref_uses_document_path(left, query)
                 || runtime_field_ref_uses_document_path(right, query)
         }
-        Filter::CompareExpr { .. } => true,
+        // Mirror the planner's `filter_uses_document_path`: only route
+        // a CompareExpr to the document-path path when an operand
+        // actually traverses a document path. Flat predicates such as
+        // the tenant-iso policy `col = CURRENT_TENANT()` stay on the
+        // regular filter path.
+        Filter::CompareExpr { lhs, rhs, .. } => {
+            runtime_expr_uses_document_path(lhs, query)
+                || runtime_expr_uses_document_path(rhs, query)
+        }
         Filter::And(left, right) | Filter::Or(left, right) => {
             runtime_filter_uses_document_path(left, query)
                 || runtime_filter_uses_document_path(right, query)
         }
         Filter::Not(inner) => runtime_filter_uses_document_path(inner, query),
+    }
+}
+
+/// Runtime twin of the planner's `expr_uses_document_path` — must stay
+/// in sync so FAST PATH 2 gating agrees with the operator the planner
+/// chose. See `planner::logical_helpers::expr_uses_document_path`.
+fn runtime_expr_uses_document_path(
+    expr: &crate::storage::query::ast::Expr,
+    query: &TableQuery,
+) -> bool {
+    use crate::storage::query::ast::Expr;
+    match expr {
+        Expr::Literal { .. } | Expr::Parameter { .. } => false,
+        Expr::Column { field, .. } => runtime_field_ref_uses_document_path(field, query),
+        Expr::BinaryOp { lhs, rhs, .. } => {
+            runtime_expr_uses_document_path(lhs, query)
+                || runtime_expr_uses_document_path(rhs, query)
+        }
+        Expr::UnaryOp { operand, .. } => runtime_expr_uses_document_path(operand, query),
+        Expr::Cast { inner, .. } => runtime_expr_uses_document_path(inner, query),
+        Expr::FunctionCall { args, .. } => args
+            .iter()
+            .any(|a| runtime_expr_uses_document_path(a, query)),
+        Expr::Case {
+            branches, else_, ..
+        } => {
+            branches.iter().any(|(cond, val)| {
+                runtime_expr_uses_document_path(cond, query)
+                    || runtime_expr_uses_document_path(val, query)
+            }) || else_
+                .as_ref()
+                .is_some_and(|e| runtime_expr_uses_document_path(e, query))
+        }
+        Expr::IsNull { operand, .. } => runtime_expr_uses_document_path(operand, query),
+        Expr::InList { target, values, .. } => {
+            runtime_expr_uses_document_path(target, query)
+                || values
+                    .iter()
+                    .any(|v| runtime_expr_uses_document_path(v, query))
+        }
+        Expr::Between {
+            target, low, high, ..
+        } => {
+            runtime_expr_uses_document_path(target, query)
+                || runtime_expr_uses_document_path(low, query)
+                || runtime_expr_uses_document_path(high, query)
+        }
+        Expr::Subquery { .. } | Expr::WindowFunctionCall { .. } => true,
     }
 }
 
