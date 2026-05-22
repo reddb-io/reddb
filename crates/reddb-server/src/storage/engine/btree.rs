@@ -38,8 +38,12 @@ use super::pager::{Pager, PagerError};
 /// Maximum key size (to ensure at least 2 keys per node)
 pub const MAX_KEY_SIZE: usize = 1024;
 
-/// Maximum value size for inline storage
-pub const MAX_VALUE_SIZE: usize = 1024;
+/// Maximum value size for inline storage.
+///
+/// Derived as `PAGE_SIZE / 4` so it tracks the page size automatically and
+/// preserves the design invariant of at least two cells per leaf. At the
+/// 16KB page this is 4096 bytes (4x the legacy 4KB-page limit of 1024).
+pub const MAX_VALUE_SIZE: usize = PAGE_SIZE / 4;
 
 /// Minimum fill factor before merge (as percentage)
 pub const MIN_FILL_FACTOR: usize = 25;
@@ -992,7 +996,7 @@ mod tests {
         let tree = BTree::new(pager.clone());
 
         let value = vec![b'v'; 200];
-        for i in 0..60u32 {
+        for i in 0..300u32 {
             let key = format!("key{:03}", i);
             tree.insert(key.as_bytes(), &value).unwrap();
         }
@@ -1026,7 +1030,7 @@ mod tests {
             tree.delete(key).unwrap();
         }
 
-        let expected = 60 - keys.len();
+        let expected = 300 - keys.len();
         assert_eq!(tree.count().unwrap(), expected);
 
         let mut cursor = tree.cursor_first().unwrap();
@@ -1036,7 +1040,7 @@ mod tests {
         }
 
         assert_eq!(results.len(), expected);
-        let last_key = format!("key{:03}", 59).into_bytes();
+        let last_key = format!("key{:03}", 299).into_bytes();
         assert_eq!(results.last(), Some(&last_key));
 
         cleanup(&path);
