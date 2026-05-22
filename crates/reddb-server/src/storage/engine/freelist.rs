@@ -442,8 +442,8 @@ mod tests {
     #[test]
     fn test_free_ids_per_trunk() {
         // Verify the constant is reasonable
-        // (4096 - 32 - 8) / 4 = 1014
-        assert_eq!(FREE_IDS_PER_TRUNK, 1014);
-        assert_eq!(FREE_IDS_PER_TRUNK, 1014);
+        // (16384 - 32 - 8) / 4 = 4086
+        assert_eq!(FREE_IDS_PER_TRUNK, 4086);
+        assert_eq!(FREE_IDS_PER_TRUNK, 4086);
     }
 }

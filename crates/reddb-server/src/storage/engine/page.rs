@@ -1,9 +1,9 @@
 //! Page structure for RedDB storage engine
 //!
-//! A page is the fundamental unit of storage (4KB aligned for efficient I/O).
+//! A page is the fundamental unit of storage (16KB aligned for efficient I/O).
 //! Each page has a fixed header followed by type-specific content.
 //!
-//! # Page Layout (4096 bytes)
+//! # Page Layout (16384 bytes)
 //!
 //! ```text
 //! ┌───────────────────────────────────────────────────────────┐
@@ -28,8 +28,8 @@
 
 use super::crc32::crc32;
 
-/// Page size in bytes (4KB, standard for most file systems)
-pub const PAGE_SIZE: usize = 4096;
+/// Page size in bytes (16KB, matching InnoDB's default for higher B-tree fanout)
+pub const PAGE_SIZE: usize = 16384;
 
 /// Header size in bytes
 pub const HEADER_SIZE: usize = 32;
@@ -38,7 +38,7 @@ pub const HEADER_SIZE: usize = 32;
 pub const CONTENT_SIZE: usize = PAGE_SIZE - HEADER_SIZE;
 
 /// Maximum number of cells per page (limited by cell pointer array)
-pub const MAX_CELLS: usize = (CONTENT_SIZE - 4) / 6; // ~676 cells
+pub const MAX_CELLS: usize = (CONTENT_SIZE - 4) / 6; // ~2724 cells
 
 /// Magic bytes for database file identification
 pub const MAGIC_BYTES: [u8; 4] = [0x52, 0x44, 0x44, 0x42]; // "RDDB"
@@ -449,7 +449,7 @@ mod tests {
         }
 
         assert!(count > 0);
-        assert!(count < 10); // With 500 byte values, should fit ~7 cells
+        assert!(count < 40); // With 500 byte values in a 16KB page, should fit ~28 cells
     }
 
     #[test]

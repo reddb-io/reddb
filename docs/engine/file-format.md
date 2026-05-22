@@ -24,9 +24,9 @@ RedDB persists data in `.rdb` files using a page-based binary format. This docum
 
 ---
 
-## 1. Page Structure (4096 bytes)
+## 1. Page Structure (16384 bytes)
 
-Every page is exactly 4096 bytes. The first 32 bytes are a fixed header; the remaining 4064 bytes hold content.
+Every page is exactly 16384 bytes. The first 32 bytes are a fixed header; the remaining 16352 bytes hold content.
 
 ### Page Header (32 bytes)
 
@@ -43,7 +43,7 @@ Every page is exactly 4096 bytes. The first 32 bytes are a fixed header; the rem
 | 20 | 8 | u64 LE | `lsn` | Log Sequence Number (WAL byte offset) |
 | 28 | 4 | u32 LE | `checksum` | CRC32 of entire page content |
 
-### Page Content Layout (4064 bytes)
+### Page Content Layout (16352 bytes)
 
 ```
 Offset 32                                              Offset 4095
@@ -84,7 +84,7 @@ Page 0 identifies the database and tracks physical metadata.
 | 0-31 | 32 | — | Page header | `page_type=6` (Header), `page_id=0` |
 | 32 | 4 | `[u8;4]` | `magic` | `RDDB` (`0x52 0x44 0x44 0x42`) |
 | 36 | 4 | u32 LE | `version` | `0x00010000` (format 1.0.0) |
-| 40 | 4 | u32 LE | `page_size` | `4096` (always) |
+| 40 | 4 | u32 LE | `page_size` | `16384` (always) |
 | 44 | 4 | u32 LE | `page_count` | Total pages in file |
 | 48 | 4 | u32 LE | `freelist_head` | First freelist trunk page (0 = none) |
 | 52-4095 | — | — | Reserved | Zeros |
@@ -129,9 +129,9 @@ Free pages are tracked via linked trunk pages, each containing an array of avail
 | 0-31 | 32 | — | Page header (`page_type=5`) |
 | 32 | 4 | u32 LE | `next_trunk` — next trunk page ID (0 = last) |
 | 36 | 4 | u32 LE | `count` — number of free page IDs in this trunk |
-| 40-4095 | variable | `[u32 LE]` | Array of free page IDs |
+| 40-16383 | variable | `[u32 LE]` | Array of free page IDs |
 
-**Capacity**: `(4096 - 32 - 8) / 4 = 1014` free page IDs per trunk.
+**Capacity**: `(16384 - 32 - 8) / 4 = 4086` free page IDs per trunk.
 
 Trunks form a singly-linked list. The `freelist_head` in page 0 points to the first trunk.
 
@@ -146,7 +146,7 @@ Each collection has its own B+ tree rooted at the page stored in the metadata pa
 - All data in **leaf nodes** (interior nodes store only keys + child pointers)
 - Leaf nodes form a **doubly-linked list** for range scans
 - Max key size: **1024 bytes**
-- Max inline value size: **1024 bytes**
+- Max inline value size: **4096 bytes** (4 KB, derived as `PAGE_SIZE / 4`)
 - Minimum fill factor: **25%** before merge
 
 ### Leaf Page Layout
@@ -550,13 +550,13 @@ Checksums are **verified on read** and **updated on write**. A mismatch on read 
 
 | Constant | Value | Description |
 |:---------|:------|:------------|
-| `PAGE_SIZE` | 4096 bytes | Fixed for all pages |
+| `PAGE_SIZE` | 16384 bytes | Fixed for all pages (16 KB, matches InnoDB default) |
 | `HEADER_SIZE` | 32 bytes | Per-page header overhead |
-| `CONTENT_SIZE` | 4064 bytes | Usable content per page |
-| `MAX_CELLS` | ~676 | `(4064 - 4) / 6` |
-| `FREE_IDS_PER_TRUNK` | 1014 | `(4096 - 32 - 8) / 4` |
+| `CONTENT_SIZE` | 16352 bytes | Usable content per page |
+| `MAX_CELLS` | ~2724 | `(16352 - 4) / 6` |
+| `FREE_IDS_PER_TRUNK` | 4086 | `(16384 - 32 - 8) / 4` |
 | `MAX_KEY_SIZE` | 1024 bytes | B-tree key limit |
-| `MAX_VALUE_SIZE` | 1024 bytes | B-tree inline value limit |
+| `MAX_VALUE_SIZE` | 4096 bytes | B-tree inline value limit (`PAGE_SIZE / 4`) |
 | `MIN_FILL_FACTOR` | 25% | B-tree merge threshold |
 | `LEAF_DATA_OFFSET` | 40 | Leaf cell data start (`HEADER_SIZE + 8`) |
 | `INTERIOR_DATA_OFFSET` | 32 | Interior cell data start (`HEADER_SIZE`) |
@@ -576,7 +576,7 @@ On `Pager::open()`, an exclusive advisory lock (`flock`) is acquired on the `.rd
 Before writing dirty pages to their final locations, they are first written to a separate `.rdb-dwb` file with a CRC32-verified header. If a crash occurs during the final write (torn page), the complete page can be recovered from the DWB on next open.
 
 ```
-DWB format: [magic: "RDDW"][count: u32][checksum: u32][page_id: u32, page_data: 4096 bytes]...
+DWB format: [magic: "RDDW"][count: u32][checksum: u32][page_id: u32, page_data: 16384 bytes]...
 ```
 
 ### Layer 3: Header Shadow (`.rdb-hdr`)
