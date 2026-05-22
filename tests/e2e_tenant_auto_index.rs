@@ -82,12 +82,11 @@ fn alter_disable_tenancy_drops_auto_index() {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn dotted_tenant_path_skips_auto_index() {
     let rt = open_runtime();
     exec(
         &rt,
-        "CREATE TABLE events (id INT, kind TEXT, meta TEXT) \
+        "CREATE TABLE events (id INT, event_kind TEXT, meta TEXT) \
          TENANT BY (meta.tenant)",
     );
     // Dotted paths aren't covered by flat secondary indices today.

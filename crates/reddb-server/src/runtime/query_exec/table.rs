@@ -1261,8 +1261,24 @@ pub(crate) fn execute_runtime_canonical_table_node(
         "document_path_filter" => {
             let mut records = execute_runtime_canonical_table_child(db, node, context)?;
             if let Some(filter) = effective_filter.as_ref() {
+                // The capability gate exists so non-document rows in a
+                // document collection don't survive a `body.field`
+                // predicate (#551). But a dotted *tenant* path like
+                // `meta.tenant` on a plain table targets a real JSON
+                // column the row actually carries — those rows have no
+                // "document" capability, so the bare gate would drop
+                // every one of them and the tenant policy would match
+                // nothing (#638). Let a row through when it owns the
+                // root column the document path traverses; the resolver
+                // already parses JSON-in-TEXT, and an unresolvable path
+                // is excluded by the predicate itself.
                 records.retain(|record| {
-                    runtime_record_has_document_capability(record)
+                    (runtime_record_has_document_capability(record)
+                        || runtime_record_carries_filter_document_roots(
+                            record,
+                            filter,
+                            context.query,
+                        ))
                         && evaluate_runtime_filter_with_db(
                             Some(db),
                             record,
@@ -1367,6 +1383,139 @@ pub(crate) fn execute_runtime_canonical_table_child(
         ))
     })?;
     execute_runtime_canonical_table_node(db, child, context)
+}
+
+/// Does `record` carry the root column of every document path the
+/// filter traverses? Used to relax the `document_path_filter`
+/// capability gate for dotted tenant/JSON-column predicates on plain
+/// tables (#638): `meta.tenant` resolves against the row's real `meta`
+/// column, so the row should be evaluated even without a "document"
+/// capability. Returns `false` when the filter references no resolvable
+/// dotted root (e.g. a foreign-table qualifier with no dotted path), so
+/// genuine non-document rows in a document collection stay gated.
+fn runtime_record_carries_filter_document_roots(
+    record: &UnifiedRecord,
+    filter: &Filter,
+    query: &TableQuery,
+) -> bool {
+    let mut roots: Vec<Option<String>> = Vec::new();
+    collect_filter_document_path_roots(filter, query, &mut roots);
+    !roots.is_empty()
+        && roots.iter().all(|root| {
+            root.as_ref()
+                .is_some_and(|root| record.get(root.as_str()).is_some())
+        })
+}
+
+/// Collect, for each document-path field the filter references, the
+/// root column its path traverses (`meta` for `meta.tenant`). A
+/// document-path field with no dotted root (a bare foreign-table
+/// qualifier) contributes `None` so the caller treats it as
+/// unresolvable. Mirrors the shape of `runtime_filter_uses_document_path`.
+fn collect_filter_document_path_roots(
+    filter: &Filter,
+    query: &TableQuery,
+    out: &mut Vec<Option<String>>,
+) {
+    match filter {
+        Filter::Compare { field, .. }
+        | Filter::IsNull(field)
+        | Filter::IsNotNull(field)
+        | Filter::In { field, .. }
+        | Filter::Between { field, .. }
+        | Filter::Like { field, .. }
+        | Filter::StartsWith { field, .. }
+        | Filter::EndsWith { field, .. }
+        | Filter::Contains { field, .. } => {
+            push_field_document_path_root(field, query, out);
+        }
+        Filter::CompareFields { left, right, .. } => {
+            push_field_document_path_root(left, query, out);
+            push_field_document_path_root(right, query, out);
+        }
+        Filter::CompareExpr { lhs, rhs, .. } => {
+            collect_expr_document_path_roots(lhs, query, out);
+            collect_expr_document_path_roots(rhs, query, out);
+        }
+        Filter::And(left, right) | Filter::Or(left, right) => {
+            collect_filter_document_path_roots(left, query, out);
+            collect_filter_document_path_roots(right, query, out);
+        }
+        Filter::Not(inner) => collect_filter_document_path_roots(inner, query, out),
+    }
+}
+
+fn collect_expr_document_path_roots(
+    expr: &crate::storage::query::ast::Expr,
+    query: &TableQuery,
+    out: &mut Vec<Option<String>>,
+) {
+    use crate::storage::query::ast::Expr;
+    match expr {
+        Expr::Literal { .. } | Expr::Parameter { .. } => {}
+        Expr::Column { field, .. } => push_field_document_path_root(field, query, out),
+        Expr::BinaryOp { lhs, rhs, .. } => {
+            collect_expr_document_path_roots(lhs, query, out);
+            collect_expr_document_path_roots(rhs, query, out);
+        }
+        Expr::UnaryOp { operand, .. } => collect_expr_document_path_roots(operand, query, out),
+        Expr::Cast { inner, .. } => collect_expr_document_path_roots(inner, query, out),
+        Expr::FunctionCall { args, .. } => {
+            for arg in args {
+                collect_expr_document_path_roots(arg, query, out);
+            }
+        }
+        Expr::Case {
+            branches, else_, ..
+        } => {
+            for (cond, val) in branches {
+                collect_expr_document_path_roots(cond, query, out);
+                collect_expr_document_path_roots(val, query, out);
+            }
+            if let Some(e) = else_ {
+                collect_expr_document_path_roots(e, query, out);
+            }
+        }
+        Expr::IsNull { operand, .. } => collect_expr_document_path_roots(operand, query, out),
+        Expr::InList { target, values, .. } => {
+            collect_expr_document_path_roots(target, query, out);
+            for v in values {
+                collect_expr_document_path_roots(v, query, out);
+            }
+        }
+        Expr::Between {
+            target, low, high, ..
+        } => {
+            collect_expr_document_path_roots(target, query, out);
+            collect_expr_document_path_roots(low, query, out);
+            collect_expr_document_path_roots(high, query, out);
+        }
+        // Opaque shapes can't be proven to traverse a known root —
+        // contribute an unresolvable marker so the gate stays strict.
+        Expr::Subquery { .. } | Expr::WindowFunctionCall { .. } => out.push(None),
+    }
+}
+
+/// Push the resolvable document-path root for `field`, if it is one.
+/// A dotted column (`meta.tenant`) yields `Some("meta")`. A bare
+/// foreign-table qualifier (document-path by virtue of the qualifier,
+/// not a dotted name) yields `None` — unresolvable for presence checks.
+/// Flat same-table columns are not document paths and contribute nothing.
+fn push_field_document_path_root(
+    field: &FieldRef,
+    query: &TableQuery,
+    out: &mut Vec<Option<String>>,
+) {
+    if !runtime_field_ref_uses_document_path(field, query) {
+        return;
+    }
+    match field {
+        FieldRef::TableColumn { column, .. } => match column.split_once('.') {
+            Some((root, _)) => out.push(Some(root.to_string())),
+            None => out.push(None),
+        },
+        _ => out.push(None),
+    }
 }
 
 fn runtime_filter_uses_document_path(filter: &Filter, query: &TableQuery) -> bool {

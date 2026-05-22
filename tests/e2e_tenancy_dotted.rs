@@ -26,21 +26,22 @@ fn row_count(rt: &RedDBRuntime, sql: &str) -> usize {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn dotted_tenant_path_filters_reads() {
     let rt = open_runtime();
 
     // JSON metadata column, tenant lives under `metadata.tenant`.
+    // `kind` is a reserved system field, so the user column is
+    // `event_kind` (mirrors the rename in e2e_within_clause).
     exec(
         &rt,
-        "CREATE TABLE events (id INT, kind TEXT, meta TEXT) \
+        "CREATE TABLE events (id INT, event_kind TEXT, meta TEXT) \
          TENANT BY (meta.tenant)",
     );
 
     // Seed directly with JSON payloads for two tenants.
     exec(
         &rt,
-        "INSERT INTO events (id, kind, meta) VALUES \
+        "INSERT INTO events (id, event_kind, meta) VALUES \
            (1, 'login', '{\"tenant\": \"acme\", \"ip\": \"1.2.3.4\"}'), \
            (2, 'login', '{\"tenant\": \"globex\", \"ip\": \"5.6.7.8\"}'), \
            (3, 'signup', '{\"tenant\": \"acme\"}')",
@@ -68,7 +69,6 @@ fn dotted_tenant_path_filters_reads() {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn dotted_tenant_auto_fills_missing_root() {
     let rt = open_runtime();
 
@@ -96,7 +96,6 @@ fn dotted_tenant_auto_fills_missing_root() {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn dotted_tenant_merges_existing_root_json() {
     let rt = open_runtime();
 
