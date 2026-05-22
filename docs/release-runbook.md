@@ -54,23 +54,40 @@ There is no step at which an `@reddb-io/sdk@X.Y.Z` exists on npm
 without a corresponding GitHub Release containing `red-<plat>-<arch>`
 for the supported platforms.
 
-### Manual override (skip Changesets)
+### Manual override (skip Changesets) — one command
 
-If the Changesets bot is unavailable or you need an emergency cut, you
-can still tag manually:
+If the Changesets bot is unavailable or you need an emergency cut, use
+the guarded local cutter instead of running the steps by hand:
 
 ```bash
-git checkout main && git pull
-# bump versions yourself — `release:version` works even outside CI as
-# long as there's at least one changeset under `.changeset/`.
-pnpm changeset && pnpm release:version
-git add -A && git commit -m "chore(release): version packages (manual)"
-VERSION="$(node -e 'process.stdout.write(require(`./package.json`).version)')"
-git tag -a "v$VERSION" -m "Release v$VERSION"
-git push origin main "v$VERSION"
+make minor   # or: make patch / make major   (./scripts/release.sh <type>)
+make release-push
+make release-verify VERSION=v1.4.0 WAIT=--wait
 ```
 
-The pushed tag still triggers `release.yml` end-to-end.
+`scripts/release.sh` does the error-prone parts safely:
+
+1. **Preflight** — refuses to run on a dirty tree, off `main`, or on a
+   `main` that drifted from `origin/main`. Cutting from a stale `main`
+   is exactly what produced past version drift; it is now a hard stop.
+2. **Bump** — drives `changeset version` + `scripts/sync-version.js`, so
+   every lock-stepped manifest moves together. (If `changeset version`
+   can't render the GitHub changelog locally — it needs a PR context it
+   doesn't have outside CI — the script falls back to the basic
+   changelog automatically and restores the config afterward.)
+3. **Gate** — runs `scripts/check-versions.sh` and **aborts before
+   tagging** if any file disagrees. No tag is ever cut from an
+   inconsistent tree.
+4. **Tag** — commits `chore(release): version packages` and creates
+   `v<version>`. It deliberately does **not** push; `make release-push`
+   fires the pipeline as a separate, conscious step.
+
+After the workflow runs, `make release-verify VERSION=v<version>`
+(`scripts/verify-release.sh`) confirms the tag, the published GitHub
+Release, every downloadable binary asset (it actually downloads one),
+and the npm version are all in sync — the "published to npm with no
+matching Release" window (#418) becomes a failed check, not a surprise.
+Add `WAIT=--wait` to poll `release.yml` to completion first.
 
 ### Verifying lock-step
 
