@@ -9426,7 +9426,8 @@ impl RedDBRuntime {
     ///
     /// In legacy mode (IAM not enabled): requires Write role.
     /// In IAM mode: requires an explicit `drop` / `truncate` policy on
-    /// `collection:<name>` (Admin role auto-passes via AdminBypass).
+    /// `collection:<name>`; admin authority allows the action only when no
+    /// explicit Deny matches.
     /// Records an audit log entry for both allow and deny outcomes.
     fn check_ddl_collection_privilege(
         &self,
