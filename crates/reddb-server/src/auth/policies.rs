@@ -177,6 +177,10 @@ pub struct Condition {
     pub source_ip: Option<Vec<IpCidr>>,
     pub mfa: Option<bool>,
     pub time_window: Option<TimeWindow>,
+    /// Require the principal to be (or not be) system-owned.
+    pub system_owned: Option<bool>,
+    /// Require the principal to be (or not be) platform-scoped.
+    pub platform_scoped: Option<bool>,
 }
 
 /// CIDR block for `source_ip` matches.
@@ -236,6 +240,14 @@ pub struct EvalContext {
     /// matched and no explicit `Deny` applies — it does **not** override
     /// an explicit Deny.
     pub principal_is_admin_role: bool,
+    /// Set when the principal's user record is system-owned (operator-owned,
+    /// immutable through the normal user-management API). Policies can match
+    /// on this via the `system_owned` condition key to distinguish operator
+    /// principals from ordinary users without a separate login type.
+    pub principal_is_system_owned: bool,
+    /// Set when the principal is platform-scoped (no tenant — `tenant_id`
+    /// is `None`). Matched via the `platform_scoped` condition key.
+    pub principal_is_platform_scoped: bool,
 }
 
 /// Outcome of `evaluate` / `simulate`.
@@ -558,6 +570,8 @@ impl Condition {
         };
         let tenant_match = obj.get("tenant_match").and_then(|v| v.as_bool());
         let mfa = obj.get("mfa").and_then(|v| v.as_bool());
+        let system_owned = obj.get("system_owned").and_then(|v| v.as_bool());
+        let platform_scoped = obj.get("platform_scoped").and_then(|v| v.as_bool());
 
         let source_ip = match obj.get("source_ip") {
             None | Some(Value::Null) => None,
@@ -588,6 +602,8 @@ impl Condition {
             source_ip,
             mfa,
             time_window,
+            system_owned,
+            platform_scoped,
         })
     }
 
@@ -604,6 +620,12 @@ impl Condition {
         }
         if let Some(b) = self.mfa {
             obj.insert("mfa".into(), Value::Bool(b));
+        }
+        if let Some(b) = self.system_owned {
+            obj.insert("system_owned".into(), Value::Bool(b));
+        }
+        if let Some(b) = self.platform_scoped {
+            obj.insert("platform_scoped".into(), Value::Bool(b));
         }
         if let Some(cidrs) = &self.source_ip {
             obj.insert(
@@ -1076,6 +1098,16 @@ fn condition_holds(cond: Option<&Condition>, resource: &ResourceRef, ctx: &EvalC
             return false;
         }
     }
+    if let Some(want) = c.system_owned {
+        if ctx.principal_is_system_owned != want {
+            return false;
+        }
+    }
+    if let Some(want) = c.platform_scoped {
+        if ctx.principal_is_platform_scoped != want {
+            return false;
+        }
+    }
     if let Some(cidrs) = &c.source_ip {
         let Some(ip) = ctx.peer_ip else {
             return false;
@@ -1401,6 +1433,57 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_principal_attribute_conditions() {
+        let p = Policy::from_json_str(
+            r#"{
+                "id": "p-attrs",
+                "version": 1,
+                "statements": [{
+                    "effect": "allow",
+                    "actions": ["admin:reload"],
+                    "resources": ["*"],
+                    "condition": { "system_owned": true, "platform_scoped": false }
+                }]
+            }"#,
+        )
+        .unwrap();
+        let c = p.statements[0].condition.as_ref().unwrap();
+        assert_eq!(c.system_owned, Some(true));
+        assert_eq!(c.platform_scoped, Some(false));
+        let p2 = Policy::from_json_str(&p.to_json_string()).unwrap();
+        assert_eq!(p, p2);
+    }
+
+    #[test]
+    fn condition_principal_attributes_gate_evaluation() {
+        let p = Policy::from_json_str(
+            r#"{
+                "id": "p-sys",
+                "version": 1,
+                "statements": [{
+                    "effect": "allow",
+                    "actions": ["admin:reload"],
+                    "resources": ["*"],
+                    "condition": { "system_owned": true }
+                }]
+            }"#,
+        )
+        .unwrap();
+        let r = ResourceRef::new("config", "global");
+        let mut ctx = ctx_now(1_700_000_000_000);
+        ctx.principal_is_system_owned = false;
+        assert!(matches!(
+            evaluate(&[&p], "admin:reload", &r, &ctx),
+            Decision::DefaultDeny
+        ));
+        ctx.principal_is_system_owned = true;
+        assert!(matches!(
+            evaluate(&[&p], "admin:reload", &r, &ctx),
+            Decision::Allow { .. }
+        ));
+    }
+
+    #[test]
     fn roundtrip_with_conditions() {
         let p = Policy::from_json_str(cond_policy_json()).unwrap();
         let s = p.to_json_string();
@@ -1631,6 +1714,8 @@ mod tests {
             source_ip: None,
             mfa: None,
             time_window: None,
+            system_owned: None,
+            platform_scoped: None,
         };
         let r = ResourceRef::new("table", "x");
         assert!(condition_holds(Some(&c), &r, &ctx_now(1_000)));
@@ -1647,6 +1732,8 @@ mod tests {
             source_ip: None,
             mfa: None,
             time_window: None,
+            system_owned: None,
+            platform_scoped: None,
         };
         let r = ResourceRef::new("table", "x");
         assert!(!condition_holds(Some(&c), &r, &ctx_now(1_999)));
@@ -1663,6 +1750,8 @@ mod tests {
             source_ip: Some(vec![parse_cidr("10.0.0.0/8").unwrap()]),
             mfa: None,
             time_window: None,
+            system_owned: None,
+            platform_scoped: None,
         };
         let r = ResourceRef::new("table", "x");
         let mut ctx = ctx_now(1);
@@ -1686,6 +1775,8 @@ mod tests {
             source_ip: Some(vec![cidr]),
             mfa: None,
             time_window: None,
+            system_owned: None,
+            platform_scoped: None,
         };
         let r = ResourceRef::new("table", "public.x");
         let mut ctx = ctx_now(1);
@@ -1704,6 +1795,8 @@ mod tests {
             source_ip: None,
             mfa: None,
             time_window: None,
+            system_owned: None,
+            platform_scoped: None,
         };
         let r = ResourceRef::new("table", "x").with_tenant("acme");
         let mut ctx = ctx_now(1);
@@ -1722,6 +1815,8 @@ mod tests {
             source_ip: None,
             mfa: Some(true),
             time_window: None,
+            system_owned: None,
+            platform_scoped: None,
         };
         let r = ResourceRef::new("table", "x");
         let mut ctx = ctx_now(1);

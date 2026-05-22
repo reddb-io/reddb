@@ -6870,7 +6870,11 @@ impl RedDBRuntime {
         let columns = self.resolved_table_projection_columns(table)?;
         let request = ColumnAccessRequest::select(table.table.clone(), columns);
         let principal = UserId::from_parts(frame.effective_scope(), username);
-        let ctx = runtime_iam_context(role, frame.effective_scope());
+        let ctx = runtime_iam_context(
+            role,
+            frame.effective_scope(),
+            auth_store.principal_is_system_owned(&principal),
+        );
         let outcome = auth_store.check_column_projection_authz(&principal, &request, &ctx);
         if outcome.allowed() {
             return Ok(());
@@ -9230,7 +9234,11 @@ impl RedDBRuntime {
         if auth_store.iam_authorization_enabled() {
             let iam_action = legacy_action_to_iam(action);
             let iam_resource = legacy_resource_to_iam(&resource, tenant.as_deref());
-            let iam_ctx = runtime_iam_context(role, tenant.as_deref());
+            let iam_ctx = runtime_iam_context(
+                role,
+                tenant.as_deref(),
+                auth_store.principal_is_system_owned(&principal_id),
+            );
             if !auth_store.check_policy_authz(&principal_id, iam_action, &iam_resource, &iam_ctx) {
                 return Err(format!(
                     "principal=`{}` action=`{}` resource=`{}:{}` denied by IAM policy",
@@ -9366,7 +9374,11 @@ impl RedDBRuntime {
         table: &str,
         columns: &[String],
     ) -> Result<(), String> {
-        let iam_ctx = runtime_iam_context(role, tenant);
+        let iam_ctx = runtime_iam_context(
+            role,
+            tenant,
+            auth_store.principal_is_system_owned(principal),
+        );
         let request =
             crate::auth::ColumnAccessRequest::select(table.to_string(), columns.iter().cloned());
         let outcome = auth_store.check_column_projection_authz(principal, &request, &iam_ctx);
@@ -9411,7 +9423,11 @@ impl RedDBRuntime {
         if let Some(t) = tenant {
             resource = resource.with_tenant(t.to_string());
         }
-        let ctx = runtime_iam_context(role, tenant);
+        let ctx = runtime_iam_context(
+            role,
+            tenant,
+            auth_store.principal_is_system_owned(principal),
+        );
         if auth_store.check_policy_authz(principal, action, &resource, &ctx) {
             Ok(())
         } else {
@@ -9473,7 +9489,11 @@ impl RedDBRuntime {
         if let Some(t) = tenant {
             resource = resource.with_tenant(t.to_string());
         }
-        let ctx = runtime_iam_context(role, tenant);
+        let ctx = runtime_iam_context(
+            role,
+            tenant,
+            auth_store.principal_is_system_owned(principal),
+        );
         if auth_store.check_policy_authz(principal, action, &resource, &ctx) {
             self.inner.audit_log.record(
                 action,
@@ -10898,6 +10918,7 @@ fn is_policy_column_name(column: &str) -> bool {
 fn runtime_iam_context(
     role: crate::auth::Role,
     tenant: Option<&str>,
+    principal_is_system_owned: bool,
 ) -> crate::auth::policies::EvalContext {
     crate::auth::policies::EvalContext {
         principal_tenant: tenant.map(|t| t.to_string()),
@@ -10906,6 +10927,8 @@ fn runtime_iam_context(
         mfa_present: false,
         now_ms: crate::auth::now_ms(),
         principal_is_admin_role: role == crate::auth::Role::Admin,
+        principal_is_system_owned,
+        principal_is_platform_scoped: tenant.is_none(),
     }
 }
 
