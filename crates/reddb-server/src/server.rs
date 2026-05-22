@@ -59,6 +59,11 @@ mod tests {
     };
 
     #[test]
+    fn server_options_default_http_body_limit_is_32_mib() {
+        assert_eq!(ServerOptions::default().max_body_bytes, 32 * 1024 * 1024);
+    }
+
+    #[test]
     fn health_json_reports_transport_listeners() {
         let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
         let mut options = ServerOptions::default();
@@ -182,11 +187,13 @@ pub struct ServerOptions {
     pub transport_readiness: crate::service_cli::TransportReadiness,
 }
 
+pub const DEFAULT_HTTP_MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
+
 impl Default for ServerOptions {
     fn default() -> Self {
         Self {
             bind_addr: "127.0.0.1:5055".to_string(),
-            max_body_bytes: 1024 * 1024,
+            max_body_bytes: DEFAULT_HTTP_MAX_BODY_BYTES,
             read_timeout_ms: 5_000,
             write_timeout_ms: 5_000,
             max_scan_limit: 1_000,
