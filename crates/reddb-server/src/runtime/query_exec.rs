@@ -28,7 +28,7 @@ mod vector;
 pub(crate) use filter_compiled::CompiledEntityFilter;
 pub(crate) use helpers::{
     evaluate_entity_filter, evaluate_entity_filter_with_db, extract_entity_id_from_filter,
-    extract_zone_predicates, try_hash_eq_lookup,
+    extract_select_column_names, extract_zone_predicates, try_hash_eq_lookup,
 };
 pub(super) use hybrid::execute_runtime_hybrid_query;
 pub(crate) use indexed_scan::try_sorted_index_lookup;
@@ -129,9 +129,24 @@ pub(super) fn execute_runtime_table_query(
                 resolve_table_row_by_logical_id(db, &query.table, EntityId::new(entity_id))
             {
                 let json = execute_runtime_serialize_single_entity(&entity);
-                let records: Vec<UnifiedRecord> = runtime_table_record_from_entity(entity)
+                // Honor explicit legacy-alias projections (e.g.
+                // `SELECT red_entity_id, …`) on the fast entity-id
+                // path; the bare-`from_entity` materialiser skips
+                // `set_legacy_row_id_if_requested`, so the column
+                // would otherwise come back missing.
+                let explicit_cols = extract_select_column_names(&effective_projections);
+                let records: Vec<UnifiedRecord> = if explicit_cols.is_empty() {
+                    runtime_table_record_from_entity(entity)
+                        .into_iter()
+                        .collect()
+                } else {
+                    super::record_search::runtime_table_record_from_entity_projected(
+                        entity,
+                        &explicit_cols,
+                    )
                     .into_iter()
-                    .collect();
+                    .collect()
+                };
                 let columns = projected_columns(&records, &effective_projections);
                 return Ok(UnifiedResult {
                     columns,
