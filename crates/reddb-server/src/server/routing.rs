@@ -166,6 +166,11 @@ impl RedDBServer {
             ("POST", "/ai/prompt") => self.handle_ai_prompt(body),
             ("POST", "/ai/credentials") => self.handle_ai_credentials(body),
 
+            // Self-describing entrypoints for first-run/devex.
+            ("GET", "/") => self.handle_root_discovery(),
+            ("GET", "/query") => self.handle_query_contract(),
+            ("GET", "/grpc") => self.handle_grpc_discovery(),
+
             // Eventual Consistency endpoints
             ("GET", "/ec/status") => handlers_ec::handle_ec_global_status(&self.runtime),
 
@@ -1789,6 +1794,104 @@ mod tests {
             200,
             "fresh server should report query readiness after /query works: {}",
             String::from_utf8_lossy(&query_ready.body)
+        );
+    }
+
+    #[test]
+    fn get_grpc_explains_grpc_contract() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let server = RedDBServer::new(runtime);
+
+        let response = server.route(request("/grpc"));
+
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let json: crate::json::Value =
+            crate::json::from_slice(&response.body).expect("grpc discovery json");
+        assert_eq!(json.get("service"), Some(&crate::json!("reddb.v1.RedDB")));
+        assert!(
+            json.get("examples")
+                .and_then(crate::json::Value::as_object)
+                .and_then(|examples| examples.get("query"))
+                .and_then(crate::json::Value::as_str)
+                .unwrap_or_default()
+                .contains("grpcurl"),
+            "GET /grpc should advertise a grpcurl query example: {json:?}"
+        );
+    }
+
+    #[test]
+    fn get_query_explains_post_contract() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let server = RedDBServer::new(runtime);
+
+        let response = server.route(request("/query"));
+
+        assert_eq!(
+            response.status,
+            405,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        assert!(
+            response
+                .extra_headers
+                .iter()
+                .any(|(name, value)| *name == "Allow" && value == "POST"),
+            "GET /query should advertise Allow: POST"
+        );
+        let json: crate::json::Value =
+            crate::json::from_slice(&response.body).expect("query contract json");
+        assert_eq!(json.get("ok"), Some(&crate::json!(false)));
+        assert_eq!(json.get("code"), Some(&crate::json!("method_not_allowed")));
+        assert!(
+            json.get("examples")
+                .and_then(crate::json::Value::as_object)
+                .and_then(|examples| examples.get("json_query"))
+                .and_then(crate::json::Value::as_str)
+                .unwrap_or_default()
+                .contains("SELECT 1"),
+            "GET /query should teach the minimal POST /query shape: {json:?}"
+        );
+    }
+
+    #[test]
+    fn root_endpoint_is_self_describing_for_first_run() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let server = RedDBServer::new(runtime);
+
+        let response = server.route(request("/"));
+
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let json: crate::json::Value =
+            crate::json::from_slice(&response.body).expect("root discovery json");
+        assert_eq!(json.get("service"), Some(&crate::json!("reddb")));
+        assert_eq!(json.get("ok"), Some(&crate::json!(true)));
+        assert!(
+            json.get("endpoints")
+                .and_then(crate::json::Value::as_object)
+                .and_then(|endpoints| endpoints.get("query"))
+                .and_then(crate::json::Value::as_str)
+                == Some("POST /query"),
+            "root discovery should advertise /query: {json:?}"
+        );
+        assert!(
+            json.get("examples")
+                .and_then(crate::json::Value::as_object)
+                .and_then(|examples| examples.get("http_json_query"))
+                .and_then(crate::json::Value::as_str)
+                .unwrap_or_default()
+                .contains("SELECT 1"),
+            "root discovery should include a minimal query example: {json:?}"
         );
     }
 

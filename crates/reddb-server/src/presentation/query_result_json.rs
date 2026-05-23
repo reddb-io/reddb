@@ -103,7 +103,12 @@ pub(crate) fn unified_result_json_with_records(
     );
     object.insert(
         "records".to_string(),
-        JsonValue::Array(records.iter().map(unified_record_json).collect()),
+        JsonValue::Array(
+            records
+                .iter()
+                .map(|record| unified_record_json(record, &result.columns))
+                .collect(),
+        ),
     );
     object.insert("stats".to_string(), query_stats_json(&result.stats));
     JsonValue::Object(object)
@@ -297,22 +302,16 @@ fn is_universal_table_source(table: &str) -> bool {
     is_universal_query_source(table)
 }
 
-fn unified_record_json(record: &UnifiedRecord) -> JsonValue {
+fn unified_record_json(record: &UnifiedRecord, columns: &[String]) -> JsonValue {
     let mut object = Map::new();
     object.insert(
         "values".to_string(),
-        JsonValue::Object(
-            record
-                .iter_fields()
-                .map(|(key, value)| {
-                    (
-                        key.to_string(),
-                        crate::presentation::entity_json::storage_value_to_json(value),
-                    )
-                })
-                .collect(),
-        ),
+        JsonValue::Object(projected_values_json(record, columns)),
     );
+    let meta = record_metadata_json(record, columns);
+    if !meta.is_empty() {
+        object.insert("meta".to_string(), JsonValue::Object(meta));
+    }
     object.insert(
         "nodes".to_string(),
         JsonValue::Object(
@@ -348,6 +347,67 @@ fn unified_record_json(record: &UnifiedRecord) -> JsonValue {
         ),
     );
     JsonValue::Object(object)
+}
+
+fn projected_values_json(record: &UnifiedRecord, columns: &[String]) -> Map<String, JsonValue> {
+    if columns.is_empty() {
+        return record
+            .iter_fields()
+            .map(|(key, value)| {
+                (
+                    key.to_string(),
+                    crate::presentation::entity_json::storage_value_to_json(value),
+                )
+            })
+            .collect();
+    }
+
+    columns
+        .iter()
+        .filter_map(|column| {
+            record.get(column).map(|value| {
+                (
+                    column.clone(),
+                    crate::presentation::entity_json::storage_value_to_json(value),
+                )
+            })
+        })
+        .collect()
+}
+
+fn record_metadata_json(record: &UnifiedRecord, columns: &[String]) -> Map<String, JsonValue> {
+    record
+        .iter_fields()
+        .filter_map(|(key, value)| {
+            let key = key.as_ref();
+            if columns.iter().any(|column| column == key) || !is_record_metadata_key(key) {
+                return None;
+            }
+            Some((
+                key.to_string(),
+                crate::presentation::entity_json::storage_value_to_json(value),
+            ))
+        })
+        .collect()
+}
+
+fn is_record_metadata_key(key: &str) -> bool {
+    matches!(
+        key,
+        "rid"
+            | "red_entity_id"
+            | "collection"
+            | "red_collection"
+            | "kind"
+            | "red_kind"
+            | "tenant"
+            | "created_at"
+            | "updated_at"
+            | "row_id"
+            | "red_sequence_id"
+            | "red_entity_type"
+            | "red_capabilities"
+    )
 }
 
 fn matched_node_json(node: &MatchedNode) -> JsonValue {

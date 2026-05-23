@@ -534,6 +534,229 @@ impl RedDBServer {
         JsonValue::Object(object)
     }
 
+    fn handle_grpc_discovery(&self) -> HttpResponse {
+        let mut methods = Map::new();
+        methods.insert(
+            "query".to_string(),
+            JsonValue::String("reddb.v1.RedDB/Query".to_string()),
+        );
+        methods.insert(
+            "batch_query".to_string(),
+            JsonValue::String("reddb.v1.RedDB/BatchQuery".to_string()),
+        );
+        methods.insert(
+            "health".to_string(),
+            JsonValue::String("reddb.v1.RedDB/Health".to_string()),
+        );
+        methods.insert(
+            "prepare".to_string(),
+            JsonValue::String("reddb.v1.RedDB/Prepare".to_string()),
+        );
+        methods.insert(
+            "execute_prepared".to_string(),
+            JsonValue::String("reddb.v1.RedDB/ExecutePrepared".to_string()),
+        );
+
+        let mut examples = Map::new();
+        examples.insert(
+            "query".to_string(),
+            JsonValue::String(
+                "grpcurl -plaintext -d '{\"query\":\"SELECT 1\"}' 127.0.0.1:50051 reddb.v1.RedDB/Query"
+                    .to_string(),
+            ),
+        );
+        examples.insert(
+            "query_with_params".to_string(),
+            JsonValue::String(
+                "grpcurl -plaintext -d '{\"query\":\"SELECT $1 AS value\",\"params\":[{\"intValue\":42}]}' 127.0.0.1:50051 reddb.v1.RedDB/Query"
+                    .to_string(),
+            ),
+        );
+        examples.insert(
+            "health".to_string(),
+            JsonValue::String(
+                "grpcurl -plaintext -d '{}' 127.0.0.1:50051 reddb.v1.RedDB/Health".to_string(),
+            ),
+        );
+
+        let mut object = Map::new();
+        object.insert("ok".to_string(), JsonValue::Bool(true));
+        object.insert(
+            "service".to_string(),
+            JsonValue::String("reddb.v1.RedDB".to_string()),
+        );
+        object.insert(
+            "package".to_string(),
+            JsonValue::String("reddb.v1".to_string()),
+        );
+        object.insert(
+            "proto".to_string(),
+            JsonValue::String("crates/reddb-grpc-proto/proto/reddb.proto".to_string()),
+        );
+        object.insert("methods".to_string(), JsonValue::Object(methods));
+        object.insert("examples".to_string(), JsonValue::Object(examples));
+        object.insert(
+            "transport_listeners".to_string(),
+            self.transport_readiness_json(),
+        );
+        object.insert(
+            "hint".to_string(),
+            JsonValue::String(
+                "If grpcurl cannot list services, pass the proto file with -import-path crates/reddb-grpc-proto/proto -proto reddb.proto."
+                    .to_string(),
+            ),
+        );
+        json_response(200, JsonValue::Object(object))
+    }
+
+    fn handle_query_contract(&self) -> HttpResponse {
+        let mut examples = Map::new();
+        examples.insert(
+            "raw_sql".to_string(),
+            JsonValue::String("curl -sS http://127.0.0.1:8080/query -d 'SELECT 1'".to_string()),
+        );
+        examples.insert(
+            "json_query".to_string(),
+            JsonValue::String(
+                "curl -sS http://127.0.0.1:8080/query -H 'content-type: application/json' -d '{\"query\":\"SELECT 1\"}'"
+                    .to_string(),
+            ),
+        );
+        examples.insert(
+            "json_query_with_params".to_string(),
+            JsonValue::String(
+                "curl -sS http://127.0.0.1:8080/query -H 'content-type: application/json' -d '{\"query\":\"SELECT $1 AS value\",\"params\":[42]}'"
+                    .to_string(),
+            ),
+        );
+
+        let mut request_body = Map::new();
+        request_body.insert(
+            "query".to_string(),
+            JsonValue::String("required string".to_string()),
+        );
+        request_body.insert(
+            "params".to_string(),
+            JsonValue::String("optional array".to_string()),
+        );
+
+        let mut response_shape = Map::new();
+        response_shape.insert(
+            "columns".to_string(),
+            JsonValue::String("projected column names".to_string()),
+        );
+        response_shape.insert(
+            "records[].values".to_string(),
+            JsonValue::String("only projected values".to_string()),
+        );
+        response_shape.insert(
+            "records[].meta".to_string(),
+            JsonValue::String("internal metadata when present".to_string()),
+        );
+
+        let mut object = Map::new();
+        object.insert("ok".to_string(), JsonValue::Bool(false));
+        object.insert(
+            "code".to_string(),
+            JsonValue::String("method_not_allowed".to_string()),
+        );
+        object.insert(
+            "message".to_string(),
+            JsonValue::String("/query accepts POST requests".to_string()),
+        );
+        object.insert(
+            "hint".to_string(),
+            JsonValue::String(
+                "Send raw SQL in the body, or JSON with a string 'query' field.".to_string(),
+            ),
+        );
+        object.insert("method".to_string(), JsonValue::String("POST".to_string()));
+        object.insert("path".to_string(), JsonValue::String("/query".to_string()));
+        object.insert("request_body".to_string(), JsonValue::Object(request_body));
+        object.insert(
+            "response_shape".to_string(),
+            JsonValue::Object(response_shape),
+        );
+        object.insert("examples".to_string(), JsonValue::Object(examples));
+        object.insert(
+            "docs".to_string(),
+            JsonValue::String("https://reddb.io/docs/query".to_string()),
+        );
+
+        json_response(405, JsonValue::Object(object))
+            .with_header("Allow", http::HeaderValue::from_static("POST"))
+    }
+
+    fn handle_root_discovery(&self) -> HttpResponse {
+        let mut endpoints = Map::new();
+        endpoints.insert(
+            "health".to_string(),
+            JsonValue::String("GET /health".to_string()),
+        );
+        endpoints.insert(
+            "ready".to_string(),
+            JsonValue::String("GET /ready".to_string()),
+        );
+        endpoints.insert(
+            "query".to_string(),
+            JsonValue::String("POST /query".to_string()),
+        );
+        endpoints.insert(
+            "query_readiness".to_string(),
+            JsonValue::String("GET /ready/query".to_string()),
+        );
+        endpoints.insert(
+            "catalog".to_string(),
+            JsonValue::String("GET /catalog".to_string()),
+        );
+        endpoints.insert(
+            "deployment_profiles".to_string(),
+            JsonValue::String("GET /deployment/profiles".to_string()),
+        );
+
+        let mut examples = Map::new();
+        examples.insert(
+            "http_raw_sql".to_string(),
+            JsonValue::String("curl -sS http://127.0.0.1:8080/query -d 'SELECT 1'".to_string()),
+        );
+        examples.insert(
+            "http_json_query".to_string(),
+            JsonValue::String(
+                "curl -sS http://127.0.0.1:8080/query -H 'content-type: application/json' -d '{\"query\":\"SELECT 1\"}'"
+                    .to_string(),
+            ),
+        );
+        examples.insert(
+            "http_json_query_with_params".to_string(),
+            JsonValue::String(
+                "curl -sS http://127.0.0.1:8080/query -H 'content-type: application/json' -d '{\"query\":\"SELECT $1 AS value\",\"params\":[42]}'"
+                    .to_string(),
+            ),
+        );
+
+        let mut object = Map::new();
+        object.insert("ok".to_string(), JsonValue::Bool(true));
+        object.insert(
+            "service".to_string(),
+            JsonValue::String("reddb".to_string()),
+        );
+        object.insert(
+            "version".to_string(),
+            JsonValue::String(env!("CARGO_PKG_VERSION").to_string()),
+        );
+        object.insert("endpoints".to_string(), JsonValue::Object(endpoints));
+        object.insert("examples".to_string(), JsonValue::Object(examples));
+        object.insert(
+            "docs".to_string(),
+            JsonValue::String("https://reddb.io/docs".to_string()),
+        );
+        object.insert(
+            "transport_listeners".to_string(),
+            self.transport_readiness_json(),
+        );
+        json_response(200, JsonValue::Object(object))
+    }
+
     fn health_json_with_transport(&self, report: &HealthReport) -> JsonValue {
         let mut value = crate::presentation::ops_json::health_json(report);
         if let JsonValue::Object(ref mut object) = value {
