@@ -352,6 +352,15 @@ impl ServerCommandConfig {
                 .insert(NO_AUTH_META.to_string(), "true".to_string());
         }
 
+        // Issue #652 — Control Event Ledger Compliance Mode.
+        // `REDDB_COMPLIANCE_MODE=true|1|yes|on` makes the producer
+        // slices (652b/c/d) fail-closed on ledger persistence
+        // failures. Default `false` — log-and-continue on emit error.
+        if let Some(raw) = env_nonempty("REDDB_COMPLIANCE_MODE") {
+            options.control_events.compliance_mode =
+                matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
+        }
+
         // Issue #517 — canonical `REDDB_BACKUP_*` contract takes
         // precedence. On Err, surface the partial-config message so
         // boot exits non-zero with a clear operator message. On
