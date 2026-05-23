@@ -137,8 +137,8 @@ fn first_value(response: &JsonValue) -> &str {
 }
 
 #[test]
-#[ignore = "pre-existing failure on main, tracked in #633"]
 fn grafana_prometheus_datasource_panels_render_representative_metrics() {
+    let _lock = env_lock().lock().expect("env lock");
     let rt = RedDBRuntime::in_memory().expect("runtime");
     exec(
         &rt,
