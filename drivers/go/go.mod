@@ -5,7 +5,7 @@ go 1.24.0
 require (
 	github.com/klauspost/compress v1.18.6
 	google.golang.org/grpc v1.79.3
-	google.golang.org/protobuf v1.36.10
+	google.golang.org/protobuf v1.36.11
 )
 
 require (
