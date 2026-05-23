@@ -56,6 +56,7 @@ pub enum EventKind {
     RestoreRun,
     FailoverPromotion,
     ReplicationSafety,
+    EvidenceExport,
 }
 
 impl EventKind {
@@ -83,6 +84,7 @@ impl EventKind {
             Self::RestoreRun => "restore.run",
             Self::FailoverPromotion => "failover.promotion",
             Self::ReplicationSafety => "replication.safety",
+            Self::EvidenceExport => "evidence.export",
         }
     }
 }
