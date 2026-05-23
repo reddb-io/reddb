@@ -2084,7 +2084,7 @@ impl RedDBRuntime {
 
         let runtime = Self {
             inner: Arc::new(RuntimeInner {
-                db,
+                db: db.clone(),
                 layout: PhysicalLayout::from_options(&options),
                 indices: IndexCatalog::register_default_vector_graph(
                     options.has_capability(crate::api::Capability::Table),
@@ -2196,6 +2196,10 @@ impl RedDBRuntime {
                         &data_path,
                     ))
                 },
+                control_event_ledger: Arc::new(crate::runtime::control_events::RuntimeLedger::new(
+                    db.store(),
+                )),
+                control_event_config: options.control_events,
                 lease_lifecycle: std::sync::OnceLock::new(),
                 replica_apply_metrics: crate::replication::logical::ReplicaApplyMetrics::default(),
                 quota_bucket: crate::runtime::quota_bucket::QuotaBucket::from_env(),

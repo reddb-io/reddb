@@ -45,6 +45,10 @@ pub enum EventKind {
     UserDisable,
     ApiKeyCreate,
     ApiKeyRevoke,
+    VaultMetadataRead,
+    VaultUnseal,
+    VaultRotate,
+    VaultPurge,
 }
 
 impl EventKind {
@@ -61,6 +65,10 @@ impl EventKind {
             Self::UserDisable => "user.disable",
             Self::ApiKeyCreate => "apikey.create",
             Self::ApiKeyRevoke => "apikey.revoke",
+            Self::VaultMetadataRead => "vault.metadata_read",
+            Self::VaultUnseal => "vault.unseal",
+            Self::VaultRotate => "vault.rotate",
+            Self::VaultPurge => "vault.purge",
         }
     }
 }
