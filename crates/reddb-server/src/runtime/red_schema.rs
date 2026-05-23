@@ -70,6 +70,22 @@ pub(super) const QUEUES_INTERNAL: &str = "__red_schema_queues";
 // versions: `(event_name, version, schema_json, registered_at)`.
 pub(super) const SCHEMA_REGISTRY: &str = "red.schema_registry";
 pub(super) const SCHEMA_REGISTRY_INTERNAL: &str = "__red_schema_schema_registry";
+// Issue #655 — governance/evidence surfaces. These are read-only
+// projections over runtime-owned stores, not SQL collections.
+pub(super) const GOVERNANCE_REGISTRY: &str = "red.registry";
+pub(super) const GOVERNANCE_REGISTRY_INTERNAL: &str = "__red_schema_registry";
+pub(super) const GOVERNANCE_REGISTRY_HISTORY: &str = "red.registry_history";
+pub(super) const GOVERNANCE_REGISTRY_HISTORY_INTERNAL: &str = "__red_schema_registry_history";
+pub(super) const MANAGED_POLICIES: &str = "red.managed_policies";
+pub(super) const MANAGED_POLICIES_INTERNAL: &str = "__red_schema_managed_policies";
+pub(super) const CONTROL_EVENTS: &str = "red.control_events";
+pub(super) const CONTROL_EVENTS_INTERNAL: &str = "__red_schema_control_events";
+pub(super) const USERS: &str = "red.users";
+pub(super) const USERS_INTERNAL: &str = "__red_schema_users";
+pub(super) const API_KEYS: &str = "red.api_keys";
+pub(super) const API_KEYS_INTERNAL: &str = "__red_schema_api_keys";
+pub(super) const CONTROL_CAPABILITIES: &str = "red.control_capabilities";
+pub(super) const CONTROL_CAPABILITIES_INTERNAL: &str = "__red_schema_control_capabilities";
 pub(super) const READ_ONLY_ERROR: &str = "system schema is read-only";
 
 const COLLECTION_COLUMNS: [&str; 15] = [
@@ -198,6 +214,90 @@ const MATERIALIZED_VIEW_COLUMNS: [&str; 7] = [
 const SCHEMA_REGISTRY_COLUMNS: [&str; 4] =
     ["event_name", "version", "schema_json", "registered_at"];
 
+const GOVERNANCE_REGISTRY_COLUMNS: [&str; 12] = [
+    "id",
+    "version",
+    "resource_type",
+    "schema",
+    "mutability",
+    "sensitivity",
+    "managed",
+    "required_action",
+    "required_resource",
+    "evidence_requirement",
+    "updated_by",
+    "updated_at",
+];
+
+const GOVERNANCE_REGISTRY_HISTORY_COLUMNS: [&str; 15] = [
+    "id",
+    "version",
+    "resource_type",
+    "schema",
+    "mutability",
+    "sensitivity",
+    "managed",
+    "required_action",
+    "required_resource",
+    "evidence_requirement",
+    "updated_by",
+    "updated_at",
+    "superseded_by",
+    "superseded_at",
+    "change_reason",
+];
+
+const MANAGED_POLICY_COLUMNS: [&str; 9] = [
+    "policy_id",
+    "registry_id",
+    "version",
+    "schema",
+    "required_action",
+    "required_resource",
+    "evidence_requirement",
+    "updated_by",
+    "updated_at",
+];
+
+const CONTROL_EVENT_COLUMNS: [&str; 14] = [
+    "id",
+    "ts",
+    "kind",
+    "outcome",
+    "actor_kind",
+    "actor_user_id",
+    "scope",
+    "action",
+    "resource",
+    "reason",
+    "matched_policy_id",
+    "request_id",
+    "trace_id",
+    "fields_json",
+];
+
+const USER_COLUMNS: [&str; 8] = [
+    "username",
+    "tenant_id",
+    "role",
+    "enabled",
+    "system_owned",
+    "created_at",
+    "updated_at",
+    "api_key_count",
+];
+
+const API_KEY_COLUMNS: [&str; 6] = [
+    "owner",
+    "tenant_id",
+    "name",
+    "role",
+    "created_at",
+    "key_fingerprint",
+];
+
+const CONTROL_CAPABILITY_COLUMNS: [&str; 4] = ["action", "resource_kind", "scope", "description"];
+
 const SUBSCRIPTION_COLUMNS: [&str; 11] = [
     "name",
     "collection",
@@ -231,6 +331,16 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
         (QUEUE_PENDING, QUEUE_PENDING_INTERNAL),
         (QUEUES, QUEUES_INTERNAL),
         (SCHEMA_REGISTRY, SCHEMA_REGISTRY_INTERNAL),
+        (
+            GOVERNANCE_REGISTRY_HISTORY,
+            GOVERNANCE_REGISTRY_HISTORY_INTERNAL,
+        ),
+        (GOVERNANCE_REGISTRY, GOVERNANCE_REGISTRY_INTERNAL),
+        (MANAGED_POLICIES, MANAGED_POLICIES_INTERNAL),
+        (CONTROL_EVENTS, CONTROL_EVENTS_INTERNAL),
+        (USERS, USERS_INTERNAL),
+        (API_KEYS, API_KEYS_INTERNAL),
+        (CONTROL_CAPABILITIES, CONTROL_CAPABILITIES_INTERNAL),
     ] {
         if let Some(next) = replace_case_insensitive_outside_quotes(&rewritten, public, internal) {
             rewritten = next;
@@ -284,6 +394,20 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(QUEUES)
         || table.eq_ignore_ascii_case(SCHEMA_REGISTRY_INTERNAL)
         || table.eq_ignore_ascii_case(SCHEMA_REGISTRY)
+        || table.eq_ignore_ascii_case(GOVERNANCE_REGISTRY_INTERNAL)
+        || table.eq_ignore_ascii_case(GOVERNANCE_REGISTRY)
+        || table.eq_ignore_ascii_case(GOVERNANCE_REGISTRY_HISTORY_INTERNAL)
+        || table.eq_ignore_ascii_case(GOVERNANCE_REGISTRY_HISTORY)
+        || table.eq_ignore_ascii_case(MANAGED_POLICIES_INTERNAL)
+        || table.eq_ignore_ascii_case(MANAGED_POLICIES)
+        || table.eq_ignore_ascii_case(CONTROL_EVENTS_INTERNAL)
+        || table.eq_ignore_ascii_case(CONTROL_EVENTS)
+        || table.eq_ignore_ascii_case(USERS_INTERNAL)
+        || table.eq_ignore_ascii_case(USERS)
+        || table.eq_ignore_ascii_case(API_KEYS_INTERNAL)
+        || table.eq_ignore_ascii_case(API_KEYS)
+        || table.eq_ignore_ascii_case(CONTROL_CAPABILITIES_INTERNAL)
+        || table.eq_ignore_ascii_case(CONTROL_CAPABILITIES)
 }
 
 pub(super) fn red_query(
@@ -330,6 +454,15 @@ pub(super) fn red_query(
         VirtualTableKind::QueuePending => queue_pending_snapshot(runtime, visible_collections),
         VirtualTableKind::Queues => queues_snapshot(runtime, tenant, visible_collections),
         VirtualTableKind::SchemaRegistry => schema_registry_snapshot(runtime),
+        VirtualTableKind::GovernanceRegistry => governance_registry_snapshot(runtime),
+        VirtualTableKind::GovernanceRegistryHistory => {
+            governance_registry_history_snapshot(runtime)
+        }
+        VirtualTableKind::ManagedPolicies => managed_policies_snapshot(runtime),
+        VirtualTableKind::ControlEvents => control_events_snapshot(runtime, tenant),
+        VirtualTableKind::Users => users_snapshot(runtime, tenant),
+        VirtualTableKind::ApiKeys => api_keys_snapshot(runtime, tenant),
+        VirtualTableKind::ControlCapabilities => control_capabilities_snapshot(),
     };
 
     let table_name = query.table.as_str();
@@ -436,6 +569,13 @@ enum VirtualTableKind {
     QueuePending,
     Queues,
     SchemaRegistry,
+    GovernanceRegistry,
+    GovernanceRegistryHistory,
+    ManagedPolicies,
+    ControlEvents,
+    Users,
+    ApiKeys,
+    ControlCapabilities,
 }
 
 impl VirtualTableKind {
@@ -455,6 +595,13 @@ impl VirtualTableKind {
             Self::QueuePending => &QUEUE_PENDING_COLUMNS,
             Self::Queues => &QUEUE_COLUMNS,
             Self::SchemaRegistry => &SCHEMA_REGISTRY_COLUMNS,
+            Self::GovernanceRegistry => &GOVERNANCE_REGISTRY_COLUMNS,
+            Self::GovernanceRegistryHistory => &GOVERNANCE_REGISTRY_HISTORY_COLUMNS,
+            Self::ManagedPolicies => &MANAGED_POLICY_COLUMNS,
+            Self::ControlEvents => &CONTROL_EVENT_COLUMNS,
+            Self::Users => &USER_COLUMNS,
+            Self::ApiKeys => &API_KEY_COLUMNS,
+            Self::ControlCapabilities => &CONTROL_CAPABILITY_COLUMNS,
         }
     }
 
@@ -474,6 +621,13 @@ impl VirtualTableKind {
             Self::QueuePending => QUEUE_PENDING,
             Self::Queues => QUEUES,
             Self::SchemaRegistry => SCHEMA_REGISTRY,
+            Self::GovernanceRegistry => GOVERNANCE_REGISTRY,
+            Self::GovernanceRegistryHistory => GOVERNANCE_REGISTRY_HISTORY,
+            Self::ManagedPolicies => MANAGED_POLICIES,
+            Self::ControlEvents => CONTROL_EVENTS,
+            Self::Users => USERS,
+            Self::ApiKeys => API_KEYS,
+            Self::ControlCapabilities => CONTROL_CAPABILITIES,
         }
     }
 }
@@ -527,9 +681,373 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
     {
         return Ok(VirtualTableKind::SchemaRegistry);
     }
+    if name.eq_ignore_ascii_case(GOVERNANCE_REGISTRY_INTERNAL)
+        || name.eq_ignore_ascii_case(GOVERNANCE_REGISTRY)
+    {
+        return Ok(VirtualTableKind::GovernanceRegistry);
+    }
+    if name.eq_ignore_ascii_case(GOVERNANCE_REGISTRY_HISTORY_INTERNAL)
+        || name.eq_ignore_ascii_case(GOVERNANCE_REGISTRY_HISTORY)
+    {
+        return Ok(VirtualTableKind::GovernanceRegistryHistory);
+    }
+    if name.eq_ignore_ascii_case(MANAGED_POLICIES_INTERNAL)
+        || name.eq_ignore_ascii_case(MANAGED_POLICIES)
+    {
+        return Ok(VirtualTableKind::ManagedPolicies);
+    }
+    if name.eq_ignore_ascii_case(CONTROL_EVENTS_INTERNAL)
+        || name.eq_ignore_ascii_case(CONTROL_EVENTS)
+    {
+        return Ok(VirtualTableKind::ControlEvents);
+    }
+    if name.eq_ignore_ascii_case(USERS_INTERNAL) || name.eq_ignore_ascii_case(USERS) {
+        return Ok(VirtualTableKind::Users);
+    }
+    if name.eq_ignore_ascii_case(API_KEYS_INTERNAL) || name.eq_ignore_ascii_case(API_KEYS) {
+        return Ok(VirtualTableKind::ApiKeys);
+    }
+    if name.eq_ignore_ascii_case(CONTROL_CAPABILITIES_INTERNAL)
+        || name.eq_ignore_ascii_case(CONTROL_CAPABILITIES)
+    {
+        return Ok(VirtualTableKind::ControlCapabilities);
+    }
     Err(RedDBError::Query(format!(
         "unknown system schema relation `{name}`"
     )))
+}
+
+fn governance_registry_snapshot(runtime: &RedDBRuntime) -> Vec<UnifiedRecord> {
+    let schema = Arc::new(
+        GOVERNANCE_REGISTRY_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    runtime
+        .config_registry()
+        .list_active()
+        .into_iter()
+        .map(|entry| governance_registry_record(Arc::clone(&schema), entry))
+        .collect()
+}
+
+fn governance_registry_history_snapshot(runtime: &RedDBRuntime) -> Vec<UnifiedRecord> {
+    let schema = Arc::new(
+        GOVERNANCE_REGISTRY_HISTORY_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let registry = runtime.config_registry();
+    let mut rows = Vec::new();
+    for active in registry.list_active() {
+        for record in registry.history(&active.id) {
+            rows.push(governance_registry_history_record(
+                Arc::clone(&schema),
+                record,
+            ));
+        }
+    }
+    rows
+}
+
+fn managed_policies_snapshot(runtime: &RedDBRuntime) -> Vec<UnifiedRecord> {
+    let schema = Arc::new(
+        MANAGED_POLICY_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    runtime
+        .config_registry()
+        .list_active()
+        .into_iter()
+        .filter(|entry| entry.managed && entry.resource_type == "policy")
+        .map(|entry| {
+            let policy_id = entry
+                .required_resource
+                .strip_prefix("policy:")
+                .unwrap_or(&entry.id)
+                .to_string();
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(policy_id),
+                    Value::text(entry.id),
+                    Value::UnsignedInteger(entry.version),
+                    Value::text(entry.schema),
+                    Value::text(entry.required_action),
+                    Value::text(entry.required_resource),
+                    Value::text(registry_evidence_requirement(entry.evidence_requirement)),
+                    Value::text(entry.updated_by),
+                    timestamp_ms_value(entry.updated_at_ms),
+                ],
+            )
+        })
+        .collect()
+}
+
+fn control_events_snapshot(runtime: &RedDBRuntime, tenant: Option<&str>) -> Vec<UnifiedRecord> {
+    let schema = Arc::new(
+        CONTROL_EVENT_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let Some(manager) = runtime
+        .db()
+        .store()
+        .get_collection(super::control_events::CONTROL_EVENTS_COLLECTION)
+    else {
+        return Vec::new();
+    };
+    manager
+        .query_all(|_| true)
+        .into_iter()
+        .filter_map(|entity| {
+            let row = entity.data.as_row()?;
+            if let Some(tenant) = tenant {
+                match row.get_field("scope") {
+                    Some(Value::Text(scope)) if scope.as_ref() == tenant => {}
+                    _ => return None,
+                }
+            }
+            Some(UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                CONTROL_EVENT_COLUMNS
+                    .iter()
+                    .map(|column| row.get_field(column).cloned().unwrap_or(Value::Null))
+                    .collect(),
+            ))
+        })
+        .collect()
+}
+
+fn users_snapshot(runtime: &RedDBRuntime, tenant: Option<&str>) -> Vec<UnifiedRecord> {
+    let schema = Arc::new(
+        USER_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let auth_store = runtime.inner.auth_store.read().clone();
+    let Some(auth_store) = auth_store else {
+        return Vec::new();
+    };
+    let tenant_filter = tenant.map(Some);
+    auth_store
+        .list_users_scoped(tenant_filter)
+        .into_iter()
+        .map(|user| {
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(user.username),
+                    user.tenant_id.map(Value::text).unwrap_or(Value::Null),
+                    Value::text(user.role.as_str()),
+                    Value::Boolean(user.enabled),
+                    Value::Boolean(user.system_owned),
+                    timestamp_ms_value(user.created_at),
+                    timestamp_ms_value(user.updated_at),
+                    Value::UnsignedInteger(user.api_keys.len() as u64),
+                ],
+            )
+        })
+        .collect()
+}
+
+fn api_keys_snapshot(runtime: &RedDBRuntime, tenant: Option<&str>) -> Vec<UnifiedRecord> {
+    let schema = Arc::new(
+        API_KEY_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let auth_store = runtime.inner.auth_store.read().clone();
+    let Some(auth_store) = auth_store else {
+        return Vec::new();
+    };
+    let tenant_filter = tenant.map(Some);
+    let mut rows = Vec::new();
+    for user in auth_store.list_users_scoped(tenant_filter) {
+        let owner = match user.tenant_id.as_deref() {
+            Some(tenant) => format!("{tenant}/{}", user.username),
+            None => user.username.clone(),
+        };
+        for key in user.api_keys {
+            rows.push(UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(owner.clone()),
+                    user.tenant_id
+                        .clone()
+                        .map(Value::text)
+                        .unwrap_or(Value::Null),
+                    Value::text(key.name),
+                    Value::text(key.role.as_str()),
+                    timestamp_ms_value(key.created_at),
+                    Value::text(api_key_fingerprint(&key.key)),
+                ],
+            ));
+        }
+    }
+    rows
+}
+
+fn control_capabilities_snapshot() -> Vec<UnifiedRecord> {
+    const ACTIONS: &[&str] = &[
+        "policy:put",
+        "policy:drop",
+        "policy:attach",
+        "policy:detach",
+        "policy:simulate",
+        "admin:bootstrap",
+        "admin:audit-read",
+        "admin:reload",
+        "admin:lease-promote",
+        "config:read",
+        "config:write",
+        "config:*",
+        "vault:read_metadata",
+        "vault:write",
+        "vault:unseal",
+        "vault:unseal_history",
+        "vault:purge",
+        "red.registry:register",
+        "red.registry:supersede",
+        "red.registry:*",
+        "admin:*",
+        "vault:*",
+        "kv:*",
+        "policy:*",
+    ];
+
+    let schema = Arc::new(
+        CONTROL_CAPABILITY_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    ACTIONS
+        .iter()
+        .map(|action| {
+            let resource_kind = control_capability_resource_kind(action);
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(*action),
+                    Value::text(resource_kind),
+                    Value::text(control_capability_scope(action)),
+                    Value::text(format!("{action} on {resource_kind} resources")),
+                ],
+            )
+        })
+        .collect()
+}
+
+fn governance_registry_record(
+    schema: Arc<Vec<Arc<str>>>,
+    entry: crate::auth::registry::ConfigRegistryEntry,
+) -> UnifiedRecord {
+    UnifiedRecord::with_schema(
+        schema,
+        vec![
+            Value::text(entry.id),
+            Value::UnsignedInteger(entry.version),
+            Value::text(entry.resource_type),
+            Value::text(entry.schema),
+            Value::text(registry_mutability(entry.mutability)),
+            Value::text(registry_sensitivity(entry.sensitivity)),
+            Value::Boolean(entry.managed),
+            Value::text(entry.required_action),
+            Value::text(entry.required_resource),
+            Value::text(registry_evidence_requirement(entry.evidence_requirement)),
+            Value::text(entry.updated_by),
+            timestamp_ms_value(entry.updated_at_ms),
+        ],
+    )
+}
+
+fn governance_registry_history_record(
+    schema: Arc<Vec<Arc<str>>>,
+    record: crate::auth::registry::ConfigRegistryHistoryRecord,
+) -> UnifiedRecord {
+    let entry = record.entry;
+    UnifiedRecord::with_schema(
+        schema,
+        vec![
+            Value::text(entry.id),
+            Value::UnsignedInteger(entry.version),
+            Value::text(entry.resource_type),
+            Value::text(entry.schema),
+            Value::text(registry_mutability(entry.mutability)),
+            Value::text(registry_sensitivity(entry.sensitivity)),
+            Value::Boolean(entry.managed),
+            Value::text(entry.required_action),
+            Value::text(entry.required_resource),
+            Value::text(registry_evidence_requirement(entry.evidence_requirement)),
+            Value::text(entry.updated_by),
+            timestamp_ms_value(entry.updated_at_ms),
+            Value::text(record.superseded_by),
+            timestamp_ms_value(record.superseded_at_ms),
+            Value::text(record.change_reason),
+        ],
+    )
+}
+
+fn registry_mutability(value: crate::auth::registry::Mutability) -> &'static str {
+    match value {
+        crate::auth::registry::Mutability::Immutable => "immutable",
+        crate::auth::registry::Mutability::MutableViaGovernance => "mutable_via_governance",
+    }
+}
+
+fn registry_sensitivity(value: crate::auth::registry::Sensitivity) -> &'static str {
+    match value {
+        crate::auth::registry::Sensitivity::Public => "public",
+        crate::auth::registry::Sensitivity::Internal => "internal",
+        crate::auth::registry::Sensitivity::Confidential => "confidential",
+        crate::auth::registry::Sensitivity::Secret => "secret",
+    }
+}
+
+fn registry_evidence_requirement(
+    value: crate::auth::registry::EvidenceRequirement,
+) -> &'static str {
+    match value {
+        crate::auth::registry::EvidenceRequirement::None => "none",
+        crate::auth::registry::EvidenceRequirement::Metadata => "metadata",
+        crate::auth::registry::EvidenceRequirement::Full => "full",
+    }
+}
+
+fn api_key_fingerprint(key: &str) -> String {
+    format!("blake3:{}", blake3::hash(key.as_bytes()).to_hex())
+}
+
+fn control_capability_resource_kind(action: &str) -> &str {
+    if action.starts_with("red.registry:") {
+        "registry"
+    } else if let Some((prefix, _)) = action.split_once(':') {
+        prefix
+    } else {
+        "system"
+    }
+}
+
+fn control_capability_scope(action: &str) -> &'static str {
+    if action.starts_with("admin:") || action.starts_with("red.registry:") {
+        "platform"
+    } else {
+        "tenant"
+    }
+}
+
+fn timestamp_ms_value(value: u128) -> Value {
+    i64::try_from(value)
+        .map(Value::TimestampMs)
+        .unwrap_or(Value::Null)
 }
 
 fn schema_registry_snapshot(runtime: &RedDBRuntime) -> Vec<UnifiedRecord> {
