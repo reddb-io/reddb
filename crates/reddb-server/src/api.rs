@@ -208,6 +208,9 @@ pub struct RedDBOptions {
     pub replication: ReplicationConfig,
     /// Authentication & authorization configuration.
     pub auth: AuthConfig,
+    /// Control Event Ledger configuration (issue #652). Read from
+    /// `REDDB_COMPLIANCE_MODE` at boot.
+    pub control_events: crate::runtime::control_events::ControlEventConfig,
     /// Auto-create a HASH index on a user `id` column the first time a
     /// row carrying that column is inserted into a collection. See
     /// `UnifiedStoreConfig::auto_index_id`. Defaults to `true`; set to
@@ -252,6 +255,7 @@ impl fmt::Debug for RedDBOptions {
             .field("remote_key", &self.remote_key)
             .field("replication", &self.replication)
             .field("auth", &self.auth)
+            .field("control_events", &self.control_events)
             .field("layout", &self.layout)
             .field("layout_overrides", &self.layout_overrides)
             .finish()
@@ -280,6 +284,7 @@ impl Clone for RedDBOptions {
             remote_key: self.remote_key.clone(),
             replication: self.replication.clone(),
             auth: self.auth.clone(),
+            control_events: self.control_events,
             auto_index_id: self.auto_index_id,
             layout: self.layout,
             layout_overrides: self.layout_overrides.clone(),
@@ -318,6 +323,7 @@ impl Default for RedDBOptions {
             remote_key: None,
             replication: ReplicationConfig::standalone(),
             auth: AuthConfig::default(),
+            control_events: crate::runtime::control_events::ControlEventConfig::default(),
             auto_index_id: true,
             layout: crate::storage::layout::StorageLayout::default(),
             layout_overrides: crate::storage::layout::LayoutOverrides::default(),
