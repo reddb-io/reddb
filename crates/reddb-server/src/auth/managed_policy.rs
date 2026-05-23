@@ -854,6 +854,89 @@ mod tests {
         );
     }
 
+    // ---- #647 system-owned guardrail integration: tenant-scope half ----
+    //
+    // Acceptance #4 for #647 asks that tenant-scoped and platform-scoped
+    // system-owned users be tested *separately*. The Allow-path test
+    // (`structurally_eligible_caller_with_matching_policy_is_allowed`)
+    // already pins the platform-scoped operator. A tenant-scoped
+    // system-owned user is *not* a platform-scoped operator — the gate
+    // requires both flags — so even with `policy:*` granted the gate
+    // must Deny on `NotStructurallyEligible` and never reach the policy
+    // evaluator. Pins acceptance #3 too: system-owned alone is not
+    // enough; platform scope is part of the operator-principal shape.
+
+    #[test]
+    fn tenant_scoped_system_owned_user_is_structurally_ineligible_for_managed_policy() {
+        let store = store();
+        let seeder = seed_registry_admin(&store);
+        store
+            .create_system_user("ops", "p", Role::Admin, Some("acme"))
+            .expect("create tenant-scoped system-owned user");
+        let ops_acme = UserId::scoped("acme", "ops");
+        // Grant the broadest possible policy permission — proves the
+        // Deny below is structural, not policy-evaluator fallout.
+        store
+            .put_policy(allow_all_policies("p-ops-acme-allow"))
+            .unwrap();
+        store
+            .attach_policy(PrincipalRef::User(ops_acme.clone()), "p-ops-acme-allow")
+            .unwrap();
+
+        let reg = ConfigRegistry::new();
+        reg.register(
+            &store,
+            &seeder,
+            &registry_admin_ctx(),
+            managed_policy_draft("p-baseline-readonly"),
+            1_000,
+        )
+        .unwrap();
+
+        let gate = ManagedPolicyGate::new(&reg);
+        // Mirror the runtime EvalContext shape for a tenant-scoped
+        // system-owned user — system_owned=true (the user record says
+        // so) AND platform_scoped=false (tenant.is_some()).
+        let ctx = EvalContext {
+            principal_tenant: Some("acme".into()),
+            current_tenant: Some("acme".into()),
+            peer_ip: None,
+            mfa_present: false,
+            now_ms: 1_700_000_000_100,
+            principal_is_admin_role: true,
+            principal_is_system_owned: true,
+            principal_is_platform_scoped: false,
+        };
+
+        for op in [
+            PolicyOp::Put,
+            PolicyOp::Drop,
+            PolicyOp::Attach,
+            PolicyOp::Detach,
+        ] {
+            let decision = gate.check_mutation(&store, &ops_acme, &ctx, "p-baseline-readonly", op);
+            match decision {
+                ManagedPolicyDecision::Deny {
+                    reason:
+                        DenyReason::NotStructurallyEligible {
+                            is_system_owned,
+                            is_platform_scoped,
+                        },
+                    op: got_op,
+                    ..
+                } => {
+                    assert_eq!(got_op, op);
+                    assert!(is_system_owned, "system_owned flag should propagate");
+                    assert!(
+                        !is_platform_scoped,
+                        "tenant-scoped principal must report platform_scoped=false"
+                    );
+                }
+                other => panic!("expected NotStructurallyEligible Deny for {op:?}, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn split_required_resource_handles_bare_string() {
         assert_eq!(
