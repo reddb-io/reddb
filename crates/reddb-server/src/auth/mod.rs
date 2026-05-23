@@ -18,6 +18,7 @@ pub mod middleware;
 pub mod oauth;
 pub mod policies;
 pub mod privileges;
+pub mod registry;
 pub mod scope_cache;
 pub mod scram;
 pub mod store;
