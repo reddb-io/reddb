@@ -2013,6 +2013,7 @@ pub(crate) const BOOTSTRAP_FIRST_ADMIN_KEY: &str = "system.bootstrap.first_admin
 pub(crate) const PRESET_ENV: &str = "REDDB_PRESET";
 pub(crate) const PRESET_SIMPLE: &str = "simple";
 pub(crate) const PRESET_PRODUCTION: &str = "production";
+pub(crate) const PRESET_REGULATED: &str = "regulated";
 
 /// Policy id installed by the `production` preset and attached to the
 /// first admin. Grants `"*"` on `"*"` so the admin has policy-derived
@@ -2078,9 +2079,13 @@ pub(crate) fn apply_preset(
             None
         }
         PRESET_PRODUCTION => Some(apply_production_preset(auth_store)?),
+        PRESET_REGULATED => {
+            runtime.query_audit().enable_infrastructure();
+            None
+        }
         other => {
             return Err(format!(
-                "REDDB_PRESET={other:?} is not recognised (expected `simple` or `production`)"
+                "REDDB_PRESET={other:?} is not recognised (expected `simple`, `production`, or `regulated`)"
             ));
         }
     };
@@ -3078,6 +3083,50 @@ mod tests {
             crate::storage::schema::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_PRODUCTION),
             other => panic!("expected Text(production), got {other:?}"),
         }
+
+        clear_preset_env();
+    }
+
+    #[test]
+    fn regulated_preset_enables_query_audit_infrastructure_without_rules() {
+        let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        clear_preset_env();
+        // SAFETY: env serialised by `no_auth_env_lock`.
+        unsafe {
+            std::env::set_var(PRESET_ENV, PRESET_REGULATED);
+        }
+
+        let (runtime, auth_store) = fresh_runtime_and_store();
+        apply_preset(&runtime, &auth_store).expect("regulated preset applies cleanly");
+
+        assert!(runtime.query_audit().is_enabled());
+        assert!(runtime.query_audit().rules().is_empty());
+        assert!(
+            runtime
+                .db()
+                .store()
+                .get_collection(crate::runtime::query_audit::QUERY_AUDIT_COLLECTION)
+                .is_some(),
+            "regulated preset should create the query-audit stream"
+        );
+
+        runtime
+            .execute_query("CREATE TABLE docs (id INT)")
+            .expect("create table");
+        runtime
+            .execute_query("INSERT INTO docs (id) VALUES (1)")
+            .expect("insert");
+        runtime.execute_query("SELECT * FROM docs").expect("select");
+        let rows = runtime
+            .db()
+            .store()
+            .get_collection(crate::runtime::query_audit::QUERY_AUDIT_COLLECTION)
+            .expect("query audit collection")
+            .query_all(|_| true);
+        assert!(
+            rows.is_empty(),
+            "regulated preset must not globally audit every query"
+        );
 
         clear_preset_env();
     }
