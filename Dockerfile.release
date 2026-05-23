@@ -3,7 +3,7 @@
 # Release image: use binaries already produced by the release build matrix.
 # This keeps GHCR publishing from recompiling RedDB inside Docker.
 
-FROM busybox:1.36 AS layout
+FROM busybox:1.37 AS layout
 
 RUN mkdir -p /data /etc/reddb
 
