@@ -241,6 +241,29 @@ impl AuthStore {
     /// key.  The certificate hex string is returned in `BootstrapResult`
     /// so the admin can save it.
     pub fn bootstrap(&self, username: &str, password: &str) -> Result<BootstrapResult, AuthError> {
+        self.bootstrap_with_ownership(username, password, false)
+    }
+
+    /// Bootstrap the first admin with `system_owned = true` and platform
+    /// scope (`tenant = None`). The resulting principal carries both
+    /// `principal_is_system_owned` and `principal_is_platform_scoped`,
+    /// which is what #649's `ManagedConfigGate` requires before allowing
+    /// writes to managed config keys. Used by the `production` bootstrap
+    /// preset (issue #650).
+    pub fn bootstrap_system_admin(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<BootstrapResult, AuthError> {
+        self.bootstrap_with_ownership(username, password, true)
+    }
+
+    fn bootstrap_with_ownership(
+        &self,
+        username: &str,
+        password: &str,
+        system_owned: bool,
+    ) -> Result<BootstrapResult, AuthError> {
         // Atomic seal: only the first caller wins.
         if self
             .bootstrapped
@@ -262,7 +285,11 @@ impl AuthStore {
             }
         }
 
-        let user = self.create_user(username, password, Role::Admin)?;
+        let user = if system_owned {
+            self.create_system_user(username, password, Role::Admin, None)?
+        } else {
+            self.create_user(username, password, Role::Admin)?
+        };
         let key = self.create_api_key(username, "bootstrap", Role::Admin)?;
 
         // Generate a certificate-based keypair and re-seal the vault.
