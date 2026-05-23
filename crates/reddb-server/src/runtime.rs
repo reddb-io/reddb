@@ -1223,6 +1223,7 @@ pub mod control_events;
 pub(crate) mod ddl;
 pub mod disk_space_monitor;
 mod dml_target_scan;
+pub mod evidence_export;
 mod expr_eval;
 mod graph_dsl;
 mod health_connection;
