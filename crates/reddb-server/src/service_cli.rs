@@ -1964,16 +1964,15 @@ pub(crate) fn build_runtime_with_telemetry(
         } else {
             Arc::new(AuthStore::new(db_options.auth.clone()))
         };
-    // Issue #663 — when `--no-auth` is active, deliberately skip
-    // `bootstrap_from_env`. Otherwise a stray
-    // `REDDB_USERNAME`+`REDDB_PASSWORD` pair in the operator's
-    // environment would silently create an admin user, defeating the
-    // whole point of opting into anonymous mode.
+    // Issue #663 — when `--no-auth` is active, deliberately skip the
+    // preset machinery. Otherwise a stray `REDDB_USERNAME`+`REDDB_PASSWORD`
+    // pair in the operator's environment would silently create an admin
+    // user, defeating the whole point of opting into anonymous mode.
     if no_auth {
         eprintln!("{NO_AUTH_WARNING}");
         tracing::warn!("{NO_AUTH_WARNING}");
     } else {
-        auth_store.bootstrap_from_env();
+        apply_preset(&runtime, &auth_store)?;
     }
 
     // Background session purge (every 5 minutes)
@@ -1989,6 +1988,155 @@ pub(crate) fn build_runtime_with_telemetry(
     }
 
     Ok((runtime, auth_store, telemetry_guard))
+}
+
+/// Reserved config keys describing first-boot bootstrap state (issue #650).
+/// Presence of [`BOOTSTRAP_COMPLETED_KEY`] is the idempotency hinge: when
+/// it is set, [`apply_preset`] silently no-ops on subsequent boots so a
+/// container restart with the same env is a no-op.
+pub(crate) const BOOTSTRAP_COMPLETED_KEY: &str = "system.bootstrap.completed";
+pub(crate) const BOOTSTRAP_PRESET_KEY: &str = "system.bootstrap.preset";
+pub(crate) const BOOTSTRAP_FIRST_ADMIN_KEY: &str = "system.bootstrap.first_admin_id";
+
+/// Env var selecting the bootstrap preset. Default = `simple`.
+pub(crate) const PRESET_ENV: &str = "REDDB_PRESET";
+pub(crate) const PRESET_SIMPLE: &str = "simple";
+pub(crate) const PRESET_PRODUCTION: &str = "production";
+
+/// Policy id installed by the `production` preset and attached to the
+/// first admin. Grants `"*"` on `"*"` so the admin has policy-derived
+/// broad authority (acceptance #3) — not an authorization bypass.
+pub(crate) const FIRST_ADMIN_ALLOW_ALL_POLICY: &str = "system.bootstrap.first-admin-allow-all";
+
+/// Apply the bootstrap preset selected by `REDDB_PRESET` (default
+/// `simple`). Idempotent — if `system.bootstrap.completed` is already
+/// set, this is a one-line `tracing::info!` no-op and the server proceeds
+/// (issue #650 acceptance #5).
+///
+/// Caller must have already short-circuited the `--no-auth` / `--dev`
+/// path (issue #663): when that flag is set, the preset must be skipped
+/// entirely — no admin created, no bootstrap state written.
+pub(crate) fn apply_preset(
+    runtime: &RedDBRuntime,
+    auth_store: &Arc<AuthStore>,
+) -> Result<(), String> {
+    let store = runtime.db().store();
+
+    if store.get_config(BOOTSTRAP_COMPLETED_KEY).is_some() {
+        tracing::info!("bootstrap state present, skipping preset application");
+        return Ok(());
+    }
+
+    // `_FILE` companion expansion for k8s secret mounts. Errors here
+    // (e.g. both `REDDB_PASSWORD` and `REDDB_PASSWORD_FILE` set) are
+    // operator misconfigs and should fail the boot loudly.
+    for var in ["REDDB_USERNAME", "REDDB_PASSWORD"] {
+        crate::utils::expand_file_env(var)
+            .map_err(|err| format!("expand {var}_FILE: {err}"))?;
+    }
+
+    let preset = std::env::var(PRESET_ENV)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| PRESET_SIMPLE.to_string());
+
+    let first_admin_id = match preset.as_str() {
+        PRESET_SIMPLE => {
+            // `simple` is the default low-friction preset. Auth knobs
+            // remain whatever the CLI/env set; we only persist the
+            // bootstrap state so subsequent boots are idempotent.
+            None
+        }
+        PRESET_PRODUCTION => Some(apply_production_preset(auth_store)?),
+        other => {
+            return Err(format!(
+                "REDDB_PRESET={other:?} is not recognised (expected `simple` or `production`)"
+            ));
+        }
+    };
+
+    persist_bootstrap_state(runtime, &preset, first_admin_id.as_deref());
+    tracing::info!(preset = %preset, "bootstrap preset applied");
+    Ok(())
+}
+
+fn apply_production_preset(auth_store: &Arc<AuthStore>) -> Result<String, String> {
+    use crate::auth::store::PrincipalRef;
+    use crate::auth::{policies::Policy, UserId};
+
+    let username = std::env::var("REDDB_USERNAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            "REDDB_PRESET=production requires REDDB_USERNAME (or REDDB_USERNAME_FILE)".to_string()
+        })?;
+    let password = std::env::var("REDDB_PASSWORD")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            "REDDB_PRESET=production requires REDDB_PASSWORD (or REDDB_PASSWORD_FILE)".to_string()
+        })?;
+
+    // (1) Create the first admin as system-owned + platform-scoped so
+    // #649's `ManagedConfigGate` accepts them on managed-config writes.
+    let result = auth_store
+        .bootstrap_system_admin(&username, &password)
+        .map_err(|err| format!("bootstrap first admin: {err}"))?;
+    let first_admin = UserId::platform(result.user.username.clone());
+
+    // (2) Install the allow-all policy as an ordinary policy row.
+    let policy = Policy::from_json_str(&format!(
+        r#"{{
+            "id": "{id}",
+            "version": 1,
+            "statements": [{{
+                "effect": "allow",
+                "actions": ["*"],
+                "resources": ["*"]
+            }}]
+        }}"#,
+        id = FIRST_ADMIN_ALLOW_ALL_POLICY
+    ))
+    .map_err(|err| format!("compile allow-all policy: {err}"))?;
+    auth_store
+        .put_policy(policy)
+        .map_err(|err| format!("install allow-all policy: {err}"))?;
+
+    // (3) Attach the policy to the first admin.
+    auth_store
+        .attach_policy(
+            PrincipalRef::User(first_admin.clone()),
+            FIRST_ADMIN_ALLOW_ALL_POLICY,
+        )
+        .map_err(|err| format!("attach allow-all policy: {err}"))?;
+
+    Ok(first_admin.to_string())
+}
+
+fn persist_bootstrap_state(
+    runtime: &RedDBRuntime,
+    preset: &str,
+    first_admin_id: Option<&str>,
+) {
+    let store = runtime.db().store();
+    let mut tree = crate::serde_json::Map::new();
+    tree.insert(
+        BOOTSTRAP_COMPLETED_KEY.to_string(),
+        crate::serde_json::Value::Bool(true),
+    );
+    tree.insert(
+        BOOTSTRAP_PRESET_KEY.to_string(),
+        crate::serde_json::Value::String(preset.to_string()),
+    );
+    if let Some(id) = first_admin_id {
+        tree.insert(
+            BOOTSTRAP_FIRST_ADMIN_KEY.to_string(),
+            crate::serde_json::Value::String(id.to_string()),
+        );
+    }
+    let json = crate::serde_json::Value::Object(tree);
+    store.set_config_tree("", &json);
 }
 
 /// Read `red.logging.*` keys from the persistent config store and
@@ -2768,6 +2916,264 @@ mod tests {
             std::env::remove_var("REDDB_USERNAME");
             std::env::remove_var("REDDB_PASSWORD");
         }
+    }
+
+    // ---------- Issue #650 — bootstrap presets ----------
+
+    // Preset tests mutate process-global env (`REDDB_PRESET`,
+    // `REDDB_USERNAME`, `REDDB_PASSWORD`) and the global tracing
+    // subscriber. Share the no_auth lock so they don't race with each
+    // other or with the --no-auth tests above.
+    fn clear_preset_env() {
+        // SAFETY: callers hold `no_auth_env_lock()`.
+        unsafe {
+            std::env::remove_var(PRESET_ENV);
+            std::env::remove_var("REDDB_USERNAME");
+            std::env::remove_var("REDDB_PASSWORD");
+            std::env::remove_var("REDDB_USERNAME_FILE");
+            std::env::remove_var("REDDB_PASSWORD_FILE");
+        }
+    }
+
+    fn fresh_runtime_and_store() -> (RedDBRuntime, Arc<AuthStore>) {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let auth_store = Arc::new(AuthStore::new(crate::auth::AuthConfig::default()));
+        (runtime, auth_store)
+    }
+
+    #[test]
+    fn simple_preset_is_default_and_persists_state() {
+        let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        clear_preset_env();
+
+        let (runtime, auth_store) = fresh_runtime_and_store();
+        apply_preset(&runtime, &auth_store).expect("simple preset applies cleanly");
+
+        // No admin was created — `simple` is anonymous-friendly.
+        assert!(
+            auth_store.needs_bootstrap(),
+            "simple preset must not create an admin"
+        );
+
+        // Bootstrap state persisted so the next boot is a no-op.
+        let store = runtime.db().store();
+        let completed = store
+            .get_config(BOOTSTRAP_COMPLETED_KEY)
+            .expect("completed key persisted");
+        assert!(matches!(
+            completed,
+            crate::storage::schema::Value::Boolean(true)
+        ));
+        let preset = store
+            .get_config(BOOTSTRAP_PRESET_KEY)
+            .expect("preset key persisted");
+        match preset {
+            crate::storage::schema::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_SIMPLE),
+            other => panic!("expected Text(simple), got {other:?}"),
+        }
+        assert!(
+            store.get_config(BOOTSTRAP_FIRST_ADMIN_KEY).is_none(),
+            "simple preset must not record a first admin"
+        );
+
+        clear_preset_env();
+    }
+
+    #[test]
+    fn production_preset_creates_first_admin_with_allow_all_policy() {
+        use crate::auth::policies::{EvalContext, ResourceRef};
+        use crate::auth::UserId;
+
+        let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        clear_preset_env();
+        // SAFETY: env serialised by `no_auth_env_lock`.
+        unsafe {
+            std::env::set_var(PRESET_ENV, PRESET_PRODUCTION);
+            std::env::set_var("REDDB_USERNAME", "ops");
+            std::env::set_var("REDDB_PASSWORD", "hunter2");
+        }
+
+        let (runtime, auth_store) = fresh_runtime_and_store();
+        apply_preset(&runtime, &auth_store).expect("production preset applies cleanly");
+
+        // Admin exists and the auth store is sealed.
+        assert!(
+            !auth_store.needs_bootstrap(),
+            "production preset must seal bootstrap"
+        );
+        let users = auth_store.list_users();
+        assert_eq!(users.len(), 1);
+        let admin = &users[0];
+        assert_eq!(admin.username, "ops");
+        assert!(
+            admin.system_owned,
+            "first admin must be system-owned to pass the managed-config gate"
+        );
+        assert!(
+            admin.tenant_id.is_none(),
+            "first admin must be platform-scoped (tenant=None)"
+        );
+
+        // Allow-all policy was installed and attached to the first admin.
+        let policy = auth_store
+            .get_policy(FIRST_ADMIN_ALLOW_ALL_POLICY)
+            .expect("allow-all policy installed");
+        assert!(!policy.statements.is_empty());
+
+        // Verify policy-derived authority via the policy evaluator —
+        // not a bypass. Any action on any resource must Allow.
+        let actor = UserId::platform("ops");
+        let ctx = EvalContext {
+            principal_tenant: None,
+            current_tenant: None,
+            peer_ip: None,
+            mfa_present: false,
+            now_ms: 1_700_000_000_000,
+            principal_is_admin_role: true,
+            principal_is_system_owned: true,
+            principal_is_platform_scoped: true,
+        };
+        let arbitrary_resource = ResourceRef::new("config", "red.config.audit.enabled");
+        assert!(
+            auth_store.check_policy_authz(&actor, "config:write", &arbitrary_resource, &ctx),
+            "allow-all policy must grant arbitrary actions via the evaluator"
+        );
+
+        // Persisted state records the first admin id.
+        let store = runtime.db().store();
+        match store
+            .get_config(BOOTSTRAP_FIRST_ADMIN_KEY)
+            .expect("first_admin_id persisted")
+        {
+            crate::storage::schema::Value::Text(s) => assert_eq!(s.as_ref(), "ops"),
+            other => panic!("expected Text(ops), got {other:?}"),
+        }
+        match store.get_config(BOOTSTRAP_PRESET_KEY).unwrap() {
+            crate::storage::schema::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_PRODUCTION),
+            other => panic!("expected Text(production), got {other:?}"),
+        }
+
+        clear_preset_env();
+    }
+
+    #[test]
+    fn production_preset_refuses_to_start_without_password() {
+        let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        clear_preset_env();
+        // SAFETY: env serialised by `no_auth_env_lock`.
+        unsafe {
+            std::env::set_var(PRESET_ENV, PRESET_PRODUCTION);
+            std::env::set_var("REDDB_USERNAME", "ops");
+        }
+
+        let (runtime, auth_store) = fresh_runtime_and_store();
+        let err = apply_preset(&runtime, &auth_store).expect_err("must reject missing password");
+        assert!(
+            err.contains("REDDB_PASSWORD"),
+            "error must name the missing env: {err}"
+        );
+
+        // Nothing was persisted; nothing was created.
+        assert!(auth_store.needs_bootstrap());
+        assert!(runtime
+            .db()
+            .store()
+            .get_config(BOOTSTRAP_COMPLETED_KEY)
+            .is_none());
+
+        clear_preset_env();
+    }
+
+    #[test]
+    fn re_running_production_after_first_boot_is_a_silent_skip() {
+        let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        clear_preset_env();
+        // SAFETY: env serialised by `no_auth_env_lock`.
+        unsafe {
+            std::env::set_var(PRESET_ENV, PRESET_PRODUCTION);
+            std::env::set_var("REDDB_USERNAME", "ops");
+            std::env::set_var("REDDB_PASSWORD", "hunter2");
+        }
+
+        let (runtime, auth_store) = fresh_runtime_and_store();
+        apply_preset(&runtime, &auth_store).expect("first apply");
+        assert_eq!(auth_store.list_users().len(), 1);
+
+        // Second invocation: same runtime/store, same env. Must be a
+        // no-op — no error, no duplicate admin, no duplicate policy.
+        // We do NOT reuse `auth_store` because production sealed it; the
+        // idempotency hinge is the persisted config key, not the auth
+        // store's in-memory seal. Build a fresh `AuthStore` as a restart
+        // would and confirm `apply_preset` is a silent skip.
+        let fresh = Arc::new(AuthStore::new(crate::auth::AuthConfig::default()));
+        apply_preset(&runtime, &fresh).expect("re-run is silent-skip");
+        assert!(
+            fresh.needs_bootstrap(),
+            "re-run must not create a second admin"
+        );
+        assert!(
+            fresh.get_policy(FIRST_ADMIN_ALLOW_ALL_POLICY).is_none(),
+            "re-run must not re-install the allow-all policy on the fresh store"
+        );
+
+        clear_preset_env();
+    }
+
+    #[test]
+    fn unrecognised_preset_value_is_rejected() {
+        let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        clear_preset_env();
+        // SAFETY: env serialised by `no_auth_env_lock`.
+        unsafe {
+            std::env::set_var(PRESET_ENV, "weird");
+        }
+
+        let (runtime, auth_store) = fresh_runtime_and_store();
+        let err = apply_preset(&runtime, &auth_store).expect_err("must reject unknown preset");
+        assert!(err.contains("weird"), "error must echo the value: {err}");
+        assert!(auth_store.needs_bootstrap());
+
+        clear_preset_env();
+    }
+
+    #[test]
+    fn no_auth_short_circuits_preset_entirely() {
+        let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        clear_preset_env();
+        // SAFETY: env serialised by `no_auth_env_lock`. Production creds
+        // are set but `--no-auth` must win — no admin, no bootstrap state.
+        unsafe {
+            std::env::set_var(PRESET_ENV, PRESET_PRODUCTION);
+            std::env::set_var("REDDB_USERNAME", "ops");
+            std::env::set_var("REDDB_PASSWORD", "hunter2");
+        }
+
+        let options = no_auth_test_config(true)
+            .to_db_options()
+            .expect("to_db_options");
+        assert!(no_auth_active(&options));
+
+        // Mirror `build_runtime_with_telemetry`: when no_auth_active,
+        // `apply_preset` is never called.
+        let (runtime, auth_store) = fresh_runtime_and_store();
+        if !no_auth_active(&options) {
+            apply_preset(&runtime, &auth_store).expect("would apply preset");
+        }
+
+        assert!(
+            auth_store.needs_bootstrap(),
+            "--no-auth must prevent any admin creation"
+        );
+        assert!(
+            runtime
+                .db()
+                .store()
+                .get_config(BOOTSTRAP_COMPLETED_KEY)
+                .is_none(),
+            "--no-auth must skip bootstrap-state persistence"
+        );
+
+        clear_preset_env();
     }
 
     #[test]
