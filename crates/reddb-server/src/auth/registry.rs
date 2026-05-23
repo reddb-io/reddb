@@ -297,6 +297,25 @@ impl ConfigRegistry {
             .and_then(|m| m.get(id).cloned())
             .unwrap_or_default()
     }
+
+    /// Restore an active entry that was already accepted through a trusted
+    /// bootstrap path and persisted in internal config state. This is not a
+    /// governance mutation; it only rehydrates the process-local registry
+    /// after `system.bootstrap.completed` makes the manifest file optional.
+    pub(crate) fn restore_bootstrap_entry(
+        &self,
+        entry: ConfigRegistryEntry,
+    ) -> Result<(), RegistryError> {
+        let mut active = self.active.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = active.get(&entry.id) {
+            if existing == &entry {
+                return Ok(());
+            }
+            return Err(RegistryError::AlreadyRegistered(entry.id));
+        }
+        active.insert(entry.id.clone(), entry);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
