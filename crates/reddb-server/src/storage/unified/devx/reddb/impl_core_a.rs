@@ -1006,9 +1006,9 @@ impl RedDB {
         let query_allowed = if self.options.mode == StorageMode::Persistent {
             let authority = self.physical_authority_status();
             (authority.native_bootstrap_ready || authority.sidecar_loaded_from.is_some())
-                && matches!(report.state, HealthState::Healthy)
+                && report.allows_serving_traffic()
         } else {
-            matches!(report.state, HealthState::Healthy)
+            report.allows_serving_traffic()
         };
 
         let write_allowed = !self.options.read_only && report.state != HealthState::Unhealthy;
