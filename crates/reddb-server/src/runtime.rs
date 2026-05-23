@@ -1141,6 +1141,11 @@ struct RuntimeInner {
     /// 6.5). Lives next to the primary `.rdb` file so backup +
     /// restore flows ship it alongside the data.
     audit_log: Arc<crate::runtime::audit_log::AuditLogger>,
+    /// Durable control-plane evidence ledger. Producer slices emit
+    /// through this sink and decide fail-open/fail-closed using
+    /// `control_event_config`.
+    control_event_ledger: Arc<crate::runtime::control_events::RuntimeLedger>,
+    control_event_config: crate::runtime::control_events::ControlEventConfig,
     /// Serverless writer-lease state machine. `None` when the operator
     /// did not opt into lease fencing (`RED_LEASE_REQUIRED` unset/false).
     /// When set, owns the {acquire/refresh/release/lost} transitions and
