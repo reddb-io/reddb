@@ -1066,6 +1066,99 @@ impl RedDBRuntime {
         self.audit_log().record_event(builder.build());
     }
 
+    fn emit_vault_control_event(
+        &self,
+        kind: crate::runtime::control_events::EventKind,
+        outcome: crate::runtime::control_events::Outcome,
+        action: &'static str,
+        collection: &str,
+        key: &str,
+        reason: &str,
+        entry: Option<&VaultEntry>,
+        extra_fields: Vec<(String, crate::runtime::control_events::Sensitivity)>,
+    ) -> RedDBResult<()> {
+        use crate::runtime::control_events::{
+            ActorRef, ControlEvent, ControlEventCtx, ControlEventLedger, Sensitivity,
+        };
+        use std::borrow::Cow;
+
+        let tenant = current_tenant();
+        let principal = current_auth_identity().map(|(principal, _)| principal);
+        let actor_user = principal
+            .as_ref()
+            .map(|principal| crate::auth::UserId::from_parts(tenant.as_deref(), principal));
+        let request_id = Self::vault_request_id();
+        let actor = actor_user
+            .as_ref()
+            .map(ActorRef::User)
+            .unwrap_or(ActorRef::Anonymous);
+        let ctx = ControlEventCtx {
+            actor,
+            scope: tenant.as_ref().map(|scope| Cow::Borrowed(scope.as_str())),
+            request_id: Some(Cow::Borrowed(request_id.as_str())),
+            trace_id: None,
+        };
+
+        let target = Self::vault_target_resource(collection, key);
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("path".to_string(), Sensitivity::raw(target.clone()));
+        fields.insert("collection".to_string(), Sensitivity::raw(collection));
+        fields.insert("key".to_string(), Sensitivity::raw(key));
+        fields.insert(
+            "connection_id".to_string(),
+            Sensitivity::raw(current_connection_id().to_string()),
+        );
+        if let Some(entry) = entry {
+            fields.insert(
+                "entity_id".to_string(),
+                Sensitivity::raw(entry.id.raw().to_string()),
+            );
+            fields.insert(
+                "sequence_id".to_string(),
+                Sensitivity::raw(entry.sequence_id.to_string()),
+            );
+            fields.insert(
+                "version".to_string(),
+                Sensitivity::raw(entry.version.to_string()),
+            );
+            fields.insert("op".to_string(), Sensitivity::raw(entry.op.clone()));
+            fields.insert(
+                "tombstone".to_string(),
+                Sensitivity::raw(entry.tombstone.to_string()),
+            );
+            if !entry.tombstone {
+                fields.insert(
+                    "fingerprint".to_string(),
+                    Sensitivity::raw(vault_fingerprint(&entry.value)),
+                );
+            }
+            fields.insert(
+                "tags".to_string(),
+                Sensitivity::raw(format!("{:?}", vault_tags_value(&entry.metadata))),
+            );
+        }
+        for (key, value) in extra_fields {
+            fields.insert(key, value);
+        }
+
+        let event = ControlEvent {
+            kind,
+            outcome,
+            action: Cow::Borrowed(action),
+            resource: Some(format!("vault:{target}")),
+            reason: Some(reason.to_string()),
+            matched_policy_id: None,
+            fields,
+        };
+        match self.inner.control_event_ledger.emit(&ctx, event) {
+            Ok(_) => Ok(()),
+            Err(err) if self.inner.control_event_config.require_persistence() => {
+                Err(RedDBError::Internal(err.to_string()))
+            }
+            Err(_) => Ok(()),
+        }
+    }
+
     pub(crate) fn resolve_vault_secret_value(
         &self,
         collection: &str,
@@ -1081,6 +1174,16 @@ impl RedDBRuntime {
                 &reason,
                 entry.as_ref(),
             );
+            self.emit_vault_control_event(
+                crate::runtime::control_events::EventKind::VaultUnseal,
+                crate::runtime::control_events::Outcome::Denied,
+                "vault:unseal",
+                collection,
+                key,
+                &reason,
+                entry.as_ref(),
+                Vec::new(),
+            )?;
             return Err(RedDBError::Query(reason));
         }
         let Some(entry) = entry else {
@@ -1092,6 +1195,16 @@ impl RedDBRuntime {
                 reason,
                 None,
             );
+            self.emit_vault_control_event(
+                crate::runtime::control_events::EventKind::VaultUnseal,
+                crate::runtime::control_events::Outcome::Denied,
+                "vault:unseal",
+                collection,
+                key,
+                reason,
+                None,
+                Vec::new(),
+            )?;
             return Err(RedDBError::NotFound(format!(
                 "vault secret '{}.{}' not found",
                 collection, key
@@ -1106,6 +1219,16 @@ impl RedDBRuntime {
                 reason,
                 Some(&entry),
             );
+            self.emit_vault_control_event(
+                crate::runtime::control_events::EventKind::VaultUnseal,
+                crate::runtime::control_events::Outcome::Denied,
+                "vault:unseal",
+                collection,
+                key,
+                reason,
+                Some(&entry),
+                Vec::new(),
+            )?;
             return Err(RedDBError::NotFound(format!(
                 "vault secret '{}.{}' is deleted",
                 collection, key
@@ -1120,6 +1243,16 @@ impl RedDBRuntime {
                     "ok",
                     Some(&entry),
                 );
+                self.emit_vault_control_event(
+                    crate::runtime::control_events::EventKind::VaultUnseal,
+                    crate::runtime::control_events::Outcome::Allowed,
+                    "vault:unseal",
+                    collection,
+                    key,
+                    "ok",
+                    Some(&entry),
+                    Vec::new(),
+                )?;
                 Ok(value)
             }
             Err(err) => {
@@ -1131,6 +1264,16 @@ impl RedDBRuntime {
                     &reason,
                     Some(&entry),
                 );
+                self.emit_vault_control_event(
+                    crate::runtime::control_events::EventKind::VaultUnseal,
+                    crate::runtime::control_events::Outcome::Error,
+                    "vault:unseal",
+                    collection,
+                    key,
+                    &reason,
+                    Some(&entry),
+                    Vec::new(),
+                )?;
                 Err(err)
             }
         }
@@ -1266,6 +1409,16 @@ impl RedDBRuntime {
                     "ok",
                     Some(&entry),
                 );
+                self.emit_vault_control_event(
+                    crate::runtime::control_events::EventKind::VaultRotate,
+                    crate::runtime::control_events::Outcome::Allowed,
+                    "vault:rotate",
+                    collection,
+                    key,
+                    "ok",
+                    Some(&entry),
+                    Vec::new(),
+                )?;
                 Ok(vault_write_result(
                     raw_query,
                     "vault_rotate",
@@ -1303,12 +1456,39 @@ impl RedDBRuntime {
                     "tombstone".into(),
                     "op".into(),
                 ]);
-                for entry in entries
+                let mut visible = Vec::new();
+                for entry in entries {
+                    match self.check_vault_capability("vault:read_metadata", collection, &entry.key)
+                    {
+                        Ok(()) => {
+                            self.emit_vault_control_event(
+                                crate::runtime::control_events::EventKind::VaultMetadataRead,
+                                crate::runtime::control_events::Outcome::Allowed,
+                                "vault:read_metadata",
+                                collection,
+                                &entry.key,
+                                "ok",
+                                Some(&entry),
+                                Vec::new(),
+                            )?;
+                            visible.push(entry);
+                        }
+                        Err(reason) => {
+                            self.emit_vault_control_event(
+                                crate::runtime::control_events::EventKind::VaultMetadataRead,
+                                crate::runtime::control_events::Outcome::Denied,
+                                "vault:read_metadata",
+                                collection,
+                                &entry.key,
+                                &reason,
+                                Some(&entry),
+                                Vec::new(),
+                            )?;
+                        }
+                    }
+                }
+                for entry in visible
                     .into_iter()
-                    .filter(|entry| {
-                        self.check_vault_capability("vault:read_metadata", collection, &entry.key)
-                            .is_ok()
-                    })
                     .skip(*offset)
                     .take(limit.unwrap_or(usize::MAX))
                 {
@@ -1326,11 +1506,35 @@ impl RedDBRuntime {
             }
 
             KvCommand::History { collection, key } => {
-                self.check_vault_capability("vault:read_metadata", collection, key)
-                    .map_err(RedDBError::Query)?;
+                let latest = ops.get_vault_entry(collection, key)?;
+                if let Err(reason) =
+                    self.check_vault_capability("vault:read_metadata", collection, key)
+                {
+                    self.emit_vault_control_event(
+                        crate::runtime::control_events::EventKind::VaultMetadataRead,
+                        crate::runtime::control_events::Outcome::Denied,
+                        "vault:read_metadata",
+                        collection,
+                        key,
+                        &reason,
+                        latest.as_ref(),
+                        Vec::new(),
+                    )?;
+                    return Err(RedDBError::Query(reason));
+                }
                 let versions =
                     super::keyed_spine::history_versions(ops.vault_versions(collection, key)?);
                 let result = vault_history_result(collection, key, &versions);
+                self.emit_vault_control_event(
+                    crate::runtime::control_events::EventKind::VaultMetadataRead,
+                    crate::runtime::control_events::Outcome::Allowed,
+                    "vault:read_metadata",
+                    collection,
+                    key,
+                    "ok",
+                    latest.as_ref(),
+                    Vec::new(),
+                )?;
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
                     mode: crate::storage::query::modes::QueryMode::Sql,
@@ -1353,6 +1557,16 @@ impl RedDBRuntime {
                         &reason,
                         entry.as_ref(),
                     );
+                    self.emit_vault_control_event(
+                        crate::runtime::control_events::EventKind::VaultPurge,
+                        crate::runtime::control_events::Outcome::Denied,
+                        "vault:purge",
+                        collection,
+                        key,
+                        &reason,
+                        entry.as_ref(),
+                        Vec::new(),
+                    )?;
                     return Err(RedDBError::Query(reason));
                 }
                 self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
@@ -1365,6 +1579,19 @@ impl RedDBRuntime {
                     "ok",
                     entry.as_ref(),
                 );
+                self.emit_vault_control_event(
+                    crate::runtime::control_events::EventKind::VaultPurge,
+                    crate::runtime::control_events::Outcome::Allowed,
+                    "vault:purge",
+                    collection,
+                    key,
+                    "ok",
+                    entry.as_ref(),
+                    vec![(
+                        "purged".to_string(),
+                        crate::runtime::control_events::Sensitivity::raw(purged.to_string()),
+                    )],
+                )?;
                 let mut result = UnifiedResult::with_columns(vec![
                     "ok".into(),
                     "collection".into(),
@@ -1394,12 +1621,35 @@ impl RedDBRuntime {
                 key,
             } => {
                 if *model == crate::catalog::CollectionModel::Vault {
-                    self.check_vault_capability("vault:read_metadata", collection, key)
-                        .map_err(RedDBError::Query)?;
                     let entry = ops.get_vault_entry(collection, key)?;
+                    if let Err(reason) =
+                        self.check_vault_capability("vault:read_metadata", collection, key)
+                    {
+                        self.emit_vault_control_event(
+                            crate::runtime::control_events::EventKind::VaultMetadataRead,
+                            crate::runtime::control_events::Outcome::Denied,
+                            "vault:read_metadata",
+                            collection,
+                            key,
+                            &reason,
+                            entry.as_ref(),
+                            Vec::new(),
+                        )?;
+                        return Err(RedDBError::Query(reason));
+                    }
                     let key_available = self.vault_key_available(collection);
                     let result =
                         vault_metadata_result(collection, key, entry.as_ref(), key_available);
+                    self.emit_vault_control_event(
+                        crate::runtime::control_events::EventKind::VaultMetadataRead,
+                        crate::runtime::control_events::Outcome::Allowed,
+                        "vault:read_metadata",
+                        collection,
+                        key,
+                        "ok",
+                        entry.as_ref(),
+                        Vec::new(),
+                    )?;
                     return Ok(RuntimeQueryResult {
                         query: raw_query.to_string(),
                         mode: crate::storage::query::modes::QueryMode::Sql,
@@ -1538,6 +1788,16 @@ impl RedDBRuntime {
                         &reason,
                         entry.as_ref(),
                     );
+                    self.emit_vault_control_event(
+                        crate::runtime::control_events::EventKind::VaultUnseal,
+                        crate::runtime::control_events::Outcome::Denied,
+                        action,
+                        collection,
+                        key,
+                        &reason,
+                        entry.as_ref(),
+                        Vec::new(),
+                    )?;
                     return Err(RedDBError::Query(reason));
                 }
                 let Some(entry) = entry else {
@@ -1549,6 +1809,16 @@ impl RedDBRuntime {
                         reason,
                         None,
                     );
+                    self.emit_vault_control_event(
+                        crate::runtime::control_events::EventKind::VaultUnseal,
+                        crate::runtime::control_events::Outcome::Denied,
+                        action,
+                        collection,
+                        key,
+                        reason,
+                        None,
+                        Vec::new(),
+                    )?;
                     return Err(RedDBError::NotFound(format!(
                         "vault secret '{}.{}' not found",
                         collection, key
@@ -1563,6 +1833,16 @@ impl RedDBRuntime {
                         reason,
                         Some(&entry),
                     );
+                    self.emit_vault_control_event(
+                        crate::runtime::control_events::EventKind::VaultUnseal,
+                        crate::runtime::control_events::Outcome::Denied,
+                        action,
+                        collection,
+                        key,
+                        reason,
+                        Some(&entry),
+                        Vec::new(),
+                    )?;
                     return Err(RedDBError::NotFound(format!(
                         "vault secret '{}.{}' is deleted",
                         collection, key
@@ -1577,6 +1857,16 @@ impl RedDBRuntime {
                             "ok",
                             Some(&entry),
                         );
+                        self.emit_vault_control_event(
+                            crate::runtime::control_events::EventKind::VaultUnseal,
+                            crate::runtime::control_events::Outcome::Allowed,
+                            action,
+                            collection,
+                            key,
+                            "ok",
+                            Some(&entry),
+                            Vec::new(),
+                        )?;
                         let mut result = UnifiedResult::with_columns(vec![
                             "collection".into(),
                             "key".into(),
@@ -1606,6 +1896,16 @@ impl RedDBRuntime {
                             &reason,
                             Some(&entry),
                         );
+                        self.emit_vault_control_event(
+                            crate::runtime::control_events::EventKind::VaultUnseal,
+                            crate::runtime::control_events::Outcome::Error,
+                            action,
+                            collection,
+                            key,
+                            &reason,
+                            Some(&entry),
+                            Vec::new(),
+                        )?;
                         Err(err)
                     }
                 }

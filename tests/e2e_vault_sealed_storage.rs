@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use reddb::auth::{AuthConfig, AuthStore, Role, UserId};
+use reddb::runtime::control_events::CONTROL_EVENTS_COLLECTION;
 use reddb::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
 use reddb::storage::schema::Value;
 use reddb::storage::EntityData;
@@ -128,6 +129,27 @@ fn boolean(row: &reddb::storage::query::unified::UnifiedRecord, name: &str) -> b
     }
 }
 
+fn control_event_rows(rt: &RedDBRuntime) -> Vec<std::collections::HashMap<String, Value>> {
+    rt.db()
+        .store()
+        .get_collection(CONTROL_EVENTS_COLLECTION)
+        .expect("control events collection should exist")
+        .query_all(|_| true)
+        .into_iter()
+        .filter_map(|entity| match entity.data {
+            EntityData::Row(row) => row.named,
+            _ => None,
+        })
+        .collect()
+}
+
+fn named_text(row: &std::collections::HashMap<String, Value>, name: &str) -> String {
+    match row.get(name) {
+        Some(Value::Text(value)) => value.to_string(),
+        other => panic!("expected text field {name}, got {other:?}"),
+    }
+}
+
 #[test]
 fn vault_put_seals_payload_before_persistence() {
     let path = temp_db_path("vault_sealed_storage");
@@ -212,6 +234,201 @@ fn vault_put_seals_payload_before_persistence() {
             Some(&Value::text("sealed_unavailable"))
         );
         assert!(matches!(record.get("fingerprint"), Some(Value::Text(_))));
+    }
+
+    cleanup_related(&path);
+}
+
+#[test]
+fn vault_metadata_and_unseal_control_events_minimize_evidence() {
+    let path = temp_db_path("vault_control_events_unseal_653");
+    cleanup_related(&path);
+
+    let secret = "tok_live_653_probe BEGIN_PRIVATE_KEY_653 BEGIN_CERTIFICATE_653";
+    let (rt, auth) = open_runtime_with_vault(&path, "vault-pass-653");
+    auth.create_user("alice", "p", Role::Write).unwrap();
+    rt.execute_query("CREATE VAULT secrets WITH OWN MASTER KEY")
+        .expect("create vault");
+    rt.execute_query(&format!("VAULT PUT secrets.api_key = '{secret}'"))
+        .expect("vault put");
+
+    attach_alice_policy(
+        &auth,
+        "vault-control-events-unrelated",
+        r#"[
+            {"effect":"allow","actions":["vault:read_metadata"],"resources":["vault:other.key"]}
+        ]"#,
+    );
+    let denied_get = as_user("alice", Role::Write, || {
+        rt.execute_query("VAULT GET secrets.api_key")
+    })
+    .expect_err("metadata read without policy must fail");
+    assert!(denied_get.to_string().contains("vault:read_metadata"));
+
+    attach_alice_policy(
+        &auth,
+        "vault-control-events-metadata",
+        r#"[
+            {"effect":"allow","actions":["vault:read_metadata"],"resources":["vault:secrets.api_key"]}
+        ]"#,
+    );
+    as_user("alice", Role::Write, || {
+        rt.execute_query("VAULT GET secrets.api_key")
+    })
+    .expect("metadata read should be allowed");
+
+    let denied_unseal = as_user("alice", Role::Write, || {
+        rt.execute_query("UNSEAL VAULT secrets.api_key")
+    })
+    .expect_err("unseal without policy must fail");
+    assert!(denied_unseal.to_string().contains("vault:unseal"));
+
+    attach_alice_policy(
+        &auth,
+        "vault-control-events-unseal",
+        r#"[
+            {"effect":"allow","actions":["vault:unseal"],"resources":["vault:secrets.api_key"]}
+        ]"#,
+    );
+    as_user("alice", Role::Write, || {
+        rt.execute_query("UNSEAL VAULT secrets.api_key")
+    })
+    .expect("unseal should be allowed");
+
+    let sealed_auth = Arc::new(AuthStore::new(AuthConfig::default()));
+    sealed_auth.create_user("alice", "p", Role::Write).unwrap();
+    attach_alice_policy(
+        &sealed_auth,
+        "vault-control-events-unseal-error",
+        r#"[
+            {"effect":"allow","actions":["vault:unseal"],"resources":["vault:secrets.api_key"]}
+        ]"#,
+    );
+    rt.set_auth_store(sealed_auth);
+    let error_unseal = as_user("alice", Role::Write, || {
+        rt.execute_query("UNSEAL VAULT secrets.api_key")
+    })
+    .expect_err("sealed key provider should produce an unseal error");
+    assert!(error_unseal
+        .to_string()
+        .contains("vault sealed_unavailable"));
+
+    let rows = control_event_rows(&rt);
+    let ledger_body = format!("{rows:?}");
+    assert!(ledger_body.contains("vault.metadata_read"), "{ledger_body}");
+    assert!(ledger_body.contains("vault.unseal"), "{ledger_body}");
+    assert!(
+        ledger_body.contains("\"outcome\": Text(\"denied\")"),
+        "{ledger_body}"
+    );
+    assert!(
+        ledger_body.contains("\"outcome\": Text(\"allowed\")"),
+        "{ledger_body}"
+    );
+    assert!(
+        ledger_body.contains("\"outcome\": Text(\"error\")"),
+        "{ledger_body}"
+    );
+    assert!(ledger_body.contains("secrets.api_key"), "{ledger_body}");
+    assert!(ledger_body.contains("fingerprint"), "{ledger_body}");
+    assert!(ledger_body.contains("version"), "{ledger_body}");
+    assert!(rows
+        .iter()
+        .any(|row| named_text(row, "actor_user_id") == "alice"));
+    assert!(
+        rows.iter()
+            .all(|row| row.contains_key("scope") && row.contains_key("resource")),
+        "{ledger_body}"
+    );
+    for forbidden in [
+        secret,
+        "tok_live_653_probe",
+        "BEGIN_PRIVATE_KEY_653",
+        "BEGIN_CERTIFICATE_653",
+    ] {
+        assert!(
+            !ledger_body.contains(forbidden),
+            "control events must not store raw secret evidence `{forbidden}`: {ledger_body}"
+        );
+    }
+
+    cleanup_related(&path);
+}
+
+#[test]
+fn vault_rotation_and_purge_control_events_minimize_evidence() {
+    let path = temp_db_path("vault_control_events_lifecycle_653");
+    cleanup_related(&path);
+
+    let secret_v1 = "rotate_tok_live_653 BEGIN_PRIVATE_KEY_ROTATE_653";
+    let secret_v2 = "purge_certificate_probe_653 BEGIN_CERTIFICATE_PURGE_653";
+    let (rt, auth) = open_runtime_with_vault(&path, "vault-pass-lifecycle-653");
+    auth.create_user("alice", "p", Role::Write).unwrap();
+
+    rt.execute_query("CREATE VAULT secrets WITH OWN MASTER KEY")
+        .expect("create vault");
+    as_user("alice", Role::Write, || {
+        rt.execute_query(&format!("VAULT PUT secrets.api_key = '{secret_v1}'"))
+    })
+    .expect("vault put");
+    as_user("alice", Role::Write, || {
+        rt.execute_query(&format!("ROTATE VAULT secrets.api_key = '{secret_v2}'"))
+    })
+    .expect("vault rotate");
+
+    attach_alice_policy(
+        &auth,
+        "vault-control-events-purge-unrelated",
+        r#"[
+            {"effect":"allow","actions":["vault:read_metadata"],"resources":["vault:secrets.api_key"]}
+        ]"#,
+    );
+    let denied_purge = as_user("alice", Role::Write, || {
+        rt.execute_query("PURGE VAULT secrets.api_key")
+    })
+    .expect_err("purge without policy must fail");
+    assert!(denied_purge.to_string().contains("vault:purge"));
+
+    attach_alice_policy(
+        &auth,
+        "vault-control-events-purge",
+        r#"[
+            {"effect":"allow","actions":["vault:purge"],"resources":["vault:secrets.api_key"]}
+        ]"#,
+    );
+    as_user("alice", Role::Write, || {
+        rt.execute_query("PURGE VAULT secrets.api_key")
+    })
+    .expect("vault purge");
+
+    let rows = control_event_rows(&rt);
+    let ledger_body = format!("{rows:?}");
+    assert!(ledger_body.contains("vault.rotate"), "{ledger_body}");
+    assert!(ledger_body.contains("vault.purge"), "{ledger_body}");
+    assert!(
+        ledger_body.contains("\"outcome\": Text(\"denied\")"),
+        "{ledger_body}"
+    );
+    assert!(
+        ledger_body.contains("\"outcome\": Text(\"allowed\")"),
+        "{ledger_body}"
+    );
+    assert!(ledger_body.contains("secrets.api_key"), "{ledger_body}");
+    assert!(ledger_body.contains("fingerprint"), "{ledger_body}");
+    assert!(ledger_body.contains("version"), "{ledger_body}");
+    assert!(ledger_body.contains("purged"), "{ledger_body}");
+    for forbidden in [
+        secret_v1,
+        secret_v2,
+        "rotate_tok_live_653",
+        "BEGIN_PRIVATE_KEY_ROTATE_653",
+        "purge_certificate_probe_653",
+        "BEGIN_CERTIFICATE_PURGE_653",
+    ] {
+        assert!(
+            !ledger_body.contains(forbidden),
+            "control events must not store raw lifecycle evidence `{forbidden}`: {ledger_body}"
+        );
     }
 
     cleanup_related(&path);
