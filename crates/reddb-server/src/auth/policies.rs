@@ -103,6 +103,8 @@ const ACTION_ALLOWLIST: &[&str] = &[
     "vault:unseal",
     "vault:unseal_history",
     "vault:purge",
+    "evidence:export",
+    "evidence:*",
     "red.registry:register",
     "red.registry:supersede",
     "red.registry:*",
