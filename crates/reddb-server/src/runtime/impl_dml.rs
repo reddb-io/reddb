@@ -2420,6 +2420,14 @@ fn build_returning_result(
                             Arc::clone(&sys_key_updated_at()),
                             Value::UnsignedInteger(entity.updated_at),
                         );
+                        // Legacy alias: an explicit `RETURNING red_entity_id`
+                        // still resolves to the row's rid. Only surfaces when
+                        // the projected column list names it — `RETURNING *`
+                        // keeps the envelope clean (rid, not red_entity_id).
+                        values.insert(
+                            Arc::clone(&sys_key_red_entity_id()),
+                            Value::UnsignedInteger(out.id.raw()),
+                        );
                     } else {
                         values.insert(
                             Arc::clone(&sys_key_red_entity_id()),
