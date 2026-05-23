@@ -3096,7 +3096,6 @@ fn test_select_config_function_accepts_bare_path_and_default() {
 }
 
 #[test]
-#[ignore = "KV() in WHERE still returns 0 rows after #636 fixes — see #636 agent-notes"]
 fn test_kv_function_filters_rows_and_uses_bare_default() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
