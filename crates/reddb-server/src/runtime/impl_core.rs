@@ -2038,6 +2038,11 @@ impl RedDBRuntime {
         self.inner.lock_manager.clone()
     }
 
+    /// Process-local governance registry for managed policy/config guardrails.
+    pub fn config_registry(&self) -> std::sync::Arc<crate::auth::registry::ConfigRegistry> {
+        self.inner.config_registry.clone()
+    }
+
     #[inline(never)]
     pub fn with_options(options: RedDBOptions) -> RedDBResult<Self> {
         Self::with_pool(options, ConnectionPoolConfig::default())
@@ -2117,6 +2122,7 @@ impl RedDBRuntime {
                 rmw_locks: RmwLockTable::new(),
                 planner_dirty_tables: parking_lot::RwLock::new(HashSet::new()),
                 ec_registry: Arc::new(crate::ec::config::EcRegistry::new()),
+                config_registry: Arc::new(crate::auth::registry::ConfigRegistry::new()),
                 ec_worker: crate::ec::worker::EcWorker::new(),
                 auth_store: parking_lot::RwLock::new(None),
                 oauth_validator: parking_lot::RwLock::new(None),

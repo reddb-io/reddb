@@ -970,6 +970,7 @@ struct RuntimeInner {
     rmw_locks: RmwLockTable,
     planner_dirty_tables: parking_lot::RwLock<HashSet<String>>,
     ec_registry: Arc<crate::ec::config::EcRegistry>,
+    config_registry: Arc<crate::auth::registry::ConfigRegistry>,
     ec_worker: crate::ec::worker::EcWorker,
     /// Optional AuthStore — injected by server boot when auth is
     /// enabled. Required for `Value::Secret` auto-encrypt/decrypt

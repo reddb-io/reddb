@@ -169,7 +169,10 @@ impl Sensitivity {
 
     pub fn hashed(value: &[u8]) -> Self {
         let hex = blake3::hash(value).to_hex().to_string();
-        Self::Hashed { algo: "blake3", hex }
+        Self::Hashed {
+            algo: "blake3",
+            hex,
+        }
     }
 
     pub fn redacted() -> Self {
@@ -223,19 +226,11 @@ pub trait ControlEventLedger: Send + Sync {
 /// Runtime knob for the ledger. Lives on
 /// `RedDBOptions::control_events` and is read at boot from
 /// `REDDB_COMPLIANCE_MODE`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ControlEventConfig {
     /// When true, the producer slices MUST abort their originating
     /// mutation on `emit` failure (fail closed). Default: false.
     pub compliance_mode: bool,
-}
-
-impl Default for ControlEventConfig {
-    fn default() -> Self {
-        Self {
-            compliance_mode: false,
-        }
-    }
 }
 
 impl ControlEventConfig {
@@ -274,7 +269,9 @@ impl ControlEventLedger for RuntimeLedger {
         // ns since epoch: ms * 1e6, clamped to i64 range. The actual
         // call site doesn't have nanosecond precision today; producer
         // slices that need it can carry it via `fields`.
-        let ts_ns = (ts_ms as i128).saturating_mul(1_000_000).min(i64::MAX as i128) as i64;
+        let ts_ns = (ts_ms as i128)
+            .saturating_mul(1_000_000)
+            .min(i64::MAX as i128) as i64;
         // UUIDv7 is time-sortable in its first 48 bits, satisfying the
         // brief's "ULID, sortable by time" requirement without adding
         // a ulid dep.
@@ -476,10 +473,7 @@ mod tests {
                     "trace_id",
                     "fields_json",
                 ] {
-                    assert!(
-                        named.contains_key(col),
-                        "missing schema column {col}"
-                    );
+                    assert!(named.contains_key(col), "missing schema column {col}");
                 }
                 assert_eq!(named["kind"], Value::text("policy.create"));
                 assert_eq!(named["outcome"], Value::text("allowed"));
@@ -529,10 +523,7 @@ mod tests {
                 assert_eq!(hex.len(), 64);
                 // Pin the digest so producer-slice tests (652b/c/d)
                 // can rely on it across runs.
-                assert_eq!(
-                    hex,
-                    blake3::hash(b"hunter2").to_hex().to_string(),
-                );
+                assert_eq!(hex, blake3::hash(b"hunter2").to_hex().to_string(),);
             }
             other => panic!("expected Hashed, got {other:?}"),
         }

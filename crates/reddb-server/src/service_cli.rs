@@ -357,8 +357,10 @@ impl ServerCommandConfig {
         // slices (652b/c/d) fail-closed on ledger persistence
         // failures. Default `false` — log-and-continue on emit error.
         if let Some(raw) = env_nonempty("REDDB_COMPLIANCE_MODE") {
-            options.control_events.compliance_mode =
-                matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
+            options.control_events.compliance_mode = matches!(
+                raw.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            );
         }
 
         // Issue #517 — canonical `REDDB_BACKUP_*` contract takes
@@ -2032,6 +2034,10 @@ pub(crate) fn apply_preset(
     let store = runtime.db().store();
 
     if store.get_config(BOOTSTRAP_COMPLETED_KEY).is_some() {
+        crate::cli::bootstrap_manifest::rehydrate_manifest_registry(
+            runtime,
+            &runtime.config_registry(),
+        )?;
         tracing::info!("bootstrap state present, skipping preset application");
         return Ok(());
     }
@@ -2040,8 +2046,7 @@ pub(crate) fn apply_preset(
     // (e.g. both `REDDB_PASSWORD` and `REDDB_PASSWORD_FILE` set) are
     // operator misconfigs and should fail the boot loudly.
     for var in ["REDDB_USERNAME", "REDDB_PASSWORD"] {
-        crate::utils::expand_file_env(var)
-            .map_err(|err| format!("expand {var}_FILE: {err}"))?;
+        crate::utils::expand_file_env(var).map_err(|err| format!("expand {var}_FILE: {err}"))?;
     }
 
     let preset = std::env::var(PRESET_ENV)
@@ -2049,6 +2054,21 @@ pub(crate) fn apply_preset(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| PRESET_SIMPLE.to_string());
+
+    if let Ok(path) = std::env::var(crate::cli::bootstrap_manifest::MANIFEST_ENV) {
+        let path = path.trim();
+        if !path.is_empty() {
+            let first_admin_id = crate::cli::bootstrap_manifest::apply_manifest_file(
+                runtime,
+                auth_store,
+                &runtime.config_registry(),
+                std::path::Path::new(path),
+            )?;
+            persist_bootstrap_state(runtime, "manifest", Some(&first_admin_id));
+            tracing::info!("bootstrap manifest applied");
+            return Ok(());
+        }
+    }
 
     let first_admin_id = match preset.as_str() {
         PRESET_SIMPLE => {
@@ -2123,11 +2143,7 @@ fn apply_production_preset(auth_store: &Arc<AuthStore>) -> Result<String, String
     Ok(first_admin.to_string())
 }
 
-fn persist_bootstrap_state(
-    runtime: &RedDBRuntime,
-    preset: &str,
-    first_admin_id: Option<&str>,
-) {
+fn persist_bootstrap_state(runtime: &RedDBRuntime, preset: &str, first_admin_id: Option<&str>) {
     let store = runtime.db().store();
     let mut tree = crate::serde_json::Map::new();
     tree.insert(
@@ -2937,6 +2953,7 @@ mod tests {
         // SAFETY: callers hold `no_auth_env_lock()`.
         unsafe {
             std::env::remove_var(PRESET_ENV);
+            std::env::remove_var("REDDB_BOOTSTRAP_MANIFEST");
             std::env::remove_var("REDDB_USERNAME");
             std::env::remove_var("REDDB_PASSWORD");
             std::env::remove_var("REDDB_USERNAME_FILE");
@@ -3061,6 +3078,178 @@ mod tests {
             crate::storage::schema::Value::Text(s) => assert_eq!(s.as_ref(), PRESET_PRODUCTION),
             other => panic!("expected Text(production), got {other:?}"),
         }
+
+        clear_preset_env();
+    }
+
+    #[test]
+    fn bootstrap_manifest_installs_initial_users_policies_guardrails_and_config() {
+        use crate::auth::policies::{EvalContext, ResourceRef};
+        use crate::auth::UserId;
+        use crate::storage::schema::Value;
+
+        let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        clear_preset_env();
+
+        let manifest_path = std::env::temp_dir().join(format!(
+            "reddb-bootstrap-manifest-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        ));
+        std::fs::write(
+            &manifest_path,
+            r#"{
+                "users": [
+                    {
+                        "username": "ops",
+                        "password": "hunter2",
+                        "role": "admin",
+                        "system_owned": true
+                    }
+                ],
+                "policies": [
+                    {
+                        "id": "bootstrap-registry-admin",
+                        "version": 1,
+                        "statements": [
+                            {
+                                "effect": "allow",
+                                "actions": ["red.registry:*", "policy:*", "config:write", "app:read"],
+                                "resources": ["registry:*", "policy:*", "config:*", "collection:docs"]
+                            }
+                        ]
+                    }
+                ],
+                "managed_policies": [
+                    {
+                        "id": "managed-deny-drop",
+                        "version": 1,
+                        "statements": [
+                            {
+                                "effect": "deny",
+                                "actions": ["policy:drop"],
+                                "resources": ["policy:managed-deny-drop"]
+                            }
+                        ],
+                        "required_resource": "policy:managed-deny-drop",
+                        "evidence": "full"
+                    }
+                ],
+                "attachments": [
+                    {"user": "ops", "policy": "bootstrap-registry-admin"}
+                ],
+                "managed_config_namespaces": [
+                    {
+                        "id": "red.ai",
+                        "required_action": "config:write",
+                        "required_resource": "config:red.ai.*",
+                        "evidence": "metadata"
+                    }
+                ],
+                "config": [
+                    {"key": "red.ai.default.provider", "value": "openai"},
+                    {
+                        "key": "red.ai.openai.default.secret_ref",
+                        "secret_ref": {"collection": "red.vault", "key": "openai"}
+                    }
+                ],
+                "actor": "ops"
+            }"#,
+        )
+        .expect("write manifest");
+        // SAFETY: env serialised by `no_auth_env_lock`.
+        unsafe {
+            std::env::set_var("REDDB_BOOTSTRAP_MANIFEST", &manifest_path);
+        }
+
+        let (runtime, auth_store) = fresh_runtime_and_store();
+        apply_preset(&runtime, &auth_store).expect("manifest applies cleanly");
+
+        let users = auth_store.list_users();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].username, "ops");
+        assert!(users[0].system_owned);
+
+        let actor = UserId::platform("ops");
+        let ctx = EvalContext {
+            principal_tenant: None,
+            current_tenant: None,
+            peer_ip: None,
+            mfa_present: false,
+            now_ms: 1_700_000_000_000,
+            principal_is_admin_role: true,
+            principal_is_system_owned: true,
+            principal_is_platform_scoped: true,
+        };
+        assert!(auth_store.check_policy_authz(
+            &actor,
+            "app:read",
+            &ResourceRef::new("collection", "docs"),
+            &ctx
+        ));
+
+        let managed_policy = runtime
+            .config_registry()
+            .get_active("managed-deny-drop")
+            .expect("managed policy registry entry");
+        assert!(managed_policy.managed);
+        assert_eq!(managed_policy.resource_type, "policy");
+        let managed_config = runtime
+            .config_registry()
+            .get_active("red.ai")
+            .expect("managed config namespace registry entry");
+        assert!(managed_config.managed);
+        assert_eq!(managed_config.resource_type, "config_namespace");
+
+        let store = runtime.db().store();
+        match store
+            .get_config("red.ai.default.provider")
+            .expect("plain config persisted")
+        {
+            Value::Text(s) => assert_eq!(s.as_ref(), "openai"),
+            other => panic!("expected provider text, got {other:?}"),
+        }
+        let Value::Json(bytes) = store
+            .get_config("red.ai.openai.default.secret_ref")
+            .expect("secret ref config persisted")
+        else {
+            panic!("secret ref must be stored as structured JSON");
+        };
+        let reference: crate::serde_json::Value =
+            crate::serde_json::from_slice(&bytes).expect("secret ref json");
+        assert_eq!(
+            reference.get("type").and_then(|v| v.as_str()),
+            Some("secret_ref")
+        );
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains("hunter2"),
+            "manifest password must not leak into secret ref config"
+        );
+
+        let completed = store
+            .get_config(BOOTSTRAP_COMPLETED_KEY)
+            .expect("bootstrap completion persisted");
+        assert!(matches!(completed, Value::Boolean(true)));
+        assert!(
+            store
+                .get_config("system.bootstrap.manifest.registry_entries")
+                .is_some(),
+            "managed registry entries must be persisted internally"
+        );
+
+        std::fs::remove_file(&manifest_path).expect("remove manifest after first boot");
+        let restored_registry = Arc::new(crate::auth::registry::ConfigRegistry::new());
+        crate::cli::bootstrap_manifest::rehydrate_manifest_registry(&runtime, &restored_registry)
+            .expect("registry rehydrates without manifest file");
+        assert!(restored_registry.get_active("managed-deny-drop").is_some());
+        assert!(restored_registry.get_active("red.ai").is_some());
+
+        let fresh = Arc::new(AuthStore::new(crate::auth::AuthConfig::default()));
+        apply_preset(&runtime, &fresh).expect("re-run must not need manifest file");
+        assert!(fresh.needs_bootstrap());
 
         clear_preset_env();
     }
