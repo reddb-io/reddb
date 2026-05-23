@@ -1,6 +1,8 @@
 //! Runtime-backed virtual `red.*` schema tables.
 
-use reddb::auth::Role;
+use reddb::auth::policies::{EvalContext, Policy};
+use reddb::auth::registry::{ConfigRegistryDraft, EvidenceRequirement, Mutability, Sensitivity};
+use reddb::auth::{AuthConfig, AuthStore, Role, UserId};
 use reddb::runtime::mvcc::{
     clear_current_auth_identity, clear_current_connection_id, clear_current_tenant,
     set_current_auth_identity, set_current_connection_id, set_current_tenant,
@@ -53,6 +55,90 @@ const STATS_COLUMNS: [&str; 10] = [
     "last_write_ms",
     "attention_score",
 ];
+
+const REGISTRY_COLUMNS: [&str; 12] = [
+    "id",
+    "version",
+    "resource_type",
+    "schema",
+    "mutability",
+    "sensitivity",
+    "managed",
+    "required_action",
+    "required_resource",
+    "evidence_requirement",
+    "updated_by",
+    "updated_at",
+];
+
+const REGISTRY_HISTORY_COLUMNS: [&str; 15] = [
+    "id",
+    "version",
+    "resource_type",
+    "schema",
+    "mutability",
+    "sensitivity",
+    "managed",
+    "required_action",
+    "required_resource",
+    "evidence_requirement",
+    "updated_by",
+    "updated_at",
+    "superseded_by",
+    "superseded_at",
+    "change_reason",
+];
+
+const MANAGED_POLICY_COLUMNS: [&str; 9] = [
+    "policy_id",
+    "registry_id",
+    "version",
+    "schema",
+    "required_action",
+    "required_resource",
+    "evidence_requirement",
+    "updated_by",
+    "updated_at",
+];
+
+const CONTROL_EVENT_COLUMNS: [&str; 14] = [
+    "id",
+    "ts",
+    "kind",
+    "outcome",
+    "actor_kind",
+    "actor_user_id",
+    "scope",
+    "action",
+    "resource",
+    "reason",
+    "matched_policy_id",
+    "request_id",
+    "trace_id",
+    "fields_json",
+];
+
+const USER_EVIDENCE_COLUMNS: [&str; 8] = [
+    "username",
+    "tenant_id",
+    "role",
+    "enabled",
+    "system_owned",
+    "created_at",
+    "updated_at",
+    "api_key_count",
+];
+
+const API_KEY_EVIDENCE_COLUMNS: [&str; 6] = [
+    "owner",
+    "tenant_id",
+    "name",
+    "role",
+    "created_at",
+    "key_fingerprint",
+];
+
+const CONTROL_CAPABILITY_COLUMNS: [&str; 4] = ["action", "resource_kind", "scope", "description"];
 
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime")
@@ -122,6 +208,63 @@ fn seed_stable_introspection_fixture(rt: &RedDBRuntime) {
         "CREATE POLICY active_users ON users FOR SELECT TO reader USING (active = true)",
     );
     exec(rt, "ALTER TABLE users ENABLE ROW LEVEL SECURITY");
+}
+
+fn registry_admin_ctx() -> EvalContext {
+    EvalContext {
+        principal_tenant: None,
+        current_tenant: None,
+        peer_ip: None,
+        mfa_present: false,
+        now_ms: 1_700_000_000_000,
+        principal_is_admin_role: true,
+        principal_is_system_owned: false,
+        principal_is_platform_scoped: true,
+    }
+}
+
+fn registry_policy(id: &str) -> Policy {
+    Policy::from_json_str(&format!(
+        r#"{{
+            "id": "{id}",
+            "version": 1,
+            "statements": [{{
+                "effect": "allow",
+                "actions": ["red.registry:*"],
+                "resources": ["registry:*"]
+            }}]
+        }}"#
+    ))
+    .unwrap()
+}
+
+fn table_read_policy(id: &str) -> Policy {
+    Policy::from_json_str(&format!(
+        r#"{{
+            "id": "{id}",
+            "version": 1,
+            "statements": [{{
+                "effect": "allow",
+                "actions": ["select"],
+                "resources": ["table:*"]
+            }}]
+        }}"#
+    ))
+    .unwrap()
+}
+
+fn registry_draft(id: &str, schema: &str, managed: bool) -> ConfigRegistryDraft {
+    ConfigRegistryDraft {
+        id: id.to_string(),
+        resource_type: "policy".to_string(),
+        schema: schema.to_string(),
+        mutability: Mutability::MutableViaGovernance,
+        sensitivity: Sensitivity::Internal,
+        managed,
+        required_action: "policy:put".to_string(),
+        required_resource: format!("policy:{id}"),
+        evidence_requirement: EvidenceRequirement::Metadata,
+    }
 }
 
 fn text_field<'a>(
@@ -277,6 +420,207 @@ fn red_schema_introspection_is_stable_across_virtual_tables() {
         assert_eq!(first, second, "{sql} changed between reads");
         assert!(!first.1.is_empty(), "{sql} returned no rows");
     }
+
+    cleanup_scope();
+}
+
+#[test]
+fn governance_and_evidence_views_are_queryable_and_minimize_secret_material() {
+    cleanup_scope();
+    let rt = runtime();
+    let auth = std::sync::Arc::new(AuthStore::new(AuthConfig::default()));
+    auth.create_user("ops", "ops-password", Role::Admin)
+        .unwrap();
+    auth.create_user_in_tenant(Some("acme"), "alice", "alice-password", Role::Write)
+        .unwrap();
+    let alice_key = auth
+        .create_api_key_in_tenant(Some("acme"), "alice", "deploy", Role::Write)
+        .unwrap();
+    auth.put_policy(registry_policy("registry-admin")).unwrap();
+    auth.put_policy(table_read_policy("alice-red-schema-read"))
+        .unwrap();
+    auth.attach_policy(
+        reddb::auth::store::PrincipalRef::User(UserId::platform("ops")),
+        "registry-admin",
+    )
+    .unwrap();
+    auth.attach_policy(
+        reddb::auth::store::PrincipalRef::User(UserId::platform("alice")),
+        "alice-red-schema-read",
+    )
+    .unwrap();
+    auth.attach_policy(
+        reddb::auth::store::PrincipalRef::User(UserId::scoped("acme", "alice")),
+        "alice-red-schema-read",
+    )
+    .unwrap();
+    rt.set_auth_store(std::sync::Arc::clone(&auth));
+
+    let registry = rt.config_registry();
+    let actor = UserId::platform("ops");
+    registry
+        .register(
+            auth.as_ref(),
+            &actor,
+            &registry_admin_ctx(),
+            registry_draft("checkout_guardrail", "v1", true),
+            1_700_000_000_001,
+        )
+        .expect("register managed policy");
+    registry
+        .supersede(
+            auth.as_ref(),
+            &actor,
+            &registry_admin_ctx(),
+            registry_draft("checkout_guardrail", "v2", true),
+            "tighten approval evidence",
+            1_700_000_000_002,
+        )
+        .expect("supersede managed policy");
+
+    exec(&rt, "CREATE TABLE audit_docs (id INT)");
+    let denied = {
+        set_current_auth_identity("alice".to_string(), Role::Read);
+        let err = rt
+            .execute_query("CREATE TABLE denied_audit_docs (id INT)")
+            .expect_err("reader must not create tables");
+        clear_current_auth_identity();
+        err
+    };
+    assert!(denied.to_string().contains("permission denied"));
+
+    let registry_rows = rt
+        .execute_query("SELECT * FROM red.registry WHERE id = 'checkout_guardrail'")
+        .expect("red.registry select");
+    assert_eq!(
+        registry_rows.result.columns,
+        REGISTRY_COLUMNS.map(str::to_string)
+    );
+    assert_eq!(registry_rows.result.records.len(), 1);
+    let registry_row = &registry_rows.result.records[0];
+    assert_eq!(
+        registry_row.get("version"),
+        Some(&Value::UnsignedInteger(2))
+    );
+    assert_eq!(registry_row.get("managed"), Some(&Value::Boolean(true)));
+    assert_eq!(registry_row.get("schema"), Some(&Value::text("v2")));
+
+    let history_rows = rt
+        .execute_query("SELECT * FROM red.registry_history WHERE id = 'checkout_guardrail'")
+        .expect("red.registry_history select");
+    assert_eq!(
+        history_rows.result.columns,
+        REGISTRY_HISTORY_COLUMNS.map(str::to_string)
+    );
+    assert_eq!(history_rows.result.records.len(), 1);
+    assert_eq!(
+        history_rows.result.records[0].get("change_reason"),
+        Some(&Value::text("tighten approval evidence"))
+    );
+
+    let managed = rt
+        .execute_query("SELECT * FROM red.managed_policies WHERE policy_id = 'checkout_guardrail'")
+        .expect("red.managed_policies select");
+    assert_eq!(
+        managed.result.columns,
+        MANAGED_POLICY_COLUMNS.map(str::to_string)
+    );
+    assert_eq!(managed.result.records.len(), 1);
+
+    let allowed_events = rt
+        .execute_query(
+            "SELECT actor_user_id, scope, action, resource, outcome FROM red.control_events \
+             WHERE kind = 'schema.ddl' AND outcome = 'allowed'",
+        )
+        .expect("red.control_events allowed filter");
+    assert!(
+        allowed_events
+            .result
+            .records
+            .iter()
+            .any(
+                |row| row.get("action") == Some(&Value::text("create_table"))
+                    && row.get("resource") == Some(&Value::text("table:audit_docs"))
+            ),
+        "allowed control event missing: {:?}",
+        allowed_events.result.records
+    );
+
+    let denied_events = rt
+        .execute_query(
+            "SELECT actor_user_id, scope, action, resource, outcome FROM red.control_events \
+             WHERE actor_user_id = 'alice' AND outcome = 'denied'",
+        )
+        .expect("red.control_events actor/outcome filter");
+    assert_eq!(denied_events.result.records.len(), 1);
+    assert_eq!(
+        denied_events.result.records[0].get("action"),
+        Some(&Value::text("create_table"))
+    );
+
+    let all_event_columns = rt
+        .execute_query("SELECT * FROM red.control_events WHERE outcome = 'denied'")
+        .expect("red.control_events column contract");
+    assert_eq!(
+        all_event_columns.result.columns,
+        CONTROL_EVENT_COLUMNS.map(str::to_string)
+    );
+
+    set_current_auth_identity("alice".to_string(), Role::Read);
+    set_current_tenant("acme".to_string());
+    let scoped_events = rt
+        .execute_query("SELECT * FROM red.control_events WHERE actor_user_id = 'alice'")
+        .expect("tenant-scoped control events");
+    assert_eq!(scoped_events.result.records.len(), 0);
+    clear_current_auth_identity();
+    clear_current_tenant();
+
+    let users = rt
+        .execute_query("SELECT * FROM red.users WHERE username = 'alice'")
+        .expect("red.users select");
+    assert_eq!(
+        users.result.columns,
+        USER_EVIDENCE_COLUMNS.map(str::to_string)
+    );
+    assert_eq!(users.result.records.len(), 1);
+    assert_eq!(
+        users.result.records[0].get("tenant_id"),
+        Some(&Value::text("acme"))
+    );
+    let users_body = format!("{:?}", users.result);
+    assert!(!users.result.columns.iter().any(|c| c == "password_hash"));
+    assert!(!users_body.contains("alice-password"), "{users_body}");
+
+    let api_keys = rt
+        .execute_query("SELECT * FROM red.api_keys WHERE owner = 'acme/alice'")
+        .expect("red.api_keys select");
+    assert_eq!(
+        api_keys.result.columns,
+        API_KEY_EVIDENCE_COLUMNS.map(str::to_string)
+    );
+    assert_eq!(api_keys.result.records.len(), 1);
+    assert_eq!(
+        api_keys.result.records[0].get("name"),
+        Some(&Value::text("deploy"))
+    );
+    let key_body = format!("{:?}", api_keys.result);
+    assert!(!api_keys.result.columns.iter().any(|c| c == "key"));
+    assert!(!key_body.contains(&alice_key.key), "{key_body}");
+
+    let capabilities = rt
+        .execute_query(
+            "SELECT * FROM red.control_capabilities WHERE action = 'red.registry:register'",
+        )
+        .expect("red.control_capabilities select");
+    assert_eq!(
+        capabilities.result.columns,
+        CONTROL_CAPABILITY_COLUMNS.map(str::to_string)
+    );
+    assert_eq!(capabilities.result.records.len(), 1);
+    assert_eq!(
+        capabilities.result.records[0].get("resource_kind"),
+        Some(&Value::text("registry"))
+    );
 
     cleanup_scope();
 }
