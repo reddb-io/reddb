@@ -2784,6 +2784,65 @@ mod tests {
     }
 
     #[test]
+    fn test_tenant_scoped_system_owned_user_guardrail_integration() {
+        // Acceptance #1 + #2 + #4 (tenant-scoped half) for issue #647.
+        //
+        // The destructive-mutation guard (`reject_system_owned`) is on
+        // the tenant-aware code paths (`*_in_tenant`), but the existing
+        // `test_system_owned_user_blocks_destructive_mutations` only
+        // exercises the platform shim. Pin the tenant-scoped path so a
+        // future refactor that loses the guard on `*_in_tenant` is
+        // caught.
+        let store = AuthStore::new(test_config());
+        store
+            .create_system_user("ops", "pass", Role::Admin, Some("acme"))
+            .unwrap();
+
+        let uid = UserId::scoped("acme", "ops");
+
+        // delete / disable / password-change / role-change — all four
+        // destructive paths block on a tenant-scoped system-owned user.
+        let err = store
+            .delete_user_in_tenant(Some("acme"), "ops")
+            .unwrap_err();
+        assert!(matches!(err, AuthError::SystemUserImmutable { .. }));
+
+        let err = store
+            .change_password_in_tenant(Some("acme"), "ops", "pass", "new")
+            .unwrap_err();
+        assert!(matches!(err, AuthError::SystemUserImmutable { .. }));
+
+        let err = store
+            .change_role_in_tenant(Some("acme"), "ops", Role::Read)
+            .unwrap_err();
+        assert!(matches!(err, AuthError::SystemUserImmutable { .. }));
+
+        let err = store.set_user_enabled(&uid, false).unwrap_err();
+        assert!(matches!(err, AuthError::SystemUserImmutable { .. }));
+
+        // Tenant-isolation sanity: a same-named non-system user under a
+        // different tenant remains fully mutable. Without this the test
+        // above could be passing because the guard refuses all `ops`
+        // users by name rather than by id.
+        store
+            .create_user_in_tenant(Some("globex"), "ops", "pass", Role::Admin)
+            .unwrap();
+        store
+            .change_role_in_tenant(Some("globex"), "ops", Role::Read)
+            .unwrap();
+        store.delete_user_in_tenant(Some("globex"), "ops").unwrap();
+
+        // API-key rotation path still works for the system-owned user
+        // (intentionally bypasses `reject_system_owned`).
+        let key = store
+            .create_api_key_in_tenant(Some("acme"), "ops", "rotation", Role::Admin)
+            .unwrap();
+        assert!(store.validate_token(&key.key).is_some());
+        store.revoke_api_key(&key.key).unwrap();
+        assert!(store.validate_token(&key.key).is_none());
+    }
+
+    #[test]
     fn test_regular_user_mutations_still_work() {
         let store = AuthStore::new(test_config());
         store.create_user("alice", "old", Role::Admin).unwrap();
