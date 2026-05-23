@@ -211,6 +211,10 @@ pub struct RedDBOptions {
     /// Control Event Ledger configuration (issue #652). Read from
     /// `REDDB_COMPLIANCE_MODE` at boot.
     pub control_events: crate::runtime::control_events::ControlEventConfig,
+    /// Scoped data-plane query audit configuration. Disabled by
+    /// default; the regulated preset enables the stream without
+    /// adding catch-all rules.
+    pub query_audit: crate::runtime::query_audit::QueryAuditConfig,
     /// Auto-create a HASH index on a user `id` column the first time a
     /// row carrying that column is inserted into a collection. See
     /// `UnifiedStoreConfig::auto_index_id`. Defaults to `true`; set to
@@ -256,6 +260,7 @@ impl fmt::Debug for RedDBOptions {
             .field("replication", &self.replication)
             .field("auth", &self.auth)
             .field("control_events", &self.control_events)
+            .field("query_audit", &self.query_audit)
             .field("layout", &self.layout)
             .field("layout_overrides", &self.layout_overrides)
             .finish()
@@ -285,6 +290,7 @@ impl Clone for RedDBOptions {
             replication: self.replication.clone(),
             auth: self.auth.clone(),
             control_events: self.control_events,
+            query_audit: self.query_audit.clone(),
             auto_index_id: self.auto_index_id,
             layout: self.layout,
             layout_overrides: self.layout_overrides.clone(),
@@ -324,6 +330,7 @@ impl Default for RedDBOptions {
             replication: ReplicationConfig::standalone(),
             auth: AuthConfig::default(),
             control_events: crate::runtime::control_events::ControlEventConfig::default(),
+            query_audit: crate::runtime::query_audit::QueryAuditConfig::default(),
             auto_index_id: true,
             layout: crate::storage::layout::StorageLayout::default(),
             layout_overrides: crate::storage::layout::LayoutOverrides::default(),

@@ -1146,6 +1146,10 @@ struct RuntimeInner {
     /// `control_event_config`.
     control_event_ledger: Arc<crate::runtime::control_events::RuntimeLedger>,
     control_event_config: crate::runtime::control_events::ControlEventConfig,
+    /// Data-plane query audit stream. Kept separate from the Control
+    /// Event Ledger so scoped query metadata cannot be confused with
+    /// governance evidence.
+    query_audit: Arc<crate::runtime::query_audit::QueryAuditStream>,
     /// Serverless writer-lease state machine. `None` when the operator
     /// did not opt into lease fencing (`RED_LEASE_REQUIRED` unset/false).
     /// When set, owns the {acquire/refresh/release/lost} transitions and
@@ -1256,6 +1260,7 @@ pub mod locking;
 pub(crate) mod mutation;
 pub(crate) mod primary_queue_store;
 mod probabilistic_store;
+pub mod query_audit;
 pub(crate) mod query_exec;
 mod queue_delivery;
 pub(crate) mod queue_lifecycle;
