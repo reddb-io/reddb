@@ -353,6 +353,12 @@ fn server_flags() -> Vec<FlagSchema> {
         FlagSchema::new("vault")
             .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)")
             .with_default("false"),
+        FlagSchema::boolean("no-auth").with_description(
+            "Hard-disable auth: anonymous access, ignores REDDB_USERNAME/PASSWORD/vault, \
+             prints a startup warning. Local-dev shortcut — NEVER use in production.",
+        ),
+        FlagSchema::boolean("dev")
+            .with_description("Alias for --no-auth (local development convenience)."),
         FlagSchema::new("log-dir").with_description(
             "Directory for rotating log files (defaults to the parent of --path / ./logs)",
         ),

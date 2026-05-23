@@ -2349,6 +2349,12 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_description("Fail instead of creating the database file"),
                 cli::types::FlagSchema::boolean("vault")
                     .with_description("Enable the encrypted auth vault"),
+                cli::types::FlagSchema::boolean("no-auth").with_description(
+                    "Hard-disable auth: anonymous access, ignores REDDB_USERNAME/PASSWORD/vault, \
+                     prints a startup warning. Local-dev shortcut — NEVER use in production.",
+                ),
+                cli::types::FlagSchema::boolean("dev")
+                    .with_description("Alias for --no-auth (local development convenience)."),
                 cli::types::FlagSchema::new("workers")
                     .with_short('w')
                     .with_description("Worker thread count (default: auto-detect from CPUs)"),
@@ -2867,6 +2873,7 @@ fn build_server_config(
         role,
         primary_addr: flag_string(flags, "primary-addr").filter(|value| !value.is_empty()),
         vault: flag_bool(flags, "vault"),
+        no_auth: flag_bool(flags, "no-auth") || flag_bool(flags, "dev"),
         workers,
         telemetry: Some(telemetry),
         http_limits_cli,

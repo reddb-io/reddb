@@ -121,6 +121,17 @@ pub struct ServerCommandConfig {
     pub role: String,
     pub primary_addr: Option<String>,
     pub vault: bool,
+    /// Issue #663 — explicit `--no-auth` / `--dev` flag for local
+    /// no-password mode. When `true`, the boot pipeline force-disables
+    /// auth (`auth.enabled = false`, `auth.require_auth = false`,
+    /// `auth.vault_enabled = false`) and skips
+    /// `AuthStore::bootstrap_from_env`, so an explicit
+    /// `REDDB_USERNAME` + `REDDB_PASSWORD` pair cannot accidentally
+    /// turn anonymous access into a logged-in admin. An unmissable
+    /// warning is emitted at startup. Default `false` — the existing
+    /// implicit no-auth behaviour (just don't set the envs) is
+    /// unchanged.
+    pub no_auth: bool,
     /// Override worker thread count (None = auto-detect from CPUs)
     pub workers: Option<usize>,
     /// Telemetry config (Phase 6 logging). `None` falls back to the
@@ -247,6 +258,32 @@ const BACKUP_KIND_META: &str = "red.boot.backup.backend_kind";
 /// the lag-monitor wiring entirely.
 const BACKUP_PAUSE_ON_LAG_META: &str = "red.boot.backup.pause_on_lag_secs";
 
+/// Issue #663 — metadata key set by `to_db_options` when the operator
+/// passes `--no-auth` / `--dev`. Read in `build_runtime_with_telemetry`
+/// to (a) skip `AuthStore::bootstrap_from_env` (so a stray
+/// `REDDB_USERNAME`/`REDDB_PASSWORD` cannot auto-create an admin) and
+/// (b) emit the loud "auth disabled" warning. Threaded via `metadata`
+/// — rather than a public `RedDBOptions` field — to keep the flag a
+/// CLI/boot concern with no meaning for library consumers.
+pub(crate) const NO_AUTH_META: &str = "red.boot.no_auth";
+
+/// Returns `true` when `--no-auth` / `--dev` was active for this boot,
+/// i.e. when `to_db_options` stamped [`NO_AUTH_META`] on `options.metadata`.
+pub(crate) fn no_auth_active(options: &RedDBOptions) -> bool {
+    options
+        .metadata
+        .get(NO_AUTH_META)
+        .map(|v| v == "true")
+        .unwrap_or(false)
+}
+
+/// Loud, unmissable warning printed when the operator opts into
+/// anonymous access via `--no-auth` / `--dev`. Goes to stderr (always
+/// visible at startup) **and** the tracing layer (captured by file
+/// logs once telemetry is wired).
+const NO_AUTH_WARNING: &str =
+    "⚠ auth disabled (--no-auth) — anonymous access, do NOT use in production";
+
 impl ServerCommandConfig {
     fn to_db_options(&self) -> Result<RedDBOptions, String> {
         let mut options = match &self.path {
@@ -294,6 +331,25 @@ impl ServerCommandConfig {
 
         if self.vault {
             options.auth.vault_enabled = true;
+        }
+
+        // Issue #663 — `--no-auth` / `--dev` is the last word on auth
+        // for this boot: force every auth knob off, regardless of any
+        // env-derived config (`--vault`, `REDDB_USERNAME`/`PASSWORD`,
+        // `REDDB_VAULT_KEY`, OAuth, cert) the operator may also have
+        // set. We *also* stamp [`NO_AUTH_META`] so the auth-store
+        // builder downstream knows to skip `bootstrap_from_env`
+        // (which would otherwise auto-create an admin from
+        // `REDDB_USERNAME`/`REDDB_PASSWORD` even with auth disabled,
+        // a footgun for the local-dev workflow this flag exists to
+        // support).
+        if self.no_auth {
+            options.auth.enabled = false;
+            options.auth.require_auth = false;
+            options.auth.vault_enabled = false;
+            options
+                .metadata
+                .insert(NO_AUTH_META.to_string(), "true".to_string());
         }
 
         // Issue #517 — canonical `REDDB_BACKUP_*` contract takes
@@ -1895,6 +1951,7 @@ pub(crate) fn build_runtime_with_telemetry(
     );
     let telemetry_guard = crate::telemetry::init(merged);
 
+    let no_auth = no_auth_active(&db_options);
     let auth_store =
         if db_options.auth.vault_enabled {
             let pager =
@@ -1907,7 +1964,17 @@ pub(crate) fn build_runtime_with_telemetry(
         } else {
             Arc::new(AuthStore::new(db_options.auth.clone()))
         };
-    auth_store.bootstrap_from_env();
+    // Issue #663 — when `--no-auth` is active, deliberately skip
+    // `bootstrap_from_env`. Otherwise a stray
+    // `REDDB_USERNAME`+`REDDB_PASSWORD` pair in the operator's
+    // environment would silently create an admin user, defeating the
+    // whole point of opting into anonymous mode.
+    if no_auth {
+        eprintln!("{NO_AUTH_WARNING}");
+        tracing::warn!("{NO_AUTH_WARNING}");
+    } else {
+        auth_store.bootstrap_from_env();
+    }
 
     // Background session purge (every 5 minutes)
     {
@@ -2563,6 +2630,144 @@ mod tests {
         assert_eq!(readiness.failed.len(), 1);
         assert!(readiness.failed[0].explicit);
         assert_eq!(readiness.failed[0].bind_addr, addr);
+    }
+
+    // ---------- Issue #663 — `--no-auth` / `--dev` ----------
+
+    // Env access in tests is process-global; serialise the two
+    // `--no-auth` tests so the REDDB_USERNAME / REDDB_PASSWORD pair
+    // one of them sets cannot leak into the other under cargo's
+    // default parallel runner.
+    fn no_auth_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    fn no_auth_test_config(no_auth: bool) -> ServerCommandConfig {
+        ServerCommandConfig {
+            path: None,
+            router_bind_addr: Some(DEFAULT_ROUTER_BIND_ADDR.to_string()),
+            router_bind_explicit: false,
+            grpc_bind_addr: None,
+            grpc_bind_explicit: false,
+            grpc_tls_bind_addr: None,
+            grpc_tls_cert: None,
+            grpc_tls_key: None,
+            grpc_tls_client_ca: None,
+            http_bind_addr: None,
+            http_bind_explicit: false,
+            http_tls_bind_addr: None,
+            http_tls_cert: None,
+            http_tls_key: None,
+            http_tls_client_ca: None,
+            wire_bind_addr: None,
+            wire_bind_explicit: false,
+            wire_tls_bind_addr: None,
+            wire_tls_cert: None,
+            wire_tls_key: None,
+            pg_bind_addr: None,
+            create_if_missing: true,
+            read_only: false,
+            role: "standalone".to_string(),
+            primary_addr: None,
+            // Operator-set `--vault`: `--no-auth` must override this
+            // alongside REDDB_USERNAME/PASSWORD.
+            vault: true,
+            no_auth,
+            workers: None,
+            telemetry: None,
+            http_limits_cli: crate::server::HttpLimitsCliInput::default(),
+        }
+    }
+
+    #[test]
+    fn no_auth_flag_disables_every_auth_knob_and_stamps_metadata() {
+        let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        // Pre-existing env that *would* turn auth on if `--no-auth`
+        // weren't the last word. The acceptance criterion is that
+        // the flag wins over env.
+        // SAFETY: serialised by `no_auth_env_lock` above.
+        unsafe {
+            std::env::set_var("REDDB_USERNAME", "admin");
+            std::env::set_var("REDDB_PASSWORD", "hunter2");
+        }
+        let config = no_auth_test_config(true);
+        let options = config.to_db_options().expect("to_db_options");
+
+        assert!(no_auth_active(&options), "metadata should be stamped");
+        assert!(!options.auth.enabled, "auth.enabled must be forced off");
+        assert!(
+            !options.auth.require_auth,
+            "require_auth must be forced off"
+        );
+        assert!(
+            !options.auth.vault_enabled,
+            "vault_enabled must be forced off (overrides --vault)"
+        );
+        assert_eq!(
+            options.metadata.get(NO_AUTH_META).map(String::as_str),
+            Some("true"),
+        );
+
+        // SAFETY: serialised by `no_auth_env_lock` above.
+        unsafe {
+            std::env::remove_var("REDDB_USERNAME");
+            std::env::remove_var("REDDB_PASSWORD");
+        }
+    }
+
+    #[test]
+    fn default_behaviour_without_no_auth_flag_is_unchanged() {
+        let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let config = no_auth_test_config(false);
+        let options = config.to_db_options().expect("to_db_options");
+
+        assert!(
+            !no_auth_active(&options),
+            "default boot must not be marked no-auth"
+        );
+        assert!(
+            options.metadata.get(NO_AUTH_META).is_none(),
+            "metadata key must be absent when flag is off"
+        );
+        // `--vault` should still take effect when `--no-auth` is not set.
+        assert!(options.auth.vault_enabled);
+    }
+
+    #[test]
+    fn no_auth_active_blocks_bootstrap_from_env() {
+        let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialised by `no_auth_env_lock` above. The pair
+        // would normally cause `AuthStore::bootstrap_from_env` to
+        // create an admin; the boot pipeline must suppress that call
+        // whenever `no_auth_active` is true.
+        unsafe {
+            std::env::set_var("REDDB_USERNAME", "admin");
+            std::env::set_var("REDDB_PASSWORD", "hunter2");
+        }
+
+        let options = no_auth_test_config(true)
+            .to_db_options()
+            .expect("to_db_options");
+
+        // Mirror the exact branch in `build_runtime_with_telemetry`:
+        // build a non-vault AuthStore from `options.auth`, then call
+        // `bootstrap_from_env` *only* when the no-auth gate is off.
+        let auth_store = AuthStore::new(options.auth.clone());
+        if !no_auth_active(&options) {
+            auth_store.bootstrap_from_env();
+        }
+
+        assert!(
+            auth_store.needs_bootstrap(),
+            "no admin user must be bootstrapped under --no-auth even with REDDB_USERNAME/PASSWORD set"
+        );
+
+        // SAFETY: serialised by `no_auth_env_lock` above.
+        unsafe {
+            std::env::remove_var("REDDB_USERNAME");
+            std::env::remove_var("REDDB_PASSWORD");
+        }
     }
 
     #[test]
