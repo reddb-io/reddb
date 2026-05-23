@@ -108,7 +108,7 @@ harness = false
 
 [dev-dependencies]
 # Criterion benchmark harness for blob_cache_bench (#190).
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 # tempfile: L2-backed scenarios need a temp directory per bench group.
 tempfile = "3"
 # Used by `tests/compile_fail.rs` to assert that misuse of
