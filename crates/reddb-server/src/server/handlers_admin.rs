@@ -2012,18 +2012,34 @@ impl RedDBServer {
             self.runtime.write_gate().role(),
             crate::replication::ReplicationRole::Replica { .. }
         ) {
-            return json_error(
-                409,
-                "promotion only allowed on a replica (current role is not Replica)",
-            );
+            let reason = "promotion only allowed on a replica (current role is not Replica)";
+            if let Err(err) = self.runtime.emit_control_event(
+                crate::runtime::control_events::EventKind::FailoverPromotion,
+                crate::runtime::control_events::Outcome::Denied,
+                "failover_promote",
+                Some("replication:role".to_string()),
+                Some(reason.to_string()),
+                Vec::new(),
+            ) {
+                return json_error(500, err.to_string());
+            }
+            return json_error(409, reason);
         }
 
         // Backend guard.
         let Some(backend) = self.runtime.db().options().remote_backend_atomic.clone() else {
-            return json_error(
-                412,
-                "promotion requires a CAS-capable remote backend (use s3, fs, or http with RED_HTTP_CONDITIONAL_WRITES=true)",
-            );
+            let reason = "promotion requires a CAS-capable remote backend (use s3, fs, or http with RED_HTTP_CONDITIONAL_WRITES=true)";
+            if let Err(err) = self.runtime.emit_control_event(
+                crate::runtime::control_events::EventKind::FailoverPromotion,
+                crate::runtime::control_events::Outcome::Denied,
+                "failover_promote",
+                Some("replication:backend".to_string()),
+                Some(reason.to_string()),
+                Vec::new(),
+            ) {
+                return json_error(500, err.to_string());
+            }
+            return json_error(412, reason);
         };
 
         // Apply health guard. Anything other than `ok` / `healthy`
@@ -2033,12 +2049,23 @@ impl RedDBServer {
             health.as_str(),
             "stalled_gap" | "divergence" | "apply_error"
         ) {
-            return json_error(
-                409,
-                format!(
-                    "promotion refused — replica apply state is `{health}`; resolve before promoting"
-                ),
+            let reason = format!(
+                "promotion refused — replica apply state is `{health}`; resolve before promoting"
             );
+            if let Err(err) = self.runtime.emit_control_event(
+                crate::runtime::control_events::EventKind::ReplicationSafety,
+                crate::runtime::control_events::Outcome::Denied,
+                "promotion_refused",
+                Some("replication:apply_health".to_string()),
+                Some(reason.clone()),
+                vec![(
+                    "apply_health".to_string(),
+                    crate::runtime::control_events::Sensitivity::raw(health),
+                )],
+            ) {
+                return json_error(500, err.to_string());
+            }
+            return json_error(409, reason);
         }
 
         // Body parsing.
@@ -2059,7 +2086,20 @@ impl RedDBServer {
                         .unwrap_or(60_000);
                     (holder, ttl)
                 }
-                Err(err) => return json_error(400, format!("invalid JSON body: {err}")),
+                Err(err) => {
+                    let reason = format!("invalid JSON body: {err}");
+                    if let Err(emit_err) = self.runtime.emit_control_event(
+                        crate::runtime::control_events::EventKind::FailoverPromotion,
+                        crate::runtime::control_events::Outcome::Error,
+                        "failover_promote",
+                        Some("replication:request".to_string()),
+                        Some(reason.clone()),
+                        Vec::new(),
+                    ) {
+                        return json_error(500, emit_err.to_string());
+                    }
+                    return json_error(400, reason);
+                }
             }
         };
 
@@ -2080,6 +2120,31 @@ impl RedDBServer {
             ttl_ms,
         ) {
             Ok(lease) => {
+                if let Err(err) = self.runtime.emit_control_event(
+                    crate::runtime::control_events::EventKind::FailoverPromotion,
+                    crate::runtime::control_events::Outcome::Allowed,
+                    "failover_promote",
+                    Some(format!("replication:database:{database_key}")),
+                    None,
+                    vec![
+                        (
+                            "holder_id".to_string(),
+                            crate::runtime::control_events::Sensitivity::raw(&lease.holder_id),
+                        ),
+                        (
+                            "generation".to_string(),
+                            crate::runtime::control_events::Sensitivity::raw(
+                                lease.generation.to_string(),
+                            ),
+                        ),
+                        (
+                            "ttl_ms".to_string(),
+                            crate::runtime::control_events::Sensitivity::raw(ttl_ms.to_string()),
+                        ),
+                    ],
+                ) {
+                    return json_error(500, err.to_string());
+                }
                 let mut object = Map::new();
                 object.insert("ok".to_string(), JsonValue::Bool(true));
                 object.insert("holder_id".to_string(), JsonValue::String(lease.holder_id));
@@ -2104,7 +2169,29 @@ impl RedDBServer {
                 );
                 json_response(200, JsonValue::Object(object))
             }
-            Err(err) => json_error(409, format!("promotion refused: {err}")),
+            Err(err) => {
+                let reason = format!("promotion refused: {err}");
+                if let Err(emit_err) = self.runtime.emit_control_event(
+                    crate::runtime::control_events::EventKind::FailoverPromotion,
+                    crate::runtime::control_events::Outcome::Denied,
+                    "failover_promote",
+                    Some(format!("replication:database:{database_key}")),
+                    Some(reason.clone()),
+                    vec![
+                        (
+                            "holder_id".to_string(),
+                            crate::runtime::control_events::Sensitivity::raw(holder_id),
+                        ),
+                        (
+                            "ttl_ms".to_string(),
+                            crate::runtime::control_events::Sensitivity::raw(ttl_ms.to_string()),
+                        ),
+                    ],
+                ) {
+                    return json_error(500, emit_err.to_string());
+                }
+                json_error(409, reason)
+            }
         }
     }
 

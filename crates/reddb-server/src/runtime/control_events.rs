@@ -49,6 +49,13 @@ pub enum EventKind {
     VaultUnseal,
     VaultRotate,
     VaultPurge,
+    SchemaDdl,
+    TenantGovernance,
+    RlsGovernance,
+    BackupRun,
+    RestoreRun,
+    FailoverPromotion,
+    ReplicationSafety,
 }
 
 impl EventKind {
@@ -69,6 +76,13 @@ impl EventKind {
             Self::VaultUnseal => "vault.unseal",
             Self::VaultRotate => "vault.rotate",
             Self::VaultPurge => "vault.purge",
+            Self::SchemaDdl => "schema.ddl",
+            Self::TenantGovernance => "tenant.governance",
+            Self::RlsGovernance => "rls.governance",
+            Self::BackupRun => "backup.run",
+            Self::RestoreRun => "restore.run",
+            Self::FailoverPromotion => "failover.promotion",
+            Self::ReplicationSafety => "replication.safety",
         }
     }
 }
