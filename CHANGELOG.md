@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.5.0
+
+### Minor Changes
+
+- Policy-first auth, governance guardrails, NFS/build infra hardening, dep maintenance
+
+  - feat(auth): policy-first evaluator — admin is no longer a bypass ([#644](https://github.com/reddb-io/reddb/issues/644))
+  - feat(auth): managed policy guardrail tracer + system-owned user integration ([#646](https://github.com/reddb-io/reddb/issues/646), [#647](https://github.com/reddb-io/reddb/issues/647))
+  - feat(auth): red.registry tracer + managed config namespace enforcement ([#648](https://github.com/reddb-io/reddb/issues/648), [#649](https://github.com/reddb-io/reddb/issues/649))
+  - feat(auth): policy context for system-owned/platform-scoped users ([#645](https://github.com/reddb-io/reddb/issues/645))
+  - feat(server): explicit --no-auth / --dev flag for local no-password mode ([#663](https://github.com/reddb-io/reddb/issues/663))
+  - fix(engine): rid/logical-identity envelope regression + KV()-in-WHERE ([#636](https://github.com/reddb-io/reddb/issues/636))
+  - fix(engine): parser unbounded recursion / OOM on view body + WITHIN ([#635](https://github.com/reddb-io/reddb/issues/635))
+  - fix(engine): WAL recovery commit-batch replay, dotted-tenant scoping, $secret/$config SQL, ASK envelope fixes ([#638](https://github.com/reddb-io/reddb/issues/638), [#639](https://github.com/reddb-io/reddb/issues/639), [#640](https://github.com/reddb-io/reddb/issues/640), [#641](https://github.com/reddb-io/reddb/issues/641))
+  - fix(gate): pnpm build now actually builds (was 90-min workspace-test); package.json scripts straightened out
+  - chore(deps): bump grpc 1.79→1.81, protobuf 1.36.10→1.36.11, toml 0.8→1.1, criterion 0.5→0.8, lz4_flex, busybox
+
 ## 1.4.0
 
 ### Minor Changes
