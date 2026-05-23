@@ -4,6 +4,7 @@
 /// completion. Self-contained -- no external dependencies on config or
 /// storage layers.
 pub mod bootstrap;
+pub mod bootstrap_manifest;
 pub mod commands;
 pub mod complete;
 pub mod error;
