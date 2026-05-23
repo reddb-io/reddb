@@ -415,6 +415,10 @@ fn execute_grpc_query_with_optional_params(
     query: String,
     params: Vec<QueryValue>,
 ) -> Result<RuntimeQueryResult, Status> {
+    if query.trim().is_empty() {
+        return Err(Status::invalid_argument("query field cannot be empty"));
+    }
+
     if params.is_empty() {
         return runtime.execute_query(&query).map_err(to_status);
     }
@@ -517,6 +521,86 @@ mod grpc_query_value_tests {
             kind: Some(Kind::UuidValue(vec![0; 15])),
         })
         .is_err());
+    }
+
+    #[test]
+    fn grpc_query_rejects_empty_query_before_runtime_parse() {
+        let runtime =
+            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+        let err = execute_grpc_query_with_optional_params(&runtime, "  ".to_string(), Vec::new())
+            .expect_err("empty query should fail");
+
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(err.message(), "query field cannot be empty");
+    }
+
+    #[test]
+    fn grpc_query_params_are_bound_before_execution() {
+        let runtime =
+            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+        seed_grpc_param_table(&runtime);
+
+        let result = execute_grpc_query_with_optional_params(
+            &runtime,
+            "SELECT id, name FROM p WHERE id = $1 AND name = $2".to_string(),
+            grpc_param_values(),
+        )
+        .expect("parameterized query");
+
+        assert_eq!(result.result.records.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn grpc_query_rpc_binds_query_request_params() {
+        let runtime =
+            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+        seed_grpc_param_table(&runtime);
+        let service = GrpcRuntime {
+            runtime,
+            auth_store: Arc::new(AuthStore::new(crate::auth::AuthConfig::default())),
+            prepared_registry: PreparedStatementRegistry::new(),
+            oauth_validator: None,
+        };
+
+        let reply = RedDb::query(
+            &service,
+            Request::new(QueryRequest {
+                query: "SELECT id, name FROM p WHERE id = $1 AND name = $2".to_string(),
+                entity_types: Vec::new(),
+                capabilities: Vec::new(),
+                params: grpc_param_values(),
+            }),
+        )
+        .await
+        .expect("query rpc")
+        .into_inner();
+
+        assert_eq!(reply.record_count, 1);
+        assert!(reply.result_json.contains("Alice"), "{}", reply.result_json);
+        assert!(!reply.result_json.contains("Bob"), "{}", reply.result_json);
+    }
+
+    fn seed_grpc_param_table(runtime: &RedDBRuntime) {
+        runtime
+            .execute_query("CREATE TABLE p (id INTEGER, name TEXT)")
+            .expect("create table");
+        runtime
+            .execute_query("INSERT INTO p (id, name) VALUES (1, 'Alice')")
+            .expect("insert alice");
+        runtime
+            .execute_query("INSERT INTO p (id, name) VALUES (2, 'Bob')")
+            .expect("insert bob");
+    }
+
+    fn grpc_param_values() -> Vec<QueryValue> {
+        vec![
+            QueryValue {
+                kind: Some(Kind::IntValue(1)),
+            },
+            QueryValue {
+                kind: Some(Kind::TextValue("Alice".to_string())),
+            },
+        ]
     }
 }
 

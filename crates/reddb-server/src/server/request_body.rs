@@ -13,29 +13,29 @@ pub(crate) fn extract_query_request(body: &[u8]) -> Result<ParsedQueryRequest, H
     }
 
     if trimmed.starts_with('{') {
-        if let Ok(parsed) = parse_json(trimmed) {
-            let json = JsonValue::from(parsed);
-            if let Some(query) = json.get("query").and_then(JsonValue::as_str) {
-                if query.trim().is_empty() {
-                    return Err(json_error(400, "query field cannot be empty"));
-                }
-
-                let (entity_types, capabilities) =
-                    crate::application::query_payload::parse_json_search_selection(&json)
-                        .map_err(|err| json_error(400, err.to_string()))?;
-                let params = parse_params_field(&json)?;
-                return Ok(ParsedQueryRequest {
-                    query: query.to_string(),
-                    entity_types,
-                    capabilities,
-                    params,
-                });
+        let parsed = parse_json(trimmed)
+            .map_err(|err| json_error(400, format!("invalid JSON body: {err}")))?;
+        let json = JsonValue::from(parsed);
+        if let Some(query) = json.get("query").and_then(JsonValue::as_str) {
+            if query.trim().is_empty() {
+                return Err(json_error(400, "query field cannot be empty"));
             }
-            return Err(json_error(
-                400,
-                "JSON body must contain a string field named 'query'",
-            ));
+
+            let (entity_types, capabilities) =
+                crate::application::query_payload::parse_json_search_selection(&json)
+                    .map_err(|err| json_error(400, err.to_string()))?;
+            let params = parse_params_field(&json)?;
+            return Ok(ParsedQueryRequest {
+                query: query.to_string(),
+                entity_types,
+                capabilities,
+                params,
+            });
         }
+        return Err(json_error(
+            400,
+            "JSON body must contain a string field named 'query'",
+        ));
     }
 
     Ok(ParsedQueryRequest {

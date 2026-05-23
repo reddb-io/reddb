@@ -869,6 +869,69 @@ mod tests {
     }
 
     #[test]
+    fn http_query_malformed_json_returns_json_error_instead_of_sql_parse_error() {
+        let server = make_server();
+        let r = server.handle_query(br#"{"query": "#.to_vec());
+
+        assert_eq!(r.status, 400, "{}", body_str(&r));
+        let text = body_str(&r);
+        assert!(text.contains("invalid JSON body"), "got: {text}");
+        assert!(
+            !text.to_lowercase().contains("unexpected token"),
+            "malformed JSON should not fall through to SQL parsing: {text}"
+        );
+    }
+
+    #[test]
+    fn http_query_projected_values_do_not_include_internal_metadata() {
+        let server = make_server();
+        assert_eq!(
+            server
+                .handle_query(
+                    br#"{"query": "CREATE TABLE products (id INTEGER, name TEXT, price INTEGER)"}"#
+                        .to_vec()
+                )
+                .status,
+            200
+        );
+        assert_eq!(
+            server
+                .handle_query(br#"{"query": "INSERT INTO products (id, name, price) VALUES (1, 'Red Cloud', 99)"}"#.to_vec())
+                .status,
+            200
+        );
+
+        let r = server.handle_query(
+            br#"{"query": "SELECT name, price FROM products WHERE id = 1"}"#.to_vec(),
+        );
+
+        assert_eq!(r.status, 200, "{}", body_str(&r));
+        let json: crate::json::Value = crate::json::from_str(&body_str(&r)).expect("query json");
+        let columns = json
+            .get("result")
+            .and_then(|value| value.get("columns"))
+            .and_then(crate::json::Value::as_array)
+            .expect("columns");
+        assert_eq!(columns, &vec![crate::json!("name"), crate::json!("price")]);
+        let values = json
+            .get("result")
+            .and_then(|value| value.get("records"))
+            .and_then(crate::json::Value::as_array)
+            .and_then(|records| records.first())
+            .and_then(|record| record.get("values"))
+            .and_then(crate::json::Value::as_object)
+            .expect("record values");
+        let keys: Vec<&str> = values.keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["name", "price"], "values: {values:?}");
+        assert!(
+            !values.contains_key("rid")
+                && !values.contains_key("collection")
+                && !values.contains_key("kind"),
+            "internal metadata leaked into values: {values:?}"
+        );
+    }
+
+    #[test]
     fn http_query_no_params_keeps_legacy_path() {
         // Sanity: absence of `params` keeps the existing single-arg
         // `execute_query(sql)` path so legacy clients are unaffected.
