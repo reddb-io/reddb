@@ -70,6 +70,7 @@ impl RedDBRuntime {
                     "target".into(),
                     "nodes_visited".into(),
                     "negative_cycle_detected".into(),
+                    "path_found".into(),
                     "hop_count".into(),
                     "total_weight".into(),
                 ]);
@@ -85,9 +86,11 @@ impl RedDBRuntime {
                     },
                 );
                 if let Some(ref path) = res.path {
+                    record.set("path_found", Value::Boolean(true));
                     record.set("hop_count", Value::Integer(path.hop_count as i64));
                     record.set("total_weight", Value::Float(path.total_weight));
                 } else {
+                    record.set("path_found", Value::Boolean(false));
                     record.set("hop_count", Value::Null);
                     record.set("total_weight", Value::Null);
                 }

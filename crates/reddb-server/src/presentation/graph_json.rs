@@ -96,6 +96,10 @@ pub(crate) fn graph_path_result_json(result: &RuntimeGraphPathResult) -> JsonVal
             .unwrap_or(JsonValue::Null),
     );
     object.insert(
+        "path_found".to_string(),
+        JsonValue::Bool(result.path.is_some()),
+    );
+    object.insert(
         "path".to_string(),
         match &result.path {
             Some(path) => graph_path_json(path),

@@ -315,7 +315,8 @@ pub fn snapshot_store_with_declarations(
         );
 
         let declared_indices = declared_indices(&collection_name, declarations);
-        let operational_indices = operational_indices(&collection_name, index_catalog);
+        let operational_indices =
+            operational_indices(&collection_name, index_catalog, declarations);
         let (indexes_in_sync, missing_operational_indices, undeclared_operational_indices) =
             collection_index_consistency(&declared_indices, &operational_indices);
         let (queryable_index_count, indexes_requiring_rebuild_count, indexes_locally_in_sync) =
@@ -702,25 +703,30 @@ fn declared_indices(
     selected
 }
 
-fn operational_indices(collection_name: &str, index_catalog: Option<&IndexCatalog>) -> Vec<String> {
+fn operational_indices(
+    collection_name: &str,
+    index_catalog: Option<&IndexCatalog>,
+    declarations: Option<&CatalogDeclarations>,
+) -> Vec<String> {
+    if let Some(declarations) = declarations {
+        let mut selected = declarations
+            .operational_indexes
+            .iter()
+            .filter(|index| index.collection.as_deref() == Some(collection_name))
+            .map(|index| index.name.clone())
+            .collect::<Vec<_>>();
+        selected.sort();
+        selected.dedup();
+        return selected;
+    }
+
     let mut selected = index_catalog
         .map(IndexCatalog::snapshot)
         .unwrap_or_default()
         .into_iter()
         .filter(|metric| metric.enabled)
         .filter_map(|metric| {
-            if metric.name.starts_with(collection_name)
-                || matches!(
-                    metric.kind,
-                    IndexKind::BTree
-                        | IndexKind::GraphAdjacency
-                        | IndexKind::VectorHnsw
-                        | IndexKind::VectorInverted
-                        | IndexKind::FullText
-                        | IndexKind::DocumentPathValue
-                        | IndexKind::HybridSearch
-                )
-            {
+            if metric.name.starts_with(collection_name) {
                 Some(metric.name)
             } else {
                 None

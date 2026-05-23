@@ -1461,6 +1461,24 @@ fn graph_shortest_path_resolves_labels_for_both_endpoints() {
 }
 
 #[test]
+fn graph_shortest_path_no_path_is_explicit() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('alice', 'Alice')")
+        .expect("insert alice");
+    rt.execute_query("INSERT INTO tales NODE (label, name) VALUES ('bob', 'Bob')")
+        .expect("insert bob");
+
+    let res = rt
+        .execute_query("GRAPH SHORTEST_PATH 'alice' TO 'bob'")
+        .expect("shortest path without edge executes");
+
+    assert_eq!(res.result.records.len(), 1);
+    assert!(!bool_at(&res, 0, "path_found"));
+    assert!(is_null_at(&res, 0, "hop_count"));
+    assert!(is_null_at(&res, 0, "total_weight"));
+}
+
+#[test]
 fn grimms_showcase_graph_commands_resolve_labels() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
     let hansel = insert_graph_node(&rt, "hansel", "Hansel");

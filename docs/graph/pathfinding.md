@@ -123,7 +123,12 @@ Shortest-path responses include:
 - `direction`
 - `nodes_visited`
 - `negative_cycle_detected`
+- `path_found`
 - `path`
+
+When no route exists, `path_found` is `false` and `path` is `null`. SQL
+`GRAPH SHORTEST_PATH` uses the same semantics in tabular form: `path_found =
+false`, `hop_count = NULL`, and `total_weight = NULL`.
 
 The `path` object includes:
 

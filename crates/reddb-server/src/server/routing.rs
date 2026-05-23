@@ -238,7 +238,11 @@ impl RedDBServer {
 
             ("GET", "/health") => {
                 let report = self.native_use_cases().health();
-                let status = if report.is_healthy() { 200 } else { 503 };
+                let status = if report.allows_serving_traffic() {
+                    200
+                } else {
+                    503
+                };
                 json_response(status, self.health_json_with_transport(&report))
             }
             ("GET", "/ready/query") => {
@@ -311,7 +315,11 @@ impl RedDBServer {
             }
             ("GET", "/ready") => {
                 let report = self.native_use_cases().health();
-                let status = if report.is_healthy() { 200 } else { 503 };
+                let status = if report.allows_serving_traffic() {
+                    200
+                } else {
+                    503
+                };
                 json_response(status, self.health_json_with_transport(&report))
             }
             ("GET", "/deployment/profiles") => {
@@ -1732,6 +1740,56 @@ mod tests {
             .headers
             .insert("authorization".to_string(), format!("Bearer {token}"));
         request
+    }
+
+    #[test]
+    fn fresh_server_health_is_ready_when_query_endpoint_works() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let server = RedDBServer::new(runtime);
+
+        let query = server.route(request_with(
+            "POST",
+            "/query",
+            br#"{"query":"SELECT 1"}"#.to_vec(),
+        ));
+        assert_eq!(
+            query.status,
+            200,
+            "fresh server should accept queries: {}",
+            String::from_utf8_lossy(&query.body)
+        );
+
+        let health = server.route(request("/health"));
+        let health_body = String::from_utf8_lossy(&health.body);
+        assert_eq!(
+            health.status, 200,
+            "fresh server should not report degraded health after queries work: {}",
+            health_body
+        );
+        assert!(
+            health_body.contains("\"state\":\"healthy\""),
+            "fresh server should report healthy state after queries work: {health_body}"
+        );
+        assert!(
+            health_body.contains("\"issues\":[]"),
+            "fresh server should not report startup drift issues after queries work: {health_body}"
+        );
+
+        let ready = server.route(request("/ready"));
+        assert_eq!(
+            ready.status,
+            200,
+            "fresh server should be ready after queries work: {}",
+            String::from_utf8_lossy(&ready.body)
+        );
+
+        let query_ready = server.route(request("/ready/query"));
+        assert_eq!(
+            query_ready.status,
+            200,
+            "fresh server should report query readiness after /query works: {}",
+            String::from_utf8_lossy(&query_ready.body)
+        );
     }
 
     #[test]

@@ -70,6 +70,11 @@ Algorithms:
 
 Ordering metrics: `hop_count`, `total_weight`, `nodes_visited`.
 
+`GRAPH SHORTEST_PATH` returns one summary row unless `LIMIT 0` is used. The
+row includes `path_found`; when no route exists between the resolved source and
+target, `path_found` is `false` and `hop_count` / `total_weight` are `NULL`
+instead of looking like a successful empty path.
+
 ## GRAPH CENTRALITY
 
 Compute centrality scores:

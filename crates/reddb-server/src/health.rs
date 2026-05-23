@@ -69,6 +69,17 @@ impl HealthReport {
         matches!(self.state, HealthState::Healthy)
     }
 
+    pub(crate) fn allows_serving_traffic(&self) -> bool {
+        match self.state {
+            HealthState::Healthy => true,
+            HealthState::Unhealthy => false,
+            HealthState::Degraded => self
+                .issues
+                .iter()
+                .all(|issue| matches!(issue.component.as_str(), "native_registry")),
+        }
+    }
+
     pub fn issue(&mut self, component: impl Into<String>, message: impl Into<String>) {
         self.issues.push(HealthIssue {
             component: component.into(),
