@@ -96,6 +96,68 @@ struct QueryControlEventSpec {
     fields: Vec<(String, crate::runtime::control_events::Sensitivity)>,
 }
 
+#[derive(Clone)]
+struct QueryAuditPlan {
+    statement_kind: &'static str,
+    collections: Vec<String>,
+}
+
+fn query_audit_plan(expr: &QueryExpr) -> Option<QueryAuditPlan> {
+    let mut collections = Vec::new();
+    let statement_kind = match expr {
+        QueryExpr::Table(table) => {
+            push_query_audit_collection(&mut collections, &table.table);
+            "select"
+        }
+        QueryExpr::Join(join) => {
+            collect_query_audit_collections(&join.left, &mut collections);
+            collect_query_audit_collections(&join.right, &mut collections);
+            "select"
+        }
+        QueryExpr::Insert(insert) => {
+            push_query_audit_collection(&mut collections, &insert.table);
+            "insert"
+        }
+        QueryExpr::Update(update) => {
+            push_query_audit_collection(&mut collections, &update.table);
+            "update"
+        }
+        QueryExpr::Delete(delete) => {
+            push_query_audit_collection(&mut collections, &delete.table);
+            "delete"
+        }
+        _ => return None,
+    };
+    if collections.is_empty() {
+        None
+    } else {
+        Some(QueryAuditPlan {
+            statement_kind,
+            collections,
+        })
+    }
+}
+
+fn collect_query_audit_collections(expr: &QueryExpr, collections: &mut Vec<String>) {
+    match expr {
+        QueryExpr::Table(table) => push_query_audit_collection(collections, &table.table),
+        QueryExpr::Join(join) => {
+            collect_query_audit_collections(&join.left, collections);
+            collect_query_audit_collections(&join.right, collections);
+        }
+        _ => {}
+    }
+}
+
+fn push_query_audit_collection(collections: &mut Vec<String>, name: &str) {
+    if name == "red" || name.starts_with("red.") || name.starts_with("__red_schema_") {
+        return;
+    }
+    if !collections.iter().any(|existing| existing == name) {
+        collections.push(name.to_string());
+    }
+}
+
 fn query_control_event_specs(expr: &QueryExpr) -> Vec<QueryControlEventSpec> {
     use crate::runtime::control_events::{EventKind, Sensitivity};
 
@@ -2224,6 +2286,10 @@ impl RedDBRuntime {
         self.inner.config_registry.clone()
     }
 
+    pub fn query_audit(&self) -> std::sync::Arc<crate::runtime::query_audit::QueryAuditStream> {
+        self.inner.query_audit.clone()
+    }
+
     #[inline(never)]
     pub fn with_options(options: RedDBOptions) -> RedDBResult<Self> {
         Self::with_pool(options, ConnectionPoolConfig::default())
@@ -2381,6 +2447,10 @@ impl RedDBRuntime {
                     db.store(),
                 )),
                 control_event_config: options.control_events,
+                query_audit: Arc::new(crate::runtime::query_audit::QueryAuditStream::new(
+                    db.store(),
+                    options.query_audit.clone(),
+                )),
                 lease_lifecycle: std::sync::OnceLock::new(),
                 replica_apply_metrics: crate::replication::logical::ReplicaApplyMetrics::default(),
                 quota_bucket: crate::runtime::quota_bucket::QuotaBucket::from_env(),
@@ -3478,6 +3548,37 @@ impl RedDBRuntime {
             }
             Err(_) => Ok(()),
         }
+    }
+
+    fn emit_query_audit(
+        &self,
+        query: &str,
+        plan: &QueryAuditPlan,
+        duration_ms: u64,
+        result: &RuntimeQueryResult,
+    ) {
+        if !self.inner.query_audit.has_rules() {
+            return;
+        }
+        let actor = current_auth_identity().map(|(principal, _)| principal);
+        let tenant = current_tenant();
+        let row_count = if result.statement_type == "select" {
+            result.result.records.len() as u64
+        } else {
+            result.affected_rows
+        };
+        self.inner
+            .query_audit
+            .emit(crate::runtime::query_audit::QueryAuditEvent {
+                actor,
+                tenant,
+                statement_kind: plan.statement_kind,
+                touched_collections: plan.collections.clone(),
+                duration_ms,
+                row_count,
+                request_id: Some(crate::crypto::uuid::Uuid::new_v7().to_string()),
+                query_hash: Some(blake3::hash(query.as_bytes()).to_hex().to_string()),
+            });
     }
 
     /// Slice 10 of issue #527 — shared queue telemetry counters
@@ -5145,6 +5246,7 @@ impl RedDBRuntime {
         if !has_scope_override_active()
             && !query.trim_start().starts_with("WITHIN")
             && !query.trim_start().starts_with("within")
+            && !self.inner.query_audit.has_rules()
             && !self
                 .inner
                 .tx_contexts
@@ -5236,13 +5338,17 @@ impl RedDBRuntime {
         }
 
         // ── TURBO: bypass SQL parse for SELECT * FROM x WHERE _entity_id = N ──
-        if let Some(result) = self.try_fast_entity_lookup(execution_query) {
-            return result;
+        if !self.inner.query_audit.has_rules() {
+            if let Some(result) = self.try_fast_entity_lookup(execution_query) {
+                return result;
+            }
         }
 
         // ── Result cache: return cached result if still fresh (30s TTL) ──
-        if let Some(result) = frame.read_result_cache(self) {
-            return Ok(result);
+        if !self.inner.query_audit.has_rules() {
+            if let Some(result) = frame.read_result_cache(self) {
+                return Ok(result);
+            }
         }
 
         let prepared = frame.prepare_statement(self, execution_query)?;
@@ -5252,6 +5358,7 @@ impl RedDBRuntime {
         let statement = query_expr_name(&expr);
         let result_cache_scopes = query_expr_result_cache_scopes(&expr);
         let control_event_specs = query_control_event_specs(&expr);
+        let query_audit_plan = query_audit_plan(&expr);
 
         let _lock_guard = match frame.prepare_dispatch(self, &expr) {
             Ok(guard) => guard,
@@ -5271,6 +5378,7 @@ impl RedDBRuntime {
             }
         };
         let frame_iface: &dyn super::statement_frame::ReadFrame = &frame;
+        let query_audit_started = std::time::Instant::now();
 
         let query_result = match expr {
             QueryExpr::Graph(_) | QueryExpr::Path(_) => {
@@ -6750,6 +6858,15 @@ impl RedDBRuntime {
                     spec.fields.clone(),
                 )?;
             }
+        }
+
+        if let (Some(plan), Ok(result)) = (&query_audit_plan, &query_result) {
+            self.emit_query_audit(
+                query,
+                plan,
+                query_audit_started.elapsed().as_millis() as u64,
+                result,
+            );
         }
 
         // Decrypt Value::Secret columns in-place before caching, so
