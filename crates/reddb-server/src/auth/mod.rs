@@ -14,6 +14,7 @@
 pub mod cert;
 pub mod column_policy_gate;
 pub mod locks;
+pub mod managed_config;
 pub mod middleware;
 pub mod oauth;
 pub mod policies;
