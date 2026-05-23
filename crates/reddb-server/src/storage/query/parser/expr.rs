@@ -616,8 +616,7 @@ impl<'a> Parser<'a> {
         // column". Capture each path-shaped argument as a lowercased
         // string literal instead so it matches stored keys (which
         // `SET CONFIG` also lowercases) and never resolves as a column.
-        if function_name.eq_ignore_ascii_case("CONFIG")
-            || function_name.eq_ignore_ascii_case("KV")
+        if function_name.eq_ignore_ascii_case("CONFIG") || function_name.eq_ignore_ascii_case("KV")
         {
             let mut args = Vec::new();
             if !self.check(&Token::RParen) {
