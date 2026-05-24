@@ -612,7 +612,7 @@ fn register_entry(
         .map_err(|err| format!("register `{}`: {err}", entry.id))
 }
 
-fn persist_registry_state(
+pub(crate) fn persist_registry_state(
     runtime: &RedDBRuntime,
     entries: &[ConfigRegistryEntry],
 ) -> Result<(), String> {

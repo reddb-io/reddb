@@ -814,6 +814,25 @@ impl RedDBRuntime {
             principal_is_system_owned: auth_store.principal_is_system_owned(&principal_id),
             principal_is_platform_scoped: principal_id.tenant.is_none(),
         };
+        if action == "config:write" {
+            let managed_key = if collection == "red.config" {
+                format!("red.config.{key}")
+            } else {
+                key.to_string()
+            };
+            let gate = crate::auth::managed_config::ManagedConfigGate::new(
+                self.inner.config_registry.as_ref(),
+            );
+            match gate.check_write(&auth_store, &principal_id, &ctx, &managed_key) {
+                crate::auth::managed_config::ManagedConfigDecision::PassThrough { .. } => {}
+                crate::auth::managed_config::ManagedConfigDecision::Allow { .. } => return Ok(()),
+                crate::auth::managed_config::ManagedConfigDecision::Deny { reason, .. } => {
+                    return Err(format!(
+                        "permission denied: managed config mutation blocked for `{managed_key}`: {reason}"
+                    ));
+                }
+            }
+        }
         if auth_store.check_policy_authz(&principal_id, action, &resource, &ctx) {
             Ok(())
         } else {
