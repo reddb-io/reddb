@@ -1,5 +1,6 @@
 //! Stable Config keyed command execution.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::catalog::{CollectionModel, SchemaMode};
@@ -58,6 +59,24 @@ impl ConfigVersion {
 struct ConfigSecretRef {
     collection: String,
     key: String,
+}
+
+struct ConfigMutationEvidence {
+    id: String,
+    resource_type: String,
+    managed: bool,
+    mutability: crate::auth::registry::Mutability,
+    matched_action: Option<String>,
+    matched_resource: Option<String>,
+    payload: Option<Value>,
+}
+
+enum ConfigMutationAuthz {
+    Allowed(ConfigMutationEvidence),
+    Denied {
+        reason: String,
+        evidence: ConfigMutationEvidence,
+    },
 }
 
 impl RedDBRuntime {
@@ -278,16 +297,81 @@ impl RedDBRuntime {
         tags: &[String],
         op: &str,
     ) -> RedDBResult<RuntimeQueryResult> {
-        self.check_system_config_capability("config:write", collection, key)
-            .map_err(RedDBError::Query)?;
-        self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
-        self.ensure_config_collection(collection)?;
-        let latest = self.latest_config_version(collection, key)?;
+        let mut evidence = match self.authorize_config_write_for_event(collection, key) {
+            ConfigMutationAuthz::Allowed(evidence) => evidence,
+            ConfigMutationAuthz::Denied {
+                reason,
+                mut evidence,
+            } => {
+                evidence.payload = Some(value.clone());
+                let _ = self.emit_config_mutation_event(
+                    crate::runtime::control_events::EventKind::ConfigWrite,
+                    crate::runtime::control_events::Outcome::Denied,
+                    "config:write",
+                    collection,
+                    key,
+                    Some(reason.clone()),
+                    &evidence,
+                );
+                return Err(RedDBError::Query(reason));
+            }
+        };
+        if let Err(err) = self.check_write(crate::runtime::write_gate::WriteKind::Dml) {
+            let _ = self.emit_config_mutation_event(
+                crate::runtime::control_events::EventKind::ConfigWrite,
+                crate::runtime::control_events::Outcome::Error,
+                "config:write",
+                collection,
+                key,
+                Some(err.to_string()),
+                &evidence,
+            );
+            return Err(err);
+        }
+        if let Err(err) = self.ensure_config_collection(collection) {
+            let _ = self.emit_config_mutation_event(
+                crate::runtime::control_events::EventKind::ConfigWrite,
+                crate::runtime::control_events::Outcome::Error,
+                "config:write",
+                collection,
+                key,
+                Some(err.to_string()),
+                &evidence,
+            );
+            return Err(err);
+        }
+        let latest = match self.latest_config_version(collection, key) {
+            Ok(latest) => latest,
+            Err(err) => {
+                let _ = self.emit_config_mutation_event(
+                    crate::runtime::control_events::EventKind::ConfigWrite,
+                    crate::runtime::control_events::Outcome::Error,
+                    "config:write",
+                    collection,
+                    key,
+                    Some(err.to_string()),
+                    &evidence,
+                );
+                return Err(err);
+            }
+        };
         let version = latest.as_ref().map(|version| version.version).unwrap_or(0) + 1;
         let (value_type, schema_version) = resolve_config_schema(latest.as_ref(), requested_type);
         if let Some(value_type) = value_type {
-            validate_config_value_type(&value, value_type)?;
+            if let Err(err) = validate_config_value_type(&value, value_type) {
+                let _ = self.emit_config_mutation_event(
+                    crate::runtime::control_events::EventKind::ConfigWrite,
+                    crate::runtime::control_events::Outcome::Error,
+                    "config:write",
+                    collection,
+                    key,
+                    Some(err.to_string()),
+                    &evidence,
+                );
+                return Err(err);
+            }
         }
+        evidence.payload = Some(value.clone());
         let before = latest.as_ref().and_then(|version| {
             if version.tombstone {
                 None
@@ -305,7 +389,7 @@ impl RedDBRuntime {
         } else {
             crate::replication::cdc::ChangeOperation::Insert
         };
-        let id = self.append_config_version(
+        let id = match self.append_config_version(
             collection,
             key,
             value,
@@ -315,10 +399,48 @@ impl RedDBRuntime {
             value_type,
             schema_version,
             tags,
-        )?;
+        ) {
+            Ok(id) => id,
+            Err(err) => {
+                let _ = self.emit_config_mutation_event(
+                    crate::runtime::control_events::EventKind::ConfigWrite,
+                    crate::runtime::control_events::Outcome::Error,
+                    "config:write",
+                    collection,
+                    key,
+                    Some(err.to_string()),
+                    &evidence,
+                );
+                return Err(err);
+            }
+        };
         self.record_kv_watch_event(change_op, collection, key, id.raw(), before, after);
-        self.prune_config_history(collection, key)?;
+        if let Err(err) = self.prune_config_history(collection, key) {
+            let _ = self.emit_config_mutation_event(
+                crate::runtime::control_events::EventKind::ConfigWrite,
+                crate::runtime::control_events::Outcome::Error,
+                "config:write",
+                collection,
+                key,
+                Some(err.to_string()),
+                &evidence,
+            );
+            return Err(err);
+        }
         self.invalidate_result_cache();
+        if let Err(err) = self.emit_config_mutation_event(
+            crate::runtime::control_events::EventKind::ConfigWrite,
+            crate::runtime::control_events::Outcome::Allowed,
+            "config:write",
+            collection,
+            key,
+            None,
+            &evidence,
+        ) {
+            let _ = self.inner.db.store().delete(collection, id);
+            self.invalidate_result_cache();
+            return Err(err);
+        }
         Ok(config_write_output(
             raw_query,
             collection,
@@ -342,15 +464,65 @@ impl RedDBRuntime {
         collection: &str,
         key: &str,
     ) -> RedDBResult<RuntimeQueryResult> {
-        self.check_system_config_capability("config:write", collection, key)
-            .map_err(RedDBError::Query)?;
-        self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
-        self.ensure_config_collection(collection)?;
-        let latest = self.latest_config_version(collection, key)?;
+        let mut evidence = match self.authorize_config_write_for_event(collection, key) {
+            ConfigMutationAuthz::Allowed(evidence) => evidence,
+            ConfigMutationAuthz::Denied { reason, evidence } => {
+                let _ = self.emit_config_mutation_event(
+                    crate::runtime::control_events::EventKind::ConfigDelete,
+                    crate::runtime::control_events::Outcome::Denied,
+                    "config:delete",
+                    collection,
+                    key,
+                    Some(reason.clone()),
+                    &evidence,
+                );
+                return Err(RedDBError::Query(reason));
+            }
+        };
+        if let Err(err) = self.check_write(crate::runtime::write_gate::WriteKind::Dml) {
+            let _ = self.emit_config_mutation_event(
+                crate::runtime::control_events::EventKind::ConfigDelete,
+                crate::runtime::control_events::Outcome::Error,
+                "config:delete",
+                collection,
+                key,
+                Some(err.to_string()),
+                &evidence,
+            );
+            return Err(err);
+        }
+        if let Err(err) = self.ensure_config_collection(collection) {
+            let _ = self.emit_config_mutation_event(
+                crate::runtime::control_events::EventKind::ConfigDelete,
+                crate::runtime::control_events::Outcome::Error,
+                "config:delete",
+                collection,
+                key,
+                Some(err.to_string()),
+                &evidence,
+            );
+            return Err(err);
+        }
+        let latest = match self.latest_config_version(collection, key) {
+            Ok(latest) => latest,
+            Err(err) => {
+                let _ = self.emit_config_mutation_event(
+                    crate::runtime::control_events::EventKind::ConfigDelete,
+                    crate::runtime::control_events::Outcome::Error,
+                    "config:delete",
+                    collection,
+                    key,
+                    Some(err.to_string()),
+                    &evidence,
+                );
+                return Err(err);
+            }
+        };
+        evidence.payload = latest.as_ref().map(|version| version.value.clone());
         let version = latest.as_ref().map(|version| version.version).unwrap_or(0) + 1;
         let value_type = latest.as_ref().and_then(|version| version.value_type);
         let schema_version = latest.as_ref().and_then(|version| version.schema_version);
-        let id = self.append_config_version(
+        let id = match self.append_config_version(
             collection,
             key,
             Value::Null,
@@ -360,7 +532,21 @@ impl RedDBRuntime {
             value_type,
             schema_version,
             &[],
-        )?;
+        ) {
+            Ok(id) => id,
+            Err(err) => {
+                let _ = self.emit_config_mutation_event(
+                    crate::runtime::control_events::EventKind::ConfigDelete,
+                    crate::runtime::control_events::Outcome::Error,
+                    "config:delete",
+                    collection,
+                    key,
+                    Some(err.to_string()),
+                    &evidence,
+                );
+                return Err(err);
+            }
+        };
         if let Some(before) = latest.as_ref().and_then(|version| {
             if version.tombstone {
                 None
@@ -379,8 +565,32 @@ impl RedDBRuntime {
                 None,
             );
         }
-        self.prune_config_history(collection, key)?;
+        if let Err(err) = self.prune_config_history(collection, key) {
+            let _ = self.emit_config_mutation_event(
+                crate::runtime::control_events::EventKind::ConfigDelete,
+                crate::runtime::control_events::Outcome::Error,
+                "config:delete",
+                collection,
+                key,
+                Some(err.to_string()),
+                &evidence,
+            );
+            return Err(err);
+        }
         self.invalidate_result_cache();
+        if let Err(err) = self.emit_config_mutation_event(
+            crate::runtime::control_events::EventKind::ConfigDelete,
+            crate::runtime::control_events::Outcome::Allowed,
+            "config:delete",
+            collection,
+            key,
+            None,
+            &evidence,
+        ) {
+            let _ = self.inner.db.store().delete(collection, id);
+            self.invalidate_result_cache();
+            return Err(err);
+        }
         Ok(config_write_output(
             raw_query,
             collection,
@@ -775,6 +985,231 @@ impl RedDBRuntime {
                 .map_err(|err| RedDBError::Internal(err.to_string()))?;
         }
         Ok(())
+    }
+
+    fn authorize_config_write_for_event(&self, collection: &str, key: &str) -> ConfigMutationAuthz {
+        let default_evidence = self.default_config_mutation_evidence(collection, key);
+        let Some(auth_store) = self.inner.auth_store.read().clone() else {
+            return ConfigMutationAuthz::Allowed(default_evidence);
+        };
+        if !auth_store.iam_authorization_enabled() {
+            return ConfigMutationAuthz::Allowed(default_evidence);
+        }
+        let Some((principal, role)) = current_auth_identity() else {
+            return ConfigMutationAuthz::Denied {
+                reason:
+                    "IAM authorization is enabled; config capability check requires an authenticated principal"
+                        .to_string(),
+                evidence: default_evidence,
+            };
+        };
+        let tenant = current_tenant();
+        let principal_id = crate::auth::UserId::from_parts(tenant.as_deref(), &principal);
+        let ctx = crate::auth::policies::EvalContext {
+            principal_tenant: tenant.clone(),
+            current_tenant: tenant.clone(),
+            peer_ip: None,
+            mfa_present: false,
+            now_ms: crate::utils::now_unix_millis() as u128,
+            principal_is_admin_role: role == crate::auth::Role::Admin,
+            principal_is_system_owned: auth_store.principal_is_system_owned(&principal_id),
+            principal_is_platform_scoped: principal_id.tenant.is_none(),
+        };
+        let managed_key = if collection == "red.config" {
+            format!("red.config.{key}")
+        } else {
+            key.to_string()
+        };
+        let gate = crate::auth::managed_config::ManagedConfigGate::new(
+            self.inner.config_registry.as_ref(),
+        );
+        match gate.check_write(&auth_store, &principal_id, &ctx, &managed_key) {
+            crate::auth::managed_config::ManagedConfigDecision::Allow {
+                entry_id,
+                resource_type,
+                managed,
+                mutability,
+                matched_action,
+                matched_resource,
+                ..
+            } => {
+                return ConfigMutationAuthz::Allowed(ConfigMutationEvidence {
+                    id: entry_id,
+                    resource_type,
+                    managed,
+                    mutability,
+                    matched_action: Some(matched_action),
+                    matched_resource: Some(matched_resource),
+                    payload: None,
+                });
+            }
+            crate::auth::managed_config::ManagedConfigDecision::Deny {
+                entry_id,
+                resource_type,
+                managed,
+                mutability,
+                matched_action,
+                matched_resource,
+                reason,
+                ..
+            } => {
+                return ConfigMutationAuthz::Denied {
+                    reason: format!(
+                        "permission denied: managed config mutation blocked for `{managed_key}`: {reason}"
+                    ),
+                    evidence: ConfigMutationEvidence {
+                        id: entry_id,
+                        resource_type,
+                        managed,
+                        mutability,
+                        matched_action: Some(matched_action),
+                        matched_resource: Some(matched_resource),
+                        payload: None,
+                    },
+                };
+            }
+            crate::auth::managed_config::ManagedConfigDecision::PassThrough { .. } => {}
+        }
+
+        let mut resource = crate::auth::policies::ResourceRef::new(
+            "config",
+            config_target_resource(collection, key),
+        );
+        if let Some(ref tenant) = tenant {
+            resource = resource.with_tenant(tenant.clone());
+        }
+        if auth_store.check_policy_authz(&principal_id, "config:write", &resource, &ctx) {
+            ConfigMutationAuthz::Allowed(default_evidence)
+        } else {
+            ConfigMutationAuthz::Denied {
+                reason: format!(
+                    "principal=`{}` action=`config:write` resource=`config:{}` denied by IAM policy",
+                    principal,
+                    config_target_resource(collection, key)
+                ),
+                evidence: default_evidence,
+            }
+        }
+    }
+
+    fn default_config_mutation_evidence(
+        &self,
+        collection: &str,
+        key: &str,
+    ) -> ConfigMutationEvidence {
+        let id = if collection == "red.config" {
+            format!("red.config.{key}")
+        } else {
+            key.to_string()
+        };
+        ConfigMutationEvidence {
+            id,
+            resource_type: crate::auth::managed_config::RESOURCE_TYPE_CONFIG_KEY.to_string(),
+            managed: false,
+            mutability: crate::auth::registry::Mutability::MutableViaGovernance,
+            matched_action: None,
+            matched_resource: None,
+            payload: None,
+        }
+    }
+
+    fn emit_config_mutation_event(
+        &self,
+        kind: crate::runtime::control_events::EventKind,
+        outcome: crate::runtime::control_events::Outcome,
+        action: &'static str,
+        collection: &str,
+        key: &str,
+        reason: Option<String>,
+        evidence: &ConfigMutationEvidence,
+    ) -> RedDBResult<()> {
+        use crate::runtime::control_events::{
+            ActorRef, ControlEvent, ControlEventCtx, Sensitivity,
+        };
+
+        let tenant = current_tenant();
+        let principal = current_auth_identity();
+        let actor_user = principal
+            .as_ref()
+            .map(|(principal, _)| crate::auth::UserId::from_parts(tenant.as_deref(), principal));
+        let actor = actor_user
+            .as_ref()
+            .map(ActorRef::User)
+            .unwrap_or(ActorRef::Anonymous);
+        let ctx = ControlEventCtx {
+            actor,
+            scope: tenant
+                .as_ref()
+                .map(|scope| std::borrow::Cow::Borrowed(scope.as_str())),
+            request_id: Some(std::borrow::Cow::Owned(format!(
+                "conn-{}",
+                current_connection_id()
+            ))),
+            trace_id: None,
+        };
+
+        let mut fields = HashMap::new();
+        fields.insert("id".to_string(), Sensitivity::raw(evidence.id.clone()));
+        fields.insert(
+            "resource_type".to_string(),
+            Sensitivity::raw(evidence.resource_type.clone()),
+        );
+        fields.insert(
+            "managed".to_string(),
+            Sensitivity::raw(evidence.managed.to_string()),
+        );
+        fields.insert(
+            "mutability".to_string(),
+            Sensitivity::raw(config_mutability_label(evidence.mutability)),
+        );
+        fields.insert("collection".to_string(), Sensitivity::raw(collection));
+        fields.insert("key".to_string(), Sensitivity::raw(key));
+        fields.insert(
+            "connection_id".to_string(),
+            Sensitivity::raw(current_connection_id().to_string()),
+        );
+        if let Some((_, role)) = principal {
+            fields.insert("actor_role".to_string(), Sensitivity::raw(role.as_str()));
+        }
+        if let Some(matched_action) = &evidence.matched_action {
+            fields.insert(
+                "matched_action".to_string(),
+                Sensitivity::raw(matched_action.clone()),
+            );
+        }
+        if let Some(matched_resource) = &evidence.matched_resource {
+            fields.insert(
+                "matched_resource".to_string(),
+                Sensitivity::raw(matched_resource.clone()),
+            );
+        }
+        if let Some(payload) = &evidence.payload {
+            fields.insert(
+                "payload".to_string(),
+                config_payload_sensitivity(&evidence.resource_type, "payload", payload),
+            );
+        }
+
+        let event = ControlEvent {
+            kind,
+            outcome,
+            action: std::borrow::Cow::Borrowed(action),
+            resource: Some(format!(
+                "config:{}",
+                config_target_resource(collection, key)
+            )),
+            reason,
+            matched_policy_id: None,
+            fields,
+        };
+        let ledger = self.inner.control_event_ledger.read();
+        match ledger.emit(&ctx, event) {
+            Ok(_) => Ok(()),
+            Err(err) if self.inner.control_event_config.require_persistence() => {
+                Err(RedDBError::Internal(err.to_string()))
+            }
+            Err(_) => Ok(()),
+        }
     }
 
     fn check_config_capability(
@@ -1181,6 +1616,42 @@ fn config_tags_from_value(value: Option<&Value>) -> Vec<String> {
             })
             .unwrap_or_default(),
         _ => Vec::new(),
+    }
+}
+
+fn config_payload_sensitivity(
+    resource_type: &str,
+    field: &str,
+    value: &Value,
+) -> crate::runtime::control_events::Sensitivity {
+    let payload = config_payload_bytes(value);
+    if config_payload_raw_allowed(resource_type, field) {
+        crate::runtime::control_events::Sensitivity::raw(
+            String::from_utf8_lossy(&payload).into_owned(),
+        )
+    } else {
+        crate::runtime::control_events::Sensitivity::hashed(&payload)
+    }
+}
+
+fn config_payload_bytes(value: &Value) -> Vec<u8> {
+    let json = crate::presentation::entity_json::storage_value_to_json(value);
+    crate::serde_json::to_vec(&json).unwrap_or_else(|_| value.to_string().into_bytes())
+}
+
+fn config_payload_raw_allowed(resource_type: &str, field: &str) -> bool {
+    const RAW_PAYLOAD_FIELDS: &[(&str, &str)] = &[("audit_surface", "payload")];
+    RAW_PAYLOAD_FIELDS
+        .iter()
+        .any(|(allowed_type, allowed_field)| {
+            *allowed_type == resource_type && *allowed_field == field
+        })
+}
+
+fn config_mutability_label(mutability: crate::auth::registry::Mutability) -> &'static str {
+    match mutability {
+        crate::auth::registry::Mutability::Immutable => "immutable",
+        crate::auth::registry::Mutability::MutableViaGovernance => "mutable_via_governance",
     }
 }
 
