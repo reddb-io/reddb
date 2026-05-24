@@ -362,6 +362,10 @@ impl ServerCommandConfig {
                 "1" | "true" | "yes" | "on"
             );
         }
+        if env_nonempty(PRESET_ENV).is_some_and(|s| s.trim() == PRESET_REGULATED) {
+            options.control_events.compliance_mode = true;
+            options.query_audit = crate::runtime::query_audit::QueryAuditConfig::regulated();
+        }
 
         // Issue #517 — canonical `REDDB_BACKUP_*` contract takes
         // precedence. On Err, surface the partial-config message so
@@ -2019,6 +2023,10 @@ pub(crate) const PRESET_REGULATED: &str = "regulated";
 /// first admin. Grants `"*"` on `"*"` so the admin has policy-derived
 /// broad authority (acceptance #3) — not an authorization bypass.
 pub(crate) const FIRST_ADMIN_ALLOW_ALL_POLICY: &str = "system.bootstrap.first-admin-allow-all";
+pub(crate) const REGULATED_PROTECT_MANAGED_POLICY: &str = "system.regulated.protect-managed";
+pub(crate) const REGULATED_AUDIT_CONFIG_NAMESPACE: &str = "red.config.audit";
+pub(crate) const REGULATED_EVIDENCE_CONFIG_NAMESPACE: &str = "red.config.evidence";
+pub(crate) const REGULATED_QUERY_AUDIT_CONFIG_NAMESPACE: &str = "red.config.query_audit";
 
 /// Apply the bootstrap preset selected by `REDDB_PRESET` (default
 /// `simple`). Idempotent — if `system.bootstrap.completed` is already
@@ -2080,7 +2088,7 @@ pub(crate) fn apply_preset(
         }
         PRESET_PRODUCTION => Some(apply_production_preset(auth_store)?),
         PRESET_REGULATED => {
-            runtime.query_audit().enable_infrastructure();
+            apply_regulated_preset(runtime, auth_store)?;
             None
         }
         other => {
@@ -2146,6 +2154,121 @@ fn apply_production_preset(auth_store: &Arc<AuthStore>) -> Result<String, String
         .map_err(|err| format!("attach allow-all policy: {err}"))?;
 
     Ok(first_admin.to_string())
+}
+
+fn apply_regulated_preset(
+    runtime: &RedDBRuntime,
+    auth_store: &Arc<AuthStore>,
+) -> Result<(), String> {
+    use crate::auth::policies::Policy;
+    use crate::auth::registry::EvidenceRequirement;
+
+    runtime.query_audit().enable_infrastructure();
+
+    let policy = Policy::from_json_str(&format!(
+        r#"{{
+            "id": "{id}",
+            "version": 1,
+            "statements": [
+                {{
+                    "effect": "deny",
+                    "actions": ["policy:put", "policy:drop", "policy:attach", "policy:detach"],
+                    "resources": ["policy:{id}"]
+                }},
+                {{
+                    "effect": "deny",
+                    "actions": ["config:write"],
+                    "resources": [
+                        "config:{audit}.*",
+                        "config:{evidence}.*",
+                        "config:{query_audit}.*"
+                    ]
+                }}
+            ]
+        }}"#,
+        id = REGULATED_PROTECT_MANAGED_POLICY,
+        audit = REGULATED_AUDIT_CONFIG_NAMESPACE,
+        evidence = REGULATED_EVIDENCE_CONFIG_NAMESPACE,
+        query_audit = REGULATED_QUERY_AUDIT_CONFIG_NAMESPACE,
+    ))
+    .map_err(|err| format!("compile regulated guardrail policy: {err}"))?;
+    auth_store
+        .put_policy(policy)
+        .map_err(|err| format!("install regulated guardrail policy: {err}"))?;
+
+    let now_ms = crate::utils::now_unix_millis() as u128;
+    let entries = vec![
+        regulated_registry_entry(
+            REGULATED_PROTECT_MANAGED_POLICY,
+            crate::auth::managed_policy::RESOURCE_TYPE_POLICY,
+            "iam_policy",
+            "policy:*",
+            &format!("policy:{REGULATED_PROTECT_MANAGED_POLICY}"),
+            EvidenceRequirement::Metadata,
+            now_ms,
+        ),
+        regulated_registry_entry(
+            REGULATED_AUDIT_CONFIG_NAMESPACE,
+            crate::auth::managed_config::RESOURCE_TYPE_CONFIG_NAMESPACE,
+            "config_namespace",
+            "config:write",
+            &format!("config:{REGULATED_AUDIT_CONFIG_NAMESPACE}.*"),
+            EvidenceRequirement::Metadata,
+            now_ms,
+        ),
+        regulated_registry_entry(
+            REGULATED_EVIDENCE_CONFIG_NAMESPACE,
+            crate::auth::managed_config::RESOURCE_TYPE_CONFIG_NAMESPACE,
+            "config_namespace",
+            "config:write",
+            &format!("config:{REGULATED_EVIDENCE_CONFIG_NAMESPACE}.*"),
+            EvidenceRequirement::Metadata,
+            now_ms,
+        ),
+        regulated_registry_entry(
+            REGULATED_QUERY_AUDIT_CONFIG_NAMESPACE,
+            crate::auth::managed_config::RESOURCE_TYPE_CONFIG_NAMESPACE,
+            "config_namespace",
+            "config:write",
+            &format!("config:{REGULATED_QUERY_AUDIT_CONFIG_NAMESPACE}.*"),
+            EvidenceRequirement::Metadata,
+            now_ms,
+        ),
+    ];
+
+    for entry in entries.iter().cloned() {
+        runtime
+            .config_registry()
+            .restore_bootstrap_entry(entry)
+            .map_err(|err| format!("install regulated registry entry: {err}"))?;
+    }
+    crate::cli::bootstrap_manifest::persist_registry_state(runtime, &entries)?;
+    Ok(())
+}
+
+fn regulated_registry_entry(
+    id: &str,
+    resource_type: &str,
+    schema: &str,
+    required_action: &str,
+    required_resource: &str,
+    evidence_requirement: crate::auth::registry::EvidenceRequirement,
+    updated_at_ms: u128,
+) -> crate::auth::registry::ConfigRegistryEntry {
+    crate::auth::registry::ConfigRegistryEntry {
+        id: id.to_string(),
+        version: 1,
+        resource_type: resource_type.to_string(),
+        schema: schema.to_string(),
+        mutability: crate::auth::registry::Mutability::Immutable,
+        sensitivity: crate::auth::registry::Sensitivity::Internal,
+        managed: true,
+        required_action: required_action.to_string(),
+        required_resource: required_resource.to_string(),
+        evidence_requirement,
+        updated_by: "system:regulated-preset".to_string(),
+        updated_at_ms,
+    }
 }
 
 fn persist_bootstrap_state(runtime: &RedDBRuntime, preset: &str, first_admin_id: Option<&str>) {
@@ -3126,6 +3249,200 @@ mod tests {
         assert!(
             rows.is_empty(),
             "regulated preset must not globally audit every query"
+        );
+
+        clear_preset_env();
+    }
+
+    #[test]
+    fn regulated_preset_installs_managed_evidence_guardrails_end_to_end() {
+        use crate::auth::policies::{EvalContext, Policy, ResourceRef};
+        use crate::auth::store::PrincipalRef;
+        use crate::auth::{Role, UserId};
+        use crate::runtime::mvcc::{clear_current_auth_identity, set_current_auth_identity};
+        use crate::storage::schema::Value;
+
+        let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        clear_preset_env();
+        // SAFETY: env serialised by `no_auth_env_lock`.
+        unsafe {
+            std::env::set_var(PRESET_ENV, PRESET_REGULATED);
+        }
+
+        let options = no_auth_test_config(false)
+            .to_db_options()
+            .expect("regulated options");
+        assert!(
+            options.control_events.compliance_mode,
+            "regulated preset must enable fail-closed control evidence before runtime boot"
+        );
+        assert!(
+            options.query_audit.enabled && options.query_audit.rules.is_empty(),
+            "regulated preset must enable query-audit infrastructure without global rules"
+        );
+
+        let runtime = RedDBRuntime::with_options(options).expect("runtime");
+        let auth_store = Arc::new(AuthStore::new(crate::auth::AuthConfig::default()));
+        apply_preset(&runtime, &auth_store).expect("regulated preset applies cleanly");
+        runtime.set_auth_store(Arc::clone(&auth_store));
+
+        assert!(runtime.control_events_require_persistence());
+        assert!(runtime.query_audit().is_enabled());
+        assert!(runtime.query_audit().rules().is_empty());
+        assert!(auth_store
+            .get_policy(REGULATED_PROTECT_MANAGED_POLICY)
+            .is_some());
+
+        let managed_policy = runtime
+            .config_registry()
+            .get_active(REGULATED_PROTECT_MANAGED_POLICY)
+            .expect("regulated managed policy registry entry");
+        assert!(managed_policy.managed);
+        assert_eq!(managed_policy.resource_type, "policy");
+        assert!(
+            runtime
+                .config_registry()
+                .get_active(REGULATED_AUDIT_CONFIG_NAMESPACE)
+                .expect("regulated audit config namespace")
+                .managed
+        );
+
+        let registry_rows = runtime
+            .execute_query(&format!(
+                "SELECT id, managed FROM red.registry WHERE id = '{}'",
+                REGULATED_PROTECT_MANAGED_POLICY
+            ))
+            .expect("red.registry query");
+        assert_eq!(registry_rows.result.records.len(), 1);
+        assert_eq!(
+            registry_rows.result.records[0].get("managed"),
+            Some(&Value::Boolean(true))
+        );
+
+        let managed_policy_rows = runtime
+            .execute_query(&format!(
+                "SELECT policy_id FROM red.managed_policies WHERE policy_id = '{}'",
+                REGULATED_PROTECT_MANAGED_POLICY
+            ))
+            .expect("red.managed_policies query");
+        assert_eq!(managed_policy_rows.result.records.len(), 1);
+
+        let capability_rows = runtime
+            .execute_query(
+                "SELECT action FROM red.control_capabilities WHERE action = 'evidence:export'",
+            )
+            .expect("red.control_capabilities query");
+        assert_eq!(capability_rows.result.records.len(), 1);
+
+        auth_store
+            .create_user("alice", "p", Role::Admin)
+            .expect("create ordinary admin");
+        let allow_all = Policy::from_json_str(
+            r#"{
+                "id": "alice-allow-all",
+                "version": 1,
+                "statements": [{
+                    "effect": "allow",
+                    "actions": ["*"],
+                    "resources": ["*"]
+                }]
+            }"#,
+        )
+        .expect("allow-all policy");
+        auth_store.put_policy(allow_all).expect("install allow-all");
+        auth_store
+            .attach_policy(
+                PrincipalRef::User(UserId::platform("alice")),
+                "alice-allow-all",
+            )
+            .expect("attach allow-all");
+        let ctx = EvalContext {
+            principal_tenant: None,
+            current_tenant: None,
+            peer_ip: None,
+            mfa_present: false,
+            now_ms: 1_700_000_000_000,
+            principal_is_admin_role: true,
+            principal_is_system_owned: false,
+            principal_is_platform_scoped: true,
+        };
+        assert!(
+            auth_store.check_policy_authz(
+                &UserId::platform("alice"),
+                "policy:drop",
+                &ResourceRef::new("policy", REGULATED_PROTECT_MANAGED_POLICY),
+                &ctx,
+            ),
+            "ordinary allow-all policy should be broad enough that only the managed guardrail blocks"
+        );
+
+        set_current_auth_identity("alice".to_string(), Role::Admin);
+        let denied = runtime.execute_query(&format!(
+            "DROP POLICY '{}'",
+            REGULATED_PROTECT_MANAGED_POLICY
+        ));
+        clear_current_auth_identity();
+        let err = denied.expect_err("managed policy guardrail must deny ordinary admin");
+        assert!(
+            err.to_string().contains("managed policy"),
+            "error should name the managed guardrail: {err}"
+        );
+        assert!(
+            auth_store
+                .get_policy(REGULATED_PROTECT_MANAGED_POLICY)
+                .is_some(),
+            "denied mutation must leave managed policy installed"
+        );
+
+        let denied_events = runtime
+            .execute_query(&format!(
+                "SELECT action, resource, outcome FROM red.control_events \
+                 WHERE action = 'policy:drop' AND resource = 'policy:{}'",
+                REGULATED_PROTECT_MANAGED_POLICY
+            ))
+            .expect("red.control_events denied policy drop");
+        assert_eq!(denied_events.result.records.len(), 1);
+        assert_eq!(
+            denied_events.result.records[0].get("outcome"),
+            Some(&Value::text("denied"))
+        );
+
+        set_current_auth_identity("alice".to_string(), Role::Admin);
+        let config_denied = runtime.execute_query("SET CONFIG red.config.audit.enabled = true");
+        clear_current_auth_identity();
+        let err = config_denied.expect_err("managed config guardrail must deny ordinary admin");
+        assert!(
+            err.to_string().contains("managed config"),
+            "error should name the managed config guardrail: {err}"
+        );
+
+        let denied_config_events = runtime
+            .execute_query(
+                "SELECT action, resource, outcome FROM red.control_events \
+                 WHERE action = 'config:write' AND resource = 'config:red.config.audit.enabled'",
+            )
+            .expect("red.control_events denied config write");
+        assert_eq!(denied_config_events.result.records.len(), 1);
+        assert_eq!(
+            denied_config_events.result.records[0].get("outcome"),
+            Some(&Value::text("denied"))
+        );
+
+        runtime
+            .execute_query("CREATE TABLE regulated_docs (id INT)")
+            .expect("create user table");
+        runtime
+            .execute_query("SELECT * FROM regulated_docs")
+            .expect("select user table");
+        let audit_rows = runtime
+            .db()
+            .store()
+            .get_collection(crate::runtime::query_audit::QUERY_AUDIT_COLLECTION)
+            .expect("query audit collection")
+            .query_all(|_| true);
+        assert!(
+            audit_rows.is_empty(),
+            "regulated preset must not globally audit data-plane queries"
         );
 
         clear_preset_env();
