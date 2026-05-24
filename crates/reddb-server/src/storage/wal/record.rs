@@ -67,6 +67,8 @@ pub enum RecordType {
     /// [TxID: 8][PageID: 4][CkptEpoch: 8][DataLen: 4][Data: N][CRC: 4]
     /// ```
     FullPageImage = 8,
+    /// Logical vector insert for vector-turbo WAL replay.
+    VectorInsert = 9,
 }
 
 impl RecordType {
@@ -80,6 +82,7 @@ impl RecordType {
             6 => Some(RecordType::PageWriteCompressed),
             7 => Some(RecordType::TxCommitBatch),
             8 => Some(RecordType::FullPageImage),
+            9 => Some(RecordType::VectorInsert),
             _ => None,
         }
     }
@@ -112,6 +115,13 @@ pub enum WalRecord {
         page_id: u32,
         ckpt_epoch: u64,
         data: Vec<u8>,
+    },
+    /// Logical vector insert payload. Recovery can replay FP32 into the
+    /// in-memory vector-turbo index without requiring snapshot files.
+    VectorInsert {
+        collection: String,
+        entity_id: u64,
+        vector: Vec<f32>,
     },
     /// Checkpoint marker (indicates up to which LSN pages are flushed)
     Checkpoint { lsn: u64 },
@@ -206,6 +216,20 @@ impl WalRecord {
                 buf.extend_from_slice(&ckpt_epoch.to_le_bytes());
                 buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
                 buf.extend_from_slice(data);
+            }
+            WalRecord::VectorInsert {
+                collection,
+                entity_id,
+                vector,
+            } => {
+                buf.push(RecordType::VectorInsert as u8);
+                buf.extend_from_slice(&(collection.len() as u32).to_le_bytes());
+                buf.extend_from_slice(collection.as_bytes());
+                buf.extend_from_slice(&entity_id.to_le_bytes());
+                buf.extend_from_slice(&(vector.len() as u32).to_le_bytes());
+                for value in vector {
+                    buf.extend_from_slice(&value.to_le_bytes());
+                }
             }
             WalRecord::Checkpoint { lsn } => {
                 buf.push(RecordType::Checkpoint as u8);
@@ -370,6 +394,46 @@ impl WalRecord {
                 }
 
                 WalRecord::TxCommitBatch { tx_id, actions }
+            }
+            RecordType::VectorInsert => {
+                let mut len_buf = [0u8; 4];
+                reader.read_exact(&mut len_buf)?;
+                running_crc = crc32_update(running_crc, &len_buf);
+                let collection_len = u32::from_le_bytes(len_buf) as usize;
+
+                let mut collection_buf = vec![0u8; collection_len];
+                reader.read_exact(&mut collection_buf)?;
+                running_crc = crc32_update(running_crc, &collection_buf);
+                let collection = String::from_utf8(collection_buf).map_err(|err| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("invalid collection utf8: {err}"),
+                    )
+                })?;
+
+                let mut entity_buf = [0u8; 8];
+                reader.read_exact(&mut entity_buf)?;
+                running_crc = crc32_update(running_crc, &entity_buf);
+                let entity_id = u64::from_le_bytes(entity_buf);
+
+                let mut count_buf = [0u8; 4];
+                reader.read_exact(&mut count_buf)?;
+                running_crc = crc32_update(running_crc, &count_buf);
+                let count = u32::from_le_bytes(count_buf) as usize;
+
+                let mut vector = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let mut value_buf = [0u8; 4];
+                    reader.read_exact(&mut value_buf)?;
+                    running_crc = crc32_update(running_crc, &value_buf);
+                    vector.push(f32::from_le_bytes(value_buf));
+                }
+
+                WalRecord::VectorInsert {
+                    collection,
+                    entity_id,
+                    vector,
+                }
             }
             RecordType::FullPageImage => {
                 let mut tx_buf = [0u8; 8];
@@ -602,6 +666,21 @@ mod tests {
         let original = WalRecord::TxCommitBatch {
             tx_id: 42,
             actions: vec![b"old-version".to_vec(), b"new-version".to_vec()],
+        };
+        let encoded = original.encode();
+
+        let mut cursor = Cursor::new(encoded);
+        let decoded = WalRecord::read(&mut cursor).unwrap().unwrap();
+
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn test_vector_insert_roundtrip() {
+        let original = WalRecord::VectorInsert {
+            collection: "turbo".to_string(),
+            entity_id: 42,
+            vector: vec![1.0, -0.5, 0.25],
         };
         let encoded = original.encode();
 

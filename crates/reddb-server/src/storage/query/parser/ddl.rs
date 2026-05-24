@@ -407,7 +407,36 @@ impl<'a> Parser<'a> {
                 self.position(),
             ));
         }
-        let kind = self.expect_ident_or_keyword()?.to_ascii_lowercase();
+        let mut kind = self.expect_ident_or_keyword()?.to_ascii_lowercase();
+        while self.consume(&Token::Dot)? {
+            let part = self.expect_ident_or_keyword()?.to_ascii_lowercase();
+            kind.push('.');
+            kind.push_str(&part);
+        }
+        let (vector_dimension, vector_metric) = if kind == "vector.turbo" {
+            if !self.consume_ident_ci("DIM")? {
+                return Err(ParseError::expected(
+                    vec!["DIM"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+            let dimension = self.parse_integer()?;
+            if dimension <= 0 {
+                return Err(ParseError::new(
+                    "VECTOR DIM must be a positive integer".to_string(),
+                    self.position(),
+                ));
+            }
+            let metric = if self.consume(&Token::Metric)? {
+                self.parse_distance_metric()?
+            } else {
+                crate::storage::engine::distance::DistanceMetric::Cosine
+            };
+            (Some(dimension as usize), Some(metric))
+        } else {
+            (None, None)
+        };
         let allowed_signers = if self.consume_ident_ci("SIGNED_BY")? {
             self.parse_signed_by_list()?
         } else {
@@ -417,6 +446,8 @@ impl<'a> Parser<'a> {
             name,
             kind,
             if_not_exists,
+            vector_dimension,
+            vector_metric,
             allowed_signers,
         }))
     }

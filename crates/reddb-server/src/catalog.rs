@@ -668,6 +668,7 @@ fn infer_indices(
                 | (CollectionModel::Graph, IndexKind::GraphAdjacency)
                 | (CollectionModel::Vector, IndexKind::VectorHnsw)
                 | (CollectionModel::Vector, IndexKind::VectorInverted)
+                | (CollectionModel::Vector, IndexKind::VectorTurbo)
                 | (CollectionModel::Document, IndexKind::FullText)
                 | (CollectionModel::Document, IndexKind::DocumentPathValue)
                 | (CollectionModel::Kv, IndexKind::Hash)
@@ -1096,6 +1097,7 @@ fn index_kind_string(kind: IndexKind) -> String {
         IndexKind::Spatial => "spatial.rtree",
         IndexKind::VectorHnsw => "vector.hnsw",
         IndexKind::VectorInverted => "vector.inverted",
+        IndexKind::VectorTurbo => "vector.turbo",
         IndexKind::GraphAdjacency => "graph.adjacency",
         IndexKind::FullText => "text.fulltext",
         IndexKind::DocumentPathValue => "document.pathvalue",

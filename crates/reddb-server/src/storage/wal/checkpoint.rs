@@ -193,6 +193,10 @@ impl Checkpointer {
                     // Store-level logical commit batches are replayed by
                     // UnifiedStore, not by the pager page checkpoint path.
                 }
+                WalRecord::VectorInsert { .. } => {
+                    // Vector-turbo logical inserts are replayed by the
+                    // vector index layer, not by page checkpointing.
+                }
                 WalRecord::FullPageImage { .. } => {
                     // FPI records (gh-478) are consumed by the pager
                     // recovery path before redo, not by checkpoint
