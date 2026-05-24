@@ -295,6 +295,22 @@ impl RedDBRuntime {
             "graph" => CollectionModel::Graph,
             "document" => CollectionModel::Document,
             "metrics" => CollectionModel::Metrics,
+            "vector.turbo" => {
+                let dimension = query.vector_dimension.ok_or_else(|| {
+                    RedDBError::Query(
+                        "CREATE COLLECTION KIND vector.turbo requires DIM".to_string(),
+                    )
+                })?;
+                let create = CreateVectorQuery {
+                    name: query.name.clone(),
+                    dimension,
+                    metric: query
+                        .vector_metric
+                        .unwrap_or(crate::storage::engine::distance::DistanceMetric::Cosine),
+                    if_not_exists: query.if_not_exists,
+                };
+                return self.execute_create_vector(raw_query, &create);
+            }
             // KIND blockchain — issue #523 foundation: stored on top of a
             // Table-shaped collection. The `chain` marker + reserved-column
             // discipline make the difference. Schema validation, conflict

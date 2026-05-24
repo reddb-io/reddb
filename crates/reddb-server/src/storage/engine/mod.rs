@@ -52,6 +52,7 @@ pub mod store_strategy;
 pub mod binary_quantize;
 pub mod int8_quantize;
 pub mod tiered_search;
+pub mod turboquant;
 pub mod unified_index;
 pub mod vector_metadata;
 pub mod vector_store;

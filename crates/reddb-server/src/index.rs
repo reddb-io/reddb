@@ -14,6 +14,7 @@ pub enum IndexKind {
     Spatial,
     VectorHnsw,
     VectorInverted,
+    VectorTurbo,
     GraphAdjacency,
     FullText,
     DocumentPathValue,
@@ -29,6 +30,7 @@ impl IndexKind {
             Self::Spatial => "spatial.rtree",
             Self::VectorHnsw => "vector.hnsw",
             Self::VectorInverted => "vector.inverted",
+            Self::VectorTurbo => "vector.turbo",
             Self::GraphAdjacency => "graph.adjacency",
             Self::FullText => "text.fulltext",
             Self::DocumentPathValue => "document.pathvalue",
@@ -152,6 +154,7 @@ impl IndexCatalog {
             "vector-inverted",
             IndexKind::VectorInverted,
         ));
+        catalog.register(IndexConfig::new("vector-turbo", IndexKind::VectorTurbo));
         catalog
     }
 }
