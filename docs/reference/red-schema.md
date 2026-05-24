@@ -21,6 +21,13 @@ Implemented relations:
 | `red.policies`    | `SHOW POLICIES`, `SHOW POLICIES ON <collection>` |
 | `red.stats`       | `SHOW STATS`, `SHOW STATS <collection>` |
 | `red.subscriptions` | `EVENTS STATUS`, `EVENTS STATUS <collection>` |
+| `red.registry` | Governance registry metadata; see [Control Evidence Matrix](../compliance/control-evidence-matrix.md). |
+| `red.registry_history` | Governance registry supersession history; see [Control Evidence Matrix](../compliance/control-evidence-matrix.md). |
+| `red.managed_policies` | Managed policy guardrail metadata; see [Control Evidence Matrix](../compliance/control-evidence-matrix.md). |
+| `red.control_events` | Control-plane evidence ledger; see [Control Evidence Matrix](../compliance/control-evidence-matrix.md). |
+| `red.users` | Minimized user evidence metadata; see [Control Evidence Matrix](../compliance/control-evidence-matrix.md). |
+| `red.api_keys` | Minimized API-key evidence metadata; see [Control Evidence Matrix](../compliance/control-evidence-matrix.md). |
+| `red.control_capabilities` | Governance/evidence action vocabulary; see [Control Evidence Matrix](../compliance/control-evidence-matrix.md). |
 
 The `red.*` relations are virtual runtime tables, not user collections. `SELECT`
 queries support ordinary projection, `WHERE`, `ORDER BY`, `LIMIT`, and `OFFSET`
