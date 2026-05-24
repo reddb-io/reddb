@@ -312,6 +312,96 @@ fn query_control_event_specs(expr: &QueryExpr) -> Vec<QueryControlEventSpec> {
                 fields,
             });
         }
+        QueryExpr::SetConfig { key, .. } => {
+            specs.push(QueryControlEventSpec {
+                kind: EventKind::ConfigWrite,
+                action: "config:write",
+                resource: Some(format!("config:{key}")),
+                fields: vec![("key".to_string(), Sensitivity::raw(key))],
+            });
+        }
+        QueryExpr::ConfigCommand(cmd) => match cmd {
+            crate::storage::query::ast::ConfigCommand::Put {
+                collection, key, ..
+            }
+            | crate::storage::query::ast::ConfigCommand::Rotate {
+                collection, key, ..
+            } => {
+                let target = format!("{collection}/{key}");
+                specs.push(QueryControlEventSpec {
+                    kind: EventKind::ConfigWrite,
+                    action: "config:write",
+                    resource: Some(format!("config:{target}")),
+                    fields: vec![
+                        ("collection".to_string(), Sensitivity::raw(collection)),
+                        ("key".to_string(), Sensitivity::raw(key)),
+                    ],
+                });
+            }
+            crate::storage::query::ast::ConfigCommand::Delete { collection, key } => {
+                let target = format!("{collection}/{key}");
+                specs.push(QueryControlEventSpec {
+                    kind: EventKind::ConfigDelete,
+                    action: "config:write",
+                    resource: Some(format!("config:{target}")),
+                    fields: vec![
+                        ("collection".to_string(), Sensitivity::raw(collection)),
+                        ("key".to_string(), Sensitivity::raw(key)),
+                    ],
+                });
+            }
+            _ => {}
+        },
+        QueryExpr::AlterUser(stmt) => {
+            let disables = stmt.attributes.iter().any(|attr| {
+                matches!(
+                    attr,
+                    crate::storage::query::ast::AlterUserAttribute::Disable
+                )
+            });
+            specs.push(QueryControlEventSpec {
+                kind: if disables {
+                    EventKind::UserDisable
+                } else {
+                    EventKind::UserUpdate
+                },
+                action: "alter_user",
+                resource: Some(format!("user:{}", stmt.username)),
+                fields: Vec::new(),
+            });
+        }
+        QueryExpr::CreateIamPolicy { id, .. } => {
+            specs.push(QueryControlEventSpec {
+                kind: EventKind::PolicyCreate,
+                action: "policy:put",
+                resource: Some(format!("policy:{id}")),
+                fields: Vec::new(),
+            });
+        }
+        QueryExpr::DropIamPolicy { id } => {
+            specs.push(QueryControlEventSpec {
+                kind: EventKind::PolicyDelete,
+                action: "policy:drop",
+                resource: Some(format!("policy:{id}")),
+                fields: Vec::new(),
+            });
+        }
+        QueryExpr::AttachPolicy { policy_id, .. } => {
+            specs.push(QueryControlEventSpec {
+                kind: EventKind::PolicyUpdate,
+                action: "policy:attach",
+                resource: Some(format!("policy:{policy_id}")),
+                fields: Vec::new(),
+            });
+        }
+        QueryExpr::DetachPolicy { policy_id, .. } => {
+            specs.push(QueryControlEventSpec {
+                kind: EventKind::PolicyUpdate,
+                action: "policy:detach",
+                resource: Some(format!("policy:{policy_id}")),
+                fields: Vec::new(),
+            });
+        }
         _ => {}
     }
     specs
@@ -2288,6 +2378,10 @@ impl RedDBRuntime {
 
     pub fn query_audit(&self) -> std::sync::Arc<crate::runtime::query_audit::QueryAuditStream> {
         self.inner.query_audit.clone()
+    }
+
+    pub fn control_events_require_persistence(&self) -> bool {
+        self.inner.control_event_config.require_persistence()
     }
 
     #[inline(never)]
@@ -5654,26 +5748,31 @@ impl RedDBRuntime {
                         "red.secret.* is reserved for vault secrets; use SET SECRET".to_string(),
                     ));
                 }
-                let store = self.inner.db.store();
-                let json_val = match value {
-                    Value::Text(s) => crate::serde_json::Value::String(s.to_string()),
-                    Value::Integer(n) => crate::serde_json::Value::Number(*n as f64),
-                    Value::Float(n) => crate::serde_json::Value::Number(*n),
-                    Value::Boolean(b) => crate::serde_json::Value::Bool(*b),
-                    _ => crate::serde_json::Value::String(value.to_string()),
-                };
-                store.set_config_tree(key, &json_val);
-                update_current_config_value(key, value.clone());
-                // Config changes can flip runtime behavior mid-session
-                // (auto_decrypt, auto_encrypt, etc.) — invalidate the
-                // result cache so subsequent reads re-execute against
-                // the new config.
-                self.invalidate_result_cache();
-                Ok(RuntimeQueryResult::ok_message(
-                    query.to_string(),
-                    &format!("config set: {key}"),
-                    "set",
-                ))
+                match self.check_managed_config_write_for_set_config(key) {
+                    Err(err) => Err(err),
+                    Ok(()) => {
+                        let store = self.inner.db.store();
+                        let json_val = match value {
+                            Value::Text(s) => crate::serde_json::Value::String(s.to_string()),
+                            Value::Integer(n) => crate::serde_json::Value::Number(*n as f64),
+                            Value::Float(n) => crate::serde_json::Value::Number(*n),
+                            Value::Boolean(b) => crate::serde_json::Value::Bool(*b),
+                            _ => crate::serde_json::Value::String(value.to_string()),
+                        };
+                        store.set_config_tree(key, &json_val);
+                        update_current_config_value(key, value.clone());
+                        // Config changes can flip runtime behavior mid-session
+                        // (auto_decrypt, auto_encrypt, etc.) — invalidate the
+                        // result cache so subsequent reads re-execute against
+                        // the new config.
+                        self.invalidate_result_cache();
+                        Ok(RuntimeQueryResult::ok_message(
+                            query.to_string(),
+                            &format!("config set: {key}"),
+                            "set",
+                        ))
+                    }
+                }
             }
             // SET SECRET key = value
             QueryExpr::SetSecret { ref key, ref value } => {
@@ -9930,6 +10029,32 @@ impl RedDBRuntime {
         resource_kind: &str,
         resource_name: &str,
     ) -> Result<(), String> {
+        let ctx = runtime_iam_context(
+            role,
+            tenant,
+            auth_store.principal_is_system_owned(principal),
+        );
+        if let Some(op) = match action {
+            "policy:put" => Some(crate::auth::managed_policy::PolicyOp::Put),
+            "policy:drop" => Some(crate::auth::managed_policy::PolicyOp::Drop),
+            "policy:attach" => Some(crate::auth::managed_policy::PolicyOp::Attach),
+            "policy:detach" => Some(crate::auth::managed_policy::PolicyOp::Detach),
+            _ => None,
+        } {
+            let gate = crate::auth::managed_policy::ManagedPolicyGate::new(
+                self.inner.config_registry.as_ref(),
+            );
+            match gate.check_mutation(auth_store, principal, &ctx, resource_name, op) {
+                crate::auth::managed_policy::ManagedPolicyDecision::PassThrough { .. }
+                | crate::auth::managed_policy::ManagedPolicyDecision::Allow { .. } => {}
+                crate::auth::managed_policy::ManagedPolicyDecision::Deny { reason, .. } => {
+                    return Err(format!(
+                        "permission denied: managed policy mutation blocked for `{resource_name}`: {reason}"
+                    ));
+                }
+            }
+        }
+
         if !auth_store.iam_authorization_enabled() {
             return if role == crate::auth::Role::Admin {
                 Ok(())
@@ -9948,11 +10073,6 @@ impl RedDBRuntime {
         if let Some(t) = tenant {
             resource = resource.with_tenant(t.to_string());
         }
-        let ctx = runtime_iam_context(
-            role,
-            tenant,
-            auth_store.principal_is_system_owned(principal),
-        );
         if auth_store.check_policy_authz(principal, action, &resource, &ctx) {
             Ok(())
         } else {
@@ -9960,6 +10080,33 @@ impl RedDBRuntime {
                 "principal=`{}` action=`{}` resource=`{}:{}` denied by IAM policy",
                 principal, action, resource.kind, resource.name
             ))
+        }
+    }
+
+    fn check_managed_config_write_for_set_config(&self, key: &str) -> RedDBResult<()> {
+        let Some(auth_store) = self.inner.auth_store.read().clone() else {
+            return Ok(());
+        };
+        let (username, role) = current_auth_identity()
+            .unwrap_or_else(|| ("anonymous".to_string(), crate::auth::Role::Read));
+        let tenant = current_tenant();
+        let principal = crate::auth::UserId::from_parts(tenant.as_deref(), &username);
+        let ctx = runtime_iam_context(
+            role,
+            tenant.as_deref(),
+            auth_store.principal_is_system_owned(&principal),
+        );
+        let gate = crate::auth::managed_config::ManagedConfigGate::new(
+            self.inner.config_registry.as_ref(),
+        );
+        match gate.check_write(&auth_store, &principal, &ctx, key) {
+            crate::auth::managed_config::ManagedConfigDecision::PassThrough { .. }
+            | crate::auth::managed_config::ManagedConfigDecision::Allow { .. } => Ok(()),
+            crate::auth::managed_config::ManagedConfigDecision::Deny { reason, .. } => {
+                Err(RedDBError::Query(format!(
+                    "permission denied: managed config mutation blocked for `{key}`: {reason}"
+                )))
+            }
         }
     }
 
