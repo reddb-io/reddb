@@ -19,12 +19,17 @@
 //!   SQL surface — ordinary DML cannot reach these entries by
 //!   construction.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
 use super::policies::{EvalContext, ResourceRef};
 use super::store::AuthStore;
 use super::UserId;
+use crate::runtime::control_events::{
+    ControlEvent, ControlEventConfig, ControlEventCtx, ControlEventLedger, EventKind, Outcome,
+    Sensitivity as ControlSensitivity,
+};
 
 /// How a config resource may be changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +115,9 @@ pub enum RegistryError {
     Immutable(String),
     /// Tried to register an id that already has an active entry.
     AlreadyRegistered(String),
+    /// The registry mutation succeeded locally, but compliance mode
+    /// required durable control-event evidence and the ledger rejected it.
+    ControlEvent(String),
 }
 
 impl std::fmt::Display for RegistryError {
@@ -122,6 +130,7 @@ impl std::fmt::Display for RegistryError {
             Self::NotFound(id) => write!(f, "registry entry not found: {id}"),
             Self::Immutable(id) => write!(f, "registry entry is immutable: {id}"),
             Self::AlreadyRegistered(id) => write!(f, "registry entry already exists: {id}"),
+            Self::ControlEvent(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -142,6 +151,13 @@ pub struct ConfigRegistryDraft {
     pub required_action: String,
     pub required_resource: String,
     pub evidence_requirement: EvidenceRequirement,
+}
+
+/// Control-event dependencies for audited registry mutations.
+pub struct ConfigRegistryControl<'a> {
+    pub ctx: &'a ControlEventCtx<'a>,
+    pub ledger: &'a dyn ControlEventLedger,
+    pub config: ControlEventConfig,
 }
 
 /// In-process registry. Accessed only through governance methods; never
@@ -208,6 +224,43 @@ impl ConfigRegistry {
         Ok(entry)
     }
 
+    pub fn register_with_control_events(
+        &self,
+        auth: &AuthStore,
+        actor: &UserId,
+        ctx: &EvalContext,
+        draft: ConfigRegistryDraft,
+        now_ms: u128,
+        control: &ConfigRegistryControl<'_>,
+    ) -> Result<ConfigRegistryEntry, RegistryError> {
+        let id = draft.id.clone();
+        let draft_for_event = draft.clone();
+        match self.register(auth, actor, ctx, draft, now_ms) {
+            Ok(entry) => match emit_registry_event(
+                control,
+                Outcome::Allowed,
+                ACTION_REGISTER,
+                &entry.id,
+                None,
+                registry_fields_for_entry(&entry),
+            ) {
+                Ok(()) => Ok(entry),
+                Err(err) => {
+                    self.rollback_register(&id);
+                    Err(err)
+                }
+            },
+            Err(err @ RegistryError::Unauthorized { .. }) => {
+                emit_registry_denied(control, ACTION_REGISTER, &id, &err, &draft_for_event);
+                Err(err)
+            }
+            Err(err) => {
+                emit_registry_error(control, ACTION_REGISTER, &id, &err, &draft_for_event);
+                Err(err)
+            }
+        }
+    }
+
     /// Supersede the active entry for `id`. The previous version is
     /// pushed into history with `superseded_at_ms == now_ms` and the
     /// caller-supplied `change_reason`. Rejected if the active entry is
@@ -272,6 +325,48 @@ impl ConfigRegistry {
         Ok(next)
     }
 
+    pub fn supersede_with_control_events(
+        &self,
+        auth: &AuthStore,
+        actor: &UserId,
+        ctx: &EvalContext,
+        draft: ConfigRegistryDraft,
+        change_reason: impl Into<String>,
+        now_ms: u128,
+        control: &ConfigRegistryControl<'_>,
+    ) -> Result<ConfigRegistryEntry, RegistryError> {
+        let id = draft.id.clone();
+        let draft_for_event = draft.clone();
+        let previous = self.get_active(&id);
+        let history_len = self.history(&id).len();
+        match self.supersede(auth, actor, ctx, draft, change_reason, now_ms) {
+            Ok(entry) => match emit_registry_event(
+                control,
+                Outcome::Allowed,
+                ACTION_SUPERSEDE,
+                &entry.id,
+                None,
+                registry_fields_for_entry(&entry),
+            ) {
+                Ok(()) => Ok(entry),
+                Err(err) => {
+                    if let Some(previous) = previous {
+                        self.rollback_supersede(previous, history_len);
+                    }
+                    Err(err)
+                }
+            },
+            Err(err @ RegistryError::Unauthorized { .. }) => {
+                emit_registry_denied(control, ACTION_SUPERSEDE, &id, &err, &draft_for_event);
+                Err(err)
+            }
+            Err(err) => {
+                emit_registry_error(control, ACTION_SUPERSEDE, &id, &err, &draft_for_event);
+                Err(err)
+            }
+        }
+    }
+
     /// Active surface — current version for `id`, or `None`.
     pub fn get_active(&self, id: &str) -> Option<ConfigRegistryEntry> {
         self.active.read().ok().and_then(|m| m.get(id).cloned())
@@ -315,6 +410,163 @@ impl ConfigRegistry {
         }
         active.insert(entry.id.clone(), entry);
         Ok(())
+    }
+
+    fn rollback_register(&self, id: &str) {
+        self.active
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
+    }
+
+    fn rollback_supersede(&self, previous: ConfigRegistryEntry, history_len: usize) {
+        let id = previous.id.clone();
+        self.active
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.clone(), previous);
+        if let Some(records) = self
+            .history
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&id)
+        {
+            records.truncate(history_len);
+        }
+    }
+}
+
+fn emit_registry_denied(
+    control: &ConfigRegistryControl<'_>,
+    action: &'static str,
+    id: &str,
+    err: &RegistryError,
+    draft: &ConfigRegistryDraft,
+) {
+    let _ = emit_registry_event(
+        control,
+        Outcome::Denied,
+        action,
+        id,
+        Some(err.to_string()),
+        registry_fields_for_draft(draft),
+    );
+}
+
+fn emit_registry_error(
+    control: &ConfigRegistryControl<'_>,
+    action: &'static str,
+    id: &str,
+    err: &RegistryError,
+    draft: &ConfigRegistryDraft,
+) {
+    let _ = emit_registry_event(
+        control,
+        Outcome::Error,
+        action,
+        id,
+        Some(err.to_string()),
+        registry_fields_for_draft(draft),
+    );
+}
+
+fn emit_registry_event(
+    control: &ConfigRegistryControl<'_>,
+    outcome: Outcome,
+    action: &'static str,
+    id: &str,
+    reason: Option<String>,
+    fields: HashMap<String, ControlSensitivity>,
+) -> Result<(), RegistryError> {
+    let event = ControlEvent {
+        kind: EventKind::ConfigWrite,
+        outcome,
+        action: Cow::Borrowed(action),
+        resource: Some(format!("{RESOURCE_KIND}:{id}")),
+        reason,
+        matched_policy_id: None,
+        fields,
+    };
+    match control.ledger.emit(control.ctx, event) {
+        Ok(_) => Ok(()),
+        Err(err) if control.config.require_persistence() => {
+            Err(RegistryError::ControlEvent(err.to_string()))
+        }
+        Err(_) => Ok(()),
+    }
+}
+
+fn registry_fields_for_entry(entry: &ConfigRegistryEntry) -> HashMap<String, ControlSensitivity> {
+    let mut fields = registry_common_fields(
+        &entry.id,
+        &entry.resource_type,
+        entry.managed,
+        entry.mutability,
+    );
+    fields.insert(
+        "payload".to_string(),
+        registry_payload_sensitivity(&entry.resource_type, entry.schema.as_bytes()),
+    );
+    fields.insert(
+        "version".to_string(),
+        ControlSensitivity::raw(entry.version.to_string()),
+    );
+    fields
+}
+
+fn registry_fields_for_draft(draft: &ConfigRegistryDraft) -> HashMap<String, ControlSensitivity> {
+    let mut fields = registry_common_fields(
+        &draft.id,
+        &draft.resource_type,
+        draft.managed,
+        draft.mutability,
+    );
+    fields.insert(
+        "payload".to_string(),
+        registry_payload_sensitivity(&draft.resource_type, draft.schema.as_bytes()),
+    );
+    fields
+}
+
+fn registry_common_fields(
+    id: &str,
+    resource_type: &str,
+    managed: bool,
+    mutability: Mutability,
+) -> HashMap<String, ControlSensitivity> {
+    let mut fields = HashMap::new();
+    fields.insert("id".to_string(), ControlSensitivity::raw(id));
+    fields.insert(
+        "resource_type".to_string(),
+        ControlSensitivity::raw(resource_type),
+    );
+    fields.insert(
+        "managed".to_string(),
+        ControlSensitivity::raw(managed.to_string()),
+    );
+    fields.insert(
+        "mutability".to_string(),
+        ControlSensitivity::raw(mutability_label(mutability)),
+    );
+    fields
+}
+
+fn registry_payload_sensitivity(resource_type: &str, payload: &[u8]) -> ControlSensitivity {
+    if registry_payload_raw_allowed(resource_type) {
+        ControlSensitivity::raw(String::from_utf8_lossy(payload).into_owned())
+    } else {
+        ControlSensitivity::hashed(payload)
+    }
+}
+
+fn registry_payload_raw_allowed(resource_type: &str) -> bool {
+    matches!(resource_type, "audit_surface")
+}
+
+fn mutability_label(mutability: Mutability) -> &'static str {
+    match mutability {
+        Mutability::Immutable => "immutable",
+        Mutability::MutableViaGovernance => "mutable_via_governance",
     }
 }
 

@@ -1144,7 +1144,8 @@ struct RuntimeInner {
     /// Durable control-plane evidence ledger. Producer slices emit
     /// through this sink and decide fail-open/fail-closed using
     /// `control_event_config`.
-    control_event_ledger: Arc<crate::runtime::control_events::RuntimeLedger>,
+    control_event_ledger:
+        parking_lot::RwLock<Arc<dyn crate::runtime::control_events::ControlEventLedger>>,
     control_event_config: crate::runtime::control_events::ControlEventConfig,
     /// Data-plane query audit stream. Kept separate from the Control
     /// Event Ledger so scoped query metadata cannot be confused with
