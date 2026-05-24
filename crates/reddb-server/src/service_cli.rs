@@ -1979,6 +1979,10 @@ pub(crate) fn build_runtime_with_telemetry(
         } else {
             Arc::new(AuthStore::new(db_options.auth.clone()))
         };
+    auth_store.configure_control_events(
+        runtime.control_event_ledger(),
+        runtime.control_event_config(),
+    );
     // Issue #663 — when `--no-auth` is active, deliberately skip the
     // preset machinery. Otherwise a stray `REDDB_USERNAME`+`REDDB_PASSWORD`
     // pair in the operator's environment would silently create an admin

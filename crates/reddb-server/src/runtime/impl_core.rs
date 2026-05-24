@@ -2352,6 +2352,16 @@ impl RedDBRuntime {
         self.inner.control_event_config.require_persistence()
     }
 
+    pub fn control_event_config(&self) -> crate::runtime::control_events::ControlEventConfig {
+        self.inner.control_event_config
+    }
+
+    pub fn control_event_ledger(
+        &self,
+    ) -> Arc<dyn crate::runtime::control_events::ControlEventLedger> {
+        self.inner.control_event_ledger.read().clone()
+    }
+
     #[doc(hidden)]
     pub fn replace_control_event_ledger_for_tests(
         &self,
