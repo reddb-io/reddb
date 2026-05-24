@@ -50,14 +50,20 @@ impl TurboQuantIndex {
         k: usize,
         metric: DistanceMetric,
     ) -> Vec<TurboSearchResult> {
+        if query.len() != self.codec.dim() {
+            return Vec::new();
+        }
+
+        let scores = self.codec.score_many(query, &self.encoded, metric);
         let mut results = self
             .ids
             .iter()
             .zip(&self.vectors)
-            .filter(|(_, vector)| vector.len() == query.len())
-            .map(|(entity_id, vector)| TurboSearchResult {
+            .zip(scores)
+            .filter(|((_, vector), _)| vector.len() == query.len())
+            .map(|((entity_id, _), score)| TurboSearchResult {
                 entity_id: *entity_id,
-                score: self.codec.scalar_score(query, vector, metric),
+                score,
             })
             .collect::<Vec<_>>();
         results.sort_by(|left, right| {
