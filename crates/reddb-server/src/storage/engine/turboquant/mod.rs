@@ -9,3 +9,4 @@ pub mod codec;
 pub mod extent;
 pub mod index;
 pub mod rotation;
+pub mod scoring;
