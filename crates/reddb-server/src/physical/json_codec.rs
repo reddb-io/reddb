@@ -1539,6 +1539,7 @@ pub(super) fn index_kind_from_str(value: &str) -> io::Result<IndexKind> {
         "btree" => Ok(IndexKind::BTree),
         "vector.hnsw" => Ok(IndexKind::VectorHnsw),
         "vector.inverted" => Ok(IndexKind::VectorInverted),
+        "vector.turbo" => Ok(IndexKind::VectorTurbo),
         "graph.adjacency" => Ok(IndexKind::GraphAdjacency),
         "text.fulltext" => Ok(IndexKind::FullText),
         "document.pathvalue" => Ok(IndexKind::DocumentPathValue),

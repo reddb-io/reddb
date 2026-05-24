@@ -655,6 +655,9 @@ impl StoreCommitCoordinator {
                     data,
                 } => pending.push((tx_id, data)),
                 WalRecord::Checkpoint { .. } => {}
+                WalRecord::VectorInsert { .. } => {
+                    // Dedicated vector WAL records are not store actions.
+                }
                 WalRecord::FullPageImage { .. } => {
                     // Pager-level FPI (gh-478); store replay ignores.
                 }

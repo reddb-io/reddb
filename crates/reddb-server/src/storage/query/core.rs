@@ -1847,6 +1847,8 @@ pub struct CreateCollectionQuery {
     pub name: String,
     pub kind: String,
     pub if_not_exists: bool,
+    pub vector_dimension: Option<usize>,
+    pub vector_metric: Option<DistanceMetric>,
     /// Initial Ed25519 allowed-signer registry. Empty = unsigned collection.
     /// Each entry is a 32-byte Ed25519 public key. Mutable post-create via
     /// `ALTER COLLECTION ... ADD|REVOKE SIGNER` (see issue #520).

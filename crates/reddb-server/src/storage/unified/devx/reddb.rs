@@ -226,6 +226,7 @@ fn infer_collection_index_kind(model: CollectionModel, index_name: &str) -> Inde
         "graph-adjacency" => IndexKind::GraphAdjacency,
         "vector-hnsw" => IndexKind::VectorHnsw,
         "vector-inverted" => IndexKind::VectorInverted,
+        "vector-turbo" => IndexKind::VectorTurbo,
         "text-fulltext" => IndexKind::FullText,
         "document-pathvalue" => IndexKind::DocumentPathValue,
         "search-hybrid" => IndexKind::HybridSearch,
@@ -247,7 +248,9 @@ fn estimate_index_entries(collection: &CollectionDescriptor, kind: IndexKind) ->
             collection.entities
         }
         IndexKind::GraphAdjacency => collection.cross_refs.max(collection.entities),
-        IndexKind::VectorHnsw | IndexKind::VectorInverted => collection.entities,
+        IndexKind::VectorHnsw | IndexKind::VectorInverted | IndexKind::VectorTurbo => {
+            collection.entities
+        }
         IndexKind::FullText => collection.entities.saturating_mul(4),
         IndexKind::DocumentPathValue => collection.entities.saturating_mul(6),
         IndexKind::HybridSearch => collection.entities,
@@ -263,6 +266,7 @@ fn estimate_index_memory(entries: usize, kind: IndexKind) -> u64 {
         IndexKind::GraphAdjacency => 96,
         IndexKind::VectorHnsw => 256,
         IndexKind::VectorInverted => 128,
+        IndexKind::VectorTurbo => 64,
         IndexKind::FullText => 80,
         IndexKind::DocumentPathValue => 104,
         IndexKind::HybridSearch => 144,
@@ -279,6 +283,7 @@ fn index_backend_name(kind: IndexKind) -> &'static str {
         IndexKind::GraphAdjacency => "adjacency-map",
         IndexKind::VectorHnsw => "vector-hnsw",
         IndexKind::VectorInverted => "vector-ivf",
+        IndexKind::VectorTurbo => "vector-turbo",
         IndexKind::FullText => "inverted-text",
         IndexKind::DocumentPathValue => "document-pathvalue",
         IndexKind::HybridSearch => "hybrid-score",

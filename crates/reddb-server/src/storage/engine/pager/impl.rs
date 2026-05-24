@@ -938,6 +938,43 @@ impl Pager {
         Ok(page)
     }
 
+    /// Reserve a contiguous extent of vector pages.
+    pub fn reserve_contig_extent(&self, n_pages: u32) -> Result<super::ExtentId, PagerError> {
+        if self.config.read_only {
+            return Err(PagerError::ReadOnly);
+        }
+        if n_pages == 0 {
+            return Err(PagerError::InvalidDatabase(
+                "contiguous extent must reserve at least one page".to_string(),
+            ));
+        }
+
+        let start_page = {
+            let mut header = self.header_write()?;
+            let start = header.page_count;
+            header.page_count = header.page_count.checked_add(n_pages).ok_or_else(|| {
+                PagerError::InvalidDatabase("contiguous extent page count overflow".to_string())
+            })?;
+            *self.header_dirty_lock()? = true;
+            start
+        };
+
+        for page_id in start_page..start_page + n_pages {
+            let mut page = Page::new(PageType::Vector, page_id);
+            page.update_checksum();
+            if let Some(dirty_page) = self.cache.insert(page_id, page) {
+                let evicted_id = dirty_page.page_id();
+                self.write_page_raw(evicted_id, &dirty_page)?;
+            }
+            self.cache.mark_dirty(page_id);
+        }
+
+        Ok(super::ExtentId {
+            start_page,
+            n_pages,
+        })
+    }
+
     /// Free a page (return to freelist)
     pub fn free_page(&self, page_id: u32) -> Result<(), PagerError> {
         if self.config.read_only {
