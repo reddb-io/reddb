@@ -1047,6 +1047,7 @@ impl RedDB {
             "btree" => Some(crate::index::IndexKind::BTree),
             "vector.hnsw" => Some(crate::index::IndexKind::VectorHnsw),
             "vector.inverted" => Some(crate::index::IndexKind::VectorInverted),
+            "vector.turbo" => Some(crate::index::IndexKind::VectorTurbo),
             "graph.adjacency" => Some(crate::index::IndexKind::GraphAdjacency),
             "text.fulltext" => Some(crate::index::IndexKind::FullText),
             "document.pathvalue" => Some(crate::index::IndexKind::DocumentPathValue),
@@ -1059,6 +1060,7 @@ impl RedDB {
         match kind {
             IndexKind::VectorHnsw => Some("hnsw"),
             IndexKind::VectorInverted => Some("ivf"),
+            IndexKind::VectorTurbo => Some("turboquant"),
             IndexKind::GraphAdjacency => Some("graph.adjacency"),
             IndexKind::FullText => Some("text.fulltext"),
             IndexKind::DocumentPathValue => Some("document.pathvalue"),

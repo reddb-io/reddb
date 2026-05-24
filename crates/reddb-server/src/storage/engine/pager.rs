@@ -70,6 +70,13 @@ pub enum PagerError {
     InvalidKey,
 }
 
+/// A contiguous run of database pages reserved for vector-turbo payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtentId {
+    pub start_page: u32,
+    pub n_pages: u32,
+}
+
 impl std::fmt::Display for PagerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

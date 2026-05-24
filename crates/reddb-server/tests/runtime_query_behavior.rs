@@ -1159,6 +1159,73 @@ fn native_vector_collection_validates_inserts_and_searches_by_metric() {
 }
 
 #[test]
+fn vector_turbo_collection_searches_with_inner_product_and_cosine() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("CREATE COLLECTION turbo_ip KIND vector.turbo DIM 2 METRIC IP")
+        .expect("create vector.turbo collection");
+
+    for (name, x, y) in [
+        ("wide", 3.0, 0.1),
+        ("unit", 1.0, 0.0),
+        ("diagonal", 0.7, 0.7),
+    ] {
+        rt.execute_query(&format!(
+            "INSERT INTO turbo_ip VECTOR (embedding, content) VALUES ([{x}, {y}], '{name}')"
+        ))
+        .unwrap_or_else(|err| panic!("insert {name}: {err:?}"));
+    }
+
+    let ip = rt
+        .execute_query("VECTOR SEARCH turbo_ip SIMILAR TO [1.0, 0.0] LIMIT 3")
+        .expect("inner product search uses collection metric");
+    assert_eq!(text_at(&ip, 0, "content"), "wide");
+    assert_eq!(text_at(&ip, 1, "content"), "unit");
+
+    let cosine = rt
+        .execute_query("VECTOR SEARCH turbo_ip SIMILAR TO [1.0, 0.0] METRIC cosine LIMIT 3")
+        .expect("cosine search can override collection metric");
+    assert_eq!(text_at(&cosine, 0, "content"), "unit");
+    assert_eq!(text_at(&cosine, 1, "content"), "wide");
+
+    let catalog = rt
+        .execute_query("SHOW COLLECTIONS WHERE name = 'turbo_ip'")
+        .expect("show vector.turbo collection");
+    assert_eq!(uint_at(&catalog, 0, "dimension"), 2);
+    assert_eq!(text_at(&catalog, 0, "metric"), "inner_product");
+}
+
+#[test]
+fn vector_turbo_collection_reopens_without_tv_snapshot() {
+    let path = std::env::temp_dir().join(format!(
+        "reddb-vector-turbo-reopen-{}.db",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("rdb-uwal"));
+
+    {
+        let rt =
+            RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("runtime boots");
+        rt.execute_query("CREATE COLLECTION turbo_reopen KIND vector.turbo DIM 2 METRIC cosine")
+            .expect("create vector.turbo collection");
+        rt.execute_query(
+            "INSERT INTO turbo_reopen VECTOR (embedding, content) VALUES ([1.0, 0.0], 'persisted')",
+        )
+        .expect("insert vector");
+    }
+
+    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("runtime reopens");
+    let result = rt
+        .execute_query("VECTOR SEARCH turbo_reopen SIMILAR TO [1.0, 0.0] LIMIT 1")
+        .expect("search after reopen");
+    assert_eq!(text_at(&result, 0, "content"), "persisted");
+    assert!(!path.with_extension("tv").exists());
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("rdb-uwal"));
+}
+
+#[test]
 fn create_document_reaches_executor_not_yet_supported() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
     let err = rt

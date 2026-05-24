@@ -91,6 +91,19 @@ fn test_parse_create_graph_document_and_collection_forms() {
     };
     assert_eq!(unknown.kind, "mystery");
 
+    let turbo =
+        parse("CREATE COLLECTION turbo_embeddings KIND vector.turbo DIM 1536 METRIC IP").unwrap();
+    let QueryExpr::CreateCollection(turbo) = turbo else {
+        panic!("Expected CreateCollectionQuery");
+    };
+    assert_eq!(turbo.name, "turbo_embeddings");
+    assert_eq!(turbo.kind, "vector.turbo");
+    assert_eq!(turbo.vector_dimension, Some(1536));
+    assert_eq!(
+        turbo.vector_metric,
+        Some(crate::storage::engine::distance::DistanceMetric::InnerProduct)
+    );
+
     // Signed Writes (issue #520): CREATE COLLECTION ... SIGNED_BY (...)
     let pk_a = "11".repeat(32);
     let pk_b = "22".repeat(32);
