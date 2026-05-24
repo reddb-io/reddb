@@ -14,13 +14,19 @@ use crate::storage::encryption::argon2id::{derive_key, Argon2Params};
 use crate::storage::engine::pager::Pager;
 
 use super::column_policy_gate::{ColumnAccessRequest, ColumnPolicyGate, ColumnPolicyOutcome};
+use super::managed_policy::{ManagedPolicyDecision, ManagedPolicyGate, PolicyOp};
 use super::policies::{self as iam_policies, EvalContext, Policy, ResourceRef, SimulationOutcome};
 use super::privileges::{
     check_grant, Action, AuthzContext, AuthzError, Grant, GrantPrincipal, GrantsView,
     PermissionCache, Resource, UserAttributes,
 };
+use super::registry::ConfigRegistry;
 use super::vault::{KeyPair, Vault, VaultState};
 use super::{now_ms, ApiKey, AuthConfig, AuthError, Role, Session, User, UserId};
+use crate::runtime::control_events::{
+    ControlEvent, ControlEventConfig, ControlEventCtx, ControlEventLedger, EventKind, Outcome,
+    Sensitivity,
+};
 
 // ---------------------------------------------------------------------------
 // PrincipalRef + SimCtx — IAM policy attachments
@@ -45,6 +51,21 @@ pub struct SimCtx {
     pub peer_ip: Option<std::net::IpAddr>,
     pub mfa_present: bool,
     pub now_ms: Option<u128>,
+}
+
+/// Control-event dependencies for audited IAM policy mutations.
+///
+/// The existing `put_policy` / `delete_policy` / attach / detach
+/// methods remain unaudited for bootstrap and synthetic GRANT internals.
+/// Public mutation surfaces that need evidence pass this context to the
+/// `*_with_control_events` siblings.
+pub struct PolicyMutationControl<'a> {
+    pub ctx: &'a ControlEventCtx<'a>,
+    pub ledger: &'a dyn ControlEventLedger,
+    pub config: ControlEventConfig,
+    pub registry: Option<&'a ConfigRegistry>,
+    pub actor: &'a UserId,
+    pub eval_ctx: &'a EvalContext,
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +168,102 @@ fn auth_argon2_params() -> Argon2Params {
         t_cost: 3,
         p: 1,
         tag_len: 32,
+    }
+}
+
+fn policy_control_fields(
+    policy_id: &str,
+    policy: Option<&Policy>,
+    principal: Option<&PrincipalRef>,
+) -> HashMap<String, Sensitivity> {
+    let mut fields = HashMap::new();
+    fields.insert("policy_id".to_string(), Sensitivity::raw(policy_id));
+    if let Some(policy) = policy {
+        let effects = policy
+            .statements
+            .iter()
+            .map(|s| match s.effect {
+                iam_policies::Effect::Allow => "allow",
+                iam_policies::Effect::Deny => "deny",
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let actions = policy
+            .statements
+            .iter()
+            .flat_map(|s| s.actions.iter())
+            .map(policy_action_pattern)
+            .collect::<Vec<_>>()
+            .join(",");
+        let resources = policy
+            .statements
+            .iter()
+            .flat_map(|s| s.resources.iter())
+            .map(policy_resource_pattern)
+            .collect::<Vec<_>>()
+            .join(",");
+        fields.insert("effect".to_string(), Sensitivity::raw(effects));
+        fields.insert("action".to_string(), Sensitivity::raw(actions));
+        fields.insert("resource".to_string(), Sensitivity::raw(resources));
+        if let Some(attrs) = policy_principal_attrs(policy) {
+            fields.insert("principal_attrs".to_string(), Sensitivity::raw(attrs));
+        }
+    }
+    if let Some(principal) = principal {
+        fields.insert(
+            "principal".to_string(),
+            Sensitivity::raw(policy_principal_label(principal)),
+        );
+    }
+    fields
+}
+
+fn policy_action_pattern(pattern: &iam_policies::ActionPattern) -> String {
+    match pattern {
+        iam_policies::ActionPattern::Exact(s) => s.clone(),
+        iam_policies::ActionPattern::Wildcard => "*".to_string(),
+        iam_policies::ActionPattern::Prefix(s) => format!("{s}:*"),
+    }
+}
+
+fn policy_resource_pattern(pattern: &iam_policies::ResourcePattern) -> String {
+    match pattern {
+        iam_policies::ResourcePattern::Exact { kind, name } => format!("{kind}:{name}"),
+        iam_policies::ResourcePattern::Glob(s) => s.clone(),
+        iam_policies::ResourcePattern::Wildcard => "*".to_string(),
+    }
+}
+
+fn policy_principal_attrs(policy: &Policy) -> Option<String> {
+    let mut attrs = Vec::new();
+    for statement in &policy.statements {
+        let Some(condition) = &statement.condition else {
+            continue;
+        };
+        if let Some(value) = condition.system_owned {
+            attrs.push(format!("system_owned={value}"));
+        }
+        if let Some(value) = condition.platform_scoped {
+            attrs.push(format!("platform_scoped={value}"));
+        }
+        if let Some(value) = condition.mfa {
+            attrs.push(format!("mfa={value}"));
+        }
+        if let Some(value) = condition.tenant_match {
+            attrs.push(format!("tenant_match={value}"));
+        }
+    }
+    if attrs.is_empty() {
+        None
+    } else {
+        Some(attrs.join(","))
+    }
+}
+
+fn policy_principal_label(principal: &PrincipalRef) -> String {
+    match principal {
+        PrincipalRef::User(uid) => format!("user:{uid}"),
+        PrincipalRef::Group(group) => format!("group:{group}"),
     }
 }
 
@@ -1774,6 +1891,492 @@ impl AuthStore {
     // evaluator. AuthStore handles persistence + per-user cache + the
     // GRANT translation layer (synthetic `_grant_*` policies).
     // -----------------------------------------------------------------
+
+    pub fn put_policy_with_control_events(
+        &self,
+        p: Policy,
+        control: &PolicyMutationControl<'_>,
+    ) -> Result<(), AuthError> {
+        let policy_id = p.id.clone();
+        let kind = if self.get_policy(&policy_id).is_some() {
+            EventKind::PolicyUpdate
+        } else {
+            EventKind::PolicyCreate
+        };
+
+        if p.id.starts_with("_grant_") || p.id.starts_with("_default_") {
+            let err = AuthError::Forbidden(format!("policy id `{}` is reserved", p.id));
+            self.emit_policy_error(
+                control,
+                kind,
+                "policy:put",
+                &policy_id,
+                Some(&p),
+                None,
+                &err,
+            );
+            return Err(err);
+        }
+
+        if let Some(ManagedPolicyDecision::Deny {
+            entry_id,
+            matched_action,
+            matched_resource,
+            reason,
+            ..
+        }) = self.managed_policy_decision(&policy_id, PolicyOp::Put, control)
+        {
+            self.emit_policy_denied(
+                control,
+                kind,
+                "policy:put",
+                &policy_id,
+                Some(&p),
+                None,
+                &reason.to_string(),
+                Some(entry_id),
+                Some((matched_action, matched_resource)),
+            );
+            return Err(Self::managed_policy_error(&policy_id, &reason.to_string()));
+        }
+
+        let previous = self.get_policy(&policy_id);
+        let was_enabled = self.iam_authorization_enabled();
+        match self.put_policy_internal(p.clone()) {
+            Ok(()) => match self.emit_policy_allowed(
+                control,
+                kind,
+                "policy:put",
+                &policy_id,
+                Some(&p),
+                None,
+                None,
+            ) {
+                Ok(()) => Ok(()),
+                Err(err) => {
+                    self.restore_policy_put(&policy_id, previous, was_enabled);
+                    Err(err)
+                }
+            },
+            Err(err) => {
+                self.emit_policy_error(
+                    control,
+                    kind,
+                    "policy:put",
+                    &policy_id,
+                    Some(&p),
+                    None,
+                    &err,
+                );
+                Err(err)
+            }
+        }
+    }
+
+    pub fn delete_policy_with_control_events(
+        &self,
+        id: &str,
+        control: &PolicyMutationControl<'_>,
+    ) -> Result<(), AuthError> {
+        let existing = self.get_policy(id);
+        if let Some(ManagedPolicyDecision::Deny {
+            entry_id,
+            matched_action,
+            matched_resource,
+            reason,
+            ..
+        }) = self.managed_policy_decision(id, PolicyOp::Drop, control)
+        {
+            self.emit_policy_denied(
+                control,
+                EventKind::PolicyDelete,
+                "policy:drop",
+                id,
+                existing.as_deref(),
+                None,
+                &reason.to_string(),
+                Some(entry_id),
+                Some((matched_action, matched_resource)),
+            );
+            return Err(Self::managed_policy_error(id, &reason.to_string()));
+        }
+
+        let user_attachments = self
+            .user_attachments
+            .read()
+            .map(|m| m.clone())
+            .unwrap_or_default();
+        let group_attachments = self
+            .group_attachments
+            .read()
+            .map(|m| m.clone())
+            .unwrap_or_default();
+        let was_enabled = self.iam_authorization_enabled();
+        match self.delete_policy(id) {
+            Ok(()) => match self.emit_policy_allowed(
+                control,
+                EventKind::PolicyDelete,
+                "policy:drop",
+                id,
+                existing.as_deref(),
+                None,
+                None,
+            ) {
+                Ok(()) => Ok(()),
+                Err(err) => {
+                    if let Some(policy) = existing {
+                        self.restore_policy_delete(
+                            id,
+                            policy,
+                            user_attachments,
+                            group_attachments,
+                            was_enabled,
+                        );
+                    }
+                    Err(err)
+                }
+            },
+            Err(err) => {
+                self.emit_policy_error(
+                    control,
+                    EventKind::PolicyDelete,
+                    "policy:drop",
+                    id,
+                    existing.as_deref(),
+                    None,
+                    &err,
+                );
+                Err(err)
+            }
+        }
+    }
+
+    pub fn attach_policy_with_control_events(
+        &self,
+        principal: PrincipalRef,
+        policy_id: &str,
+        control: &PolicyMutationControl<'_>,
+    ) -> Result<(), AuthError> {
+        let existing = self.get_policy(policy_id);
+        if let Some(ManagedPolicyDecision::Deny {
+            entry_id,
+            matched_action,
+            matched_resource,
+            reason,
+            ..
+        }) = self.managed_policy_decision(policy_id, PolicyOp::Attach, control)
+        {
+            self.emit_policy_denied(
+                control,
+                EventKind::PolicyAttach,
+                "policy:attach",
+                policy_id,
+                existing.as_deref(),
+                Some(&principal),
+                &reason.to_string(),
+                Some(entry_id),
+                Some((matched_action, matched_resource)),
+            );
+            return Err(Self::managed_policy_error(policy_id, &reason.to_string()));
+        }
+
+        let user_attachments = self
+            .user_attachments
+            .read()
+            .map(|m| m.clone())
+            .unwrap_or_default();
+        let group_attachments = self
+            .group_attachments
+            .read()
+            .map(|m| m.clone())
+            .unwrap_or_default();
+        match self.attach_policy(principal.clone(), policy_id) {
+            Ok(()) => match self.emit_policy_allowed(
+                control,
+                EventKind::PolicyAttach,
+                "policy:attach",
+                policy_id,
+                existing.as_deref(),
+                Some(&principal),
+                None,
+            ) {
+                Ok(()) => Ok(()),
+                Err(err) => {
+                    self.restore_policy_attachments(user_attachments, group_attachments);
+                    Err(err)
+                }
+            },
+            Err(err) => {
+                self.emit_policy_error(
+                    control,
+                    EventKind::PolicyAttach,
+                    "policy:attach",
+                    policy_id,
+                    existing.as_deref(),
+                    Some(&principal),
+                    &err,
+                );
+                Err(err)
+            }
+        }
+    }
+
+    pub fn detach_policy_with_control_events(
+        &self,
+        principal: PrincipalRef,
+        policy_id: &str,
+        control: &PolicyMutationControl<'_>,
+    ) -> Result<(), AuthError> {
+        let existing = self.get_policy(policy_id);
+        if let Some(ManagedPolicyDecision::Deny {
+            entry_id,
+            matched_action,
+            matched_resource,
+            reason,
+            ..
+        }) = self.managed_policy_decision(policy_id, PolicyOp::Detach, control)
+        {
+            self.emit_policy_denied(
+                control,
+                EventKind::PolicyDetach,
+                "policy:detach",
+                policy_id,
+                existing.as_deref(),
+                Some(&principal),
+                &reason.to_string(),
+                Some(entry_id),
+                Some((matched_action, matched_resource)),
+            );
+            return Err(Self::managed_policy_error(policy_id, &reason.to_string()));
+        }
+        let Some(existing_policy) = existing else {
+            let err = AuthError::Forbidden(format!("policy `{policy_id}` not found"));
+            self.emit_policy_error(
+                control,
+                EventKind::PolicyDetach,
+                "policy:detach",
+                policy_id,
+                None,
+                Some(&principal),
+                &err,
+            );
+            return Err(err);
+        };
+
+        let user_attachments = self
+            .user_attachments
+            .read()
+            .map(|m| m.clone())
+            .unwrap_or_default();
+        let group_attachments = self
+            .group_attachments
+            .read()
+            .map(|m| m.clone())
+            .unwrap_or_default();
+        match self.detach_policy(principal.clone(), policy_id) {
+            Ok(()) => match self.emit_policy_allowed(
+                control,
+                EventKind::PolicyDetach,
+                "policy:detach",
+                policy_id,
+                Some(existing_policy.as_ref()),
+                Some(&principal),
+                None,
+            ) {
+                Ok(()) => Ok(()),
+                Err(err) => {
+                    self.restore_policy_attachments(user_attachments, group_attachments);
+                    Err(err)
+                }
+            },
+            Err(err) => {
+                self.emit_policy_error(
+                    control,
+                    EventKind::PolicyDetach,
+                    "policy:detach",
+                    policy_id,
+                    Some(existing_policy.as_ref()),
+                    Some(&principal),
+                    &err,
+                );
+                Err(err)
+            }
+        }
+    }
+
+    fn managed_policy_decision(
+        &self,
+        policy_id: &str,
+        op: PolicyOp,
+        control: &PolicyMutationControl<'_>,
+    ) -> Option<ManagedPolicyDecision> {
+        control.registry.map(|registry| {
+            ManagedPolicyGate::new(registry).check_mutation(
+                self,
+                control.actor,
+                control.eval_ctx,
+                policy_id,
+                op,
+            )
+        })
+    }
+
+    fn managed_policy_error(policy_id: &str, reason: &str) -> AuthError {
+        AuthError::Forbidden(format!(
+            "managed policy mutation blocked for `{policy_id}`: {reason}"
+        ))
+    }
+
+    fn emit_policy_allowed(
+        &self,
+        control: &PolicyMutationControl<'_>,
+        kind: EventKind,
+        action: &'static str,
+        policy_id: &str,
+        policy: Option<&Policy>,
+        principal: Option<&PrincipalRef>,
+        matched_policy_id: Option<String>,
+    ) -> Result<(), AuthError> {
+        let event = ControlEvent {
+            kind,
+            outcome: Outcome::Allowed,
+            action: std::borrow::Cow::Borrowed(action),
+            resource: Some(format!("policy:{policy_id}")),
+            reason: None,
+            matched_policy_id,
+            fields: policy_control_fields(policy_id, policy, principal),
+        };
+        match control.ledger.emit(control.ctx, event) {
+            Ok(_) => Ok(()),
+            Err(err) if control.config.require_persistence() => {
+                Err(AuthError::Internal(err.to_string()))
+            }
+            Err(_) => Ok(()),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_policy_denied(
+        &self,
+        control: &PolicyMutationControl<'_>,
+        kind: EventKind,
+        action: &'static str,
+        policy_id: &str,
+        policy: Option<&Policy>,
+        principal: Option<&PrincipalRef>,
+        reason: &str,
+        matched_policy_id: Option<String>,
+        matched: Option<(String, String)>,
+    ) {
+        let mut fields = policy_control_fields(policy_id, policy, principal);
+        if let Some((matched_action, matched_resource)) = matched {
+            fields.insert(
+                "matched_action".to_string(),
+                Sensitivity::raw(matched_action),
+            );
+            fields.insert(
+                "matched_resource".to_string(),
+                Sensitivity::raw(matched_resource),
+            );
+        }
+        let event = ControlEvent {
+            kind,
+            outcome: Outcome::Denied,
+            action: std::borrow::Cow::Borrowed(action),
+            resource: Some(format!("policy:{policy_id}")),
+            reason: Some(reason.to_string()),
+            matched_policy_id,
+            fields,
+        };
+        let _ = control.ledger.emit(control.ctx, event);
+    }
+
+    fn emit_policy_error(
+        &self,
+        control: &PolicyMutationControl<'_>,
+        kind: EventKind,
+        action: &'static str,
+        policy_id: &str,
+        policy: Option<&Policy>,
+        principal: Option<&PrincipalRef>,
+        err: &AuthError,
+    ) {
+        let event = ControlEvent {
+            kind,
+            outcome: Outcome::Error,
+            action: std::borrow::Cow::Borrowed(action),
+            resource: Some(format!("policy:{policy_id}")),
+            reason: Some(err.to_string()),
+            matched_policy_id: None,
+            fields: policy_control_fields(policy_id, policy, principal),
+        };
+        let _ = control.ledger.emit(control.ctx, event);
+    }
+
+    fn restore_policy_put(
+        &self,
+        policy_id: &str,
+        previous: Option<Arc<Policy>>,
+        was_enabled: bool,
+    ) {
+        let mut policies = self.policies.write().unwrap_or_else(|e| e.into_inner());
+        match previous {
+            Some(policy) => {
+                policies.insert(policy_id.to_string(), policy);
+            }
+            None => {
+                policies.remove(policy_id);
+            }
+        }
+        drop(policies);
+        self.iam_authorization_enabled
+            .store(was_enabled, Ordering::Release);
+        self.iam_effective_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.invalidate_visible_collections_cache();
+        self.persist_iam_to_kv();
+    }
+
+    fn restore_policy_delete(
+        &self,
+        policy_id: &str,
+        policy: Arc<Policy>,
+        user_attachments: HashMap<UserId, Vec<String>>,
+        group_attachments: HashMap<String, Vec<String>>,
+        was_enabled: bool,
+    ) {
+        self.policies
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(policy_id.to_string(), policy);
+        self.restore_policy_attachments(user_attachments, group_attachments);
+        self.iam_authorization_enabled
+            .store(was_enabled, Ordering::Release);
+        self.persist_iam_to_kv();
+    }
+
+    fn restore_policy_attachments(
+        &self,
+        user_attachments: HashMap<UserId, Vec<String>>,
+        group_attachments: HashMap<String, Vec<String>>,
+    ) {
+        *self
+            .user_attachments
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = user_attachments;
+        *self
+            .group_attachments
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = group_attachments;
+        self.iam_effective_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.invalidate_visible_collections_cache();
+        self.persist_iam_to_kv();
+    }
 
     /// Insert or replace a policy by id. Rejects synthetic ids
     /// (`_grant_*` / `_default_*`) so callers can't hand-write them

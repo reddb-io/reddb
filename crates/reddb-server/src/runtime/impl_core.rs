@@ -370,38 +370,6 @@ fn query_control_event_specs(expr: &QueryExpr) -> Vec<QueryControlEventSpec> {
                 fields: Vec::new(),
             });
         }
-        QueryExpr::CreateIamPolicy { id, .. } => {
-            specs.push(QueryControlEventSpec {
-                kind: EventKind::PolicyCreate,
-                action: "policy:put",
-                resource: Some(format!("policy:{id}")),
-                fields: Vec::new(),
-            });
-        }
-        QueryExpr::DropIamPolicy { id } => {
-            specs.push(QueryControlEventSpec {
-                kind: EventKind::PolicyDelete,
-                action: "policy:drop",
-                resource: Some(format!("policy:{id}")),
-                fields: Vec::new(),
-            });
-        }
-        QueryExpr::AttachPolicy { policy_id, .. } => {
-            specs.push(QueryControlEventSpec {
-                kind: EventKind::PolicyUpdate,
-                action: "policy:attach",
-                resource: Some(format!("policy:{policy_id}")),
-                fields: Vec::new(),
-            });
-        }
-        QueryExpr::DetachPolicy { policy_id, .. } => {
-            specs.push(QueryControlEventSpec {
-                kind: EventKind::PolicyUpdate,
-                action: "policy:detach",
-                resource: Some(format!("policy:{policy_id}")),
-                fields: Vec::new(),
-            });
-        }
         _ => {}
     }
     specs
@@ -3641,6 +3609,22 @@ impl RedDBRuntime {
                 Err(RedDBError::Internal(err.to_string()))
             }
             Err(_) => Ok(()),
+        }
+    }
+
+    fn policy_mutation_control_ctx<'a>(
+        &self,
+        actor: &'a crate::auth::UserId,
+        tenant: Option<&'a str>,
+    ) -> crate::runtime::control_events::ControlEventCtx<'a> {
+        crate::runtime::control_events::ControlEventCtx {
+            actor: crate::runtime::control_events::ActorRef::User(actor),
+            scope: tenant.map(std::borrow::Cow::Borrowed),
+            request_id: Some(std::borrow::Cow::Owned(format!(
+                "conn-{}",
+                current_connection_id()
+            ))),
+            trace_id: None,
         }
     }
 
@@ -10034,26 +10018,6 @@ impl RedDBRuntime {
             tenant,
             auth_store.principal_is_system_owned(principal),
         );
-        if let Some(op) = match action {
-            "policy:put" => Some(crate::auth::managed_policy::PolicyOp::Put),
-            "policy:drop" => Some(crate::auth::managed_policy::PolicyOp::Drop),
-            "policy:attach" => Some(crate::auth::managed_policy::PolicyOp::Attach),
-            "policy:detach" => Some(crate::auth::managed_policy::PolicyOp::Detach),
-            _ => None,
-        } {
-            let gate = crate::auth::managed_policy::ManagedPolicyGate::new(
-                self.inner.config_registry.as_ref(),
-            );
-            match gate.check_mutation(auth_store, principal, &ctx, resource_name, op) {
-                crate::auth::managed_policy::ManagedPolicyDecision::PassThrough { .. }
-                | crate::auth::managed_policy::ManagedPolicyDecision::Allow { .. } => {}
-                crate::auth::managed_policy::ManagedPolicyDecision::Deny { reason, .. } => {
-                    return Err(format!(
-                        "permission denied: managed policy mutation blocked for `{resource_name}`: {reason}"
-                    ));
-                }
-            }
-        }
 
         if !auth_store.iam_authorization_enabled() {
             return if role == crate::auth::Role::Admin {
@@ -10504,13 +10468,29 @@ impl RedDBRuntime {
             policy.id = id.to_string();
         }
         let pid = policy.id.clone();
+        let tenant = current_tenant();
+        let (actor_name, actor_role) = current_auth_identity()
+            .unwrap_or_else(|| ("anonymous".to_string(), crate::auth::Role::Read));
+        let actor = crate::auth::UserId::from_parts(tenant.as_deref(), &actor_name);
+        let eval_ctx = runtime_iam_context(
+            actor_role,
+            tenant.as_deref(),
+            auth_store.principal_is_system_owned(&actor),
+        );
+        let event_ctx = self.policy_mutation_control_ctx(&actor, tenant.as_deref());
+        let control = crate::auth::store::PolicyMutationControl {
+            ctx: &event_ctx,
+            ledger: self.inner.control_event_ledger.as_ref(),
+            config: self.inner.control_event_config,
+            registry: Some(self.inner.config_registry.as_ref()),
+            actor: &actor,
+            eval_ctx: &eval_ctx,
+        };
         auth_store
-            .put_policy(policy)
+            .put_policy_with_control_events(policy, &control)
             .map_err(|e| RedDBError::Query(e.to_string()))?;
 
-        let principal = current_auth_identity()
-            .map(|(u, _)| u)
-            .unwrap_or_else(|| "anonymous".into());
+        let principal = actor_name;
         tracing::info!(
             target: "audit",
             principal = %principal,
@@ -10541,13 +10521,29 @@ impl RedDBRuntime {
             .read()
             .clone()
             .ok_or_else(|| RedDBError::Query("auth store not configured".to_string()))?;
+        let tenant = current_tenant();
+        let (actor_name, actor_role) = current_auth_identity()
+            .unwrap_or_else(|| ("anonymous".to_string(), crate::auth::Role::Read));
+        let actor = crate::auth::UserId::from_parts(tenant.as_deref(), &actor_name);
+        let eval_ctx = runtime_iam_context(
+            actor_role,
+            tenant.as_deref(),
+            auth_store.principal_is_system_owned(&actor),
+        );
+        let event_ctx = self.policy_mutation_control_ctx(&actor, tenant.as_deref());
+        let control = crate::auth::store::PolicyMutationControl {
+            ctx: &event_ctx,
+            ledger: self.inner.control_event_ledger.as_ref(),
+            config: self.inner.control_event_config,
+            registry: Some(self.inner.config_registry.as_ref()),
+            actor: &actor,
+            eval_ctx: &eval_ctx,
+        };
         auth_store
-            .delete_policy(id)
+            .delete_policy_with_control_events(id, &control)
             .map_err(|e| RedDBError::Query(e.to_string()))?;
 
-        let principal = current_auth_identity()
-            .map(|(u, _)| u)
-            .unwrap_or_else(|| "anonymous".into());
+        let principal = actor_name;
         tracing::info!(
             target: "audit",
             principal = %principal,
@@ -10594,13 +10590,29 @@ impl RedDBRuntime {
             PolicyPrincipalRef::Group(g) => PrincipalRef::Group(g.clone()),
         };
         let pretty_target = principal_label(principal);
+        let tenant = current_tenant();
+        let (actor_name, actor_role) = current_auth_identity()
+            .unwrap_or_else(|| ("anonymous".to_string(), crate::auth::Role::Read));
+        let actor = crate::auth::UserId::from_parts(tenant.as_deref(), &actor_name);
+        let eval_ctx = runtime_iam_context(
+            actor_role,
+            tenant.as_deref(),
+            auth_store.principal_is_system_owned(&actor),
+        );
+        let event_ctx = self.policy_mutation_control_ctx(&actor, tenant.as_deref());
+        let control = crate::auth::store::PolicyMutationControl {
+            ctx: &event_ctx,
+            ledger: self.inner.control_event_ledger.as_ref(),
+            config: self.inner.control_event_config,
+            registry: Some(self.inner.config_registry.as_ref()),
+            actor: &actor,
+            eval_ctx: &eval_ctx,
+        };
         auth_store
-            .attach_policy(p, policy_id)
+            .attach_policy_with_control_events(p, policy_id, &control)
             .map_err(|e| RedDBError::Query(e.to_string()))?;
 
-        let principal_str = current_auth_identity()
-            .map(|(u, _)| u)
-            .unwrap_or_else(|| "anonymous".into());
+        let principal_str = actor_name;
         tracing::info!(
             target: "audit",
             principal = %principal_str,
@@ -10648,13 +10660,29 @@ impl RedDBRuntime {
             PolicyPrincipalRef::Group(g) => PrincipalRef::Group(g.clone()),
         };
         let pretty_target = principal_label(principal);
+        let tenant = current_tenant();
+        let (actor_name, actor_role) = current_auth_identity()
+            .unwrap_or_else(|| ("anonymous".to_string(), crate::auth::Role::Read));
+        let actor = crate::auth::UserId::from_parts(tenant.as_deref(), &actor_name);
+        let eval_ctx = runtime_iam_context(
+            actor_role,
+            tenant.as_deref(),
+            auth_store.principal_is_system_owned(&actor),
+        );
+        let event_ctx = self.policy_mutation_control_ctx(&actor, tenant.as_deref());
+        let control = crate::auth::store::PolicyMutationControl {
+            ctx: &event_ctx,
+            ledger: self.inner.control_event_ledger.as_ref(),
+            config: self.inner.control_event_config,
+            registry: Some(self.inner.config_registry.as_ref()),
+            actor: &actor,
+            eval_ctx: &eval_ctx,
+        };
         auth_store
-            .detach_policy(p, policy_id)
+            .detach_policy_with_control_events(p, policy_id, &control)
             .map_err(|e| RedDBError::Query(e.to_string()))?;
 
-        let principal_str = current_auth_identity()
-            .map(|(u, _)| u)
-            .unwrap_or_else(|| "anonymous".into());
+        let principal_str = actor_name;
         tracing::info!(
             target: "audit",
             principal = %principal_str,
