@@ -2352,6 +2352,14 @@ impl RedDBRuntime {
         self.inner.control_event_config.require_persistence()
     }
 
+    #[doc(hidden)]
+    pub fn replace_control_event_ledger_for_tests(
+        &self,
+        ledger: Arc<dyn crate::runtime::control_events::ControlEventLedger>,
+    ) {
+        *self.inner.control_event_ledger.write() = ledger;
+    }
+
     #[inline(never)]
     pub fn with_options(options: RedDBOptions) -> RedDBResult<Self> {
         Self::with_pool(options, ConnectionPoolConfig::default())
@@ -2505,8 +2513,8 @@ impl RedDBRuntime {
                         &data_path,
                     ))
                 },
-                control_event_ledger: Arc::new(crate::runtime::control_events::RuntimeLedger::new(
-                    db.store(),
+                control_event_ledger: parking_lot::RwLock::new(Arc::new(
+                    crate::runtime::control_events::RuntimeLedger::new(db.store()),
                 )),
                 control_event_config: options.control_events,
                 query_audit: Arc::new(crate::runtime::query_audit::QueryAuditStream::new(
@@ -3603,7 +3611,8 @@ impl RedDBRuntime {
             matched_policy_id: None,
             fields,
         };
-        match self.inner.control_event_ledger.emit(&ctx, event) {
+        let ledger = self.inner.control_event_ledger.read();
+        match ledger.emit(&ctx, event) {
             Ok(_) => Ok(()),
             Err(err) if self.inner.control_event_config.require_persistence() => {
                 Err(RedDBError::Internal(err.to_string()))
@@ -10478,9 +10487,10 @@ impl RedDBRuntime {
             auth_store.principal_is_system_owned(&actor),
         );
         let event_ctx = self.policy_mutation_control_ctx(&actor, tenant.as_deref());
+        let ledger = self.inner.control_event_ledger.read();
         let control = crate::auth::store::PolicyMutationControl {
             ctx: &event_ctx,
-            ledger: self.inner.control_event_ledger.as_ref(),
+            ledger: ledger.as_ref(),
             config: self.inner.control_event_config,
             registry: Some(self.inner.config_registry.as_ref()),
             actor: &actor,
@@ -10531,9 +10541,10 @@ impl RedDBRuntime {
             auth_store.principal_is_system_owned(&actor),
         );
         let event_ctx = self.policy_mutation_control_ctx(&actor, tenant.as_deref());
+        let ledger = self.inner.control_event_ledger.read();
         let control = crate::auth::store::PolicyMutationControl {
             ctx: &event_ctx,
-            ledger: self.inner.control_event_ledger.as_ref(),
+            ledger: ledger.as_ref(),
             config: self.inner.control_event_config,
             registry: Some(self.inner.config_registry.as_ref()),
             actor: &actor,
@@ -10600,9 +10611,10 @@ impl RedDBRuntime {
             auth_store.principal_is_system_owned(&actor),
         );
         let event_ctx = self.policy_mutation_control_ctx(&actor, tenant.as_deref());
+        let ledger = self.inner.control_event_ledger.read();
         let control = crate::auth::store::PolicyMutationControl {
             ctx: &event_ctx,
-            ledger: self.inner.control_event_ledger.as_ref(),
+            ledger: ledger.as_ref(),
             config: self.inner.control_event_config,
             registry: Some(self.inner.config_registry.as_ref()),
             actor: &actor,
@@ -10670,9 +10682,10 @@ impl RedDBRuntime {
             auth_store.principal_is_system_owned(&actor),
         );
         let event_ctx = self.policy_mutation_control_ctx(&actor, tenant.as_deref());
+        let ledger = self.inner.control_event_ledger.read();
         let control = crate::auth::store::PolicyMutationControl {
             ctx: &event_ctx,
-            ledger: self.inner.control_event_ledger.as_ref(),
+            ledger: ledger.as_ref(),
             config: self.inner.control_event_config,
             registry: Some(self.inner.config_registry.as_ref()),
             actor: &actor,

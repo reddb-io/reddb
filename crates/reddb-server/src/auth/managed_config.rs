@@ -29,7 +29,7 @@
 //! can replay the decision.
 
 use super::policies::{EvalContext, ResourceRef};
-use super::registry::{ConfigRegistry, ConfigRegistryEntry, EvidenceRequirement};
+use super::registry::{ConfigRegistry, ConfigRegistryEntry, EvidenceRequirement, Mutability};
 use super::store::AuthStore;
 use super::UserId;
 
@@ -46,6 +46,9 @@ pub enum ManagedConfigDecision {
     Allow {
         entry_id: String,
         entry_version: u64,
+        resource_type: String,
+        managed: bool,
+        mutability: Mutability,
         matched_action: String,
         matched_resource: String,
         evidence: EvidenceRequirement,
@@ -55,6 +58,9 @@ pub enum ManagedConfigDecision {
     Deny {
         entry_id: String,
         entry_version: u64,
+        resource_type: String,
+        managed: bool,
+        mutability: Mutability,
         matched_action: String,
         matched_resource: String,
         reason: DenyReason,
@@ -151,6 +157,9 @@ impl<'a> ManagedConfigGate<'a> {
             return ManagedConfigDecision::Deny {
                 entry_id: entry.id.clone(),
                 entry_version: entry.version,
+                resource_type: entry.resource_type.clone(),
+                managed: entry.managed,
+                mutability: entry.mutability,
                 matched_action: entry.required_action.clone(),
                 matched_resource,
                 reason: DenyReason::NotStructurallyEligible {
@@ -165,6 +174,9 @@ impl<'a> ManagedConfigGate<'a> {
             return ManagedConfigDecision::Deny {
                 entry_id: entry.id.clone(),
                 entry_version: entry.version,
+                resource_type: entry.resource_type.clone(),
+                managed: entry.managed,
+                mutability: entry.mutability,
                 matched_action: entry.required_action.clone(),
                 matched_resource,
                 reason: DenyReason::PolicyDenied,
@@ -172,8 +184,11 @@ impl<'a> ManagedConfigGate<'a> {
         }
 
         ManagedConfigDecision::Allow {
-            entry_id: entry.id,
+            entry_id: entry.id.clone(),
             entry_version: entry.version,
+            resource_type: entry.resource_type.clone(),
+            managed: entry.managed,
+            mutability: entry.mutability,
             matched_action: entry.required_action.clone(),
             matched_resource,
             evidence: entry.evidence_requirement,
@@ -641,6 +656,7 @@ mod tests {
                 matched_action,
                 matched_resource,
                 reason,
+                ..
             } => {
                 assert_eq!(entry_id, "red.config.backup.retention_days");
                 assert_eq!(entry_version, 1);

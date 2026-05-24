@@ -1150,7 +1150,8 @@ impl RedDBRuntime {
             matched_policy_id: None,
             fields,
         };
-        match self.inner.control_event_ledger.emit(&ctx, event) {
+        let ledger = self.inner.control_event_ledger.read();
+        match ledger.emit(&ctx, event) {
             Ok(_) => Ok(()),
             Err(err) if self.inner.control_event_config.require_persistence() => {
                 Err(RedDBError::Internal(err.to_string()))
