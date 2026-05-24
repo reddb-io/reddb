@@ -3,7 +3,9 @@
 //! Password hashing delegates to the existing Argon2id implementation in
 //! `crate::storage::encryption::argon2id`.  Token generation uses the
 //! OS CSPRNG (`crate::crypto::os_random`) plus SHA-256.
+#![deny(clippy::disallowed_methods)]
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -66,6 +68,19 @@ pub struct PolicyMutationControl<'a> {
     pub registry: Option<&'a ConfigRegistry>,
     pub actor: &'a UserId,
     pub eval_ctx: &'a EvalContext,
+}
+
+/// Control-event dependencies for audited user lifecycle mutations.
+pub struct UserLifecycleControl<'a> {
+    pub ctx: &'a ControlEventCtx<'a>,
+    pub ledger: &'a dyn ControlEventLedger,
+    pub config: ControlEventConfig,
+}
+
+#[derive(Clone)]
+struct AuthStoreControlEvents {
+    ledger: Arc<dyn ControlEventLedger>,
+    config: ControlEventConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +173,7 @@ pub struct AuthStore {
     /// invalidated explicitly on GRANT/REVOKE/CREATE POLICY/DROP
     /// POLICY/DROP COLLECTION.
     visible_collections_cache: super::scope_cache::AuthCache,
+    control_events: RwLock<Option<AuthStoreControlEvents>>,
 }
 
 // Use fast-but-safe Argon2id params for auth hashing (smaller than the
@@ -267,6 +283,82 @@ fn policy_principal_label(principal: &PrincipalRef) -> String {
     }
 }
 
+fn default_user_lifecycle_ctx<'a>() -> ControlEventCtx<'a> {
+    ControlEventCtx {
+        actor: crate::runtime::control_events::ActorRef::Anonymous,
+        scope: None,
+        request_id: None,
+        trace_id: None,
+    }
+}
+
+fn bootstrap_user_lifecycle_ctx<'a>() -> ControlEventCtx<'a> {
+    ControlEventCtx {
+        actor: crate::runtime::control_events::ActorRef::System("bootstrap"),
+        scope: None,
+        request_id: None,
+        trace_id: None,
+    }
+}
+
+fn user_resource(id: &UserId) -> String {
+    format!("user:{id}")
+}
+
+fn api_key_resource(api_key_id: &str) -> String {
+    format!("apikey:{api_key_id}")
+}
+
+fn api_key_id(key: &str) -> String {
+    hex::encode(sha256(key.as_bytes()))
+}
+
+fn password_evidence() -> Sensitivity {
+    Sensitivity::redacted()
+}
+
+fn user_control_fields(
+    id: &UserId,
+    role: Option<Role>,
+    enabled: Option<bool>,
+    include_password: bool,
+) -> HashMap<String, Sensitivity> {
+    let mut fields = HashMap::new();
+    fields.insert(
+        "username".to_string(),
+        Sensitivity::raw(id.username.clone()),
+    );
+    fields.insert(
+        "tenant_id".to_string(),
+        Sensitivity::raw(id.tenant.clone().unwrap_or_default()),
+    );
+    if let Some(role) = role {
+        fields.insert("role".to_string(), Sensitivity::raw(role.as_str()));
+    }
+    if let Some(enabled) = enabled {
+        fields.insert("enabled".to_string(), Sensitivity::raw(enabled.to_string()));
+    }
+    if include_password {
+        fields.insert("password".to_string(), password_evidence());
+    }
+    fields
+}
+
+fn api_key_control_fields(
+    id: &UserId,
+    role: Role,
+    api_key_id: &str,
+) -> HashMap<String, Sensitivity> {
+    let mut fields = user_control_fields(id, Some(role), None, false);
+    fields.insert("api_key_id".to_string(), Sensitivity::raw(api_key_id));
+    fields.insert("api_key".to_string(), Sensitivity::redacted());
+    fields
+}
+
+fn user_error_is_denied(err: &AuthError) -> bool {
+    !matches!(err, AuthError::Internal(_))
+}
+
 impl AuthStore {
     // -----------------------------------------------------------------
     // Construction
@@ -296,7 +388,26 @@ impl AuthStore {
             visible_collections_cache: super::scope_cache::AuthCache::new(
                 super::scope_cache::DEFAULT_TTL,
             ),
+            control_events: RwLock::new(None),
         }
+    }
+
+    pub fn configure_control_events(
+        &self,
+        ledger: Arc<dyn ControlEventLedger>,
+        config: ControlEventConfig,
+    ) {
+        *self
+            .control_events
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(AuthStoreControlEvents { ledger, config });
+    }
+
+    fn configured_control_events(&self) -> Option<AuthStoreControlEvents> {
+        self.control_events
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Create an `AuthStore` backed by encrypted vault pages inside the
@@ -358,7 +469,39 @@ impl AuthStore {
     /// key.  The certificate hex string is returned in `BootstrapResult`
     /// so the admin can save it.
     pub fn bootstrap(&self, username: &str, password: &str) -> Result<BootstrapResult, AuthError> {
-        self.bootstrap_with_ownership(username, password, false)
+        if let Some(configured) = self.configured_control_events() {
+            let ctx = bootstrap_user_lifecycle_ctx();
+            let control = UserLifecycleControl {
+                ctx: &ctx,
+                ledger: configured.ledger.as_ref(),
+                config: configured.config,
+            };
+            self.bootstrap_with_ownership_and_control_events(username, password, false, &control)
+        } else {
+            self.bootstrap_with_ownership(username, password, false)
+        }
+    }
+
+    pub fn bootstrap_with_control_events(
+        &self,
+        username: &str,
+        password: &str,
+        ctx: &ControlEventCtx<'_>,
+        ledger: &dyn ControlEventLedger,
+        config: ControlEventConfig,
+    ) -> Result<BootstrapResult, AuthError> {
+        let system_ctx = ControlEventCtx {
+            actor: crate::runtime::control_events::ActorRef::System("bootstrap"),
+            scope: ctx.scope.clone(),
+            request_id: ctx.request_id.clone(),
+            trace_id: ctx.trace_id.clone(),
+        };
+        let control = UserLifecycleControl {
+            ctx: &system_ctx,
+            ledger,
+            config,
+        };
+        self.bootstrap_with_ownership_and_control_events(username, password, false, &control)
     }
 
     /// Bootstrap the first admin with `system_owned = true` and platform
@@ -372,10 +515,29 @@ impl AuthStore {
         username: &str,
         password: &str,
     ) -> Result<BootstrapResult, AuthError> {
-        self.bootstrap_with_ownership(username, password, true)
+        if let Some(configured) = self.configured_control_events() {
+            let ctx = bootstrap_user_lifecycle_ctx();
+            let control = UserLifecycleControl {
+                ctx: &ctx,
+                ledger: configured.ledger.as_ref(),
+                config: configured.config,
+            };
+            self.bootstrap_with_ownership_and_control_events(username, password, true, &control)
+        } else {
+            self.bootstrap_with_ownership(username, password, true)
+        }
     }
 
     fn bootstrap_with_ownership(
+        &self,
+        username: &str,
+        password: &str,
+        system_owned: bool,
+    ) -> Result<BootstrapResult, AuthError> {
+        self.bootstrap_with_ownership_unaudited(username, password, system_owned)
+    }
+
+    fn bootstrap_with_ownership_unaudited(
         &self,
         username: &str,
         password: &str,
@@ -403,11 +565,24 @@ impl AuthStore {
         }
 
         let user = if system_owned {
-            self.create_system_user(username, password, Role::Admin, None)?
+            self.create_user_in_tenant_with_ownership_unaudited(
+                None,
+                username,
+                password,
+                Role::Admin,
+                true,
+            )?
         } else {
-            self.create_user(username, password, Role::Admin)?
+            self.create_user_in_tenant_with_ownership_unaudited(
+                None,
+                username,
+                password,
+                Role::Admin,
+                false,
+            )?
         };
-        let key = self.create_api_key(username, "bootstrap", Role::Admin)?;
+        let key =
+            self.create_api_key_in_tenant_unaudited(None, username, "bootstrap", Role::Admin)?;
 
         // Generate a certificate-based keypair and re-seal the vault.
         let certificate = if let Some(ref pager) = self.pager {
@@ -441,6 +616,48 @@ impl AuthStore {
             api_key: key,
             certificate,
         })
+    }
+
+    fn bootstrap_with_ownership_and_control_events(
+        &self,
+        username: &str,
+        password: &str,
+        system_owned: bool,
+        control: &UserLifecycleControl<'_>,
+    ) -> Result<BootstrapResult, AuthError> {
+        let id = UserId::from_parts(None, username);
+        match self.bootstrap_with_ownership_unaudited(username, password, system_owned) {
+            Ok(result) => {
+                let event_result = self.emit_user_lifecycle_allowed(
+                    control,
+                    EventKind::UserCreate,
+                    "user.create",
+                    &id,
+                    user_control_fields(&id, Some(Role::Admin), Some(true), true),
+                );
+                if let Err(err) = event_result {
+                    self.rollback_bootstrap(&id);
+                    return Err(err);
+                }
+                Ok(result)
+            }
+            Err(err) => {
+                self.emit_user_lifecycle_outcome(
+                    control,
+                    if user_error_is_denied(&err) {
+                        Outcome::Denied
+                    } else {
+                        Outcome::Error
+                    },
+                    EventKind::UserCreate,
+                    "user.create",
+                    &id,
+                    Some(err.to_string()),
+                    user_control_fields(&id, Some(Role::Admin), Some(true), true),
+                );
+                Err(err)
+            }
+        }
     }
 
     /// Auto-bootstrap from environment variables if no users exist.
@@ -838,6 +1055,20 @@ impl AuthStore {
         self.create_user_in_tenant(None, username, password, role)
     }
 
+    pub fn create_user_with_control_events(
+        &self,
+        username: &str,
+        password: &str,
+        role: Role,
+        ctx: &ControlEventCtx<'_>,
+        ledger: &dyn ControlEventLedger,
+        config: ControlEventConfig,
+    ) -> Result<User, AuthError> {
+        self.create_user_in_tenant_with_control_events(
+            None, username, password, role, ctx, ledger, config,
+        )
+    }
+
     /// Create a user under the given tenant scope. `tenant_id == None`
     /// produces a platform-wide user. `(tenant, username)` is the
     /// uniqueness key — the same `username` may exist independently
@@ -849,7 +1080,42 @@ impl AuthStore {
         password: &str,
         role: Role,
     ) -> Result<User, AuthError> {
-        self.create_user_in_tenant_with_ownership(tenant_id, username, password, role, false)
+        if let Some(configured) = self.configured_control_events() {
+            let ctx = default_user_lifecycle_ctx();
+            let control = UserLifecycleControl {
+                ctx: &ctx,
+                ledger: configured.ledger.as_ref(),
+                config: configured.config,
+            };
+            self.create_user_in_tenant_with_ownership_controlled(
+                tenant_id, username, password, role, false, &control,
+            )
+        } else {
+            self.create_user_in_tenant_with_ownership_unaudited(
+                tenant_id, username, password, role, false,
+            )
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_user_in_tenant_with_control_events(
+        &self,
+        tenant_id: Option<&str>,
+        username: &str,
+        password: &str,
+        role: Role,
+        ctx: &ControlEventCtx<'_>,
+        ledger: &dyn ControlEventLedger,
+        config: ControlEventConfig,
+    ) -> Result<User, AuthError> {
+        let control = UserLifecycleControl {
+            ctx,
+            ledger,
+            config,
+        };
+        self.create_user_in_tenant_with_ownership_controlled(
+            tenant_id, username, password, role, false, &control,
+        )
     }
 
     pub fn create_system_user(
@@ -859,10 +1125,24 @@ impl AuthStore {
         role: Role,
         tenant_id: Option<&str>,
     ) -> Result<User, AuthError> {
-        self.create_user_in_tenant_with_ownership(tenant_id, username, password, role, true)
+        if let Some(configured) = self.configured_control_events() {
+            let ctx = default_user_lifecycle_ctx();
+            let control = UserLifecycleControl {
+                ctx: &ctx,
+                ledger: configured.ledger.as_ref(),
+                config: configured.config,
+            };
+            self.create_user_in_tenant_with_ownership_controlled(
+                tenant_id, username, password, role, true, &control,
+            )
+        } else {
+            self.create_user_in_tenant_with_ownership_unaudited(
+                tenant_id, username, password, role, true,
+            )
+        }
     }
 
-    fn create_user_in_tenant_with_ownership(
+    fn create_user_in_tenant_with_ownership_unaudited(
         &self,
         tenant_id: Option<&str>,
         username: &str,
@@ -893,6 +1173,55 @@ impl AuthStore {
         drop(users); // release lock before vault I/O
         self.persist_to_vault();
         Ok(user)
+    }
+
+    fn create_user_in_tenant_with_ownership_controlled(
+        &self,
+        tenant_id: Option<&str>,
+        username: &str,
+        password: &str,
+        role: Role,
+        system_owned: bool,
+        control: &UserLifecycleControl<'_>,
+    ) -> Result<User, AuthError> {
+        let id = UserId::from_parts(tenant_id, username);
+        match self.create_user_in_tenant_with_ownership_unaudited(
+            tenant_id,
+            username,
+            password,
+            role,
+            system_owned,
+        ) {
+            Ok(user) => {
+                if let Err(err) = self.emit_user_lifecycle_allowed(
+                    control,
+                    EventKind::UserCreate,
+                    "user.create",
+                    &id,
+                    user_control_fields(&id, Some(role), Some(true), true),
+                ) {
+                    self.rollback_create_user(&id);
+                    return Err(err);
+                }
+                Ok(user)
+            }
+            Err(err) => {
+                self.emit_user_lifecycle_outcome(
+                    control,
+                    if user_error_is_denied(&err) {
+                        Outcome::Denied
+                    } else {
+                        Outcome::Error
+                    },
+                    EventKind::UserCreate,
+                    "user.create",
+                    &id,
+                    Some(err.to_string()),
+                    user_control_fields(&id, Some(role), Some(true), true),
+                );
+                Err(err)
+            }
+        }
     }
 
     /// Look up a user's SCRAM verifier by full `UserId`.
@@ -983,9 +1312,53 @@ impl AuthStore {
         self.delete_user_in_tenant(None, username)
     }
 
+    pub fn delete_user_with_control_events(
+        &self,
+        username: &str,
+        ctx: &ControlEventCtx<'_>,
+        ledger: &dyn ControlEventLedger,
+        config: ControlEventConfig,
+    ) -> Result<(), AuthError> {
+        self.delete_user_in_tenant_with_control_events(None, username, ctx, ledger, config)
+    }
+
     /// Delete a user identified by `(tenant_id, username)` and revoke
     /// all of their API keys + sessions.
     pub fn delete_user_in_tenant(
+        &self,
+        tenant_id: Option<&str>,
+        username: &str,
+    ) -> Result<(), AuthError> {
+        if let Some(configured) = self.configured_control_events() {
+            let ctx = default_user_lifecycle_ctx();
+            let control = UserLifecycleControl {
+                ctx: &ctx,
+                ledger: configured.ledger.as_ref(),
+                config: configured.config,
+            };
+            self.delete_user_in_tenant_controlled(tenant_id, username, &control)
+        } else {
+            self.delete_user_in_tenant_unaudited(tenant_id, username)
+        }
+    }
+
+    pub fn delete_user_in_tenant_with_control_events(
+        &self,
+        tenant_id: Option<&str>,
+        username: &str,
+        ctx: &ControlEventCtx<'_>,
+        ledger: &dyn ControlEventLedger,
+        config: ControlEventConfig,
+    ) -> Result<(), AuthError> {
+        let control = UserLifecycleControl {
+            ctx,
+            ledger,
+            config,
+        };
+        self.delete_user_in_tenant_controlled(tenant_id, username, &control)
+    }
+
+    fn delete_user_in_tenant_unaudited(
         &self,
         tenant_id: Option<&str>,
         username: &str,
@@ -1018,6 +1391,49 @@ impl AuthStore {
         Ok(())
     }
 
+    fn delete_user_in_tenant_controlled(
+        &self,
+        tenant_id: Option<&str>,
+        username: &str,
+        control: &UserLifecycleControl<'_>,
+    ) -> Result<(), AuthError> {
+        let id = UserId::from_parts(tenant_id, username);
+        let rollback = self.user_delete_rollback_snapshot(&id, tenant_id, username);
+        match self.delete_user_in_tenant_unaudited(tenant_id, username) {
+            Ok(()) => {
+                if let Err(err) = self.emit_user_lifecycle_allowed(
+                    control,
+                    EventKind::UserDelete,
+                    "user.delete",
+                    &id,
+                    user_control_fields(&id, rollback.as_ref().map(|r| r.0.role), None, false),
+                ) {
+                    if let Some((user, sessions)) = rollback {
+                        self.restore_deleted_user(&id, user, sessions);
+                    }
+                    return Err(err);
+                }
+                Ok(())
+            }
+            Err(err) => {
+                self.emit_user_lifecycle_outcome(
+                    control,
+                    if user_error_is_denied(&err) {
+                        Outcome::Denied
+                    } else {
+                        Outcome::Error
+                    },
+                    EventKind::UserDelete,
+                    "user.delete",
+                    &id,
+                    Some(err.to_string()),
+                    user_control_fields(&id, rollback.as_ref().map(|r| r.0.role), None, false),
+                );
+                Err(err)
+            }
+        }
+    }
+
     /// Change password (requires the old password). Defaults to
     /// platform tenant; use [`Self::change_password_in_tenant`] for
     /// scoped users.
@@ -1030,7 +1446,84 @@ impl AuthStore {
         self.change_password_in_tenant(None, username, old_password, new_password)
     }
 
+    pub fn change_password_with_control_events(
+        &self,
+        username: &str,
+        old_password: &str,
+        new_password: &str,
+        ctx: &ControlEventCtx<'_>,
+        ledger: &dyn ControlEventLedger,
+        config: ControlEventConfig,
+    ) -> Result<(), AuthError> {
+        self.change_password_in_tenant_with_control_events(
+            None,
+            username,
+            old_password,
+            new_password,
+            ctx,
+            ledger,
+            config,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn change_password_in_tenant(
+        &self,
+        tenant_id: Option<&str>,
+        username: &str,
+        old_password: &str,
+        new_password: &str,
+    ) -> Result<(), AuthError> {
+        if let Some(configured) = self.configured_control_events() {
+            let ctx = default_user_lifecycle_ctx();
+            let control = UserLifecycleControl {
+                ctx: &ctx,
+                ledger: configured.ledger.as_ref(),
+                config: configured.config,
+            };
+            self.change_password_in_tenant_controlled(
+                tenant_id,
+                username,
+                old_password,
+                new_password,
+                &control,
+            )
+        } else {
+            self.change_password_in_tenant_unaudited(
+                tenant_id,
+                username,
+                old_password,
+                new_password,
+            )
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn change_password_in_tenant_with_control_events(
+        &self,
+        tenant_id: Option<&str>,
+        username: &str,
+        old_password: &str,
+        new_password: &str,
+        ctx: &ControlEventCtx<'_>,
+        ledger: &dyn ControlEventLedger,
+        config: ControlEventConfig,
+    ) -> Result<(), AuthError> {
+        let control = UserLifecycleControl {
+            ctx,
+            ledger,
+            config,
+        };
+        self.change_password_in_tenant_controlled(
+            tenant_id,
+            username,
+            old_password,
+            new_password,
+            &control,
+        )
+    }
+
+    fn change_password_in_tenant_unaudited(
         &self,
         tenant_id: Option<&str>,
         username: &str,
@@ -1056,6 +1549,64 @@ impl AuthStore {
         Ok(())
     }
 
+    fn change_password_in_tenant_controlled(
+        &self,
+        tenant_id: Option<&str>,
+        username: &str,
+        old_password: &str,
+        new_password: &str,
+        control: &UserLifecycleControl<'_>,
+    ) -> Result<(), AuthError> {
+        let id = UserId::from_parts(tenant_id, username);
+        let previous = self.get_user_cloned(&id);
+        match self.change_password_in_tenant_unaudited(
+            tenant_id,
+            username,
+            old_password,
+            new_password,
+        ) {
+            Ok(()) => {
+                if let Err(err) = self.emit_user_lifecycle_allowed(
+                    control,
+                    EventKind::UserUpdate,
+                    "user.update",
+                    &id,
+                    user_control_fields(
+                        &id,
+                        previous.as_ref().map(|u| u.role),
+                        previous.as_ref().map(|u| u.enabled),
+                        true,
+                    ),
+                ) {
+                    self.restore_user_snapshot(&id, previous);
+                    return Err(err);
+                }
+                Ok(())
+            }
+            Err(err) => {
+                self.emit_user_lifecycle_outcome(
+                    control,
+                    if user_error_is_denied(&err) {
+                        Outcome::Denied
+                    } else {
+                        Outcome::Error
+                    },
+                    EventKind::UserUpdate,
+                    "user.update",
+                    &id,
+                    Some(err.to_string()),
+                    user_control_fields(
+                        &id,
+                        previous.as_ref().map(|u| u.role),
+                        previous.as_ref().map(|u| u.enabled),
+                        true,
+                    ),
+                );
+                Err(err)
+            }
+        }
+    }
+
     /// Change a user's role (admin-only operation). Defaults to platform
     /// tenant; use [`Self::change_role_in_tenant`] for scoped users.
     pub fn change_role(&self, username: &str, new_role: Role) -> Result<(), AuthError> {
@@ -1063,6 +1614,42 @@ impl AuthStore {
     }
 
     pub fn change_role_in_tenant(
+        &self,
+        tenant_id: Option<&str>,
+        username: &str,
+        new_role: Role,
+    ) -> Result<(), AuthError> {
+        if let Some(configured) = self.configured_control_events() {
+            let ctx = default_user_lifecycle_ctx();
+            let control = UserLifecycleControl {
+                ctx: &ctx,
+                ledger: configured.ledger.as_ref(),
+                config: configured.config,
+            };
+            self.change_role_in_tenant_controlled(tenant_id, username, new_role, &control)
+        } else {
+            self.change_role_in_tenant_unaudited(tenant_id, username, new_role)
+        }
+    }
+
+    pub fn change_role_in_tenant_with_control_events(
+        &self,
+        tenant_id: Option<&str>,
+        username: &str,
+        new_role: Role,
+        ctx: &ControlEventCtx<'_>,
+        ledger: &dyn ControlEventLedger,
+        config: ControlEventConfig,
+    ) -> Result<(), AuthError> {
+        let control = UserLifecycleControl {
+            ctx,
+            ledger,
+            config,
+        };
+        self.change_role_in_tenant_controlled(tenant_id, username, new_role, &control)
+    }
+
+    fn change_role_in_tenant_unaudited(
         &self,
         tenant_id: Option<&str>,
         username: &str,
@@ -1110,6 +1697,58 @@ impl AuthStore {
 
         self.persist_to_vault();
         Ok(())
+    }
+
+    fn change_role_in_tenant_controlled(
+        &self,
+        tenant_id: Option<&str>,
+        username: &str,
+        new_role: Role,
+        control: &UserLifecycleControl<'_>,
+    ) -> Result<(), AuthError> {
+        let id = UserId::from_parts(tenant_id, username);
+        let previous = self.get_user_cloned(&id);
+        match self.change_role_in_tenant_unaudited(tenant_id, username, new_role) {
+            Ok(()) => {
+                if let Err(err) = self.emit_user_lifecycle_allowed(
+                    control,
+                    EventKind::UserUpdate,
+                    "user.update",
+                    &id,
+                    user_control_fields(
+                        &id,
+                        Some(new_role),
+                        previous.as_ref().map(|u| u.enabled),
+                        false,
+                    ),
+                ) {
+                    self.restore_user_snapshot(&id, previous);
+                    return Err(err);
+                }
+                Ok(())
+            }
+            Err(err) => {
+                self.emit_user_lifecycle_outcome(
+                    control,
+                    if user_error_is_denied(&err) {
+                        Outcome::Denied
+                    } else {
+                        Outcome::Error
+                    },
+                    EventKind::UserUpdate,
+                    "user.update",
+                    &id,
+                    Some(err.to_string()),
+                    user_control_fields(
+                        &id,
+                        Some(new_role),
+                        previous.as_ref().map(|u| u.enabled),
+                        false,
+                    ),
+                );
+                Err(err)
+            }
+        }
     }
 
     // -----------------------------------------------------------------
@@ -1240,7 +1879,60 @@ impl AuthStore {
         self.create_api_key_in_tenant(None, username, name, role)
     }
 
+    pub fn create_api_key_with_control_events(
+        &self,
+        username: &str,
+        name: &str,
+        role: Role,
+        ctx: &ControlEventCtx<'_>,
+        ledger: &dyn ControlEventLedger,
+        config: ControlEventConfig,
+    ) -> Result<ApiKey, AuthError> {
+        self.create_api_key_in_tenant_with_control_events(
+            None, username, name, role, ctx, ledger, config,
+        )
+    }
+
     pub fn create_api_key_in_tenant(
+        &self,
+        tenant_id: Option<&str>,
+        username: &str,
+        name: &str,
+        role: Role,
+    ) -> Result<ApiKey, AuthError> {
+        if let Some(configured) = self.configured_control_events() {
+            let ctx = default_user_lifecycle_ctx();
+            let control = UserLifecycleControl {
+                ctx: &ctx,
+                ledger: configured.ledger.as_ref(),
+                config: configured.config,
+            };
+            self.create_api_key_in_tenant_controlled(tenant_id, username, name, role, &control)
+        } else {
+            self.create_api_key_in_tenant_unaudited(tenant_id, username, name, role)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_api_key_in_tenant_with_control_events(
+        &self,
+        tenant_id: Option<&str>,
+        username: &str,
+        name: &str,
+        role: Role,
+        ctx: &ControlEventCtx<'_>,
+        ledger: &dyn ControlEventLedger,
+        config: ControlEventConfig,
+    ) -> Result<ApiKey, AuthError> {
+        let control = UserLifecycleControl {
+            ctx,
+            ledger,
+            config,
+        };
+        self.create_api_key_in_tenant_controlled(tenant_id, username, name, role, &control)
+    }
+
+    fn create_api_key_in_tenant_unaudited(
         &self,
         tenant_id: Option<&str>,
         username: &str,
@@ -1281,8 +1973,80 @@ impl AuthStore {
         Ok(api_key)
     }
 
+    fn create_api_key_in_tenant_controlled(
+        &self,
+        tenant_id: Option<&str>,
+        username: &str,
+        name: &str,
+        role: Role,
+        control: &UserLifecycleControl<'_>,
+    ) -> Result<ApiKey, AuthError> {
+        let id = UserId::from_parts(tenant_id, username);
+        match self.create_api_key_in_tenant_unaudited(tenant_id, username, name, role) {
+            Ok(api_key) => {
+                let key_id = api_key_id(&api_key.key);
+                if let Err(err) = self.emit_api_key_allowed(
+                    control,
+                    EventKind::ApiKeyCreate,
+                    "apikey.create",
+                    &key_id,
+                    api_key_control_fields(&id, role, &key_id),
+                ) {
+                    self.rollback_create_api_key(&id, &api_key.key);
+                    return Err(err);
+                }
+                Ok(api_key)
+            }
+            Err(err) => {
+                self.emit_user_lifecycle_outcome(
+                    control,
+                    if user_error_is_denied(&err) {
+                        Outcome::Denied
+                    } else {
+                        Outcome::Error
+                    },
+                    EventKind::ApiKeyCreate,
+                    "apikey.create",
+                    &id,
+                    Some(err.to_string()),
+                    user_control_fields(&id, Some(role), None, false),
+                );
+                Err(err)
+            }
+        }
+    }
+
     /// Revoke (delete) an API key.
     pub fn revoke_api_key(&self, key: &str) -> Result<(), AuthError> {
+        if let Some(configured) = self.configured_control_events() {
+            let ctx = default_user_lifecycle_ctx();
+            let control = UserLifecycleControl {
+                ctx: &ctx,
+                ledger: configured.ledger.as_ref(),
+                config: configured.config,
+            };
+            self.revoke_api_key_controlled(key, &control)
+        } else {
+            self.revoke_api_key_unaudited(key)
+        }
+    }
+
+    pub fn revoke_api_key_with_control_events(
+        &self,
+        key: &str,
+        ctx: &ControlEventCtx<'_>,
+        ledger: &dyn ControlEventLedger,
+        config: ControlEventConfig,
+    ) -> Result<(), AuthError> {
+        let control = UserLifecycleControl {
+            ctx,
+            ledger,
+            config,
+        };
+        self.revoke_api_key_controlled(key, &control)
+    }
+
+    fn revoke_api_key_unaudited(&self, key: &str) -> Result<(), AuthError> {
         let mut users = self.users.write().map_err(lock_err)?;
 
         // Find which user owns this key (look up by the api_key_index
@@ -1319,6 +2083,53 @@ impl AuthStore {
 
         self.persist_to_vault();
         Ok(())
+    }
+
+    fn revoke_api_key_controlled(
+        &self,
+        key: &str,
+        control: &UserLifecycleControl<'_>,
+    ) -> Result<(), AuthError> {
+        let key_id = api_key_id(key);
+        let rollback = self.api_key_rollback_snapshot(key);
+        let id = rollback
+            .as_ref()
+            .map(|r| r.0.clone())
+            .unwrap_or_else(|| UserId::from_parts(None, ""));
+        let role = rollback.as_ref().map(|r| r.1.role).unwrap_or(Role::Read);
+        match self.revoke_api_key_unaudited(key) {
+            Ok(()) => {
+                if let Err(err) = self.emit_api_key_allowed(
+                    control,
+                    EventKind::ApiKeyRevoke,
+                    "apikey.revoke",
+                    &key_id,
+                    api_key_control_fields(&id, role, &key_id),
+                ) {
+                    if let Some((owner, api_key)) = rollback {
+                        self.restore_api_key(&owner, api_key);
+                    }
+                    return Err(err);
+                }
+                Ok(())
+            }
+            Err(err) => {
+                self.emit_user_lifecycle_outcome(
+                    control,
+                    if user_error_is_denied(&err) {
+                        Outcome::Denied
+                    } else {
+                        Outcome::Error
+                    },
+                    EventKind::ApiKeyRevoke,
+                    "apikey.revoke",
+                    &id,
+                    Some(err.to_string()),
+                    api_key_control_fields(&id, role, &key_id),
+                );
+                Err(err)
+            }
+        }
     }
 
     // -----------------------------------------------------------------
@@ -1704,6 +2515,47 @@ impl AuthStore {
 
     /// Toggle `User.enabled` without rotating credentials.
     pub fn set_user_enabled(&self, uid: &UserId, enabled: bool) -> Result<(), AuthError> {
+        if let Some(configured) = self.configured_control_events() {
+            let ctx = default_user_lifecycle_ctx();
+            let control = UserLifecycleControl {
+                ctx: &ctx,
+                ledger: configured.ledger.as_ref(),
+                config: configured.config,
+            };
+            self.set_user_enabled_controlled(uid, enabled, &control)
+        } else {
+            self.set_user_enabled_unaudited(uid, enabled)
+        }
+    }
+
+    pub fn disable_user(
+        &self,
+        username: &str,
+        ctx: &ControlEventCtx<'_>,
+        ledger: &dyn ControlEventLedger,
+        config: ControlEventConfig,
+    ) -> Result<(), AuthError> {
+        self.disable_user_in_tenant(None, username, ctx, ledger, config)
+    }
+
+    pub fn disable_user_in_tenant(
+        &self,
+        tenant_id: Option<&str>,
+        username: &str,
+        ctx: &ControlEventCtx<'_>,
+        ledger: &dyn ControlEventLedger,
+        config: ControlEventConfig,
+    ) -> Result<(), AuthError> {
+        let uid = UserId::from_parts(tenant_id, username);
+        let control = UserLifecycleControl {
+            ctx,
+            ledger,
+            config,
+        };
+        self.set_user_enabled_controlled(&uid, false, &control)
+    }
+
+    fn set_user_enabled_unaudited(&self, uid: &UserId, enabled: bool) -> Result<(), AuthError> {
         let mut users = self.users.write().map_err(lock_err)?;
         let user = users
             .get_mut(uid)
@@ -1714,6 +2566,292 @@ impl AuthStore {
         drop(users);
         self.persist_to_vault();
         Ok(())
+    }
+
+    fn set_user_enabled_controlled(
+        &self,
+        uid: &UserId,
+        enabled: bool,
+        control: &UserLifecycleControl<'_>,
+    ) -> Result<(), AuthError> {
+        let previous = self.get_user_cloned(uid);
+        let kind = if enabled {
+            EventKind::UserUpdate
+        } else {
+            EventKind::UserDisable
+        };
+        let action = if enabled {
+            "user.update"
+        } else {
+            "user.disable"
+        };
+        match self.set_user_enabled_unaudited(uid, enabled) {
+            Ok(()) => {
+                if let Err(err) = self.emit_user_lifecycle_allowed(
+                    control,
+                    kind,
+                    action,
+                    uid,
+                    user_control_fields(
+                        uid,
+                        previous.as_ref().map(|u| u.role),
+                        Some(enabled),
+                        false,
+                    ),
+                ) {
+                    self.restore_user_snapshot(uid, previous);
+                    return Err(err);
+                }
+                Ok(())
+            }
+            Err(err) => {
+                self.emit_user_lifecycle_outcome(
+                    control,
+                    if user_error_is_denied(&err) {
+                        Outcome::Denied
+                    } else {
+                        Outcome::Error
+                    },
+                    kind,
+                    action,
+                    uid,
+                    Some(err.to_string()),
+                    user_control_fields(
+                        uid,
+                        previous.as_ref().map(|u| u.role),
+                        Some(enabled),
+                        false,
+                    ),
+                );
+                Err(err)
+            }
+        }
+    }
+
+    fn emit_user_lifecycle_allowed(
+        &self,
+        control: &UserLifecycleControl<'_>,
+        kind: EventKind,
+        action: &'static str,
+        id: &UserId,
+        fields: HashMap<String, Sensitivity>,
+    ) -> Result<(), AuthError> {
+        self.emit_user_lifecycle_event(control, Outcome::Allowed, kind, action, id, None, fields)
+    }
+
+    fn emit_api_key_allowed(
+        &self,
+        control: &UserLifecycleControl<'_>,
+        kind: EventKind,
+        action: &'static str,
+        api_key_id: &str,
+        fields: HashMap<String, Sensitivity>,
+    ) -> Result<(), AuthError> {
+        self.emit_control_event(
+            control,
+            Outcome::Allowed,
+            kind,
+            action,
+            Some(api_key_resource(api_key_id)),
+            None,
+            fields,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_user_lifecycle_outcome(
+        &self,
+        control: &UserLifecycleControl<'_>,
+        outcome: Outcome,
+        kind: EventKind,
+        action: &'static str,
+        id: &UserId,
+        reason: Option<String>,
+        fields: HashMap<String, Sensitivity>,
+    ) {
+        let _ = self.emit_user_lifecycle_event(control, outcome, kind, action, id, reason, fields);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_user_lifecycle_event(
+        &self,
+        control: &UserLifecycleControl<'_>,
+        outcome: Outcome,
+        kind: EventKind,
+        action: &'static str,
+        id: &UserId,
+        reason: Option<String>,
+        fields: HashMap<String, Sensitivity>,
+    ) -> Result<(), AuthError> {
+        self.emit_control_event(
+            control,
+            outcome,
+            kind,
+            action,
+            Some(user_resource(id)),
+            reason,
+            fields,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_control_event(
+        &self,
+        control: &UserLifecycleControl<'_>,
+        outcome: Outcome,
+        kind: EventKind,
+        action: &'static str,
+        resource: Option<String>,
+        reason: Option<String>,
+        fields: HashMap<String, Sensitivity>,
+    ) -> Result<(), AuthError> {
+        let event = ControlEvent {
+            kind,
+            outcome,
+            action: Cow::Borrowed(action),
+            resource,
+            reason,
+            matched_policy_id: None,
+            fields,
+        };
+        match control.ledger.emit(control.ctx, event) {
+            Ok(_) => Ok(()),
+            Err(err) if control.config.require_persistence() => {
+                Err(AuthError::Internal(err.to_string()))
+            }
+            Err(_) => Ok(()),
+        }
+    }
+
+    fn rollback_create_user(&self, id: &UserId) {
+        let removed = self
+            .users
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
+        if let Some(user) = removed {
+            self.remove_api_key_index_entries(&user);
+        }
+        self.persist_to_vault();
+    }
+
+    fn rollback_bootstrap(&self, id: &UserId) {
+        self.bootstrapped.store(false, Ordering::Release);
+        self.rollback_create_user(id);
+    }
+
+    fn restore_user_snapshot(&self, id: &UserId, previous: Option<User>) {
+        match previous {
+            Some(user) => {
+                self.users
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(id.clone(), user.clone());
+                self.index_user_api_keys(id, &user);
+            }
+            None => {
+                self.rollback_create_user(id);
+                return;
+            }
+        }
+        self.persist_to_vault();
+    }
+
+    fn user_delete_rollback_snapshot(
+        &self,
+        id: &UserId,
+        tenant_id: Option<&str>,
+        username: &str,
+    ) -> Option<(User, Vec<(String, Session)>)> {
+        let user = self.get_user_cloned(id)?;
+        let sessions = self
+            .sessions
+            .read()
+            .map(|sessions| {
+                sessions
+                    .iter()
+                    .filter(|(_, session)| {
+                        session.username == username && session.tenant_id.as_deref() == tenant_id
+                    })
+                    .map(|(token, session)| (token.clone(), session.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some((user, sessions))
+    }
+
+    fn restore_deleted_user(&self, id: &UserId, user: User, sessions: Vec<(String, Session)>) {
+        self.users
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.clone(), user.clone());
+        self.index_user_api_keys(id, &user);
+        if !sessions.is_empty() {
+            let mut guard = self.sessions.write().unwrap_or_else(|e| e.into_inner());
+            for (token, session) in sessions {
+                guard.insert(token, session);
+            }
+        }
+        self.persist_to_vault();
+    }
+
+    fn rollback_create_api_key(&self, id: &UserId, key: &str) {
+        if let Ok(mut users) = self.users.write() {
+            if let Some(user) = users.get_mut(id) {
+                user.api_keys.retain(|api_key| api_key.key != key);
+                user.updated_at = now_ms();
+            }
+        }
+        if let Ok(mut idx) = self.api_key_index.write() {
+            idx.remove(key);
+        }
+        self.persist_to_vault();
+    }
+
+    fn api_key_rollback_snapshot(&self, key: &str) -> Option<(UserId, ApiKey)> {
+        let users = self.users.read().ok()?;
+        users.iter().find_map(|(id, user)| {
+            user.api_keys
+                .iter()
+                .find(|api_key| api_key.key == key)
+                .cloned()
+                .map(|api_key| (id.clone(), api_key))
+        })
+    }
+
+    fn restore_api_key(&self, id: &UserId, api_key: ApiKey) {
+        if let Ok(mut users) = self.users.write() {
+            if let Some(user) = users.get_mut(id) {
+                if !user
+                    .api_keys
+                    .iter()
+                    .any(|candidate| candidate.key == api_key.key)
+                {
+                    user.api_keys.push(api_key.clone());
+                    user.updated_at = now_ms();
+                }
+            }
+        }
+        if let Ok(mut idx) = self.api_key_index.write() {
+            idx.insert(api_key.key.clone(), (id.clone(), api_key.role));
+        }
+        self.persist_to_vault();
+    }
+
+    fn remove_api_key_index_entries(&self, user: &User) {
+        if let Ok(mut idx) = self.api_key_index.write() {
+            for api_key in &user.api_keys {
+                idx.remove(&api_key.key);
+            }
+        }
+    }
+
+    fn index_user_api_keys(&self, id: &UserId, user: &User) {
+        if let Ok(mut idx) = self.api_key_index.write() {
+            for api_key in &user.api_keys {
+                idx.insert(api_key.key.clone(), (id.clone(), api_key.role));
+            }
+        }
     }
 
     // -----------------------------------------------------------------
