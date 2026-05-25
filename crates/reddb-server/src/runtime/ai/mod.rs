@@ -22,6 +22,7 @@ pub mod dedup_cache;
 pub mod determinism_decider;
 pub mod explain_plan_builder;
 pub mod grpc_ask_message;
+pub mod local_embedding;
 pub mod mcp_ask_tool;
 pub mod metrics;
 pub mod ner;
