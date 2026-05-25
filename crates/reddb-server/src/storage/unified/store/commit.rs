@@ -566,6 +566,26 @@ impl StoreCommitCoordinator {
         Ok(())
     }
 
+    /// Encode + enqueue a single, non-batched [`WalRecord`] (issue
+    /// #693). Honours the same Strict / Grouped / Async branching as
+    /// [`Self::append_actions`] so durability semantics are uniform
+    /// across record kinds.
+    pub(crate) fn append_single_record(&self, record: WalRecord) -> io::Result<()> {
+        let blob = record.encode();
+        let wal_bytes = blob.len() as u64;
+        if matches!(self.mode, DurabilityMode::Strict) {
+            {
+                let mut wal = self.wal.lock();
+                wal.append(&record)?;
+            }
+            self.force_sync()?;
+            return Ok(());
+        }
+        let commit_lsn = self.queue.enqueue(blob);
+        self.wait_until_durable(commit_lsn, wal_bytes)?;
+        Ok(())
+    }
+
     pub(crate) fn force_sync(&self) -> io::Result<()> {
         {
             let mut wal = self.wal.lock();
@@ -869,6 +889,29 @@ impl UnifiedStore {
 
     pub(crate) fn wal_path_for_db(path: &Path) -> PathBuf {
         path.with_extension("rdb-uwal")
+    }
+
+    /// Emit a [`WalRecord::VectorInsert`] for a `vector.turbo`
+    /// collection (issue #693). Returns `Ok(())` when no commit
+    /// coordinator is configured (in-memory mode) so callers don't
+    /// have to special-case the missing WAL — the in-memory index
+    /// update remains durable enough for in-memory runtimes by
+    /// construction.
+    pub(crate) fn append_vector_insert_record(
+        &self,
+        collection: &str,
+        entity_id: u64,
+        vector: &[f32],
+    ) -> std::io::Result<()> {
+        let Some(commit) = &self.commit else {
+            return Ok(());
+        };
+        let record = WalRecord::VectorInsert {
+            collection: collection.to_string(),
+            entity_id,
+            vector: vector.to_vec(),
+        };
+        commit.append_single_record(record)
     }
 
     pub(crate) fn finish_paged_write(

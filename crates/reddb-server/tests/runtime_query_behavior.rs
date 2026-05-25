@@ -1164,10 +1164,15 @@ fn vector_turbo_collection_searches_with_inner_product_and_cosine() {
     rt.execute_query("CREATE COLLECTION turbo_ip KIND vector.turbo DIM 2 METRIC IP")
         .expect("create vector.turbo collection");
 
+    // Distinct enough angles to survive TurboQuant's 4-bit
+    // quantization: "unit" hugs the X-axis (cosine ≈ 1, small IP),
+    // "wide" sits at 45° with a much larger norm (cosine ≈ 0.707,
+    // big IP), "orthogonal" is on the Y-axis. Under IP the longer
+    // 45° vector wins; under cosine the X-aligned vector wins.
     for (name, x, y) in [
-        ("wide", 3.0, 0.1),
+        ("wide", 3.0, 3.0),
         ("unit", 1.0, 0.0),
-        ("diagonal", 0.7, 0.7),
+        ("orthogonal", 0.0, 1.0),
     ] {
         rt.execute_query(&format!(
             "INSERT INTO turbo_ip VECTOR (embedding, content) VALUES ([{x}, {y}], '{name}')"
@@ -1223,6 +1228,88 @@ fn vector_turbo_collection_reopens_without_tv_snapshot() {
 
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(path.with_extension("rdb-uwal"));
+}
+
+/// Acceptance check for issue #693 — `vector.turbo` SEARCH must
+/// agree with the scalar oracle (`TurboQuantIndex::search` is the
+/// reference implementation; the runtime SEARCH path goes through
+/// the same scorer via `select_scorer()`). We insert N vectors,
+/// run a query through the SQL surface, recompute the expected
+/// top-k ranking through `TurboQuantIndex` directly with the same
+/// codec seed, and assert order + score agreement.
+#[test]
+fn vector_turbo_search_matches_scalar_oracle_top_k() {
+    use reddb_server::runtime::vector_turbo_kind::TURBO_CODEC_SEED;
+    use reddb_server::storage::engine::distance::DistanceMetric;
+    use reddb_server::storage::engine::turboquant::index::TurboQuantIndex;
+    use reddb_server::storage::EntityId;
+
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+    rt.execute_query("CREATE COLLECTION turbo_oracle KIND vector.turbo DIM 8 METRIC cosine")
+        .expect("create vector.turbo collection");
+
+    // 32 vectors with deliberately distinct directions so the
+    // 4-bit quantization preserves the top-k ranking against the
+    // FP32 oracle. Each vector lives mostly along one axis with a
+    // small jitter on a second axis — that's plenty of angular
+    // separation for the 8-dim codec.
+    let mut dataset: Vec<Vec<f32>> = Vec::with_capacity(32);
+    for i in 0..32u32 {
+        let axis = (i as usize) % 8;
+        let off = ((i / 8) as f32) * 0.05;
+        let mut v = vec![off; 8];
+        v[axis] = 1.0 + (i as f32) * 0.001;
+        dataset.push(v);
+    }
+    for (i, vector) in dataset.iter().enumerate() {
+        let lit = vector
+            .iter()
+            .map(|v| format!("{v}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        rt.execute_query(&format!(
+            "INSERT INTO turbo_oracle VECTOR (embedding, content) VALUES ([{lit}], 'v{i}')"
+        ))
+        .unwrap_or_else(|err| panic!("insert v{i}: {err:?}"));
+    }
+
+    // Query aligned with axis 3 — vectors 3, 11, 19, 27 are the
+    // axis-3 cohort and should occupy the top 4 by cosine.
+    let query_vec = [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+    let query_lit = query_vec
+        .iter()
+        .map(|v| format!("{v}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let runtime_result = rt
+        .execute_query(&format!(
+            "VECTOR SEARCH turbo_oracle SIMILAR TO [{query_lit}] LIMIT 4"
+        ))
+        .expect("turbo search");
+    assert_eq!(runtime_result.result.len(), 4);
+
+    // Rebuild the same index through TurboQuantIndex with the
+    // canonical codec seed and compare top-k ordering. This is the
+    // scalar-oracle assertion: same dataset → same ordering, no
+    // matter which scorer kernel `select_scorer()` picks at runtime.
+    let mut oracle = TurboQuantIndex::new(8, TURBO_CODEC_SEED);
+    for (i, vector) in dataset.iter().enumerate() {
+        oracle.insert(EntityId::new((i + 1) as u64), vector.clone());
+    }
+    let oracle_hits = oracle.search(&query_vec, 4, DistanceMetric::Cosine);
+    assert_eq!(oracle_hits.len(), 4);
+
+    let runtime_ranks: Vec<String> = (0..4)
+        .map(|row| text_at(&runtime_result, row, "content").to_string())
+        .collect();
+    let oracle_ranks: Vec<String> = oracle_hits
+        .iter()
+        .map(|hit| format!("v{}", hit.entity_id.raw() - 1))
+        .collect();
+    assert_eq!(
+        runtime_ranks, oracle_ranks,
+        "runtime SEARCH ranking must match the scalar TurboQuant oracle (issue #693)"
+    );
 }
 
 #[test]
