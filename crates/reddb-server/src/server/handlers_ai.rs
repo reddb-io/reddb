@@ -1727,7 +1727,49 @@ const AI_MODEL_TASK_EMBEDDING: &str = "embedding";
 const AI_MODEL_ENGINE_CANDLE: &str = "candle";
 const AI_MODEL_PROVIDER_LOCAL: &str = "local";
 const AI_MODEL_STATUS_REGISTERED: &str = "registered";
-const AI_MODEL_PULL_POLICIES: &[&str] = &["on_demand", "eager", "manual"];
+/// Canonical pull policy names. The operator-facing contract uses
+/// `never` / `if_missing` / `always`; the legacy alternative names
+/// (`manual` / `on_demand` / `eager`) are accepted by `from_payload`
+/// and normalised through [`normalize_pull_policy`] before storage.
+pub(crate) const AI_MODEL_PULL_POLICY_NEVER: &str = "never";
+pub(crate) const AI_MODEL_PULL_POLICY_IF_MISSING: &str = "if_missing";
+pub(crate) const AI_MODEL_PULL_POLICY_ALWAYS: &str = "always";
+const AI_MODEL_PULL_POLICIES: &[&str] = &[
+    AI_MODEL_PULL_POLICY_NEVER,
+    AI_MODEL_PULL_POLICY_IF_MISSING,
+    AI_MODEL_PULL_POLICY_ALWAYS,
+];
+/// Fields that must never be accepted at the model-registration boundary
+/// because they would lead to plaintext secrets being persisted into the
+/// model registry. Callers must use `credential_alias` plus the vault
+/// path conventions instead.
+const AI_MODEL_REJECTED_PLAINTEXT_FIELDS: &[&str] = &[
+    "api_key",
+    "apikey",
+    "api_token",
+    "token",
+    "auth_token",
+    "bearer_token",
+    "password",
+    "secret",
+    "hf_token",
+    "huggingface_token",
+    "huggingface_api_key",
+];
+
+/// Map a raw `pull_policy` string (canonical name or legacy alias) to
+/// its canonical name. Returns `None` if the input is not a recognised
+/// policy. Matching is case-insensitive.
+pub(crate) fn normalize_pull_policy(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "never" | "manual" => Some(AI_MODEL_PULL_POLICY_NEVER),
+        "if_missing" | "ifmissing" | "on_demand" | "ondemand" => {
+            Some(AI_MODEL_PULL_POLICY_IF_MISSING)
+        }
+        "always" | "eager" => Some(AI_MODEL_PULL_POLICY_ALWAYS),
+        _ => None,
+    }
+}
 const AI_MODEL_TRUST_DISABLED: &str = "disabled";
 const AI_MODEL_TRUST_ALLOW_REMOTE_CODE: &str = "allow_remote_code";
 const AI_MODEL_TRUST_POLICIES: &[&str] = &["disabled", "allow_remote_code"];
@@ -1754,10 +1796,27 @@ struct LocalAiModelSpec {
     dimensions: u32,
     pull_policy: String,
     trust_policy: String,
+    /// Vault alias used to resolve provider credentials for the pull
+    /// (currently HuggingFace). Resolves via `red.secret.ai.{provider}.{alias}`
+    /// per the shared `resolve_api_key` contract. Plaintext secrets are
+    /// never accepted at this boundary.
+    credential_alias: Option<String>,
 }
 
 impl LocalAiModelSpec {
     fn from_payload(payload: &JsonValue) -> Result<Self, String> {
+        // Reject any plaintext-credential field at this boundary. The
+        // registry is read by query-time code and must not carry secrets.
+        for field in AI_MODEL_REJECTED_PLAINTEXT_FIELDS {
+            if payload.get(field).is_some() {
+                return Err(format!(
+                    "field '{field}' is rejected: registered models must not store plaintext \
+                     provider credentials. Use 'credential_alias' and store the secret in the \
+                     vault at 'red.secret.ai.{{provider}}.{{alias}}' instead."
+                ));
+            }
+        }
+
         let name = json_string_field(payload, "name")
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -1853,15 +1912,17 @@ impl LocalAiModelSpec {
             ));
         }
 
-        let pull_policy = json_string_field(payload, "pull_policy")
-            .map(|s| s.trim().to_ascii_lowercase())
+        let raw_pull_policy = json_string_field(payload, "pull_policy")
+            .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "on_demand".to_string());
-        if !AI_MODEL_PULL_POLICIES.contains(&pull_policy.as_str()) {
-            return Err(format!(
-                "field 'pull_policy' '{pull_policy}' is invalid; expected one of {AI_MODEL_PULL_POLICIES:?}"
-            ));
-        }
+            .unwrap_or_else(|| AI_MODEL_PULL_POLICY_IF_MISSING.to_string());
+        let pull_policy = normalize_pull_policy(&raw_pull_policy)
+            .ok_or_else(|| {
+                format!(
+                    "field 'pull_policy' '{raw_pull_policy}' is invalid; expected one of {AI_MODEL_PULL_POLICIES:?}"
+                )
+            })?
+            .to_string();
 
         let trust_policy = json_string_field(payload, "trust_policy")
             .map(|s| s.trim().to_ascii_lowercase())
@@ -1886,6 +1947,22 @@ impl LocalAiModelSpec {
             }
         }
 
+        let credential_alias = json_string_field(payload, "credential_alias")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(alias) = credential_alias.as_deref() {
+            if alias.len() > 128
+                || !alias
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err(format!(
+                    "field 'credential_alias' '{alias}' is invalid; only ASCII alphanumerics, \
+                     '_' and '-' are allowed (max 128 chars)"
+                ));
+            }
+        }
+
         Ok(Self {
             name,
             provider,
@@ -1896,6 +1973,7 @@ impl LocalAiModelSpec {
             dimensions,
             pull_policy,
             trust_policy,
+            credential_alias,
         })
     }
 
@@ -1925,6 +2003,12 @@ impl LocalAiModelSpec {
             "trust_policy".to_string(),
             JsonValue::String(self.trust_policy.clone()),
         );
+        if let Some(alias) = &self.credential_alias {
+            obj.insert(
+                "credential_alias".to_string(),
+                JsonValue::String(alias.clone()),
+            );
+        }
         obj.insert("status".to_string(), JsonValue::String(status.to_string()));
         obj.insert(
             "created_at_unix_ms".to_string(),
@@ -2756,6 +2840,380 @@ mod tests {
         let err =
             crate::ai::grpc_embeddings(server.runtime(), &payload).expect_err("should not succeed");
         assert!(matches!(err, crate::RedDBError::FeatureNotEnabled(_)));
+        let _ = std::fs::remove_file(path);
+    }
+
+    // ====================================================================
+    // #683 — credential resolution + pull-policy enforcement
+    // ====================================================================
+
+    fn register_local_model_with(
+        server: &RedDBServer,
+        name: &str,
+        dimensions: u32,
+        extra_fields: &str,
+    ) -> HttpResponse {
+        let body = format!(
+            r#"{{
+                "name": "{name}",
+                "provider": "local",
+                "source": "sentence-transformers/all-MiniLM-L6-v2",
+                "task": "embedding",
+                "revision": "main",
+                "engine": "candle",
+                "dimensions": {dimensions}{extra_fields}
+            }}"#
+        );
+        server.handle_ai_model_register(body.into_bytes())
+    }
+
+    #[test]
+    fn registration_rejects_plaintext_api_key_field() {
+        let (server, path) = make_server("reg_no_plain");
+        let resp = register_local_model_with(&server, "mini", 4, r#", "api_key":"sk-leak""#);
+        assert_eq!(resp.status, 400, "must reject api_key in body");
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(
+            body.contains("api_key") && body.contains("plaintext"),
+            "unhelpful error: {body}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn registration_rejects_huggingface_token_field() {
+        let (server, path) = make_server("reg_no_hf_token");
+        let resp = register_local_model_with(&server, "mini", 4, r#", "hf_token":"hf_leak""#);
+        assert_eq!(resp.status, 400);
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("hf_token"), "unhelpful error: {body}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn registration_persists_credential_alias_not_secret() {
+        let (server, path) = make_server("reg_with_alias");
+        let resp =
+            register_local_model_with(&server, "mini", 4, r#", "credential_alias":"hf_prod""#);
+        assert_eq!(
+            resp.status,
+            201,
+            "register failed: {}",
+            String::from_utf8_lossy(&resp.body)
+        );
+        let key = format!("red.config.ai.models.mini");
+        let (value, _) = server
+            .entity_use_cases()
+            .get_kv(RED_CONFIG_COLLECTION, &key)
+            .expect("read")
+            .expect("registered");
+        let Value::Text(raw) = value else {
+            panic!("not text");
+        };
+        assert!(
+            raw.contains("\"credential_alias\":\"hf_prod\""),
+            "alias not stored: {raw}"
+        );
+        // The persisted entry must never contain any of the rejected
+        // plaintext credential field names.
+        for forbidden in &[
+            "api_key",
+            "hf_token",
+            "huggingface_token",
+            "secret",
+            "password",
+        ] {
+            assert!(
+                !raw.contains(&format!("\"{forbidden}\":")),
+                "plaintext credential leaked into model entry as '{forbidden}': {raw}"
+            );
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn registration_accepts_canonical_and_legacy_pull_policies() {
+        let (server, path) = make_server("reg_policies");
+        // Canonical names.
+        for canonical in &["never", "if_missing", "always"] {
+            let extra = format!(r#", "pull_policy":"{canonical}""#);
+            let body = format!(
+                r#"{{"name":"m_{canonical}","provider":"local","source":"s/r","task":"embedding","revision":"main","engine":"candle","dimensions":4{extra}}}"#
+            );
+            let resp = server.handle_ai_model_register(body.into_bytes());
+            assert_eq!(
+                resp.status,
+                201,
+                "canonical '{canonical}' rejected: {}",
+                String::from_utf8_lossy(&resp.body)
+            );
+        }
+        // Legacy aliases.
+        for (legacy, canonical) in &[
+            ("manual", "never"),
+            ("on_demand", "if_missing"),
+            ("eager", "always"),
+        ] {
+            let extra = format!(r#", "pull_policy":"{legacy}""#);
+            let body = format!(
+                r#"{{"name":"m_{legacy}","provider":"local","source":"s/r","task":"embedding","revision":"main","engine":"candle","dimensions":4{extra}}}"#
+            );
+            let resp = server.handle_ai_model_register(body.into_bytes());
+            assert_eq!(resp.status, 201, "legacy '{legacy}' rejected");
+            let parsed = parse_json_body(&resp.body);
+            let stored = parsed
+                .get("model")
+                .and_then(|m| m.get("pull_policy"))
+                .and_then(JsonValue::as_str)
+                .unwrap_or("");
+            assert_eq!(
+                stored, *canonical,
+                "legacy '{legacy}' must normalise to '{canonical}', got '{stored}'"
+            );
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn registration_rejects_unknown_pull_policy() {
+        let (server, path) = make_server("reg_bad_policy");
+        let resp = register_local_model_with(&server, "mini", 4, r#", "pull_policy":"sometimes""#);
+        assert_eq!(resp.status, 400);
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("sometimes"), "expected echo: {body}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn stamp_policy_on_entry(server: &RedDBServer, name: &str, policy: &str) {
+        let key = format!("red.config.ai.models.{name}");
+        let (value, _) = server
+            .entity_use_cases()
+            .get_kv(RED_CONFIG_COLLECTION, &key)
+            .expect("read")
+            .expect("registered");
+        let Value::Text(raw) = value else {
+            panic!("not text")
+        };
+        let mut parsed: JsonValue = crate::json::parse_json(&raw).expect("parse").into();
+        if let JsonValue::Object(ref mut obj) = parsed {
+            obj.insert(
+                "pull_policy".to_string(),
+                JsonValue::String(policy.to_string()),
+            );
+        }
+        let encoded = crate::json::to_string(&parsed).expect("re-encode");
+        let _ = server
+            .entity_use_cases()
+            .delete_kv(RED_CONFIG_COLLECTION, &key);
+        server
+            .entity_use_cases()
+            .create_kv(CreateKvInput {
+                collection: RED_CONFIG_COLLECTION.to_string(),
+                key,
+                value: Value::text(encoded),
+                metadata: Vec::new(),
+            })
+            .expect("stamp policy");
+    }
+
+    #[test]
+    fn embed_local_policy_never_returns_clear_missing_artifact_error() {
+        let _g = install_fake_backend();
+        let (server, path) = make_server("policy_never");
+        register_local_model(&server, "mini", 4);
+        stamp_policy_on_entry(&server, "mini", "never");
+        // Skip install stamp — model is registered but not installed.
+        let body = br#"{"provider":"local","model":"mini","inputs":["x"]}"#.to_vec();
+        let response = server.handle_ai_embeddings(body);
+        assert_eq!(response.status, 404, "expected 404 missing-artifact");
+        let payload = parse_json_body(&response.body);
+        let err = payload
+            .get("error")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("");
+        assert!(
+            err.contains("pull_policy='never'") && err.contains("forbids"),
+            "policy not surfaced: {err}"
+        );
+        // The error must point the operator at the explicit pull
+        // endpoint and must NOT mention any remote-provider fallback.
+        assert!(
+            err.contains("POST /ai/models/mini/pull"),
+            "no remediation: {err}"
+        );
+        assert!(
+            !err.to_ascii_lowercase().contains("falling back")
+                && !err.to_ascii_lowercase().contains("openai")
+                && !err.to_ascii_lowercase().contains("huggingface"),
+            "silent remote fallback hinted in error: {err}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn embed_local_policy_if_missing_returns_distinct_error() {
+        let _g = install_fake_backend();
+        let (server, path) = make_server("policy_if_missing");
+        register_local_model(&server, "mini", 4);
+        stamp_policy_on_entry(&server, "mini", "if_missing");
+        let body = br#"{"provider":"local","model":"mini","inputs":["x"]}"#.to_vec();
+        let response = server.handle_ai_embeddings(body);
+        assert_eq!(response.status, 404);
+        let payload = parse_json_body(&response.body);
+        let err = payload
+            .get("error")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("");
+        assert!(
+            err.contains("pull_policy='if_missing'") && err.contains("POST /ai/models/mini/pull"),
+            "policy not surfaced or remediation missing: {err}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn embed_local_policy_always_surfaces_refresh_intent_in_error() {
+        let _g = install_fake_backend();
+        let (server, path) = make_server("policy_always");
+        register_local_model(&server, "mini", 4);
+        stamp_policy_on_entry(&server, "mini", "always");
+        let body = br#"{"provider":"local","model":"mini","inputs":["x"]}"#.to_vec();
+        let response = server.handle_ai_embeddings(body);
+        assert_eq!(response.status, 404);
+        let payload = parse_json_body(&response.body);
+        let err = payload
+            .get("error")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("");
+        assert!(
+            err.contains("pull_policy='always'") && err.contains("refresh"),
+            "policy not surfaced: {err}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn embed_local_no_silent_remote_fallback_when_local_not_installed() {
+        // Confirm that even with valid HF env credentials set, a
+        // provider=local request that fails locally is NOT routed to
+        // the remote HuggingFace transport.
+        let _g = install_fake_backend();
+        let (server, path) = make_server("no_silent_fb");
+        register_local_model(&server, "mini", 4);
+        // Don't stamp installed.
+        std::env::set_var("REDDB_HUGGINGFACE_API_KEY", "hf_test_key");
+        let body = br#"{"provider":"local","model":"mini","inputs":["x"]}"#.to_vec();
+        let response = server.handle_ai_embeddings(body);
+        std::env::remove_var("REDDB_HUGGINGFACE_API_KEY");
+        // 4xx, not 200; and the error must not name a remote provider.
+        assert!(
+            (400..500).contains(&response.status),
+            "unexpected success-or-5xx status: {}",
+            response.status
+        );
+        let payload = parse_json_body(&response.body);
+        let err = payload
+            .get("error")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        assert!(
+            !err.contains("openai") && !err.contains("huggingface api"),
+            "remote provider mentioned in local-failure error: {err}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pull_rejects_plaintext_api_key_in_body() {
+        let (server, path) = make_server("pull_no_plain");
+        register_local_model(&server, "mini", 4);
+        let body = br#"{"api_key":"sk-leak"}"#.to_vec();
+        let resp = server.handle_ai_model_pull("mini", body);
+        assert_eq!(resp.status, 400, "pull must reject plaintext api_key");
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(
+            body.contains("api_key") && body.contains("plaintext"),
+            "unhelpful error: {body}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pull_with_unset_credential_alias_errors_with_vault_remediation() {
+        // The model entry has credential_alias=hf_prod but no secret
+        // has been stored at red.secret.ai.huggingface.hf_prod, so the
+        // pull must fail before touching the cache and the error must
+        // point the operator at the vault path.
+        let (server, path) = make_server("pull_alias_unset");
+        let resp =
+            register_local_model_with(&server, "mini", 4, r#", "credential_alias":"hf_prod""#);
+        assert_eq!(resp.status, 201);
+        // Ensure no env override silently provides the key.
+        std::env::remove_var("REDDB_HUGGINGFACE_API_KEY_HF_PROD");
+        std::env::remove_var("REDDB_HUGGINGFACE_API_KEY");
+        let resp = server.handle_ai_model_pull("mini", Vec::new());
+        assert_eq!(resp.status, 400, "expected 400 missing-credential");
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(
+            body.contains("hf_prod") && body.contains("red.secret.ai.huggingface.hf_prod"),
+            "vault remediation missing: {body}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pull_resolves_credential_from_vault_via_alias() {
+        // Stage a vault secret at the canonical path and confirm the
+        // pull resolves it (and proceeds to the fixture-dir check,
+        // which fails next — but with a *different* error class).
+        let (server, path) = make_server("pull_alias_ok");
+        let resp =
+            register_local_model_with(&server, "mini", 4, r#", "credential_alias":"hf_prod""#);
+        assert_eq!(resp.status, 201);
+        // Stage the credential via the legacy config KV path. The
+        // resolver walks env → vault (red.secret.*) → legacy
+        // (red.config.*.key), so a value here is the simplest stand-in
+        // for a real vault that does not need an AuthStore set up.
+        let legacy_key =
+            crate::ai::ai_api_legacy_config_key(&crate::ai::AiProvider::HuggingFace, "hf_prod");
+        server
+            .entity_use_cases()
+            .create_kv(CreateKvInput {
+                collection: RED_CONFIG_COLLECTION.to_string(),
+                key: legacy_key,
+                value: Value::text("hf_real_token"),
+                metadata: Vec::new(),
+            })
+            .expect("stage credential");
+        std::env::remove_var("REDDB_HUGGINGFACE_API_KEY_HF_PROD");
+        std::env::remove_var("REDDB_HUGGINGFACE_API_KEY");
+
+        // No fixture_dir → the fixture stage fails. We assert the
+        // error is the fixture-stage error, proving credential
+        // resolution passed.
+        let resp = server.handle_ai_model_pull("mini", Vec::new());
+        assert_eq!(resp.status, 400);
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(
+            body.contains("fixture_dir") || body.contains("no artifact source"),
+            "expected fixture-stage error after successful credential resolution: {body}"
+        );
+        // And critically: the resolved token must not appear in the
+        // model entry KV.
+        let key = format!("red.config.ai.models.mini");
+        let (value, _) = server
+            .entity_use_cases()
+            .get_kv(RED_CONFIG_COLLECTION, &key)
+            .expect("read")
+            .expect("registered");
+        let Value::Text(raw) = value else {
+            panic!("not text")
+        };
+        assert!(
+            !raw.contains("hf_real_token"),
+            "resolved token leaked into registry entry: {raw}"
+        );
         let _ = std::fs::remove_file(path);
     }
 }
