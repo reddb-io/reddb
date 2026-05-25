@@ -1,26 +1,33 @@
-//! TurboQuant lookup-table scoring kernels.
+//! TurboQuant per-block scoring kernels.
 //!
-//! MIT notice: NEON scoring structure is derived from the turbovec MIT upstream
-//! at RyanCodrai/turbovec commit 4a4f2cd2db233f24405911b1ceaf1823fa23b4ac.
+//! This slice (S1 of PRD #688 / ADR 0024) ships the reference scalar
+//! kernel only. SIMD kernels (NEON, AVX2, AVX-512BW) are added in
+//! later slices and join [`select_scorer`] without changing the
+//! dispatch surface or paying a per-query branch cost.
+//!
+//! MIT notice: LUT construction shape and the PERM0-aware decode loop
+//! are derived from RyanCodrai/turbovec (commit
+//! `4a4f2cd2db233f24405911b1ceaf1823fa23b4ac`, MIT); the RedDB
+//! `PerBlockScorer` trait, dispatch, and scalar oracle are
+//! clean-room.
 
-use super::codec::EncodedVector;
+use super::storage::{BLOCK_LANES, PERM0};
 
-pub const BLOCK_LANES: usize = 32;
-pub const QUERY_BATCH: usize = 4;
 const MAX_LUT: f32 = 127.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScoreKernel {
     Scalar,
-    Neon,
 }
 
+/// Per-query lookup table. Built once per `score_many` call and shared
+/// across every block of a collection.
 #[derive(Debug, Clone)]
 pub struct QueryLut {
-    uint8_luts: Vec<u8>,
-    n_byte_groups: usize,
-    scale: f32,
-    bias: f32,
+    pub bytes: Vec<u8>,
+    pub n_byte_groups: usize,
+    pub scale: f32,
+    pub bias: f32,
 }
 
 impl QueryLut {
@@ -56,7 +63,7 @@ impl QueryLut {
             1.0
         };
         let inv_scale = 1.0 / scale;
-        let mut uint8_luts = vec![0u8; n_byte_groups * 32];
+        let mut bytes = vec![0u8; n_byte_groups * 32];
 
         for group in 0..n_byte_groups {
             let group_base = group * 32;
@@ -68,13 +75,11 @@ impl QueryLut {
                 .iter()
                 .copied()
                 .fold(f32::INFINITY, f32::min);
-
             for code in 0..16 {
-                uint8_luts[group_base + code] = ((float_luts[group_base + code] - hi_min)
-                    * inv_scale)
+                bytes[group_base + code] = ((float_luts[group_base + code] - hi_min) * inv_scale)
                     .round()
                     .clamp(0.0, MAX_LUT) as u8;
-                uint8_luts[group_base + 16 + code] = ((float_luts[group_base + 16 + code] - lo_min)
+                bytes[group_base + 16 + code] = ((float_luts[group_base + 16 + code] - lo_min)
                     * inv_scale)
                     .round()
                     .clamp(0.0, MAX_LUT) as u8;
@@ -82,229 +87,171 @@ impl QueryLut {
         }
 
         Self {
-            uint8_luts,
+            bytes,
             n_byte_groups,
             scale,
             bias,
         }
     }
+}
 
-    pub fn score_scalar(&self, packed: &[u8]) -> f32 {
-        let mut sum = 0u32;
-        for group in 0..self.n_byte_groups {
-            let codes = packed.get(group).copied().unwrap_or(0);
-            let lo = (codes & 0x0f) as usize;
-            let hi = (codes >> 4) as usize;
-            let group_base = group * 32;
-            sum += self.uint8_luts[group_base + hi] as u32;
-            sum += self.uint8_luts[group_base + 16 + lo] as u32;
+/// Single block scoring trait. Each implementation consumes one
+/// `block_codes` slice (PERM0-interleaved, 64-byte aligned by
+/// [`super::storage::BlockedCodeStorage`]) and writes one score per
+/// lane into `out`.
+///
+/// SIMD slices add impls (NEON, AVX2, AVX-512BW) and join
+/// [`select_scorer`] without changing this trait.
+pub trait PerBlockScorer: Sync + Send {
+    fn kernel(&self) -> ScoreKernel;
+
+    /// Compute `lut.scale * sum_g(lut[g][hi] + lut[g][lo]) + lut.bias`
+    /// for each lane in `0..n_vectors`. Lanes `>= n_vectors` are filled
+    /// with `0.0`. The output is the unit-rotated-query dot product —
+    /// outer code applies metric-specific transforms and per-vector
+    /// scales.
+    fn score_block(
+        &self,
+        lut: &QueryLut,
+        block_codes: &[u8],
+        n_byte_groups: usize,
+        n_vectors: usize,
+        out: &mut [f32; BLOCK_LANES],
+    );
+}
+
+/// Reference scalar implementation. Acts as the oracle the
+/// equivalence-test harness keys off — every SIMD slice must match
+/// this kernel bit-exactly.
+pub struct ScalarScorer;
+
+impl PerBlockScorer for ScalarScorer {
+    fn kernel(&self) -> ScoreKernel {
+        ScoreKernel::Scalar
+    }
+
+    fn score_block(
+        &self,
+        lut: &QueryLut,
+        block_codes: &[u8],
+        n_byte_groups: usize,
+        n_vectors: usize,
+        out: &mut [f32; BLOCK_LANES],
+    ) {
+        debug_assert_eq!(n_byte_groups, lut.n_byte_groups);
+        debug_assert!(block_codes.len() >= n_byte_groups * BLOCK_LANES);
+        debug_assert!(n_vectors <= BLOCK_LANES);
+
+        for (lane, slot) in out.iter_mut().enumerate() {
+            if lane >= n_vectors {
+                *slot = 0.0;
+                continue;
+            }
+            let mut acc = 0u32;
+            for g in 0..n_byte_groups {
+                let (hi, lo) = decode_perm0_byte(block_codes, g, lane);
+                acc = acc.wrapping_add(lut.bytes[g * 32 + hi as usize] as u32);
+                acc = acc.wrapping_add(lut.bytes[g * 32 + 16 + lo as usize] as u32);
+            }
+            *slot = lut.scale.mul_add(acc as f32, lut.bias);
         }
-        self.scale.mul_add(sum as f32, self.bias)
     }
 }
 
-#[inline]
-pub fn detect_score_kernel() -> ScoreKernel {
-    #[cfg(target_arch = "aarch64")]
-    {
-        if std::arch::is_aarch64_feature_detected!("neon") {
-            return ScoreKernel::Neon;
-        }
-    }
-    ScoreKernel::Scalar
+static SCALAR_SCORER: ScalarScorer = ScalarScorer;
+
+/// Pick the best available scoring kernel for this host. Today always
+/// returns the scalar scorer; SIMD slices add themselves here without
+/// touching the call site.
+pub fn select_scorer() -> &'static dyn PerBlockScorer {
+    &SCALAR_SCORER
 }
 
-pub fn score_units(lut: &QueryLut, encoded: &[EncodedVector]) -> Vec<f32> {
-    match detect_score_kernel() {
-        #[cfg(target_arch = "aarch64")]
-        ScoreKernel::Neon => unsafe { score_units_neon(lut, encoded) },
-        _ => score_units_scalar(lut, encoded),
-    }
-}
-
-pub fn score_query_batch(
-    luts: [&QueryLut; QUERY_BATCH],
-    encoded: &[EncodedVector],
-) -> [Vec<f32>; QUERY_BATCH] {
-    std::array::from_fn(|query| score_units(luts[query], encoded))
-}
-
-pub fn score_units_scalar(lut: &QueryLut, encoded: &[EncodedVector]) -> Vec<f32> {
-    encoded
+fn decode_perm0_byte(block_codes: &[u8], group: usize, lane: usize) -> (u8, u8) {
+    debug_assert!(lane < BLOCK_LANES);
+    let half = lane / 16;
+    let within_half = lane % 16;
+    let perm_pos = PERM0
         .iter()
-        .map(|vector| lut.score_scalar(&vector.packed))
-        .collect()
-}
-
-#[inline]
-pub fn block_has_allowed(_block_index: usize) -> bool {
-    true
-}
-
-#[cfg(target_arch = "aarch64")]
-unsafe fn score_units_neon(lut: &QueryLut, encoded: &[EncodedVector]) -> Vec<f32> {
-    let mut scores = vec![0.0; encoded.len()];
-    for (block_idx, block) in encoded.chunks(BLOCK_LANES).enumerate() {
-        if !block_has_allowed(block_idx) {
-            continue;
-        }
-        score_block_neon(
-            lut,
-            block,
-            &mut scores[block_idx * BLOCK_LANES..block_idx * BLOCK_LANES + block.len()],
-        );
+        .position(|&v| v == within_half)
+        .expect("lane in perm0");
+    let group_base = group * BLOCK_LANES;
+    let hi_pair = block_codes[group_base + perm_pos];
+    let lo_pair = block_codes[group_base + 16 + perm_pos];
+    if half == 0 {
+        (hi_pair & 0x0f, lo_pair & 0x0f)
+    } else {
+        (hi_pair >> 4, lo_pair >> 4)
     }
-    scores
-}
-
-#[cfg(target_arch = "aarch64")]
-unsafe fn score_block_neon(lut: &QueryLut, encoded: &[EncodedVector], out: &mut [f32]) {
-    use std::arch::aarch64::*;
-
-    debug_assert!(encoded.len() <= BLOCK_LANES);
-    let mut acc = [0u32; BLOCK_LANES];
-    let mask = vdupq_n_u8(0x0f);
-
-    for group in 0..lut.n_byte_groups {
-        let mut codes = [0u8; BLOCK_LANES];
-        for (lane, vector) in encoded.iter().enumerate() {
-            codes[lane] = vector.packed.get(group).copied().unwrap_or(0);
-        }
-
-        let group_base = group * 32;
-        let lut_hi = vld1q_u8(lut.uint8_luts.as_ptr().add(group_base));
-        let lut_lo = vld1q_u8(lut.uint8_luts.as_ptr().add(group_base + 16));
-
-        for half in 0..2 {
-            let lane_base = half * 16;
-            let c = vld1q_u8(codes.as_ptr().add(lane_base));
-            let lo = vandq_u8(c, mask);
-            let hi = vshrq_n_u8(c, 4);
-            let sum = vaddq_u8(vqtbl1q_u8(lut_lo, lo), vqtbl1q_u8(lut_hi, hi));
-            let widened_lo = vmovl_u8(vget_low_u8(sum));
-            let widened_hi = vmovl_u8(vget_high_u8(sum));
-            let acc0 = vmovl_u16(vget_low_u16(widened_lo));
-            let acc1 = vmovl_u16(vget_high_u16(widened_lo));
-            let acc2 = vmovl_u16(vget_low_u16(widened_hi));
-            let acc3 = vmovl_u16(vget_high_u16(widened_hi));
-            vst1q_u32(
-                acc.as_mut_ptr().add(lane_base),
-                vaddq_u32(vld1q_u32(acc.as_ptr().add(lane_base)), acc0),
-            );
-            vst1q_u32(
-                acc.as_mut_ptr().add(lane_base + 4),
-                vaddq_u32(vld1q_u32(acc.as_ptr().add(lane_base + 4)), acc1),
-            );
-            vst1q_u32(
-                acc.as_mut_ptr().add(lane_base + 8),
-                vaddq_u32(vld1q_u32(acc.as_ptr().add(lane_base + 8)), acc2),
-            );
-            vst1q_u32(
-                acc.as_mut_ptr().add(lane_base + 12),
-                vaddq_u32(vld1q_u32(acc.as_ptr().add(lane_base + 12)), acc3),
-            );
-        }
-    }
-
-    let v_bias = vdupq_n_f32(lut.bias);
-    let v_scale = vdupq_n_f32(lut.scale);
-    let mut scored = [0.0f32; BLOCK_LANES];
-    for chunk in 0..8 {
-        let f = vcvtq_f32_u32(vld1q_u32(acc.as_ptr().add(chunk * 4)));
-        vst1q_f32(
-            scored.as_mut_ptr().add(chunk * 4),
-            vfmaq_f32(v_bias, v_scale, f),
-        );
-    }
-
-    out.copy_from_slice(&scored[..encoded.len()]);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
-    use proptest::test_runner::Config;
+    use crate::storage::engine::turboquant::storage::BlockedCodeStorage;
 
-    fn encoded_strategy() -> impl Strategy<Value = EncodedVector> {
-        prop::collection::vec(any::<u8>(), 1..=33)
-            .prop_map(|packed| EncodedVector { packed, scale: 1.0 })
-    }
-
-    fn query_strategy() -> impl Strategy<Value = Vec<f32>> {
-        prop::collection::vec(-1.0f32..1.0, 1..=65)
-    }
-
-    fn centroids() -> Vec<f64> {
-        (0..16)
-            .map(|code| -1.0 + (code as f64 + 0.5) * 0.125)
+    fn centroids_for(bits: u8) -> Vec<f64> {
+        let levels = 1usize << bits;
+        let step = 2.0 / levels as f64;
+        (0..levels)
+            .map(|i| -1.0 + (i as f64 + 0.5) * step)
             .collect()
     }
 
-    proptest! {
-        #![proptest_config(Config { cases: 10_000, ..Config::default() })]
-
-        #[test]
-        fn scalar_lut_scoring_is_finite_for_random_codes(query in query_strategy(), encoded in encoded_strategy()) {
-            let lut = QueryLut::build(&query, &centroids());
-            prop_assert!(lut.score_scalar(&encoded.packed).is_finite());
-        }
+    #[test]
+    fn scalar_block_score_is_zero_when_query_is_zero() {
+        let lut = QueryLut::build(&[0.0f32; 4], &centroids_for(4));
+        let mut storage = BlockedCodeStorage::new(2);
+        storage.append(&[0x12, 0x34], 1.0);
+        let mut out = [0.0f32; BLOCK_LANES];
+        ScalarScorer.score_block(&lut, storage.block_codes(0), 2, 1, &mut out);
+        // Bias = 0 for zero query, scale arbitrary, acc clamps to LUT min
+        // (all zero entries) → 0 + 0 == 0.
+        assert_eq!(out[0], 0.0);
     }
 
     #[test]
-    fn scalar_lut_scoring_covers_required_edge_blocks() {
-        let centroids = centroids();
-        let cases = [
-            (vec![0.0; 4], vec![0x00; 2]),
-            (vec![1.0, -1.0, 0.5, -0.5], vec![0xff; 2]),
-            (vec![-0.25, 0.5, -0.75], vec![0xf0; 2]),
-        ];
+    fn scalar_block_score_matches_per_vector_scalar_lut() {
+        // Cross-check: reconstruct the per-vector scalar sum
+        // (sum of LUT[hi] + LUT[16+lo] over groups) by direct
+        // arithmetic on the per-vector packed bytes and confirm
+        // ScalarScorer agrees on the equivalent lane.
+        let centroids = centroids_for(4);
+        let query = vec![0.2f32, -0.3, 0.4, -0.5];
+        let lut = QueryLut::build(&query, &centroids);
 
-        for (query, packed) in cases {
-            let lut = QueryLut::build(&query, &centroids);
+        let n_byte_groups = 2;
+        let mut storage = BlockedCodeStorage::new(n_byte_groups);
+        let packed_a = vec![0xa3u8, 0x5c];
+        let packed_b = vec![0x71u8, 0xfe];
+        storage.append(&packed_a, 1.0);
+        storage.append(&packed_b, 1.0);
+
+        let mut out = [0.0f32; BLOCK_LANES];
+        ScalarScorer.score_block(&lut, storage.block_codes(0), n_byte_groups, 2, &mut out);
+
+        for (lane, packed) in [&packed_a, &packed_b].iter().enumerate() {
+            let mut expected = 0u32;
+            for (g, byte) in packed.iter().enumerate() {
+                let lo = (byte & 0x0f) as usize;
+                let hi = (byte >> 4) as usize;
+                expected += lut.bytes[g * 32 + hi] as u32;
+                expected += lut.bytes[g * 32 + 16 + lo] as u32;
+            }
+            let expected_f = lut.scale.mul_add(expected as f32, lut.bias);
             assert_eq!(
-                lut.score_scalar(&packed),
-                score_units_scalar(&lut, &[EncodedVector { packed, scale: 1.0 }])[0]
+                out[lane], expected_f,
+                "lane {lane} matches per-vector LUT scoring",
             );
         }
+
+        for lane in 2..BLOCK_LANES {
+            assert_eq!(out[lane], 0.0, "unused lane {lane} stays 0");
+        }
     }
 
     #[test]
-    fn four_query_batch_matches_individual_dispatch() {
-        let centroids = centroids();
-        let queries = [
-            vec![0.0; 4],
-            vec![1.0, -1.0, 0.5, -0.5],
-            vec![-0.25, 0.5, -0.75, 1.0],
-            vec![0.125, 0.25, 0.5, 1.0],
-        ];
-        let luts = queries
-            .iter()
-            .map(|query| QueryLut::build(query, &centroids))
-            .collect::<Vec<_>>();
-        let encoded = (0..BLOCK_LANES)
-            .map(|lane| EncodedVector {
-                packed: vec![lane as u8, 0xff],
-                scale: 1.0,
-            })
-            .collect::<Vec<_>>();
-
-        let batch = score_query_batch([&luts[0], &luts[1], &luts[2], &luts[3]], &encoded);
-        for query in 0..QUERY_BATCH {
-            assert_eq!(batch[query], score_units(&luts[query], &encoded));
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    proptest! {
-        #![proptest_config(Config { cases: 10_000, ..Config::default() })]
-
-        #[test]
-        fn neon_matches_scalar_for_random_blocks(query in query_strategy(), block in prop::collection::vec(encoded_strategy(), 1..=BLOCK_LANES)) {
-            let lut = QueryLut::build(&query, &centroids());
-            let scalar = score_units_scalar(&lut, &block);
-            let neon = unsafe { score_units_neon(&lut, &block) };
-            prop_assert_eq!(scalar, neon);
-        }
+    fn select_scorer_returns_scalar_in_this_slice() {
+        assert_eq!(select_scorer().kernel(), ScoreKernel::Scalar);
     }
 }
