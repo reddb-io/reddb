@@ -1168,15 +1168,34 @@ impl RedDBServer {
                 {
                     return response;
                 }
-                // AI model registry: /ai/models/{name}
-                if let Some(model_name) = path.strip_prefix("/ai/models/") {
-                    let model_name = model_name.trim_matches('/');
-                    if !model_name.is_empty() && !model_name.contains('/') {
-                        return match method.as_str() {
-                            "GET" => self.handle_ai_model_get(model_name),
-                            "PUT" => self.handle_ai_model_update(model_name, body),
-                            _ => json_error(405, "method not allowed for /ai/models/{name}"),
-                        };
+                // AI model registry: /ai/models/{name} and
+                // cache actions /ai/models/{name}/{pull|cache}.
+                if let Some(rest) = path.strip_prefix("/ai/models/") {
+                    let rest = rest.trim_matches('/');
+                    if !rest.is_empty() {
+                        if let Some((model_name, action)) = rest.split_once('/') {
+                            if !model_name.is_empty() && !model_name.contains('/') {
+                                return match (method.as_str(), action) {
+                                    ("POST", "pull") => self.handle_ai_model_pull(model_name, body),
+                                    ("GET", "cache") => {
+                                        self.handle_ai_model_cache_status(model_name)
+                                    }
+                                    ("DELETE", "cache") => {
+                                        self.handle_ai_model_cache_drop(model_name)
+                                    }
+                                    _ => json_error(
+                                        405,
+                                        "method not allowed for /ai/models/{name}/{action}",
+                                    ),
+                                };
+                            }
+                        } else if !rest.contains('/') {
+                            return match method.as_str() {
+                                "GET" => self.handle_ai_model_get(rest),
+                                "PUT" => self.handle_ai_model_update(rest, body),
+                                _ => json_error(405, "method not allowed for /ai/models/{name}"),
+                            };
+                        }
                     }
                 }
                 // Config key routes: /config/{key.path}
