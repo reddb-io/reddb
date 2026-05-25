@@ -1246,7 +1246,6 @@ fn embed_runtime_vector_text(db: &RedDB, text: &str) -> RedDBResult<Vec<f32>> {
 
     let provider = crate::ai::resolve_default_provider(&kv_getter);
     let model = crate::ai::resolve_default_model(&provider, &kv_getter);
-    eprintln!("DEBUG embed_runtime_vector_text provider={:?} model={:?}", provider.token(), model);
 
     // Issue #681 — when the default provider is `local`, route through
     // the registered local-model backend (registry from #678, cache from
