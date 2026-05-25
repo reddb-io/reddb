@@ -51,10 +51,13 @@ impl Codec {
         self.dim.div_ceil(2)
     }
 
-    /// Encode `vector` and append it to `storage`. Returns a handle the
-    /// caller can pass back to [`Self::score_many`] (indirectly through
-    /// the storage itself).
-    pub fn encode_into(&self, storage: &mut BlockedCodeStorage, vector: &[f32]) -> EncodedVector {
+    /// Encode `vector` into the packed 4-bit code groups +
+    /// pre-rotation L2 norm without appending to any storage. This is
+    /// the persistence-layer entry point used by
+    /// `TurboExtent::append` in the durable write path (#693). The
+    /// `BlockedCodeStorage::append` view of the same bytes is what
+    /// the in-memory scorer reads.
+    pub fn encode_packed(&self, vector: &[f32]) -> (Vec<u8>, f32) {
         assert_eq!(vector.len(), self.dim, "encode dimension must match codec",);
         let scale = distance::l2_norm(vector);
         let normalized = if scale > 0.0 {
@@ -72,6 +75,14 @@ impl Codec {
                 .unwrap_or(0);
             packed[i] = lo | (hi << 4);
         }
+        (packed, scale)
+    }
+
+    /// Encode `vector` and append it to `storage`. Returns a handle the
+    /// caller can pass back to [`Self::score_many`] (indirectly through
+    /// the storage itself).
+    pub fn encode_into(&self, storage: &mut BlockedCodeStorage, vector: &[f32]) -> EncodedVector {
+        let (packed, scale) = self.encode_packed(vector);
         storage.append(&packed, scale).into()
     }
 

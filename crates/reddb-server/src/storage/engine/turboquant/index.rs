@@ -92,6 +92,16 @@ impl TurboQuantIndex {
         results
     }
 
+    /// Encode `vector` to the packed-codes + LE f32-norm byte layout
+    /// that the TurboExtent persists. Used by the INSERT path
+    /// (#693) so the extent and the in-memory `BlockedCodeStorage`
+    /// see the same bytes for the same vector.
+    pub fn encode_for_extent(&self, vector: &[f32]) -> Vec<u8> {
+        let (mut packed, scale) = self.codec.encode_packed(vector);
+        packed.extend_from_slice(&scale.to_le_bytes());
+        packed
+    }
+
     pub fn len(&self) -> usize {
         self.ids.len()
     }
