@@ -90,6 +90,7 @@ backend-s3 = []
 backend-turso = []
 backend-d1 = []
 ai-ner-network = ["dep:reqwest"]
+local-models = []
 # OpenTelemetry tracing. Opt-in (`--features otel`) so the OTLP
 # dependency tree doesn't bloat the default build.
 otel = []

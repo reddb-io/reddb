@@ -200,6 +200,7 @@ pub(crate) fn to_status(err: crate::api::RedDBError) -> Status {
         }
         crate::api::RedDBError::QuotaExceeded(msg) => Status::resource_exhausted(msg),
         crate::api::RedDBError::ReadOnly(msg) => Status::failed_precondition(msg),
+        crate::api::RedDBError::FeatureNotEnabled(msg) => Status::failed_precondition(msg),
         crate::api::RedDBError::Validation { message, .. } => Status::invalid_argument(message),
         other => Status::internal(other.to_string()),
     }

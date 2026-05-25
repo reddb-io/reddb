@@ -323,6 +323,11 @@ impl RedDBServer {
             Ok(p) => p,
             Err(err) => return json_error(400, err.to_string()),
         };
+        if matches!(provider, AiProvider::Local) {
+            let err = crate::ai::local_prompt_unavailable_error();
+            let (status, msg) = crate::server::transport::map_runtime_error(&err);
+            return json_error(status, msg);
+        }
         let credential = json_string_field(&payload, "credential");
         let api_key = match self.resolve_provider_api_key(&provider, credential.as_deref()) {
             Ok(key) => key,
@@ -478,12 +483,9 @@ impl RedDBServer {
                 );
             }
             crate::ai::AiProvider::Local => {
-                return json_error(
-                    400,
-                    "Local embeddings require the `local-models` feature \
-                     flag at engine build time."
-                        .to_string(),
-                );
+                let err = crate::ai::local_embeddings_unavailable_error();
+                let (status, msg) = crate::server::transport::map_runtime_error(&err);
+                return json_error(status, msg);
             }
             _ => {}
         }
@@ -696,6 +698,11 @@ impl RedDBServer {
             Ok(provider) => provider,
             Err(err) => return json_error(400, err),
         };
+        if matches!(provider, AiProvider::Local) {
+            let err = crate::ai::local_prompt_unavailable_error();
+            let (status, msg) = crate::server::transport::map_runtime_error(&err);
+            return json_error(status, msg);
+        }
 
         let model = json_string_field(&payload, "model").unwrap_or_else(|| {
             std::env::var(provider.prompt_model_env_name())

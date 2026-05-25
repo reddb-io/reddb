@@ -12,12 +12,66 @@
 //! transport and fail there, which proves the guard was passed.
 
 use reddb::ai::{grpc_embeddings, parse_provider};
-use reddb::application::{QueryUseCases, SearchSimilarInput};
+use reddb::application::{ExecuteQueryInput, QueryUseCases, SearchSimilarInput};
 use reddb::json::{Map, Value as JsonValue};
+use reddb::server::RedDBServer;
 use reddb::RedDBRuntime;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::time::Duration;
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("in-memory runtime")
+}
+
+fn assert_local_models_disabled_error(msg: &str) {
+    let lower = msg.to_ascii_lowercase();
+    assert!(lower.contains("local"), "{msg}");
+    assert!(lower.contains("local-models"), "{msg}");
+    assert!(lower.contains("feature"), "{msg}");
+    assert!(lower.contains("ollama"), "{msg}");
+}
+
+fn spawn_http_server(rt: RedDBRuntime) -> String {
+    let server = RedDBServer::new(rt);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    server.serve_in_background_on(listener);
+    addr.to_string()
+}
+
+fn post_json(addr: &str, path: &str, body: &str) -> (u16, String) {
+    let request = format!(
+        "POST {path} HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {}",
+        body.len(),
+        body
+    );
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+    stream.write_all(request.as_bytes()).expect("write request");
+    stream.flush().expect("flush request");
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("read response");
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or_else(|| panic!("missing status in response: {response}"));
+    let body = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_string())
+        .unwrap_or_default();
+    (status, body)
 }
 
 #[test]
@@ -106,6 +160,54 @@ fn grpc_embeddings_huggingface_dispatches_to_hf_client() {
 }
 
 #[test]
+#[cfg(not(feature = "local-models"))]
+fn http_embeddings_rejects_local_when_local_models_feature_is_disabled() {
+    let addr = spawn_http_server(rt());
+    let (status, body) = post_json(
+        &addr,
+        "/ai/embeddings",
+        r#"{"provider":"local","inputs":["hello"]}"#,
+    );
+
+    assert_eq!(status, 501, "unexpected response body: {body}");
+    assert_local_models_disabled_error(&body);
+}
+
+#[test]
+fn http_prompt_rejects_local_because_generation_is_out_of_scope() {
+    let addr = spawn_http_server(rt());
+    let (status, body) = post_json(
+        &addr,
+        "/ai/prompt",
+        r#"{"provider":"local","prompt":"hello"}"#,
+    );
+
+    assert_eq!(status, 400, "unexpected response body: {body}");
+    let lower = body.to_ascii_lowercase();
+    assert!(lower.contains("out of scope"), "{body}");
+    assert!(lower.contains("embeddings-only"), "{body}");
+}
+
+#[test]
+#[cfg(not(feature = "local-models"))]
+fn grpc_embeddings_rejects_local_when_local_models_feature_is_disabled() {
+    let rt = rt();
+    let mut payload = Map::new();
+    payload.insert(
+        "provider".to_string(),
+        JsonValue::String("local".to_string()),
+    );
+    payload.insert(
+        "inputs".to_string(),
+        JsonValue::Array(vec![JsonValue::String("hi".to_string())]),
+    );
+
+    let err = grpc_embeddings(&rt, &JsonValue::Object(payload))
+        .expect_err("local embeddings should require the local-models feature");
+    assert_local_models_disabled_error(&err.to_string());
+}
+
+#[test]
 fn grpc_embeddings_rejects_empty_inputs() {
     let rt = rt();
     let mut payload = Map::new();
@@ -178,4 +280,38 @@ fn search_similar_rejects_incompatible_provider() {
         msg.to_ascii_lowercase().contains("not yet available"),
         "{msg}"
     );
+}
+
+#[test]
+#[cfg(not(feature = "local-models"))]
+fn search_similar_rejects_local_when_local_models_feature_is_disabled() {
+    let rt = rt();
+    let q = QueryUseCases::new(&rt);
+    let err = q
+        .search_similar(SearchSimilarInput {
+            collection: "docs".to_string(),
+            vector: Vec::new(),
+            k: 5,
+            min_score: 0.0,
+            text: Some("hello world".to_string()),
+            provider: Some("local".to_string()),
+        })
+        .expect_err("local SEARCH SIMILAR must require the local-models feature");
+
+    assert_local_models_disabled_error(&err.to_string());
+}
+
+#[test]
+#[cfg(not(feature = "local-models"))]
+fn auto_embed_insert_rejects_local_when_local_models_feature_is_disabled() {
+    let rt = rt();
+    let q = QueryUseCases::new(&rt);
+    let err = q
+        .execute(ExecuteQueryInput {
+            query: "INSERT INTO docs (body) VALUES ('hello') WITH AUTO EMBED (body) USING local"
+                .to_string(),
+        })
+        .expect_err("local AUTO EMBED must require the local-models feature");
+
+    assert_local_models_disabled_error(&err.to_string());
 }

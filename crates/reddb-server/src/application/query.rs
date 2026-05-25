@@ -154,6 +154,9 @@ impl<'a, P: RuntimeQueryPort + crate::application::ports::RuntimeEntityPort + ?S
                 // cycles resolving a key — Anthropic has no embeddings
                 // endpoint, HuggingFace uses a different wire shape,
                 // Local needs the `local-models` feature flag.
+                if matches!(provider, crate::ai::AiProvider::Local) {
+                    return Err(crate::ai::local_embeddings_unavailable_error());
+                }
                 if !provider.is_openai_compatible() {
                     return Err(crate::RedDBError::Query(format!(
                         "SEARCH SIMILAR: embeddings are not yet available for provider '{}'. \

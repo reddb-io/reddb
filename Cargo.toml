@@ -55,6 +55,7 @@ backend-turso = ["reddb-server/backend-turso"]
 backend-d1 = ["reddb-server/backend-d1"]
 otel = ["reddb-server/otel"]
 ai-ner-network = ["reddb-server/ai-ner-network"]
+local-models = ["reddb-server/local-models"]
 embedded = ["reddb-client/embedded"]
 redwire = ["reddb-client/redwire"]
 
