@@ -18,6 +18,7 @@ const MAX_LUT: f32 = 127.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScoreKernel {
     Scalar,
+    Avx2,
 }
 
 /// Per-query lookup table. Built once per `score_many` call and shared
@@ -160,11 +161,132 @@ impl PerBlockScorer for ScalarScorer {
 
 static SCALAR_SCORER: ScalarScorer = ScalarScorer;
 
-/// Pick the best available scoring kernel for this host. Today always
-/// returns the scalar scorer; SIMD slices add themselves here without
-/// touching the call site.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+static AVX2_SCORER: Avx2Scorer = Avx2Scorer;
+
+/// Pick the best available scoring kernel for this host. SIMD slices
+/// register themselves here without touching the call site; the choice
+/// is made once per query (no per-block branch cost).
 pub fn select_scorer() -> &'static dyn PerBlockScorer {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        // AVX-512BW will land in a future slice and take precedence
+        // over AVX2 here; until then AVX2 is the widest x86 kernel.
+        // FMA is required to match the scalar oracle bit-exactly —
+        // `ScalarScorer` uses `f32::mul_add`, so the AVX2 path must
+        // use `vfmadd` rather than separate mul+add to stay byte-
+        // identical. AVX2 + FMA3 ship together on every relevant
+        // Intel/AMD core; the rare AVX2-but-no-FMA host falls back
+        // to scalar.
+        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+            return &AVX2_SCORER;
+        }
+    }
     &SCALAR_SCORER
+}
+
+/// AVX2 block scorer. Reads aligned 256-bit lanes straight from
+/// [`super::storage::BlockedCodeStorage::block_codes`] with no
+/// per-query repack and table-looks up nibble scores via `vpshufb`.
+///
+/// MIT notice: the SIMD body is adapted from RyanCodrai/turbovec
+/// (commit `4a4f2cd2db233f24405911b1ceaf1823fa23b4ac`, MIT). The
+/// per-vector scale and tail handling are clean-room — the trait
+/// returns the unit-rotated dot product only; outer code applies
+/// metric and per-vector scale, matching [`ScalarScorer`].
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+pub struct Avx2Scorer;
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+impl PerBlockScorer for Avx2Scorer {
+    fn kernel(&self) -> ScoreKernel {
+        ScoreKernel::Avx2
+    }
+
+    fn score_block(
+        &self,
+        lut: &QueryLut,
+        block_codes: &[u8],
+        n_byte_groups: usize,
+        n_vectors: usize,
+        out: &mut [f32; BLOCK_LANES],
+    ) {
+        debug_assert_eq!(n_byte_groups, lut.n_byte_groups);
+        debug_assert!(block_codes.len() >= n_byte_groups * BLOCK_LANES);
+        debug_assert!(n_vectors <= BLOCK_LANES);
+        debug_assert!(std::is_x86_feature_detected!("avx2"));
+        debug_assert!(std::is_x86_feature_detected!("fma"));
+        // SAFETY: AVX2 + FMA availability is enforced by `select_scorer`
+        // and re-asserted by the debug checks above.
+        unsafe {
+            score_block_avx2_inner(lut, block_codes, n_byte_groups, n_vectors, out);
+        }
+    }
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn score_block_avx2_inner(
+    lut: &QueryLut,
+    block_codes: &[u8],
+    n_byte_groups: usize,
+    n_vectors: usize,
+    out: &mut [f32; BLOCK_LANES],
+) {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    let mut accum = [_mm256_setzero_si256(); 4];
+    let nibble_mask = _mm256_set1_epi8(0x0f);
+
+    for g in 0..n_byte_groups {
+        let codes = _mm256_loadu_si256(block_codes.as_ptr().add(g * BLOCK_LANES) as *const __m256i);
+        let clo = _mm256_and_si256(codes, nibble_mask);
+        let chi = _mm256_and_si256(_mm256_srli_epi16(codes, 4), nibble_mask);
+        let table = _mm256_loadu_si256(lut.bytes.as_ptr().add(g * 32) as *const __m256i);
+        let lo_scores = _mm256_shuffle_epi8(table, clo);
+        let hi_scores = _mm256_shuffle_epi8(table, chi);
+
+        accum[0] = _mm256_add_epi16(accum[0], lo_scores);
+        accum[1] = _mm256_add_epi16(accum[1], _mm256_srli_epi16(lo_scores, 8));
+        accum[2] = _mm256_add_epi16(accum[2], hi_scores);
+        accum[3] = _mm256_add_epi16(accum[3], _mm256_srli_epi16(hi_scores, 8));
+    }
+
+    accum[0] = _mm256_sub_epi16(accum[0], _mm256_slli_epi16(accum[1], 8));
+    accum[2] = _mm256_sub_epi16(accum[2], _mm256_slli_epi16(accum[3], 8));
+
+    let dis0 = _mm256_add_epi16(
+        _mm256_permute2x128_si256(accum[0], accum[1], 0x21),
+        _mm256_blend_epi32(accum[0], accum[1], 0xf0),
+    );
+    let dis1 = _mm256_add_epi16(
+        _mm256_permute2x128_si256(accum[2], accum[3], 0x21),
+        _mm256_blend_epi32(accum[2], accum[3], 0xf0),
+    );
+
+    let sums = [
+        _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(_mm256_castsi256_si128(dis0))),
+        _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(_mm256_extracti128_si256(dis0, 1))),
+        _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(_mm256_castsi256_si128(dis1))),
+        _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(_mm256_extracti128_si256(dis1, 1))),
+    ];
+    let v_scale = _mm256_set1_ps(lut.scale);
+    let v_bias = _mm256_set1_ps(lut.bias);
+
+    for (chunk, sum) in sums.iter().enumerate() {
+        let lane_start = chunk * 8;
+        // FMA matches `f32::mul_add` used by `ScalarScorer` bit-exactly.
+        let score = _mm256_fmadd_ps(v_scale, *sum, v_bias);
+        _mm256_storeu_ps(out.as_mut_ptr().add(lane_start), score);
+    }
+
+    // Tail lanes match the scalar oracle: unused slots are 0.0.
+    for score in out.iter_mut().take(BLOCK_LANES).skip(n_vectors) {
+        *score = 0.0;
+    }
 }
 
 fn decode_perm0_byte(block_codes: &[u8], group: usize, lane: usize) -> (u8, u8) {
@@ -251,7 +373,80 @@ mod tests {
     }
 
     #[test]
-    fn select_scorer_returns_scalar_in_this_slice() {
-        assert_eq!(select_scorer().kernel(), ScoreKernel::Scalar);
+    fn select_scorer_matches_host_capability() {
+        let kernel = select_scorer().kernel();
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+                assert_eq!(kernel, ScoreKernel::Avx2);
+                return;
+            }
+        }
+        assert_eq!(kernel, ScoreKernel::Scalar);
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[test]
+    fn avx2_scorer_matches_scalar_oracle_across_dataset_sizes() {
+        if !std::is_x86_feature_detected!("avx2") || !std::is_x86_feature_detected!("fma") {
+            return;
+        }
+        let centroids = centroids_for(4);
+        // Queries chosen to exercise different LUT shapes (zero, sign-mixed,
+        // single-axis) and to keep n_byte_groups small enough that the
+        // AVX2 kernel's u16 accumulators cannot overflow vs the scalar
+        // u32 oracle (max sum per lane = 2*n_byte_groups*127).
+        let queries: [Vec<f32>; 4] = [
+            vec![0.0; 8],
+            vec![0.7, -0.3, 0.4, -0.1, 0.2, -0.5, 0.6, -0.9],
+            vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+        ];
+
+        for query in &queries {
+            let lut = QueryLut::build(query, &centroids);
+            let n_byte_groups = lut.n_byte_groups;
+
+            for n in [1usize, 31, 32, 33, 95, 96, 97] {
+                let mut storage = BlockedCodeStorage::new(n_byte_groups);
+                for i in 0..n {
+                    let packed: Vec<u8> = (0..n_byte_groups)
+                        .map(|g| {
+                            let lo = ((i + g * 3) & 0x0f) as u8;
+                            let hi = ((i * 5 + g * 7) & 0x0f) as u8;
+                            lo | (hi << 4)
+                        })
+                        .collect();
+                    storage.append(&packed, 1.0);
+                }
+
+                for b in 0..storage.n_blocks() {
+                    let filled = storage.block_lanes_filled(b);
+                    let mut scalar_out = [0.0f32; BLOCK_LANES];
+                    let mut avx2_out = [f32::NAN; BLOCK_LANES];
+                    ScalarScorer.score_block(
+                        &lut,
+                        storage.block_codes(b),
+                        n_byte_groups,
+                        filled,
+                        &mut scalar_out,
+                    );
+                    AVX2_SCORER.score_block(
+                        &lut,
+                        storage.block_codes(b),
+                        n_byte_groups,
+                        filled,
+                        &mut avx2_out,
+                    );
+                    for lane in 0..BLOCK_LANES {
+                        assert_eq!(
+                            avx2_out[lane].to_bits(),
+                            scalar_out[lane].to_bits(),
+                            "AVX2 diverges from scalar at N={n}, block {b}, lane {lane}",
+                        );
+                    }
+                }
+            }
+        }
     }
 }
