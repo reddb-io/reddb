@@ -122,6 +122,21 @@ pub struct RedDB {
     pub(crate) continuous_aggregates: std::sync::OnceLock<
         Arc<crate::storage::timeseries::continuous_aggregate::ContinuousAggregateEngine>,
     >,
+    /// Per-collection `vector.turbo` runtime state (issue #693, PRD
+    /// #668). Lazily initialised: the entire map allocation is
+    /// deferred until the first turbo collection is created. Each
+    /// entry owns the in-memory `TurboQuantIndex` + optional
+    /// `TurboExtent` for the collection.
+    pub(crate) turbo_collections: std::sync::OnceLock<
+        Arc<
+            parking_lot::Mutex<
+                std::collections::HashMap<
+                    String,
+                    Arc<crate::runtime::vector_turbo_kind::TurboCollectionState>,
+                >,
+            >,
+        >,
+    >,
 }
 
 /// A cached HNSW index together with the entity count at build time.

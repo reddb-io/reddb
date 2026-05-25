@@ -2718,10 +2718,40 @@ impl RuntimeEntityPort for RedDBRuntime {
         }
 
         let id = builder.save()?;
+        let dense_for_turbo = match db.store().get(&input.collection, id).map(|e| e.data) {
+            Some(crate::storage::unified::EntityData::Vector(data)) => Some(data.dense.clone()),
+            _ => None,
+        };
         // Phase 1.1 MVCC universal: stamp xmin on the vector so
         // concurrent ANN scans hide it until the transaction commits.
         self.stamp_xmin_if_in_txn(&input.collection, id);
         refresh_context_index(&db, &input.collection, id)?;
+        // Issue #693 — vector.turbo write path. Order matters and
+        // matches the write sequence the next slice (#673) will
+        // attach kill-points to: WAL append → in-memory index update
+        // → TurboExtent append. The legacy `vector` path is the
+        // `None` branch and is untouched.
+        if let (Some(state), Some(dense)) = (db.turbo_state(&input.collection), dense_for_turbo) {
+            // Lazy populate so an INSERT after restart sees the
+            // pre-restart vectors in the index before appending its
+            // own.
+            state.ensure_populated(&db.store(), &input.collection);
+            let _ = db
+                .store()
+                .append_vector_insert_record(&input.collection, id.raw(), &dense);
+            let mut index = state.index.lock();
+            index.insert(id, dense.clone());
+            // Mirror the encoded codes into the per-collection
+            // TurboExtent when one is available. The bytes are the
+            // 4-bit-packed code groups (`n_byte_groups`) plus the
+            // little-endian L2 norm — same shape `BlockedCodeStorage`
+            // appends in-memory. Failures are non-fatal in this
+            // slice; durability of the extent is owned by #673.
+            if let Some(extent) = state.extent.lock().as_mut() {
+                let packed = index.encode_for_extent(&dense);
+                let _ = extent.append(&packed);
+            }
+        }
         self.cdc_emit(
             crate::replication::cdc::ChangeOperation::Insert,
             &input.collection,

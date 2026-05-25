@@ -355,6 +355,7 @@ impl RedDB {
             semantic_cache: std::sync::OnceLock::new(),
             hypertables: std::sync::OnceLock::new(),
             continuous_aggregates: std::sync::OnceLock::new(),
+            turbo_collections: std::sync::OnceLock::new(),
         }
         .with_initialized_metadata()
     }
