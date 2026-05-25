@@ -1,0 +1,11 @@
+# .red/config.yaml — per-project plugin settings (consumed by /afk and friends)
+# Uncomment any line to override the default.
+
+# afk:
+#   default_runner: claude        # fallback runner when no explicit signal
+#   fleet:
+#     target: 2                   # default supervisor worker target
+#   hooks:
+#     defaults:
+#       cargo: true               # ship cargo isolation on Rust projects
+#       gradle: true              # ship gradle isolation when GRADLE_USER_HOME_BASE is set
