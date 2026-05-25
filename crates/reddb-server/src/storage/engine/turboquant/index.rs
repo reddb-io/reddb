@@ -1,9 +1,13 @@
 //! Scalar TurboQuant index composition.
 //!
-//! MIT notice: clean-room RedDB implementation for the turbovec-compatible
-//! TurboQuant surface; no upstream turbovec source is copied.
+//! Owns the blocked-by-32 [`BlockedCodeStorage`] plus the id and raw
+//! vector tables. Search routes through [`Codec::score_many`], which
+//! dispatches to the scalar [`super::scoring::PerBlockScorer`] today
+//! and will admit SIMD kernels in later slices without further
+//! changes here.
 
 use super::codec::{Codec, EncodedVector};
+use super::storage::{BlockedCodeStorage, BLOCK_LANES};
 use crate::storage::engine::distance::DistanceMetric;
 use crate::storage::EntityId;
 use std::cmp::Ordering;
@@ -17,31 +21,39 @@ pub struct TurboSearchResult {
 #[derive(Debug)]
 pub struct TurboQuantIndex {
     codec: Codec,
+    storage: BlockedCodeStorage,
     ids: Vec<EntityId>,
-    encoded: Vec<EncodedVector>,
+    handles: Vec<EncodedVector>,
     vectors: Vec<Vec<f32>>,
 }
 
 impl TurboQuantIndex {
     pub fn new(dim: usize, seed: u64) -> Self {
+        let codec = Codec::new(dim, seed);
+        let storage = BlockedCodeStorage::new(codec.n_byte_groups());
         Self {
-            codec: Codec::new(dim, seed),
+            codec,
+            storage,
             ids: Vec::new(),
-            encoded: Vec::new(),
+            handles: Vec::new(),
             vectors: Vec::new(),
         }
     }
 
     pub fn insert(&mut self, entity_id: EntityId, vector: Vec<f32>) {
-        let encoded = self.codec.encode(&vector);
+        // In this slice the storage layer is append-only — there is no
+        // in-place lane rewrite yet (background rebuild is owned by
+        // PRD #688 / issue #673). Duplicate ids are accepted but only
+        // their latest raw vector is remembered; the search filter
+        // below picks them up by handle.
         if let Some(pos) = self.ids.iter().position(|id| *id == entity_id) {
-            self.encoded[pos] = encoded;
             self.vectors[pos] = vector;
-        } else {
-            self.ids.push(entity_id);
-            self.encoded.push(encoded);
-            self.vectors.push(vector);
+            return;
         }
+        let handle = self.codec.encode_into(&mut self.storage, &vector);
+        self.ids.push(entity_id);
+        self.handles.push(handle);
+        self.vectors.push(vector);
     }
 
     pub fn search(
@@ -54,16 +66,19 @@ impl TurboQuantIndex {
             return Vec::new();
         }
 
-        let scores = self.codec.score_many(query, &self.encoded, metric);
+        let scores = self.codec.score_many(query, &self.storage, metric);
         let mut results = self
             .ids
             .iter()
+            .zip(&self.handles)
             .zip(&self.vectors)
-            .zip(scores)
-            .filter(|((_, vector), _)| vector.len() == query.len())
-            .map(|((entity_id, _), score)| TurboSearchResult {
-                entity_id: *entity_id,
-                score,
+            .filter(|((_, _), vector)| vector.len() == query.len())
+            .map(|((entity_id, handle), _)| {
+                let idx = handle.block_idx as usize * BLOCK_LANES + handle.lane as usize;
+                TurboSearchResult {
+                    entity_id: *entity_id,
+                    score: scores[idx],
+                }
             })
             .collect::<Vec<_>>();
         results.sort_by(|left, right| {
@@ -79,6 +94,10 @@ impl TurboQuantIndex {
 
     pub fn len(&self) -> usize {
         self.ids.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
     }
 }
 
