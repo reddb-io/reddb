@@ -165,6 +165,8 @@ impl RedDBServer {
             ("POST", "/ai/embeddings") => self.handle_ai_embeddings(body),
             ("POST", "/ai/prompt") => self.handle_ai_prompt(body),
             ("POST", "/ai/credentials") => self.handle_ai_credentials(body),
+            ("POST", "/ai/models") => self.handle_ai_model_register(body),
+            ("GET", "/ai/models") => self.handle_ai_model_list(),
 
             // Self-describing entrypoints for first-run/devex.
             ("GET", "/") => self.handle_root_discovery(),
@@ -1165,6 +1167,17 @@ impl RedDBServer {
                     self.handle_v1_keyed_route(method.as_str(), &path, &query, &body)
                 {
                     return response;
+                }
+                // AI model registry: /ai/models/{name}
+                if let Some(model_name) = path.strip_prefix("/ai/models/") {
+                    let model_name = model_name.trim_matches('/');
+                    if !model_name.is_empty() && !model_name.contains('/') {
+                        return match method.as_str() {
+                            "GET" => self.handle_ai_model_get(model_name),
+                            "PUT" => self.handle_ai_model_update(model_name, body),
+                            _ => json_error(405, "method not allowed for /ai/models/{name}"),
+                        };
+                    }
                 }
                 // Config key routes: /config/{key.path}
                 if let Some(config_key) = path.strip_prefix("/config/") {
