@@ -483,9 +483,11 @@ impl RedDBServer {
                 );
             }
             crate::ai::AiProvider::Local => {
-                let err = crate::ai::local_embeddings_unavailable_error();
-                let (status, msg) = crate::server::transport::map_runtime_error(&err);
-                return json_error(status, msg);
+                // Local provider has its own end-to-end path: it
+                // resolves a registered+installed local model through
+                // the runtime's swappable backend and short-circuits
+                // before the OpenAI-compatible transport code below.
+                return self.handle_ai_embeddings_local(&payload);
             }
             _ => {}
         }
@@ -685,6 +687,179 @@ impl RedDBServer {
             );
         }
 
+        json_response(200, JsonValue::Object(object))
+    }
+
+    /// Local-provider embedding path (#680).
+    ///
+    /// Routes through the runtime's swappable backend after resolving a
+    /// registered+installed local model. Mirrors the OpenAI-compatible
+    /// response shape (`provider`, `model`, `count`, `embeddings`,
+    /// `saved`) so existing clients stay source-compatible, and adds
+    /// `model_source`, `model_revision`, `model_engine`, `dimensions`
+    /// fields that the local catalog publishes.
+    fn handle_ai_embeddings_local(&self, payload: &JsonValue) -> HttpResponse {
+        let model_name = match json_string_field(payload, "model") {
+            Some(name) if !name.trim().is_empty() => name.trim().to_string(),
+            _ => {
+                return json_error(
+                    400,
+                    "field 'model' is required for the local provider and must be the \
+                     registered local model name (see POST /ai/models)",
+                );
+            }
+        };
+
+        let max_inputs = match parse_optional_positive_usize(payload, "max_inputs")
+            .map(|v| v.unwrap_or(DEFAULT_MAX_INPUTS))
+        {
+            Ok(value) => value,
+            Err(err) => return json_error(400, err),
+        };
+
+        let inputs = match self.collect_ai_embedding_inputs(payload, max_inputs) {
+            Ok(inputs) => inputs,
+            Err(err) => return json_error(400, err),
+        };
+
+        let save_options = match parse_ai_embedding_save_options(payload) {
+            Ok(options) => options,
+            Err(err) => return json_error(400, err),
+        };
+
+        let texts: Vec<String> = inputs.iter().map(|i| i.text.clone()).collect();
+        let response = match crate::runtime::ai::local_embedding::embed_local(
+            &self.runtime,
+            &model_name,
+            texts,
+        ) {
+            Ok(response) => response,
+            Err(err) => {
+                let (status, msg) = crate::server::transport::map_runtime_error(&err);
+                return json_error(status, msg);
+            }
+        };
+
+        if response.embeddings.len() != inputs.len() {
+            return json_error(
+                500,
+                "local backend returned a different number of embeddings than requested inputs",
+            );
+        }
+
+        let mut saved = Vec::new();
+        if let Some(save) = save_options {
+            for (index, embedding) in response.embeddings.iter().cloned().enumerate() {
+                let mut metadata = save.metadata.clone();
+                metadata.push((
+                    "_ai_provider".to_string(),
+                    MetadataValue::String(response.provider.to_string()),
+                ));
+                metadata.push((
+                    "_ai_model".to_string(),
+                    MetadataValue::String(response.name.clone()),
+                ));
+                metadata.push((
+                    "_ai_model_source".to_string(),
+                    MetadataValue::String(response.source.clone()),
+                ));
+                metadata.push((
+                    "_ai_model_revision".to_string(),
+                    MetadataValue::String(response.revision.clone()),
+                ));
+                if let Some(source_row) = &inputs[index].source_row {
+                    metadata.push((
+                        "_source_collection".to_string(),
+                        MetadataValue::String(source_row.table.clone()),
+                    ));
+                    metadata.push((
+                        "_source_row_id".to_string(),
+                        MetadataValue::Int(source_row.row_id as i64),
+                    ));
+                }
+                let create_result = self.entity_use_cases().create_vector(CreateVectorInput {
+                    collection: save.collection.clone(),
+                    dense: embedding,
+                    content: if save.include_content {
+                        Some(inputs[index].text.clone())
+                    } else {
+                        None
+                    },
+                    metadata,
+                    link_row: None,
+                    link_node: None,
+                });
+                let output = match create_result {
+                    Ok(output) => output,
+                    Err(err) => {
+                        return json_error(
+                            400,
+                            format!("failed to persist embedding at index {index}: {err}"),
+                        );
+                    }
+                };
+                let mut item = Map::new();
+                item.insert("index".to_string(), JsonValue::Number(index as f64));
+                item.insert("id".to_string(), JsonValue::Number(output.id.raw() as f64));
+                if let Some(source_row) = &inputs[index].source_row {
+                    item.insert(
+                        "source_row_id".to_string(),
+                        JsonValue::Number(source_row.row_id as f64),
+                    );
+                    item.insert(
+                        "source_collection".to_string(),
+                        JsonValue::String(source_row.table.clone()),
+                    );
+                }
+                saved.push(JsonValue::Object(item));
+            }
+        }
+
+        let mut object = Map::new();
+        object.insert("ok".to_string(), JsonValue::Bool(true));
+        object.insert(
+            "provider".to_string(),
+            JsonValue::String(response.provider.to_string()),
+        );
+        object.insert("model".to_string(), JsonValue::String(response.name));
+        object.insert(
+            "model_source".to_string(),
+            JsonValue::String(response.source),
+        );
+        object.insert(
+            "model_revision".to_string(),
+            JsonValue::String(response.revision),
+        );
+        object.insert(
+            "model_engine".to_string(),
+            JsonValue::String(response.engine),
+        );
+        object.insert(
+            "dimensions".to_string(),
+            JsonValue::Number(response.dimensions as f64),
+        );
+        object.insert(
+            "count".to_string(),
+            JsonValue::Number(response.embeddings.len() as f64),
+        );
+        object.insert(
+            "embeddings".to_string(),
+            JsonValue::Array(
+                response
+                    .embeddings
+                    .iter()
+                    .map(|embedding| {
+                        JsonValue::Array(
+                            embedding
+                                .iter()
+                                .map(|value| JsonValue::Number(*value as f64))
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            ),
+        );
+        object.insert("saved".to_string(), JsonValue::Array(saved));
         json_response(200, JsonValue::Object(object))
     }
 
@@ -2180,6 +2355,407 @@ mod tests {
         .expect("resolve from vault");
         assert_eq!(resolved, "sk_test_vault");
 
+        let _ = std::fs::remove_file(path);
+    }
+
+    // ====================================================================
+    // Local AI embedding routing (#680).
+    //
+    // Drives both HTTP (`handle_ai_embeddings`) and gRPC
+    // (`crate::ai::grpc_embeddings`) through the same scenarios so the
+    // two surfaces stay aligned. The deterministic fake backend lives
+    // in `runtime::ai::local_embedding` and is installed per-test;
+    // every test that exercises the success path explicitly installs
+    // it, and the `disabled_feature_*` tests clear it so the cfg gate
+    // is the only signal left.
+    // ====================================================================
+
+    use crate::runtime::ai::local_embedding::{
+        clear_local_embedding_backend_for_tests, install_local_embedding_backend,
+        DeterministicFakeBackend, LocalEmbeddingBackend,
+    };
+
+    // The local embedding backend lives in a process-global OnceLock,
+    // so any test that touches it must serialize against the rest of
+    // the local-embedding suite. Without this lock the parallel test
+    // runner interleaves `install` and `clear`, and the disabled-feature
+    // path either disappears or leaks into the success tests.
+    fn backend_test_lock() -> &'static std::sync::Mutex<()> {
+        static L: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        L.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    fn lock_backend() -> std::sync::MutexGuard<'static, ()> {
+        backend_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn fresh_runtime_path(label: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "reddb_local_emb_{label}_{}_{}.rdb",
+            std::process::id(),
+            nanos
+        ))
+    }
+
+    fn make_server(label: &str) -> (RedDBServer, std::path::PathBuf) {
+        let path = fresh_runtime_path(label);
+        let rt =
+            RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("runtime opens");
+        (RedDBServer::new(rt), path)
+    }
+
+    fn register_local_model(server: &RedDBServer, name: &str, dimensions: u32) {
+        let body = format!(
+            r#"{{
+                "name": "{name}",
+                "provider": "local",
+                "source": "sentence-transformers/all-MiniLM-L6-v2",
+                "task": "embedding",
+                "revision": "main",
+                "engine": "candle",
+                "dimensions": {dimensions}
+            }}"#
+        );
+        let response = server.handle_ai_model_register(body.into_bytes());
+        assert_eq!(
+            response.status,
+            201,
+            "register failed: {}",
+            String::from_utf8_lossy(&response.body)
+        );
+    }
+
+    fn stamp_installed_in_registry(server: &RedDBServer, name: &str) {
+        // Promote the registry entry to `installed` directly. The cache
+        // pull path (#679) writes the on-disk artifacts; this test
+        // doesn't exercise pull, only the embeddings surface, so we
+        // edit the registry KV in place.
+        let key = format!("red.config.ai.models.{name}");
+        let entry = server
+            .entity_use_cases()
+            .get_kv(RED_CONFIG_COLLECTION, &key)
+            .expect("read")
+            .expect("registered");
+        let raw = match entry.0 {
+            Value::Text(s) => s.to_string(),
+            other => panic!("unexpected value: {other:?}"),
+        };
+        let mut parsed: JsonValue = crate::json::parse_json(&raw).expect("parse").into();
+        if let JsonValue::Object(ref mut object) = parsed {
+            object.insert(
+                "status".to_string(),
+                JsonValue::String("installed".to_string()),
+            );
+        }
+        let encoded = crate::json::to_string(&parsed).expect("re-encode");
+        let _ = server
+            .entity_use_cases()
+            .delete_kv(RED_CONFIG_COLLECTION, &key);
+        server
+            .entity_use_cases()
+            .create_kv(CreateKvInput {
+                collection: RED_CONFIG_COLLECTION.to_string(),
+                key,
+                value: Value::text(encoded),
+                metadata: Vec::new(),
+            })
+            .expect("stamp installed");
+    }
+
+    /// Take the backend lock and install the deterministic fake.
+    /// Callers bind the returned guard to `_g` so the lock is held for
+    /// the whole test body; dropping it lets the next backend test
+    /// claim the slot.
+    fn install_fake_backend() -> std::sync::MutexGuard<'static, ()> {
+        let guard = lock_backend();
+        let backend: std::sync::Arc<dyn LocalEmbeddingBackend> =
+            std::sync::Arc::new(DeterministicFakeBackend);
+        install_local_embedding_backend(backend);
+        guard
+    }
+
+    /// Take the backend lock and clear the installed slot. The
+    /// disabled-feature tests rely on this to make `cfg!(feature =
+    /// "local-models")` the only signal left.
+    fn clear_backend_for_test() -> std::sync::MutexGuard<'static, ()> {
+        let guard = lock_backend();
+        clear_local_embedding_backend_for_tests();
+        guard
+    }
+
+    fn parse_json_body(body: &[u8]) -> JsonValue {
+        let text = std::str::from_utf8(body).expect("utf8");
+        crate::json::parse_json(text).expect("body json").into()
+    }
+
+    #[test]
+    fn http_local_embeddings_returns_deterministic_vector_when_registered_and_installed() {
+        let _g = install_fake_backend();
+        let (server, path) = make_server("http_ok");
+        register_local_model(&server, "mini", 8);
+        stamp_installed_in_registry(&server, "mini");
+
+        let body = br#"{"provider":"local","model":"mini","inputs":["hello","world"]}"#.to_vec();
+        let response = server.handle_ai_embeddings(body);
+        assert_eq!(
+            response.status,
+            200,
+            "expected 200, got {} body={}",
+            response.status,
+            String::from_utf8_lossy(&response.body)
+        );
+        let payload = parse_json_body(&response.body);
+        assert_eq!(
+            payload.get("provider").and_then(JsonValue::as_str),
+            Some("local")
+        );
+        assert_eq!(
+            payload.get("model").and_then(JsonValue::as_str),
+            Some("mini")
+        );
+        assert_eq!(
+            payload.get("dimensions").and_then(JsonValue::as_u64),
+            Some(8)
+        );
+        assert_eq!(payload.get("count").and_then(JsonValue::as_u64), Some(2));
+        let embeddings = payload
+            .get("embeddings")
+            .and_then(JsonValue::as_array)
+            .expect("embeddings array");
+        assert_eq!(embeddings.len(), 2);
+        for row in embeddings {
+            let row = row.as_array().expect("row");
+            assert_eq!(row.len(), 8);
+        }
+        // Determinism: replay returns the same bytes.
+        let response2 = server.handle_ai_embeddings(
+            br#"{"provider":"local","model":"mini","inputs":["hello"]}"#.to_vec(),
+        );
+        let payload2 = parse_json_body(&response2.body);
+        let first = embeddings[0].as_array().unwrap();
+        let replay = payload2
+            .get("embeddings")
+            .and_then(JsonValue::as_array)
+            .unwrap()[0]
+            .as_array()
+            .unwrap();
+        assert_eq!(first, replay);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn http_local_embeddings_404_when_model_not_registered() {
+        let _g = install_fake_backend();
+        let (server, path) = make_server("http_missing");
+        let body = br#"{"provider":"local","model":"ghost","inputs":["x"]}"#.to_vec();
+        let response = server.handle_ai_embeddings(body);
+        assert_eq!(
+            response.status,
+            404,
+            "body={}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let payload = parse_json_body(&response.body);
+        let err = payload
+            .get("error")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("");
+        assert!(
+            err.contains("'ghost' is not registered"),
+            "unexpected error: {err}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn http_local_embeddings_404_when_registered_but_not_installed() {
+        let _g = install_fake_backend();
+        let (server, path) = make_server("http_not_installed");
+        register_local_model(&server, "mini", 4);
+        // Skip the install stamp on purpose.
+        let body = br#"{"provider":"local","model":"mini","inputs":["x"]}"#.to_vec();
+        let response = server.handle_ai_embeddings(body);
+        assert_eq!(response.status, 404);
+        let payload = parse_json_body(&response.body);
+        let err = payload
+            .get("error")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("");
+        assert!(
+            err.contains("not installed") && err.contains("pull"),
+            "unexpected error: {err}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn http_local_embeddings_400_when_model_field_missing() {
+        let _g = install_fake_backend();
+        let (server, path) = make_server("http_no_model");
+        let body = br#"{"provider":"local","inputs":["x"]}"#.to_vec();
+        let response = server.handle_ai_embeddings(body);
+        assert_eq!(response.status, 400);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn http_local_embeddings_501_when_feature_disabled_and_no_backend() {
+        // The cfg-feature gate only fires when no backend was installed.
+        // Tests run with the default cargo feature set (no `local-models`),
+        // so clearing the backend is enough to surface FeatureNotEnabled.
+        if cfg!(feature = "local-models") {
+            // When the feature flag is on the gate falls back to the
+            // deterministic fake; the disabled-feature error is not
+            // reachable. Skip the assertion (the dedicated coverage
+            // lives in the no-feature CI matrix).
+            return;
+        }
+        let _g = clear_backend_for_test();
+        let (server, path) = make_server("http_disabled");
+        register_local_model(&server, "mini", 4);
+        stamp_installed_in_registry(&server, "mini");
+        let body = br#"{"provider":"local","model":"mini","inputs":["x"]}"#.to_vec();
+        let response = server.handle_ai_embeddings(body);
+        assert_eq!(
+            response.status,
+            501,
+            "expected 501 feature-not-enabled, got {} body={}",
+            response.status,
+            String::from_utf8_lossy(&response.body)
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn http_local_embeddings_response_does_not_leak_into_huggingface_path() {
+        // Remote HuggingFace stays distinct: local routing only fires
+        // when provider="local", so a provider="huggingface" request
+        // hits the huggingface_embeddings transport (which 4xxs here
+        // for lack of API key) and never touches the local backend.
+        let _g = install_fake_backend();
+        let (server, path) = make_server("http_hf_distinct");
+        register_local_model(&server, "mini", 4);
+        stamp_installed_in_registry(&server, "mini");
+        // Drop the env API key so the HF path 400s on auth, not on
+        // accidental local routing.
+        std::env::remove_var("REDDB_HUGGINGFACE_API_KEY");
+        let body = br#"{"provider":"huggingface","model":"mini","inputs":["x"]}"#.to_vec();
+        let response = server.handle_ai_embeddings(body);
+        assert_ne!(response.status, 200, "HF without key must not succeed");
+        let payload = parse_json_body(&response.body);
+        let err = payload
+            .get("error")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("");
+        // Whatever the failure mode (missing key, network), the message
+        // must not name the local provider or the local backend.
+        assert!(
+            !err.to_ascii_lowercase().contains("local model"),
+            "HF path leaked local routing: {err}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn grpc_local_embeddings_returns_provider_local_with_model_metadata() {
+        let _g = install_fake_backend();
+        let (server, path) = make_server("grpc_ok");
+        register_local_model(&server, "mini", 6);
+        stamp_installed_in_registry(&server, "mini");
+
+        let payload_text = r#"{"provider":"local","model":"mini","inputs":["a","b"]}"#;
+        let payload: JsonValue = crate::json::parse_json(payload_text).expect("parse").into();
+        let response = crate::ai::grpc_embeddings(server.runtime(), &payload)
+            .expect("grpc embeddings succeeds");
+        assert_eq!(
+            response.get("provider").and_then(JsonValue::as_str),
+            Some("local")
+        );
+        assert_eq!(
+            response.get("model").and_then(JsonValue::as_str),
+            Some("mini")
+        );
+        assert_eq!(
+            response.get("model_source").and_then(JsonValue::as_str),
+            Some("sentence-transformers/all-MiniLM-L6-v2")
+        );
+        assert_eq!(
+            response.get("model_revision").and_then(JsonValue::as_str),
+            Some("main")
+        );
+        assert_eq!(
+            response.get("dimensions").and_then(JsonValue::as_u64),
+            Some(6)
+        );
+        let embeddings = response
+            .get("embeddings")
+            .and_then(JsonValue::as_array)
+            .expect("embeddings");
+        assert_eq!(embeddings.len(), 2);
+        for row in embeddings {
+            assert_eq!(row.as_array().unwrap().len(), 6);
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn grpc_local_embeddings_errors_when_model_not_registered() {
+        let _g = install_fake_backend();
+        let (server, path) = make_server("grpc_missing");
+        let payload: JsonValue =
+            crate::json::parse_json(r#"{"provider":"local","model":"ghost","inputs":["a"]}"#)
+                .expect("parse")
+                .into();
+        let err =
+            crate::ai::grpc_embeddings(server.runtime(), &payload).expect_err("should not succeed");
+        let msg = err.to_string();
+        assert!(msg.contains("'ghost' is not registered"), "got: {msg}");
+        assert!(matches!(err, crate::RedDBError::NotFound(_)));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn grpc_local_embeddings_errors_when_registered_but_not_installed() {
+        let _g = install_fake_backend();
+        let (server, path) = make_server("grpc_uninstalled");
+        register_local_model(&server, "mini", 4);
+        let payload: JsonValue =
+            crate::json::parse_json(r#"{"provider":"local","model":"mini","inputs":["a"]}"#)
+                .expect("parse")
+                .into();
+        let err =
+            crate::ai::grpc_embeddings(server.runtime(), &payload).expect_err("should not succeed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not installed") && msg.contains("pull"),
+            "got: {msg}"
+        );
+        assert!(matches!(err, crate::RedDBError::NotFound(_)));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn grpc_local_embeddings_errors_when_feature_disabled_and_no_backend() {
+        if cfg!(feature = "local-models") {
+            return;
+        }
+        let _g = clear_backend_for_test();
+        let (server, path) = make_server("grpc_disabled");
+        register_local_model(&server, "mini", 4);
+        stamp_installed_in_registry(&server, "mini");
+        let payload: JsonValue =
+            crate::json::parse_json(r#"{"provider":"local","model":"mini","inputs":["a"]}"#)
+                .expect("parse")
+                .into();
+        let err =
+            crate::ai::grpc_embeddings(server.runtime(), &payload).expect_err("should not succeed");
+        assert!(matches!(err, crate::RedDBError::FeatureNotEnabled(_)));
         let _ = std::fs::remove_file(path);
     }
 }

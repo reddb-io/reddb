@@ -2314,7 +2314,7 @@ pub fn grpc_embeddings(
             ));
         }
         AiProvider::Local => {
-            return Err(local_embeddings_unavailable_error());
+            return grpc_embeddings_local(runtime, payload);
         }
         _ => {}
     }
@@ -2395,6 +2395,73 @@ pub fn grpc_embeddings(
     if let Some(tt) = response.total_tokens {
         obj.insert("total_tokens".to_string(), JsonValue::Number(tt as f64));
     }
+    Ok(JsonValue::Object(obj))
+}
+
+/// gRPC local-provider embedding path (#680).
+///
+/// Mirrors the HTTP local path: resolves a registered+installed local
+/// model, runs the runtime backend, and returns the same JSON shape
+/// the HTTP handler produces (`provider`, `model`, `model_source`,
+/// `model_revision`, `model_engine`, `dimensions`, `embeddings`).
+/// Save-side behaviour is HTTP-only; gRPC mirrors the OpenAI-compatible
+/// gRPC path which also does not persist.
+fn grpc_embeddings_local(
+    runtime: &crate::runtime::RedDBRuntime,
+    payload: &JsonValue,
+) -> crate::RedDBResult<JsonValue> {
+    let model_name = payload
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            crate::RedDBError::Query(
+                "field 'model' is required for the local provider and must be the \
+                 registered local model name (see POST /ai/models)"
+                    .to_string(),
+            )
+        })?
+        .to_string();
+
+    let inputs = grpc_collect_embedding_inputs(runtime, payload)?;
+    let response = crate::runtime::ai::local_embedding::embed_local(runtime, &model_name, inputs)?;
+
+    let embeddings_json: Vec<JsonValue> = response
+        .embeddings
+        .into_iter()
+        .map(|vec| {
+            JsonValue::Array(
+                vec.into_iter()
+                    .map(|f| JsonValue::Number(f as f64))
+                    .collect(),
+            )
+        })
+        .collect();
+
+    let mut obj = Map::new();
+    obj.insert(
+        "provider".to_string(),
+        JsonValue::String(response.provider.to_string()),
+    );
+    obj.insert("model".to_string(), JsonValue::String(response.name));
+    obj.insert(
+        "model_source".to_string(),
+        JsonValue::String(response.source),
+    );
+    obj.insert(
+        "model_revision".to_string(),
+        JsonValue::String(response.revision),
+    );
+    obj.insert(
+        "model_engine".to_string(),
+        JsonValue::String(response.engine),
+    );
+    obj.insert(
+        "dimensions".to_string(),
+        JsonValue::Number(response.dimensions as f64),
+    );
+    obj.insert("embeddings".to_string(), JsonValue::Array(embeddings_json));
     Ok(JsonValue::Object(obj))
 }
 
