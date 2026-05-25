@@ -36,6 +36,30 @@ const STATUS_INSTALLED: &str = "installed";
 const TASK_EMBEDDING: &str = "embedding";
 const PROVIDER_LOCAL: &str = "local";
 
+/// Canonical pull-policy names mirrored from the model-registry contract
+/// (`crate::server::handlers_ai`). The embed path is read-side and does
+/// not depend on the handler module, so these constants are duplicated
+/// deliberately to keep the runtime crate free of HTTP-layer coupling.
+const PULL_POLICY_NEVER: &str = "never";
+const PULL_POLICY_IF_MISSING: &str = "if_missing";
+const PULL_POLICY_ALWAYS: &str = "always";
+
+/// Normalise a stored `pull_policy` value to its canonical form. Old
+/// registry entries written before the rename still carry
+/// `manual`/`on_demand`/`eager`; those continue to resolve to the
+/// matching canonical name so existing installs keep working.
+fn normalize_stored_pull_policy(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "never" | "manual" => PULL_POLICY_NEVER,
+        "always" | "eager" => PULL_POLICY_ALWAYS,
+        // Default — anything else, including the legacy `on_demand`, is
+        // treated as `if_missing` (the safest default for query-time
+        // routing: never auto-acquire silently, but allow operator
+        // pulls).
+        _ => PULL_POLICY_IF_MISSING,
+    }
+}
+
 const LOCAL_MODELS_DISABLED_MESSAGE: &str =
     "local embeddings require the `local-models` feature flag at engine build time. \
      Build with: cargo build --features local-models. Alternatively, install a backend \
@@ -218,11 +242,32 @@ pub fn embed_local(
         )));
     }
     if descriptor.status != STATUS_INSTALLED {
-        return Err(RedDBError::NotFound(format!(
-            "local model '{name}' is registered (status='{}') but its artifacts are not installed; \
-             pull with `POST /ai/models/{name}/pull` before requesting embeddings",
-            descriptor.status
-        )));
+        // Operator-safe contract: query-time routing never silently
+        // acquires artifacts and never falls back to a remote provider.
+        // Each policy surfaces a clear, distinct error so the operator
+        // knows which knob to turn.
+        let message = match descriptor.pull_policy {
+            PULL_POLICY_NEVER => format!(
+                "local model '{name}' is registered (status='{}') but its artifacts are not installed; \
+                 pull_policy='never' forbids runtime acquisition. An operator must explicitly install \
+                 the model via `POST /ai/models/{name}/pull`.",
+                descriptor.status
+            ),
+            PULL_POLICY_ALWAYS => format!(
+                "local model '{name}' is registered (status='{}') but its artifacts are not installed; \
+                 pull_policy='always' is configured but query-time auto-pull is not implemented in this slice. \
+                 Trigger a refresh via `POST /ai/models/{name}/pull` before requesting embeddings.",
+                descriptor.status
+            ),
+            // PULL_POLICY_IF_MISSING (default)
+            _ => format!(
+                "local model '{name}' is registered (status='{}') but its artifacts are not installed; \
+                 pull_policy='if_missing' permits acquisition only via the explicit pull endpoint \
+                 (query-time auto-pull is not implemented). Run `POST /ai/models/{name}/pull` to install.",
+                descriptor.status
+            ),
+        };
+        return Err(RedDBError::NotFound(message));
     }
 
     let request = LocalEmbeddingRequest {
@@ -274,6 +319,10 @@ struct ModelDescriptor {
     task: String,
     status: String,
     dimensions: u32,
+    /// Canonical pull policy (`never` / `if_missing` / `always`),
+    /// normalised at read time so the gate logic does not need to know
+    /// about legacy alias spellings.
+    pull_policy: &'static str,
 }
 
 fn read_model_descriptor(runtime: &RedDBRuntime, name: &str) -> RedDBResult<ModelDescriptor> {
@@ -321,6 +370,11 @@ fn read_model_descriptor(runtime: &RedDBRuntime, name: &str) -> RedDBResult<Mode
         .ok_or_else(|| {
             RedDBError::Query(format!("model entry for '{name}' is missing 'dimensions'"))
         })? as u32;
+    let pull_policy = normalize_stored_pull_policy(
+        pick("pull_policy")
+            .as_deref()
+            .unwrap_or(PULL_POLICY_IF_MISSING),
+    );
 
     Ok(ModelDescriptor {
         name: pick("name").unwrap_or_else(|| name.to_string()),
@@ -331,6 +385,7 @@ fn read_model_descriptor(runtime: &RedDBRuntime, name: &str) -> RedDBResult<Mode
         task,
         status,
         dimensions,
+        pull_policy,
     })
 }
 

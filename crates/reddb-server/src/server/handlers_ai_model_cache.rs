@@ -38,6 +38,23 @@ const STAGING_DIR_NAME: &str = ".staging";
 const PURGE_DIR_NAME: &str = ".purge";
 const MANIFEST_FILE: &str = "manifest.json";
 
+/// Body fields the pull endpoint must reject outright: the boundary
+/// never accepts plaintext credentials. Operators stage them in the
+/// vault and reference them by `credential_alias`.
+const PULL_REJECTED_PLAINTEXT_FIELDS: &[&str] = &[
+    "api_key",
+    "apikey",
+    "api_token",
+    "token",
+    "auth_token",
+    "bearer_token",
+    "password",
+    "secret",
+    "hf_token",
+    "huggingface_token",
+    "huggingface_api_key",
+];
+
 const STATUS_REGISTERED: &str = "registered";
 const STATUS_INSTALLED: &str = "installed";
 const STATUS_MISSING: &str = "missing";
@@ -59,6 +76,23 @@ impl RedDBServer {
             Err(resp) => return resp,
         };
 
+        // The pull boundary must never accept a plaintext provider
+        // credential. Operators stage HuggingFace tokens through the
+        // vault and the model registry references them by alias.
+        for field in PULL_REJECTED_PLAINTEXT_FIELDS {
+            if payload.get(field).is_some() {
+                return json_error(
+                    400,
+                    format!(
+                        "field '{field}' is rejected: pull must not accept plaintext credentials. \
+                         Store the secret in the vault at 'red.secret.ai.huggingface.{{alias}}' and \
+                         reference it via the model's 'credential_alias' or pass 'credential_alias' \
+                         on the pull request."
+                    ),
+                );
+            }
+        }
+
         let entry = match self.read_model_entry(&name) {
             Ok(Some(entry)) => entry,
             Ok(None) => {
@@ -66,6 +100,30 @@ impl RedDBServer {
             }
             Err(err) => return json_error(500, err),
         };
+
+        // Resolve provider credentials for the eventual live pull. The
+        // alias falls back to whatever was registered on the model
+        // entry; absence is allowed only for public sources. We do not
+        // attach the resolved key to the response — it stays in
+        // memory just long enough to authenticate the (future) HTTP
+        // pull call.
+        let credential_alias = payload
+            .get("credential_alias")
+            .and_then(JsonValue::as_str)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                entry
+                    .get("credential_alias")
+                    .and_then(JsonValue::as_str)
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            });
+        let _resolved_credential =
+            match self.resolve_pull_credential(&entry, credential_alias.as_deref()) {
+                Ok(value) => value,
+                Err((status, message)) => return json_error(status, message),
+            };
 
         let fixture_dir = match resolve_fixture_dir(&payload, |k| self.read_config_text(k)) {
             Ok(p) => p,
@@ -194,6 +252,69 @@ impl RedDBServer {
             JsonValue::String(STATUS_REGISTERED.into()),
         );
         json_response(200, JsonValue::Object(object))
+    }
+
+    /// Resolve provider credentials for a pull request, when the
+    /// registered source is a private remote (HuggingFace today). The
+    /// resolver returns `Ok(None)` if no alias is set AND the source
+    /// does not appear to need one; `Ok(Some(_))` when a key was
+    /// successfully resolved via env/vault/legacy config; and
+    /// `Err((status, message))` when the operator asked for credential
+    /// resolution but the vault did not have a usable secret.
+    ///
+    /// The returned value is intentionally consumed by the caller and
+    /// never persisted into the model entry or the HTTP response — the
+    /// pull surface is the only code that should ever materialise the
+    /// plaintext key.
+    fn resolve_pull_credential(
+        &self,
+        _entry: &JsonValue,
+        credential_alias: Option<&str>,
+    ) -> Result<Option<String>, (u16, String)> {
+        // Public HuggingFace repos do not need a key; only attempt
+        // resolution when the operator opted in by setting an alias.
+        // Private/gated repos still flow through this gate by virtue
+        // of an alias on the model entry or the pull request body.
+        let Some(alias) = credential_alias else {
+            return Ok(None);
+        };
+
+        let result = crate::ai::resolve_api_key(
+            &crate::ai::AiProvider::HuggingFace,
+            Some(alias),
+            |kv_key| {
+                if kv_key.starts_with("red.secret.") {
+                    return Ok(self.runtime().vault_kv_get(kv_key));
+                }
+                match self
+                    .entity_use_cases()
+                    .get_kv(RED_CONFIG_COLLECTION, kv_key)
+                {
+                    Ok(Some((Value::Text(secret), _))) => Ok(Some(secret.to_string())),
+                    Ok(_) => Ok(None),
+                    Err(err) => Err(crate::RedDBError::Query(format!(
+                        "failed to read AI credential store: {err}"
+                    ))),
+                }
+            },
+        );
+        match result {
+            Ok(key) if !key.trim().is_empty() => Ok(Some(key)),
+            Ok(_) => Err((
+                400,
+                format!(
+                    "credential_alias '{alias}' resolved to an empty secret; store the \
+                     HuggingFace token at 'red.secret.ai.huggingface.{alias}' before pulling"
+                ),
+            )),
+            Err(err) => Err((
+                400,
+                format!(
+                    "failed to resolve HuggingFace credentials for alias '{alias}': {err}. \
+                     Store the token at 'red.secret.ai.huggingface.{alias}' in the vault."
+                ),
+            )),
+        }
     }
 
     fn read_model_entry(&self, name: &str) -> Result<Option<JsonValue>, String> {
