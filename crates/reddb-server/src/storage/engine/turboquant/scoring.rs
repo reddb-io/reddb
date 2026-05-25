@@ -19,6 +19,7 @@ const MAX_LUT: f32 = 127.0;
 pub enum ScoreKernel {
     Scalar,
     Avx2,
+    Avx512Bw,
 }
 
 /// Per-query lookup table. Built once per `score_many` call and shared
@@ -164,20 +165,28 @@ static SCALAR_SCORER: ScalarScorer = ScalarScorer;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 static AVX2_SCORER: Avx2Scorer = Avx2Scorer;
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+static AVX512BW_SCORER: Avx512BwScorer = Avx512BwScorer;
+
 /// Pick the best available scoring kernel for this host. SIMD slices
 /// register themselves here without touching the call site; the choice
 /// is made once per query (no per-block branch cost).
 pub fn select_scorer() -> &'static dyn PerBlockScorer {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
-        // AVX-512BW will land in a future slice and take precedence
-        // over AVX2 here; until then AVX2 is the widest x86 kernel.
-        // FMA is required to match the scalar oracle bit-exactly —
-        // `ScalarScorer` uses `f32::mul_add`, so the AVX2 path must
+        // AVX-512BW is the widest x86 kernel and takes precedence over
+        // AVX2 when available. FMA is required throughout to match
+        // `ScalarScorer`'s `f32::mul_add` bit-exactly; the SIMD paths
         // use `vfmadd` rather than separate mul+add to stay byte-
-        // identical. AVX2 + FMA3 ship together on every relevant
-        // Intel/AMD core; the rare AVX2-but-no-FMA host falls back
-        // to scalar.
+        // identical. AVX-512F implies AVX2, and FMA3 ships on every
+        // relevant Intel/AMD AVX2+ core; rare hosts that drop FMA fall
+        // back to scalar.
+        if std::is_x86_feature_detected!("avx512bw")
+            && std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("fma")
+        {
+            return &AVX512BW_SCORER;
+        }
         if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
             return &AVX2_SCORER;
         }
@@ -289,6 +298,163 @@ unsafe fn score_block_avx2_inner(
     }
 }
 
+/// AVX-512BW block scorer. Processes pairs of byte groups in a single
+/// 512-bit register so that `vpshufb` resolves four 128-bit lane
+/// lookups per iteration (two groups × hi/lo tables).
+///
+/// MIT notice: the paired-group `vpshufb` + u16-accumulator structure
+/// is adapted from RyanCodrai/turbovec (commit
+/// `4a4f2cd2db233f24405911b1ceaf1823fa23b4ac`, MIT). The single-block
+/// trait surface, the fold from 512→256-bit lanes, and the tail
+/// handling are clean-room.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+pub struct Avx512BwScorer;
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+impl PerBlockScorer for Avx512BwScorer {
+    fn kernel(&self) -> ScoreKernel {
+        ScoreKernel::Avx512Bw
+    }
+
+    fn score_block(
+        &self,
+        lut: &QueryLut,
+        block_codes: &[u8],
+        n_byte_groups: usize,
+        n_vectors: usize,
+        out: &mut [f32; BLOCK_LANES],
+    ) {
+        debug_assert_eq!(n_byte_groups, lut.n_byte_groups);
+        debug_assert!(block_codes.len() >= n_byte_groups * BLOCK_LANES);
+        debug_assert!(n_vectors <= BLOCK_LANES);
+        debug_assert!(std::is_x86_feature_detected!("avx512bw"));
+        debug_assert!(std::is_x86_feature_detected!("avx512f"));
+        debug_assert!(std::is_x86_feature_detected!("fma"));
+        // SAFETY: AVX-512BW/F + FMA availability is enforced by
+        // `select_scorer` and re-asserted by the debug checks above.
+        unsafe {
+            score_block_avx512bw_inner(lut, block_codes, n_byte_groups, n_vectors, out);
+        }
+    }
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512bw,avx512f,avx2,avx,fma")]
+unsafe fn score_block_avx512bw_inner(
+    lut: &QueryLut,
+    block_codes: &[u8],
+    n_byte_groups: usize,
+    n_vectors: usize,
+    out: &mut [f32; BLOCK_LANES],
+) {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    // 32 u16 lanes per accumulator — one position per byte across two
+    // adjacent groups. The lower 256 bits hold group g, the upper 256
+    // hold group g+1; they are folded together after the loop. The u16
+    // headroom matches the AVX2 kernel: max sum per lane = 2 *
+    // n_byte_groups * MAX_LUT, safe for n_byte_groups <= 258.
+    let mut accum = [_mm512_setzero_si512(); 4];
+    let nibble_mask = _mm512_set1_epi8(0x0f);
+
+    let mut g = 0;
+    while g + 2 <= n_byte_groups {
+        let codes = _mm512_loadu_si512(block_codes.as_ptr().add(g * BLOCK_LANES) as *const _);
+        let clo = _mm512_and_si512(codes, nibble_mask);
+        let chi = _mm512_and_si512(_mm512_srli_epi16(codes, 4), nibble_mask);
+        let table = _mm512_loadu_si512(lut.bytes.as_ptr().add(g * 32) as *const _);
+        let lo_scores = _mm512_shuffle_epi8(table, clo);
+        let hi_scores = _mm512_shuffle_epi8(table, chi);
+
+        accum[0] = _mm512_add_epi16(accum[0], lo_scores);
+        accum[1] = _mm512_add_epi16(accum[1], _mm512_srli_epi16(lo_scores, 8));
+        accum[2] = _mm512_add_epi16(accum[2], hi_scores);
+        accum[3] = _mm512_add_epi16(accum[3], _mm512_srli_epi16(hi_scores, 8));
+
+        g += 2;
+    }
+
+    // Fold the 512-bit accumulators back to 256-bit by summing the two
+    // halves. After this, each `accum256[i]` matches what the AVX2
+    // kernel computes for the same `accum[i]`, modulo the unpaired
+    // tail group which is added below.
+    let mut accum256 = [
+        _mm256_add_epi16(
+            _mm512_castsi512_si256(accum[0]),
+            _mm512_extracti64x4_epi64(accum[0], 1),
+        ),
+        _mm256_add_epi16(
+            _mm512_castsi512_si256(accum[1]),
+            _mm512_extracti64x4_epi64(accum[1], 1),
+        ),
+        _mm256_add_epi16(
+            _mm512_castsi512_si256(accum[2]),
+            _mm512_extracti64x4_epi64(accum[2], 1),
+        ),
+        _mm256_add_epi16(
+            _mm512_castsi512_si256(accum[3]),
+            _mm512_extracti64x4_epi64(accum[3], 1),
+        ),
+    ];
+
+    // Tail: an odd number of byte groups leaves one group unpaired.
+    // Handle it with the AVX2-shaped 256-bit kernel body so the result
+    // remains bit-identical to `ScalarScorer` and `Avx2Scorer`.
+    if g < n_byte_groups {
+        let nibble_mask_256 = _mm256_set1_epi8(0x0f);
+        let codes = _mm256_loadu_si256(block_codes.as_ptr().add(g * BLOCK_LANES) as *const __m256i);
+        let clo = _mm256_and_si256(codes, nibble_mask_256);
+        let chi = _mm256_and_si256(_mm256_srli_epi16(codes, 4), nibble_mask_256);
+        let table = _mm256_loadu_si256(lut.bytes.as_ptr().add(g * 32) as *const __m256i);
+        let lo_scores = _mm256_shuffle_epi8(table, clo);
+        let hi_scores = _mm256_shuffle_epi8(table, chi);
+
+        accum256[0] = _mm256_add_epi16(accum256[0], lo_scores);
+        accum256[1] = _mm256_add_epi16(accum256[1], _mm256_srli_epi16(lo_scores, 8));
+        accum256[2] = _mm256_add_epi16(accum256[2], hi_scores);
+        accum256[3] = _mm256_add_epi16(accum256[3], _mm256_srli_epi16(hi_scores, 8));
+    }
+
+    // Split the (high, low) byte-position sums per the AVX2 trick:
+    // accum256[0] currently holds, per 16-bit lane i,
+    //   lo_scores[2i] + lo_scores[2i+1] * 256 summed across groups.
+    // accum256[1] holds sum of lo_scores[2i+1] (zero-extended).
+    // Subtracting (accum256[1] << 8) leaves sum of lo_scores[2i].
+    accum256[0] = _mm256_sub_epi16(accum256[0], _mm256_slli_epi16(accum256[1], 8));
+    accum256[2] = _mm256_sub_epi16(accum256[2], _mm256_slli_epi16(accum256[3], 8));
+
+    // Interleave even/odd byte-position sums back into lane order.
+    let dis0 = _mm256_add_epi16(
+        _mm256_permute2x128_si256(accum256[0], accum256[1], 0x21),
+        _mm256_blend_epi32(accum256[0], accum256[1], 0xf0),
+    );
+    let dis1 = _mm256_add_epi16(
+        _mm256_permute2x128_si256(accum256[2], accum256[3], 0x21),
+        _mm256_blend_epi32(accum256[2], accum256[3], 0xf0),
+    );
+
+    let v_scale = _mm512_set1_ps(lut.scale);
+    let v_bias = _mm512_set1_ps(lut.bias);
+
+    // 16 u16 → 16 u32 → 16 f32 per store. FMA matches `f32::mul_add`
+    // bit-exactly, the contract the scalar oracle locks down.
+    let sum0 = _mm512_cvtepi32_ps(_mm512_cvtepu16_epi32(dis0));
+    let scores0 = _mm512_fmadd_ps(v_scale, sum0, v_bias);
+    _mm512_storeu_ps(out.as_mut_ptr(), scores0);
+
+    let sum1 = _mm512_cvtepi32_ps(_mm512_cvtepu16_epi32(dis1));
+    let scores1 = _mm512_fmadd_ps(v_scale, sum1, v_bias);
+    _mm512_storeu_ps(out.as_mut_ptr().add(16), scores1);
+
+    // Tail lanes match the scalar oracle: unused slots are 0.0.
+    for score in out.iter_mut().take(BLOCK_LANES).skip(n_vectors) {
+        *score = 0.0;
+    }
+}
+
 fn decode_perm0_byte(block_codes: &[u8], group: usize, lane: usize) -> (u8, u8) {
     debug_assert!(lane < BLOCK_LANES);
     let half = lane / 16;
@@ -377,6 +543,13 @@ mod tests {
         let kernel = select_scorer().kernel();
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
+            if std::is_x86_feature_detected!("avx512bw")
+                && std::is_x86_feature_detected!("avx512f")
+                && std::is_x86_feature_detected!("fma")
+            {
+                assert_eq!(kernel, ScoreKernel::Avx512Bw);
+                return;
+            }
             if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
                 assert_eq!(kernel, ScoreKernel::Avx2);
                 return;
@@ -443,6 +616,79 @@ mod tests {
                             avx2_out[lane].to_bits(),
                             scalar_out[lane].to_bits(),
                             "AVX2 diverges from scalar at N={n}, block {b}, lane {lane}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[test]
+    fn avx512bw_scorer_matches_scalar_oracle_across_dataset_sizes() {
+        if !std::is_x86_feature_detected!("avx512bw")
+            || !std::is_x86_feature_detected!("avx512f")
+            || !std::is_x86_feature_detected!("fma")
+        {
+            return;
+        }
+        let centroids = centroids_for(4);
+        // Queries chosen to exercise different LUT shapes (zero,
+        // sign-mixed, single-axis) plus a query whose n_byte_groups is
+        // odd (5) so the kernel exercises both the paired-group main
+        // loop and the unpaired-tail branch. `n_byte_groups` stays
+        // small enough that the u16 accumulators cannot overflow vs
+        // the scalar u32 oracle (max sum per lane = 2 *
+        // n_byte_groups * 127).
+        let queries: [Vec<f32>; 5] = [
+            vec![0.0; 8],
+            vec![0.7, -0.3, 0.4, -0.1, 0.2, -0.5, 0.6, -0.9],
+            vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+            // 10-dim → 5 byte groups: odd count exercises the tail.
+            vec![0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8, 0.9, -1.0],
+        ];
+
+        for query in &queries {
+            let lut = QueryLut::build(query, &centroids);
+            let n_byte_groups = lut.n_byte_groups;
+
+            for n in [1usize, 31, 32, 33, 95, 96, 97] {
+                let mut storage = BlockedCodeStorage::new(n_byte_groups);
+                for i in 0..n {
+                    let packed: Vec<u8> = (0..n_byte_groups)
+                        .map(|g| {
+                            let lo = ((i + g * 3) & 0x0f) as u8;
+                            let hi = ((i * 5 + g * 7) & 0x0f) as u8;
+                            lo | (hi << 4)
+                        })
+                        .collect();
+                    storage.append(&packed, 1.0);
+                }
+
+                for b in 0..storage.n_blocks() {
+                    let filled = storage.block_lanes_filled(b);
+                    let mut scalar_out = [0.0f32; BLOCK_LANES];
+                    let mut avx512_out = [f32::NAN; BLOCK_LANES];
+                    ScalarScorer.score_block(
+                        &lut,
+                        storage.block_codes(b),
+                        n_byte_groups,
+                        filled,
+                        &mut scalar_out,
+                    );
+                    AVX512BW_SCORER.score_block(
+                        &lut,
+                        storage.block_codes(b),
+                        n_byte_groups,
+                        filled,
+                        &mut avx512_out,
+                    );
+                    for lane in 0..BLOCK_LANES {
+                        assert_eq!(
+                            avx512_out[lane].to_bits(),
+                            scalar_out[lane].to_bits(),
+                            "AVX-512BW diverges from scalar at N={n}, block {b}, lane {lane}",
                         );
                     }
                 }
