@@ -107,6 +107,7 @@ fn graph_projection_json(projection: &crate::PhysicalGraphProjection) -> JsonVal
 
 pub mod handlers_admin;
 mod handlers_ai;
+mod handlers_ai_model_cache;
 mod handlers_auth;
 mod handlers_backup;
 mod handlers_ec;
