@@ -28,6 +28,7 @@ use crate::crypto::sha256::Sha256;
 use crate::json::{parse_json, Value as JsonValue};
 use crate::runtime::RedDBRuntime;
 use crate::storage::schema::Value;
+use crate::storage::unified::RedDB;
 use crate::{RedDBError, RedDBResult};
 
 const RED_CONFIG_COLLECTION: &str = "red_config";
@@ -195,6 +196,18 @@ pub fn embed_local(
     name: &str,
     inputs: Vec<String>,
 ) -> RedDBResult<LocalEmbeddingResponse> {
+    embed_local_with_db(&runtime.db(), name, inputs)
+}
+
+/// Variant of [`embed_local`] that operates against a `RedDB` handle
+/// directly. The runtime query executor only carries `&RedDB`, so the
+/// text-vector-search routing path calls this rather than the runtime
+/// wrapper above.
+pub fn embed_local_with_db(
+    db: &RedDB,
+    name: &str,
+    inputs: Vec<String>,
+) -> RedDBResult<LocalEmbeddingResponse> {
     if inputs.is_empty() {
         return Err(RedDBError::Query(
             "at least one input is required for local embeddings".to_string(),
@@ -226,7 +239,7 @@ pub fn embed_local(
         }
     };
 
-    let descriptor = read_model_descriptor(runtime, name)?;
+    let descriptor = read_model_descriptor(db, name)?;
 
     if descriptor.provider != PROVIDER_LOCAL {
         return Err(RedDBError::Query(format!(
@@ -325,9 +338,8 @@ struct ModelDescriptor {
     pull_policy: &'static str,
 }
 
-fn read_model_descriptor(runtime: &RedDBRuntime, name: &str) -> RedDBResult<ModelDescriptor> {
+fn read_model_descriptor(db: &RedDB, name: &str) -> RedDBResult<ModelDescriptor> {
     let key = format!("{AI_MODEL_KEY_PREFIX}{name}");
-    let db = runtime.db();
     let raw = match db.get_kv(RED_CONFIG_COLLECTION, &key) {
         Some((Value::Text(text), _)) => text.to_string(),
         Some(_) => {

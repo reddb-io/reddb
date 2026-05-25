@@ -1227,7 +1227,10 @@ pub(super) fn resolve_runtime_vector_source(
                 ))),
             }
         }
-        VectorSource::Text(text) => embed_runtime_vector_text(db, text),
+        VectorSource::Text(text) => {
+            eprintln!("DEBUG resolve_runtime_vector_source Text({text:?})");
+            embed_runtime_vector_text(db, text)
+        }
         VectorSource::Subquery(expr) => resolve_runtime_vector_subquery(db, expr.as_ref()),
     }
 }
@@ -1243,6 +1246,27 @@ fn embed_runtime_vector_text(db: &RedDB, text: &str) -> RedDBResult<Vec<f32>> {
 
     let provider = crate::ai::resolve_default_provider(&kv_getter);
     let model = crate::ai::resolve_default_model(&provider, &kv_getter);
+    eprintln!("DEBUG embed_runtime_vector_text provider={:?} model={:?}", provider.token(), model);
+
+    // Issue #681 — when the default provider is `local`, route through
+    // the registered local-model backend (registry from #678, cache from
+    // #679, backend dispatch from #680). The resolved embedding flows
+    // into the existing vector-search path; the dimension contract on
+    // the target collection is validated downstream in
+    // `validate_vector_query_shape`. We never silently fall back to a
+    // remote provider on failure — propagating the error keeps the
+    // operator-safe contract documented for `embed_local`.
+    if matches!(provider, crate::ai::AiProvider::Local) {
+        let response = crate::runtime::ai::local_embedding::embed_local_with_db(
+            db,
+            &model,
+            vec![text.to_string()],
+        )?;
+        return response.embeddings.into_iter().next().ok_or_else(|| {
+            RedDBError::Query("local embedding backend returned no vectors".to_string())
+        });
+    }
+
     let api_key = crate::ai::resolve_api_key(&provider, None, kv_getter)?;
     let transport = crate::runtime::ai::transport::AiTransport::new(
         crate::runtime::ai::transport::AiTransportConfig::default(),
