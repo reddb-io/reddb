@@ -98,6 +98,52 @@ pub(crate) fn runtime_vector_matches(
         .get_collection(&query.collection)
         .ok_or_else(|| RedDBError::NotFound(query.collection.clone()))?;
 
+    // Issue #693 — `vector.turbo` SEARCH goes through the
+    // TurboQuantIndex, which dispatches scoring through
+    // `select_scorer()` (scalar / AVX2 / AVX-512BW / NEON, runtime
+    // selected). Legacy `vector` collections continue on the
+    // brute-force path below.
+    if let Some(state) = db.turbo_state(&query.collection) {
+        state.ensure_populated(&db.store(), &query.collection);
+        let search_k = if effective_vector_filter(query).is_some() {
+            manager.count().max(1)
+        } else {
+            query.k.max(1)
+        };
+        let index = state.index.lock();
+        let raw = index.search(vector, search_k, metric);
+        let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
+        let mut results = Vec::with_capacity(raw.len());
+        for hit in raw {
+            let Some(entity) = db.store().get(&query.collection, hit.entity_id) else {
+                continue;
+            };
+            if !crate::runtime::impl_core::entity_visible_with_context(snap_ctx.as_ref(), &entity) {
+                continue;
+            }
+            let distance = match metric {
+                DistanceMetric::Cosine => 1.0 - hit.score,
+                DistanceMetric::InnerProduct | DistanceMetric::L2 => -hit.score,
+            };
+            if let Some(threshold) = query.threshold {
+                let pass = match metric {
+                    DistanceMetric::L2 => distance <= threshold,
+                    DistanceMetric::Cosine | DistanceMetric::InnerProduct => hit.score >= threshold,
+                };
+                if !pass {
+                    continue;
+                }
+            }
+            results.push(SimilarResult {
+                entity_id: hit.entity_id,
+                score: hit.score,
+                distance,
+                entity,
+            });
+        }
+        return Ok(results);
+    }
+
     let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
     let mut index = BruteForceVectorIndex::default();
     let search_k = if effective_vector_filter(query).is_some() {

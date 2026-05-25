@@ -1394,6 +1394,67 @@ impl RedDB {
         self.store.clone()
     }
 
+    /// Per-process registry of `vector.turbo` collection state (issue
+    /// #693). Lazily allocated on first access; the inner map holds an
+    /// `Arc<TurboCollectionState>` per turbo collection so concurrent
+    /// SEARCHers and INSERTers can share the in-memory index without
+    /// holding the outer map lock for the whole operation.
+    pub(crate) fn turbo_collections(
+        &self,
+    ) -> &Arc<
+        parking_lot::Mutex<
+            std::collections::HashMap<
+                String,
+                Arc<crate::runtime::vector_turbo_kind::TurboCollectionState>,
+            >,
+        >,
+    > {
+        self.turbo_collections
+            .get_or_init(|| Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())))
+    }
+
+    /// Look up (or lazily create) the runtime state for a turbo
+    /// collection. Returns `None` for collections that are not marked
+    /// `turbo` in the catalog.
+    ///
+    /// Lazy creation matters for two reasons: (a) a fresh process
+    /// reopens a persistent DB without any turbo state in memory; (b)
+    /// the contract (dim + metric) is read here instead of being
+    /// stored separately, which keeps the catalog as the single source
+    /// of truth.
+    pub(crate) fn turbo_state(
+        &self,
+        collection: &str,
+    ) -> Option<Arc<crate::runtime::vector_turbo_kind::TurboCollectionState>> {
+        if !crate::runtime::vector_turbo_kind::is_turbo(&self.store, collection) {
+            return None;
+        }
+        let map = self.turbo_collections();
+        {
+            let guard = map.lock();
+            if let Some(state) = guard.get(collection) {
+                return Some(Arc::clone(state));
+            }
+        }
+        let contract = self.collection_contract(collection)?;
+        let dim = contract.vector_dimension?;
+        let metric = contract
+            .vector_metric
+            .unwrap_or(crate::storage::engine::distance::DistanceMetric::Cosine);
+        let state = Arc::new(
+            crate::runtime::vector_turbo_kind::TurboCollectionState::new(
+                dim,
+                metric,
+                self.store.pager(),
+            ),
+        );
+        let mut guard = map.lock();
+        let entry = guard
+            .entry(collection.to_string())
+            .or_insert_with(|| Arc::clone(&state));
+        Some(Arc::clone(entry))
+    }
+
     /// Lazily-initialised ML runtime. First caller wins; subsequent
     /// callers observe the same instance. The runtime is created
     /// with an in-memory persistence backend by default — production

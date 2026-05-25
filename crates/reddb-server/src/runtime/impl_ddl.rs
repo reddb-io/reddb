@@ -309,7 +309,25 @@ impl RedDBRuntime {
                         .unwrap_or(crate::storage::engine::distance::DistanceMetric::Cosine),
                     if_not_exists: query.if_not_exists,
                 };
-                return self.execute_create_vector(raw_query, &create);
+                let result = self.execute_create_vector(raw_query, &create)?;
+                // Issue #693 — durable kind marker that distinguishes
+                // this collection from the legacy `vector` path on
+                // every restart. Runtime state (TurboQuantIndex +
+                // TurboExtent) is lazily materialised by
+                // `RedDB::turbo_state` on first INSERT/SEARCH so the
+                // marker is the only thing that needs to survive.
+                let store = self.inner.db.store();
+                crate::runtime::vector_turbo_kind::mark_as_turbo(&store, &query.name);
+                self.inner
+                    .db
+                    .persist_metadata()
+                    .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                // Eagerly construct the state so the TurboExtent (if
+                // any) is reserved at creation time rather than on
+                // first INSERT. Errors are swallowed: the lazy path in
+                // `turbo_state` will retry on the next access.
+                let _ = self.inner.db.turbo_state(&query.name);
+                return Ok(result);
             }
             // KIND blockchain — issue #523 foundation: stored on top of a
             // Table-shaped collection. The `chain` marker + reserved-column
