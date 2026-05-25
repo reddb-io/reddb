@@ -1357,6 +1357,438 @@ impl RedDBServer {
         })
         .map_err(|e| e.to_string())
     }
+
+    /// POST /ai/models — register a local AI embedding model.
+    pub(crate) fn handle_ai_model_register(&self, body: Vec<u8>) -> HttpResponse {
+        let payload = match parse_json_body(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+        let spec = match LocalAiModelSpec::from_payload(&payload) {
+            Ok(spec) => spec,
+            Err(err) => return json_error(400, err),
+        };
+        let key = ai_model_config_key(&spec.name);
+        match self.entity_use_cases().get_kv(RED_CONFIG_COLLECTION, &key) {
+            Ok(Some(_)) => {
+                return json_error(
+                    409,
+                    format!("local AI model '{}' is already registered", spec.name),
+                )
+            }
+            Ok(None) => {}
+            Err(err) => return json_error(500, format!("failed to read model registry: {err}")),
+        }
+
+        let now = now_unix_ms();
+        let stored = spec.to_stored_json(AI_MODEL_STATUS_REGISTERED, now, now);
+        let stored_text = match crate::json::to_string(&stored) {
+            Ok(s) => s,
+            Err(err) => return json_error(500, format!("failed to encode model entry: {err}")),
+        };
+        if let Err(err) = self.entity_use_cases().create_kv(CreateKvInput {
+            collection: RED_CONFIG_COLLECTION.to_string(),
+            key,
+            value: Value::text(stored_text),
+            metadata: Vec::new(),
+        }) {
+            return json_error(400, format!("failed to register model: {err}"));
+        }
+
+        let mut object = Map::new();
+        object.insert("ok".to_string(), JsonValue::Bool(true));
+        object.insert("model".to_string(), stored);
+        json_response(201, JsonValue::Object(object))
+    }
+
+    /// PUT /ai/models/{name} — update an already-registered local AI model.
+    pub(crate) fn handle_ai_model_update(&self, name: &str, body: Vec<u8>) -> HttpResponse {
+        if name.trim().is_empty() {
+            return json_error(400, "model name path segment cannot be empty");
+        }
+        let payload = match parse_json_body(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+        let mut spec = match LocalAiModelSpec::from_payload(&payload) {
+            Ok(spec) => spec,
+            Err(err) => return json_error(400, err),
+        };
+        // The path name is authoritative; reject a body whose `name` field
+        // disagrees rather than silently picking one.
+        if let Some(body_name) = json_string_field(&payload, "name") {
+            if body_name.trim() != name {
+                return json_error(
+                    400,
+                    format!(
+                        "model name in path '{name}' does not match body field '{}'",
+                        body_name.trim()
+                    ),
+                );
+            }
+        }
+        spec.name = name.to_string();
+        let key = ai_model_config_key(name);
+        let existing: Option<JsonValue> = match self
+            .entity_use_cases()
+            .get_kv(RED_CONFIG_COLLECTION, &key)
+        {
+            Ok(Some((Value::Text(text), _))) => {
+                crate::json::parse_json(&text).ok().map(JsonValue::from)
+            }
+            Ok(_) => None,
+            Err(err) => return json_error(500, format!("failed to read model registry: {err}")),
+        };
+        let created_at = existing
+            .as_ref()
+            .and_then(|v| v.get("created_at_unix_ms"))
+            .and_then(JsonValue::as_u64)
+            .unwrap_or_else(now_unix_ms);
+        if existing.is_none() {
+            return json_error(404, format!("local AI model '{name}' is not registered"));
+        }
+        let now = now_unix_ms();
+        let stored = spec.to_stored_json(AI_MODEL_STATUS_REGISTERED, created_at, now);
+        let stored_text = match crate::json::to_string(&stored) {
+            Ok(s) => s,
+            Err(err) => return json_error(500, format!("failed to encode model entry: {err}")),
+        };
+        let _ = self
+            .entity_use_cases()
+            .delete_kv(RED_CONFIG_COLLECTION, &key);
+        if let Err(err) = self.entity_use_cases().create_kv(CreateKvInput {
+            collection: RED_CONFIG_COLLECTION.to_string(),
+            key,
+            value: Value::text(stored_text),
+            metadata: Vec::new(),
+        }) {
+            return json_error(400, format!("failed to update model: {err}"));
+        }
+
+        let mut object = Map::new();
+        object.insert("ok".to_string(), JsonValue::Bool(true));
+        object.insert("model".to_string(), stored);
+        json_response(200, JsonValue::Object(object))
+    }
+
+    /// GET /ai/models — list all registered local AI models.
+    pub(crate) fn handle_ai_model_list(&self) -> HttpResponse {
+        let entries = self.collect_ai_model_entries();
+        let mut models: Vec<JsonValue> = entries.into_iter().map(|(_, v)| v).collect();
+        models.sort_by(|a, b| {
+            let lhs = a.get("name").and_then(JsonValue::as_str).unwrap_or("");
+            let rhs = b.get("name").and_then(JsonValue::as_str).unwrap_or("");
+            lhs.cmp(rhs)
+        });
+        let mut object = Map::new();
+        object.insert("ok".to_string(), JsonValue::Bool(true));
+        object.insert("count".to_string(), JsonValue::Number(models.len() as f64));
+        object.insert("models".to_string(), JsonValue::Array(models));
+        json_response(200, JsonValue::Object(object))
+    }
+
+    /// GET /ai/models/{name} — inspect one registered local AI model.
+    pub(crate) fn handle_ai_model_get(&self, name: &str) -> HttpResponse {
+        if name.trim().is_empty() {
+            return json_error(400, "model name path segment cannot be empty");
+        }
+        let key = ai_model_config_key(name);
+        match self.entity_use_cases().get_kv(RED_CONFIG_COLLECTION, &key) {
+            Ok(Some((Value::Text(text), _))) => match crate::json::parse_json(&text) {
+                Ok(model) => {
+                    let model: JsonValue = model.into();
+                    let mut object = Map::new();
+                    object.insert("ok".to_string(), JsonValue::Bool(true));
+                    object.insert("model".to_string(), model);
+                    json_response(200, JsonValue::Object(object))
+                }
+                Err(err) => {
+                    json_error(500, format!("model entry for '{name}' is corrupted: {err}"))
+                }
+            },
+            Ok(_) => json_error(404, format!("local AI model '{name}' is not registered")),
+            Err(err) => json_error(500, format!("failed to read model registry: {err}")),
+        }
+    }
+
+    fn collect_ai_model_entries(&self) -> Vec<(String, JsonValue)> {
+        let store = self.runtime.db().store();
+        let Some(manager) = store.get_collection(RED_CONFIG_COLLECTION) else {
+            return Vec::new();
+        };
+        let entities = manager.query_all(|_| true);
+        let mut out = Vec::new();
+        for entity in entities {
+            let EntityData::Row(row) = &entity.data else {
+                continue;
+            };
+            let Some(named) = row.named.as_ref() else {
+                continue;
+            };
+            let key = match named.get("key") {
+                Some(Value::Text(s)) => s.to_string(),
+                _ => continue,
+            };
+            let Some(model_name) = key.strip_prefix(AI_MODEL_KEY_PREFIX) else {
+                continue;
+            };
+            if model_name.is_empty() || model_name.contains('.') {
+                continue;
+            }
+            let value = match named.get("value") {
+                Some(Value::Text(s)) => s.to_string(),
+                _ => continue,
+            };
+            if let Ok(parsed) = crate::json::parse_json(&value) {
+                out.push((model_name.to_string(), JsonValue::from(parsed)));
+            }
+        }
+        out
+    }
+}
+
+const AI_MODEL_KEY_PREFIX: &str = "red.config.ai.models.";
+const AI_MODEL_TASK_EMBEDDING: &str = "embedding";
+const AI_MODEL_ENGINE_CANDLE: &str = "candle";
+const AI_MODEL_PROVIDER_LOCAL: &str = "local";
+const AI_MODEL_STATUS_REGISTERED: &str = "registered";
+const AI_MODEL_PULL_POLICIES: &[&str] = &["on_demand", "eager", "manual"];
+const AI_MODEL_TRUST_DISABLED: &str = "disabled";
+const AI_MODEL_TRUST_ALLOW_REMOTE_CODE: &str = "allow_remote_code";
+const AI_MODEL_TRUST_POLICIES: &[&str] = &["disabled", "allow_remote_code"];
+
+fn ai_model_config_key(name: &str) -> String {
+    format!("{AI_MODEL_KEY_PREFIX}{name}")
+}
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+#[derive(Debug, Clone)]
+struct LocalAiModelSpec {
+    name: String,
+    provider: String,
+    source: String,
+    task: String,
+    revision: String,
+    engine: String,
+    dimensions: u32,
+    pull_policy: String,
+    trust_policy: String,
+}
+
+impl LocalAiModelSpec {
+    fn from_payload(payload: &JsonValue) -> Result<Self, String> {
+        let name = json_string_field(payload, "name")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "field 'name' is required and cannot be empty".to_string())?;
+        validate_model_name(&name)?;
+
+        let provider = json_string_field(payload, "provider")
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| AI_MODEL_PROVIDER_LOCAL.to_string());
+        if provider != AI_MODEL_PROVIDER_LOCAL {
+            return Err(format!(
+                "field 'provider' must be '{AI_MODEL_PROVIDER_LOCAL}' for the local model catalog (got '{provider}'); other providers are not registered through this endpoint"
+            ));
+        }
+
+        let source = json_string_field(payload, "source")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                "field 'source' is required and cannot be empty (e.g. HuggingFace repo id 'sentence-transformers/all-MiniLM-L6-v2')".to_string()
+            })?;
+        if source.chars().any(|c| c.is_whitespace()) {
+            return Err("field 'source' must not contain whitespace".to_string());
+        }
+
+        let task = json_string_field(payload, "task")
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "field 'task' is required; only '{AI_MODEL_TASK_EMBEDDING}' is supported in this slice"
+                )
+            })?;
+        if matches!(
+            task.as_str(),
+            "prompt" | "generation" | "chat" | "completion"
+        ) {
+            return Err(format!(
+                "task '{task}' is out of scope: local prompt and generation are not supported; only '{AI_MODEL_TASK_EMBEDDING}' is supported"
+            ));
+        }
+        if task != AI_MODEL_TASK_EMBEDDING {
+            return Err(format!(
+                "unsupported task '{task}'; only '{AI_MODEL_TASK_EMBEDDING}' is supported"
+            ));
+        }
+
+        let revision = json_string_field(payload, "revision")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                "field 'revision' is required and must be a pinned git revision or tag (no floating refs)".to_string()
+            })?;
+        if revision.chars().any(|c| c.is_whitespace()) {
+            return Err("field 'revision' must not contain whitespace".to_string());
+        }
+
+        let engine = json_string_field(payload, "engine")
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| AI_MODEL_ENGINE_CANDLE.to_string());
+        if engine != AI_MODEL_ENGINE_CANDLE {
+            return Err(format!(
+                "field 'engine' '{engine}' is not supported; only '{AI_MODEL_ENGINE_CANDLE}' is supported in this slice"
+            ));
+        }
+
+        let dimensions_value = payload
+            .get("dimensions")
+            .ok_or_else(|| "field 'dimensions' is required".to_string())?;
+        let dimensions = match dimensions_value {
+            JsonValue::Number(n)
+                if n.is_finite() && *n >= 1.0 && n.fract().abs() < f64::EPSILON =>
+            {
+                let as_u = *n as u32;
+                if (as_u as f64 - *n).abs() >= f64::EPSILON {
+                    return Err(format!(
+                        "field 'dimensions' must be a positive integer (got {n})"
+                    ));
+                }
+                as_u
+            }
+            _ => {
+                return Err(format!(
+                    "field 'dimensions' must be a positive integer (got {dimensions_value:?})"
+                ))
+            }
+        };
+        if !(1..=65_536).contains(&dimensions) {
+            return Err(format!(
+                "field 'dimensions' must be between 1 and 65536 (got {dimensions})"
+            ));
+        }
+
+        let pull_policy = json_string_field(payload, "pull_policy")
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "on_demand".to_string());
+        if !AI_MODEL_PULL_POLICIES.contains(&pull_policy.as_str()) {
+            return Err(format!(
+                "field 'pull_policy' '{pull_policy}' is invalid; expected one of {AI_MODEL_PULL_POLICIES:?}"
+            ));
+        }
+
+        let trust_policy = json_string_field(payload, "trust_policy")
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| AI_MODEL_TRUST_DISABLED.to_string());
+        if !AI_MODEL_TRUST_POLICIES.contains(&trust_policy.as_str()) {
+            return Err(format!(
+                "field 'trust_policy' '{trust_policy}' is invalid; expected one of {AI_MODEL_TRUST_POLICIES:?}"
+            ));
+        }
+        if trust_policy == AI_MODEL_TRUST_ALLOW_REMOTE_CODE {
+            // The contract requires an explicit acknowledgement; reject
+            // unless the caller passes `acknowledge_remote_code_risk: true`.
+            let acked = payload
+                .get("acknowledge_remote_code_risk")
+                .and_then(JsonValue::as_bool)
+                .unwrap_or(false);
+            if !acked {
+                return Err(format!(
+                    "trust_policy '{AI_MODEL_TRUST_ALLOW_REMOTE_CODE}' requires 'acknowledge_remote_code_risk': true; defaulting to '{AI_MODEL_TRUST_DISABLED}' otherwise"
+                ));
+            }
+        }
+
+        Ok(Self {
+            name,
+            provider,
+            source,
+            task,
+            revision,
+            engine,
+            dimensions,
+            pull_policy,
+            trust_policy,
+        })
+    }
+
+    fn to_stored_json(&self, status: &str, created_at: u64, updated_at: u64) -> JsonValue {
+        let mut obj = Map::new();
+        obj.insert("name".to_string(), JsonValue::String(self.name.clone()));
+        obj.insert(
+            "provider".to_string(),
+            JsonValue::String(self.provider.clone()),
+        );
+        obj.insert("source".to_string(), JsonValue::String(self.source.clone()));
+        obj.insert("task".to_string(), JsonValue::String(self.task.clone()));
+        obj.insert(
+            "revision".to_string(),
+            JsonValue::String(self.revision.clone()),
+        );
+        obj.insert("engine".to_string(), JsonValue::String(self.engine.clone()));
+        obj.insert(
+            "dimensions".to_string(),
+            JsonValue::Number(self.dimensions as f64),
+        );
+        obj.insert(
+            "pull_policy".to_string(),
+            JsonValue::String(self.pull_policy.clone()),
+        );
+        obj.insert(
+            "trust_policy".to_string(),
+            JsonValue::String(self.trust_policy.clone()),
+        );
+        obj.insert("status".to_string(), JsonValue::String(status.to_string()));
+        obj.insert(
+            "created_at_unix_ms".to_string(),
+            JsonValue::Number(created_at as f64),
+        );
+        obj.insert(
+            "updated_at_unix_ms".to_string(),
+            JsonValue::Number(updated_at as f64),
+        );
+        JsonValue::Object(obj)
+    }
+}
+
+fn validate_model_name(name: &str) -> Result<(), String> {
+    if name.len() > 128 {
+        return Err(format!(
+            "field 'name' must be at most 128 characters (got {})",
+            name.len()
+        ));
+    }
+    let valid = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if !valid {
+        return Err(format!(
+            "field 'name' '{name}' is invalid; only ASCII alphanumerics, '_' and '-' are allowed"
+        ));
+    }
+    if name
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_alphabetic() || c == '_')
+        != Some(true)
+    {
+        return Err(format!(
+            "field 'name' '{name}' must start with an ASCII letter or '_'"
+        ));
+    }
+    Ok(())
 }
 
 fn parse_ai_provider(payload: &JsonValue) -> Result<AiProvider, String> {
