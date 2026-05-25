@@ -2099,27 +2099,40 @@ pub fn huggingface_prompt(
 // Local model stubs (requires 'local-models' feature flag)
 // ============================================================================
 
+const LOCAL_MODELS_DISABLED_MESSAGE: &str = "local embeddings require the `local-models` feature \
+flag at engine build time. Build with: cargo build --features local-models. Alternatively, use \
+the 'ollama' provider with a local Ollama server.";
+
+const LOCAL_EMBEDDINGS_NOT_IMPLEMENTED_MESSAGE: &str = "local embeddings are registered by the \
+`local-models` feature, but local model artifact execution is not implemented in this slice. \
+Alternatively, use the 'ollama' provider with a local Ollama server.";
+
+const LOCAL_PROMPT_OUT_OF_SCOPE_MESSAGE: &str = "local prompt and generation are out of scope for \
+the `local-models` feature; the local provider contract is embeddings-only for this slice.";
+
+pub fn local_embeddings_unavailable_error() -> crate::RedDBError {
+    if cfg!(feature = "local-models") {
+        crate::RedDBError::Query(LOCAL_EMBEDDINGS_NOT_IMPLEMENTED_MESSAGE.to_string())
+    } else {
+        crate::RedDBError::FeatureNotEnabled(LOCAL_MODELS_DISABLED_MESSAGE.to_string())
+    }
+}
+
+pub fn local_prompt_unavailable_error() -> crate::RedDBError {
+    crate::RedDBError::Query(LOCAL_PROMPT_OUT_OF_SCOPE_MESSAGE.to_string())
+}
+
 /// Local embedding via candle — requires `local-models` feature.
 pub fn local_embeddings(
     _model_id: &str,
     _texts: &[String],
 ) -> crate::RedDBResult<OpenAiEmbeddingResponse> {
-    Err(crate::RedDBError::FeatureNotEnabled(
-        "local model inference requires the 'local-models' feature flag. \
-         Build with: cargo build --features local-models. \
-         Alternatively, use 'ollama' provider with a local Ollama server."
-            .to_string(),
-    ))
+    Err(local_embeddings_unavailable_error())
 }
 
 /// Local prompt via candle — requires `local-models` feature.
 pub fn local_prompt(_model_id: &str, _prompt: &str) -> crate::RedDBResult<AiPromptResponse> {
-    Err(crate::RedDBError::FeatureNotEnabled(
-        "local model inference requires the 'local-models' feature flag. \
-         Build with: cargo build --features local-models. \
-         Alternatively, use 'ollama' provider with a local Ollama server."
-            .to_string(),
-    ))
+    Err(local_prompt_unavailable_error())
 }
 
 // ============================================================================
@@ -2301,11 +2314,7 @@ pub fn grpc_embeddings(
             ));
         }
         AiProvider::Local => {
-            return Err(crate::RedDBError::Query(
-                "Local embeddings require the `local-models` feature \
-                 flag at engine build time."
-                    .to_string(),
-            ));
+            return Err(local_embeddings_unavailable_error());
         }
         _ => {}
     }

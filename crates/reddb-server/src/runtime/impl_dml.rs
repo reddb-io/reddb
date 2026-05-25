@@ -539,6 +539,12 @@ impl RedDBRuntime {
             None => query,
         };
         self.check_insert_column_policy(query)?;
+        if let Some(ref embed_config) = query.auto_embed {
+            let provider = crate::ai::parse_provider(&embed_config.provider)?;
+            if matches!(provider, crate::ai::AiProvider::Local) {
+                return Err(crate::ai::local_embeddings_unavailable_error());
+            }
+        }
 
         let mut inserted_count: u64 = 0;
         let effective_rows =

@@ -262,6 +262,11 @@ impl RedDBServer {
             Ok(p) => p,
             Err(e) => return json_error(400, e.to_string()),
         };
+        if matches!(provider, crate::ai::AiProvider::Local) {
+            let err = crate::ai::local_embeddings_unavailable_error();
+            let (status, msg) = crate::server::transport::map_runtime_error(&err);
+            return json_error(status, msg);
+        }
         let api_key = match crate::ai::resolve_api_key_from_runtime(&provider, None, &self.runtime)
         {
             Ok(k) => k,
