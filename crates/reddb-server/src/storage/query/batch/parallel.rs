@@ -13,8 +13,7 @@
 //! threshold is tuned so short scans skip rayon entirely (overhead
 //! dominates). The threshold is tweakable via `min_parallel_len`.
 
-use std::collections::HashMap;
-
+use indexmap::IndexMap;
 use rayon::prelude::*;
 
 use super::column_batch::ColumnBatch;
@@ -43,7 +42,10 @@ pub fn parallel_sum_f64_with(data: &[f64], min_parallel_len: usize) -> f64 {
 /// `batch_aggregate` on each, then merges the partial group-by state.
 /// Supports the same set of [`AggregateOp`] as the single-threaded
 /// path. Thread-safety comes from each thread producing its own
-/// `HashMap` which is merged sequentially at the end.
+/// `IndexMap` which is merged sequentially at the end. The merge
+/// pass walks partials in the rayon collect order and inserts into
+/// an `IndexMap` so the *intermediate* merged-group order is
+/// deterministic; the final output is then sorted by key (#630).
 pub fn parallel_aggregate(
     batches: &[ColumnBatch],
     group_columns: &[usize],
@@ -60,7 +62,7 @@ pub fn parallel_aggregate(
 }
 
 fn merge_partials(partials: Vec<Vec<AggregateRow>>, specs: &[AggregateSpec]) -> Vec<AggregateRow> {
-    let mut combined: HashMap<Vec<GroupKeyPart>, Vec<MergedState>> = HashMap::new();
+    let mut combined: IndexMap<Vec<GroupKeyPart>, Vec<MergedState>> = IndexMap::new();
     for rows in partials {
         for row in rows {
             let entry = combined

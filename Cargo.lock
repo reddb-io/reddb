@@ -2304,6 +2304,7 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "http",
+ "indexmap",
  "insta",
  "itoa",
  "jsonwebtoken",
