@@ -68,54 +68,12 @@ pub const MAX_RESOURCES: usize = 50;
 /// Maximum serialized JSON size in bytes.
 pub const MAX_POLICY_BYTES: usize = 32 * 1024;
 
-/// Recognised action verbs. Anything outside this allowlist is rejected
-/// at validation time so a typo in a policy can never silently widen
-/// access.
-const ACTION_ALLOWLIST: &[&str] = &[
-    "select",
-    "write",
-    "insert",
-    "update",
-    "delete",
-    "truncate",
-    "references",
-    "execute",
-    "usage",
-    "grant",
-    "revoke",
-    "create",
-    "drop",
-    "alter",
-    "policy:put",
-    "policy:drop",
-    "policy:attach",
-    "policy:detach",
-    "policy:simulate",
-    "kv:invalidate",
-    "admin:bootstrap",
-    "admin:audit-read",
-    "admin:reload",
-    "admin:lease-promote",
-    "config:read",
-    "config:write",
-    "config:*",
-    "vault:read_metadata",
-    "vault:read",
-    "vault:write",
-    "vault:unseal",
-    "vault:unseal_history",
-    "vault:purge",
-    "evidence:export",
-    "evidence:*",
-    "red.registry:register",
-    "red.registry:supersede",
-    "red.registry:*",
-    "*",
-    "admin:*",
-    "vault:*",
-    "kv:*",
-    "policy:*",
-];
+// Recognised action verbs live in [`crate::auth::action_catalog`] — the
+// single source of truth shared with the `red.control_capabilities`
+// virtual table. Validation here defers to
+// `action_catalog::is_valid_action` so a typo in a policy can never
+// silently widen access *and* so the catalog and validator cannot drift
+// out of sync.
 
 // ---------------------------------------------------------------------------
 // Policy / Statement
@@ -715,7 +673,7 @@ fn action_to_string(a: &ActionPattern) -> String {
 
 fn validate_action(a: &ActionPattern) -> Result<(), PolicyError> {
     let s = action_to_string(a);
-    if ACTION_ALLOWLIST.iter().any(|w| *w == s) {
+    if crate::auth::action_catalog::is_valid_action(&s) {
         Ok(())
     } else {
         Err(PolicyError::InvalidAction(s))
