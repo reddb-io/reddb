@@ -896,35 +896,7 @@ fn api_keys_snapshot(runtime: &RedDBRuntime, tenant: Option<&str>) -> Vec<Unifie
 }
 
 fn control_capabilities_snapshot() -> Vec<UnifiedRecord> {
-    const ACTIONS: &[&str] = &[
-        "policy:put",
-        "policy:drop",
-        "policy:attach",
-        "policy:detach",
-        "policy:simulate",
-        "admin:bootstrap",
-        "admin:audit-read",
-        "admin:reload",
-        "admin:lease-promote",
-        "config:read",
-        "config:write",
-        "config:*",
-        "vault:read_metadata",
-        "vault:read",
-        "vault:write",
-        "vault:unseal",
-        "vault:unseal_history",
-        "vault:purge",
-        "evidence:export",
-        "evidence:*",
-        "red.registry:register",
-        "red.registry:supersede",
-        "red.registry:*",
-        "admin:*",
-        "vault:*",
-        "kv:*",
-        "policy:*",
-    ];
+    use crate::auth::action_catalog::{ActionCategory, ACTIONS};
 
     let schema = Arc::new(
         CONTROL_CAPABILITY_COLUMNS
@@ -932,14 +904,34 @@ fn control_capabilities_snapshot() -> Vec<UnifiedRecord> {
             .map(|name| Arc::<str>::from(*name))
             .collect::<Vec<_>>(),
     );
+    // The historical snapshot was a hand-curated subset of the
+    // allowlist — pure DML/DDL verbs (`select`, `insert`, …) and the
+    // bare `*` wildcard were not advertised. Reproduce that subset by
+    // filtering the catalog: only emit policy/admin/config/vault/other
+    // entries plus their namespaced wildcards, never the catch-all `*`.
     ACTIONS
         .iter()
-        .map(|action| {
+        .filter(|entry| {
+            if entry.name == "*" {
+                return false;
+            }
+            matches!(
+                entry.category,
+                ActionCategory::Policy
+                    | ActionCategory::Admin
+                    | ActionCategory::Config
+                    | ActionCategory::Vault
+                    | ActionCategory::Other
+                    | ActionCategory::Wildcard
+            )
+        })
+        .map(|entry| {
+            let action = entry.name;
             let resource_kind = control_capability_resource_kind(action);
             UnifiedRecord::with_schema(
                 Arc::clone(&schema),
                 vec![
-                    Value::text(*action),
+                    Value::text(action),
                     Value::text(resource_kind),
                     Value::text(control_capability_scope(action)),
                     Value::text(format!("{action} on {resource_kind} resources")),

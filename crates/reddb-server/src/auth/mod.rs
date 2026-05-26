@@ -11,6 +11,7 @@
 //! - User/Password login -> session token
 //! - API key -> direct auth with assigned role
 
+pub mod action_catalog;
 pub mod cert;
 pub mod column_policy_gate;
 pub mod locks;
