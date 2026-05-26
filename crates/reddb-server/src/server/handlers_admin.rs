@@ -2486,6 +2486,57 @@ impl RedDBServer {
         json_response(200, JsonValue::Object(envelope))
     }
 
+    /// `GET /admin/policies/actions` — list every recognised policy
+    /// action verb. Issue #709: HTTP introspection mirror of the
+    /// `red.policy.actions` SQL virtual table.
+    pub(crate) fn handle_iam_policy_actions(&self) -> HttpResponse {
+        use crate::auth::action_catalog::{LifecycleState, ACTIONS};
+
+        let items: Vec<JsonValue> = ACTIONS
+            .iter()
+            .map(|entry| {
+                let (state, replacement, since_version) = match &entry.lifecycle_state {
+                    LifecycleState::Active => ("active", JsonValue::Null, JsonValue::Null),
+                    LifecycleState::Deprecated {
+                        replacement,
+                        since_version,
+                    } => (
+                        "deprecated",
+                        replacement
+                            .map(|r| JsonValue::String(r.to_string()))
+                            .unwrap_or(JsonValue::Null),
+                        JsonValue::String(since_version.to_string()),
+                    ),
+                    LifecycleState::Removed => ("removed", JsonValue::Null, JsonValue::Null),
+                };
+                let mut obj = Map::new();
+                obj.insert(
+                    "name".to_string(),
+                    JsonValue::String(entry.name.to_string()),
+                );
+                obj.insert(
+                    "category".to_string(),
+                    JsonValue::String(entry.category.as_str().to_string()),
+                );
+                obj.insert(
+                    "lifecycle_state".to_string(),
+                    JsonValue::String(state.to_string()),
+                );
+                obj.insert("replacement".to_string(), replacement);
+                obj.insert("since_version".to_string(), since_version);
+                obj.insert(
+                    "gates_description".to_string(),
+                    JsonValue::String(entry.gates_description.to_string()),
+                );
+                JsonValue::Object(obj)
+            })
+            .collect();
+        let mut envelope = Map::new();
+        envelope.insert("count".to_string(), JsonValue::Number(items.len() as f64));
+        envelope.insert("items".to_string(), JsonValue::Array(items));
+        json_response(200, JsonValue::Object(envelope))
+    }
+
     /// `DELETE /admin/policies/:id` — drop a policy.
     pub(crate) fn handle_iam_policy_delete(&self, id: &str) -> HttpResponse {
         let Some(store) = self.auth_store.as_ref() else {
