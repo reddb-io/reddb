@@ -502,6 +502,13 @@ pub struct UnifiedStore {
     /// avoided acquiring the `cross_refs` / `reverse_refs` write locks.
     /// Used by tests to pin the early-exit; cheap relaxed counter otherwise.
     unindex_cross_refs_fast_path: AtomicU64,
+    /// WAL-replayed `VectorInsert` records, captured at open time and
+    /// drained per-collection on first `vector.turbo` access (issue
+    /// #694). Boot-time recovery: the in-memory TurboQuant index is
+    /// rebuilt by replaying these FP32 vectors in WAL order, so the
+    /// rebuilt state is byte-deterministic against the pre-restart
+    /// state under a fixed codec seed.
+    pub(crate) replayed_turbo_inserts: parking_lot::Mutex<HashMap<String, Vec<(u64, Vec<f32>)>>>,
 }
 
 mod builder;

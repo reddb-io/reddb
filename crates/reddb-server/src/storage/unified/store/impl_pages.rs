@@ -328,6 +328,7 @@ impl UnifiedStore {
             paged_registry_dirty: AtomicBool::new(false),
             commit: None,
             unindex_cross_refs_fast_path: AtomicU64::new(0),
+            replayed_turbo_inserts: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
@@ -400,6 +401,7 @@ impl UnifiedStore {
             paged_registry_dirty: AtomicBool::new(false),
             commit,
             unindex_cross_refs_fast_path: AtomicU64::new(0),
+            replayed_turbo_inserts: parking_lot::Mutex::new(HashMap::new()),
         };
 
         // Load existing data from pages if database exists

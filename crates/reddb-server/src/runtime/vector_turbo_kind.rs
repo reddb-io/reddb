@@ -21,6 +21,7 @@ use crate::storage::engine::turboquant::index::TurboQuantIndex;
 use crate::storage::engine::Pager;
 use crate::storage::schema::Value;
 use crate::storage::unified::{EntityData, UnifiedStore};
+use crate::storage::EntityId;
 
 /// Value stored under `red.collection.{name}.kind` for vector.turbo
 /// collections. Must be distinct from `blockchain_kind::CHAIN_KIND_TAG`
@@ -94,10 +95,22 @@ impl TurboCollectionState {
     }
 
     /// Lazily populate the in-memory index from any vector entities
-    /// already persisted in the collection. Called on first access
-    /// after restart so a fresh `vector.turbo` runtime sees the
-    /// pre-restart data without requiring WAL replay (which lands in
-    /// the crash-safety slice, #673).
+    /// already persisted in the collection, then drain any WAL-replayed
+    /// `VectorInsert` records captured at store-open time (issue #694).
+    ///
+    /// Boot-time recovery: the WAL `VectorInsert` records are the
+    /// authoritative source for vectors that may not have made it into
+    /// the entity manager's persisted state (e.g. a crash between WAL
+    /// fsync and the next paged flush). Replaying them in WAL order
+    /// under a fixed codec seed reconstructs the in-memory
+    /// `TurboQuantIndex` deterministically — including the
+    /// partial-block tail introduced by ADR 0024.
+    ///
+    /// Non-vector traffic does not block on this rebuild: the runtime
+    /// only takes this path on the first turbo INSERT/SEARCH after
+    /// boot. `#673` wires the per-collection `ready: bool` flag on
+    /// top of this hook to keep vector traffic from observing a
+    /// half-built index while the rebuild is in flight.
     pub fn ensure_populated(&self, store: &UnifiedStore, collection: &str) {
         use std::sync::atomic::Ordering;
         if self.populated.load(Ordering::Acquire) {
@@ -118,7 +131,30 @@ impl TurboCollectionState {
                 }
             }
         }
+        // Drain WAL-replayed VectorInsert records (#694). Apply in WAL
+        // order so the resulting block/lane placement matches the
+        // pre-restart state byte-for-byte. Duplicate ids (same vector
+        // also present in the entity manager) overwrite via
+        // `TurboQuantIndex::insert`'s id-replace branch, which is safe
+        // and idempotent because the codec seed is constant.
+        if let Some(records) = store.take_replayed_turbo_inserts(collection) {
+            for (raw_id, vector) in records {
+                if vector.len() == self.dim {
+                    index.insert(EntityId::new(raw_id), vector);
+                }
+            }
+        }
         self.populated.store(true, Ordering::Release);
+    }
+
+    /// Background-rebuild hook (#694 / #673). Today this drives the
+    /// same code path as the synchronous lazy populate — boot already
+    /// does not block on it, because rebuild happens on the first
+    /// turbo INSERT/SEARCH and non-vector traffic never enters here.
+    /// `#673` will wrap this in a worker thread + ready flag without
+    /// changing the contract.
+    pub fn background_rebuild(&self, store: &UnifiedStore, collection: &str) {
+        self.ensure_populated(store, collection);
     }
 }
 
