@@ -137,6 +137,28 @@ pub struct RedDB {
             >,
         >,
     >,
+    /// Join handles for `vector.turbo` background-rebuild workers
+    /// (issue #673). Each call to `turbo_state` that materialises a
+    /// fresh `TurboCollectionState` registers a handle here; the
+    /// `Drop` impl below joins every handle before releasing
+    /// `store`, so a runtime restart on the same database path is
+    /// not racy with an in-flight rebuild holding the file lock.
+    pub(crate) turbo_rebuild_workers: parking_lot::Mutex<Vec<std::thread::JoinHandle<()>>>,
+}
+
+impl Drop for RedDB {
+    fn drop(&mut self) {
+        // Issue #673 — wait for every `vector.turbo` background
+        // rebuild worker to exit before our `Arc<UnifiedStore>` is
+        // released. The worker holds a strong handle to the store
+        // during its work phase, so without this join a fast
+        // `RedDBRuntime` restart on the same path observes the
+        // file lock as still held by the soon-to-exit worker.
+        let handles: Vec<_> = self.turbo_rebuild_workers.lock().drain(..).collect();
+        for h in handles {
+            let _ = h.join();
+        }
+    }
 }
 
 /// A cached HNSW index together with the entity count at build time.
