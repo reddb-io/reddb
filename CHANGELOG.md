@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `QUEUE ACK` / `QUEUE NACK` accept the server-issued opaque `delivery_id`
+  alongside the legacy `(queue, group, message_id)` tuple
+  ([#627](https://github.com/reddb-io/reddb/issues/627),
+  [ADR 0026](.red/adr/0026-delivery-id-wire-shape.md)). New RQL syntax:
+  `QUEUE ACK <queue> [GROUP <group> '<message_id>'] [WITH delivery_id = '<base32>']`.
+  The same wire shape applies to all four transports (redwire, gRPC,
+  Postgres-wire, HTTP). When both handles are supplied, `delivery_id` wins
+  unconditionally — a stale `delivery_id` returns an error instead of
+  falling back to the tuple.
+
+### Deprecated
+
+- ACK/NACK by the legacy `(queue, group, message_id)` tuple. The tuple path
+  still works in this release but emits a rate-limited server-side
+  deprecation log line (per connection + queue, one entry per minute). The
+  tuple path will be removed one minor release after this one — drivers
+  should switch to sending `delivery_id`, which is already returned by
+  `QUEUE READ` / `QUEUE CLAIM`.
+
 ## 1.5.0
 
 ### Minor Changes
