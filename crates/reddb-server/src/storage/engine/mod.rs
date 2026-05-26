@@ -39,6 +39,7 @@ pub mod hnsw;
 pub mod hot_update;
 pub mod hybrid;
 pub mod ivf;
+pub mod overflow;
 pub mod page;
 pub mod page_cache;
 pub mod pager;
