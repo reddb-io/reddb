@@ -356,6 +356,7 @@ impl RedDB {
             hypertables: std::sync::OnceLock::new(),
             continuous_aggregates: std::sync::OnceLock::new(),
             turbo_collections: std::sync::OnceLock::new(),
+            turbo_rebuild_workers: parking_lot::Mutex::new(Vec::new()),
         }
         .with_initialized_metadata()
     }
