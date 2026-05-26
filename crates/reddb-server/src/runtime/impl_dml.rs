@@ -542,7 +542,25 @@ impl RedDBRuntime {
         if let Some(ref embed_config) = query.auto_embed {
             let provider = crate::ai::parse_provider(&embed_config.provider)?;
             if matches!(provider, crate::ai::AiProvider::Local) {
-                return Err(crate::ai::local_embeddings_unavailable_error());
+                // Issue #682 — pre-flight the local model registry before
+                // any row write. Missing model, uninstalled artifacts,
+                // wrong task, and disabled-feature failures surface as
+                // deterministic errors that leave the target collection
+                // untouched, satisfying the "no partial writes on
+                // embedding failure" criterion for the failure modes
+                // owned by the local provider.
+                let model_name = embed_config.model.as_deref().map(str::trim).unwrap_or("");
+                if model_name.is_empty() {
+                    return Err(RedDBError::Query(
+                        "AUTO EMBED with provider=local requires MODEL '<registered-model-name>'; \
+                         the local provider does not have an implicit default model"
+                            .to_string(),
+                    ));
+                }
+                crate::runtime::ai::local_embedding::preflight_local_embedding(
+                    &self.inner.db,
+                    model_name,
+                )?;
             }
         }
 
@@ -1239,7 +1257,16 @@ impl RedDBRuntime {
         if let Some(ref embed_config) = query.auto_embed {
             let store = self.inner.db.store();
             let provider = crate::ai::parse_provider(&embed_config.provider)?;
-            let api_key = crate::ai::resolve_api_key_from_runtime(&provider, None, self)?;
+            let is_local_provider = matches!(provider, crate::ai::AiProvider::Local);
+            // Local provider runs in-process — no API key path applies.
+            // The pre-flight above already required `MODEL '<name>'`
+            // for the local case, so the unwrap_or default below only
+            // ever fires for OpenAI-compatible providers.
+            let api_key = if is_local_provider {
+                String::new()
+            } else {
+                crate::ai::resolve_api_key_from_runtime(&provider, None, self)?
+            };
             let model = embed_config.model.clone().unwrap_or_else(|| {
                 std::env::var("REDDB_OPENAI_EMBEDDING_MODEL")
                     .ok()
@@ -1286,25 +1313,43 @@ impl RedDBRuntime {
                 let batch_texts: Vec<String> =
                     entity_combos.iter().map(|(_, t)| t.clone()).collect();
 
-                let batch_client =
-                    crate::runtime::ai::batch_client::AiBatchClient::from_runtime(self);
+                // Issue #682 — when the provider is `local`, bypass
+                // AiBatchClient (which is HTTP-only) and dispatch
+                // directly through the in-process local embedding
+                // backend. All texts go in one call, mirroring the
+                // single-round-trip shape of the remote path. The
+                // local backend does not perform intra-batch dedup —
+                // each input position gets its own row in the output
+                // — which keeps the per-row "create_vector" loop
+                // below correct without additional fan-out logic.
+                let embeddings = if is_local_provider {
+                    let response = crate::runtime::ai::local_embedding::embed_local_with_db(
+                        &self.inner.db,
+                        &model,
+                        batch_texts,
+                    )?;
+                    response.embeddings
+                } else {
+                    let batch_client =
+                        crate::runtime::ai::batch_client::AiBatchClient::from_runtime(self);
 
-                let embeddings = match tokio::runtime::Handle::try_current() {
-                    Ok(handle) => tokio::task::block_in_place(|| {
-                        handle.block_on(batch_client.embed_batch(
-                            &provider,
-                            &model,
-                            &api_key,
-                            batch_texts,
-                        ))
-                    }),
-                    Err(_) => {
-                        return Err(RedDBError::Query(
-                            "AUTO EMBED requires a Tokio runtime context".to_string(),
-                        ));
+                    match tokio::runtime::Handle::try_current() {
+                        Ok(handle) => tokio::task::block_in_place(|| {
+                            handle.block_on(batch_client.embed_batch(
+                                &provider,
+                                &model,
+                                &api_key,
+                                batch_texts,
+                            ))
+                        }),
+                        Err(_) => {
+                            return Err(RedDBError::Query(
+                                "AUTO EMBED requires a Tokio runtime context".to_string(),
+                            ));
+                        }
                     }
-                }
-                .map_err(|e| RedDBError::Query(e.to_string()))?;
+                    .map_err(|e| RedDBError::Query(e.to_string()))?
+                };
 
                 // Distribute phase: persist one vector per non-empty embedding.
                 for ((_, combined), dense) in entity_combos.iter().zip(embeddings) {

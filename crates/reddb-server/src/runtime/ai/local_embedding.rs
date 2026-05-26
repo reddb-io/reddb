@@ -199,6 +199,83 @@ pub fn embed_local(
     embed_local_with_db(&runtime.db(), name, inputs)
 }
 
+/// Validate that a local embedding request for `name` would resolve a
+/// registered+installed model and an available backend, without sending
+/// any inputs.
+///
+/// Used by write paths (e.g. INSERT ... WITH AUTO EMBED) that need a
+/// deterministic pre-flight to fail the statement before any side
+/// effect on the target collection, satisfying the
+/// "embedding failures leave the target collection unchanged" contract
+/// for the failure modes the local provider owns: feature disabled,
+/// missing model, uninstalled artifacts, unsupported task, wrong
+/// provider tag, missing dimensions, corrupted registry entry.
+///
+/// Returns the resolved descriptor's `dimensions` so callers can pin
+/// the expected output shape before any backend round-trip.
+pub fn preflight_local_embedding(db: &RedDB, name: &str) -> RedDBResult<u32> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(RedDBError::Query(
+            "local embedding 'model' field cannot be empty; pass the registered local model name"
+                .to_string(),
+        ));
+    }
+
+    // Mirror the backend-availability gate from `embed_local_with_db`
+    // so a feature-off build fails before the write phase rather than
+    // after we have already inserted rows.
+    if current_backend().is_none() && !cfg!(feature = "local-models") {
+        return Err(RedDBError::FeatureNotEnabled(
+            LOCAL_MODELS_DISABLED_MESSAGE.to_string(),
+        ));
+    }
+
+    let descriptor = read_model_descriptor(db, name)?;
+    if descriptor.provider != PROVIDER_LOCAL {
+        return Err(RedDBError::Query(format!(
+            "model '{name}' has provider '{}'; only '{PROVIDER_LOCAL}' is supported by local embedding routing",
+            descriptor.provider
+        )));
+    }
+    if descriptor.task != TASK_EMBEDDING {
+        return Err(RedDBError::Query(format!(
+            "model '{name}' has task '{}'; only '{TASK_EMBEDDING}' is supported by the local provider \
+             (prompt/generation are out of scope)",
+            descriptor.task
+        )));
+    }
+    if descriptor.status != STATUS_INSTALLED {
+        let message = match descriptor.pull_policy {
+            PULL_POLICY_NEVER => format!(
+                "local model '{name}' is registered (status='{}') but its artifacts are not installed; \
+                 pull_policy='never' forbids runtime acquisition. An operator must explicitly install \
+                 the model via `POST /ai/models/{name}/pull`.",
+                descriptor.status
+            ),
+            PULL_POLICY_ALWAYS => format!(
+                "local model '{name}' is registered (status='{}') but its artifacts are not installed; \
+                 pull_policy='always' is configured but query-time auto-pull is not implemented in this slice. \
+                 Trigger a refresh via `POST /ai/models/{name}/pull` before requesting embeddings.",
+                descriptor.status
+            ),
+            _ => format!(
+                "local model '{name}' is registered (status='{}') but its artifacts are not installed; \
+                 pull_policy='if_missing' permits acquisition only via the explicit pull endpoint \
+                 (query-time auto-pull is not implemented). Run `POST /ai/models/{name}/pull` to install.",
+                descriptor.status
+            ),
+        };
+        return Err(RedDBError::NotFound(message));
+    }
+    if descriptor.dimensions == 0 {
+        return Err(RedDBError::Query(format!(
+            "model '{name}' registry entry has dimensions=0; re-register with the model's true output width"
+        )));
+    }
+    Ok(descriptor.dimensions)
+}
+
 /// Variant of [`embed_local`] that operates against a `RedDB` handle
 /// directly. The runtime query executor only carries `&RedDB`, so the
 /// text-vector-search routing path calls this rather than the runtime
