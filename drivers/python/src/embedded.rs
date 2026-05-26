@@ -67,11 +67,7 @@ impl EmbeddedRuntime {
 
     /// Parameterized query: parse `sql`, bind `$N` slots with `params`,
     /// then run the expression directly (skips the SQL plan cache).
-    pub fn query_with_params(
-        &self,
-        sql: &str,
-        params: &[ParamValue],
-    ) -> Result<QueryRows, String> {
+    pub fn query_with_params(&self, sql: &str, params: &[ParamValue]) -> Result<QueryRows, String> {
         let parsed = parse_multi(sql).map_err(|e| e.to_string())?;
         let bound = user_params::bind(&parsed, params).map_err(|e| e.to_string())?;
         let qr = self
@@ -106,7 +102,10 @@ impl EmbeddedRuntime {
 
     pub fn delete(&self, collection: &str, id: &str) -> Result<u64, String> {
         let sql = format!("DELETE FROM {collection} WHERE rid = {id}");
-        let qr = self.runtime.execute_query(&sql).map_err(|e| e.to_string())?;
+        let qr = self
+            .runtime
+            .execute_query(&sql)
+            .map_err(|e| e.to_string())?;
         Ok(qr.affected_rows)
     }
 
@@ -136,8 +135,7 @@ fn map_query_result(qr: &reddb::runtime::RuntimeQueryResult) -> QueryRows {
         .records
         .first()
         .map(|r| {
-            let mut keys: Vec<String> =
-                r.iter_fields().map(|(k, _)| k.to_string()).collect();
+            let mut keys: Vec<String> = r.iter_fields().map(|(k, _)| k.to_string()).collect();
             keys.sort();
             keys
         })
@@ -155,8 +153,7 @@ fn map_query_result(qr: &reddb::runtime::RuntimeQueryResult) -> QueryRows {
 }
 
 fn record_to_pairs(record: &UnifiedRecord) -> Vec<(String, ScalarOut)> {
-    let mut entries: Vec<(&std::sync::Arc<str>, &SchemaValue)> =
-        record.iter_fields().collect();
+    let mut entries: Vec<(&std::sync::Arc<str>, &SchemaValue)> = record.iter_fields().collect();
     entries.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
     entries
         .into_iter()

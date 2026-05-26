@@ -196,6 +196,38 @@ jobs:
         if: always()
         run: sccache --show-stats
 
+  drivers-python-build:
+    # Issue #664 — `drivers/python` opts out of the workspace (it's a
+    # maturin cdylib, not a workspace member), so `cargo check --all`
+    # in `quality` does not cover it. Build both feature combinations
+    # explicitly to catch breakage like the 37-error tonic/prost drift
+    # that motivated this gate.
+    name: Drivers / Python (cargo check)
+    needs: gate
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: ./.github/actions/install-protoc
+        with:
+          version: '28.3'
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: drivers-python-rust-1.91.0
+          cache-on-failure: "true"
+          workspaces: drivers/python -> target
+      - name: cargo check --no-default-features (slim grpc/wire client only)
+        working-directory: drivers/python
+        run: cargo check --locked --no-default-features
+      - name: cargo check (default: embedded engine)
+        working-directory: drivers/python
+        run: cargo check --locked
+
   feature-matrix:
     # PLAN.md B5 — compile every supported feature combination that
     # operators may select for release artifacts.
