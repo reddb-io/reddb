@@ -838,18 +838,26 @@ impl RedDBRuntime {
                 queue,
                 group,
                 message_id,
+                delivery_id,
             } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
-                require_queue_group(store.as_ref(), queue, group)?;
-                let message_id = parse_message_id(message_id)?;
+                let (group_owned, message_entity) = resolve_ack_nack_handle(
+                    store.as_ref(),
+                    queue,
+                    group,
+                    message_id,
+                    delivery_id.as_deref(),
+                )?;
+                let group_ref = group_owned.as_str();
+                require_queue_group(store.as_ref(), queue, group_ref)?;
                 let config = load_queue_config(store.as_ref(), queue);
                 super::queue_delivery::ack_message(
                     self,
                     store.as_ref(),
                     queue,
-                    group,
-                    message_id,
+                    group_ref,
+                    message_entity,
                     &config,
                 )?;
                 self.invalidate_result_cache();
@@ -864,18 +872,26 @@ impl RedDBRuntime {
                 queue,
                 group,
                 message_id,
+                delivery_id,
             } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
-                require_queue_group(store.as_ref(), queue, group)?;
-                let message_id = parse_message_id(message_id)?;
+                let (group_owned, message_entity) = resolve_ack_nack_handle(
+                    store.as_ref(),
+                    queue,
+                    group,
+                    message_id,
+                    delivery_id.as_deref(),
+                )?;
+                let group_ref = group_owned.as_str();
+                require_queue_group(store.as_ref(), queue, group_ref)?;
                 let config = load_queue_config(store.as_ref(), queue);
                 let message = match super::queue_delivery::nack_message(
                     self,
                     store.as_ref(),
                     queue,
-                    group,
-                    message_id,
+                    group_ref,
+                    message_entity,
                     &config,
                 )? {
                     super::queue_delivery::NackOutcome::Requeued => "message requeued".to_string(),
@@ -2051,6 +2067,102 @@ fn parse_message_id(value: &str) -> RedDBResult<EntityId> {
     raw.parse::<u64>()
         .map(EntityId::new)
         .map_err(|_| RedDBError::Query(format!("invalid message id '{}'", value)))
+}
+
+/// ADR 0026: resolve the ACK/NACK handle. When `delivery_id` is supplied,
+/// it wins unconditionally — strict failure if the handle does not resolve
+/// to a live pending delivery on `queue`. When only the legacy tuple is
+/// supplied, emit a rate-limited deprecation log line and use the tuple.
+/// At least one handle must be present.
+pub(super) fn resolve_ack_nack_handle(
+    store: &UnifiedStore,
+    queue: &str,
+    group_hint: &str,
+    message_id_hint: &str,
+    delivery_id: Option<&str>,
+) -> RedDBResult<(String, EntityId)> {
+    if let Some(did) = delivery_id {
+        return resolve_delivery_id(store, queue, did);
+    }
+    if group_hint.is_empty() || message_id_hint.is_empty() {
+        return Err(RedDBError::Query(
+            "ACK/NACK requires either GROUP <group> '<message_id>' or WITH delivery_id = '<id>'"
+                .to_string(),
+        ));
+    }
+    log_tuple_deprecation(queue);
+    let entity = parse_message_id(message_id_hint)?;
+    Ok((group_hint.to_string(), entity))
+}
+
+fn resolve_delivery_id(
+    store: &UnifiedStore,
+    queue: &str,
+    delivery_id: &str,
+) -> RedDBResult<(String, EntityId)> {
+    let Some(manager) = store.get_collection(QUEUE_META_COLLECTION) else {
+        return Err(RedDBError::Query(format!(
+            "delivery_id '{}' does not resolve to a live pending delivery",
+            delivery_id
+        )));
+    };
+    for entity in manager.query_all(|entity| {
+        entity.data.as_row().is_some_and(|row| {
+            row_text(row, "kind").as_deref() == Some("queue_pending_lc")
+                && row_text(row, "delivery_id").as_deref() == Some(delivery_id)
+        })
+    }) {
+        if let Some(row) = entity.data.as_row() {
+            let row_queue = row_text(row, "queue").unwrap_or_default();
+            let row_group = row_text(row, "group").unwrap_or_default();
+            let row_message = row_u64(row, "message_id").unwrap_or(0);
+            if row_queue != queue {
+                return Err(RedDBError::Query(format!(
+                    "delivery_id '{}' belongs to queue '{}', not '{}'",
+                    delivery_id, row_queue, queue
+                )));
+            }
+            return Ok((row_group, EntityId::new(row_message)));
+        }
+    }
+    Err(RedDBError::Query(format!(
+        "delivery_id '{}' does not resolve to a live pending delivery",
+        delivery_id
+    )))
+}
+
+/// Per-(connection, queue) rate-limited "tuple ACK is deprecated" log line.
+/// One emission per minute matches ADR 0026's operational guidance.
+fn log_tuple_deprecation(queue: &str) {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+
+    static LAST_EMIT: OnceLock<Mutex<HashMap<(u64, String), Instant>>> = OnceLock::new();
+    const COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
+
+    let map = LAST_EMIT.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = (super::impl_core::current_connection_id(), queue.to_string());
+    let now = Instant::now();
+    let mut guard = match map.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    let should_emit = match guard.get(&key) {
+        Some(prev) if now.duration_since(*prev) < COOLDOWN => false,
+        _ => true,
+    };
+    if should_emit {
+        guard.insert(key.clone(), now);
+        drop(guard);
+        tracing::warn!(
+            target: "reddb::queue_lifecycle",
+            queue = queue,
+            connection_id = key.0,
+            "ACK/NACK by (queue, group, message_id) tuple is deprecated; \
+             switch to the server-issued delivery_id (ADR 0026). \
+             The tuple path will be removed one minor release after introduction.",
+        );
+    }
 }
 
 fn message_id_string(message_id: EntityId) -> String {

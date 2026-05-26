@@ -343,25 +343,23 @@ impl<'a> Parser<'a> {
             Token::Ack => {
                 self.advance()?;
                 let queue = self.expect_ident()?;
-                self.expect(Token::Group)?;
-                let group = self.expect_ident()?;
-                let message_id = self.parse_string()?;
+                let (group, message_id, delivery_id) = self.parse_ack_nack_handle()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Ack {
                     queue,
                     group,
                     message_id,
+                    delivery_id,
                 }))
             }
             Token::Nack => {
                 self.advance()?;
                 let queue = self.expect_ident()?;
-                self.expect(Token::Group)?;
-                let group = self.expect_ident()?;
-                let message_id = self.parse_string()?;
+                let (group, message_id, delivery_id) = self.parse_ack_nack_handle()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Nack {
                     queue,
                     group,
                     message_id,
+                    delivery_id,
                 }))
             }
             _ => Err(ParseError::expected(
@@ -373,6 +371,52 @@ impl<'a> Parser<'a> {
                 self.position(),
             )),
         }
+    }
+
+    /// Parse the tuple/`delivery_id` handle that follows `ACK <queue>` /
+    /// `NACK <queue>`. Returns `(group, message_id, delivery_id)`:
+    ///
+    /// - `GROUP <group> '<message_id>'`               → legacy tuple, no delivery_id
+    /// - `GROUP <group> '<message_id>' WITH delivery_id = '<base32>'` → both, delivery_id wins (ADR 0026)
+    /// - `WITH delivery_id = '<base32>'`              → delivery_id only; group / message_id empty
+    ///
+    /// Refusing both is a parse error — at least one handle is required.
+    fn parse_ack_nack_handle(&mut self) -> Result<(String, String, Option<String>), ParseError> {
+        let (group, message_id) = if matches!(self.peek(), Token::Group) {
+            self.advance()?;
+            let group = self.expect_ident()?;
+            let message_id = self.parse_string()?;
+            (group, message_id)
+        } else {
+            (String::new(), String::new())
+        };
+        let delivery_id = if self.consume(&Token::With)? {
+            if !self.consume_ident_ci("delivery_id")? {
+                return Err(ParseError::expected(
+                    vec!["delivery_id"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+            if !self.consume(&Token::Eq)? {
+                return Err(ParseError::expected(
+                    vec!["="],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+            Some(self.parse_string()?)
+        } else {
+            None
+        };
+        if group.is_empty() && delivery_id.is_none() {
+            return Err(ParseError::expected(
+                vec!["GROUP", "WITH delivery_id"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        Ok((group, message_id, delivery_id))
     }
 
     fn consume_queue_mode(&mut self) -> Result<Option<QueueMode>, ParseError> {
