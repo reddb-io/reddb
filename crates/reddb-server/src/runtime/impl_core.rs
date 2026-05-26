@@ -9873,7 +9873,13 @@ impl RedDBRuntime {
                 tenant.as_deref(),
                 auth_store.principal_is_system_owned(&principal_id),
             );
-            if !auth_store.check_policy_authz(&principal_id, iam_action, &iam_resource, &iam_ctx) {
+            if !auth_store.check_policy_authz_with_role(
+                &principal_id,
+                iam_action,
+                &iam_resource,
+                &iam_ctx,
+                role,
+            ) {
                 return Err(format!(
                     "principal=`{}` action=`{}` resource=`{}:{}` denied by IAM policy",
                     username, iam_action, iam_resource.kind, iam_resource.name
@@ -10063,7 +10069,7 @@ impl RedDBRuntime {
         if let Some(t) = tenant {
             resource = resource.with_tenant(t.to_string());
         }
-        if auth_store.check_policy_authz(principal, action, &resource, &ctx) {
+        if auth_store.check_policy_authz_with_role(principal, action, &resource, &ctx, role) {
             Ok(())
         } else {
             Err(format!(
@@ -10156,7 +10162,7 @@ impl RedDBRuntime {
             tenant,
             auth_store.principal_is_system_owned(principal),
         );
-        if auth_store.check_policy_authz(principal, action, &resource, &ctx) {
+        if auth_store.check_policy_authz_with_role(principal, action, &resource, &ctx, role) {
             self.inner.audit_log.record(
                 action,
                 username,
@@ -10764,7 +10770,28 @@ impl RedDBRuntime {
             Some(PolicyPrincipalRef::Group(g)) => auth_store.group_policies(g),
         };
 
-        let mut records = Vec::with_capacity(pols.len());
+        let mut records = Vec::with_capacity(pols.len() + 1);
+
+        // Header row (#712 / S5A): synthetic record at index 0 that
+        // reports the active PolicyEnforcementMode and the hard-cutover
+        // version, so an operator running SHOW POLICIES can see the
+        // current posture without a separate command.
+        let mode = auth_store.enforcement_mode();
+        let mut header = UnifiedRecord::default();
+        header.set_arc(
+            Arc::from("id"),
+            SchemaValue::text("<enforcement_mode>".to_string()),
+        );
+        header.set_arc(Arc::from("statements"), SchemaValue::Integer(0));
+        header.set_arc(Arc::from("tenant"), SchemaValue::Null);
+        let header_json = format!(
+            r#"{{"enforcement_mode":"{}","policy_only_hard_version":"{}"}}"#,
+            mode.as_str(),
+            crate::auth::enforcement_mode::POLICY_ONLY_HARD_VERSION
+        );
+        header.set_arc(Arc::from("json"), SchemaValue::text(header_json));
+        records.push(header);
+
         for p in pols.iter() {
             let mut rec = UnifiedRecord::default();
             rec.set_arc(Arc::from("id"), SchemaValue::text(p.id.clone()));

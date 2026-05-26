@@ -328,6 +328,24 @@ impl RedDBRuntime {
             );
             return Err(err);
         }
+        // #712 / S5A: reject invalid values for the enforcement-mode
+        // config key before any storage mutation. The allowlist lives
+        // on PolicyEnforcementMode::parse so it stays in lockstep with
+        // the evaluator's understanding of the modes.
+        if is_enforcement_mode_config(collection, key) {
+            if let Err(err) = validate_enforcement_mode_value(&value) {
+                let _ = self.emit_config_mutation_event(
+                    crate::runtime::control_events::EventKind::ConfigWrite,
+                    crate::runtime::control_events::Outcome::Denied,
+                    "config:write",
+                    collection,
+                    key,
+                    Some(err.to_string()),
+                    &evidence,
+                );
+                return Err(err);
+            }
+        }
         if let Err(err) = self.ensure_config_collection(collection) {
             let _ = self.emit_config_mutation_event(
                 crate::runtime::control_events::EventKind::ConfigWrite,
@@ -440,6 +458,22 @@ impl RedDBRuntime {
             let _ = self.inner.db.store().delete(collection, id);
             self.invalidate_result_cache();
             return Err(err);
+        }
+        // #712 / S5A: now that the write is durable and audited, push
+        // the new mode into the live AuthStore so subsequent IAM
+        // decisions honour it without waiting for a restart.
+        if is_enforcement_mode_config(collection, key) {
+            if let Some(auth_store) = self.inner.auth_store.read().clone() {
+                if let Value::Text(text) =
+                    &evidence.payload.as_ref().cloned().unwrap_or(Value::Null)
+                {
+                    if let Some(mode) =
+                        crate::auth::enforcement_mode::PolicyEnforcementMode::parse(text)
+                    {
+                        auth_store.set_enforcement_mode(mode);
+                    }
+                }
+            }
         }
         Ok(config_write_output(
             raw_query,
@@ -1078,7 +1112,13 @@ impl RedDBRuntime {
         if let Some(ref tenant) = tenant {
             resource = resource.with_tenant(tenant.clone());
         }
-        if auth_store.check_policy_authz(&principal_id, "config:write", &resource, &ctx) {
+        if auth_store.check_policy_authz_with_role(
+            &principal_id,
+            "config:write",
+            &resource,
+            &ctx,
+            role,
+        ) {
             ConfigMutationAuthz::Allowed(default_evidence)
         } else {
             ConfigMutationAuthz::Denied {
@@ -1268,7 +1308,7 @@ impl RedDBRuntime {
                 }
             }
         }
-        if auth_store.check_policy_authz(&principal_id, action, &resource, &ctx) {
+        if auth_store.check_policy_authz_with_role(&principal_id, action, &resource, &ctx, role) {
             Ok(())
         } else {
             Err(format!(
@@ -1533,6 +1573,43 @@ fn validate_config_value_type(value: &Value, value_type: ConfigValueType) -> Red
             "CONFIG value type mismatch: expected {}, got {}",
             value_type.as_str(),
             config_actual_value_type(value),
+        )))
+    }
+}
+
+/// `true` when `(collection, key)` addresses the policy enforcement
+/// mode flag (#712 / S5A). The flag lives under `red.config` so the
+/// rest of the config infrastructure (managed-config registry, audit,
+/// history) governs it for free.
+fn is_enforcement_mode_config(collection: &str, key: &str) -> bool {
+    collection == "red.config" && key == "policy.enforcement_mode"
+}
+
+/// Reject any value the policy evaluator does not understand. Surfaced
+/// as `InvalidConfig` so the SQL error path mirrors how other config
+/// validation failures are reported.
+fn validate_enforcement_mode_value(value: &Value) -> RedDBResult<()> {
+    let text = match value {
+        Value::Text(text) => text.as_ref(),
+        _ => {
+            return Err(RedDBError::InvalidConfig(format!(
+                "config key `{}` must be a string ({} or {}); got {}",
+                crate::auth::enforcement_mode::ENFORCEMENT_MODE_CONFIG_KEY,
+                crate::auth::enforcement_mode::PolicyEnforcementMode::LegacyRbac.as_str(),
+                crate::auth::enforcement_mode::PolicyEnforcementMode::PolicyOnly.as_str(),
+                config_actual_value_type(value),
+            )));
+        }
+    };
+    if crate::auth::enforcement_mode::PolicyEnforcementMode::parse(text).is_some() {
+        Ok(())
+    } else {
+        Err(RedDBError::InvalidConfig(format!(
+            "config key `{}` accepts only `{}` or `{}`, got `{}`",
+            crate::auth::enforcement_mode::ENFORCEMENT_MODE_CONFIG_KEY,
+            crate::auth::enforcement_mode::PolicyEnforcementMode::LegacyRbac.as_str(),
+            crate::auth::enforcement_mode::PolicyEnforcementMode::PolicyOnly.as_str(),
+            text,
         )))
     }
 }
