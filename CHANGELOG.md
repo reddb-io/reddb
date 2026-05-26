@@ -4,6 +4,21 @@
 
 ### Added
 
+- TurboQuant NEON scoring kernel on the canonical blocked-by-32 layout
+  ([#692](https://github.com/reddb-io/reddb/issues/692),
+  [PRD #688](https://github.com/reddb-io/reddb/issues/688),
+  [ADR 0024](.red/adr/0024-turboquant-encoded-storage-layout.md)). aarch64
+  hosts now get SIMD scoring on TurboQuant — `select_scorer()` picks
+  `NeonScorer` (NEON is mandatory in the AArch64 base ISA) and falls back to
+  scalar on every other arch. The kernel reads aligned 128-bit lanes
+  straight from `BlockedCodeStorage::block_codes(...)` with no per-query
+  gather, uses `vqtbl1q_u8` for nibble lookups, and finishes with
+  `vfmaq_f32` so output is bit-identical to `ScalarScorer` (the contract
+  the AVX2/AVX-512BW slices already enforce). Equivalence test gated
+  `#[cfg(target_arch = "aarch64")]`; release matrix already builds
+  aarch64-gnu natively on a Blacksmith ARM runner and aarch64-musl via
+  `messense/rust-musl-cross` so no new build deps are introduced.
+
 - `QUEUE ACK` / `QUEUE NACK` accept the server-issued opaque `delivery_id`
   alongside the legacy `(queue, group, message_id)` tuple
   ([#627](https://github.com/reddb-io/reddb/issues/627),
