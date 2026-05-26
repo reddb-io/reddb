@@ -171,6 +171,17 @@ Field rules:
 | `admin:audit-read` | Admin | Read the audit log. |
 | `admin:reload` | Admin | Force or request a `SIGHUP`-equivalent reload of runtime secrets where supported. |
 | `admin:lease-promote` | Admin | Promote a follower lease in a replicated cluster. |
+| `config:read` | Config | Read a key from `red_config`. |
+| `config:write` | Config | Create or update a key in `red_config`. |
+| `config:delete` | Config | Delete a key from `red_config`. |
+| `config:*` | Wildcard | Every config verb. |
+| `vault:read_metadata` | Vault | List entries or read metadata (`VAULT LIST`, `VAULT GET`). Never returns the secret value. |
+| `vault:read` | Vault | Reveal the current decrypted value (`VAULT UNSEAL <key>` for latest version; also gates the internal `secret_ref` resolver used by config indirection and the AI credential resolver). |
+| `vault:unseal_history` | Vault | Reveal a non-latest version (`VAULT UNSEAL <key> VERSION <n>`) — strictly greater power than `vault:read`. |
+| `vault:write` | Vault | `VAULT PUT`, `VAULT ROTATE`, `VAULT DELETE`. |
+| `vault:unseal` | Vault | Master-key seal/unseal lifecycle of a vault collection (does not gate individual secret reads — see `vault:read`). |
+| `vault:purge` | Vault | Hard-purge a deleted entry beyond the tombstone window. |
+| `vault:*` | Wildcard | Every vault verb. |
 | `*` | Wildcard | Every action — including future ones. Use sparingly. |
 | `admin:*` | Wildcard | Every admin verb. Pairs well with conditioned break-glass policies. |
 | `policy:*` | Wildcard | Every policy verb. Use for sub-admins who manage authz only. |
@@ -327,9 +338,6 @@ Pseudocode:
 
 ```text
 fn evaluate(principal, action, resource, ctx) -> Decision:
-    if principal.is_admin():
-        return Allow{reason: "admin bypass"}
-
     policies = effective_policies(principal)   // groups first, then user
     if policies.is_empty() and SYSTEM_HAS_NO_POLICIES:
         return legacy_rbac_decision(principal, action, resource)
@@ -347,6 +355,13 @@ fn evaluate(principal, action, resource, ctx) -> Decision:
             if stmt.effect == Allow and matched_allow.is_none():
                 matched_allow = Some((policy.id, stmt.sid))
             // do NOT short-circuit on allow — keep scanning for deny
+
+    // No explicit Deny matched. Admin is a policy-derived broad allow
+    // — it never overrides Deny. If you want admin to lose access to a
+    // namespace, attach an explicit Deny on the path glob. (See ADR
+    // 0021 and 0027.)
+    if principal.is_admin():
+        return AdminBypass{reason: "admin fallback allow"}
 
     return matched_allow
         .map(|(pid, sid)| Allow{policy: pid, sid: sid})

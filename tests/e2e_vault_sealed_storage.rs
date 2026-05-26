@@ -281,13 +281,13 @@ fn vault_metadata_and_unseal_control_events_minimize_evidence() {
         rt.execute_query("UNSEAL VAULT secrets.api_key")
     })
     .expect_err("unseal without policy must fail");
-    assert!(denied_unseal.to_string().contains("vault:unseal"));
+    assert!(denied_unseal.to_string().contains("vault:read"));
 
     attach_alice_policy(
         &auth,
         "vault-control-events-unseal",
         r#"[
-            {"effect":"allow","actions":["vault:unseal"],"resources":["vault:secrets.api_key"]}
+            {"effect":"allow","actions":["vault:read"],"resources":["vault:secrets.api_key"]}
         ]"#,
     );
     as_user("alice", Role::Write, || {
@@ -301,7 +301,7 @@ fn vault_metadata_and_unseal_control_events_minimize_evidence() {
         &sealed_auth,
         "vault-control-events-unseal-error",
         r#"[
-            {"effect":"allow","actions":["vault:unseal"],"resources":["vault:secrets.api_key"]}
+            {"effect":"allow","actions":["vault:read"],"resources":["vault:secrets.api_key"]}
         ]"#,
     );
     rt.set_auth_store(sealed_auth);
@@ -316,7 +316,7 @@ fn vault_metadata_and_unseal_control_events_minimize_evidence() {
     let rows = control_event_rows(&rt);
     let ledger_body = format!("{rows:?}");
     assert!(ledger_body.contains("vault.metadata_read"), "{ledger_body}");
-    assert!(ledger_body.contains("vault.unseal"), "{ledger_body}");
+    assert!(ledger_body.contains("vault.read"), "{ledger_body}");
     assert!(
         ledger_body.contains("\"outcome\": Text(\"denied\")"),
         "{ledger_body}"
@@ -508,20 +508,20 @@ fn vault_get_is_metadata_only_and_unseal_is_capability_gated_and_audited() {
     let denied = as_user("alice", Role::Write, || {
         rt.execute_query("UNSEAL VAULT secrets.api_key")
     })
-    .expect_err("unseal without vault:unseal must fail");
-    assert!(denied.to_string().contains("vault:unseal"));
+    .expect_err("unseal without vault:read must fail");
+    assert!(denied.to_string().contains("vault:read"));
 
     attach_alice_policy(
         &auth,
         "vault-unseal",
         r#"[
-            {"effect":"allow","actions":["vault:unseal"],"resources":["vault:secrets.api_key"]}
+            {"effect":"allow","actions":["vault:read"],"resources":["vault:secrets.api_key"]}
         ]"#,
     );
     let unsealed = as_user("alice", Role::Write, || {
         rt.execute_query("UNSEAL VAULT secrets.api_key")
     })
-    .expect("unseal should pass with vault:unseal");
+    .expect("unseal should pass with vault:read");
     assert_eq!(
         unsealed.result.records[0].get("value"),
         Some(&Value::text(secret))
@@ -529,7 +529,7 @@ fn vault_get_is_metadata_only_and_unseal_is_capability_gated_and_audited() {
 
     assert!(rt.audit_log().wait_idle(std::time::Duration::from_secs(2)));
     let audit_body = std::fs::read_to_string(rt.audit_log().path()).unwrap_or_default();
-    assert!(audit_body.contains("vault/unseal"));
+    assert!(audit_body.contains("vault/unseal")); // audit_log path retains the legacy "unseal" subpath name for value-reveal events
     assert!(audit_body.contains("\"outcome\":\"denied\""));
     assert!(audit_body.contains("\"outcome\":\"success\""));
     assert!(audit_body.contains("alice"));
@@ -574,7 +574,7 @@ fn vault_lifecycle_versions_history_purge_and_historical_unseal_are_audited() {
         "vault-lifecycle-current",
         r#"[
             {"effect":"allow","actions":["vault:read_metadata"],"resources":["vault:secrets.api_key"]},
-            {"effect":"allow","actions":["vault:unseal"],"resources":["vault:secrets.api_key"]}
+            {"effect":"allow","actions":["vault:read"],"resources":["vault:secrets.api_key"]}
         ]"#,
     );
 

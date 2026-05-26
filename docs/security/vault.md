@@ -310,6 +310,64 @@ SHOW CONFIG red.secret.stripe;
 | `red.secret.<your.app>.*` | Application-defined secrets (Stripe keys, OAuth client secrets, third-party tokens) | unreadable |
 | `red.config.*`          | Plaintext, non-sensitive configuration               | always readable       |
 
+### Locking down secrets by path with policies
+
+Vault actions are policy-evaluable per resource path. The resource is
+`vault:<collection>/<key>` and supports segment globbing, so a single
+policy can cover an entire prefix like `red.secret.ai.*`.
+
+| Action | Gates |
+|:---|:---|
+| `vault:read_metadata` | `VAULT LIST`, `VAULT GET` — metadata only, never the value |
+| `vault:read` | `VAULT UNSEAL <key>` (latest version) and internal `secret_ref` indirection — i.e. anywhere the *decrypted value* is revealed |
+| `vault:unseal_history` | `VAULT UNSEAL <key> VERSION <n>` — strictly greater power than `vault:read` |
+| `vault:write` | `VAULT PUT`, `VAULT ROTATE`, `VAULT DELETE` |
+| `vault:unseal` | Master-key seal/unseal lifecycle of a vault *collection* (orthogonal to individual reads) |
+| `vault:purge` | Hard-purge a deleted entry |
+
+**Recipe — lock down an AI provider namespace so nobody (including
+admin) can read or rotate it:**
+
+```json
+{
+  "id": "lock-ai-custom-secrets",
+  "statements": [
+    {
+      "sid": "no-read-ai-custom",
+      "effect": "deny",
+      "actions": ["vault:read", "vault:read_metadata", "vault:write"],
+      "resources": ["vault:red.vault/red.secret.ai.custom.*"]
+    }
+  ]
+}
+```
+
+Attach to the `everyone` group. Explicit `Deny` is honoured even for
+admin (see ADR 0021 / 0027).
+
+**Recipe — allow a specific operator to reveal an OpenAI key, deny
+everyone else:**
+
+```json
+{
+  "id": "ai-openai-key-keeper",
+  "statements": [
+    {
+      "sid": "allow-keeper",
+      "effect": "allow",
+      "actions": ["vault:read"],
+      "resources": ["vault:red.vault/red.secret.ai.openai.*"]
+    }
+  ]
+}
+```
+
+Attach to a single user (`alice`) — under default-deny, no other
+principal can `UNSEAL` those entries. The AI subsystem itself reads
+the same secret as *system* (not as the calling user) when a query
+needs it, and emits an `ai.credential.resolve` audit event identifying
+the principal that triggered the indirect read.
+
 ### `Value::Secret` and `Value::Password` columns
 
 Field-level encryption integrates with the same vault:

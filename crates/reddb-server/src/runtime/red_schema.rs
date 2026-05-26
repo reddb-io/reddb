@@ -910,6 +910,7 @@ fn control_capabilities_snapshot() -> Vec<UnifiedRecord> {
         "config:write",
         "config:*",
         "vault:read_metadata",
+        "vault:read",
         "vault:write",
         "vault:unseal",
         "vault:unseal_history",

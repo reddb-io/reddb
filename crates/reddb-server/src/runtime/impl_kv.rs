@@ -1167,7 +1167,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<Value> {
         let ops = KvAtomicOps::new(self);
         let entry = ops.get_vault_entry(collection, key)?;
-        if let Err(reason) = self.check_vault_capability("vault:unseal", collection, key) {
+        if let Err(reason) = self.check_vault_capability("vault:read", collection, key) {
             self.audit_vault_unseal(
                 collection,
                 key,
@@ -1176,9 +1176,9 @@ impl RedDBRuntime {
                 entry.as_ref(),
             );
             self.emit_vault_control_event(
-                crate::runtime::control_events::EventKind::VaultUnseal,
+                crate::runtime::control_events::EventKind::VaultRead,
                 crate::runtime::control_events::Outcome::Denied,
-                "vault:unseal",
+                "vault:read",
                 collection,
                 key,
                 &reason,
@@ -1197,9 +1197,9 @@ impl RedDBRuntime {
                 None,
             );
             self.emit_vault_control_event(
-                crate::runtime::control_events::EventKind::VaultUnseal,
+                crate::runtime::control_events::EventKind::VaultRead,
                 crate::runtime::control_events::Outcome::Denied,
-                "vault:unseal",
+                "vault:read",
                 collection,
                 key,
                 reason,
@@ -1221,9 +1221,9 @@ impl RedDBRuntime {
                 Some(&entry),
             );
             self.emit_vault_control_event(
-                crate::runtime::control_events::EventKind::VaultUnseal,
+                crate::runtime::control_events::EventKind::VaultRead,
                 crate::runtime::control_events::Outcome::Denied,
-                "vault:unseal",
+                "vault:read",
                 collection,
                 key,
                 reason,
@@ -1245,9 +1245,9 @@ impl RedDBRuntime {
                     Some(&entry),
                 );
                 self.emit_vault_control_event(
-                    crate::runtime::control_events::EventKind::VaultUnseal,
+                    crate::runtime::control_events::EventKind::VaultRead,
                     crate::runtime::control_events::Outcome::Allowed,
-                    "vault:unseal",
+                    "vault:read",
                     collection,
                     key,
                     "ok",
@@ -1266,9 +1266,9 @@ impl RedDBRuntime {
                     Some(&entry),
                 );
                 self.emit_vault_control_event(
-                    crate::runtime::control_events::EventKind::VaultUnseal,
+                    crate::runtime::control_events::EventKind::VaultRead,
                     crate::runtime::control_events::Outcome::Error,
-                    "vault:unseal",
+                    "vault:read",
                     collection,
                     key,
                     &reason,
@@ -1776,10 +1776,15 @@ impl RedDBRuntime {
                 };
                 let action = match (version, latest.as_ref()) {
                     (Some(requested), Some(latest)) if *requested == latest.version => {
-                        "vault:unseal"
+                        "vault:read"
                     }
                     (Some(_), _) => "vault:unseal_history",
-                    _ => "vault:unseal",
+                    _ => "vault:read",
+                };
+                let event_kind = if action == "vault:read" {
+                    crate::runtime::control_events::EventKind::VaultRead
+                } else {
+                    crate::runtime::control_events::EventKind::VaultUnseal
                 };
                 if let Err(reason) = self.check_vault_capability(action, collection, key) {
                     self.audit_vault_unseal(
@@ -1790,7 +1795,7 @@ impl RedDBRuntime {
                         entry.as_ref(),
                     );
                     self.emit_vault_control_event(
-                        crate::runtime::control_events::EventKind::VaultUnseal,
+                        event_kind,
                         crate::runtime::control_events::Outcome::Denied,
                         action,
                         collection,
@@ -1811,7 +1816,7 @@ impl RedDBRuntime {
                         None,
                     );
                     self.emit_vault_control_event(
-                        crate::runtime::control_events::EventKind::VaultUnseal,
+                        event_kind,
                         crate::runtime::control_events::Outcome::Denied,
                         action,
                         collection,
@@ -1835,7 +1840,7 @@ impl RedDBRuntime {
                         Some(&entry),
                     );
                     self.emit_vault_control_event(
-                        crate::runtime::control_events::EventKind::VaultUnseal,
+                        event_kind,
                         crate::runtime::control_events::Outcome::Denied,
                         action,
                         collection,
@@ -1859,7 +1864,7 @@ impl RedDBRuntime {
                             Some(&entry),
                         );
                         self.emit_vault_control_event(
-                            crate::runtime::control_events::EventKind::VaultUnseal,
+                            event_kind,
                             crate::runtime::control_events::Outcome::Allowed,
                             action,
                             collection,
@@ -1898,7 +1903,7 @@ impl RedDBRuntime {
                             Some(&entry),
                         );
                         self.emit_vault_control_event(
-                            crate::runtime::control_events::EventKind::VaultUnseal,
+                            event_kind,
                             crate::runtime::control_events::Outcome::Error,
                             action,
                             collection,

@@ -12,8 +12,10 @@
   - [Context Search](/query/search-commands.md#search-context)
   - [Semantic Search](/query/search-commands.md#search-similar)
   - [Auto Embedding](/query/insert.md#with-auto-embed)
-  - [AI Providers](/api/http.md#ai)
+  - [AI Providers](/guides/ai-providers.md)
   - [Local HuggingFace Embeddings](/guides/local-embeddings.md)
+  - [Multi-Model Queries](/guides/multi-model-queries.md)
+  - [AI Provider Modes](/api/ai-provider-modes.md)
 
 - **Query Language (RQL)**
   - [SELECT](/query/select.md)

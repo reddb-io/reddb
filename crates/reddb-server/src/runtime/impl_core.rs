@@ -524,6 +524,13 @@ pub(crate) fn current_auth_identity() -> Option<(String, crate::auth::Role)> {
     CURRENT_AUTH_IDENTITY.with(|cell| cell.borrow().clone())
 }
 
+/// Public probe of the thread-local auth identity for callers outside
+/// the `runtime` module (e.g. the AI credential resolver, which audits
+/// who triggered a secret read on behalf of a query).
+pub fn current_auth_identity_for_audit() -> Option<(String, crate::auth::Role)> {
+    current_auth_identity()
+}
+
 /// Install the session tenant id for the current thread (Phase 2.5.3
 /// multi-tenancy). Called by `SET TENANT 'id'` dispatch and by
 /// transport middleware that resolves tenant from auth claims (e.g.
