@@ -174,8 +174,8 @@ fn crash_before_wal_fsync_leaves_no_partial_state() {
     let path = db_path("before-wal-fsync");
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
-            .expect("boot persistent");
+        let rt =
+            RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("boot persistent");
         rt.execute_query("CREATE COLLECTION cx KIND vector.turbo DIM 8 METRIC cosine")
             .expect("create");
         insert_vector(&rt, "cx", "survivor", &synth_vector(0));
@@ -185,8 +185,8 @@ fn crash_before_wal_fsync_leaves_no_partial_state() {
         install(None);
     }
 
-    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
-        .expect("reopen persistent");
+    let rt =
+        RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen persistent");
     let hits = search_contents(&rt, "cx", &synth_vector(1), 5);
     assert!(
         hits.iter().any(|c| c == "survivor"),
@@ -208,8 +208,8 @@ fn crash_before_index_commit_recovers_via_wal_replay() {
     let path = db_path("before-index-commit");
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
-            .expect("boot persistent");
+        let rt =
+            RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("boot persistent");
         rt.execute_query("CREATE COLLECTION cx KIND vector.turbo DIM 8 METRIC cosine")
             .expect("create");
         insert_vector(&rt, "cx", "survivor", &synth_vector(0));
@@ -219,8 +219,8 @@ fn crash_before_index_commit_recovers_via_wal_replay() {
         install(None);
     }
 
-    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
-        .expect("reopen persistent");
+    let rt =
+        RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen persistent");
     let hits = search_contents(&rt, "cx", &synth_vector(1), 5);
     assert!(
         hits.iter().any(|c| c == "recovered"),
@@ -239,8 +239,8 @@ fn crash_before_extent_fsync_recovers_via_wal_replay() {
     let path = db_path("before-extent-fsync");
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
-            .expect("boot persistent");
+        let rt =
+            RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("boot persistent");
         rt.execute_query("CREATE COLLECTION cx KIND vector.turbo DIM 8 METRIC cosine")
             .expect("create");
         insert_vector(&rt, "cx", "survivor", &synth_vector(0));
@@ -250,8 +250,8 @@ fn crash_before_extent_fsync_recovers_via_wal_replay() {
         install(None);
     }
 
-    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
-        .expect("reopen persistent");
+    let rt =
+        RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen persistent");
     let hits = search_contents(&rt, "cx", &synth_vector(1), 5);
     assert!(
         hits.iter().any(|c| c == "recovered"),
@@ -269,8 +269,8 @@ fn crash_mid_checkpoint_does_not_lose_acked_inserts() {
     let path = db_path("mid-checkpoint");
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
-            .expect("boot persistent");
+        let rt =
+            RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("boot persistent");
         rt.execute_query("CREATE COLLECTION cx KIND vector.turbo DIM 8 METRIC cosine")
             .expect("create");
         for i in 0..5 {
@@ -285,8 +285,8 @@ fn crash_mid_checkpoint_does_not_lose_acked_inserts() {
         install(None);
     }
 
-    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
-        .expect("reopen persistent");
+    let rt =
+        RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen persistent");
     let hits = search_contents(&rt, "cx", &synth_vector(0), 8);
     for i in 0..5 {
         let want = format!("v{i}");
@@ -311,8 +311,8 @@ fn crash_in_partial_tail_recovers_to_clean_boundary() {
     let n = 33;
 
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
-            .expect("boot persistent");
+        let rt =
+            RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("boot persistent");
         rt.execute_query("CREATE COLLECTION cx KIND vector.turbo DIM 8 METRIC cosine")
             .expect("create");
         for i in 0..n {
@@ -323,8 +323,8 @@ fn crash_in_partial_tail_recovers_to_clean_boundary() {
         install(None);
     }
 
-    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
-        .expect("reopen persistent");
+    let rt =
+        RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen persistent");
     let hits = search_contents(&rt, "cx", &synth_vector(0), 64);
     for i in 0..n {
         let want = format!("v{i}");
