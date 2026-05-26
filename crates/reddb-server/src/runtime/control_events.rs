@@ -60,6 +60,10 @@ pub enum EventKind {
     FailoverPromotion,
     ReplicationSafety,
     EvidenceExport,
+    /// Emitted at startup when the `REDDB_POLICY_BREAK_GLASS` env var
+    /// triggers the [`crate::auth::self_lock_guard`] recovery path —
+    /// see issue #713.
+    PolicyBreakGlass,
 }
 
 impl EventKind {
@@ -91,6 +95,7 @@ impl EventKind {
             Self::FailoverPromotion => "failover.promotion",
             Self::ReplicationSafety => "replication.safety",
             Self::EvidenceExport => "evidence.export",
+            Self::PolicyBreakGlass => "policy.break_glass",
         }
     }
 }
