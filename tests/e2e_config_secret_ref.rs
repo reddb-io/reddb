@@ -120,7 +120,7 @@ fn config_secret_ref_get_is_reference_and_resolve_is_explicit_authorized_and_aud
         "bob",
         "vault-only",
         r#"[
-            {"effect":"allow","actions":["vault:unseal"],"resources":["vault:secrets.api_key"]}
+            {"effect":"allow","actions":["vault:read"],"resources":["vault:secrets.api_key"]}
         ]"#,
     );
     let config_denied = as_user("bob", Role::Write, || {
@@ -142,9 +142,9 @@ fn config_secret_ref_get_is_reference_and_resolve_is_explicit_authorized_and_aud
     let denied = as_user("alice", Role::Write, || {
         rt.execute_query("RESOLVE CONFIG app api_key")
     })
-    .expect_err("resolve without vault:unseal must fail");
+    .expect_err("resolve without vault:read must fail");
     let denied = denied.to_string();
-    assert!(denied.contains("vault:unseal"), "{denied}");
+    assert!(denied.contains("vault:read"), "{denied}");
     assert!(!denied.contains(secret));
 
     attach_user_policy(
@@ -152,7 +152,7 @@ fn config_secret_ref_get_is_reference_and_resolve_is_explicit_authorized_and_aud
         "alice",
         "vault-unseal",
         r#"[
-            {"effect":"allow","actions":["vault:unseal"],"resources":["vault:secrets.api_key"]}
+            {"effect":"allow","actions":["vault:read"],"resources":["vault:secrets.api_key"]}
         ]"#,
     );
     let resolved = as_user("alice", Role::Write, || {
@@ -172,7 +172,7 @@ fn config_secret_ref_get_is_reference_and_resolve_is_explicit_authorized_and_aud
         "config-read-missing",
         r#"[
             {"effect":"allow","actions":["config:read"],"resources":["config:app.missing_api_key"]},
-            {"effect":"allow","actions":["vault:unseal"],"resources":["vault:secrets.missing"]}
+            {"effect":"allow","actions":["vault:read"],"resources":["vault:secrets.missing"]}
         ]"#,
     );
     let missing = as_user("alice", Role::Write, || {

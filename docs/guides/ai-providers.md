@@ -126,6 +126,92 @@ Default provider can be overridden per-call with `USING <provider>`.
 
 ---
 
+## Vault credentials
+
+Every provider in the matrix above (except `local` and `ollama`, which
+do not require an API key) resolves its key through the same lookup
+chain. Storing the key in the vault is the production path; env vars
+are useful for dev.
+
+**Canonical vault path:**
+
+```
+red.secret.ai.<provider>.<alias>.api_key
+```
+
+- `<provider>` matches the **Token** column of the capability matrix
+  (`openai`, `huggingface`, `groq`, `together`, `openrouter`,
+  `venice`, `deepseek`, `anthropic`).
+- `<alias>` is the credential alias. `default` is implicit when a
+  request omits `"credential"`.
+
+**Stage a key** (after `CREATE VAULT secrets` + `VAULT UNSEAL`):
+
+```bash
+reddb-cli vault set red.secret.ai.openai.default.api_key "sk-..."
+reddb-cli vault set red.secret.ai.huggingface.default.api_key "hf_..."
+reddb-cli vault set red.secret.ai.openai.prod.api_key "sk-prod-..."
+```
+
+Vault setup itself is covered in [Security → Vault](/security/vault.md).
+
+**Resolution order** (first non-empty wins, per request):
+
+1. Env var `REDDB_<PROVIDER>_API_KEY_<ALIAS>` (or `REDDB_<PROVIDER>_API_KEY` for the default alias)
+2. Vault: `red.secret.ai.<provider>.<alias>.api_key`
+3. Config indirection: `red.config.ai.<provider>.<alias>.secret_ref` points at another KV/vault path
+4. Legacy plaintext config: `red.config.ai.<provider>.<alias>.key` (deprecated — do not use for new deployments)
+
+A missing key surfaces as a `400` with the exact path the operator
+should populate. There is no silent fallback to a different alias or
+provider.
+
+**Use the staged key from SQL or HTTP:**
+
+```sql
+-- uses red.secret.ai.openai.default.api_key (default alias is implicit)
+INSERT INTO docs (body) VALUES ('hello')
+  WITH AUTO EMBED (body) USING openai;
+
+ASK 'summarise yesterday' USING openai;
+```
+
+```bash
+# pick a non-default alias by naming it in the request body
+curl -X POST localhost:8080/ai/embeddings \
+  -H 'content-type: application/json' \
+  -d '{"provider":"openai","inputs":["hi"],"credential":"prod"}'
+```
+
+**Plaintext at the boundary is rejected.** `POST /ai/models/{name}/pull`
+and the local-embedding pull surface refuse bodies that carry
+`api_key`, `token`, `hf_token`, `huggingface_api_key`, etc. The
+operator stages the secret in the vault and references it by
+`credential_alias` (see [Local HuggingFace
+Embeddings](/guides/local-embeddings.md#credentials)).
+
+**Lock secrets down by path with a policy.** Vault paths are
+policy-globbable, so an operator can keep an entire AI provider
+namespace off-limits — even from admin:
+
+```json
+{"effect":"deny","actions":["vault:read","vault:write"],
+ "resources":["vault:red.vault/red.secret.ai.custom.*"]}
+```
+
+See [Security → Vault](/security/vault.md#locking-down-secrets-by-path-with-policies)
+for the full action table and ADR 0027 for the policy-scoping design.
+
+**Indirect reads are audited, not denied.** When a query like
+`INSERT … WITH AUTO EMBED USING openai` needs a provider key, the AI
+subsystem reads the secret as system (not as the calling user) — the
+query layer is the right place to gate "who can run AUTO EMBED?", not
+the resolver. Every such read emits an `ai.credential.resolve` audit
+event with the principal, provider, alias, and which vault paths were
+consulted (never the value).
+
+---
+
 ## Environment variables
 
 | Variable                            | Default                       | Purpose                  |

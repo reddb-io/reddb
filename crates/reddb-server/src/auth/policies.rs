@@ -99,6 +99,7 @@ const ACTION_ALLOWLIST: &[&str] = &[
     "config:write",
     "config:*",
     "vault:read_metadata",
+    "vault:read",
     "vault:write",
     "vault:unseal",
     "vault:unseal_history",

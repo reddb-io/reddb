@@ -1966,22 +1966,71 @@ fn normalize_alias_token(alias: &str) -> String {
 }
 
 /// Convenience: resolve API key using a RedDBRuntime's KV store.
+///
+/// Emits an `ai.credential.resolve` audit event so operators can answer
+/// "which principal caused us to read `red.secret.ai.<provider>.*`?"
+/// even though the read itself is performed as system (the AI subsystem
+/// must always be able to fetch the key the query needs — denying it
+/// would be denying the query at the wrong layer). The audit record
+/// never contains the secret value.
 pub fn resolve_api_key_from_runtime(
     provider: &AiProvider,
     credential_alias: Option<&str>,
     runtime: &crate::runtime::RedDBRuntime,
 ) -> crate::RedDBResult<String> {
     use crate::application::ports::RuntimeEntityPort;
-    resolve_api_key(provider, credential_alias, |kv_key| {
+    let alias_for_audit = credential_alias.unwrap_or("default").to_string();
+    let provider_token = provider.token().to_string();
+    let audited_paths: std::cell::RefCell<Vec<(String, bool)>> =
+        std::cell::RefCell::new(Vec::new());
+    let result = resolve_api_key(provider, credential_alias, |kv_key| {
         if kv_key.starts_with("red.secret.") {
-            return Ok(runtime.vault_kv_get(kv_key));
+            let value = runtime.vault_kv_get(kv_key);
+            audited_paths
+                .borrow_mut()
+                .push((kv_key.to_string(), value.is_some()));
+            return Ok(value);
         }
         match runtime.get_kv("red_config", kv_key)? {
-            Some((crate::storage::schema::Value::Text(secret), _)) => Ok(Some(secret.to_string())),
-            Some(_) => Ok(None),
-            None => Ok(None),
+            Some((crate::storage::schema::Value::Text(secret), _)) => {
+                audited_paths.borrow_mut().push((kv_key.to_string(), true));
+                Ok(Some(secret.to_string()))
+            }
+            Some(_) => {
+                audited_paths.borrow_mut().push((kv_key.to_string(), false));
+                Ok(None)
+            }
+            None => {
+                audited_paths.borrow_mut().push((kv_key.to_string(), false));
+                Ok(None)
+            }
         }
-    })
+    });
+    let audited_paths = audited_paths.into_inner();
+
+    let principal = crate::runtime::impl_core::current_auth_identity_for_audit()
+        .map(|(user, _role)| user)
+        .unwrap_or_else(|| "system".to_string());
+    let outcome = if result.is_ok() { "hit" } else { "miss" };
+    let target = format!("ai.credential:{provider_token}/{alias_for_audit}");
+    let paths_json: Vec<crate::serde_json::Value> = audited_paths
+        .iter()
+        .map(|(p, hit)| {
+            crate::serde_json::json!({
+                "path": p,
+                "hit": hit,
+            })
+        })
+        .collect();
+    let details = crate::serde_json::json!({
+        "provider": provider_token,
+        "alias": alias_for_audit,
+        "paths_checked": paths_json,
+    });
+    runtime
+        .audit_log()
+        .record("ai.credential.resolve", &principal, &target, outcome, details);
+    result
 }
 
 // ============================================================================
