@@ -11,6 +11,7 @@
 //! available, plus the codec dimension / metric inherited from the
 //! collection contract.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,6 +20,7 @@ use parking_lot::{Condvar, Mutex};
 use crate::storage::engine::distance::DistanceMetric;
 use crate::storage::engine::turboquant::extent::TurboExtent;
 use crate::storage::engine::turboquant::index::TurboQuantIndex;
+use crate::storage::engine::turboquant::snapshot::{read_snapshot, write_snapshot, SnapshotError};
 use crate::storage::engine::Pager;
 use crate::storage::schema::Value;
 use crate::storage::unified::{EntityData, UnifiedStore};
@@ -85,6 +87,17 @@ pub struct TurboCollectionState {
     /// Condvar-paired wait surface for SEARCH callers that want to
     /// block (bounded) until ready instead of immediately failing.
     ready_signal: Arc<(Mutex<bool>, Condvar)>,
+    /// `.tv` snapshot file path for this collection (#674). `None` when
+    /// the active `StorageLayout` opts out of snapshot files
+    /// (`Minimal` / embedded). When `Some`, the checkpoint cycle dumps
+    /// here and boot prefers loading from here over rebuilding from
+    /// the extent.
+    snapshot_path: Mutex<Option<PathBuf>>,
+    /// Async-barrier handle for the most-recently-spawned snapshot
+    /// dump worker (#674). The next checkpoint cycle joins the
+    /// previous worker before starting a new one — bounds backpressure
+    /// to at most one in-flight dump per collection.
+    prev_snapshot_join: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl TurboCollectionState {
@@ -102,7 +115,21 @@ impl TurboCollectionState {
             populated: std::sync::atomic::AtomicBool::new(false),
             ready: std::sync::atomic::AtomicBool::new(false),
             ready_signal: Arc::new((Mutex::new(false), Condvar::new())),
+            snapshot_path: Mutex::new(None),
+            prev_snapshot_join: Mutex::new(None),
         }
+    }
+
+    /// Set (or clear) the `.tv` snapshot path for this collection.
+    /// Called by `RedDB::turbo_state` once the resolved
+    /// `TieredLayoutPaths` is known.
+    pub fn set_snapshot_path(&self, path: Option<PathBuf>) {
+        *self.snapshot_path.lock() = path;
+    }
+
+    /// Current `.tv` snapshot path, if any.
+    pub fn snapshot_path(&self) -> Option<PathBuf> {
+        self.snapshot_path.lock().clone()
     }
 
     /// Returns the current readiness flag. `true` means the
@@ -171,11 +198,45 @@ impl TurboCollectionState {
         if self.populated.load(Ordering::Acquire) {
             return;
         }
-        if let Some(manager) = store.get_collection(collection) {
-            for entity in manager.query_all(|_| true) {
-                if let EntityData::Vector(data) = &entity.data {
-                    if data.dense.len() == self.dim {
-                        index.insert(entity.id, data.dense.clone());
+        // Snapshot-first boot (#674). When a valid `.tv` exists at
+        // the layout-derived path, replay its `(id, vector)` pairs in
+        // stored order. The deterministic codec seed reproduces
+        // byte-identical block/lane placement, so the index ends up
+        // identical to what a from-scratch entity scan would build —
+        // without walking the entity manager. Snapshots are purely a
+        // cache: any failure (missing, truncated, crc-bad, dim/seed
+        // drift) falls through to the legacy entity-scan path so
+        // boot still succeeds.
+        let mut snapshot_loaded = false;
+        if let Some(path) = self.snapshot_path.lock().clone() {
+            if path.exists() {
+                match read_snapshot(&path, self.dim as u32, TURBO_CODEC_SEED) {
+                    Ok(payload) => {
+                        for (raw_id, vector) in payload.vectors {
+                            index.insert(EntityId::new(raw_id), vector);
+                        }
+                        snapshot_loaded = true;
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "reddb::turbo::snapshot",
+                            collection,
+                            path = %path.display(),
+                            error = %err,
+                            "vector.turbo snapshot unusable; falling back to extent/WAL rebuild",
+                        );
+                    }
+                }
+            }
+        }
+
+        if !snapshot_loaded {
+            if let Some(manager) = store.get_collection(collection) {
+                for entity in manager.query_all(|_| true) {
+                    if let EntityData::Vector(data) = &entity.data {
+                        if data.dense.len() == self.dim {
+                            index.insert(entity.id, data.dense.clone());
+                        }
                     }
                 }
             }
@@ -195,6 +256,82 @@ impl TurboCollectionState {
         }
         self.populated.store(true, Ordering::Release);
         self.mark_ready();
+    }
+
+    /// Capture the current in-memory index state and dump it to the
+    /// configured `.tv` path on a worker thread (#674). The next
+    /// caller (typically the next WAL checkpoint cycle) blocks on the
+    /// previous worker before starting a new one — bounded
+    /// backpressure of at most one dump in flight per collection. The
+    /// WAL checkpoint itself never waits for the snapshot fsync.
+    ///
+    /// No-op when `snapshot_path` is `None` (`StorageLayout::Minimal`
+    /// or embedded mode) — preserves the single-file portability
+    /// story.
+    pub fn dump_snapshot_async(self: &Arc<Self>, lsn: u64) {
+        let Some(path) = self.snapshot_path.lock().clone() else {
+            return;
+        };
+
+        // Async barrier: wait for any previous dump to finish before
+        // taking a fresh snapshot. Joining here (and not inside the
+        // new worker) keeps the work serialized per collection and
+        // ensures the on-disk file moves monotonically forward.
+        if let Some(prev) = self.prev_snapshot_join.lock().take() {
+            let _ = prev.join();
+        }
+
+        // Capture state under the index lock — the encode/decode
+        // path uses the same lock — then drop the lock and serialize
+        // off-thread so the checkpoint completion latency is not
+        // blocked on snapshot fsync (acceptance criterion #674.5).
+        let dim = self.dim as u32;
+        let captured: Vec<(u64, Vec<f32>)> = {
+            let guard = self.index.lock();
+            guard
+                .iter_persisted()
+                .map(|(id, v)| (id.raw(), v.to_vec()))
+                .collect()
+        };
+
+        let path_for_worker = path.clone();
+        let handle = std::thread::Builder::new()
+            .name("turbo-snapshot-dump".to_string())
+            .spawn(move || {
+                if let Some(parent) = path_for_worker.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Err(err) =
+                    write_snapshot(&path_for_worker, dim, TURBO_CODEC_SEED, lsn, &captured)
+                {
+                    tracing::warn!(
+                        target: "reddb::turbo::snapshot",
+                        path = %path_for_worker.display(),
+                        error = %err,
+                        "vector.turbo snapshot dump failed; cache will be rebuilt on next checkpoint",
+                    );
+                }
+            })
+            .ok();
+
+        *self.prev_snapshot_join.lock() = handle;
+    }
+
+    /// Join the in-flight snapshot worker, if any. Used by `RedDB::Drop`
+    /// to make sure no `.tv` write outlives the runtime, and by tests
+    /// that want to assert the on-disk state synchronously.
+    pub fn wait_snapshot(&self) {
+        if let Some(prev) = self.prev_snapshot_join.lock().take() {
+            let _ = prev.join();
+        }
+    }
+
+    /// Surface `SnapshotError::Io` to callers that need it. Currently
+    /// unused outside of tests but kept on the public path so the
+    /// snapshot module stays an implementation detail of this state.
+    #[allow(dead_code)]
+    pub(crate) fn snapshot_error_is_fatal(err: &SnapshotError) -> bool {
+        matches!(err, SnapshotError::Io(_))
     }
 
     /// Background-rebuild hook (#694 / #673). Drives the same code

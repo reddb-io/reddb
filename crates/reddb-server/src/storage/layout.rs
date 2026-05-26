@@ -317,6 +317,27 @@ impl TieredLayoutPaths {
         }
         Ok(())
     }
+
+    /// Path for a `vector.turbo` collection's `.tv` snapshot (#674).
+    /// Returns `None` when the layout opts out of snapshots (typically
+    /// `StorageLayout::Minimal` / embedded mode). Path conventions:
+    ///
+    /// - dedicated snapshot dir → `<snapshot_dir>/<collection>.tv`
+    /// - toggle on without dedicated dir → `<db>.<collection>.tv`
+    ///   sidecar next to the data file
+    pub fn turbo_snapshot_path(&self, collection: &str) -> Option<PathBuf> {
+        if !self.toggles.dedicated_snapshot_dir {
+            return None;
+        }
+        if let Some(dir) = &self.snapshot_dir {
+            return Some(dir.join(format!("{collection}.tv")));
+        }
+        let stem = file_name(&self.data_file);
+        Some(sibling_path(
+            &self.data_file,
+            &format!("{stem}.{collection}.tv"),
+        ))
+    }
 }
 
 fn file_name(path: &Path) -> String {
