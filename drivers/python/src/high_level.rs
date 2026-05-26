@@ -15,9 +15,9 @@ use crate::embedded::{EmbeddedRuntime, ParamValue, QueryRows, ScalarOut};
 #[cfg(feature = "embedded")]
 use reddb::runtime::RedDBRuntime;
 #[cfg(feature = "embedded")]
-use reddb::storage::cache::{BlobCachePolicy, BlobCachePut};
-#[cfg(feature = "embedded")]
 use reddb::storage::cache::blob::CachePresence;
+#[cfg(feature = "embedded")]
+use reddb::storage::cache::{BlobCachePolicy, BlobCachePut};
 
 use reddb::client::RedDBClient;
 
@@ -100,7 +100,10 @@ impl RedDb {
         self.ensure_open()?;
 
         if sql.trim().is_empty() {
-            return Err(err("INVALID_ARGUMENT", "query SQL must be a non-empty string"));
+            return Err(err(
+                "INVALID_ARGUMENT",
+                "query SQL must be a non-empty string",
+            ));
         }
 
         let binds = collect_params(args, params)?;
@@ -348,13 +351,10 @@ impl RedDb {
         self.ensure_open()?;
         let collection = sql_identifier_path(collection)?;
         let limit = normalize_limit(limit)?;
-        let where_sql = filter
-            .map(|f| format!(" WHERE {f}"))
-            .unwrap_or_default();
+        let where_sql = filter.map(|f| format!(" WHERE {f}")).unwrap_or_default();
         let order_sql = order_by.unwrap_or("rid ASC");
-        let sql = format!(
-            "SELECT * FROM {collection}{where_sql} ORDER BY {order_sql} LIMIT {limit}"
-        );
+        let sql =
+            format!("SELECT * FROM {collection}{where_sql} ORDER BY {order_sql} LIMIT {limit}");
         let rows = match &self.backend {
             #[cfg(feature = "embedded")]
             Backend::Embedded(rt) => {
@@ -571,14 +571,14 @@ impl DocumentClient {
         let collection = sql_identifier_path(collection)?;
         ensure_document_collection(rt, &collection)?;
         let body = sql_json_literal(py, document.as_any())?;
-        let sql = format!(
-            "INSERT INTO {collection} DOCUMENT (body) VALUES ({body}) RETURNING *"
-        );
+        let sql = format!("INSERT INTO {collection} DOCUMENT (body) VALUES ({body}) RETURNING *");
         let qr = rt.query(&sql).map_err(|e| err("QUERY_ERROR", e))?;
-        let row = qr
-            .rows
-            .first()
-            .ok_or_else(|| err("INVALID_RESPONSE", "documents.insert expected one returned item"))?;
+        let row = qr.rows.first().ok_or_else(|| {
+            err(
+                "INVALID_RESPONSE",
+                "documents.insert expected one returned item",
+            )
+        })?;
         let item = row_to_pydict(py, row)?;
         let rid = item
             .get_item("rid")?
@@ -613,13 +613,10 @@ impl DocumentClient {
         let rt = self.embedded()?;
         let collection = sql_identifier_path(collection)?;
         let limit = normalize_limit(limit)?;
-        let where_sql = filter
-            .map(|f| format!(" WHERE {f}"))
-            .unwrap_or_default();
+        let where_sql = filter.map(|f| format!(" WHERE {f}")).unwrap_or_default();
         let order_sql = order_by.unwrap_or("rid ASC");
-        let sql = format!(
-            "SELECT * FROM {collection}{where_sql} ORDER BY {order_sql} LIMIT {limit}"
-        );
+        let sql =
+            format!("SELECT * FROM {collection}{where_sql} ORDER BY {order_sql} LIMIT {limit}");
         let qr = rt.query(&sql).map_err(|e| err("QUERY_ERROR", e))?;
         let out = PyDict::new(py);
         out.set_item("items", rows_to_pylist(py, &qr.rows)?)?;
@@ -761,7 +758,10 @@ impl KvClient {
             .query(&format!("KV GET {path}"))
             .map_err(|e| err("QUERY_ERROR", e))?;
         let out = PyDict::new(py);
-        out.set_item("exists", qr.rows.first().is_some_and(|row| kv_row_exists(row)))?;
+        out.set_item(
+            "exists",
+            qr.rows.first().is_some_and(|row| kv_row_exists(row)),
+        )?;
         Ok(out)
     }
 
@@ -800,18 +800,19 @@ impl KvClient {
             .map_err(|e| err("QUERY_ERROR", e))?;
         let items = PyList::empty(py);
         for row in &qr.rows {
-            let key = row.iter().find_map(|(name, value)| {
-                (name == "key").then(|| scalar_string(value))
-            });
+            let key = row
+                .iter()
+                .find_map(|(name, value)| (name == "key").then(|| scalar_string(value)));
             if let Some(key) = key {
                 if prefix.is_some_and(|prefix| !key.starts_with(prefix)) {
                     continue;
                 }
                 let item = PyDict::new(py);
                 item.set_item("key", key)?;
-                if let Some(value) = row.iter().find_map(|(name, value)| {
-                    (name == "value").then_some(value)
-                }) {
+                if let Some(value) = row
+                    .iter()
+                    .find_map(|(name, value)| (name == "value").then_some(value))
+                {
                     item.set_item("value", kv_scalar_to_py(py, value)?)?;
                 }
                 items.append(item)?;
@@ -1076,16 +1077,22 @@ pub struct CacheClient {
 #[pymethods]
 impl CacheClient {
     /// Fetch a cached value. Returns bytes on hit, None on miss.
-    fn get<'py>(&self, py: Python<'py>, namespace: &str, key: &str) -> PyResult<Option<Bound<'py, PyBytes>>> {
+    fn get<'py>(
+        &self,
+        py: Python<'py>,
+        namespace: &str,
+        key: &str,
+    ) -> PyResult<Option<Bound<'py, PyBytes>>> {
         match &self.backend {
             #[cfg(feature = "embedded")]
-            CacheBackend::Embedded(rt) => {
-                match rt.result_blob_cache().get(namespace, key) {
-                    Some(hit) => Ok(Some(PyBytes::new(py, hit.value()))),
-                    None => Ok(None),
-                }
-            }
-            CacheBackend::Grpc => Err(err("NOT_SUPPORTED", "cache not available over gRPC transport; use the HTTP transport")),
+            CacheBackend::Embedded(rt) => match rt.result_blob_cache().get(namespace, key) {
+                Some(hit) => Ok(Some(PyBytes::new(py, hit.value()))),
+                None => Ok(None),
+            },
+            CacheBackend::Grpc => Err(err(
+                "NOT_SUPPORTED",
+                "cache not available over gRPC transport; use the HTTP transport",
+            )),
         }
     }
 
@@ -1115,7 +1122,10 @@ impl CacheClient {
                     .map_err(|e| err("CACHE_ERROR", format!("{e:?}")))?;
                 Ok(())
             }
-            CacheBackend::Grpc => Err(err("NOT_SUPPORTED", "cache not available over gRPC transport")),
+            CacheBackend::Grpc => Err(err(
+                "NOT_SUPPORTED",
+                "cache not available over gRPC transport",
+            )),
         }
     }
 
@@ -1131,7 +1141,10 @@ impl CacheClient {
                 };
                 Ok(status)
             }
-            CacheBackend::Grpc => Err(err("NOT_SUPPORTED", "cache not available over gRPC transport")),
+            CacheBackend::Grpc => Err(err(
+                "NOT_SUPPORTED",
+                "cache not available over gRPC transport",
+            )),
         }
     }
 
@@ -1139,10 +1152,11 @@ impl CacheClient {
     fn invalidate(&self, namespace: &str, key: &str) -> PyResult<usize> {
         match &self.backend {
             #[cfg(feature = "embedded")]
-            CacheBackend::Embedded(rt) => {
-                Ok(rt.result_blob_cache().invalidate_key(namespace, key))
-            }
-            CacheBackend::Grpc => Err(err("NOT_SUPPORTED", "cache not available over gRPC transport")),
+            CacheBackend::Embedded(rt) => Ok(rt.result_blob_cache().invalidate_key(namespace, key)),
+            CacheBackend::Grpc => Err(err(
+                "NOT_SUPPORTED",
+                "cache not available over gRPC transport",
+            )),
         }
     }
 
@@ -1153,7 +1167,10 @@ impl CacheClient {
             CacheBackend::Embedded(rt) => {
                 Ok(rt.result_blob_cache().invalidate_prefix(namespace, prefix))
             }
-            CacheBackend::Grpc => Err(err("NOT_SUPPORTED", "cache not available over gRPC transport")),
+            CacheBackend::Grpc => Err(err(
+                "NOT_SUPPORTED",
+                "cache not available over gRPC transport",
+            )),
         }
     }
 
@@ -1165,7 +1182,10 @@ impl CacheClient {
                 let tag_refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
                 Ok(rt.result_blob_cache().invalidate_tags(namespace, &tag_refs))
             }
-            CacheBackend::Grpc => Err(err("NOT_SUPPORTED", "cache not available over gRPC transport")),
+            CacheBackend::Grpc => Err(err(
+                "NOT_SUPPORTED",
+                "cache not available over gRPC transport",
+            )),
         }
     }
 
@@ -1177,7 +1197,10 @@ impl CacheClient {
                 rt.result_blob_cache().invalidate_namespace(namespace);
                 Ok(())
             }
-            CacheBackend::Grpc => Err(err("NOT_SUPPORTED", "cache not available over gRPC transport")),
+            CacheBackend::Grpc => Err(err(
+                "NOT_SUPPORTED",
+                "cache not available over gRPC transport",
+            )),
         }
     }
 }
@@ -1488,6 +1511,7 @@ fn scalar_to_py(py: Python<'_>, v: ScalarOut) -> PyObject {
     }
 }
 
+#[cfg(feature = "embedded")]
 fn row_to_pydict<'py>(
     py: Python<'py>,
     row: &[(String, ScalarOut)],
@@ -1499,6 +1523,7 @@ fn row_to_pydict<'py>(
     Ok(dict)
 }
 
+#[cfg(feature = "embedded")]
 fn rows_to_pylist<'py>(
     py: Python<'py>,
     rows: &[Vec<(String, ScalarOut)>],
@@ -1558,9 +1583,7 @@ fn sql_identifier(value: &str) -> PyResult<String> {
             .chars()
             .next()
             .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
-        || !value
-            .chars()
-            .all(|c| c == '_' || c.is_ascii_alphanumeric())
+        || !value.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
     {
         return Err(err(
             "INVALID_ARGUMENT",
@@ -1634,17 +1657,14 @@ fn kv_path(collection: &str, key: &str) -> PyResult<String> {
 }
 
 fn kv_key_segment(key: &str) -> String {
-    if !key.is_empty()
-        && key
-            .chars()
-            .all(|c| c == '_' || c.is_ascii_alphanumeric())
-    {
+    if !key.is_empty() && key.chars().all(|c| c == '_' || c.is_ascii_alphanumeric()) {
         key.to_string()
     } else {
         sql_string_literal(key)
     }
 }
 
+#[cfg(feature = "embedded")]
 fn scalar_string(value: &ScalarOut) -> String {
     match value {
         ScalarOut::Null => String::new(),
@@ -1655,25 +1675,21 @@ fn scalar_string(value: &ScalarOut) -> String {
     }
 }
 
-fn kv_scalar_to_py<'py>(
-    py: Python<'py>,
-    value: &ScalarOut,
-) -> PyResult<Bound<'py, PyAny>> {
+#[cfg(feature = "embedded")]
+fn kv_scalar_to_py<'py>(py: Python<'py>, value: &ScalarOut) -> PyResult<Bound<'py, PyAny>> {
     match value {
-        ScalarOut::Text(text) => {
-            json_text_to_py(py, text)
-                .or_else(|_| Ok(text.as_str().into_pyobject(py).unwrap().into_any()))
-        }
+        ScalarOut::Text(text) => json_text_to_py(py, text)
+            .or_else(|_| Ok(text.as_str().into_pyobject(py).unwrap().into_any())),
         ScalarOut::Json(text) => json_text_to_py(py, text)
             .or_else(|_| Ok(text.as_str().into_pyobject(py).unwrap().into_any())),
         other => Ok(scalar_to_py(py, other.clone()).into_bound(py)),
     }
 }
 
+#[cfg(feature = "embedded")]
 fn kv_row_exists(row: &[(String, ScalarOut)]) -> bool {
-    row.iter().any(|(name, value)| {
-        name == "rid" && !matches!(value, ScalarOut::Null)
-    })
+    row.iter()
+        .any(|(name, value)| name == "rid" && !matches!(value, ScalarOut::Null))
 }
 
 fn json_text_to_py<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyAny>> {
