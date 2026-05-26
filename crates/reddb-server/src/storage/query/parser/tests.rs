@@ -4486,6 +4486,7 @@ fn test_parse_queue_control_and_group_command_forms() {
             queue,
             group,
             message_id,
+            delivery_id: None,
         }) if queue == "tasks" && group == "workers" && message_id == "msg-1"
     ));
 
@@ -4496,6 +4497,7 @@ fn test_parse_queue_control_and_group_command_forms() {
             queue,
             group,
             message_id,
+            delivery_id: None,
         }) if queue == "tasks" && group == "workers" && message_id == "msg-2"
     ));
 
@@ -4536,6 +4538,76 @@ fn test_parse_queue_control_and_group_command_forms() {
     ] {
         assert!(parse(sql).is_err(), "{sql}");
     }
+}
+
+#[test]
+fn test_parse_queue_ack_nack_delivery_id_forms() {
+    // ADR 0026: ACK/NACK accept the legacy tuple, the new `delivery_id`
+    // handle, both (delivery_id wins downstream), and refuse neither.
+    let cases: &[(&str, Option<&str>, Option<&str>, Option<&str>)] = &[
+        // (rql, expected_group, expected_message_id, expected_delivery_id)
+        (
+            "QUEUE ACK tasks GROUP workers 'msg-1'",
+            Some("workers"),
+            Some("msg-1"),
+            None,
+        ),
+        (
+            "QUEUE ACK tasks WITH delivery_id = 'abc123'",
+            Some(""),
+            Some(""),
+            Some("abc123"),
+        ),
+        (
+            "QUEUE ACK tasks GROUP workers 'msg-1' WITH delivery_id = 'abc123'",
+            Some("workers"),
+            Some("msg-1"),
+            Some("abc123"),
+        ),
+    ];
+    for (rql, expected_group, expected_message, expected_delivery) in cases {
+        let parsed = parse(rql).unwrap_or_else(|err| panic!("parse {rql:?}: {err:?}"));
+        match parsed {
+            QueryExpr::QueueCommand(QueueCommand::Ack {
+                queue,
+                group,
+                message_id,
+                delivery_id,
+            }) => {
+                assert_eq!(queue, "tasks", "queue mismatch for {rql:?}");
+                assert_eq!(Some(group.as_str()), *expected_group, "group {rql:?}");
+                assert_eq!(
+                    Some(message_id.as_str()),
+                    *expected_message,
+                    "message_id {rql:?}",
+                );
+                assert_eq!(
+                    delivery_id.as_deref(),
+                    *expected_delivery,
+                    "delivery_id {rql:?}",
+                );
+            }
+            other => panic!("expected QueueCommand::Ack for {rql:?}, got {other:?}"),
+        }
+    }
+
+    // NACK mirrors ACK — sanity-check one shape so the grammar stays in sync.
+    let parsed = parse("QUEUE NACK tasks WITH delivery_id = 'xyz'").unwrap();
+    assert!(matches!(
+        parsed,
+        QueryExpr::QueueCommand(QueueCommand::Nack {
+            ref queue,
+            ref group,
+            ref message_id,
+            delivery_id: Some(ref did),
+        }) if queue == "tasks" && group.is_empty() && message_id.is_empty() && did == "xyz",
+    ));
+
+    // Neither handle — parse error.
+    assert!(parse("QUEUE ACK tasks").is_err());
+    assert!(parse("QUEUE NACK tasks").is_err());
+    // Misspelled key inside WITH — parse error.
+    assert!(parse("QUEUE ACK tasks WITH wrong = 'x'").is_err());
 }
 
 #[test]
