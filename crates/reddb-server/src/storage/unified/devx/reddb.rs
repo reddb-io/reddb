@@ -158,6 +158,16 @@ impl Drop for RedDB {
         for h in handles {
             let _ = h.join();
         }
+        // Issue #674 — also join any in-flight `.tv` snapshot dump
+        // so the on-disk file is complete and renamed before a
+        // restart observes it. Without this, a fast reopen can race
+        // and see the `<path>.tv.tmp` before the atomic rename.
+        if let Some(map) = self.turbo_collections.get() {
+            let states: Vec<_> = map.lock().values().cloned().collect();
+            for state in states {
+                state.wait_snapshot();
+            }
+        }
     }
 }
 
