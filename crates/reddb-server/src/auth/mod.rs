@@ -14,6 +14,7 @@
 pub mod action_catalog;
 pub mod cert;
 pub mod column_policy_gate;
+pub mod enforcement_mode;
 pub mod locks;
 pub mod managed_config;
 pub mod managed_policy;
