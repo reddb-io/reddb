@@ -154,7 +154,13 @@ impl RedDBRuntime {
             principal_is_system_owned: auth_store.principal_is_system_owned(&principal),
             principal_is_platform_scoped: principal.tenant.is_none(),
         };
-        if auth_store.check_policy_authz(&principal, EVIDENCE_EXPORT_ACTION, &resource, &ctx) {
+        if auth_store.check_policy_authz_with_role(
+            &principal,
+            EVIDENCE_EXPORT_ACTION,
+            &resource,
+            &ctx,
+            role,
+        ) {
             Ok(())
         } else {
             Err(RedDBError::Query(format!(

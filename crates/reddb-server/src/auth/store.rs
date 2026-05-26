@@ -16,6 +16,7 @@ use crate::storage::encryption::argon2id::{derive_key, Argon2Params};
 use crate::storage::engine::pager::Pager;
 
 use super::column_policy_gate::{ColumnAccessRequest, ColumnPolicyGate, ColumnPolicyOutcome};
+use super::enforcement_mode::{legacy_rbac_decision, PolicyEnforcementMode};
 use super::managed_policy::{ManagedPolicyDecision, ManagedPolicyGate, PolicyOp};
 use super::policies::{self as iam_policies, EvalContext, Policy, ResourceRef, SimulationOutcome};
 use super::privileges::{
@@ -163,6 +164,21 @@ pub struct AuthStore {
     /// IAM evaluator and stays deny-by-default even if policies are
     /// later deleted. Persisted under `red.iam.enabled`.
     iam_authorization_enabled: AtomicBool,
+    /// Selects the fallback behaviour when the IAM evaluator returns
+    /// `DefaultDeny`. See [`PolicyEnforcementMode`] and #712 / S5A.
+    /// Default is [`PolicyEnforcementMode::default_existing_install`]
+    /// (`LegacyRbac`) so an existing install upgrading past #712
+    /// keeps its current authorization posture until the operator
+    /// flips it explicitly. The bootstrap path sets this to
+    /// `PolicyOnly` for fresh installs; the boot-time config loader
+    /// supersedes both when a `red.config.policy.enforcement_mode`
+    /// value is present in the configured value store.
+    enforcement_mode: RwLock<PolicyEnforcementMode>,
+    /// Once-per-boot flag used by [`AuthStore::take_legacy_rbac_warn_once`]
+    /// to deliver exactly one `warn`-level log line when the store is
+    /// running under [`PolicyEnforcementMode::LegacyRbac`]. The boot
+    /// path checks the flag and, if it can claim it, emits the line.
+    legacy_rbac_boot_warn_emitted: AtomicBool,
     /// `(tenant, role) → HashSet<CollectionId>` cache used by the AI
     /// pipeline (issue #119). Distinct from `permission_cache`, which
     /// is keyed by `UserId` and answers `(resource, action)` lookups —
@@ -385,6 +401,8 @@ impl AuthStore {
             group_attachments: RwLock::new(HashMap::new()),
             iam_effective_cache: RwLock::new(HashMap::new()),
             iam_authorization_enabled: AtomicBool::new(false),
+            enforcement_mode: RwLock::new(PolicyEnforcementMode::default_existing_install()),
+            legacy_rbac_boot_warn_emitted: AtomicBool::new(false),
             visible_collections_cache: super::scope_cache::AuthCache::new(
                 super::scope_cache::DEFAULT_TTL,
             ),
@@ -610,6 +628,14 @@ impl AuthStore {
         } else {
             None
         };
+
+        // #712 / S5A: fresh bootstraps land in the strict posture.
+        // Persist explicitly to vault_kv so subsequent boots
+        // (rehydrate_iam) pick up `policy_only` instead of the
+        // existing-install default. Existing installs upgrading past
+        // this commit never traverse this branch — `bootstrap()` is
+        // sealed once and never re-runs.
+        self.set_enforcement_mode(PolicyEnforcementMode::default_fresh_bootstrap());
 
         Ok(BootstrapResult {
             user,
@@ -3842,6 +3868,14 @@ impl AuthStore {
 
     /// Production hot-path policy evaluation. Returns `true` on Allow
     /// / AdminBypass, `false` on Deny / DefaultDeny.
+    ///
+    /// This entry point is **strict**: it never consults the
+    /// [`PolicyEnforcementMode`] fallback. Governance APIs that gate
+    /// admin-tier mutations (managed-config writes, registry
+    /// supersedes, managed-policy lifecycle) call this so they cannot
+    /// accidentally pick up the lenient `LegacyRbac` posture. Runtime
+    /// hot-path callers that should respect the mode call
+    /// [`AuthStore::check_policy_authz_with_role`] instead.
     pub fn check_policy_authz(
         &self,
         principal: &UserId,
@@ -3856,6 +3890,91 @@ impl AuthStore {
             decision,
             iam_policies::Decision::Allow { .. } | iam_policies::Decision::AdminBypass
         )
+    }
+
+    /// Mode-aware policy evaluation for runtime SQL/HTTP/wire surfaces.
+    ///
+    /// Returns `true` on `Allow`/`AdminBypass`, `false` on an explicit
+    /// `Deny`. On `DefaultDeny` (no statement matched) the result
+    /// depends on the active [`PolicyEnforcementMode`]:
+    ///
+    /// * `LegacyRbac` — defer to
+    ///   [`legacy_rbac_decision`][super::enforcement_mode::legacy_rbac_decision]
+    ///   using the caller's `role`. This preserves the pre-#712
+    ///   behaviour where a principal with no attached policy is gated
+    ///   only by their role.
+    /// * `PolicyOnly` — return `false`. A principal needs an explicit
+    ///   matching `Allow` to be authorized.
+    ///
+    /// An explicit `Deny` always wins, irrespective of mode and role.
+    pub fn check_policy_authz_with_role(
+        &self,
+        principal: &UserId,
+        action: &str,
+        resource: &ResourceRef,
+        ctx: &EvalContext,
+        role: Role,
+    ) -> bool {
+        let pols = self.effective_policies(principal);
+        let refs: Vec<&Policy> = pols.iter().map(|p| p.as_ref()).collect();
+        let decision = iam_policies::evaluate(&refs, action, resource, ctx);
+        match decision {
+            iam_policies::Decision::Allow { .. } | iam_policies::Decision::AdminBypass => true,
+            iam_policies::Decision::Deny { .. } => false,
+            iam_policies::Decision::DefaultDeny => match self.enforcement_mode() {
+                PolicyEnforcementMode::LegacyRbac => legacy_rbac_decision(role, action),
+                PolicyEnforcementMode::PolicyOnly => false,
+            },
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // PolicyEnforcementMode (#712)
+    // -----------------------------------------------------------------
+
+    /// Read the active enforcement mode. Cheap (a single `RwLock` read);
+    /// safe to call on the hot path.
+    pub fn enforcement_mode(&self) -> PolicyEnforcementMode {
+        *self
+            .enforcement_mode
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Overwrite the active enforcement mode and persist it to the
+    /// vault KV so the new value survives a restart. Returns the
+    /// previous value so callers logging a transition (e.g. the
+    /// boot-time loader, the S5B migration command) can record the
+    /// before/after.
+    pub fn set_enforcement_mode(&self, mode: PolicyEnforcementMode) -> PolicyEnforcementMode {
+        let prev = {
+            let mut guard = self
+                .enforcement_mode
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let prev = *guard;
+            *guard = mode;
+            prev
+        };
+        self.vault_kv_set(
+            "red.config.policy.enforcement_mode".to_string(),
+            mode.as_str().to_string(),
+        );
+        prev
+    }
+
+    /// Claim the "emit the one-time legacy-RBAC boot warning" token.
+    /// Returns `true` on the first call after construction (or after a
+    /// process restart) **iff** the active mode is `LegacyRbac`;
+    /// returns `false` on every subsequent call so the boot path can
+    /// guarantee the warning is logged at most once per boot.
+    pub fn take_legacy_rbac_warn_once(&self) -> bool {
+        if self.enforcement_mode() != PolicyEnforcementMode::LegacyRbac {
+            return false;
+        }
+        !self
+            .legacy_rbac_boot_warn_emitted
+            .swap(true, Ordering::AcqRel)
     }
 
     /// Evaluate a resolved table projection through the column policy
@@ -3968,6 +4087,37 @@ impl AuthStore {
         self.iam_authorization_enabled
             .store(enabled, Ordering::Release);
         self.invalidate_iam_cache(None);
+
+        // #712 / S5A: load persisted enforcement mode, if any. Absence
+        // of the key means an existing install upgrading past #712 —
+        // stay on the lenient default written at construction time.
+        // Fresh installs receive `PolicyOnly` via the bootstrap path
+        // (`mark_bootstrap_complete`) before the first restart, so this
+        // hydrate path picks it up on every subsequent boot.
+        if let Some(stored) = self.vault_kv_get("red.config.policy.enforcement_mode") {
+            if let Some(mode) = PolicyEnforcementMode::parse(&stored) {
+                *self
+                    .enforcement_mode
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner()) = mode;
+            }
+        }
+
+        // #712 / S5A: legacy_rbac is a transitional posture; emit one
+        // boot-time warning so operators see the migration nudge in
+        // their logs. The flag inside take_legacy_rbac_warn_once
+        // guarantees we don't spam reload cycles.
+        if self.take_legacy_rbac_warn_once() {
+            tracing::warn!(
+                target: "reddb::auth::enforcement_mode",
+                mode = "legacy_rbac",
+                hard_version = crate::auth::enforcement_mode::POLICY_ONLY_HARD_VERSION,
+                "policy enforcement_mode=legacy_rbac (transitional). Run \
+                 `MIGRATE POLICY MODE TO 'policy_only'` (next slice S5B) \
+                 before {} to flip this install over to the strict posture.",
+                crate::auth::enforcement_mode::POLICY_ONLY_HARD_VERSION,
+            );
+        }
     }
 
     /// Snapshot policies + attachments into the vault KV. Called
@@ -4828,5 +4978,240 @@ mod tests {
     fn test_user_id_display() {
         assert_eq!(UserId::platform("admin").to_string(), "admin");
         assert_eq!(UserId::scoped("acme", "alice").to_string(), "acme/alice");
+    }
+
+    // -----------------------------------------------------------------
+    // PolicyEnforcementMode wiring (#712 / S5A)
+    // -----------------------------------------------------------------
+
+    fn enforcement_eval_ctx(role: Role) -> EvalContext {
+        EvalContext {
+            principal_tenant: None,
+            current_tenant: None,
+            peer_ip: None,
+            mfa_present: false,
+            now_ms: 1_700_000_000_000,
+            principal_is_admin_role: role == Role::Admin,
+            principal_is_system_owned: false,
+            principal_is_platform_scoped: true,
+        }
+    }
+
+    /// Helper: install a single unrelated allow policy so the IAM
+    /// path is the authoritative one — without any installed policy
+    /// the auth flow short-circuits before we ever consult the mode.
+    fn install_unrelated_policy(store: &AuthStore) {
+        store
+            .put_policy(
+                Policy::from_json_str(
+                    r#"{"id":"p-unrelated","version":1,"statements":[{"effect":"allow","actions":["select"],"resources":["table:public.other"]}]}"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn enforcement_mode_default_for_new_store_is_legacy_rbac() {
+        // Pre-bootstrap construction = "existing install" path.
+        // Defaulting to LegacyRbac preserves pre-#712 behaviour on
+        // upgrade so an operator that has not yet attached IAM
+        // policies does not lose access after the upgrade.
+        let store = AuthStore::new(test_config());
+        assert_eq!(store.enforcement_mode(), PolicyEnforcementMode::LegacyRbac);
+    }
+
+    #[test]
+    fn enforcement_mode_set_round_trips_and_returns_previous() {
+        let store = AuthStore::new(test_config());
+        let prev = store.set_enforcement_mode(PolicyEnforcementMode::PolicyOnly);
+        assert_eq!(prev, PolicyEnforcementMode::LegacyRbac);
+        assert_eq!(store.enforcement_mode(), PolicyEnforcementMode::PolicyOnly);
+        let prev = store.set_enforcement_mode(PolicyEnforcementMode::LegacyRbac);
+        assert_eq!(prev, PolicyEnforcementMode::PolicyOnly);
+    }
+
+    #[test]
+    fn policy_only_mode_treats_no_matching_policy_as_deny() {
+        // Acceptance #2: in `policy_only` mode a principal with no
+        // matching policy is denied even when the action's role
+        // floor would otherwise have allowed it.
+        let store = AuthStore::new(test_config());
+        store.create_user("alice", "p", Role::Admin).unwrap();
+        let uid = UserId::platform("alice");
+        install_unrelated_policy(&store);
+        store.set_enforcement_mode(PolicyEnforcementMode::PolicyOnly);
+
+        let resource = ResourceRef::new("table", "public.t");
+        // Even Role::Admin is denied — DefaultDeny is the deciding
+        // signal in `policy_only`, regardless of role.
+        assert!(!store.check_policy_authz_with_role(
+            &uid,
+            "select",
+            &resource,
+            &enforcement_eval_ctx(Role::Admin),
+            Role::Admin,
+        ));
+    }
+
+    #[test]
+    fn legacy_rbac_mode_falls_back_to_role_decision() {
+        // Acceptance #3: in `legacy_rbac` mode the same principal
+        // falls through to the role-based decision. `select` requires
+        // only `Read`, so all three roles satisfy it; a write verb
+        // requires `Write`, so `Read` does not.
+        let store = AuthStore::new(test_config());
+        store.create_user("alice", "p", Role::Read).unwrap();
+        let uid = UserId::platform("alice");
+        install_unrelated_policy(&store);
+        store.set_enforcement_mode(PolicyEnforcementMode::LegacyRbac);
+
+        let table = ResourceRef::new("table", "public.t");
+        // Read role + select action: allowed via the legacy fallback.
+        assert!(store.check_policy_authz_with_role(
+            &uid,
+            "select",
+            &table,
+            &enforcement_eval_ctx(Role::Read),
+            Role::Read,
+        ));
+        // Read role + insert action: legacy decision says no.
+        assert!(!store.check_policy_authz_with_role(
+            &uid,
+            "insert",
+            &table,
+            &enforcement_eval_ctx(Role::Read),
+            Role::Read,
+        ));
+        // Admin role + insert action: legacy decision says yes.
+        assert!(store.check_policy_authz_with_role(
+            &uid,
+            "insert",
+            &table,
+            &enforcement_eval_ctx(Role::Admin),
+            Role::Admin,
+        ));
+    }
+
+    #[test]
+    fn explicit_deny_wins_irrespective_of_mode_or_role() {
+        // Even in `legacy_rbac` with an Admin role, an explicit
+        // matching Deny statement always denies. The mode only
+        // influences the `DefaultDeny` arm, never an explicit one.
+        let store = AuthStore::new(test_config());
+        store.create_user("alice", "p", Role::Admin).unwrap();
+        let uid = UserId::platform("alice");
+        store
+            .put_policy(
+                Policy::from_json_str(
+                    r#"{"id":"p-deny-select","version":1,"statements":[{"effect":"deny","actions":["select"],"resources":["table:public.t"]}]}"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        store
+            .attach_policy(PrincipalRef::User(uid.clone()), "p-deny-select")
+            .unwrap();
+
+        let resource = ResourceRef::new("table", "public.t");
+        for mode in [
+            PolicyEnforcementMode::LegacyRbac,
+            PolicyEnforcementMode::PolicyOnly,
+        ] {
+            store.set_enforcement_mode(mode);
+            assert!(
+                !store.check_policy_authz_with_role(
+                    &uid,
+                    "select",
+                    &resource,
+                    &enforcement_eval_ctx(Role::Admin),
+                    Role::Admin,
+                ),
+                "explicit deny must win under mode {mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_allow_wins_irrespective_of_mode_or_role() {
+        // Symmetric guarantee: an explicit Allow is honoured even in
+        // `policy_only` mode for a role that the legacy fallback
+        // would have rejected (Read role + admin-tier action).
+        let store = AuthStore::new(test_config());
+        store.create_user("alice", "p", Role::Read).unwrap();
+        let uid = UserId::platform("alice");
+        store
+            .put_policy(
+                Policy::from_json_str(
+                    r#"{"id":"p-allow-create","version":1,"statements":[{"effect":"allow","actions":["create"],"resources":["table:public.t"]}]}"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        store
+            .attach_policy(PrincipalRef::User(uid.clone()), "p-allow-create")
+            .unwrap();
+        store.set_enforcement_mode(PolicyEnforcementMode::PolicyOnly);
+
+        let resource = ResourceRef::new("table", "public.t");
+        assert!(store.check_policy_authz_with_role(
+            &uid,
+            "create",
+            &resource,
+            &enforcement_eval_ctx(Role::Read),
+            Role::Read,
+        ));
+    }
+
+    #[test]
+    fn take_legacy_rbac_warn_once_is_at_most_once_per_boot() {
+        let store = AuthStore::new(test_config());
+        // Default mode = LegacyRbac, so the first call wins the token.
+        assert!(store.take_legacy_rbac_warn_once());
+        // Every subsequent call is a no-op for the lifetime of this
+        // process / AuthStore — that is the "once per boot" guarantee.
+        for _ in 0..3 {
+            assert!(!store.take_legacy_rbac_warn_once());
+        }
+    }
+
+    #[test]
+    fn take_legacy_rbac_warn_once_is_silent_under_policy_only() {
+        // Acceptance #5 phrases the warning as "Boot in legacy_rbac
+        // mode emits exactly one warn entry per boot" — implicitly,
+        // `policy_only` boots emit zero. The token must not be
+        // claimable when the mode is strict so the boot path stays
+        // quiet.
+        let store = AuthStore::new(test_config());
+        store.set_enforcement_mode(PolicyEnforcementMode::PolicyOnly);
+        assert!(!store.take_legacy_rbac_warn_once());
+        // And, importantly, switching back to LegacyRbac later does
+        // not "owe" us a warning — the token was never claimed under
+        // policy_only, so it is still available the first time the
+        // mode is legacy_rbac.
+        store.set_enforcement_mode(PolicyEnforcementMode::LegacyRbac);
+        assert!(store.take_legacy_rbac_warn_once());
+        assert!(!store.take_legacy_rbac_warn_once());
+    }
+
+    #[test]
+    fn strict_check_policy_authz_ignores_enforcement_mode() {
+        // Governance APIs (managed_config, registry, managed_policy)
+        // call the strict `check_policy_authz` — it must return
+        // `false` on DefaultDeny regardless of mode so the lenient
+        // posture cannot accidentally elevate an admin-tier mutation.
+        let store = AuthStore::new(test_config());
+        store.create_user("alice", "p", Role::Admin).unwrap();
+        let uid = UserId::platform("alice");
+        install_unrelated_policy(&store);
+        store.set_enforcement_mode(PolicyEnforcementMode::LegacyRbac);
+
+        let resource = ResourceRef::new("table", "public.t");
+        assert!(!store.check_policy_authz(
+            &uid,
+            "select",
+            &resource,
+            &enforcement_eval_ctx(Role::Admin),
+        ));
     }
 }
