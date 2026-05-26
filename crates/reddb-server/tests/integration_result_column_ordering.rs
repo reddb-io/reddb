@@ -159,9 +159,6 @@ fn select_star_after_reopen_keeps_declared_column_order() {
             "SELECT * column order drifted on run {run}: first={first_cols:?} now={cols:?}"
         );
         let rows = rows_for(&rt2, sql);
-        assert_eq!(
-            rows, first_rows,
-            "SELECT * row order drifted on run {run}"
-        );
+        assert_eq!(rows, first_rows, "SELECT * row order drifted on run {run}");
     }
 }
