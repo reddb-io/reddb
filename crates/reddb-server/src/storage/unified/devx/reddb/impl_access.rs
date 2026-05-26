@@ -1449,10 +1449,27 @@ impl RedDB {
             ),
         );
         let mut guard = map.lock();
+        let inserted_now = !guard.contains_key(collection);
         let entry = guard
             .entry(collection.to_string())
             .or_insert_with(|| Arc::clone(&state));
-        Some(Arc::clone(entry))
+        let handle = Arc::clone(entry);
+        drop(guard);
+        // Issue #673 — first materialisation of this collection's
+        // state kicks off a background rebuild worker. Non-vector
+        // traffic is unaffected (it never reaches `turbo_state`);
+        // vector SEARCH/INSERT observes the readiness flag via
+        // `wait_until_ready` instead of blocking inline on the
+        // synchronous lazy populate.
+        if inserted_now {
+            let join = crate::runtime::vector_turbo_kind::spawn_background_rebuild(
+                Arc::clone(&self.store),
+                collection.to_string(),
+                Arc::clone(&handle),
+            );
+            self.turbo_rebuild_workers.lock().push(join);
+        }
+        Some(handle)
     }
 
     /// Lazily-initialised ML runtime. First caller wins; subsequent

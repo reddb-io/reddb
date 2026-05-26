@@ -104,7 +104,30 @@ pub(crate) fn runtime_vector_matches(
     // selected). Legacy `vector` collections continue on the
     // brute-force path below.
     if let Some(state) = db.turbo_state(&query.collection) {
-        state.ensure_populated(&db.store(), &query.collection);
+        // Issue #673 — wait briefly for the background rebuild to
+        // finish. If the timeout fires, return a structured NOT_READY
+        // signal instead of silently blocking or returning empty.
+        // The bounded wait lets fast rebuilds satisfy the caller
+        // transparently while slow ones surface as actionable errors.
+        let wait_ms = std::env::var("REDDB_TURBO_SEARCH_READY_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(500);
+        if !state.wait_until_ready(std::time::Duration::from_millis(wait_ms)) {
+            // Fall back to a synchronous populate from the calling
+            // thread. The rebuild may have raced with the wait
+            // (cheap collections finish before the worker is even
+            // scheduled); the explicit populate doubles as a
+            // last-chance unblock so a SEARCH after restart on a
+            // single-vector collection never spuriously 503s.
+            state.ensure_populated(&db.store(), &query.collection);
+            if !state.is_ready() {
+                return Err(RedDBError::InvalidOperation(format!(
+                    "NOT_READY: vector.turbo collection '{}' is rebuilding (turbo index recovery); retry shortly",
+                    query.collection
+                )));
+            }
+        }
         let search_k = if effective_vector_filter(query).is_some() {
             manager.count().max(1)
         } else {

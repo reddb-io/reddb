@@ -12,8 +12,9 @@
 //! collection contract.
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 
 use crate::storage::engine::distance::DistanceMetric;
 use crate::storage::engine::turboquant::extent::TurboExtent;
@@ -76,6 +77,14 @@ pub struct TurboCollectionState {
     /// Set once the lazy rebuild from persisted vector entities has
     /// happened. Subsequent INSERT/SEARCH calls skip the scan.
     populated: std::sync::atomic::AtomicBool,
+    /// Issue #673 — per-collection readiness flag. Flips to `true`
+    /// only after the background rebuild completes. SEARCH against a
+    /// not-yet-ready collection waits (with bounded timeout) or
+    /// returns a structured NOT_READY response.
+    ready: std::sync::atomic::AtomicBool,
+    /// Condvar-paired wait surface for SEARCH callers that want to
+    /// block (bounded) until ready instead of immediately failing.
+    ready_signal: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl TurboCollectionState {
@@ -91,7 +100,47 @@ impl TurboCollectionState {
             index: Mutex::new(index),
             extent: Mutex::new(extent),
             populated: std::sync::atomic::AtomicBool::new(false),
+            ready: std::sync::atomic::AtomicBool::new(false),
+            ready_signal: Arc::new((Mutex::new(false), Condvar::new())),
         }
+    }
+
+    /// Returns the current readiness flag. `true` means the
+    /// background rebuild (or lazy populate) has completed and the
+    /// in-memory index reflects every WAL-acked INSERT.
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Mark the collection as ready. Called at the end of
+    /// `ensure_populated` and from the background rebuild worker.
+    /// Wakes any SEARCH callers parked on `wait_until_ready`.
+    fn mark_ready(&self) {
+        self.ready.store(true, std::sync::atomic::Ordering::Release);
+        let (lock, cv) = &*self.ready_signal;
+        let mut flag = lock.lock();
+        *flag = true;
+        cv.notify_all();
+    }
+
+    /// Block the caller (with a bounded timeout) until the
+    /// collection becomes ready. Returns `true` if ready within the
+    /// timeout, `false` if the timeout fired. A zero-or-negative
+    /// timeout still does one fast-path check.
+    pub fn wait_until_ready(&self, timeout: Duration) -> bool {
+        if self.is_ready() {
+            return true;
+        }
+        if timeout.is_zero() {
+            return self.is_ready();
+        }
+        let (lock, cv) = &*self.ready_signal;
+        let mut flag = lock.lock();
+        if *flag {
+            return true;
+        }
+        let _ = cv.wait_for(&mut flag, timeout);
+        *flag
     }
 
     /// Lazily populate the in-memory index from any vector entities
@@ -145,16 +194,61 @@ impl TurboCollectionState {
             }
         }
         self.populated.store(true, Ordering::Release);
+        self.mark_ready();
     }
 
-    /// Background-rebuild hook (#694 / #673). Today this drives the
-    /// same code path as the synchronous lazy populate — boot already
-    /// does not block on it, because rebuild happens on the first
-    /// turbo INSERT/SEARCH and non-vector traffic never enters here.
-    /// `#673` will wrap this in a worker thread + ready flag without
-    /// changing the contract.
+    /// Background-rebuild hook (#694 / #673). Drives the same code
+    /// path as `ensure_populated`; safe to call from a worker thread.
+    /// On completion the per-collection readiness flag flips and any
+    /// SEARCH callers parked on `wait_until_ready` are woken.
     pub fn background_rebuild(&self, store: &UnifiedStore, collection: &str) {
         self.ensure_populated(store, collection);
+    }
+}
+
+/// Public hook (#673) — issued by `RedDB::turbo_state` the first
+/// time a turbo collection's state is materialised. Spawns a worker
+/// thread that drains the WAL replay buffer + persisted vector
+/// entities and flips the readiness flag. Non-vector traffic never
+/// blocks on this; vector SEARCH/INSERT against a not-yet-ready
+/// collection observes the flag via `is_ready` / `wait_until_ready`.
+pub fn spawn_background_rebuild(
+    store: Arc<UnifiedStore>,
+    collection: String,
+    state: Arc<TurboCollectionState>,
+) -> std::thread::JoinHandle<()> {
+    // Worker holds a *weak* handle to the store so it can detect
+    // shutdown when the upgrade fails. The runtime registers the
+    // returned `JoinHandle` and joins it in `RedDB::Drop` before
+    // releasing its own `Arc<UnifiedStore>`, which is what
+    // guarantees a clean restart on the same database path.
+    let store_weak = Arc::downgrade(&store);
+    drop(store);
+    std::thread::Builder::new()
+        .name(format!("turbo-rebuild-{collection}"))
+        .spawn(move || {
+            let Some(store) = store_weak.upgrade() else {
+                return;
+            };
+            state.background_rebuild(&store, &collection);
+            store.set_config_tree(
+                &format!("red.collection.{collection}.vector.turbo.ready"),
+                &crate::serde_json::Value::Bool(true),
+            );
+        })
+        .expect("spawn turbo background rebuild thread")
+}
+
+/// Read the persisted readiness flag from the catalog. Used by
+/// admin/introspection paths that don't hold the runtime
+/// `TurboCollectionState` (e.g. SHOW COLLECTION metadata, cross-
+/// process tooling). The in-memory `TurboCollectionState::is_ready`
+/// is the authoritative live signal; this is the persisted shadow.
+pub fn ready_flag_from_catalog(store: &UnifiedStore, collection: &str) -> bool {
+    let key = format!("red.collection.{collection}.vector.turbo.ready");
+    match store.get_config(&key) {
+        Some(Value::Boolean(b)) => b,
+        _ => false,
     }
 }
 

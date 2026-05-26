@@ -105,6 +105,11 @@ turbo-crash-inject = []
 # dependency tree doesn't bloat the default build.
 otel = []
 
+[[test]]
+name = "integration_turbo_crash_inject"
+path = "tests/integration_turbo_crash_inject.rs"
+required-features = ["turbo-crash-inject"]
+
 [[bench]]
 name = "blob_cache_bench"
 harness = false
