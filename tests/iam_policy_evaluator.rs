@@ -121,9 +121,10 @@ fn admin_does_not_bypass_explicit_deny() {
 }
 
 #[test]
-fn admin_keeps_broad_allow_without_deny() {
-    // With no matching Deny, admin authority still grants access even when
-    // no Allow statement matches the request.
+fn admin_without_matching_allow_falls_through_to_default_deny() {
+    // After retiring the AdminBypass shortcut, admin authority is no longer
+    // an evaluator-level fallback. An admin without a matching Allow (and
+    // no matching Deny either) gets DefaultDeny like any other principal.
     let p = parse(
         r#"{
             "id": "p-allow-orders",
@@ -139,7 +140,7 @@ fn admin_keeps_broad_allow_without_deny() {
     ctx.principal_is_admin_role = true;
     let r = ResourceRef::new("table", "public.unrelated");
     let d = evaluate(&[&p], "delete", &r, &ctx);
-    assert!(matches!(d, Decision::AdminBypass), "got {d:?}");
+    assert_eq!(d, Decision::DefaultDeny, "got {d:?}");
 }
 
 #[test]
