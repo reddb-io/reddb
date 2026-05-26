@@ -102,6 +102,11 @@ ASK 'summarize the latest articles' USING anthropic;
 Same applies to `Local` when the `local-models` feature flag is not
 compiled in: fail fast rather than silently demote.
 
+> The `local` provider runs HuggingFace embedding artifacts in-process,
+> *separately* from the hosted HuggingFace Inference API above. The
+> register / pull / cache / query lifecycle is documented in
+> [Local HuggingFace embeddings](/guides/local-embeddings.md).
+
 ---
 
 ## Setting a default provider
