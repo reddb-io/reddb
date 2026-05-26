@@ -20,6 +20,7 @@ pub enum ScoreKernel {
     Scalar,
     Avx2,
     Avx512Bw,
+    Neon,
 }
 
 /// Per-query lookup table. Built once per `score_many` call and shared
@@ -168,6 +169,9 @@ static AVX2_SCORER: Avx2Scorer = Avx2Scorer;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 static AVX512BW_SCORER: Avx512BwScorer = Avx512BwScorer;
 
+#[cfg(target_arch = "aarch64")]
+static NEON_SCORER: NeonScorer = NeonScorer;
+
 /// Pick the best available scoring kernel for this host. SIMD slices
 /// register themselves here without touching the call site; the choice
 /// is made once per query (no per-block branch cost).
@@ -191,6 +195,16 @@ pub fn select_scorer() -> &'static dyn PerBlockScorer {
             return &AVX2_SCORER;
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        // NEON (Advanced SIMD) is mandatory in the AArch64 base ISA, so
+        // no runtime detection is needed — every aarch64 host supports
+        // the intrinsics this kernel uses. `vfmaq_f32` is the
+        // single-rounding fused multiply-add that matches
+        // `ScalarScorer`'s `f32::mul_add` bit-exactly.
+        return &NEON_SCORER;
+    }
+    #[allow(unreachable_code)]
     &SCALAR_SCORER
 }
 
@@ -455,6 +469,161 @@ unsafe fn score_block_avx512bw_inner(
     }
 }
 
+/// NEON block scorer. Reads aligned 128-bit lanes straight from
+/// [`super::storage::BlockedCodeStorage::block_codes`] with no
+/// per-query repack and table-looks up nibble scores via `vqtbl1q_u8`.
+///
+/// MIT notice: the SIMD body is adapted from RyanCodrai/turbovec
+/// (commit `4a4f2cd2db233f24405911b1ceaf1823fa23b4ac`, MIT). The
+/// single-block trait surface, the PERM0-aware lane scatter, and the
+/// tail handling are clean-room — the trait returns the unit-rotated
+/// dot product only; outer code applies metric and per-vector scale,
+/// matching [`ScalarScorer`].
+#[cfg(target_arch = "aarch64")]
+pub struct NeonScorer;
+
+#[cfg(target_arch = "aarch64")]
+impl PerBlockScorer for NeonScorer {
+    fn kernel(&self) -> ScoreKernel {
+        ScoreKernel::Neon
+    }
+
+    fn score_block(
+        &self,
+        lut: &QueryLut,
+        block_codes: &[u8],
+        n_byte_groups: usize,
+        n_vectors: usize,
+        out: &mut [f32; BLOCK_LANES],
+    ) {
+        debug_assert_eq!(n_byte_groups, lut.n_byte_groups);
+        debug_assert!(block_codes.len() >= n_byte_groups * BLOCK_LANES);
+        debug_assert!(n_vectors <= BLOCK_LANES);
+        // SAFETY: NEON is part of the mandatory aarch64 base ISA, so
+        // every `target_arch = "aarch64"` host supports these intrinsics.
+        unsafe {
+            score_block_neon_inner(lut, block_codes, n_byte_groups, n_vectors, out);
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn score_block_neon_inner(
+    lut: &QueryLut,
+    block_codes: &[u8],
+    n_byte_groups: usize,
+    n_vectors: usize,
+    out: &mut [f32; BLOCK_LANES],
+) {
+    use std::arch::aarch64::*;
+
+    // Four u16x8 accumulators cover the 32-lane block split as two
+    // 16-lane halves (half-0 = lanes `PERM0[i]`, half-1 = lanes
+    // `PERM0[i] + 16` for `i in 0..16`). Each half splits again into a
+    // low 8-position u16x8 and a high 8-position u16x8. u16 headroom
+    // matches the AVX2/AVX-512BW kernels: max sum per position = 2 *
+    // n_byte_groups * MAX_LUT, safe for n_byte_groups <= 258.
+    let mut acc_h0_lo = vdupq_n_u16(0);
+    let mut acc_h0_hi = vdupq_n_u16(0);
+    let mut acc_h1_lo = vdupq_n_u16(0);
+    let mut acc_h1_hi = vdupq_n_u16(0);
+    let nibble_mask = vdupq_n_u8(0x0f);
+
+    for g in 0..n_byte_groups {
+        let base = g * BLOCK_LANES;
+        // 16 bytes of "hi-pairs" (perm-positions 0..16) and 16 bytes of
+        // "lo-pairs" (perm-positions 16..32). Each byte packs two
+        // 4-bit codes: low nibble belongs to lane `PERM0[perm_pos]`
+        // (half 0), high nibble to lane `PERM0[perm_pos] + 16` (half 1).
+        let hi_pair = vld1q_u8(block_codes.as_ptr().add(base));
+        let lo_pair = vld1q_u8(block_codes.as_ptr().add(base + 16));
+        let hi_lut = vld1q_u8(lut.bytes.as_ptr().add(g * 32));
+        let lo_lut = vld1q_u8(lut.bytes.as_ptr().add(g * 32 + 16));
+
+        // Half-0 nibble indices (low nibbles).
+        let idx_lo_h0 = vandq_u8(lo_pair, nibble_mask);
+        let idx_hi_h0 = vandq_u8(hi_pair, nibble_mask);
+        // Half-1 nibble indices (high nibbles).
+        let idx_lo_h1 = vshrq_n_u8(lo_pair, 4);
+        let idx_hi_h1 = vshrq_n_u8(hi_pair, 4);
+
+        // `vqtbl1q_u8` does a 16-entry byte table lookup; all indices
+        // are masked to 0..16 so no out-of-range result is consumed.
+        let s_lo_h0 = vqtbl1q_u8(lo_lut, idx_lo_h0);
+        let s_hi_h0 = vqtbl1q_u8(hi_lut, idx_hi_h0);
+        let s_lo_h1 = vqtbl1q_u8(lo_lut, idx_lo_h1);
+        let s_hi_h1 = vqtbl1q_u8(hi_lut, idx_hi_h1);
+
+        // Per-position score = lo-table contribution + hi-table
+        // contribution. `vaddl_u8` widens u8x8 + u8x8 → u16x8 in one
+        // op, accumulating without overflow into the u16 lanes.
+        acc_h0_lo = vaddq_u16(
+            acc_h0_lo,
+            vaddl_u8(vget_low_u8(s_lo_h0), vget_low_u8(s_hi_h0)),
+        );
+        acc_h0_hi = vaddq_u16(
+            acc_h0_hi,
+            vaddl_u8(vget_high_u8(s_lo_h0), vget_high_u8(s_hi_h0)),
+        );
+        acc_h1_lo = vaddq_u16(
+            acc_h1_lo,
+            vaddl_u8(vget_low_u8(s_lo_h1), vget_low_u8(s_hi_h1)),
+        );
+        acc_h1_hi = vaddq_u16(
+            acc_h1_hi,
+            vaddl_u8(vget_high_u8(s_lo_h1), vget_high_u8(s_hi_h1)),
+        );
+    }
+
+    let scale = vdupq_n_f32(lut.scale);
+    let bias = vdupq_n_f32(lut.bias);
+
+    // Widen u16x8 → u32x4 × 2 → f32x4 × 2 then FMA with scale/bias.
+    // `vfmaq_f32(a, b, c) = a + b * c` is a single-rounding fused
+    // multiply-add and matches `f32::mul_add` bit-exactly — the
+    // contract the scalar oracle locks down.
+    let conv = |acc_u16: uint16x8_t| -> [f32; 8] {
+        let lo_u32 = vmovl_u16(vget_low_u16(acc_u16));
+        let hi_u32 = vmovl_u16(vget_high_u16(acc_u16));
+        let lo_f = vcvtq_f32_u32(lo_u32);
+        let hi_f = vcvtq_f32_u32(hi_u32);
+        let lo_score = vfmaq_f32(bias, scale, lo_f);
+        let hi_score = vfmaq_f32(bias, scale, hi_f);
+        let mut tmp = [0.0f32; 8];
+        vst1q_f32(tmp.as_mut_ptr(), lo_score);
+        vst1q_f32(tmp.as_mut_ptr().add(4), hi_score);
+        tmp
+    };
+
+    let h0_lo = conv(acc_h0_lo);
+    let h0_hi = conv(acc_h0_hi);
+    let h1_lo = conv(acc_h1_lo);
+    let h1_hi = conv(acc_h1_hi);
+
+    // Scatter perm-positions back to lane order. `scores_hN[perm_pos]`
+    // is the score for the lane PERM0 maps `perm_pos` to (offset by 16
+    // for half 1). Done in scalar — this is 32 stores at the tail of
+    // the hot loop, dwarfed by the per-group SIMD work above.
+    let mut scores_h0 = [0.0f32; 16];
+    let mut scores_h1 = [0.0f32; 16];
+    scores_h0[..8].copy_from_slice(&h0_lo);
+    scores_h0[8..].copy_from_slice(&h0_hi);
+    scores_h1[..8].copy_from_slice(&h1_lo);
+    scores_h1[8..].copy_from_slice(&h1_hi);
+
+    for perm_pos in 0..16 {
+        let lane = PERM0[perm_pos];
+        out[lane] = scores_h0[perm_pos];
+        out[lane + 16] = scores_h1[perm_pos];
+    }
+
+    // Tail lanes match the scalar oracle: unused slots are 0.0.
+    for score in out.iter_mut().take(BLOCK_LANES).skip(n_vectors) {
+        *score = 0.0;
+    }
+}
+
 fn decode_perm0_byte(block_codes: &[u8], group: usize, lane: usize) -> (u8, u8) {
     debug_assert!(lane < BLOCK_LANES);
     let half = lane / 16;
@@ -555,7 +724,17 @@ mod tests {
                 return;
             }
         }
-        assert_eq!(kernel, ScoreKernel::Scalar);
+        #[cfg(target_arch = "aarch64")]
+        {
+            // NEON is mandatory on aarch64 — no runtime gate; the
+            // dispatch must always pick it on this arch.
+            assert_eq!(kernel, ScoreKernel::Neon);
+            return;
+        }
+        #[allow(unreachable_code)]
+        {
+            assert_eq!(kernel, ScoreKernel::Scalar);
+        }
     }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -689,6 +868,77 @@ mod tests {
                             avx512_out[lane].to_bits(),
                             scalar_out[lane].to_bits(),
                             "AVX-512BW diverges from scalar at N={n}, block {b}, lane {lane}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_scorer_matches_scalar_oracle_across_dataset_sizes() {
+        // NEON is mandatory on aarch64; no runtime gate needed. Query
+        // shapes mirror the AVX-512BW test so the paired-byte structure
+        // and the odd-`n_byte_groups` tail-only case are both covered.
+        // `n_byte_groups` stays small enough that u16 accumulators
+        // cannot overflow vs the scalar u32 oracle (max sum per
+        // position = 2 * n_byte_groups * 127).
+        let centroids = centroids_for(4);
+        let queries: [Vec<f32>; 5] = [
+            vec![0.0; 8],
+            vec![0.7, -0.3, 0.4, -0.1, 0.2, -0.5, 0.6, -0.9],
+            vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+            // 10-dim → 5 byte groups: odd count exercises the tail of
+            // any paired-group kernel (NEON walks groups one at a time
+            // so there is no paired/unpaired distinction, but the case
+            // is kept for parity with the AVX-512BW test).
+            vec![0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8, 0.9, -1.0],
+        ];
+
+        for query in &queries {
+            let lut = QueryLut::build(query, &centroids);
+            let n_byte_groups = lut.n_byte_groups;
+
+            // Coverage includes the tail-only case (n < BLOCK_LANES)
+            // and exact-block-boundary sizes (32, 96) per acceptance.
+            for n in [1usize, 31, 32, 33, 95, 96, 97] {
+                let mut storage = BlockedCodeStorage::new(n_byte_groups);
+                for i in 0..n {
+                    let packed: Vec<u8> = (0..n_byte_groups)
+                        .map(|g| {
+                            let lo = ((i + g * 3) & 0x0f) as u8;
+                            let hi = ((i * 5 + g * 7) & 0x0f) as u8;
+                            lo | (hi << 4)
+                        })
+                        .collect();
+                    storage.append(&packed, 1.0);
+                }
+
+                for b in 0..storage.n_blocks() {
+                    let filled = storage.block_lanes_filled(b);
+                    let mut scalar_out = [0.0f32; BLOCK_LANES];
+                    let mut neon_out = [f32::NAN; BLOCK_LANES];
+                    ScalarScorer.score_block(
+                        &lut,
+                        storage.block_codes(b),
+                        n_byte_groups,
+                        filled,
+                        &mut scalar_out,
+                    );
+                    NEON_SCORER.score_block(
+                        &lut,
+                        storage.block_codes(b),
+                        n_byte_groups,
+                        filled,
+                        &mut neon_out,
+                    );
+                    for lane in 0..BLOCK_LANES {
+                        assert_eq!(
+                            neon_out[lane].to_bits(),
+                            scalar_out[lane].to_bits(),
+                            "NEON diverges from scalar at N={n}, block {b}, lane {lane}",
                         );
                     }
                 }
