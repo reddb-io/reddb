@@ -388,8 +388,31 @@ impl RedDB {
                 self.store.save_to_file(path)?;
             }
             self.persist_metadata()?;
+            // Issue #674 — tie `vector.turbo` `.tv` snapshot dumps to
+            // the WAL checkpoint cycle. Each turbo collection with a
+            // resolved snapshot path spawns at most one in-flight
+            // dump; the dump itself is fully async so checkpoint
+            // completion latency is unaffected. Embedded mode
+            // (`StorageLayout::Minimal`) has no snapshot path and is
+            // a no-op.
+            self.dump_turbo_snapshots(0);
         }
         Ok(())
+    }
+
+    /// Walk the registered `vector.turbo` collections and trigger one
+    /// async snapshot dump per collection. `lsn` is recorded in the
+    /// snapshot header; pass `0` when the runtime layer doesn't track
+    /// a precise checkpoint LSN (snapshot loading does not rely on
+    /// LSN ordering — see `vector_turbo_kind::ensure_populated`).
+    pub(crate) fn dump_turbo_snapshots(&self, lsn: u64) {
+        let Some(map) = self.turbo_collections.get() else {
+            return;
+        };
+        let states: Vec<_> = map.lock().values().cloned().collect();
+        for state in states {
+            state.dump_snapshot_async(lsn);
+        }
     }
 
     /// Push the on-disk database file to the configured remote

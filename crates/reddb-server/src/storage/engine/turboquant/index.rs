@@ -109,6 +109,22 @@ impl TurboQuantIndex {
     pub fn is_empty(&self) -> bool {
         self.ids.is_empty()
     }
+
+    pub fn dim(&self) -> usize {
+        self.codec.dim()
+    }
+
+    /// `(entity_id, vector)` pairs in insertion order — the order
+    /// `insert` saw, which is also the order block/lane placement was
+    /// chosen. Feeding the same sequence into a fresh
+    /// `TurboQuantIndex::new(dim, seed)` reproduces byte-identical
+    /// encoded codes. Used by the `.tv` snapshot writer (#674).
+    pub fn iter_persisted(&self) -> impl Iterator<Item = (crate::storage::EntityId, &[f32])> {
+        self.ids
+            .iter()
+            .copied()
+            .zip(self.vectors.iter().map(|v| v.as_slice()))
+    }
 }
 
 #[cfg(test)]
