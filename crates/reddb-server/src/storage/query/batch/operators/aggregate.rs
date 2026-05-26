@@ -6,7 +6,7 @@
 //! primitive; the SQL dispatch layer converts it to a result batch
 //! as part of the B5 (projections) sprint.
 
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 use super::super::column_batch::{ColumnBatch, ColumnVector, ValueRef};
 
@@ -92,7 +92,12 @@ pub fn batch_aggregate(
     if batch.is_empty() {
         return Vec::new();
     }
-    let mut groups: HashMap<GroupKey, Vec<Accumulator>> = HashMap::new();
+    // IndexMap (insertion-order iteration) instead of HashMap (#630): the
+    // output is sorted by key below, but using HashMap also makes the
+    // *intermediate* group-discovery order randomized per-process, which
+    // is the shape the original bug report attributed to non-deterministic
+    // column ordering. IndexMap pins that intermediate order too.
+    let mut groups: IndexMap<GroupKey, Vec<Accumulator>> = IndexMap::new();
     for row in 0..batch.len() {
         let key: GroupKey = group_columns
             .iter()
