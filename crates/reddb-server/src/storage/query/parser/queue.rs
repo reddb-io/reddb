@@ -381,9 +381,7 @@ impl<'a> Parser<'a> {
     /// - `WITH delivery_id = '<base32>'`              → delivery_id only; group / message_id empty
     ///
     /// Refusing both is a parse error — at least one handle is required.
-    fn parse_ack_nack_handle(
-        &mut self,
-    ) -> Result<(String, String, Option<String>), ParseError> {
+    fn parse_ack_nack_handle(&mut self) -> Result<(String, String, Option<String>), ParseError> {
         let (group, message_id) = if matches!(self.peek(), Token::Group) {
             self.advance()?;
             let group = self.expect_ident()?;
