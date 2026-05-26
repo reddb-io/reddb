@@ -13,6 +13,7 @@
   - [Semantic Search](/query/search-commands.md#search-similar)
   - [Auto Embedding](/query/insert.md#with-auto-embed)
   - [AI Providers](/api/http.md#ai)
+  - [Local HuggingFace Embeddings](/guides/local-embeddings.md)
 
 - **Query Language (RQL)**
   - [SELECT](/query/select.md)
