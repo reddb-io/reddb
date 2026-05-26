@@ -2147,10 +2147,8 @@ fn log_tuple_deprecation(queue: &str) {
         Ok(g) => g,
         Err(_) => return,
     };
-    let should_emit = match guard.get(&key) {
-        Some(prev) if now.duration_since(*prev) < COOLDOWN => false,
-        _ => true,
-    };
+    let should_emit =
+        !matches!(guard.get(&key), Some(prev) if now.duration_since(*prev) < COOLDOWN);
     if should_emit {
         guard.insert(key.clone(), now);
         drop(guard);
