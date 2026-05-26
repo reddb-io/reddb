@@ -849,6 +849,12 @@ impl RedDBServer {
                 if path == "/admin/policies/simulate" && method == "POST" {
                     return self.handle_iam_simulate(body);
                 }
+                if path == "/admin/policies/actions" {
+                    return match method.as_str() {
+                        "GET" => self.handle_iam_policy_actions(),
+                        _ => json_error(405, "method not allowed"),
+                    };
+                }
                 if let Some(rest) = path.strip_prefix("/admin/policies/") {
                     let id = rest.trim_matches('/');
                     if !id.is_empty() && !id.contains('/') {
