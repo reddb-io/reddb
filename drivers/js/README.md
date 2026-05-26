@@ -31,9 +31,48 @@ import { connect } from 'npm:@reddb-io/sdk'
 ```
 
 The `postinstall` script downloads the matching `red` binary from GitHub
-Releases into `node_modules/@reddb-io/sdk/bin/`. If your environment blocks
-postinstall scripts or has no network, set `REDDB_BINARY_PATH=/path/to/red`
-and the driver will use that instead.
+Releases into `node_modules/@reddb-io/sdk/bin/`. If the download fails (no
+network, 404, unsupported platform) the install now **fails loud** with an
+actionable multi-line message — it no longer silently ships an empty `bin/`
+that explodes the first time you call `connect()`. See the next section
+for the supported offline paths.
+
+## Offline / restricted-network installs
+
+If your CI or workstation has no network during `npm install`, or your
+environment blocks postinstall scripts entirely, opt out explicitly and
+point the driver at a binary you provide yourself:
+
+```bash
+# 1. Install the SDK without trying to download the engine.
+REDDB_SKIP_POSTINSTALL=1 npm install @reddb-io/sdk
+
+# 2. At runtime, tell connect() where the red binary lives.
+export REDDB_BIN=/path/to/red          # canonical, per ADR 0006
+# (REDDB_BINARY_PATH is a deprecated alias kept for the rollout window.)
+```
+
+Three ways to get a `red` binary:
+
+- Install the latest stable release with the official installer and use
+  `REDDB_BIN="$(command -v red)"`:
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash
+  ```
+- Build from a workspace checkout of `reddb-io/reddb`:
+  ```bash
+  cargo build --release --bin red
+  export REDDB_BIN="$PWD/target/release/red"
+  ```
+- Download a prebuilt asset from the releases page and drop it at
+  `<package>/bin/red[.exe]`:
+  <https://github.com/reddb-io/reddb/releases>
+
+When `REDDB_SKIP_POSTINSTALL=1` is set the postinstall script prints a one-line
+notice and exits 0; without it, any download failure exits non-zero so the
+install surfaces the problem immediately. If you forget to provide the
+binary, `connect()` raises a clear `binary "red" not found` error that names
+`REDDB_BIN` as the override.
 
 ## Quickstart
 
