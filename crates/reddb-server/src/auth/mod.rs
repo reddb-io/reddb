@@ -24,6 +24,7 @@ pub mod privileges;
 pub mod registry;
 pub mod scope_cache;
 pub mod scram;
+pub mod self_lock_guard;
 pub mod store;
 pub mod vault;
 
