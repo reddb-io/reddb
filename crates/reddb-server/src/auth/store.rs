@@ -1230,6 +1230,10 @@ impl AuthStore {
     /// (or `None` for the bootstrap admin) so cross-tenant collisions
     /// never authenticate the wrong identity.
     pub fn lookup_scram_verifier(&self, id: &UserId) -> Option<crate::auth::scram::ScramVerifier> {
+        // Synthetic platform-owner principal must never authenticate.
+        if crate::auth::self_lock_guard::is_synthetic_principal(&id.username) {
+            return None;
+        }
         let users = self.users.read().ok()?;
         users.get(id).and_then(|u| u.scram_verifier.clone())
     }
@@ -1246,6 +1250,10 @@ impl AuthStore {
     }
 
     /// Return all users (password hashes redacted).
+    ///
+    /// The synthetic [`crate::auth::self_lock_guard::PLATFORM_OWNER_USERNAME`]
+    /// principal is filtered out — it is a policy-graph anchor, not an
+    /// operator-visible account.
     pub fn list_users(&self) -> Vec<User> {
         let users = match self.users.read() {
             Ok(g) => g,
@@ -1253,6 +1261,7 @@ impl AuthStore {
         };
         users
             .values()
+            .filter(|u| !crate::auth::self_lock_guard::is_synthetic_principal(&u.username))
             .map(|u| User {
                 password_hash: String::new(), // redacted
                 ..u.clone()
@@ -1277,6 +1286,7 @@ impl AuthStore {
                 None => true,
                 Some(t) => u.tenant_id.as_deref() == t,
             })
+            .filter(|u| !crate::auth::self_lock_guard::is_synthetic_principal(&u.username))
             .map(|u| User {
                 password_hash: String::new(), // redacted
                 ..u.clone()
@@ -1775,6 +1785,12 @@ impl AuthStore {
         username: &str,
         password: &str,
     ) -> Result<Session, AuthError> {
+        // The synthetic platform-owner principal exists only as a
+        // policy-graph anchor (see `crate::auth::self_lock_guard`); it
+        // must never authenticate via any transport.
+        if crate::auth::self_lock_guard::is_synthetic_principal(username) {
+            return Err(AuthError::InvalidCredentials);
+        }
         let id = UserId::from_parts(tenant_id, username);
         let users = self.users.read().map_err(lock_err)?;
         let user = users.get(&id).ok_or(AuthError::InvalidCredentials)?;
@@ -3218,6 +3234,21 @@ impl AuthStore {
             return Err(Self::managed_policy_error(policy_id, &reason.to_string()));
         }
 
+        if let Some(err_msg) = self.check_self_lock_invariant_for_attach(policy_id) {
+            self.emit_policy_denied(
+                control,
+                EventKind::PolicyAttach,
+                "policy:attach",
+                policy_id,
+                existing.as_deref(),
+                Some(&principal),
+                &err_msg,
+                None,
+                None,
+            );
+            return Err(AuthError::Forbidden(err_msg));
+        }
+
         let user_attachments = self
             .user_attachments
             .read()
@@ -3357,6 +3388,27 @@ impl AuthStore {
                 op,
             )
         })
+    }
+
+    /// Run the [`crate::auth::self_lock_guard`] invariant against the
+    /// current policy set. Returns `Some(error_message)` when an attach
+    /// must be refused, `None` when the system would remain unlockable.
+    ///
+    /// `_policy_id` is informational — the invariant is on the full
+    /// graph and doesn't currently special-case the new entry.
+    fn check_self_lock_invariant_for_attach(&self, _policy_id: &str) -> Option<String> {
+        use crate::auth::self_lock_guard::{
+            check_self_lock_invariant, format_block_error, InvariantOutcome,
+        };
+        let policies: Vec<Arc<Policy>> = match self.policies.read() {
+            Ok(map) => map.values().cloned().collect(),
+            Err(_) => return None,
+        };
+        let outcome = check_self_lock_invariant(&policies);
+        match &outcome {
+            InvariantOutcome::Ok => None,
+            InvariantOutcome::Blocked { .. } => format_block_error(&outcome),
+        }
     }
 
     fn managed_policy_error(policy_id: &str, reason: &str) -> AuthError {
@@ -3688,6 +3740,94 @@ impl AuthStore {
             }
         }
         deleted
+    }
+
+    /// Apply the `REDDB_POLICY_BREAK_GLASS` recovery path: install or
+    /// refresh the unlock policy, ensure the synthetic platform-owner
+    /// user record exists, rebind the unlock policy to it, and emit a
+    /// `policy.break_glass` audit event. Idempotent across reboots.
+    ///
+    /// `boot_ts_ms` is recorded in the audit event so operators can
+    /// correlate the recovery with the boot transcript.
+    pub fn apply_policy_break_glass(&self, boot_ts_ms: u128) -> Result<(), AuthError> {
+        use crate::auth::self_lock_guard::{
+            break_glass_audit_fields, unlock_policy, PLATFORM_OWNER_UNLOCK_POLICY_ID,
+            PLATFORM_OWNER_USERNAME,
+        };
+
+        // (1) Install or refresh the unlock policy. `put_policy_internal`
+        // bypasses the synthetic-namespace guard, lets us replace any
+        // tampered persisted copy, and persists to vault on success.
+        let policy = unlock_policy();
+        self.put_policy_internal(policy)?;
+
+        // (2) Ensure the synthetic platform-owner user record exists.
+        // We bypass the public user-creation API to keep this user
+        // immutable, disabled, and absent from operator listings even
+        // if our filter ever regresses.
+        let owner_id = UserId::platform(PLATFORM_OWNER_USERNAME);
+        {
+            let mut users = self.users.write().unwrap_or_else(|e| e.into_inner());
+            users.entry(owner_id.clone()).or_insert_with(|| User {
+                username: PLATFORM_OWNER_USERNAME.to_string(),
+                tenant_id: None,
+                // No usable password; even if `authenticate` were
+                // wired to accept the principal it would fail
+                // verification. Defence in depth: `enabled = false`
+                // and the username filter both block it.
+                password_hash: String::new(),
+                scram_verifier: None,
+                role: Role::Admin,
+                api_keys: Vec::new(),
+                created_at: boot_ts_ms,
+                updated_at: boot_ts_ms,
+                enabled: false,
+                system_owned: true,
+            });
+        }
+
+        // (3) Rebind the unlock policy to the synthetic principal.
+        // `attach_policy` is idempotent (the helper checks for an
+        // existing binding before appending).
+        self.attach_policy(
+            PrincipalRef::User(owner_id.clone()),
+            PLATFORM_OWNER_UNLOCK_POLICY_ID,
+        )?;
+
+        // (4) Emit a loud audit event. If the control-event ledger
+        // isn't configured (e.g. unit tests without runtime wiring),
+        // log a warn and proceed — recovery must not depend on audit
+        // wiring being live.
+        let fields_raw = break_glass_audit_fields(boot_ts_ms);
+        let mut fields: HashMap<String, Sensitivity> = HashMap::new();
+        for (k, v) in fields_raw {
+            fields.insert(k, Sensitivity::raw(v));
+        }
+        if let Some(configured) = self.configured_control_events() {
+            let ctx = ControlEventCtx {
+                actor: crate::runtime::control_events::ActorRef::System("break_glass"),
+                scope: None,
+                request_id: None,
+                trace_id: None,
+            };
+            let event = ControlEvent {
+                kind: EventKind::PolicyBreakGlass,
+                outcome: Outcome::Allowed,
+                action: std::borrow::Cow::Borrowed("policy:break_glass"),
+                resource: Some(format!("policy:{PLATFORM_OWNER_UNLOCK_POLICY_ID}")),
+                reason: Some("REDDB_POLICY_BREAK_GLASS=1 at boot".into()),
+                matched_policy_id: None,
+                fields,
+            };
+            let _ = configured.ledger.emit(&ctx, event);
+        }
+        tracing::warn!(
+            policy_id = PLATFORM_OWNER_UNLOCK_POLICY_ID,
+            principal = PLATFORM_OWNER_USERNAME,
+            boot_ts_ms = %boot_ts_ms,
+            "REDDB_POLICY_BREAK_GLASS=1 — installed/refreshed platform-owner unlock policy and rebound to synthetic principal"
+        );
+        Ok(())
     }
 
     /// Attach a policy to a user or group. Returns an error if the

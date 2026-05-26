@@ -1992,6 +1992,7 @@ pub(crate) fn build_runtime_with_telemetry(
         tracing::warn!("{NO_AUTH_WARNING}");
     } else {
         apply_preset(&runtime, &auth_store)?;
+        maybe_apply_policy_break_glass(&auth_store);
     }
 
     // Background session purge (every 5 minutes)
@@ -2007,6 +2008,33 @@ pub(crate) fn build_runtime_with_telemetry(
     }
 
     Ok((runtime, auth_store, telemetry_guard))
+}
+
+/// Honour `REDDB_POLICY_BREAK_GLASS=1` at boot — see issue #713 and
+/// the [`crate::auth::self_lock_guard`] module. Anything other than
+/// `1`/`true`/`yes` (case-insensitive) is treated as not set.
+fn maybe_apply_policy_break_glass(auth_store: &Arc<AuthStore>) {
+    use crate::auth::self_lock_guard::BREAK_GLASS_ENV;
+
+    let enabled = std::env::var(BREAK_GLASS_ENV)
+        .ok()
+        .map(|v| {
+            let trimmed = v.trim().to_ascii_lowercase();
+            matches!(trimmed.as_str(), "1" | "true" | "yes")
+        })
+        .unwrap_or(false);
+    if !enabled {
+        return;
+    }
+    let now = crate::utils::now_unix_millis() as u128;
+    match auth_store.apply_policy_break_glass(now) {
+        Ok(()) => {
+            tracing::warn!(env = BREAK_GLASS_ENV, "policy break-glass recovery applied");
+        }
+        Err(err) => {
+            tracing::error!(env = BREAK_GLASS_ENV, %err, "policy break-glass recovery failed");
+        }
+    }
 }
 
 /// Reserved config keys describing first-boot bootstrap state (issue #650).
