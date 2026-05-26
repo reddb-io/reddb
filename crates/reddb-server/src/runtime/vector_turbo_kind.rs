@@ -116,8 +116,7 @@ impl TurboCollectionState {
     /// `ensure_populated` and from the background rebuild worker.
     /// Wakes any SEARCH callers parked on `wait_until_ready`.
     fn mark_ready(&self) {
-        self.ready
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.ready.store(true, std::sync::atomic::Ordering::Release);
         let (lock, cv) = &*self.ready_signal;
         let mut flag = lock.lock();
         *flag = true;
