@@ -1775,9 +1775,7 @@ impl RedDBRuntime {
                     None => latest.clone(),
                 };
                 let action = match (version, latest.as_ref()) {
-                    (Some(requested), Some(latest)) if *requested == latest.version => {
-                        "vault:read"
-                    }
+                    (Some(requested), Some(latest)) if *requested == latest.version => "vault:read",
                     (Some(_), _) => "vault:unseal_history",
                     _ => "vault:read",
                 };
