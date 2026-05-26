@@ -196,6 +196,10 @@ impl Checkpointer {
                 WalRecord::VectorInsert { .. } => {
                     // Vector-turbo logical inserts are replayed by the
                     // vector index layer, not by page checkpointing.
+                    // Issue #694 — named crash boundary for #673.
+                    crate::runtime::turbo_crash_inject::fire(
+                        crate::runtime::turbo_crash_inject::InjectionPoint::MidCheckpoint,
+                    );
                 }
                 WalRecord::FullPageImage { .. } => {
                     // FPI records (gh-478) are consumed by the pager

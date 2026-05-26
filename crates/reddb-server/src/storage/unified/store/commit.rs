@@ -675,8 +675,18 @@ impl StoreCommitCoordinator {
                     data,
                 } => pending.push((tx_id, data)),
                 WalRecord::Checkpoint { .. } => {}
-                WalRecord::VectorInsert { .. } => {
-                    // Dedicated vector WAL records are not store actions.
+                WalRecord::VectorInsert {
+                    collection,
+                    entity_id,
+                    vector,
+                } => {
+                    // Issue #694 — capture `vector.turbo` WAL inserts so the
+                    // boot-time TurboQuant index rebuild can drain them in
+                    // WAL order (deterministic against the pre-restart
+                    // state under a fixed codec seed). The legacy `vector`
+                    // path doesn't read this map.
+                    let mut map = store.replayed_turbo_inserts.lock();
+                    map.entry(collection).or_default().push((entity_id, vector));
                 }
                 WalRecord::FullPageImage { .. } => {
                     // Pager-level FPI (gh-478); store replay ignores.
