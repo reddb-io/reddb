@@ -941,7 +941,7 @@ impl RedDBRuntime {
             principal_is_system_owned: auth_store.principal_is_system_owned(&principal_id),
             principal_is_platform_scoped: principal_id.tenant.is_none(),
         };
-        if auth_store.check_policy_authz(&principal_id, action, &resource, &ctx) {
+        if auth_store.check_policy_authz_with_role(&principal_id, action, &resource, &ctx, role) {
             Ok(())
         } else {
             Err(format!(
@@ -2135,7 +2135,13 @@ impl RedDBRuntime {
             principal_is_system_owned: auth_store.principal_is_system_owned(&principal),
             principal_is_platform_scoped: principal.tenant.is_none(),
         };
-        if auth_store.check_policy_authz(&principal, "kv:invalidate", &resource, &ctx) {
+        if auth_store.check_policy_authz_with_role(
+            &principal,
+            "kv:invalidate",
+            &resource,
+            &ctx,
+            role,
+        ) {
             Ok(())
         } else {
             Err(RedDBError::Query(format!(

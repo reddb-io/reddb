@@ -27,6 +27,13 @@ fn runtime_with_auth() -> (RedDBRuntime, Arc<AuthStore>) {
     let rt = RedDBRuntime::with_options(RedDBOptions::persistent(dir.join("data.rdb")))
         .expect("runtime");
     let store = Arc::new(AuthStore::new(AuthConfig::default()));
+    // The runtime IAM tests below assume the strict posture — "no
+    // matching policy → deny". Under the default `LegacyRbac` mode
+    // (#712 / S5A) the principal would fall back to the role-based
+    // decision and many tests would accidentally pass via the
+    // legacy fallback. Pin `PolicyOnly` so each test exercises the
+    // policy evaluator directly.
+    store.set_enforcement_mode(reddb::auth::enforcement_mode::PolicyEnforcementMode::PolicyOnly);
     store.create_user("admin", "p", Role::Admin).unwrap();
     store.create_user("alice", "p", Role::Write).unwrap();
     rt.set_auth_store(Arc::clone(&store));
@@ -891,7 +898,23 @@ fn group_policy_applies_through_alter_user_membership() {
         rt.execute_query("SHOW POLICIES FOR GROUP analysts")
             .unwrap()
     });
-    assert_eq!(show.result.records.len(), 1);
+    // #712 / S5A: SHOW POLICIES now prepends a synthetic header row
+    // that reports the active enforcement mode. The group's actual
+    // policies follow — one in this case.
+    assert_eq!(show.result.records.len(), 2);
+    let header_id = match show.result.records[0].get("id").unwrap() {
+        reddb::storage::schema::Value::Text(text) => text.to_string(),
+        other => panic!("expected text id, got {other:?}"),
+    };
+    assert_eq!(header_id, "<enforcement_mode>");
+    let header_json = match show.result.records[0].get("json").unwrap() {
+        reddb::storage::schema::Value::Text(text) => text.to_string(),
+        other => panic!("expected text json, got {other:?}"),
+    };
+    assert!(
+        header_json.contains("\"enforcement_mode\":\"policy_only\""),
+        "header reports active mode: {header_json}",
+    );
 
     as_user("admin", Role::Admin, || {
         rt.execute_query("ALTER USER alice ADD GROUP analysts")

@@ -2072,7 +2072,13 @@ fn validate_subscription_auth(
         if let Some(t) = tenant.as_deref() {
             source_resource = source_resource.with_tenant(t.to_string());
         }
-        if !auth_store.check_policy_authz(&principal, "select", &source_resource, &ctx) {
+        if !auth_store.check_policy_authz_with_role(
+            &principal,
+            "select",
+            &source_resource,
+            &ctx,
+            role,
+        ) {
             return Err(RedDBError::Query(format!(
                 "permission denied: principal=`{}` action=`select` resource=`{}:{}` denied by IAM policy",
                 principal, source_resource.kind, source_resource.name
@@ -2084,7 +2090,13 @@ fn validate_subscription_auth(
         if let Some(t) = tenant.as_deref() {
             target_resource = target_resource.with_tenant(t.to_string());
         }
-        if !auth_store.check_policy_authz(&principal, "write", &target_resource, &ctx) {
+        if !auth_store.check_policy_authz_with_role(
+            &principal,
+            "write",
+            &target_resource,
+            &ctx,
+            role,
+        ) {
             return Err(RedDBError::Query(format!(
                 "permission denied: principal=`{}` action=`write` resource=`{}:{}` denied by IAM policy",
                 principal, target_resource.kind, target_resource.name
@@ -2557,6 +2569,14 @@ mod tests {
         let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
         rt.execute_query("CREATE TABLE qux (id INT)").unwrap();
         let store = wire_auth_store(&rt);
+        // Acceptance #2 (#712 / S5A): in `policy_only` mode a
+        // principal with no matching policy is denied even if their
+        // role would have permitted the action. The pre-#712 default
+        // of "no policy → deny" only holds under `policy_only`, so
+        // pin the mode explicitly here so the assertion holds
+        // regardless of the construction-time default.
+        store
+            .set_enforcement_mode(crate::auth::enforcement_mode::PolicyEnforcementMode::PolicyOnly);
         // A policy exists (IAM active) but gives no truncate right.
         let select_only = Policy {
             id: "select-only-2".to_string(),
