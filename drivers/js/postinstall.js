@@ -6,12 +6,16 @@
  *     via the vendored asset fetcher.
  *   - Targets the GitHub release matching this package's version.
  *   - Drops the binary at `<package>/bin/red[.exe]` and chmods +x on Unix.
- *   - On any failure, prints a warning to stderr but exits 0 — `npm install`
- *     never breaks because of this script. The user gets a clear error
- *     later when they call `connect()` if the binary isn't present.
+ *   - Intentional skip paths (workspace checkout, REDDB_SKIP_POSTINSTALL=1)
+ *     exit 0 quietly. Any unintentional failure (no network, 404, asset
+ *     fetcher error, unsupported platform) prints an actionable multi-line
+ *     message to stderr and exits 1 so `npm install` fails loud — never
+ *     ships a package with an empty bin/ that explodes later at connect().
  *
  * Override hooks (env vars):
- *   REDDB_SKIP_POSTINSTALL=1      do nothing
+ *   REDDB_SKIP_POSTINSTALL=1      do nothing, exit 0 (caller will provide
+ *                                 the binary via REDDB_BIN or a vendored
+ *                                 copy at bin/red[.exe])
  *   REDDB_POSTINSTALL_VERSION=…   pull a different release tag
  *   REDDB_POSTINSTALL_REPO=…      pull from a fork (default: reddb-io/reddb)
  */
@@ -54,17 +58,32 @@ if (!HERE.includes(`${sep}node_modules${sep}`)) {
 
 main().catch((err) => {
   process.stderr.write(formatFailure(err))
-  process.exit(0)
+  process.exit(1)
 })
 
 function formatFailure(err) {
   const repo = process.env.REDDB_POSTINSTALL_REPO || DEFAULT_REPO
+  const escapeHatches =
+    `       Escape hatches (any one of these will unblock the install):\n` +
+    `         - Skip the download and provide the binary yourself:\n` +
+    `             REDDB_SKIP_POSTINSTALL=1 npm install\n` +
+    `             then at runtime:  export REDDB_BIN=/path/to/red\n` +
+    `         - Or install red via the official installer and point at it:\n` +
+    `             curl -fsSL https://raw.githubusercontent.com/${repo}/main/install.sh | bash\n` +
+    `             export REDDB_BIN="$(command -v red)"\n` +
+    `         - Or build from a workspace checkout of ${repo}:\n` +
+    `             cargo build --release --bin red\n` +
+    `             export REDDB_BIN="$PWD/target/release/red"\n` +
+    `         - Or download the binary manually from\n` +
+    `             https://github.com/${repo}/releases\n` +
+    `           and place it at <package>/bin/red[.exe]\n`
+
   if (err && err.code === 'UNSUPPORTED_PLATFORM') {
     return (
       `reddb: no prebuilt red binary for ${process.platform}/${process.arch}.\n` +
-      `       Options:\n` +
-      `         - build from source: https://github.com/${repo}#build-from-source\n` +
-      `         - or set REDDB_BIN=/path/to/red to point at one you compiled.\n`
+      `       Building from source is required for this platform:\n` +
+      `         https://github.com/${repo}#build-from-source\n` +
+      escapeHatches
     )
   }
   if (err && err.code === 'ASSET_NOT_FOUND') {
@@ -72,25 +91,16 @@ function formatFailure(err) {
       `reddb: release asset not found at ${err.url}\n` +
       `       Common cause: the GitHub Release for this SDK version has not\n` +
       `       been published yet (or your platform's binary was not produced\n` +
-      `       for that release). To unblock without reinstalling:\n` +
-      `         1. Install the latest stable red via the official installer\n` +
-      `            and point the SDK at it:\n` +
-      `              curl -fsSL https://raw.githubusercontent.com/${repo}/main/install.sh | bash\n` +
-      `              export REDDB_BIN="$(command -v red)"\n` +
-      `         2. Or pull a specific tag explicitly and re-run postinstall:\n` +
-      `              REDDB_POSTINSTALL_VERSION=v1.0.5 npm rebuild @reddb-io/sdk\n` +
-      `         3. Or skip the download entirely and provide the binary yourself:\n` +
-      `              REDDB_SKIP_POSTINSTALL=1 (re-install), then export REDDB_BIN=…\n` +
-      `       Releases: https://github.com/${repo}/releases\n`
+      `       for that release). You can also pull a specific tag explicitly:\n` +
+      `         REDDB_POSTINSTALL_VERSION=v1.0.5 npm rebuild @reddb-io/sdk\n` +
+      escapeHatches
     )
   }
   return (
-    `reddb: postinstall could not download the binary (${err && err.message}).\n` +
-    `       The package itself still installs. To use the driver:\n` +
-    `         - run the installer: curl -fsSL https://raw.githubusercontent.com/${repo}/main/install.sh | bash\n` +
-    `           then: export REDDB_BIN="$(command -v red)"\n` +
-    `         - or download manually from https://github.com/${repo}/releases\n` +
-    `         - or set REDDB_BIN=/path/to/red.\n`
+    `reddb: postinstall could not download the red binary (${(err && err.message) || err}).\n` +
+    `       Install failed — the SDK will not work without a binary at\n` +
+    `       <package>/bin/red[.exe] or pointed at by REDDB_BIN.\n` +
+    escapeHatches
   )
 }
 
