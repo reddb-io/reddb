@@ -279,6 +279,16 @@ impl UnifiedStore {
         &self.context_index
     }
 
+    /// Drain WAL-replayed `VectorInsert` records for `collection`
+    /// (issue #694). Returns `None` when nothing was captured at open
+    /// time (in-memory mode, fresh database, or non-turbo collection).
+    /// One-shot: the caller owns the records after this call, the
+    /// store's internal buffer is cleared for that collection.
+    pub fn take_replayed_turbo_inserts(&self, collection: &str) -> Option<Vec<(u64, Vec<f32>)>> {
+        let mut map = self.replayed_turbo_inserts.lock();
+        map.remove(collection)
+    }
+
     /// Set multiple config KV pairs at once from a JSON tree.
     /// Keys are flattened with dot-notation: `{"a":{"b":1}}` → `a.b = 1`.
     pub fn set_config_tree(&self, prefix: &str, json: &crate::serde_json::Value) -> usize {

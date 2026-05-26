@@ -2736,9 +2736,13 @@ impl RuntimeEntityPort for RedDBRuntime {
             // pre-restart vectors in the index before appending its
             // own.
             state.ensure_populated(&db.store(), &input.collection);
+            // Issue #694 — named crash boundaries for #673.
+            use crate::runtime::turbo_crash_inject::{fire, InjectionPoint};
+            fire(InjectionPoint::BeforeWalFsync);
             let _ = db
                 .store()
                 .append_vector_insert_record(&input.collection, id.raw(), &dense);
+            fire(InjectionPoint::BeforeIndexCommit);
             let mut index = state.index.lock();
             index.insert(id, dense.clone());
             // Mirror the encoded codes into the per-collection
@@ -2747,6 +2751,7 @@ impl RuntimeEntityPort for RedDBRuntime {
             // little-endian L2 norm — same shape `BlockedCodeStorage`
             // appends in-memory. Failures are non-fatal in this
             // slice; durability of the extent is owned by #673.
+            fire(InjectionPoint::BeforeExtentFsync);
             if let Some(extent) = state.extent.lock().as_mut() {
                 let packed = index.encode_for_extent(&dense);
                 let _ = extent.append(&packed);

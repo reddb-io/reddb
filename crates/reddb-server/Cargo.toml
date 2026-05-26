@@ -91,6 +91,12 @@ backend-turso = []
 backend-d1 = []
 ai-ner-network = ["dep:reqwest"]
 local-models = []
+# Test-only crash injection for `vector.turbo` named boundaries (#694).
+# Production builds compile the injection points to a no-op; this
+# feature lights up the installable injector so the crash-safety
+# slice (#673) can drive its kill-point tests against named
+# boundaries from outside the test binary too.
+turbo-crash-inject = []
 # OpenTelemetry tracing. Opt-in (`--features otel`) so the OTLP
 # dependency tree doesn't bloat the default build.
 otel = []
