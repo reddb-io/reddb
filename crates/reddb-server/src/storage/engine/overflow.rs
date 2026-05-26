@@ -374,7 +374,10 @@ mod tests {
             let after_free = pager.page_count().unwrap();
             let (head2, _) = chain.store(&data).unwrap();
             let after_realloc = pager.page_count().unwrap();
-            assert_eq!(after_realloc, after_free, "second store should reuse freed pages");
+            assert_eq!(
+                after_realloc, after_free,
+                "second store should reuse freed pages"
+            );
 
             chain.free(head2).unwrap();
         }
