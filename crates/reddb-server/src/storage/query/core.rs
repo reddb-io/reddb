@@ -2727,13 +2727,21 @@ pub enum QueueCommand {
     },
     Ack {
         queue: String,
+        // Legacy tuple handle. Empty `group` / `message_id` strings mean
+        // the request relies solely on `delivery_id`. ADR 0026: when both
+        // `delivery_id` and the tuple are supplied, `delivery_id` wins.
         group: String,
         message_id: String,
+        /// Server-issued opaque base32 delivery handle (ADR 0026). When
+        /// present, takes precedence over the legacy tuple; the tuple is
+        /// kept for one minor release as a wire-compat bridge.
+        delivery_id: Option<String>,
     },
     Nack {
         queue: String,
         group: String,
         message_id: String,
+        delivery_id: Option<String>,
     },
     Move {
         source: String,
