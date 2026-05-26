@@ -11,6 +11,7 @@ pub mod proto {
 
 #[cfg(feature = "embedded")]
 mod embedded;
+#[cfg(feature = "embedded")]
 mod high_level;
 
 use proto::red_db_client::RedDbClient;
@@ -629,16 +630,21 @@ impl rustls::client::danger::ServerCertVerifier for DangerousVerifier {
 ///     reddb.wire_connect("127.0.0.1:5050")          -> WireConnection
 #[pymodule]
 fn reddb(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // High-level: the one users should care about.
-    m.add_function(wrap_pyfunction!(high_level::connect, m)?)?;
-    m.add_class::<high_level::RedDb>()?;
-    m.add_class::<high_level::RedDbError>()?;
-    m.add_class::<high_level::CacheClient>()?;
-    m.add_class::<high_level::DocumentClient>()?;
-    m.add_class::<high_level::KvClient>()?;
-    m.add_class::<high_level::QueueClient>()?;
-    m.add_class::<high_level::TxClient>()?;
-    m.add("helper_spec_version", high_level::HELPER_SPEC_VERSION)?;
+    // High-level: the one users should care about. Only available when
+    // the `embedded` feature is on — the high-level driver routes
+    // every helper call through the in-process engine today.
+    #[cfg(feature = "embedded")]
+    {
+        m.add_function(wrap_pyfunction!(high_level::connect, m)?)?;
+        m.add_class::<high_level::RedDb>()?;
+        m.add_class::<high_level::RedDbError>()?;
+        m.add_class::<high_level::CacheClient>()?;
+        m.add_class::<high_level::DocumentClient>()?;
+        m.add_class::<high_level::KvClient>()?;
+        m.add_class::<high_level::QueueClient>()?;
+        m.add_class::<high_level::TxClient>()?;
+        m.add("helper_spec_version", high_level::HELPER_SPEC_VERSION)?;
+    }
 
     // Legacy: keep the existing classes available for power users.
     m.add_function(wrap_pyfunction!(legacy_grpc_connect, m)?)?;

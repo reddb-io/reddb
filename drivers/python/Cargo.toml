@@ -27,8 +27,9 @@ embedded = ["dep:reddb"]
 
 [dependencies]
 pyo3 = { version = "0.24", features = ["extension-module"] }
-tonic = "0.12"
-prost = "0.13"
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 serde_json = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
@@ -36,7 +37,13 @@ rustls-pemfile = "2"
 webpki-roots = "0.26"
 
 # Engine — only compiled in when the `embedded` feature is on.
+# The high-level driver (src/high_level.rs) is gated behind this
+# feature too because every helper currently dispatches through the
+# in-process runtime. A thin proto-only client wired into
+# Backend::Grpc is tracked separately; until then `--no-default-features`
+# builds the slim `Connection` / `WireConnection` API only.
 reddb = { package = "reddb-io", version = "1.0", path = "../..", optional = true }
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-build = "0.14"
+tonic-prost-build = "0.14"
