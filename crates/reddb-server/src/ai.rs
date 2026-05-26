@@ -2027,9 +2027,13 @@ pub fn resolve_api_key_from_runtime(
         "alias": alias_for_audit,
         "paths_checked": paths_json,
     });
-    runtime
-        .audit_log()
-        .record("ai.credential.resolve", &principal, &target, outcome, details);
+    runtime.audit_log().record(
+        "ai.credential.resolve",
+        &principal,
+        &target,
+        outcome,
+        details,
+    );
     result
 }
 
