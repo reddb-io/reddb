@@ -1,5 +1,6 @@
 pub(crate) mod admin_json;
 pub(crate) mod catalog_json;
+pub(crate) mod cluster_status_json;
 pub(crate) mod deployment_json;
 pub(crate) mod entity_json;
 pub(crate) mod graph_json;
