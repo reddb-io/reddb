@@ -113,15 +113,15 @@ pub struct QueueTelemetrySnapshot {
     pub wait_duration: Vec<((String, String), WaitDurationHistogram)>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct HistogramCell {
     bucket_counts: Vec<AtomicU64>,
     sum_ms: AtomicU64,
     count: AtomicU64,
 }
 
-impl HistogramCell {
-    fn new() -> Self {
+impl Default for HistogramCell {
+    fn default() -> Self {
         Self {
             bucket_counts: (0..WAIT_DURATION_BUCKETS_MS.len())
                 .map(|_| AtomicU64::new(0))
@@ -130,7 +130,9 @@ impl HistogramCell {
             count: AtomicU64::new(0),
         }
     }
+}
 
+impl HistogramCell {
     fn observe(&self, value_ms: u64) {
         for (i, upper) in WAIT_DURATION_BUCKETS_MS.iter().enumerate() {
             if value_ms <= *upper {
@@ -277,9 +279,7 @@ impl QueueTelemetryCounters {
                 .fetch_add(1, Ordering::Relaxed);
         }
         let mut h = self.wait_duration.lock().unwrap_or_else(|p| p.into_inner());
-        h.entry(key)
-            .or_insert_with(HistogramCell::new)
-            .observe(duration_ms);
+        h.entry(key).or_default().observe(duration_ms);
     }
 
     fn pair_snapshot(
