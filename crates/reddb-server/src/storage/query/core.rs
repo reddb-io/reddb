@@ -2737,6 +2737,11 @@ pub enum QueueCommand {
         group: Option<String>,
         consumer: String,
         count: usize,
+        /// Optional blocking-read deadline in milliseconds (PRD #718 slice
+        /// A: `QUEUE READ … WAIT <duration>`). `None` means classic
+        /// non-blocking semantics. The runtime currently honors the field
+        /// synchronously — the actual wait registry lands in slice C.
+        wait_ms: Option<u64>,
     },
     Pending {
         queue: String,
