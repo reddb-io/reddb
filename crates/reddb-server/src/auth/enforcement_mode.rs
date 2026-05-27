@@ -120,6 +120,7 @@ fn required_role_for_action(action: &str) -> Role {
             ActionCategory::Dml => Role::Write,
             ActionCategory::Schema => Role::Write,
             ActionCategory::Ai => Role::Read,
+            ActionCategory::Notification => Role::Write,
             ActionCategory::Ddl
             | ActionCategory::Function
             | ActionCategory::Mgmt
