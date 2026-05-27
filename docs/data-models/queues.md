@@ -116,7 +116,35 @@ QUEUE LPUSH tasks {"urgent":true}
 
 -- Push with priority (priority queues only)
 QUEUE PUSH urgent_tasks {"job":"deploy"} PRIORITY 10
+
+-- Delayed delivery (relative): message is durable and inspectable
+-- but not deliverable until 30 s after push.
+QUEUE PUSH tasks {"job":"reminder"} DELAY 30s
+
+-- Delayed delivery (absolute): message becomes deliverable at the
+-- given unix-ms instant. A past timestamp is equivalent to no delay.
+QUEUE PUSH tasks {"job":"reminder"} AVAILABLE AT 1735689600000
 ```
+
+#### Delayed availability vs. TTL
+
+`DELAY` / `AVAILABLE AT` and `WITH TTL` (on `CREATE QUEUE`) are
+independent dimensions of a message's lifetime:
+
+* **Availability** (`DELAY` / `AVAILABLE AT`) — the *earliest* time a
+  message can be returned by `QUEUE READ`, `QUEUE POP`, or
+  `QUEUE READ ... WAIT`. Before its availability time the message
+  stays in the queue and surfaces through inspection
+  (`SELECT ... FROM QUEUE <name>`, `QUEUE PEEK`) with its
+  `available_at` projection column populated, but no consumer can
+  receive it.
+* **TTL** (`WITH TTL` on `CREATE QUEUE`) — the *latest* time a
+  message may live before it is eligible to be expired.
+
+A delayed message is delivered the next time a reader runs after its
+availability instant has passed. `QUEUE READ ... WAIT <duration>`
+honours `DELAY` natively — a parked waiter wakes when the message
+becomes due, capped by the caller's `WAIT` budget.
 
 ### Pop (dequeue)
 

@@ -165,6 +165,23 @@ pub(super) struct QueueMessageView {
     attempts: u32,
     pub(super) max_attempts: u32,
     enqueued_at_ns: u64,
+    /// First-delivery instant for delayed messages (issue #722). `None`
+    /// means immediate availability. Sourced from the
+    /// `_available_at_ns` metadata field, populated on push.
+    pub(super) available_at_ns: Option<u64>,
+}
+
+impl QueueMessageView {
+    /// Whether this message is currently deliverable. Messages whose
+    /// `available_at_ns` lies in the future remain durable and
+    /// inspectable but are filtered out of `QUEUE READ` / `QUEUE POP`
+    /// projections.
+    pub(super) fn is_available_now(&self) -> bool {
+        match self.available_at_ns {
+            Some(at) => at <= now_ns(),
+            None => true,
+        }
+    }
 }
 
 impl RedDBRuntime {
@@ -220,9 +237,41 @@ impl RedDBRuntime {
             if std::time::Instant::now() >= deadline {
                 return Ok(Vec::new());
             }
-            match registry.wait_until(&snapshot, deadline) {
+            // Issue #722: a delayed message becomes deliverable when its
+            // `available_at_ns` passes, but the registry only wakes on
+            // producer commits — a quiet queue with a future due-time
+            // would otherwise sit on the condvar until the user budget
+            // expired. Cap the park horizon at the soonest future
+            // `available_at_ns` so the next loop iteration probes the
+            // queue at-or-just-after the message becomes due. A
+            // `Timeout` from the capped park is not the final answer; we
+            // loop and re-probe before deciding the user budget is up.
+            let park_deadline = match earliest_future_available_at(&self.inner.db.store(), queue) {
+                Some(at_ns) => {
+                    let now_ns = now_ns();
+                    if at_ns <= now_ns {
+                        // Already due; re-probe immediately.
+                        deadline.min(std::time::Instant::now())
+                    } else {
+                        let wait_ns = at_ns - now_ns;
+                        let due_instant =
+                            std::time::Instant::now() + std::time::Duration::from_nanos(wait_ns);
+                        deadline.min(due_instant)
+                    }
+                }
+                None => deadline,
+            };
+            match registry.wait_until(&snapshot, park_deadline) {
                 crate::runtime::queue_wait_registry::WaitOutcome::Woken => continue,
-                crate::runtime::queue_wait_registry::WaitOutcome::Timeout => return Ok(Vec::new()),
+                crate::runtime::queue_wait_registry::WaitOutcome::Timeout => {
+                    // If this was the user-supplied deadline, give up;
+                    // otherwise loop and re-probe (a delayed message may
+                    // have just become due).
+                    if std::time::Instant::now() >= deadline {
+                        return Ok(Vec::new());
+                    }
+                    continue;
+                }
                 crate::runtime::queue_wait_registry::WaitOutcome::Cancelled => {
                     return Err(RedDBError::Query(QUEUE_READ_WAIT_CANCELLED.to_string()))
                 }
@@ -617,6 +666,7 @@ impl RedDBRuntime {
                 value,
                 side,
                 priority,
+                available,
             } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
@@ -663,9 +713,25 @@ impl RedDBRuntime {
                 let id = store
                     .insert_auto(queue, entity)
                     .map_err(|err| RedDBError::Internal(err.to_string()))?;
-                if let Some(ttl_ms) = config.ttl_ms {
+                // Resolve per-message availability (issue #722): DELAY is
+                // relative to the push instant, AVAILABLE AT carries an
+                // absolute unix-ms. Both collapse to a unix-ns timestamp
+                // delivery paths compare against. `None` means immediate.
+                let available_at_ns = available.map(|a| match a {
+                    crate::storage::query::ast::QueueAvailability::DelayMs(ms) => {
+                        now_ns().saturating_add(ms.saturating_mul(1_000_000))
+                    }
+                    crate::storage::query::ast::QueueAvailability::AtUnixMs(ms) => {
+                        ms.saturating_mul(1_000_000)
+                    }
+                });
+                if config.ttl_ms.is_some() || available_at_ns.is_some() {
                     store
-                        .set_metadata(queue, id, queue_message_ttl_metadata(ttl_ms))
+                        .set_metadata(
+                            queue,
+                            id,
+                            queue_message_metadata(config.ttl_ms, available_at_ns),
+                        )
                         .map_err(|err| RedDBError::Internal(err.to_string()))?;
                 }
                 // Slice C of PRD #718 — wake `QUEUE READ … WAIT` waiters.
@@ -1712,6 +1778,10 @@ pub(super) fn load_queue_message_views_with_runtime(
         })
         .into_iter()
         .filter_map(queue_message_view_from_entity)
+        .map(|mut view| {
+            view.available_at_ns = read_message_available_at_ns(store, queue, view.id);
+            view
+        })
         .collect())
 }
 
@@ -1732,6 +1802,7 @@ fn queue_message_view_from_entity(entity: UnifiedEntity) -> Option<QueueMessageV
         attempts: data.attempts,
         max_attempts: data.max_attempts,
         enqueued_at_ns: data.enqueued_at_ns,
+        available_at_ns: None,
     })
 }
 
@@ -1855,7 +1926,9 @@ fn queue_projection_value(message: &QueueMessageView, dlq: bool, column: &str) -
         "attempts" => Some(Value::UnsignedInteger(u64::from(message.attempts))),
         "last_error" => Some(Value::Null),
         "enqueued_at" => Some(Value::UnsignedInteger(message.enqueued_at_ns)),
-        "available_at" => Some(Value::UnsignedInteger(message.enqueued_at_ns)),
+        "available_at" => Some(Value::UnsignedInteger(
+            message.available_at_ns.unwrap_or(message.enqueued_at_ns),
+        )),
         "dlq" => Some(Value::Boolean(dlq)),
         "tenant" => queue_message_tenant(&message.payload).or(Some(Value::Null)),
         _ => None,
@@ -2059,7 +2132,11 @@ pub(super) fn queue_message_view_by_id(
     let manager = queue_manager(store, queue)?;
     Ok(manager
         .get(message_id)
-        .and_then(queue_message_view_from_entity))
+        .and_then(queue_message_view_from_entity)
+        .map(|mut view| {
+            view.available_at_ns = read_message_available_at_ns(store, queue, view.id);
+            view
+        }))
 }
 
 pub(super) fn sort_queue_messages(
@@ -2512,18 +2589,69 @@ pub(super) fn now_ns() -> u64 {
 }
 
 pub(super) fn queue_message_ttl_metadata(ttl_ms: u64) -> Metadata {
-    Metadata::with_fields(
-        [(
+    queue_message_metadata(Some(ttl_ms), None)
+}
+
+/// Build the per-message metadata row attached to a queue message. Both
+/// fields are optional — `_ttl_ms` carries the per-message TTL (existing
+/// behaviour) and `_available_at_ns` carries the first-delivery instant
+/// for delayed messages (issue #722). When both are present they share
+/// the same row, since `UnifiedStore::set_metadata` replaces the entry.
+pub(super) fn queue_message_metadata(
+    ttl_ms: Option<u64>,
+    available_at_ns: Option<u64>,
+) -> Metadata {
+    let mut fields = HashMap::new();
+    if let Some(ttl_ms) = ttl_ms {
+        fields.insert(
             "_ttl_ms".to_string(),
             if ttl_ms <= i64::MAX as u64 {
                 MetadataValue::Int(ttl_ms as i64)
             } else {
                 MetadataValue::Timestamp(ttl_ms)
             },
-        )]
-        .into_iter()
-        .collect(),
-    )
+        );
+    }
+    if let Some(at_ns) = available_at_ns {
+        fields.insert(
+            "_available_at_ns".to_string(),
+            MetadataValue::Timestamp(at_ns),
+        );
+    }
+    Metadata::with_fields(fields)
+}
+
+/// Smallest future `available_at_ns` among messages currently sitting
+/// on `queue`. Used by `QUEUE READ … WAIT` (issue #722) to cap the
+/// condvar park horizon: without this, a waiter on a quiet queue with
+/// only delayed messages would never wake when one became due, since
+/// the wait registry is only notified by producer commits. Returns
+/// `None` when no future-dated message exists (the common case — the
+/// caller falls back to the user-supplied wait budget).
+pub(super) fn earliest_future_available_at(store: &UnifiedStore, queue: &str) -> Option<u64> {
+    let now_ns = now_ns();
+    let views = load_queue_message_views_with_runtime(None, store, queue).ok()?;
+    views
+        .iter()
+        .filter_map(|v| v.available_at_ns)
+        .filter(|at| *at > now_ns)
+        .min()
+}
+
+/// Read the `_available_at_ns` metadata for a queue message. Returns
+/// `None` for messages with no delay (the common case) or when the
+/// metadata row is missing entirely.
+pub(super) fn read_message_available_at_ns(
+    store: &UnifiedStore,
+    queue: &str,
+    message_id: EntityId,
+) -> Option<u64> {
+    let md = store.get_metadata(queue, message_id)?;
+    match md.get("_available_at_ns")? {
+        MetadataValue::Timestamp(t) => Some(*t),
+        MetadataValue::Int(i) if *i >= 0 => Some(*i as u64),
+        _ => None,
+    }
 }
 
 /// Rough payload byte estimate for outbox watermark tracking.

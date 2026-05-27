@@ -1,8 +1,8 @@
 //! Parser for QUEUE commands and CREATE/DROP QUEUE
 
 use super::super::ast::{
-    AlterQueueQuery, CreateQueueQuery, DropQueueQuery, QueryExpr, QueueCommand, QueueMode,
-    QueueSide, DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP, DEFAULT_QUEUE_LOCK_DEADLINE_MS,
+    AlterQueueQuery, CreateQueueQuery, DropQueueQuery, QueryExpr, QueueAvailability, QueueCommand,
+    QueueMode, QueueSide, DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP, DEFAULT_QUEUE_LOCK_DEADLINE_MS,
     DEFAULT_QUEUE_MAX_ATTEMPTS,
 };
 use super::super::lexer::Token;
@@ -138,16 +138,13 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 let queue = self.expect_ident()?;
                 let value = self.parse_value()?;
-                let priority = if self.consume(&Token::Priority)? {
-                    Some(self.parse_integer()? as i32)
-                } else {
-                    None
-                };
+                let (priority, available) = self.parse_push_tail_clauses()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Push {
                     queue,
                     value,
                     side: QueueSide::Right,
                     priority,
+                    available,
                 }))
             }
             Token::Pop => {
@@ -242,27 +239,26 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 let queue = self.expect_ident()?;
                 let value = self.parse_value()?;
+                let (_priority, available) = self.parse_push_tail_clauses()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Push {
                     queue,
                     value,
                     side: QueueSide::Left,
                     priority: None,
+                    available,
                 }))
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("RPUSH") => {
                 self.advance()?;
                 let queue = self.expect_ident()?;
                 let value = self.parse_value()?;
-                let priority = if self.consume(&Token::Priority)? {
-                    Some(self.parse_integer()? as i32)
-                } else {
-                    None
-                };
+                let (priority, available) = self.parse_push_tail_clauses()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Push {
                     queue,
                     value,
                     side: QueueSide::Right,
                     priority,
+                    available,
                 }))
             }
             Token::Group => {
@@ -421,6 +417,61 @@ impl<'a> Parser<'a> {
             ));
         }
         Ok((group, message_id, delivery_id))
+    }
+
+    /// Parse the optional `PRIORITY <int>`, `DELAY <duration>`, and
+    /// `AVAILABLE AT <unix_ms>` tail of a `QUEUE PUSH` / `RPUSH` / `LPUSH`
+    /// (issue #722). Clauses may appear in any order; each may appear at
+    /// most once. `AVAILABLE AT` and `DELAY` are mutually exclusive — both
+    /// produce a per-message availability instant, so accepting both
+    /// would force the parser to pick a winner silently.
+    fn parse_push_tail_clauses(
+        &mut self,
+    ) -> Result<(Option<i32>, Option<QueueAvailability>), ParseError> {
+        let mut priority: Option<i32> = None;
+        let mut available: Option<QueueAvailability> = None;
+        loop {
+            if self.consume(&Token::Priority)? {
+                if priority.is_some() {
+                    return Err(ParseError::new(
+                        "duplicate PRIORITY clause".to_string(),
+                        self.position(),
+                    ));
+                }
+                priority = Some(self.parse_integer()? as i32);
+            } else if self.peek_ident_ci("DELAY") {
+                self.advance()?;
+                if available.is_some() {
+                    return Err(ParseError::new(
+                        "QUEUE PUSH accepts at most one of DELAY / AVAILABLE AT".to_string(),
+                        self.position(),
+                    ));
+                }
+                let value = self.parse_float()?;
+                let unit = self.parse_queue_duration_unit()?;
+                available = Some(QueueAvailability::DelayMs((value * unit).max(0.0) as u64));
+            } else if self.peek_ident_ci("AVAILABLE") {
+                self.advance()?;
+                if !self.consume_ident_ci("AT")? {
+                    return Err(ParseError::expected(
+                        vec!["AT"],
+                        self.peek(),
+                        self.position(),
+                    ));
+                }
+                if available.is_some() {
+                    return Err(ParseError::new(
+                        "QUEUE PUSH accepts at most one of DELAY / AVAILABLE AT".to_string(),
+                        self.position(),
+                    ));
+                }
+                let unix_ms = self.parse_integer()?.max(0) as u64;
+                available = Some(QueueAvailability::AtUnixMs(unix_ms));
+            } else {
+                break;
+            }
+        }
+        Ok((priority, available))
     }
 
     /// Parse an optional `WAIT <duration>` tail (slice A of PRD #718).
