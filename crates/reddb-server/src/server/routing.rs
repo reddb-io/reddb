@@ -242,6 +242,10 @@ impl RedDBServer {
                 self.handle_prometheus_remote_write(&query, &headers, body)
             }
             ("GET", "/admin/status") => self.handle_admin_status(),
+            // Red UI cluster status snapshot (#738) — single aggregated
+            // contract so the UI doesn't need to stitch /admin/status,
+            // /replication/status, /backup/status, /ready/* together.
+            ("GET", "/cluster/status") => self.handle_cluster_status(),
             // SOC 2 / HIPAA structured audit query — JSONL/JSON over
             // the active `.audit.log` plus rotated archives.
             ("GET", "/admin/audit") => self.handle_admin_audit_query(&query),
