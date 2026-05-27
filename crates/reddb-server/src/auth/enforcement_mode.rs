@@ -121,6 +121,7 @@ fn required_role_for_action(action: &str) -> Role {
             ActionCategory::Schema => Role::Write,
             ActionCategory::Ai => Role::Read,
             ActionCategory::Notification => Role::Write,
+            ActionCategory::Stream => Role::Write,
             ActionCategory::Ddl
             | ActionCategory::Function
             | ActionCategory::Mgmt
