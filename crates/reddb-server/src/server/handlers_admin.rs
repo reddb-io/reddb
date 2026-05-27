@@ -2088,7 +2088,7 @@ impl RedDBServer {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let uptime_secs = (now_ms.saturating_sub(lifecycle.started_at_ms() as u64) as f64) / 1000.0;
+        let uptime_secs = (now_ms.saturating_sub(lifecycle.started_at_ms()) as f64) / 1000.0;
 
         let role_view = match self.runtime.write_gate().role() {
             crate::replication::ReplicationRole::Standalone => ProcessRoleView::Standalone,
@@ -2187,7 +2187,7 @@ impl RedDBServer {
             version: env!("CARGO_PKG_VERSION").to_string(),
             phase: phase.as_str().to_string(),
             uptime_secs,
-            started_at_unix_ms: lifecycle.started_at_ms() as u64,
+            started_at_unix_ms: lifecycle.started_at_ms(),
             ready_at_unix_ms: lifecycle.ready_at_ms(),
             read_only: self.runtime.write_gate().is_read_only(),
             // This handler is only reachable from the network-serving
@@ -2201,7 +2201,7 @@ impl RedDBServer {
                 active: runtime_stats.active_connections as u64,
                 idle: runtime_stats.idle_connections as u64,
                 total_checkouts: runtime_stats.total_checkouts,
-                max: limits.max_connections.map(|n| n as u64),
+                max: limits.max_connections,
             },
             storage: StorageSnapshot {
                 db_size_bytes,
