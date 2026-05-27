@@ -9503,6 +9503,16 @@ impl RedDBRuntime {
             .map(|ctx| ctx.writer_xid())
     }
 
+    /// `true` when the given connection id has an open `BEGIN`. Issue
+    /// #760 — `OpenStream` consults this to refuse output streams that
+    /// would otherwise collide with an interactive transaction (see
+    /// ADR 0029 "Transaction interaction"). HTTP requests pre-dating the
+    /// connection-id plumbing run with id `0`, which never carries a
+    /// transaction context, so this returns `false` on those paths.
+    pub fn connection_in_transaction(&self, conn_id: u64) -> bool {
+        self.inner.tx_contexts.read().contains_key(&conn_id)
+    }
+
     /// Access the shared `SnapshotManager` — useful for VACUUM to compute
     /// the oldest-active xid when reclaiming dead tuples.
     pub fn snapshot_manager(&self) -> Arc<crate::storage::transaction::snapshot::SnapshotManager> {

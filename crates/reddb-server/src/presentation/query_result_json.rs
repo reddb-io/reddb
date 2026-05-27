@@ -530,7 +530,7 @@ fn is_universal_table_source(table: &str) -> bool {
     is_universal_query_source(table)
 }
 
-fn unified_record_json(record: &UnifiedRecord, columns: &[String]) -> JsonValue {
+pub(crate) fn unified_record_json(record: &UnifiedRecord, columns: &[String]) -> JsonValue {
     let mut object = Map::new();
     object.insert(
         "values".to_string(),
