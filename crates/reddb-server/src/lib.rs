@@ -31,6 +31,7 @@ pub mod json_field;
 pub mod log;
 pub mod mcp;
 pub mod modules;
+pub mod notifications;
 pub mod physical;
 pub(crate) mod presentation;
 pub mod regress;
