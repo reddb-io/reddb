@@ -636,6 +636,7 @@ fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::ShowEffectivePermissions { .. } => "show_effective_permissions",
         QueryExpr::SimulatePolicy { .. } => "simulate_policy",
         QueryExpr::LintPolicy { .. } => "lint_policy",
+        QueryExpr::MigratePolicyMode { .. } => "migrate_policy_mode",
         QueryExpr::CreateMigration(_) => "create_migration",
         QueryExpr::ApplyMigration(_) => "apply_migration",
         QueryExpr::RollbackMigration(_) => "rollback_migration",

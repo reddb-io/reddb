@@ -855,6 +855,12 @@ impl RedDBServer {
                         _ => json_error(405, "method not allowed"),
                     };
                 }
+                if path == "/admin/policies/migrate-mode" {
+                    return match method.as_str() {
+                        "POST" => self.handle_iam_policy_migrate_mode(body),
+                        _ => json_error(405, "method not allowed"),
+                    };
+                }
                 if path == "/admin/policies/actions" {
                     return match method.as_str() {
                         "GET" => self.handle_iam_policy_actions(),
