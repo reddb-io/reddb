@@ -529,11 +529,22 @@ impl QueueStore for PrimaryQueueStore {
     fn available_messages(&self, queue: &str, side: QueueSide) -> Vec<MessageId> {
         let pending: std::collections::HashSet<MessageId> =
             self.pending_message_ids(queue, None).into_iter().collect();
+        let now_ns = now_unix_ns();
+        let store = self.store();
         let mut out: Vec<MessageId> = self
             .list_queue_messages(queue)
             .into_iter()
             .map(|m| m.id.raw())
             .filter(|id| !pending.contains(id))
+            .filter(|id| {
+                // Issue #722: skip messages with a future `available_at_ns`.
+                super::impl_queue::read_message_available_at_ns(
+                    store.as_ref(),
+                    queue,
+                    EntityId::new(*id),
+                )
+                .is_none_or(|at| at <= now_ns)
+            })
             .collect();
         if matches!(side, QueueSide::Right) {
             out.reverse();
@@ -553,11 +564,22 @@ impl QueueStore for PrimaryQueueStore {
             .collect();
         let acked: std::collections::HashSet<MessageId> =
             self.acked_message_ids(queue, group).into_iter().collect();
+        let now_ns = now_unix_ns();
+        let store = self.store();
         let mut out: Vec<MessageId> = self
             .list_queue_messages(queue)
             .into_iter()
             .map(|m| m.id.raw())
             .filter(|id| !pending.contains(id) && !acked.contains(id))
+            .filter(|id| {
+                // Issue #722: skip delayed messages.
+                super::impl_queue::read_message_available_at_ns(
+                    store.as_ref(),
+                    queue,
+                    EntityId::new(*id),
+                )
+                .is_none_or(|at| at <= now_ns)
+            })
             .collect();
         if matches!(side, QueueSide::Right) {
             out.reverse();
