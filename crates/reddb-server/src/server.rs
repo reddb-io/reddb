@@ -128,6 +128,7 @@ pub mod http_connection_limiter;
 pub mod http_handler_metrics;
 pub mod http_limits;
 pub mod ingest_pipeline;
+pub mod output_stream;
 mod patch_support;
 mod request_body;
 mod request_context;
