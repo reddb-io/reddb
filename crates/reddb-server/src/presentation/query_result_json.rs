@@ -6,6 +6,7 @@ use crate::storage::query::unified::{
     VectorSearchResult,
 };
 use crate::storage::query::{is_universal_entity_source as is_universal_query_source, QueryExpr};
+use crate::storage::schema::types::Value as StorageValue;
 
 pub(crate) fn query_mode_name(mode: QueryMode) -> &'static str {
     match mode {
@@ -79,10 +80,237 @@ pub(crate) fn runtime_query_json(
         unified_result_json_with_records(&result.result, &records),
     );
     object.insert(
+        "descriptor".to_string(),
+        descriptor_json(&result.result, &records),
+    );
+    object.insert(
         "selection".to_string(),
         crate::presentation::query_view::search_selection_json(entity_types, capabilities),
     );
     JsonValue::Object(object)
+}
+
+/// #737 — additive query-result descriptor metadata.
+///
+/// Lets Red UI (and any other client) pick a stable renderer for the
+/// payload without probing rows. Strictly additive — every other
+/// field of the response is unchanged, so legacy clients keep working
+/// unmodified.
+pub(crate) fn descriptor_json(result: &UnifiedResult, records: &[UnifiedRecord]) -> JsonValue {
+    let mut rows = 0usize;
+    let mut nodes = 0usize;
+    let mut edges = 0usize;
+    let mut paths = 0usize;
+    let mut vector_matches = 0usize;
+
+    for record in records {
+        if record.iter_fields().next().is_some() {
+            rows += 1;
+        }
+        nodes += record.nodes.len();
+        edges += record.edges.len();
+        paths += record.paths.len();
+        vector_matches += record.vector_results.len();
+    }
+
+    let has_table = rows > 0 || !result.columns.is_empty();
+    let has_graph = nodes > 0 || edges > 0 || paths > 0;
+    let has_vector = vector_matches > 0;
+    // The query endpoint doesn't return queue / timeseries / metrics
+    // result shapes today. Acceptance criterion #3 requires honest
+    // false flags here rather than "unknown" — the engine *does* know
+    // these shapes are absent because the result envelope has no
+    // carrier for them.
+    let has_queue = false;
+    let has_timeseries = false;
+    let has_metrics = false;
+
+    let mut models_present: Vec<&'static str> = Vec::new();
+    if has_table {
+        models_present.push("table");
+    }
+    if has_graph {
+        models_present.push("graph");
+    }
+    if has_vector {
+        models_present.push("vector");
+    }
+
+    let result_kind = match (has_table, has_graph, has_vector) {
+        (false, false, false) => "empty",
+        (true, false, false) => "table",
+        (false, true, false) => "graph",
+        (false, false, true) => "vector",
+        _ => "mixed",
+    };
+
+    // Renderer hints — first entry is the primary renderer, the
+    // remainder are fallback renderers the UI can offer as tabs.
+    let renderer_hints: Vec<&'static str> = match result_kind {
+        "empty" => vec!["empty"],
+        "table" => vec!["table"],
+        "graph" => vec!["graph"],
+        "vector" => vec!["vector"],
+        _ => {
+            let mut hints = Vec::new();
+            if has_graph {
+                hints.push("graph");
+            }
+            if has_vector {
+                hints.push("vector");
+            }
+            if has_table {
+                hints.push("table");
+            }
+            hints
+        }
+    };
+
+    let mut counts = Map::new();
+    counts.insert("rows".to_string(), JsonValue::Number(rows as f64));
+    counts.insert("nodes".to_string(), JsonValue::Number(nodes as f64));
+    counts.insert("edges".to_string(), JsonValue::Number(edges as f64));
+    counts.insert("paths".to_string(), JsonValue::Number(paths as f64));
+    counts.insert(
+        "vector_matches".to_string(),
+        JsonValue::Number(vector_matches as f64),
+    );
+
+    let mut object = Map::new();
+    object.insert(
+        "result_kind".to_string(),
+        JsonValue::String(result_kind.to_string()),
+    );
+    object.insert(
+        "models_present".to_string(),
+        JsonValue::Array(
+            models_present
+                .iter()
+                .map(|name| JsonValue::String((*name).to_string()))
+                .collect(),
+        ),
+    );
+    object.insert(
+        "renderer_hints".to_string(),
+        JsonValue::Array(
+            renderer_hints
+                .iter()
+                .map(|name| JsonValue::String((*name).to_string()))
+                .collect(),
+        ),
+    );
+    object.insert("counts_by_kind".to_string(), JsonValue::Object(counts));
+    object.insert("has_table".to_string(), JsonValue::Bool(has_table));
+    object.insert("has_graph".to_string(), JsonValue::Bool(has_graph));
+    object.insert("has_vector".to_string(), JsonValue::Bool(has_vector));
+    object.insert("has_queue".to_string(), JsonValue::Bool(has_queue));
+    object.insert(
+        "has_timeseries".to_string(),
+        JsonValue::Bool(has_timeseries),
+    );
+    object.insert("has_metrics".to_string(), JsonValue::Bool(has_metrics));
+    object.insert(
+        "columns".to_string(),
+        JsonValue::Array(descriptor_columns_json(&result.columns, records)),
+    );
+
+    JsonValue::Object(object)
+}
+
+fn descriptor_columns_json(columns: &[String], records: &[UnifiedRecord]) -> Vec<JsonValue> {
+    columns
+        .iter()
+        .map(|name| {
+            let mut entry = Map::new();
+            entry.insert("name".to_string(), JsonValue::String(name.clone()));
+            let (ty, nullable) = infer_column_type(name, records);
+            entry.insert("type".to_string(), JsonValue::String(ty.to_string()));
+            entry.insert("nullable".to_string(), JsonValue::Bool(nullable));
+            JsonValue::Object(entry)
+        })
+        .collect()
+}
+
+/// First non-null value of `column` determines its descriptor type.
+/// `nullable=true` when at least one record has the column missing or
+/// `Value::Null`. If no record ever carries a non-null value for the
+/// column we return `("unknown", true)` — acceptance criterion #3
+/// requires a safe unknown rather than a guess.
+fn infer_column_type(column: &str, records: &[UnifiedRecord]) -> (&'static str, bool) {
+    let mut concrete: Option<&'static str> = None;
+    let mut nullable = false;
+    for record in records {
+        match record.get(column) {
+            None => nullable = true,
+            Some(StorageValue::Null) => nullable = true,
+            Some(value) => {
+                if concrete.is_none() {
+                    concrete = Some(coarse_type_for(value));
+                }
+            }
+        }
+    }
+    match concrete {
+        Some(ty) => (ty, nullable),
+        None => ("unknown", true),
+    }
+}
+
+/// Map a storage `Value` variant to a coarse JSON-renderer-friendly
+/// type tag. Stays intentionally small — UI rendering cares about
+/// "is this a number / string / object / vector / reference", not
+/// every internal subtype.
+fn coarse_type_for(value: &StorageValue) -> &'static str {
+    match value {
+        StorageValue::Null => "null",
+        StorageValue::Boolean(_) => "boolean",
+        StorageValue::Integer(_)
+        | StorageValue::UnsignedInteger(_)
+        | StorageValue::Float(_)
+        | StorageValue::Decimal(_)
+        | StorageValue::BigInt(_)
+        | StorageValue::Port(_)
+        | StorageValue::Latitude(_)
+        | StorageValue::Longitude(_)
+        | StorageValue::EnumValue(_) => "number",
+        StorageValue::Timestamp(_) | StorageValue::TimestampMs(_) => "timestamp",
+        StorageValue::Duration(_) => "duration",
+        StorageValue::Date(_) | StorageValue::Time(_) => "string",
+        StorageValue::Text(_)
+        | StorageValue::Email(_)
+        | StorageValue::Url(_)
+        | StorageValue::Password(_)
+        | StorageValue::AssetCode(_) => "string",
+        StorageValue::Uuid(_)
+        | StorageValue::IpAddr(_)
+        | StorageValue::Ipv4(_)
+        | StorageValue::Ipv6(_)
+        | StorageValue::MacAddr(_)
+        | StorageValue::Cidr(_, _)
+        | StorageValue::Subnet(_, _)
+        | StorageValue::Country2(_)
+        | StorageValue::Country3(_)
+        | StorageValue::Lang2(_)
+        | StorageValue::Lang5(_)
+        | StorageValue::Currency(_)
+        | StorageValue::Color(_)
+        | StorageValue::ColorAlpha(_)
+        | StorageValue::Phone(_)
+        | StorageValue::Semver(_) => "string",
+        StorageValue::Blob(_) | StorageValue::Secret(_) => "binary",
+        StorageValue::Array(_) => "array",
+        StorageValue::Json(_) | StorageValue::Money { .. } => "object",
+        StorageValue::Vector(_) => "vector",
+        StorageValue::NodeRef(_)
+        | StorageValue::EdgeRef(_)
+        | StorageValue::VectorRef(_, _)
+        | StorageValue::RowRef(_, _)
+        | StorageValue::KeyRef(_, _)
+        | StorageValue::DocRef(_, _)
+        | StorageValue::TableRef(_)
+        | StorageValue::PageRef(_) => "reference",
+        StorageValue::GeoPoint(_, _) => "object",
+    }
 }
 
 pub(crate) fn unified_result_json_with_records(
@@ -542,4 +770,336 @@ fn vector_search_result_json(result: &VectorSearchResult) -> JsonValue {
         },
     );
     JsonValue::Object(object)
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    //! #737 — contract tests for the additive query-result descriptor.
+    //!
+    //! These exercise `descriptor_json` directly against
+    //! `UnifiedResult` fixtures so the contract is pinned independent
+    //! of the SQL/Gremlin executor stack. The seven shapes the brief
+    //! calls out (table-only, document/JSON, graph, vector, queue,
+    //! timeseries-or-metrics, mixed multimodel) each get one test.
+    use super::*;
+    use crate::storage::query::unified::{
+        GraphPath, MatchedEdge, MatchedNode, UnifiedRecord, UnifiedResult, VectorSearchResult,
+    };
+    use crate::storage::schema::types::Value as StorageValue;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn arc_schema(cols: &[&str]) -> Arc<Vec<Arc<str>>> {
+        Arc::new(cols.iter().map(|c| Arc::from(*c)).collect())
+    }
+
+    fn descriptor(result: &UnifiedResult) -> JsonValue {
+        descriptor_json(result, &result.records)
+    }
+
+    fn as_kind(d: &JsonValue) -> &str {
+        d.get("result_kind").and_then(JsonValue::as_str).unwrap()
+    }
+
+    fn as_models(d: &JsonValue) -> Vec<String> {
+        d.get("models_present")
+            .and_then(JsonValue::as_array)
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn as_count(d: &JsonValue, key: &str) -> f64 {
+        d.get("counts_by_kind")
+            .and_then(|c| c.get(key))
+            .and_then(JsonValue::as_f64)
+            .unwrap()
+    }
+
+    fn as_bool(d: &JsonValue, key: &str) -> bool {
+        d.get(key).and_then(JsonValue::as_bool).unwrap()
+    }
+
+    #[test]
+    fn descriptor_table_only_classifies_table_with_typed_columns() {
+        let schema = arc_schema(&["id", "name", "active"]);
+        let rec = UnifiedRecord::with_schema(
+            schema,
+            vec![
+                StorageValue::Integer(1),
+                StorageValue::Text(Arc::from("alice")),
+                StorageValue::Boolean(true),
+            ],
+        );
+        let mut result =
+            UnifiedResult::with_columns(vec!["id".into(), "name".into(), "active".into()]);
+        result.push(rec);
+
+        let d = descriptor(&result);
+        assert_eq!(as_kind(&d), "table");
+        assert_eq!(as_models(&d), vec!["table"]);
+        assert_eq!(as_count(&d, "rows"), 1.0);
+        assert_eq!(as_count(&d, "nodes"), 0.0);
+        assert_eq!(as_count(&d, "vector_matches"), 0.0);
+        assert!(as_bool(&d, "has_table"));
+        assert!(!as_bool(&d, "has_graph"));
+        assert!(!as_bool(&d, "has_vector"));
+        assert!(!as_bool(&d, "has_queue"));
+        assert!(!as_bool(&d, "has_timeseries"));
+        assert!(!as_bool(&d, "has_metrics"));
+
+        let cols = d.get("columns").and_then(JsonValue::as_array).unwrap();
+        let types: Vec<(&str, &str, bool)> = cols
+            .iter()
+            .map(|c| {
+                (
+                    c.get("name").and_then(JsonValue::as_str).unwrap(),
+                    c.get("type").and_then(JsonValue::as_str).unwrap(),
+                    c.get("nullable").and_then(JsonValue::as_bool).unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            types,
+            vec![
+                ("id", "number", false),
+                ("name", "string", false),
+                ("active", "boolean", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn descriptor_document_json_record_is_a_table_with_object_column() {
+        // Document/JSON-shaped responses ride the same UnifiedResult
+        // envelope as table responses (one record per document, with
+        // a `Json` payload column). The descriptor must still resolve
+        // them as `table` rather than guess at a "json" kind.
+        let schema = arc_schema(&["id", "payload"]);
+        let rec = UnifiedRecord::with_schema(
+            schema,
+            vec![
+                StorageValue::Integer(7),
+                StorageValue::Json(b"{\"k\":1}".to_vec()),
+            ],
+        );
+        let mut result = UnifiedResult::with_columns(vec!["id".into(), "payload".into()]);
+        result.push(rec);
+
+        let d = descriptor(&result);
+        assert_eq!(as_kind(&d), "table");
+        let cols = d.get("columns").and_then(JsonValue::as_array).unwrap();
+        let payload = cols
+            .iter()
+            .find(|c| c.get("name").and_then(JsonValue::as_str) == Some("payload"))
+            .unwrap();
+        assert_eq!(
+            payload.get("type").and_then(JsonValue::as_str).unwrap(),
+            "object"
+        );
+    }
+
+    #[test]
+    fn descriptor_graph_only_classifies_graph_and_counts_topology() {
+        let mut rec = UnifiedRecord::new();
+        rec.set_node(
+            "n",
+            MatchedNode {
+                id: "n1".into(),
+                label: "n1".into(),
+                node_label: "person".into(),
+                properties: HashMap::new(),
+            },
+        );
+        rec.set_edge("e", MatchedEdge::from_tuple("n1", "knows", "n2", 1.0));
+        rec.paths.push(
+            GraphPath::start("n1").extend(MatchedEdge::from_tuple("n1", "knows", "n2", 1.0), "n2"),
+        );
+
+        let mut result = UnifiedResult::empty();
+        result.push(rec);
+
+        let d = descriptor(&result);
+        assert_eq!(as_kind(&d), "graph");
+        assert_eq!(as_models(&d), vec!["graph"]);
+        assert_eq!(as_count(&d, "nodes"), 1.0);
+        assert_eq!(as_count(&d, "edges"), 1.0);
+        assert_eq!(as_count(&d, "paths"), 1.0);
+        assert_eq!(as_count(&d, "rows"), 0.0);
+        assert!(as_bool(&d, "has_graph"));
+        assert!(!as_bool(&d, "has_table"));
+        assert!(!as_bool(&d, "has_vector"));
+
+        let hints = d
+            .get("renderer_hints")
+            .and_then(JsonValue::as_array)
+            .unwrap();
+        assert_eq!(hints[0].as_str(), Some("graph"));
+    }
+
+    #[test]
+    fn descriptor_vector_only_classifies_vector_and_counts_matches() {
+        let mut rec = UnifiedRecord::new();
+        rec.vector_results
+            .push(VectorSearchResult::new(1, "embeddings", 0.1));
+        rec.vector_results
+            .push(VectorSearchResult::new(2, "embeddings", 0.2));
+        let mut result = UnifiedResult::empty();
+        result.push(rec);
+
+        let d = descriptor(&result);
+        assert_eq!(as_kind(&d), "vector");
+        assert_eq!(as_models(&d), vec!["vector"]);
+        assert_eq!(as_count(&d, "vector_matches"), 2.0);
+        assert!(as_bool(&d, "has_vector"));
+        assert!(!as_bool(&d, "has_graph"));
+        assert!(!as_bool(&d, "has_table"));
+    }
+
+    #[test]
+    fn descriptor_queue_shape_is_absent_from_query_envelope() {
+        // The `/query` endpoint can't carry queue payloads — the
+        // engine has no `queue_results` slot on UnifiedResult. The
+        // descriptor must report this as a known false rather than
+        // an unknown, so the UI can confidently hide queue-only
+        // renderers when reading query responses.
+        let result = UnifiedResult::empty();
+        let d = descriptor(&result);
+        assert!(!as_bool(&d, "has_queue"));
+        assert_eq!(as_kind(&d), "empty");
+    }
+
+    #[test]
+    fn descriptor_timeseries_metrics_shape_is_absent_from_query_envelope() {
+        // Same contract as the queue test: timeseries / metrics
+        // shapes have no query-envelope carrier, so they're known
+        // absent (not unknown).
+        let schema = arc_schema(&["ts", "value"]);
+        let rec = UnifiedRecord::with_schema(
+            schema,
+            vec![
+                StorageValue::TimestampMs(1_700_000_000_000),
+                StorageValue::Float(42.5),
+            ],
+        );
+        let mut result = UnifiedResult::with_columns(vec!["ts".into(), "value".into()]);
+        result.push(rec);
+
+        let d = descriptor(&result);
+        // Even though the payload *looks like* timeseries, the
+        // query envelope's known-shape flag stays false: we
+        // didn't add a typed carrier for it in this slice.
+        assert!(!as_bool(&d, "has_timeseries"));
+        assert!(!as_bool(&d, "has_metrics"));
+        assert_eq!(as_kind(&d), "table");
+        let cols = d.get("columns").and_then(JsonValue::as_array).unwrap();
+        let ts = cols
+            .iter()
+            .find(|c| c.get("name").and_then(JsonValue::as_str) == Some("ts"))
+            .unwrap();
+        assert_eq!(
+            ts.get("type").and_then(JsonValue::as_str).unwrap(),
+            "timestamp"
+        );
+    }
+
+    #[test]
+    fn descriptor_mixed_multimodel_lists_each_present_model() {
+        let schema = arc_schema(&["id"]);
+        let mut rec = UnifiedRecord::with_schema(schema, vec![StorageValue::Integer(9)]);
+        rec.set_node(
+            "n",
+            MatchedNode {
+                id: "n1".into(),
+                label: "n1".into(),
+                node_label: "doc".into(),
+                properties: HashMap::new(),
+            },
+        );
+        rec.vector_results
+            .push(VectorSearchResult::new(11, "embeds", 0.05));
+
+        let mut result = UnifiedResult::with_columns(vec!["id".into()]);
+        result.push(rec);
+
+        let d = descriptor(&result);
+        assert_eq!(as_kind(&d), "mixed");
+        let models = as_models(&d);
+        assert!(models.contains(&"table".to_string()));
+        assert!(models.contains(&"graph".to_string()));
+        assert!(models.contains(&"vector".to_string()));
+        assert!(as_bool(&d, "has_table"));
+        assert!(as_bool(&d, "has_graph"));
+        assert!(as_bool(&d, "has_vector"));
+
+        let hints = d
+            .get("renderer_hints")
+            .and_then(JsonValue::as_array)
+            .unwrap();
+        // mixed → at least 2 renderer hints offered to the UI
+        assert!(hints.len() >= 2, "expected multiple hints, got {hints:?}");
+    }
+
+    #[test]
+    fn descriptor_column_with_only_nulls_is_unknown_nullable() {
+        // Acceptance criterion #3: safe unknown when the engine
+        // can't determine the column type. We never observed a
+        // non-null value, so `type=unknown, nullable=true`.
+        let schema = arc_schema(&["mystery"]);
+        let rec = UnifiedRecord::with_schema(schema, vec![StorageValue::Null]);
+        let mut result = UnifiedResult::with_columns(vec!["mystery".into()]);
+        result.push(rec);
+
+        let d = descriptor(&result);
+        let cols = d.get("columns").and_then(JsonValue::as_array).unwrap();
+        let entry = &cols[0];
+        assert_eq!(
+            entry.get("type").and_then(JsonValue::as_str).unwrap(),
+            "unknown"
+        );
+        assert!(entry.get("nullable").and_then(JsonValue::as_bool).unwrap());
+    }
+
+    #[test]
+    fn descriptor_preserves_existing_query_response_shape() {
+        // Acceptance criterion #2: additive. The base envelope keys
+        // that pre-#737 clients rely on must all still be present,
+        // and `descriptor` is the only new top-level key.
+        use crate::runtime::RuntimeQueryResult;
+        use crate::storage::query::modes::QueryMode;
+
+        let mut unified = UnifiedResult::with_columns(vec!["x".into()]);
+        unified.push(UnifiedRecord::with_schema(
+            arc_schema(&["x"]),
+            vec![StorageValue::Integer(1)],
+        ));
+
+        let runtime_result = RuntimeQueryResult {
+            query: "SELECT x FROM t".to_string(),
+            mode: QueryMode::Sql,
+            statement: "select",
+            engine: "test",
+            result: unified,
+            affected_rows: 0,
+            statement_type: "select",
+        };
+
+        let json = runtime_query_json(&runtime_result, &None, &None);
+        let obj = json.as_object().unwrap();
+        for key in [
+            "ok",
+            "query",
+            "mode",
+            "capability",
+            "statement",
+            "engine",
+            "record_count",
+            "result",
+            "selection",
+            "descriptor",
+        ] {
+            assert!(obj.contains_key(key), "missing key {key} in {obj:?}");
+        }
+    }
 }
