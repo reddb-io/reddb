@@ -86,6 +86,11 @@ pub(super) const API_KEYS: &str = "red.api_keys";
 pub(super) const API_KEYS_INTERNAL: &str = "__red_schema_api_keys";
 pub(super) const CONTROL_CAPABILITIES: &str = "red.control_capabilities";
 pub(super) const CONTROL_CAPABILITIES_INTERNAL: &str = "__red_schema_control_capabilities";
+// Issue #709 — ActionCatalog SQL surface. One row per entry in
+// `auth::action_catalog::ACTIONS` so operators can browse the canonical
+// list of policy action verbs from SQL.
+pub(super) const POLICY_ACTIONS: &str = "red.policy.actions";
+pub(super) const POLICY_ACTIONS_INTERNAL: &str = "__red_schema_policy_actions";
 pub(super) const READ_ONLY_ERROR: &str = "system schema is read-only";
 
 const COLLECTION_COLUMNS: [&str; 15] = [
@@ -298,6 +303,15 @@ const API_KEY_COLUMNS: [&str; 6] = [
 
 const CONTROL_CAPABILITY_COLUMNS: [&str; 4] = ["action", "resource_kind", "scope", "description"];
 
+const POLICY_ACTION_COLUMNS: [&str; 6] = [
+    "name",
+    "category",
+    "lifecycle_state",
+    "replacement",
+    "since_version",
+    "gates_description",
+];
+
 const SUBSCRIPTION_COLUMNS: [&str; 11] = [
     "name",
     "collection",
@@ -323,6 +337,7 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
         (SHOW_CREATE, SHOW_CREATE_INTERNAL),
         (SHOW_INDEXES, SHOW_INDEXES_INTERNAL),
         (INDICES, INDICES_INTERNAL),
+        (POLICY_ACTIONS, POLICY_ACTIONS_INTERNAL),
         (POLICIES, POLICIES_INTERNAL),
         (STATS, STATS_INTERNAL),
         (SUBSCRIPTIONS, SUBSCRIPTIONS_INTERNAL),
@@ -408,6 +423,8 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(API_KEYS)
         || table.eq_ignore_ascii_case(CONTROL_CAPABILITIES_INTERNAL)
         || table.eq_ignore_ascii_case(CONTROL_CAPABILITIES)
+        || table.eq_ignore_ascii_case(POLICY_ACTIONS_INTERNAL)
+        || table.eq_ignore_ascii_case(POLICY_ACTIONS)
 }
 
 pub(super) fn red_query(
@@ -463,6 +480,7 @@ pub(super) fn red_query(
         VirtualTableKind::Users => users_snapshot(runtime, tenant),
         VirtualTableKind::ApiKeys => api_keys_snapshot(runtime, tenant),
         VirtualTableKind::ControlCapabilities => control_capabilities_snapshot(),
+        VirtualTableKind::PolicyActions => policy_actions_snapshot(),
     };
 
     let table_name = query.table.as_str();
@@ -576,6 +594,7 @@ enum VirtualTableKind {
     Users,
     ApiKeys,
     ControlCapabilities,
+    PolicyActions,
 }
 
 impl VirtualTableKind {
@@ -602,6 +621,7 @@ impl VirtualTableKind {
             Self::Users => &USER_COLUMNS,
             Self::ApiKeys => &API_KEY_COLUMNS,
             Self::ControlCapabilities => &CONTROL_CAPABILITY_COLUMNS,
+            Self::PolicyActions => &POLICY_ACTION_COLUMNS,
         }
     }
 
@@ -628,6 +648,7 @@ impl VirtualTableKind {
             Self::Users => USERS,
             Self::ApiKeys => API_KEYS,
             Self::ControlCapabilities => CONTROL_CAPABILITIES,
+            Self::PolicyActions => POLICY_ACTIONS,
         }
     }
 }
@@ -711,6 +732,11 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
         || name.eq_ignore_ascii_case(CONTROL_CAPABILITIES)
     {
         return Ok(VirtualTableKind::ControlCapabilities);
+    }
+    if name.eq_ignore_ascii_case(POLICY_ACTIONS_INTERNAL)
+        || name.eq_ignore_ascii_case(POLICY_ACTIONS)
+    {
+        return Ok(VirtualTableKind::PolicyActions);
     }
     Err(RedDBError::Query(format!(
         "unknown system schema relation `{name}`"
@@ -935,6 +961,45 @@ fn control_capabilities_snapshot() -> Vec<UnifiedRecord> {
                     Value::text(resource_kind),
                     Value::text(control_capability_scope(action)),
                     Value::text(format!("{action} on {resource_kind} resources")),
+                ],
+            )
+        })
+        .collect()
+}
+
+fn policy_actions_snapshot() -> Vec<UnifiedRecord> {
+    use crate::auth::action_catalog::{LifecycleState, ACTIONS};
+
+    let schema = Arc::new(
+        POLICY_ACTION_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    ACTIONS
+        .iter()
+        .map(|entry| {
+            let (state_name, replacement, since_version) = match &entry.lifecycle_state {
+                LifecycleState::Active => ("active", Value::Null, Value::Null),
+                LifecycleState::Deprecated {
+                    replacement,
+                    since_version,
+                } => (
+                    "deprecated",
+                    replacement.map(Value::text).unwrap_or(Value::Null),
+                    Value::text(*since_version),
+                ),
+                LifecycleState::Removed => ("removed", Value::Null, Value::Null),
+            };
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(entry.name),
+                    Value::text(entry.category.as_str()),
+                    Value::text(state_name),
+                    replacement,
+                    since_version,
+                    Value::text(entry.gates_description),
                 ],
             )
         })
@@ -2828,5 +2893,56 @@ mod tests {
     fn rewrite_handles_red_subscriptions() {
         let rewritten = rewrite_virtual_names("SELECT * FROM red.subscriptions").unwrap();
         assert_eq!(rewritten, "SELECT * FROM __red_schema_subscriptions");
+    }
+
+    // Issue #709 — `red.policy.actions` is a new sibling of
+    // `red.policies` and must rewrite to its own internal name even
+    // though the public name shares the `red.po` prefix.
+    #[test]
+    fn rewrite_handles_red_policy_actions_and_red_policies_independently() {
+        let actions =
+            rewrite_virtual_names("SELECT * FROM red.policy.actions").expect("policy.actions");
+        assert_eq!(actions, "SELECT * FROM __red_schema_policy_actions");
+        let policies = rewrite_virtual_names("SELECT * FROM red.policies").expect("policies");
+        assert_eq!(policies, "SELECT * FROM __red_schema_policies");
+    }
+
+    // Issue #709 — Active rows surface NULL for the deprecation
+    // columns and Deprecated rows surface the replacement +
+    // since_version pair. The snapshot encoder is the single source
+    // of truth shared by the SQL virtual table and the HTTP
+    // introspection surface; both contracts pivot on this shape.
+    #[test]
+    fn policy_actions_snapshot_encodes_lifecycle_columns() {
+        use crate::storage::schema::Value;
+        let rows = policy_actions_snapshot();
+        assert_eq!(rows.len(), crate::auth::action_catalog::ACTIONS.len());
+
+        let active = rows
+            .iter()
+            .find(|row| row.get("name") == Some(&Value::text("policy:put")))
+            .expect("policy:put row");
+        assert_eq!(active.get("category"), Some(&Value::text("policy")));
+        assert_eq!(active.get("lifecycle_state"), Some(&Value::text("active")));
+        assert_eq!(active.get("replacement"), Some(&Value::Null));
+        assert_eq!(active.get("since_version"), Some(&Value::Null));
+        assert!(matches!(
+            active.get("gates_description"),
+            Some(Value::Text(_))
+        ));
+
+        let deprecated = rows
+            .iter()
+            .find(|row| row.get("name") == Some(&Value::text("vault:unseal_history")))
+            .expect("vault:unseal_history row");
+        assert_eq!(
+            deprecated.get("lifecycle_state"),
+            Some(&Value::text("deprecated"))
+        );
+        assert_eq!(
+            deprecated.get("replacement"),
+            Some(&Value::text("vault:read_metadata"))
+        );
+        assert_eq!(deprecated.get("since_version"), Some(&Value::text("0.5.0")));
     }
 }

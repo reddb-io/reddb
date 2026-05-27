@@ -81,6 +81,43 @@ fn http_request(addr: &str, method: &str, path: &str, body: Option<&str>) -> (u1
 }
 
 #[test]
+fn list_policy_actions_returns_catalog() {
+    let addr = spawn_server();
+    let (status, body) = http_request(&addr, "GET", "/admin/policies/actions", None);
+    assert_eq!(status, 200, "body={body}");
+    // Every catalog entry surfaces with its six columns.
+    assert!(body.contains("\"name\":\"policy:put\""), "body={body}");
+    assert!(body.contains("\"category\":\"policy\""), "body={body}");
+    assert!(
+        body.contains("\"lifecycle_state\":\"active\""),
+        "body={body}"
+    );
+    assert!(body.contains("\"gates_description\""), "body={body}");
+    // The catalog ships a Deprecated entry — replacement + since_version
+    // must populate when lifecycle is deprecated.
+    assert!(
+        body.contains("\"name\":\"vault:unseal_history\""),
+        "body={body}"
+    );
+    assert!(
+        body.contains("\"lifecycle_state\":\"deprecated\""),
+        "body={body}"
+    );
+    assert!(
+        body.contains("\"replacement\":\"vault:read_metadata\""),
+        "body={body}"
+    );
+    assert!(body.contains("\"since_version\":\"0.5.0\""), "body={body}");
+}
+
+#[test]
+fn list_policy_actions_rejects_non_get() {
+    let addr = spawn_server();
+    let (status, _) = http_request(&addr, "POST", "/admin/policies/actions", Some("{}"));
+    assert_eq!(status, 405);
+}
+
+#[test]
 fn put_get_delete_policy_roundtrip() {
     let addr = spawn_server();
     let body = r#"{"id":"p1","version":1,"statements":[{"effect":"allow","actions":["select"],"resources":["table:public.orders"]}]}"#;

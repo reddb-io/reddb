@@ -60,6 +60,28 @@ pub enum ActionCategory {
     Other,
 }
 
+impl ActionCategory {
+    /// Stable lowercase identifier used by the SQL virtual table and
+    /// the `GET /admin/policies/actions` HTTP surface. Operators read
+    /// these strings, so they are part of the public contract.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ActionCategory::Dml => "dml",
+            ActionCategory::Ddl => "ddl",
+            ActionCategory::Schema => "schema",
+            ActionCategory::Function => "function",
+            ActionCategory::Mgmt => "mgmt",
+            ActionCategory::Policy => "policy",
+            ActionCategory::Admin => "admin",
+            ActionCategory::Config => "config",
+            ActionCategory::Vault => "vault",
+            ActionCategory::Wildcard => "wildcard",
+            ActionCategory::Ai => "ai",
+            ActionCategory::Other => "other",
+        }
+    }
+}
+
 /// Lifecycle state for a catalog entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LifecycleState {

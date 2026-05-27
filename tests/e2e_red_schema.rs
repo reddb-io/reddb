@@ -140,6 +140,15 @@ const API_KEY_EVIDENCE_COLUMNS: [&str; 6] = [
 
 const CONTROL_CAPABILITY_COLUMNS: [&str; 4] = ["action", "resource_kind", "scope", "description"];
 
+const POLICY_ACTION_COLUMNS: [&str; 6] = [
+    "name",
+    "category",
+    "lifecycle_state",
+    "replacement",
+    "since_version",
+    "gates_description",
+];
+
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime")
 }
@@ -621,6 +630,81 @@ fn governance_and_evidence_views_are_queryable_and_minimize_secret_material() {
         capabilities.result.records[0].get("resource_kind"),
         Some(&Value::text("registry"))
     );
+
+    cleanup_scope();
+}
+
+// Issue #709 — `red.policy.actions` virtual table contract. Verifies
+// the six-column shape, that the catalog deprecated entry surfaces a
+// non-NULL `replacement` + `since_version` pair, that active rows
+// expose NULL there, and that WHERE / ORDER BY work as advertised.
+#[test]
+fn red_policy_actions_virtual_table_surfaces_catalog() {
+    cleanup_scope();
+    let rt = runtime();
+
+    let result = rt
+        .execute_query("SELECT * FROM red.policy.actions ORDER BY name")
+        .expect("red.policy.actions select")
+        .result;
+
+    assert_eq!(result.columns, POLICY_ACTION_COLUMNS.map(str::to_string));
+    // Matches the catalog cardinality so a stray addition trips the
+    // test; the count is intentionally read off the live catalog
+    // rather than hard-coded.
+    let catalog_len = reddb::auth::action_catalog::ACTIONS.len();
+    assert_eq!(result.records.len(), catalog_len);
+
+    // Every catalog entry has all six columns populated (replacement
+    // and since_version are NULL for Active entries, populated for
+    // Deprecated entries — both shapes are valid).
+    for record in &result.records {
+        assert!(matches!(record.get("name"), Some(Value::Text(_))));
+        assert!(matches!(record.get("category"), Some(Value::Text(_))));
+        assert!(matches!(
+            record.get("lifecycle_state"),
+            Some(Value::Text(_))
+        ));
+        assert!(matches!(
+            record.get("gates_description"),
+            Some(Value::Text(_))
+        ));
+    }
+
+    // Vault category WHERE filter.
+    let vault = rt
+        .execute_query("SELECT * FROM red.policy.actions WHERE category = 'vault'")
+        .expect("vault filter")
+        .result;
+    assert!(!vault.records.is_empty());
+    for record in &vault.records {
+        assert_eq!(record.get("category"), Some(&Value::text("vault")));
+    }
+
+    // Deprecated entry: replacement + since_version populated.
+    let dep = rt
+        .execute_query("SELECT * FROM red.policy.actions WHERE name = 'vault:unseal_history'")
+        .expect("deprecated lookup")
+        .result;
+    assert_eq!(dep.records.len(), 1);
+    let row = &dep.records[0];
+    assert_eq!(row.get("lifecycle_state"), Some(&Value::text("deprecated")));
+    assert_eq!(
+        row.get("replacement"),
+        Some(&Value::text("vault:read_metadata"))
+    );
+    assert_eq!(row.get("since_version"), Some(&Value::text("0.5.0")));
+
+    // Active entry: replacement + since_version are NULL.
+    let active = rt
+        .execute_query("SELECT * FROM red.policy.actions WHERE name = 'policy:put'")
+        .expect("active lookup")
+        .result;
+    assert_eq!(active.records.len(), 1);
+    let row = &active.records[0];
+    assert_eq!(row.get("lifecycle_state"), Some(&Value::text("active")));
+    assert_eq!(row.get("replacement"), Some(&Value::Null));
+    assert_eq!(row.get("since_version"), Some(&Value::Null));
 
     cleanup_scope();
 }
