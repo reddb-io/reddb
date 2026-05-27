@@ -281,6 +281,29 @@ mutable at runtime via `SET CONFIG`.
 SET CONFIG red.config.queue.max_wait_ms = 5000
 ```
 
+## Telemetry — `/metrics`
+
+The `/metrics` endpoint exposes Prometheus series for queue activity. Wait-path
+series (slice D of PRD #718) cover the `QUEUE READ … WAIT <duration>` park
+lifecycle. Labels are `(queue, scope)` where `scope` is the wait registry
+namespace — empty in the single-tenant default.
+
+| Series | Type | Labels | When it increments |
+|--------|------|--------|--------------------|
+| `queue_wait_started_total` | counter | `queue`, `scope` | A WAIT call's first non-blocking probe returned empty and the caller entered the park loop. |
+| `queue_wait_woken_total` | counter | `queue`, `scope` | The lifecycle resolved by a notify followed by a successful re-probe (a message was delivered). |
+| `queue_wait_timed_out_total` | counter | `queue`, `scope` | The WAIT budget elapsed without a delivery; the call returned an empty projection. |
+| `queue_wait_cancelled_total` | counter | `queue`, `scope` | The wait registry was cancelled (shutdown drain) before the lifecycle resolved. |
+| `queue_wait_duration_ms` | histogram | `queue`, `scope` | Wall-clock started→resolved duration, in milliseconds. Buckets: `10, 50, 100, 500, 1000, 5000, 30000, 60000, +Inf`. |
+
+Each `queue_wait_started_total` increment pairs 1:1 with exactly one terminal
+outcome (`woken`, `timed_out`, `cancelled`) and one histogram observation.
+Immediate-available reads bypass the park loop entirely and do not touch any of
+these series.
+
+Normal wait outcomes (timeout, wake, cancellation) are **not** operator events
+— they emit no audit log entries and trigger no operator-event notifications.
+
 ## Introspection
 
 ```sql

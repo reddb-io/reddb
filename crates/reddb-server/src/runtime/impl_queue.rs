@@ -219,9 +219,22 @@ impl RedDBRuntime {
         // Empty under WAIT: park on the registry. WAIT 0 collapses to
         // a single re-probe of the registry's current state — useful
         // for tests but the timeout path returns immediately.
+        //
+        // Telemetry (slice D / PRD #718 / #729): we record exactly one
+        // `wait_started` increment at entry, and exactly one terminal
+        // outcome increment + histogram observation at exit, for the
+        // (scope, queue) labels. The histogram measures wall-clock
+        // started→resolved across all re-park iterations of this call.
         let registry = self.queue_wait_registry();
         let scope = queue_wait_scope();
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+        let telemetry = self.queue_telemetry();
+        telemetry.record_wait_started(&scope, queue);
+        let wait_start = std::time::Instant::now();
+        let observe = |outcome: crate::runtime::queue_telemetry::WaitOutcomeLabel| {
+            let elapsed_ms = wait_start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+            telemetry.record_wait_outcome(&scope, queue, outcome, elapsed_ms);
+        };
         loop {
             // Snapshot BEFORE the re-probe so a notify that fires
             // between the probe and the park bumps the generation and
@@ -229,12 +242,15 @@ impl RedDBRuntime {
             let snapshot = registry.snapshot(&scope, queue);
             let delivered = do_read(self)?;
             if !delivered.is_empty() {
+                observe(crate::runtime::queue_telemetry::WaitOutcomeLabel::Woken);
                 return Ok(delivered);
             }
             if registry.is_cancelled() {
+                observe(crate::runtime::queue_telemetry::WaitOutcomeLabel::Cancelled);
                 return Err(RedDBError::Query(QUEUE_READ_WAIT_CANCELLED.to_string()));
             }
             if std::time::Instant::now() >= deadline {
+                observe(crate::runtime::queue_telemetry::WaitOutcomeLabel::Timeout);
                 return Ok(Vec::new());
             }
             // Issue #722: a delayed message becomes deliverable when its
@@ -268,12 +284,14 @@ impl RedDBRuntime {
                     // otherwise loop and re-probe (a delayed message may
                     // have just become due).
                     if std::time::Instant::now() >= deadline {
+                        observe(crate::runtime::queue_telemetry::WaitOutcomeLabel::Timeout);
                         return Ok(Vec::new());
                     }
                     continue;
                 }
                 crate::runtime::queue_wait_registry::WaitOutcome::Cancelled => {
-                    return Err(RedDBError::Query(QUEUE_READ_WAIT_CANCELLED.to_string()))
+                    observe(crate::runtime::queue_telemetry::WaitOutcomeLabel::Cancelled);
+                    return Err(RedDBError::Query(QUEUE_READ_WAIT_CANCELLED.to_string()));
                 }
             }
         }
