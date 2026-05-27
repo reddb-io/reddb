@@ -19,6 +19,7 @@ pub mod locks;
 pub mod managed_config;
 pub mod managed_policy;
 pub mod middleware;
+pub mod migrate_policy_mode;
 pub mod oauth;
 pub mod policies;
 pub mod policy_linter;

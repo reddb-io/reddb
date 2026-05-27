@@ -2557,6 +2557,119 @@ impl RedDBServer {
         json_response(200, JsonValue::Object(envelope))
     }
 
+    /// `POST /admin/policies/migrate-mode` — body
+    /// `{ "target": "policy_only", "dry_run": true | false }`. Runs the
+    /// same pre-flight delta simulator as the SQL `MIGRATE POLICY MODE`
+    /// command and mirrors its outcomes exactly. Issue #714.
+    pub(crate) fn handle_iam_policy_migrate_mode(&self, body: Vec<u8>) -> HttpResponse {
+        use crate::auth::enforcement_mode::PolicyEnforcementMode;
+        use crate::auth::migrate_policy_mode::{
+            principal_label, simulate_migration_delta, MigratePolicyDelta,
+        };
+        use crate::auth::policies::ResourceRef;
+
+        let Some(store) = self.auth_store.as_ref() else {
+            return json_error(503, "auth store not configured");
+        };
+        let parsed = match crate::serde_json::from_str::<crate::serde_json::Value>(
+            std::str::from_utf8(&body).unwrap_or(""),
+        ) {
+            Ok(v) => v,
+            Err(e) => return json_error(400, format!("invalid JSON body: {e}")),
+        };
+        let obj = match parsed.as_object() {
+            Some(o) => o,
+            None => return json_error(400, "body must be a JSON object"),
+        };
+        let target = match obj.get("target").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => return json_error(400, "missing `target`"),
+        };
+        let dry_run = obj
+            .get("dry_run")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let parsed_mode = match PolicyEnforcementMode::parse(&target) {
+            Some(m) => m,
+            None => {
+                return json_error(
+                    400,
+                    format!("invalid target `{target}` (expected `policy_only`)"),
+                );
+            }
+        };
+        if parsed_mode != PolicyEnforcementMode::PolicyOnly {
+            return json_error(
+                400,
+                format!("target `{target}` is not supported — only `policy_only` may be migrated to via this endpoint"),
+            );
+        }
+
+        let snapshot = self.runtime.catalog();
+        let resources: Vec<ResourceRef> = snapshot
+            .collections
+            .iter()
+            .map(|c| ResourceRef::new("table", c.name.clone()))
+            .collect();
+        let now_ms = crate::utils::now_unix_millis() as u128;
+        let deltas: Vec<MigratePolicyDelta> =
+            simulate_migration_delta(store.as_ref(), &resources, now_ms);
+
+        let outcome_str = if dry_run {
+            "dry_run"
+        } else if deltas.is_empty() {
+            "applied"
+        } else {
+            "refused"
+        };
+        self.iam_audit("iam/policy.migrate_mode", &target, outcome_str);
+
+        let items: Vec<JsonValue> = deltas
+            .iter()
+            .map(|d| {
+                let mut row = Map::new();
+                row.insert(
+                    "principal".to_string(),
+                    JsonValue::String(principal_label(&d.principal)),
+                );
+                row.insert(
+                    "role".to_string(),
+                    JsonValue::String(d.role.as_str().to_string()),
+                );
+                row.insert("action".to_string(), JsonValue::String(d.action.clone()));
+                row.insert(
+                    "resource_kind".to_string(),
+                    JsonValue::String(d.resource_kind.clone()),
+                );
+                row.insert(
+                    "resource_name".to_string(),
+                    JsonValue::String(d.resource_name.clone()),
+                );
+                JsonValue::Object(row)
+            })
+            .collect();
+        let mut envelope = Map::new();
+        envelope.insert("target".to_string(), JsonValue::String(target.clone()));
+        envelope.insert("dry_run".to_string(), JsonValue::Bool(dry_run));
+        envelope.insert(
+            "outcome".to_string(),
+            JsonValue::String(outcome_str.to_string()),
+        );
+        envelope.insert("count".to_string(), JsonValue::Number(items.len() as f64));
+        envelope.insert("delta".to_string(), JsonValue::Array(items));
+
+        if !dry_run && !deltas.is_empty() {
+            // Refuse: 409 Conflict carries the delta so the client
+            // can decide whether to attach allow policies and retry.
+            return json_response(409, JsonValue::Object(envelope));
+        }
+        if !dry_run {
+            store.set_enforcement_mode(parsed_mode);
+        }
+        json_response(200, JsonValue::Object(envelope))
+    }
+
     /// `DELETE /admin/policies/:id` — drop a policy.
     pub(crate) fn handle_iam_policy_delete(&self, id: &str) -> HttpResponse {
         let Some(store) = self.auth_store.as_ref() else {
