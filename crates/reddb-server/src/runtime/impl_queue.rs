@@ -735,6 +735,11 @@ impl RedDBRuntime {
                 group,
                 consumer,
                 count,
+                // Slice A of PRD #718 plumbs WAIT through the AST; the
+                // actual blocking-read registry lands in slice C. Until
+                // then the runtime calls `group_read` synchronously and
+                // ignores `wait_ms`.
+                wait_ms: _,
             } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
