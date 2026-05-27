@@ -2240,6 +2240,7 @@ fn resolve_delivery_id(
 /// Per-(connection, queue) rate-limited "tuple ACK is deprecated" log line.
 /// One emission per minute matches ADR 0026's operational guidance.
 fn log_tuple_deprecation(queue: &str) {
+    use std::sync::atomic::Ordering;
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
 
@@ -2258,6 +2259,7 @@ fn log_tuple_deprecation(queue: &str) {
     if should_emit {
         guard.insert(key.clone(), now);
         drop(guard);
+        TUPLE_DEPRECATION_EMITS.fetch_add(1, Ordering::Relaxed);
         tracing::warn!(
             target: "reddb::queue_lifecycle",
             queue = queue,
@@ -2268,6 +2270,14 @@ fn log_tuple_deprecation(queue: &str) {
         );
     }
 }
+
+/// Total count of tuple-deprecation log emissions since process start.
+/// Intentionally process-wide and `pub` so the transport-bridge
+/// integration tests can observe that the legacy tuple path emitted a
+/// deprecation while the `delivery_id` path stayed silent, without
+/// having to plumb a `tracing::Subscriber` through every test.
+pub static TUPLE_DEPRECATION_EMITS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 fn message_id_string(message_id: EntityId) -> String {
     message_id.raw().to_string()
