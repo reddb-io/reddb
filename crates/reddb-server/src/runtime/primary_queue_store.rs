@@ -456,6 +456,24 @@ pub(crate) struct RuntimeQueueBridge {
     runtime: RedDBRuntime,
 }
 
+/// Bridge between the lifecycle `QueueSide` (defined in
+/// `storage::queue::deque`) and the AST `QueueSide` (defined in
+/// `storage::query::ast::core`) that `queue_delivery::pop_messages`
+/// consumes. Both enums have the same two variants but they live in
+/// separate modules and don't share a `From` impl — they may unify in a
+/// later cleanup, but for now this helper keeps the trait signature
+/// clean.
+fn queue_side_to_ast(
+    side: crate::storage::queue::lifecycle::QueueSide,
+) -> crate::storage::query::ast::QueueSide {
+    use crate::storage::query::ast::QueueSide as Ast;
+    use crate::storage::queue::lifecycle::QueueSide as Lc;
+    match side {
+        Lc::Left => Ast::Left,
+        Lc::Right => Ast::Right,
+    }
+}
+
 impl QueueTxnContext for RuntimeQueueBridge {
     fn retire_message(&self, queue: &str, message_id: MessageId) {
         let store = self.runtime.db().store();
@@ -818,6 +836,101 @@ impl QueueStore for PrimaryQueueStore {
                     .unwrap_or(false)
         });
         Ok(())
+    }
+
+    fn pop_available(
+        &self,
+        _txn: &QueueTxn,
+        queue: &str,
+        side: QueueSide,
+        count: usize,
+    ) -> Result<Vec<(MessageId, Value)>> {
+        // Shim onto the existing `queue_delivery::pop_messages` flow.
+        // That helper holds the per-message lock, skips currently-pending
+        // rows, and retires each popped message through the same MVCC
+        // tombstone path `record_pending_tombstone` would route to via
+        // the live `QueueTxnContext`. The `_txn` argument is accepted
+        // for trait parity but ignored on the primary — the runtime
+        // tombstone bookkeeping happens inside `delete_message_with_state`.
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let store = self.runtime.db().store();
+        let popped = super::queue_delivery::pop_messages(
+            &self.runtime,
+            &store,
+            queue,
+            queue_side_to_ast(side),
+            count,
+        )
+        .map_err(|_| QueueStoreError::UnknownQueue(queue.to_string()))?;
+        Ok(popped
+            .into_iter()
+            .map(|m| (m.message_id.raw(), m.payload))
+            .collect())
+    }
+
+    fn delete_with_state(&self, _txn: &QueueTxn, queue: &str, message_id: MessageId) -> Result<()> {
+        // Shim onto `queue_delivery::delete_message_with_state`, which
+        // walks the same `current_xid → set_xmax → record_pending_tombstone`
+        // path the `RuntimeQueueBridge::retire_message` adapter uses.
+        // `_txn` is accepted for trait parity but ignored — the runtime
+        // owns the tombstone log on the primary.
+        let store = self.runtime.db().store();
+        super::queue_delivery::delete_message_with_state(
+            Some(&self.runtime),
+            &store,
+            queue,
+            EntityId::new(message_id),
+        )
+        .map_err(|_| QueueStoreError::UnknownQueue(queue.to_string()))?;
+        Ok(())
+    }
+
+    fn move_to_queue(
+        &self,
+        _txn: &QueueTxn,
+        source: &str,
+        dest: &str,
+        side: QueueSide,
+        count: usize,
+    ) -> Result<usize> {
+        // Atomic-ish move: pop the source-side messages (retiring them
+        // through the MVCC tombstone path), then insert each payload on
+        // `dest` via the same `enqueue` machinery the inline
+        // `impl_queue::execute_queue_move` uses. On insert failure the
+        // already-inserted destination rows are rolled back; the source
+        // pops have already retired, so on rollback they revive via
+        // MVCC when the surrounding statement aborts.
+        if count == 0 {
+            return Ok(0);
+        }
+        let store = self.runtime.db().store();
+        let popped = super::queue_delivery::pop_messages(
+            &self.runtime,
+            &store,
+            source,
+            queue_side_to_ast(side),
+            count,
+        )
+        .map_err(|_| QueueStoreError::UnknownQueue(source.to_string()))?;
+        if popped.is_empty() {
+            return Ok(0);
+        }
+        let mut inserted: Vec<EntityId> = Vec::with_capacity(popped.len());
+        for msg in &popped {
+            match super::impl_queue::insert_moved_queue_message_payload(&store, dest, &msg.payload)
+            {
+                Ok(id) => inserted.push(id),
+                Err(_) => {
+                    for id in inserted {
+                        let _ = store.delete(dest, id);
+                    }
+                    return Err(QueueStoreError::UnknownQueue(dest.to_string()));
+                }
+            }
+        }
+        Ok(popped.len())
     }
 }
 

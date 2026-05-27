@@ -1561,6 +1561,49 @@ fn queue_message_view_from_entity(entity: UnifiedEntity) -> Option<QueueMessageV
     })
 }
 
+/// Insert a moved payload onto `queue` using only the payload value —
+/// priority / attempts / TTL fall back to the destination queue's
+/// catalog config (mirrors a fresh enqueue rather than carrying source
+/// metadata over). Used by `PrimaryQueueStore::move_to_queue`, the
+/// `QueueLifecycle::move_between_queues` adapter that owns only
+/// `(message_id, payload)` after `pop_messages` retires the source row.
+pub(super) fn insert_moved_queue_message_payload(
+    store: &UnifiedStore,
+    queue: &str,
+    payload: &Value,
+) -> RedDBResult<EntityId> {
+    let config = load_queue_config(store, queue);
+    let position = next_queue_position(store, queue, QueueSide::Right)?;
+    let enqueued_at_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let entity = UnifiedEntity::new(
+        EntityId::new(0),
+        EntityKind::QueueMessage {
+            queue: queue.to_string(),
+            position,
+        },
+        EntityData::QueueMessage(QueueMessageData {
+            payload: payload.clone(),
+            priority: None,
+            enqueued_at_ns,
+            attempts: 0,
+            max_attempts: config.max_attempts,
+            acked: false,
+        }),
+    );
+    let id = store
+        .insert_auto(queue, entity)
+        .map_err(|err| RedDBError::Internal(err.to_string()))?;
+    if let Some(ttl_ms) = config.ttl_ms {
+        store
+            .set_metadata(queue, id, queue_message_ttl_metadata(ttl_ms))
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+    }
+    Ok(id)
+}
+
 fn insert_moved_queue_message(
     store: &UnifiedStore,
     queue: &str,
