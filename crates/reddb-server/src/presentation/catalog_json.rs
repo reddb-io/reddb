@@ -811,6 +811,462 @@ pub(crate) fn collection_descriptor_json(descriptor: &CollectionDescriptor) -> J
     JsonValue::Object(object)
 }
 
+/// Capability tags advertised to the Red UI for a collection. The
+/// "primary" tag mirrors the model kind so the UI never has to map an
+/// enum twice; the rest enumerate the action surfaces the toolbar may
+/// expose for that model. Action *authorization* is reported separately
+/// in the `actions` object — these tags only say which actions are
+/// shaped by the model.
+fn ui_capabilities_for_model(model: CollectionModel) -> Vec<&'static str> {
+    match model {
+        CollectionModel::Table => vec![
+            "select",
+            "insert",
+            "update",
+            "delete",
+            "describe",
+            "create_index",
+            "drop_collection",
+        ],
+        CollectionModel::Document => vec![
+            "select",
+            "insert",
+            "update",
+            "delete",
+            "describe",
+            "json_path",
+            "drop_collection",
+        ],
+        CollectionModel::Queue => vec![
+            "push",
+            "peek",
+            "read",
+            "ack",
+            "nack",
+            "dlq_move",
+            "purge",
+            "describe",
+            "drop_collection",
+        ],
+        CollectionModel::Vector => vec!["upsert", "search", "describe", "drop_collection"],
+        CollectionModel::Graph => vec![
+            "nodes",
+            "edges",
+            "traverse",
+            "subgraph",
+            "describe",
+            "drop_collection",
+        ],
+        CollectionModel::Kv => vec![
+            "get",
+            "put",
+            "delete",
+            "list_by_prefix",
+            "increment",
+            "compare_and_set",
+            "describe",
+            "drop_collection",
+        ],
+        CollectionModel::TimeSeries => vec![
+            "insert",
+            "range_query",
+            "downsample",
+            "describe",
+            "drop_collection",
+        ],
+        CollectionModel::Metrics => vec!["query", "describe", "drop_collection"],
+        CollectionModel::Hll
+        | CollectionModel::Sketch
+        | CollectionModel::Filter
+        | CollectionModel::Config
+        | CollectionModel::Vault
+        | CollectionModel::Mixed => vec!["describe", "drop_collection"],
+    }
+}
+
+/// Tri-state action decision rendered as a JSON object.
+///
+/// `Allowed(true|false)` is authoritative; the backend can prove the
+/// answer with the auth state at hand. `Unknown` is reserved for
+/// actions whose authorization depends on policy slices that are not
+/// yet implemented (#740/#741) — the UI must treat these as
+/// "indeterminate", not "permitted". The accompanying `reason`
+/// explains either the denial or the deferral.
+fn ui_action_decision(allowed: Option<bool>, reason: Option<&str>) -> JsonValue {
+    let mut object = Map::new();
+    match allowed {
+        Some(value) => object.insert("allowed".to_string(), JsonValue::Bool(value)),
+        None => object.insert(
+            "allowed".to_string(),
+            JsonValue::String("unknown".to_string()),
+        ),
+    };
+    object.insert(
+        "reason".to_string(),
+        reason
+            .map(|r| JsonValue::String(r.to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    JsonValue::Object(object)
+}
+
+/// Red UI collection metadata contract (issue #736, PRD #735).
+///
+/// One stable payload that lets the UI specialize empty and non-empty
+/// collections without probing data rows: model kind, primary +
+/// secondary capabilities, schema + system-column summary, indexes,
+/// retention/TTL, tenant scope, entity count, and current-principal
+/// action affordances. Per the thread-discussion decision on #736, the
+/// actions envelope is partial: actions backed by today's coarse
+/// `Role` get a boolean answer; finer-grained actions return
+/// `"allowed":"unknown"` with a reason pointing at the deferred
+/// security slices (#740/#741) — never a fake `true`/`false`.
+pub(crate) fn collection_ui_metadata_json(
+    descriptor: &CollectionDescriptor,
+    contract: Option<&crate::physical::CollectionContract>,
+    default_ttl_ms: Option<u64>,
+    role: Option<crate::auth::Role>,
+    auth_enabled: bool,
+) -> JsonValue {
+    let mut object = Map::new();
+    object.insert(
+        "name".to_string(),
+        JsonValue::String(descriptor.name.clone()),
+    );
+    let model = descriptor.model;
+    let model_str = collection_model_str(model);
+    object.insert(
+        "model".to_string(),
+        JsonValue::String(model_str.to_string()),
+    );
+    object.insert(
+        "primary_capability".to_string(),
+        JsonValue::String(model_str.to_string()),
+    );
+    object.insert(
+        "capabilities".to_string(),
+        JsonValue::Array(
+            ui_capabilities_for_model(model)
+                .into_iter()
+                .map(|s| JsonValue::String(s.to_string()))
+                .collect(),
+        ),
+    );
+
+    // Schema + system-column summary. Strict tables get the typed
+    // column list; non-table / dynamic collections expose only the
+    // mode + system columns so the UI can render a useful header
+    // without probing rows.
+    let mut schema = Map::new();
+    schema.insert(
+        "mode".to_string(),
+        JsonValue::String(schema_mode_str(descriptor.schema_mode).to_string()),
+    );
+    schema.insert(
+        "declared_mode".to_string(),
+        descriptor
+            .declared_schema_mode
+            .map(|m| JsonValue::String(schema_mode_str(m).to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    schema.insert(
+        "observed_mode".to_string(),
+        JsonValue::String(schema_mode_str(descriptor.observed_schema_mode).to_string()),
+    );
+    schema.insert(
+        "columns".to_string(),
+        contract
+            .map(|c| JsonValue::Array(contract_columns_json(c)))
+            .unwrap_or(JsonValue::Null),
+    );
+    schema.insert(
+        "system_columns".to_string(),
+        JsonValue::Array(
+            ["__id", "__created_at", "__updated_at"]
+                .into_iter()
+                .map(|s| JsonValue::String(s.to_string()))
+                .collect(),
+        ),
+    );
+    schema.insert(
+        "timestamps_enabled".to_string(),
+        JsonValue::Bool(contract.map(|c| c.timestamps_enabled).unwrap_or(false)),
+    );
+    schema.insert(
+        "append_only".to_string(),
+        JsonValue::Bool(contract.map(|c| c.append_only).unwrap_or(false)),
+    );
+    object.insert("schema".to_string(), JsonValue::Object(schema));
+
+    let mut indexes = Map::new();
+    indexes.insert(
+        "declared".to_string(),
+        JsonValue::Array(
+            descriptor
+                .declared_indices
+                .iter()
+                .cloned()
+                .map(JsonValue::String)
+                .collect(),
+        ),
+    );
+    indexes.insert(
+        "operational".to_string(),
+        JsonValue::Array(
+            descriptor
+                .operational_indices
+                .iter()
+                .cloned()
+                .map(JsonValue::String)
+                .collect(),
+        ),
+    );
+    indexes.insert(
+        "effective".to_string(),
+        JsonValue::Array(
+            descriptor
+                .indices
+                .iter()
+                .cloned()
+                .map(JsonValue::String)
+                .collect(),
+        ),
+    );
+    indexes.insert(
+        "in_sync".to_string(),
+        JsonValue::Bool(descriptor.indexes_in_sync),
+    );
+    object.insert("indexes".to_string(), JsonValue::Object(indexes));
+
+    let mut retention = Map::new();
+    retention.insert(
+        "default_ttl_ms".to_string(),
+        default_ttl_ms
+            .map(|ms| JsonValue::Number(ms as f64))
+            .unwrap_or(JsonValue::Null),
+    );
+    retention.insert(
+        "retention_duration_ms".to_string(),
+        descriptor
+            .retention_duration_ms
+            .map(|ms| JsonValue::Number(ms as f64))
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert("retention".to_string(), JsonValue::Object(retention));
+
+    // Tenant scope is not yet a per-collection fact in the catalog.
+    // The UI gets an explicit "unknown" so it doesn't infer a global
+    // scope from silence. #740/#741 add tenant-aware authorization.
+    let mut tenant_scope = Map::new();
+    tenant_scope.insert("kind".to_string(), JsonValue::String("unknown".to_string()));
+    tenant_scope.insert(
+        "reason".to_string(),
+        JsonValue::String("tenant-aware collection ownership deferred to #740/#741".to_string()),
+    );
+    object.insert("tenant_scope".to_string(), JsonValue::Object(tenant_scope));
+
+    object.insert(
+        "entity_count".to_string(),
+        JsonValue::Number(descriptor.entities as f64),
+    );
+
+    // Model-specific knobs so the UI can build the right toolbar
+    // without re-decoding the catalog snapshot.
+    let mut model_specific = Map::new();
+    if matches!(model, CollectionModel::Queue) {
+        model_specific.insert(
+            "queue_mode".to_string(),
+            descriptor
+                .queue_mode
+                .map(|m| JsonValue::String(m.as_str().to_string()))
+                .unwrap_or(JsonValue::Null),
+        );
+        model_specific.insert(
+            "max_attempts".to_string(),
+            descriptor
+                .queue_max_attempts
+                .map(|v| JsonValue::Number(v as f64))
+                .unwrap_or(JsonValue::Null),
+        );
+        model_specific.insert(
+            "lock_deadline_ms".to_string(),
+            descriptor
+                .queue_lock_deadline_ms
+                .map(|v| JsonValue::Number(v as f64))
+                .unwrap_or(JsonValue::Null),
+        );
+        model_specific.insert(
+            "in_flight_cap_per_group".to_string(),
+            descriptor
+                .queue_in_flight_cap_per_group
+                .map(|v| JsonValue::Number(v as f64))
+                .unwrap_or(JsonValue::Null),
+        );
+        model_specific.insert(
+            "dlq_target".to_string(),
+            descriptor
+                .queue_dlq_target
+                .as_ref()
+                .map(|s| JsonValue::String(s.clone()))
+                .unwrap_or(JsonValue::Null),
+        );
+    }
+    if matches!(model, CollectionModel::Vector) {
+        model_specific.insert(
+            "dimension".to_string(),
+            descriptor
+                .vector_dimension
+                .map(|v| JsonValue::Number(v as f64))
+                .unwrap_or(JsonValue::Null),
+        );
+        model_specific.insert(
+            "metric".to_string(),
+            descriptor
+                .vector_metric
+                .map(|m| JsonValue::String(distance_metric_str(m).to_string()))
+                .unwrap_or(JsonValue::Null),
+        );
+    }
+    if matches!(model, CollectionModel::TimeSeries) {
+        model_specific.insert(
+            "session_key".to_string(),
+            descriptor
+                .session_key
+                .as_ref()
+                .map(|s| JsonValue::String(s.clone()))
+                .unwrap_or(JsonValue::Null),
+        );
+        model_specific.insert(
+            "session_gap_ms".to_string(),
+            descriptor
+                .session_gap_ms
+                .map(|v| JsonValue::Number(v as f64))
+                .unwrap_or(JsonValue::Null),
+        );
+    }
+    object.insert(
+        "model_specific".to_string(),
+        JsonValue::Object(model_specific),
+    );
+
+    // Action affordances. Two-tier: coarse role-derived decisions get
+    // a boolean; fine-grained operations the backend cannot prove
+    // today get "unknown" with a pointer at #740/#741 (the thread
+    // discussion on #736 makes this contract explicit).
+    let can_read = role.map(|r| r.can_read()).unwrap_or(!auth_enabled);
+    let can_write = role.map(|r| r.can_write()).unwrap_or(!auth_enabled);
+    let can_admin = role.map(|r| r.can_admin()).unwrap_or(!auth_enabled);
+    let deny_read_reason = if !can_read {
+        Some("principal lacks read role")
+    } else {
+        None
+    };
+    let deny_write_reason = if !can_write {
+        Some("principal lacks write role")
+    } else {
+        None
+    };
+    let deny_admin_reason = if !can_admin {
+        Some("principal lacks admin role")
+    } else {
+        None
+    };
+
+    let mut actions = Map::new();
+    actions.insert(
+        "read".to_string(),
+        ui_action_decision(Some(can_read), deny_read_reason),
+    );
+    actions.insert(
+        "write".to_string(),
+        ui_action_decision(Some(can_write), deny_write_reason),
+    );
+    actions.insert(
+        "delete".to_string(),
+        ui_action_decision(Some(can_write), deny_write_reason),
+    );
+    actions.insert(
+        "create_index".to_string(),
+        ui_action_decision(Some(can_write), deny_write_reason),
+    );
+    actions.insert(
+        "drop_collection".to_string(),
+        ui_action_decision(Some(can_admin), deny_admin_reason),
+    );
+    actions.insert(
+        "alter_collection".to_string(),
+        ui_action_decision(
+            None,
+            Some("tenant- and resource-scoped policy deferred to #740/#741"),
+        ),
+    );
+
+    // Model-specific actions. Each one is keyed by the model so the
+    // UI can render the correct toolbar without parsing capability
+    // tags. Authorization on these is intentionally `unknown` until
+    // the policy slices land — the coarse Role gate cannot prove
+    // queue-level or vector-level decisions on its own.
+    match model {
+        CollectionModel::Queue => {
+            for action in ["push", "peek", "ack", "nack", "purge", "dlq_move"] {
+                let coarse = if action == "purge" || action == "dlq_move" {
+                    Some(can_admin)
+                } else {
+                    Some(can_write)
+                };
+                let reason = match action {
+                    "purge" | "dlq_move" => deny_admin_reason,
+                    _ => deny_write_reason,
+                };
+                actions.insert(action.to_string(), ui_action_decision(coarse, reason));
+            }
+        }
+        CollectionModel::Vector => {
+            actions.insert(
+                "search".to_string(),
+                ui_action_decision(Some(can_read), deny_read_reason),
+            );
+            actions.insert(
+                "upsert".to_string(),
+                ui_action_decision(Some(can_write), deny_write_reason),
+            );
+        }
+        CollectionModel::Graph => {
+            actions.insert(
+                "traverse".to_string(),
+                ui_action_decision(Some(can_read), deny_read_reason),
+            );
+            actions.insert(
+                "subgraph".to_string(),
+                ui_action_decision(Some(can_read), deny_read_reason),
+            );
+        }
+        CollectionModel::Kv => {
+            actions.insert(
+                "increment".to_string(),
+                ui_action_decision(Some(can_write), deny_write_reason),
+            );
+            actions.insert(
+                "compare_and_set".to_string(),
+                ui_action_decision(Some(can_write), deny_write_reason),
+            );
+            actions.insert(
+                "list_by_prefix".to_string(),
+                ui_action_decision(Some(can_read), deny_read_reason),
+            );
+        }
+        _ => {}
+    }
+    object.insert("actions".to_string(), JsonValue::Object(actions));
+
+    object.insert(
+        "attention_required".to_string(),
+        JsonValue::Bool(descriptor.attention_required),
+    );
+
+    JsonValue::Object(object)
+}
+
 pub(crate) fn collection_contract_json(
     contract: &crate::physical::CollectionContract,
 ) -> JsonValue {
