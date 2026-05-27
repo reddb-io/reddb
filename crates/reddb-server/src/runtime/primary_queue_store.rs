@@ -398,10 +398,21 @@ impl PrimaryQueueStore {
         let Some(manager) = store.get_collection(queue) else {
             return Vec::new();
         };
+        // Honour the calling connection's MVCC snapshot: a queue message
+        // retired through `delete_message_with_state` inside a transaction
+        // stamps `xmax` and is only invisible to consumers once the txn
+        // commits — same contract the legacy `load_queue_message_views_with_runtime`
+        // applies. Without this, a committed lifecycle ack still surfaces
+        // the message on subsequent reads.
+        let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
         let mut out: Vec<QueueMessageOrdered> = manager
-            .query_all(|entity| {
-                matches!(entity.kind, EntityKind::QueueMessage { .. })
-                    && matches!(entity.data, EntityData::QueueMessage(_))
+            .query_all(move |entity| {
+                if !matches!(entity.kind, EntityKind::QueueMessage { .. })
+                    || !matches!(entity.data, EntityData::QueueMessage(_))
+                {
+                    return false;
+                }
+                crate::runtime::impl_core::entity_visible_with_context(snap_ctx.as_ref(), entity)
             })
             .into_iter()
             .filter_map(|entity| {
