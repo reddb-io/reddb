@@ -240,6 +240,7 @@ impl UnifiedExecutor {
             | QueryExpr::ShowEffectivePermissions { .. }
             | QueryExpr::SimulatePolicy { .. }
             | QueryExpr::LintPolicy { .. }
+            | QueryExpr::MigratePolicyMode { .. }
             | QueryExpr::CreateMigration(_)
             | QueryExpr::ApplyMigration(_)
             | QueryExpr::RollbackMigration(_)
@@ -475,6 +476,7 @@ impl UnifiedExecutor {
             | QueryExpr::ShowEffectivePermissions { .. }
             | QueryExpr::SimulatePolicy { .. }
             | QueryExpr::LintPolicy { .. }
+            | QueryExpr::MigratePolicyMode { .. }
             | QueryExpr::CreateMigration(_)
             | QueryExpr::ApplyMigration(_)
             | QueryExpr::RollbackMigration(_)

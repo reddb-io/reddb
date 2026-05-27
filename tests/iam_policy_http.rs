@@ -294,3 +294,79 @@ fn simulate_default_deny_when_no_attachments() {
         "body={body_text}"
     );
 }
+
+#[test]
+fn migrate_policy_mode_dry_run_returns_delta() {
+    // A Write-role principal without any policies has full
+    // legacy_rbac access to writes; under `policy_only` they would
+    // lose everything. DRY RUN must return that delta in the body
+    // without mutating the live enforcement mode.
+    let addr = spawn_server();
+    // Pre-seed a table so the catalog snapshot has a concrete
+    // resource to probe.
+    let (status, _) = http_request(
+        &addr,
+        "POST",
+        "/query",
+        Some(r#"{"query":"CREATE TABLE orders (id INT)"}"#),
+    );
+    assert_eq!(status, 200);
+
+    let body = r#"{"target":"policy_only","dry_run":true}"#;
+    let (status, body_text) =
+        http_request(&addr, "POST", "/admin/policies/migrate-mode", Some(body));
+    assert_eq!(status, 200, "body={body_text}");
+    assert!(body_text.contains("\"dry_run\":true"), "body={body_text}");
+    assert!(
+        body_text.contains("\"outcome\":\"dry_run\""),
+        "body={body_text}"
+    );
+    // alice was created as Read role in spawn_server, so she will lose
+    // `select` (the one read action she could do via legacy_rbac) on
+    // the `orders` table when policy_only kicks in.
+    assert!(
+        body_text.contains("\"principal\":\"alice\""),
+        "body={body_text}"
+    );
+    assert!(
+        body_text.contains("\"action\":\"select\""),
+        "body={body_text}"
+    );
+}
+
+#[test]
+fn migrate_policy_mode_refuses_with_delta() {
+    let addr = spawn_server();
+    let (status, _) = http_request(
+        &addr,
+        "POST",
+        "/query",
+        Some(r#"{"query":"CREATE TABLE orders (id INT)"}"#),
+    );
+    assert_eq!(status, 200);
+
+    let body = r#"{"target":"policy_only","dry_run":false}"#;
+    let (status, body_text) =
+        http_request(&addr, "POST", "/admin/policies/migrate-mode", Some(body));
+    assert_eq!(status, 409, "body={body_text}");
+    assert!(
+        body_text.contains("\"outcome\":\"refused\""),
+        "body={body_text}"
+    );
+}
+
+#[test]
+fn migrate_policy_mode_rejects_non_policy_only_target() {
+    let addr = spawn_server();
+    let body = r#"{"target":"legacy_rbac","dry_run":true}"#;
+    let (status, body_text) =
+        http_request(&addr, "POST", "/admin/policies/migrate-mode", Some(body));
+    assert_eq!(status, 400, "body={body_text}");
+}
+
+#[test]
+fn migrate_policy_mode_rejects_non_post() {
+    let addr = spawn_server();
+    let (status, _) = http_request(&addr, "GET", "/admin/policies/migrate-mode", None);
+    assert_eq!(status, 405);
+}

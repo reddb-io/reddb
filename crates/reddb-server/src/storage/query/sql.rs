@@ -792,6 +792,7 @@ impl<'a> Parser<'a> {
                     || name.eq_ignore_ascii_case("REVOKE")
                     || name.eq_ignore_ascii_case("SIMULATE")
                     || name.eq_ignore_ascii_case("LINT")
+                    || name.eq_ignore_ascii_case("MIGRATE")
                     || name.eq_ignore_ascii_case("APPLY") =>
             {
                 self.parse_sql_statement().map(FrontendStatement::Sql)
@@ -2161,6 +2162,24 @@ impl<'a> Parser<'a> {
             Token::Ident(name) if name.eq_ignore_ascii_case("LINT") => {
                 let expr = self.parse_lint_policy()?;
                 Ok(SqlCommand::IamPolicy(expr))
+            }
+            Token::Ident(name) if name.eq_ignore_ascii_case("MIGRATE") => {
+                // `MIGRATE POLICY MODE TO ...` is the S5B (#714) path.
+                // Lookahead one token because `MIGRATE` is otherwise
+                // unused at this layer.
+                let next = self.peek_next()?.clone();
+                let is_policy_mode = matches!(&next, Token::Policy)
+                    || matches!(&next, Token::Ident(name)
+                        if name.eq_ignore_ascii_case("POLICY"));
+                if is_policy_mode {
+                    let expr = self.parse_migrate_policy_mode()?;
+                    return Ok(SqlCommand::IamPolicy(expr));
+                }
+                Err(ParseError::expected(
+                    vec!["POLICY"],
+                    self.peek(),
+                    self.position(),
+                ))
             }
             Token::Set => {
                 self.advance()?;

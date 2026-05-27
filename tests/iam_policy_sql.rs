@@ -128,3 +128,27 @@ fn simulate_parses() {
         other => panic!("expected SimulatePolicy, got {other:?}"),
     }
 }
+
+#[test]
+fn migrate_policy_mode_parses_basic() {
+    let e = parse("MIGRATE POLICY MODE TO 'policy_only'");
+    match e {
+        QueryExpr::MigratePolicyMode { target, dry_run } => {
+            assert_eq!(target, "policy_only");
+            assert!(!dry_run);
+        }
+        other => panic!("expected MigratePolicyMode, got {other:?}"),
+    }
+}
+
+#[test]
+fn migrate_policy_mode_parses_dry_run() {
+    let e = parse("MIGRATE POLICY MODE TO 'policy_only' DRY RUN");
+    match e {
+        QueryExpr::MigratePolicyMode { target, dry_run } => {
+            assert_eq!(target, "policy_only");
+            assert!(dry_run);
+        }
+        other => panic!("expected MigratePolicyMode(DRY RUN), got {other:?}"),
+    }
+}

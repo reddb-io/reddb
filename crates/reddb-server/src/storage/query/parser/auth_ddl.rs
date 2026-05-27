@@ -291,6 +291,48 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Parse `MIGRATE POLICY MODE TO '<mode>' [DRY RUN]`. Caller has
+    /// just observed the leading `MIGRATE` ident; the token is still
+    /// queued. Issue #714.
+    pub fn parse_migrate_policy_mode(&mut self) -> Result<QueryExpr, ParseError> {
+        self.advance()?; // ident "MIGRATE"
+        if !self.consume(&Token::Policy)? && !self.consume_ident_ci("POLICY")? {
+            return Err(ParseError::expected(
+                vec!["POLICY"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        if !self.consume(&Token::Mode)? && !self.consume_ident_ci("MODE")? {
+            return Err(ParseError::expected(
+                vec!["MODE"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        if !self.consume(&Token::To)? && !self.consume_ident_ci("TO")? {
+            return Err(ParseError::expected(
+                vec!["TO"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        let target = self.parse_string()?;
+        let dry_run = if self.consume_ident_ci("DRY")? {
+            if !self.consume_ident_ci("RUN")? {
+                return Err(ParseError::expected(
+                    vec!["RUN"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+            true
+        } else {
+            false
+        };
+        Ok(QueryExpr::MigratePolicyMode { target, dry_run })
+    }
+
     /// Parse `LINT POLICY '<id>'` or `LINT POLICY JSON '<json>'`. Caller
     /// has just observed the `LINT` ident; the leading token is still
     /// queued. Issue #710.
