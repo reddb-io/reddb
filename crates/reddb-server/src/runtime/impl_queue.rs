@@ -11,6 +11,63 @@ use crate::storage::unified::{Metadata, MetadataValue, UnifiedStore};
 
 use super::*;
 
+use super::primary_queue_store::PrimaryQueueStore;
+use super::queue_lifecycle::{QueueLifecycle, RetirementOutcome};
+use crate::storage::queue::lifecycle::{
+    QueueSide as LcQueueSide, QueueStore as _, QueueStoreError, QueueTxn,
+};
+
+/// Build a [`QueueLifecycle`] backed by a fresh [`PrimaryQueueStore`] for
+/// the given `queue`, plus a `QueueTxn` bound to the live runtime
+/// connection. The store inside the lifecycle and the standalone
+/// [`PrimaryQueueStore`] returned for ack/nack lookups share the same
+/// underlying [`UnifiedStore`] — calls against either are observable on
+/// the other.
+pub(super) fn runtime_lifecycle(
+    runtime: &RedDBRuntime,
+    queue: &str,
+) -> (
+    QueueLifecycle<PrimaryQueueStore>,
+    PrimaryQueueStore,
+    QueueTxn,
+) {
+    let primary_for_lookup = PrimaryQueueStore::new(runtime.clone());
+    let primary_for_lifecycle = PrimaryQueueStore::new(runtime.clone());
+    let txn = primary_for_lifecycle.new_txn();
+    let cfg = primary_for_lifecycle.lifecycle_config(queue);
+    (
+        QueueLifecycle::new(primary_for_lifecycle, cfg),
+        primary_for_lookup,
+        txn,
+    )
+}
+
+/// Convert a lifecycle `QueueSide` view into the AST flavour we accept
+/// from `QueueCommand` callers. Both enums are isomorphic but live in
+/// different modules.
+fn ast_side_to_lc(side: crate::storage::query::ast::QueueSide) -> LcQueueSide {
+    use crate::storage::query::ast::QueueSide as Ast;
+    match side {
+        Ast::Left => LcQueueSide::Left,
+        Ast::Right => LcQueueSide::Right,
+    }
+}
+
+/// Map a `QueueStoreError` (returned by lifecycle methods) onto the
+/// runtime-facing `RedDBError`. Mirrors the wire-error shapes the legacy
+/// `queue_delivery::*` helpers produced.
+fn map_qse(err: QueueStoreError) -> RedDBError {
+    match err {
+        QueueStoreError::UnknownDelivery(id) => RedDBError::NotFound(format!(
+            "delivery_id '{id}' does not resolve to a live pending delivery"
+        )),
+        QueueStoreError::UnknownQueue(q) => RedDBError::NotFound(format!("queue '{q}' not found")),
+        QueueStoreError::ReplicaImmutable => {
+            RedDBError::Internal("replica QueueStore is immutable".to_string())
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Outbox metrics (exposed via /metrics)
 // ---------------------------------------------------------------------------
@@ -556,23 +613,20 @@ impl RedDBRuntime {
             QueueCommand::Pop { queue, side, count } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
-                let popped = super::queue_delivery::pop_messages(
-                    self,
-                    store.as_ref(),
-                    queue,
-                    *side,
-                    *count,
-                )?;
+                let (lifecycle, _ps, txn) = runtime_lifecycle(self, queue);
+                let popped = lifecycle
+                    .pop(queue, ast_side_to_lc(*side), *count, &txn)
+                    .map_err(map_qse)?;
 
                 let mut result =
                     UnifiedResult::with_columns(vec!["message_id".into(), "payload".into()]);
-                for message in &popped {
+                for (message_id, payload) in &popped {
                     let mut record = UnifiedRecord::new();
                     record.set(
                         "message_id",
-                        Value::text(message_id_string(message.message_id)),
+                        Value::text(message_id_string(EntityId::new(*message_id))),
                     );
-                    record.set("payload", message.payload.clone());
+                    record.set("payload", payload.clone());
                     result.push(record);
                 }
                 let popped_count = popped.len() as u64;
@@ -593,8 +647,8 @@ impl RedDBRuntime {
             QueueCommand::Peek { queue, count } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
-                let messages =
-                    super::queue_delivery::peek_messages(self, store.as_ref(), queue, *count)?;
+                let (lifecycle, _ps, txn) = runtime_lifecycle(self, queue);
+                let messages = lifecycle.peek(queue, *count, &txn);
 
                 let mut result =
                     UnifiedResult::with_columns(vec!["message_id".into(), "payload".into()]);
@@ -602,7 +656,7 @@ impl RedDBRuntime {
                     let mut record = UnifiedRecord::new();
                     record.set(
                         "message_id",
-                        Value::text(message_id_string(message.message_id)),
+                        Value::text(message_id_string(EntityId::new(message.message_id))),
                     );
                     record.set("payload", message.payload);
                     result.push(record);
@@ -642,7 +696,8 @@ impl RedDBRuntime {
             QueueCommand::Purge { queue } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
-                let count = super::queue_delivery::purge_messages(self, store.as_ref(), queue)?;
+                let (lifecycle, _ps, txn) = runtime_lifecycle(self, queue);
+                let count = lifecycle.purge(queue, &txn).map_err(map_qse)?;
                 if count > 0 {
                     self.invalidate_result_cache();
                 }
@@ -683,14 +738,17 @@ impl RedDBRuntime {
             } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
-                let delivered = super::queue_delivery::read_messages(
-                    self,
-                    store.as_ref(),
-                    queue,
-                    group.as_deref(),
-                    consumer,
-                    *count,
-                )?;
+                // Resolve the consumer group up-front so the lifecycle
+                // sees the same auto-created `_work_default` / fanout
+                // group the legacy `read_messages` would have minted.
+                let config = load_queue_config(store.as_ref(), queue);
+                let group_owned =
+                    resolve_read_group(store.as_ref(), queue, group.as_deref(), consumer, &config)?;
+                let group_ref = group_owned.as_str();
+                let (lifecycle, _ps, txn) = runtime_lifecycle(self, queue);
+                let delivered = lifecycle
+                    .group_read(&txn, queue, group_ref, consumer, *count)
+                    .map_err(map_qse)?;
 
                 let mut result = UnifiedResult::with_columns(vec![
                     "message_id".into(),
@@ -704,7 +762,7 @@ impl RedDBRuntime {
                     let mut record = UnifiedRecord::new();
                     record.set(
                         "message_id",
-                        Value::text(message_id_string(message.message_id)),
+                        Value::text(message_id_string(EntityId::new(message.message_id))),
                     );
                     record.set("payload", message.payload);
                     record.set("consumer", Value::text(message.consumer));
@@ -789,14 +847,11 @@ impl RedDBRuntime {
             } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
-                let delivered = super::queue_delivery::claim_messages(
-                    self,
-                    store.as_ref(),
-                    queue,
-                    group,
-                    consumer,
-                    *min_idle_ms,
-                )?;
+                require_queue_group(store.as_ref(), queue, group)?;
+                let (lifecycle, _ps, txn) = runtime_lifecycle(self, queue);
+                let delivered = lifecycle
+                    .claim_delivering(queue, consumer, *min_idle_ms, &txn)
+                    .map_err(map_qse)?;
 
                 let mut result = UnifiedResult::with_columns(vec![
                     "message_id".into(),
@@ -809,7 +864,7 @@ impl RedDBRuntime {
                     let mut record = UnifiedRecord::new();
                     record.set(
                         "message_id",
-                        Value::text(message_id_string(message.message_id)),
+                        Value::text(message_id_string(EntityId::new(message.message_id))),
                     );
                     record.set("payload", message.payload);
                     record.set("consumer", Value::text(message.consumer));
@@ -851,15 +906,21 @@ impl RedDBRuntime {
                 )?;
                 let group_ref = group_owned.as_str();
                 require_queue_group(store.as_ref(), queue, group_ref)?;
-                let config = load_queue_config(store.as_ref(), queue);
-                super::queue_delivery::ack_message(
-                    self,
-                    store.as_ref(),
-                    queue,
-                    group_ref,
-                    message_entity,
-                    &config,
-                )?;
+                let (lifecycle, ps, txn) = runtime_lifecycle(self, queue);
+                let did = match delivery_id.as_deref() {
+                    Some(d) => d.to_string(),
+                    None => ps
+                        .find_pending_by_key(queue, message_entity.raw(), group_ref)
+                        .ok_or_else(|| {
+                            RedDBError::NotFound(format!(
+                                "no pending delivery for message '{}' on queue '{}' (group '{}')",
+                                message_entity.raw(),
+                                queue,
+                                group_ref
+                            ))
+                        })?,
+                };
+                lifecycle.ack(&txn, &did).map_err(map_qse)?;
                 self.invalidate_result_cache();
 
                 Ok(RuntimeQueryResult::ok_message(
@@ -885,22 +946,26 @@ impl RedDBRuntime {
                 )?;
                 let group_ref = group_owned.as_str();
                 require_queue_group(store.as_ref(), queue, group_ref)?;
-                let config = load_queue_config(store.as_ref(), queue);
-                let message = match super::queue_delivery::nack_message(
-                    self,
-                    store.as_ref(),
-                    queue,
-                    group_ref,
-                    message_entity,
-                    &config,
-                )? {
-                    super::queue_delivery::NackOutcome::Requeued => "message requeued".to_string(),
-                    super::queue_delivery::NackOutcome::MovedToDlq(dlq) => {
+                let (lifecycle, ps, txn) = runtime_lifecycle(self, queue);
+                let did = match delivery_id.as_deref() {
+                    Some(d) => d.to_string(),
+                    None => ps
+                        .find_pending_by_key(queue, message_entity.raw(), group_ref)
+                        .ok_or_else(|| {
+                            RedDBError::NotFound(format!(
+                                "no pending delivery for message '{}' on queue '{}' (group '{}')",
+                                message_entity.raw(),
+                                queue,
+                                group_ref
+                            ))
+                        })?,
+                };
+                let message = match lifecycle.nack(&txn, &did).map_err(map_qse)? {
+                    RetirementOutcome::Requeued => "message requeued".to_string(),
+                    RetirementOutcome::MovedToDlq(dlq) => {
                         format!("message moved to dead-letter queue '{}'", dlq)
                     }
-                    super::queue_delivery::NackOutcome::Dropped => {
-                        "message dropped after max attempts".to_string()
-                    }
+                    RetirementOutcome::Dropped => "message dropped after max attempts".to_string(),
                 };
                 self.invalidate_result_cache();
 
@@ -1049,13 +1114,11 @@ impl RedDBRuntime {
             }
         }
 
+        let (move_lifecycle, _move_ps, move_txn) = runtime_lifecycle(self, source);
         for message in &selected {
-            super::queue_delivery::delete_message_with_state(
-                Some(self),
-                store.as_ref(),
-                source,
-                message.id,
-            )?;
+            move_lifecycle
+                .delete_with_state(source, message.id.raw(), &move_txn)
+                .map_err(map_qse)?;
         }
         if !selected.is_empty() {
             self.invalidate_result_cache();
