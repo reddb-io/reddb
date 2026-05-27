@@ -156,6 +156,9 @@ impl RedDBServer {
             ("POST", "/v1/_admin/system-users") => self.handle_admin_create_system_user(body),
             ("POST", "/auth/users") => self.handle_auth_create_user(&headers, body, None),
             ("GET", "/auth/users") => self.handle_auth_list_users(&headers, &query),
+            ("GET", "/auth/tenants") => self.handle_auth_list_tenants(&headers),
+            ("GET", "/auth/policies") => self.handle_auth_list_policies(&headers),
+            ("POST", "/auth/can") => self.handle_auth_can(&headers, body),
             ("POST", "/auth/api-keys") => self.handle_auth_create_api_key(body),
             ("POST", "/auth/change-password") => self.handle_auth_change_password(body),
             ("GET", "/auth/whoami") => self.handle_auth_whoami(&headers),
@@ -1672,8 +1675,14 @@ impl RedDBServer {
                     BearerOutcome::Invalid => return false,
                     BearerOutcome::NoMatch => return false,
                 };
+                // POST /auth/can is a self-introspection probe — any
+                // authenticated principal (including read-only) can ask
+                // what they themselves are permitted to do.
+                let is_self_probe = matches!((method, path), ("POST", "/auth/can"));
                 let is_write = !matches!(method, "GET" | "HEAD" | "OPTIONS");
-                if is_write {
+                if is_self_probe {
+                    role.can_read()
+                } else if is_write {
                     role.can_write()
                 } else {
                     role.can_read()
@@ -2399,6 +2408,419 @@ mod tests {
             body.get("error"),
             Some(&crate::json!("not_found_or_not_visible"))
         );
+    }
+
+    // -----------------------------------------------------------------
+    // #740 — Red UI security read contracts: /auth/tenants,
+    // /auth/policies, /auth/can.
+    // -----------------------------------------------------------------
+
+    fn auth_server(require_auth: bool) -> (RedDBServer, std::sync::Arc<crate::auth::AuthStore>) {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let auth = std::sync::Arc::new(crate::auth::AuthStore::new(crate::auth::AuthConfig {
+            enabled: true,
+            require_auth,
+            ..crate::auth::AuthConfig::default()
+        }));
+        let server = RedDBServer::new(runtime).with_auth(std::sync::Arc::clone(&auth));
+        (server, auth)
+    }
+
+    fn issue_token(
+        auth: &crate::auth::AuthStore,
+        tenant: Option<&str>,
+        username: &str,
+        role: crate::auth::Role,
+    ) -> String {
+        auth.create_user_in_tenant(tenant, username, "pw", role)
+            .expect("create user");
+        auth.authenticate_in_tenant(tenant, username, "pw")
+            .expect("authenticate")
+            .token
+    }
+
+    fn parse_json(body: &[u8]) -> crate::json::Value {
+        crate::json::from_slice(body).expect("json parse")
+    }
+
+    #[test]
+    fn auth_tenants_platform_admin_sees_every_tenant() {
+        let (server, auth) = auth_server(true);
+        let admin_token = issue_token(&auth, None, "admin", crate::auth::Role::Admin);
+        // Seed users in two tenants + one platform user.
+        auth.create_user_in_tenant(Some("acme"), "alice", "pw", crate::auth::Role::Read)
+            .unwrap();
+        auth.create_user_in_tenant(Some("widgets"), "bob", "pw", crate::auth::Role::Read)
+            .unwrap();
+
+        let response = server.route(request_with_bearer(
+            "GET",
+            "/auth/tenants",
+            Vec::new(),
+            &admin_token,
+        ));
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+
+        let body = parse_json(&response.body);
+        let tenants = body
+            .get("tenants")
+            .and_then(crate::json::Value::as_array)
+            .expect("tenants array");
+        let ids: Vec<Option<&str>> = tenants
+            .iter()
+            .map(|t| t.get("id").and_then(crate::json::Value::as_str))
+            .collect();
+        // Platform admin sees the implicit platform entry + every tenant.
+        assert!(ids.contains(&None), "platform entry missing: {ids:?}");
+        assert!(ids.contains(&Some("acme")), "acme missing: {ids:?}");
+        assert!(ids.contains(&Some("widgets")), "widgets missing: {ids:?}");
+    }
+
+    #[test]
+    fn auth_tenants_tenant_admin_sees_only_own_tenant() {
+        let (server, auth) = auth_server(true);
+        // Platform tenant has 'platform_user'; acme has 'alice_admin' as admin.
+        auth.create_user_in_tenant(None, "platform_user", "pw", crate::auth::Role::Read)
+            .unwrap();
+        auth.create_user_in_tenant(Some("widgets"), "bob", "pw", crate::auth::Role::Read)
+            .unwrap();
+        let token = issue_token(&auth, Some("acme"), "alice_admin", crate::auth::Role::Admin);
+
+        let response = server.route(request_with_bearer(
+            "GET",
+            "/auth/tenants",
+            Vec::new(),
+            &token,
+        ));
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let body = parse_json(&response.body);
+        let tenants = body
+            .get("tenants")
+            .and_then(crate::json::Value::as_array)
+            .unwrap();
+        let ids: Vec<Option<&str>> = tenants
+            .iter()
+            .map(|t| t.get("id").and_then(crate::json::Value::as_str))
+            .collect();
+        assert_eq!(
+            ids,
+            vec![Some("acme")],
+            "tenant admin must see only own tenant: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn auth_tenants_non_admin_sees_only_self_scope() {
+        let (server, auth) = auth_server(true);
+        auth.create_user_in_tenant(Some("widgets"), "bob", "pw", crate::auth::Role::Read)
+            .unwrap();
+        let token = issue_token(&auth, Some("acme"), "carol", crate::auth::Role::Read);
+        let response = server.route(request_with_bearer(
+            "GET",
+            "/auth/tenants",
+            Vec::new(),
+            &token,
+        ));
+        assert_eq!(response.status, 200);
+        let body = parse_json(&response.body);
+        let tenants = body
+            .get("tenants")
+            .and_then(crate::json::Value::as_array)
+            .unwrap();
+        let ids: Vec<Option<&str>> = tenants
+            .iter()
+            .map(|t| t.get("id").and_then(crate::json::Value::as_str))
+            .collect();
+        assert_eq!(ids, vec![Some("acme")]);
+    }
+
+    #[test]
+    fn auth_tenants_unauthenticated_requires_auth() {
+        let (server, _auth) = auth_server(true);
+        let response = server.route(request("/auth/tenants"));
+        // Routing middleware gates this — no bearer with require_auth on.
+        assert_eq!(response.status, 401);
+    }
+
+    #[test]
+    fn auth_tenants_auth_disabled_returns_full_set() {
+        // require_auth = false, no bearer → handler treats it as
+        // platform-admin visibility.
+        let (server, auth) = auth_server(false);
+        auth.create_user_in_tenant(Some("acme"), "alice", "pw", crate::auth::Role::Read)
+            .unwrap();
+        let response = server.route(request("/auth/tenants"));
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let body = parse_json(&response.body);
+        let tenants = body
+            .get("tenants")
+            .and_then(crate::json::Value::as_array)
+            .unwrap();
+        let ids: Vec<Option<&str>> = tenants
+            .iter()
+            .map(|t| t.get("id").and_then(crate::json::Value::as_str))
+            .collect();
+        assert!(ids.contains(&Some("acme")));
+    }
+
+    #[test]
+    fn auth_policies_platform_admin_sees_every_policy() {
+        let (server, auth) = auth_server(true);
+        let admin_token = issue_token(&auth, None, "admin", crate::auth::Role::Admin);
+        // Two policies in different tenants.
+        let policy_json = |id: &str, tenant: Option<&str>| {
+            let tenant_field = match tenant {
+                Some(t) => format!(",\"tenant\":\"{t}\""),
+                None => String::new(),
+            };
+            format!(
+                r#"{{"id":"{id}","version":1,"statements":[{{"effect":"Allow","actions":["*"],"resources":["*"]}}]{tenant_field}}}"#
+            )
+        };
+        auth.put_policy(
+            crate::auth::policies::Policy::from_json_str(&policy_json("p_platform", None)).unwrap(),
+        )
+        .unwrap();
+        auth.put_policy(
+            crate::auth::policies::Policy::from_json_str(&policy_json("p_acme", Some("acme")))
+                .unwrap(),
+        )
+        .unwrap();
+        auth.put_policy(
+            crate::auth::policies::Policy::from_json_str(&policy_json(
+                "p_widgets",
+                Some("widgets"),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let response = server.route(request_with_bearer(
+            "GET",
+            "/auth/policies",
+            Vec::new(),
+            &admin_token,
+        ));
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let body = parse_json(&response.body);
+        let policies = body
+            .get("policies")
+            .and_then(crate::json::Value::as_array)
+            .unwrap();
+        let ids: Vec<&str> = policies
+            .iter()
+            .filter_map(|p| p.get("id").and_then(crate::json::Value::as_str))
+            .collect();
+        for required in ["p_platform", "p_acme", "p_widgets"] {
+            assert!(
+                ids.contains(&required),
+                "platform admin missing {required}: {ids:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn auth_policies_tenant_admin_sees_own_plus_platform() {
+        let (server, auth) = auth_server(true);
+        let policy_json = |id: &str, tenant: Option<&str>| {
+            let tenant_field = match tenant {
+                Some(t) => format!(",\"tenant\":\"{t}\""),
+                None => String::new(),
+            };
+            format!(
+                r#"{{"id":"{id}","version":1,"statements":[{{"effect":"Allow","actions":["*"],"resources":["*"]}}]{tenant_field}}}"#
+            )
+        };
+        auth.put_policy(
+            crate::auth::policies::Policy::from_json_str(&policy_json("p_platform", None)).unwrap(),
+        )
+        .unwrap();
+        auth.put_policy(
+            crate::auth::policies::Policy::from_json_str(&policy_json("p_acme", Some("acme")))
+                .unwrap(),
+        )
+        .unwrap();
+        auth.put_policy(
+            crate::auth::policies::Policy::from_json_str(&policy_json(
+                "p_widgets",
+                Some("widgets"),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let token = issue_token(&auth, Some("acme"), "alice_admin", crate::auth::Role::Admin);
+
+        let response = server.route(request_with_bearer(
+            "GET",
+            "/auth/policies",
+            Vec::new(),
+            &token,
+        ));
+        assert_eq!(response.status, 200);
+        let body = parse_json(&response.body);
+        let policies = body
+            .get("policies")
+            .and_then(crate::json::Value::as_array)
+            .unwrap();
+        let ids: Vec<&str> = policies
+            .iter()
+            .filter_map(|p| p.get("id").and_then(crate::json::Value::as_str))
+            .collect();
+        assert!(
+            ids.contains(&"p_platform"),
+            "platform policy hidden: {ids:?}"
+        );
+        assert!(ids.contains(&"p_acme"), "own tenant policy hidden: {ids:?}");
+        assert!(
+            !ids.contains(&"p_widgets"),
+            "leaked other-tenant policy: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn auth_can_batch_returns_results_per_check() {
+        let (server, auth) = auth_server(true);
+        let admin_token = issue_token(&auth, None, "admin", crate::auth::Role::Admin);
+        // Attach allow-all so admin user has a matching Allow.
+        auth.put_policy(
+            crate::auth::policies::Policy::from_json_str(
+                r#"{"id":"allow_all","version":1,"statements":[{"effect":"Allow","actions":["*"],"resources":["*"]}]}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        auth.attach_policy(
+            crate::auth::store::PrincipalRef::User(crate::auth::UserId::from_parts(None, "admin")),
+            "allow_all",
+        )
+        .unwrap();
+
+        let body = br#"{"checks":[
+            {"action":"read","resource":{"kind":"collection","name":"accounts"}},
+            {"action":"delete","resource":{"kind":"collection","name":"audit"}}
+        ]}"#
+        .to_vec();
+        let response = server.route(request_with_bearer("POST", "/auth/can", body, &admin_token));
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let body = parse_json(&response.body);
+        let results = body
+            .get("results")
+            .and_then(crate::json::Value::as_array)
+            .expect("results array");
+        assert_eq!(results.len(), 2);
+        for r in results {
+            assert_eq!(r.get("allowed"), Some(&crate::json!(true)));
+            assert!(
+                r.get("reason")
+                    .and_then(crate::json::Value::as_str)
+                    .is_some(),
+                "reason must be present and a string: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn auth_can_denies_when_no_matching_policy_in_policy_only_mode() {
+        let (server, auth) = auth_server(true);
+        auth.set_enforcement_mode(crate::auth::enforcement_mode::PolicyEnforcementMode::PolicyOnly);
+        let token = issue_token(&auth, Some("acme"), "alice", crate::auth::Role::Read);
+
+        let body = br#"{"checks":[
+            {"action":"write","resource":{"kind":"collection","name":"secret"}}
+        ]}"#
+        .to_vec();
+        let response = server.route(request_with_bearer("POST", "/auth/can", body, &token));
+        assert_eq!(response.status, 200);
+        let body = parse_json(&response.body);
+        let result = &body
+            .get("results")
+            .and_then(crate::json::Value::as_array)
+            .unwrap()[0];
+        assert_eq!(result.get("allowed"), Some(&crate::json!(false)));
+        let reason = result
+            .get("reason")
+            .and_then(crate::json::Value::as_str)
+            .unwrap();
+        assert!(
+            reason.contains("default deny") || reason.starts_with("deny"),
+            "reason should explain the deny: {reason}"
+        );
+    }
+
+    #[test]
+    fn auth_can_accepts_single_check_form() {
+        let (server, auth) = auth_server(true);
+        let token = issue_token(&auth, None, "admin", crate::auth::Role::Admin);
+        let body =
+            br#"{"action":"read","resource":{"kind":"collection","name":"accounts"}}"#.to_vec();
+        let response = server.route(request_with_bearer("POST", "/auth/can", body, &token));
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let body = parse_json(&response.body);
+        let results = body
+            .get("results")
+            .and_then(crate::json::Value::as_array)
+            .expect("results array");
+        assert_eq!(results.len(), 1, "single-check form must yield one result");
+    }
+
+    #[test]
+    fn auth_can_unauthenticated_requires_auth() {
+        let (server, _auth) = auth_server(true);
+        let body = br#"{"checks":[{"action":"read","resource":{"kind":"collection","name":"x"}}]}"#
+            .to_vec();
+        let response = server.route(request_with("POST", "/auth/can", body));
+        // Gated by the routing middleware before reaching the handler.
+        assert_eq!(response.status, 401);
+    }
+
+    #[test]
+    fn auth_can_auth_disabled_returns_results() {
+        let (server, _auth) = auth_server(false);
+        let body = br#"{"checks":[{"action":"read","resource":{"kind":"collection","name":"x"}}]}"#
+            .to_vec();
+        let response = server.route(request_with("POST", "/auth/can", body));
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let body = parse_json(&response.body);
+        let results = body
+            .get("results")
+            .and_then(crate::json::Value::as_array)
+            .unwrap();
+        assert_eq!(results.len(), 1);
     }
 
     #[test]
