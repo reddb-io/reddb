@@ -354,6 +354,7 @@ impl CostEstimator {
             | QueryExpr::ShowPolicies { .. }
             | QueryExpr::ShowEffectivePermissions { .. }
             | QueryExpr::SimulatePolicy { .. }
+            | QueryExpr::LintPolicy { .. }
             | QueryExpr::CreateMigration(_)
             | QueryExpr::ApplyMigration(_)
             | QueryExpr::RollbackMigration(_)
@@ -439,6 +440,7 @@ impl CostEstimator {
             | QueryExpr::ShowPolicies { .. }
             | QueryExpr::ShowEffectivePermissions { .. }
             | QueryExpr::SimulatePolicy { .. }
+            | QueryExpr::LintPolicy { .. }
             | QueryExpr::CreateMigration(_)
             | QueryExpr::ApplyMigration(_)
             | QueryExpr::RollbackMigration(_)

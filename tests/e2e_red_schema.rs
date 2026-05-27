@@ -710,6 +710,116 @@ fn red_policy_actions_virtual_table_surfaces_catalog() {
 }
 
 #[test]
+fn lint_policy_json_returns_diagnostic_rows() {
+    cleanup_scope();
+    let rt = runtime();
+    // No auth_store needed for the JSON form — the linter walks the
+    // literal directly.
+    let result = rt
+        .execute_query(
+            "LINT POLICY JSON '{\"id\":\"p\",\"version\":1,\"statements\":[\
+             {\"effect\":\"allow\",\"actions\":[\"definitely-not-an-action\",\"vault:unseal_history\"],\
+             \"resources\":[\"*\"]}]}'",
+        )
+        .expect("LINT POLICY JSON")
+        .result;
+
+    assert_eq!(
+        result.columns,
+        vec![
+            "severity".to_string(),
+            "code".to_string(),
+            "message".to_string(),
+            "suggested_fix".to_string(),
+            "location".to_string(),
+        ]
+    );
+    // 3 diagnostics: UnknownAction (error), DeprecatedAction (warning),
+    // SuspectResource (warning).
+    assert_eq!(result.records.len(), 3, "rows={:?}", result.records);
+    // Errors sort before warnings.
+    assert_eq!(text(&result.records[0], "severity"), "error");
+    assert_eq!(text(&result.records[0], "code"), "unknown_action");
+    // The deprecated diagnostic carries the catalog's replacement hint.
+    let dep = result
+        .records
+        .iter()
+        .find(
+            |r| matches!(r.get("code"), Some(Value::Text(s)) if s.as_ref() == "deprecated_action"),
+        )
+        .expect("deprecated_action row");
+    assert_eq!(text(dep, "suggested_fix"), "vault:read_metadata");
+    cleanup_scope();
+}
+
+#[test]
+fn lint_policy_by_id_matches_lint_policy_json() {
+    cleanup_scope();
+    let rt = runtime();
+    let auth = std::sync::Arc::new(AuthStore::new(AuthConfig::default()));
+    let policy_json = r#"{"id":"shadowed","version":1,"statements":[
+        {"effect":"allow","actions":["select"],"resources":["table:foo"]},
+        {"effect":"deny","actions":["select"],"resources":["table:foo"]}
+    ]}"#;
+    let policy = Policy::from_json_str(policy_json).expect("policy parse");
+    auth.put_policy(policy).expect("put policy");
+    rt.set_auth_store(auth.clone());
+
+    // By id — fetches the stored document and lints it.
+    let by_id = rt
+        .execute_query("LINT POLICY 'shadowed'")
+        .expect("LINT POLICY id")
+        .result;
+    // By JSON literal — same diagnostic shape, no auth_store touch.
+    let by_json_sql = format!("LINT POLICY JSON '{}'", policy_json.replace('\'', "''"));
+    let by_json = rt
+        .execute_query(&by_json_sql)
+        .expect("LINT POLICY JSON")
+        .result;
+
+    // Same diagnostic set in the same order.
+    assert!(!by_id.records.is_empty());
+    assert_eq!(by_id.records.len(), by_json.records.len());
+    for (a, b) in by_id.records.iter().zip(by_json.records.iter()) {
+        assert_eq!(a.get("code"), b.get("code"), "rows={a:?} vs {b:?}");
+        assert_eq!(a.get("severity"), b.get("severity"));
+    }
+    let has_no_effect = by_id.records.iter().any(
+        |r| matches!(r.get("code"), Some(Value::Text(s)) if s.as_ref() == "no_effect_statements"),
+    );
+    assert!(has_no_effect, "rows={:?}", by_id.records);
+    cleanup_scope();
+}
+
+#[test]
+fn lint_policy_unknown_id_errors() {
+    cleanup_scope();
+    let rt = runtime();
+    let auth = std::sync::Arc::new(AuthStore::new(AuthConfig::default()));
+    rt.set_auth_store(auth);
+    let err = rt
+        .execute_query("LINT POLICY 'missing'")
+        .expect_err("missing policy must error");
+    assert!(format!("{err:?}").contains("missing"));
+    cleanup_scope();
+}
+
+#[test]
+fn lint_policy_clean_policy_returns_zero_rows() {
+    cleanup_scope();
+    let rt = runtime();
+    let result = rt
+        .execute_query(
+            "LINT POLICY JSON '{\"id\":\"p\",\"version\":1,\"statements\":[\
+             {\"effect\":\"allow\",\"actions\":[\"select\"],\"resources\":[\"table:public.orders\"]}]}'",
+        )
+        .expect("clean lint")
+        .result;
+    assert!(result.records.is_empty(), "rows={:?}", result.records);
+    cleanup_scope();
+}
+
+#[test]
 fn show_commands_match_red_schema_queries_for_stable_introspection() {
     cleanup_scope();
     let rt = runtime();

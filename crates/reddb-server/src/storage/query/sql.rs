@@ -791,6 +791,7 @@ impl<'a> Parser<'a> {
                 if name.eq_ignore_ascii_case("GRANT")
                     || name.eq_ignore_ascii_case("REVOKE")
                     || name.eq_ignore_ascii_case("SIMULATE")
+                    || name.eq_ignore_ascii_case("LINT")
                     || name.eq_ignore_ascii_case("APPLY") =>
             {
                 self.parse_sql_statement().map(FrontendStatement::Sql)
@@ -2155,6 +2156,10 @@ impl<'a> Parser<'a> {
             }
             Token::Ident(name) if name.eq_ignore_ascii_case("SIMULATE") => {
                 let expr = self.parse_simulate_policy()?;
+                Ok(SqlCommand::IamPolicy(expr))
+            }
+            Token::Ident(name) if name.eq_ignore_ascii_case("LINT") => {
+                let expr = self.parse_lint_policy()?;
                 Ok(SqlCommand::IamPolicy(expr))
             }
             Token::Set => {
