@@ -143,4 +143,8 @@ impl RuntimeQueryPort for RedDBRuntime {
     fn resolve_semantic_api_key(&self, provider: &crate::ai::AiProvider) -> RedDBResult<String> {
         crate::ai::resolve_api_key_from_runtime(provider, None, self)
     }
+
+    fn enforce_ai_provider_policy(&self, provider: &crate::ai::AiProvider) -> RedDBResult<()> {
+        crate::runtime::ai::provider_gate::enforce(self, provider)
+    }
 }
