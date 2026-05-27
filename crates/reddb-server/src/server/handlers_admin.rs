@@ -2066,6 +2066,167 @@ impl RedDBServer {
         json_response(200, JsonValue::Object(object))
     }
 
+    /// `GET /cluster/status` — Red UI cluster status snapshot (#738).
+    ///
+    /// Aggregates deployment shape, runtime health, storage, WAL, system
+    /// resources, and replication facts behind one stable contract so
+    /// the UI can render a cluster status page without stitching
+    /// multiple endpoints. Fields the engine cannot measure reliably
+    /// today are returned as a structured
+    /// `{ "available": false, "reason": "..." }` envelope rather than
+    /// fabricated — see the #738 thread-discussion decision.
+    pub(crate) fn handle_cluster_status(&self) -> HttpResponse {
+        use crate::presentation::cluster_status_json::{
+            cluster_status_json, ClusterStatusInputs, ConnectionSnapshot, DeploymentShapeView,
+            ProcessRoleView, ReplicaView, ReplicationSnapshot, StorageSnapshot, SystemSnapshot,
+            TransportListenerView, TransportSnapshot, WalSnapshot,
+        };
+
+        let lifecycle = self.runtime.lifecycle();
+        let phase = lifecycle.phase();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let uptime_secs = (now_ms.saturating_sub(lifecycle.started_at_ms() as u64) as f64) / 1000.0;
+
+        let role_view = match self.runtime.write_gate().role() {
+            crate::replication::ReplicationRole::Standalone => ProcessRoleView::Standalone,
+            crate::replication::ReplicationRole::Primary => ProcessRoleView::Primary,
+            crate::replication::ReplicationRole::Replica { .. } => ProcessRoleView::Replica,
+        };
+
+        let db = self.runtime.db();
+        let db_size_bytes = db
+            .path()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len());
+        let remote_backend = db
+            .options()
+            .remote_backend
+            .as_ref()
+            .map(|b| b.name().to_string());
+
+        let (enc_state, enc_error) = self.runtime.encryption_at_rest_status();
+
+        let active = self
+            .options
+            .transport_readiness
+            .active
+            .iter()
+            .map(|l| TransportListenerView {
+                transport: l.transport.clone(),
+                bind_addr: l.bind_addr.clone(),
+                explicit: l.explicit,
+                reason: None,
+            })
+            .collect();
+        let failed = self
+            .options
+            .transport_readiness
+            .failed
+            .iter()
+            .map(|l| TransportListenerView {
+                transport: l.transport.clone(),
+                bind_addr: l.bind_addr.clone(),
+                explicit: l.explicit,
+                reason: Some(l.reason.clone()),
+            })
+            .collect();
+
+        let runtime_stats = self.runtime.stats();
+        let limits = self.runtime.resource_limits();
+
+        let (current_lsn, last_archived_lsn) = self.runtime.wal_archive_progress();
+
+        let system = &runtime_stats.system;
+        let system_view = SystemSnapshot {
+            pid: system.pid,
+            cpu_cores: system.cpu_cores,
+            os: system.os.clone(),
+            arch: system.arch.clone(),
+            hostname: system.hostname.clone(),
+            // `SystemInfo` returns 0 on platforms where the engine
+            // cannot probe memory (currently anything non-Linux). Map
+            // that to `None` so the JSON envelope is honest about
+            // measurement absence rather than reporting `0`.
+            total_memory_bytes: if system.total_memory_bytes == 0 {
+                None
+            } else {
+                Some(system.total_memory_bytes)
+            },
+            available_memory_bytes: if system.available_memory_bytes == 0 {
+                None
+            } else {
+                Some(system.available_memory_bytes)
+            },
+        };
+
+        let replicas = self
+            .runtime
+            .primary_replica_snapshots()
+            .into_iter()
+            .map(|r| ReplicaView {
+                id: r.id,
+                last_acked_lsn: r.last_acked_lsn,
+                last_sent_lsn: r.last_sent_lsn,
+                last_durable_lsn: r.last_durable_lsn,
+                last_seen_at_unix_ms: r.last_seen_at_unix_ms,
+                region: r.region,
+            })
+            .collect();
+        let apply_errors = self
+            .runtime
+            .replica_apply_error_counts()
+            .iter()
+            .map(|(kind, count)| (kind.label().to_string(), *count))
+            .collect();
+
+        let inputs = ClusterStatusInputs {
+            snapshot_at_unix_ms: now_ms,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            phase: phase.as_str().to_string(),
+            uptime_secs,
+            started_at_unix_ms: lifecycle.started_at_ms() as u64,
+            ready_at_unix_ms: lifecycle.ready_at_ms(),
+            read_only: self.runtime.write_gate().is_read_only(),
+            // This handler is only reachable from the network-serving
+            // runtime (this crate's HTTP listener). Per the #738
+            // thread-discussion we report `server` rather than
+            // fabricating a richer classification we cannot prove.
+            deployment_shape: DeploymentShapeView::Server,
+            process_role: role_view,
+            transport: TransportSnapshot { active, failed },
+            connections: ConnectionSnapshot {
+                active: runtime_stats.active_connections as u64,
+                idle: runtime_stats.idle_connections as u64,
+                total_checkouts: runtime_stats.total_checkouts,
+                max: limits.max_connections.map(|n| n as u64),
+            },
+            storage: StorageSnapshot {
+                db_size_bytes,
+                remote_backend,
+                encryption_state: enc_state.to_string(),
+                encryption_error: enc_error,
+                paged_mode: runtime_stats.paged_mode,
+            },
+            wal: WalSnapshot {
+                current_lsn,
+                last_archived_lsn,
+            },
+            system: system_view,
+            replication: ReplicationSnapshot {
+                role: role_view,
+                commit_policy: self.runtime.commit_policy().label().to_string(),
+                replicas,
+                apply_health: self.runtime.replica_apply_health(),
+                apply_errors,
+            },
+        };
+
+        json_response(200, cluster_status_json(&inputs))
+    }
+
     /// `POST /admin/drain` — flip to Draining phase. Subsequent
     /// `WriteGate`-checked writes will be rejected until shutdown
     /// completes or another phase override re-enables Ready.
