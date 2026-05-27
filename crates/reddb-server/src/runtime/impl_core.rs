@@ -1358,6 +1358,7 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
         | QueryExpr::ShowPolicies { .. }
         | QueryExpr::ShowEffectivePermissions { .. }
         | QueryExpr::SimulatePolicy { .. }
+        | QueryExpr::LintPolicy { .. }
         | QueryExpr::CreateMigration(_)
         | QueryExpr::ApplyMigration(_)
         | QueryExpr::RollbackMigration(_)
@@ -6946,6 +6947,7 @@ impl RedDBRuntime {
                 ref action,
                 ref resource,
             } => self.execute_simulate_policy(query, user, action, resource),
+            QueryExpr::LintPolicy { ref source } => self.execute_lint_policy(query, source),
             QueryExpr::CreateMigration(ref q) => self.execute_create_migration(query, q),
             QueryExpr::ApplyMigration(ref q) => self.execute_apply_migration(query, q),
             QueryExpr::RollbackMigration(ref q) => self.execute_rollback_migration(query, q),
@@ -9720,6 +9722,19 @@ impl RedDBRuntime {
                     "*",
                 );
             }
+            QueryExpr::LintPolicy { .. } => {
+                // Linting is a read-only inspection — gate it like
+                // simulate (policy management role).
+                return self.check_policy_management_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    "policy:simulate",
+                    "policy",
+                    "*",
+                );
+            }
             // DROP and TRUNCATE — Write-role gate + per-collection IAM policy
             // when IAM mode is active. Other DDL stays role-only for now.
             QueryExpr::DropTable(q) => {
@@ -10889,6 +10904,102 @@ impl RedDBRuntime {
             query: query.to_string(),
             mode: crate::storage::query::modes::QueryMode::Sql,
             statement: "show_effective_permissions",
+            engine: "iam-policies",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+        })
+    }
+
+    fn execute_lint_policy(
+        &self,
+        query: &str,
+        source: &crate::storage::query::ast::LintPolicySource,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        use crate::auth::policy_linter::lint;
+        use crate::storage::query::ast::LintPolicySource;
+        use crate::storage::query::unified::UnifiedRecord;
+        use crate::storage::schema::Value as SchemaValue;
+        use std::sync::Arc;
+
+        // Resolve the policy text. `JSON` source lints the literal
+        // verbatim; `Id` source fetches the stored document so
+        // operators can lint a policy by name without rebuilding the
+        // JSON from `SHOW POLICY`.
+        let policy_text = match source {
+            LintPolicySource::Json(text) => text.clone(),
+            LintPolicySource::Id(id) => {
+                let auth_store =
+                    self.inner.auth_store.read().clone().ok_or_else(|| {
+                        RedDBError::Query("auth store not configured".to_string())
+                    })?;
+                let policy = auth_store
+                    .get_policy(id)
+                    .ok_or_else(|| RedDBError::Query(format!("policy `{id}` not found")))?;
+                policy.to_json_string()
+            }
+        };
+        let diagnostics = lint(&policy_text);
+
+        let principal_str = current_auth_identity()
+            .map(|(u, _)| u)
+            .unwrap_or_else(|| "anonymous".into());
+        tracing::info!(
+            target: "audit",
+            principal = %principal_str,
+            action = "iam:policy.lint",
+            diagnostic_count = diagnostics.len(),
+            "LINT POLICY issued"
+        );
+        self.inner.audit_log.record(
+            "iam/policy.lint",
+            &principal_str,
+            match source {
+                LintPolicySource::Id(id) => id.as_str(),
+                LintPolicySource::Json(_) => "<json>",
+            },
+            "ok",
+            crate::json::Value::Null,
+        );
+
+        // One row per diagnostic. Column order matches the HTTP
+        // surface's JSON keys so the two contracts line up.
+        const COLUMNS: [&str; 5] = ["severity", "code", "message", "suggested_fix", "location"];
+        let schema = Arc::new(
+            COLUMNS
+                .iter()
+                .map(|name| Arc::<str>::from(*name))
+                .collect::<Vec<_>>(),
+        );
+        let records: Vec<UnifiedRecord> = diagnostics
+            .iter()
+            .map(|d| {
+                UnifiedRecord::with_schema(
+                    Arc::clone(&schema),
+                    vec![
+                        SchemaValue::text(d.severity.as_str()),
+                        SchemaValue::text(d.code.as_str()),
+                        SchemaValue::text(d.message.clone()),
+                        d.suggested_fix
+                            .as_deref()
+                            .map(SchemaValue::text)
+                            .unwrap_or(SchemaValue::Null),
+                        d.location
+                            .as_deref()
+                            .map(SchemaValue::text)
+                            .unwrap_or(SchemaValue::Null),
+                    ],
+                )
+            })
+            .collect();
+        let mut result = crate::storage::query::unified::UnifiedResult::with_columns(
+            COLUMNS.iter().map(|c| c.to_string()).collect(),
+        );
+        result.records = records;
+        Ok(RuntimeQueryResult {
+            query: query.to_string(),
+            mode: crate::storage::query::modes::QueryMode::Sql,
+            statement: "lint_policy",
             engine: "iam-policies",
             result,
             affected_rows: 0,
