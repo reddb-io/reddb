@@ -239,6 +239,20 @@ LIMIT 100
 - **Consumer group tracking**: per-consumer delivery state with NACK/claim support.
 - **WAL integration**: push/pop/ack are durable via write-ahead log.
 
+## Configuration
+
+Server-side knobs that govern queue behaviour live under `red.config` and are
+mutable at runtime via `SET CONFIG`.
+
+| Key | Default | Effect |
+|-----|---------|--------|
+| `red.config.queue.max_wait_ms` | `60000` (60s) | Maximum budget the runtime will honour on `QUEUE READ … WAIT <duration>`. Requests above the cap are rejected immediately with an error that names the active cap; no waiter is registered. `WAIT` is also rejected inside an explicit `BEGIN`/`COMMIT` transaction — the wait is autocommit-only. |
+
+```sql
+-- Tighten the cap to 5 seconds for an operator-controlled deployment
+SET CONFIG red.config.queue.max_wait_ms = 5000
+```
+
 ## Introspection
 
 ```sql
