@@ -2505,6 +2505,10 @@ impl RedDBRuntime {
                 pending_versioned_updates: parking_lot::RwLock::new(HashMap::new()),
                 pending_kv_watch_events: parking_lot::RwLock::new(HashMap::new()),
                 pending_store_wal_actions: parking_lot::RwLock::new(HashMap::new()),
+                queue_wait_registry: std::sync::Arc::new(
+                    crate::runtime::queue_wait_registry::QueueWaitRegistry::new(),
+                ),
+                pending_queue_wakes: parking_lot::RwLock::new(HashMap::new()),
                 tenant_tables: parking_lot::RwLock::new(HashMap::new()),
                 ddl_epoch: std::sync::atomic::AtomicU64::new(0),
                 write_gate: Arc::new(crate::runtime::write_gate::WriteGate::from_options(
@@ -6048,6 +6052,7 @@ impl RedDBRuntime {
                                     self.revive_pending_versioned_updates(conn_id);
                                     self.revive_pending_tombstones(conn_id);
                                     self.discard_pending_kv_watch_events(conn_id);
+                                    self.discard_pending_queue_wakes(conn_id);
                                     self.discard_pending_store_wal_actions(conn_id);
                                     return Err(err);
                                 }
@@ -6080,6 +6085,7 @@ impl RedDBRuntime {
                                 self.finalize_pending_versioned_updates(conn_id);
                                 self.finalize_pending_tombstones(conn_id);
                                 self.finalize_pending_kv_watch_events(conn_id);
+                                self.finalize_pending_queue_wakes(conn_id);
                                 ("commit", format!("COMMIT — xid={} committed", ctx.xid))
                             }
                             None => (
@@ -6108,6 +6114,7 @@ impl RedDBRuntime {
                                 self.revive_pending_versioned_updates(conn_id);
                                 self.revive_pending_tombstones(conn_id);
                                 self.discard_pending_kv_watch_events(conn_id);
+                                self.discard_pending_queue_wakes(conn_id);
                                 self.discard_pending_store_wal_actions(conn_id);
                                 ("rollback", format!("ROLLBACK — xid={} aborted", ctx.xid))
                             }
@@ -9067,6 +9074,44 @@ impl RedDBRuntime {
                 }
             }
         }
+    }
+
+    /// Slice C of PRD #718 — accessor for the local wait registry.
+    pub fn queue_wait_registry(
+        &self,
+    ) -> std::sync::Arc<crate::runtime::queue_wait_registry::QueueWaitRegistry> {
+        self.inner.queue_wait_registry.clone()
+    }
+
+    /// Buffer a `(scope, queue)` wake on the current connection so it
+    /// fires post-COMMIT, or notify immediately if no transaction is
+    /// open (autocommit path). The wait registry only ever observes
+    /// notifies for committed work — rollback drops the buffer.
+    pub(crate) fn record_queue_wake(&self, scope: &str, queue: &str) {
+        if self.current_xid().is_some() {
+            let conn_id = current_connection_id();
+            self.inner
+                .pending_queue_wakes
+                .write()
+                .entry(conn_id)
+                .or_default()
+                .push((scope.to_string(), queue.to_string()));
+            return;
+        }
+        self.inner.queue_wait_registry.notify(scope, queue);
+    }
+
+    pub(crate) fn finalize_pending_queue_wakes(&self, conn_id: u64) {
+        let Some(pending) = self.inner.pending_queue_wakes.write().remove(&conn_id) else {
+            return;
+        };
+        for (scope, queue) in pending {
+            self.inner.queue_wait_registry.notify(&scope, &queue);
+        }
+    }
+
+    pub(crate) fn discard_pending_queue_wakes(&self, conn_id: u64) {
+        self.inner.pending_queue_wakes.write().remove(&conn_id);
     }
 
     pub(crate) fn finalize_pending_kv_watch_events(&self, conn_id: u64) {
