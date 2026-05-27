@@ -4,6 +4,43 @@
 
 ### Added
 
+- `QueueLifecycle` gains three new methods on the canonical surface:
+  `pop`, `delete_with_state`, `move_between_queues`
+  ([#539 follow-up](https://github.com/reddb-io/reddb/issues/539),
+  [#716](https://github.com/reddb-io/reddb/issues/716)). Lifecycle
+  wrappers delegate to new `QueueStore` trait methods
+  (`pop_available`, `delete_with_state`, `move_to_queue`) implemented
+  on all three stores — `InMemoryQueueStore` (semantic implementation
+  with proper tombstone routing), `PrimaryQueueStore` (shims to the
+  existing `queue_delivery::*` MVCC-aware paths), and
+  `ReplicaQueueStore` (returns `ReplicaImmutable`).
+
+- Every queue command handler in `runtime/impl_queue.rs` (Pop, Peek,
+  Purge, Read, Claim, Ack, Nack, Move) now routes through
+  `QueueLifecycle` instead of `queue_delivery::*` directly
+  ([#716](https://github.com/reddb-io/reddb/issues/716)). The lifecycle
+  is the single funnel for every mutation on a queue; `queue_delivery`
+  shrinks to an implementation detail of the primary store and will be
+  fully inlined in a later slice. Wire output is byte-identical
+  (existing transport tests unchanged).
+
+- Domain vocabulary for **Live queue wait**, **Ephemeral notification**,
+  and **Durable stream** + **ADR 0028** establishing the boundary
+  between the three primitives so the queue lifecycle does not absorb
+  incompatible semantics. First-cut `QUEUE READ ... WAIT` semantics
+  scoped (autocommit-only, explicit duration, server-side max cap,
+  Prometheus telemetry).
+
+### Notes
+
+- The `## Unreleased` entries below carried the NEON + QUEUE ACK
+  delivery_id work shipped in v1.6.0; they have been moved under that
+  release heading where they belong.
+
+## 1.6.0
+
+### Added
+
 - TurboQuant NEON scoring kernel on the canonical blocked-by-32 layout
   ([#692](https://github.com/reddb-io/reddb/issues/692),
   [PRD #688](https://github.com/reddb-io/reddb/issues/688),
