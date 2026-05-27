@@ -543,7 +543,7 @@ impl QueueStore for PrimaryQueueStore {
                     queue,
                     EntityId::new(*id),
                 )
-                .map_or(true, |at| at <= now_ns)
+                .is_none_or(|at| at <= now_ns)
             })
             .collect();
         if matches!(side, QueueSide::Right) {
@@ -578,7 +578,7 @@ impl QueueStore for PrimaryQueueStore {
                     queue,
                     EntityId::new(*id),
                 )
-                .map_or(true, |at| at <= now_ns)
+                .is_none_or(|at| at <= now_ns)
             })
             .collect();
         if matches!(side, QueueSide::Right) {
