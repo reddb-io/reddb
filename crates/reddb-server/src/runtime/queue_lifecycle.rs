@@ -343,12 +343,13 @@ impl<S: QueueStore> QueueLifecycle<S> {
     /// against `LifecycleConfig::max_attempts` + `dlq_target` and applies
     /// it. Callers never see the decision — observe outcomes via the test
     /// tap.
-    pub(crate) fn nack(&self, txn: &QueueTxn, delivery_id: &str) -> Result<()> {
+    pub(crate) fn nack(&self, txn: &QueueTxn, delivery_id: &str) -> Result<RetirementOutcome> {
         let bumped = self.store.bump_attempt(txn, delivery_id)?;
         let max_attempts = self
             .store
             .read_max_attempts(&bumped.queue, bumped.message_id);
         let attempts = bumped.attempts;
+        let outcome: RetirementOutcome;
         if attempts >= max_attempts {
             match &self.config.dlq_target {
                 Some(target) => {
@@ -358,7 +359,8 @@ impl<S: QueueStore> QueueLifecycle<S> {
                         .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
                     self.retire(txn, delivery_id)?;
                     self.store.enqueue_dlq(txn, target, payload)?;
-                    self.record(RetirementOutcome::MovedToDlq(target.clone()));
+                    outcome = RetirementOutcome::MovedToDlq(target.clone());
+                    self.record(outcome.clone());
                     // DLQ promotion is forensic — emit through the
                     // process-wide audit sink (which also lays a
                     // tracing::warn breadcrumb under
@@ -379,12 +381,14 @@ impl<S: QueueStore> QueueLifecycle<S> {
                 }
                 None => {
                     self.retire(txn, delivery_id)?;
-                    self.record(RetirementOutcome::Dropped);
+                    outcome = RetirementOutcome::Dropped;
+                    self.record(outcome.clone());
                 }
             }
         } else {
             self.store.release_pending(txn, delivery_id)?;
-            self.record(RetirementOutcome::Requeued);
+            outcome = RetirementOutcome::Requeued;
+            self.record(outcome.clone());
         }
         // Counter bumping when the telemetry handle is attached.
         // Per-(queue, group, mode) labels stay accurate even though
@@ -407,7 +411,7 @@ impl<S: QueueStore> QueueLifecycle<S> {
             };
             telemetry.record_nacked("", "", self.config.mode.as_str(), outcome);
         }
-        Ok(())
+        Ok(outcome)
     }
 
     /// Non-mutating peek — returns up to `count` available messages on
