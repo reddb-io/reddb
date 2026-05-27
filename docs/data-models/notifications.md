@@ -9,7 +9,7 @@ for the architectural rationale.
 | Primitive                  | Replay | ACK / DLQ | Consumer offsets | Per-message state              | Typical use                                  |
 | -------------------------- | :----: | :-------: | :--------------: | ------------------------------ | -------------------------------------------- |
 | **Queue**                  |   N    |     Y     |        N         | Pending delivery, ACK, retries | Work distribution, durable jobs              |
-| **Durable stream** (future) |   Y    |     N     |        Y         | Append-only log + offsets      | Event sourcing, CDC                          |
+| **Durable stream**         |   Y    |     N     |        Y         | Append-only log + offsets      | Event sourcing, audit logs, future CDC       |
 | **Ephemeral notification** |   N    |     N     |        N         | None — fire and forget         | Live UI hints, "deployed", "config reloaded" |
 
 This page documents the **ephemeral notification** primitive
@@ -95,8 +95,8 @@ source of truth.
 - **Not a replacement for `QUEUE READ … WAIT`** — that primitive
   preserves ACK/NACK/DLQ and per-message delivery state.
 - **Not a durable stream** — durable streams keep per-consumer
-  offsets and can replay history. The dedicated stream
-  collection model arrives in a future PRD slice.
+  offsets and can replay history. See the dedicated
+  [durable stream primitive](streams.md).
 - **Not a cross-process pub/sub bus** — the registry is
   in-memory and process-local. Multi-node fan-out is out of
   scope for the first slice (mirrors the ADR's decision to defer
