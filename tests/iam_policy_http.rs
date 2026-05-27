@@ -111,6 +111,58 @@ fn list_policy_actions_returns_catalog() {
 }
 
 #[test]
+fn lint_policy_returns_diagnostics() {
+    let addr = spawn_server();
+    // Clean policy — empty diagnostics array.
+    let clean = r#"{"id":"p1","version":1,"statements":[
+        {"effect":"allow","actions":["select"],"resources":["table:public.orders"]}
+    ]}"#;
+    let (status, body) = http_request(&addr, "POST", "/admin/policies/lint", Some(clean));
+    assert_eq!(status, 200, "body={body}");
+    assert!(body.contains("\"count\":0"), "body={body}");
+    assert!(body.contains("\"diagnostics\":[]"), "body={body}");
+
+    // Dirty policy — unknown action, deprecated action, suspect
+    // resource, and a no-effect Allow+Deny pair. Every diagnostic
+    // kind must surface in the response body.
+    let dirty = r#"{"id":"p2","version":1,"statements":[
+        {"effect":"allow","actions":["definitely-not-an-action","vault:unseal_history"],"resources":["*","table:foo"]},
+        {"effect":"allow","actions":["select"],"resources":["table:bar"]},
+        {"effect":"deny","actions":["select"],"resources":["table:bar"]}
+    ]}"#;
+    let (status, body) = http_request(&addr, "POST", "/admin/policies/lint", Some(dirty));
+    assert_eq!(status, 200, "body={body}");
+    assert!(body.contains("\"code\":\"unknown_action\""), "body={body}");
+    assert!(
+        body.contains("\"code\":\"deprecated_action\""),
+        "body={body}"
+    );
+    assert!(
+        body.contains("\"suggested_fix\":\"vault:read_metadata\""),
+        "body={body}"
+    );
+    assert!(
+        body.contains("\"code\":\"suspect_resource\""),
+        "body={body}"
+    );
+    assert!(
+        body.contains("\"code\":\"no_effect_statements\""),
+        "body={body}"
+    );
+    // Errors sort before warnings.
+    let err_idx = body.find("\"severity\":\"error\"").unwrap();
+    let warn_idx = body.find("\"severity\":\"warning\"").unwrap();
+    assert!(err_idx < warn_idx, "body={body}");
+}
+
+#[test]
+fn lint_policy_rejects_non_post() {
+    let addr = spawn_server();
+    let (status, _) = http_request(&addr, "GET", "/admin/policies/lint", None);
+    assert_eq!(status, 405);
+}
+
+#[test]
 fn list_policy_actions_rejects_non_get() {
     let addr = spawn_server();
     let (status, _) = http_request(&addr, "POST", "/admin/policies/actions", Some("{}"));

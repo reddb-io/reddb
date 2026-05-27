@@ -21,6 +21,7 @@ pub mod managed_policy;
 pub mod middleware;
 pub mod oauth;
 pub mod policies;
+pub mod policy_linter;
 pub mod privileges;
 pub mod registry;
 pub mod scope_cache;

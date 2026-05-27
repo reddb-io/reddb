@@ -492,6 +492,7 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         | QueryExpr::ShowPolicies { .. }
         | QueryExpr::ShowEffectivePermissions { .. }
         | QueryExpr::SimulatePolicy { .. }
+        | QueryExpr::LintPolicy { .. }
         | QueryExpr::CreateMigration(_)
         | QueryExpr::ApplyMigration(_)
         | QueryExpr::RollbackMigration(_)
@@ -861,6 +862,7 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::ShowPolicies { .. } => "show_policies",
         QueryExpr::ShowEffectivePermissions { .. } => "show_effective_permissions",
         QueryExpr::SimulatePolicy { .. } => "simulate_policy",
+        QueryExpr::LintPolicy { .. } => "lint_policy",
         QueryExpr::CreateMigration(_) => "create_migration",
         QueryExpr::ApplyMigration(_) => "apply_migration",
         QueryExpr::RollbackMigration(_) => "rollback_migration",

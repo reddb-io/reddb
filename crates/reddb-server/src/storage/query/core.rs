@@ -249,6 +249,22 @@ pub enum QueryExpr {
         action: String,
         resource: PolicyResourceRef,
     },
+    /// `LINT POLICY '<id>'` — fetch a stored policy from the
+    /// AuthStore and run the [`PolicyLinter`](crate::auth::policy_linter)
+    /// against its serialized JSON.
+    ///
+    /// `LINT POLICY JSON '<json>'` — lint the supplied JSON document
+    /// directly without consulting the AuthStore. Issue #710.
+    LintPolicy { source: LintPolicySource },
+}
+
+/// Source of the policy document being linted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LintPolicySource {
+    /// Fetch the document from the AuthStore by id.
+    Id(String),
+    /// Use the supplied JSON literal verbatim.
+    Json(String),
 }
 
 /// Tenant-qualified user reference for IAM policy SQL DDL.

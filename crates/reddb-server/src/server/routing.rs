@@ -849,6 +849,12 @@ impl RedDBServer {
                 if path == "/admin/policies/simulate" && method == "POST" {
                     return self.handle_iam_simulate(body);
                 }
+                if path == "/admin/policies/lint" {
+                    return match method.as_str() {
+                        "POST" => self.handle_iam_policy_lint(body),
+                        _ => json_error(405, "method not allowed"),
+                    };
+                }
                 if path == "/admin/policies/actions" {
                     return match method.as_str() {
                         "GET" => self.handle_iam_policy_actions(),
