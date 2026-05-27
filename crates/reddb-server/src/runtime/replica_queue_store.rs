@@ -396,6 +396,38 @@ impl QueueStore for ReplicaQueueStore {
         })
         .collect()
     }
+
+    fn pop_available(
+        &self,
+        _txn: &QueueTxn,
+        _queue: &str,
+        _side: QueueSide,
+        _count: usize,
+    ) -> Result<Vec<(MessageId, Value)>> {
+        // Replicas replay the primary's pop decisions via the
+        // logical-WAL apply path — never invoked directly. Fail closed.
+        Err(QueueStoreError::ReplicaImmutable)
+    }
+
+    fn delete_with_state(
+        &self,
+        _txn: &QueueTxn,
+        _queue: &str,
+        _message_id: MessageId,
+    ) -> Result<()> {
+        Err(QueueStoreError::ReplicaImmutable)
+    }
+
+    fn move_to_queue(
+        &self,
+        _txn: &QueueTxn,
+        _source: &str,
+        _dest: &str,
+        _side: QueueSide,
+        _count: usize,
+    ) -> Result<usize> {
+        Err(QueueStoreError::ReplicaImmutable)
+    }
 }
 
 /// Read attempts as an externally observable counter — used by tests

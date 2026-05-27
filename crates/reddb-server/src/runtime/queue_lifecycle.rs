@@ -606,6 +606,54 @@ impl<S: QueueStore> QueueLifecycle<S> {
         self.store.purge_queue(txn, queue)
     }
 
+    /// Destructive read: pop up to `count` messages from `queue`,
+    /// scanning from `side`, retiring each through the MVCC tombstone
+    /// path. Returns `(message_id, payload)` pairs in scan order.
+    /// Lifecycle-side replacement for `queue_delivery::pop_messages` —
+    /// the call sites in `impl_queue::QueueCommand::Pop` will move onto
+    /// this surface during the PRD #527 atomic cutover.
+    pub(crate) fn pop(
+        &self,
+        queue: &str,
+        side: QueueSide,
+        count: usize,
+        txn: &QueueTxn,
+    ) -> Result<Vec<(MessageId, Value)>> {
+        self.store.pop_available(txn, queue, side, count)
+    }
+
+    /// Retire `(queue, message_id)` through the same MVCC tombstone path
+    /// `ack` uses, without going through a pending row. Lifecycle-side
+    /// replacement for `queue_delivery::delete_message_with_state` —
+    /// callers that already hold the `(queue, message_id)` pair
+    /// (auto-DLQ branch on read, MOVE delete side) will move onto this
+    /// surface during the PRD #527 atomic cutover.
+    pub(crate) fn delete_with_state(
+        &self,
+        queue: &str,
+        message_id: MessageId,
+        txn: &QueueTxn,
+    ) -> Result<()> {
+        self.store.delete_with_state(txn, queue, message_id)
+    }
+
+    /// Atomically move up to `count` messages from `source` onto `dest`
+    /// (scanning `source` from `side`). Each moved message lands on
+    /// `dest` with a fresh `message_id` and is retired on `source` via
+    /// the same MVCC tombstone path as `delete_with_state`. Returns the
+    /// count actually moved. Lifecycle-side replacement for the inline
+    /// MOVE logic in `impl_queue.rs:1017-1053`.
+    pub(crate) fn move_between_queues(
+        &self,
+        source: &str,
+        dest: &str,
+        side: QueueSide,
+        count: usize,
+        txn: &QueueTxn,
+    ) -> Result<usize> {
+        self.store.move_to_queue(txn, source, dest, side, count)
+    }
+
     fn record(&self, outcome: RetirementOutcome) {
         self.outcomes
             .lock()

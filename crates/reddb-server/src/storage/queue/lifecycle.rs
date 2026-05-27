@@ -293,6 +293,54 @@ pub(crate) trait QueueStore {
     /// find candidates whose lock has expired beyond the caller-supplied
     /// `min_idle_ms` threshold. Read-only — no transaction context.
     fn pending_deliveries_for_queue(&self, queue: &str) -> Vec<PendingDeliveryView>;
+
+    /// Destructive read: pop up to `count` messages from `queue` scanning
+    /// from `side`, retiring each underlying message through the same
+    /// MVCC tombstone path as `ack_pending`. Returns the popped
+    /// `(message_id, payload)` pairs in scan order. Skips messages that
+    /// are currently pending (held by another delivery) or whose lock
+    /// cannot be acquired non-blockingly. Group-less — caller does not
+    /// hold a delivery handle.
+    ///
+    /// Prereq for `QueueLifecycle::pop`, the lifecycle-side replacement
+    /// for `queue_delivery::pop_messages` (PRD #527 atomic cutover).
+    fn pop_available(
+        &self,
+        txn: &QueueTxn,
+        queue: &str,
+        side: QueueSide,
+        count: usize,
+    ) -> Result<Vec<(MessageId, Value)>>;
+
+    /// Retire `(queue, message_id)` through the same MVCC tombstone path
+    /// `ack_pending` uses, without going through a pending row. Used by
+    /// the auto-DLQ-exceed branch on read, the cross-queue MOVE delete
+    /// side, and any future caller that already holds the (queue,
+    /// message_id) pair directly. Idempotent — calling on a
+    /// already-retired message is a no-op.
+    ///
+    /// Prereq for `QueueLifecycle::delete_with_state`, the lifecycle-side
+    /// replacement for `queue_delivery::delete_message_with_state`.
+    fn delete_with_state(&self, txn: &QueueTxn, queue: &str, message_id: MessageId) -> Result<()>;
+
+    /// Atomically move up to `count` messages from `source` onto `dest`,
+    /// scanning `source` from `side`. Each moved message is inserted on
+    /// `dest` (gaining a fresh `message_id`) and then retired on
+    /// `source` via the same MVCC tombstone path as `delete_with_state`.
+    /// Returns the count actually moved (≤ `count`; can be 0 when
+    /// `source` is empty or every candidate is locked).
+    ///
+    /// Prereq for `QueueLifecycle::move_between_queues`, the
+    /// lifecycle-side replacement for the inline MOVE logic in
+    /// `impl_queue.rs`.
+    fn move_to_queue(
+        &self,
+        txn: &QueueTxn,
+        source: &str,
+        dest: &str,
+        side: QueueSide,
+        count: usize,
+    ) -> Result<usize>;
 }
 
 /// Read-only view of a pending delivery, returned by
@@ -727,6 +775,126 @@ impl QueueStore for InMemoryQueueStore {
             })
             .collect()
     }
+
+    fn pop_available(
+        &self,
+        txn: &QueueTxn,
+        queue: &str,
+        side: QueueSide,
+        count: usize,
+    ) -> Result<Vec<(MessageId, Value)>> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let mut popped: Vec<(MessageId, Value)> = Vec::new();
+        {
+            let mut state = self.state.lock().expect("state poisoned");
+            // `pending` snapshot keyed by message_id — pop must skip any
+            // available row that already has a pending delivery against it.
+            let pending_ids: std::collections::HashSet<MessageId> = state
+                .pending
+                .values()
+                .filter(|p| p.queue == queue)
+                .map(|p| p.message_id)
+                .collect();
+            let Some(ids) = state.queues.get(queue).cloned() else {
+                return Ok(Vec::new());
+            };
+            let iter: Box<dyn Iterator<Item = MessageId>> = match side {
+                QueueSide::Left => Box::new(ids.into_iter()),
+                QueueSide::Right => Box::new(ids.into_iter().rev()),
+            };
+            let mut to_remove: Vec<MessageId> = Vec::new();
+            for mid in iter {
+                if popped.len() >= count {
+                    break;
+                }
+                if pending_ids.contains(&mid) {
+                    continue;
+                }
+                let Some(payload) = state.payloads.get(&(queue.to_string(), mid)).cloned() else {
+                    continue;
+                };
+                popped.push((mid, payload));
+                to_remove.push(mid);
+            }
+            if !to_remove.is_empty() {
+                if let Some(queue_ids) = state.queues.get_mut(queue) {
+                    queue_ids.retain(|id| !to_remove.contains(id));
+                }
+                for mid in &to_remove {
+                    state.payloads.remove(&(queue.to_string(), *mid));
+                    state.max_attempts.remove(&(queue.to_string(), *mid));
+                }
+            }
+        }
+        for (mid, _) in &popped {
+            txn.record_pending_tombstone(queue, *mid);
+        }
+        Ok(popped)
+    }
+
+    fn delete_with_state(&self, txn: &QueueTxn, queue: &str, message_id: MessageId) -> Result<()> {
+        let removed = {
+            let mut state = self.state.lock().expect("state poisoned");
+            let key = (queue.to_string(), message_id);
+            let was_present = state
+                .queues
+                .get(queue)
+                .map(|ids| ids.contains(&message_id))
+                .unwrap_or(false)
+                || state.payloads.contains_key(&key);
+            if let Some(queue_ids) = state.queues.get_mut(queue) {
+                queue_ids.retain(|id| *id != message_id);
+            }
+            state.payloads.remove(&key);
+            state.max_attempts.remove(&key);
+            was_present
+        };
+        if removed {
+            txn.record_pending_tombstone(queue, message_id);
+        }
+        Ok(())
+    }
+
+    fn move_to_queue(
+        &self,
+        txn: &QueueTxn,
+        source: &str,
+        dest: &str,
+        side: QueueSide,
+        count: usize,
+    ) -> Result<usize> {
+        if count == 0 {
+            return Ok(0);
+        }
+        // Allocate fresh message ids on `dest` from the same counter that
+        // `seed_queue`/`mark_pending` use, so test assertions on the
+        // destination side can match.
+        let popped = self.pop_available(txn, source, side, count)?;
+        if popped.is_empty() {
+            return Ok(0);
+        }
+        let moved = popped.len();
+        {
+            let mut state = self.state.lock().expect("state poisoned");
+            // Allocate new ids first, then drop the `state` borrow before
+            // re-entering it for the payload writes. Keeps the borrow
+            // checker happy and the lock contiguous.
+            let assignments: Vec<(MessageId, Value)> = popped
+                .into_iter()
+                .map(|(_, payload)| (self.counter.fetch_add(1, Ordering::Relaxed), payload))
+                .collect();
+            let dest_ids = state.queues.entry(dest.to_string()).or_default();
+            for (id, _) in &assignments {
+                dest_ids.push(*id);
+            }
+            for (id, payload) in assignments {
+                state.payloads.insert((dest.to_string(), id), payload);
+            }
+        }
+        Ok(moved)
+    }
 }
 
 /// RFC 4648 base32 (lowercase, no padding). Hand-rolled — no `base32`
@@ -763,6 +931,94 @@ mod tests {
 
     fn txn() -> QueueTxn {
         QueueTxn::new()
+    }
+
+    #[test]
+    fn pop_available_drains_and_records_tombstones() {
+        let store = InMemoryQueueStore::new();
+        store.seed_queue("q", vec![10, 20, 30]);
+        for &id in &[10u64, 20, 30] {
+            store.seed_payload("q", id, Value::Null);
+        }
+        let t = txn();
+        let popped = store.pop_available(&t, "q", QueueSide::Left, 2).unwrap();
+        assert_eq!(
+            popped.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![10, 20]
+        );
+        // Remaining available is the un-popped id.
+        assert_eq!(store.available_messages("q", QueueSide::Left), vec![30]);
+        // Tombstones recorded in pop order.
+        let stones = t.recorded_tombstones();
+        assert_eq!(stones.len(), 2);
+        assert_eq!(stones[0].message_id, 10);
+        assert_eq!(stones[1].message_id, 20);
+    }
+
+    #[test]
+    fn pop_available_skips_pending_messages() {
+        let store = InMemoryQueueStore::new();
+        store.seed_queue("q", vec![10, 20]);
+        for &id in &[10u64, 20] {
+            store.seed_payload("q", id, Value::Null);
+        }
+        let t = txn();
+        // Lock id=10 as pending — pop must skip it.
+        store
+            .mark_pending(&t, "q", 10, "g", deadline_in(1000))
+            .unwrap();
+        let popped = store.pop_available(&t, "q", QueueSide::Left, 10).unwrap();
+        assert_eq!(
+            popped.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![20]
+        );
+    }
+
+    #[test]
+    fn delete_with_state_retires_and_records_tombstone() {
+        let store = InMemoryQueueStore::new();
+        store.seed_queue("q", vec![10, 20]);
+        store.seed_payload("q", 10, Value::Null);
+        store.seed_payload("q", 20, Value::Null);
+        let t = txn();
+        store.delete_with_state(&t, "q", 10).unwrap();
+        assert_eq!(store.available_messages("q", QueueSide::Left), vec![20]);
+        let stones = t.recorded_tombstones();
+        assert_eq!(stones.len(), 1);
+        assert_eq!(stones[0].message_id, 10);
+        // Idempotent: delete of an already-retired id is a silent no-op
+        // (no extra tombstone recorded).
+        store.delete_with_state(&t, "q", 10).unwrap();
+        assert_eq!(t.recorded_tombstones().len(), 1);
+    }
+
+    #[test]
+    fn move_to_queue_transfers_payloads_and_retires_source() {
+        let store = InMemoryQueueStore::new();
+        store.seed_queue("src", vec![100, 200]);
+        store.seed_payload("src", 100, Value::Boolean(true));
+        store.seed_payload("src", 200, Value::Boolean(false));
+        let t = txn();
+        let moved = store
+            .move_to_queue(&t, "src", "dst", QueueSide::Left, 5)
+            .unwrap();
+        assert_eq!(moved, 2);
+        // Source drained, dest carries two new ids (counter-allocated).
+        assert!(store.available_messages("src", QueueSide::Left).is_empty());
+        let dst_ids = store.available_messages("dst", QueueSide::Left);
+        assert_eq!(dst_ids.len(), 2);
+        // Payloads survived the move in order.
+        assert_eq!(
+            store.read_message("dst", dst_ids[0]),
+            Some(Value::Boolean(true))
+        );
+        assert_eq!(
+            store.read_message("dst", dst_ids[1]),
+            Some(Value::Boolean(false))
+        );
+        // Tombstone recorded for each source id.
+        let stones = t.recorded_tombstones();
+        assert_eq!(stones.len(), 2);
     }
 
     #[test]
