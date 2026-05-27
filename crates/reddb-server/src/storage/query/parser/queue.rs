@@ -158,6 +158,7 @@ impl<'a> Parser<'a> {
                 } else {
                     1
                 };
+                self.reject_wait_clause("POP")?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Pop {
                     queue,
                     side: QueueSide::Left,
@@ -177,6 +178,7 @@ impl<'a> Parser<'a> {
                     } else {
                         1
                     };
+                self.reject_wait_clause("PEEK")?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Peek { queue, count }))
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("LEN") => {
@@ -295,11 +297,13 @@ impl<'a> Parser<'a> {
                 } else {
                     1
                 };
+                let wait_ms = self.parse_optional_wait_clause()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::GroupRead {
                     queue,
                     group,
                     consumer,
                     count,
+                    wait_ms,
                 }))
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("PENDING") => {
@@ -417,6 +421,39 @@ impl<'a> Parser<'a> {
             ));
         }
         Ok((group, message_id, delivery_id))
+    }
+
+    /// Parse an optional `WAIT <duration>` tail (slice A of PRD #718).
+    ///
+    /// Returns `None` if the next token is not the `WAIT` keyword. When
+    /// `WAIT` is present, a duration literal is mandatory — a bare
+    /// `WAIT` with no number errors with a clear "expected: number"
+    /// message bubbled up from `parse_float`.
+    fn parse_optional_wait_clause(&mut self) -> Result<Option<u64>, ParseError> {
+        if !self.peek_ident_ci("WAIT") {
+            return Ok(None);
+        }
+        self.advance()?;
+        let value = self.parse_float()?;
+        let unit = self.parse_queue_duration_unit()?;
+        Ok(Some((value * unit).max(0.0) as u64))
+    }
+
+    /// Reject a stray `WAIT …` tail after a command form that does not
+    /// support blocking reads (`POP`, `PEEK`). The error names the
+    /// command so the operator sees why their statement was refused.
+    fn reject_wait_clause(&mut self, command: &'static str) -> Result<(), ParseError> {
+        if self.peek_ident_ci("WAIT") {
+            return Err(ParseError::new(
+                format!("QUEUE {command} does not support WAIT; use QUEUE READ … WAIT <duration>"),
+                self.position(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn peek_ident_ci(&self, name: &str) -> bool {
+        matches!(self.peek(), Token::Ident(id) if id.eq_ignore_ascii_case(name))
     }
 
     fn consume_queue_mode(&mut self) -> Result<Option<QueueMode>, ParseError> {

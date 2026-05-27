@@ -4465,6 +4465,7 @@ fn test_parse_queue_control_and_group_command_forms() {
             group: Some(group),
             consumer,
             count,
+            wait_ms: None,
         }) if queue == "tasks" && group == "workers" && consumer == "worker1" && count == 10
     ));
 
@@ -4476,6 +4477,7 @@ fn test_parse_queue_control_and_group_command_forms() {
             group: None,
             consumer,
             count,
+            wait_ms: None,
         }) if queue == "tasks" && consumer == "worker1" && count == 10
     ));
 
@@ -4537,6 +4539,60 @@ fn test_parse_queue_control_and_group_command_forms() {
         "QUEUE UNKNOWN tasks",
     ] {
         assert!(parse(sql).is_err(), "{sql}");
+    }
+}
+
+#[test]
+fn test_parse_queue_read_wait_clause() {
+    // PRD #718 slice A: `QUEUE READ … WAIT <duration>` parses with the
+    // duration normalized to milliseconds; absence of WAIT keeps the
+    // classic non-blocking semantics (`wait_ms = None`).
+    let query = parse("QUEUE READ tasks GROUP workers CONSUMER worker1 WAIT 5s").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::QueueCommand(QueueCommand::GroupRead {
+            queue,
+            group: Some(group),
+            consumer,
+            count: 1,
+            wait_ms: Some(5000),
+        }) if queue == "tasks" && group == "workers" && consumer == "worker1"
+    ));
+
+    let query = parse("QUEUE READ tasks GROUP workers CONSUMER worker1").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::QueueCommand(QueueCommand::GroupRead {
+            queue,
+            group: Some(group),
+            consumer,
+            count: 1,
+            wait_ms: None,
+        }) if queue == "tasks" && group == "workers" && consumer == "worker1"
+    ));
+
+    // COUNT and WAIT compose without ambiguity.
+    let query =
+        parse("QUEUE READ tasks GROUP workers CONSUMER worker1 COUNT 3 WAIT 250ms").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::QueueCommand(QueueCommand::GroupRead {
+            count: 3,
+            wait_ms: Some(250),
+            ..
+        })
+    ));
+
+    for sql in [
+        // WAIT with no duration is rejected (PRD #718 slice A acceptance).
+        "QUEUE READ tasks GROUP workers CONSUMER worker1 WAIT",
+        // WAIT after POP / PEEK is meaningless and must be rejected.
+        "QUEUE POP tasks WAIT 5s",
+        "QUEUE PEEK tasks WAIT 5s",
+        "QUEUE POP tasks COUNT 2 WAIT 5s",
+        "QUEUE PEEK tasks COUNT 2 WAIT 5s",
+    ] {
+        assert!(parse(sql).is_err(), "{sql} should not parse");
     }
 }
 
