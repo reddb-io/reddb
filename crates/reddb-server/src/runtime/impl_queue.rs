@@ -50,6 +50,15 @@ pub(super) fn runtime_lifecycle(
 pub(crate) const QUEUE_READ_WAIT_CANCELLED: &str =
     "QUEUE READ WAIT cancelled — server shutting down";
 
+/// Slice B of PRD #718 — `red.config` key naming the maximum WAIT
+/// budget the runtime will honour. Values above the cap are rejected
+/// before any waiter is registered.
+pub(crate) const QUEUE_MAX_WAIT_MS_CONFIG_KEY: &str = "red.config.queue.max_wait_ms";
+
+/// Default cap when the operator has not set
+/// [`QUEUE_MAX_WAIT_MS_CONFIG_KEY`] — 60 seconds, in milliseconds.
+pub(crate) const QUEUE_MAX_WAIT_MS_DEFAULT: u64 = 60_000;
+
 /// Slice C of PRD #718 — scope key for the queue wait registry.
 /// Today every connection in the process shares a single namespace;
 /// the helper exists so multi-tenant scoping (e.g. tenant id) can be
@@ -822,6 +831,26 @@ impl RedDBRuntime {
             } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
+                // Slice B of PRD #718: reject `WAIT` issued inside an
+                // explicit transaction, and reject `WAIT > cap` before
+                // any waiter is registered. Both checks fire before the
+                // lifecycle is touched so a refused statement leaves
+                // no side effects (no group auto-create, no parking).
+                if let Some(ms) = *wait_ms {
+                    if self.current_xid().is_some() {
+                        return Err(RedDBError::Query(
+                            "QUEUE READ … WAIT is autocommit-only: refusing to park inside an explicit transaction (BEGIN/COMMIT)"
+                                .to_string(),
+                        ));
+                    }
+                    let cap =
+                        self.config_u64(QUEUE_MAX_WAIT_MS_CONFIG_KEY, QUEUE_MAX_WAIT_MS_DEFAULT);
+                    if ms > cap {
+                        return Err(RedDBError::Query(format!(
+                            "QUEUE READ … WAIT {ms}ms exceeds server cap {QUEUE_MAX_WAIT_MS_CONFIG_KEY} = {cap}ms"
+                        )));
+                    }
+                }
                 // Resolve the consumer group up-front so the lifecycle
                 // sees the same auto-created `_work_default` / fanout
                 // group the legacy `read_messages` would have minted.
