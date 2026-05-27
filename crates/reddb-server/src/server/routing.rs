@@ -839,6 +839,22 @@ impl RedDBServer {
             ("GET", "/repo/commits") => handlers_vcs::handle_commits_list(&self.runtime, &query),
             ("POST", "/repo/commits") => handlers_vcs::handle_commit_create(&self.runtime, body),
             _ => {
+                // `GET /catalog/collections/{name}` — Red UI metadata
+                // contract (#736). Strip the prefix and dispatch only
+                // when the tail looks like a single collection name —
+                // the exact-match arms above (`/catalog/collections/readiness`,
+                // `/catalog/collections/readiness/attention`) already
+                // took priority, so a trailing `/readiness*` segment
+                // can never reach here.
+                if method == "GET" {
+                    if let Some(rest) = path.strip_prefix("/catalog/collections/") {
+                        let name = rest.trim_matches('/');
+                        if !name.is_empty() && !name.contains('/') {
+                            return self.handle_collection_ui_metadata(name, &headers);
+                        }
+                    }
+                }
+
                 // IAM policy admin endpoints (Agent #28 lane).
                 if path == "/admin/policies" {
                     return match method.as_str() {
@@ -2073,6 +2089,332 @@ mod tests {
             br#"{"by":1}"#.to_vec(),
         ));
         assert_eq!(vault_counter.status, 405);
+    }
+
+    // ---------- Issue #736 — Red UI collection metadata contract ----------
+    //
+    // Contract tests for `GET /catalog/collections/{name}`. Each test
+    // creates a collection of a given model kind, fetches the
+    // metadata, and pins the shape the Red UI relies on:
+    //   - `model` + `primary_capability` mirror the model kind
+    //   - `capabilities[]` lists the action surfaces for that model
+    //   - `schema`, `indexes`, `retention`, `tenant_scope`,
+    //     `entity_count`, `model_specific`, `actions` all present
+    //   - empty collections still classify by model without probing
+    //   - not-found returns 404 with the authorization-safe body
+    //
+    // The runtime is in-memory and has no auth store wired, so the
+    // server's principal resolver returns `(None, false)` and the
+    // coarse action gates default to "allowed". That is the right
+    // contract for "auth not configured" mode.
+
+    fn ui_metadata(server: &RedDBServer, name: &str) -> crate::json::Value {
+        let response = server.route(request(&format!("/catalog/collections/{name}")));
+        assert_eq!(
+            response.status,
+            200,
+            "ui_metadata expected 200 for {name}: {}",
+            String::from_utf8_lossy(&response.body)
+        );
+        crate::json::from_slice(&response.body).expect("ui metadata JSON")
+    }
+
+    fn ddl(server: &RedDBServer, sql: &str) {
+        let response = server.route(request_with(
+            "POST",
+            "/query",
+            format!("{{\"query\":{}}}", crate::json!(sql)).into_bytes(),
+        ));
+        assert!(
+            (200..300).contains(&response.status),
+            "DDL `{sql}` failed: {}",
+            String::from_utf8_lossy(&response.body)
+        );
+    }
+
+    fn assert_metadata_envelope(payload: &crate::json::Value, name: &str, model: &str) {
+        assert_eq!(payload.get("ok"), Some(&crate::json!(true)));
+        let collection = payload.get("collection").expect("collection object");
+        assert_eq!(collection.get("name"), Some(&crate::json!(name)));
+        assert_eq!(collection.get("model"), Some(&crate::json!(model)));
+        assert_eq!(
+            collection.get("primary_capability"),
+            Some(&crate::json!(model))
+        );
+        let caps = collection
+            .get("capabilities")
+            .and_then(crate::json::Value::as_array)
+            .expect("capabilities array");
+        assert!(
+            !caps.is_empty(),
+            "capabilities must be non-empty for {model}"
+        );
+        assert!(caps.iter().any(|c| c.as_str() == Some("describe")));
+        assert!(collection.get("schema").is_some(), "schema object missing");
+        assert!(
+            collection.get("indexes").is_some(),
+            "indexes object missing"
+        );
+        assert!(collection.get("retention").is_some(), "retention missing");
+        assert!(
+            collection.get("tenant_scope").is_some(),
+            "tenant_scope missing"
+        );
+        assert!(
+            collection.get("entity_count").is_some(),
+            "entity_count missing"
+        );
+        let actions = collection
+            .get("actions")
+            .and_then(crate::json::Value::as_object)
+            .expect("actions object");
+        for required in [
+            "read",
+            "write",
+            "delete",
+            "drop_collection",
+            "alter_collection",
+        ] {
+            assert!(
+                actions.contains_key(required),
+                "actions.{required} missing for {model}"
+            );
+        }
+        let alter = actions.get("alter_collection").unwrap();
+        assert_eq!(
+            alter.get("allowed"),
+            Some(&crate::json!("unknown")),
+            "alter_collection must be unknown until #740/#741: {alter}"
+        );
+        let tenant = collection.get("tenant_scope").unwrap();
+        assert_eq!(tenant.get("kind"), Some(&crate::json!("unknown")));
+    }
+
+    fn fresh_server() -> RedDBServer {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        RedDBServer::new(runtime)
+    }
+
+    #[test]
+    fn ui_metadata_table_contract() {
+        let server = fresh_server();
+        ddl(
+            &server,
+            "CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT)",
+        );
+        let payload = ui_metadata(&server, "accounts");
+        assert_metadata_envelope(&payload, "accounts", "table");
+
+        let collection = payload.get("collection").unwrap();
+        // Empty table classifies as `model=table` without probing rows.
+        assert_eq!(collection.get("entity_count"), Some(&crate::json!(0.0)));
+        // Strict schema produces a typed column list from the contract.
+        let schema = collection.get("schema").unwrap();
+        let mode = schema
+            .get("mode")
+            .and_then(crate::json::Value::as_str)
+            .expect("schema.mode");
+        assert!(
+            matches!(mode, "strict" | "semi_structured"),
+            "table schema.mode unexpected: {mode}"
+        );
+        let columns = schema
+            .get("columns")
+            .and_then(crate::json::Value::as_array)
+            .expect("schema.columns must be populated for tables");
+        assert!(!columns.is_empty(), "table columns must be exposed");
+        // Capability tags include table-specific actions.
+        let caps: Vec<&str> = collection
+            .get("capabilities")
+            .and_then(crate::json::Value::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(|c| c.as_str())
+            .collect();
+        for required in ["select", "insert", "update", "delete", "create_index"] {
+            assert!(
+                caps.contains(&required),
+                "table capabilities missing {required}: {caps:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ui_metadata_document_contract() {
+        let server = fresh_server();
+        ddl(&server, "CREATE DOCUMENT notes");
+        let payload = ui_metadata(&server, "notes");
+        assert_metadata_envelope(&payload, "notes", "document");
+        let caps: Vec<&str> = payload
+            .get("collection")
+            .unwrap()
+            .get("capabilities")
+            .and_then(crate::json::Value::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(|c| c.as_str())
+            .collect();
+        assert!(caps.contains(&"json_path"));
+    }
+
+    #[test]
+    fn ui_metadata_queue_contract() {
+        let server = fresh_server();
+        ddl(&server, "CREATE QUEUE jobs");
+        let payload = ui_metadata(&server, "jobs");
+        assert_metadata_envelope(&payload, "jobs", "queue");
+
+        let collection = payload.get("collection").unwrap();
+        let actions = collection
+            .get("actions")
+            .and_then(crate::json::Value::as_object)
+            .unwrap();
+        for queue_action in ["push", "peek", "ack", "nack", "purge", "dlq_move"] {
+            assert!(
+                actions.contains_key(queue_action),
+                "queue action {queue_action} missing"
+            );
+        }
+        let model_specific = collection.get("model_specific").unwrap();
+        assert!(
+            model_specific.get("queue_mode").is_some(),
+            "queue_mode must be exposed"
+        );
+    }
+
+    #[test]
+    fn ui_metadata_vector_contract() {
+        let server = fresh_server();
+        ddl(
+            &server,
+            "CREATE COLLECTION embeddings KIND vector.turbo DIM 8 METRIC cosine",
+        );
+        let payload = ui_metadata(&server, "embeddings");
+        assert_metadata_envelope(&payload, "embeddings", "vector");
+        let model_specific = payload
+            .get("collection")
+            .unwrap()
+            .get("model_specific")
+            .unwrap();
+        assert_eq!(model_specific.get("dimension"), Some(&crate::json!(8.0)));
+        assert_eq!(model_specific.get("metric"), Some(&crate::json!("cosine")));
+        let actions = payload
+            .get("collection")
+            .unwrap()
+            .get("actions")
+            .and_then(crate::json::Value::as_object)
+            .unwrap();
+        assert!(actions.contains_key("search"));
+        assert!(actions.contains_key("upsert"));
+    }
+
+    #[test]
+    fn ui_metadata_graph_contract() {
+        let server = fresh_server();
+        ddl(&server, "CREATE GRAPH social");
+        let payload = ui_metadata(&server, "social");
+        assert_metadata_envelope(&payload, "social", "graph");
+        let actions = payload
+            .get("collection")
+            .unwrap()
+            .get("actions")
+            .and_then(crate::json::Value::as_object)
+            .unwrap();
+        assert!(actions.contains_key("traverse"));
+        assert!(actions.contains_key("subgraph"));
+    }
+
+    #[test]
+    fn ui_metadata_kv_contract() {
+        let server = fresh_server();
+        ddl(&server, "CREATE KV sessions");
+        let payload = ui_metadata(&server, "sessions");
+        assert_metadata_envelope(&payload, "sessions", "kv");
+        let actions = payload
+            .get("collection")
+            .unwrap()
+            .get("actions")
+            .and_then(crate::json::Value::as_object)
+            .unwrap();
+        for kv_action in ["increment", "compare_and_set", "list_by_prefix"] {
+            assert!(
+                actions.contains_key(kv_action),
+                "kv action {kv_action} missing"
+            );
+        }
+    }
+
+    #[test]
+    fn ui_metadata_timeseries_contract() {
+        let server = fresh_server();
+        ddl(&server, "CREATE TIMESERIES events");
+        let payload = ui_metadata(&server, "events");
+        assert_metadata_envelope(&payload, "events", "timeseries");
+        let model_specific = payload
+            .get("collection")
+            .unwrap()
+            .get("model_specific")
+            .unwrap();
+        assert!(model_specific.get("session_key").is_some());
+        assert!(model_specific.get("session_gap_ms").is_some());
+    }
+
+    #[test]
+    fn ui_metadata_empty_collection_classifies_without_rows() {
+        // Acceptance criterion: empty collections classify by model
+        // without probing data rows. We never insert any rows.
+        let server = fresh_server();
+        ddl(&server, "CREATE TABLE empty_t (id INTEGER PRIMARY KEY)");
+        ddl(&server, "CREATE QUEUE empty_q");
+        ddl(&server, "CREATE KV empty_kv");
+
+        for (name, model) in [
+            ("empty_t", "table"),
+            ("empty_q", "queue"),
+            ("empty_kv", "kv"),
+        ] {
+            let payload = ui_metadata(&server, name);
+            let collection = payload.get("collection").unwrap();
+            assert_eq!(collection.get("model"), Some(&crate::json!(model)));
+            assert_eq!(
+                collection.get("entity_count"),
+                Some(&crate::json!(0.0)),
+                "empty collection {name} should report 0 entities without probing"
+            );
+        }
+    }
+
+    #[test]
+    fn ui_metadata_not_found_is_authorization_safe() {
+        let server = fresh_server();
+        let response = server.route(request("/catalog/collections/does_not_exist"));
+        assert_eq!(response.status, 404);
+        let body: crate::json::Value =
+            crate::json::from_slice(&response.body).expect("not-found JSON");
+        // Authorization-safe envelope: identical for "absent" and
+        // "not-visible-to-this-principal" so the endpoint cannot be
+        // used to enumerate collections by probing names.
+        assert_eq!(body.get("ok"), Some(&crate::json!(false)));
+        assert_eq!(
+            body.get("error"),
+            Some(&crate::json!("not_found_or_not_visible"))
+        );
+    }
+
+    #[test]
+    fn ui_metadata_readiness_exact_arm_still_wins() {
+        // The exact-match arm for `/catalog/collections/readiness`
+        // must not be shadowed by the new dynamic strip_prefix
+        // handler (#736). Hitting it must keep returning the
+        // readiness payload, not a 404 from the metadata handler.
+        let server = fresh_server();
+        let response = server.route(request("/catalog/collections/readiness"));
+        assert_eq!(
+            response.status,
+            200,
+            "readiness arm must still match: {}",
+            String::from_utf8_lossy(&response.body)
+        );
     }
 }
 
