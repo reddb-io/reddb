@@ -1175,6 +1175,22 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeQueryResult> {
         use crate::ai::{parse_provider, resolve_api_key_from_runtime};
 
+        // S3 / #711: planner-level provider gate. Runs as the first
+        // step — before the AskPipeline and before the credential
+        // resolver — so a policy-denied query never spends cycles on
+        // retrieval and the resolver-side `ai.credential.resolve`
+        // audit event is not emitted. Failover providers are gated
+        // again inside the `attempt_provider` closure below.
+        {
+            let (default_provider_pre, _) = crate::ai::resolve_defaults_from_runtime(self);
+            let provider_names_pre =
+                self.ask_provider_failover_names(ask.provider.as_deref(), &default_provider_pre)?;
+            if let Some(first) = provider_names_pre.first() {
+                let provider_pre = parse_provider(first)?;
+                crate::runtime::ai::provider_gate::enforce(self, &provider_pre)?;
+            }
+        }
+
         // Stage 1-4: AskPipeline narrows the candidate set BEFORE any
         // LLM call. Issue #119 / #120 / #121: scope-pre-filter +
         // schema-vocabulary lookup + scoped vector search + value
@@ -1252,6 +1268,10 @@ impl RedDBRuntime {
         let live_streaming = stream_emit.is_some();
         let mut attempt_provider = |provider_name: &str| -> RedDBResult<AskLlmAttempt> {
             let provider = parse_provider(provider_name)?;
+            // S3 / #711: planner-level provider gate. Runs before the
+            // credential resolver so `ai.credential.resolve` is not
+            // emitted for queries the policy denied.
+            crate::runtime::ai::provider_gate::enforce(self, &provider)?;
             let model = ask.model.clone().unwrap_or_else(|| default_model.clone());
 
             let requested_mode = if ask.strict {
@@ -1631,6 +1651,8 @@ impl RedDBRuntime {
             .first()
             .ok_or_else(|| RedDBError::Query("ASK provider list is empty".to_string()))?;
         let provider = crate::ai::parse_provider(provider_name)?;
+        // S3 / #711: planner-level provider gate (EXPLAIN path).
+        crate::runtime::ai::provider_gate::enforce(self, &provider)?;
         let provider_token = provider.token().to_string();
         let model = ask.model.clone().unwrap_or(default_model);
         let registry = self.ask_provider_capability_registry(&provider_token);

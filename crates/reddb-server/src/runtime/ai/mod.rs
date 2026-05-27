@@ -31,6 +31,7 @@ pub mod prompt_assembler;
 pub mod prompt_template;
 pub mod provider_capabilities;
 pub mod provider_failover;
+pub mod provider_gate;
 pub mod rrf_fuser;
 pub mod sources_fingerprint;
 pub mod sse_frame_encoder;

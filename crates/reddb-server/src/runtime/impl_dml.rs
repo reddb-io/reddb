@@ -541,6 +541,10 @@ impl RedDBRuntime {
         self.check_insert_column_policy(query)?;
         if let Some(ref embed_config) = query.auto_embed {
             let provider = crate::ai::parse_provider(&embed_config.provider)?;
+            // S3 / #711: planner-level provider gate. Runs before the
+            // local-model preflight and the API-key resolver so neither
+            // side-effect fires when policy denies.
+            crate::runtime::ai::provider_gate::enforce(self, &provider)?;
             if matches!(provider, crate::ai::AiProvider::Local) {
                 // Issue #682 — pre-flight the local model registry before
                 // any row write. Missing model, uninstalled artifacts,
