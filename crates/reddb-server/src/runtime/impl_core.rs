@@ -1359,6 +1359,7 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
         | QueryExpr::ShowEffectivePermissions { .. }
         | QueryExpr::SimulatePolicy { .. }
         | QueryExpr::LintPolicy { .. }
+        | QueryExpr::MigratePolicyMode { .. }
         | QueryExpr::CreateMigration(_)
         | QueryExpr::ApplyMigration(_)
         | QueryExpr::RollbackMigration(_)
@@ -6948,6 +6949,10 @@ impl RedDBRuntime {
                 ref resource,
             } => self.execute_simulate_policy(query, user, action, resource),
             QueryExpr::LintPolicy { ref source } => self.execute_lint_policy(query, source),
+            QueryExpr::MigratePolicyMode {
+                ref target,
+                dry_run,
+            } => self.execute_migrate_policy_mode(query, target, dry_run),
             QueryExpr::CreateMigration(ref q) => self.execute_create_migration(query, q),
             QueryExpr::ApplyMigration(ref q) => self.execute_apply_migration(query, q),
             QueryExpr::RollbackMigration(ref q) => self.execute_rollback_migration(query, q),
@@ -9735,6 +9740,26 @@ impl RedDBRuntime {
                     "*",
                 );
             }
+            QueryExpr::MigratePolicyMode { dry_run, .. } => {
+                // DRY RUN is a pre-flight inspection (policy:simulate).
+                // The actual mode flip is a privileged mutation under
+                // the policy:put action (it persists a new enforcement
+                // mode to the vault KV through `set_enforcement_mode`).
+                let action = if *dry_run {
+                    "policy:simulate"
+                } else {
+                    "policy:put"
+                };
+                return self.check_policy_management_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    action,
+                    "policy",
+                    "*",
+                );
+            }
             // DROP and TRUNCATE — Write-role gate + per-collection IAM policy
             // when IAM mode is active. Other DDL stays role-only for now.
             QueryExpr::DropTable(q) => {
@@ -11000,6 +11025,176 @@ impl RedDBRuntime {
             query: query.to_string(),
             mode: crate::storage::query::modes::QueryMode::Sql,
             statement: "lint_policy",
+            engine: "iam-policies",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+        })
+    }
+
+    /// `MIGRATE POLICY MODE TO '<target>' [DRY RUN]` — flip the install
+    /// from `legacy_rbac` to `policy_only` after the pre-flight delta
+    /// simulator confirms no non-admin principal would lose access.
+    /// Issue #714.
+    fn execute_migrate_policy_mode(
+        &self,
+        query: &str,
+        target: &str,
+        dry_run: bool,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        use crate::auth::enforcement_mode::PolicyEnforcementMode;
+        use crate::auth::migrate_policy_mode::{
+            principal_label, simulate_migration_delta, MigratePolicyDelta,
+        };
+        use crate::auth::policies::ResourceRef;
+        use crate::storage::query::unified::UnifiedRecord;
+        use crate::storage::schema::Value as SchemaValue;
+        use std::sync::Arc;
+
+        // Only `policy_only` is a meaningful destination for this
+        // command — flipping back to `legacy_rbac` is supported via
+        // direct config writes (it doesn't need a pre-flight). We
+        // reject everything else with the same allowlist `parse` uses.
+        let parsed = PolicyEnforcementMode::parse(target).ok_or_else(|| {
+            RedDBError::Query(format!(
+                "MIGRATE POLICY MODE: invalid target `{target}` (expected `policy_only`)"
+            ))
+        })?;
+        if parsed != PolicyEnforcementMode::PolicyOnly {
+            return Err(RedDBError::Query(format!(
+                "MIGRATE POLICY MODE: target `{target}` is not supported — only `policy_only` may be migrated to via this command"
+            )));
+        }
+
+        let auth_store = self
+            .inner
+            .auth_store
+            .read()
+            .clone()
+            .ok_or_else(|| RedDBError::Query("auth store not configured".to_string()))?;
+
+        // Resource enumeration: every existing collection probed as
+        // `table:<name>`. This is the realistic resource surface for
+        // the legacy_rbac fallback (the role floors gate per-table
+        // actions). Wildcard / column-scoped resources are still
+        // covered by the policy evaluator because evaluate() resolves
+        // resource patterns relative to the concrete resources we
+        // probe here.
+        let snapshot = self.inner.db.catalog_model_snapshot();
+        let resources: Vec<ResourceRef> = snapshot
+            .collections
+            .iter()
+            .map(|c| ResourceRef::new("table", c.name.clone()))
+            .collect();
+
+        let now_ms = crate::utils::now_unix_millis() as u128;
+        let deltas: Vec<MigratePolicyDelta> =
+            simulate_migration_delta(auth_store.as_ref(), &resources, now_ms);
+
+        let principal_str = current_auth_identity()
+            .map(|(u, _)| u)
+            .unwrap_or_else(|| "anonymous".into());
+
+        // Audit every issuance. The outcome line differentiates
+        // dry-run, refused, and applied — operators can grep for these
+        // strings in the audit log.
+        let outcome_str = if dry_run {
+            "dry_run"
+        } else if deltas.is_empty() {
+            "applied"
+        } else {
+            "refused"
+        };
+        tracing::info!(
+            target: "audit",
+            principal = %principal_str,
+            action = "iam:policy.migrate_mode",
+            target = %target,
+            dry_run,
+            delta_count = deltas.len(),
+            outcome = outcome_str,
+            "MIGRATE POLICY MODE issued"
+        );
+        self.inner.audit_log.record(
+            "iam/policy.migrate_mode",
+            &principal_str,
+            target,
+            outcome_str,
+            crate::json::Value::Null,
+        );
+
+        // Refuse the non-dry-run path when any principal would lose
+        // access. The error string carries a compact summary plus the
+        // delta count so operators can re-run with DRY RUN to inspect.
+        if !dry_run && !deltas.is_empty() {
+            let summary = deltas
+                .iter()
+                .take(5)
+                .map(|d| {
+                    format!(
+                        "{}:{}/{}:{}",
+                        principal_label(&d.principal),
+                        d.action,
+                        d.resource_kind,
+                        d.resource_name
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let more = if deltas.len() > 5 {
+                format!(" (and {} more)", deltas.len() - 5)
+            } else {
+                String::new()
+            };
+            return Err(RedDBError::Query(format!(
+                "MIGRATE POLICY MODE refused: {n} principal/action/resource pair(s) would lose access under `policy_only`. Run `MIGRATE POLICY MODE TO '{target}' DRY RUN` to inspect. Sample: {summary}{more}",
+                n = deltas.len(),
+            )));
+        }
+
+        // Mutate the live enforcement mode only on the non-dry-run
+        // path with an empty delta. `set_enforcement_mode` also
+        // persists to vault_kv so the new mode survives restart.
+        if !dry_run {
+            auth_store.set_enforcement_mode(parsed);
+        }
+
+        const COLUMNS: [&str; 5] = [
+            "principal",
+            "role",
+            "action",
+            "resource_kind",
+            "resource_name",
+        ];
+        let schema = Arc::new(
+            COLUMNS
+                .iter()
+                .map(|name| Arc::<str>::from(*name))
+                .collect::<Vec<_>>(),
+        );
+        let records: Vec<UnifiedRecord> = deltas
+            .iter()
+            .map(|d| {
+                UnifiedRecord::with_schema(
+                    Arc::clone(&schema),
+                    vec![
+                        SchemaValue::text(principal_label(&d.principal)),
+                        SchemaValue::text(d.role.as_str()),
+                        SchemaValue::text(d.action.clone()),
+                        SchemaValue::text(d.resource_kind.clone()),
+                        SchemaValue::text(d.resource_name.clone()),
+                    ],
+                )
+            })
+            .collect();
+        let mut result = crate::storage::query::unified::UnifiedResult::with_columns(
+            COLUMNS.iter().map(|c| c.to_string()).collect(),
+        );
+        result.records = records;
+        Ok(RuntimeQueryResult {
+            query: query.to_string(),
+            mode: crate::storage::query::modes::QueryMode::Sql,
+            statement: "migrate_policy_mode",
             engine: "iam-policies",
             result,
             affected_rows: 0,

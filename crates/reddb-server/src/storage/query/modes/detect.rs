@@ -77,6 +77,7 @@ pub fn detect_mode(input: &str) -> QueryMode {
             | "detach"
             | "simulate"
             | "lint"
+            | "migrate"
             | "apply"
             | "events"
             | "describe"

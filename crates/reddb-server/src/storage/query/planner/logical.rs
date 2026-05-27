@@ -672,6 +672,7 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
         | QueryExpr::ShowEffectivePermissions { .. }
         | QueryExpr::SimulatePolicy { .. }
         | QueryExpr::LintPolicy { .. }
+        | QueryExpr::MigratePolicyMode { .. }
         | QueryExpr::CreateMigration(_)
         | QueryExpr::ApplyMigration(_)
         | QueryExpr::RollbackMigration(_)

@@ -256,6 +256,13 @@ pub enum QueryExpr {
     /// `LINT POLICY JSON '<json>'` — lint the supplied JSON document
     /// directly without consulting the AuthStore. Issue #710.
     LintPolicy { source: LintPolicySource },
+    /// `MIGRATE POLICY MODE TO '<target>' [DRY RUN]` — switch the
+    /// install from the legacy_rbac fallback to strict policy_only
+    /// after running the pre-flight delta simulator. With `DRY RUN`,
+    /// only the delta is returned. Without it, the migration refuses
+    /// if the delta is non-empty and otherwise mutates the
+    /// enforcement mode. Issue #714.
+    MigratePolicyMode { target: String, dry_run: bool },
 }
 
 /// Source of the policy document being linted.

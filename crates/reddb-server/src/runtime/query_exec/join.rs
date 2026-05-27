@@ -331,6 +331,7 @@ pub(crate) fn runtime_join_table_context(
         | QueryExpr::ShowEffectivePermissions { .. }
         | QueryExpr::SimulatePolicy { .. }
         | QueryExpr::LintPolicy { .. }
+        | QueryExpr::MigratePolicyMode { .. }
         | QueryExpr::CreateMigration(_)
         | QueryExpr::ApplyMigration(_)
         | QueryExpr::RollbackMigration(_)

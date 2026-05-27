@@ -251,6 +251,7 @@ impl RewriteRule for NormalizeRule {
             | QueryExpr::ShowEffectivePermissions { .. }
             | QueryExpr::SimulatePolicy { .. }
             | QueryExpr::LintPolicy { .. }
+            | QueryExpr::MigratePolicyMode { .. }
             | QueryExpr::CreateMigration(_)
             | QueryExpr::ApplyMigration(_)
             | QueryExpr::RollbackMigration(_)
@@ -377,6 +378,7 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::ShowEffectivePermissions { .. }
             | QueryExpr::SimulatePolicy { .. }
             | QueryExpr::LintPolicy { .. }
+            | QueryExpr::MigratePolicyMode { .. }
             | QueryExpr::CreateMigration(_)
             | QueryExpr::ApplyMigration(_)
             | QueryExpr::RollbackMigration(_)
@@ -462,6 +464,7 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::ShowEffectivePermissions { .. }
             | QueryExpr::SimulatePolicy { .. }
             | QueryExpr::LintPolicy { .. }
+            | QueryExpr::MigratePolicyMode { .. }
             | QueryExpr::CreateMigration(_)
             | QueryExpr::ApplyMigration(_)
             | QueryExpr::RollbackMigration(_)
