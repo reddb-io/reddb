@@ -21,8 +21,11 @@
 //!   strictly shadowed by a no-condition `Deny` with overlapping
 //!   action/resource sets, making the Allow effectively dead code
 //!   (severity: warning).
-//!
-//! `SelfLockRisk` is intentionally out of scope until #706 lands.
+//! * [`DiagnosticCode::SelfLockRisk`] — the candidate policy, if
+//!   attached, would fail the [`crate::auth::self_lock_guard`]
+//!   invariant, i.e. would prevent the synthetic platform owner from
+//!   ever detaching policies again. Severity is `error` because the
+//!   attach-time guard will refuse the same policy.
 //!
 //! ## Diagnostic ordering
 //!
@@ -72,6 +75,7 @@ pub enum DiagnosticCode {
     DeprecatedAction,
     SuspectResource,
     NoEffectStatements,
+    SelfLockRisk,
 }
 
 impl DiagnosticCode {
@@ -81,6 +85,7 @@ impl DiagnosticCode {
             DiagnosticCode::DeprecatedAction => "deprecated_action",
             DiagnosticCode::SuspectResource => "suspect_resource",
             DiagnosticCode::NoEffectStatements => "no_effect_statements",
+            DiagnosticCode::SelfLockRisk => "self_lock_risk",
         }
     }
 }
@@ -189,6 +194,10 @@ pub fn lint_value(policy: &Value) -> Vec<Diagnostic> {
     // Pass 2: cross-statement NoEffectStatements check.
     lint_no_effect(&parsed_statements, &mut out);
 
+    // Pass 3: SelfLockRisk — reuse the attach-time guard from S6 so
+    // operators see the identical explanation at author time.
+    lint_self_lock(policy, &parsed_statements, &mut out);
+
     finalize(out)
 }
 
@@ -224,6 +233,7 @@ struct ParsedStatement {
     actions: Vec<String>,
     resources: Vec<String>,
     has_condition: bool,
+    sid: Option<String>,
 }
 
 fn lint_statement(s_idx: usize, st: &Value, out: &mut Vec<Diagnostic>) -> ParsedStatement {
@@ -232,6 +242,7 @@ fn lint_statement(s_idx: usize, st: &Value, out: &mut Vec<Diagnostic>) -> Parsed
         actions: Vec::new(),
         resources: Vec::new(),
         has_condition: false,
+        sid: None,
     };
     let Some(obj) = st.as_object() else {
         return parsed;
@@ -242,6 +253,7 @@ fn lint_statement(s_idx: usize, st: &Value, out: &mut Vec<Diagnostic>) -> Parsed
         .and_then(|e| e.as_str())
         .map(|s| s.to_ascii_lowercase());
     parsed.has_condition = matches!(obj.get("condition"), Some(c) if !matches!(c, Value::Null));
+    parsed.sid = obj.get("sid").and_then(|s| s.as_str()).map(|s| s.into());
 
     if let Some(actions) = obj.get("actions").and_then(|a| a.as_array()) {
         for (a_idx, a) in actions.iter().enumerate() {
@@ -397,6 +409,64 @@ fn lint_no_effect(stmts: &[ParsedStatement], out: &mut Vec<Diagnostic>) {
             break;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// SelfLockRisk — author-time mirror of `PolicySelfLockGuard` (S6, #713)
+// ---------------------------------------------------------------------------
+
+/// Feed the candidate policy through the same simulation the attach-time
+/// guard runs and, if the invariant would refuse the attach, surface a
+/// diagnostic whose `message` is the verbatim attach-time error string.
+///
+/// If the policy fails to parse via [`Policy::from_json_str`] — typically
+/// because an `UnknownAction` diagnostic has already flagged a typo — we
+/// skip the check rather than double-reporting. The other diagnostic
+/// kinds tell the operator what's wrong before they ever reach this
+/// pass.
+fn lint_self_lock(
+    policy: &Value,
+    parsed_statements: &[ParsedStatement],
+    out: &mut Vec<Diagnostic>,
+) {
+    use std::sync::Arc;
+
+    use crate::auth::policies::Policy;
+    use crate::auth::self_lock_guard::{
+        check_self_lock_invariant, format_block_error, InvariantOutcome,
+    };
+
+    let policy_json = policy.to_string_compact();
+    let Ok(parsed) = Policy::from_json_str(&policy_json) else {
+        return;
+    };
+    let outcome = check_self_lock_invariant(&[Arc::new(parsed)]);
+    let InvariantOutcome::Blocked { ref sid, .. } = outcome else {
+        return;
+    };
+    let Some(message) = format_block_error(&outcome) else {
+        return;
+    };
+
+    // Best-effort location: if the guard named a sid, map it back to
+    // a statement index in the raw document so operator tooling can
+    // jump to the offending statement.
+    let location = sid.as_ref().and_then(|target| {
+        parsed_statements
+            .iter()
+            .position(|st| st.sid.as_deref() == Some(target.as_str()))
+            .map(|idx| format!("statements[{idx}]"))
+    });
+
+    out.push(Diagnostic {
+        severity: Severity::Error,
+        code: DiagnosticCode::SelfLockRisk,
+        message,
+        suggested_fix: Some(
+            "narrow the Deny with a condition (e.g. `system_owned: false`) or remove it".into(),
+        ),
+        location,
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -568,6 +638,90 @@ mod tests {
         let diags = lint("{ not json");
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn self_lock_risk_flags_deny_detach_on_wildcard() {
+        let p = r#"{
+            "id": "p-brick",
+            "version": 1,
+            "statements": [{
+                "sid": "lock",
+                "effect": "deny",
+                "actions": ["policy:detach"],
+                "resources": ["*"]
+            }]
+        }"#;
+        let diags = lint(p);
+        let d = diags
+            .iter()
+            .find(|d| d.code == DiagnosticCode::SelfLockRisk)
+            .expect("self-lock diagnostic");
+        assert_eq!(d.severity, Severity::Error);
+        assert!(d.message.contains("self-lock invariant"), "{}", d.message);
+        assert!(d.message.contains("p-brick"), "{}", d.message);
+        assert!(d.message.contains("lock"), "{}", d.message);
+        assert_eq!(d.location.as_deref(), Some("statements[0]"));
+    }
+
+    #[test]
+    fn self_lock_risk_message_matches_attach_time_error_verbatim() {
+        use crate::auth::policies::Policy;
+        use crate::auth::self_lock_guard::{check_self_lock_invariant, format_block_error};
+        use std::sync::Arc;
+
+        let raw = r#"{
+            "id": "p-brick",
+            "version": 1,
+            "statements": [{
+                "sid": "lock",
+                "effect": "deny",
+                "actions": ["policy:detach"],
+                "resources": ["*"]
+            }]
+        }"#;
+
+        // Linter side.
+        let diags = lint(raw);
+        let d = diags
+            .iter()
+            .find(|d| d.code == DiagnosticCode::SelfLockRisk)
+            .expect("self-lock diagnostic");
+
+        // Attach-side error built from the same primitive.
+        let policy = Arc::new(Policy::from_json_str(raw).expect("parses"));
+        let outcome = check_self_lock_invariant(&[policy]);
+        let attach_msg = format_block_error(&outcome).expect("blocked carries a message");
+
+        assert_eq!(d.message, attach_msg, "linter must mirror attach error");
+    }
+
+    #[test]
+    fn self_lock_risk_silent_for_narrower_deny() {
+        // The same deny restricted to non-system-owned principals does
+        // not lock the synthetic platform owner out.
+        let p = r#"{
+            "id": "p-narrow",
+            "version": 1,
+            "statements": [{
+                "effect": "deny",
+                "actions": ["policy:detach"],
+                "resources": ["*"],
+                "condition": { "system_owned": false }
+            }]
+        }"#;
+        let diags = lint(p);
+        assert!(
+            !diags.iter().any(|d| d.code == DiagnosticCode::SelfLockRisk),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn self_lock_risk_silent_for_clean_policy() {
+        assert!(!lint(clean_policy())
+            .iter()
+            .any(|d| d.code == DiagnosticCode::SelfLockRisk));
     }
 
     #[test]

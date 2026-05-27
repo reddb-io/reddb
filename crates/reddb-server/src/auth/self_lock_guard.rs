@@ -494,5 +494,62 @@ mod tests {
         fn event_kind_break_glass_str() {
             assert_eq!(EventKind::PolicyBreakGlass.as_str(), "policy.break_glass");
         }
+
+        #[test]
+        fn linter_and_attach_surface_same_self_lock_message() {
+            // Acceptance for S2B (#715): the linter must report the
+            // SelfLockRisk diagnostic with the exact string the
+            // attach-time guard surfaces, so operators see the same
+            // explanation in both places.
+            use crate::auth::policy_linter::{lint, DiagnosticCode};
+
+            let raw = r#"{
+                "id": "p-self-lock",
+                "version": 1,
+                "statements": [{
+                    "sid": "brick",
+                    "effect": "deny",
+                    "actions": ["policy:detach"],
+                    "resources": ["*"]
+                }]
+            }"#;
+
+            // Linter side.
+            let diags = lint(raw);
+            let lint_msg = diags
+                .iter()
+                .find(|d| d.code == DiagnosticCode::SelfLockRisk)
+                .expect("linter must flag SelfLockRisk")
+                .message
+                .clone();
+
+            // Attach side, against a real AuthStore.
+            let store = fresh_store();
+            store.create_user("alice", "p", Role::Admin).unwrap();
+            let alice = UserId::platform("alice");
+            store
+                .put_policy(Policy::from_json_str(raw).unwrap())
+                .unwrap();
+            let err = attach_with_ledger(
+                &store,
+                PrincipalRef::User(alice.clone()),
+                "p-self-lock",
+                &alice,
+            )
+            .expect_err("attach must refuse");
+
+            // The attach error wraps the same string in
+            // `AuthError::Forbidden(...)` — strip the wrapper before
+            // comparing so we're matching the *explanation*, not the
+            // error-variant Display prefix.
+            let attach_msg = match err {
+                crate::auth::AuthError::Forbidden(s) => s,
+                other => panic!("expected Forbidden, got {other:?}"),
+            };
+            assert_eq!(
+                lint_msg, attach_msg,
+                "linter and attach must surface identical self-lock explanations",
+            );
+        }
     }
 }
