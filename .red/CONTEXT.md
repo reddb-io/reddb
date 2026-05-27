@@ -35,6 +35,11 @@ Reusable vocabulary for code, docs, and architecture decisions. New terms join t
 - **Result cache** — SQL result-row cache with three backends (`Legacy`, `BlobCache`, `Shadow`). Selected via `runtime.result_cache.backend` config knob.
 - **AggregateQueryPlanner** — push-down GROUP BY planner that materializes O(group count) instead of O(row count).
 - **AskPipeline** — 4-stage funnel for the AI ASK command: token extraction → schema vocabulary match → vector search scoped → value filter. Stage 1 is opt-in heuristic-or-LLM via `ai.ner.backend` config.
+- **Output stream** — bidirectional result-set delivery for a single query, pinned to an MVCC snapshot at open and bounded by `stream.snapshot.ttl_ms`. Distinct from durable-stream/notification/queue (ADR 0028) — carries query results, not events. See ADR 0029.
+- **Input stream** — bulk-write counterpart that accepts rows piped from the client and auto-commits per chunk; partial failure leaves a recoverable RID prefix. Not a transaction — explicit `BEGIN ... COMMIT` is incompatible and rejected at open. See ADR 0029.
+- **Stream lease** — internal, unforwarded credential issued at `OpenStream`, bound to the snapshot pin. Outlives the bearer token so credential rotation does not terminate accepted streaming work; lease TTL is capped by snapshot TTL.
+- **Chunk page alignment** — output-stream production buffer reads in N × 16 KiB units (engine `PAGE_SIZE`). Server flushes when byte, row, or latency cap fires. Wire frames carry row-encoded data, not raw page bytes — drivers stay thin and storage layout stays free to evolve.
+- **Resumable annotation** — output-stream open returns `resumable: true|false` based on whether the query has a stable total order. Resume re-executes against the pinned snapshot with `resume_after_rid` filter; prefix hash detects substitution.
 
 ## Auth & Security
 
