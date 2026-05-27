@@ -3709,6 +3709,11 @@ impl RedDBRuntime {
             delivered: self.inner.queue_telemetry.delivered_snapshot(),
             acked: self.inner.queue_telemetry.acked_snapshot(),
             nacked: self.inner.queue_telemetry.nacked_snapshot(),
+            wait_started: self.inner.queue_telemetry.wait_started_snapshot(),
+            wait_woken: self.inner.queue_telemetry.wait_woken_snapshot(),
+            wait_timed_out: self.inner.queue_telemetry.wait_timed_out_snapshot(),
+            wait_cancelled: self.inner.queue_telemetry.wait_cancelled_snapshot(),
+            wait_duration: self.inner.queue_telemetry.wait_duration_snapshot(),
         }
     }
 
