@@ -2537,6 +2537,26 @@ impl RedDBServer {
         json_response(200, JsonValue::Object(envelope))
     }
 
+    /// `POST /admin/policies/lint` — lint a policy document supplied
+    /// in the request body. Returns an envelope `{count, diagnostics:
+    /// [...]}` mirroring the SQL `LINT POLICY` result set. Issue #710.
+    ///
+    /// The body is treated as the policy JSON itself (not an envelope
+    /// containing a policy under some key) so the surface composes
+    /// with `PUT /admin/policies/:id` — operators can lint exactly the
+    /// document they're about to install.
+    pub(crate) fn handle_iam_policy_lint(&self, body: Vec<u8>) -> HttpResponse {
+        let Ok(text) = std::str::from_utf8(&body) else {
+            return json_error(400, "body must be utf-8 JSON");
+        };
+        let diags = crate::auth::policy_linter::lint(text);
+        let items: Vec<JsonValue> = diags.iter().map(|d| d.to_json_value()).collect();
+        let mut envelope = Map::new();
+        envelope.insert("count".to_string(), JsonValue::Number(items.len() as f64));
+        envelope.insert("diagnostics".to_string(), JsonValue::Array(items));
+        json_response(200, JsonValue::Object(envelope))
+    }
+
     /// `DELETE /admin/policies/:id` — drop a policy.
     pub(crate) fn handle_iam_policy_delete(&self, id: &str) -> HttpResponse {
         let Some(store) = self.auth_store.as_ref() else {

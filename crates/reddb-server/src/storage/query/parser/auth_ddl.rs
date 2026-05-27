@@ -33,7 +33,7 @@
 
 use crate::storage::query::ast::{
     AlterUserAttribute, AlterUserStmt, GrantObject, GrantObjectKind, GrantPrincipalRef, GrantStmt,
-    PolicyPrincipalRef, PolicyResourceRef, PolicyUserRef, QueryExpr, RevokeStmt,
+    LintPolicySource, PolicyPrincipalRef, PolicyResourceRef, PolicyUserRef, QueryExpr, RevokeStmt,
 };
 use crate::storage::query::lexer::Token;
 use crate::storage::query::parser::{ParseError, Parser};
@@ -288,6 +288,33 @@ impl<'a> Parser<'a> {
             user,
             action,
             resource,
+        })
+    }
+
+    /// Parse `LINT POLICY '<id>'` or `LINT POLICY JSON '<json>'`. Caller
+    /// has just observed the `LINT` ident; the leading token is still
+    /// queued. Issue #710.
+    pub fn parse_lint_policy(&mut self) -> Result<QueryExpr, ParseError> {
+        self.advance()?; // ident "LINT"
+        if !self.consume(&Token::Policy)? && !self.consume_ident_ci("POLICY")? {
+            return Err(ParseError::expected(
+                vec!["POLICY"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        // Disambiguate the two forms by the next token:
+        //   * `JSON '<...>'`     → lint the supplied JSON literal.
+        //   * `'<id>'`           → fetch by id from the AuthStore.
+        if self.consume(&Token::Json)? || self.consume_ident_ci("JSON")? {
+            let json = self.parse_string()?;
+            return Ok(QueryExpr::LintPolicy {
+                source: LintPolicySource::Json(json),
+            });
+        }
+        let id = self.parse_string()?;
+        Ok(QueryExpr::LintPolicy {
+            source: LintPolicySource::Id(id),
         })
     }
 
