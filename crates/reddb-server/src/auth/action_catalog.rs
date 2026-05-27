@@ -55,6 +55,9 @@ pub enum ActionCategory {
     Wildcard,
     /// AI / analytics-facing actions (none today; reserved).
     Ai,
+    /// Ephemeral notification verbs (`notify`, `notify:cross-tenant`).
+    /// Gates the pub/sub primitive defined in `crate::notifications`.
+    Notification,
     /// Catch-all for actions that don't fit a tighter category yet
     /// (`evidence:export`, `red.registry:register`, `kv:invalidate`).
     Other,
@@ -77,6 +80,7 @@ impl ActionCategory {
             ActionCategory::Vault => "vault",
             ActionCategory::Wildcard => "wildcard",
             ActionCategory::Ai => "ai",
+            ActionCategory::Notification => "notification",
             ActionCategory::Other => "other",
         }
     }
@@ -439,6 +443,31 @@ pub const ACTIONS: &[ActionEntry] = &[
         category: ActionCategory::Wildcard,
         lifecycle_state: LifecycleState::Active,
         gates_description: "any AI-namespace verb",
+    },
+    // -- Ephemeral notifications (#720 / PRD #718) -----------------------
+    // RedDB-native pub/sub primitive. `notify` gates publish/subscribe
+    // inside the principal's own tenant; `notify:cross-tenant` is the
+    // explicit capability required to address another tenant's channel
+    // or the platform-global namespace. See `crate::notifications`.
+    ActionEntry {
+        name: "notify",
+        category: ActionCategory::Notification,
+        lifecycle_state: LifecycleState::Active,
+        gates_description:
+            "publish to / subscribe to ephemeral notification channels in the principal's own tenant",
+    },
+    ActionEntry {
+        name: "notify:cross-tenant",
+        category: ActionCategory::Notification,
+        lifecycle_state: LifecycleState::Active,
+        gates_description:
+            "address ephemeral notification channels in another tenant or the global namespace",
+    },
+    ActionEntry {
+        name: "notify:*",
+        category: ActionCategory::Wildcard,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "any ephemeral notification verb",
     },
     // -- Wildcards (kept last for legacy ordering) -----------------------
     ActionEntry {
