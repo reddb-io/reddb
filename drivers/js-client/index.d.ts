@@ -183,6 +183,17 @@ export class QueueClient {
   peek(queue: string, count?: number): Promise<unknown[]>
   len(queue: string): Promise<number>
   purge(queue: string): Promise<QueryResult>
+  /**
+   * Live `QUEUE READ … WAIT <ms>` helper (PRD #718 / #725). Blocks
+   * until a message is available, the wait budget elapses, or the
+   * server cancels. Timeout returns an empty array — same shape as
+   * an empty pop, never throws. `waitMs` is required.
+   */
+  readWait(
+    queue: string,
+    consumer: string,
+    options: { waitMs: number; group?: string; count?: number },
+  ): Promise<unknown[]>
 }
 
 /**

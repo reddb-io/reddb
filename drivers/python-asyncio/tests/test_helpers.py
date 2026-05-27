@@ -158,6 +158,36 @@ async def test_queue_rejects_invalid_identifier():
         await queue.push("bad-name!", "x")
 
 
+async def test_queue_read_wait_builds_sql_and_returns_payloads():
+    transport = FakeTransport(replies=[
+        {"rows": []},
+        {"rows": [{"payload": "x"}]},
+        {"rows": []},
+    ])
+    queue = QueueClient(transport)
+
+    # Timeout returns empty list — same shape as an empty pop.
+    assert await queue.read_wait("jobs", "worker1", wait_ms=0) == []
+    # Available message returns payloads.
+    assert await queue.read_wait("jobs", "worker1", wait_ms=30_000) == ["x"]
+    # GROUP + COUNT both flow into the SQL.
+    await queue.read_wait("jobs", "worker1", wait_ms=5000, group="g", count=4)
+
+    assert [c[1][0] for c in transport.calls] == [
+        "QUEUE READ jobs CONSUMER worker1 WAIT 0ms",
+        "QUEUE READ jobs CONSUMER worker1 WAIT 30000ms",
+        "QUEUE READ jobs GROUP g CONSUMER worker1 COUNT 4 WAIT 5000ms",
+    ]
+
+
+async def test_queue_read_wait_requires_non_negative_wait_ms():
+    queue = QueueClient(FakeTransport())
+    with pytest.raises(RedDBError):
+        await queue.read_wait("jobs", "w", wait_ms=-1)
+    with pytest.raises(RedDBError):
+        await queue.read_wait("jobs", "w", wait_ms=1.5)  # type: ignore[arg-type]
+
+
 # ---------------------------------------------------------- Document helpers
 
 

@@ -248,6 +248,45 @@ public class QueueClient internal constructor(private val q: Querier) {
         val body = q.query("QUEUE PURGE ${Sql.identifier(queue)}")
         return DeleteResult(Sql.affectedFromBody(body))
     }
+
+    public data class ReadWaitOptions(val group: String? = null, val count: Int? = null)
+
+    /**
+     * Live `QUEUE READ … WAIT <ms>` helper (PRD #718 / #725). Blocks
+     * until a message is available for [consumer] on [queue], the
+     * [wait] budget elapses, or the server cancels. Timeout returns
+     * an empty list — same shape as an empty [pop]; never throws.
+     * [wait] is required; there is no infinite-wait default.
+     * Cancellation and cap rejection surface via the transport.
+     */
+    public suspend fun readWait(
+        queue: String,
+        consumer: String,
+        wait: kotlin.time.Duration,
+        opts: ReadWaitOptions = ReadWaitOptions(),
+    ): List<Any?> {
+        Sql.assertIdentifier(queue, "queue name")
+        Sql.assertIdentifier(consumer, "consumer name")
+        if (wait.isNegative()) {
+            throw HelperException.InvalidArgument(
+                "queue readWait requires a non-negative wait duration (no infinite wait)"
+            )
+        }
+        val groupClause = opts.group?.takeIf { it.isNotEmpty() }?.let { g ->
+            Sql.assertIdentifier(g, "group name")
+            " GROUP ${Sql.identifier(g)}"
+        } ?: ""
+        val countClause = opts.count?.let { c ->
+            if (c < 0) throw HelperException.InvalidArgument(
+                "queue count must be a non-negative integer"
+            )
+            " COUNT $c"
+        } ?: ""
+        val waitMs = wait.inWholeMilliseconds
+        val sql = "QUEUE READ ${Sql.identifier(queue)}$groupClause CONSUMER ${Sql.identifier(consumer)}$countClause WAIT ${waitMs}ms"
+        val body = q.query(sql)
+        return Sql.allRows(body).map { it["payload"] }
+    }
 }
 
 // --- pure SQL helpers + envelope parsing (unit-testable) --------------------

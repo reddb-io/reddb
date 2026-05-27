@@ -52,6 +52,50 @@ class QueueClient:
     async def purge(self, queue: str) -> dict[str, Any]:
         return await self._t.query(f"QUEUE PURGE {sql_identifier(queue)}")
 
+    async def read_wait(
+        self,
+        queue: str,
+        consumer: str,
+        *,
+        wait_ms: int,
+        group: str | None = None,
+        count: int | None = None,
+    ) -> list[Any]:
+        """Live ``QUEUE READ … WAIT <ms>`` helper (PRD #718 / #725).
+
+        Blocks until a message is available for ``consumer`` on ``queue``
+        (optionally scoped to ``group``), the ``wait_ms`` budget elapses,
+        or the server cancels. Timeout returns an empty list — same shape
+        as a non-waiting empty pop, never raises. ``wait_ms`` is required;
+        there is no infinite-wait default. Cancellation and cap rejection
+        surface as ``RedDBError`` via the transport.
+        """
+        sql = _build_read_wait_sql(
+            queue, consumer, wait_ms=wait_ms, group=group, count=count
+        )
+        result = await self._t.query(sql)
+        return _queue_payloads(result)
+
+
+def _build_read_wait_sql(
+    queue: str,
+    consumer: str,
+    *,
+    wait_ms: int,
+    group: str | None,
+    count: int | None,
+) -> str:
+    if not isinstance(wait_ms, int) or isinstance(wait_ms, bool) or wait_ms < 0:
+        raise RedDBError(
+            "queue read_wait requires a non-negative integer wait_ms (no infinite wait)",
+            code="INVALID_ARGUMENT",
+        )
+    q = sql_identifier(queue)
+    c = sql_identifier(consumer)
+    g = f" GROUP {sql_identifier(group)}" if group is not None else ""
+    n = _queue_count(count) if count is not None else ""
+    return f"QUEUE READ {q}{g} CONSUMER {c}{n} WAIT {wait_ms}ms"
+
 
 def _queue_count(count: Any) -> str:
     if count is None:
