@@ -634,6 +634,88 @@ impl RedDBServer {
         }
     }
 
+    /// `GET /catalog/collections/{name}` — Red UI collection metadata
+    /// contract (issue #736, PRD #735). Returns the model kind,
+    /// capability tags, schema + system-column summary, indexes,
+    /// retention/TTL, tenant scope, entity count, and the current
+    /// principal's action affordances in one payload so the UI can
+    /// specialize empty and non-empty collections without probing
+    /// data rows. The action envelope is partial today: actions the
+    /// backend can prove with the existing coarse `Role` get a
+    /// boolean; fine-grained ones return `"allowed":"unknown"` with a
+    /// pointer at the deferred security slices (#740/#741).
+    pub(crate) fn handle_collection_ui_metadata(
+        &self,
+        name: &str,
+        headers: &std::collections::BTreeMap<String, String>,
+    ) -> HttpResponse {
+        if name.trim().is_empty() {
+            return json_error(400, "collection name cannot be empty");
+        }
+        let snapshot = self.catalog_use_cases().snapshot();
+        let descriptor = match snapshot.collections.iter().find(|c| c.name == name) {
+            Some(d) => d,
+            None => {
+                // Distinct, authorization-safe behavior: 404 with a
+                // body that is identical for "absent" and
+                // "not-visible-to-this-principal" so a non-admin
+                // probe cannot use the endpoint to enumerate
+                // collections. Real tenant-aware visibility lands
+                // in #740/#741.
+                let mut object = crate::json::Map::new();
+                object.insert("ok".to_string(), JsonValue::Bool(false));
+                object.insert(
+                    "error".to_string(),
+                    JsonValue::String("not_found_or_not_visible".to_string()),
+                );
+                object.insert(
+                    "collection".to_string(),
+                    JsonValue::String(name.to_string()),
+                );
+                return json_response(404, JsonValue::Object(object));
+            }
+        };
+        let contract = self.runtime.db().collection_contract(name);
+        let default_ttl_ms = self.runtime.db().collection_default_ttl_ms(name);
+        let (role, auth_enabled) = self.resolve_ui_principal(headers);
+        let body = crate::presentation::catalog_json::collection_ui_metadata_json(
+            descriptor,
+            contract.as_ref(),
+            default_ttl_ms,
+            role,
+            auth_enabled,
+        );
+        let mut wrapper = crate::json::Map::new();
+        wrapper.insert("ok".to_string(), JsonValue::Bool(true));
+        wrapper.insert("collection".to_string(), body);
+        json_response(200, JsonValue::Object(wrapper))
+    }
+
+    fn resolve_ui_principal(
+        &self,
+        headers: &std::collections::BTreeMap<String, String>,
+    ) -> (Option<crate::auth::Role>, bool) {
+        let auth_store = match self.auth_store.as_ref() {
+            Some(store) => store,
+            None => return (None, false),
+        };
+        if !auth_store.is_enabled() {
+            return (None, false);
+        }
+        let token = headers
+            .get("authorization")
+            .and_then(|v| v.strip_prefix("Bearer "));
+        match token {
+            Some(tok) => {
+                match super::routing::resolve_bearer_role(tok, &self.runtime, auth_store.as_ref()) {
+                    super::routing::BearerOutcome::Valid(role) => (Some(role), true),
+                    _ => (None, true),
+                }
+            }
+            None => (None, true),
+        }
+    }
+
     pub(crate) fn handle_describe_collection(&self, name: &str) -> HttpResponse {
         let store = self.runtime.db().store();
         match store.get_collection(name) {
