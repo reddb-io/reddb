@@ -1185,6 +1185,16 @@ struct RuntimeInner {
     /// lifecycle (delivered/acked/nacked) rendered onto `/metrics`.
     /// Process-local; counters reset on restart by design.
     queue_telemetry: std::sync::Arc<queue_telemetry::QueueTelemetryCounters>,
+    /// Slice C of PRD #718 — local wait registry for `QUEUE READ … WAIT`.
+    /// Producer commits notify; readers park here until wake-or-timeout
+    /// or until `cancel_all` is invoked at shutdown.
+    queue_wait_registry: std::sync::Arc<queue_wait_registry::QueueWaitRegistry>,
+    /// Per-connection list of `(scope, queue)` pairs that should be
+    /// notified through `queue_wait_registry` on COMMIT (slice C of
+    /// PRD #718). Push paths buffer here while inside a txn; the
+    /// COMMIT path drains and notifies. ROLLBACK discards — by design
+    /// rolled-back enqueues do not deliver and do not wake waiters.
+    pending_queue_wakes: parking_lot::RwLock<HashMap<u64, Vec<(String, String)>>>,
     /// Process-local normal-KV tag index used by `INVALIDATE TAGS`.
     kv_tag_index: KvTagIndex,
     /// Issue #524 — in-memory chain-tip cache per collection. Populated lazily
@@ -1267,6 +1277,7 @@ pub(crate) mod query_exec;
 mod queue_delivery;
 pub(crate) mod queue_lifecycle;
 pub(crate) mod queue_telemetry;
+pub(crate) mod queue_wait_registry;
 pub mod quota_bucket;
 mod record_search;
 mod red_schema;

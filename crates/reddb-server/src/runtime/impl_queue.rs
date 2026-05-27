@@ -42,6 +42,22 @@ pub(super) fn runtime_lifecycle(
     )
 }
 
+/// Slice C of PRD #718 — error surfaced to callers when the wait
+/// registry is cancelled (server shutdown) while a `QUEUE READ … WAIT`
+/// is parked. Kept as a plain `RedDBError::Query` so transports
+/// inherit the message unchanged — there is no separate `Cancelled`
+/// variant on the public error today.
+pub(crate) const QUEUE_READ_WAIT_CANCELLED: &str =
+    "QUEUE READ WAIT cancelled — server shutting down";
+
+/// Slice C of PRD #718 — scope key for the queue wait registry.
+/// Today every connection in the process shares a single namespace;
+/// the helper exists so multi-tenant scoping (e.g. tenant id) can be
+/// threaded through later without touching every call site.
+pub(super) fn queue_wait_scope() -> String {
+    crate::runtime::impl_core::current_tenant().unwrap_or_default()
+}
+
 /// Convert a lifecycle `QueueSide` view into the AST flavour we accept
 /// from `QueueCommand` callers. Both enums are isomorphic but live in
 /// different modules.
@@ -143,6 +159,68 @@ pub(super) struct QueueMessageView {
 }
 
 impl RedDBRuntime {
+    /// Slice C of PRD #718 — non-blocking `group_read` plus optional
+    /// `WAIT <duration>` retry. When `wait_ms` is `None` this is the
+    /// pre-slice-C synchronous read. When `Some`, an immediate empty
+    /// projection parks the caller on the shared
+    /// [`crate::runtime::queue_wait_registry::QueueWaitRegistry`] and
+    /// retries on wake until the deadline. Timeout returns an empty
+    /// projection (zero records, no error). Shutdown cancellation
+    /// returns [`QUEUE_READ_WAIT_CANCELLED`].
+    pub(super) fn group_read_with_optional_wait(
+        &self,
+        queue: &str,
+        group: &str,
+        consumer: &str,
+        count: usize,
+        wait_ms: Option<u64>,
+    ) -> RedDBResult<Vec<crate::runtime::queue_lifecycle::DeliveredMessage>> {
+        let do_read =
+            |runtime: &RedDBRuntime| -> RedDBResult<Vec<crate::runtime::queue_lifecycle::DeliveredMessage>> {
+                let (lifecycle, _ps, txn) = runtime_lifecycle(runtime, queue);
+                lifecycle
+                    .group_read(&txn, queue, group, consumer, count)
+                    .map_err(map_qse)
+            };
+
+        let delivered = do_read(self)?;
+        let Some(wait_ms) = wait_ms else {
+            return Ok(delivered);
+        };
+        if !delivered.is_empty() {
+            return Ok(delivered);
+        }
+        // Empty under WAIT: park on the registry. WAIT 0 collapses to
+        // a single re-probe of the registry's current state — useful
+        // for tests but the timeout path returns immediately.
+        let registry = self.queue_wait_registry();
+        let scope = queue_wait_scope();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+        loop {
+            // Snapshot BEFORE the re-probe so a notify that fires
+            // between the probe and the park bumps the generation and
+            // wait_until returns Woken without ever blocking.
+            let snapshot = registry.snapshot(&scope, queue);
+            let delivered = do_read(self)?;
+            if !delivered.is_empty() {
+                return Ok(delivered);
+            }
+            if registry.is_cancelled() {
+                return Err(RedDBError::Query(QUEUE_READ_WAIT_CANCELLED.to_string()));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(Vec::new());
+            }
+            match registry.wait_until(&snapshot, deadline) {
+                crate::runtime::queue_wait_registry::WaitOutcome::Woken => continue,
+                crate::runtime::queue_wait_registry::WaitOutcome::Timeout => return Ok(Vec::new()),
+                crate::runtime::queue_wait_registry::WaitOutcome::Cancelled => {
+                    return Err(RedDBError::Query(QUEUE_READ_WAIT_CANCELLED.to_string()))
+                }
+            }
+        }
+    }
+
     pub(crate) fn enqueue_event_payload(
         &self,
         queue: &str,
@@ -581,6 +659,11 @@ impl RedDBRuntime {
                         .set_metadata(queue, id, queue_message_ttl_metadata(ttl_ms))
                         .map_err(|err| RedDBError::Internal(err.to_string()))?;
                 }
+                // Slice C of PRD #718 — wake `QUEUE READ … WAIT` waiters.
+                // Under autocommit this fires immediately; inside a txn
+                // the wake is buffered and replayed on COMMIT (rollback
+                // discards it so rolled-back enqueues do not deliver).
+                self.record_queue_wake(&queue_wait_scope(), queue);
                 self.invalidate_result_cache();
 
                 let mut result = UnifiedResult::with_columns(vec![
@@ -735,11 +818,7 @@ impl RedDBRuntime {
                 group,
                 consumer,
                 count,
-                // Slice A of PRD #718 plumbs WAIT through the AST; the
-                // actual blocking-read registry lands in slice C. Until
-                // then the runtime calls `group_read` synchronously and
-                // ignores `wait_ms`.
-                wait_ms: _,
+                wait_ms,
             } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
@@ -750,10 +829,8 @@ impl RedDBRuntime {
                 let group_owned =
                     resolve_read_group(store.as_ref(), queue, group.as_deref(), consumer, &config)?;
                 let group_ref = group_owned.as_str();
-                let (lifecycle, _ps, txn) = runtime_lifecycle(self, queue);
-                let delivered = lifecycle
-                    .group_read(&txn, queue, group_ref, consumer, *count)
-                    .map_err(map_qse)?;
+                let delivered = self
+                    .group_read_with_optional_wait(queue, group_ref, consumer, *count, *wait_ms)?;
 
                 let mut result = UnifiedResult::with_columns(vec![
                     "message_id".into(),
