@@ -362,6 +362,84 @@ pub const ACTIONS: &[ActionEntry] = &[
         lifecycle_state: LifecycleState::Active,
         gates_description: "any registry verb",
     },
+    // -- AI provider gate (S3 / #711) ------------------------------------
+    // The `ai:provider:<token>` namespace lets operators express "role X
+    // cannot use AI provider Y" without denying `insert` on entire
+    // collections. The gate runs at the SQL planner before the AI
+    // credential resolver — see `runtime::ai::provider_gate`. Tokens
+    // mirror `AiProvider::token()` exactly.
+    ActionEntry {
+        name: "ai:provider:openai",
+        category: ActionCategory::Ai,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "use the OpenAI provider for ASK / AUTO EMBED / SEARCH SIMILAR",
+    },
+    ActionEntry {
+        name: "ai:provider:anthropic",
+        category: ActionCategory::Ai,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "use the Anthropic provider for ASK / AUTO EMBED / SEARCH SIMILAR",
+    },
+    ActionEntry {
+        name: "ai:provider:groq",
+        category: ActionCategory::Ai,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "use the Groq provider for ASK / AUTO EMBED / SEARCH SIMILAR",
+    },
+    ActionEntry {
+        name: "ai:provider:openrouter",
+        category: ActionCategory::Ai,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "use the OpenRouter provider for ASK / AUTO EMBED / SEARCH SIMILAR",
+    },
+    ActionEntry {
+        name: "ai:provider:together",
+        category: ActionCategory::Ai,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "use the Together provider for ASK / AUTO EMBED / SEARCH SIMILAR",
+    },
+    ActionEntry {
+        name: "ai:provider:venice",
+        category: ActionCategory::Ai,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "use the Venice provider for ASK / AUTO EMBED / SEARCH SIMILAR",
+    },
+    ActionEntry {
+        name: "ai:provider:ollama",
+        category: ActionCategory::Ai,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "use the Ollama provider for ASK / AUTO EMBED / SEARCH SIMILAR",
+    },
+    ActionEntry {
+        name: "ai:provider:deepseek",
+        category: ActionCategory::Ai,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "use the DeepSeek provider for ASK / AUTO EMBED / SEARCH SIMILAR",
+    },
+    ActionEntry {
+        name: "ai:provider:huggingface",
+        category: ActionCategory::Ai,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "use the HuggingFace provider for ASK / AUTO EMBED / SEARCH SIMILAR",
+    },
+    ActionEntry {
+        name: "ai:provider:local",
+        category: ActionCategory::Ai,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "use the local (in-process) embedding provider",
+    },
+    ActionEntry {
+        name: "ai:provider:*",
+        category: ActionCategory::Wildcard,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "use any AI provider (provider-gate wildcard)",
+    },
+    ActionEntry {
+        name: "ai:*",
+        category: ActionCategory::Wildcard,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "any AI-namespace verb",
+    },
     // -- Wildcards (kept last for legacy ordering) -----------------------
     ActionEntry {
         name: "*",

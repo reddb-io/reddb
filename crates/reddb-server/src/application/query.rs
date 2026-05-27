@@ -150,6 +150,10 @@ impl<'a, P: RuntimeQueryPort + crate::application::ports::RuntimeEntityPort + ?S
                         crate::ai::parse_provider(&name)?
                     }
                 };
+                // S3 / #711: planner-level provider gate runs before the
+                // compatibility check + key resolver so neither emits
+                // side-effects for a policy-denied query.
+                self.runtime.enforce_ai_provider_policy(&provider)?;
                 // Gate non-OpenAI-compatible providers before we spend
                 // cycles resolving a key — Anthropic has no embeddings
                 // endpoint, HuggingFace uses a different wire shape,

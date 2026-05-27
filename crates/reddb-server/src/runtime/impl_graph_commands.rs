@@ -517,6 +517,10 @@ impl RedDBRuntime {
                         Some(p) => crate::ai::parse_provider(p)?,
                         None => default_provider,
                     };
+                    // S3 / #711: planner-level provider gate. Runs
+                    // before the credential resolver so the resolver
+                    // audit event is not emitted when policy denies.
+                    crate::runtime::ai::provider_gate::enforce(self, &provider)?;
                     let api_key = crate::ai::resolve_api_key_from_runtime(&provider, None, self)?;
                     let model = std::env::var("REDDB_OPENAI_EMBEDDING_MODEL")
                         .ok()

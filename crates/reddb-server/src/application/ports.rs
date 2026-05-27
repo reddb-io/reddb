@@ -116,6 +116,10 @@ pub trait RuntimeQueryPort {
         input: crate::application::SearchContextInput,
     ) -> RedDBResult<crate::runtime::ContextSearchResult>;
     fn resolve_semantic_api_key(&self, provider: &crate::ai::AiProvider) -> RedDBResult<String>;
+    /// Planner-level provider policy gate (#711, S3). Returns `Ok(())`
+    /// to proceed, `Err` when an explicit Deny matches. Default-allow
+    /// when no `ai:provider:*` policy is attached.
+    fn enforce_ai_provider_policy(&self, provider: &crate::ai::AiProvider) -> RedDBResult<()>;
 }
 
 pub trait RuntimeEntityPort {
