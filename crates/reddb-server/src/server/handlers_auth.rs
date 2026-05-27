@@ -13,7 +13,10 @@
 //! can target any tenant.
 
 use super::*;
-use crate::auth::{AuthError, UserId};
+use crate::auth::policies::{Decision, EvalContext, ResourceRef};
+use crate::auth::store::SimCtx;
+use crate::auth::{AuthError, Role, UserId};
+use std::collections::BTreeSet;
 
 /// Resolved caller for an admin-only auth endpoint.
 struct AuthCaller {
@@ -672,4 +675,428 @@ impl RedDBServer {
             }
         }
     }
+
+    /// GET /auth/tenants
+    ///
+    /// Red UI tenant-list contract. Returns the tenants visible to the
+    /// current principal so the UI can render its tenant switcher and
+    /// tenant-scoped tables without probing user/policy listings.
+    ///
+    /// Visibility rules (hybrid tenant model — see #739 thread):
+    ///   * Platform admin (`tenant_id = None`, role `Admin`): every
+    ///     tenant the AuthStore has *evidence* of. Tenants are derived
+    ///     from the union of user `tenant_id`s and policy `tenant`
+    ///     fields, deduplicated and sorted. The implicit platform
+    ///     tenant is exposed as a separate entry with `"id": null`.
+    ///   * Tenant-scoped principal: exactly their own tenant.
+    ///   * Authenticated platform-scoped non-admin: only the platform
+    ///     entry (`id: null`).
+    ///   * Auth disabled / no token (when allowed): platform admin
+    ///     treatment — every visible tenant.
+    pub(crate) fn handle_auth_list_tenants(
+        &self,
+        headers: &BTreeMap<String, String>,
+    ) -> HttpResponse {
+        let auth_store = match &self.auth_store {
+            Some(store) => store,
+            None => return json_error(501, "authentication is not configured"),
+        };
+
+        let caller = resolve_auth_caller(self, headers);
+        if caller.is_none() && auth_store.is_enabled() && auth_store.config().require_auth {
+            return json_error(401, "authentication required");
+        }
+
+        // Compute the universe of known tenants from the AuthStore
+        // (users + policies). Platform (`None`) is always represented
+        // as a separate entry so the UI can render a stable row for it.
+        let mut platform_seen = false;
+        let mut tenants: BTreeSet<String> = BTreeSet::new();
+        for user in auth_store.list_users() {
+            match user.tenant_id {
+                Some(t) => {
+                    tenants.insert(t);
+                }
+                None => platform_seen = true,
+            }
+        }
+        for policy in auth_store.list_policies() {
+            match &policy.tenant {
+                Some(t) => {
+                    tenants.insert(t.clone());
+                }
+                None => platform_seen = true,
+            }
+        }
+
+        let visible: Vec<Option<String>> = match &caller {
+            Some(c) if c.is_platform_admin() => {
+                let mut out: Vec<Option<String>> = Vec::new();
+                if platform_seen {
+                    out.push(None);
+                }
+                out.extend(tenants.into_iter().map(Some));
+                out
+            }
+            Some(c) => match &c.id.tenant {
+                Some(t) => vec![Some(t.clone())],
+                None => vec![None],
+            },
+            None => {
+                // Auth disabled (or require_auth off and no token) —
+                // mirror platform-admin visibility.
+                let mut out: Vec<Option<String>> = Vec::new();
+                if platform_seen {
+                    out.push(None);
+                }
+                out.extend(tenants.into_iter().map(Some));
+                out
+            }
+        };
+
+        let tenant_values: Vec<JsonValue> = visible
+            .into_iter()
+            .map(|id| {
+                let mut obj = Map::new();
+                match id {
+                    Some(t) => {
+                        obj.insert("id".to_string(), JsonValue::String(t));
+                        obj.insert("scope".to_string(), JsonValue::String("tenant".to_string()));
+                    }
+                    None => {
+                        obj.insert("id".to_string(), JsonValue::Null);
+                        obj.insert(
+                            "scope".to_string(),
+                            JsonValue::String("platform".to_string()),
+                        );
+                    }
+                }
+                JsonValue::Object(obj)
+            })
+            .collect();
+
+        let mut object = Map::new();
+        object.insert("ok".to_string(), JsonValue::Bool(true));
+        object.insert("tenants".to_string(), JsonValue::Array(tenant_values));
+        json_response(200, JsonValue::Object(object))
+    }
+
+    /// GET /auth/policies
+    ///
+    /// Red UI policy-list contract. Returns policy summaries visible to
+    /// the current principal. Statement bodies are intentionally
+    /// summarised (counts only) — full policy bodies are an admin-only
+    /// detail surface left to a future slice.
+    ///
+    /// Visibility rules:
+    ///   * Platform admin: every policy.
+    ///   * Tenant-scoped admin: tenant-attached policies for their
+    ///     tenant + platform-wide policies (`tenant = None`) since
+    ///     platform-wide rules affect their tenant too.
+    ///   * Non-admin authenticated principal: only the policies that
+    ///     resolve to *them* via `effective_policies` (group + user
+    ///     attachments). This lets a user see which rules govern them
+    ///     without leaking the full registry.
+    ///   * Auth disabled: every policy.
+    pub(crate) fn handle_auth_list_policies(
+        &self,
+        headers: &BTreeMap<String, String>,
+    ) -> HttpResponse {
+        let auth_store = match &self.auth_store {
+            Some(store) => store,
+            None => return json_error(501, "authentication is not configured"),
+        };
+
+        let caller = resolve_auth_caller(self, headers);
+        if caller.is_none() && auth_store.is_enabled() && auth_store.config().require_auth {
+            return json_error(401, "authentication required");
+        }
+
+        let all_policies = auth_store.list_policies();
+
+        let visible: Vec<_> = match &caller {
+            Some(c) if c.is_platform_admin() => all_policies,
+            Some(c) if c.role.can_admin() => {
+                let tenant = c.id.tenant.clone();
+                all_policies
+                    .into_iter()
+                    .filter(|p| p.tenant.is_none() || p.tenant == tenant)
+                    .collect()
+            }
+            Some(c) => {
+                let effective = auth_store.effective_policies(&c.id);
+                let allowed_ids: BTreeSet<String> =
+                    effective.iter().map(|p| p.id.clone()).collect();
+                all_policies
+                    .into_iter()
+                    .filter(|p| allowed_ids.contains(&p.id))
+                    .collect()
+            }
+            None => all_policies,
+        };
+
+        let policy_values: Vec<JsonValue> = visible
+            .iter()
+            .map(|p| {
+                let mut obj = Map::new();
+                obj.insert("id".to_string(), JsonValue::String(p.id.clone()));
+                obj.insert("version".to_string(), JsonValue::Number(p.version as f64));
+                match &p.tenant {
+                    Some(t) => {
+                        obj.insert("tenant".to_string(), JsonValue::String(t.clone()));
+                        obj.insert("scope".to_string(), JsonValue::String("tenant".to_string()));
+                    }
+                    None => {
+                        obj.insert("tenant".to_string(), JsonValue::Null);
+                        obj.insert(
+                            "scope".to_string(),
+                            JsonValue::String("platform".to_string()),
+                        );
+                    }
+                }
+                obj.insert(
+                    "statement_count".to_string(),
+                    JsonValue::Number(p.statements.len() as f64),
+                );
+                obj.insert(
+                    "created_at".to_string(),
+                    JsonValue::Number(p.created_at as f64),
+                );
+                obj.insert(
+                    "updated_at".to_string(),
+                    JsonValue::Number(p.updated_at as f64),
+                );
+                JsonValue::Object(obj)
+            })
+            .collect();
+
+        let mut object = Map::new();
+        object.insert("ok".to_string(), JsonValue::Bool(true));
+        object.insert("policies".to_string(), JsonValue::Array(policy_values));
+        json_response(200, JsonValue::Object(object))
+    }
+
+    /// POST /auth/can
+    ///
+    /// Batch authorization probe for the current principal.
+    ///
+    /// Body shape:
+    /// ```text
+    /// { "checks": [
+    ///     { "action": "read", "resource": { "kind": "collection", "name": "accounts" } },
+    ///     { "action": "write", "resource": { "kind": "collection", "name": "audit" },
+    ///       "current_tenant": "acme" }
+    ///   ]
+    /// }
+    /// ```
+    /// A trivial single-check form is also accepted by promoting the
+    /// top-level `action`/`resource`/`current_tenant` keys to a one-element
+    /// `checks` array.
+    ///
+    /// Each result is `{ allowed, reason, action, resource }` where
+    /// `reason` is a UI-safe explanation produced by the policy
+    /// simulator (e.g. `"allow at p1.statement[0]"`,
+    /// `"no statement matched (default deny)"`).
+    pub(crate) fn handle_auth_can(
+        &self,
+        headers: &BTreeMap<String, String>,
+        body: Vec<u8>,
+    ) -> HttpResponse {
+        let auth_store = match &self.auth_store {
+            Some(store) => store,
+            None => return json_error(501, "authentication is not configured"),
+        };
+
+        let payload = match parse_json_body(&body) {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
+
+        // Resolve the caller, with auth-disabled treated as a platform-admin
+        // probe (the UI uses this to introspect what's possible without a
+        // bound principal during dev).
+        let caller = resolve_auth_caller(self, headers);
+        if caller.is_none() && auth_store.is_enabled() && auth_store.config().require_auth {
+            return json_error(401, "authentication required");
+        }
+
+        // Extract the checks array — fall back to a single-check form
+        // built from top-level fields.
+        let checks: Vec<JsonValue> = match payload.get("checks") {
+            Some(JsonValue::Array(arr)) => arr.clone(),
+            Some(_) => {
+                return json_error(400, "'checks' must be an array");
+            }
+            None => {
+                if payload.get("action").is_some() {
+                    vec![payload.clone()]
+                } else {
+                    return json_error(400, "missing 'checks' array or top-level 'action'");
+                }
+            }
+        };
+
+        if checks.is_empty() {
+            return json_error(400, "'checks' must not be empty");
+        }
+        const MAX_CHECKS: usize = 64;
+        if checks.len() > MAX_CHECKS {
+            return json_error(
+                400,
+                format!("too many checks: {} > {MAX_CHECKS}", checks.len()),
+            );
+        }
+
+        // The principal used for evaluation. When auth is disabled and
+        // no caller is present, fabricate a synthetic platform-admin
+        // principal so the probe still produces meaningful answers.
+        let (principal, role): (UserId, Role) = match &caller {
+            Some(c) => (c.id.clone(), c.role),
+            None => (UserId::from_parts(None, "anonymous"), Role::Admin),
+        };
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+
+        let mut results: Vec<JsonValue> = Vec::with_capacity(checks.len());
+        for (idx, raw) in checks.iter().enumerate() {
+            let obj = match raw {
+                JsonValue::Object(m) => m,
+                _ => {
+                    results.push(check_error_json(idx, "check entries must be objects"));
+                    continue;
+                }
+            };
+
+            let action = match obj.get("action").and_then(JsonValue::as_str) {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => {
+                    results.push(check_error_json(idx, "missing 'action'"));
+                    continue;
+                }
+            };
+
+            let (kind, name, res_tenant) = match obj.get("resource") {
+                Some(JsonValue::Object(res)) => {
+                    let kind = res
+                        .get("kind")
+                        .and_then(JsonValue::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let name = res
+                        .get("name")
+                        .and_then(JsonValue::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let tenant = res
+                        .get("tenant")
+                        .and_then(JsonValue::as_str)
+                        .map(|s| s.to_string());
+                    if kind.is_empty() || name.is_empty() {
+                        results.push(check_error_json(
+                            idx,
+                            "resource requires non-empty 'kind' and 'name'",
+                        ));
+                        continue;
+                    }
+                    (kind, name, tenant)
+                }
+                _ => {
+                    results.push(check_error_json(idx, "missing 'resource' object"));
+                    continue;
+                }
+            };
+
+            let mut resource = ResourceRef::new(kind.clone(), name.clone());
+            if let Some(t) = res_tenant.clone() {
+                resource = resource.with_tenant(t);
+            }
+
+            let current_tenant = obj
+                .get("current_tenant")
+                .and_then(JsonValue::as_str)
+                .map(|s| s.to_string())
+                .or_else(|| principal.tenant.clone());
+
+            let principal_is_admin_role = role == Role::Admin;
+            let principal_is_system_owned = auth_store.principal_is_system_owned(&principal);
+            let ctx = EvalContext {
+                principal_tenant: principal.tenant.clone(),
+                current_tenant: current_tenant.clone(),
+                peer_ip: None,
+                mfa_present: false,
+                now_ms,
+                principal_is_admin_role,
+                principal_is_system_owned,
+                principal_is_platform_scoped: principal.tenant.is_none(),
+            };
+
+            let allowed =
+                auth_store.check_policy_authz_with_role(&principal, &action, &resource, &ctx, role);
+
+            let sim = auth_store.simulate(
+                &principal,
+                &action,
+                &resource,
+                SimCtx {
+                    current_tenant,
+                    peer_ip: None,
+                    mfa_present: false,
+                    now_ms: Some(now_ms),
+                },
+            );
+            let reason = match (&sim.decision, allowed) {
+                // Simulator agrees with the runtime evaluator.
+                (Decision::Allow { .. }, true) | (Decision::Deny { .. }, false) => sim.reason,
+                // Default-deny but runtime granted via LegacyRbac role fallback.
+                (Decision::DefaultDeny, true) => {
+                    "allowed by role-based legacy fallback (no matching policy)".to_string()
+                }
+                (Decision::DefaultDeny, false) => sim.reason,
+                // Should not happen — admin-bypass was retired — but
+                // surface honestly rather than asserting.
+                (Decision::AdminBypass, _) => "admin bypass".to_string(),
+                // Simulator says allow but evaluator says deny (or vice
+                // versa). Both are conceivable when mode + role disagree.
+                (Decision::Allow { .. }, false) => {
+                    format!("denied by enforcement policy ({})", sim.reason)
+                }
+                (Decision::Deny { .. }, true) => sim.reason,
+            };
+
+            let mut entry = Map::new();
+            entry.insert("action".to_string(), JsonValue::String(action));
+            let mut res_obj = Map::new();
+            res_obj.insert("kind".to_string(), JsonValue::String(kind));
+            res_obj.insert("name".to_string(), JsonValue::String(name));
+            if let Some(t) = res_tenant {
+                res_obj.insert("tenant".to_string(), JsonValue::String(t));
+            }
+            entry.insert("resource".to_string(), JsonValue::Object(res_obj));
+            entry.insert("allowed".to_string(), JsonValue::Bool(allowed));
+            entry.insert(
+                "reason".to_string(),
+                crate::json_field::SerializedJsonField::tainted(&reason),
+            );
+            results.push(JsonValue::Object(entry));
+        }
+
+        let mut object = Map::new();
+        object.insert("ok".to_string(), JsonValue::Bool(true));
+        object.insert("results".to_string(), JsonValue::Array(results));
+        json_response(200, JsonValue::Object(object))
+    }
+}
+
+fn check_error_json(index: usize, message: &str) -> JsonValue {
+    let mut obj = Map::new();
+    obj.insert("index".to_string(), JsonValue::Number(index as f64));
+    obj.insert("allowed".to_string(), JsonValue::Bool(false));
+    obj.insert(
+        "error".to_string(),
+        crate::json_field::SerializedJsonField::tainted(message),
+    );
+    JsonValue::Object(obj)
 }
