@@ -58,6 +58,10 @@ pub enum ActionCategory {
     /// Ephemeral notification verbs (`notify`, `notify:cross-tenant`).
     /// Gates the pub/sub primitive defined in `crate::notifications`.
     Notification,
+    /// Durable stream verbs (`stream`, `stream:cross-tenant`). Gates
+    /// the append-only event-log primitive defined in
+    /// `crate::streams`.
+    Stream,
     /// Catch-all for actions that don't fit a tighter category yet
     /// (`evidence:export`, `red.registry:register`, `kv:invalidate`).
     Other,
@@ -81,6 +85,7 @@ impl ActionCategory {
             ActionCategory::Wildcard => "wildcard",
             ActionCategory::Ai => "ai",
             ActionCategory::Notification => "notification",
+            ActionCategory::Stream => "stream",
             ActionCategory::Other => "other",
         }
     }
@@ -468,6 +473,32 @@ pub const ACTIONS: &[ActionEntry] = &[
         category: ActionCategory::Wildcard,
         lifecycle_state: LifecycleState::Active,
         gates_description: "any ephemeral notification verb",
+    },
+    // -- Durable streams (#721 / PRD #718) -------------------------------
+    // RedDB-native append-only event-log primitive. `stream` gates
+    // append / read / offset save inside the principal's own tenant;
+    // `stream:cross-tenant` is the explicit capability required to
+    // address another tenant's stream or the platform-global
+    // namespace. See `crate::streams`.
+    ActionEntry {
+        name: "stream",
+        category: ActionCategory::Stream,
+        lifecycle_state: LifecycleState::Active,
+        gates_description:
+            "append, read, and offset-save on durable streams in the principal's own tenant",
+    },
+    ActionEntry {
+        name: "stream:cross-tenant",
+        category: ActionCategory::Stream,
+        lifecycle_state: LifecycleState::Active,
+        gates_description:
+            "address durable streams in another tenant or the global namespace",
+    },
+    ActionEntry {
+        name: "stream:*",
+        category: ActionCategory::Wildcard,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "any durable stream verb",
     },
     // -- Wildcards (kept last for legacy ordering) -----------------------
     ActionEntry {
