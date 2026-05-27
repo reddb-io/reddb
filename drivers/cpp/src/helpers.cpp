@@ -738,4 +738,41 @@ DeleteResult QueueClient::purge(const std::string& queue) {
     return DeleteResult{sql::affected_from_body(body)};
 }
 
+std::vector<JsonValue> QueueClient::read_wait(const std::string& queue,
+                                              const std::string& consumer,
+                                              int64_t wait_ms,
+                                              const ReadWaitOptions& opts) {
+    sql::assert_identifier(queue, "queue name");
+    sql::assert_identifier(consumer, "consumer name");
+    if (wait_ms < 0) {
+        throw HelperError(HelperError::Code::InvalidArgument,
+            "queue read_wait requires a non-negative wait_ms (no infinite wait)");
+    }
+    std::string group_clause;
+    if (opts.group && !opts.group->empty()) {
+        sql::assert_identifier(*opts.group, "group name");
+        group_clause = " GROUP " + sql::identifier(*opts.group);
+    }
+    std::string count_clause;
+    if (opts.count) {
+        if (*opts.count < 0) {
+            throw HelperError(HelperError::Code::InvalidArgument,
+                "queue count must be a non-negative integer");
+        }
+        count_clause = " COUNT " + std::to_string(*opts.count);
+    }
+    std::string stmt = "QUEUE READ " + sql::identifier(queue) + group_clause
+        + " CONSUMER " + sql::identifier(consumer) + count_clause
+        + " WAIT " + std::to_string(wait_ms) + "ms";
+    std::string body = q_->query(stmt, {});
+    auto rows = sql::all_rows(body);
+    std::vector<JsonValue> out;
+    out.reserve(rows.size());
+    for (auto& r : rows) {
+        auto it = r.find("payload");
+        out.push_back(it != r.end() ? it->second : JsonValue{});
+    }
+    return out;
+}
+
 } // namespace reddb::helpers

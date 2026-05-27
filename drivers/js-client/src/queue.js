@@ -38,6 +38,30 @@ export class QueueClient {
       sql: `QUEUE PURGE ${queueIdentifier(queue)}`,
     })
   }
+
+  // Live `QUEUE READ … WAIT <ms>` helper (PRD #718 / #725). Same
+  // contract as drivers/js: required `waitMs`, timeout returns empty
+  // array, cancellation/cap rejection surface as transport errors.
+  async readWait(queue, consumer, options = {}) {
+    const sql = buildQueueReadWaitSql(queue, consumer, options)
+    const result = await this.client.call('query', { sql })
+    return queuePayloads(result)
+  }
+}
+
+function buildQueueReadWaitSql(queue, consumer, options) {
+  const { waitMs, group = null, count = null } = options ?? {}
+  if (!Number.isInteger(waitMs) || waitMs < 0) {
+    throw new RedDBError(
+      'INVALID_QUEUE_WAIT',
+      'queue readWait requires an explicit non-negative integer waitMs (no infinite wait)',
+    )
+  }
+  const q = queueIdentifier(queue)
+  const c = queueIdentifier(consumer)
+  const g = group != null ? ` GROUP ${queueIdentifier(group)}` : ''
+  const n = count != null ? queueCount(count) : ''
+  return `QUEUE READ ${q}${g} CONSUMER ${c}${n} WAIT ${waitMs}ms`
 }
 
 function queueIdentifier(value) {

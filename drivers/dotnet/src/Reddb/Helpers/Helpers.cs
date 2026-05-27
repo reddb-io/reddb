@@ -365,6 +365,68 @@ public sealed class QueueClient
             Array.Empty<object?>(), ct).ConfigureAwait(false);
         return new DeleteResult(Sql.AffectedFromBody(body.Span));
     }
+
+    /// <summary>
+    /// Options for <see cref="ReadWaitAsync"/>.
+    /// </summary>
+    public sealed class ReadWaitOptions
+    {
+        /// <summary>Optional consumer group name.</summary>
+        public string? Group { get; set; }
+        /// <summary>Optional max messages to deliver. Server default = 1.</summary>
+        public int? Count { get; set; }
+    }
+
+    /// <summary>
+    /// Live <c>QUEUE READ … WAIT &lt;ms&gt;</c> helper (PRD #718 / #725).
+    /// Blocks until a message is available for <paramref name="consumer"/>
+    /// on <paramref name="queue"/>, the wait budget elapses, or the
+    /// server cancels. Timeout returns an empty list — same shape as
+    /// an empty <see cref="PopAsync"/>; never throws. <paramref name="wait"/>
+    /// must be specified — there is no infinite-wait default.
+    /// Cancellation and cap rejection surface as transport exceptions.
+    /// </summary>
+    public async ValueTask<IReadOnlyList<object?>> ReadWaitAsync(
+        string queue,
+        string consumer,
+        TimeSpan wait,
+        ReadWaitOptions? opts = null,
+        CancellationToken ct = default)
+    {
+        Sql.AssertIdentifier(queue, "queue name");
+        Sql.AssertIdentifier(consumer, "consumer name");
+        if (wait < TimeSpan.Zero)
+        {
+            throw new HelperException.InvalidArgument(
+                "queue ReadWait requires a non-negative wait duration (no infinite wait)");
+        }
+        opts ??= new ReadWaitOptions();
+        string groupClause = "";
+        if (!string.IsNullOrEmpty(opts.Group))
+        {
+            Sql.AssertIdentifier(opts.Group!, "group name");
+            groupClause = $" GROUP {Sql.Identifier(opts.Group!)}";
+        }
+        string countClause = "";
+        if (opts.Count is not null)
+        {
+            if (opts.Count < 0)
+                throw new HelperException.InvalidArgument(
+                    "queue count must be a non-negative integer");
+            countClause = $" COUNT {opts.Count}";
+        }
+        long waitMs = (long)wait.TotalMilliseconds;
+        string sql = $"QUEUE READ {Sql.Identifier(queue)}{groupClause} CONSUMER {Sql.Identifier(consumer)}{countClause} WAIT {waitMs}ms";
+        var body = await _q.QueryAsync(sql, Array.Empty<object?>(), ct).ConfigureAwait(false);
+        var rows = Sql.AllRows(body.Span);
+        var out_ = new List<object?>(rows.Count);
+        foreach (var row in rows)
+        {
+            row.TryGetValue("payload", out var p);
+            out_.Add(p);
+        }
+        return out_;
+    }
 }
 
 /// <summary>

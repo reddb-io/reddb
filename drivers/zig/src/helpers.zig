@@ -436,6 +436,68 @@ pub const QueueClient = struct {
         defer self.allocator.free(body);
         return DeleteResult{ .affected = try affectedFromBody(self.allocator, body) };
     }
+
+    pub const ReadWaitOptions = struct {
+        group: ?[]const u8 = null,
+        count: ?i32 = null,
+    };
+
+    /// Live `QUEUE READ … WAIT <ms>` helper (PRD #718 / #725). Blocks
+    /// until a message is available for `consumer` on `queue_name`, the
+    /// `wait_ms` budget elapses, or the server cancels. Timeout returns
+    /// an empty slice — same shape as an empty `pop`. `wait_ms` is
+    /// required (non-negative); there is no infinite-wait default.
+    pub fn readWait(
+        self: QueueClient,
+        queue_name: []const u8,
+        consumer: []const u8,
+        wait_ms: i64,
+        opts: ReadWaitOptions,
+    ) ![]json.Value {
+        try assertIdentifier(queue_name, "queue name");
+        try assertIdentifier(consumer, "consumer name");
+        if (wait_ms < 0) return HelperError.InvalidArgument;
+        if (opts.count) |c| {
+            if (c < 0) return HelperError.InvalidArgument;
+        }
+        const qid = try identifier(self.allocator, queue_name);
+        defer self.allocator.free(qid);
+        const cid = try identifier(self.allocator, consumer);
+        defer self.allocator.free(cid);
+
+        var group_buf: []u8 = try self.allocator.alloc(u8, 0);
+        defer self.allocator.free(group_buf);
+        if (opts.group) |g| {
+            if (g.len > 0) {
+                try assertIdentifier(g, "group name");
+                const gid = try identifier(self.allocator, g);
+                defer self.allocator.free(gid);
+                self.allocator.free(group_buf);
+                group_buf = try std.fmt.allocPrint(self.allocator, " GROUP {s}", .{gid});
+            }
+        }
+        var count_buf: []u8 = try self.allocator.alloc(u8, 0);
+        defer self.allocator.free(count_buf);
+        if (opts.count) |c| {
+            self.allocator.free(count_buf);
+            count_buf = try std.fmt.allocPrint(self.allocator, " COUNT {d}", .{c});
+        }
+        const sql = try std.fmt.allocPrint(
+            self.allocator,
+            "QUEUE READ {s}{s} CONSUMER {s}{s} WAIT {d}ms",
+            .{ qid, group_buf, cid, count_buf, wait_ms },
+        );
+        defer self.allocator.free(sql);
+        const body = try self.q.query(self.allocator, sql, &.{});
+        defer self.allocator.free(body);
+        const rows = try allRows(self.allocator, body);
+        defer self.allocator.free(rows);
+        var out = try self.allocator.alloc(json.Value, rows.len);
+        for (rows, 0..) |row, i| {
+            out[i] = row.object.get("payload") orelse json.Value{ .null = {} };
+        }
+        return out;
+    }
 };
 
 // --- pure SQL helpers (unit-testable) ---------------------------------------

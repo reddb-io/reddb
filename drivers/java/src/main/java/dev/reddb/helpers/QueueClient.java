@@ -79,4 +79,57 @@ public final class QueueClient {
         byte[] body = q.query("QUEUE PURGE " + Sql.sqlIdentifier(queue));
         return new Envelopes.DeleteResult(Sql.affectedFromBody(body));
     }
+
+    /** Options for {@link #readWait(String, String, java.time.Duration, ReadWaitOptions)}. */
+    public static final class ReadWaitOptions {
+        public String group = null;
+        public Integer count = null;
+        public ReadWaitOptions group(String v) { this.group = v; return this; }
+        public ReadWaitOptions count(int v) { this.count = v; return this; }
+    }
+
+    public List<Object> readWait(String queue, String consumer, java.time.Duration wait) {
+        return readWait(queue, consumer, wait, null);
+    }
+
+    /**
+     * Live {@code QUEUE READ … WAIT <ms>} helper (PRD #718 / #725).
+     * Blocks until a message is available for {@code consumer} on
+     * {@code queue}, the wait budget elapses, or the server cancels.
+     * Timeout returns an empty list — same shape as an empty
+     * {@link #pop(String)}; never throws. {@code wait} is required —
+     * no infinite-wait default. Cancellation and cap rejection
+     * surface as exceptions from the transport.
+     */
+    public List<Object> readWait(String queue, String consumer, java.time.Duration wait, ReadWaitOptions opts) {
+        Sql.assertIdentifier(queue, "queue name");
+        Sql.assertIdentifier(consumer, "consumer name");
+        if (wait == null || wait.isNegative()) {
+            throw new HelperException.InvalidArgument(
+                "queue readWait requires a non-negative wait duration (no infinite wait)");
+        }
+        if (opts == null) opts = new ReadWaitOptions();
+        String groupClause = "";
+        if (opts.group != null && !opts.group.isEmpty()) {
+            Sql.assertIdentifier(opts.group, "group name");
+            groupClause = " GROUP " + Sql.sqlIdentifier(opts.group);
+        }
+        String countClause = "";
+        if (opts.count != null) {
+            if (opts.count < 0) {
+                throw new HelperException.InvalidArgument(
+                    "queue count must be a non-negative integer");
+            }
+            countClause = " COUNT " + opts.count;
+        }
+        long waitMs = wait.toMillis();
+        String sql = "QUEUE READ " + Sql.sqlIdentifier(queue) + groupClause
+            + " CONSUMER " + Sql.sqlIdentifier(consumer) + countClause
+            + " WAIT " + waitMs + "ms";
+        byte[] body = q.query(sql);
+        List<Map<String, Object>> rows = Sql.allRows(body);
+        List<Object> out = new ArrayList<>(rows.size());
+        for (Map<String, Object> r : rows) out.add(r.get("payload"));
+        return out;
+    }
 }
