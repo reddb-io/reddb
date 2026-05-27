@@ -367,6 +367,11 @@ impl StatementExecutionFrame {
         <Self as ReadFrame>::should_cache_result(self)
             && result.statement_type == "select"
             && result.engine != "vault"
+            // `QUEUE READ` is a stateful read: a delayed message
+            // (issue #722) becomes deliverable over time without a
+            // producer push to invalidate the cache, so a cached empty
+            // result would hide it. Skip caching entirely.
+            && result.statement != "queue_group_read"
             && result.result.pre_serialized_json.is_none()
             && result.result.records.len() <= 5
     }

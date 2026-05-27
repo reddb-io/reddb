@@ -2700,6 +2700,20 @@ pub enum QueueSide {
     Right,
 }
 
+/// Per-message delayed availability for `QUEUE PUSH` (PRD #718 / #722).
+///
+/// `DelayMs` is relative — the runtime resolves it against the push-time
+/// wall clock. `AtUnixMs` is absolute — the runtime promotes it to
+/// nanoseconds unchanged. Both ultimately surface to consumers as an
+/// `available_at_ns` metadata field that delivery paths filter on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueAvailability {
+    /// Delay the first delivery by this many milliseconds from push time.
+    DelayMs(u64),
+    /// Make the message first-deliverable at this absolute unix-ms instant.
+    AtUnixMs(u64),
+}
+
 /// Queue operation commands
 // The largest variant carries an inline `Filter`; boxing it would ripple
 // to every construction and match site for a marginal stack-size win, so
@@ -2712,6 +2726,12 @@ pub enum QueueCommand {
         value: Value,
         side: QueueSide,
         priority: Option<i32>,
+        /// Per-message delayed availability (issue #722). `None` means the
+        /// message is deliverable immediately. `Some(_)` resolves to an
+        /// `available_at_ns` metadata field at push time; delivery paths
+        /// (`QUEUE READ`, `QUEUE POP`, `QUEUE READ … WAIT`) refuse to
+        /// deliver the message until that instant.
+        available: Option<QueueAvailability>,
     },
     Pop {
         queue: String,

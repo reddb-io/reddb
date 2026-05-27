@@ -206,6 +206,9 @@ fn available_messages(
         super::impl_queue::load_queue_message_views_with_runtime(Some(runtime), store, queue)?
             .into_iter()
             .filter(|message| !pending_ids.contains(&message.id))
+            // Issue #722: delayed messages remain durable and visible to
+            // inspection but are not yet deliverable.
+            .filter(|message| message.is_available_now())
             .collect::<Vec<_>>();
     super::impl_queue::sort_queue_messages(&mut messages, &config, side);
     Ok(messages)
