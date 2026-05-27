@@ -88,12 +88,21 @@ fn list_policy_actions_returns_catalog() {
     // Every catalog entry surfaces with its six columns.
     assert!(body.contains("\"name\":\"policy:put\""), "body={body}");
     assert!(body.contains("\"category\":\"policy\""), "body={body}");
-    assert!(body.contains("\"lifecycle_state\":\"active\""), "body={body}");
+    assert!(
+        body.contains("\"lifecycle_state\":\"active\""),
+        "body={body}"
+    );
     assert!(body.contains("\"gates_description\""), "body={body}");
     // The catalog ships a Deprecated entry — replacement + since_version
     // must populate when lifecycle is deprecated.
-    assert!(body.contains("\"name\":\"vault:unseal_history\""), "body={body}");
-    assert!(body.contains("\"lifecycle_state\":\"deprecated\""), "body={body}");
+    assert!(
+        body.contains("\"name\":\"vault:unseal_history\""),
+        "body={body}"
+    );
+    assert!(
+        body.contains("\"lifecycle_state\":\"deprecated\""),
+        "body={body}"
+    );
     assert!(
         body.contains("\"replacement\":\"vault:read_metadata\""),
         "body={body}"
