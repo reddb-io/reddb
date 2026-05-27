@@ -1672,6 +1672,94 @@ impl RedDBServer {
                     n
                 );
             }
+
+            // QUEUE READ … WAIT telemetry — slice D of PRD #718 (#729).
+            // One started increment per park lifecycle; exactly one
+            // terminal outcome (woken/timed_out/cancelled) per started.
+            // Labels are (queue, scope) where scope is the registry
+            // scope key — today the tenant id, empty in single-tenant.
+            let render_wait_counter =
+                |body: &mut String, name: &str, help: &str, samples: &[((String, String), u64)]| {
+                    let _ = writeln!(body, "# HELP {} {}", name, help);
+                    let _ = writeln!(body, "# TYPE {} counter", name);
+                    for ((scope, queue), n) in samples {
+                        let _ = writeln!(
+                            body,
+                            "{}{{queue=\"{}\",scope=\"{}\"}} {}",
+                            name,
+                            sanitize_label(queue),
+                            sanitize_label(scope),
+                            n
+                        );
+                    }
+                };
+            render_wait_counter(
+                &mut body,
+                "queue_wait_started_total",
+                "QUEUE READ ... WAIT lifecycles that entered the park loop.",
+                &queue_telemetry.wait_started,
+            );
+            render_wait_counter(
+                &mut body,
+                "queue_wait_woken_total",
+                "QUEUE READ ... WAIT lifecycles that resolved by wake + delivery.",
+                &queue_telemetry.wait_woken,
+            );
+            render_wait_counter(
+                &mut body,
+                "queue_wait_timed_out_total",
+                "QUEUE READ ... WAIT lifecycles that resolved by WAIT budget expiry.",
+                &queue_telemetry.wait_timed_out,
+            );
+            render_wait_counter(
+                &mut body,
+                "queue_wait_cancelled_total",
+                "QUEUE READ ... WAIT lifecycles that resolved by registry cancellation.",
+                &queue_telemetry.wait_cancelled,
+            );
+
+            let _ = writeln!(
+                body,
+                "# HELP queue_wait_duration_ms Wall-clock duration of QUEUE READ ... WAIT park lifecycles, milliseconds."
+            );
+            let _ = writeln!(body, "# TYPE queue_wait_duration_ms histogram");
+            for ((scope, queue), hist) in &queue_telemetry.wait_duration {
+                for (i, upper) in crate::runtime::queue_telemetry::WAIT_DURATION_BUCKETS_MS
+                    .iter()
+                    .enumerate()
+                {
+                    let count = hist.bucket_counts.get(i).copied().unwrap_or(0);
+                    let _ = writeln!(
+                        body,
+                        "queue_wait_duration_ms_bucket{{queue=\"{}\",scope=\"{}\",le=\"{}\"}} {}",
+                        sanitize_label(queue),
+                        sanitize_label(scope),
+                        upper,
+                        count
+                    );
+                }
+                let _ = writeln!(
+                    body,
+                    "queue_wait_duration_ms_bucket{{queue=\"{}\",scope=\"{}\",le=\"+Inf\"}} {}",
+                    sanitize_label(queue),
+                    sanitize_label(scope),
+                    hist.count
+                );
+                let _ = writeln!(
+                    body,
+                    "queue_wait_duration_ms_sum{{queue=\"{}\",scope=\"{}\"}} {}",
+                    sanitize_label(queue),
+                    sanitize_label(scope),
+                    hist.sum_ms
+                );
+                let _ = writeln!(
+                    body,
+                    "queue_wait_duration_ms_count{{queue=\"{}\",scope=\"{}\"}} {}",
+                    sanitize_label(queue),
+                    sanitize_label(scope),
+                    hist.count
+                );
+            }
         }
 
         // Events outbox metrics — issue #299
