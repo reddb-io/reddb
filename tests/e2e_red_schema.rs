@@ -661,7 +661,10 @@ fn red_policy_actions_virtual_table_surfaces_catalog() {
     for record in &result.records {
         assert!(matches!(record.get("name"), Some(Value::Text(_))));
         assert!(matches!(record.get("category"), Some(Value::Text(_))));
-        assert!(matches!(record.get("lifecycle_state"), Some(Value::Text(_))));
+        assert!(matches!(
+            record.get("lifecycle_state"),
+            Some(Value::Text(_))
+        ));
         assert!(matches!(
             record.get("gates_description"),
             Some(Value::Text(_))
@@ -680,15 +683,16 @@ fn red_policy_actions_virtual_table_surfaces_catalog() {
 
     // Deprecated entry: replacement + since_version populated.
     let dep = rt
-        .execute_query(
-            "SELECT * FROM red.policy.actions WHERE name = 'vault:unseal_history'",
-        )
+        .execute_query("SELECT * FROM red.policy.actions WHERE name = 'vault:unseal_history'")
         .expect("deprecated lookup")
         .result;
     assert_eq!(dep.records.len(), 1);
     let row = &dep.records[0];
     assert_eq!(row.get("lifecycle_state"), Some(&Value::text("deprecated")));
-    assert_eq!(row.get("replacement"), Some(&Value::text("vault:read_metadata")));
+    assert_eq!(
+        row.get("replacement"),
+        Some(&Value::text("vault:read_metadata"))
+    );
     assert_eq!(row.get("since_version"), Some(&Value::text("0.5.0")));
 
     // Active entry: replacement + since_version are NULL.
