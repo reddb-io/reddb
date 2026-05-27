@@ -162,6 +162,7 @@ fn arb_queue_push() -> impl Strategy<Value = QueryExpr> {
             value,
             side: QueueSide::Right,
             priority: None,
+            available: None,
         })
     })
 }
