@@ -135,6 +135,54 @@ pub enum SqlCommand {
     ExplainMigration(ExplainMigrationQuery),
 }
 
+/// Issue #789 — Analytics v0 non-goal map for `CREATE …` forms.
+///
+/// PRD #782 ringfences Analytics v0 around a metric-centric catalog and
+/// explicitly excludes generic analytics objects, a separate event
+/// storage model, cohorts, funnels, SLA contracts, and adapter surfaces.
+/// When the parser sees one of these idents in the `CREATE` head, return
+/// a stable v0-scoped rejection message; otherwise return `None` and let
+/// the regular CREATE fallback handle the token.
+fn analytics_v0_non_goal_create(token: &Token) -> Option<String> {
+    let ident = match token {
+        Token::Ident(s) => s,
+        _ => return None,
+    };
+    let upper = ident.to_ascii_uppercase();
+    let message = match upper.as_str() {
+        "ANALYTICS" => {
+            "CREATE ANALYTICS is not supported in Analytics v0 — \
+             use CREATE METRIC <dotted.path> for the metric-centric \
+             catalog (PRD #782 non-goal)"
+        }
+        "EVENT" => {
+            "CREATE EVENT is not supported in Analytics v0 — \
+             event-shaped data lives in ordinary TABLE/DOCUMENT \
+             collections, not a new storage model (PRD #782 non-goal)"
+        }
+        "COHORT" => {
+            "CREATE COHORT is not supported in Analytics v0 — \
+             cohort surfaces are deferred (PRD #782 non-goal)"
+        }
+        "FUNNEL" => {
+            "CREATE FUNNEL is not supported in Analytics v0 — \
+             funnel surfaces are deferred (PRD #782 non-goal)"
+        }
+        "SLA" => {
+            "CREATE SLA is not supported in Analytics v0 — \
+             SLA/legal/commercial contract modeling is post-MVP \
+             (PRD #782 non-goal)"
+        }
+        "ADAPTER" => {
+            "CREATE ADAPTER is not supported in Analytics v0 — \
+             Prometheus/Grafana/Snowplow/Google Analytics adapters \
+             are deferred (PRD #782 non-goal)"
+        }
+        _ => return None,
+    };
+    Some(message.to_string())
+}
+
 fn collection_model_filter(model: &str) -> Filter {
     Filter::Compare {
         field: FieldRef::column("", "model"),
@@ -1658,6 +1706,15 @@ impl<'a> Parser<'a> {
                     self.position(),
                 )),
             }
+        } else if let Some(reason) = analytics_v0_non_goal_create(self.peek()) {
+            // Issue #789 — enforce Analytics v0 non-goals at the parser
+            // surface. The parent PRD (#782) explicitly excludes generic
+            // analytics objects, a new event storage model, cohorts,
+            // funnels, SLA contracts, and adapters from v0. Reject these
+            // CREATE forms here with a stable, non-goal-specific message
+            // so accidental use surfaces an obvious "out of scope for v0"
+            // error rather than the generic CREATE fallback.
+            Err(ParseError::new(reason, self.position()))
         } else if let Some(err) =
             ParseError::unsupported_recognized_token(self.peek(), self.position())
         {
