@@ -108,6 +108,17 @@ pub(super) const DOCUMENTS: &str = "red.documents";
 pub(super) const DOCUMENTS_INTERNAL: &str = "__red_schema_documents";
 pub(super) const KV: &str = "red.kv";
 pub(super) const KV_INTERNAL: &str = "__red_schema_kv";
+// Issue #746 — typed `red.vectors` / `red.graphs` model-shaped
+// projections for Red UI toolbars. Like #745's trio, these are
+// read-only projections over `red.collections` plus the catalog
+// contract (and, for vectors, the optional introspection registry
+// from #743). Rich fields that depend on later artifact / viewport
+// publish points (e.g. `artifact_state`) surface explicit
+// `unavailable` / NULL values rather than blocking on those slices.
+pub(super) const VECTORS: &str = "red.vectors";
+pub(super) const VECTORS_INTERNAL: &str = "__red_schema_vectors";
+pub(super) const GRAPHS: &str = "red.graphs";
+pub(super) const GRAPHS_INTERNAL: &str = "__red_schema_graphs";
 pub(super) const READ_ONLY_ERROR: &str = "system schema is read-only";
 
 const COLLECTION_COLUMNS: [&str; 15] = [
@@ -387,6 +398,46 @@ const KV_COLUMNS: [&str; 8] = [
     "internal",
 ];
 
+// Issue #746 — typed `red.vectors`. `search_capable` is the UI's edit
+// affordance for SEARCH toolbars. `artifact_state` is a stable
+// lifecycle bucket sourced from the vector introspection registry
+// (#743); when no entry has been published it defaults to
+// `unavailable`, never NULL, so the UI can render a stable badge
+// without conditional rendering on missing data.
+const VECTOR_COLUMNS: [&str; 10] = [
+    "name",
+    "dimensions",
+    "metric",
+    "vector_count",
+    "search_capable",
+    "artifact_state",
+    "in_memory_bytes",
+    "on_disk_bytes",
+    "tenant_id",
+    "internal",
+];
+
+// Issue #746 — typed `red.graphs`. `supports_viewport` is the stable
+// capability indicator the Red UI graph explorer keys on (graph
+// viewport contract #744 has landed). `supports_algorithms` is a
+// stable capability flag (true — `GRAPH CENTRALITY / SHORTEST_PATH /
+// ...` are always available against any graph collection).
+// `node_labels` / `edge_labels` are deterministic, sorted arrays of
+// the distinct labels observed in this collection's nodes / edges
+// at snapshot time.
+const GRAPH_COLUMNS: [&str; 10] = [
+    "name",
+    "node_count",
+    "edge_count",
+    "node_labels",
+    "edge_labels",
+    "supports_viewport",
+    "supports_algorithms",
+    "in_memory_bytes",
+    "on_disk_bytes",
+    "internal",
+];
+
 const SUBSCRIPTION_COLUMNS: [&str; 11] = [
     "name",
     "collection",
@@ -436,6 +487,8 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
         (TABLES, TABLES_INTERNAL),
         (DOCUMENTS, DOCUMENTS_INTERNAL),
         (KV, KV_INTERNAL),
+        (VECTORS, VECTORS_INTERNAL),
+        (GRAPHS, GRAPHS_INTERNAL),
     ] {
         if let Some(next) = replace_case_insensitive_outside_quotes(&rewritten, public, internal) {
             rewritten = next;
@@ -515,6 +568,10 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(DOCUMENTS)
         || table.eq_ignore_ascii_case(KV_INTERNAL)
         || table.eq_ignore_ascii_case(KV)
+        || table.eq_ignore_ascii_case(VECTORS_INTERNAL)
+        || table.eq_ignore_ascii_case(VECTORS)
+        || table.eq_ignore_ascii_case(GRAPHS_INTERNAL)
+        || table.eq_ignore_ascii_case(GRAPHS)
 }
 
 pub(super) fn red_query(
@@ -578,6 +635,8 @@ pub(super) fn red_query(
         VirtualTableKind::Tables => tables_snapshot(runtime, tenant, visible_collections),
         VirtualTableKind::Documents => documents_snapshot(runtime, tenant, visible_collections),
         VirtualTableKind::Kv => kv_snapshot(runtime, tenant, visible_collections),
+        VirtualTableKind::Vectors => vectors_snapshot(runtime, tenant, visible_collections),
+        VirtualTableKind::Graphs => graphs_snapshot(runtime, tenant, visible_collections),
     };
 
     let table_name = query.table.as_str();
@@ -697,6 +756,8 @@ enum VirtualTableKind {
     Tables,
     Documents,
     Kv,
+    Vectors,
+    Graphs,
 }
 
 impl VirtualTableKind {
@@ -729,6 +790,8 @@ impl VirtualTableKind {
             Self::Tables => &TABLE_COLUMNS,
             Self::Documents => &DOCUMENT_COLUMNS,
             Self::Kv => &KV_COLUMNS,
+            Self::Vectors => &VECTOR_COLUMNS,
+            Self::Graphs => &GRAPH_COLUMNS,
         }
     }
 
@@ -761,6 +824,8 @@ impl VirtualTableKind {
             Self::Tables => TABLES,
             Self::Documents => DOCUMENTS,
             Self::Kv => KV,
+            Self::Vectors => VECTORS,
+            Self::Graphs => GRAPHS,
         }
     }
 }
@@ -868,6 +933,12 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
     }
     if name.eq_ignore_ascii_case(KV_INTERNAL) || name.eq_ignore_ascii_case(KV) {
         return Ok(VirtualTableKind::Kv);
+    }
+    if name.eq_ignore_ascii_case(VECTORS_INTERNAL) || name.eq_ignore_ascii_case(VECTORS) {
+        return Ok(VirtualTableKind::Vectors);
+    }
+    if name.eq_ignore_ascii_case(GRAPHS_INTERNAL) || name.eq_ignore_ascii_case(GRAPHS) {
+        return Ok(VirtualTableKind::Graphs);
     }
     Err(RedDBError::Query(format!(
         "unknown system schema relation `{name}`"
@@ -2476,6 +2547,190 @@ fn kv_snapshot(
         .collect()
 }
 
+/// Issue #746 — typed `red.vectors` projection. Filtered to
+/// `model = vector`. `dimensions` / `metric` come from the catalog
+/// contract — both are NULL when undeclared (e.g. dynamic-mode
+/// vector collection). `artifact_state` / `search_capable` come
+/// from the vector introspection registry (#743). The registry is
+/// populated lazily by the engine; when there is no published row
+/// for this collection, `artifact_state` defaults to `unavailable`
+/// and `search_capable` defaults to `false`, per the thread-
+/// discussion decision on #746 (stable explicit values, not NULL).
+fn vectors_snapshot(
+    runtime: &RedDBRuntime,
+    tenant: Option<&str>,
+    visible_collections: Option<&HashSet<String>>,
+) -> Vec<UnifiedRecord> {
+    let snapshot = runtime.db().catalog_model_snapshot();
+    let schema = Arc::new(
+        VECTOR_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let store = runtime.db().store();
+    let internal_registry = InternalCollectionRegistry::from_store(store.as_ref());
+
+    snapshot
+        .collections
+        .into_iter()
+        .filter(|c| c.model == CollectionModel::Vector)
+        .filter(|c| collection_is_visible(&c.name, visible_collections))
+        .filter(|c| {
+            tenant.is_none_or(|tenant| {
+                collection_tenant(store.as_ref(), &c.name)
+                    .as_deref()
+                    .is_none_or(|owner| owner == tenant)
+            })
+        })
+        .map(|collection| {
+            let in_memory_bytes = store
+                .get_collection(&collection.name)
+                .map(|manager| manager.stats().total_memory_bytes as u64)
+                .unwrap_or(0);
+            let on_disk_bytes = crate::storage::disk_accountant::bytes_on_disk_for(
+                store.as_ref(),
+                &collection.name,
+            );
+            let owner_tenant = collection_tenant(store.as_ref(), &collection.name);
+            let visible_tenant = owner_tenant.as_deref().or(tenant);
+            let internal = internal_registry.is_internal(&collection.name);
+            let dimensions = collection
+                .vector_dimension
+                .map(|d| Value::UnsignedInteger(d as u64))
+                .unwrap_or(Value::Null);
+            let metric = collection
+                .vector_metric
+                .map(|m| Value::text(distance_metric_name(m)))
+                .unwrap_or(Value::Null);
+            let introspection = runtime.vector_introspection_get(&collection.name);
+            let (artifact_state, search_capable) = match introspection {
+                Some(row) => (row.artifact.state.as_str(), row.vector.search_capable),
+                None => ("unavailable", false),
+            };
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(collection.name.clone()),
+                    dimensions,
+                    metric,
+                    Value::UnsignedInteger(collection.entities as u64),
+                    Value::Boolean(search_capable),
+                    Value::text(artifact_state),
+                    Value::UnsignedInteger(in_memory_bytes),
+                    Value::UnsignedInteger(on_disk_bytes),
+                    visible_tenant.map(Value::text).unwrap_or(Value::Null),
+                    Value::Boolean(internal),
+                ],
+            )
+        })
+        .collect()
+}
+
+/// Issue #746 — typed `red.graphs` projection. Filtered to
+/// `model = graph`. Per-collection node / edge counts are produced by
+/// a single scan over the collection's segment manager (the catalog
+/// snapshot's `entities` total lumps nodes and edges together for
+/// graph collections, which the UI cannot split). `node_labels` /
+/// `edge_labels` are deterministic sorted arrays so test assertions
+/// and the toolbar both see a stable shape. `supports_viewport` is
+/// the stable indicator the explorer keys on; the viewport contract
+/// itself landed in #744.
+fn graphs_snapshot(
+    runtime: &RedDBRuntime,
+    tenant: Option<&str>,
+    visible_collections: Option<&HashSet<String>>,
+) -> Vec<UnifiedRecord> {
+    let snapshot = runtime.db().catalog_model_snapshot();
+    let schema = Arc::new(
+        GRAPH_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    let store = runtime.db().store();
+    let internal_registry = InternalCollectionRegistry::from_store(store.as_ref());
+
+    snapshot
+        .collections
+        .into_iter()
+        .filter(|c| c.model == CollectionModel::Graph)
+        .filter(|c| collection_is_visible(&c.name, visible_collections))
+        .filter(|c| {
+            tenant.is_none_or(|tenant| {
+                collection_tenant(store.as_ref(), &c.name)
+                    .as_deref()
+                    .is_none_or(|owner| owner == tenant)
+            })
+        })
+        .map(|collection| {
+            let (node_count, edge_count, node_labels, edge_labels) =
+                graph_counts(store.as_ref(), &collection.name);
+            let in_memory_bytes = store
+                .get_collection(&collection.name)
+                .map(|manager| manager.stats().total_memory_bytes as u64)
+                .unwrap_or(0);
+            let on_disk_bytes = crate::storage::disk_accountant::bytes_on_disk_for(
+                store.as_ref(),
+                &collection.name,
+            );
+            let internal = internal_registry.is_internal(&collection.name);
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(collection.name),
+                    Value::UnsignedInteger(node_count),
+                    Value::UnsignedInteger(edge_count),
+                    Value::Array(node_labels.into_iter().map(Value::text).collect()),
+                    Value::Array(edge_labels.into_iter().map(Value::text).collect()),
+                    Value::Boolean(true),
+                    Value::Boolean(true),
+                    Value::UnsignedInteger(in_memory_bytes),
+                    Value::UnsignedInteger(on_disk_bytes),
+                    Value::Boolean(internal),
+                ],
+            )
+        })
+        .collect()
+}
+
+/// Issue #746 — single-pass scan over a graph collection's segment
+/// manager that returns `(node_count, edge_count, node_labels,
+/// edge_labels)`. Labels are deduplicated and returned in sorted
+/// order so the typed projection has a stable shape across calls.
+fn graph_counts(store: &UnifiedStore, collection: &str) -> (u64, u64, Vec<String>, Vec<String>) {
+    let Some(manager) = store.get_collection(collection) else {
+        return (0, 0, Vec::new(), Vec::new());
+    };
+    let mut node_count: u64 = 0;
+    let mut edge_count: u64 = 0;
+    let mut node_labels: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut edge_labels: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for entity in manager.query_all(|_| true) {
+        match &entity.kind {
+            crate::storage::EntityKind::GraphNode(node) => {
+                node_count = node_count.saturating_add(1);
+                if !node.node_type.is_empty() {
+                    node_labels.insert(node.node_type.clone());
+                }
+            }
+            crate::storage::EntityKind::GraphEdge(edge) => {
+                edge_count = edge_count.saturating_add(1);
+                if !edge.label.is_empty() {
+                    edge_labels.insert(edge.label.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    (
+        node_count,
+        edge_count,
+        node_labels.into_iter().collect(),
+        edge_labels.into_iter().collect(),
+    )
+}
+
 /// Issue #745 — count the rows that look like documents (have a JSON
 /// or text `body` field) and the distinct top-level field names seen
 /// across them. Mirrors `infer_document_columns` so the two surfaces
@@ -3345,6 +3600,16 @@ mod tests {
         assert_eq!(documents, "SELECT * FROM __red_schema_documents");
         let kv = rewrite_virtual_names("SELECT * FROM red.kv").expect("kv");
         assert_eq!(kv, "SELECT * FROM __red_schema_kv");
+    }
+
+    // Issue #746 — typed `red.vectors` / `red.graphs` join the trio
+    // from #745 with the same public→internal rewrite contract.
+    #[test]
+    fn rewrite_handles_typed_vector_and_graph_relations() {
+        let vectors = rewrite_virtual_names("SELECT * FROM red.vectors").expect("vectors");
+        assert_eq!(vectors, "SELECT * FROM __red_schema_vectors");
+        let graphs = rewrite_virtual_names("SELECT * FROM red.graphs").expect("graphs");
+        assert_eq!(graphs, "SELECT * FROM __red_schema_graphs");
     }
 
     #[test]
