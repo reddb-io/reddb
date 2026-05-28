@@ -70,6 +70,9 @@ pub(super) const QUEUES_INTERNAL: &str = "__red_schema_queues";
 // versions: `(event_name, version, schema_json, registered_at)`.
 pub(super) const SCHEMA_REGISTRY: &str = "red.schema_registry";
 pub(super) const SCHEMA_REGISTRY_INTERNAL: &str = "__red_schema_schema_registry";
+// Issue #784 — Analytics v0 metric descriptor catalog.
+pub(super) const ANALYTICS_METRICS: &str = "red.analytics.metrics";
+pub(super) const ANALYTICS_METRICS_INTERNAL: &str = "__red_schema_analytics_metrics";
 // Issue #655 — governance/evidence surfaces. These are read-only
 // projections over runtime-owned stores, not SQL collections.
 pub(super) const GOVERNANCE_REGISTRY: &str = "red.registry";
@@ -219,6 +222,8 @@ const MATERIALIZED_VIEW_COLUMNS: [&str; 7] = [
 const SCHEMA_REGISTRY_COLUMNS: [&str; 4] =
     ["event_name", "version", "schema_json", "registered_at"];
 
+const ANALYTICS_METRIC_COLUMNS: [&str; 4] = ["path", "kind", "role", "created_at"];
+
 const GOVERNANCE_REGISTRY_COLUMNS: [&str; 12] = [
     "id",
     "version",
@@ -345,6 +350,7 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
         (MATERIALIZED_VIEWS, MATERIALIZED_VIEWS_INTERNAL),
         (QUEUE_PENDING, QUEUE_PENDING_INTERNAL),
         (QUEUES, QUEUES_INTERNAL),
+        (ANALYTICS_METRICS, ANALYTICS_METRICS_INTERNAL),
         (SCHEMA_REGISTRY, SCHEMA_REGISTRY_INTERNAL),
         (
             GOVERNANCE_REGISTRY_HISTORY,
@@ -407,6 +413,8 @@ pub(super) fn is_virtual_table(table: &str) -> bool {
         || table.eq_ignore_ascii_case(QUEUE_PENDING)
         || table.eq_ignore_ascii_case(QUEUES_INTERNAL)
         || table.eq_ignore_ascii_case(QUEUES)
+        || table.eq_ignore_ascii_case(ANALYTICS_METRICS_INTERNAL)
+        || table.eq_ignore_ascii_case(ANALYTICS_METRICS)
         || table.eq_ignore_ascii_case(SCHEMA_REGISTRY_INTERNAL)
         || table.eq_ignore_ascii_case(SCHEMA_REGISTRY)
         || table.eq_ignore_ascii_case(GOVERNANCE_REGISTRY_INTERNAL)
@@ -470,6 +478,7 @@ pub(super) fn red_query(
         VirtualTableKind::MaterializedViews => materialized_views_snapshot(runtime),
         VirtualTableKind::QueuePending => queue_pending_snapshot(runtime, visible_collections),
         VirtualTableKind::Queues => queues_snapshot(runtime, tenant, visible_collections),
+        VirtualTableKind::AnalyticsMetrics => analytics_metrics_snapshot(runtime),
         VirtualTableKind::SchemaRegistry => schema_registry_snapshot(runtime),
         VirtualTableKind::GovernanceRegistry => governance_registry_snapshot(runtime),
         VirtualTableKind::GovernanceRegistryHistory => {
@@ -586,6 +595,7 @@ enum VirtualTableKind {
     MaterializedViews,
     QueuePending,
     Queues,
+    AnalyticsMetrics,
     SchemaRegistry,
     GovernanceRegistry,
     GovernanceRegistryHistory,
@@ -613,6 +623,7 @@ impl VirtualTableKind {
             Self::MaterializedViews => &MATERIALIZED_VIEW_COLUMNS,
             Self::QueuePending => &QUEUE_PENDING_COLUMNS,
             Self::Queues => &QUEUE_COLUMNS,
+            Self::AnalyticsMetrics => &ANALYTICS_METRIC_COLUMNS,
             Self::SchemaRegistry => &SCHEMA_REGISTRY_COLUMNS,
             Self::GovernanceRegistry => &GOVERNANCE_REGISTRY_COLUMNS,
             Self::GovernanceRegistryHistory => &GOVERNANCE_REGISTRY_HISTORY_COLUMNS,
@@ -640,6 +651,7 @@ impl VirtualTableKind {
             Self::MaterializedViews => MATERIALIZED_VIEWS,
             Self::QueuePending => QUEUE_PENDING,
             Self::Queues => QUEUES,
+            Self::AnalyticsMetrics => ANALYTICS_METRICS,
             Self::SchemaRegistry => SCHEMA_REGISTRY,
             Self::GovernanceRegistry => GOVERNANCE_REGISTRY,
             Self::GovernanceRegistryHistory => GOVERNANCE_REGISTRY_HISTORY,
@@ -696,6 +708,11 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
     }
     if name.eq_ignore_ascii_case(QUEUES_INTERNAL) || name.eq_ignore_ascii_case(QUEUES) {
         return Ok(VirtualTableKind::Queues);
+    }
+    if name.eq_ignore_ascii_case(ANALYTICS_METRICS_INTERNAL)
+        || name.eq_ignore_ascii_case(ANALYTICS_METRICS)
+    {
+        return Ok(VirtualTableKind::AnalyticsMetrics);
     }
     if name.eq_ignore_ascii_case(SCHEMA_REGISTRY_INTERNAL)
         || name.eq_ignore_ascii_case(SCHEMA_REGISTRY)
@@ -1128,6 +1145,30 @@ fn schema_registry_snapshot(runtime: &RedDBRuntime) -> Vec<UnifiedRecord> {
                     Value::UnsignedInteger(entry.version as u64),
                     Value::text(entry.schema_json),
                     Value::TimestampMs(entry.registered_at_ms as i64),
+                ],
+            )
+        })
+        .collect()
+}
+
+fn analytics_metrics_snapshot(runtime: &RedDBRuntime) -> Vec<UnifiedRecord> {
+    let store = runtime.db().store();
+    let schema = Arc::new(
+        ANALYTICS_METRIC_COLUMNS
+            .iter()
+            .map(|name| Arc::<str>::from(*name))
+            .collect::<Vec<_>>(),
+    );
+    super::metric_descriptor_catalog::list(store.as_ref())
+        .into_iter()
+        .map(|entry| {
+            UnifiedRecord::with_schema(
+                Arc::clone(&schema),
+                vec![
+                    Value::text(entry.path),
+                    Value::text(entry.kind),
+                    Value::text(entry.role),
+                    timestamp_ms_value(entry.created_at_ms),
                 ],
             )
         })
