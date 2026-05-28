@@ -19,8 +19,9 @@
 //! `handlers_query::handle_query_ndjson_stream` and is dispatched from
 //! `routing::try_route_streaming`.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::runtime::RedDBRuntime;
@@ -85,6 +86,15 @@ pub struct StreamConfig {
     pub chunk_max_pages: usize,
     pub chunk_max_rows: usize,
     pub chunk_max_latency_ms: u64,
+    /// Process-wide concurrent stream cap (issue #761 / S2).
+    /// Acquiring the (N+1)th slot is refused with
+    /// `server_stream_capacity_exhausted`.
+    pub max_global_streams: usize,
+    /// Per-principal concurrent stream cap (issue #761 / S2).
+    /// Acquiring the (M+1)th slot for a single principal is refused
+    /// with `principal_stream_quota_exhausted` even when the global
+    /// counter still has room.
+    pub max_per_principal_streams: usize,
 }
 
 impl Default for StreamConfig {
@@ -103,6 +113,8 @@ impl StreamConfig {
         chunk_max_pages: 64,
         chunk_max_rows: 1000,
         chunk_max_latency_ms: 50,
+        max_global_streams: 256,
+        max_per_principal_streams: 32,
     };
 
     /// Read every `stream.*` key from `red_config` over the runtime's KV
@@ -139,6 +151,12 @@ impl StreamConfig {
         if let Some(v) = read_u64("stream.chunk.max_latency_ms") {
             cfg.chunk_max_latency_ms = v;
         }
+        if let Some(v) = read_u64("stream.max_global") {
+            cfg.max_global_streams = v as usize;
+        }
+        if let Some(v) = read_u64("stream.max_per_principal") {
+            cfg.max_per_principal_streams = v as usize;
+        }
         cfg.normalize();
         cfg
     }
@@ -161,6 +179,12 @@ impl StreamConfig {
         }
         if self.chunk_max_rows == 0 {
             self.chunk_max_rows = 1;
+        }
+        if self.max_global_streams == 0 {
+            self.max_global_streams = 1;
+        }
+        if self.max_per_principal_streams == 0 {
+            self.max_per_principal_streams = 1;
         }
     }
 
@@ -393,6 +417,155 @@ pub fn write_chunked_terminator<W: std::io::Write>(writer: &mut W) -> std::io::R
     writer.flush()
 }
 
+/// Issue #761 / S2 — process-wide stream capacity registry. Holds two
+/// counters: a global concurrent-stream count and a per-principal map.
+/// Both are decremented when the [`StreamCapacityGuard`] handed back
+/// from a successful `try_acquire` is dropped, so the release path
+/// covers every normal exit (success, mid-stream error, snapshot
+/// expiry, client disconnect that drops the writer chain, panic
+/// unwind through the stack frame holding the guard).
+#[derive(Debug, Default)]
+pub struct StreamCapacityRegistry {
+    inner: Mutex<CapacityInner>,
+}
+
+#[derive(Debug, Default)]
+struct CapacityInner {
+    global_count: usize,
+    per_principal: HashMap<String, usize>,
+}
+
+/// Failure modes of [`StreamCapacityRegistry::try_acquire`]. Each
+/// variant carries the cap that fired and the live counter value at
+/// refusal time so clients can back off intelligently (the HTTP layer
+/// surfaces these inside the structured 429 body).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcquireError {
+    /// `stream.max_global` exceeded. Per acceptance criterion #1.
+    GlobalExhausted { limit: usize, current: usize },
+    /// `stream.max_per_principal` exceeded for `principal`. Per
+    /// acceptance criterion #2. The principal is surfaced verbatim;
+    /// callers must escape it on the wire.
+    PrincipalExhausted {
+        principal: String,
+        limit: usize,
+        current: usize,
+    },
+}
+
+impl AcquireError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            AcquireError::GlobalExhausted { .. } => "server_stream_capacity_exhausted",
+            AcquireError::PrincipalExhausted { .. } => "principal_stream_quota_exhausted",
+        }
+    }
+
+    pub fn message(&self) -> String {
+        match self {
+            AcquireError::GlobalExhausted { limit, current } => {
+                format!("server stream capacity exhausted (limit {limit}, current {current})")
+            }
+            AcquireError::PrincipalExhausted {
+                principal,
+                limit,
+                current,
+            } => format!(
+                "principal {principal} stream quota exhausted (limit {limit}, current {current})"
+            ),
+        }
+    }
+}
+
+impl StreamCapacityRegistry {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Attempt to acquire one slot. Both caps are checked under the
+    /// same lock, so a concurrent acquire+release pair cannot over-
+    /// issue beyond either ceiling (acceptance criterion #5).
+    pub fn try_acquire(
+        self: &Arc<Self>,
+        principal: &str,
+        max_global: usize,
+        max_per_principal: usize,
+    ) -> Result<StreamCapacityGuard, AcquireError> {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.global_count >= max_global {
+            return Err(AcquireError::GlobalExhausted {
+                limit: max_global,
+                current: inner.global_count,
+            });
+        }
+        let current = inner.per_principal.get(principal).copied().unwrap_or(0);
+        if current >= max_per_principal {
+            return Err(AcquireError::PrincipalExhausted {
+                principal: principal.to_string(),
+                limit: max_per_principal,
+                current,
+            });
+        }
+        inner.global_count += 1;
+        inner
+            .per_principal
+            .insert(principal.to_string(), current + 1);
+        Ok(StreamCapacityGuard {
+            registry: Arc::clone(self),
+            principal: principal.to_string(),
+            released: false,
+        })
+    }
+
+    fn release(&self, principal: &str) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.global_count > 0 {
+            inner.global_count -= 1;
+        }
+        if let Some(count) = inner.per_principal.get_mut(principal) {
+            if *count > 0 {
+                *count -= 1;
+            }
+            if *count == 0 {
+                inner.per_principal.remove(principal);
+            }
+        }
+    }
+
+    /// Visible for tests and audit handlers.
+    pub fn snapshot(&self) -> (usize, HashMap<String, usize>) {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        (inner.global_count, inner.per_principal.clone())
+    }
+}
+
+/// RAII slot returned by [`StreamCapacityRegistry::try_acquire`].
+/// Decrements both counters on drop — acceptance criterion #4
+/// ("releasing a slot on stream end (any reason) decrements both
+/// counters atomically").
+#[must_use = "dropping the guard immediately releases the stream slot"]
+#[derive(Debug)]
+pub struct StreamCapacityGuard {
+    registry: Arc<StreamCapacityRegistry>,
+    principal: String,
+    released: bool,
+}
+
+impl StreamCapacityGuard {
+    pub fn principal(&self) -> &str {
+        &self.principal
+    }
+}
+
+impl Drop for StreamCapacityGuard {
+    fn drop(&mut self) {
+        if !self.released {
+            self.registry.release(&self.principal);
+            self.released = true;
+        }
+    }
+}
+
 /// Borrow the lease registry's clock by default — the routing handler
 /// uses this, tests inject their own.
 pub fn system_clock() -> Arc<dyn Clock> {
@@ -467,12 +640,16 @@ mod tests {
             chunk_max_pages: 8,
             chunk_max_rows: 0,
             chunk_max_latency_ms: 1,
+            max_global_streams: 0,
+            max_per_principal_streams: 0,
         };
         cfg.normalize();
         assert_eq!(cfg.chunk_min_pages, 1);
         assert_eq!(cfg.chunk_max_pages, 8);
         assert_eq!(cfg.chunk_default_pages, 8); // clamped down to max
         assert!(cfg.chunk_max_rows >= 1);
+        assert!(cfg.max_global_streams >= 1);
+        assert!(cfg.max_per_principal_streams >= 1);
     }
 
     /// Test sink that accumulates flushed chunks into an interior-mutable
@@ -603,5 +780,120 @@ mod tests {
         // 11 bytes in `{"row":{}}\n` → hex 'b'.
         assert!(text.contains("\r\nb\r\n{\"row\":{}}\n\r\n"));
         assert!(text.ends_with("0\r\n\r\n"));
+    }
+
+    // ──────── Issue #761 / S2 — capacity registry ────────
+
+    #[test]
+    fn capacity_registry_global_exhausted_returns_structured_error() {
+        let reg = StreamCapacityRegistry::new();
+        let _g1 = reg.try_acquire("alice", 2, 32).unwrap();
+        let _g2 = reg.try_acquire("alice", 2, 32).unwrap();
+        let err = reg.try_acquire("alice", 2, 32).unwrap_err();
+        assert_eq!(
+            err,
+            AcquireError::GlobalExhausted {
+                limit: 2,
+                current: 2,
+            }
+        );
+        assert_eq!(err.code(), "server_stream_capacity_exhausted");
+    }
+
+    #[test]
+    fn capacity_registry_per_principal_exhausted_independent_of_global() {
+        // Acceptance criterion #2: per-principal cap fires even when
+        // global has room. Acceptance criterion #3: counters are
+        // independent across principals.
+        let reg = StreamCapacityRegistry::new();
+        let _a1 = reg.try_acquire("alice", 100, 2).unwrap();
+        let _a2 = reg.try_acquire("alice", 100, 2).unwrap();
+        let err = reg.try_acquire("alice", 100, 2).unwrap_err();
+        assert_eq!(
+            err,
+            AcquireError::PrincipalExhausted {
+                principal: "alice".to_string(),
+                limit: 2,
+                current: 2,
+            }
+        );
+        assert_eq!(err.code(), "principal_stream_quota_exhausted");
+
+        // Bob is unaffected by Alice's quota.
+        let _b1 = reg.try_acquire("bob", 100, 2).unwrap();
+        let _b2 = reg.try_acquire("bob", 100, 2).unwrap();
+    }
+
+    #[test]
+    fn capacity_registry_release_frees_both_counters() {
+        // Acceptance criterion #4: drop releases both counters.
+        let reg = StreamCapacityRegistry::new();
+        let g1 = reg.try_acquire("alice", 1, 1).unwrap();
+        assert!(reg.try_acquire("alice", 1, 1).is_err());
+        drop(g1);
+        let (global, per_principal) = reg.snapshot();
+        assert_eq!(global, 0);
+        assert!(per_principal.is_empty());
+        // Slot is now reclaimable.
+        let _g2 = reg.try_acquire("alice", 1, 1).unwrap();
+    }
+
+    #[test]
+    fn capacity_registry_concurrent_acquire_release_does_not_over_issue() {
+        // Acceptance criterion #5: stress coverage. Spawn `THREADS`
+        // threads each running `ITERS` acquire+release cycles against
+        // a registry sized to fit only `CAP` slots; the live count
+        // must never exceed `CAP`, and the registry must return to
+        // zero once every thread has joined.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const THREADS: usize = 16;
+        const ITERS: usize = 200;
+        const CAP_GLOBAL: usize = 4;
+        const CAP_PER_PRINCIPAL: usize = 4;
+
+        let reg = StreamCapacityRegistry::new();
+        let observed_max = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for tid in 0..THREADS {
+            let reg = Arc::clone(&reg);
+            let observed_max = Arc::clone(&observed_max);
+            // Two principals share the global cap, each capped at
+            // `CAP_PER_PRINCIPAL` themselves.
+            let principal = format!("p{}", tid % 2);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..ITERS {
+                    if let Ok(guard) = reg.try_acquire(&principal, CAP_GLOBAL, CAP_PER_PRINCIPAL) {
+                        let (live, _) = reg.snapshot();
+                        observed_max.fetch_max(live, Ordering::SeqCst);
+                        // Hold the slot just long enough to let other
+                        // threads race against the cap.
+                        std::thread::yield_now();
+                        drop(guard);
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let (global_after, per_principal_after) = reg.snapshot();
+        assert_eq!(global_after, 0, "global counter leaked");
+        assert!(
+            per_principal_after.is_empty(),
+            "per-principal map leaked: {per_principal_after:?}"
+        );
+        assert!(
+            observed_max.load(Ordering::SeqCst) <= CAP_GLOBAL,
+            "global cap was breached: observed {} > {}",
+            observed_max.load(Ordering::SeqCst),
+            CAP_GLOBAL
+        );
+    }
+
+    #[test]
+    fn stream_config_defaults_carry_s2_caps() {
+        assert_eq!(StreamConfig::DEFAULT.max_global_streams, 256);
+        assert_eq!(StreamConfig::DEFAULT.max_per_principal_streams, 32);
     }
 }
