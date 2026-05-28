@@ -6,6 +6,8 @@ time-stamped metric data. No need for a separate InfluxDB or TimescaleDB.
 In the Analytics v0 ontology, Time-Series is storage/layout for timestamped
 samples and materializations. It is not the metric catalog itself: KPI and SLI
 meaning lives on metric descriptors, and SLOs are objectives over SLI metrics.
+Metric descriptors may read from or materialize into Time-Series collections,
+but Time-Series does not own product or reliability semantics.
 
 ## When to Use
 
