@@ -18,6 +18,78 @@ pub struct MetricDescriptor {
     pub kind: String,
     pub role: String,
     pub created_at_ms: u128,
+    /// Issue #790 — derived metric descriptors.
+    ///
+    /// A descriptor is "derived" when at least one of these fields is set.
+    /// They name the inputs that *would* feed a future execution layer:
+    /// `source` references an `red.analytics.sources` profile,
+    /// `query` is a free-form expression string (opaque at v0),
+    /// `window_ms` is the evaluation window in milliseconds, and
+    /// `time_field` overrides the source's time column. v0 stores them
+    /// verbatim — there is no execution engine yet; see [`read_output_unsupported`].
+    pub source: Option<String>,
+    pub query: Option<String>,
+    pub window_ms: Option<u64>,
+    pub time_field: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DerivedSpec {
+    pub source: Option<String>,
+    pub query: Option<String>,
+    pub window_ms: Option<u64>,
+    pub time_field: Option<String>,
+}
+
+impl DerivedSpec {
+    pub fn is_empty(&self) -> bool {
+        self.source.is_none()
+            && self.query.is_none()
+            && self.window_ms.is_none()
+            && self.time_field.is_none()
+    }
+}
+
+/// Build the standard "metric output reads are not yet implemented" error.
+///
+/// Analytics v0 ships descriptor state only — there is no execution engine
+/// that turns a derived metric definition into a value. Callers asking for
+/// the *output* (current value, sample series, etc.) get a structured error
+/// that names the path and explains why, so downstream tooling does not
+/// confuse "not yet built" with "metric does not exist".
+/// Parse `READ METRIC <dotted.path>` into the requested path.
+///
+/// Returns `Ok(None)` for any statement that does not start with
+/// `READ METRIC`, leaving the regular SQL pipeline untouched. Recognising
+/// the form here (rather than in the grammar) keeps the intercept narrow
+/// and avoids polluting the executor planner pipe-patterns just to surface
+/// a structured "not yet implemented" error.
+pub fn parse_read_metric_statement(sql: &str) -> Option<String> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let mut tokens = trimmed.split_whitespace();
+    let head = tokens.next()?;
+    let next = tokens.next()?;
+    if !head.eq_ignore_ascii_case("READ") || !next.eq_ignore_ascii_case("METRIC") {
+        return None;
+    }
+    let path = tokens.next()?.to_string();
+    if tokens.next().is_some() {
+        // Reject trailing tokens — keep the surface narrow so users get
+        // a clear "unsupported" error rather than silently dropped args.
+        return Some(path + " <trailing>");
+    }
+    Some(path)
+}
+
+pub fn read_output_unsupported(path: &str) -> RedDBError {
+    RedDBError::Query(format!(
+        "metric output read for '{path}' is not yet implemented: \
+         Analytics v0 persists derived metric descriptors only — the \
+         execution engine that materializes KPI/SLI values from \
+         source/query/window definitions has not shipped yet. The \
+         descriptor itself remains readable via \
+         red.analytics.metrics."
+    ))
 }
 
 fn now_ms() -> u128 {
@@ -32,10 +104,12 @@ pub fn create(
     path: &str,
     kind: &str,
     role: &str,
+    derived: DerivedSpec,
 ) -> RedDBResult<MetricDescriptor> {
     validate_path(path)?;
     validate_kind(kind)?;
     validate_role(role)?;
+    validate_derived(&derived)?;
 
     let mut entries = load(store);
     if entries.iter().any(|entry| entry.path == path) {
@@ -49,6 +123,10 @@ pub fn create(
         kind: kind.to_string(),
         role: role.to_string(),
         created_at_ms: now_ms(),
+        source: derived.source,
+        query: derived.query,
+        window_ms: derived.window_ms,
+        time_field: derived.time_field,
     };
     entries.push(descriptor.clone());
     save(store, &entries);
@@ -147,6 +225,41 @@ fn validate_role(role: &str) -> RedDBResult<()> {
     )))
 }
 
+fn validate_derived(derived: &DerivedSpec) -> RedDBResult<()> {
+    if let Some(source) = &derived.source {
+        validate_identifier(source, "derived metric source")?;
+    }
+    if let Some(field) = &derived.time_field {
+        validate_identifier(field, "derived metric time_field")?;
+    }
+    if let Some(query) = &derived.query {
+        if query.trim().is_empty() {
+            return Err(RedDBError::Query(
+                "derived metric QUERY must not be empty".to_string(),
+            ));
+        }
+    }
+    if derived.window_ms == Some(0) {
+        return Err(RedDBError::Query(
+            "derived metric WINDOW must be greater than zero".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_identifier(value: &str, label: &str) -> RedDBResult<()> {
+    if value.is_empty()
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return Err(RedDBError::Query(format!(
+            "invalid {label} '{value}': expected an alphanumeric/underscore identifier"
+        )));
+    }
+    Ok(())
+}
+
 fn read_latest_registry_json(store: &UnifiedStore) -> Option<String> {
     let manager = store.get_collection("red_config")?;
     let mut all = manager.query_all(|_| true);
@@ -199,11 +312,27 @@ fn load(store: &UnifiedStore) -> Vec<MetricDescriptor> {
         let Some(created_at_ms) = lookup("created_at_ms").and_then(JsonValue::as_f64) else {
             continue;
         };
+        let source = lookup("source")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string);
+        let query = lookup("query")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string);
+        let window_ms = lookup("window_ms")
+            .and_then(JsonValue::as_f64)
+            .map(|n| n as u64);
+        let time_field = lookup("time_field")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string);
         out.push(MetricDescriptor {
             path: path.to_string(),
             kind: kind.to_string(),
             role: role.to_string(),
             created_at_ms: created_at_ms as u128,
+            source,
+            query,
+            window_ms,
+            time_field,
         });
     }
     out
@@ -235,5 +364,29 @@ fn entry_to_json(entry: &MetricDescriptor) -> crate::serde_json::Value {
         "created_at_ms".to_string(),
         crate::serde_json::Value::Number(entry.created_at_ms as f64),
     );
+    if let Some(source) = &entry.source {
+        obj.insert(
+            "source".to_string(),
+            crate::serde_json::Value::String(source.clone()),
+        );
+    }
+    if let Some(query) = &entry.query {
+        obj.insert(
+            "query".to_string(),
+            crate::serde_json::Value::String(query.clone()),
+        );
+    }
+    if let Some(window_ms) = entry.window_ms {
+        obj.insert(
+            "window_ms".to_string(),
+            crate::serde_json::Value::Number(window_ms as f64),
+        );
+    }
+    if let Some(time_field) = &entry.time_field {
+        obj.insert(
+            "time_field".to_string(),
+            crate::serde_json::Value::String(time_field.clone()),
+        );
+    }
     crate::serde_json::Value::Object(obj)
 }
