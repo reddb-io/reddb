@@ -95,6 +95,10 @@ pub struct StreamConfig {
     /// with `principal_stream_quota_exhausted` even when the global
     /// counter still has room.
     pub max_per_principal_streams: usize,
+    /// Issue #765 / S6 — default end-to-end verification mode for input
+    /// streams when the open frame does not request one
+    /// (`stream.integrity.default_verify`, `"none"` per ADR 0029).
+    pub default_verify: crate::runtime::integrity_tombstone::VerifyMode,
 }
 
 impl Default for StreamConfig {
@@ -115,6 +119,7 @@ impl StreamConfig {
         chunk_max_latency_ms: 50,
         max_global_streams: 256,
         max_per_principal_streams: 32,
+        default_verify: crate::runtime::integrity_tombstone::VerifyMode::None,
     };
 
     /// Read every `stream.*` key from `red_config` over the runtime's KV
@@ -156,6 +161,13 @@ impl StreamConfig {
         }
         if let Some(v) = read_u64("stream.max_per_principal") {
             cfg.max_per_principal_streams = v as usize;
+        }
+        // Issue #765 / S6 — opt-in integrity default. Stored as a Text key
+        // (`"none"` / `"sha256"`); anything else falls back to `None`.
+        if let Some((Value::Text(text), _)) =
+            db.get_kv(RED_CONFIG_COLLECTION, "stream.integrity.default_verify")
+        {
+            cfg.default_verify = crate::runtime::integrity_tombstone::VerifyMode::parse(&text);
         }
         cfg.normalize();
         cfg
@@ -1078,6 +1090,7 @@ mod tests {
             chunk_max_latency_ms: 1,
             max_global_streams: 0,
             max_per_principal_streams: 0,
+            default_verify: crate::runtime::integrity_tombstone::VerifyMode::None,
         };
         cfg.normalize();
         assert_eq!(cfg.chunk_min_pages, 1);

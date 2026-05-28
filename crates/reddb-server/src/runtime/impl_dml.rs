@@ -144,6 +144,94 @@ impl RedDBRuntime {
         persisted
     }
 
+    /// Issue #765 / S6 — lazily hydrate the integrity-tombstone cache from
+    /// `red_config` on first access. Returns `true` when at least one
+    /// tombstone range is present. Subsequent calls observe the cached state
+    /// flag (`1` empty / `2` present) and skip the store scan.
+    fn ensure_integrity_tombstones_loaded(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        match self
+            .inner
+            .integrity_tombstones_state
+            .load(Ordering::Relaxed)
+        {
+            1 => return false,
+            2 => return true,
+            _ => {}
+        }
+        // Cold: load under the cache lock so a concurrent reader cannot
+        // observe a half-populated vector.
+        let mut guard = self.inner.integrity_tombstones.lock();
+        if self
+            .inner
+            .integrity_tombstones_state
+            .load(Ordering::Relaxed)
+            == 0
+        {
+            let ranges = crate::runtime::integrity_tombstone::load_ranges(&self.inner.db.store());
+            let present = !ranges.is_empty();
+            *guard = ranges;
+            self.inner
+                .integrity_tombstones_state
+                .store(if present { 2 } else { 1 }, Ordering::Relaxed);
+        }
+        self.inner
+            .integrity_tombstones_state
+            .load(Ordering::Relaxed)
+            == 2
+    }
+
+    /// Issue #765 / S6 — durably record an integrity tombstone over the
+    /// inclusive RID range `[lo, hi]` of `table` (the committed rows of an
+    /// input stream whose end-to-end SHA-256 digest did not match). The range
+    /// is persisted to `red_config` (survives restart) and folded into the
+    /// in-memory cache so the same process filters it immediately.
+    pub fn record_integrity_tombstone(&self, table: &str, lo: u64, hi: u64) {
+        use std::sync::atomic::Ordering;
+        self.ensure_integrity_tombstones_loaded();
+        let mut guard = self.inner.integrity_tombstones.lock();
+        guard.push(crate::runtime::integrity_tombstone::TombstoneRange::new(
+            table.to_string(),
+            lo,
+            hi,
+        ));
+        crate::runtime::integrity_tombstone::persist_ranges(&self.inner.db.store(), &guard);
+        self.inner
+            .integrity_tombstones_state
+            .store(2, Ordering::Relaxed);
+    }
+
+    /// Issue #765 / S6 — snapshot of the currently-cached tombstone ranges.
+    /// Intended for tests and forensic surfaces; the read path uses
+    /// [`Self::filter_integrity_tombstoned`] which avoids the clone.
+    pub fn integrity_tombstone_ranges(
+        &self,
+    ) -> Vec<crate::runtime::integrity_tombstone::TombstoneRange> {
+        self.ensure_integrity_tombstones_loaded();
+        self.inner.integrity_tombstones.lock().clone()
+    }
+
+    /// Issue #765 / S6 — drop tombstoned rows from a SELECT result in place.
+    /// Fast no-op (one relaxed atomic load) when no tombstone has ever been
+    /// recorded. Clears `pre_serialized_json` when any row is removed so the
+    /// fast-path JSON cannot leak a filtered row back onto the wire.
+    pub fn filter_integrity_tombstoned(&self, result: &mut UnifiedResult) {
+        if !self.ensure_integrity_tombstones_loaded() {
+            return;
+        }
+        let guard = self.inner.integrity_tombstones.lock();
+        if guard.is_empty() {
+            return;
+        }
+        let before = result.records.len();
+        result.records.retain(|record| {
+            !crate::runtime::integrity_tombstone::record_tombstoned(&guard, record)
+        });
+        if result.records.len() != before {
+            result.pre_serialized_json = None;
+        }
+    }
+
     /// Phase 2.5.4: inject `CURRENT_TENANT()` into an INSERT when the
     /// target table is tenant-scoped and the user's column list does
     /// not already name the tenant column.
