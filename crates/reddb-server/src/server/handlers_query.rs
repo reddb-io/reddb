@@ -795,6 +795,20 @@ impl RedDBServer {
 
         let clock = SystemClock;
         let config = StreamConfig::load(&self.runtime);
+        // Issue #765 / S6 — opt-in end-to-end SHA-256. The open frame may
+        // request `verify` ("sha256" / "none"); absent that, the
+        // `stream.integrity.default_verify` config applies. When disabled
+        // (the default) no rolling hash is computed and the row path is
+        // byte-identical to the S4 baseline.
+        let verify_mode = parse_open_verify(open_line, config.default_verify);
+        // Capture the table's highest RID before any chunk commits so a
+        // later digest mismatch can tombstone exactly the rows this stream
+        // appended. Only paid when verification is enabled.
+        let pre_max_rid = if verify_mode.is_enabled() {
+            table_max_rid(&self.runtime, &target)
+        } else {
+            0
+        };
         let snapshot_lsn = self.runtime.cdc_current_lsn();
         let lease = output_stream::open_stream(config, snapshot_lsn, false, &clock)
             .expect("OpenStream succeeds once the in-transaction gate has passed");
@@ -820,6 +834,13 @@ impl RedDBServer {
         let chunk_size = config.chunk_max_rows.max(1);
         let mut stream_error: Option<(String, String)> = None;
         let mut close_reason = crate::server::output_stream::CloseReason::Ok;
+        // Issue #765 / S6 — rolling SHA-256 over the row payloads (raw row
+        // frame bytes, in arrival order) and the client's expected digest
+        // parsed off the terminal `{"end":{"sha256":...}}` frame.
+        let mut hasher = verify_mode
+            .is_enabled()
+            .then(crate::server::output_stream::PrefixHasher::new);
+        let mut expected_digest: Option<String> = None;
 
         let mut producer = ChunkProducer::new(&config, &clock);
         {
@@ -867,8 +888,23 @@ impl RedDBServer {
                     close_reason = crate::server::output_stream::CloseReason::SnapshotExpired;
                     break;
                 }
+                // Issue #765 / S6 — when verifying, the client closes the
+                // row sequence with a terminal `{"end":{"sha256":...}}`
+                // frame carrying the expected digest. Detect it before the
+                // row parser so it is not mistaken for a malformed row.
+                if verify_mode.is_enabled() {
+                    if let Some(digest) = parse_client_end_digest(raw) {
+                        expected_digest = Some(digest);
+                        break;
+                    }
+                }
                 match parse_row_frame(raw, &columns) {
-                    Ok(row_values) => pending.push(row_values),
+                    Ok(row_values) => {
+                        if let Some(h) = hasher.as_mut() {
+                            h.update(raw);
+                        }
+                        pending.push(row_values);
+                    }
                     Err(message) => {
                         stream_error = Some((
                             "invalid_row".to_string(),
@@ -906,6 +942,55 @@ impl RedDBServer {
                 }
             }
 
+            // Issue #765 / S6 — integrity verification outcome. Only when
+            // verification was requested and the ingest itself did not fail.
+            // `integrity_ok` flips the terminal `end` envelope's `integrity`
+            // field to "ok"; `integrity_failure` carries (expected, actual,
+            // tombstoned RID range) for the dedicated error envelope.
+            let mut integrity_ok = false;
+            let mut integrity_failure: Option<(String, String, Option<(u64, u64)>)> = None;
+            if stream_error.is_none() && verify_mode.is_enabled() {
+                match (expected_digest.take(), hasher.take()) {
+                    (Some(expected), Some(h)) => {
+                        let actual = h.finalize_hex();
+                        if constant_time_str_eq(&expected, &actual) {
+                            integrity_ok = true;
+                        } else {
+                            // PRD #759: rows already committed per chunk, so
+                            // rollback is impossible — tombstone the RID
+                            // range this stream appended instead. RIDs are
+                            // monotonic, so (pre_max, post_max] is exactly the
+                            // committed set absent a concurrent writer.
+                            let post_max = table_max_rid(&self.runtime, &target);
+                            let range = if post_max > pre_max_rid {
+                                let lo = pre_max_rid + 1;
+                                self.runtime
+                                    .record_integrity_tombstone(&target, lo, post_max);
+                                Some((lo, post_max))
+                            } else {
+                                None
+                            };
+                            close_reason =
+                                crate::server::output_stream::CloseReason::IntegrityFailed;
+                            integrity_failure = Some((expected, actual, range));
+                        }
+                    }
+                    _ => {
+                        // verify=sha256 requested but no terminal digest
+                        // frame arrived — we cannot assert corruption, so the
+                        // committed rows are NOT tombstoned. Fail closed with
+                        // a distinct code so the client knows verification did
+                        // not actually run.
+                        stream_error = Some((
+                            "integrity_missing_digest".to_string(),
+                            "verify=sha256 requested but no terminal digest frame was sent"
+                                .to_string(),
+                        ));
+                        close_reason = crate::server::output_stream::CloseReason::Error;
+                    }
+                }
+            }
+
             if let Some((code, message)) = stream_error.as_ref() {
                 let mut envelope = crate::json::Map::new();
                 let mut payload = crate::json::Map::new();
@@ -922,6 +1007,36 @@ impl RedDBServer {
                     "recoverable_rid".to_string(),
                     crate::json::Value::Number(committed_rid as f64),
                 );
+                envelope.insert("error".to_string(), crate::json::Value::Object(payload));
+                let mut line = crate::json::Value::Object(envelope).to_string_compact();
+                line.push('\n');
+                producer.push_line(line.as_bytes(), &mut flush)?;
+            } else if let Some((expected, actual, range)) = integrity_failure.as_ref() {
+                // Issue #765 / S6 — integrity mismatch envelope. Rows are
+                // already durable (auto-commit); the RID range was tombstoned
+                // above and is reported so the client can correlate.
+                let mut envelope = crate::json::Map::new();
+                let mut payload = crate::json::Map::new();
+                payload.insert(
+                    "code".to_string(),
+                    crate::json::Value::String("integrity_failed".to_string()),
+                );
+                payload.insert(
+                    "expected".to_string(),
+                    crate::json::Value::String(expected.clone()),
+                );
+                payload.insert(
+                    "actual".to_string(),
+                    crate::json::Value::String(actual.clone()),
+                );
+                let range_value = match range {
+                    Some((lo, hi)) => crate::json::Value::Array(vec![
+                        crate::json::Value::Number(*lo as f64),
+                        crate::json::Value::Number(*hi as f64),
+                    ]),
+                    None => crate::json::Value::Null,
+                };
+                payload.insert("tombstoned_rid_range".to_string(), range_value);
                 envelope.insert("error".to_string(), crate::json::Value::Object(payload));
                 let mut line = crate::json::Value::Object(envelope).to_string_compact();
                 line.push('\n');
@@ -949,6 +1064,14 @@ impl RedDBServer {
                     "snapshot_lsn".to_string(),
                     crate::json::Value::Number(lease.snapshot_lsn as f64),
                 );
+                // Issue #765 / S6 — surface the verification result only when
+                // it ran. Without `verify`, no integrity field appears.
+                if integrity_ok {
+                    payload.insert(
+                        "integrity".to_string(),
+                        crate::json::Value::String("ok".to_string()),
+                    );
+                }
                 envelope.insert("end".to_string(), crate::json::Value::Object(payload));
                 let mut line = crate::json::Value::Object(envelope).to_string_compact();
                 line.push('\n');
@@ -1180,6 +1303,57 @@ pub(crate) fn parse_open_frame(line: &[u8]) -> Result<(String, Vec<String>), Str
         columns.push(name.to_string());
     }
     Ok((target, columns))
+}
+
+/// Issue #765 / S6 — read the optional `verify` field off the open frame
+/// (`{"open":{...,"verify":"sha256"}}`). Falls back to `default` (the
+/// `stream.integrity.default_verify` config) when absent or unparseable —
+/// a malformed opt-in must never terminate a stream that would otherwise run.
+pub(crate) fn parse_open_verify(
+    line: &[u8],
+    default: crate::runtime::integrity_tombstone::VerifyMode,
+) -> crate::runtime::integrity_tombstone::VerifyMode {
+    let Ok(value) = crate::json::from_slice::<crate::json::Value>(line) else {
+        return default;
+    };
+    match value
+        .get("open")
+        .and_then(|open| open.get("verify"))
+        .and_then(crate::json::Value::as_str)
+    {
+        Some(token) => crate::runtime::integrity_tombstone::VerifyMode::parse(token),
+        None => default,
+    }
+}
+
+/// Issue #765 / S6 — parse the client's terminal digest frame
+/// (`{"end":{"sha256":"<hex>"}}`). Returns the expected digest string, or
+/// `None` for any line that is not a well-formed end frame (those fall
+/// through to the row parser).
+pub(crate) fn parse_client_end_digest(line: &[u8]) -> Option<String> {
+    let value: crate::json::Value = crate::json::from_slice(line).ok()?;
+    value
+        .get("end")?
+        .get("sha256")
+        .and_then(crate::json::Value::as_str)
+        .map(str::to_string)
+}
+
+/// Issue #765 / S6 — highest RID currently present in `table`, or `0` when
+/// the table is empty / unreadable. Used to bracket the RID range an input
+/// stream appends so a digest mismatch can tombstone exactly those rows.
+fn table_max_rid(runtime: &crate::runtime::RedDBRuntime, table: &str) -> u64 {
+    let sql = format!("SELECT rid FROM {table}");
+    match runtime.execute_query(&sql) {
+        Ok(result) => result
+            .result
+            .records
+            .iter()
+            .filter_map(record_rid)
+            .max()
+            .unwrap_or(0),
+        Err(_) => 0,
+    }
 }
 
 /// Issue #763 — parse a row frame `{"row":{"c1":v1,...}}` into the
